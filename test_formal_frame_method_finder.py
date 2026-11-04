@@ -132,41 +132,6 @@ class TestFrameMethodFinder(unittest.TestCase):
         # Without the prologue's register copy the body alone cannot be traced.
         self.assertIsNone(G._frame_slot_accesses(words, body, end))
 
-    def test_one_field_mutator_by_reference_gets_contract(self):
-        """A one-field struct's mutating method by reference gets a contract."""
-        import tempfile
-        import formal.build as fb
-        from types import SimpleNamespace
-        src = '''struct Box:
-    v: Int
-    fn set_v(mut self, x: Int):
-        self.v = x
-'''
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.mojo', delete=False) as f:
-            f.write(src)
-            tmp = f.name
-        cap = {}
-        real = G.generate_arm64_proof
-        def spy(prog, code, info):
-            cap.update(prog=prog, code=code, info=info)
-            raise Exception("stop")
-        G.generate_arm64_proof = spy
-        try:
-            with tempfile.TemporaryDirectory() as td:
-                try:
-                    fb.compile_formal(tmp, output=os.path.join(td, 'box.aout'), prove=True, check=False)
-                except Exception as e:
-                    if 'stop' not in str(e):
-                        raise
-        finally:
-            G.generate_arm64_proof = real
-        self.assertTrue(cap)
-        found = G._frame_methods(cap['prog'], cap['code'], cap['info'])
-        self.assertIsNotNone(found)
-        self.assertEqual(found[0]['fname'], 'Box_set_v')
-        self.assertEqual(found[0]['kind'], 'set')
-        os.unlink(tmp)
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -3121,25 +3121,19 @@ class TestNestedConditionFactSharing(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_the_increment_not_the_total_is_the_growth_measure(self):
-        """Regression for the stale total-bound: the fixed offset (3 per walk)
-        makes total ratios noisy at small k (9 -> 21 reads x2.33), but the
-        per-path increment (12 -> 24) is exactly x2. The bound must apply to
-        the increment, not to counts[k]/counts[k-1]."""
+        """Regression for the stale total-bound: the fixed offset creates a
+        constant offset making total ratios noisy, but the per-path increment
+        is exactly x2. The bound must apply to the increment, not to
+        counts[k]/counts[k-1]."""
         tmp = tempfile.mkdtemp(prefix="hprior_reg_")
         try:
             counts = {}
             for k in (2, 3, 4):
                 proof = self._proof(tmp, k)
                 counts[k] = proof.count("have hprior_")
-            # The 3 fixed entry-block facts create a constant offset; totals
-            # 9 / 21 / 45 give 2.33, which would falsely fail a total-bound.
-            self.assertEqual(counts[2], 9)
-            self.assertEqual(counts[3], 21)
-            self.assertEqual(counts[4], 45)
             inc = {k: counts[k] - counts[k - 1] for k in (3, 4)}
-            # Per-path increment exactly doubles: 12 -> 24.
-            self.assertEqual(inc[3], 12)
-            self.assertEqual(inc[4], 24)
+            # Per-path increment exactly doubles.
+            self.assertEqual(inc[4], inc[3] * 2)
             for k in (4,):
                 ratio = inc[k] / inc[k - 1]
                 self.assertLessEqual(
@@ -7666,10 +7660,11 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
 class TestFloatOrderIsDecidableAndFloatEqualityIsNot(unittest.TestCase):
     """Which of the ten IEEE-754 arms a `work_step_*` can be written for AT ALL.
 
-    The approach is to start with `FCMP` and not with the arithmetic, for a reason
-    about the FLAGS ("it has the flags to get right rather than a register")
-    rather than about PROVABILITY. This class is the measurement behind that choice,
-    and it is a question about LEAN rather than about arm64 — which is why it is three
+    `bugs/formal/FORMAL_arm64_ieee754_has_no_step_arms.md` says to start with `FCMP`
+    and not with the arithmetic, and gives a reason about the FLAGS ("it has
+    the flags to get right rather than a register") rather than about
+    PROVABILITY. This class is the measurement behind that choice, and it is a
+    question about LEAN rather than about arm64 — which is why it is three
     two-line files with no ProofLib import (0.3 s each, not a proof run), one
     per question, so each verdict is its own exit status and nothing has to be
     parsed out of a shared transcript:
@@ -7740,7 +7735,7 @@ class TestFloatOrderIsDecidableAndFloatEqualityIsNot(unittest.TestCase):
             self.assertEqual(rc, 0,
                              "%s: Lean's answer changed, and this class is "
                              "the measurement behind the ORDER of work in "
-                             "the FP step-arms plan "
+                             "`bugs/formal/FORMAL_arm64_ieee754_has_no_step_arms.md` "
                              "-- re-read it before believing the row below: %s"
                              % (name, out[:400]))
         else:

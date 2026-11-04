@@ -55,7 +55,7 @@ export rule. `test_formal_core_hostmods.py` pins that: the module builds, a prog
 derives from `Enum` builds, and its members read as their own literals.
 
 **`.value` AND `.name` ARE NOT IN THIS FILE.** They are the enum's whole reason
-for existing, and they are answered in `formal/model/frames.py`
+for existing, and they are answered in `formal/model.py`
 (`enum_member_accessor`) and `formal/build.py` (`_enum_member_sites`), not here —
 because `Reg.RAX.value` is not a call into this module, it is an attribute read
 on a class constant, and it was silently answering **0** before that fix:

@@ -44,7 +44,7 @@ WHAT IS NOT HERE, AND WHY
     It is `fill` plus a word count, so it inherits `fill`'s absence; and
     `TextWrapper` is an object with nine pieces of mutable configuration, which
     is at least nine words where a value on this path is one
-    (`formal/model/builtins.py`; `bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`
+    (`formal/model.py`; `bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`
     is the measurement, and it is `collections`' and `copy`'s
     blocker too). Note the consequence honestly: `wrap`/`fill` being ABSENT
     means the absent `TextWrapper` costs nothing extra, because nothing that
