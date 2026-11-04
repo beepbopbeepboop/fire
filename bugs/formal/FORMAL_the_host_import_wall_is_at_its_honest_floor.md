@@ -335,7 +335,7 @@ and both are within ±1 of what this table said, except where §0 says otherwise
 | `atexit` | 2 | 0 | 1 | **a callback.** `register(f)` stores a callable to run at exit. |
 | `uuid` | 2 | 0 | 1 | `uuid4()` is 122 bits of randomness with no state to draw from. `HOST_UNREACHABLE`, correctly. |
 | `asyncio` | 1 | 0 | 1 | **an event loop and a thread.** `run`/`sleep`/`gather`. |
-| `functools` | 1 | 1 | 1 | host module added; imports resolve. |
+| `functools` | 1 | 1 | 1 | **CLAIMED** — `formal25-3`, `bug:FORMAL_functools_is_unbuildable_as_a_host_module`. Not touched here. |
 | `importlib.util` | 10 | 1 | 4 | `spec_from_file_location`/`find_spec` are the same host-process capability as `importlib` above, under a name the corpus grew into since this table was written; `test_arm64_encoders.py` is the one file it is alone for.
 | `pwd` | 1 | 1 | 0 | **the password database.** `test_formal_os.py` is alone for it. It is `HOST_UNREACHABLE` by the rule this tree states — the file is not something a freestanding image has — and it is in NO tier today, so the tool prints it as `unclassified`.
 | `tokenize` / `token` again, separately | 2 / 1 | 1 / 0 | 2 / 0 | §"What is cheap and NOT in the table" below, which says why the constants alone move 0 files; `token`'s own row is its `INFO`/`ENDMARKER` vocabulary and nothing reaches it alone.

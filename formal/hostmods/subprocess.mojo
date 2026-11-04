@@ -447,7 +447,7 @@ def _admitted(what: str) -> int:
     The one place all twelve admissions share a body, and it is a function like
     any other so that the printed text is a single fact rather than four copies
     of it that can drift.  `exit` is a libSystem symbol this target binds
-    (`formal/model/builtins.py`'s `FRAME_C_VALUE_CALLS` lists it), and the message goes to
+    (`formal/model.py`'s `FRAME_C_VALUE_CALLS` lists it), and the message goes to
     stdout because there is no `stderr` on this path: `stderr` is a stream, and
     a stream is not a value here (`formal/hostmods/sys.mojo`).
     """

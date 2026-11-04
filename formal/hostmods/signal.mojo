@@ -107,7 +107,7 @@ THE TWO THINGS THAT ARE NOT QUITE CPYTHON, STATED HERE
     is `int.__str__`, so a plain `int` agrees with the host on every read an
     `int` can express. `.name` is the one it cannot, and it is above.
   * `strsignal` and `raise_signal` return 0 where CPython returns `None`.
-    `None` folds to the word 0 on this path (`formal/model/frames.py`, `NONE_WORD`).
+    `None` folds to the word 0 on this path (`formal/model.py`, `NONE_WORD`).
 """
 
 # ── the signal numbers ──────────────────────────────────────────────────────
