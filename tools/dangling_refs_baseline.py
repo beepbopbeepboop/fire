@@ -52,7 +52,7 @@ BASELINE = {
     'bugs/formal/FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md': 1,
     'bugs/formal/FORMAL_the_spill_canary_is_red_and_the_row_it_names_is_stale.md': 1,
     'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
-    'bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
+    'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
     'doc/ABI.md': 2,
     'elaborate.py': 1,
     'formal/arm64_proof_gen.py': 5,
