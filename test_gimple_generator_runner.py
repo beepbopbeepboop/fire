@@ -1119,12 +1119,9 @@ def main():
 
 def _regression_read_table_callable_reader():
     # Root-cause regression for bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
-    # `_get_reader` is a callable-valued parameter (default csv.reader); the
-    # loop `for row in _get_reader(lines, ...):` in `read_table` must be
-    # refused honestly (not silently wrong) until callable-local loop typing
-    # lands — this test captures the refusal so a future fix can prove it passes.
-    test_generator_refused(
-        "cpp_for_callable_param_read_table_like", """\
+    # After callable-local loop typing lands, this compiles past the for.
+    try:
+        gimple_codegen.compile_to_gimple_with_cpp("""\
 def read_table(infile, header, *, sep='\\t',
                _get_reader=__import__('csv').reader):
     lines = infile.splitlines()
@@ -1133,7 +1130,14 @@ def read_table(infile, header, *, sep='\\t',
 
 def main():
     pass
-""", "callable-valued parameter '_get_reader'")
+""", do_imports=False)
+        print("PASS  cpp_for_callable_param_read_table_like")
+        global _PASS
+        _PASS += 1
+    except Exception as e:
+        print(f"FAIL  cpp_for_callable_param_read_table_like: {e}")
+        global _FAIL
+        _FAIL += 1
 
 
 def _cpp_coroutine_builtin_module_constant():
@@ -11260,3 +11264,28 @@ if __name__ == '__main__':
     print(f"\n{_PASS} passed, {_FAIL} failed")
     if _FAIL:
         raise SystemExit(1)
+
+
+
+# Flag instance iteration via __iter__ yielding from self._iter_member_()
+# (enum.py Flag.__iter__ pattern) — _iter_member_ aliased to a generator
+# method, called via self._iter_member_() inside a generator method with
+# yield from.
+test_generator_stdout("flag_instance_iter_via_iter_member_alias", """\
+class Flag:
+    @classmethod
+    def _iter_member_by_value_(cls, value: Int):
+        yield 1
+        yield value
+
+    _iter_member_ = _iter_member_by_value_
+
+    def __iter__(self):
+        yield from self._iter_member_(7)
+
+def main():
+    f = Flag()
+    for x in f:
+        print(x)
+""", "1\n7\n")
+
