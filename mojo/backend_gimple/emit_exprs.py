@@ -7132,22 +7132,17 @@ def none_only_locals(gen) -> set:
 
 def is_none_needle(gen, e) -> bool:
     """Is the membership NEEDLE `e` the value `None`? True for a `None`
-    literal, and for a local that holds `None` on every path (see
-    `none_only_locals`). Such a needle must not reach the int path: its
-    int64_t word is the same as an int 0's, which matched a `0` slot."""
+    literal, and for a local that holds `None` at join points (flow-sensitive)."""
     if _is_none_literal(e):
         return True
     if isinstance(e, IdentExpr):
         name = _as_str(_as_ident_node(e).name)
-        # Check flow state first
         try:
             flow_state = getattr(gen, '_flow_none_state', {}) or {}
             if flow_state.get(name) is True:
                 return True
         except Exception:
             pass
-        if name in none_only_locals(gen):
-            return True
     return False
 
 
