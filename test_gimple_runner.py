@@ -14452,7 +14452,8 @@ def main():
                   test_namedtuple_shaped_class_runs_regression,
                   test_none_bound_local_is_none_not_zero_in_membership,
                   test_none_member_of_a_set_is_not_the_int_zero,
-                  test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool):
+                  test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool,
+                  test_slice_equals_after_a_multibyte_character):
         try:
             _late()
         except AssertionError as e:
@@ -14801,6 +14802,37 @@ def main():
             print("skip")
         else:
             print("keep")
+main()
+""")
+
+
+def test_slice_equals_after_a_multibyte_character():
+    """`src[j:j + n] == lit` after a non-ASCII character compared the BYTES at
+    the codepoint offsets (`mojo_cstr_region_eq` read start/stop as byte
+    offsets), so a scanner that tests a delimiter by slice found it one
+    position early. The compiled tokenizer lost string boundaries that way: the
+    stage2 bootstrap binary refused every dump input with a non-ASCII comment
+    followed by a few string entries."""
+    test_gimple_matches_cpython("gimple_slice_eq_after_multibyte", """\
+def scan(src: str, i: int, quote: str) -> int:
+    n = len(src)
+    j = i + 1
+    while j < n:
+        if src[j:j + 1] == quote:
+            return j + 1
+        j += 1
+    return -1
+
+def main():
+    src = "# a → b\\nx = {\\n    'k0': 'v0',\\n    'k1': 'v1',\\n}\\n"
+    print(scan(src, 18, "'"), scan(src, 24, "'"))
+    print(src[2:5] == "a →", src[:3] == "# a", src[3:4] == "→")
+    print(src[18:22] == "'k0'", src[0:200] == src, src[-2:] == "}\\n")
+    t = "éeab"
+    print(t[2:4] == "ab", t[-2:] == "ab", t[:2] == "ée", t[1:3] == "ea")
+    print(src.startswith("'k0'", 18), src.startswith("'k0'", 17), src.startswith("→", 4))
+    print(src.endswith("→", 0, 5), src.endswith("b", 0, 7), src.count("'"), src.count("'", 20), src.count(""), t.count("", 1, 3))
+
 main()
 """)
 

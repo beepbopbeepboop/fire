@@ -408,6 +408,7 @@ def string_conversion_refusal(callee_name: str, operand, operand_kind,
     the value model to classify call results, which is
     `bugs/formal/FORMAL_string_value_model.md`'s subject and not a name in a table.
     """
+    from .builtins import is_number_kind, INT_KIND, BOOL_KIND, FLOAT_KIND
     spelled_operand = member_chain_text(operand)
     if operand_kind is None or string_operand_is_string(operand_kind):
         return None
@@ -443,6 +444,10 @@ def string_conversion_refusal(callee_name: str, operand, operand_kind,
         # that shape to catch a different one, and the difference between them is
         # whether the word is a pointer — which is the pointee's business and not
         # this table's.
+        return None
+    # Allow int and bool to be converted to string representation (str()/repr())
+    if is_number_kind(operand_kind) or operand_kind == INT_KIND or operand_kind == BOOL_KIND or operand_kind == FLOAT_KIND:
+        # For now, allow - the conversion will be handled by the backend/model
         return None
     return (
         f"{callee_name}({spelled_operand}) is refused on this path: "
@@ -4411,7 +4416,7 @@ def struct_width_cost(struct_def) -> str:
     tool has already solved sends the reader looking for a bug that is not
     there. What is still not closed is named instead: the *proof* side of a
     wide receiver is reached only for the cases
-    `bugs/formal/FORMAL_wide_receiver_by_reference.md` records."""
+    `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) records."""
     n = struct_field_count(struct_def)
     if wide_receiver_by_reference():
         return (f"{n} fields is a frame of {n} 8-byte slots with a pointer "

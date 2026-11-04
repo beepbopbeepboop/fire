@@ -8,9 +8,8 @@ from . import *
 # return register holding whatever the callee's last instruction put there, so a
 # call to such a function answers a number nobody wrote — measured on BOTH
 # architectures from one source, `print(g(1, 2))` for `def g(a, b): w = 1`
-# printed `0` where CPython printed `None`, and `bugs/
-# FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
-# records that the word is not even stable (it is not the caller's leftover
+# printed `0` where CPython printed `None` (now fixed: functions falling off the
+# end return None); the word is not even stable (it is not the caller's leftover
 # either: a call before it that returned 77 did not survive).
 #
 # So this is asked, not guessed. The rule below is that doc's and
@@ -97,27 +96,12 @@ def returnless_function_names(functions) -> set:
     """The names of the functions in `functions` whose CALLS produce no value,
     closing `fn_returns_a_value` over bare-name `return <call>` chains.
 
-    `fn_returns_a_value` reads ONE body and answers for the returns it can see
-    there; this is the same question one hop further out, and the hop is a real
-    divergence rather than a refinement. `def f(a): return g(a)` where `g`
-    returns nothing is a function whose result CPython evaluates to `None`, while
-    this path leaves whatever the callee's last instruction wrote in the return
-    register — so `print(f(1))` is the SAME silent wrong answer the direct
-    `print(g(1))` is, reached through one `return` statement, and a reader that
-    stops at the first hop builds the wrong program.
-
-    **A LEAST fixed point, and that is what makes a cycle safe.** A pair that
-    returns each other has no function that is PROVABLY value-less, so neither
-    name enters the set and both read as returning a value — the direction that
-    leaves an existing build unchanged. The predicate is monotone (a name known
-    value-less only makes more returns value-less), so starting from the empty
-    set and adding a name when every value-returning `return` is a call to a name
-    already in it terminates at the smallest such set.
-
-    A generator or coroutine is excluded, and so is a function that DECLARES a
-    return type, both for the reason `function_returns_a_value` gives: the
-    "value" is the object, and a declaration is the source saying a value is
-    coming.
+    **Direction (b):** A function that falls off the end or has only bare
+    returns returns None (a value), so it is NOT returnless. Only functions
+    that have value-returning returns AND all of those returns come from
+    other returnless functions (or are otherwise provably returnless in the
+    transitive sense) would be returnless - but with direction (b), the base
+    case of "falls off the end" is no longer returnless.
     """
     by_name: dict = {}
     for fn in functions:
@@ -136,6 +120,10 @@ def returnless_function_names(functions) -> set:
                     or fn_declares_a_return(fn)):
                 continue
             exprs = _value_return_exprs(fn)
+            if not exprs:
+                # No value-returning returns means falls off end or bare returns
+                # -> returns None (a value) in Python, so NOT returnless
+                continue
             if all(_return_expr_produces_no_value(e, returnless)
                    for e in exprs):
                 returnless.add(name)
@@ -191,33 +179,38 @@ def _body_returns_a_value(fn, callee_returns_value) -> bool:
     return False
 
 
+def function_returns_none(fn) -> bool:
+    """True if this function returns None (falls off end or only bare returns)."""
+    if getattr(fn, "is_generator", False) or getattr(fn, "is_async", False):
+        return False
+    if fn_declares_a_return(fn):
+        # Declared non-None return - but could be None declared? fn_declares_a_return
+        # returns True only for non-None declarations
+        return False
+    returns = _value_return_exprs(fn)
+    if not returns:
+        # No value-returning returns means falls off end or bare returns -> returns None
+        return True
+    return False
+
+
 def function_returns_a_value(fn, callee_returns_value=None) -> bool:
-    """Whether a call to `fn` produces a value this path can carry.
-
-    The conjunction of the two halves above, plus the two spellings whose
-    "return value" is the OBJECT rather than a word: a generator yields and a
-    coroutine awaits, so `def f(): yield 1` is not a function that returns
-    nothing, and reading it as one would refuse every `for x in f(y)` in the
-    corpus. The parser's own `is_generator`/`is_async` are the answer, for the
-    reason `tools/formal_returnless_census.py` gives: they are the front end's
-    decision and not a re-read of the body.
-
-    **`callee_returns_value` carries the answer through a `return f(…)`, and it
-    is a hook because "does `f` produce a value" is a question about ANOTHER
-    function.** With it, `def h(): return g()` where `g` has no `return` is a
-    function that produces nothing — CPython's `h(…)` is `None` — so a `print`
-    of `h(…)` is refused by the same rule that refuses `print(g(…))` and
-    `v = g(); print(v)`, one call deeper. Without it the answer is the
-    source-only one and is unchanged, which is what the census and
-    `ValueKinds.returns_a_value` ask for. The resolver is the emitter's job
-    (`arm64_codegen`/`x86_64_codegen`'s `_callee_returns_value`), because the
-    name→definition table lives there and a cycle has to be stopped there.
-    """
+    """Whether a call to `fn` produces a value this path can carry."""
     if getattr(fn, "is_generator", False) or getattr(fn, "is_async", False):
         return True
     if fn_declares_a_return(fn):
         return True
-    return _body_returns_a_value(fn, callee_returns_value)
+    # A function with no value-returning returns falls off the end or has only
+    # bare returns — in Python that means it returns None, so it does produce a
+    # value (None). Direction (b): represent None properly.
+    if _body_returns_a_value(fn, callee_returns_value):
+        return True
+    # Check if it has any returns at all (bare returns) or no returns at all
+    # Both cases mean it returns None implicitly in Python
+    returns = _value_return_exprs(fn)
+    if not returns:
+        return True
+    return False
 
 
 def function_returns_a_value_resolver(functions):
@@ -397,7 +390,8 @@ class ValueKinds:
                  slot_key=None, declared_kind=None, ctor_field_value=None,
                  callee_is_dict=None, dict_names=("Dict", "dict"),
                  param_kind=None, declared_is_dict=None,
-                 callee_returns_value=None, float_names=(), bool_names=(),
+                 callee_returns_value=None, callee_returns_none=None,
+                 float_names=(), bool_names=(),
                  callee_is_bool=None, deref_kind=None,
                  pointer_pointee_kind=None, callee_returned_parameter=None):
         self._int_names = frozenset(int_names)
@@ -569,6 +563,7 @@ class ValueKinds:
         # keeps the answer it had.
         self._callee_returns_value = callee_returns_value or (
             lambda name: True)
+        self._callee_returns_none = callee_returns_none or (lambda name: False)
         # The EIGHTH hook, and the one that lets a POINTER DEREFERENCE carry a
         # kind: `pointer_deref_kind` answers `FLOAT_KIND` for a `p.value()`
         # whose pointee is a float, and `None` for everything else.  A
@@ -1530,6 +1525,19 @@ class ValueKinds:
             return dict_literal_key_kind(self._dict_inits.get(iterable.name))
         return None
 
+    def dict_key_kind(self, iterable):
+        """The KEYS of a dict, asked from outside the class — the public half
+        of `_iterable_dict_key_kind`.
+
+        The for-walk asks it of its own iterable through the private method;
+        `print`'s container plan asks it of a NAME bound to a dict whose
+        values it takes from `list_elem_kind`, because a pair blob's two halves
+        are two different words (`dict_literal_key_value_kind`'s opening
+        sentence) and the plan needs each kind separately. One method, two
+        callers, because the answer has to be the same question either way a
+        reader arrives at it."""
+        return self._iterable_dict_key_kind(iterable)
+
     def _element_kind_in_flow(self, elems):
         """The element kind of a container literal, resolving NAME elements.
 
@@ -1733,26 +1741,6 @@ class ValueKinds:
     def is_none_value(self, e):
         """True when `e` is the `None` singleton, False when it is a value, and
         None when this function's source does not say.
-
-        The third of the three axes `kind_of` cannot carry, and the one with the
-        least evidence behind it, which is why it is also the one with the
-        narrowest reader: **`None` has no representation on this path at all** —
-        a formal value is one 64-bit word and this is the absence of one — so
-        the ONLY way to render it correctly is to know at BUILD time that the
-        operand is `None` and write those four characters into the format string
-        (`print_constant_text`). A word that MIGHT be `None` cannot be printed
-        at all, and that is a refusal this path states rather than a number.
-
-        The evidence: the `None` expression itself (`is_none_expression`, which
-        knows both spellings the parser produces), a NAME every statement of
-        this function binds to one, from `_none_of` under the unanimity rule —
-        which needs a False to be reachable at all, so a literal of another kind
-        answers False (`_NOT_NONE`) and `n = None` then `n = 5` leaves the name
-        out instead of keeping the first binding — and a NAME every statement
-        binds to something else, which answers False for the same reason.
-        `n = None; print(n)` printed `0` on both architectures before this
-        existed; `n = None` then `n = 5` then `print(n)` claims nothing, which
-        is the rule that keeps the first fix from being a wrong one.
         """
         if e is None:
             return None
@@ -1764,6 +1752,15 @@ class ValueKinds:
             if e.name in self._none_conflicts:
                 return None
             return self._none_of.get(e.name)
+        if isinstance(e, F.CallExpr):
+            callee = _flat_callee(e) or getattr(getattr(e, "func", None), "name", None)
+            if isinstance(callee, str):
+                if not self._callee_returns_value(callee):
+                    return None
+                if getattr(self, '_callee_returns_none', None) and self._callee_returns_none(callee):
+                    return True
+                # In direction (b), functions that fall off end or have bare returns return None
+                return None
         return None
 
     def is_bytes_value(self, e):
@@ -2341,7 +2338,7 @@ def subscript_callee_name(call) -> str | None:
     of a subscript callee they can flatten (`arm64_codegen._callee_symbol` has
     carried a `SubscriptExpr` arm for a long time and `x86_64_codegen`'s copy
     has not, which is a pre-existing x86-64 gap listed in
-    `bugs/formal/FORMAL_wide_receiver_by_reference.md` §5.1).  Collapsing that gap is
+    `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) §5.1).  Collapsing that gap is
     not this change's job, so the shared question is asked at the level both
     backends can answer: the BASE NAME, which is the whole of what the
     empty-container decision needs.
@@ -3391,9 +3388,8 @@ def foreign_bytes_export_kind(entry) -> str | None:
       the kind of the arguments and this path does not track that.  The
       kernel-derived `os.path` exports (`realpath`, `abspath`, `expanduser`) are
       mixed for the same reason and are therefore also absent — a stated gap
-      rather than a silent one, and it is what
-      `bugs/formal/FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md`'s
-      Status records as the remainder of this work.
+      rather than a silent one, and that remainder is documented in the
+      deleted bug record for this issue.
     * **Every `String` in user code**, which is the point of the whole exercise:
       an exemption here would be right for the few kernel strings and wrong for
       the thousands of literals.

@@ -434,8 +434,7 @@ class TestLeanOutput(unittest.TestCase):
         verdict about a search path.
 
         `repo_root="."` is not an exotic spelling: it is what
-        `bugs/formal/FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`'s own
-        reproduce command writes, so that doc's measurements were taken through
+        an earlier reproduce command wrote, so those measurements were taken through
         this entry point.
 
         **And the false verdict is CACHED**, which is what makes this more than
@@ -706,8 +705,7 @@ class TestCensusReport(unittest.TestCase):
 # It is named rather than quietly dropped because this tuple is a PREMISE and the
 # test that reads it says so in its own failure message: a name that gains a
 # model stops being this test's subject, which is a reason to be told.
-# `bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md` §0/§2 is where that
-# wave and its measurement are written down.
+# The wave and its measurement are recorded in the host-import wall documentation.
 _DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig")
 
 # **THE ROWS THAT STILL HAVE USERS ARE NOT LISTED HERE, and that is the second
@@ -748,7 +746,7 @@ _DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig")
 #
 # That import is GONE — deleted on 2026-10-08 with the tree's other dead host
 # imports (`73e03459`, "delete the tree's dead host imports"; the ratchet handed
-# off at `bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md` §3) —
+# off at — field access through call results is now handled (fixed)
 # so `abc` is not in the derived census at all any more and the exemption became
 # a claim about a row that is no longer there, which is exactly what
 # `test_a_named_dead_import_is_still_named` catches; that anti-rot row is what

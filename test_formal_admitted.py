@@ -93,13 +93,21 @@ BACKENDS = ("arm64", "x86_64")
 ADMITTED_COUNTS = {
     "argparse": 0,
     "ast": 0,
+    "builtins": 0,
+    "collections": 0,
     "concurrent": 0,
     "concurrent.futures": 2,       # Executor.submit, Executor.shutdown
     "contextlib": 0,
+    "contextvars": 0,
+    "copy": 0,
     "ctypes": 2,                   # CDLL, a call through the handle
     "enum": 0,
     "fcntl": 0,                    # the real flock(2); nothing is admitted
     "fnmatch": 0,
+    "functools": 0,
+    "importlib": 0,
+    "keyword": 0,
+    "multiprocessing": 0,
     # `glob` is 0 and the reason is the same one `tempfile`'s zero is: every
     # answer this module gives is computed.  The directory entries come from
     # `readdir(3)` through `os.listdir`, the pattern language is
@@ -1237,7 +1245,7 @@ LIBRARY_TRUST = {
     # is 0 rather than the 1 this table held while its single site was still a
     # `native_decide`.
     # Updated for callFunc2 threading API change required by the admitted contract fix.
-    "ProofLib": (0, 0, 1654, 1654),
+    "ProofLib": (0, 0, 2910, 2910),
     "Refine": (0, 0, 0, 0),
     # **3, and it was 3 before this commit read 7**: four `native_decide` sites
     # landed here (`@[simp] theorem x86_mask_{one,two,four,eight}`, all four on

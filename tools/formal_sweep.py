@@ -788,7 +788,7 @@ _MEMBER_RE = re.compile(r"\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)")
 # Most of what it found is ONE design defect wearing five costumes, and the
 # families below are ordered so that the *distinction that changes what you
 # would do* wins over the one that does not. All five are recorded in
-# bugs/formal/FORMAL_wide_receiver_by_reference.md; they are separated here because
+# FORMAL_wide_receiver_by_reference.md (deleted; fixed); they are separated here because
 # they have different fixes:
 #
 #   * the address ESCAPES (returned, or aliased out of a method) — the caller

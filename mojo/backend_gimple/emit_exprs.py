@@ -487,7 +487,7 @@ def _closure_value(gen, name: str, _ci) -> tuple:
             # parent's scope and is not visible here, so build it from this closure's own
             # env (the same thing a CALL to the sibling does). `(void *)0` here crashed the
             # callee on its first capture read.
-            _sib_env = ggc._build_outer_closure_env(gen, _ci)
+            _sib_env = gen._build_outer_closure_env(_ci)
             env_void = gen._new_val('void *', f'(void *){_sib_env}')
         else:
             env_void = gen._new_val('void *', '(void *)0')
@@ -7036,7 +7036,7 @@ def none_only_locals(gen) -> set:
     if body is not None:
         nodes = gimple_exprtypes._walk_ast(body)
         if not any(isinstance(n, MatchStmt) for n in nodes):
-            bound: set = set(gen._cur_func_params or ())
+            bound: set = set(ginf.cur_func_param_set(gen))
             for n in nodes:
                 bound |= _names_bound_by(n)
             out = none_bound_locals(gen) - bound

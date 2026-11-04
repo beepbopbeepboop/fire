@@ -1,22 +1,21 @@
 # Pinning regression for FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.
-# Before fix: print(g(...)) for a no-return g built and printed 0 (wrong word).
-# After fix: it is refused with a message naming the callee and CPython's None.
+# Fixed: a function that falls off the end returns None (CPython semantics).
 
-def test_return_less_call_refused_at_print():
+def test_return_less_call_returns_none():
     import subprocess, sys, os
-    src = ".tmp/reg/probe.mojo"
+    src = ".tmp/reg/probe2.mojo"
     os.makedirs(".tmp/reg", exist_ok=True)
     with open(src, "w") as f:
         f.write("def g(a,b):\n    w=1\n\ndef main()->Int32:\n    print(g(1,2))\n    return 0\n")
     out = subprocess.run(
-        [sys.executable, "fire.py", "build", "--formal", "--no-prove", "-o", ".tmp/reg/y", src],
+        [sys.executable, "fire.py", "build", "--formal", "--no-prove", "-o", ".tmp/reg/y2", src],
         capture_output=True, text=True)
-    # Must refuse (non-zero exit) and mention the cause.
-    assert out.returncode != 0, "expected refusal, got exit 0 (bug still present)"
-    stderr = (out.stderr or "") + (out.stdout or "")
-    assert "g returns nothing" in stderr or "returns nothing" in stderr, \
-        "expected refusal message naming return-less call; got: %s" % stderr[:500]
+    assert out.returncode == 0, "build failed: %s" % (out.stderr or out.stdout)[:500]
+    # Run it
+    run = subprocess.run([".tmp/reg/y2"], capture_output=True, text=True)
+    assert "None" in run.stdout, "expected None, got: %s" % run.stdout
+
 
 if __name__ == "__main__":
-    test_return_less_call_refused_at_print()
+    test_return_less_call_returns_none()
     print("PASS")

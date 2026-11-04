@@ -2880,7 +2880,7 @@ def _ctor_param_evidence(gen, struct_name, param, xf_own) -> str:
 def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_collect_self_assigns`."""
     _key = (id(body), str(_method_names) if isinstance(_method_names, set) else str(_method_names))
-    _hit = getattr(__import__('mojo.middle.module_shared', fromlist=['_SELF_ASSIGN_MEMO']), '_SELF_ASSIGN_MEMO', {}).get((_key, 'reads'))
+    _hit = self_assign_memo_get((_key, 'reads'))
     if _hit is not None:
         for fn in _hit:
             if fn not in found and fn not in _method_names and fn not in _PSEUDO_DUNDER_ATTRS:
@@ -2893,7 +2893,7 @@ def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
                 and fn not in _PSEUDO_DUNDER_ATTRS):
             _reads.append(fn)
             found[fn] = _UNKNOWN_FIELD_CTYPE
-    __import__('mojo.middle.module_shared', fromlist=['_SELF_ASSIGN_MEMO'])._SELF_ASSIGN_MEMO[(_key, 'reads')] = _reads
+    self_assign_memo_set((_key, 'reads'), _reads)
 
 
 
@@ -13423,8 +13423,14 @@ def gen_module_impl(self, stmts: list):
         # and its attributes then read off a mis-typed handle.
         _mkrf_bare: dict = {}
         for _outer_name in sorted(self._all_closures):
-            _inner_map = self._all_closures[_outer_name]
-            for _bare in sorted(_inner_map):
+            # Typed `dict` and the key read through `_as_str`: an untyped
+            # `_inner_map` subscripted by an untyped loop key was lowered as a
+            # LIST read (`mojo_list_get_int(inner_map, key)`), a dict read as a
+            # list, and the stage2 binary crashed in this round on any file with
+            # a nested def.
+            _inner_map: dict = self._all_closures[_outer_name]
+            for _bare0 in sorted(_inner_map):
+                _bare = _as_str(_bare0)
                 _mkrf_bare[_bare] = _inner_map[_bare].lifted_name
         for s in all_functions:
             if not _is_foreign_main(s) and isinstance(s, FunctionDef):
@@ -13771,8 +13777,13 @@ def gen_module_impl(self, stmts: list):
             # use it directly for the C declaration (fixes container-returning
             # calls kept at the int64_t default; see doc: the missing
             # declaration in the middle is the struct field type).
-            _ret = self.func_return_types.get(_value.func.name) or \
-                self._infer_return_type(_value.func.name)
+            # Only the registered answer: the fallback this used to carry,
+            # `self._infer_return_type(<callee NAME>)`, passed a STRING where
+            # that function takes a statement list. CPython walked the name's
+            # characters and found nothing; the compiled compiler read the
+            # string as a list header and segfaulted on any module whose
+            # global is assigned a call (`_C_KEYWORDS = frozenset({...})`).
+            _ret = self.func_return_types.get(_value.func.name)
             if isinstance(_ret, str) and _ret.endswith(' *'):
                 _phase17_set_gtype(_gname, _ret, _own)
                 if _ret in ('MojoDict *', 'MojoList *', 'MojoSet *',
@@ -17611,8 +17622,12 @@ def gen_module_impl(self, stmts: list):
     # typedef-emission loop just above this one avoids the bug by using
     # a single-target `for ci in inner_map.values():` — mirror that here.
     for outer_name in sorted(self._all_closures):
-        inner_map = self._all_closures[outer_name]
-        for inner_name in sorted(inner_map):
+        # Typed `dict`, and the key through `_as_str`: untyped, `inner_map[key]`
+        # was lowered as a LIST read of a dict (the stage2 binary segfaulted in
+        # `mojo_list_get_int` for any file with a closure).
+        inner_map: dict = self._all_closures[outer_name]
+        for inner_name0 in sorted(inner_map):
+            inner_name = _as_str(inner_name0)
             ci = inner_map[inner_name]
             if ci.env_struct:
                 alloc_fn = f"_alloc_{ci.env_struct}"

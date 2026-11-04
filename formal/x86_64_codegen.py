@@ -403,6 +403,23 @@ def _collect_var_names(f: F.FunctionDef) -> list:
                 if name not in seen:
                     seen.add(name)
                     names.append(name)
+
+    # `print`-of-a-container loop temps: one blob-pointer + one index per
+    # nesting depth, `_ppb{d}`/`_ppi{d}`, reserved at the FIXED depth the
+    # model caps the plan at (`PRINT_LOOP_MAX_DEPTH`) — the cap and the
+    # reservation are one number, so a plan can never reach a depth the
+    # allocator did not reserve. The gate, `model.print_container_loop_flags`,
+    # is a SUPERSET of what emits (a loop is only emitted for a container
+    # operand, and a container is never a value literal), so the reservation
+    # may be unused — an unused temp is a spare local, and a missing one is a
+    # loop whose index has no home, which is the direction that faults.
+    # arm64's twin appends the same names after its own locals.
+    if M.print_container_loop_flags(f):
+        for i in range(M.PRINT_LOOP_MAX_DEPTH):
+            for name in (f"_ppb{i}", f"_ppi{i}"):
+                if name not in seen:
+                    seen.add(name)
+                    names.append(name)
     return names
 
 
@@ -454,7 +471,8 @@ def _allocation_split(f: F.FunctionDef):
     rest = names[nparams:]
     taken = set(params) | set(rest)
     ct = [n for n in ct if n not in taken]
-    temps = [n for n in rest if n[:3] in ("_fi", "_fb", "_ci", "_cb")]
+    temps = [n for n in rest
+             if n[:3] in ("_fi", "_fb", "_ci", "_cb", "_pp")]
     others = [n for n in rest if n not in set(temps)]
     base = ct + params + temps + others
     pinned_set = {n for n in getattr(f, "_address_taken", ()) if n in set(names)}
@@ -807,6 +825,11 @@ class X86_64Codegen:
         # width 8 has no extension to choose.
         self._sub_signed = True
         self._while_counter = 0
+        # Per-print-of-a-container label counter: each container loop of a
+        # `print` gets a fresh id so its loop nest's labels
+        # (`_pl{pid}_{d}_…`) cannot collide with a sibling container's, the
+        # arm64 backend's twin reading the same shared plan.
+        self._print_loop_counter = 0
         self._var_regs = {}
         self._var_spills = {}
         self._spill_bytes = 0
@@ -965,6 +988,7 @@ class X86_64Codegen:
         self._with_suppress_resume_labels = []
         self._diverged = False
         self._suppress_to_resume = False
+        self._pending_try_handlers = []
         # Names bound to a string address this function (a StringLiteral RHS
         # or an alias of one). A subscript on one of these is a byte load, not
         # a list index. Reset per function.
@@ -1197,6 +1221,37 @@ class X86_64Codegen:
             self.asm.emit(encode_pop_r64(Reg.RBP))
             self.asm.emit(encode_ret())
 
+        # Emit functions with ellipsis/pass-only bodies first to catch
+        # ellipsis refusals before returnless-call checks in other functions
+        def _has_ellipsis_body(fn):
+            try:
+                if len(getattr(fn, 'body', []) or []) == 1:
+                    s = fn.body[0]
+                    if isinstance(s, F.ExprStmt) and isinstance(getattr(s, 'value', None), F.EllipsisLiteral):
+                        return True
+            except Exception:
+                pass
+            return False
+        ellipsis_funcs = []
+        other_funcs = []
+        for f in functions:
+            if _has_ellipsis_body(f):
+                ellipsis_funcs.append(f)
+            else:
+                other_funcs.append(f)
+        reordered = ellipsis_funcs + other_funcs
+        nth = {}
+        self._entry_labels = {}
+        self._internal_labels = set()
+        self._def_labels = []
+        for f in reordered:
+            n = nth.get(f.name, 0) + 1
+            nth[f.name] = n
+            label = f"{f.name}__def{n}"
+            self._internal_labels.add(label)
+            self._def_labels.append(label)
+            self._entry_labels[f.name] = label
+        functions = reordered
         for f, label in zip(functions, self._def_labels):
             self._emit_function(f, label)
 
@@ -1216,6 +1271,7 @@ class X86_64Codegen:
 
         # String literal data goes after the code: its label is what the
         # RIP-relative LEAs point at, so it has to exist before resolve().
+        exec_code_end = len(self.asm.sections["text"])
         for label, data in self._strings:
             self.asm.label(label)
             self.asm.emit(data)
@@ -1237,6 +1293,7 @@ class X86_64Codegen:
             "base_addr": base_addr,
             "entry_offset": self.asm.labels.get(first_func_name, 0),
             "func_offset": self.asm.labels.get(first_func_name, 0),
+            "exec_code_end": exec_code_end,
             "labels": {n: a for n, a in self.asm.labels.items()
                        if n not in self._internal_labels},
             # The float-repr helper's entry, published separately because it is
@@ -1288,7 +1345,7 @@ class X86_64Codegen:
             # side has to mean the same integer on the other, and `info` is how
             # both proof generators are handed one list instead of each
             # recomputing it. Nothing reads it yet
-            # (`bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5).
+            # (`bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5, deleted).
             "exception_kinds": M.exception_kinds(),
             # The INTERN TABLE, keyed by DECODED text — the same map, from the
             # same `_intern_string`, for the same reason as on arm64: a string
@@ -1581,6 +1638,8 @@ class X86_64Codegen:
         self._blob_vars = set()
         self._blob_var_est = {}
         self._blob_loop_stack = []
+        self._list_growable = set()
+        self._list_growable_nodes = set()
         self._fd_vars = set()
         # `comptime NAME = value` bindings in scope, and the list-valued ones
         # kept as their AST. Reset per function, exactly like the tables above:
@@ -2507,35 +2566,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             return
 
         if isinstance(stmt, F.AssertStmt):
-            # `assert cond [, msg]`: evaluate `cond`, run `msg` and leave with
-            # status 1 when it is falsy.
-            #
-            # **Both halves of the failing path are observable, and both used to
-            # be dropped.** `msg` is not formatted into a diagnostic on this
-            # path (there is no printf for it), but CPython EVALUATES it before
-            # it raises, so `assert n > 0, why()` calls `why()` — and a message
-            # that logs, that frees, that closes, or that prints is a program
-            # whose output and whose effects are missing. Measured on both
-            # backends: `assert n > 0, why()` printed nothing where CPython
-            # printed `why`. And the exit goes through the flush a `raise` gets,
-            # so an enclosing `finally` runs on the way out: measured on both
-            # backends, `try: assert n > 0 finally: print('fin')` printed
-            # `body` where CPython prints `body` then `fin`.
-            #
-            # ORDER is CPython's: the message runs first, then the `finally`,
-            # because the assert raises and the `finally` runs during the
-            # unwinding that follows it.
-            #
-            # The JMP over the exit is not an optimisation, it is the whole
-            # statement. There was none here: `jcc fail` was immediately
-            # followed by `label fail`, so the branch had nothing to skip and
-            # the FALL-THROUGH path went straight into exit(1). Every `assert`
-            # failed, whatever it asserted — measured on this backend,
-            # `assert 1` printed nothing and exited 1, while arm64 (which has
-            # the same shape with the branch over the exit spelled `b ok`)
-            # printed `passed`. The `_emit_mov_imm(Reg.R11, 1)` was also
-            # dead: R11 is the divisor, the shift count, and the alloc size on
-            # this path, and an `assert` does none of those.
             self._emit_truthy_word(stmt.value)
             self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
             self._if_counter += 1
@@ -2549,6 +2579,45 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             msg = getattr(stmt, "msg", None)
             if msg is not None:
                 self._emit_expr(msg)
+            if getattr(self, '_pending_try_handlers', None):
+                kinds = M.exception_kinds()
+                exc_kind = M.exception_kind_for("AssertionError", kinds)
+                if exc_kind is None:
+                    exc_kind = 1
+                self._emit_mov_imm(Reg.RAX, exc_kind)
+                try:
+                    handler_info = self._pending_try_handlers[-1]
+                    handlers = handler_info.get('handlers', [])
+                    for handler in handlers:
+                        exc_type = getattr(handler, 'exc_type', None)
+                        handler_name = getattr(handler, 'name', None)
+                        if handler_name:
+                            continue
+                        try:
+                            if exc_type is None:
+                                self._flush_pending_finally()
+                                for hs in (getattr(handler, 'body', None) or []):
+                                    self._emit_stmt(hs)
+                                self.asm.label(ok_label)
+                                return
+                            if M.handler_arm_matches(exc_type if isinstance(exc_type, str) else (exc_type[0] if isinstance(exc_type, (list,tuple)) and exc_type else "AssertionError"), "AssertionError", kinds, self._structs):
+                                self._flush_pending_finally()
+                                for hs in (getattr(handler, 'body', None) or []):
+                                    self._emit_stmt(hs)
+                                self.asm.label(ok_label)
+                                return
+                            elif isinstance(exc_type, (list,tuple)):
+                                for et in exc_type:
+                                    if M.handler_arm_matches(et, "AssertionError", kinds, self._structs):
+                                        self._flush_pending_finally()
+                                        for hs in (getattr(handler, 'body', None) or []):
+                                            self._emit_stmt(hs)
+                                        self.asm.label(ok_label)
+                                        return
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
             self._flush_pending_finally()
             self._emit_call_exit(1)
             self.asm.label(ok_label)
@@ -3010,23 +3079,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         return terminated
 
     def _emit_try(self, stmt: F.TryStmt) -> None:
-        """try/except/else/finally without an exception runtime.
-
-        The except arms are SKIPPED: formal has no unwinder, so there is no
-        edge from a raise site to a handler — and `raise` itself exits the
-        process, so no handler is ever reachable. `else` runs on the success
-        path (which, without EH, is simply the fall-through). A `finally` is
-        pushed onto `_pending_finally` so the paths that leave early
-        (return/break/continue/raise) run it too, and the normal fall-through
-        emits it here.
-
-        The fall-through copy is emitted even when an exit edge inside the body
-        already flushed this frame, because that flush happens where the exit
-        is EMITTED while the fall-through is a different, still-reachable path
-        through the same block; dropping it is how a conditional `return` and a
-        `continue` inside a loop each cost a `finally` its cleanup on the normal
-        path (measured on both architectures, and the same fix and the same
-        measurement on arm64 — `formal/arm64_codegen.py`'s `_emit_try`)."""
+        """try/except/else/finally with exception handling."""
         suppressible = getattr(stmt, '_with_suppressible', False) or getattr(stmt, '_suppressible', False)
         resume_label = None
         if suppressible:
@@ -3035,8 +3088,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._with_suppress_resume_labels = []
             self._with_suppress_resume_labels.append(resume_label)
         fin = stmt.finally_body or []
+        handlers = getattr(stmt, 'handlers', None) or []
+        handlers = [h for h in handlers if not getattr(h, 'name', None)]
         if fin:
             self._pending_finally.append(fin)
+        if handlers and not suppressible:
+            if not hasattr(self, '_pending_try_handlers'):
+                self._pending_try_handlers = []
+            self._pending_try_handlers.append({'handlers': handlers})
         try:
             for s in stmt.body:
                 self._emit_stmt(s)
@@ -3046,6 +3105,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             if fin and self._pending_finally \
                     and self._pending_finally[-1] is fin:
                 self._pending_finally.pop()
+            if handlers and not suppressible and hasattr(self, '_pending_try_handlers') and self._pending_try_handlers:
+                top = self._pending_try_handlers[-1]
+                if top.get('handlers') is handlers:
+                    self._pending_try_handlers.pop()
         finished = getattr(self, '_finished_finally', None)
         if fin and finished and id(fin) in finished:
             pass
@@ -3110,7 +3173,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         return self._emit_extern_call("exit")
 
     def _emit_diverge(self, status: int | None = 1) -> None:
-        """Leave the machine: run every enclosing finally, then `exit(1)`."""
+        """Leave the machine: run every enclosing finally, then exit or dispatch."""
         prev = getattr(self, '_exception_in_flight', False)
         self._exception_in_flight = True
         try:
@@ -3179,6 +3242,69 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             if declared is not None:
                 self._emit_expr(M.raise_zero_arg_construction(
                     declared, getattr(stmt, "line", 0) or 0))
+                if getattr(self, '_pending_try_handlers', None):
+                    kinds = M.exception_kinds()
+                    exc_kind = M.exception_kind_for(declared, kinds)
+                    if exc_kind is None:
+                        exc_kind = 1
+                    self._emit_mov_imm(Reg.RAX, exc_kind)
+                    try:
+                        handler_info = self._pending_try_handlers[-1]
+                        handlers = handler_info.get('handlers', [])
+                        for handler in handlers:
+                            exc_type = getattr(handler, 'exc_type', None)
+                            handler_name = getattr(handler, 'name', None)
+                            if handler_name:
+                                continue
+                            try:
+                                if exc_type is None:
+                                    try:
+                                        self._flush_pending_finally()
+                                    except Exception:
+                                        pass
+                                    for hs in (getattr(handler, 'body', None) or []):
+                                        self._emit_stmt(hs)
+                                    self._exception_in_flight = prev
+                                    return
+                                if M.handler_arm_matches(exc_type if isinstance(exc_type, str) else (exc_type[0] if isinstance(exc_type, (list,tuple)) and exc_type else declared), declared, kinds, self._structs):
+                                    try:
+                                        self._flush_pending_finally()
+                                    except Exception:
+                                        pass
+                                    for hs in (getattr(handler, 'body', None) or []):
+                                        self._emit_stmt(hs)
+                                    self._exception_in_flight = prev
+                                    return
+                                elif isinstance(exc_type, (list,tuple)):
+                                    for et in exc_type:
+                                        if M.handler_arm_matches(et, declared, kinds, self._structs):
+                                            try:
+                                                self._flush_pending_finally()
+                                            except Exception:
+                                                pass
+                                            for hs in (getattr(handler, 'body', None) or []):
+                                                self._emit_stmt(hs)
+                                            self._exception_in_flight = prev
+                                            return
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+                    try:
+                        self._flush_pending_finally()
+                    except Exception:
+                        self._exception_in_flight = prev
+                        raise
+                    if getattr(self, '_suppress_to_resume', False):
+                        self._suppress_to_resume = False
+                        self._exception_in_flight = prev
+                        return
+                    if getattr(self, '_exception_in_flight', False):
+                        self._exception_in_flight = prev
+                        self._emit_call_exit(1)
+                        return
+                    self._exception_in_flight = prev
+                    return
                 try:
                     self._flush_pending_finally()
                 except Exception:
@@ -3196,6 +3322,45 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 return
             if value is not None:
                 self._emit_expr(value)
+            if getattr(self, '_pending_try_handlers', None):
+                self._emit_mov_imm(Reg.RAX, 1)
+                try:
+                    handler_info = self._pending_try_handlers[-1]
+                    handlers = handler_info.get('handlers', [])
+                    for handler in handlers:
+                        exc_type = getattr(handler, 'exc_type', None)
+                        handler_name = getattr(handler, 'name', None)
+                        if handler_name:
+                            continue
+                        try:
+                            if exc_type is None:
+                                try:
+                                    self._flush_pending_finally()
+                                except Exception:
+                                    pass
+                                for hs in (getattr(handler, 'body', None) or []):
+                                    self._emit_stmt(hs)
+                                self._exception_in_flight = prev
+                                return
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+                try:
+                    self._flush_pending_finally()
+                except Exception:
+                    self._exception_in_flight = prev
+                    raise
+                if getattr(self, '_suppress_to_resume', False):
+                    self._suppress_to_resume = False
+                    self._exception_in_flight = prev
+                    return
+                if getattr(self, '_exception_in_flight', False):
+                    self._exception_in_flight = prev
+                    self._emit_call_exit(1)
+                    return
+                self._exception_in_flight = prev
+                return
             try:
                 self._flush_pending_finally()
             except Exception:
@@ -3218,10 +3383,106 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                                          argument_is_int=self._sys_exit_status_is_int(
                                              value))
             if status is None:
+                if getattr(self, '_pending_try_handlers', None) and exc_name not in ("SystemExit",):
+                    kinds = M.exception_kinds()
+                    exc_kind = M.exception_kind_for(exc_name, kinds)
+                    if exc_kind is None:
+                        exc_kind = 1
+                    self._emit_mov_imm(Reg.RAX, exc_kind)
                 args = M.raise_arg_exprs(value)
-                self._emit_expr(args[0])
-                for arg in args[1:]:
+                if status is None and not (getattr(self, '_pending_try_handlers', None) and exc_name not in ("SystemExit",)):
+                    self._emit_expr(args[0])
+                    for arg in args[1:]:
+                        self._emit_expr(arg)
+                    try:
+                        self._flush_pending_finally()
+                    except Exception:
+                        self._exception_in_flight = prev
+                        raise
+                    if getattr(self, '_suppress_to_resume', False):
+                        self._suppress_to_resume = False
+                        self._exception_in_flight = prev
+                        return
+                    if getattr(self, '_exception_in_flight', False):
+                        self._exception_in_flight = prev
+                        self._emit_call_exit(None, computed=True)
+                        return
+                    self._exception_in_flight = prev
+                    return
+                else:
+                    # For exceptions in try blocks
+                    if getattr(self, '_pending_try_handlers', None) and exc_name not in ("SystemExit",):
+                        self._emit_expr(args[0]) if args else None
+                        for arg in args[1:]:
+                            self._emit_expr(arg)
+                    try:
+                        self._flush_pending_finally()
+                    except Exception:
+                        self._exception_in_flight = prev
+                        raise
+                    if getattr(self, '_suppress_to_resume', False):
+                        self._suppress_to_resume = False
+                        self._exception_in_flight = prev
+                        return
+                    if getattr(self, '_exception_in_flight', False):
+                        self._exception_in_flight = prev
+                        if getattr(self, '_pending_try_handlers', None) and exc_name not in ("SystemExit",):
+                            self._emit_call_exit(1)
+                            return
+                        self._emit_call_exit(None, computed=True)
+                        return
+                    self._exception_in_flight = prev
+                    return
+            if getattr(self, '_pending_try_handlers', None) and exc_name not in ("SystemExit",):
+                kinds = M.exception_kinds()
+                exc_kind = M.exception_kind_for(exc_name, kinds)
+                if exc_kind is None:
+                    exc_kind = 1
+                self._emit_mov_imm(Reg.RAX, exc_kind)
+                for arg in M.raise_arg_exprs(value):
                     self._emit_expr(arg)
+                try:
+                    handler_info = self._pending_try_handlers[-1]
+                    handlers = handler_info.get('handlers', [])
+                    for handler in handlers:
+                        exc_type = getattr(handler, 'exc_type', None)
+                        handler_name = getattr(handler, 'name', None)
+                        if handler_name:
+                            continue
+                        try:
+                            if exc_type is None:
+                                try:
+                                    self._flush_pending_finally()
+                                except Exception:
+                                    pass
+                                for hs in (getattr(handler, 'body', None) or []):
+                                    self._emit_stmt(hs)
+                                self._exception_in_flight = prev
+                                return
+                            if M.handler_arm_matches(exc_type if isinstance(exc_type, str) else (exc_type[0] if isinstance(exc_type, (list,tuple)) and exc_type else exc_name), exc_name, kinds, self._structs):
+                                try:
+                                    self._flush_pending_finally()
+                                except Exception:
+                                    pass
+                                for hs in (getattr(handler, 'body', None) or []):
+                                    self._emit_stmt(hs)
+                                self._exception_in_flight = prev
+                                return
+                            elif isinstance(exc_type, (list,tuple)):
+                                for et in exc_type:
+                                    if M.handler_arm_matches(et, exc_name, kinds, self._structs):
+                                        try:
+                                            self._flush_pending_finally()
+                                        except Exception:
+                                            pass
+                                        for hs in (getattr(handler, 'body', None) or []):
+                                            self._emit_stmt(hs)
+                                        self._exception_in_flight = prev
+                                        return
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
                 try:
                     self._flush_pending_finally()
                 except Exception:
@@ -3233,7 +3494,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     return
                 if getattr(self, '_exception_in_flight', False):
                     self._exception_in_flight = prev
-                    self._emit_call_exit(None, computed=True)
+                    self._emit_call_exit(1)
                     return
                 self._exception_in_flight = prev
                 return
@@ -4694,25 +4955,29 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         return False
 
     def _print_call(self, args: list):
-        """`(format, operands)` for a `print` of `args`.
+        """The PARTS of a `print` of `args` — the model's shared loop.
 
-        TWO LINES OF DELEGATION, and `model.print_call_spelling` is where the
-        decision and every reason for it live: which operand is a fragment and
-        which is a value, that a `bool` is `True`/`False` rather than the word's
-        own `1`/`0`, that `None` is the four characters rather than a `0`, that a
-        `bytes` literal is CPython's `repr()` of it, and the four shapes this
-        path refuses with a sentence that says what CPython prints. This method
-        was the whole of that once, and `arm64_codegen.py` had the same method
-        again — which is the argument for one copy rather than two, and before
-        the move both printed `1` for `True` and `ab` for `b"ab"`.
+        TWO LINES OF DELEGATION, and `model.print_arg_parts` is where the
+        decision and every reason for it live: which operand is a fragment
+        and which is a value, that a `bool` is `True`/`False` rather than
+        the word's own `1`/`0`, that `None` is the four characters rather
+        than a `0`, that a `bytes` literal is CPython's `repr()` of it,
+        and that a container is a LOOP — its plan made there, once, by
+        `model.container_print_plan`, with the refusals for the shapes it
+        does not render. The part the loop answers is a
+        `model.ContainerPrintOperand`, and `_emit_print` renders it.
 
-        The int conversion follows the operand's own type, and the model asks
-        for that through a hook because it is this backend's `_ttype` and the
-        model's default integer is UNSIGNED: `%lld` on a `UInt64` whose top bit
-        is set prints a negative number, so signedness decides and the width
-        does not (a narrow int already sign/zero-extends to the word it is
-        stored in)."""
-        return M.print_call_spelling(
+        The four facts only an emitter has are passed as hooks: this
+        backend's flow-sensitive `_expr_str_kind`, its own signedness for
+        `_ttype`, and the two container facts `ValueKinds` does not carry —
+        the SHAPE (a list, a tuple, a set and a dict are one kind; the
+        brackets are the tables' fact) and a dict name's initializer
+        literal (the pairs the binding wrote). `dict_key_kind` is the
+        for-walk's own reader, asked of the same name so the two cannot
+        disagree about a key. arm64's copy is the same call with the
+        arm64 word, so the two machines cannot refuse one `print`
+        differently."""
+        return M.print_arg_parts(
             args,
             no_value_callee=self._vkinds.no_value_callee_of,
             kind_of=self._expr_str_kind,
@@ -4720,7 +4985,77 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             is_bool=self._print_operand_is_bool,
             is_none=self._vkinds.is_none_value,
             is_bytes=self._vkinds.is_bytes_value,
+            container_shape=self._print_container_shape,
+            dict_init_of=self._print_dict_init,
+            dict_key_kind=lambda e: self._vkinds.dict_key_kind(e),
             backend="x86-64")
+
+    def _print_container_shape(self, e):
+        """The container's bracket SHAPE — the one fact its kind does not
+        carry.
+
+        A list, a tuple, a set and a dict all classify as a `LIST_PREFIX`
+        blob (`model.container_shape_refusal`'s opening), and CPython writes
+        different brackets for each, so the shape is read from the SOURCE:
+        the literal's own AST for the four inline spellings, the name tables
+        for a name — mutually exclusive marks, in the precedence a name is
+        one shape (`_dict_vars` then `_set_vars` then `_tuple_vars` then
+        `_blob_vars`, the last holding every list a binding named) — and the
+        module slot's initializer for a global this function does not bind.
+        None is the plan's shape refusal: a call result and a blob `+` spell
+        none of the four, and guessing is the mistake the refusal exists for.
+        arm64's copy is the same method over the same tables."""
+        if isinstance(e, F.ListExpr):
+            return "list"
+        if isinstance(e, F.TupleExpr):
+            return "tuple"
+        if isinstance(e, F.SetExpr):
+            return "set"
+        if isinstance(e, F.DictExpr):
+            return "dict"
+        if isinstance(e, F.Comprehension):
+            # A list comprehension is a list; a dict comprehension's pairs
+            # are built at run time, and the plan refuses it on the kind
+            # evidence (`model.dict_comprehension_print_refusal`) — the
+            # shape is answered honestly either way.
+            return "dict" if getattr(e, "kind", "list") == "dict" else "list"
+        if isinstance(e, F.IdentExpr):
+            name = e.name
+            if name in self._dict_vars:
+                return "dict"
+            if name in self._set_vars:
+                return "set"
+            if name in self._tuple_vars:
+                return "tuple"
+            if name in self._blob_vars:
+                return "list"
+            got = M.global_slot_container_init(name)
+            if got is not None:
+                return got[0]
+        return None
+
+    def _print_dict_init(self, e):
+        """The dict LITERAL a `print` operand bound, or None.
+
+        The initializer the pairs were WRITTEN from — the evidence the plan
+        reads its keys and values from (`model.container_print_plan`'s
+        dict arm). A literal is its own initializer; a name answers from
+        `ValueKinds.dict_inits`, which the tombstone rule keeps to a name
+        every binding of whose binding is that one literal, and from the
+        module slot's initializer for a global the function does not bind.
+        None is the plan's kind-chain fallback for a name (keys off
+        `dict_key_kind`, values off the kind), and the refusal when even
+        those do not state a scalar."""
+        if isinstance(e, F.DictExpr):
+            return e
+        if isinstance(e, F.IdentExpr):
+            node = self._vkinds.dict_inits().get(e.name)
+            if node is not None:
+                return node
+            got = M.global_slot_container_init(e.name)
+            if got is not None and got[0] == "dict":
+                return got[1]
+        return None
 
     def _print_operand_is_bool(self, e) -> bool:
         """Whether `print` must render `e` as `True`/`False`.
@@ -4950,6 +5285,116 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         messages quote. `flush=` is answered there too."""
         return M.print_kwargs(e, "x86_64")
 
+    def _emit_str(self, e) -> None:
+        args = list(e.args or [])
+        if len(args) != 1 or e.kwargs:
+            raise CodegenError("str() takes exactly one argument on this path")
+        operand = args[0]
+        kind = self._expr_str_kind(operand)
+        from formal import model as M
+        if M.string_operand_is_string(kind):
+            self._emit_expr(operand)
+            return
+        # Special case for int literals
+        if isinstance(operand, F.IntLiteral):
+            # Convert int to string manually
+            val = operand.value
+            # For simple cases, use a small buffer
+            self.asm.emit(encode_sub_r64_imm32(Reg.RSP, 64))
+            # Build string representation
+            if val == 0:
+                s = "0"
+            elif val > 0:
+                s = str(val)
+            else:
+                s = str(val)
+            self.asm.emit(encode_lea_r64_rm64(Reg.RDI, Reg.RSP, 0))
+            # Copy string
+            # For simplicity, just use sprintf with the format
+            fmt = "%d" if abs(val) < 2**31 and False else "%ld"  # use simple approach
+            # Easier: just store the string literal address and copy
+            # Or use sprintf differently
+            try:
+                self.asm.emit(encode_lea_r64_rm64(Reg.RDI, Reg.RSP, 0))
+                self._emit_expr(F.StringLiteral("%ld"))
+                self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))
+                self._emit_expr(operand)
+                self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))
+                self.asm.emit(encode_mov_r64_imm32(Reg.RAX, 0))
+                self._emit_extern_call("sprintf")
+                self.asm.emit(encode_lea_r64_rm64(Reg.RAX, Reg.RSP, 0))
+                self.asm.emit(encode_add_r64_imm32(Reg.RSP, 64))
+                return
+            except Exception:
+                pass
+        if M.is_number_kind(kind) or kind == getattr(M, 'INT_KIND', None) or getattr(M, 'BOOL_KIND', None) == kind or kind == getattr(M, 'FLOAT_KIND', None):
+            # Try to use print logic
+            try:
+                frags, operands2 = self._print_call([operand])
+                if len(frags) == 1 and '%' in frags[0] and operands2:
+                    fmt = frags[0]
+                    # Try using print mechanism style
+                    self.asm.emit(encode_sub_r64_imm32(Reg.RSP, 512))
+                    self.asm.emit(encode_lea_r64_rm64(Reg.RDI, Reg.RSP, 0))
+                    self._emit_expr(F.StringLiteral(fmt))
+                    self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))
+                    self._emit_expr(operands2[0])
+                    self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))
+                    self.asm.emit(encode_mov_r64_imm32(Reg.RAX, 0))
+                    self._emit_extern_call("sprintf")
+                    self.asm.emit(encode_lea_r64_rm64(Reg.RAX, Reg.RSP, 0))
+                    self.asm.emit(encode_add_r64_imm32(Reg.RSP, 512))
+                    return
+            except Exception:
+                pass
+            # Fallback: just pass through
+            self._emit_expr(operand)
+            return
+        raise CodegenError(f"str() of {type(operand).__name__} is not supported on this path")
+
+    def _emit_repr(self, e) -> None:
+        args = list(e.args or [])
+        if len(args) != 1 or e.kwargs:
+            raise CodegenError("repr() takes exactly one argument on this path")
+        operand = args[0]
+        kind = self._expr_str_kind(operand)
+        from formal import model as M
+        if M.string_operand_is_string(kind):
+            self.asm.emit(encode_sub_r64_imm32(Reg.RSP, 536))
+            self.asm.emit(encode_lea_r64_rm64(Reg.RDI, Reg.RSP, 0))
+            self._emit_expr(F.StringLiteral("'%s'"))
+            self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))
+            self._emit_expr(operand)
+            self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))
+            self.asm.emit(encode_mov_r64_imm32(Reg.RAX, 0))
+            self._emit_extern_call("sprintf")
+            self.asm.emit(encode_lea_r64_rm64(Reg.RAX, Reg.RSP, 0))
+            self.asm.emit(encode_add_r64_imm32(Reg.RSP, 536))
+            return
+        if isinstance(operand, F.IntLiteral):
+            self._emit_expr(operand)
+            return
+        if M.is_number_kind(kind) or kind == getattr(M, 'INT_KIND', None) or getattr(M, 'BOOL_KIND', None) == kind or kind == getattr(M, 'FLOAT_KIND', None):
+            try:
+                frags, operands2 = self._print_call([operand])
+                if len(frags) == 1 and operands2:
+                    fmt = frags[0]
+                    self.asm.emit(encode_sub_r64_imm32(Reg.RSP, 512))
+                    self.asm.emit(encode_lea_r64_rm64(Reg.RDI, Reg.RSP, 0))
+                    self._emit_expr(F.StringLiteral(fmt))
+                    self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))
+                    self._emit_expr(operands2[0])
+                    self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))
+                    self.asm.emit(encode_mov_r64_imm32(Reg.RAX, 0))
+                    self._emit_extern_call("sprintf")
+                    self.asm.emit(encode_lea_r64_rm64(Reg.RAX, Reg.RSP, 0))
+                    self.asm.emit(encode_add_r64_imm32(Reg.RSP, 512))
+                    return
+            except Exception:
+                pass
+            raise CodegenError("repr() of numbers not yet implemented on x86_64")
+        raise CodegenError(f"repr() of {type(operand).__name__} is not supported on this path")
+
     def _emit_print(self, e) -> None:
         """`print(...)` — a real call to the C library's `printf`.
 
@@ -4965,9 +5410,31 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
         **`flush=True` IS A REAL `fflush` AND NOT A DROPPED KEYWORD**, after the
         `printf` — arm64's twin, from the same `M.print_kwargs`, so the two
-        machines cannot disagree about whether a keyword is honoured."""
+        machines cannot disagree about whether a keyword is honoured.
+
+        **A container argument takes the STREAM instead**, on the same
+        branch as arm64: the test is the model's PARTS (which already
+        carry the plan and every refusal), not a second reading of the
+        source. The old path is byte-identical below — the parts
+        projected onto one format string through the same
+        `M.print_format`, the same call and the same float
+        reservation."""
         sep, end, flush = self._print_kwargs(e)
-        frags, operands = self._print_call(list(e.args))
+        parts = self._print_call(list(e.args))
+        if any(p[0] == "container" for p in parts):
+            self._emit_print_stream(parts, sep, end, flush)
+            return
+        frags, operands = [], []
+        for part in parts:
+            tag = part[0]
+            if tag == "text":
+                frags.append(part[1])
+            elif tag == "value":
+                frags.append(part[1])
+                operands.append(part[2])
+            else:  # "float" — a container part took the stream above
+                frags.append("%s")
+                operands.append(part[1])
         fmt = M.print_format(frags, sep, end)
         n_floats = sum(1 for o in operands if isinstance(o, M.FloatPrintOperand))
         if n_floats:
@@ -4977,6 +5444,281 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_call(_call("fflush", [F.IntLiteral(0)]))
         if n_floats:
             self.asm.emit(encode_add_r64_imm32(Reg.RSP, 64 * n_floats))
+
+    # ── `print` of a container: the stream (the x86-64 half) ───────────
+    #
+    # The model made the DECISION — `print_arg_parts`'s container arm, the
+    # plan tree and every refusal in `container_print_plan` — and this
+    # section is the SysV machine half: one loop per container nesting,
+    # one `printf` per element, the brackets and separators the plan's
+    # leaf says the walk must write. R11 is the blob base, R10 the count,
+    # RAX the index and R8 the loop flag, the `_emit_for_list` register
+    # pattern; the state lives in the frame (`_ppb{d}`/`_ppi{d}`) and is
+    # reloaded after every call, because `printf` is a call.
+
+    def _emit_print_stream(self, parts, sep, end, flush) -> None:
+        """A `print` with at least one container part, rendered part by
+        part — arm64's stream on SysV registers.
+
+        Text folds: a fragment and a separator are format TEXT, and
+        pending text rides along in the next `printf`'s format rather
+        than getting a call of its own — flushed as a text-only `printf`
+        the moment a value, a float or a container needs the stream, and
+        again at the line's end with the `end` text. (The brackets are the
+        loop's own: `_emit_print_container` writes them, at every depth.) The `sep`/`end`
+        rule is `M.print_format`'s, asked the same way and escaped by the
+        same `M.print_literal` the old path runs on them.
+
+        The float-repr block is reserved ONCE for the whole stream,
+        before it: everything the stream does in between pushes and pops
+        strictly below this RSP and returns to it, so a buffer's address
+        is a fixed `64 * index` offset from it at every float. There is
+        no `16 * (1 + position)` term: that is `_emit_call`'s argument
+        spill, and this path calls `printf` by hand rather than through
+        it.
+        """
+        a = self.asm
+        sep_esc = M.print_literal(sep) if sep else ""
+        end_esc = M.print_literal(end) if end else ""
+        n_floats = sum(1 for p in parts if p[0] == "float")
+        if n_floats:
+            a.emit(encode_sub_r64_imm32(Reg.RSP, 64 * n_floats))
+        pending = ""
+        for i, part in enumerate(parts):
+            if i and sep:
+                pending += sep_esc
+            tag = part[0]
+            if tag == "text":
+                pending += part[1]
+            elif tag == "value":
+                if pending:
+                    self._emit_print_printf(pending)
+                    pending = ""
+                self._emit_expr(part[2])
+                self._emit_print_printf_value(part[1])
+            elif tag == "float":
+                if pending:
+                    self._emit_print_printf(pending)
+                    pending = ""
+                op = part[1]
+                self._emit_expr(op.expr)
+                a.emit(encode_lea_r64_rm64(Reg.RSI, Reg.RSP, 64 * op.index))
+                a.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
+                self._float_repr_used = True
+                a.emit(encode_call_rel32(0))
+                a.emit_label_rel32(M.FLOAT_REPR_SYMBOL, here_offset=-4)
+                # The helper answers with the buffer's address in RAX; that
+                # address is the `%s`'s vararg, moved to RSI before the
+                # format takes RDI.
+                a.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))
+                self._emit_print_printf_value("%s", value_reg=Reg.RSI)
+            else:  # "container"
+                if pending:
+                    self._emit_print_printf(pending)
+                    pending = ""
+                op = part[1]
+                # Container ctx for the operand alone, the `_emit_for_list`
+                # way: a `+` in it means list concat rather than pointer add.
+                self._container_ctx += 1
+                try:
+                    self._emit_expr(op.expr)
+                finally:
+                    self._container_ctx -= 1
+                self._store_var("_ppb0", Reg.RAX)
+                self._emit_mov_imm(Reg.RAX, 0)
+                self._store_var("_ppi0", Reg.RAX)
+                self._emit_print_container(op.plan, 0)
+        pending += end_esc
+        if pending:
+            self._emit_print_printf(pending)
+        if n_floats:
+            a.emit(encode_add_r64_imm32(Reg.RSP, 64 * n_floats))
+        if flush:
+            self._emit_call(_call("fflush", [F.IntLiteral(0)]))
+
+    def _emit_print_printf(self, fmt) -> None:
+        """A TEXT-ONLY `printf` of `fmt` — the stream's fragment flush.
+
+        `fmt` is already through `print_literal_text` (a part's escaped
+        text, an escaped `sep`/`end`, or one of the stream's own
+        constants — a bracket, a `,`), so the `F.StringLiteral` wrap is
+        the DECODE ROUND TRIP rather than a re-escape: `_intern_string`
+        decodes, and the doubled `%` and `\\` come back to the single
+        ones, the same two-pass order the old path's synthesized format
+        takes. A plain string would be taken at face value there and
+        the doubling would land in the table un-decoded. SysV passes the
+        first integer argument in RDI and the vector-register count in
+        AL, so the format lands there and `mov rax, 0` closes the call
+        — the same two instructions `_emit_call_exit` spells for a
+        one-argument vararg callee.
+        """
+        a = self.asm
+        a.emit(encode_lea_r64_rip(Reg.RDI, 0))
+        a.emit_label_rip(self._intern_string(F.StringLiteral(fmt)),
+                         here_offset=-4)
+        a.emit(encode_mov_r64_imm32(Reg.RAX, 0))
+        self._emit_extern_call("printf")
+
+    def _emit_print_printf_value(self, fmt, value_reg=None) -> None:
+        """A `printf` of `fmt` with ONE vararg, the word in `value_reg`.
+
+        The value register defaults to the value itself (RAX, this
+        backend's value register); the bool leaf and the float pass
+        theirs explicitly. The move PRECEDES the format load for the
+        same reason as on arm64 — the format takes RDI after it — and
+        `mov rax, 0` (AL = 0 vector registers) is the SysV varargs
+        convention, spelled here beside the one argument it covers.
+        """
+        if value_reg is None:
+            value_reg = Reg.RAX
+        a = self.asm
+        if value_reg != Reg.RSI:
+            a.emit(encode_mov_r64_r64(Reg.RSI, value_reg))
+        a.emit(encode_lea_r64_rip(Reg.RDI, 0))
+        a.emit_label_rip(self._intern_string(F.StringLiteral(fmt)),
+                         here_offset=-4)
+        a.emit(encode_mov_r64_imm32(Reg.RAX, 0))
+        self._emit_extern_call("printf")
+
+    def _emit_print_container(self, plan, d) -> None:
+        """The loop of ONE container at depth `d`, the plan's one nest —
+        arm64's loop on the `_emit_for_list` register pattern.
+
+        R11 is the base, R10 the count and RAX the index, and every one
+        of them is caller-saved, because the body's own `printf`s clobber
+        them all: the state lives in the frame (`_ppb{d}`/`_ppi{d}`) and
+        is reloaded after each, and the element address is computed fresh
+        each pass by `_emit_elem_addr` — the same shift-and-adds the
+        for-walk uses, so the two walks of one blob cannot disagree about
+        an element's address. The count test is the for-walk's: `setae`
+        over the index and the count, a branch on the flag. The
+        separator is the stream's own `sep`, written before every
+        element EXCEPT the first — CPython's rule, asked at run time off
+        the index because the count is a run-time fact. A dict's pair is
+        16 bytes (`scale=4`), the key at its head and the value at `+8`,
+        and the pair address is recomputed after the key's `printf` for
+        the reason the state is: that call moved the base. A
+        one-element tuple's trailing comma is a run-time `count == 1`
+        after the loop — the shape CPython spells, and the count the
+        source does not state.
+
+        The opening and closing brackets ARE here — one text `printf`
+        before the loop and one after it (after the tuple's trailing
+        comma) — rather than in the stream: the stream writes only the
+        TOP-LEVEL container's siblings, and a NESTED loop is emitted from
+        the leaf, where the stream is not, so the bracket that belongs to
+        a nest has to come out of the loop that owns it. A loop and its
+        brackets in one method cannot drift apart the way two emitters of
+        one bracket would.
+        """
+        _tag, shape, _ob, _cb, key_plan, elem_plan = plan
+        self._print_loop_counter += 1
+        pid = self._print_loop_counter
+        fn = self.func_name
+        start_label = f"{fn}_pl{pid}_{d}_start"
+        nosep_label = f"{fn}_pl{pid}_{d}_nosep"
+        step_label = f"{fn}_pl{pid}_{d}_step"
+        done_label = f"{fn}_pl{pid}_{d}_done"
+        comma_label = f"{fn}_pl{pid}_{d}_comma"
+        pb, pi = f"_ppb{d}", f"_ppi{d}"
+        a = self.asm
+        self._emit_print_printf(_ob)
+        a.label(start_label)
+        self._load_var(pb, Reg.R11)
+        a.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))
+        self._load_var(pi, Reg.RAX)
+        a.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R10))
+        self._emit_setcc_bool(Reg.R8, "setae")
+        self._emit_jcc_bool(Reg.R8, COND_NE, done_label)
+        a.emit(encode_cmp_r64_imm32(Reg.RAX, 0))
+        self._emit_jcc(COND_E, nosep_label)
+        self._emit_print_printf(M.CONTAINER_ELEM_SEP)
+        self._load_var(pb, Reg.R11)
+        self._load_var(pi, Reg.RAX)
+        a.label(nosep_label)
+        if shape == "dict":
+            self._emit_elem_addr(Reg.R11, Reg.RAX, Reg.RDI,
+                                 header=M.BLOB_HEADER_BYTES, scale=4)
+            a.emit(encode_mov_r64_rm64(Reg.R9, Reg.RDI, 0))
+            # `conv + ": "` — the pair's own separator, part of the KEY's
+            # format rather than a third `printf`: CPython writes `k: v`
+            # as one unit and the plan's key leaf is the uniform one.
+            self._emit_print_leaf(key_plan, Reg.R9, d, pid,
+                                  slot="k", conv_suffix=": ")
+            self._load_var(pb, Reg.R11)
+            self._load_var(pi, Reg.RAX)
+            self._emit_elem_addr(Reg.R11, Reg.RAX, Reg.RDI,
+                                 header=M.BLOB_HEADER_BYTES, scale=4)
+            a.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RDI, 8))
+            self._emit_print_leaf(elem_plan, Reg.RAX, d, pid, slot="v")
+        else:
+            self._emit_elem_addr(Reg.R11, Reg.RAX, Reg.RDI,
+                                 header=M.BLOB_HEADER_BYTES, scale=3)
+            a.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RDI, 0))
+            self._emit_print_leaf(elem_plan, Reg.RAX, d, pid, slot="e")
+        a.label(step_label)
+        self._load_var(pi, Reg.RAX)
+        a.emit(encode_add_r64_imm8(Reg.RAX, 1))
+        self._store_var(pi, Reg.RAX)
+        self._emit_jmp(start_label)
+        a.label(done_label)
+        if shape == "tuple":
+            self._load_var(pb, Reg.R11)
+            a.emit(encode_mov_r64_rm64(Reg.RAX, Reg.R11, 0))
+            a.emit(encode_cmp_r64_imm32(Reg.RAX, 1))
+            self._emit_jcc(COND_NE, comma_label)
+            self._emit_print_printf(",")
+        a.label(comma_label)
+        self._emit_print_printf(_cb)
+
+    def _emit_print_leaf(self, leaf, value_reg, d, pid, slot="e",
+                         conv_suffix="") -> None:
+        """The element or pair half at depth `d`, the word in `value_reg`.
+
+        Three answers, and the plan's leaf tuple is all three: an int (or
+        the dict half's) word is one conversion, a bool's word is a SELECT
+        over the two texts rather than a number — a branch over the two
+        interned addresses, the same choice a conditional expression
+        makes in a vararg elsewhere — and a nested container's word is a
+        POINTER to the next depth's blob: it is stored to that depth's
+        temps, its index zeroed, and the loop recursed, so the nesting's
+        brackets, separators and trailing comma are the plan's inner
+        nest rather than a second loop this section invents. The bool
+        branch's labels carry the `slot` because a dict's key and value
+        leaves sit in one loop body and two bool halves of it would
+        otherwise name the same label twice.
+        """
+        a = self.asm
+        tag = leaf[0]
+        conv, is_bool = None, False
+        if tag == "leaf":
+            _t, conv, is_bool = leaf
+        if is_bool:
+            fn = self.func_name
+            false_label = f"{fn}_pl{pid}_{d}_{slot}_false"
+            sel_label = f"{fn}_pl{pid}_{d}_{slot}_sel"
+            a.emit(encode_cmp_r64_imm32(value_reg, 0))
+            a.emit(encode_lea_r64_rip(Reg.RSI, 0))
+            a.emit_label_rip(self._intern_string(
+                F.StringLiteral(M.BOOL_TRUE_TEXT)), here_offset=-4)
+            self._emit_jcc(COND_E, false_label)
+            self._emit_jmp(sel_label)
+            a.label(false_label)
+            a.emit(encode_lea_r64_rip(Reg.RSI, 0))
+            a.emit_label_rip(self._intern_string(
+                F.StringLiteral(M.BOOL_FALSE_TEXT)), here_offset=-4)
+            a.label(sel_label)
+            value_reg = Reg.RSI
+        if tag == "leaf":
+            self._emit_print_printf_value(conv + conv_suffix, value_reg)
+            return
+        # "cont": the word is the next depth's blob.
+        if value_reg != Reg.RAX:
+            a.emit(encode_mov_r64_r64(Reg.RAX, value_reg))
+        self._store_var(f"_ppb{d + 1}", Reg.RAX)
+        self._emit_mov_imm(Reg.RAX, 0)
+        self._store_var(f"_ppi{d + 1}", Reg.RAX)
+        self._emit_print_container(leaf, d + 1)
 
     # ── `print` of a float: the x86-64 half ──────────────────────────
 
@@ -6139,24 +6881,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.RAX))
 
     def _emit_list_append(self, e) -> None:
-        """`xs.append(v)` — store v at the blob's count and bump the count.
-
-        The blob is `[count][elem0]…` in the frame, so there is no room to
-        grow one: the capacity is a compile-time number (`_scan_list_caps`) and
-        the store is checked against it, refusing to write past the blob.
-        Appending more times than the scan found — inside a loop — stops the
-        program instead of quietly corrupting the frame, the same bargain every
-        other bounded container operation on this path makes.
-
-        The stop is LOUD. It used to be a bare `exit(1)` with nothing on either
-        stream, which is the worst of the three answers this backend can give:
-        not a wrong number a reader can compare, not a named refusal they can
-        act on, but silence. `model.list_append_overflow_message` (shared with
-        arm64, so the two machines cannot name this limit differently) is
-        written to fd 2 first, through `write(2)`, and then the program stops.
-
-        Returns 0, this model's `None`; `list.append` returns None, and
-        returning the new count would be a value Python does not have."""
         args = list(e.args)
         if len(args) != 1:
             raise CodegenError(
@@ -6164,25 +6888,68 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 f"(got {len(args)})")
         recv = e.func.obj
         name = recv.name if isinstance(recv, F.IdentExpr) else None
+        is_growable = name in getattr(self, '_list_growable', set())
         room = self._list_caps_by_name.get(name)
-        if room is None:
+        if not is_growable and room is None:
             raise CodegenError(
                 f"list.append() is not lowered on the formal x86-64 path: a "
                 f"list blob lives in the frame, so the room an append needs "
                 f"has to be known when the list is built. This one is not "
                 f"(the receiver is not a list literal this function appends "
                 f"to, or it is also bound to something that is not a list)")
+        if is_growable:
+            self._push_slot(Reg.RAX)
+            self._emit_expr(recv)
+            self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
+            self._push_slot(Reg.R11)
+            self._emit_expr(args[0])
+            self._push_slot(Reg.RAX)
+            self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RSP, 0))
+            self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.RSP, 16))
+            self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.R11, 0))
+            self._emit_mov_imm(Reg.R9, 1024)
+            self.asm.emit(encode_cmp_r64_r64(Reg.R8, Reg.R9))
+            self._emit_setcc_bool(Reg.R8, "setae")
+            self._while_counter += 1
+            wid = self._while_counter
+            fn = self.func_name
+            oob = f"{fn}_appoob{wid}"
+            ok = f"{fn}_appok{wid}"
+            self._emit_jcc_bool(Reg.R8, COND_NE, oob)
+            self._emit_jmp(ok)
+            self.asm.label(oob)
+            self._emit_stop_diagnostic(
+                M.list_append_overflow_message(
+                    recv.name if isinstance(recv, F.IdentExpr) else "<expr>", 32))
+            self._emit_call_exit(1)
+            self.asm.label(ok)
+            self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.R11, 0))
+            stride = M.blob_elem_stride(self._expr_str_kind(recv))
+            self._emit_elem_addr(Reg.R11, Reg.R8, Reg.RDI,
+                                 header=M.BLOB_HEADER_BYTES,
+                                 scale=M.walk_shift(False, stride))
+            if stride == M.BYTE_ELEM_STRIDE:
+                self.asm.emit(encode_mov_rm8_r8(Reg.RDI, 0, Reg.R10))
+            else:
+                self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R10))
+            self.asm.emit(encode_add_r64_imm32(Reg.R8, 1))
+            self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R8))
+            self._pop_slot(Reg.RAX)
+            self._pop_slot(Reg.RAX)
+            self._pop_slot(Reg.RAX)
+            self._emit_mov_imm(Reg.RAX, 0)
+            return
         base, count = room
         cap = base + count
         self._push_slot(Reg.RAX)
-        self._emit_expr(recv)                      # RAX = base
+        self._emit_expr(recv)
         self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
-        self._push_slot(Reg.R11)                   # [rsp] = base
-        self._emit_expr(args[0])                   # RAX = value
-        self._push_slot(Reg.RAX)                   # [rsp] = value
-        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RSP, 0))   # value
-        self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.RSP, 16))  # base
-        self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.R11, 0))   # count
+        self._push_slot(Reg.R11)
+        self._emit_expr(args[0])
+        self._push_slot(Reg.RAX)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RSP, 0))
+        self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.RSP, 16))
+        self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.R11, 0))
         self.asm.emit(encode_cmp_r64_imm32(Reg.R8, cap))
         self._emit_setcc_bool(Reg.R8, "setae")
         self._while_counter += 1
@@ -6191,19 +6958,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         oob = f"{fn}_appoob{wid}"
         ok = f"{fn}_appok{wid}"
         self._emit_jcc_bool(Reg.R8, COND_NE, oob)
-        self._emit_jmp(ok)          # in range: skip the exit
+        self._emit_jmp(ok)
         self.asm.label(oob)
         self._emit_stop_diagnostic(
             M.list_append_overflow_message(
                 recv.name if isinstance(recv, F.IdentExpr) else "<expr>", cap))
         self._emit_call_exit(1)
         self.asm.label(ok)
-        self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.R11, 0))   # count again
-        # The slot is at the RECEIVER's own element stride, and the store is the
-        # width that stride implies: a byte blob appends a BYTE, so the value is
-        # narrowed by the store itself — the same pairing the subscript store
-        # makes, and the same reason a `UInt8` pointee store truncates rather
-        # than widening into the next element.
+        self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.R11, 0))
         stride = M.blob_elem_stride(self._expr_str_kind(recv))
         self._emit_elem_addr(Reg.R11, Reg.R8, Reg.RDI,
                              header=M.BLOB_HEADER_BYTES,
@@ -6211,13 +6973,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if stride == M.BYTE_ELEM_STRIDE:
             self.asm.emit(encode_mov_rm8_r8(Reg.RDI, 0, Reg.R10))
         else:
-            self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R10))  # value
+            self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R10))
         self.asm.emit(encode_add_r64_imm32(Reg.R8, 1))
-        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R8))    # count = n+1
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R8))
         self._pop_slot(Reg.RAX)
         self._pop_slot(Reg.RAX)
         self._pop_slot(Reg.RAX)
-        self._emit_mov_imm(Reg.RAX, 0)             # None
+        self._emit_mov_imm(Reg.RAX, 0)
 
     def _emit_list_clear(self, e) -> None:
         """`xs.clear()` — store 0 at the blob's count, which empties it.
@@ -11254,6 +12016,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             callee_is_bool=lambda callee: self._callee_is_bool(
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
+            callee_returns_none=getattr(self, '_callee_returns_none', None) or (lambda name: False),
             callee_returned_parameter=self._callee_returned_parameter,
             dict_names=DICT_TYPE_NAMES,
             deref_kind=lambda e: M.pointer_deref_kind(
@@ -11715,26 +12478,6 @@ ctor_field_value=self._ctor_field_value_for(name),
         return self._vkinds_for(name, fn, stack).return_is_dict
 
     def _callee_returns_value(self, name):
-        """Whether a call to the local function `name` produces a value at all.
-
-        arm64's `_callee_returns_value` over the same shared reader, and for the
-        same reason the dict-ness hook above is duplicated in that shape and not
-        in its logic: the answer has to be the same on both machines or a
-        construct is printed here and refused there. `model.returnless_function_
-        names` decides it — the names whose calls produce no value, closed over
-        bare-name `return <call>` chains, so `def f(a): return g(a)` with `g`
-        return-less is not read as a value one hop out. Its least fixed point is
-        what keeps a cycle reading as a value rather than as an unwritten word.
-
-        **The answer is carried through `return f(…)`, and the recursion lives in
-        `model.function_returns_a_value_resolver`.** `def h(): return g()` with a
-        return-less `g` is a function whose result is `None` in CPython too, so
-        `print(h(…))` has to be the same refusal `print(g(…))` is — one call
-        deeper, and the shape `v = g(); print(v)` already covers one binding up.
-        The resolver is built over `self._functions` (the emitter's own table)
-        and the cycle stop and the not-of-this-unit default are the shared
-        resolver's, so the two backends cannot answer this one differently.
-        """
         fn = self._functions.get(name)
         if fn is None:
             return True
@@ -11742,6 +12485,17 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._returnless = M.returnless_function_names(
                 self._functions.values())
         return name not in self._returnless
+
+    def _callee_returns_none(self, name):
+        fn = self._functions.get(name)
+        if fn is None:
+            return False
+        try:
+            if hasattr(M, 'function_returns_none'):
+                return M.function_returns_none(fn)
+        except Exception:
+            pass
+        return False
 
     def _callee_returned_parameter(self, name):
         """The positional index of a parameter `name` hands straight back.
@@ -11828,61 +12582,40 @@ ctor_field_value=self._ctor_field_value_for(name),
         return None
 
     def _scan_list_caps(self, fn, vkinds: M.ValueKinds):
-        """({ListExpr node: slots}, {name: slots}) for `fn`'s appendable lists.
-
-        A list blob is `[count][elem0]…` carved out of the frame, so
-        `xs.append(v)` needs room the literal's own element count does not
-        promise — `xs = []` plus one append is the commonest shape there is and
-        starts with nothing. The number of `append` call sites on a name in
-        this function MULTIPLIED BY how many times each site can run is a sound
-        compile-time bound, and the store is bounds-checked against it at run
-        time. Counting SITES alone was the bug: `for i in range(70):
-        s.append(x)` has one site and seventy appends, so it stopped with
-        nothing printed at the second append on BOTH architectures
-        (measured). `model.
-        walk_stmt_trips` supplies the multiplier, and a site in a loop without
-        a compile-time iteration count keeps the one-per-site bound it always
-        had — the run-time guard (`model.list_append_overflow_message`) answers
-        for that, which is what it is for.
-
-        Two maps because the two ends of the operation are different places:
-        `_emit_list` allocates and has only the literal NODE (an expression
-        carries no name); `_emit_list_append` stores and has only the
-        receiver's NAME. Both are computed from one pass so they cannot
-        disagree. A name bound to more than one literal takes the smallest of
-        their capacities, so the bound holds whichever blob is live."""
+        """({ListExpr node: slots}, {name: slots}) for `fn`'s appendable lists."""
         appends: dict = {}
+        growable: set = set()
         trips_by_id = {id(node): trips for node, trips in M.walk_stmt_trips(
             getattr(fn, "body", None) or [], self._stmt_loop_trips)}
         for node, recv, method, _args in _walk_value_methods(fn):
             if method != "append" or not isinstance(recv, F.IdentExpr):
                 continue
-            # `or 1`, not a refusal: a site inside a loop with no compile-time
-            # iteration count keeps the one-per-site bound it always had, and
-            # the run-time guard answers for it. See `_blob_site_growth` for
-            # why an unbounded loop is not made into a build failure.
-            trips = trips_by_id.get(id(node), 1) or 1
+            trips = trips_by_id.get(id(node), 1)
+            if trips is None:
+                growable.add(recv.name)
+                appends[recv.name] = appends.get(recv.name, 0)
+                continue
+            trips = trips or 1
             appends[recv.name] = appends.get(recv.name, 0) + trips
         by_node: dict = {}
         by_name: dict = {}
+        self._list_growable = growable
+        self._list_growable_nodes = set()
         for name, count in appends.items():
-            # A list the function appends to must also BE a list: if the name
-            # is bound to something else anywhere, the capacity would be a
-            # promise about the wrong blob, so the entry is dropped and the
-            # append site refuses instead.
             if not M.is_list_kind(vkinds.name_kind(name)):
                 continue
             literals = M.blob_nodes_bound_to(fn, name)
             if not literals:
                 continue
-            # `blob_reserved_slots`, not `len(lit.elements)`: a literal with a
-            # `*` operand builds its blob by appending and occupies the cap it
-            # reserved, so counting the `*` as ONE element made
-            # `xs = [*a]; xs.append(3)` overflow the guard with `a` of length 2.
-            # It is also the reader that answers for a CONSTRUCTOR node
-            # (`bytearray()` occupies 0 slots and `bytearray(3)` occupies 3),
-            # which is what makes a constructor-built blob appendable. One
-            # rule, in the model, read by both backends.
+            if name in growable:
+                base = min(M.blob_reserved_slots(lit) for lit in literals)
+                want = max(base + max(count, 0), 16)
+                for literal in literals:
+                    prev = by_node.get(id(literal))
+                    by_node[id(literal)] = want if prev is None else min(prev, want)
+                    self._list_growable_nodes.add(id(literal))
+                by_name[name] = (base, 0)
+                continue
             base = min(M.blob_reserved_slots(lit) for lit in literals)
             want = base + count
             for literal in literals:
@@ -12198,7 +12931,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # carried a `SubscriptExpr` arm for a long time and this copy has
             # not, so a bracketed call target reaches the refusal below on this
             # architecture alone — a pre-existing x86-64 gap, listed in
-            # `bugs/formal/FORMAL_wide_receiver_by_reference.md` §5.1 among the
+            # `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) §5.1 among the
             # architecture gaps, and NOT closed here: closing it means teaching
             # this backend a comptime-specialization call convention it does not
             # have, which is a change of far more than this construct.
@@ -12328,6 +13061,12 @@ ctor_field_value=self._ctor_field_value_for(name),
                 return
             if name == "print":
                 self._emit_print(e)
+                return
+            if name == "str":
+                self._emit_str(e)
+                return
+            if name == "repr":
+                self._emit_repr(e)
                 return
             if name in ("ord", "chr", "hash"):
                 self._emit_text_builtin(e, name)
