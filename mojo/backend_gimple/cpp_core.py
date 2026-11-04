@@ -1997,7 +1997,6 @@ def _cpp_tagged_operand_word(gen, node) -> str:
     scalar is boxed by its static C++ type (`cpp_async._cpp_word_of_kind`), so
     a str operand of `x or 'a'` is a `mojo_box_from_str` box, not a raw
     pointer the consumer would print as an address."""
-    from mojo.backend_gimple import cpp_async as _ca
     if (isinstance(node, gimple_ctypes.NoneLiteral)
             or (isinstance(node, gimple_ctypes.IdentExpr) and node.name == 'None')):
         return "mojo_box_none()"
@@ -2006,7 +2005,7 @@ def _cpp_tagged_operand_word(gen, node) -> str:
     ctype = gimple_exprtypes._infer_simple_expr_ctype(
         node, gen._cpp_declared or {},
         getattr(gen, '_cpp_gen_self_fields', None), gen._async_api) or 'int64_t'
-    return _ca._cpp_word_of_kind(ctype, gen._cpp_expr(node))
+    return gimple_exprtypes._cpp_word_of_kind(ctype, gen._cpp_expr(node))
 
 
 def _cpp_rethrow_pending(ctype: str, call: str) -> str:
@@ -2254,8 +2253,7 @@ def _cpp_expr(gen, e) -> str:
                 and e.name not in gen._cpp_declared
                 and e.name in gen._generator_api
                 and e.name in getattr(gen, '_supported_generators', ())):
-            from mojo.backend_gimple import cpp_async as _ca
-            _gw = _ca._cpp_sig_default_word(gen, e)
+            _gw = gen._cpp_sig_default_word(e)
             if _gw is not None:
                 return _gw
         if (gen._cpp_declared is not None
@@ -2884,7 +2882,6 @@ def _cpp_expr(gen, e) -> str:
             # `x in (glob.glob, glob.iglob, glob_tree)`: membership over FUNCTION
             # values is equality of their words (a function's identity).
             if isinstance(e.right, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)) and e.right.elements:
-                from mojo.backend_gimple import cpp_async as _ca
                 _fws = []
                 for _el in e.right.elements:
                     _fw = None
@@ -2892,7 +2889,7 @@ def _cpp_expr(gen, e) -> str:
                             or (isinstance(_el, gimple_ctypes.IdentExpr)
                                 and _el.name in gen._generator_api
                                 and _el.name not in (gen._cpp_declared or ()))):
-                        _fw = _ca._cpp_sig_default_word(gen, _el)
+                        _fw = gen._cpp_sig_default_word(_el)
                     if _fw is None:
                         _fws = None
                         break

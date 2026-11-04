@@ -4149,7 +4149,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # `*args` callee: pad the fixed slots (self included) up to its slot,
         # then pack the positionals from there on -- see
         # ggc._emit_generator_start_call, which this mirrors.
-        _gm_star = ggc._generator_star_slot(_gm_api, node)
+        _gm_star = gen._generator_star_slot(_gm_api, node)
         _gm_nfixed = _gm_star if _gm_star is not None else len(_gm_expected)
         if _gm_expected and len(all_args) < _gm_nfixed:
             # Explicit loop, NOT `{kn: gen.lower_expr(ke) for kn, ke in
@@ -4192,7 +4192,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             for _, _ke in _gm_kwargs:
                 gen.lower_expr(_ke)
         if _gm_star is not None:
-            all_args = ggc._pack_generator_star_args(gen, all_args, _gm_star)
+            all_args = gen._pack_generator_star_args(all_args, _gm_star)
         t = gen._call_expr('MojoGenerator *', f"{_gm_api['base']}_start", all_args)
         gen._generator_var_api[t] = _gm_api
         return 'MojoGenerator *', t
