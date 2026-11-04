@@ -3582,8 +3582,7 @@ def interpolated_literal_segments(spelled: str) -> list:
     apart: `expr` is a value, `:spec` is a FORMAT (`>3`, `04d`) and `!conv` is a
     CONVERSION (`!r`, `!s`) — and neither of the latter two is a value on this
     path in any case, which is what
-    `bugs/formal/FORMAL_string_composition_has_no_buffer.md` §7.3 says a lowering has
-    to say rather than answering them as if they were an f-string's field.
+    (string composition) says a lowering has to say rather than answering them as if they were an f-string's field.
 
     Brace-depth tracked, so `f"{d['k']}"` and `f"{ {'a': 1}['a'] }"` split
     correctly — a naive `find('}')` truncates the first one at the dict literal.
@@ -3721,8 +3720,7 @@ def interpolated_literal_refusal(node, where: str = "") -> str:
         spec or a conversion, since those are three questions and the old
         sentence merged them into one;
       * the `print` advice, which was wrong and is gone.
-        `bugs/formal/FORMAL_string_composition_has_no_buffer.md` §6 named it as "**NOT
-        the fix** … the message's own advice is wrong", and it is: CPython's
+        the earlier bug notes named it as "**NOT the fix** … the message's own advice is wrong", and it is: CPython's
         `print` puts a `sep` between its operands, so following "Print the parts
         as separate operands" on `f"n={n}"` with `n = 7` gives
 
@@ -3805,7 +3803,7 @@ def _interpolated_shape_sentence(segs: list) -> str:
     The fields are named because they are the thing a reader has to look up in
     their own source, and the count of chunks and their byte lengths is the
     thing that decides the §7.1 bound — `formal/
-    FORMAL_string_composition_has_no_buffer.md` §7.1 asks for "a buffer with a
+    the string composition doc §7.1 asks for "a buffer with a
     compile-time-known bound", and the bound IS the chunk bytes plus the widest
     each field's declared type can render. So the diagnostic now prints the half
     of that arithmetic a reader can check without running anything.
@@ -3907,11 +3905,11 @@ def integer_text_width(bits: int) -> int:
     against `decimal` should find a formula.
 
     This is the number §7.1 of
-    `bugs/formal/FORMAL_string_composition_has_no_buffer.md` needs and the corpus has
+    string composition needs and the corpus has
     never been asked for: a buffer with a COMPILE-TIME-KNOWN bound needs each
     field's WIDTH to be known at compile time, and an integer's width is a
     property of its declared type rather than of its value — which is the only
-    reason the doc's step 1 can promise a bound at all.
+    reason the step 1 can promise a bound at all.
     """
     if not isinstance(bits, int) or bits < 2:
         return 0

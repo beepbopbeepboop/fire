@@ -706,8 +706,7 @@ class TestCensusReport(unittest.TestCase):
 # It is named rather than quietly dropped because this tuple is a PREMISE and the
 # test that reads it says so in its own failure message: a name that gains a
 # model stops being this test's subject, which is a reason to be told.
-# `bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md` §0/§2 is where that
-# wave and its measurement are written down.
+# The wave and its measurement are recorded in the host-import wall documentation.
 _DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig")
 
 # **THE ROWS THAT STILL HAVE USERS ARE NOT LISTED HERE, and that is the second
