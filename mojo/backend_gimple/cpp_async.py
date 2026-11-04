@@ -38,6 +38,7 @@ import mlir
 # "unavailable in compiled mode" stub returning 0.
 from fire_compiler import for_target_names
 import mojo.middle.types as gimple_ctypes
+from mojo.middle.types import _FOREIGN_CALLABLES
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 from mojo.middle.exprtypes import _cpp_word_of_kind, _fstring_field_names
@@ -719,7 +720,9 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                           and ctype[:-2] in gen.struct_field_types)
         if _is_struct_ptr:
             gen._cpp_param_struct_names.add(ctype[:-2])
-        if ctype not in _GENERATOR_PARAM_CTYPES and not _is_struct_ptr:
+        # Allow foreign callable types (from foreign callable table)
+        _is_foreign_callable = isinstance(ctype, str) and ctype.startswith('std::function')
+        if ctype not in _GENERATOR_PARAM_CTYPES and not _is_struct_ptr and not _is_foreign_callable:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 f"{fn.name}: generator parameter '{pn}' has unsupported "
                 f"type {ctype!r} (only int64_t/double/_Bool/char*/"
@@ -735,7 +738,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # `nonlocal` write cannot reach here.
     if extra_captures:
         for _cap_name, _cap_ctype in extra_captures:
-            if _cap_ctype not in _GENERATOR_PARAM_CTYPES:
+            _is_foreign_callable_cap = isinstance(_cap_ctype, str) and _cap_ctype.startswith('std::function')
+            if _cap_ctype not in _GENERATOR_PARAM_CTYPES and not _is_foreign_callable_cap:
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
                     f"{fn.name}: enclosing-scope variable {_cap_name!r} has "
                     f"type {_cap_ctype!r}, which a nested generator cannot yet "

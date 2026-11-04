@@ -49,7 +49,22 @@ import mojo.middle.coro as gimple_gen_coro
 # deferred. This file is DOWNSTREAM of `gimple_codegen`, so a top-level
 # `import mojo.middle.infra_infer` here starts the chain before
 # `gimple_codegen` has defined anything, and `infra_infer`'s own top-level
-# `import gimple_codegen` then leads `emit_infra`'s top-level
+# `import gimple_codegen
+
+_ENUM_BASES = {'Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag', 'ReprEnum'}
+
+
+def _is_enum_class_def(node):
+    try:
+        bases = getattr(node, 'bases', None) or []
+        for b in bases:
+            if isinstance(b, str) and b in _ENUM_BASES:
+                return True
+            # could be other forms
+    except Exception:
+        pass
+    return False
+
 # `from mojo.middle.infra_infer import _FC_SEP, ...` back into a half-built
 # `infra_infer`:
 #
@@ -3733,18 +3748,19 @@ def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) ->
         # cannot be rebound yet: refuse it, rather than let the compiled path
         # call the undecorated body (or a stub for the unbound name).
         for _rb_s in stmts or []:
-            if isinstance(_rb_s, FunctionDef):
+            if isinstance(_rb_s, FunctionDef) or isinstance(_rb_s, StructDef):
                 continue
             if isinstance(_rb_s, StructDef):
                 continue  # direct decorated classes/structs at module level are handled separately
             for _rb_d in _gmi_scope_defs([_rb_s]):
-                for _rb_dec in _rb_d.decorators or []:
-                    if _gmi_is_rebindable(self, _rb_dec, _rb_scope, _rb_d.name):
-                        raise RuntimeError(
-                            f"decorator {_gmi_decorator_head(_rb_dec)!r} on {_rb_d.name!r} is inside a "
-                            f"module-level block, which the compiled path cannot rebind yet; it would "
-                            f"silently call the undecorated function (see "
-                            f"bugs/hard/COMPILE_FAIL_decorator_application_dropped.md)")
+                if isinstance(_rb_d, FunctionDef):
+                    for _rb_dec in _rb_d.decorators or []:
+                        if _gmi_is_rebindable(self, _rb_dec, _rb_scope, _rb_d.name):
+                            raise RuntimeError(
+                                f"decorator {_gmi_decorator_head(_rb_dec)!r} on {_rb_d.name!r} is inside a "
+                                f"module-level block, which the compiled path cannot rebind yet; it would "
+                                f"silently call the undecorated function (see "
+                                f"bugs/hard/COMPILE_FAIL_decorator_application_dropped.md)")
     return _gmi_rebind_block(self, stmts, _rb_scope, at_module)
 
 
@@ -3754,7 +3770,7 @@ def _gmi_is_rebindable(gen, dec, scope: dict, def_name: str) -> bool:
         return False
     _ANNOTATION_DECORATORS = frozenset({
         'staticmethod', 'classmethod', 'export', 'doc_hidden', 'gpu', 'kernel',
-        'property', 'abstractmethod',
+        'property', 'abstractmethod', 'lldb_formatter_wrapping_type',
     })
     if _head in _ANNOTATION_DECORATORS:
         return False
@@ -17085,9 +17101,9 @@ def gen_module_impl(self, stmts: list):
     # dispatch's `_mojo_getattr_<Struct>` reads. Computed and emitted HERE,
     # ahead of both the reflection definitions (which call the arms' symbols)
     # and the function bodies.
-    struct_defs = [s for s in stmts if isinstance(s, StructDef)]
+    struct_defs = [s for s in stmts if isinstance(s, StructDef) and not _is_enum_class_def(s)]
     if not self.do_imports:
-        struct_defs += [s for s in (imported_stmts or []) if isinstance(s, StructDef)]
+        struct_defs += [s for s in (imported_stmts or []) if isinstance(s, StructDef) and not _is_enum_class_def(s)]
     # The method prototypes below can carry a `MojoGenerator *` return
     # (a generator method — row-25 entry C's `Mailbox___iter__`), but the
     # generator block that DEFINES the type emits later in this section.
@@ -17940,34 +17956,101 @@ def gen_module_impl(self, stmts: list):
             for _bn in self._struct_bases[_cn]:
                 parts.append(f'    mojo_class_register({_ctag}LL, '
                              f'{gimple_exprtypes._struct_type_id(_as_str(_bn))}LL, 0);')
+        # Methods of static classes must be findable through the runtime class
+        # table so that instances of dynamic classes inheriting from static
+        # bases can call them.
+        try:
+            _all_sds = all_struct_defs if 'all_struct_defs' in locals() else []
+        except Exception:
+            _all_sds = []
+        for _sd in _all_sds:
+            _sdn = _as_str(getattr(_sd, 'name', ''))
+            if not _sdn or _sdn not in self._struct_bases:
+                continue
+            _sdcname = self._struct_cname_by_id.get(id(_sd), _sdn)
+            if self._struct_name_owner.get(_sdcname) is not _sd:
+                continue
+            _sdtag = gimple_exprtypes._struct_type_id(_sdcname)
+            for _m in getattr(_sd, 'methods', None) or []:
+                _mname = getattr(_m, 'name', None)
+                if _mname is None:
+                    continue
+                _mname_s = _as_str(_mname)
+                if _mname_s.startswith('__') and _mname_s.endswith('__') and _mname_s not in ('__init__', '__new__', '__call__'):
+                    continue
+                try:
+                    _msym = self._struct_method_csym(_sdcname, _mname_s, '')
+                except Exception:
+                    try:
+                        _msym = f"{_sdcname}_{_mname_s}"
+                    except Exception:
+                        continue
+                parts.append(f'    mojo_class_setattr({_sdtag}LL, "{_c_escape(_mname_s)}", (int64_t)(intptr_t){_msym});')
         parts.append('}')
         parts.append('')
 
-    if self.emit_struct_defs and getattr(self, '_class_attr_words', None):
-        # The reader the run-time class table asks for an attribute a class BODY declares:
-        # the live global, as one word (a float boxed, a string/container by address).
-        parts.append('static int _mojo_classattr_read(int64_t tag, char *name, int64_t *out) {')
-        for _wn, _wa, _wm, _wt, _wf in self._class_attr_words:
-            _wn = _as_str(_wn)
-            if _wf is not None:
-                _wexpr = f'mojo_box_from_double({_wf if (chr(46) in _wf or chr(101) in _wf) else _wf + ".0"})'
-            elif _wt == 'int64_t':
-                _wexpr = _wm
-            elif _wt == 'double':
-                _wexpr = f'mojo_box_from_double({_wm})'
-            elif _wt.endswith('*'):
-                _wexpr = f'(int64_t)(intptr_t){_wm}'
-            else:
+    if self.emit_struct_defs:
+        _has_classattr_words = bool(getattr(self, '_class_attr_words', None))
+        # Collect methods of static base classes
+        try:
+            _all_sds2 = all_struct_defs if 'all_struct_defs' in locals() else []
+        except Exception:
+            _all_sds2 = []
+        _method_entries = []
+        for _sd in _all_sds2:
+            _sdn = _as_str(getattr(_sd, 'name', ''))
+            if not _sdn:
                 continue
-            parts.append(f'    if (tag == {gimple_exprtypes._struct_type_id(_wn)}LL '
-                         f'&& !strcmp(name, "{_c_escape(_as_str(_wa))}")) '
-                         f'{{ *out = {_wexpr}; return 1; }}')
-        parts.append('    return 0;')
-        parts.append('}')
-        parts.append('static void __attribute__((constructor)) _mojo_register_classattr_reader(void) {')
-        parts.append('    mojo_register_classattr_reader(_mojo_classattr_read);')
-        parts.append('}')
-        parts.append('')
+            try:
+                _sdcname = self._struct_cname_by_id.get(id(_sd), _sdn)
+                if self._struct_name_owner.get(_sdcname) is not _sd:
+                    continue
+                _sdtag = gimple_exprtypes._struct_type_id(_sdcname)
+            except Exception:
+                continue
+            for _m in getattr(_sd, 'methods', None) or []:
+                _mname = getattr(_m, 'name', None)
+                if _mname is None:
+                    continue
+                _mname_s = _as_str(_mname)
+                if _mname_s.startswith('__') and _mname_s.endswith('__') and _mname_s not in ('__init__', '__new__', '__call__'):
+                    continue
+                try:
+                    _msym = self._struct_method_csym(_sdcname, _mname_s, '')
+                except Exception:
+                    try:
+                        _msym = f"{_sdcname}_{_mname_s}"
+                    except Exception:
+                        continue
+                _method_entries.append((_sdtag, _mname_s, _msym))
+        if _has_classattr_words or _method_entries:
+            # The reader the run-time class table asks for an attribute a class BODY declares:
+            # the live global, as one word (a float boxed, a string/container by address).
+            parts.append('static int _mojo_classattr_read(int64_t tag, char *name, int64_t *out) {')
+            if _has_classattr_words:
+                for _wn, _wa, _wm, _wt, _wf in self._class_attr_words:
+                    _wn = _as_str(_wn)
+                    if _wf is not None:
+                        _wexpr = f'mojo_box_from_double({_wf if (chr(46) in _wf or chr(101) in _wf) else _wf + ".0"})'
+                    elif _wt == 'int64_t':
+                        _wexpr = _wm
+                    elif _wt == 'double':
+                        _wexpr = f'mojo_box_from_double({_wm})'
+                    elif _wt.endswith('*'):
+                        _wexpr = f'(int64_t)(intptr_t){_wm}'
+                    else:
+                        continue
+                    parts.append(f'    if (tag == {gimple_exprtypes._struct_type_id(_wn)}LL '
+                                 f'&& !strcmp(name, "{_c_escape(_as_str(_wa))}")) '
+                                 f'{{ *out = {_wexpr}; return 1; }}')
+            for _sdtag, _mname_s, _msym in _method_entries:
+                parts.append(f'    if (tag == {_sdtag}LL && !strcmp(name, "{_c_escape(_mname_s)}")) {{ *out = (int64_t)(intptr_t){_msym}; return 1; }}')
+            parts.append('    return 0;')
+            parts.append('}')
+            parts.append('static void __attribute__((constructor)) _mojo_register_classattr_reader(void) {')
+            parts.append('    mojo_register_classattr_reader(_mojo_classattr_read);')
+            parts.append('}')
+            parts.append('')
 
     if self.emit_struct_defs:
         class_attr_inits = getattr(self, '_class_attr_inits', [])
@@ -18483,8 +18566,21 @@ def gen_module_impl(self, stmts: list):
     # bodies exist — a `print(x)` of a list literal in an IMPORTED module is a
     # reference, and that module's text is spliced into this `parts` long after
     # this module's own code was written.
+    try:
+        if hasattr(self, '_module_stmts'):
+            self._module_stmts.clear()
+        if hasattr(self, '_all_transitive_stmts_ordered'):
+            self._all_transitive_stmts_ordered.clear()
+        if hasattr(self, '_all_transitive_stmts_ids'):
+            self._all_transitive_stmts_ids.clear()
+        try:
+            imported_stmts.clear()
+        except Exception:
+            pass
+    except Exception:
+        pass
     return self._dedup_variadic_externs(_drop_unreferenced_unimpl_stubs(_drop_unreachable_repr_cluster(parts)))
 
 def __getattr__(name):
-    import gimple_codegen as _gc
-    return getattr(_gc, name)
+    import gimple_codegen
+    return getattr(gimple_codegen, name)
