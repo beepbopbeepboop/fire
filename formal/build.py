@@ -8542,7 +8542,7 @@ def check_frame_field_blob_premises(structs) -> None:
     `not-answerable/host-import` → `codegen`, which puts 67 unbuildable files
     into the measured denominator and reports the coverage as 40.4% when the
     accurate figure is the baseline's.  That is the mirror image of the drift
-    `bugs/formal/FORMAL_wide_receiver_by_reference.md` calls out, and it flatters
+    `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) calls out, and it flatters
     nothing while misinforming.
 
     So the check moved LATER, to the one point where both facts are known.  It
@@ -11497,7 +11497,7 @@ def _refuse_holder_use(fn, node, holders, by_name, why, reason=None) -> None:
         f"multi-field struct is the ADDRESS of a frame of 8-byte slots that "
         f"belongs to the function which created it, so it can only be read, "
         f"written, copied, or passed as a method's receiver. "
-        f"bugs/formal/FORMAL_wide_receiver_by_reference.md records the design and "
+        f"FORMAL_wide_receiver_by_reference.md (deleted; fixed) records the design and "
         f"what is still open about it")
 
 
@@ -20874,7 +20874,7 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
     multi-field struct that word is the address of its frame — so the receiver
     arrives as the address it already was, and the one parameter `MojoFunc`
     has is still enough.  The whole ABI question
-    `bugs/formal/FORMAL_wide_receiver_by_reference.md` asks is answered by that
+    `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) asks is answered by that
     accident of the design, and this function is where it shows up: the
     receiver-width refusal below fires only for a struct that fits NEITHER
     representation, which with the switch on is one whose fields cannot be
@@ -22511,7 +22511,7 @@ def _method_exports(source_paths: list, structs_by_file: dict,
     architectures.
 
     The hand-off is sound rather than merely possible, and the reason is the one
-    `bugs/formal/FORMAL_wide_receiver_by_reference.md` gives for the by-reference design
+    `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) gives for the by-reference design
     itself: the callee is a method of the receiver's OWN struct, and the
     importer derived that struct's field list from this very file
     (`imported_struct_defs`), so `base + 8k` is computed from the same field

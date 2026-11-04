@@ -14,8 +14,8 @@ from . import *
 # `UInt64 → UInt64`) are untouched.
 #
 # The full design, its cost, and the proof-side algebra (`ProofLib.Frame`,
-# `ProofLib.MF`, `Refine.FrameOk_except`) are in
-# `bugs/formal/FORMAL_wide_receiver_by_reference.md`.  What is here is the part the
+# `ProofLib.MF`, `Refine.FrameOk_except`) were in
+# `FORMAL_wide_receiver_by_reference.md` (deleted; fixed).  What is here is the part the
 # two backends have to agree on, which is why it is in the shared model rather
 # than in either of them: a width that the build pass and the codegen pass
 # measured differently is a struct whose receiver is the wrong number of bytes

@@ -4411,7 +4411,7 @@ def struct_width_cost(struct_def) -> str:
     tool has already solved sends the reader looking for a bug that is not
     there. What is still not closed is named instead: the *proof* side of a
     wide receiver is reached only for the cases
-    `bugs/formal/FORMAL_wide_receiver_by_reference.md` records."""
+    `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) records."""
     n = struct_field_count(struct_def)
     if wide_receiver_by_reference():
         return (f"{n} fields is a frame of {n} 8-byte slots with a pointer "

@@ -83,7 +83,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_optional_needs_a_niche.md` | **unclaimed** | `Optional[T]` has a representation now, and the payloads it cannot answer are exactly the ones with no word left |
 | `FORMAL_pointer_value_model.md` | **unclaimed** | what a pointer IS on the formal path, and why the 54-file group was never about that |
 | `FORMAL_string_value_model.md` | **unclaimed** | what a string IS on the formal path, and the two things that want to be one |
-| `FORMAL_wide_receiver_by_reference.md` | **unclaimed** | the one-word value model, and the by-reference receiver that fits inside it |
+| (removed) | — | bug fixed and doc deleted (wide receiver by reference) |
 
 ### `formal/dataclass_transform` — 1 document, 0 claimed
 
