@@ -268,6 +268,13 @@ def main():
     print(P.v, Q.v, P.__name__ == Q.__name__)
 main()
 """,
+    'repr_of_instance_of_run_time_class': """\
+def main():
+    Foo = type('Foo', (), {'x': 1})
+    o = Foo()
+    print('Foo' in repr(o))
+main()
+""",
     'metaclass_prepare_returns_namespace_dict': """\
 def main():
     Meta = type('Meta', (type,), {})
