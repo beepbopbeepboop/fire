@@ -45,6 +45,7 @@ BASELINE = {
     'bugs/formal/FORMAL_listdir_no_run_time_sequence.md': 1,
     'bugs/formal/FORMAL_model_package_split_left_duplicate_copies.md': 1,
     'bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md': 9,
+    'bugs/formal/FORMAL_str_repr_format_and_percent_have_no_lowering.md': 1,
     'bugs/formal/FORMAL_sweep_work_map.md': 1,
     'bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md': 1,
     'bugs/formal/FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md': 1,
@@ -168,8 +169,17 @@ BARE_BASELINE = {
     'bugs/formal/FORMAL_known_limits.md': 6,
     'bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md': 3,
     'bugs/formal/FORMAL_string_value_model.md': 2,
+<<<<<<< HEAD
     'bugs/formal/FORMAL_sweep_work_map.md': 2,
     'bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md': 4,
+||||||| 81c9a0872
+    'bugs/formal/FORMAL_sweep_work_map.md': 2,
+    'bugs/formal/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md': 2,
+    'bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md': 3,
+=======
+    'bugs/formal/FORMAL_sweep_work_map.md': 3,
+    'bugs/formal/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md': 2,
+>>>>>>> master
     'bugs/formal/FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md': 1,
     'bugs/formal/FORMAL_time_struct_shaped_answers.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md': 3,

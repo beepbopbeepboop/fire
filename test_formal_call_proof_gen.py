@@ -5559,7 +5559,7 @@ class TestStructFieldHasNoValueInTheModel(unittest.TestCase):
     def test_the_machine_half_builds_on_both_backends(self):
         """The gap is a model domain, not a lowering — measured, not argued.
 
-        `bugs/formal/FORMAL_wide_receiver_by_reference.md` §"The proposition" quotes
+        `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) §"The proposition" quotes
         the mutator's frame contract, and `test_formal_run.py` runs the
         program on both architectures.  What is checked here is the narrower
         half that decides which side of the boundary this example is on: both

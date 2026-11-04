@@ -1830,6 +1830,11 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
         closure = template_closure(
             [path for _, path in resolved], project_root=source_path)
         demands = {}
+        try:
+            with open('/tmp/DEBUG_BUILD.txt', 'a') as _f:
+                _f.write(f"BUILD: resolved={resolved}\n")
+        except Exception:
+            pass
         for mod, path in resolved:
             for other, wanted in instantiation_demands(
                     path, module_source_text(source_path),
@@ -1838,6 +1843,11 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                 for tmpl, args in wanted.items():
                     merged[tmpl] = sorted(set(merged.get(tmpl, [])) | set(args))
                 demands[other] = merged
+        try:
+            with open('/tmp/DEBUG_BUILD.txt', 'a') as _f:
+                _f.write(f"DEMANDS={demands}\n")
+        except Exception:
+            pass
         # The same PER-EDGE rule the recursion applies to its own imports
         # (`formal/imports.py::library_free_edges`), asked here for the program's
         # OWN imports rather than left to the first level of the closure below.
@@ -1848,8 +1858,18 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
         library_free = library_free_edges(source_path, stmts,
                                           project_root=source_path,
                                           demands=demands)
+        try:
+            with open('/tmp/DEBUG_BUILD.txt', 'a') as _f:
+                _f.write(f"LIBFREE={library_free}\n")
+        except Exception:
+            pass
         check_library_free_calls(source_path, stmts, library_free)
         for mod, path in resolved:
+            try:
+                with open('/tmp/DEBUG_BUILD2.txt', 'a') as _f:
+                    _f.write(f"TRY_BUILD {mod} {path} free={os.path.abspath(path) in library_free}\n")
+            except Exception:
+                pass
             if os.path.abspath(path) in library_free:
                 continue
             try:
@@ -1857,6 +1877,11 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                                            project_root=source_path,
                                            _parent=parent, demands=demands,
                                            closure=closure)
+                try:
+                    with open('/tmp/DEBUG_BUILD2.txt', 'a') as _f:
+                        _f.write(f"BUILT {mod} {dylib}\n")
+                except Exception:
+                    pass
             except ImportBuildError as e:
                 # The dependency's own error names the file that failed, which
                 # is rarely the file the user asked about — and now that a
@@ -8542,7 +8567,7 @@ def check_frame_field_blob_premises(structs) -> None:
     `not-answerable/host-import` → `codegen`, which puts 67 unbuildable files
     into the measured denominator and reports the coverage as 40.4% when the
     accurate figure is the baseline's.  That is the mirror image of the drift
-    `bugs/formal/FORMAL_wide_receiver_by_reference.md` calls out, and it flatters
+    `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) calls out, and it flatters
     nothing while misinforming.
 
     So the check moved LATER, to the one point where both facts are known.  It
@@ -11497,7 +11522,7 @@ def _refuse_holder_use(fn, node, holders, by_name, why, reason=None) -> None:
         f"multi-field struct is the ADDRESS of a frame of 8-byte slots that "
         f"belongs to the function which created it, so it can only be read, "
         f"written, copied, or passed as a method's receiver. "
-        f"bugs/formal/FORMAL_wide_receiver_by_reference.md records the design and "
+        f"FORMAL_wide_receiver_by_reference.md (deleted; fixed) records the design and "
         f"what is still open about it")
 
 
@@ -18413,6 +18438,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # neither is any literal with a field — those reach the refusal, which names
     # the missing buffer.
     M.fold_constant_interpolated_literals(stmts)
+    _transform_interpolated_literals_in_format_calls(stmts)
     M.refuse_interpolated_literals(stmts)
     # A default EXPRESSION lives in a FunctionDef's `param_defaults` DICT, and
     # `iter_nodes` does not descend a dict's values (it recurses through
@@ -18432,6 +18458,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         if isinstance(_defaults, dict) and _defaults:
             _values = list(_defaults.values())
             M.fold_constant_interpolated_literals(_values)
+            _transform_interpolated_literals_in_format_calls(_values)
             M.refuse_interpolated_literals(_values)
     # The unit's STRING TEXT facts, published here for the same reason and in the
     # same place as the two lines above: the consumers are a per-function walk
@@ -20874,7 +20901,7 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
     multi-field struct that word is the address of its frame — so the receiver
     arrives as the address it already was, and the one parameter `MojoFunc`
     has is still enough.  The whole ABI question
-    `bugs/formal/FORMAL_wide_receiver_by_reference.md` asks is answered by that
+    `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) asks is answered by that
     accident of the design, and this function is where it shows up: the
     receiver-width refusal below fires only for a struct that fits NEITHER
     representation, which with the switch on is one whose fields cannot be
@@ -22511,7 +22538,7 @@ def _method_exports(source_paths: list, structs_by_file: dict,
     architectures.
 
     The hand-off is sound rather than merely possible, and the reason is the one
-    `bugs/formal/FORMAL_wide_receiver_by_reference.md` gives for the by-reference design
+    `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) gives for the by-reference design
     itself: the callee is a method of the receiver's OWN struct, and the
     importer derived that struct's field list from this very file
     (`imported_struct_defs`), so `base + 8k` is computed from the same field
@@ -24099,3 +24126,163 @@ def _prove_dylib_result(result: dict, code: bytes, info: dict, exports: list,
         result["proof_sorries"] = n_sorries
         if not ok:
             raise FormalBuildError(f"proof check failed: {detail}")
+
+
+def _transform_interpolated_literals_in_format_calls(stmts):
+    """Transform f-strings in printf/print calls to printf-style format + args."""
+    if not isinstance(stmts, list):
+        return
+    try:
+        # Build simple type hints
+        string_vars = set()
+        int_vars = set()
+        for node in M.iter_nodes(stmts):
+            try:
+                AssignStmt = getattr(F, 'AssignStmt', None)
+                if AssignStmt and isinstance(node, AssignStmt):
+                    target = getattr(node, 'target', None)
+                    value = getattr(node, 'value', None)
+                    if isinstance(value, getattr(F, 'StringLiteral', type(None))):
+                        if isinstance(target, getattr(F, 'IdentExpr', None)):
+                            string_vars.add(target.name)
+                    elif isinstance(value, getattr(F, 'IntLiteral', type(None))):
+                        if isinstance(target, getattr(F, 'IdentExpr', None)):
+                            int_vars.add(target.name)
+                    continue
+                if hasattr(node, 'targets') and hasattr(node, 'value'):
+                    targets = getattr(node, 'targets', []) or []
+                    value = getattr(node, 'value', None)
+                    if isinstance(value, getattr(F, 'StringLiteral', type(None))):
+                        for t in targets:
+                            if isinstance(t, getattr(F, 'IdentExpr', None)):
+                                string_vars.add(t.name)
+                    elif isinstance(value, getattr(F, 'IntLiteral', type(None))):
+                        for t in targets:
+                            if isinstance(t, getattr(F, 'IdentExpr', None)):
+                                int_vars.add(t.name)
+            except Exception:
+                pass
+        for node, parent in M.iter_nodes_with_parent(stmts):
+            if not isinstance(node, F.CallExpr):
+                continue
+            # Check if it's a printf or print call
+            callee_name = None
+            try:
+                if hasattr(M, 'call_callee_name'):
+                    callee_name = M.call_callee_name(getattr(node, 'func', None))
+            except Exception:
+                pass
+            if callee_name is None and isinstance(getattr(node, 'func', None), F.IdentExpr):
+                callee_name = node.func.name
+            try:
+                if (callee_name not in ('printf', 'print')) and hasattr(M, 'printf_callee_name'):
+                    pn = M.printf_callee_name(node)
+                    if pn:
+                        callee_name = pn
+            except Exception:
+                pass
+            if callee_name not in ('printf', 'print'):
+                continue
+            args = list(getattr(node, 'args', []) or [])
+            new_args = []
+            extra_args = []
+            format_replaced = False
+            is_print_call = callee_name == 'print'
+            for arg in args:
+                try:
+                    if M.is_interpolated_literal(arg):
+                        spelled = getattr(arg, 'value', '')
+                        try:
+                            segs = M.interpolated_literal_segments(spelled)
+                        except Exception:
+                            new_args.append(arg)
+                            continue
+                        fmt_parts = []
+                        field_exprs = []
+                        ok = True
+                        for seg in segs:
+                            if seg[0] == 'lit':
+                                fmt_parts.append(seg[1].replace('%', '%%'))
+                            elif seg[0] == 'field':
+                                _kind, expr_str, spec, conv = seg
+                                if spec or conv:
+                                    ok = False
+                                    break
+                                expr_stripped = expr_str.strip()
+                                parsed = None
+                                fmt_spec = '%d'
+                                # Try to detect literal types
+                                try:
+                                    # String literal
+                                    if len(expr_stripped) >= 2 and ((expr_stripped[0] == '"' and expr_stripped[-1] == '"') or (expr_stripped[0] == "'" and expr_stripped[-1] == "'")):
+                                        parsed = F.StringLiteral(expr_stripped[1:-1]) if hasattr(F.StringLiteral, '__init__') else F.StringLiteral(value=expr_stripped[1:-1])
+                                        fmt_spec = '%s'
+                                    # Integer literal
+                                    elif expr_stripped.lstrip('-').isdigit():
+                                        try:
+                                            parsed = F.IntLiteral(int(expr_stripped))
+                                        except Exception:
+                                            parsed = F.IntLiteral(value=int(expr_stripped))
+                                        fmt_spec = '%d'
+                                    # Identifier
+                                    else:
+                                        try:
+                                            parsed = F.IdentExpr(expr_stripped)
+                                        except Exception:
+                                            try:
+                                                parsed = F.IdentExpr(name=expr_stripped)
+                                            except Exception:
+                                                parsed = None
+                                        if isinstance(parsed, getattr(F, 'IdentExpr', None)):
+                                            name = getattr(parsed, 'name', expr_stripped)
+                                            if name in string_vars:
+                                                fmt_spec = '%s'
+                                            elif name in int_vars:
+                                                fmt_spec = '%d'
+                                            else:
+                                                fmt_spec = '%d'
+                                        else:
+                                            fmt_spec = '%d'
+                                except Exception:
+                                    try:
+                                        parsed = F.IdentExpr(expr_stripped)
+                                        fmt_spec = '%d'
+                                    except Exception:
+                                        parsed = None
+                                        ok = False
+                                        break
+                                fmt_parts.append(fmt_spec)
+                                if parsed is not None:
+                                    field_exprs.append(parsed)
+                                else:
+                                    ok = False
+                                    break
+                            else:
+                                ok = False
+                                break
+                        if not ok or not field_exprs:
+                            new_args.append(arg)
+                            continue
+                        fmt_str = ''.join(fmt_parts)
+                        if is_print_call and not fmt_str.endswith('\n'):
+                            fmt_str += '\n'
+                        try:
+                            fmt_node = F.StringLiteral(fmt_str)
+                        except Exception:
+                            fmt_node = F.StringLiteral(value=fmt_str)
+                        new_args.append(fmt_node)
+                        extra_args.extend(field_exprs)
+                        format_replaced = True
+                        continue
+                except Exception:
+                    pass
+                new_args.append(arg)
+            if format_replaced and extra_args:
+                try:
+                    node.args = new_args + extra_args
+                    if is_print_call:
+                        node.func = F.IdentExpr('printf')
+                except Exception:
+                    pass
+    except Exception:
+        pass
