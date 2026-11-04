@@ -2866,7 +2866,7 @@ def model_const(module, name):
     that were both typed by the same person on the same afternoon.
 
     A module-level name on this path is FOLDED at every read
-    (`bugs/formal/FORMAL_module_state_no_storage.md`), so there is no way to ask the
+    (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)`), so there is no way to ask the
     image for it; the declaration in the source is the only place the number
     exists, and reading it is what a caller would do too.
     """
@@ -3673,7 +3673,7 @@ def _spelled_surface():
     PIPE`, `except subprocess.SubprocessError:` — is answered by nothing the
     model can declare: a function is not a word and a class is a frame blob, so
     those sites need
-    `bugs/formal/FORMAL_module_state_no_storage.md` rather than a parameter.  Counting
+    `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)` rather than a parameter.  Counting
     both as "the tree spells this name" hid half the gap, which is the mistake
     this rewrite exists to remove.
 
@@ -3755,7 +3755,7 @@ def _modelled_subprocess_names():
 _SUBPROCESS_VALUE_ABSENT = {
     "PIPE": "the constant is a FUNCTION here (`PIPE()` binds); reading it as a "
             "value needs a module-level name that is a folded literal — "
-            "bugs/formal/FORMAL_module_state_no_storage.md",
+            "FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)",
     "STDOUT": "as PIPE",
     "DEVNULL": "as PIPE",
     "SubprocessError": "a catchable TYPE, and a class on this path is a frame "
@@ -3827,7 +3827,7 @@ def test_the_modelled_surface_covers_what_the_tree_spells(tmpdir=None):
     # function of the same name: `stdout=subprocess.PIPE` needs a WORD and
     # `subprocess.PIPE` is a function, so the call site is refused while
     # `subprocess.PIPE()` beside it builds.  That is the whole
-    # `FORMAL_module_state_no_storage.md` gap, and a ratchet that treated the
+    # `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted)` gap, and a ratchet that treated the
     # name as covered would be green over six refused call sites.
     unexplained = sorted(n for n in value_reads
                          if n not in _SUBPROCESS_VALUE_ABSENT)
@@ -3835,7 +3835,7 @@ def test_the_modelled_surface_covers_what_the_tree_spells(tmpdir=None):
           "this tree READS `subprocess.` names as VALUES that nothing answers: "
           + ", ".join(unexplained) + "\n"
           "    A value read needs a folded module-level literal, not a "
-          "function (bugs/formal/FORMAL_module_state_no_storage.md), so declaring one "
+          "function (FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)), so declaring one "
           "does not cover it. Record it in _SUBPROCESS_VALUE_ABSENT with the "
           "reason, or fix the module-state gap.")
     stale = sorted(n for n in _SUBPROCESS_VALUE_ABSENT if n not in value_reads)

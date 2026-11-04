@@ -1530,6 +1530,7 @@ def _build_cfg(body, entry_facts: dict = None) -> tuple:
                 # reach nothing, because each of those copies is emitted at a
                 # point the function or the loop leaves.
                 fin = getattr(s, "finally_body", None)
+                suppressible = getattr(s, '_with_suppressible', False) or getattr(s, '_suppressible', False)
                 if fin is not None:
                     early = _leaves_early(blocks, body_start, body_end,
                                            outer_loops)
@@ -1547,7 +1548,29 @@ def _build_cfg(body, entry_facts: dict = None) -> tuple:
                     # every path leaves is exactly where the clause's reads have
                     # to be checked.
                     if early:
-                        run(fin, loops, early)
+                        if suppressible:
+                            # For suppressible with blocks, only exception raises
+                            # can be suppressed; returns must return from function
+                            raise_early = []
+                            return_early = []
+                            for bidx in early:
+                                b = blocks[bidx]
+                                # Check if it's a raise
+                                is_raise = False
+                                for st in getattr(b, 'stmts', []):
+                                    if isinstance(st, F.RaiseStmt):
+                                        is_raise = True
+                                        break
+                                if is_raise:
+                                    raise_early.append(bidx)
+                                else:
+                                    return_early.append(bidx)
+                            if raise_early:
+                                pending = list(pending) + run(fin, loops, raise_early)
+                            if return_early:
+                                run(fin, loops, return_early)
+                        else:
+                            run(fin, loops, early)
                 else:
                     pending = arm_exits
                 cur = None
