@@ -3689,7 +3689,9 @@ def _eligible_async_common(fn: N.FunctionDef, nested: bool = False,
         if pann not in _SCALARISH and not _is_struct_param(pann):
             return False, f'param {pname!r} type {pann!r} (v0 scalar / struct only)'
     if getattr(fn, 'kwonly', None):
-        return False, 'kwonly params (v0)'
+        _kwbad = _unrepresentable_kwonly(fn)
+        if _kwbad:
+            return False, f'kwonly params (v0): {_kwbad}'
     # NORMALIZE, then judge. `_async_awaits_ok` below only accepts an
     # `AwaitExpr` in STATEMENT position, so an `await` nested inside a
     # call's argument list would otherwise make the function ineligible
