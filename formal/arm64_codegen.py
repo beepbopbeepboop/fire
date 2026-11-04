@@ -398,6 +398,20 @@ def _collect_var_names(f: F.FunctionDef) -> list:
         for i in range(acc_c[1] + 1):
             add(f"_ci{i}")
             add(f"_cb{i}")
+
+    # `print`-of-a-container loop temps: one blob-pointer + one index per
+    # nesting depth, `_ppb{d}`/`_ppi{d}`, reserved at the FIXED depth the
+    # model caps the plan at (`PRINT_LOOP_MAX_DEPTH`) — the cap and the
+    # reservation are one number, so a plan can never reach a depth the
+    # allocator did not reserve. The gate, `model.print_container_loop_flags`,
+    # is a SUPERSET of what emits (a loop is only emitted for a container
+    # operand, and a container is never a value literal), so the reservation
+    # may be unused — an unused temp is a spare local, and a missing one is a
+    # loop whose index has no home, which is the direction that faults.
+    if M.print_container_loop_flags(f):
+        for i in range(M.PRINT_LOOP_MAX_DEPTH):
+            add(f"_ppb{i}")
+            add(f"_ppi{i}")
     return names
 
 
@@ -446,7 +460,7 @@ def _allocation_split(f: F.FunctionDef):
     taken = set(params) | set(rest)
     ct = [n for n in ct if n not in taken]
     temps = [n for n in rest
-             if n[:3] in ("_fi", "_fb", "_ci", "_cb")]
+             if n[:3] in ("_fi", "_fb", "_ci", "_cb", "_pp")]
     others = [n for n in rest if n not in set(temps)]
     base = ct + params + temps + others
     # Filtered to names this function really binds: the table is published from
@@ -752,6 +766,11 @@ dylib_exports: list = None, globals_base: int = None,
         self._while_counter = 0
         self._assert_counter = 0
         self._tup_counter = 0
+        # Per-print-of-a-container label counter: each container ARGUMENT of a
+        # `print` gets a fresh id so its loop nest's labels (`_pl{pid}_{d}_…`)
+        # cannot collide with a sibling container argument's, at the nesting
+        # depth the depth index alone does not separate.
+        self._print_loop_counter = 0
         # Per-image counter for the lazy module-global initializer's skip
         # label; unique per function because the assembler's labels are.
         self._gi_counter = 0
@@ -6988,23 +7007,27 @@ ctor_field_value=self._ctor_field_value_for(name),
         return False
 
     def _print_call(self, args: list):
-        """`(format, operands)` for a `print` of `args`.
+        """The PARTS of a `print` of `args` — the model's shared loop.
 
-        TWO LINES OF DELEGATION, and `model.print_call_spelling` is where the
-        decision and every reason for it live: which operand is a fragment and
-        which is a value, that a `bool` is `True`/`False` rather than the word's
-        own `1`/`0`, that `None` is the four characters rather than a `0`, that a
-        `bytes` literal is CPython's `repr()` of it, and the four shapes this
-        path refuses with a sentence that says what CPython prints. This method
-        was the whole of that once, and `x86_64_codegen.py` had the same method
-        again — two copies of a rendering rule is how two architectures come to
-        print one program differently, and before the move both of them printed
-        `1` for `True`.
+        TWO LINES OF DELEGATION, and `model.print_arg_parts` is where the
+        decision and every reason for it live: which operand is a fragment
+        and which is a value, that a `bool` is `True`/`False` rather than the
+        word's own `1`/`0`, that `None` is the four characters rather than a
+        `0`, that a `bytes` literal is CPython's `repr()` of it, and that a
+        container is a LOOP — its plan made there, once, by
+        `model.container_print_plan`, with the refusals for the shapes it does
+        not render. The part the loop answers is a
+        `model.ContainerPrintOperand`, and `_emit_print` renders it.
 
-        The three facts only an emitter has are passed as hooks: this backend's
-        flow-sensitive `_expr_str_kind`, its own signedness for `_ttype`, and
-        `ValueKinds.no_value_callee_of` for the value this path cannot carry."""
-        return M.print_call_spelling(
+        The four facts only an emitter has are passed as hooks: this
+        backend's flow-sensitive `_expr_str_kind`, its own signedness for
+        `_ttype`, and the two container facts `ValueKinds` does not carry —
+        the SHAPE (a list, a tuple, a set and a dict are one kind; the
+        brackets are the tables' fact) and a dict name's initializer literal
+        (the pairs the binding wrote). `dict_key_kind` is the for-walk's own
+        reader, asked of the same name so the two cannot disagree about a
+        key."""
+        return M.print_arg_parts(
             args,
             no_value_callee=self._vkinds.no_value_callee_of,
             kind_of=self._expr_str_kind,
@@ -7012,7 +7035,78 @@ ctor_field_value=self._ctor_field_value_for(name),
             is_bool=self._print_operand_is_bool,
             is_none=self._vkinds.is_none_value,
             is_bytes=self._vkinds.is_bytes_value,
+            container_shape=self._print_container_shape,
+            dict_init_of=self._print_dict_init,
+            dict_key_kind=lambda e: self._vkinds.dict_key_kind(e),
             backend="arm64")
+
+    def _print_container_shape(self, e):
+        """The container's bracket SHAPE — the one fact its kind does not
+        carry.
+
+        A list, a tuple, a set and a dict all classify as a `LIST_PREFIX`
+        blob (`model.container_shape_refusal`'s opening), and CPython writes
+        different brackets for each, so the shape is read from the SOURCE:
+        the literal's own AST for the four inline spellings, the name tables
+        for a name — mutually exclusive marks, in the precedence a name is
+        one shape (`_dict_vars` then `_set_vars` then `_tuple_vars` then
+        `_blob_vars`, the last holding every list a binding named) — and the
+        module slot's initializer for a global this function does not bind.
+        None is the plan's shape refusal: a call result and a blob `+` spell
+        none of the four, and guessing is the mistake the refusal exists for.
+        """
+        if isinstance(e, F.ListExpr):
+            return "list"
+        if isinstance(e, F.TupleExpr):
+            return "tuple"
+        if isinstance(e, F.SetExpr):
+            return "set"
+        if isinstance(e, F.DictExpr):
+            return "dict"
+        if isinstance(e, F.Comprehension):
+            # A list comprehension is a list; a dict comprehension's pairs are
+            # built at run time, and the plan refuses it on the kind evidence
+            # (`model.dict_comprehension_print_refusal`) — the shape is
+            # answered honestly either way.
+            return "dict" if getattr(e, "kind", "list") == "dict" else "list"
+        if isinstance(e, F.IdentExpr):
+            name = e.name
+            if name in self._dict_vars:
+                return "dict"
+            if name in self._set_vars:
+                return "set"
+            if name in self._tuple_vars:
+                return "tuple"
+            if name in self._blob_vars:
+                return "list"
+            got = M.global_slot_container_init(name)
+            if got is not None:
+                return got[0]
+        return None
+
+    def _print_dict_init(self, e):
+        """The dict LITERAL a `print` operand bound, or None.
+
+        The initializer the pairs were WRITTEN from — the evidence the plan
+        reads its keys and values from (`model.container_print_plan`'s
+        dict arm). A literal is its own initializer; a name answers from
+        `ValueKinds.dict_inits`, which the tombstone rule keeps to a name
+        every binding of whose binding is that one literal, and from the
+        module slot's initializer for a global the function does not bind.
+        None is the plan's kind-chain fallback for a name (keys off
+        `dict_key_kind`, values off the kind), and the refusal when even
+        those do not state a scalar.
+        """
+        if isinstance(e, F.DictExpr):
+            return e
+        if isinstance(e, F.IdentExpr):
+            node = self._vkinds.dict_inits().get(e.name)
+            if node is not None:
+                return node
+            got = M.global_slot_container_init(e.name)
+            if got is not None and got[0] == "dict":
+                return got[1]
+        return None
 
     def _print_operand_is_bool(self, e) -> bool:
         """Whether `print` must render `e` as `True`/`False`.
@@ -7416,9 +7510,33 @@ ctor_field_value=self._ctor_field_value_for(name),
         program whose output has not reached the pipe yet, which is a missing
         line rather than a wrong one. `fflush(NULL)` is the C library's own
         "every stream"; there is exactly one stream this model writes, which is
-        the fact `print(file=…)`'s refusal is stated on (`M.print_kwargs`)."""
+        the fact `print(file=…)`'s refusal is stated on (`M.print_kwargs`).
+
+        **A container argument takes the STREAM instead**, and the branch is on
+        the PARTS rather than on the source: `self._print_call` is the model's
+        `print_arg_parts`, which has already made the plan (and every refusal
+        with a sentence) for each container argument, so the emitter's branch
+        is a test of the answer and not a second reading of the argument. The
+        old path below is byte-identical to the single-printf answer for every
+        print without a container: the parts projected onto one format string,
+        in `model.print_call_spelling`'s order, through the same
+        `M.print_format`, the same call and the same float reservation."""
         sep, end, flush = self._print_kwargs(e)
-        frags, operands = self._print_call(list(e.args))
+        parts = self._print_call(list(e.args))
+        if any(p[0] == "container" for p in parts):
+            self._emit_print_stream(parts, sep, end, flush)
+            return
+        frags, operands = [], []
+        for part in parts:
+            tag = part[0]
+            if tag == "text":
+                frags.append(part[1])
+            elif tag == "value":
+                frags.append(part[1])
+                operands.append(part[2])
+            else:  # "float" — a container part took the stream above
+                frags.append("%s")
+                operands.append(part[1])
         fmt = M.print_format(frags, sep, end)
         # The float-repr buffers, ONE reservation per print call, made HERE
         # rather than in the operand: this block sits ABOVE everything
@@ -7443,6 +7561,275 @@ ctor_field_value=self._ctor_field_value_for(name),
                                        args=[F.IntLiteral(0)]))
         if n_floats:
             self.asm.emit(encode_add_xd_xn_imm(31, 31, 64 * n_floats))
+
+    # ── `print` of a container: the stream ─────────────────────────────────
+    #
+    # The model made the DECISION — `print_arg_parts`'s container arm, the
+    # plan tree and every refusal in `container_print_plan` — and this
+    # section is the machine half: one loop per container nesting, one
+    # `printf` per element, the brackets and separators the plan's leaf
+    # says the walk must write. The plan and the loop walk the same tree,
+    # so a shape the plan renders is a loop this section can spell, and
+    # the temporary the loop indexes is the one `_collect_var_names`
+    # reserved at the plan's own depth cap.
+
+    def _emit_print_stream(self, parts, sep, end, flush) -> None:
+        """A `print` with at least one container part, rendered part by part.
+
+        Text folds: a fragment and a separator are format TEXT,
+        and pending text rides along in the next `printf`'s format rather
+        than getting a call of its own — flushed as a text-only `printf`
+        the moment a value, a float or a container needs the stream, and
+        again at the line's end with the `end` text. (The brackets are the
+        loop's own: `_emit_print_container` writes them, at every depth.) The `sep`/`end`
+        rule is `M.print_format`'s, asked the same way: between parts
+        (never before the first) and at the end, escaped by the same
+        `M.print_literal` the old path runs on them, so a custom `sep=`
+        that holds a `%` or a backslash is answered by one decoder here
+        and there.
+
+        The float-repr block is reserved ONCE for the whole stream, before
+        it, for the same reason `_emit_print` makes its one reservation:
+        everything the stream does in between — the text flushes, the
+        element `printf`s' variadic areas, the evaluation of an operand
+        that itself calls — pushes and pops strictly below this SP and
+        returns to it, so a buffer's address is a fixed `64 * index`
+        offset from it at every float. There is no `16 * (1 + position)`
+        term: that is `_emit_call`'s argument spill, and this path calls
+        `printf` by hand rather than through it.
+        """
+        a = self.asm
+        sep_esc = M.print_literal(sep) if sep else ""
+        end_esc = M.print_literal(end) if end else ""
+        n_floats = sum(1 for p in parts if p[0] == "float")
+        if n_floats:
+            a.emit(encode_sub_xd_xn_imm(31, 31, 64 * n_floats))
+        pending = ""
+        for i, part in enumerate(parts):
+            if i and sep:
+                pending += sep_esc
+            tag = part[0]
+            if tag == "text":
+                pending += part[1]
+            elif tag == "value":
+                if pending:
+                    self._emit_print_printf(pending)
+                    pending = ""
+                self._emit_expr(part[2])
+                self._emit_print_printf_value(part[1])
+            elif tag == "float":
+                if pending:
+                    self._emit_print_printf(pending)
+                    pending = ""
+                op = part[1]
+                self._emit_expr(op.expr)
+                a.emit(encode_add_xd_xn_imm(1, 31, 64 * op.index))
+                self._float_repr_used = True
+                a.emit(encode_bl(0))
+                a.emit_label_rel(M.FLOAT_REPR_SYMBOL, here_offset=-4)
+                # The helper answers with the buffer's address in X0; that
+                # address is the `%s`'s vararg, moved to X1 before the
+                # format takes X0.
+                a.emit(encode_mov_zr_xn(1, 0))
+                self._emit_print_printf_value("%s", value_reg=1)
+            else:  # "container"
+                if pending:
+                    self._emit_print_printf(pending)
+                    pending = ""
+                op = part[1]
+                # Container ctx for the operand alone, the `_emit_for_list`
+                # way: a `+` in it means list concat rather than pointer add.
+                self._container_ctx += 1
+                try:
+                    self._emit_expr(op.expr)
+                finally:
+                    self._container_ctx -= 1
+                self._store_var("_ppb0", 0)
+                a.emit(encode_movz_wd_imm(0, 0))
+                self._store_var("_ppi0", 0)
+                self._emit_print_container(op.plan, 0)
+        pending += end_esc
+        if pending:
+            self._emit_print_printf(pending)
+        if n_floats:
+            a.emit(encode_add_xd_xn_imm(31, 31, 64 * n_floats))
+        if flush:
+            self._emit_call(F.CallExpr(func=F.IdentExpr(name="fflush"),
+                                       args=[F.IntLiteral(0)]))
+
+    def _emit_print_printf(self, fmt) -> None:
+        """A TEXT-ONLY `printf` of `fmt` — the stream's fragment flush.
+
+        `fmt` is already through `print_literal_text` (a part's escaped
+        text, an escaped `sep`/`end`, or one of the stream's own
+        constants — a bracket, a `,`), so the `F.StringLiteral` wrap is
+        the DECODE ROUND TRIP rather than a re-escape: `_intern_string`
+        decodes, and the doubled `%` and `\\` come back to the single
+        ones, the same two-pass order the old path's synthesized format
+        takes (`model.print_literal_text`'s stated reason). A plain
+        string would be taken at face value there and the doubling would
+        land in the table un-decoded — `100%% done` on stdout.
+        """
+        self.asm.emit_adrp_add(0, self._intern_string(F.StringLiteral(fmt)))
+        self.asm.emit_extern_bl("printf")
+
+    def _emit_print_printf_value(self, fmt, value_reg=None) -> None:
+        """A `printf` of `fmt` with ONE vararg, the word in `value_reg`.
+
+        The value register defaults to the value itself (X0, this
+        backend's value register); the bool leaf and the float pass
+        theirs explicitly. Apple arm64 passes the unnamed arguments in
+        the reserved area, so the value is copied to X1 AFTER the
+        evaluation but BEFORE the format takes X0 — the move precedes
+        the adrp for that reason — and `_emit_variadic_area` copies it
+        down and hands the space back after the call.
+        """
+        if value_reg is None:
+            value_reg = 0
+        a = self.asm
+        if value_reg != 1:
+            a.emit(encode_mov_zr_xn(1, value_reg))
+        a.emit_adrp_add(0, self._intern_string(F.StringLiteral(fmt)))
+        n = self._emit_variadic_area("printf", 2)
+        a.emit_extern_bl("printf")
+        if n:
+            a.emit(encode_add_xd_xn_imm(31, 31, n))
+
+    def _emit_print_container(self, plan, d) -> None:
+        """The loop of ONE container at depth `d`, the plan's one nest.
+
+        The layout, per depth: the state lives in the frame (`_ppb{d}`
+        the blob's base, `_ppi{d}` the index) and every register the
+        body holds is caller-saved, because the body's own `printf`s
+        clobber every one of them — so the state is reloaded from the
+        frame after each, and the element address is computed fresh
+        each pass. The count test is `_emit_for_list`'s: `cset lt`
+        over the index and the blob's count, `cbz` to the done label.
+        The separator is CPython's element separator — `M.CONTAINER_
+        ELEM_SEP`, at every nesting — written before every element
+        EXCEPT the first, CPython's rule asked at run time off the
+        index because the count is a run-time fact; it is not the
+        call's `sep`, which joins this container's parts to its
+        siblings and never enters the brackets. A dict's pair is 16
+        bytes (`lsl #4`), the key at its head and the value at `+8`,
+        and the pair address is recomputed after the key's `printf`
+        for the reason the body's state is: that call moved the base.
+        A one-element tuple's trailing comma is a run-time
+        `count == 1` after the loop — the shape CPython spells, and
+        the count the source does not state.
+
+        The opening and closing brackets ARE here — one text `printf`
+        before the loop and one after it (after the tuple's trailing
+        comma) — rather than in the stream: the stream writes only the
+        TOP-LEVEL container's siblings, and a NESTED loop is emitted from
+        the leaf, where the stream is not, so the bracket that belongs to
+        a nest has to come out of the loop that owns it. A loop and its
+        brackets in one method cannot drift apart the way two emitters of
+        one bracket would.
+        """
+        _tag, shape, _ob, _cb, key_plan, elem_plan = plan
+        self._print_loop_counter += 1
+        pid = self._print_loop_counter
+        fn = self.func_name
+        start_label = f"{fn}_pl{pid}_{d}_start"
+        nosep_label = f"{fn}_pl{pid}_{d}_nosep"
+        step_label = f"{fn}_pl{pid}_{d}_step"
+        done_label = f"{fn}_pl{pid}_{d}_done"
+        comma_label = f"{fn}_pl{pid}_{d}_comma"
+        pb, pi = f"_ppb{d}", f"_ppi{d}"
+        a = self.asm
+        self._emit_print_printf(_ob)
+        a.label(start_label)
+        self._load_var(pb, 9)
+        a.emit(encode_ldr_xt_xn_imm(1, 9, 0))
+        self._load_var(pi, 0)
+        a.emit(encode_cmp_xn_xm(0, 1))
+        a.emit(encode_cset_xd_cond(2, "lt"))
+        a.emit(encode_cbz_xn(0, 2))
+        a.emit_label_rel(done_label, here_offset=-4)
+        a.emit(encode_cmp_xn_imm(0, 0))
+        a.emit(encode_b_cond("eq", 0))
+        a.emit_label_rel(nosep_label, here_offset=-4)
+        self._emit_print_printf(M.CONTAINER_ELEM_SEP)
+        self._load_var(pb, 9)
+        self._load_var(pi, 0)
+        a.label(nosep_label)
+        if shape == "dict":
+            a.emit(encode_add_xd_xn_imm(2, 9, M.BLOB_HEADER_BYTES))
+            a.emit(encode_add_xd_xn_xm_lsl4(2, 2, 0))
+            a.emit(encode_ldr_xt_xn_imm(3, 2, 0))
+            # `conv + ": "` — the pair's own separator, part of the KEY's
+            # format rather than a third `printf`: CPython writes `k: v`
+            # as one unit and the plan's key leaf is the uniform one.
+            self._emit_print_leaf(key_plan, 3, d, slot="k",
+                                  conv_suffix=": ")
+            self._load_var(pb, 9)
+            self._load_var(pi, 0)
+            a.emit(encode_add_xd_xn_imm(2, 9, M.BLOB_HEADER_BYTES))
+            a.emit(encode_add_xd_xn_xm_lsl4(2, 2, 0))
+            a.emit(encode_ldr_xt_xn_imm(0, 2, 8))
+            self._emit_print_leaf(elem_plan, 0, d, slot="v")
+        else:
+            a.emit(encode_add_xd_xn_imm(2, 9, M.BLOB_HEADER_BYTES))
+            a.emit(encode_add_xd_xn_xm_lsl3(2, 2, 0))
+            a.emit(encode_ldr_xt_xn_imm(0, 2, 0))
+            self._emit_print_leaf(elem_plan, 0, d, slot="e")
+        a.label(step_label)
+        self._load_var(pi, 0)
+        a.emit(encode_add_xd_xn_imm(0, 0, 1))
+        self._store_var(pi, 0)
+        self._emit_b_to(start_label)
+        a.label(done_label)
+        if shape == "tuple":
+            self._load_var(pb, 9)
+            a.emit(encode_ldr_xt_xn_imm(0, 9, 0))
+            a.emit(encode_cmp_xn_imm(0, 1))
+            a.emit(encode_b_cond("ne", 0))
+            a.emit_label_rel(comma_label, here_offset=-4)
+            self._emit_print_printf(",")
+        a.label(comma_label)
+        self._emit_print_printf(_cb)
+
+    def _emit_print_leaf(self, leaf, value_reg, d, slot="e",
+                         conv_suffix="") -> None:
+        """The element or pair half at depth `d`, the word in `value_reg`.
+
+        Three answers, and the plan's leaf tuple is all three: an int
+        (or the dict half's) word is one conversion, a bool's word is a
+        SELECT over the two texts rather than a number — `CSEL` of the
+        two interned addresses, branchless, the same choice a
+        conditional expression makes in a vararg elsewhere — and a
+        nested container's word is a POINTER to the next depth's blob:
+        it is stored to that depth's temps, its index zeroed, and the
+        loop recursed, so the nesting's brackets, separators and
+        trailing comma are the plan's inner nest rather than a second
+        loop this section invents. The two tuples have two arities —
+        three for a leaf, six for a nested container — so the branch
+        is on the tag, not on a fixed unpack.
+        """
+        a = self.asm
+        tag = leaf[0]
+        conv, is_bool = None, False
+        if tag == "leaf":
+            _t, conv, is_bool = leaf
+        if is_bool:
+            a.emit(encode_cmp_xn_imm(value_reg, 0))
+            a.emit_adrp_add(1, self._intern_string(
+                F.StringLiteral(M.BOOL_TRUE_TEXT)))
+            a.emit_adrp_add(2, self._intern_string(
+                F.StringLiteral(M.BOOL_FALSE_TEXT)))
+            a.emit(encode_csel_xd_xm_cond(1, 1, 2, "ne"))
+            value_reg = 1
+        if tag == "leaf":
+            self._emit_print_printf_value(conv + conv_suffix, value_reg)
+            return
+        # "cont": the word is the next depth's blob.
+        if value_reg != 0:
+            a.emit(encode_mov_zr_xn(0, value_reg))
+        self._store_var(f"_ppb{d + 1}", 0)
+        a.emit(encode_movz_wd_imm(0, 0))
+        self._store_var(f"_ppi{d + 1}", 0)
+        self._emit_print_container(leaf, d + 1)
 
     # ── `print` of a float: the backend's half of the shared decision ──────
     #
