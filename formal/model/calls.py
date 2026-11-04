@@ -2341,7 +2341,7 @@ def subscript_callee_name(call) -> str | None:
     of a subscript callee they can flatten (`arm64_codegen._callee_symbol` has
     carried a `SubscriptExpr` arm for a long time and `x86_64_codegen`'s copy
     has not, which is a pre-existing x86-64 gap listed in
-    `bugs/formal/FORMAL_wide_receiver_by_reference.md` §5.1).  Collapsing that gap is
+    `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) §5.1).  Collapsing that gap is
     not this change's job, so the shared question is asked at the level both
     backends can answer: the BASE NAME, which is the whole of what the
     empty-container decision needs.

@@ -12198,7 +12198,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # carried a `SubscriptExpr` arm for a long time and this copy has
             # not, so a bracketed call target reaches the refusal below on this
             # architecture alone — a pre-existing x86-64 gap, listed in
-            # `bugs/formal/FORMAL_wide_receiver_by_reference.md` §5.1 among the
+            # `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) §5.1 among the
             # architecture gaps, and NOT closed here: closing it means teaching
             # this backend a comptime-specialization call convention it does not
             # have, which is a change of far more than this construct.
