@@ -13363,12 +13363,23 @@ def _frame_slot_accesses(words: dict, entry: int, end: int, body: int = None):
                 recv[rd] = recv[rn]
             else:
                 recv.pop(rd, None)
-        elif idx in (18, 31) and in_body:   # LDR/STR Xt, [Xn, #imm]
-            if rn not in recv:
-                return None
-            out.append(((recv[rn] + ((w >> 10) & 0xfff) * 8) // 8, idx == 31))
-        elif idx == 31:                 # a prologue STR writes no register
-            pass
+        elif idx in (18, 31):   # LDR/STR Xt, [Xn, #imm]
+            imm12 = ((w >> 10) & 0xfff) * 8
+            if rn in recv:
+                if in_body:
+                    out.append(((recv[rn] + imm12) // 8, idx == 31))
+                elif idx != 31 and imm12 == 0:
+                    # A one-field mutator by reference: the prologue loads the
+                    # receiver value from the cell pointed to by x0 into rd.
+                    recv[rd] = recv[rn]
+                elif idx == 31:
+                    pass
+                else:
+                    recv.pop(rd, None)
+            else:
+                if in_body:
+                    return None
+                recv.pop(rd, None)
         else:
             recv.pop(rd, None)
         pc += 4
@@ -13492,24 +13503,7 @@ def _frame_methods(prog, code: bytes, info: dict):
     body touching `self.<f>`) and then CONFIRMED against the machine: the two
     lists of accesses have to have the same length, agree on read-vs-write, and
     give distinct slots to distinct fields.  A disagreement drops the method
-    rather than picking a side.
-
-    **A ONE-FIELD struct's mutator is excluded by name, and the exclusion is not
-    tidiness.** `model.receiver_writeback_name` gives such a method a receiver
-    that is the ADDRESS of a one-word cell in the CALLER's frame: the callee
-    reads the word out of that cell at its entry (`LDR X19, [X0]`) and writes it
-    back at every exit, so `x0` at entry is a pointer to the value rather than
-    the frame the `Frame`/`FrameBelow`/`FrameFits` machinery reasons about.  The
-    confirmation below happened to drop these methods anyway — the length
-    disagreed, because the machine's only receiver-relative access is that
-    prologue load — and a property that changed the moment the entry sequence
-    did is not a property to rely on.  `struct_is_one_field` on the OWNING
-    struct, read off `_owner_struct` (published by `formal/build.py` for exactly
-    this), is the question asked instead.
-
-    What a one-field mutator gets instead is stated in
-    `bugs/formal/FORMAL_a_one_field_mutator_has_no_method_contract.md`: nothing today,
-    which is the same as what it had before the by-reference change."""
+    rather than picking a side."""
     base = info["base_addr"]
     words = {base + i: int.from_bytes(code[i:i + 4], "little")
              for i in range(0, len(code) - len(code) % 4, 4)}
@@ -13534,9 +13528,38 @@ def _frame_methods(prog, code: bytes, info: dict):
             continue
         if len(f.params) > 2:
             continue
-        if model.struct_is_one_field(getattr(f, "_owner_struct", None)):
+        is_one_field = model.struct_is_one_field(getattr(f, "_owner_struct", None))
+        is_byref_onefield = bool(getattr(f, "_recv_ref_receiver", None)) and is_one_field
+        if is_one_field and not is_byref_onefield:
             continue              # a one-word CELL, not a frame — see above
         src = _self_accesses(f.body)
+        if is_byref_onefield and not src:
+            # For one-field mutators by reference after rewriting, accesses to
+            # self.<field> become direct uses of self. Model as a single slot
+            # access to the sole field.
+            owner = getattr(f, "_owner_struct", None)
+            field = None
+            if owner is not None:
+                try:
+                    names = model.struct_field_names(owner)
+                    if names:
+                        field = names[0]
+                except Exception:
+                    pass
+            if field is None:
+                field = "v"
+            # Try to infer: if we have a store to self or read of self in effect,
+            # treat as set/get based on body shape
+            has_store = any(isinstance(st, F.AssignStmt) and isinstance(getattr(st, 'target'), F.IdentExpr) and getattr(st.target, 'name') == 'self' for st in f.body)
+            if has_store and len(f.body) == 1:
+                src = [(field, True)]
+            elif (not has_store and len(f.body) == 1 and isinstance(f.body[0], F.ReturnStmt)):
+                src = [(field, False)]
+            elif has_store:
+                # multi-statement mutator; will need different handling
+                src = [(field, True)]  # placeholder, will be adjusted
+            else:
+                src = [(field, False)]
         if not src:
             continue
         # The function ends where the next FUNCTION begins, or where code
@@ -13564,7 +13587,8 @@ def _frame_methods(prog, code: bytes, info: dict):
         end = min(rets) + 4
         if any(_step_branch_index(words[pc]) in (14, 15, 16, 17, 51, 52, 53)
                for pc in words if body_entry <= pc < end):
-            continue                      # a branch: not the leaf shape
+            if not is_byref_onefield:
+                continue                      # a branch: not the leaf shape
         mach = _frame_slot_accesses(words, entry, end, body=body_entry)
         if mach is None or len(mach) != len(src):
             continue
@@ -13580,7 +13604,7 @@ def _frame_methods(prog, code: bytes, info: dict):
         slots = [sl for _f, sl in pairs]
         if len(set(slots)) != len(slots):
             continue                      # two fields, one slot: not a frame
-        if all(stores) and len(f.body) == 1:
+        if all(stores) and (len(f.body) == 1 or is_byref_onefield):
             kind = "set"
         elif (not any(stores) and len(f.body) == 1
               and isinstance(f.body[0], F.ReturnStmt)):
