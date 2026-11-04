@@ -4387,6 +4387,8 @@ EMITTER_BUILTINS = {
     "range": "range_list",
     "len": "len",
     "print": "print",
+    "str": "str",
+    "repr": "repr",
     # `ord`, `chr` and `hash` are here for a reason that is not "the backend can
     # do them": ONE of them can and two cannot, and all three reached the LINKER
     # as dangling symbols before, because a name absent from this table is a

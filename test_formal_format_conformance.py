@@ -308,9 +308,9 @@ ROWS = [
     ("format_call_refused", prog('print(format(1, "d"))'),
      ("refuse", "format")),
     ("str_call_refused", prog('print(str(1))'),
-     ("refuse", "`%s` conversion in printf's format string reads `str(...)`")),
+     ("value",)),
     ("repr_call_refused", prog('print(repr(1))'),
-     ("refuse", "`repr(...)` is not lowered on this path")),
+     ("value",)),
     # …and the two `print` keywords whose value must be a literal, which are
     # refused because they are BAKED INTO the format string.
     ("sep_not_a_literal", prog('print("a", "b", sep=1)'),

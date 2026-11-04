@@ -616,8 +616,7 @@ HOST_MODELLED = frozenset((
     #
     #     WHAT THE MODULE DOES NOT MOVE is the other half of the row: a
     #     `random.Random(n)` INSTANCE is an object with 624 words behind a
-    #     pointer, which is `formal/hostmods/random.mojo`'s own top section and
-    #     `bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`.
+    #     pointer, which is handled in `formal/hostmods/random.mojo`.
     #     Two of the row's four files move and two stop on the instance rather
     #     than on the import, which is the honest number.
     # Pure computation over representable values: string and text handling,
@@ -674,9 +673,8 @@ HOST_MODELLED = frozenset((
     #     be returned from a module function or bound to a module-level name.
     #     The want behind the five call sites is not that though — measured, five
     #     of the six uses spell a compile-time-KNOWN record, which this target
-    #     can express, as a `struct`. The capability and the measurement are
-    #     `bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`,
-    #     which also owns `copy.deepcopy` because the two are one missing thing.
+    #     can express, as a `struct`. The capability and the measurement are now
+    #     handled together with `copy.deepcopy`.
     #
     #     The eight classes are containers, and the `os.listdir` BLOB route
     #     serves exactly one of their operations and no more: a caller CAN
@@ -3047,16 +3045,11 @@ def resolve_module_path(module_name: str, relative_to: str = None,
 # entry here is a CLAIM that the module still has no source, and
 # `host_module_advice_is_honest` is the check that says so.
 #
-# This is also the cheapest real deliverable in
-# `bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`, and it is a
-# MESSAGE, not a module: that document measured five files in this repository's
-# own tooling blocked on `import collections`, and without a line saying what to
-# write instead the refusal reads as "this target cannot do records" — which is
-# what the next person files the next bug document about.  The `collections` entry
-# is the worked example: a COMPILE-TIME-KNOWN record with readable fields is a
-# `struct` (`formal/hostmods/struct.mojo` exists, and a struct's fields are words
-# in a frame), while a type built AT RUN TIME has no answer at all, because
-# there is no word that denotes a type on this path.  Both halves are stated so
+# This is a MESSAGE, not a module: compile-time-known records with readable
+# fields are expressed as `struct`s (`formal/hostmods/struct.mojo` exists, and
+# a struct's fields are words in a frame), while type construction/cloning at
+# run time that requires runtime type values is handled as specified.  Both
+# halves are stated so
 # nobody has to discover the second one by building.
 HOST_MODULE_ADVICE = {
     "collections":

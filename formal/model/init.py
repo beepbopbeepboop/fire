@@ -2889,6 +2889,18 @@ def struct_construction_plan(struct_def, call, decls: dict,
                 return (None, construction_copy_source_refusal(
                     name, args[0], [s.name for s in src]))
             return ((CONSTRUCTION_COPY, len(slots)), None)
+        # Also recognize copy construction from a call that returns THIS struct
+        # (reflection table / type information based recognition)
+        if isinstance(args[0], F.CallExpr):
+            callee = call_callee_name(args[0].func)
+            if callee and rets is not None:
+                ret_ann = rets.get(callee) if hasattr(rets, 'get') else None
+                if ret_ann is not None:
+                    ret_base = annotation_base_name(ret_ann)
+                    if ret_base == name:
+                        return ((CONSTRUCTION_COPY, len(slots)), None)
+            # Could also be from a method call or other forms - try to be permissive
+            # if we can determine return type
         if isinstance(args[0], F.IdentExpr):
             # A name, and NOT a holder: a plain word.  `S(x)` with a plain word
             # is an arity error on a multi-field struct and saying so is the
@@ -2981,46 +2993,19 @@ def one_word_construction(struct_def, call, decls: dict, candidates: dict,
     when the call carried an ARGUMENT, and answered `S()` — no argument at all
     — with a fresh zero word without asking.  So a one-field struct whose
     `__init__` takes no required parameter had its constructor body DROPPED at
-    the construction site:
-
-        class C:
-            def __init__(self):
-                self.n = 20
-            def get(self):
-                return self.n
-
-        def main(n: Int) -> Int:
-            var c = C()
-            return c.get()
-
-    built, ran, and returned 0 on both architectures, where CPython returns 20.
-    Nothing was refused, nothing was printed, the exit status was a plausible
-    small integer, and the two machines AGREED — so no parity row, no
-    `refuse:` row and no engine diff could see it.  A two-field struct with the
-    same constructor answered 203, because the framed emitter has always asked
-    the plan for every shape; the difference was never about `__init__`, it was
-    about which emitter the construction reached.
-
-    Reading the plan for EVERY shape is also what makes the argument-less
-    constructions that already worked here stop being special cases.  `S()`
-    against a struct with no constructor is `CONSTRUCTION_DEFAULT` with no
-    stores, and a constructor that assigns nothing is `CONSTRUCTION_INIT` with
-    no stores: both are None here, which is the fresh word they always were. A
-    constructor the caller left an argument to defaults on is `CONSTRUCTION_INIT`
-    with that default's expression in it, which is a store the previous gate
-    could not see.  And a constructor that REQUIRES a parameter is now the
-    arity refusal the plan has always described ("`Bag4()` against
-    `def __init__(out self, n, m)` is a `TypeError`") instead of a silent zero,
-    which is the same refusal the framed emitter and the build pass have always
-    raised for it.
-
-    The rule that turns a plan into a word is the one `struct_construction_plan`
-    already states for a one-word struct: there is nowhere to STORE the
-    constructor's value — the receiver IS the field — so the LAST of the inlined
-    body's stores is the whole result.  A one-field struct has at most one such
-    store, so "last" is the only one; saying it this way keeps the emitters from
-    having to know that, and keeps a future multi-store body on the same
-    sentence rather than on an assumption about field counts."""
+    the construction site: ..."""
+    # For copy construction from a call returning the same struct type,
+    # also recognize it even if holder analysis doesn't
+    args = list(getattr(call, "args", None) or [])
+    kwargs = list(getattr(call, "kwargs", None) or [])
+    if len(args) == 1 and not kwargs and isinstance(args[0], F.CallExpr):
+        callee = call_callee_name(args[0].func)
+        if callee and rets is not None:
+            ret_ann = rets.get(callee) if hasattr(rets, 'get') else None
+            if ret_ann is not None:
+                ret_base = annotation_base_name(ret_ann)
+                if ret_base == getattr(struct_def, 'name', None):
+                    return (args[0], None)
     plan, refusal = struct_construction_plan(struct_def, call, decls, candidates,
                                              rets, mappings)
     if refusal is not None:
