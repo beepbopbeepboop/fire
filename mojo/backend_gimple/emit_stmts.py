@@ -68,6 +68,19 @@ from mojo.middle.calls_shared import _struct_operator_receiver
 # for why the two arms treat it differently from a plain `ValueError`.
 from mojo.middle.loops_shared import ZipLongestFillRefusal, desugar_loop_else
 
+_ENUM_BASES = {'Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag', 'ReprEnum'}
+
+
+def _is_enum_class_def(node):
+    try:
+        bases = getattr(node, 'bases', None) or []
+        for b in bases:
+            if isinstance(b, str) and b in _ENUM_BASES:
+                return True
+    except Exception:
+        pass
+    return False
+
 
 def gen_stmt(gen, node):
     # Emit #line directive to track source location. Critical for debugging:
@@ -422,6 +435,29 @@ def _gen_stmt_VarDecl(gen, node):
     if node.value is not None and _try_bind_iter_cursor(
             gen, node.name, node.value, is_decl=True):
         return
+    # Flow-sensitive None tracking for VarDecl
+    try:
+        if isinstance(node.name, str) and ',' not in node.name and getattr(node, 'value', None) is not None:
+            _fs = getattr(gen, '_flow_none_state', None)
+            if _fs is None:
+                gen._flow_none_state = {}
+                _fs = gen._flow_none_state
+            _val = node.value
+            _is_none_assign = False
+            try:
+                from fire_compiler import NoneLiteral
+                if isinstance(_val, NoneLiteral):
+                    _is_none_assign = True
+            except Exception:
+                pass
+            if not _is_none_assign and isinstance(_val, gimple_ctypes.IdentExpr) and getattr(_val, 'name', None) == 'None':
+                _is_none_assign = True
+            if _is_none_assign:
+                _fs[_as_str(node.name)] = True
+            else:
+                _fs.pop(_as_str(node.name), None)
+    except Exception:
+        pass
     # A box-producing initializer (2026-10-21 part 4, further,
     # test_python_object): `var py_float = PythonObject(0.123...)` stores
     # the literal's BITS (recorded in _pybox_double_vars so a later
@@ -1359,6 +1395,30 @@ def _gen_stmt_AssignStmt(gen, node):
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name
+        # Flow-sensitive None tracking
+        try:
+            _fs = getattr(gen, '_flow_none_state', None)
+            if _fs is None:
+                gen._flow_none_state = {}
+                _fs = gen._flow_none_state
+            # Check if assigning None
+            _val = getattr(node, 'value', None)
+            _is_none_assign = False
+            try:
+                from fire_compiler import NoneLiteral
+                if isinstance(_val, NoneLiteral):
+                    _is_none_assign = True
+            except Exception:
+                pass
+            if not _is_none_assign and isinstance(_val, gimple_ctypes.IdentExpr) and getattr(_val, 'name', None) == 'None':
+                _is_none_assign = True
+            if _is_none_assign:
+                _fs[_as_str(tname)] = True
+            else:
+                # If assigning non-None, it's no longer definitely None
+                _fs.pop(_as_str(tname), None)
+        except Exception:
+            pass
         # A name bound to a word of UNKNOWN kind (`d = os.path.split(b'a/b')[0]`,
         # a list element of a bytes split) is one too: its later reads are the
         # name itself, so its truthiness and its `or`/`and` ask the runtime
@@ -2055,7 +2115,12 @@ def _gen_stmt_AssignStmt(gen, node):
             _dsn2 = gimple_exprtypes._struct_name_of(ot)
             if _dsn2:
                 gen._field_dict_val_types.setdefault(_dsn2, {})[node.target.member] = gen._dict_val_types[v]
-        if ot in ('int', 'int64_t', 'void *'):
+        _rtobj_inst_assign = False
+        if isinstance(node.target.obj, gimple_ctypes.IdentExpr):
+            _ton = node.target.obj.name
+            if getattr(gen, '_rtobj_kinds', {}).get(('l', _ton)) == 'inst' or getattr(gen, '_rtobj_kinds', {}).get(('v', _ton)) == 'inst':
+                _rtobj_inst_assign = True
+        if _rtobj_inst_assign or ot in ('int', 'int64_t', 'void *'):
             # Opaque Python object (e.g. `s.field = val` where `s`'s
             # static type isn't narrowed past a runtime isinstance()
             # check — this compiler doesn't track that): dispatch via
@@ -3495,6 +3560,36 @@ def _gen_stmt_StructDef(gen, node):
     escapes its function (`return Tag`) and is used in a later call reads that
     later call's cell.
     """
+    if _is_enum_class_def(node):
+        try:
+            bases = getattr(node, 'bases', None) or []
+            if bases:
+                base_name = bases[0]
+                name = node.name
+                base_ident = gimple_ctypes.MemberExpr(obj=gimple_ctypes.IdentExpr(name='enum'), member=base_name, line=getattr(node,'line',0))
+                mcls_call = gimple_ctypes.CallExpr(func=gimple_ctypes.IdentExpr(name='type', line=getattr(node,'line',0)), args=[base_ident], line=getattr(node,'line',0))
+                mcls_assign = gimple_ctypes.AssignStmt(target=gimple_ctypes.IdentExpr(name=f'_{name}_mcls', line=getattr(node,'line',0)), value=mcls_call, line=getattr(node,'line',0))
+                gen._gen_stmt_AssignStmt(mcls_assign)
+                ns_items = []
+                for field in getattr(node, 'fields', []) or []:
+                    if isinstance(field, gimple_ctypes.AssignStmt) and isinstance(field.target, gimple_ctypes.IdentExpr):
+                        ns_items.append((gimple_ctypes.StringLiteral(value=field.target.name, line=getattr(field,'line',0)), field.value))
+                ns_dict = gimple_ctypes.DictExpr(pairs=ns_items, line=getattr(node,'line',0))
+                ns_assign = gimple_ctypes.AssignStmt(target=gimple_ctypes.IdentExpr(name=f'_{name}_ns', line=getattr(node,'line',0)), value=ns_dict, line=getattr(node,'line',0))
+                gen._gen_stmt_AssignStmt(ns_assign)
+                type_new_call = gimple_ctypes.CallExpr(
+                    func=gimple_ctypes.MemberExpr(obj=gimple_ctypes.IdentExpr(name='type', line=getattr(node,'line',0)), member='__new__', line=getattr(node,'line',0)),
+                    args=[gimple_ctypes.IdentExpr(name=f'_{name}_mcls', line=getattr(node,'line',0)), 
+                          gimple_ctypes.StringLiteral(value=name, line=getattr(node,'line',0)),
+                          gimple_ctypes.TupleExpr(elements=[base_ident], line=getattr(node,'line',0)),
+                          gimple_ctypes.IdentExpr(name=f'_{name}_ns', line=getattr(node,'line',0))],
+                    line=getattr(node,'line',0)
+                )
+                cls_assign = gimple_ctypes.AssignStmt(target=gimple_ctypes.IdentExpr(name=name, line=getattr(node,'line',0)), value=type_new_call, line=getattr(node,'line',0))
+                gen._gen_stmt_AssignStmt(cls_assign)
+                return
+        except Exception:
+            pass
     cattrs = gen._class_attrs.get(node.name)
     if not cattrs:
         return

@@ -268,6 +268,17 @@ def main():
     print(P.v, Q.v, P.__name__ == Q.__name__)
 main()
 """,
+    'rt_instance_dynamic_attrs_setattr_and_assign': """\
+def main():
+    Foo = type('Foo', (), {'x': 1})
+    o = Foo()
+    o.y = 3
+    setattr(o, 'z', 9)
+    print(o.x, o.y, o.z)
+    p = Foo()
+    print(hasattr(p, 'y'), hasattr(p, 'z'))
+main()
+""",
     'methods_of_static_base_reached_through_dynamic_class': """\
 class Base:
     def foo(self):
