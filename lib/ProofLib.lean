@@ -303,6 +303,11 @@ theorem winfix (v i k : Nat) :
   have hb : val.toNat < 2 ^ 64 := UInt64.toNat_lt val
   simp only [Nat.testBit_or, UInt8.toNat_ofNat, nat64, n8,
              Nat.testBit_mod_two_pow, Nat.testBit_shiftLeft, Nat.testBit_shiftRight]
+
+@[simp] theorem mem_write_u64_same_addr (mem : Nat → UInt8) (addr : Nat) (v1 v2 : UInt64) :
+    mem_write_u64 (mem_write_u64 mem addr v1) addr v2 = mem_write_u64 mem addr v2 := by
+  ext i
+  simp [mem_write_u64, mem_read_u64]
   simp only [winfix]
   by_cases h64 : i < 64
   · -- i in some window [8j, 8j+8)
@@ -882,6 +887,14 @@ theorem mem_read_u64_block_window (mem : Nat → UInt8) (sp : UInt64)
     mem_read_u64 mem ((sp + UInt64.ofNat j).toNat) :=
   mem_read_after_write_u64_high_nw mem sp hK hKnw hjnw val
 
+/-- Memory window preserved across a block: reads above `sp` in `mem'` equal
+    those in `mem`. Analogue of `FrameOk`'s memory clause for within-function
+    blocks. -/
+def BlockMemWindow (sp : UInt64) (mem mem' : Nat → UInt8) : Prop :=
+  ∀ j, sp.toNat + j < 2 ^ 64 →
+    mem_read_u64 mem' ((sp + UInt64.ofNat j).toNat) =
+    mem_read_u64 mem ((sp + UInt64.ofNat j).toNat)
+
 /-- Chain through a memory window for reads above `sp`. -/
 theorem mem_read_u64_block_window_chain (mem0 mem1 : Nat → UInt8) (sp : UInt64)
     (j : Nat) (hjnw : sp.toNat + j < 2 ^ 64)
@@ -890,15 +903,60 @@ theorem mem_read_u64_block_window_chain (mem0 mem1 : Nat → UInt8) (sp : UInt64
     mem_read_u64 mem1 ((sp + UInt64.ofNat j).toNat) =
     mem_read_u64 mem0 ((sp + UInt64.ofNat j).toNat) := hwin
 
+@[simp] theorem BlockMemWindow_read (sp : UInt64) (mem mem' : Nat → UInt8)
+    (hwin : BlockMemWindow sp mem mem') (j : Nat) (hjnw : sp.toNat + j < 2 ^ 64) :
+    mem_read_u64 mem' ((sp + UInt64.ofNat j).toNat) =
+    mem_read_u64 mem ((sp + UInt64.ofNat j).toNat) :=
+  hwin j hjnw
+
+/-- A single write below `sp` preserves the window above `sp`. -/
+theorem BlockMemWindow_write_below (sp : UInt64) (mem : Nat → UInt8)
+    {K : Nat} (hK : 8 ≤ K) (hKnw : K ≤ sp.toNat) (val : UInt64) :
+    BlockMemWindow sp mem (mem_write_u64 mem (sp - UInt64.ofNat K).toNat val) := by
+  intro j hjnw
+  apply mem_read_after_write_u64_high_nw
+  · omega
+  · exact hKnw
+  · exact hjnw
+  · exact val
+
+/-- Chain of writes below `sp` preserves the window. -/
+theorem BlockMemWindow_write_below_chain (sp : UInt64) (mem0 mem1 : Nat → UInt8)
+    (hwin : BlockMemWindow sp mem0 mem1)
+    {K : Nat} (hK : 8 ≤ K) (hKnw : K ≤ sp.toNat) (val : UInt64) :
+    BlockMemWindow sp mem0 (mem_write_u64 mem1 (sp - UInt64.ofNat K).toNat val) := by
+  intro j hjnw
+  rw [mem_read_after_write_u64_high_nw _ _ hK hKnw hjnw val]
+  exact hwin j hjnw
+
+
+
 /-- **Block memory window**: all stores below `sp` leave reads above `sp`
     unchanged. Apply repeatedly to peel a block's frame stores without
     traversing the full nested stack. -/
-theorem block_mem_read_above_sp (mem : Nat → UInt8) (sp : UInt64)
+@[simp] theorem block_mem_read_above_sp (mem : Nat → UInt8) (sp : UInt64)
     (addr : Nat) (hge : sp.toNat ≤ addr)
     {K : Nat} (hK : 8 ≤ K) (hKnw : K ≤ sp.toNat) (val : UInt64) :
     mem_read_u64 (mem_write_u64 mem (sp - UInt64.ofNat K).toNat val) addr =
     mem_read_u64 mem addr :=
   mem_read_after_writes_below_sp mem sp hK hKnw addr hge val
+
+/-- Peel a write at address below `sp` when reading from any address >= `sp`
+    (with explicit disjointness). -/
+@[simp] theorem mem_read_u64_write_below_sp (mem : Nat → UInt8) (sp : UInt64)
+    (waddr : Nat) (raddr : Nat) (hge : sp.toNat ≤ raddr)
+    (hdisj : waddr + 8 ≤ raddr ∨ raddr + 8 ≤ waddr)
+    (val : UInt64) :
+    mem_read_u64 (mem_write_u64 mem waddr val) raddr = mem_read_u64 mem raddr := by
+  apply mem_read_after_write_u64_ne
+  exact hdisj
+
+/-- Read from original memory if all writes are to addresses below `sp` and
+    read is at or above `sp`. General form that tries to avoid deep peeling. -/
+theorem mem_read_u64_above_sp_from_base (mem0 : Nat → UInt8) (sp : UInt64)
+    (raddr : Nat) (hge : sp.toNat ≤ raddr) (mem1 : Nat → UInt8)
+    (h : mem1 = mem0) : mem_read_u64 mem1 raddr = mem_read_u64 mem0 raddr := by
+  rw [h]
 
 /-- `(a - 1).toNat = a.toNat - 1` for a non-zero `UInt64`, via `u64_toNat_sub_lit`. -/
 theorem u64_toNat_sub_one' (a : UInt64) (hne : a ≠ 0) :
@@ -1845,6 +1903,32 @@ def arm64_set_reg_d (i : Nat) (s : Arm64State) (val : UInt64) : Arm64State :=
 @[simp] theorem arm64_reg_nzcv (j : Nat) (s : Arm64State) (c : UInt8) :
     arm64_reg j { s with nzcv := c } = arm64_reg j s := by
   cases j <;> rfl
+
+/-- Make memory irrelevant for register-focused reasoning. -/
+def mem_erase (s : Arm64State) : Arm64State := { s with mem := fun _ => 0 }
+
+@[simp] theorem arm64_reg_mem_erase (i : Nat) (s : Arm64State) :
+  arm64_reg i (mem_erase s) = arm64_reg i s := by
+  simp [mem_erase]
+
+@[simp] theorem arm64_state_mem_erase_regs (s : Arm64State) (i : Nat) :
+  arm64_reg i (mem_erase s) = arm64_reg i s := arm64_reg_mem_erase i s
+
+/-- Erasing memory doesn't change register values. -/
+@[simp] theorem arm64_reg_after_mem_erase (i : Nat) (s : Arm64State) :
+  arm64_reg i {s with mem := fun _ => 0} = arm64_reg i s := by
+  simp [arm64_reg_mem]
+
+/-- Normalize interleaved record updates so that `mem` is not repeatedly
+    threaded through register updates; irrelevant to register projections but
+    keeps large generated terms tractable. -/
+@[simp] theorem arm64_state_update_mem_mem (s : Arm64State) (m1 m2 : Nat → UInt8) :
+    ({ s with mem := m1 } with mem := m2) = { s with mem := m2 } := by
+  ext <;> simp
+
+@[simp] theorem arm64_state_update_reg_mem (s : Arm64State) (i : Nat) (v : UInt64) (m : Nat → UInt8) :
+    ({ arm64_set_reg i s v with mem := m }) = arm64_set_reg i { s with mem := m } v := by
+  cases i <;> ext <;> simp [arm64_set_reg]
 
 /-- `Rn` read the way the INSTRUCTION that names it reads it: register 31 is
 `SP` in the forms that HAVE an SP encoding, and `XZR` in the forms that do not.
