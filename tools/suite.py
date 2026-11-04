@@ -3670,15 +3670,14 @@ test('formal-textwrap', [PY, 'test_formal_textwrap.py'], mem='tiny',
      extra=['test_formal_textwrap.py', 'formal/hostmods/textwrap.mojo',
             'formal/hostmods/os/_syscalls.mojo'] + FORMAL_BUILD_INPUTS,
      desc="textwrap's dedent and indent, diffed against CPython on both backends")
-# The instrument behind `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md`, and
-# only the instrument: `tools/formal_proof_breadth.py` takes 60 functions from
-# this repository's own `*.py` through `compile_formal(prove=True, …)` on both
-# architectures and reads Lean's verdict, and its numbers are quoted in a bug doc
-# that says they will be re-quoted. So what is registered here is the check that
-# those numbers stay COMPARABLE across runs — the 60 identifiers are a function
-# of the tree rather than of the clock, every emitted program is a closed module
-# that reads nothing it does not define, and three programs with known verdicts
-# classify into the classes the census table depends on.
+# The proof-breadth census instrument: `tools/formal_proof_breadth.py` takes
+# 60 functions from this repository's own `*.py` through
+# `compile_formal(prove=True, …)` on both architectures and reads Lean's verdict.
+# So what is registered here is the check that those numbers stay COMPARABLE
+# across runs — the 60 identifiers are a function of the tree rather than of the
+# clock, every emitted program is a closed module that reads nothing it does not
+# define, and three programs with known verdicts classify into the classes the
+# census table depends on.
 #
 # That is 7 tests and NO Lean run, which is the point: the census's own
 # Lean-dependent numbers are its ledger's business and the instrument is cheap
@@ -3710,8 +3709,7 @@ test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
 # `formal` (test_formal.py) prints today's pass/fail against a hand-maintained
 # `EXPECTED_FAILURES` dict and throws the rest away, so a proof that got five
 # times slower, or started admitting holes, or started needing 3 GB, leaves the
-# suite green. `§0.8` of `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` is
-# the census's own summary and the finding it produced on its first run.
+# suite green; measurements are recorded in committed ledgers.
 #
 # Why it is a separate job from `formal` and not folded into it: `formal` runs
 # `fire.py` as a subprocess and learns a boolean per example, this one keeps the
