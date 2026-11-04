@@ -707,6 +707,22 @@ CASES = [
      "    printf(\"sites=%d counted=%d|\", a, b)\n"
      "    return a + b\n",
      2, "sites=1 counted=1|"),
+    # Runtime-length list grown by appending in a while loop with a runtime
+    # bound: must use a heap growable blob rather than a fixed frame reservation.
+    ("list_append_growable_while_runtime_bound",
+     "def main():\n"
+     "    var n = 5\n"
+     "    var xs = []\n"
+     "    var i = 0\n"
+     "    while i < n:\n"
+     "        xs.append(i)\n"
+     "        i = i + 1\n"
+     "    if len(xs) != 5:\n"
+     "        return 1\n"
+     "    if xs[0] != 0 or xs[4] != 4:\n"
+     "        return 2\n"
+     "    return 0\n",
+     0, None),
 
     # ── the gimple backend's C runtime, refused by name ───────────────────
     #
@@ -15905,7 +15921,7 @@ def build_formal(src, out, backend=None, tmpdir=None, env=None):
 #: truncated the same), and every needle the rows carried was early in the
 #: text, so the model's own sentence is what pins the ending.
 _APPEND_OVERFLOW_TEXT = __import__(
-    "formal.model", fromlist=["model"]).list_append_overflow_message("xs", 1)
+    "formal.model", fromlist=["model"]).list_append_overflow_message("xs", 32)
 
 STDERR_CASES = [
     # `xs.append` in a loop, past the capacity the append-site scan reserved.
@@ -15935,12 +15951,12 @@ STDERR_CASES = [
      "def main(n):\n"
      "    xs = []\n"
      "    var i = 0\n"
-     "    while i < 3:\n"
+     "    while i < 2000:\n"
      "        xs.append(7)\n"
      "        i = i + 1\n"
      "    printf(\"n=%d\", len(xs))\n"
      "    return 0\n",
-     1, ["list.append overflowed 'xs'", "its capacity is 1", "append SITES",
+     1, ["list.append overflowed 'xs'", "append SITES",
          _APPEND_OVERFLOW_TEXT]),
     # **THE ADVICE IS A PROMISE, AND THIS ROW IS WHAT KEEPS IT.** The overflow
     # message used to end "…or move the appends into a function of their own so
