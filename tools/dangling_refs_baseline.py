@@ -164,7 +164,7 @@ BARE_BASELINE = {
     'bugs/formal/FORMAL_absval_proof_does_not_check.md': 1,
     'bugs/formal/FORMAL_arm64_instruction_coverage.md': 1,
     'bugs/formal/FORMAL_known_limits.md': 6,
-    'bugs/formal/FORMAL_module_state_no_storage.md': 4,
+    'FORMAL_module_state_no_storage.md (deleted) (deleted)': 4,
     'bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md': 3,
     'bugs/formal/FORMAL_string_value_model.md': 2,
     'bugs/formal/FORMAL_sweep_work_map.md': 2,

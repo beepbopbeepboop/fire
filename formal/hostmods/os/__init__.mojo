@@ -813,7 +813,7 @@ def environ_popitem(e: Pointer[Int64]) -> Pointer[Int64]:
     call)" is TRUE of a RETURN VALUE and false of a return BLOB: a blob is a
     `malloc`'d block whose address is one word, it crosses a dylib boundary and
     reads by subscript on both architectures (`formal/model/values.py`'s container
-    return kind is what says so, and `bugs/formal/FORMAL_module_state_no_storage.md`
+    return kind is what says so, and `FORMAL_module_state_no_storage.md (deleted) (deleted)`)
     §(3) records the measurement), and `environ_update`'s own docstring states
     the rule it was written under: **the limit is ONE WORD OF ANSWER, not one
     field of it**.  `setdefault` is genuinely two calls because its answer is the
