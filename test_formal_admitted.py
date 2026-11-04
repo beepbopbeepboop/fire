@@ -93,21 +93,13 @@ BACKENDS = ("arm64", "x86_64")
 ADMITTED_COUNTS = {
     "argparse": 0,
     "ast": 0,
-    "builtins": 0,
-    "collections": 0,
     "concurrent": 0,
     "concurrent.futures": 2,       # Executor.submit, Executor.shutdown
     "contextlib": 0,
-    "contextvars": 0,
-    "copy": 0,
     "ctypes": 2,                   # CDLL, a call through the handle
     "enum": 0,
     "fcntl": 0,                    # the real flock(2); nothing is admitted
     "fnmatch": 0,
-    "functools": 0,
-    "importlib": 0,
-    "keyword": 0,
-    "multiprocessing": 0,
     # `glob` is 0 and the reason is the same one `tempfile`'s zero is: every
     # answer this module gives is computed.  The directory entries come from
     # `readdir(3)` through `os.listdir`, the pattern language is
@@ -410,7 +402,7 @@ SCOPE_PROBES = (
     # `_EXPLANATORY` had no row, so removing any of them was a no-op and the
     # table could not tell a live connective from a dead one — which is the
     # defect `tools/formal_sweep_causes.py` was fixed for in
-    # the `b10` round of `bugs/FORMAL_sweep_work_map.md` §5.1, and the reason that
+    # the `b10` round of `bugs/formal/FORMAL_sweep_work_map.md` §5.1, and the reason that
     # map's `check_cause_table` asserts every label is reachable from a sample.
     # Generated, a connective added to `_EXPLANATORY` brings its row with it and
     # the row fails if the connective does not fire.
@@ -1245,7 +1237,7 @@ LIBRARY_TRUST = {
     # is 0 rather than the 1 this table held while its single site was still a
     # `native_decide`.
     # Updated for callFunc2 threading API change required by the admitted contract fix.
-    "ProofLib": (0, 0, 2910, 2910),
+    "ProofLib": (0, 0, 1654, 1654),
     "Refine": (0, 0, 0, 0),
     # **3, and it was 3 before this commit read 7**: four `native_decide` sites
     # landed here (`@[simp] theorem x86_mask_{one,two,four,eight}`, all four on
@@ -2874,7 +2866,7 @@ def model_const(module, name):
     that were both typed by the same person on the same afternoon.
 
     A module-level name on this path is FOLDED at every read
-    (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)`), so there is no way to ask the
+    (`bugs/formal/FORMAL_module_state_no_storage.md`), so there is no way to ask the
     image for it; the declaration in the source is the only place the number
     exists, and reading it is what a caller would do too.
     """
@@ -3681,7 +3673,7 @@ def _spelled_surface():
     PIPE`, `except subprocess.SubprocessError:` — is answered by nothing the
     model can declare: a function is not a word and a class is a frame blob, so
     those sites need
-    `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)` rather than a parameter.  Counting
+    `bugs/formal/FORMAL_module_state_no_storage.md` rather than a parameter.  Counting
     both as "the tree spells this name" hid half the gap, which is the mistake
     this rewrite exists to remove.
 
@@ -3748,7 +3740,7 @@ def _modelled_subprocess_names():
     path = os.path.join(A.HOSTMODS_ROOT, "subprocess.mojo")
     names = set()
     for st in I.module_statements(path):
-        if isinstance(st, (F.FunctionDef, getattr(F, 'StructDef', object), getattr(F, 'ClassDef', object))) and getattr(st, 'name', None):
+        if isinstance(st, F.FunctionDef) and st.name:
             names.add(st.name)
     return names
 
@@ -3763,7 +3755,7 @@ def _modelled_subprocess_names():
 _SUBPROCESS_VALUE_ABSENT = {
     "PIPE": "the constant is a FUNCTION here (`PIPE()` binds); reading it as a "
             "value needs a module-level name that is a folded literal — "
-            "FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)",
+            "bugs/formal/FORMAL_module_state_no_storage.md",
     "STDOUT": "as PIPE",
     "DEVNULL": "as PIPE",
     "SubprocessError": "a catchable TYPE, and a class on this path is a frame "
@@ -3835,7 +3827,7 @@ def test_the_modelled_surface_covers_what_the_tree_spells(tmpdir=None):
     # function of the same name: `stdout=subprocess.PIPE` needs a WORD and
     # `subprocess.PIPE` is a function, so the call site is refused while
     # `subprocess.PIPE()` beside it builds.  That is the whole
-    # `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted)` gap, and a ratchet that treated the
+    # `FORMAL_module_state_no_storage.md` gap, and a ratchet that treated the
     # name as covered would be green over six refused call sites.
     unexplained = sorted(n for n in value_reads
                          if n not in _SUBPROCESS_VALUE_ABSENT)
@@ -3843,7 +3835,7 @@ def test_the_modelled_surface_covers_what_the_tree_spells(tmpdir=None):
           "this tree READS `subprocess.` names as VALUES that nothing answers: "
           + ", ".join(unexplained) + "\n"
           "    A value read needs a folded module-level literal, not a "
-          "function (FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)), so declaring one "
+          "function (bugs/formal/FORMAL_module_state_no_storage.md), so declaring one "
           "does not cover it. Record it in _SUBPROCESS_VALUE_ABSENT with the "
           "reason, or fix the module-state gap.")
     stale = sorted(n for n in _SUBPROCESS_VALUE_ABSENT if n not in value_reads)
@@ -3881,10 +3873,18 @@ def _modelled_subprocess_params(name):
 
 
 def test_the_run_return_shape_decision_is_recorded(tmpdir=None):
-    """`subprocess.mojo` records WHY `run` returns a `CompletedProcess`.
+    """`subprocess.mojo` records WHY `run` returns the status word.
 
-    Option 1: `run` returns a one-field `CompletedProcess` struct so that
-    `r.returncode` is a field access through a one-field struct.
+    The decision is option 3 of the three costed in
+    `bugs/formal/FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md`:
+    a caller reads the status through `completed_process_returncode`, a shim
+    both engines can agree on, rather than through `r.returncode`, which is a
+    field read on a word.  This pins the recording, because the decision is
+    invisible in the code — it lives only in the module's prose — and a
+    docstring that said nothing would make the next reader re-cost all three
+    options.  The two load-bearing facts are checked rather than the sentence:
+    that `run`'s word IS the returncode, and that `r.stdout` (a captured
+    STREAM, which this target does not model) is why option 1 is unavailable.
     """
     from formal import imports as I
     import fire_compiler as F
@@ -3898,12 +3898,17 @@ def test_the_run_return_shape_decision_is_recorded(tmpdir=None):
                "supposed to record has nowhere to live")
     for needle, why in (
             ("WHAT `run` HANDS BACK", "the decision's own heading is gone"),
-            ("CompletedProcess", "the decision no longer says what `run` returns"),
-            ("one-field", "the struct shape is not recorded")):
+            ("status word", "the docstring no longer says what `run` returns"),
+            ("completed_process_returncode",
+             "the option-3 shim the decision rests on is not named"),
+            ("r.stdout",
+             "the measurement that removes option 1 (a captured stream) is "
+             "gone, so the decision can be silently re-litigated")):
         check(needle in doc,
               f"subprocess.mojo's docstring is missing {needle!r}: {why}")
     return True, ("subprocess.mojo records the return-shape decision: `run` "
-                  "returns a one-field `CompletedProcess` so `r.returncode` works")
+                  "hands back the status word, `r.returncode` is refused by "
+                  "name, and `.stdout` is why option 1 cannot move version.py")
 
 
 PURE = [("the emitted Lean is inert where nothing is admitted",

@@ -799,9 +799,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     # `None` at every read (a membership needle). Per function, for the same
     # reason.
     gen._none_only_names = None
-    # Flow-sensitive None tracking: for each local, whether it's definitely None
-    # at the current program point (join points merge states).
-    gen._flow_none_state = {}
     # Pre-seed known global dicts with their value types so .get() uses the right function.
     # Also seeded from self._global_dict_val_types (Phase 1.7, never
     # reset) for the same reason _elem_types is seeded from
@@ -954,7 +951,6 @@ class FuncState:
         self.fs_tagged_opt_read: object = None
         self.fs_none_bound_names: object = None
         self.fs_none_only_names: object = None
-        self.fs_flow_none_state: object = None
         self.fs_dict_val_types: dict = {}
         self.fs_dict_nested_val_types: dict = {}
         self.fs_struct_layout: dict = {}
@@ -1059,10 +1055,6 @@ def save_func_state(gen) -> FuncState:
     st.fs_tagged_opt_read = gen._tagged_opt_read
     st.fs_none_bound_names = gen._none_bound_names
     st.fs_none_only_names = gen._none_only_names
-    try:
-        st.fs_flow_none_state = dict(getattr(gen, '_flow_none_state', {}) or {})
-    except Exception:
-        st.fs_flow_none_state = getattr(gen, '_flow_none_state', {})
     st.fs_dict_val_types = gen._dict_val_types
     st.fs_dict_nested_val_types = gen._dict_nested_val_types
     st.fs_struct_layout = gen._struct_layout
@@ -1177,10 +1169,6 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._tagged_opt_read = st.fs_tagged_opt_read
     gen._none_bound_names = st.fs_none_bound_names
     gen._none_only_names = st.fs_none_only_names
-    try:
-        gen._flow_none_state = dict(getattr(st, 'fs_flow_none_state', {}) or {})
-    except Exception:
-        gen._flow_none_state = getattr(st, 'fs_flow_none_state', {}) or {}
     gen._dict_val_types = st.fs_dict_val_types
     gen._dict_nested_val_types = st.fs_dict_nested_val_types
     gen._struct_layout = st.fs_struct_layout
@@ -2675,21 +2663,6 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             _ub = gen._new_temp('int64_t')
             gen._emit(f"  {_ub} = mojo_box_int ({aval});")
             aval = _ub
-        if (atype == 'int64_t' and aval in getattr(gen, '_boxed_vals', ())
-                and not _is_pointer_view_helper(fname)
-                and not _as_str(fname).startswith('mojo_')):
-            # A slot read out of a kind-mixed tuple/list arrives as a BOX, and a
-            # `None` slot is the shared kind-'n' box. A USER function's
-            # parameter has no None word: it is `0` (the same word a `None`
-            # literal argument passes), and the callee's `ptype is None` /
-            # `x or default` tests read it that way. Handing the box through
-            # made `fn(name, None)` look like an annotation to `_param_ctype`
-            # (the box is non-zero) and crashed the self-hosted compiler in
-            # `strdup`. Every other kind of box is passed as it was; runtime
-            # helpers (`mojo_*`) are box-aware and keep the box.
-            _un = gen._new_temp('int64_t')
-            gen._emit(f"  {_un} = mojo_unbox_plain ({aval});")
-            aval = _un
         if ptype == atype or ptype == '...':
             # Skip coercion only if C types match exactly
             coerced_args.append(aval)
@@ -3616,22 +3589,6 @@ def _local_bindings(gen, name) -> list:
     return found
 
 
-def cur_func_param_set(gen) -> set:
-    """The parameter names of the function being lowered, as a SET.
-
-    Spelled as a function with a `set` annotation instead of
-    `getattr(gen, '_cur_func_params', None) or ()` at each use: that expression
-    joins a set with an empty TUPLE, which the compiled compiler types as a
-    `MojoList *`, so `name in params` ran `mojo_list_contains_str` over a set's
-    memory and the stage2 binary segfaulted on any function with parameters."""
-    out: set = set()
-    if hasattr(gen, '_cur_func_params'):
-        got = gen._cur_func_params
-        if got:
-            out = got
-    return out
-
-
 def tagged_next_bind_name(gen, name, _seen=frozenset()) -> bool:
     """True iff every binding of `name` in THIS function is a tagged word:
     either `name = next(g)` for one and the same generator local `g`, where
@@ -3645,7 +3602,7 @@ def tagged_next_bind_name(gen, name, _seen=frozenset()) -> bool:
     word: the rule guarantees every store into `name` is the same tagged
     word. Anything else (a rebinding to a plain value, a second generator, a
     for target) answers False, and the caller unwraps as it always did."""
-    params = cur_func_param_set(gen)
+    params = getattr(gen, '_cur_func_params', None) or ()
     if name in params:
         return False
     values = _local_bindings(gen, name)
@@ -3720,7 +3677,7 @@ def tagged_mixed_name(gen, name) -> bool:
     if not any((api or {}).get('mixed_slots')
                for api in (getattr(gen, '_generator_api', None) or {}).values()):
         return False
-    params = cur_func_param_set(gen)
+    params = getattr(gen, '_cur_func_params', None) or ()
     if name in params:
         return False
     values = _local_bindings(gen, name)
@@ -3754,7 +3711,7 @@ def _tagged_generator_iterable(gen, node) -> bool:
             and isinstance(node.func, gimple_ctypes.IdentExpr)):
         fname = node.func.name
     elif isinstance(node, gimple_ctypes.IdentExpr):
-        params = cur_func_param_set(gen)
+        params = getattr(gen, '_cur_func_params', None) or ()
         if node.name in params:
             return False
         bound = _local_bindings(gen, node.name)
@@ -3782,7 +3739,7 @@ def tagged_for_target_name(gen, name) -> bool:
     of them, and any plain assignment, tuple target or other binder makes the
     answer False). The loops are found by walking the whole body, so a loop
     emitted after the copy counts too."""
-    params = cur_func_param_set(gen)
+    params = getattr(gen, '_cur_func_params', None) or ()
     if name in params:
         return False
     values = _local_bindings(gen, name)
@@ -3814,7 +3771,7 @@ def tagged_recv_name(gen, name) -> bool:
     renders an unboxed integer as itself (`mojo_repr_boxed`). A name with any
     other binder (a plain store, a copy, a loop target) answers False and the
     bind unwraps as it always did."""
-    params = cur_func_param_set(gen)
+    params = getattr(gen, '_cur_func_params', None) or ()
     if name in params:
         return False
     values = _local_bindings(gen, name)

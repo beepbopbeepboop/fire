@@ -8,7 +8,7 @@ silently change verdicts if they broke:
 1. **Relative import resolution.** `from .. import X` in a module used to
    resolve to the importer's OWN package, because `module_name.replace(".",
    os.sep)` turned `".."` into `"/"` and the candidate list degenerated to two
-   filesystem-root paths. Recorded in `bugs/FORMAL_known_limits.md` 1.3.
+   filesystem-root paths. Recorded in `bugs/formal/FORMAL_known_limits.md` 1.3.
 
 2. **The host-module tier split is a partition of what it replaced.**
    `formal/imports.py`'s `HOST_MODULES` was one 77-name list; it is now
@@ -605,7 +605,8 @@ HOST_SET_ADDED_TIERS = {
     # it, so nothing this tree can write would move a file.
     "sysconfig": "unreachable",
     # A clock `formal/hostmods/time.mojo` already reads, plus calendar
-    # arithmetic.  The answer is a shaped record.
+    # arithmetic.  The answer is a shaped record, which is
+    # `bugs/formal/FORMAL_time_struct_shaped_answers.md`'s to design.
     "datetime": "modelled",
     # `getrusage(2)` is libSystem and `struct rusage` is a fixed layout.
     "resource": "modelled",
@@ -640,7 +641,7 @@ HOST_SET_ADDED_TIERS = {
     # string, and `posix` needs the libSystem calls
     # `formal/hostmods/os/_syscalls.mojo` already makes -- THIS is a POSIX
     # target.  So nothing is missing and only the module is unwritten, which is
-    # `modelled`.  `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §"The
+    # `modelled`.  `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md` §"The
     # next step" listed all four with `msvcrt` as "not this host's", and for
     # `posix` that was false outright.
     "posix": "modelled",
@@ -660,32 +661,6 @@ HOST_SET_ADDED_TIERS = {
     "_tkinter": "unreachable",
     "_winapi": "unreachable",
     "_wmi": "unreachable",
-    # ── and the EIGHT the doc's §"The next step" terminal reading names,
-    # added 2026-11-03 by the worker holding `FORMAL_stdlib_module_names_are_
-    # not_classified.md`.  The object each needs is a TERMINAL — `getpass` and
-    # `webbrowser` are this heading's pre-existing rows — and a freestanding
-    # image that links libSystem and nothing else has none.  A spec EXISTS for
-    # every one here, so the no-spec oracle that placed the five above does not
-    # decide these: the placement is the per-name reading the doc's list is,
-    # with the evidence row for each in `formal/imports.py`'s own comment.
-    # `_curses` leaves the queue with `curses` by `capability_sibling_tier` —
-    # a derivation, not a row, which is why it is not in this table.
-    "cmd": "unreachable",
-    "curses": "unreachable",
-    "pty": "unreachable",
-    "readline": "unreachable",
-    "rlcompleter": "unreachable",
-    "tkinter": "unreachable",
-    "tty": "unreachable",
-    "turtle": "unreachable",
-    # …and the ONE the same list carried there that the reading CORRECTS, the
-    # way `posix` was corrected into `HOST_MODELLED`: the doc's list had
-    # `wsgiref` under terminal, but the load-bearing half of the package is
-    # the reference SERVER — `wsgiref.simple_server.WSGIServer` is a subclass
-    # of `http.server.HTTPServer` — so it sits under the SOCKET heading for
-    # the same object as `http`.  Recorded in `formal/imports.py` at the
-    # name, so the correction and the entry cannot drift apart.
-    "wsgiref": "unreachable",
 }
 
 
@@ -1468,7 +1443,7 @@ def test_hostmod_cross_references():
     to be is really there — a source, a test. This asks the same question about
     the module's own sentences, and it is here because four of them were not.
 
-    `bugs/FORMAL_no_exceptions.md` was cited by `json.mojo` and did not exist,
+    `bugs/formal/FORMAL_no_exceptions.md` was cited by `json.mojo` and did not exist,
     and `test_formal_io.py` / `test_formal_typing.py` were cited by the two
     modules whose real test is `test_formal_small_hosts.py` — four readers sent
     to a file that is not there. That is the `coro` failure mode CLAUDE.md

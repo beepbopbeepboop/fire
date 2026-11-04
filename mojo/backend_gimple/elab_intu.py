@@ -654,64 +654,11 @@ def _positional_bracket_ctor_args(work, base, node):
     if (base in _ERASED_WORD_STRUCTS or base in _IN_TU_LIST_BASES
             or base in gimple_ctypes._TYPE_MAP):
         return None
-    dups = _duplicated_method_names(work.gen, base)
+    dups =_duplicated_method_names(work.gen, base)
     if not dups or dups <= _ITERATION_PROTOCOL:
         return None
     args = _concrete_args(work, 'struct', base, node)
-    if args is None:
-        return None
-    # Be permissive for LinkedList/List (needed for struct element registration)
-    if isinstance(base, str) and base in ('List', 'LinkedList'):
-        gen = work.gen
-        # Register imported non-generic struct elements before checking
-        try:
-            for a in args:
-                if not isinstance(a, str):
-                    continue
-                an = a.strip()
-                if not an or an in gimple_ctypes._TYPE_MAP:
-                    continue
-                if an.startswith('_'):
-                    continue
-                if an[0].islower() or re.fullmatch(r'[A-Z][0-9]?', an):
-                    continue
-                if (an in getattr(gen, '_imported_generic_structs', {}) or
-                        an in getattr(gen, 'struct_field_types', {}) or
-                        an in getattr(gen, '_imported_struct_names', set()) or
-                        an in getattr(gen, '_intu_structs', {})):
-                    continue
-                if hasattr(gen, '_materialize_imported_struct'):
-                    tried = False
-                    for mod in set(getattr(gen, '_imported_struct_home', {}).values()) | set(getattr(gen, '_imported_generic_structs', {}).values()) | {'test_utils', 'test_utils.types'}:
-                        try:
-                            if gen._materialize_imported_struct(mod, an, an):
-                                tried = True
-                                break
-                        except Exception:
-                            continue
-                    if tried:
-                        continue
-        except Exception:
-            pass
-        for a in args:
-            if a in gimple_ctypes._TYPE_MAP:
-                continue
-            if not isinstance(a, str):
-                return None
-            if a.startswith('_'):  # skip private/internal names
-                return None
-            # Allow registered/imported/non-generic struct types as elements
-            if (a in getattr(gen, 'struct_field_types', {})
-                    or a in getattr(gen, '_imported_struct_names', set())
-                    or a in getattr(gen, '_intu_structs', {})
-                    or a in getattr(gen, '_imported_struct_home', {})):
-                continue
-            # Also allow if it looks like a struct name (capitalized, not a type param)
-            if isinstance(a, str) and a and a[0].isupper() and not re.fullmatch(r'[A-Z][0-9]?', a):
-                continue
-            return None
-        return args
-    if not all(a in gimple_ctypes._TYPE_MAP for a in args):
+    if args is None or not all(a in gimple_ctypes._TYPE_MAP for a in args):
         return None
     return args
 
@@ -1070,7 +1017,7 @@ def _container_home(gen, tname):
 _FACTORY_RETURN_CACHE: dict = {}
 
 
-def _factory_returns(fsrc: str, path: str, base: str):
+def _factory_returns(fsrc, path, base):
     """Every `def base` overload, as a list of {'pr': <parse_return result>,
     'params': [param names]} (overloads whose return is not a dependent one
     dropped), cached per (home, name) — the same factory is called many times
@@ -1079,7 +1026,7 @@ def _factory_returns(fsrc: str, path: str, base: str):
     dependent-return factory, which is the gate that keeps an
     `assert_equal(<list>, ...)` call from ever being misread as a factory
     call site (and from filing a false container-resolution refusal)."""
-    key: str = path + '\x1f' + base
+    key = path + '\x1f' + base
     if key not in _FACTORY_RETURN_CACHE:
         try:
             stmts = Parser(py_tokenize(fsrc)).parse_module()
@@ -3015,45 +2962,6 @@ def _collect_inner(work, rec, queue):
                 bases.append(base)
     if bases:
         _register_named(gen, rec['src_path'], bases)
-        # Register imported non-generic structs used as type arguments/elements
-        for b in bases:
-            try:
-                if not isinstance(b, str) or not b:
-                    continue
-                if b.startswith('_'):
-                    continue
-                if b in getattr(gen, '_imported_generic_structs', {}):
-                    continue
-                if b in getattr(gen, 'struct_field_types', {}):
-                    continue
-                if b in getattr(gen, '_imported_struct_names', set()):
-                    continue
-                if b[0].islower():
-                    continue
-                # Try to register as imported non-generic struct
-                if hasattr(gen, '_materialize_imported_struct'):
-                    # Try common modules/paths
-                    tried = False
-                    # Try from imported struct homes
-                    for mod in set(getattr(gen, '_imported_struct_home', {}).values()):
-                        try:
-                            if gen._materialize_imported_struct(mod, b, b):
-                                tried = True
-                                break
-                        except Exception:
-                            continue
-                    if not tried:
-                        # Try to find by scanning imports
-                        pass
-                # Also try via _find_imported_struct if available
-                if hasattr(gen, '_find_imported_struct'):
-                    try:
-                        # This might help in some cases
-                        pass
-                    except Exception:
-                        pass
-            except Exception:
-                continue
     for holder, attr in ann_sites:
         ann = _get(holder, attr)
         for base, args, _s, _e in _mentions(ann or ''):
@@ -3089,27 +2997,6 @@ def _collect_inner(work, rec, queue):
         args = _concrete_args(work, kind, base, n)
         if args is None:
             return
-        # Register element types for LinkedList (struct-valued elements)
-        if base == 'LinkedList' and args:
-            for a in args:
-                try:
-                    a_base = a.split('[')[0].strip()
-                    if a_base and a_base != base and a_base not in _IN_TU_LIST_BASES and a_base not in _ERASED_WORD_STRUCTS:
-                        try:
-                            _register_named(gen, gen._imported_generic_structs.get(base) or rec['src_path'], [a_base])
-                        except Exception:
-                            pass
-                        try:
-                            if hasattr(gen, '_materialize_imported_struct'):
-                                # Try to find where it's imported from
-                                if hasattr(gen, '_imported_struct_home'):
-                                    for name, path in getattr(gen, '_imported_struct_home').items():
-                                        if name == a_base:
-                                            break
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
         work.enqueue((kind, base, tuple(args)), depth + 1, queue)
     _walk(rec['parsed'], visit)
 
@@ -3674,20 +3561,6 @@ def _materialize(work, key):
     import elaborate
     import monomorphize as mm
     kind, base, args = key
-    # Register element types for LinkedList before materializing
-    if base == 'LinkedList' and args:
-        for a in args:
-            try:
-                a_base = str(a).split('[')[0].strip()
-                if a_base and a_base not in _IN_TU_LIST_BASES and a_base not in _ERASED_WORD_STRUCTS and a_base not in gimple_ctypes._TYPE_MAP:
-                    try:
-                        if hasattr(work.gen, '_imported_generic_structs'):
-                            # Try to register as generic if it is
-                            _register_named(work.gen, work.gen._imported_generic_structs.get(a_base) or _module_src(work.gen, a_base, 'struct'), [a_base])
-                    except Exception:
-                        pass
-            except Exception:
-                pass
     module_src = _module_src(work.gen, base, kind)
     if module_src is None:
         work.refuse(f'no source for {base!r}')
@@ -3816,8 +3689,6 @@ def run(gen, stmts: list):
         if kind is None:
             return
         if kind == 'struct':
-            if isinstance(base, str) and base.startswith('_'):
-                pass  # skip internal structs
             if _protocol_only_overloads(gen, base):
                 args = _concrete_args(work, kind, base, n, scope)
             else:
@@ -3834,32 +3705,7 @@ def run(gen, stmts: list):
                 # and None for everything else, which keeps its old path
                 # exactly.
                 args = _d2_ctor_args(work, base, n)
-            if args is not None and not (isinstance(base, str) and base.startswith('_')):
-                # Register imported non-generic struct elements before materializing
-                try:
-                    for a in args:
-                        if not isinstance(a, str):
-                            continue
-                        an = a.strip()
-                        if not an or an in gimple_ctypes._TYPE_MAP:
-                            continue
-                        if an.startswith('_'):
-                            continue
-                        if an[0].islower() or re.fullmatch(r'[A-Z][0-9]?', an):
-                            continue
-                        if (an in getattr(gen, '_imported_generic_structs', {}) or
-                                an in getattr(gen, 'struct_field_types', {}) or
-                                an in getattr(gen, '_imported_struct_names', set())):
-                            continue
-                        if hasattr(gen, '_materialize_imported_struct'):
-                            for mod in set(getattr(gen, '_imported_struct_home', {}).values()) | {'test_utils', 'test_utils.types'}:
-                                try:
-                                    if gen._materialize_imported_struct(mod, an, an):
-                                        break
-                                except Exception:
-                                    continue
-                except Exception:
-                    pass
+            if args is not None:
                 work.enqueue((kind, base, tuple(args)), 0, queue)
         elif kind == 'fn':
             # ROOT for generic function instantiation: either the return is
@@ -4004,84 +3850,6 @@ def run(gen, stmts: list):
     for _rec in gen._intu_factory_records.values():
         if _rec.get('kind') == 'direct':
             _lcs.update(_rec.get('local_inner') or ())
-    # Register imported non-generic structs used as elements in materialized types
-    try:
-        _to_register = set()
-        for rec in work.records.values():
-            for holder, attr in getattr(rec, 'sites', []):
-                try:
-                    ann = _get(holder, attr)
-                    if not isinstance(ann, str):
-                        continue
-                    for base, args, _s, _e in _mentions(ann):
-                        if base in _IN_TU_LIST_BASES:
-                            continue
-                        for a in args:
-                            if not isinstance(a, str):
-                                continue
-                            an = a.strip()
-                            if not an or an in gimple_ctypes._TYPE_MAP:
-                                continue
-                            if an.startswith('_'):
-                                continue
-                            if an[0].islower() or re.fullmatch(r'[A-Z][0-9]?', an):
-                                continue
-                            if (an in getattr(gen, '_imported_generic_structs', {}) or
-                                    an in getattr(gen, 'struct_field_types', {}) or
-                                    an in getattr(gen, '_imported_struct_names', set())):
-                                continue
-                            _to_register.add(an)
-                except Exception:
-                    continue
-        for an in _to_register:
-            if hasattr(gen, '_materialize_imported_struct'):
-                for mod in set(getattr(gen, '_imported_struct_home', {}).values()) | set(getattr(gen, '_imported_generic_structs', {}).values()):
-                    try:
-                        if gen._materialize_imported_struct(mod, an, an):
-                            break
-                    except Exception:
-                        continue
-            # Try to find in current module's imports
-            try:
-                cur = getattr(gen, '_current_filename', None)
-                if cur and os.path.exists(cur):
-                    with open(cur) as f:
-                        csrc = f.read()
-                    # look for from X import ... an ...
-                    import re as _re
-                    found_import = False
-                    for m in _re.finditer(r'from\s+([^\s]+)\s+import\s+([^\n]+)', csrc):
-                        mod = m.group(1)
-                        names = m.group(2)
-                        if re.search(r'\b' + re.escape(an) + r'\b', names):
-                            found_import = True
-                            if hasattr(gen, '_materialize_imported_struct'):
-                                try:
-                                    if gen._materialize_imported_struct(mod, an, an):
-                                        break
-                                except Exception:
-                                    pass
-                                # Try common re-export patterns
-                                for suffix in ['.types', '._types', '.utils']:
-                                    try:
-                                        if gen._materialize_imported_struct(mod + suffix, an, an):
-                                            break
-                                    except Exception:
-                                        continue
-                                else:
-                                    pass
-                    # If not found via direct import scan, try to be more aggressive
-                    if hasattr(gen, '_materialize_imported_struct'):
-                        for mod in set(getattr(gen, '_imported_struct_home', {}).values()) | {'test_utils', 'test_utils.types', 'test_utils.utils'}:
-                            try:
-                                if gen._materialize_imported_struct(mod, an, an):
-                                    break
-                            except Exception:
-                                continue
-            except Exception:
-                pass
-    except Exception:
-        pass
     _rewrite_annotations(work)
     _rewrite_callees(work, stmts)
     _rewrite_ctor_calls(work, stmts)

@@ -217,8 +217,9 @@ def rows():
     """[(name, area, runner_up, how, claimed_by, title)] — sorted."""
     claims = live_claims()
     out = []
-    # the formal documents live in bugs/ (moved there 2026-10-31); all in one directory
+    # the formal documents live in bugs/formal/ (moved there 2026-10-31); the index reads both places
     entries = [(n, os.path.join(BUGS, n)) for n in os.listdir(BUGS)]
+    entries += [(n, os.path.join(BUGS, 'formal', n)) for n in os.listdir(os.path.join(BUGS, 'formal'))]
     for name, path in sorted(entries):
         if not name.endswith('.md') or name == 'OPEN_WORK.md':
             continue
@@ -323,7 +324,7 @@ def conflict_markers(text):
 # STRUCTURAL, not a regex over the whole line. A regex was tried and it is wrong
 # in two ways at once: it blanks the doc-name cell (which is also a backticked
 # token followed by a `|`), and it blanks backticked words inside the TITLE
-# column — so "neither is in the formal x86-64 end-to-end proof bug doc" became "neither is
+# column — so "neither is in `FORMAL_x86_64_end_to_end_proof`" became "neither is
 # in `—`" and the comparison stopped being about the claim column. Only a table
 # row's SECOND cell is the claim, so only that cell is replaced.
 def _is_row(line):

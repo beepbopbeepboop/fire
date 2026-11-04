@@ -82,39 +82,6 @@ PROGRAMS = {
              "        return 1\n"
              "    else:\n"
              "        return 0\n",
-    # bigbody: many conditions reading locals - the class the fix targets
-    "bigbody": "def bigbody(n):\n"
-               "    b1 = 0\n"
-               "    b2 = 0\n"
-               "    b3 = 0\n"
-               "    b4 = 0\n"
-               "    b5 = 0\n"
-               "    b6 = 0\n"
-               "    if (n & 1) == 1:\n"
-               "        b1 = 1\n"
-               "    else:\n"
-               "        b1 = 0\n"
-               "    if (n & 2) == 2:\n"
-               "        b2 = 1\n"
-               "    else:\n"
-               "        b2 = 0\n"
-               "    if (n & 4) == 4:\n"
-               "        b3 = 1\n"
-               "    else:\n"
-               "        b3 = 0\n"
-               "    if (n & 8) == 8:\n"
-               "        b4 = 1\n"
-               "    else:\n"
-               "        b4 = 0\n"
-               "    if (n & 16) == 16:\n"
-               "        b5 = 1\n"
-               "    else:\n"
-               "        b5 = 0\n"
-               "    if (n & 32) == 32:\n"
-               "        b6 = 1\n"
-               "    else:\n"
-               "        b6 = 0\n"
-               "    return b1 + b2 + b3 + b4 + b5 + b6\n",
 }
 
 
@@ -739,7 +706,7 @@ class TestAConditionalExpressionIsAValue(unittest.TestCase):
     machine half's select — modelled, stepped, and generating.
 
     A conditional expression is the construct this file's sibling
-    `bugs/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`
+    `bugs/formal/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`
     is about, and it is here rather than in that file because the subject is the
     same one this file is about: two renderings of a source construct that have
     to agree, and what happens when one of them cannot exist.
@@ -760,7 +727,8 @@ class TestAConditionalExpressionIsAValue(unittest.TestCase):
         row 69, `arm64_step`'s last arm and `work_step_csel`, and the program
         GENERATES its proof with the step closed by the library lemma. What
         stays refused, by name, is the certificate wall for a CSEL-carrying
-        MULTI-BRANCH function (bug fixed, doc deleted) — the certificate's size, not the select.
+        MULTI-BRANCH function (`FORMAL_a_three_branch_certificate_exceeds_the_
+        lean_bound.md`) — the certificate's size, not the select.
     """
 
     def test_the_untyped_model_selects_between_the_two_words(self):
@@ -878,7 +846,7 @@ class TestAConditionalExpressionIsAValue(unittest.TestCase):
         What this does not pin: a CSEL-carrying program whose run certificate
         exceeds `formal/lean.py`'s `PROOF_WALL_S` is still refused — the wall
         is the certificate's size, not the select, and
-        (bug fixed, doc deleted)
+        `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`
         is the tracked leaf for it.
         """
         import struct
@@ -991,7 +959,7 @@ class TestTheConditionalExpressionModelTypechecks(unittest.TestCase):
     x86-64, and the reason is economy rather than a wall: arm64 models the
     select now (row 69, `work_step_csel` — the row above pins the generation,
     and the whole-file check of that file is the 12 GB line in
-    `bugs/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_
+    `bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_
     claim_it.md`'s Status). What this pins on x86-64 is the half this file's
     subject is about — that the model a conditional expression produces is a
     term the generated file accepts, that the bridge really is absent rather
@@ -1106,7 +1074,7 @@ class TestBitwiseNotTheRunTestTypechecks(unittest.TestCase):
 #
 # The AST node is `MojoExpr.call name (args : List MojoExpr)` now, and the
 # bridge refuses a call whose arguments no handler takes
-# (`bugs/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md`).
+# (`bugs/formal/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md`).
 # The widening named three routes, and the first was a "0.3-second experiment"
 # (route 1, the one `lib/ProofLib.lean` uses). This class is those experiments:
 # three Lean files, each answering one question, all of them

@@ -7,7 +7,7 @@
 #
 # This is the smallest program that reaches the widened convention: it calls
 # nothing, so the AST-bridge limit on calls of two or more arguments to a user
-# function (`bugs/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md`)
+# function (`bugs/formal/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md`)
 # is not in its way, and every parameter past the first is exercised: the model
 # binds both, `eval_eq_mojo` hands the bridge both, the universal theorem sets
 # `x1`, and the run test starts from the same `x1` the startup stub put there.

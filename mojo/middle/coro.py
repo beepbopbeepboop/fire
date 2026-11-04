@@ -36,7 +36,7 @@ import dataclasses
 import os
 
 import fire_compiler as N
-from fire_compiler import for_target_names, for_target_is_tuple, method_receiver_kind, _as_set
+from fire_compiler import for_target_names, for_target_is_tuple, method_receiver_kind
 
 
 def _cm_as_str(x) -> str:
@@ -77,11 +77,12 @@ except Exception:
             if not q:
                 return ''
             return q.replace('.', '_')
-# `module_qualifier` is a module-level name here (the import above binds it), so
-# `coro.module_qualifier` already exists as an attribute. It used to be attached
-# again through `sys.modules[__name__]`, which the compiled compiler has no
-# `modules` attribute for: every compile in the self-hosted binary died with
-# `AttributeError: modules` before emitting anything.
+# Attach for direct attribute access / compatibility
+import sys as _sys
+try:
+    _sys.modules[__name__].module_qualifier = module_qualifier
+except Exception:
+    pass
 from mojo.middle.literal_bindings import binding_index, unique_literal_value
 _ENV = 'MOJO_CORO'
 _MODE = 'stackswitch'
@@ -706,7 +707,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     # `_conflicting_names_in` is the one reader that acts on it.
     for nm, eks in str_kinds.items():
         if len(eks) > 1:
-            if _as_set(eks) <= {'i', 'b'}:
+            if eks <= {'i', 'b'}:
                 env[nm] = 'i'
             else:
                 env[nm] = ('conflict', frozenset(eks))
@@ -1770,7 +1771,7 @@ def _generator_value_kind(fn: N.FunctionDef,
     if has_none:
         _tag_kinds = _tag_kinds | {'n'}
     if (None not in kinds
-            and (_as_set(_tag_kinds) <= {'i', 'p', 'd', 'b', 'w', 'n'})
+            and (_tag_kinds <= {'i', 'p', 'd', 'b', 'w', 'n'})
             and ('w' in _tag_kinds or (len(_tag_kinds) >= 2 and _tag_kinds != {'i', 'b'}))
             and not any(isinstance(x, N.YieldFromExpr) and delegated is not None
                         and delegated(x.value, fn) in ('d', 'b')
@@ -2695,22 +2696,6 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
     if struct_name is None:
         _pnames = {p[0] for p in fn.params}
         for _n in _walk(fn):
-            if isinstance(_n, N.CallExpr) and isinstance(_n.func, N.IdentExpr) and _n.func.name in _pnames:
-                try:
-                    from mojo.middle.types import _debug_note
-                    _debug_note(f'[elig] read_table-like generator {getattr(fn, "name", "?")} calls callable parameter {_n.func.name!r}')
-                except Exception:
-                    pass
-            # Measure read_table-like: for over call through callable parameter
-            if isinstance(_n, N.ForStmt) and isinstance(getattr(_n, 'iterable', None), N.CallExpr):
-                _it = _n.iterable
-                if isinstance(getattr(_it, 'func', None), N.IdentExpr) and _it.func.name in _pnames:
-                    try:
-                        from mojo.middle.types import _debug_note
-                        _debug_note(f'[elig] read_table-like generator {getattr(fn, "name", "?")} iterates over call to callable parameter {_it.func.name!r}')
-                    except Exception:
-                        pass
-        for _n in _walk(fn):
             if (isinstance(_n, N.CallExpr) and isinstance(_n.func, N.IdentExpr)
                     and _n.func.name in _pnames):
                 return False, ('calls a parameter (a function value: driven '
@@ -2750,11 +2735,7 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
                                f'{pann!r} (v0: numeric or unannotated only)')
     # v0: remaining params must be simple positional scalars (or none)
     for pname, pann in params:
-        # `pann is not None` first: `_SCALARISH` lists None, but the compiled
-        # compiler reads an absent annotation as the word 0, and a set's None
-        # member is now its own slot (distinct from the int 0), so the lookup
-        # missed and every unannotated generator parameter was refused.
-        if pann is not None and pann not in _SCALARISH:
+        if pann not in _SCALARISH:
             return False, f'param {pname!r} type {pann!r} (v0 scalar-only)'
     if getattr(fn, 'kwonly', None):
         _kwbad = _unrepresentable_kwonly(fn)
@@ -3706,12 +3687,10 @@ def _eligible_async_common(fn: N.FunctionDef, nested: bool = False,
             return False, 'async method without a plain `self` first param (v0)'
         _params = _params[1:]   # self is typed by the codegen from the struct
     for pname, pann in _params:
-        if pann is not None and pann not in _SCALARISH and not _is_struct_param(pann):
+        if pann not in _SCALARISH and not _is_struct_param(pann):
             return False, f'param {pname!r} type {pann!r} (v0 scalar / struct only)'
     if getattr(fn, 'kwonly', None):
-        _kwbad = _unrepresentable_kwonly(fn)
-        if _kwbad:
-            return False, f'kwonly params (v0): {_kwbad}'
+        return False, 'kwonly params (v0)'
     # NORMALIZE, then judge. `_async_awaits_ok` below only accepts an
     # `AwaitExpr` in STATEMENT position, so an `await` nested inside a
     # call's argument list would otherwise make the function ineligible
@@ -5578,7 +5557,7 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
                 # CODEGEN_coro_yield_kind_unresolved_callsite.
                 if (pname in _PTR_EVIDENCE.get(gname, ())
                         and (None in kinds or len(kinds - {None}) > 1)
-                        and _as_set(kinds - {None}) <= {'p', 'w'}):
+                        and (kinds - {None}) <= {'p', 'w'}):
                     # used as a path / sequence word: a pointer word, whatever
                     # an untypable call site passes (see _compute_pointer_evidence)
                     resolved[pname] = 'w'
@@ -5928,6 +5907,7 @@ def _lower_escaping_generators(stmts: list) -> None:
     parameters, one that assigns a `nonlocal`, one that calls an ordinary nested
     helper of the enclosing function, and one reading a name another nested def
     provides."""
+    from mojo.backend_gimple import cpp_async as _ca
     import copy as _copy
     moved = []
     owners = []
@@ -6002,7 +5982,7 @@ def _lower_escaping_generators(stmts: list) -> None:
             if any(isinstance(n, N.NonlocalStmt) for n in _walk(inner)):
                 continue
             escapes = not _only_called_in(outer, inner.name)
-            _fs = gimple_exprtypes._fstring_field_names(inner.body)
+            _fs = _ca._fstring_field_names(inner.body)
             _own = set()
             for _pn, _pa in inner.params:
                 _own.add(_pn)
@@ -6267,13 +6247,6 @@ def _lift_capture_free_nested_scopes(stmts: list) -> None:
                     continue
                 if getattr(h, 'param_defaults', None):
                     continue
-                # A closure that does `nonlocal` assignment needs shared cells and
-                # is outside the factory model; never lift in that case.
-                try:
-                    if any(isinstance(n, N.NonlocalStmt) for n in _walk(h)):
-                        continue
-                except Exception:
-                    pass
                 # names `m` binds
                 m_bound = set()
                 for pn, _pa in m.params:
@@ -8498,15 +8471,6 @@ def register(gen, meta: list) -> None:
         _by_param = {}
         for _pn, _gn in _cpg.items():
             _api = gen._generator_api.get(_gn)
-            if _api is None:
-                _api = (getattr(gen, '_async_gen_api', None) or {}).get(_gn)
-            if _api is None:
-                _api = (getattr(gen, '_async_api', None) or {}).get(_gn)
-            if _api is None:
-                for _aname in ('_generator_var_api', '_cpp_generator_var_api'):
-                    _api = (getattr(gen, _aname, None) or {}).get(_gn)
-                    if _api is not None:
-                        break
             if _api is not None:
                 _by_param[_pn] = _api
         if _by_param:

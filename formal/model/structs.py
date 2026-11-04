@@ -14,8 +14,8 @@ from . import *
 # `UInt64 → UInt64`) are untouched.
 #
 # The full design, its cost, and the proof-side algebra (`ProofLib.Frame`,
-# `ProofLib.MF`, `Refine.FrameOk_except`) were in
-# `FORMAL_wide_receiver_by_reference.md` (deleted; fixed).  What is here is the part the
+# `ProofLib.MF`, `Refine.FrameOk_except`) are in
+# `bugs/formal/FORMAL_wide_receiver_by_reference.md`.  What is here is the part the
 # two backends have to agree on, which is why it is in the shared model rather
 # than in either of them: a width that the build pass and the codegen pass
 # measured differently is a struct whose receiver is the wrong number of bytes
@@ -242,16 +242,8 @@ def one_field_dropped_receiver_stores(fn, owner, one_field=None):
 RECEIVER_CONVENTION_NAMES = {None: "`self`", "owned": "`var self`",
                              "read": "`borrowed self`", "ref": "`ref self`"}
 
-from typing import NamedTuple
-
-
-class ReceiverWriteback(NamedTuple):
-    receiver: object
-    owner: object
-    member: object
-    decl: object
-
-
+ReceiverWriteback = collections.namedtuple("ReceiverWriteback",
+                                           "receiver owner member decl")
 ReceiverWriteback.__doc__ = (
     "`receiver` is the local whose OWN STORAGE is handed to the callee as "
     "argument 0 — the address, not the value; `owner`/`member` are the class "
@@ -1954,7 +1946,7 @@ CONTAINER_TYPE_NAMES = ("List", "list", "StaticList", "Tuple", "tuple",
 # have been handed — the callee cannot see its call sites, and the call sites
 # cannot see the callee's body across a dylib boundary — so the check that is
 # cheap and local is done and the rest is named rather than implied:
-# (function value calls — fixed).
+# `bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`.
 
 # Types this path SUBSCRIPTS.  A value of one of these answers `x[i]` with an
 # element, which is the reading a bracketed callee has to be told apart from;
@@ -2166,7 +2158,7 @@ def function_value_argument_refusal(name: str, callee: str, param: str,
     Only the bare `dbl(x)` spelling reaches this, because that is the only one
     where the argument is DEFINITIONALLY a code address; a computed argument is
     a word of unknown provenance and is named in
-    (function value call checks) rather than
+    `bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md` rather than
     refused here, where the answer would be a sentence about a program this
     check cannot see.
     """
@@ -2238,7 +2230,7 @@ def value_callee_can_hold_a_function(ann) -> bool:
 
     What it cannot do is the other direction — proving the value IS an address,
     which needs a whole-module dataflow and is named in
-    (function value call checks) rather
+    `bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md` rather
     than implied here.
     """
     base = _outer_annotation_base(ann)
@@ -2356,7 +2348,7 @@ def value_call_keyword_refusal(spelling: str, what: str) -> str:
 # …and `formal/build.py`'s function-value pre-pass already refuses the OTHER
 # direction — a function NAME handed to a parameter declared `Int` — because
 # there the value is definitionally an address.  `bugs/
-# (function value calls bug — fixed)
+# FORMAL_function_value_calls_are_not_proved_to_be_calls.md` is the document for
 # the whole of the residual, and it is right that closing it in general is a
 # whole-module dataflow: the callee cannot see its call sites and the call sites
 # cannot see the callee's body across a dylib boundary.
@@ -2468,91 +2460,14 @@ def functions_calling_a_parameter_through_a_value(functions: list) -> dict:
     is computed once per unit for the same reason
     `functions_returning_containers` is: the answer is the same for every call
     site of a callee.
-
-    **Transitive:** if a function passes a parameter to another function in a
-    position that function calls through (directly or transitively), that
-    parameter is also counted as called through a value.
     """
-    by_name = {}
+    out: dict = {}
     for fn in functions or ():
         name = getattr(fn, "name", None)
-        if name:
-            by_name.setdefault(name, []).append(fn)
-
-    # Start with direct calls
-    out = {}
-    for fn in functions or ():
-        name = getattr(fn, "name", None)
-        if not name:
-            continue
-        called = parameters_called_through_a_value(fn)
+        called = parameters_called_through_a_value(fn) if name else ()
         if called:
-            out[name] = set(called)
-
-    # Fixpoint for transitive propagation
-    changed = True
-    while changed:
-        changed = False
-        for caller in functions or ():
-            caller_name = getattr(caller, "name", None)
-            if not caller_name:
-                continue
-            caller_params = set()
-            for p in (getattr(caller, "params", None) or []):
-                pname = p[0] if isinstance(p, (list, tuple)) else getattr(p, "name", None)
-                if isinstance(pname, str):
-                    caller_params.add(pname)
-            # Find which params of caller are called through transitively
-            caller_called = out.get(caller_name) or set()
-            if not caller_called:
-                continue
-            # Look for calls where caller passes one of its called-through params
-            for call in iter_nodes(getattr(caller, "body", None) or []):
-                if not isinstance(call, F.CallExpr):
-                    continue
-                if isinstance(call.func, F.SubscriptExpr):
-                    continue
-                cname = call_callee_name(call.func)
-                if cname is None or cname not in by_name:
-                    continue
-                callee_defs_list = by_name[cname]
-                # Get positional param names for callee
-                try:
-                    shape = function_param_shape(callee_defs_list[0]) if callee_defs_list else None
-                except Exception:
-                    shape = None
-                if not shape:
-                    continue
-                callee_positional = list(getattr(shape, "positional", []) or [])
-                # Try to bind args
-                try:
-                    slots, _dropped, _err = bind_call_arguments(cname, callee_defs_list[0],
-                                                               call.args or [], call.kwargs or [])
-                except Exception:
-                    continue
-                if slots is None:
-                    continue
-                # Check each arg
-                for i, (pname_callee, value) in enumerate(zip(callee_positional, slots)):
-                    if pname_callee not in (out.get(cname) or set()):
-                        continue
-                    if not isinstance(value, F.IdentExpr):
-                        continue
-                    if value.name in caller_called and value.name in caller_params:
-                        # caller passes a param that's called through transitively
-                        # to a callee that calls through that position
-                        if value.name not in (out.get(caller_name) or set()):
-                            if caller_name not in out:
-                                out[caller_name] = set()
-                            out[caller_name].add(value.name)
-                            changed = True
-
-    # Convert sets to frozensets
-    result = {}
-    for k, v in out.items():
-        if v:
-            result[k] = frozenset(v)
-    return result
+            out[name] = frozenset(called)
+    return out
 
 
 def _binding_values(fn, name: str) -> list:
@@ -2681,44 +2596,6 @@ def _binding_sites_index(fn) -> dict:
             for item in node.items or ():
                 for name in _target_leaves(getattr(item, "alias", None)):
                     add(name, None)
-        elif isinstance(node, getattr(F, "TryStmt", object)):
-            try:
-                for h in getattr(node, "handlers", None) or []:
-                    name = getattr(h, "name", None) or getattr(h, "exc_name", None)
-                    if isinstance(name, str):
-                        add(name, None)
-                    elif name is not None:
-                        for n in _target_leaves(name):
-                            add(n, None)
-            except Exception:
-                pass
-        elif isinstance(node, getattr(F, "ExceptHandler", object)):
-            try:
-                name = getattr(node, "name", None) or getattr(node, "exc_name", None)
-                if isinstance(name, str):
-                    add(name, None)
-                elif name is not None:
-                    for n in _target_leaves(name):
-                        add(n, None)
-            except Exception:
-                pass
-        elif isinstance(node, getattr(F, "MatchStmt", object)):
-            try:
-                for case in getattr(node, "cases", None) or []:
-                    try:
-                        if hasattr(case, "pattern"):
-                            for n in _target_leaves(case.pattern):
-                                add(n, None)
-                        # also try pattern bindings
-                        pats = getattr(case, "patterns", None)
-                        if pats:
-                            for p in pats:
-                                for n in _target_leaves(p):
-                                    add(n, None)
-                    except Exception:
-                        continue
-            except Exception:
-                pass
     fn._binding_sites_index = out
     return out
 
@@ -3093,7 +2970,7 @@ def caller_local_holds(fn, name: str, _asked=frozenset()) -> str | None:
 
     The PASSING end's half for an argument the caller BOUND rather than spelled,
     which is the residual
-    (fixed) names as
+    `bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md` names as
     `apply_arg(3, xs[0])` — measured on that tree as still building and still
     trapping, with `xs` a local list.
 
@@ -3192,7 +3069,7 @@ def caller_local_element_holds(fn, name: str, index=None,
     A DICT literal is one of the literals because its VALUES are what a subscript
     hands back and they are as visible as a list's elements: `d["k"]` on
     `{"k": 17}` is 17, and `d[k]` on `{"k": 17}` is 17 or a `KeyError`, never a
-    function. That is the answer (fixed).
+    function. That is the answer `bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
     called missing ("a subscript of a DICT name … which no spelling
     distinguishes from a list") — no spelling of the SUBSCRIPT distinguishes
     them, but the spelling of the BINDING does, and that is what this reader
@@ -3397,11 +3274,7 @@ def callee_word_is_not_an_address(fn, name: str, vkinds=None) -> str | None:
     kind = (vkinds.locals or {}).get(name)
     if not kind_cannot_hold_a_code_address(kind):
         return None
-    binding_sites = _binding_values(fn, name)
-    # If we cannot see binding sites, we cannot establish agreement - be permissive
-    if not binding_sites:
-        return None
-    for value in binding_sites:
+    for value in _binding_values(fn, name):
         if value_argument_is_not_an_address(value, fn) is None:
             return None
     if is_list_kind(kind):

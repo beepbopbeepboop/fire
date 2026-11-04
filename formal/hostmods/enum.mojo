@@ -48,14 +48,14 @@ THE ONE THING THIS MODULE HAS TO EXPORT, AND WHY IT IS A FUNCTION
 -----------------------------------------------------------------
 `Enum` itself, and it is a zero-argument FUNCTION returning 0 for the reason
 every constant in this directory is one: a module-level name is not exported as a
-word (`(module state/model limits) (deleted)`), so `os.sep` and `io.SEEK_SET`
+word (`bugs/formal/FORMAL_module_state_no_storage.md`), so `os.sep` and `io.SEEK_SET`
 are functions too. Its VALUE is never read — the base is erased — so what it
 returns is not a claim about `Enum`, it is the smallest thing that satisfies the
 export rule. `test_formal_core_hostmods.py` pins that: the module builds, a program that
 derives from `Enum` builds, and its members read as their own literals.
 
 **`.value` AND `.name` ARE NOT IN THIS FILE.** They are the enum's whole reason
-for existing, and they are answered in `formal/model/frames.py`
+for existing, and they are answered in `formal/model.py`
 (`enum_member_accessor`) and `formal/build.py` (`_enum_member_sites`), not here —
 because `Reg.RAX.value` is not a call into this module, it is an attribute read
 on a class constant, and it was silently answering **0** before that fix:

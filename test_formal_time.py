@@ -409,10 +409,41 @@ def group_convert(tmpdir, verbose):
 # ── group: what this module cannot do ───────────────────────────────────────
 
 def group_limits(tmpdir, verbose):
-    """The formerly absent names are now implemented."""
+    """The absent names, asserted as refusals rather than left to discovery.
+
+    Each of these is a CPython `time` name with no representation on this
+    target, and the module docstring says which capability each one needs. A
+    module that omits a name silently is indistinguishable from a module that
+    has it, so each omission is pinned here as a build that fails with a
+    message naming the missing thing.
+    """
+    absent = {
+        "localtime": "struct tm",
+        "gmtime": "struct tm",
+        "mktime": "struct tm",
+        "strftime": "struct tm",
+        "get_clock_info": "namedtuple",
+    }
+    for name in absent:
+        src = (f"import time\n\ndef main() -> int:\n"
+               f"  time.{name}(0)\n  return 0\n")
+        tmp = os.path.join(TEMP, f"absent_{name}.mojo")
+        with open(tmp, "w") as f:
+            f.write(src)
+        r = subprocess.run(
+            [sys.executable, FIRE, "build", "--formal", "--no-prove",
+             "-o", os.path.join(TEMP, f"absent_{name}"), tmp],
+            capture_output=True, text=True, timeout=BUILD_TIMEOUT, cwd=HERE)
+        check(r.returncode != 0,
+              f"time.{name}() built, but the module documents it as absent — "
+              f"either the docstring is wrong or the module grew a name")
+        msg = (r.stderr or r.stdout)
+        check(name in msg,
+              f"time.{name}() failed without naming itself: {msg.strip()[-300:]}")
+
     if verbose:
-        print("    formerly absent names now implemented")
-    return True, "formerly absent names now implemented"
+        print(f"    {len(absent)} absent names refused, each naming itself")
+    return True, f"{len(absent)} absent names refused"
 
 
 # ── group: the struct route, measured ───────────────────────────────────────
@@ -796,9 +827,11 @@ def _build_program(tmpdir, tag, src, arch):
 def group_structroute(tmpdir, verbose):
     """The `struct tm` route, both halves of it, measured on both backends.
 
-    The five names were previously absent because "a `struct tm` cannot cross a
-    module boundary, and cannot be constructed by one"; the capability is now
-    present. This group is the measurement, and both halves of it now exist:
+    `bugs/formal/FORMAL_time_struct_shaped_answers.md` says the five absent names are
+    absent because "a `struct tm` cannot cross a module boundary, and cannot be
+    constructed by one". That is true and it is NOT the whole reason, and the
+    difference decides what a fix looks like. This group is the measurement, and
+    both halves of it now exist:
 
       * **reading** a C library's struct through a `Pointer[UInt8]` pointee WORKS
         — byte loads at `p + k`, which is what every field of a `struct tm` is
@@ -823,9 +856,10 @@ def group_structroute(tmpdir, verbose):
     44, `70000` into a `UInt16` is 4464), and the bytes AFTER a 4-byte store
     still read 0 in a buffer that was cleared.
 
-    What this group is NOT is the five names — their API shape is a separate
-    concern — and the capability they were waiting for is what this group
-    measures.
+    What this group is NOT is the five absent names. Those are
+    `bugs/formal/FORMAL_time_struct_shaped_answers.md`'s work — the API shape against
+    CPython's one struct is a judgement that doc owns — and the capability they
+    were waiting for is what this group measures.
     """
     prog, r = _build(tmpdir, "tmrow", READ_MODULE, "structroute",
                      program=READ_PROGRAM)

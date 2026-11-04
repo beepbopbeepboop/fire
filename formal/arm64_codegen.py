@@ -398,20 +398,6 @@ def _collect_var_names(f: F.FunctionDef) -> list:
         for i in range(acc_c[1] + 1):
             add(f"_ci{i}")
             add(f"_cb{i}")
-
-    # `print`-of-a-container loop temps: one blob-pointer + one index per
-    # nesting depth, `_ppb{d}`/`_ppi{d}`, reserved at the FIXED depth the
-    # model caps the plan at (`PRINT_LOOP_MAX_DEPTH`) — the cap and the
-    # reservation are one number, so a plan can never reach a depth the
-    # allocator did not reserve. The gate, `model.print_container_loop_flags`,
-    # is a SUPERSET of what emits (a loop is only emitted for a container
-    # operand, and a container is never a value literal), so the reservation
-    # may be unused — an unused temp is a spare local, and a missing one is a
-    # loop whose index has no home, which is the direction that faults.
-    if M.print_container_loop_flags(f):
-        for i in range(M.PRINT_LOOP_MAX_DEPTH):
-            add(f"_ppb{i}")
-            add(f"_ppi{i}")
     return names
 
 
@@ -460,7 +446,7 @@ def _allocation_split(f: F.FunctionDef):
     taken = set(params) | set(rest)
     ct = [n for n in ct if n not in taken]
     temps = [n for n in rest
-             if n[:3] in ("_fi", "_fb", "_ci", "_cb", "_pp")]
+             if n[:3] in ("_fi", "_fb", "_ci", "_cb")]
     others = [n for n in rest if n not in set(temps)]
     base = ct + params + temps + others
     # Filtered to names this function really binds: the table is published from
@@ -766,11 +752,6 @@ dylib_exports: list = None, globals_base: int = None,
         self._while_counter = 0
         self._assert_counter = 0
         self._tup_counter = 0
-        # Per-print-of-a-container label counter: each container ARGUMENT of a
-        # `print` gets a fresh id so its loop nest's labels (`_pl{pid}_{d}_…`)
-        # cannot collide with a sibling container argument's, at the nesting
-        # depth the depth index alone does not separate.
-        self._print_loop_counter = 0
         # Per-image counter for the lazy module-global initializer's skip
         # label; unique per function because the assembler's labels are.
         self._gi_counter = 0
@@ -862,12 +843,6 @@ dylib_exports: list = None, globals_base: int = None,
         # flush (a `return` inside a `finally`) does not emit an inner body the
         # outer flush already ran.
         self._finished_finally = set()
-        self._exception_in_flight = False
-        self._with_suppress_resume_labels = []
-        self._diverged = False
-        self._suppress_to_resume = False
-        self._pending_try_handlers = []  # stack of try blocks with handlers
-        self._exception_kind_reg = 0  # X0 holds exception kind
         # Bump cursor into the fixed frame's unused scratch region
         # (grows upward from frame bottom). Reset per function.
         self._list_cursor = 0
@@ -1179,47 +1154,6 @@ dylib_exports: list = None, globals_base: int = None,
             self.asm.emit(encode_ldp_sp_post(29, 30))
             self.asm.emit(encode_ret())
 
-        # Emit functions with ellipsis/pass-only bodies first to catch
-        # ellipsis refusals before returnless-call checks in other functions
-        def _has_ellipsis_body(fn):
-            try:
-                for stmt in getattr(fn, 'body', []) or []:
-                    if isinstance(stmt, F.ExprStmt):
-                        if isinstance(getattr(stmt, 'value', None), F.EllipsisLiteral):
-                            return True
-                    # if it's the only statement and it's ellipsis
-                # also check if body is just ellipsis
-                if len(getattr(fn, 'body', []) or []) == 1:
-                    s = fn.body[0]
-                    if isinstance(s, F.ExprStmt) and isinstance(getattr(s, 'value', None), F.EllipsisLiteral):
-                        return True
-            except Exception:
-                pass
-            return False
-        # Separate functions
-        ellipsis_funcs = []
-        other_funcs = []
-        for f in functions:
-            if _has_ellipsis_body(f):
-                ellipsis_funcs.append(f)
-            else:
-                other_funcs.append(f)
-        # Keep entry function position? The entry is needed for startup jump
-        # but we can emit its body in any order as long as label is set
-        reordered = ellipsis_funcs + other_funcs
-        # Rebuild labels in new order
-        nth = {}
-        self._entry_labels = {}
-        self._internal_labels = set()
-        self._def_labels = []
-        for f in reordered:
-            n = nth.get(f.name, 0) + 1
-            nth[f.name] = n
-            label = f"{f.name}__def{n}"
-            self._internal_labels.add(label)
-            self._def_labels.append(label)
-            self._entry_labels[f.name] = label
-        functions = reordered
         for f, label in zip(functions, self._def_labels):
             self._emit_function(f, label)
 
@@ -1246,7 +1180,6 @@ dylib_exports: list = None, globals_base: int = None,
             self.asm.labels[name] = self.asm.labels[label]
 
         # Append string literal data (labels resolved for ADRP/ADD loads)
-        exec_code_end = len(self.asm.sections["text"])
         for label, data in self._strings:
             self.asm.label(label)
             self.asm.emit(data)
@@ -1267,7 +1200,6 @@ dylib_exports: list = None, globals_base: int = None,
             "base_addr": base_addr,
             "entry_offset": self.asm.labels.get(first_func_name, 0),
             "func_offset": self.asm.labels.get(first_func_name, 0),
-            "exec_code_end": exec_code_end,
             "labels": {n: a for n, a in self.asm.labels.items()
                        if n not in self._internal_labels},
             "func_name": first_func_name,
@@ -1312,7 +1244,7 @@ dylib_exports: list = None, globals_base: int = None,
             # in `info` for both proof generators to read, because the word an
             # unwinder writes on one side has to mean the same integer on the
             # other (`model.exception_kind_table`'s docstring). Nothing reads it
-            # yet — see `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md`
+            # yet — see `bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md`
             # §5, where this is step 2 of 6. `info` rather than a re-derivation
             # here is the point: x86-64's `info` carries the same table from the
             # same publisher, so a proof that reads one cannot drift from the
@@ -1502,7 +1434,7 @@ dylib_exports: list = None, globals_base: int = None,
         # `SP + k` is INSIDE it and a method that writes its receiver does not
         # satisfy `FrameOk` — which is why the callee contract for a method is
         # `Refine.FrameOk_except`, the predicate
-        # `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) lands for exactly this.
+        # `bugs/formal/FORMAL_wide_receiver_by_reference.md` lands for exactly this.
         # The layout itself is `formal/model.py`'s, so the x86-64 backend
         # reserves the same bytes in the same order.
         self._frame_sites = M.struct_constructor_sites(f, self._structs)
@@ -1655,8 +1587,6 @@ dylib_exports: list = None, globals_base: int = None,
         self._blob_vars = set()
         self._blob_var_est = {}
         self._blob_loop_stack = []
-        self._list_growable = set()
-        self._list_growable_nodes = set()
         # …seeded with the module globals this function mentions, because the
         # literal that says what they hold is in the MODULE's statement list and
         # `_note_binding` only ever sees this function's. Seeded BEFORE the body
@@ -1838,7 +1768,7 @@ dylib_exports: list = None, globals_base: int = None,
         # right about the ABI and wrong about the consequence: `pack(fmt, v0..v7)`
         # is nine arguments, and it is `formal/hostmods/struct.mojo`'s OWN
         # documented "a format I cannot serve returns an empty list" contract
-        # that the caller could never reach.  `bugs/FORMAL_struct_pack_over_eight_
+        # that the caller could never reach.  `bugs/formal/FORMAL_struct_pack_over_eight_
         # arguments.md` has the measurement and both halves of the mechanism.
         for i, (pname, ptype) in enumerate(incoming):
             if i >= _ABI_ARG_REGS:
@@ -2792,6 +2722,30 @@ dylib_exports: list = None, globals_base: int = None,
 
 
         if isinstance(stmt, F.AssertStmt):
+            # `assert cond [, msg]` — evaluate `cond`; on falsy, run `msg` and
+            # leave with status 1.
+            #
+            # **Both halves of the failing path are observable, and both used to
+            # be dropped.** `msg` is not formatted into a diagnostic on this
+            # path (there is no printf for it), but CPython EVALUATES it before
+            # it raises, so `assert n > 0, why()` calls `why()` — and a message
+            # that logs, that frees, that closes, or that prints is a program
+            # whose output and whose effects are missing. Measured on both
+            # backends: `assert n > 0, why()` printed nothing where CPython
+            # printed `why`. `debug_assert` already emitted its messages "for
+            # their effects, and only on the path that exits"; a plain `assert`
+            # is the same construct and was not.
+            #
+            # And the exit goes through `_emit_diverge` rather than
+            # `_emit_exit` directly, which is what makes an enclosing `finally`
+            # run on the way out — the same flush a `raise` gets, and the reason
+            # it lives with the exit rather than at each call site. Measured on
+            # both backends: `try: assert n > 0 finally: print('fin')` printed
+            # `body` where CPython prints `body` then `fin`.
+            #
+            # ORDER matters and is CPython's: the message runs first, then the
+            # `finally`, because the assert raises and the `finally` runs during
+            # the unwinding that follows it.
             self._emit_truthy_word(stmt.value)
             self.asm.emit(encode_cmp_xn_imm(0, 0))
             self._assert_counter += 1
@@ -2805,45 +2759,7 @@ dylib_exports: list = None, globals_base: int = None,
             msg = getattr(stmt, "msg", None)
             if msg is not None:
                 self._emit_expr(msg)
-            if getattr(self, '_pending_try_handlers', None):
-                kinds = M.exception_kinds()
-                exc_kind = M.exception_kind_for("AssertionError", kinds)
-                if exc_kind is None:
-                    exc_kind = 1
-                self.asm.emit(encode_movz_wd_imm(0, exc_kind & 0xffffffff))
-                try:
-                    handler_info = self._pending_try_handlers[-1]
-                    handlers = handler_info.get('handlers', [])
-                    for handler in handlers:
-                        exc_type = getattr(handler, 'exc_type', None)
-                        handler_name = getattr(handler, 'name', None)
-                        if handler_name:
-                            continue
-                        try:
-                            if exc_type is None:
-                                for hs in (getattr(handler, 'body', None) or []):
-                                    self._emit_stmt(hs)
-                                self.asm.label(ok_label)
-                                return
-                            if M.handler_arm_matches(exc_type if isinstance(exc_type, str) else (exc_type[0] if isinstance(exc_type, (list,tuple)) and exc_type else "AssertionError"), "AssertionError", kinds, self._structs):
-                                for hs in (getattr(handler, 'body', None) or []):
-                                    self._emit_stmt(hs)
-                                self.asm.label(ok_label)
-                                return
-                            elif isinstance(exc_type, (list,tuple)):
-                                for et in exc_type:
-                                    if M.handler_arm_matches(et, "AssertionError", kinds, self._structs):
-                                        for hs in (getattr(handler, 'body', None) or []):
-                                            self._emit_stmt(hs)
-                                        self.asm.label(ok_label)
-                                        return
-                        except Exception:
-                            continue
-                except Exception:
-                    pass
-                self._emit_diverge()
-            else:
-                self._emit_diverge()
+            self._emit_diverge()
             self.asm.label(ok_label)
             return
 
@@ -3242,6 +3158,29 @@ dylib_exports: list = None, globals_base: int = None,
             f"arm64 path")
 
     def _flush_pending_finally(self, depth: int = 0) -> bool:
+        """Emit pending try-finally frames with index >= depth (innermost
+        first), X0 saved across them.
+
+        `depth` is 0 for return (run every enclosing finally) and the
+        loop's entry `fin_depth` for break/continue (only frames opened
+        inside that loop).
+
+        Returns whether the flushed bodies ENDED the path (an unconditional
+        `return` inside one of them), so the caller knows not to emit a second
+        epilogue — the double frame teardown that SIGBUSes arm64 (pinned by
+        `test_formal_exceptions.py::a_return_inside_a_finally_wins`).
+
+        **The frames are KEPT, and that is the fix.** This used to
+        `del self._pending_finally[depth:]` first, to stop a `return` inside a
+        `finally` from re-entering the same body; but the truncation removed the
+        frame for every LATER exit site in the same `try` too, so the second
+        `return` reached here with an empty list and emitted no cleanup at all
+        (pinned by
+        `test_formal_match.py::second_exit_from_a_try_runs_the_finally`).
+        Re-entrancy is an identity question — is THIS body already being
+        emitted — and `_emitting_finally`/`_finished_finally` answer it without
+        destroying anything.
+        """
         # A flush started from a statement (not from inside a finally) unwinds
         # a fresh exit path; a nested one (a return/raise inside a finally) is
         # part of the same unwinding and must remember what already ran.
@@ -3252,6 +3191,11 @@ dylib_exports: list = None, globals_base: int = None,
                 and id(f) not in self._finished_finally]
         if not fins:
             return False
+        # An unconditional `return` inside a body transfers control out of the
+        # image, so every frame OUTER to it is dead code and this path needs no
+        # epilogue from the caller. `run` is therefore the frames that actually
+        # execute, innermost first, and `terminated` says one of them ends the
+        # path.
         run = []
         terminated = False
         for fin in reversed(fins):
@@ -3259,55 +3203,24 @@ dylib_exports: list = None, globals_base: int = None,
             if _always_returns(fin):
                 terminated = True
                 break
+        # **X0 is saved only when the path FALLS THROUGH.** A body that returns
+        # supplies its own value, and the `stp`/`ldp` pair would leave SP 16
+        # bytes low when that body's `_emit_epilogue` does its own
+        # `add sp, #_SCRATCH` — the second half of the arm64 double-epilogue
+        # SIGBUS (`test_formal_exceptions.py::a_return_inside_a_finally_wins`).
         saved = not terminated
         if saved:
             self.asm.emit(encode_stp_sp_pre(0, 31))
         for fin in run:
             self._emitting_finally.add(id(fin))
-            exc_flight = getattr(self, '_exception_in_flight', False)
-            suppressible_exit = False
-            if exc_flight:
-                for s in fin:
-                    if getattr(s, '_with_exit_suppress', False):
-                        suppressible_exit = True
-                        break
-                    v = getattr(s, 'value', None)
-                    if v is not None and getattr(v, '_with_exit_suppress', False):
-                        suppressible_exit = True
-                        break
             try:
-                if exc_flight and suppressible_exit and getattr(self, '_with_suppress_resume_labels', None):
-                    for s in fin:
-                        self._emit_stmt(s)
-                    self.asm.emit(encode_cmp_xn_imm(0, 0))
-                    skip_label = f"{self.func_name}_with_nosuppress_{id(fin)}"
-                    nosuppress = f"{self.func_name}_with_nosuppress_cont_{id(fin)}"
-                    self.asm.emit(encode_cbz_xn(0, 0))
-                    self.asm.emit_label_rel(skip_label, here_offset=-4)
-                    # truthy - suppress
-                    self._exception_in_flight = False
-                    if saved:
-                        self.asm.emit(encode_ldp_sp_post(0, 31))
-                    resume = self._with_suppress_resume_labels[-1]
-                    self._suppress_to_resume = True
-                    self.asm.emit(encode_b(0))
-                    self.asm.emit_label_rel(resume, here_offset=-4)
-                    self.asm.label(skip_label)
-                    break  # break only on suppression
-                else:
-                    for s in fin:
-                        self._emit_stmt(s)
+                for s in fin:
+                    self._emit_stmt(s)
             finally:
                 self._emitting_finally.discard(id(fin))
-            if exc_flight:
-                self._finished_finally.add(id(fin))
-            if exc_flight and suppressible_exit and not getattr(self, '_exception_in_flight', True):
-                break
+            self._finished_finally.add(id(fin))
         if saved:
-            if getattr(self, '_exception_in_flight', False):
-                self.asm.emit(encode_ldp_sp_post(0, 31))
-            else:
-                self.asm.emit(encode_ldp_sp_post(0, 31))
+            self.asm.emit(encode_ldp_sp_post(0, 31))
         return terminated
 
     def _emit_exit(self, status) -> None:
@@ -3436,27 +3349,29 @@ dylib_exports: list = None, globals_base: int = None,
             if kind == "bl" and sym == "fflush")
 
     def _emit_diverge(self, status: int | None = 1) -> None:
-        """Leave the machine: run every enclosing finally, then exit or dispatch to handlers."""
-        prev = getattr(self, '_exception_in_flight', False)
-        self._exception_in_flight = True
-        try:
-            self._flush_pending_finally()
-            if getattr(self, '_exception_in_flight', False):
-                self._exception_in_flight = False
-                # Check for exception handlers
-                handlers_stack = getattr(self, '_pending_try_handlers', None)
-                if handlers_stack and status not in (0,) and isinstance(status, int) and status > 0 and status != 0:  # might be exception
-                    # For now, just exit - full dispatch would need more complex setup
-                    self._emit_exit(status)
-                    return
-                # Also check if X0 contains exception kind (non-zero might indicate exception)
-                self._emit_exit(status)
-                return
-            else:
-                self._exception_in_flight = False
-                return
-        finally:
-            self._exception_in_flight = prev
+        """Leave the machine: run every enclosing finally, then `exit(status)`.
+
+        The ONE way control stops on this path, and both of its callers share
+        it rather than spelling the exit each: a `raise`, which has no unwinder
+        to route to, and a dialect trap used as a statement
+        (`model.mlir_effect_diverge_call`), which has no result and so leaves
+        nothing else to emit. Two copies of the exit is how two of them come to
+        differ, and the finally flush is the part that is easy to drop — a
+        `raise` inside a `try` must still run the `finally` on its way out.
+
+        `status` is a parameter rather than a constant because
+        `raise SystemExit(3)` is CPython's way of saying "exit 3", and
+        `model.raise_exit_status` is where that is decided. Every other caller
+        passes nothing and gets the 1 the whole hierarchy leaves behind.
+
+        **`None` is the COMPUTED status and the caller has already pushed the
+        word**, which is what `_emit_exit` pops. The push is here rather than in
+        `_emit_raise` because the finally flush is here: it is SP-balanced
+        (`stp`/`ldp` around the bodies), so a word pushed before it survives, and
+        a word held in a register would not be guaranteed to.
+        """
+        self._flush_pending_finally()
+        self._emit_exit(status)
 
     def _emit_diverge_computed(self, value) -> None:
         """`raise SystemExit(<computed>)`: evaluate it, then leave with it.
@@ -3526,104 +3441,29 @@ dylib_exports: list = None, globals_base: int = None,
         if exc_name is None:
             declared = M.raise_declared_class_name(value, self._structs)
             if declared is not None:
+                # `raise MyErr` in CPython instantiates `MyErr`, so it is
+                # `raise MyErr()` — and going through the ordinary construction
+                # arm is what keeps a class whose `__init__` PRINTS honest:
+                # CPython runs the constructor, so this must too, and the
+                # refusal for a constructor body this path cannot lower keeps
+                # answering rather than being routed around. The status is 1,
+                # because `MyErr` is not `SystemExit`.
                 self._emit_expr(M.raise_zero_arg_construction(
                     declared, getattr(stmt, "line", 0) or 0))
-                if getattr(self, '_pending_try_handlers', None):
-                    kinds = M.exception_kinds()
-                    exc_kind = M.exception_kind_for(declared, kinds)
-                    if exc_kind is None:
-                        exc_kind = 1
-                    self.asm.emit(encode_movz_wd_imm(0, exc_kind & 0xffffffff))
-                    try:
-                        handler_info = self._pending_try_handlers[-1]
-                        handlers = handler_info.get('handlers', [])
-                        for handler in handlers:
-                            exc_type = getattr(handler, 'exc_type', None)
-                            handler_name = getattr(handler, 'name', None)
-                            if handler_name:
-                                continue
-                            try:
-                                if exc_type is None:
-                                    for hs in (getattr(handler, 'body', None) or []):
-                                        self._emit_stmt(hs)
-                                    return
-                                if M.handler_arm_matches(exc_type if isinstance(exc_type, str) else (exc_type[0] if isinstance(exc_type, (list,tuple)) and exc_type else declared), declared, kinds, self._structs):
-                                    for hs in (getattr(handler, 'body', None) or []):
-                                        self._emit_stmt(hs)
-                                    return
-                                elif isinstance(exc_type, (list,tuple)):
-                                    for et in exc_type:
-                                        if M.handler_arm_matches(et, declared, kinds, self._structs):
-                                            for hs in (getattr(handler, 'body', None) or []):
-                                                self._emit_stmt(hs)
-                                            return
-                            except Exception:
-                                continue
-                    except Exception:
-                        pass
-                    self._emit_diverge()
-                    return
                 self._emit_diverge()
                 return
             if value is not None:
                 self._emit_expr(value)
-            if getattr(self, '_pending_try_handlers', None):
-                self.asm.emit(encode_movz_wd_imm(0, 1))
-                self._emit_diverge()
-                return
             self._emit_diverge()
             return
         status = M.raise_exit_status(exc_name, value,
                                      argument_is_int=self._sys_exit_status_is_int(
                                          value))
         if status is None:
-            if getattr(self, '_pending_try_handlers', None) and exc_name not in ("SystemExit",):
-                kinds = M.exception_kinds()
-                exc_kind = M.exception_kind_for(exc_name, kinds)
-                if exc_kind is None:
-                    exc_kind = 1
-                self.asm.emit(encode_movz_wd_imm(0, exc_kind & 0xffffffff))
-                self._emit_diverge_computed(value)
-                return
+            # A COMPUTED status: the argument is the status, so it is evaluated
+            # once and carried, not evaluated for its effects and then discarded
+            # — and `_emit_diverge_computed` is where those three steps are.
             self._emit_diverge_computed(value)
-            return
-        if getattr(self, '_pending_try_handlers', None) and exc_name not in ("SystemExit",):
-            kinds = M.exception_kinds()
-            exc_kind = M.exception_kind_for(exc_name, kinds)
-            if exc_kind is None:
-                exc_kind = 1
-            self.asm.emit(encode_movz_wd_imm(0, exc_kind & 0xffffffff))
-            for arg in M.raise_arg_exprs(value):
-                self._emit_expr(arg)
-            # Check if any handler can catch this exception
-            handler_info = self._pending_try_handlers[-1]
-            handlers = handler_info.get('handlers', [])
-            for handler in handlers:
-                exc_type = getattr(handler, 'exc_type', None)
-                handler_name = getattr(handler, 'name', None)
-                if handler_name:  # should be filtered out, but just in case
-                    continue
-                # Check if handler can catch exc_name
-                try:
-                    if exc_type is None:  # bare except
-                        # Execute handler
-                        for hs in (getattr(handler, 'body', None) or []):
-                            self._emit_stmt(hs)
-                        return
-                    # Check if it matches
-                    if M.handler_arm_matches(exc_type if isinstance(exc_type, str) else (exc_type[0] if isinstance(exc_type, (list,tuple)) and exc_type else exc_name), exc_name, kinds):
-                        for hs in (getattr(handler, 'body', None) or []):
-                            self._emit_stmt(hs)
-                        return
-                    elif isinstance(exc_type, (list,tuple)):
-                        for et in exc_type:
-                            if M.handler_arm_matches(et, exc_name, kinds):
-                                for hs in (getattr(handler, 'body', None) or []):
-                                    self._emit_stmt(hs)
-                                return
-                except Exception:
-                    continue
-            self._emit_diverge()
             return
         for arg in M.raise_arg_exprs(value):
             self._emit_expr(arg)
@@ -3649,50 +3489,45 @@ dylib_exports: list = None, globals_base: int = None,
             args[0], getattr(self, "_vkinds", None)))
 
     def _emit_try(self, stmt: F.TryStmt) -> None:
-        """try/except/else/finally with exception handling."""
-        suppressible = getattr(stmt, '_with_suppressible', False) or getattr(stmt, '_suppressible', False)
-        resume_label = None
-        if suppressible:
-            resume_label = f"{self.func_name}_with_suppress_resume_{id(stmt)}"
-            if not hasattr(self, '_with_suppress_resume_labels'):
-                self._with_suppress_resume_labels = []
-            self._with_suppress_resume_labels.append(resume_label)
+        """try/except/else/finally without an exception runtime.
+
+        Handlers are skipped: formal has no unwinder, so there is no
+        edge from a raise site to an except arm (RaiseStmt itself exits
+        the process after flushing finallys). `else` runs on the success
+        path (always, without EH). On fall-through the finally emits
+        here; on return/break/continue/raise `_flush_pending_finally`
+        already ran it — the frame stays on `_pending_finally` (the flush
+        no longer truncates), so the pop below removes it exactly once.
+
+        **The fall-through copy is emitted even when an exit edge inside
+        the body already flushed this frame**, and that is a fix rather than
+        an optimisation: the flush happens where the `return`/`break`/
+        `continue`/`raise` is EMITTED, while the fall-through path is a
+        different path through the same block, and it is still reachable. The
+        old shape decided "was the frame flushed? then the end is unreachable"
+        and dropped the copy, which is right for an UNCONDITIONAL `return` and
+        wrong for every other case — measured on both architectures, with
+        `try: if n > 0: return 1; … finally: print()` printing nothing at all
+        when `n` was 0, and with a `continue` inside a `try` in a loop
+        skipping the cleanup on every later iteration. Both are the failure
+        this path exists to refuse elsewhere: a program that runs, exits 0 and
+        has silently not done what its source says. The copy is dead code in
+        the unconditional case, which costs bytes and nothing else.
+        """
         fin = stmt.finally_body or []
-        handlers = getattr(stmt, 'handlers', None) or []
-        handlers = [h for h in handlers if not getattr(h, 'name', None)]
-        
         if fin:
             self._pending_finally.append(fin)
-        handler_info = None
-        if handlers and not suppressible:
-            if not hasattr(self, '_pending_try_handlers'):
-                self._pending_try_handlers = []
-            handler_info = {'handlers': handlers, 'id': id(stmt), 'stmt': stmt}
-            self._pending_try_handlers.append(handler_info)
         try:
             for s in stmt.body:
                 self._emit_stmt(s)
-            # If there are handlers and exceptions might occur, we need to handle them
-            # For now, just emit else
             for s in (stmt.else_body or []):
                 self._emit_stmt(s)
         finally:
             if fin and self._pending_finally \
                     and self._pending_finally[-1] is fin:
                 self._pending_finally.pop()
-            if handler_info is not None and hasattr(self, '_pending_try_handlers') and self._pending_try_handlers:
-                if self._pending_try_handlers[-1] is handler_info:
-                    self._pending_try_handlers.pop()
-        finished = getattr(self, '_finished_finally', None)
-        if fin and finished and id(fin) in finished:
-            pass
-        else:
-            for s in fin:
-                self._emit_stmt(s)
-        if suppressible and resume_label is not None:
-            self.asm.label(resume_label)
-            if hasattr(self, '_with_suppress_resume_labels') and self._with_suppress_resume_labels:
-                self._with_suppress_resume_labels.pop()
+        for s in fin:
+            self._emit_stmt(s)
 
 
     def _emit_tuple_assign(self, stmt: F.AssignStmt) -> None:
@@ -4887,7 +4722,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             callee_is_bool=lambda callee: self._callee_is_bool(
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
-            callee_returns_none=self._callee_returns_none,
             callee_returned_parameter=self._callee_returned_parameter,
             dict_names=DICT_TYPE_NAMES,
             deref_kind=lambda e: M.pointer_deref_kind(
@@ -5324,6 +5158,29 @@ ctor_field_value=self._ctor_field_value_for(name),
             entry.get("signature") or "").strip() == "void"
 
     def _callee_returns_value(self, name, _seen=frozenset()):
+        """Whether a call to the local function `name` produces a value at all.
+
+        The seventh question `ValueKinds` asks about a callee, and the only one
+        whose answer is not about a KIND: a function with no `return` produces
+        nothing, CPython calls that `None`, and a value here is one 64-bit word,
+        so the honest answer for such a call is "not a value this path can carry"
+        rather than a kind.
+
+        **The answer is the TRANSITIVE one.** `model.returnless_function_names`
+        is the ONE reader, and it closes the question over bare-name
+        `return <call>` chains, because `def f(a): return g(a)` with `g`
+        return-less is the same `None` one hop out: reading the chain as a value
+        is what let `print(f(1))` print a word nothing wrote. Its least fixed
+        point is what keeps a cycle (two functions returning each other) reading
+        as a value rather than as an unwritten word. The x86-64 backend asks the
+        same reader, because two readings of "does this function return" is how
+        the two machines come to disagree about a construct.
+
+        The default for a name that is not a function of this unit is True, which
+        is the safe direction: it leaves the caller with the answer it had, so a
+        linked module's export (whose sources are not here to be read) changes
+        nothing.
+        """
         fn = self._functions.get(name)
         if fn is None:
             return True
@@ -5331,17 +5188,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._returnless = M.returnless_function_names(
                 self._functions.values())
         return name not in self._returnless
-
-    def _callee_returns_none(self, name):
-        fn = self._functions.get(name)
-        if fn is None:
-            return False
-        try:
-            if hasattr(M, 'function_returns_none'):
-                return M.function_returns_none(fn)
-        except Exception:
-            pass
-        return False
 
     def _callee_returned_parameter(self, name):
         """The positional index of a parameter `name` hands straight back.
@@ -5480,29 +5326,19 @@ ctor_field_value=self._ctor_field_value_for(name),
         takes the smallest of their capacities, so the bound holds whichever
         blob is live."""
         appends: dict = {}
-        growable: set = set()
         trips_by_id = {id(node): trips for node, trips in M.walk_stmt_trips(
             getattr(fn, "body", None) or [], self._stmt_loop_trips)}
         for node, recv, method, _args in _walk_value_methods(fn):
             if method != "append" or not isinstance(recv, F.IdentExpr):
                 continue
-            trips = trips_by_id.get(id(node), 1)
-            if trips is None:
-                growable.add(recv.name)
-                # For growable lists in unbounded loops, we need heap allocation
-                # and dynamic growth - mark as needing heap storage
-                appends[recv.name] = appends.get(recv.name, 0)  # will be handled specially
-                continue
             # `or 1`, not a refusal: a site inside a loop with no compile-time
             # iteration count keeps the one-per-site bound it always had, and
             # the run-time guard answers for it. See `_blob_site_growth` for
             # why an unbounded loop is not made into a build failure.
-            trips = trips or 1
+            trips = trips_by_id.get(id(node), 1) or 1
             appends[recv.name] = appends.get(recv.name, 0) + trips
         by_node: dict = {}
         by_name: dict = {}
-        self._list_growable = growable
-        self._list_growable_nodes = set()
         for name, count in appends.items():
             # A list the function appends to must also BE a list: if the name
             # is bound to something else anywhere, the capacity would be a
@@ -5512,17 +5348,6 @@ ctor_field_value=self._ctor_field_value_for(name),
                 continue
             literals = M.blob_nodes_bound_to(fn, name)
             if not literals:
-                continue
-            if name in growable:
-                # For growable lists, allocate with initial capacity and mark as growable
-                base = min(M.blob_reserved_slots(lit) for lit in literals)
-                # Give growable lists initial capacity of base + some growth room
-                want = max(base + max(count, 0), 16)  # ensure some initial capacity
-                for literal in literals:
-                    prev = by_node.get(id(literal))
-                    by_node[id(literal)] = want if prev is None else min(prev, want)
-                    self._list_growable_nodes.add(id(literal))
-                by_name[name] = (base, 0)  # 0 means growable/dynamic
                 continue
             # `blob_reserved_slots`, not `len(lit.elements)`: a literal with a
             # `*` operand builds its blob by appending and occupies the cap it
@@ -6290,7 +6115,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         shared text, so x86-64 cannot describe the same construct differently,
         and both backends ask it at BOTH comparison sites (`_emit_binop` for a
         value and `_emit_branch_unless_cmp` for a condition) — the choke-point
-        argument `bugs/FORMAL_string_value_model.md` makes for `if s < t:`
+        argument `bugs/formal/FORMAL_string_value_model.md` makes for `if s < t:`
         bypassing `_emit_binop`, which is exactly how a string comparison came
         to be a diagnostic in one context and a branch in the other.
         """
@@ -7032,27 +6857,23 @@ ctor_field_value=self._ctor_field_value_for(name),
         return False
 
     def _print_call(self, args: list):
-        """The PARTS of a `print` of `args` — the model's shared loop.
+        """`(format, operands)` for a `print` of `args`.
 
-        TWO LINES OF DELEGATION, and `model.print_arg_parts` is where the
-        decision and every reason for it live: which operand is a fragment
-        and which is a value, that a `bool` is `True`/`False` rather than the
-        word's own `1`/`0`, that `None` is the four characters rather than a
-        `0`, that a `bytes` literal is CPython's `repr()` of it, and that a
-        container is a LOOP — its plan made there, once, by
-        `model.container_print_plan`, with the refusals for the shapes it does
-        not render. The part the loop answers is a
-        `model.ContainerPrintOperand`, and `_emit_print` renders it.
+        TWO LINES OF DELEGATION, and `model.print_call_spelling` is where the
+        decision and every reason for it live: which operand is a fragment and
+        which is a value, that a `bool` is `True`/`False` rather than the word's
+        own `1`/`0`, that `None` is the four characters rather than a `0`, that a
+        `bytes` literal is CPython's `repr()` of it, and the four shapes this
+        path refuses with a sentence that says what CPython prints. This method
+        was the whole of that once, and `x86_64_codegen.py` had the same method
+        again — two copies of a rendering rule is how two architectures come to
+        print one program differently, and before the move both of them printed
+        `1` for `True`.
 
-        The four facts only an emitter has are passed as hooks: this
-        backend's flow-sensitive `_expr_str_kind`, its own signedness for
-        `_ttype`, and the two container facts `ValueKinds` does not carry —
-        the SHAPE (a list, a tuple, a set and a dict are one kind; the
-        brackets are the tables' fact) and a dict name's initializer literal
-        (the pairs the binding wrote). `dict_key_kind` is the for-walk's own
-        reader, asked of the same name so the two cannot disagree about a
-        key."""
-        return M.print_arg_parts(
+        The three facts only an emitter has are passed as hooks: this backend's
+        flow-sensitive `_expr_str_kind`, its own signedness for `_ttype`, and
+        `ValueKinds.no_value_callee_of` for the value this path cannot carry."""
+        return M.print_call_spelling(
             args,
             no_value_callee=self._vkinds.no_value_callee_of,
             kind_of=self._expr_str_kind,
@@ -7060,78 +6881,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             is_bool=self._print_operand_is_bool,
             is_none=self._vkinds.is_none_value,
             is_bytes=self._vkinds.is_bytes_value,
-            container_shape=self._print_container_shape,
-            dict_init_of=self._print_dict_init,
-            dict_key_kind=lambda e: self._vkinds.dict_key_kind(e),
             backend="arm64")
-
-    def _print_container_shape(self, e):
-        """The container's bracket SHAPE — the one fact its kind does not
-        carry.
-
-        A list, a tuple, a set and a dict all classify as a `LIST_PREFIX`
-        blob (`model.container_shape_refusal`'s opening), and CPython writes
-        different brackets for each, so the shape is read from the SOURCE:
-        the literal's own AST for the four inline spellings, the name tables
-        for a name — mutually exclusive marks, in the precedence a name is
-        one shape (`_dict_vars` then `_set_vars` then `_tuple_vars` then
-        `_blob_vars`, the last holding every list a binding named) — and the
-        module slot's initializer for a global this function does not bind.
-        None is the plan's shape refusal: a call result and a blob `+` spell
-        none of the four, and guessing is the mistake the refusal exists for.
-        """
-        if isinstance(e, F.ListExpr):
-            return "list"
-        if isinstance(e, F.TupleExpr):
-            return "tuple"
-        if isinstance(e, F.SetExpr):
-            return "set"
-        if isinstance(e, F.DictExpr):
-            return "dict"
-        if isinstance(e, F.Comprehension):
-            # A list comprehension is a list; a dict comprehension's pairs are
-            # built at run time, and the plan refuses it on the kind evidence
-            # (`model.dict_comprehension_print_refusal`) — the shape is
-            # answered honestly either way.
-            return "dict" if getattr(e, "kind", "list") == "dict" else "list"
-        if isinstance(e, F.IdentExpr):
-            name = e.name
-            if name in self._dict_vars:
-                return "dict"
-            if name in self._set_vars:
-                return "set"
-            if name in self._tuple_vars:
-                return "tuple"
-            if name in self._blob_vars:
-                return "list"
-            got = M.global_slot_container_init(name)
-            if got is not None:
-                return got[0]
-        return None
-
-    def _print_dict_init(self, e):
-        """The dict LITERAL a `print` operand bound, or None.
-
-        The initializer the pairs were WRITTEN from — the evidence the plan
-        reads its keys and values from (`model.container_print_plan`'s
-        dict arm). A literal is its own initializer; a name answers from
-        `ValueKinds.dict_inits`, which the tombstone rule keeps to a name
-        every binding of whose binding is that one literal, and from the
-        module slot's initializer for a global the function does not bind.
-        None is the plan's kind-chain fallback for a name (keys off
-        `dict_key_kind`, values off the kind), and the refusal when even
-        those do not state a scalar.
-        """
-        if isinstance(e, F.DictExpr):
-            return e
-        if isinstance(e, F.IdentExpr):
-            node = self._vkinds.dict_inits().get(e.name)
-            if node is not None:
-                return node
-            got = M.global_slot_container_init(e.name)
-            if got is not None and got[0] == "dict":
-                return got[1]
-        return None
 
     def _print_operand_is_bool(self, e) -> bool:
         """Whether `print` must render `e` as `True`/`False`.
@@ -7381,139 +7131,11 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         **Two lines of delegation**, and `M.print_kwargs`'s docstring is where
         the decision and its reasons are: `flush=` is answered there (the
-        largest `codegen-refused` family in this repository's own source), and the rule
+        largest `codegen-refused` family in this repository's own source, per
+        `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` §0.2), and the rule
         that the keyword is dispatched BEFORE its value is inspected is what
         stops a bool from being refused with a sentence about `sep`."""
         return M.print_kwargs(e, "arm64")
-
-    def _emit_str(self, e: F.CallExpr) -> None:
-        args = list(e.args or [])
-        if len(args) != 1 or e.kwargs:
-            raise CodegenError("str() takes exactly one argument on this path")
-        operand = args[0]
-        kind = self._expr_str_kind(operand)
-        from formal import model as M
-        if M.string_operand_is_string(kind):
-            self._emit_expr(operand)
-            return
-        if isinstance(operand, F.IntLiteral):
-            try:
-                self.asm.emit(encode_sub_xd_xn_imm(31, 31, 256))
-                buf_reg = 19
-                self.asm.emit(encode_add_xd_xn_imm(buf_reg, 31, 0))
-                self._emit_expr(operand)
-                self.asm.emit(encode_mov_zr_xn(2, 0))
-                self.asm.emit(encode_mov_zr_xn(0, buf_reg))
-                self.asm.emit_adrp_add(1, self._intern_string("%lld"))
-                self._emit_extern_call("sprintf", 3)
-                self.asm.emit(encode_mov_zr_xn(0, buf_reg))
-                self.asm.emit(encode_add_xd_xn_imm(31, 31, 256))
-                return
-            except Exception:
-                pass
-        # For numbers, try to format via print logic first
-        if M.is_number_kind(kind) or kind == M.INT_KIND or kind == M.BOOL_KIND or kind == M.FLOAT_KIND:
-            try:
-                frags, operands = self._print_call([operand])
-                if len(frags) == 1 and (frags[0] == "%lld" or frags[0] == "%llu" or frags[0] == "%ld" or frags[0] == "%lu" or frags[0] == "%d" or frags[0] == "%u") and operands:
-                    fmt = frags[0]
-                    self.asm.emit(encode_sub_xd_xn_imm(31, 31, 256))
-                    buf_reg = 19
-                    self.asm.emit(encode_add_xd_xn_imm(buf_reg, 31, 0))
-                    self._emit_expr(operands[0])
-                    self.asm.emit(encode_mov_zr_xn(2, 0))  # value
-                    self.asm.emit(encode_mov_zr_xn(0, buf_reg))  # buf
-                    self.asm.emit_adrp_add(1, self._intern_string(fmt))  # fmt
-                    self._emit_extern_call("sprintf", 3)
-                    self.asm.emit(encode_mov_zr_xn(0, buf_reg))
-                    self.asm.emit(encode_add_xd_xn_imm(31, 31, 256))
-                    return
-            except Exception:
-                pass
-            # Fallback to our own approach
-            self.asm.emit(encode_sub_xd_xn_imm(31, 31, 256))
-            signed = cmp_signed(self._ttype(operand)) if hasattr(self, '_ttype') else False
-            if kind == M.FLOAT_KIND:
-                fmt = F.StringLiteral(value="%g")
-            elif signed or kind == M.BOOL_KIND:
-                fmt = F.StringLiteral(value="%lld")
-            else:
-                fmt = F.StringLiteral(value="%llu")
-            buf_reg = 19
-            self.asm.emit(encode_add_xd_xn_imm(buf_reg, 31, 0))
-            self._emit_expr(operand)
-            self.asm.emit(encode_mov_zr_xn(2, 0))
-            self.asm.emit(encode_mov_zr_xn(0, buf_reg))
-            self.asm.emit_adrp_add(1, self._intern_string(fmt.value))
-            self._emit_extern_call("sprintf", 3)
-            self.asm.emit(encode_mov_zr_xn(0, buf_reg))
-            self.asm.emit(encode_add_xd_xn_imm(31, 31, 256))
-            return
-        # Try using print logic
-        try:
-            frags, operands = self._print_call([operand])
-            if len(frags) == 1 and frags[0] == "%s" and operands:
-                self._emit_expr(operands[0])
-                return
-            if len(frags) == 1 and (frags[0] == "%lld" or frags[0] == "%llu" or frags[0] == "%ld" or frags[0] == "%lu") and operands:
-                fmt = frags[0].replace('%lld','%ld').replace('%llu','%lu')
-                self.asm.emit(encode_sub_xd_xn_imm(31, 31, 256))
-                self._emit_expr(operands[0])
-                self.asm.emit(encode_mov_zr_xn(3, 0))
-                self.asm.emit(encode_add_xd_xn_imm(0, 31, 0))
-                self._emit_mov_imm("X1", 256)
-                self.asm.emit_adrp_add(2, self._intern_string(fmt))
-                self._emit_extern_call("snprintf", 4)
-                self.asm.emit(encode_add_xd_xn_imm(0, 31, 0))
-                self.asm.emit(encode_add_xd_xn_imm(31, 31, 256))
-                return
-            if len(frags) == 1 and isinstance(frags[0], str) and '%' not in frags[0]:
-                self.asm.emit_adrp_add(0, self._intern_string(frags[0]))
-                return
-        except Exception:
-            pass
-        raise CodegenError(f"str() of {type(operand).__name__} is not supported on this path")
-
-    def _emit_repr(self, e: F.CallExpr) -> None:
-        args = list(e.args or [])
-        if len(args) != 1 or e.kwargs:
-            raise CodegenError("repr() takes exactly one argument on this path")
-        operand = args[0]
-        kind = self._expr_str_kind(operand)
-        from formal import model as M
-        if M.string_operand_is_string(kind):
-            self.asm.emit(encode_sub_xd_xn_imm(31, 31, 512))
-            self._emit_expr(operand)
-            self.asm.emit(encode_mov_zr_xn(3, 0))
-            self.asm.emit(encode_add_xd_xn_imm(0, 31, 0))
-            self._emit_mov_imm("X1", 512)
-            self.asm.emit_adrp_add(2, self._intern_string("'%s'"))
-            self._emit_extern_call("snprintf", 4)
-            self.asm.emit(encode_add_xd_xn_imm(0, 31, 0))
-            self.asm.emit(encode_add_xd_xn_imm(31, 31, 512))
-            return
-        if isinstance(operand, F.IntLiteral):
-            self._emit_expr(operand)
-            return
-        if M.is_number_kind(kind) or kind == M.INT_KIND or kind == M.BOOL_KIND or kind == M.FLOAT_KIND:
-            self.asm.emit(encode_sub_xd_xn_imm(31, 31, 256))
-            signed = cmp_signed(self._ttype(operand)) if hasattr(self, '_ttype') else False
-            if kind == M.FLOAT_KIND:
-                fmt = F.StringLiteral(value="%g")
-            elif signed or kind == M.BOOL_KIND:
-                fmt = F.StringLiteral(value="%lld")
-            else:
-                fmt = F.StringLiteral(value="%llu")
-            self._emit_expr(operand)
-            self.asm.emit(encode_mov_zr_xn(3, 0))
-            self.asm.emit(encode_add_xd_xn_imm(0, 31, 0))
-            self._emit_mov_imm("X1", 256)
-            self.asm.emit_adrp_add(2, self._intern_string(fmt.value))
-            self._emit_extern_call("snprintf", 4)
-            self.asm.emit(encode_add_xd_xn_imm(0, 31, 0))
-            self.asm.emit(encode_add_xd_xn_imm(31, 31, 256))
-            return
-        raise CodegenError(f"repr() of {type(operand).__name__} is not supported on this path")
 
     def _emit_print(self, e: F.CallExpr) -> None:
         """`print(...)` — a real call to the C library's `printf`.
@@ -7535,33 +7157,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         program whose output has not reached the pipe yet, which is a missing
         line rather than a wrong one. `fflush(NULL)` is the C library's own
         "every stream"; there is exactly one stream this model writes, which is
-        the fact `print(file=…)`'s refusal is stated on (`M.print_kwargs`).
-
-        **A container argument takes the STREAM instead**, and the branch is on
-        the PARTS rather than on the source: `self._print_call` is the model's
-        `print_arg_parts`, which has already made the plan (and every refusal
-        with a sentence) for each container argument, so the emitter's branch
-        is a test of the answer and not a second reading of the argument. The
-        old path below is byte-identical to the single-printf answer for every
-        print without a container: the parts projected onto one format string,
-        in `model.print_call_spelling`'s order, through the same
-        `M.print_format`, the same call and the same float reservation."""
+        the fact `print(file=…)`'s refusal is stated on (`M.print_kwargs`)."""
         sep, end, flush = self._print_kwargs(e)
-        parts = self._print_call(list(e.args))
-        if any(p[0] == "container" for p in parts):
-            self._emit_print_stream(parts, sep, end, flush)
-            return
-        frags, operands = [], []
-        for part in parts:
-            tag = part[0]
-            if tag == "text":
-                frags.append(part[1])
-            elif tag == "value":
-                frags.append(part[1])
-                operands.append(part[2])
-            else:  # "float" — a container part took the stream above
-                frags.append("%s")
-                operands.append(part[1])
+        frags, operands = self._print_call(list(e.args))
         fmt = M.print_format(frags, sep, end)
         # The float-repr buffers, ONE reservation per print call, made HERE
         # rather than in the operand: this block sits ABOVE everything
@@ -7586,275 +7184,6 @@ ctor_field_value=self._ctor_field_value_for(name),
                                        args=[F.IntLiteral(0)]))
         if n_floats:
             self.asm.emit(encode_add_xd_xn_imm(31, 31, 64 * n_floats))
-
-    # ── `print` of a container: the stream ─────────────────────────────────
-    #
-    # The model made the DECISION — `print_arg_parts`'s container arm, the
-    # plan tree and every refusal in `container_print_plan` — and this
-    # section is the machine half: one loop per container nesting, one
-    # `printf` per element, the brackets and separators the plan's leaf
-    # says the walk must write. The plan and the loop walk the same tree,
-    # so a shape the plan renders is a loop this section can spell, and
-    # the temporary the loop indexes is the one `_collect_var_names`
-    # reserved at the plan's own depth cap.
-
-    def _emit_print_stream(self, parts, sep, end, flush) -> None:
-        """A `print` with at least one container part, rendered part by part.
-
-        Text folds: a fragment and a separator are format TEXT,
-        and pending text rides along in the next `printf`'s format rather
-        than getting a call of its own — flushed as a text-only `printf`
-        the moment a value, a float or a container needs the stream, and
-        again at the line's end with the `end` text. (The brackets are the
-        loop's own: `_emit_print_container` writes them, at every depth.) The `sep`/`end`
-        rule is `M.print_format`'s, asked the same way: between parts
-        (never before the first) and at the end, escaped by the same
-        `M.print_literal` the old path runs on them, so a custom `sep=`
-        that holds a `%` or a backslash is answered by one decoder here
-        and there.
-
-        The float-repr block is reserved ONCE for the whole stream, before
-        it, for the same reason `_emit_print` makes its one reservation:
-        everything the stream does in between — the text flushes, the
-        element `printf`s' variadic areas, the evaluation of an operand
-        that itself calls — pushes and pops strictly below this SP and
-        returns to it, so a buffer's address is a fixed `64 * index`
-        offset from it at every float. There is no `16 * (1 + position)`
-        term: that is `_emit_call`'s argument spill, and this path calls
-        `printf` by hand rather than through it.
-        """
-        a = self.asm
-        sep_esc = M.print_literal(sep) if sep else ""
-        end_esc = M.print_literal(end) if end else ""
-        n_floats = sum(1 for p in parts if p[0] == "float")
-        if n_floats:
-            a.emit(encode_sub_xd_xn_imm(31, 31, 64 * n_floats))
-        pending = ""
-        for i, part in enumerate(parts):
-            if i and sep:
-                pending += sep_esc
-            tag = part[0]
-            if tag == "text":
-                pending += part[1]
-            elif tag == "value":
-                if pending:
-                    self._emit_print_printf(pending)
-                    pending = ""
-                self._emit_expr(part[2])
-                self._emit_print_printf_value(part[1])
-            elif tag == "float":
-                if pending:
-                    self._emit_print_printf(pending)
-                    pending = ""
-                op = part[1]
-                self._emit_expr(op.expr)
-                a.emit(encode_add_xd_xn_imm(1, 31, 64 * op.index))
-                self._float_repr_used = True
-                a.emit(encode_bl(0))
-                a.emit_label_rel(M.FLOAT_REPR_SYMBOL, here_offset=-4)
-                # The helper answers with the buffer's address in X0; that
-                # address is the `%s`'s vararg, moved to X1 before the
-                # format takes X0.
-                a.emit(encode_mov_zr_xn(1, 0))
-                self._emit_print_printf_value("%s", value_reg=1)
-            else:  # "container"
-                if pending:
-                    self._emit_print_printf(pending)
-                    pending = ""
-                op = part[1]
-                # Container ctx for the operand alone, the `_emit_for_list`
-                # way: a `+` in it means list concat rather than pointer add.
-                self._container_ctx += 1
-                try:
-                    self._emit_expr(op.expr)
-                finally:
-                    self._container_ctx -= 1
-                self._store_var("_ppb0", 0)
-                a.emit(encode_movz_wd_imm(0, 0))
-                self._store_var("_ppi0", 0)
-                self._emit_print_container(op.plan, 0)
-        pending += end_esc
-        if pending:
-            self._emit_print_printf(pending)
-        if n_floats:
-            a.emit(encode_add_xd_xn_imm(31, 31, 64 * n_floats))
-        if flush:
-            self._emit_call(F.CallExpr(func=F.IdentExpr(name="fflush"),
-                                       args=[F.IntLiteral(0)]))
-
-    def _emit_print_printf(self, fmt) -> None:
-        """A TEXT-ONLY `printf` of `fmt` — the stream's fragment flush.
-
-        `fmt` is already through `print_literal_text` (a part's escaped
-        text, an escaped `sep`/`end`, or one of the stream's own
-        constants — a bracket, a `,`), so the `F.StringLiteral` wrap is
-        the DECODE ROUND TRIP rather than a re-escape: `_intern_string`
-        decodes, and the doubled `%` and `\\` come back to the single
-        ones, the same two-pass order the old path's synthesized format
-        takes (`model.print_literal_text`'s stated reason). A plain
-        string would be taken at face value there and the doubling would
-        land in the table un-decoded — `100%% done` on stdout.
-        """
-        self.asm.emit_adrp_add(0, self._intern_string(F.StringLiteral(fmt)))
-        self.asm.emit_extern_bl("printf")
-
-    def _emit_print_printf_value(self, fmt, value_reg=None) -> None:
-        """A `printf` of `fmt` with ONE vararg, the word in `value_reg`.
-
-        The value register defaults to the value itself (X0, this
-        backend's value register); the bool leaf and the float pass
-        theirs explicitly. Apple arm64 passes the unnamed arguments in
-        the reserved area, so the value is copied to X1 AFTER the
-        evaluation but BEFORE the format takes X0 — the move precedes
-        the adrp for that reason — and `_emit_variadic_area` copies it
-        down and hands the space back after the call.
-        """
-        if value_reg is None:
-            value_reg = 0
-        a = self.asm
-        if value_reg != 1:
-            a.emit(encode_mov_zr_xn(1, value_reg))
-        a.emit_adrp_add(0, self._intern_string(F.StringLiteral(fmt)))
-        n = self._emit_variadic_area("printf", 2)
-        a.emit_extern_bl("printf")
-        if n:
-            a.emit(encode_add_xd_xn_imm(31, 31, n))
-
-    def _emit_print_container(self, plan, d) -> None:
-        """The loop of ONE container at depth `d`, the plan's one nest.
-
-        The layout, per depth: the state lives in the frame (`_ppb{d}`
-        the blob's base, `_ppi{d}` the index) and every register the
-        body holds is caller-saved, because the body's own `printf`s
-        clobber every one of them — so the state is reloaded from the
-        frame after each, and the element address is computed fresh
-        each pass. The count test is `_emit_for_list`'s: `cset lt`
-        over the index and the blob's count, `cbz` to the done label.
-        The separator is CPython's element separator — `M.CONTAINER_
-        ELEM_SEP`, at every nesting — written before every element
-        EXCEPT the first, CPython's rule asked at run time off the
-        index because the count is a run-time fact; it is not the
-        call's `sep`, which joins this container's parts to its
-        siblings and never enters the brackets. A dict's pair is 16
-        bytes (`lsl #4`), the key at its head and the value at `+8`,
-        and the pair address is recomputed after the key's `printf`
-        for the reason the body's state is: that call moved the base.
-        A one-element tuple's trailing comma is a run-time
-        `count == 1` after the loop — the shape CPython spells, and
-        the count the source does not state.
-
-        The opening and closing brackets ARE here — one text `printf`
-        before the loop and one after it (after the tuple's trailing
-        comma) — rather than in the stream: the stream writes only the
-        TOP-LEVEL container's siblings, and a NESTED loop is emitted from
-        the leaf, where the stream is not, so the bracket that belongs to
-        a nest has to come out of the loop that owns it. A loop and its
-        brackets in one method cannot drift apart the way two emitters of
-        one bracket would.
-        """
-        _tag, shape, _ob, _cb, key_plan, elem_plan = plan
-        self._print_loop_counter += 1
-        pid = self._print_loop_counter
-        fn = self.func_name
-        start_label = f"{fn}_pl{pid}_{d}_start"
-        nosep_label = f"{fn}_pl{pid}_{d}_nosep"
-        step_label = f"{fn}_pl{pid}_{d}_step"
-        done_label = f"{fn}_pl{pid}_{d}_done"
-        comma_label = f"{fn}_pl{pid}_{d}_comma"
-        pb, pi = f"_ppb{d}", f"_ppi{d}"
-        a = self.asm
-        self._emit_print_printf(_ob)
-        a.label(start_label)
-        self._load_var(pb, 9)
-        a.emit(encode_ldr_xt_xn_imm(1, 9, 0))
-        self._load_var(pi, 0)
-        a.emit(encode_cmp_xn_xm(0, 1))
-        a.emit(encode_cset_xd_cond(2, "lt"))
-        a.emit(encode_cbz_xn(0, 2))
-        a.emit_label_rel(done_label, here_offset=-4)
-        a.emit(encode_cmp_xn_imm(0, 0))
-        a.emit(encode_b_cond("eq", 0))
-        a.emit_label_rel(nosep_label, here_offset=-4)
-        self._emit_print_printf(M.CONTAINER_ELEM_SEP)
-        self._load_var(pb, 9)
-        self._load_var(pi, 0)
-        a.label(nosep_label)
-        if shape == "dict":
-            a.emit(encode_add_xd_xn_imm(2, 9, M.BLOB_HEADER_BYTES))
-            a.emit(encode_add_xd_xn_xm_lsl4(2, 2, 0))
-            a.emit(encode_ldr_xt_xn_imm(3, 2, 0))
-            # `conv + ": "` — the pair's own separator, part of the KEY's
-            # format rather than a third `printf`: CPython writes `k: v`
-            # as one unit and the plan's key leaf is the uniform one.
-            self._emit_print_leaf(key_plan, 3, d, slot="k",
-                                  conv_suffix=": ")
-            self._load_var(pb, 9)
-            self._load_var(pi, 0)
-            a.emit(encode_add_xd_xn_imm(2, 9, M.BLOB_HEADER_BYTES))
-            a.emit(encode_add_xd_xn_xm_lsl4(2, 2, 0))
-            a.emit(encode_ldr_xt_xn_imm(0, 2, 8))
-            self._emit_print_leaf(elem_plan, 0, d, slot="v")
-        else:
-            a.emit(encode_add_xd_xn_imm(2, 9, M.BLOB_HEADER_BYTES))
-            a.emit(encode_add_xd_xn_xm_lsl3(2, 2, 0))
-            a.emit(encode_ldr_xt_xn_imm(0, 2, 0))
-            self._emit_print_leaf(elem_plan, 0, d, slot="e")
-        a.label(step_label)
-        self._load_var(pi, 0)
-        a.emit(encode_add_xd_xn_imm(0, 0, 1))
-        self._store_var(pi, 0)
-        self._emit_b_to(start_label)
-        a.label(done_label)
-        if shape == "tuple":
-            self._load_var(pb, 9)
-            a.emit(encode_ldr_xt_xn_imm(0, 9, 0))
-            a.emit(encode_cmp_xn_imm(0, 1))
-            a.emit(encode_b_cond("ne", 0))
-            a.emit_label_rel(comma_label, here_offset=-4)
-            self._emit_print_printf(",")
-        a.label(comma_label)
-        self._emit_print_printf(_cb)
-
-    def _emit_print_leaf(self, leaf, value_reg, d, slot="e",
-                         conv_suffix="") -> None:
-        """The element or pair half at depth `d`, the word in `value_reg`.
-
-        Three answers, and the plan's leaf tuple is all three: an int
-        (or the dict half's) word is one conversion, a bool's word is a
-        SELECT over the two texts rather than a number — `CSEL` of the
-        two interned addresses, branchless, the same choice a
-        conditional expression makes in a vararg elsewhere — and a
-        nested container's word is a POINTER to the next depth's blob:
-        it is stored to that depth's temps, its index zeroed, and the
-        loop recursed, so the nesting's brackets, separators and
-        trailing comma are the plan's inner nest rather than a second
-        loop this section invents. The two tuples have two arities —
-        three for a leaf, six for a nested container — so the branch
-        is on the tag, not on a fixed unpack.
-        """
-        a = self.asm
-        tag = leaf[0]
-        conv, is_bool = None, False
-        if tag == "leaf":
-            _t, conv, is_bool = leaf
-        if is_bool:
-            a.emit(encode_cmp_xn_imm(value_reg, 0))
-            a.emit_adrp_add(1, self._intern_string(
-                F.StringLiteral(M.BOOL_TRUE_TEXT)))
-            a.emit_adrp_add(2, self._intern_string(
-                F.StringLiteral(M.BOOL_FALSE_TEXT)))
-            a.emit(encode_csel_xd_xm_cond(1, 1, 2, "ne"))
-            value_reg = 1
-        if tag == "leaf":
-            self._emit_print_printf_value(conv + conv_suffix, value_reg)
-            return
-        # "cont": the word is the next depth's blob.
-        if value_reg != 0:
-            a.emit(encode_mov_zr_xn(0, value_reg))
-        self._store_var(f"_ppb{d + 1}", 0)
-        a.emit(encode_movz_wd_imm(0, 0))
-        self._store_var(f"_ppi{d + 1}", 0)
-        self._emit_print_container(leaf, d + 1)
 
     # ── `print` of a float: the backend's half of the shared decision ──────
     #
@@ -9175,7 +8504,26 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_str_xt_xn_imm(0, 9, 0))
 
     def _emit_list_append(self, e: F.CallExpr) -> None:
-        """`xs.append(v)` — store v at the blob's count and bump the count."""
+        """`xs.append(v)` — store v at the blob's count and bump the count.
+
+        The blob is `[count:i64][elem0]…` in the frame, so there is no room to
+        grow one: the capacity is a compile-time number (`_scan_list_caps`)
+        and the store is checked against it, refusing to write past the blob.
+        Appending more times than the scan found — inside a loop — therefore
+        stops the program instead of quietly corrupting the frame, the same
+        bargain `xs[i]` out of range makes.
+
+        The stop is LOUD. It used to be a bare `exit(1)` with nothing on either
+        stream, which is the worst of the three answers this backend can give:
+        not a wrong number a reader can compare, not a named refusal they can
+        act on, but silence. `model.list_append_overflow_message` (shared with
+        x86-64, so the two machines cannot name this limit differently) is
+        written to fd 2 first, through `write(2)`, and then the program stops.
+
+        Returns 0, which is this model's `None`: `list.append` returns None,
+        and nothing in the language can observe the difference between that and
+        a zero that a program then printed as a number, but returning the new
+        count would be a value Python does not have."""
         args = list(e.args)
         if len(args) != 1:
             raise CodegenError(
@@ -9183,55 +8531,15 @@ ctor_field_value=self._ctor_field_value_for(name),
                 f"(got {len(args)})")
         recv = e.func.obj
         name = recv.name if isinstance(recv, F.IdentExpr) else None
-        is_growable = name in getattr(self, '_list_growable', set())
-        if not is_growable and name not in self._list_caps_by_name:
+        room = self._list_caps_by_name.get(name)
+        if room is None:
             raise CodegenError(
                 f"list.append() is not lowered on the formal arm64 path: a "
                 f"list blob lives in the frame, so the room an append needs "
                 f"has to be known when the list is built. This one is not "
                 f"(the receiver is not a list literal this function appends "
                 f"to, or it is also bound to something that is not a list)")
-        if is_growable:
-            room = self._list_caps_by_name.get(name)
-            self._emit_expr(recv)
-            self.asm.emit(encode_stp_sp_pre(0, 2))
-            self._emit_expr(args[0])
-            self.asm.emit(encode_str_xt_xn_imm(0, 31, 8))
-            self.asm.emit(encode_ldr_xt_xn_imm(4, 31, 0))
-            self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))
-            self.asm.emit(encode_ldr_xt_xn_imm(1, 4, 0))
-            self._emit_mov_imm("X2", 1024)
-            self._while_counter += 1
-            oob = f"{self.func_name}_appoob{self._while_counter}"
-            ok = f"{self.func_name}_appok{self._while_counter}"
-            self.asm.emit(encode_cmp_xn_xm(1, 2))
-            self.asm.emit(encode_cset_xd_cond(3, "cs"))
-            self.asm.emit(encode_cbnz_xn(0, 3))
-            self.asm.emit_label_rel(oob, here_offset=-4)
-            stride = M.blob_elem_stride(self._expr_str_kind(recv))
-            if stride == M.BYTE_ELEM_STRIDE:
-                self.asm.emit(encode_add_xd_xn_xm(5, 4, 1))
-            else:
-                self.asm.emit(encode_add_xd_xn_xm_lsl3(5, 4, 1))
-            self.asm.emit(encode_add_xd_xn_imm(5, 5, M.BLOB_HEADER_BYTES))
-            if stride == M.BYTE_ELEM_STRIDE:
-                self.asm.emit(encode_strb_wd_wn(0, 5, 0))
-            else:
-                self.asm.emit(encode_str_xt_xn_imm(0, 5, 0))
-            self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
-            self.asm.emit(encode_str_xt_xn_imm(1, 4, 0))
-            self.asm.emit(encode_ldp_sp_post(0, 31))
-            self._emit_b_to(ok)
-            self.asm.label(oob)
-            self.asm.emit(encode_ldp_sp_post(0, 31))
-            self._emit_stop_diagnostic(
-                M.list_append_overflow_message(
-                    recv.name if isinstance(recv, F.IdentExpr) else "<expr>", 32))
-            self._emit_exit(1)
-            self.asm.label(ok)
-            self.asm.emit(encode_movz_wd_imm(0, 0))
-            return
-        base, count = self._list_caps_by_name[name]
+        base, count = room
         cap = base + count
         self._emit_expr(recv)
         # [sp+0] = the blob base, [sp+8] = the value. The push stores the base
@@ -9529,7 +8837,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         nothing on stderr. Detecting it at run time means reading `errno`,
         which is another C library call (`__error`) and therefore another
         unfollowable call in a block the proof framework has to cross — so the
-        foldable case is refused here, precisely, and variable cases are trapped at runtime.
+        foldable case is refused here, precisely, and the rest is
+        `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
         """
         reason = M.int_parse_overflow_refusal(
             M.fold_literal_expr(text_expr), base)
@@ -9892,38 +9201,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             return
         n = len(expr.elements)
         cap = max(n, self._list_caps.get(id(expr), n))
-        # Check if this list is growable (appended to in unbounded loops)
-        is_growable = getattr(self, '_list_growable_nodes', set()) and id(expr) in getattr(self, '_list_growable_nodes', set())
-        if is_growable:
-            # Allocate on heap with malloc for growable lists
-            # Layout compatible: [count][total_slots][elements...][capacity]
-            grow_cap = max(cap, 32)  # initial capacity
-            total_slots = 1 + grow_cap + 1  # count + elements + capacity
-            size_bytes = 8 * total_slots
-            # Call malloc - result in X0
-            self._emit_mov_imm("X0", size_bytes)
-            self._emit_extern_call("malloc", 1)
-            self.asm.emit(encode_stp_sp_pre(0, 2))  # save base
-            # Store count
-            self._emit_mov_imm("X10", n)
-            self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))
-            self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
-            # Store total slots
-            self._emit_mov_imm("X10", total_slots)
-            self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))
-            self.asm.emit(encode_str_xt_xn_imm(10, 9, 8))
-            # Store capacity at the end
-            self._emit_mov_imm("X10", grow_cap)
-            self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))
-            self.asm.emit(encode_str_xt_xn_imm(10, 9, 8 * (total_slots - 1)))
-            # Store elements starting at offset 8 (same as normal)
-            for i, el in enumerate(expr.elements):
-                self._emit_expr(el)
-                self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))
-                self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * (1 + i)))
-            self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
-            self.asm.emit(encode_ldp_sp_post(0, 31))
-            return
         size = 8 * (1 + cap)
         if self._compr_reloc:
             # The per-iteration base in place of a fixed blob. This literal is
@@ -10156,8 +9433,9 @@ ctor_field_value=self._ctor_field_value_for(name),
             # wrapped number or a status code — and the run-time half, the
             # same predicate over a value the build CANNOT know, which a
             # plain `ADD`/`SUB`/`MUL` used to answer with the hardware's
-            # modulo-2^64 wrap (exit 0, empty stderr); the integer overflow traps
-            # now prevent silent wrap. That
+            # modulo-2^64 wrap (exit 0, empty stderr, `bugs/formal/
+            # FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+            # `VARIABLE_ROWS` table is the measurement that pinned it). That
             # half is `_emit_int_alu_checked`: the flag-setting instruction
             # and the branch into the trap block, with the trap the one
             # answer this path has for a value the target cannot hold.
@@ -10311,11 +9589,83 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_cbnz_xn(0, reg))
         self.asm.emit_label_rel(trap, here_offset=-4)
         self._emit_b_to(ok)
+        self._emit_int_overflow_trap_block(op, trap, ok)
+        return ok
+
+    def _emit_int_overflow_trap_block(self, op: str, trap: str, ok: str) -> None:
+        """The overflow trap block every entry shape on this backend branches
+        into: the label, the one-sentence diagnostic on fd 2, and the stop at
+        `INT_OVERFLOW_TRAP_STATUS`.
+
+        The shared half of `_emit_int_overflow_trap` (the flag/register branch
+        after a `+`/`-`/`*`) and `_emit_div_overflow_precheck` (the sentinel
+        before a `//`), which need the block without either of their branches.
+        One emission of the scaffolding rather than one per caller, for the
+        reason `_emit_int_overflow_trap` states: the diagnostic and the status
+        are `model.py`'s and the two should not be able to drift."""
         self.asm.label(trap)
         self._emit_stop_diagnostic(M.int_overflow_trap_message(op))
         self._emit_exit(M.INT_OVERFLOW_TRAP_STATUS)
         self.asm.label(ok)
-        return ok
+
+    def _emit_div_overflow_precheck(self, op: str) -> None:
+        """The `//` overflow PRE-check: trap on `INT64_MIN // -1`, the one
+        division whose answer does not fit.
+
+        Measured on this machine before the shape was written: `SDIV` of the
+        overflowing pair answers the dividend and leaves the flags `N = 1,
+        Z = 0, C = 1, V = 0` — the SAME pattern `SDIV` of `INT64_MIN, 1`
+        leaves, which is why no flag a POST-check could read names the case
+        (the round had assumed the ARM set V; the CPU disagrees), and the
+        x86-64 twin's `IDIV` raises `#DE` on the pair and dies on SIGFPE
+        before any flag exists at all. So the check is a sentinel over the two
+        operands — the one exact characterization — and it runs BEFORE the
+        divide on BOTH backends. On this backend each constant goes into X2
+        in MOVZ/MOVK instructions before a REGISTER compare, not into an
+        immediate:
+        the 12-bit immediate of the 64-bit data-processing compare is
+        sign-extended into bits [63:12], so the smallest value it reaches is
+        -4096 and -1 (0xffff_ffff_ffff_ffff) is not in the class — measured,
+        `CMP X1, #0xfff` with X1 = -1 leaves BNE taken, and the x86 twin's
+        sign-extended 8-bit immediate is the one form that does reach it:
+
+            MOV X2, #0xffffffffffffffff   ; the overflow DIVISOR
+            CMP X1, X2
+            B.ne  ok
+            MOV X2, #0x8000000000000000   ; INT64_MIN, the overflow DIVIDEND
+            CMP X0, X2
+            B.ne  ok
+            <the trap block>
+        ok:
+            SDIV X2, X0, X1              ; the divide the check protects
+
+        The caller is the division arm with X0 = dividend and X1 = divisor.
+        X2 is the quotient destination the `SDIV` after `ok` writes, and each
+        constant is MOVed before the CMP that reads it, so the reuse is safe,
+        and the trap block ends in an exit, so nothing here preserves a
+        register.
+
+        The branches are not recorded as source conditions: no `if` the
+        program wrote is behind them, the reading arm64's own guards apply
+        (a recorded branch would claim a source-level conditional that is not
+        there), and the walk follows them down both edges and closes the trap
+        branch at its `BL` to the exit stub, which is the `+`/`-`/`*` trap's
+        close.
+        """
+        self._if_counter += 1
+        tid = self._if_counter
+        fn = self.func_name
+        trap = f"{fn}_ovf{tid}_t"
+        ok = f"{fn}_ovf{tid}_k"
+        self._emit_mov_imm("X2", -1)
+        self.asm.emit(encode_cmp_xn_xm(1, 2))
+        self.asm.emit(encode_b_cond("ne", 0))
+        self.asm.emit_label_rel(ok, here_offset=-4)
+        self._emit_mov_imm("X2", M.INT64_MIN)
+        self.asm.emit(encode_cmp_xn_xm(0, 2))
+        self.asm.emit(encode_b_cond("ne", 0))
+        self.asm.emit_label_rel(ok, here_offset=-4)
+        self._emit_int_overflow_trap_block(op, trap, ok)
 
     def _emit_float_to_int_range_trap(self) -> None:
         """Trap if the double in V0 does not fit in an `Int64` after truncation.
@@ -12237,7 +11587,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `struct Outer: n: Inner` with `o.n.d.x = 5` built, ran and died of
             # SIGSEGV (exit 139), while the depth-1 and depth-2 reads of the same
             # three structs answered correctly.
-            # `bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
+            # `bugs/formal/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
             # frame.md` §2 has the disassembly.
             #
             # AFTER the defaults above, not before: the slot this stores into is
@@ -12474,7 +11824,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # lives. `value_callee_can_hold_a_function` above reads the
             # DECLARATION; this reads the FLOW, and neither can see the other:
             # a local bound to `17` has no annotation to refuse on, and
-            # (function value calls through parameters — fixed)
+            # `bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
             # is the doc for what is left when neither has an answer.
             holds = M.callee_word_is_not_an_address(
                 self._cur_fn, name, self._vkinds)
@@ -12513,12 +11863,6 @@ ctor_field_value=self._ctor_field_value_for(name),
                 return
             if name == "print":
                 self._emit_print(e)
-                return
-            if name == "str":
-                self._emit_str(e)
-                return
-            if name == "repr":
-                self._emit_repr(e)
                 return
             if name in ("ord", "chr", "hash"):
                 self._emit_text_builtin(e, name)
@@ -13916,6 +13260,28 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `model.division_needs_zero_guard` is the shared decision, asked by
             # both backends for the reason `division_floors` gives above.
             needs_guard = M.division_needs_zero_guard(folded_right)
+            # `model.int_overflow_traps`'s run-time half for `//`, the shape
+            # the `+`/`-`/`*` ALU arm landed for (2026-11-02): the build-time
+            # half is `division_overflow_refusal` above, and when THAT has just
+            # decided the pair the plain `SDIV` below stays the byte-identical
+            # emission — a folded case never carries the check. The run-time
+            # half fires when the build cannot decide, and it is a PRE-check
+            # rather than the flag the `+`/`-` arm reads, measured on this
+            # machine rather than assumed: `SDIV` leaves V CLEAR on the
+            # overflowing pair (the architecture defines the result as the
+            # dividend, and the flags left are the SAME ones `INT64_MIN, 1`
+            # leaves, so no flag a post-check could read names the case) and
+            # x86-64's `IDIV` raises `#DE` before any flag exists at all, so
+            # the one check BOTH backends emit is the sentinel over the two
+            # operands, in the trap rather than in a wider word. `model.
+            # division_needs_overflow_precheck` adds the sentinel's deadness —
+            # the taken arm is the trap's own `bl fflush`, the same cost the
+            # zero guard above refuses to pay for a divisor that cannot be
+            # zero, and a `// 4` image carrying a dead sentinel re-puts the
+            # universal theorem behind the two-calls rule.
+            checked = (M.int_overflow_traps(op, result_t)
+                       and M.division_needs_overflow_precheck(
+                           folded_left, folded_right))
             self._if_counter += 1
             cid = self._if_counter
             fn = self.func_name
@@ -13930,28 +13296,8 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self.asm.emit(encode_cbz_xn(0, 1))
                 self.asm.emit_label_rel(div0_label, here_offset=-4)
             if signed:
-                if op != "%":
-                    # Check for overflow case: INT64_MIN / -1
-                    self.asm.emit(encode_movz_xd_imm(3, 0))
-                    self.asm.emit(encode_mvn_xd_xn(3, 3))  # X3 = -1
-                    self.asm.emit(encode_cmp_xn_xm(1, 3))
-                    self._if_counter += 1
-                    divok1 = f"{fn}_dovkok{self._if_counter}"
-                    self.asm.emit(encode_b_cond("ne", 0))
-                    self.asm.emit_label_rel(divok1, here_offset=-4)
-                    # divisor is -1, check if dividend is INT64_MIN
-                    self.asm.emit(encode_movz_xd_imm(4, 1))
-                    self.asm.emit(encode_lsl_xd_xn_imm(4, 4, 63))
-                    self.asm.emit(encode_cmp_xn_xm(0, 4))
-                    self._if_counter += 1
-                    divok2 = f"{fn}_dovkok2{self._if_counter}"
-                    self.asm.emit(encode_b_cond("ne", 0))
-                    self.asm.emit_label_rel(divok2, here_offset=-4)
-                    # overflow - trap
-                    self._emit_stop_diagnostic(M.int_overflow_trap_message("//"))
-                    self._emit_exit(M.INT_OVERFLOW_TRAP_STATUS)
-                    self.asm.label(divok2)
-                    self.asm.label(divok1)
+                if checked:
+                    self._emit_div_overflow_precheck(op)
                 self.asm.emit(encode_sdiv_xd_xn_xm(2, 0, 1))
             else:
                 self.asm.emit(encode_udiv_xd_xn_xm(2, 0, 1))
@@ -13998,7 +13344,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             #
             # Both are decidable when the AMOUNT is a literal and the BASE is
             # not, and precisely decidable when both are; the variable-base case
-            # traps at runtime when not foldable.
+            # is `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
             reason = M.shift_overflow_refusal(
                 op, M.fold_literal_expr(e.right), M.fold_literal_expr(e.left),
                 [e.left, e.right])
@@ -14016,23 +13362,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             if isinstance(imm_r, F.IntLiteral) and 0 <= imm_r.value <= 63:
                 self._emit_expr(e.left)
                 if op == "<<":
-                    shamt = imm_r.value
-                    self.asm.emit(encode_mov_zr_xn(2, 0))
-                    self.asm.emit(encode_lsl_xd_xn_imm(0, 0, shamt))
-                    if shamt != 0:
-                        self.asm.emit(encode_asr_xd_xn_imm(3, 0, shamt))
-                        self.asm.emit(encode_cmp_xn_xm(3, 2))
-                        self._if_counter += 1
-                        ovf = f"{self.func_name}_shimm{self._if_counter}_ovf"
-                        ok_shift = f"{self.func_name}_shimm{self._if_counter}_ok"
-                        self.asm.emit(encode_b_cond("ne", 0))
-                        self.asm.emit_label_rel(ovf, here_offset=-4)
-                        self.asm.emit(encode_b(0))
-                        self.asm.emit_label_rel(ok_shift, here_offset=-4)
-                        self.asm.label(ovf)
-                        self._emit_stop_diagnostic(M.int_overflow_trap_message("<<"))
-                        self._emit_exit(M.INT_OVERFLOW_TRAP_STATUS)
-                        self.asm.label(ok_shift)
+                    self.asm.emit(encode_lsl_xd_xn_imm(0, 0, imm_r.value))
                 elif signed:
                     self.asm.emit(encode_asr_xd_xn_imm(0, 0, imm_r.value))
                 else:
@@ -14110,7 +13440,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             #
             # All three are decidable here whenever both operands fold, which
             # is the case the corpus and a reader hit first. The variable-base
-            # case is `bugs/FORMAL_integer_overflow_at_run_time_is_still_
+            # case is `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_
             # untrapped.md`.
             reason = M.power_overflow_refusal(
                 M.fold_literal_expr(e.left), M.fold_literal_expr(exp),
@@ -14216,8 +13546,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_b_to(f"{fn}_pow{pid}_end")
             self.asm.label(neg)
             self.asm.emit(encode_ldp_sp_post(4, 5))
-            self._emit_stop_diagnostic(M.int_overflow_trap_message("**"))
-            self._emit_exit(M.INT_OVERFLOW_TRAP_STATUS)
+            self.asm.emit(encode_movz_wd_imm(0, 0))
             self.asm.label(f"{fn}_pow{pid}_end")
             return
 
@@ -14962,23 +14291,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_b_cond("ge", 8))
         self.asm.emit_label_rel(sat_label, here_offset=-4)
         if op == "<<":
-            # Check for signed overflow: if (x << y) >> y != x (signed) then overflow
-            self.asm.emit(encode_mov_zr_xn(2, 0))  # save original
             self.asm.emit(encode_lslv_xd_xn_xm(0, 0, 1))
-            self.asm.emit(encode_asrv_xd_xn_xm(3, 0, 1))  # shift result back arithmetically
-            self.asm.emit(encode_cmp_xn_xm(3, 2))  # compare with original
-            self.asm.emit(encode_b_cond("ne", 0))
-            # branch to overflow trap
-            self._if_counter += 1
-            ovf = f"{fn}_sh{sid}_ovf"
-            ok_shift = f"{fn}_sh{sid}_ok"
-            self.asm.emit_label_rel(ovf, here_offset=-4)
-            self.asm.emit(encode_b(0))
-            self.asm.emit_label_rel(ok_shift, here_offset=-4)
-            self.asm.label(ovf)
-            self._emit_stop_diagnostic(M.int_overflow_trap_message("<<"))
-            self._emit_exit(M.INT_OVERFLOW_TRAP_STATUS)
-            self.asm.label(ok_shift)
         elif signed:
             self.asm.emit(encode_asrv_xd_xn_xm(0, 0, 1))
         else:
@@ -15546,14 +14859,14 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         `base_reg` points at the blob's COUNT word, so the elements start at
         `base_reg + 8` and each element is one 8-byte word -- a set lowers as a
-        list of words on this path (`bugs/FORMAL_set_value_model.md`).  This is
+        list of words on this path (`bugs/formal/FORMAL_set_value_model.md`).  This is
         the linear scan `_emit_set_op` runs per element of the other operand,
         lifted out so `&`, `-`, `^` and `|` share one implementation rather
         than four copies of the same loop.
 
         The comparison is element WORD to element WORD, which for a set of
         strings is a comparison of `char *` ADDRESSES; that is the same limit
-        the union's dedup always had, and `bugs/FORMAL_set_value_model.md`
+        the union's dedup always had, and `bugs/formal/FORMAL_set_value_model.md`
         owns it.
 
         Clobbers X10/X11/X12 and `out_reg`; X0-X9 and the caller's registers
@@ -15630,7 +14943,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         The scan is over `other[0..other_n)`, and the element is read as a whole
         8-byte slot, which is `_emit_set_union`'s dedup compare and the same
         thing CPython means by membership here — a set lowers as a list on this
-        path (`bugs/FORMAL_set_value_model.md`), so the elements are words and
+        path (`bugs/formal/FORMAL_set_value_model.md`), so the elements are words and
         the compare is a word compare."""
         self.asm.emit(encode_movz_wd_imm(5, 0))          # i = 0
         self._while_counter += 1

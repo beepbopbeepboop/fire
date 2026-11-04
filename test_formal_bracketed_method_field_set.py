@@ -62,7 +62,7 @@ refusal text moves from "a Optional receiver is stored in the field 'self.start'
 to that unwrap.  So this change fixes the DERIVATION, which is what the 13-file
 row is blocked on and what 30 other struct layouts were getting wrong, and the
 row itself needs the representation change to finish.  Filed as
-`bugs/FORMAL_stdlib_optional_needs_a_representation.md`.
+`bugs/formal/FORMAL_stdlib_optional_needs_a_representation.md`.
 
 Every differential case is written twice, once as Mojo and once as plain Python,
 and the two are made to AGREE rather than the expectation being hand-written —

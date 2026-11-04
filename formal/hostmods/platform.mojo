@@ -87,7 +87,7 @@ REFUSAL so an omission cannot read as an implementation.
     here.
   * the CLASSES `uname_result`, `AndroidVer`, `IOSVersionInfo` — a type is not
     a value on this path, which is the same limit
-    `(module state/model limits) (deleted) (deleted)` records.
+    `bugs/formal/FORMAL_module_state_no_storage.md` records.
   * the TUPLE-SHAPED three: `uname()`, `mac_ver()`, `system_alias()`,
     `java_ver()`, `win32_ver()`, `android_ver()`, `ios_ver()`. A tuple is a
     frame blob carved out of the callee's frame and cannot be returned across a
@@ -145,7 +145,7 @@ each it reports the architecture of the image it is running in, which is the
 whole point of the name. That claim in `_syscalls.mojo` has since been
 corrected in place, along with the five other modules that repeated it; what
 the x86-64 backend does need is the right symbol per call, which is
-`formal/model/builtins.py`'s `target_libc_symbol`.
+`formal/model.py`'s `target_libc_symbol`.
 
 A Rosetta-emulated x86-64 process on an Apple Silicon host sees
 `hw.machine == "x86_64"`, so the x86-64 image's answer is `x86_64` and not this
@@ -162,7 +162,7 @@ from os._syscalls import fs_free
 # Which fact `os._syscalls.fs_macho_field` is asked for, as the two NUMBERS it
 # takes. Numbers here rather than `os._syscalls`'s own names because a
 # module-level constant is not exported as a word across a dylib boundary
-# (module state is not stored in the formal model) — which is why `_syscalls.mojo`
+# (`bugs/formal/FORMAL_module_state_no_storage.md`) — which is why `_syscalls.mojo`
 # spells the same two constants as `MACHO_WIDTH`/`MACHO_EXECUTABLE` for its own
 # callers and this module repeats the numbers it passes. 0 is the pointer width
 # in bits and 1 is "the kind of file `file -b` would call an executable"; both
@@ -454,7 +454,7 @@ def _int_value(s) -> int:
 
     `%lld` and not `%d` in the digit-to-string spelling in `system_alias`: a
     `%d` conversion is 32 bits wide on this path
-    (`bugs/FORMAL_string_value_model.md` §2), and this value is small enough
+    (`bugs/formal/FORMAL_string_value_model.md` §2), and this value is small enough
     that it would not have shown — which is why it is spelled correctly rather
     than left to be discovered by a large release number later.
     """
@@ -736,7 +736,7 @@ def platform_string(p0, p1, p2, p3, p4, p5) -> str:
     in CPython by convention and reachable, because CPython has no cross-module
     ABI to satisfy; here a name beginning with `_` is denied by
     `doc/ABI.md`'s rule (`reflect.export_exclusions`'s `EXCL_PRIVATE`, measured
-    and settled in `bugs/FORMAL_known_limits.md` §1.1) with no opt-in, so a
+    and settled in `bugs/formal/FORMAL_known_limits.md` §1.1) with no opt-in, so a
     caller cannot import it and the corner cases below could not be tested. One
     public name rather than a private definition and a public alias, because two
     names for one function is one implementation and one place to keep it right.

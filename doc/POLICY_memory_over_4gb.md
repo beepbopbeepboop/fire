@@ -112,7 +112,7 @@ Other measured footprints (same gates):
   generated proof, not concurrency. **The cause is `mem_read_bytes`'s `ite` chain
   over a 113-equation successor nest**, which `formal/x86_64_endtoend_test.py`'s
   `_concrete_read` rebuilds to evaluate one closing read;
-  `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md` measures
+  `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md` measures
   where it crosses (`const2` 19 equations / 1.4 GB, an 8-argument call 113 / 6.5 GB
   and an ABORT). It is a per-step-invariant problem and not a size problem, so
   raising `-M` would move the ceiling and not the curve. Registered as `module`

@@ -687,8 +687,6 @@ typedef struct {
 
 /* Exception object with args (for e.args / StopIteration.value). */
 typedef struct { int64_t type; char *msg; MojoList *args; } MojoExc;
-char *mojo_str_dup_registered(char *s);
-char *mojo_exc_text_new(int64_t type, char *msg, MojoList *args);
 MojoExc *mojo_exc_new(int64_t type, char *msg, MojoList *args);
 MojoList *mojo_exc_args(void *obj);
 
@@ -881,7 +879,6 @@ int64_t     mojo_box_word(int64_t v);
  * Returns 1 only for that box; any other word answers 0, which is what the
  * constant comparison answered before this existed. */
 int         mojo_word_is_none(int64_t v);
-int64_t     mojo_unbox_plain(int64_t v);
 /* Arithmetic on a possibly-boxed operand (`x + 1` on a None received by
  * `x = yield`): a None box raises a catchable TypeError, as CPython does,
  * instead of being unwrapped to its word (0) and computed with. `op` is the
@@ -1560,14 +1557,6 @@ void        mojo_dict_set_bool(MojoDict *d, char *key, int v);
  * it every plain `0` in a dict printed as `None`, because the generic value
  * repr answers "None" for a zero word. */
 void        mojo_dict_set_none(MojoDict *d, char *key);
-void        mojo_dict_set_none_key(MojoDict *d, int64_t v);
-void        mojo_dict_set_none_key_int(MojoDict *d, int64_t v);
-void        mojo_dict_set_none_key_str(MojoDict *d, char *v);
-void        mojo_dict_set_none_key_double(MojoDict *d, double v);
-void        mojo_dict_set_none_key_bool(MojoDict *d, int v);
-void        mojo_dict_set_none_key_none(MojoDict *d);
-void        mojo_dict_set_none_key_struct(MojoDict *d, void *v);
-void        mojo_dict_set_bytes_none_key(MojoDict *d, MojoBytes *key, int64_t v);
 
 /* A STRUCT stored as a dict VALUE: the boxed pointer, tagged `kind == 5` so
  * the dict's repr asks `mojo_dict_repr_val` instead of dispatching on a type
@@ -1766,7 +1755,6 @@ int64_t     mojo_hash_str(char *s);
 int64_t     mojo_hash(int64_t val);
 
 int         mojo_dict_contains(MojoDict *d, char *key);
-int         mojo_dict_contains_none(MojoDict *d);
 /* bytes-keyed access — its own key DOMAIN (see _DictSlot.keykind), so
  * `d[b'x']` and `d['x']` stay distinct entries. Keyed by content. */
 void        mojo_dict_set_bytes_int(MojoDict *d, MojoBytes *key, int64_t v);
@@ -2216,7 +2204,7 @@ typedef void* MojoFileHandle;
    They were left undeclared for the whole of FORMAL.md phase 2's ceiling 2,
    on the belief that the symbol the dylib exports is a DIFFERENT function from
    one `fire_runtime.c` declares — which is why declaring them needed a decision
-   rather than a line. Measured (`bugs/FORMAL_runtime_library_on_the_link_line.md`
+   rather than a line. Measured (`bugs/formal/FORMAL_runtime_library_on_the_link_line.md`
    §0.2, and re-measured on this tree): `fire_runtime.c` has `#define USE_PYTHON
    0`, so the definition behind the symbol is the `#else` arm at :452, and BOTH
    arms of that `#if` carry the same C signature. `MojoFileHandle` is

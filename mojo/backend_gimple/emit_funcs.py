@@ -219,7 +219,7 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
                 # Use _safe_coerce_emit to handle int→int64_t and other conversions.
                 # A heap-boxed local's var_types entry is the BOX's pointer type,
                 # so its source is the value `*box` (see _boxed_capture_source).
-                _boxed = gen._boxed_capture_source(vname, _fct)
+                _boxed = ggc._boxed_capture_source(gen, vname, _fct)
                 if _boxed is not None:
                     local_type, cname = _boxed
                 else:
@@ -242,7 +242,7 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
     # returns the variable uninitialised (the caller's first call through it was a
     # SIGBUS).
     if node.name in gen.var_types:
-        _vt, _vv = gen._closure_value(node.name, ci)
+        _vt, _vv = gex._closure_value(gen, node.name, ci)
         gen._safe_coerce_emit(_vt, gen.var_types[node.name], _vv, gen._write_dest(node.name))
 
 
@@ -766,20 +766,20 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
     # latter cannot tell "unknown" from "false" (comptime.CONST_UNKNOWN).
     val = gen._eval_const_bool_state(node.condition)
     if val == 1:
-        _bscope = gen._open_block_scope()
+        _bscope = ginf._open_block_scope(gen)
         for s in node.then_body:
             gen.gen_stmt(s)
-        gen._close_block_scope(_bscope)
+        ginf._close_block_scope(gen, _bscope)
         return
     if val == 0:
         # Try each elif branch before falling to else
         for elif_cond, elif_body in (getattr(node, 'elifs', None) or []):
             elif_val = gen._eval_const_bool_state(elif_cond)
             if elif_val == 1:
-                _bscope = gen._open_block_scope()
+                _bscope = ginf._open_block_scope(gen)
                 for s in elif_body:
                     gen.gen_stmt(s)
-                gen._close_block_scope(_bscope)
+                ginf._close_block_scope(gen, _bscope)
                 return
             if elif_val == 0:
                 continue
@@ -788,18 +788,18 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
             bb_t = gen._new_bb(); bb_m = gen._new_bb()
             gen._emit(f"  if ({cv}) goto {bb_t}; else goto {bb_m};")
             gen._emit_label(bb_t)
-            _bscope = gen._open_block_scope()
+            _bscope = ginf._open_block_scope(gen)
             for s in elif_body:
                 gen.gen_stmt(s)
-            gen._close_block_scope(_bscope)
+            ginf._close_block_scope(gen, _bscope)
             gen._emit(f"  goto {bb_m};")
             gen._emit_label(bb_m)
             return
         if node.else_body:
-            _bscope = gen._open_block_scope()
+            _bscope = ginf._open_block_scope(gen)
             for s in node.else_body:
                 gen.gen_stmt(s)
-            gen._close_block_scope(_bscope)
+            ginf._close_block_scope(gen, _bscope)
         return
     # Condition unknown at compile time: emit full runtime if-elif-else chain
     _, cond_v = gen.lower_expr(node.condition)
@@ -814,10 +814,10 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
     bb_true = gen._new_bb()
     gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
     gen._emit_label(bb_true)
-    _bscope = gen._open_block_scope()
+    _bscope = ginf._open_block_scope(gen)
     for s in node.then_body:
         gen.gen_stmt(s)
-    gen._close_block_scope(_bscope)
+    ginf._close_block_scope(gen, _bscope)
     gen._emit(f"  goto {bb_merge};")
     # elif chains
     for _elif_idx, (elif_cond, elif_body) in enumerate(elifs):
@@ -831,17 +831,17 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
             bb_false = bb_merge
         gen._emit(f"  if ({elif_cv}) goto {bb_elif_true}; else goto {bb_false};")
         gen._emit_label(bb_elif_true)
-        _bscope = gen._open_block_scope()
+        _bscope = ginf._open_block_scope(gen)
         for _elif_stmt in elif_body:
             gen.gen_stmt(_elif_stmt)
-        gen._close_block_scope(_bscope)
+        ginf._close_block_scope(gen, _bscope)
         gen._emit(f"  goto {bb_merge};")
     if has_else:
         gen._emit_label(bb_false)
-        _bscope = gen._open_block_scope()
+        _bscope = ginf._open_block_scope(gen)
         for s in node.else_body:
             gen.gen_stmt(s)
-        gen._close_block_scope(_bscope)
+        ginf._close_block_scope(gen, _bscope)
         gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_merge)
 
@@ -939,10 +939,10 @@ def _gen_stmt_ComptimeForStmt(gen, node):
             i = start
             while (step > 0 and i < stop) or (step < 0 and i > stop):
                 gen._safe_coerce_emit('int', dst, str(i), node.target)
-                _bscope = gen._open_block_scope()
+                _bscope = ginf._open_block_scope(gen)
                 for s in node.body:
                     gen.gen_stmt(s)
-                gen._close_block_scope(_bscope)
+                ginf._close_block_scope(gen, _bscope)
                 i += step
             return
     elif (isinstance(node.iterable, gimple_ctypes.CallExpr)
@@ -1021,10 +1021,10 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                             _dst = gen.var_types.get(_t) or 'int64_t'
                             gen._safe_coerce_emit(
                                 'int', _dst, str(_v), _t)
-                        _bscope = gen._open_block_scope()
+                        _bscope = ginf._open_block_scope(gen)
                         for s in node.body:
                             gen.gen_stmt(s)
-                        gen._close_block_scope(_bscope)
+                        ginf._close_block_scope(gen, _bscope)
                     return
     if not unrolled:
         pass
@@ -1931,7 +1931,7 @@ def _record_home_def_pts(gen, bare_name: str, pts: list) -> None:
     '_common_set_capture_groups_6aabcf'?` (that 37bd8e suffix happened to
     coincide with an unrelated `_global._parse_next`), which refused
     c_parser/parser/__init__.py outright — see
-    bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md.
+    bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md.
 
     The spelling RULE is `module_qualifier` (one copy, see its docstring);
     this call is about picking the RIGHT module, not sanitizing a fifth way.
@@ -2988,24 +2988,19 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # inference sees the real scalar (must precede return-type inference).
     # (Iterate keys + index, not `for k, (e, ne) in .items()`: a nested tuple
     # for-target over .items() isn't lowered correctly when self-compiled.)
-    # `_pe` is typed `dict` and its key is a fresh `_as_str` name: untyped, and
-    # with the loop key reusing the earlier `bare` (a str), `_pe[bare]` was
-    # lowered as a LIST read of a dict and the stage2 binary segfaulted here for
-    # any function that has a parameter-element record.
-    _pe: dict = getattr(gen, '_param_elem_types', {}).get(node.name, {})
-    for _pe_key in _pe:
-        _pe_bare = _as_str(_pe_key)
+    _pe = getattr(gen, '_param_elem_types', {}).get(node.name, {})
+    for bare in _pe:
         # `_pe[bare]` is a 2-tuple; `e, ne = _pe[bare]` boxes both slots
         # on the self-hosted path, so `_elem_types[bare]` got a garbage
         # ctype string and `_declare_var`'s `mojo_str_cat` ran `strlen()`
         # on it — a hard segfault on the single-TU `--dump myinterpreter.py`.
-        _pe_v = _pe[_pe_bare]
+        _pe_v = _pe[bare]
         e = _as_str(_pe_v[0])
         ne = _as_str(_pe_v[1])
         if e:
-            gen._elem_types[_pe_bare] = e
+            gen._elem_types[bare] = e
             if ne:
-                gen._nested_elem_types[_pe_bare] = ne
+                gen._nested_elem_types[bare] = ne
     # ...and the dict-VALUE half of the same contract, for the same reason and
     # beside it. A dict parameter has no binding site inside the callee, so
     # without this every `d[k]` / `d.items()` in the body fell to the
@@ -3022,15 +3017,14 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     _pem = getattr(gen, '_param_elem_mixed', {}).get(node.name, ())
     for _pem_bare in _pem:
         gen._maybe_kinds_vals.add(_as_str(_pem_bare))
-    _pdv: dict = getattr(gen, '_param_dict_val_types', {}).get(node.name, {})
-    for _pdv_key in _pdv:
-        _pdv_bare = _as_str(_pdv_key)
+    _pdv = getattr(gen, '_param_dict_val_types', {}).get(node.name, {})
+    for bare in _pdv:
         # '' is the conflicting-call-sites marker (see _record_param_dict_val),
         # and an unseeded slot is already the `int64_t` default, so both are
         # no-ops here -- deliberately, rather than seeding a lie.
-        _pdv_v = _as_str(_pdv[_pdv_bare])
+        _pdv_v = _as_str(_pdv[bare])
         if _pdv_v:
-            gen._dict_val_types[_pdv_bare] = _pdv_v
+            gen._dict_val_types[bare] = _pdv_v
     # Seed local container element types too, so return inference can see
     # through nested subscripts on locals (e.g. `return bodies[0][0]` where
     # bodies is a local list-of-double-lists). Lowering re-derives the same.
@@ -3955,11 +3949,7 @@ def _register_imported_structs(gen, stmts: list) -> None:
                     or local in gen._imported_generic_structs
                     or any(w in nm for w in gen._IMPORTED_STRUCT_SKIP_BASENAMES)):
                 continue
-            # Also check if used as type argument to LinkedList or other generic containers
-            _used_as_element = False
-            if local in src and 'LinkedList' in src and re.search(r'\b' + re.escape(local) + r'\b', src):
-                _used_as_element = True
-            if local not in param_type_names and nm not in _locally_constructed and not _used_as_element:
+            if local not in param_type_names and nm not in _locally_constructed:
                 continue
             sdef = gen._find_imported_struct(st.module, nm)
             if sdef is None:
@@ -3976,16 +3966,11 @@ def _register_imported_structs(gen, stmts: list) -> None:
             _uncommon = [m.name for m in sdef.methods
                          if m.name not in gimple_ctypes._COMMON_METHOD_NAMES]
             _called_uncommon = any(f".{mn}(" in src for mn in _uncommon)
-            if _used_as_element and not _field_accessed and not _called_uncommon:
-                pass  # allow registration
-            elif not fields and not _called_uncommon:
+            if not fields and not _called_uncommon:
                 continue
-            elif not _field_accessed and not _called_uncommon:
+            if not _field_accessed and not _called_uncommon:
                 continue  # struct is merely passed through, untouched
-            try:
-                gen._materialize_imported_struct(st.module, nm, local)
-            except Exception:
-                pass
+            gen._materialize_imported_struct(st.module, nm, local)
 
 
 
@@ -4173,9 +4158,8 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # call-site pre-pass records under.
     _seed_annotated_param_elem_types(gen, node)
     _mkey = f"{_as_str(struct_name)}_{_as_str(node.name)}"
-    _mpe: dict = getattr(gen, '_param_elem_types', {}).get(_mkey, {})
-    for _mbare0 in _mpe:
-        _mbare = _as_str(_mbare0)
+    _mpe = getattr(gen, '_param_elem_types', {}).get(_mkey, {})
+    for _mbare in _mpe:
         _mpe_v = _mpe[_mbare]
         _me = _as_str(_mpe_v[0])
         _mne = _as_str(_mpe_v[1])
@@ -4188,9 +4172,8 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     _mpmx = getattr(gen, '_param_nested_mixed', {}).get(_mkey, ())
     for _mpmx_bare in _mpmx:
         gen._nested_mixed_names.add(_as_str(_mpmx_bare))
-    _mpdv: dict = getattr(gen, '_param_dict_val_types', {}).get(_mkey, {})
-    for _mbare20 in _mpdv:
-        _mbare2 = _as_str(_mbare20)
+    _mpdv = getattr(gen, '_param_dict_val_types', {}).get(_mkey, {})
+    for _mbare2 in _mpdv:
         _mpdv_v = _as_str(_mpdv[_mbare2])
         if _mpdv_v:
             gen._dict_val_types[_mbare2] = _mpdv_v

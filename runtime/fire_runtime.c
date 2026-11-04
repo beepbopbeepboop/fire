@@ -737,16 +737,6 @@ void *_mojo_exc_obj = NULL;
 void mojo_exc_obj_set(void *obj) { _mojo_exc_obj = obj; }
 void *mojo_exc_obj_get(void) { return _mojo_exc_obj; }
 
-/* A heap copy of `s` the runtime owns: registered so it is recognised as a
- * string, and never freed by an unwind, which is what makes it safe to hand to
- * an exception that outlives the frame that built the text. */
-char *mojo_str_dup_registered(char *s) {
-    if (!s) return NULL;
-    char *d = strdup(s);
-    if (d) mojo_str_register(d);
-    return d;
-}
-
 MojoExc *mojo_exc_new(int64_t type, char *msg, MojoList *args) {
     MojoExc *exc = (MojoExc *)malloc(sizeof(MojoExc));
     if (!exc) return NULL;
@@ -756,36 +746,10 @@ MojoExc *mojo_exc_new(int64_t type, char *msg, MojoList *args) {
     return exc;
 }
 
-/* The exception OBJECT a handler binds (`except E as e`) is the message text
- * itself: every consumer of `e` -- `str(e)`, `print(e)`, an f-string, a
- * concatenation -- treats the bound `char *` as the message, and the object
- * slot used to be exactly that. The args list rides in a header in FRONT of the
- * text, so `e.args` is recoverable from the same pointer and no consumer has to
- * know there is anything more than a string. (Binding the bare `MojoExc *`
- * instead made every `str(e)` print the struct's first bytes.) */
-#define MOJO_EXC_TEXT_MAGIC 0x4d4a455854455854LL  /* "MJEXTEXT" */
-typedef struct { int64_t magic; int64_t type; MojoList *args; } _MojoExcTextHdr;
-
-char *mojo_exc_text_new(int64_t type, char *msg, MojoList *args) {
-    size_t n = msg ? strlen(msg) : 0;
-    char *blk = (char *)malloc(sizeof(_MojoExcTextHdr) + n + 1);
-    if (!blk) return NULL;
-    _MojoExcTextHdr *h = (_MojoExcTextHdr *)blk;
-    h->magic = MOJO_EXC_TEXT_MAGIC;
-    h->type = type;
-    h->args = args;
-    char *text = blk + sizeof(_MojoExcTextHdr);
-    if (msg) memcpy(text, msg, n);
-    text[n] = '\0';
-    mojo_str_register(text);
-    return text;
-}
-
 MojoList *mojo_exc_args(void *obj) {
     if (!obj) return NULL;
-    _MojoExcTextHdr *h = (_MojoExcTextHdr *)((char *)obj - sizeof(_MojoExcTextHdr));
-    if (h->magic != MOJO_EXC_TEXT_MAGIC) return NULL;
-    return h->args;
+    MojoExc *exc = (MojoExc *)obj;
+    return (MojoList *)exc->args;
 }
 
 /* Exception type tag: a small int id (assigned per exception class name at
@@ -1984,39 +1948,10 @@ int64_t mojo_box_word(int64_t v)
 
 /* See the header. The shared kind-'n' box is the only word that IS None when
  * it is still boxed; a bare word cannot say so (an int 0 has the same bits). */
-int mojo_word_is_none(int64_t v);
-/* The plain word of a box whose kind is only a spelling of a machine word: a
- * `None` box and a NULL `char *` slot are 0, a bool box is its 0/1. Every other
- * word is unchanged (a double keeps its box, a string its pointer), so the
- * result is what a bare `0` / `True` / `False` / `None` would have been where
- * a function parameter or a local reads it. A kind-mixed tuple hands these
- * back boxed (`mojo_list_get_boxed`), and a non-zero box is TRUTHY: the
- * compiled compiler read `is_generator` out of `(False, None)` that way and
- * treated every function it parsed as a generator. */
-int64_t mojo_unbox_plain(int64_t v)
-{
-    if (!mojo_is_boxed(v)) return v;
-    MojoBox *bx = (MojoBox *)(intptr_t)v;
-    if (bx->kind == 'n') return 0;
-    if (bx->kind == 'b') return bx->bits ? 1 : 0;
-    /* A string / bytes slot is its own pointer: the box only carried the kind.
-     * Handing the box on made a tuple-unpacked `char *` target (the type name
-     * in `at, av = gen.lower_expr(...)`) compare unequal to every literal, so
-     * the compiled compiler's `at == 'MojoGenerator *'` was never true. */
-    if (bx->kind == 'p' || bx->kind == 's') return bx->bits;
-    return v;
-}
-
 int mojo_word_is_none(int64_t v)
 {
     if (!mojo_is_boxed(v)) return 0;
-    MojoBox *bx = (MojoBox *)(intptr_t)v;
-    if (bx->kind == 'n') return 1;
-    /* A NULL `char *` / bytes slot of a kind-mixed list is a None too: the
-     * `(name, annotation)` rows of a parameter list are 'p' slots whose
-     * unannotated entry is NULL, and boxing that gives a kind-'p' box with
-     * no text in it. */
-    return (bx->kind == 'p' || bx->kind == 's') && bx->bits == 0;
+    return ((MojoBox *)(intptr_t)v)->kind == 'n';
 }
 
 /* Sets the TypeError slots (tag, message, object) for `detail` WITHOUT
@@ -3842,56 +3777,9 @@ char *mojo_cstr_reverse(char *s)
  * immediately strcmp-and-discard it, over and over. gimple_codegen.py's
  * `_lower_binary` special-cases the AST shape `<slice> == / != <string>`
  * to call this instead of the generic slice-then-compare lowering. */
-/* Is every byte of s[0..n) a plain ASCII byte (and not a NUL)? When it is, a
- * codepoint index equals a byte index across that prefix and the byte-offset
- * fast paths below are exact. One pass; the NUL-or-high-bit test is the same
- * "first NUL in s[0..stop)" scan the fast paths already paid for. */
-static int _prefix_is_plain_ascii(const char *s, int64_t n)
-{
-    for (int64_t k = 0; k < n; k++) {
-        unsigned char c = (unsigned char)s[k];
-        if (c == 0 || c >= 0x80) return 0;
-    }
-    return 1;
-}
-
-/* `s[start:stop] == needle` for a string that is NOT plain ASCII in the scanned
- * prefix: start and stop are CODEPOINT offsets (negative ones count from the
- * end, in codepoints), so they are mapped to byte offsets before the compare.
- * The byte-offset fast path read them as bytes, so every scanner that tested
- * `src[j:j + 3] == '\"\"\"'` after a multi-byte character looked at the wrong
- * bytes (the compiled tokenizer left `__MOJO_STR_n__` placeholders in a
- * non-ASCII file's tokens and the stage2 binary refused 8 of the 49 bootstrap
- * dump inputs). */
-static int _cstr_region_eq_utf8(char *s, int64_t start, int64_t stop, char *needle)
-{
-    int64_t ncp = mojo_str_codepoint_len(s);
-    if (stop == MOJO_SLICE_STOP_OMITTED) stop = ncp;
-    if (start < 0) start += ncp;
-    if (stop  < 0) stop  += ncp;
-    if (start < 0) start = 0;
-    if (stop > ncp) stop = ncp;
-    if (start >= stop) return needle[0] == '\0';
-    int64_t bstart = mojo_utf8_codepoint_to_byte_offset(s, start);
-    int64_t bstop  = (stop >= ncp) ? (int64_t)strlen(s)
-                                   : mojo_utf8_codepoint_to_byte_offset(s, stop);
-    size_t needle_len = strlen(needle);
-    if ((size_t)(bstop - bstart) != needle_len) return 0;
-    return memcmp(s + bstart, needle, needle_len) == 0;
-}
-
 int mojo_cstr_region_eq(char *s, int64_t start, int64_t stop, char *needle)
 {
     if (!s || !needle) return s == needle;
-    {
-        /* Scan only as far as the offsets can reach: the whole string when an
-         * offset is negative or open-ended, else the first `stop` bytes. */
-        int64_t reach = (start < 0 || stop < 0 || stop == MOJO_SLICE_STOP_OMITTED)
-                            ? (int64_t)strlen(s) : stop;
-        if (!_prefix_is_plain_ascii(s, reach)
-                && mojo_str_codepoint_len(s) != (int64_t)strlen(s))
-            return _cstr_region_eq_utf8(s, start, stop, needle);
-    }
     int64_t len;
     if (start < 0 || stop < 0 || stop == MOJO_SLICE_STOP_OMITTED) {
         len = (int64_t)strlen(s);
@@ -6160,28 +6048,13 @@ char *mojo_chr(int64_t code) {
  * count as `stop - start` (negative there means "no room", which is the
  * right answer) rather than as a clamped zero. */
 static void mojo_str_clamp_range(char *s, int64_t *start, int64_t *stop) {
-    int64_t blen = s ? (int64_t)strlen(s) : 0;
-    /* A window is in CODEPOINTS (`s.startswith(p, j)` with `j` a character
-     * index), and every caller then compares BYTES from the result, so a string
-     * with a multi-byte character has to be mapped: counting `len` and the
-     * offsets in bytes found a delimiter the wrong number of characters early
-     * after any non-ASCII character (the compiled tokenizer's
-     * `src.startswith(delim, j)` ended string literals at the wrong place). */
-    int ascii = 1;
-    for (int64_t k = 0; k < blen; k++)
-        if ((unsigned char)s[k] >= 0x80) { ascii = 0; break; }
-    int64_t len = ascii ? blen : mojo_str_codepoint_len(s);
+    int64_t len = s ? (int64_t)strlen(s) : 0;
     int64_t lo = *start, hi = *stop;
     if (hi == MOJO_SLICE_STOP_OMITTED) hi = len;
     if (lo < 0) lo += len;
     if (hi < 0) hi += len;
     if (lo < 0) lo = 0;
     if (hi > len) hi = len;
-    if (!ascii) {
-        if (lo > len) lo = len;
-        lo = (lo >= len) ? blen : mojo_utf8_codepoint_to_byte_offset(s, lo);
-        hi = (hi >= len) ? blen : mojo_utf8_codepoint_to_byte_offset(s, hi);
-    }
     *start = lo; *stop = hi;
 }
 
@@ -6718,14 +6591,7 @@ int64_t mojo_str_count_from(char *s, char *sub, int64_t start, int64_t stop) {
     mojo_str_clamp_range(s, &start, &stop);
     if (stop < start) return 0;
     int64_t nlen = (int64_t)strlen(sub);
-    if (nlen == 0) {
-        /* `stop - start` is a BYTE span here; the empty needle matches at every
-         * CHARACTER boundary of the window plus its end. */
-        int64_t chars = 0;
-        for (int64_t k = start; k < stop; k++)
-            if (((unsigned char)s[k] & 0xC0) != 0x80) chars++;
-        return chars + 1;
-    }
+    if (nlen == 0) return stop - start + 1;
     int64_t n = 0;
     for (int64_t i = start; i + nlen <= stop; i++) {
         if (memcmp(s + i, sub, (size_t)nlen) == 0) { n++; i += nlen - 1; }
@@ -7003,12 +6869,6 @@ static char _ikey_lazy[1] = {0};
 
 static char *_slot_key(_DictSlot *sl)
 {
-    if (sl->keykind == 3) {
-        if (!sl->key || sl->key == _ikey_lazy) {
-            sl->key = strdup("None");
-        }
-        return sl->key;
-    }
     if (sl->key == _ikey_lazy) {
         char tmp[_INT_STR_BLOCK];
         char *p = _fmt_int(sl->ikey, tmp);
@@ -7174,24 +7034,13 @@ static _DictSlot *_dict_find_k(MojoDict *d, char *key, int64_t keykind)
 {
     int64_t iv;
     if (keykind == 0 && _canon_int(key, &iv)) return _dict_find_ik(d, iv);
-    if (keykind == 3) {
-        uint64_t mask = (uint64_t)d->cap - 1;
-        uint64_t h = _ik_hash(0) & mask;
-        for (int64_t i = 0; i < d->cap; i++) {
-            int64_t idx = (int64_t)((h + (uint64_t)i) & mask);
-            _DictSlot *sl = &d->slots[idx];
-            if (!sl->key) return sl;
-            if (sl->keykind == 3) return sl;
-        }
-        return NULL;
-    }
     uint64_t mask = (uint64_t)d->cap - 1;      /* cap is a power of two */
-    uint64_t h = _str_hash(key ? key : "") & mask;
+    uint64_t h = _str_hash(key) & mask;
     for (int64_t i = 0; i < d->cap; i++) {
         int64_t idx = (int64_t)((h + (uint64_t)i) & mask);
         _DictSlot *sl = &d->slots[idx];
         if (!sl->key) return sl;          /* empty — insertion point */
-        if (sl->keykind == keykind && strcmp(sl->key ? sl->key : "", key ? key : "") == 0) return sl;
+        if (sl->keykind == keykind && strcmp(sl->key, key) == 0) return sl;
     }
     return NULL;
 }
@@ -7213,16 +7062,12 @@ static void _dict_set_raw_seq_kind_k(MojoDict *d, char *key, int64_t val,
     _DictSlot *sl = _dict_find_k(d, key, keykind);
     if (!sl->key) {
         int64_t iv;
-        if (keykind == 3) {
-            sl->key = _ikey_lazy ? _ikey_lazy : strdup("");
-            sl->keykind = 3;
-            sl->ikey = 0;
-        } else if (keykind == 0 && key && _canon_int(key, &iv)) {
+        if (keykind == 0 && _canon_int(key, &iv)) {
             sl->key = _ikey_lazy;
             sl->keykind = 2;
             sl->ikey = iv;
         } else {
-            sl->key = strdup(key ? key : "");
+            sl->key = strdup(key);
             sl->keykind = keykind;
         }
         sl->seq = (seq >= 0) ? seq : d->next_seq++;
@@ -7273,7 +7118,6 @@ static void _dict_grow(MojoDict *d)
     for (int64_t i = 0; i < old_cap; i++) {
         if (!old[i].key) continue;
         uint64_t j = (old[i].keykind == 2 ? _ik_hash(old[i].ikey)
-                                          : old[i].keykind == 3 ? (_ik_hash(0) & mask)
                                           : _str_hash(old[i].key)) & mask;
         while (d->slots[j].key) j = (j + 1) & mask;
         d->slots[j] = old[i];
@@ -7364,67 +7208,6 @@ void mojo_dict_set_none(MojoDict *d, char *key)
     _dict_set_raw(d, key, 0, 4);
 }
 
-static void _dict_set_none_key_raw(MojoDict *d, int64_t v, int64_t kind)
-{
-    if (!d) return;
-    if (d->used * 2 >= d->cap) _dict_grow(d);
-    _DictSlot *sl = _dict_find_k(d, "", 3);
-    if (!sl->key) {
-        sl->key = _ikey_lazy ? _ikey_lazy : strdup("");
-        sl->keykind = 3;
-        sl->ikey = 0;
-        sl->seq = d->next_seq++;
-        if (sl->seq >= d->next_seq) d->next_seq = sl->seq + 1;
-        d->used++;
-    }
-    sl->val = v;
-    sl->kind = kind;
-    sl->key_from_str = 0;
-}
-
-void mojo_dict_set_none_key(MojoDict *d, int64_t v)
-{
-    _dict_set_none_key_raw(d, v, 0);
-}
-
-void mojo_dict_set_none_key_int(MojoDict *d, int64_t v)
-{
-    _dict_set_none_key_raw(d, v, 0);
-}
-
-void mojo_dict_set_none_key_str(MojoDict *d, char *v)
-{
-    _dict_set_none_key_raw(d, (int64_t)(uintptr_t)v, 2);
-}
-
-void mojo_dict_set_none_key_double(MojoDict *d, double v)
-{
-    int64_t bits;
-    memcpy(&bits, &v, sizeof(bits));
-    _dict_set_none_key_raw(d, bits, 1);
-}
-
-void mojo_dict_set_none_key_bool(MojoDict *d, int v)
-{
-    _dict_set_none_key_raw(d, v ? 1 : 0, 3);
-}
-
-void mojo_dict_set_none_key_none(MojoDict *d)
-{
-    _dict_set_none_key_raw(d, 0, 4);
-}
-
-void mojo_dict_set_none_key_struct(MojoDict *d, void *v)
-{
-    _dict_set_none_key_raw(d, (int64_t)(uintptr_t)v, 5);
-}
-
-void mojo_dict_set_bytes_none_key(MojoDict *d, MojoBytes *key, int64_t v)
-{
-    (void)key;
-    mojo_dict_set_none_key(d, v);
-}
-
 /* A struct stored as a dict VALUE, plus the function that renders it. See
  * MojoDict.val_repr's own comment for why the function travels on the value
  * rather than in a global address->type table.
@@ -7472,17 +7255,6 @@ char *mojo_dict_repr_val(MojoDict *d, int64_t v)
 static _DictSlot *_dict_lookup_k(MojoDict *d, char *key, int64_t keykind)
 {
     if (!d || !d->cap || !d->slots) return NULL;
-    if (keykind == 3) {
-        uint64_t mask = (uint64_t)d->cap - 1;
-        uint64_t h = _ik_hash(0) & mask;
-        for (int64_t i = 0; i < d->cap; i++) {
-            int64_t idx = (int64_t)((h + (uint64_t)i) & mask);
-            _DictSlot *sl = &d->slots[idx];
-            if (!sl->key) return NULL;
-            if (sl->keykind == 3) return sl;
-        }
-        return NULL;
-    }
     /* A NULL key is Python's `None` (or an erased `str` that was never set):
      * no dict holds it -- a NULL `key` field is what marks an EMPTY slot -- so
      * `None in d` / `d.get(None)` are a plain miss, not a `strcmp (…, NULL)`.
@@ -7545,11 +7317,6 @@ char *mojo_dict_repr_slot(MojoDict *d, char *key)
 int mojo_dict_contains(MojoDict *d, char *key)
 {
     return _dict_lookup(d, key) != NULL;
-}
-
-int mojo_dict_contains_none(MojoDict *d)
-{
-    return _dict_lookup_k(d, "", 3) != NULL;
 }
 
 /* ── bytes-keyed dict access ─────────────────────────────────────────────
@@ -8675,7 +8442,6 @@ int64_t mojo_set_iter_val_int(MojoSetIter *it)
 char *mojo_set_iter_val_str(MojoSetIter *it)
 {
     _SetSlot *sl = &it->set->slots[it->order[it->pos]];
-    if (sl->tag == 3) return NULL;
     return sl->val_s ? sl->val_s : "";
 }
 
@@ -9865,9 +9631,6 @@ char *mojo_repr_int(int64_t obj) {
     return strdup(buffer);
 }
 
-typedef struct MojoClassRec MojoClassRec;
-static MojoClassRec *_class_find(int64_t tag);
-
 char *mojo_repr_str(char *s) {
     /* Python repr() of a string is quoted: repr("hi") == "'hi'", with
      * control characters shown as escapes (repr("a\nb") == "'a\\nb'") rather
@@ -9888,26 +9651,6 @@ char *mojo_repr_str(char *s) {
      * own repr() once self-hosted-compiled and diffed against the
      * interpreted stage1 dump. */
     if (!s) s = "";
-    /* Check if this is actually an instance of a run-time class. */
-    {
-        int64_t addr = (int64_t)(intptr_t)s;
-        if (addr > 65536) {
-            int64_t magic = *(int64_t *)(intptr_t)addr;
-            if (magic == MOJO_INSTOBJ_MAGIC) {
-                int64_t tag = *(int64_t *)(intptr_t)(addr + 8);
-                MojoClassRec *c = _class_find(tag);
-                if (c) {
-                    char *cname = *(char **)((char *)c + 8);
-                    if (cname) {
-                        char *buf = malloc(256);
-                        snprintf(buf, 256, "<%s object at 0x%" PRIx64 ">",
-                                 cname, addr);
-                        return buf;
-                    }
-                }
-            }
-        }
-    }
     int has_squote = 0, has_dquote = 0;
     for (const char *c = s; *c; c++) {
         if (*c == '\'') has_squote = 1;
@@ -10519,9 +10262,6 @@ char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
     return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
 }
 
-typedef struct MojoClassRec MojoClassRec;
-static MojoClassRec *_class_find(int64_t tag);
-
 char *mojo_repr_obj(int64_t addr) {
     /* Fallback for anything that isn't a plain scalar or a string: a real
      * struct/list/dict/set pointer. A full Python-style field-by-field repr
@@ -10530,24 +10270,8 @@ char *mojo_repr_obj(int64_t addr) {
      * mojo_read_type_tag above, which is enough for isinstance() but not for
      * reconstructing field names. Format as an address instead of silently
      * printing a decimal number indistinguishable from real data. */
-    static char buffer[256];
+    static char buffer[40];
     if (!addr) return "None";
-    if (addr > 65536) {
-        /* Check if it's an instance of a run-time class. */
-        int64_t magic = *(int64_t *)(intptr_t)addr;
-        if (magic == MOJO_INSTOBJ_MAGIC) {
-            int64_t tag = *(int64_t *)(intptr_t)(addr + 8);
-            MojoClassRec *c = _class_find(tag);
-            if (c) {
-                char *cname = *(char **)((char *)c + 8);
-                if (cname) {
-                    snprintf(buffer, sizeof(buffer), "<%s object at 0x%" PRIx64 ">",
-                             cname, addr);
-                    return buffer;
-                }
-            }
-        }
-    }
     snprintf(buffer, sizeof(buffer), "<object at 0x%" PRIx64 ">", addr);
     return buffer;
 }
@@ -16184,13 +15908,6 @@ int mojo_cstr_region_eq_n(char *s, int64_t slen, int64_t start, int64_t stop,
                           char *needle)
 {
     if (!s || !needle) return s == needle;
-    {
-        int64_t reach = (start < 0 || stop < 0 || stop == MOJO_SLICE_STOP_OMITTED)
-                            ? slen : (stop < slen ? stop : slen);
-        if (!_prefix_is_plain_ascii(s, reach)
-                && mojo_str_codepoint_len(s) != (int64_t)strlen(s))
-            return _cstr_region_eq_utf8(s, start, stop, needle);
-    }
     if (start < 0 || stop < 0 || stop == MOJO_SLICE_STOP_OMITTED) {
         if (start < 0) start += slen;
         if (stop  < 0) stop  += slen;
@@ -16720,50 +16437,8 @@ static int _class_lookup(int64_t tag, const char *name, int64_t *out, int depth)
     if (!c || depth > 32) return 0;
     if (mojo_dict_contains(c->attrs, (char *)name)) { *out = mojo_dict_get_int(c->attrs, (char *)name); return 1; }
     for (int i = 0; i < _n_classattr_readers; i++)
-        if (_classattr_readers[i](tag, (char *)name, out)) {
-            return 1;
-        }
-    for (int i = 0; i < c->nbases; i++) {
-        if (_class_lookup(c->bases[i], name, out, depth + 1)) {
-            return 1;
-        }
-    }
-    /* Fallback: look up mangled method names in static classes/bases */
-    if (name) {
-        /* Try common mangling patterns */
-        char buf[512];
-        if (c->name) {
-            /* Pattern: ClassName___methodname__ or ClassName_methodname */
-            snprintf(buf, sizeof(buf), "%s___%s__", c->name, name);
-            void *fp = dlsym(RTLD_DEFAULT, buf);
-            if (!fp) {
-                snprintf(buf, sizeof(buf), "%s___%s", c->name, name);
-                fp = dlsym(RTLD_DEFAULT, buf);
-            }
-            if (!fp) {
-                snprintf(buf, sizeof(buf), "%s_%s", c->name, name);
-                fp = dlsym(RTLD_DEFAULT, buf);
-            }
-            if (fp) {
-                *out = (int64_t)(intptr_t)fp;
-                return 1;
-            }
-        }
-        /* Also try global search for method name patterns */
-        const char *prefixes[] = {"Flag", "IntFlag", "Enum", "EnumMeta", "Base", 0};
-        for (int pi = 0; prefixes[pi]; pi++) {
-            snprintf(buf, sizeof(buf), "%s___%s__", prefixes[pi], name);
-            void *fp = dlsym(RTLD_DEFAULT, buf);
-            if (!fp) {
-                snprintf(buf, sizeof(buf), "%s_%s", prefixes[pi], name);
-                fp = dlsym(RTLD_DEFAULT, buf);
-            }
-            if (fp) {
-                *out = (int64_t)(intptr_t)fp;
-                return 1;
-            }
-        }
-    }
+        if (_classattr_readers[i](tag, (char *)name, out)) return 1;
+    for (int i = 0; i < c->nbases; i++) if (_class_lookup(c->bases[i], name, out, depth + 1)) return 1;
     return 0;
 }
 int mojo_class_hasattr(int64_t tag, char *name)
@@ -16848,17 +16523,8 @@ static int64_t _call_words(int64_t fn, int64_t n, const int64_t *a)
 }
 int64_t mojo_classobj_call(int64_t cls, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6)
 {
-    int64_t ctag = ((MojoClassObj *)(intptr_t)cls)->tag;
-    MojoClassRec *rc = _class_find(ctag);
-    if (rc && rc->meta) {
-        int64_t call_fn;
-        if (_class_lookup(rc->meta, "__call__", &call_fn, 0)) {
-            int64_t a[8] = { cls, a0, a1, a2, a3, a4, a5, a6 };
-            return _call_words(call_fn, n + 1, a);
-        }
-    }
     MojoInstObj *o = (MojoInstObj *)malloc(sizeof *o);
-    o->magic = MOJO_INSTOBJ_MAGIC; o->tag = ctag;
+    o->magic = MOJO_INSTOBJ_MAGIC; o->tag = ((MojoClassObj *)(intptr_t)cls)->tag;
     _pr_add(&_reg_instobj, (uint64_t)(uintptr_t)o);
     int64_t self = (int64_t)(intptr_t)o, init;
     if (_class_lookup(o->tag, "__init__", &init, 0)) {
@@ -16887,16 +16553,9 @@ int64_t mojo_rtobj_method_call(int64_t recv, char *name, int64_t n, int64_t a0, 
         if (!_class_lookup(((MojoClassObj *)(intptr_t)recv)->tag, name, &fn, 0)) {
             /* a method of the METACLASS: bound to the class, which goes first as `self` */
             MojoClassRec *rc = _class_find(((MojoClassObj *)(intptr_t)recv)->tag);
-            if (rc) {
-                if (rc->meta && _class_lookup(rc->meta, name, &fn, 0)) {
-                    a[0] = recv; a[1] = a0; a[2] = a1; a[3] = a2; a[4] = a3; a[5] = a4; a[6] = a5; a[7] = a6;
-                    return _call_words(fn, n + 1, a);
-                }
-                if (!rc->meta && !strcmp(name, "__prepare__")) {
-                    /* default metaclass type.__prepare__ returns empty dict */
-                    int64_t d = (int64_t)(intptr_t)mojo_dict_new();
-                    return d;
-                }
+            if (rc && rc->meta && _class_lookup(rc->meta, name, &fn, 0)) {
+                a[0] = recv; a[1] = a0; a[2] = a1; a[3] = a2; a[4] = a3; a[5] = a4; a[6] = a5; a[7] = a6;
+                return _call_words(fn, n + 1, a);
             }
             mojo_raise_attribute_error(name);
             return 0;
@@ -16966,24 +16625,6 @@ void mojo_type_add_base(int64_t cls, int64_t base)
 void mojo_classobj_setattr(int64_t cls, char *name, int64_t word)
 {
     mojo_class_setattr(mojo_classobj_tag(cls), name, word);
-    /* Call __set_name__ on descriptors assigned to dynamic/runtime class attributes */
-    {
-        int saved = _mojo_getattr_nothrow;
-        _mojo_getattr_nothrow = 1;
-        _mojo_getattr_missed = 0;
-        (void)mojo_obj_getattr((void *)(intptr_t)word, "__set_name__");
-        if (!_mojo_getattr_missed) {
-            /* owner is the class object/handle */
-            int64_t owner = cls;
-            if (mojo_is_instobj(word) || mojo_is_classobj(word)) {
-                mojo_rtobj_method_call(word, "__set_name__", 2, owner, (int64_t)(intptr_t)name, 0, 0, 0, 0, 0);
-            } else {
-                mojo_rtobj_method_call(word, "__set_name__", 2, owner, (int64_t)(intptr_t)name, 0, 0, 0, 0, 0);
-            }
-        }
-        _mojo_getattr_nothrow = saved;
-        _mojo_getattr_missed = 0;
-    }
 }
 /* `type(name, bases, ns)` with COMPUTED bases: every element of the list `bases` is a class
  * word (a handle from `mojo_type_new`, or a static class's tag), added in order. */
@@ -16999,59 +16640,10 @@ void mojo_type_fill_from_dict(int64_t cls, MojoDict *ns)
 {
     if (!ns) return;
     int64_t *order = mojo_dict_order_indices(ns);
-    if (!order) return;
-    /* Count occupied slots in the dict */
-    int64_t n = 0;
-    for (int64_t i = 0; i < ns->cap; i++) {
-        if (ns->slots[i].key) n++;
-    }
-    if (n == 0) {
-        free(order);
-        return;
-    }
-    for (int64_t oi = 0; oi < n && oi < ns->used; oi++) {
-        int64_t idx = order[oi];
-        if (idx < 0 || idx >= ns->cap) continue;
-        _DictSlot *s = &ns->slots[idx];
-        if (!s->key) continue;
-        int64_t w;
-        if (s->kind == 1) {
-            w = mojo_box_from_double(mojo_double_from_bits(s->val));
-        } else if (s->kind == 2) {
-            /* char * string value */
-            char *str = (char *)(uintptr_t)s->val;
-            if (str) mojo_str_register(str);
-            w = s->val;
-        } else if (s->kind == 3) {
-            /* bool */
-            w = s->val ? 1 : 0;
-        } else if (s->kind == 4) {
-            /* None */
-            w = 0;
-        } else {
-            w = s->val;
-        }
+    for (int64_t oi = 0; oi < ns->used; oi++) {
+        _DictSlot *s = &ns->slots[order[oi]];
+        int64_t w = s->kind == 1 ? mojo_box_from_double(mojo_double_from_bits(s->val)) : s->val;
         mojo_classobj_setattr(cls, _slot_key(s), w);
-        /* Call __set_name__ on descriptors assigned to dynamic class attributes */
-        {
-            int saved = _mojo_getattr_nothrow;
-            _mojo_getattr_nothrow = 1;
-            _mojo_getattr_missed = 0;
-            (void)mojo_obj_getattr((void *)(intptr_t)w, "__set_name__");
-            if (!_mojo_getattr_missed) {
-                char *name = _slot_key(s);
-                /* Try to call as method */
-                if (mojo_is_instobj(w) || mojo_is_classobj(w)) {
-                    mojo_rtobj_method_call(w, "__set_name__", 2, cls, (int64_t)(intptr_t)name, 0, 0, 0, 0, 0);
-                } else {
-                    /* For other object types, try to get the method and call it */
-                    /* As a fallback, attempt rtobj method call */
-                    mojo_rtobj_method_call(w, "__set_name__", 2, cls, (int64_t)(intptr_t)name, 0, 0, 0, 0, 0);
-                }
-            }
-            _mojo_getattr_nothrow = saved;
-            _mojo_getattr_missed = 0;
-        }
     }
     free(order);
 }
@@ -17065,23 +16657,12 @@ int mojo_classobj_lookup(void *obj, char *attr, int64_t *out)
     if (_class_lookup(((MojoClassObj *)obj)->tag, attr, out, 0)) return 1;
     /* a miss on the class and its bases: the METACLASS answers - its own attributes first,
      * then `Meta.__getattr__(cls, name)` (CPython's `type.__getattribute__` order). */
-    if (c) {
-        int64_t mtag = c->meta;
-        if (mtag) {
-            if (_class_lookup(mtag, attr, out, 0)) return 1;
-            int64_t ga, a[2] = { (int64_t)(intptr_t)obj, (int64_t)(intptr_t)attr };
-            if (strcmp(attr, "__getattr__") && _class_lookup(mtag, "__getattr__", &ga, 0)) {
-                *out = _call_words(ga, 2, a);
-                return 1;
-            }
-        } else {
-            /* default metaclass is type; __prepare__ and other type attributes */
-            if (!strcmp(attr, "__prepare__")) {
-                /* type.__prepare__ returns an empty dict */
-                int64_t d = (int64_t)(intptr_t)mojo_dict_new();
-                *out = d;
-                return 1;
-            }
+    if (c && c->meta) {
+        if (_class_lookup(c->meta, attr, out, 0)) return 1;
+        int64_t ga, a[2] = { (int64_t)(intptr_t)obj, (int64_t)(intptr_t)attr };
+        if (strcmp(attr, "__getattr__") && _class_lookup(c->meta, "__getattr__", &ga, 0)) {
+            *out = _call_words(ga, 2, a);
+            return 1;
         }
     }
     return 0;

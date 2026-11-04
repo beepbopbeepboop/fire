@@ -707,22 +707,6 @@ CASES = [
      "    printf(\"sites=%d counted=%d|\", a, b)\n"
      "    return a + b\n",
      2, "sites=1 counted=1|"),
-    # Runtime-length list grown by appending in a while loop with a runtime
-    # bound: must use a heap growable blob rather than a fixed frame reservation.
-    ("list_append_growable_while_runtime_bound",
-     "def main():\n"
-     "    var n = 5\n"
-     "    var xs = []\n"
-     "    var i = 0\n"
-     "    while i < n:\n"
-     "        xs.append(i)\n"
-     "        i = i + 1\n"
-     "    if len(xs) != 5:\n"
-     "        return 1\n"
-     "    if xs[0] != 0 or xs[4] != 4:\n"
-     "        return 2\n"
-     "    return 0\n",
-     0, None),
 
     # ── the gimple backend's C runtime, refused by name ───────────────────
     #
@@ -2096,7 +2080,7 @@ CASES = [
     # disappearance of is indistinguishable from a limit nobody re-checked.
     #
     # What closes each one, and what it costs, is in
-    # bugs/FORMAL_known_limits.md §2 and §3. The short version: the MLIR one
+    # bugs/formal/FORMAL_known_limits.md §2 and §3. The short version: the MLIR one
     # cannot be closed on this path at all (there is no MLIR in a freestanding
     # image for the template to become); the other three are shape and
     # comptime-folding rules that a fuller value model would replace.
@@ -2113,7 +2097,7 @@ CASES = [
     # conversion.
     #
     # A fifth entry was here until 2026-09-30 — `__mlir_op.`…`[n]` "builds and
-    # segfaults" — and it was TRUE when written (bugs/FORMAL_known_limits.md
+    # segfaults" — and it was TRUE when written (bugs/formal/FORMAL_known_limits.md
     # §2.2 measured exit 139 on both architectures) and stopped being true
     # before this note was corrected. It is now refused by
     # `model.mlir_dialect_refusal` on both, and is pinned where the refusal
@@ -2138,7 +2122,7 @@ CASES = [
     # already pinned by `struct_ctor_args_both_backends` (same needle, both
     # backends, same refusal) and a second case asserting the same thing is a
     # parallel implementation of a pin that exists, not extra coverage. It is
-    # listed in bugs/FORMAL_known_limits.md §3 with that case's name.
+    # listed in bugs/formal/FORMAL_known_limits.md §3 with that case's name.
     # A `comptime` binding whose right-hand side mentions a RUNTIME parameter
     # cannot be folded, and this path has no comptime evaluator that could
     # resolve it. Guessing a value would be a fabricated answer.
@@ -2149,7 +2133,7 @@ CASES = [
     # lowering at all and says "unsupported statement ComptimeVarStmt". Both
     # are honest, and the shared-text rule that `refuse:` enforces cannot
     # apply — but the DRIFT is real and is recorded in
-    # bugs/FORMAL_known_limits.md §3 as arch drift, not as agreement.
+    # bugs/formal/FORMAL_known_limits.md §3 as arch drift, not as agreement.
     ("limit_comptime_over_a_runtime_parameter",
      "def poly(coefficients):\n"
      "    comptime num_coefficients = len(coefficients)\n"
@@ -3109,7 +3093,7 @@ CASES = [
     # `~s` lexes as `s` and the parser never sees a UnaryOp at all. The model's
     # `~` refusal is landed and both backends already ask for it, so the day
     # the lexer's OP group gains a `~` the refusal fires with no further work;
-    # see bugs/FORMAL_string_value_model.md for the measured consequence today
+    # see bugs/formal/FORMAL_string_value_model.md for the measured consequence today
     # (`~s` returns the POINTER, 77693904 on arm64 and 74486761 on x86-64 for
     # the same source, and the `~` is nowhere in the AST).
     ("str_unary_negation_refused",
@@ -3336,7 +3320,7 @@ CASES = [
     #
     # `List.clear` is `count = 0`: one store to the word `len` of the same
     # receiver reads, with no capacity, no element type and no traversal, which
-    # is why it lowers where `append` cannot (`bugs/FORMAL_binary_heap_mojo_
+    # is why it lowers where `append` cannot (`bugs/formal/FORMAL_binary_heap_mojo_
     # after_the_len_value.md` \u00a73 row 1, which is this construct in the
     # stdlib).  The two numbers are BEFORE and AFTER because a `clear` that did
     # nothing would still print `0` for the second one: the first is what makes
@@ -4262,7 +4246,7 @@ BYREF_REFUSALS = [
     # not an `Int` parameter: this is the shape
     # `ownership_check.py`/`mojo/backend_gimple/cpp_core.py` write
     # (`getattr(node, f.name)`) and the one
-    # `bugs/FORMAL_dataclass_runtime_reflection.md` is about.
+    # `bugs/formal/FORMAL_dataclass_runtime_reflection.md` is about.
     ("byref_refuse_getattr_of_a_computed_name",
      "struct P:\n"
      "    var a: Int\n"
@@ -6595,8 +6579,8 @@ BOTH_ARCH_CASES = [
     # In this group rather than beside the truthiness rows it is in because the
     # kind table is ONE `formal/model.py` reader both emitters consult, so the
     # two machines cannot disagree about it, and the row is about that reader
-    # rather than about an arm64 instruction: the parameter-kind sweep note
-    # recorded the same reproducer refused as "len(s) is len() of a value
+    # rather than about an arm64 instruction: `bugs/formal/FORMAL_sweep_singles_second_half.md`
+    # §4 recorded the same reproducer refused as "len(s) is len() of a value
     # classified as 'int', and an integer has no length", and said the row was
     # open. It is not, and this is the row that says so on BOTH machines.
     ("len_of_an_unannotated_parameter_from_a_string_literal",
@@ -7197,7 +7181,7 @@ BOTH_ARCH_CASES = [
     # 46 = `scaled(Reg.RSP, 3)`'s 36, `is_bp(Reg.RBP)`'s 10, `is_bp(Reg.RAX)`'s
     # 0 — under 256 because the exit status is a byte, and a weighted sum wide
     # enough to overflow it would compare against `expected & 0xFF` and invent a
-    # mismatch (the lesson `bugs/FORMAL_arm64_instruction_coverage.md` §"Every
+    # mismatch (the lesson `bugs/formal/FORMAL_arm64_instruction_coverage.md` §"Every
     # expected value must fit in a byte" records, having been learned there).
     # `is_bp` is a COMPARISON and `scaled` is arithmetic on purpose: the rewrite
     # has to put the bare name where an operand goes, and a row that only
@@ -8338,7 +8322,7 @@ BOTH_ARCH_CASES = [
     # calling the next, with no call back into anything already on the stack.
     # Unbounded depth needs a cycle, so a chain like this walked straight past
     # the floor — and the corpus is already inside it, which is what
-    # guarding an acyclic chain across the stack floor spent its life
+    # `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` spent its life
     # measuring: `python3 tools/formal_call_depth_census.py` puts the deepest
     # single image in this repository at 89 frames against the 60 an arm64
     # budget affords (`formal/arm64_codegen.py`, and 78 for
@@ -8383,7 +8367,7 @@ BOTH_ARCH_CASES = [
     #
     # The two rules above are a predicate over a body. This one is a fact about
     # the IMAGE, and it is what closes the residual
-    # guarding an acyclic chain across the stack floor measured: the
+    # `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` measured: the
     # guard's floor is written by the first guarded function to RUN, so a guard
     # on only some prologues puts the floor wherever the program happens to reach
     # one first, and a chain of unguarded functions below that point is under a
@@ -8685,7 +8669,7 @@ BOTH_ARCH_CASES = [
     # The PROOF layer modelled `~x` as `x = 0` -- Python's `not`, not its `~` --
     # so the source model of every program using `~` was a model of a different
     # program, on both backends at once, and `eval_eq_mojo` did not catch it
-    # because `evalExpr` made the same mistake (`bugs/FORMAL_the_semantic_model_
+    # because `evalExpr` made the same mistake (`bugs/formal/FORMAL_the_semantic_model_
     # renders_a_bitwise_not_as_a_logical_one.md`). The MACHINE half was right all
     # along, which is what makes these rows the ones that had to be written: the
     # fix was a model fix, and a model fix with no executed case beside it is a
@@ -9165,23 +9149,15 @@ BOTH_ARCH_CASES = [
      "def main():\n"
      "    printf(\"[%s]\", f())\n"
      "    return 0\n", 0, "[n=7]"),
-    ("both_arch_an_fstring_with_constant_fields_folds",
-     "def main():\n"
-     "    var s = f\"n={5}\"\n"
-     "    printf(\"[%s]\", s)\n"
-     "    return 0\n", 0, "[n=5]"),
-    ("both_arch_an_fstring_with_multiple_constant_fields_folds",
-     "def main():\n"
-     "    var s = f\"{\'a\'}b{None}\"\n"
-     "    printf(\"[%s]\", s)\n"
-     "    return 0\n", 0, "[abNone]"),
     ("fstring_parameter_default_with_a_field_is_refused_like_a_statement_site",
      "def f(x=f\"n={5}\"):\n"
      "    return x\n"
      "\n"
      "def main():\n"
-     "    printf(\"[%s]\", f())\n"
-     "    return 0\n", 0, "[n=5]"),
+     "    print(f())\n"
+     "    return 0\n",
+     "refuse:is refused on this path: its value is its INTERPOLATED text, and "
+     "this path has no buffer to compose one in", None),
     # ── a double at the `Int` conversion, where the two machines once
     #    answered with two different programs ──────────────────────────────────
     #
@@ -9259,64 +9235,6 @@ BOTH_ARCH_CASES = [
      "    var z = w * 0.0\n"
      "    printf(\"n=%d\", Int(z))\n"
      "    return 0\n", 0, "n="),
-    # ── `String(unsafe_from_utf8_ptr=p)` over a DECLARED byte pointer, on both
-    #    machines ────────────────────────────────────────────────────────────
-    #
-    # The string value model's constructor check reads the operand's KIND, and
-    # a `Pointer[UInt8]` the source declared — a parameter or a local — is in no
-    # kind vocabulary (`string_names` holds annotation spellings, and `Pointer`
-    # is not one: a `Pointer[Int64]` is not text, so the pointee decides), so
-    # the reader answered the "a word is an integer" DEFAULT rather than a
-    # classification, and the check used to read that default as positive
-    # evidence and REFUSE the conversion on both architectures — a false
-    # refusal, because on this path a string IS a `char *` and the conversion
-    # is the identity on a byte pointer. The keyword in the call is the
-    # source's own statement that the operand is a raw pointer, and
-    # `model.string_conversion_pointer_intent` is the one reader of that
-    # spelling; the exemption it grants is what these rows pin, and it is
-    # asked from both backends so the two cannot drift on which keyword means
-    # a pointer.
-    #
-    # The read-back is the assertion the bug asks for: the string read back
-    # must EQUAL what was written, so a misclassification cannot pass by
-    # reading an address as a `char *` — an identity that handed a later step
-    # an address the source never wrote would print garbage or die in
-    # `printf`, not exit 0 with the text. The bytes are written one at a time
-    # ('h', 'i', NUL) into a `malloc` the source owns, compared with `!=`
-    # before being printed, so both halves of the read-back are checked at run
-    # time on each architecture.
-    ("both_arch_string_of_a_declared_byte_pointer_parameter_reads_back_"
-     "what_was_written",
-     "def f(p: Pointer[UInt8]) -> String:\n"
-     "    return String(unsafe_from_utf8_ptr=p)\n"
-     "\n"
-     "def main() -> Int:\n"
-     "    var b: Pointer[UInt8] = malloc(8)\n"
-     "    b.value() = 104\n"
-     "    b[1] = 105\n"
-     "    b[2] = 0\n"
-     "    var s = f(b)\n"
-     "    if s != \"hi\":\n"
-     "        return 1\n"
-     "    printf(\"s=%s\", s)\n"
-     "    return 0\n", 0, "s=hi"),
-    # The LOCAL spelling of the same conversion. The parameter above gets its
-    # annotation from the signature, the local from its declaration, and the
-    # two reach the kind reader by different routes (the parameter's seeding
-    # loop versus the body's binding scan), so the bug was measured on both and
-    # the rows are two rather than one.
-    ("both_arch_string_of_a_declared_byte_pointer_local_reads_back_"
-     "what_was_written",
-     "def main() -> Int:\n"
-     "    var b: Pointer[UInt8] = malloc(8)\n"
-     "    b.value() = 104\n"
-     "    b[1] = 105\n"
-     "    b[2] = 0\n"
-     "    var s = String(unsafe_from_utf8_ptr=b)\n"
-     "    if s != \"hi\":\n"
-     "        return 1\n"
-     "    printf(\"s=%s\", s)\n"
-     "    return 0\n", 0, "s=hi"),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before
@@ -9334,7 +9252,7 @@ BOTH_ARCH_CASES = [
 # which is false in every clause: `flush` is neither `sep` nor `end`, it is not
 # baked into anything, and it is the commonest keyword in THIS repository's own
 # source — nine of the sixty items `tools/formal_proof_breadth.py` measures land
-# on it (the largest formal case in the census
+# on it (`bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` §0.2's largest
 # `codegen-refused` family), every one of them the same `print(…, flush=True)`
 # in a test's `check` helper.
 #
@@ -9814,7 +9732,7 @@ ASSIGNED_TYPE_REFUSALS = [
 #
 # The second evidence source for `model.struct_field_declared_type`, and the one
 # that makes a class which assigns its fields in `__init__` and declares none a
-# lowerable program rather than a refusal by name. `bugs/FORMAL_class_assigns_its_
+# lowerable program rather than a refusal by name. `bugs/formal/FORMAL_class_assigns_its_
 # fields_in_init.md` is the finding and the measurement; what is here is the
 # evidence that the change is both sound and narrow.
 #
@@ -11778,35 +11696,6 @@ CONSTRUCTION_CASES = [
      "        return 50 + last\n"
      "    if src.get_v() != 40:\n"
      "        return 60 + src.get_v()\n"
-     "    return 7\n", 7, None),
-    # Copy construction from a call result returning the same struct type
-    # (reflection/type information driven copy construction).
-    ("constr_copy_from_call_result",
-     "struct Pair:\n"
-     "    var a: Int\n"
-     "    var b: Int\n"
-     "\n"
-     "    fn get_a(self) -> Int:\n"
-     "        return self.a\n"
-     "\n"
-     "    fn get_b(self) -> Int:\n"
-     "        return self.b\n"
-     "\n"
-     "def make() -> Pair:\n"
-     "    return Pair(3, 4)\n"
-     "\n"
-     "def copyit() -> Pair:\n"
-     "    var q = Pair(make())\n"
-     "    q.a = q.a + 10\n"
-     "    return q\n"
-     "\n"
-     "def main(n: Int) -> Int:\n"
-     "    var r = make()\n"
-     "    var q = copyit()\n"
-     "    if r.a != 3 or r.b != 4:\n"
-     "        return 10\n"
-     "    if q.a != 13 or q.b != 4:\n"
-     "        return 20\n"
      "    return 7\n", 7, None),
     # (7) A ONE-FIELD STRUCT with an argument — the value collapse, and the case
     # that shows `S(x)` on a value is not a copy at all: there is no block, the
@@ -14007,7 +13896,7 @@ SUBSCRIPT_CASES = [
     # A single-index read, with the index in a VARIABLE rather than a literal
     # because that is the shape nothing in formal/examples covers: all 65 of
     # them index with a literal, which is why an arm64 proof gap on
-    # `a[i]` (see bugs/FORMAL_arm64_known_proof_gaps.md) went unregistered.
+    # `a[i]` (see bugs/formal/FORMAL_arm64_known_proof_gaps.md) went unregistered.
     # The exit status is the assertion: 20, not a frame address.
     ("sub_single_index_var",
      "def main(n):\n"
@@ -15075,7 +14964,7 @@ WAVE6_TRUTHY_CASES = [
      "    return 0\n", 0, "0 1"),
 
     # `len()` OF THE SAME PARAMETER, which is the reader the identity test does
-    # not answer. The parameter-kind sweep note recorded a
+    # not answer. `bugs/formal/FORMAL_sweep_singles_second_half.md` §4 recorded a
     # four-line reproducer refused as "len(s) is len() of a value classified as
     # 'int', and an integer has no length", and said the row was still open; it
     # is not — the parameter's kind reaches `len()` through the same
@@ -15088,7 +14977,7 @@ WAVE6_TRUTHY_CASES = [
 
     # ── the BLOB row of the same table ──
     #
-    # `bugs/FORMAL_len_of_a_list_parameter_is_refused_though_the_same_parameter_
+    # `bugs/formal/FORMAL_len_of_a_list_parameter_is_refused_though_the_same_parameter_
     # subscripts.md`: `def total(xs): … len(xs) …` called `total([1, 2, 3, 4])`
     # was REFUSED on both architectures with "len(xs) is len() of a value
     # classified as 'int', and an integer has no length" — about a list the same
@@ -15921,7 +15810,7 @@ def build_formal(src, out, backend=None, tmpdir=None, env=None):
 #: truncated the same), and every needle the rows carried was early in the
 #: text, so the model's own sentence is what pins the ending.
 _APPEND_OVERFLOW_TEXT = __import__(
-    "formal.model", fromlist=["model"]).list_append_overflow_message("xs", 32)
+    "formal.model", fromlist=["model"]).list_append_overflow_message("xs", 1)
 
 STDERR_CASES = [
     # `xs.append` in a loop, past the capacity the append-site scan reserved.
@@ -15951,12 +15840,12 @@ STDERR_CASES = [
      "def main(n):\n"
      "    xs = []\n"
      "    var i = 0\n"
-     "    while i < 2000:\n"
+     "    while i < 3:\n"
      "        xs.append(7)\n"
      "        i = i + 1\n"
      "    printf(\"n=%d\", len(xs))\n"
      "    return 0\n",
-     1, ["list.append overflowed 'xs'", "append SITES",
+     1, ["list.append overflowed 'xs'", "its capacity is 1", "append SITES",
          _APPEND_OVERFLOW_TEXT]),
     # **THE ADVICE IS A PROMISE, AND THIS ROW IS WHAT KEEPS IT.** The overflow
     # message used to end "…or move the appends into a function of their own so
@@ -16659,7 +16548,7 @@ def reduced_stack_reads_the_limit(tmpdir, verbose=False):
     """The threshold DEPENDS on the limit: one build, two limits, two answers.
 
     The `reduced_stack_cases` group above pins the outcome at one limit; this
-    pins the dependence. `bugs/FORMAL_arm64_the_compiler_trap_recording_is_
+    pins the dependence. `bugs/formal/FORMAL_arm64_the_compiler_trap_recording_is_
     lost_and_the_stack_guards_getrlimit_is_a_program_call.md` is the
     model/proof side of the same read on the merged tree (the branch named the
     same subject `FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_
@@ -17060,19 +16949,9 @@ POINTER_DEREF_CASES = [
      "    var mid = at(s, 1)\n"
      "    if read_back(mid, 0) != 5786930140093827657:      # …b'IJKLMNOP'\n"
      "        return 1\n"
-     "    if read_back(mid, 1) != 5208208757389214273:      # …b'ABCDEFGH'\n"
-     "        return 2\n"
-     "    return 0\n", 0, None),
-    # Chained pointer arithmetic must scale at each step for wide pointees.
-    ("deref_offset_scales_in_chained_arithmetic",
-     "def read_at(p: Pointer[Int64], k: Int) -> Int:\n"
-     "    var q = (p + 1) + k\n"
-     "    return Int(q.value())\n"
-     "def main(n: Int) -> Int:\n"
-     "    var s = \"ABCDEFGHIJKLMNOPQRSTUVWX\"\n"
-     "    if read_at(s, 1) != 6365651522798441041:      # …b'QRSTUVWX'\n"
-     "        return 1\n"
-     "    return 0\n", 0, None),
+      "    if read_back(mid, 1) != 5208208757389214273:      # …b'ABCDEFGH'\n"
+      "        return 2\n"
+      "    return 0\n", 0, None),
 
     # ── `p[i]` reads at the POINTEE'S width, the same width `p.value()` does ─
     #
@@ -17921,7 +17800,7 @@ POINTER_DEREF_REFUSALS = [
     # the needle pins that, because the sentence used to name the address's
     # BASE instead and so claimed that a `p` declared `Pointer[Int64]` "is not
     # a pointer to a 8-byte element", which is false and tells the reader to
-    # declare the one thing that is already declared.  (`bugs/FORMAL_pointer_
+    # declare the one thing that is already declared.  (`bugs/formal/FORMAL_pointer_
     # value_model.md` §9's first item, fixed; its "remaining half".)
     ("deref_refuse_offset_with_an_undeclared_offset",
      "def read_at(p: Pointer[Int64], k) -> Int:\n"
@@ -20669,7 +20548,7 @@ WAVE6_NAME_CASES = [
      "refuse:is a field access through 'h'", None),
     # ── ONE construct, THREE spellings, ONE refusal ──
     #
-    # `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
+    # `bugs/formal/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
     # function.md` is the census finding that a class is not a subject: three of
     # round 2's 78 items were `codegen-refused` on BOTH machines for three
     # different reasons, and one of them was `m.x += 1` — an AUGMENTED
@@ -22632,7 +22511,7 @@ EQ_DISPATCH_CASES = [
     # first line, so CPython raises UnboundLocalError and the program has no
     # number.  What this path did was read the local's uninitialised register —
     # 78152773 on arm64 and 11 on x86-64 from identical source.  It is also where
-    # bugs/FORMAL_local_shadows_module_global's proposed fix is corrected:
+    # bugs/formal/FORMAL_local_shadows_module_global's proposed fix is corrected:
     # making the gate order-dependent would answer 6, a number CPython never
     # produces.
     ("a_local_read_before_its_assignment_is_refused",
@@ -23236,7 +23115,7 @@ TYPE_ARGUMENT_LIST_CASES = [
     # …and it is now an ANSWER rather than a refusal, which is what the rows
     # above are still refusals for. `struct Box[T: AnyType, U: AnyType]` is a
     # template the module DECLARES and APPLIES, which
-    # `bugs/FORMAL_generic_monomorph_scope.md` §9 made a thing this path
+    # `bugs/formal/FORMAL_generic_monomorph_scope.md` §9 made a thing this path
     # instantiates rather than refusing by name ("`Box[…](…) calls a name this
     # unit does not compile"). So `Box[Int, Int]` is two concrete type
     # arguments, the instantiation is emitted, and the program computes 7 —
@@ -23324,7 +23203,7 @@ TYPE_ARGUMENT_LIST_CASES = [
 # `Box[Int, Int]` was refused WITHOUT "whose index is a tuple" — the sentence
 # that describes a container lookup, which cannot happen when the base is a
 # TYPE. The program no longer refuses at all (§9 of
-# `bugs/FORMAL_generic_monomorph_scope.md`: the module both declares and
+# `bugs/formal/FORMAL_generic_monomorph_scope.md`: the module both declares and
 # applies the template, so the instantiation is emitted and `Box[Int, Int](7)`
 # computes 7), so there is no sentence to be right or wrong about. Its twin
 # assertion is not lost with it: the row above it is the same bracket over the
@@ -23447,7 +23326,7 @@ INT_PARSE_REFUSALS = [
 REFUSAL_CASES = [
     # A FUNCTION NAME in a value position, which is the first thing any
     # first-class-function work hits and the reason `functools` is not a host
-    # module.
+    # module (`bugs/formal/FORMAL_functools_is_unbuildable_as_a_host_module.md`).
     # The refusal used to be the unresolved-NAME one, whose reason clause is
     # "the register allocator collected no home for it, so the emitter and the
     # allocation walk disagree about this function's locals" — false in every
@@ -24085,7 +23964,7 @@ REFUSAL_CASES = [
 #     answered on both, by the same two shared predicates rather than by a third
 #     private copy of the flattening.
 #
-# the `2026-09-30` round of `bugs/FORMAL_sweep_work_map.md` §3.1 is where the "worth 41 files
+# the `2026-09-30` round of `bugs/formal/FORMAL_sweep_work_map.md` §3.1 is where the "worth 41 files
 # and 0 coverage" is measured: `binary_heap.mojo` is behind two further limits
 # (premise B2, and an `Optional` niche), so all 41 files stay refused and the
 # value of this fix is the diagnostic and the construct, not the count.
@@ -24576,11 +24455,11 @@ SOLE_FIELD_CALLEE_REFUSALS = [
     # -- was reported as a field READ of a method, with the message "Call it
     # (`self.clear(...)`), which is a receiver and a call and lowers" about an
     # expression that IS already a call.  This is the construct
-    # `bugs/FORMAL_binary_heap_mojo_after_the_len_value.md` §3 row 0a names, and
+    # `bugs/formal/FORMAL_binary_heap_mojo_after_the_len_value.md` §3 row 0a names, and
     # it is the file's reported verdict.
     #
     # The expectation WAS the METHOD-TABLE refusal and is now a BUILD, because
-    # `List.clear` landed (row 1 of `bugs/FORMAL_binary_heap_mojo_after_the_len_
+    # `List.clear` landed (row 1 of `bugs/formal/FORMAL_binary_heap_mojo_after_the_len_
     # value.md`'s table).  Two things in the note above were corrected by that
     # landing, and both are worth the row staying here as a build rather than
     # moving out of the group: the collapsed receiver is NOT one "the emitter
@@ -24692,7 +24571,7 @@ SOLE_FIELD_CALLEE_CASES = [
     # -- was reported as a field READ of a method, with the message "Call it
     # (`self.clear(...)`), which is a receiver and a call and lowers" about an
     # expression that IS already a call
-    # (`bugs/FORMAL_binary_heap_mojo_after_the_len_value.md` §3 row 0a).
+    # (`bugs/formal/FORMAL_binary_heap_mojo_after_the_len_value.md` §3 row 0a).
     #
     # It sat in the REFUSALS table for two rounds, on the METHOD-TABLE
     # refusal: with `_data` collapsed into `self`, the emitter was asked for
@@ -25188,7 +25067,7 @@ TYPE_APPLICATION_REFUSALS = [
 
 # ── a TYPE as a VALUE ──────────────────────────────────────────────────────
 #
-# `bugs/FORMAL_dtype_object_as_a_value.md` is the long form. A type on this path
+# `bugs/formal/FORMAL_dtype_object_as_a_value.md` is the long form. A type on this path
 # is a word, and the word is a TAG: one number per type, computed from the
 # type's name by `model.type_tag`, the same number in every unit of the image
 # and on both architectures. So `t == Int32` is an integer comparison, a type
@@ -25792,7 +25671,7 @@ def check_interpolated_literal_bound_census(verbose=False):
     bound, and which single field stops each one that does not.
 
     Returns `(passed, failures)`. This is the measurement
-    `bugs/FORMAL_string_composition_has_no_buffer.md` §7.1 asks for and does not
+    `bugs/formal/FORMAL_string_composition_has_no_buffer.md` §7.1 asks for and does not
     have. Its step 1 says: *"A buffer with a compile-time-known bound, in the
     frame scratch … The bound is computable at compile time (chunk lengths are
     known; a field's width is its declared type's)"* — and the half in
@@ -25819,6 +25698,7 @@ def check_interpolated_literal_bound_census(verbose=False):
     it stopped existing would make step 1 worth nothing — so it is a fact about
     the corpus rather than a drifting proportion, and it is asserted exactly.
     """
+    import collections as _collections
     import os as _os
     import formal.types as _types
     build = __import__("formal.build", fromlist=["build"])
@@ -25889,13 +25769,11 @@ def check_interpolated_literal_bound_census(verbose=False):
         return None
 
     scanned = 0
-    shapes = {}
+    shapes = _collections.Counter()
     total_fields = 0
     total_literals = 0
     bounded = []                     # (path, spelled, bound)
-    one_obstacle = {}
-    def _inc(d, k):
-        d[k] = d.get(k, 0) + 1
+    one_obstacle = _collections.Counter()
     for root in roots:
         for dirpath, dirnames, filenames in _os.walk(root):
             dirnames[:] = [d for d in sorted(dirnames)
@@ -25945,7 +25823,7 @@ def check_interpolated_literal_bound_census(verbose=False):
                     vk = scope.get(id(node))
                     total_fields += len(fields)
                     for seg in fields:
-                        _inc(shapes, M.interpolated_field_shape(seg[1]))
+                        shapes[M.interpolated_field_shape(seg[1])] += 1
                     bound, _why = M.interpolated_literal_bound(
                         spelled, lambda e, _vk=vk: width_of(e, _vk))
                     if bound is not None:
@@ -25964,13 +25842,13 @@ def check_interpolated_literal_bound_census(verbose=False):
                         strays = [v for v in verdicts
                                   if v[0] == "name" and v[1] and v[1][0] == "str"]
                         if shapes_ != ["name"] * len(fields):
-                            _inc(one_obstacle, "a-field-no-declaration-reaches")
+                            one_obstacle["a-field-no-declaration-reaches"] += 1
                         elif len(strays) == len(fields):
-                            _inc(one_obstacle, "every-field-is-a-string")
+                            one_obstacle["every-field-is-a-string"] += 1
                         elif strays:
-                            _inc(one_obstacle, "one-string-among-integers")
+                            one_obstacle["one-string-among-integers"] += 1
                         else:
-                            _inc(one_obstacle, "no-field-is-declared-at-all")
+                            one_obstacle["no-field-is-declared-at-all"] += 1
     n = len(bounded)
     scope_free = sum(1 for _p, s, _b in bounded
                      if all(M.interpolated_field_shape(f[1]) in
@@ -26006,21 +25884,21 @@ def check_interpolated_literal_bound_census(verbose=False):
              "width, so this row is what a resolver with no type information "
              "can answer"),
             ("literals whose every field is a STRING-typed name",
-             one_obstacle.get("every-field-is-a-string", 0), 1,
+             one_obstacle["every-field-is-a-string"], 1,
              "THE decisive count: these are decidable the moment a string field "
              "has a width, and §7.1's \"a field's width is its declared type's\" "
              "is false of every one of them — the width is a `strlen` over the "
              "VALUE and a frame buffer is reserved before the program runs"),
             ("literals with a string field among integer ones",
-             one_obstacle.get("one-string-among-integers", 0), 0,
+             one_obstacle["one-string-among-integers"], 0,
              "the mixed shape, which is where a partial bound would be worst"),
             ("literals with a field no declaration reaches",
-             one_obstacle.get("a-field-no-declaration-reaches", 0), 1,
+             one_obstacle["a-field-no-declaration-reaches"], 1,
              "a call, a subscript, an attribute or an undeclared name: nothing "
              "in the source fixes a width, so no bound arithmetic reaches it "
              "and the reading is per name"),
             ("literals with every field undeclared",
-             one_obstacle.get("no-field-is-declared-at-all", 0), 1,
+             one_obstacle["no-field-is-declared-at-all"], 1,
              "the same shape with nothing at all stated — the value model doc "
              "(`FORMAL_string_value_model`) holds the next step for these")):
         if got >= floor:
@@ -26043,7 +25921,7 @@ def check_interpolated_literal_census(verbose=False):
     """What the corpus's interpolated literals are MADE OF, over every file here.
 
     Returns `(passed, failures)`. This is the measurement
-    `bugs/FORMAL_string_composition_has_no_buffer.md` took with a throwaway
+    `bugs/formal/FORMAL_string_composition_has_no_buffer.md` took with a throwaway
     script, and the reason it is committed is §7.1's own instruction: *"Do not
     start with an f-string … Start with the ONE case that has a decidable answer
     and no lifetime question … Then measure the residue with the same method as
@@ -26408,7 +26286,7 @@ _STACK_FLOOR_PROBES = [
     #
     # The cycle rule alone left a DAG of distinct functions free to walk past
     # the floor, and the measured cost of that is in
-    # guarding an acyclic chain across the stack floor: the deepest
+    # `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`: the deepest
     # single image in this corpus is 89 frames against the 60 an arm64 budget
     # affords (76 until 2026-10-05). So a body that already contains a
     # conditional branch is guarded whether or not anything calls back into it.
@@ -26847,7 +26725,7 @@ def check_comptime_nofold_is_rerun(verbose=False):
 
 
 # residual the guard cannot reach, and the number that decided
-# guarding an acyclic chain across the stack floor's widening.
+# `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`'s widening.
 #
 # These are GRAPHS, not modules, because the question is about the function and
 # not about the parse: a module the corpus already holds would make a test that
@@ -26859,7 +26737,7 @@ def check_comptime_nofold_is_rerun(verbose=False):
 # corpus. It is written down because the rule's own argument is that the corpus
 # is already inside the hole, and a reader who wants to know by how much needs
 # the number; it was 76 and 12 until 2026-10-05, when the census was re-run for
-# guarding an acyclic chain across the stack floor and both halves
+# `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` and both halves
 # of it had moved.
 _STACK_FLOOR_DEPTH_PROBES = [
     # A straight chain of n: the answer is n, and the point of the row is that

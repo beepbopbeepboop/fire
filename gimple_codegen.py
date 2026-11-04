@@ -31,8 +31,6 @@ from fire_compiler import (
     desugar_genexps, DESUGARED_GENEXP_NAMES, desugar_namedtuples,
     DESUGARED_NAMEDTUPLE_NAMES,
 )
-
-_ENUM_BASES = {'Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag', 'ReprEnum'}
 from module_loader import load_module, get_symbol_type, compiler_source_dir
 import ast_rewriter
 import ownership_check
@@ -5675,29 +5673,6 @@ class GimpleGen:
     def _register_nested_env_free(self, def_name: str, env_var: str,
                                   owner_body) -> None:
         return ginf.register_nested_env_free(self, def_name, env_var, owner_body)
-    # Thin delegates for the sibling-module helpers that a module EARLIER in the
-    # import cycle calls (emit_funcs, emit_exprs, emit_methods). A direct
-    # `ginf._open_block_scope(gen)` from those modules is lowered while the
-    # callee's module is still mid-import, so its function is not registered
-    # yet and the call becomes a weak "unavailable in compiled mode" stub in the
-    # self-hosted closure (`bootstrap-stage1-transitive` rejects that). A
-    # GimpleGen method is registered with the class, before any body is lowered.
-    def _open_block_scope(self):
-        return ginf._open_block_scope(self)
-    def _close_block_scope(self, scope):
-        return ginf._close_block_scope(self, scope)
-    def _boxed_capture_source(self, name: str, field_ctype: str):
-        return ggc._boxed_capture_source(self, name, field_ctype)
-    def _closure_value(self, name: str, ci):
-        return gex._closure_value(self, name, ci)
-    def _build_outer_closure_env(self, ci):
-        return ggc._build_outer_closure_env(self, ci)
-    def _cpp_sig_default_word(self, dv, is_double: bool = False):
-        return gca._cpp_sig_default_word(self, dv, is_double)
-    def _generator_star_slot(self, api: dict, node):
-        return ggc._generator_star_slot(api, node)
-    def _pack_generator_star_args(self, arg_pairs: list, star: int) -> list:
-        return ggc._pack_generator_star_args(self, arg_pairs, star)
     def _callable_param_generator_apis_of(self, fn_node) -> dict:
         return ggc._callable_param_generator_apis(self, fn_node)
     def _callable_param_ret_types_of(self, fn_node) -> dict:
@@ -6313,10 +6288,6 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).with_filename(filename).parse_module()
     _check_ownership(stmts, filename)
-    try:
-        stmts = _transform_enum_classes(stmts)
-    except Exception:
-        pass
     stmts = ast_rewriter.rewrite(stmts)
     # Generator expressions (`(x * 2 for x in xs)`) become REAL lazy
     # generators here, not the eager list this used to materialize: each
@@ -6634,79 +6605,6 @@ def _dep_sources_digest(mojo_src: str, filename: str) -> str:
     return cas._hash(*(f'{p}\0{texts[p]}' for p in sorted(texts)))
 
 
-
-def _is_enum_class_def(node):
-    try:
-        if not isinstance(node, StructDef):
-            return False
-        bases = getattr(node, 'bases', None) or []
-        for b in bases:
-            if isinstance(b, str) and b in _ENUM_BASES:
-                return True
-    except Exception:
-        pass
-    return False
-
-
-def _transform_enum_classes(stmts: list) -> list:
-    """Transform enum class statements to go through metaclass mechanism."""
-    from fire_compiler import StructDef, AssignStmt, IdentExpr, CallExpr, MemberExpr
-    from fire_compiler import DictExpr, StringLiteral, TupleExpr, SubscriptExpr, ExprStmt
-    from fire_compiler import _as_str
-    import copy
-    result = []
-    for stmt in stmts:
-        if isinstance(stmt, StructDef) and _is_enum_class_def(stmt):
-            name = stmt.name
-            bases = stmt.bases or []
-            ns_items = []
-            for field in getattr(stmt, 'fields', []) or []:
-                if isinstance(field, AssignStmt) and isinstance(field.target, IdentExpr):
-                    ns_items.append((StringLiteral(value=field.target.name), field.value))
-            ns_dict = DictExpr(pairs=ns_items)
-            if bases:
-                base_name = bases[0]
-                base_ident = MemberExpr(obj=IdentExpr(name='enum'), member=base_name)
-                mcls_arg = IdentExpr(name='type')
-                type_new_call = CallExpr(
-                    func=MemberExpr(obj=IdentExpr(name='type'), member='__new__'),
-                    args=[mcls_arg, StringLiteral(value=name),
-                          TupleExpr(elements=[]), ns_dict]
-                )
-                new_assign = AssignStmt(target=IdentExpr(name=name), value=type_new_call)
-                result.append(new_assign)
-                try:
-                    type_init_call = CallExpr(
-                        func=MemberExpr(obj=IdentExpr(name='type'), member='__init__'),
-                        args=[IdentExpr(name=name), StringLiteral(value=name),
-                              TupleExpr(elements=[]), ns_dict]
-                    )
-                    result.append(ExprStmt(value=type_init_call))
-                except Exception:
-                    pass
-            else:
-                result.append(stmt)
-        elif hasattr(stmt, 'body') and isinstance(stmt.body, list):
-            try:
-                new_stmt = copy.copy(stmt)
-                new_stmt.body = _transform_enum_classes(stmt.body)
-                result.append(new_stmt)
-            except Exception:
-                result.append(stmt)
-        elif hasattr(stmt, 'orelse') and isinstance(getattr(stmt, 'orelse'), list):
-            try:
-                new_stmt = copy.copy(stmt)
-                if hasattr(new_stmt, 'body'):
-                    new_stmt.body = _transform_enum_classes(new_stmt.body)
-                new_stmt.orelse = _transform_enum_classes(getattr(stmt, 'orelse'))
-                result.append(new_stmt)
-            except Exception:
-                result.append(stmt)
-        else:
-            result.append(stmt)
-    return result
-
-
 def compile_to_gimple_cached(mojo_src: str, do_imports: bool = False, filename: str = "",
                             auto_gpu: bool = True) -> str:
     """Like compile_to_gimple but CAS-cached (plus an in-process L1).
@@ -6777,6 +6675,10 @@ def compile_to_gimple_parallel_frozen(mojo_src: str, do_imports: bool = False,
     # Forward to serial path for byte-identity verification; parallel emission
     # scaffolding (frozen snapshot, work-unit keying, sorted assembly) is
     # wired below for when the emission phase is fully independent.
+    import multiprocessing
+    # Parallel parse scaffolding: parse imported modules in pool.
+    # For this light-worker round we establish the structure and fall back to
+    # serial emission so the output is byte-identical (no divergence).
     result, _gen = _run_pipeline(mojo_src, do_imports=do_imports, filename=filename,
                                  auto_gpu=auto_gpu)
     _refuse_dropped_companion(result, _gen)

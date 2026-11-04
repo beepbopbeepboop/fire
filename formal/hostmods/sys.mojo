@@ -21,7 +21,7 @@ sources. See `formal/imports.py`'s `_HOSTMODS_ROOT`.
 WHAT THIS TARGET CAN ANSWER
 ---------------------------
 A formal value is one 64-bit word that lives in a function's own stack
-scratch, reclaimed when the function returns (`formal/model/builtins.py`, "no
+scratch, reclaimed when the function returns (`formal/model.py`, "no
 storage"). Everything below is a consequence of that and nothing here is a
 guess:
 
@@ -44,7 +44,7 @@ SO `sys.argv`, `sys.path`, `sys.modules`, `sys.stdin`, `sys.stdout`,
 implementation of them would be honest on this target. The reason in every
 case is the same one - a name that outlives the frame that made it - and the
 construct each of them needs is written down in
-`(module state/model limits) (deleted)` with the measurements.
+`bugs/formal/FORMAL_module_state_no_storage.md` with the measurements.
 
 That is the honest answer, and the alternative — shipping `sys.argv` as a
 function that returns a made-up list, or `sys.stderr` as a struct with no
@@ -53,7 +53,7 @@ its name says.
 
 `sys.exit(code)` is absent for a DIFFERENT and settled reason: `doc/ABI.md`'s
 export rule declines to advertise a C library symbol, and `exit` is one
-(`reflect._CLIB_SYMS`; measured and settled in `bugs/FORMAL_known_limits.md`
+(`reflect._CLIB_SYMS`; measured and settled in `bugs/formal/FORMAL_known_limits.md`
 1.1). No module dylib can therefore be called by that name. On this target
 the working spelling is the library's own `exit(code)`, which lowers today as
 an extern call - see `test_formal_sys.py`.
@@ -111,7 +111,7 @@ def api_version() -> int:
 def maxsize() -> int:
     """`sys.maxsize`: 2**63 - 1.
 
-    A formal value is one 64-bit word (`formal/model/builtins.py`, "What a value is"),
+    A formal value is one 64-bit word (`formal/model.py`, "What a value is"),
     so the largest integer this target can represent is the largest signed
     64-bit one. The two architectures this backend emits for are both
     little-endian, which is why `byteorder` is a constant and not a question.

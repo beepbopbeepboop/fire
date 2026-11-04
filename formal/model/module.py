@@ -1,10 +1,4 @@
-from contextvars import ContextVar
-import keyword
 from . import *
-try:
-    import fire_compiler as F
-except Exception:
-    import fire_compiler as F  # type: ignore
 
 # ── The module BODY: the top-level statements that are not declarations ──
 #
@@ -333,48 +327,56 @@ def module_body(stmts: list, symbols: dict = None) -> list:
     return final
 
 
-# With the exception unwinder now implemented, handler arms with effect
-# statements are emittable. The only arms that remain un-emittable are those
-# with `as e` bindings (refused by name) and certain undecidable cases that
-# the emitters refuse.
+# The statements whose presence in a `try`'s handler arm costs the image
+# nothing, and the ONE list they are asked from.
+#
+# A handler arm is not EMITTED on this path — `formal/arm64_codegen.py`'s
+# `_emit_try` and `formal/x86_64_codegen.py`'s skip the arms outright, and
+# `RaiseStmt` flushes the pending `finally` clauses and then `exit(1)`s, so
+# there is no edge from a raise site into an arm and no edge out of one — which
+# makes the four statements below the four whose absence changes nothing:
+#
+#   * `pass` — there is nothing to drop;
+#   * `raise` — the arm cannot run, and a `raise` here would have left the
+#     process, so dropping it changes no answer the image gives;
+#   * `continue`, `break` — control transfers out of an arm the image never
+#     enters.
+#
+# Anything ELSE in an arm is a store, a call or a statement the program wrote
+# and the image does not contain, which is why `refuse_dropped_handler_arm` is
+# asked about it rather than about the arm's mere existence: `except: pass` is
+# the commonest shape in the corpus and must keep building.
 _HANDLER_ARM_NO_EFFECT = ("PassStmt", "RaiseStmt", "ContinueStmt", "BreakStmt")
 
 
 def unemitted_handler_arm(fn):
-    """The first handler arm of `fn` that cannot be emitted, or None.
+    """The first handler arm of `fn` whose body is not in the image, or None.
 
     `(handler, statement)` for the statement that made the arm worth refusing,
     so the message can point at a line the reader wrote rather than at the arm.
+    `None` is the answer for every function without one — which is the answer
+    for the overwhelming majority, and the reason this is a walk and not a
+    per-`try` flag threaded through the emitters.
     """
     for node in iter_nodes(getattr(fn, "body", None)):
         if not isinstance(node, F.TryStmt):
             continue
         for handler in (getattr(node, "handlers", None) or []):
-            # Handlers with `as e` binding are refused (e would have no value)
-            name = getattr(handler, "name", None)
-            if name:
-                # Return the first statement in the body for error reporting,
-                # or create a dummy reference
-                body = getattr(handler, "body", None) or []
-                stmt = body[0] if body else None
-                if stmt is None:
-                    # Create a synthetic pass-like statement marker
-                    try:
-                        import fire_compiler as _F
-                        stmt = _F.PassStmt(line=getattr(handler, "line", 0) or 0,
-                                          col=getattr(handler, "col", 0) or 0)
-                    except Exception:
-                        stmt = body[0] if body else None
-                return (handler, stmt, node)
             for stmt in (getattr(handler, "body", None) or []):
                 if type(stmt).__name__ not in _HANDLER_ARM_NO_EFFECT:
-                    pass  # Can now be emitted
-    return None
+                    return (handler, stmt, node)
     return None
 
 
 def _emitted_nodes(node):
-    """`iter_nodes` including handler lists now that they are emitted."""
+    """`iter_nodes` minus every `handlers` list, whatever node it hangs off.
+
+    A `handlers` list is never emitted — both `_emit_try`s skip the arms — so a
+    walk that descends into one finds statements the image does not contain and
+    reasons about a program nobody wrote. That is the whole difference from
+    `iter_nodes`, and it is why this is a function rather than a filter: the
+    arms are the one subtree whose absence is load-bearing.
+    """
     if isinstance(node, (list, tuple)):
         for x in node:
             yield from _emitted_nodes(x)
@@ -383,6 +385,8 @@ def _emitted_nodes(node):
         return
     yield node
     for name in _node_field_names(node):
+        if name == "handlers" and isinstance(node, F.TryStmt):
+            continue
         yield from _emitted_nodes(getattr(node, name))
 
 
@@ -825,27 +829,65 @@ def clear_module_raisers() -> None:
 
 
 def uncatchable_raise(fn, graph=None) -> tuple:
-    """With full exception handling, most raises in try blocks can now be caught."""
+    """The first `raise` a `try` in `fn` cannot deliver to any of its arms.
+
+    `(raise_stmt_or_None, try_stmt, handler, callee)` — the first arm is named
+    because the message is about the arm the reader wrote, the same reason
+    `unemitted_handler_arm` returns the handler beside the statement. The
+    statement is `None` and the `callee` key is set when the raise is reached
+    THROUGH a call rather than written inside the `try`, which is the shape
+    almost every instance of this has. That key is `RaiseGraph.may_reach_raise`'s
+    own: `(kind, name, module)`, where a non-empty `module` is a call into
+    ANOTHER image.
+
+    **This is the other half of `unemitted_handler_arm`, and it is about
+    CONTROL FLOW rather than about an arm's body.** That check asks whether an
+    arm holds a statement whose absence would be visible; it says nothing about
+    what happens to the `raise` that was supposed to REACH the arm, so
+    `except: pass` passed it — correctly, since there is nothing in the arm to
+    drop — and the program still came out wrong. Measured on both
+    architectures:
+
+        class MyErr(ValueError): ...
+        def boom():
+            raise MyErr("the message")
+        def main(n):
+            try:
+                boom()
+            except:
+                pass
+            print("caught")
+            return 0
+
+    built, exited 1, and printed NOTHING; CPython prints `caught` and exits 0.
+    The arms are not the loss — an empty arm loses nothing — the loss is that
+    the `raise` ends the process where CPython runs the arm and CONTINUES, so
+    every statement after the `try` is unreachable in the image and reachable in
+    the program. That is the wrong-but-exit-0 artifact CLAUDE.md names as the
+    failure this backend exists to make impossible, wearing an exit status of 1.
+
+    Note where the `raise` is: in ANOTHER FUNCTION. That is why this asks
+    `RaiseGraph` and not a lexical walk — `try: boom()` contains no `raise` at
+    all, and a walk would have called this program fine. A try with NO arms is
+    not asked about, and neither is a raise outside any try, because there
+    `_emit_diverge` is exactly CPython's answer for an exception nothing catches
+    (status 1). The refusal is about the one shape where this path silently
+    computes something else.
+    """
     for node in iter_nodes(getattr(fn, "body", None)):
         if not isinstance(node, F.TryStmt):
             continue
         handlers = getattr(node, "handlers", None) or []
         if not handlers:
             continue
-        handlers = [h for h in handlers if not getattr(h, 'name', None)]
-        if not handlers:
-            continue
         for region in _emitted_regions(node):
-            pass
+            for inner in _emitted_nodes(region):
+                if isinstance(inner, F.RaiseStmt):
+                    return (inner, node, handlers[0], None)
             if graph is not None:
                 hit = graph.may_reach_raise(region, caller_fn=fn)
                 if hit is not None:
-                    # For calls (not direct raises in same try), be conservative
-                    if hit and len(hit) > 2 and hit[2]:  # module specified - refuse
-                        return (None, node, handlers[0], hit)
-                    elif hit:  # same module call - refuse for now
-                        return (None, node, handlers[0], hit)
-        return None
+                    return (None, node, handlers[0], hit)
     return None
 
 
@@ -1985,7 +2027,7 @@ def _generic_inference_tail(name: str) -> str:
         f"pipeline reads type arguments off an explicit bracket, so a bare call "
         f"arrives here with no instantiation to bind; the inference, the 123 "
         f"measured files it is worth, and the shape of the missing piece are "
-        f"in bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_"
+        f"in bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_"
         f"inferrable.md. So write the operation in this module, or call a "
         f"public function that does it — which is the same program with a "
         f"definition this image can bind. Spelling it `{name}[<a type>](…)` "
@@ -2048,7 +2090,7 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
     `var t = Float64` above it) has no concrete spelling to mangle, and a
     DOTTED application `mod.G[T]()` is refused by
     `comptime.specialization_name` by design.  All three are listed with the
-    exact next step in `bugs/FORMAL_generic_monomorph_scope.md`, which is the
+    exact next step in `bugs/formal/FORMAL_generic_monomorph_scope.md`, which is the
     single home for what the mechanism does not cover.
 
     **And the last sentence says the BARE case is CORRECT SOURCE, because it
@@ -2060,7 +2102,7 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
     `refuse_without:` defect in its purest form: a repair that is wrong about
     correct code. So the sentence now names what is missing (the inference),
     points at the measured 123 files and the inference's shape
-    (`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`),
+    (`bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`),
     and says the bracket is a WORKAROUND rather than the fix.
     """
     who = f"{fn_name}: " if fn_name else ""
@@ -2096,7 +2138,7 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
                     f"a bare call arrives here with no instantiation to bind; "
                     f"the inference, the 123 measured files it is worth, and the "
                     f"shape of the missing piece are in "
-                    f"bugs/FORMAL_a_bare_call_to_a_template_whose_type_"
+                    f"bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_"
                     f"arguments_are_inferrable.md. So write the operation in this "
                     f"module, or call a public function that does it — which is "
                     f"the same program with a definition this image can bind. "
@@ -2107,7 +2149,7 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
                 f"the call has to bind a symbol `{mod}` exports. That module "
                 f"does not export it, and the reason is `doc/ABI.md`'s export "
                 f"rule applied to the DECLARATION: {why}. The exclusion is "
-                f"measured and settled in bugs/FORMAL_known_limits.md §1.1, and "
+                f"measured and settled in bugs/formal/FORMAL_known_limits.md §1.1, and "
                 f"the generic case in §1.2.")
     # …and the case that is NOT an exclusion at all: the module's own source
     # declares no such name. `runtime/stdlib_wrapper.mojo`'s `from time import
@@ -2134,14 +2176,14 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
             f"both at once), an overload has no single symbol, and a C library "
             f"name like `exit` or `write` is provided by libSystem. The "
             f"exclusion is measured and settled in "
-            f"bugs/FORMAL_known_limits.md §1.1, and the generic case in §1.2. "
+            f"bugs/formal/FORMAL_known_limits.md §1.1, and the generic case in §1.2. "
             + _generic_inference_tail(name))
     if clause is not None:
         return head + (
             f"That module does not export it, and the reason is `doc/ABI.md`'s "
             f"export rule rather than anything about this call: {clause}. The "
             f"exclusion is measured and settled in "
-            f"bugs/FORMAL_known_limits.md §1.1.")
+            f"bugs/formal/FORMAL_known_limits.md §1.1.")
     return head + (
         f"That module does not export it, and the reason is `doc/ABI.md`'s "
         f"export rule rather than anything about this call: a name with a "
@@ -2149,7 +2191,7 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
         f"per instantiation (`_get_kgen_string[asm]()` is the measured case — "
         f"both at once), an overload has no single symbol, and a C library "
         f"name like `exit` or `write` is provided by libSystem. The exclusion "
-        f"is measured and settled in bugs/FORMAL_known_limits.md §1.1, and the "
+        f"is measured and settled in bugs/formal/FORMAL_known_limits.md §1.1, and the "
         f"generic case in §1.2. " + _generic_inference_tail(name))
 
 
@@ -2179,7 +2221,7 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
     CALL: a dylib exports functions (as symbols) and module-level names the
     build FOLDED TO A LITERAL (as values, because a literal needs no storage to
     cross). `sys.argv` is neither — it is a list, and §(4) of
-    `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)` records that the command line is
+    `bugs/formal/FORMAL_module_state_no_storage.md` records that the command line is
     gone before the first statement runs, so there is nothing in it either.
 
     **`variables` is the half that keeps the sentence true.** "A list, an
@@ -2252,7 +2294,7 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
                 f"STARTED at. What `{module}` publishes: {shown} — give the "
                 f"module an accessor (`def get_{leaf}(): global {leaf}; return "
                 f"{leaf}`) and call that, which reads the same slot and lowers "
-                f"today. `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)` §(2) records "
+                f"today. `bugs/formal/FORMAL_module_state_no_storage.md` §(2) records "
                 f"what it would take to publish the slot itself rather than a "
                 f"function that reads it")
     if leaf in set(containers or ()):
@@ -2272,7 +2314,7 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
                 f"of it: `def {leaf}_at(i: Int) -> Int: return "
                 f"{leaf}[i]` in `{module}`, called as `{module}.{leaf}_at(0)`. "
                 f"What `{module}` publishes: {shown}. "
-                f"`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)` §(2) records what "
+                f"`bugs/formal/FORMAL_module_state_no_storage.md` §(2) records what "
                 f"publishing the blob itself would take")
     if leaf not in set(published or ()):
         return (f"{who}{spelling} reads {leaf!r} out of the imported module "
@@ -2295,7 +2337,7 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
                 f"`formal/hostmods/sys.mojo`'s own module docstring says which "
                 f"of those names it deliberately does not declare and why "
                 f"(`argv`, `stderr`, `stdout`, `modules`, `path`), and "
-                f"`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)` §(2) and §(4) "
+                f"`bugs/formal/FORMAL_module_state_no_storage.md` §(2) and §(4) "
                 f"record what would have to be true to close the boundary for "
                 f"the ones CPython has and this path does not")
     return (f"{who}{spelling} reads {leaf!r} out of the imported module "
@@ -2312,7 +2354,7 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
             f"side of the boundary, because every value a formal program can "
             f"name lives in a function's own stack scratch, which is reclaimed "
             f"when the function returns. What `{module}` publishes: {shown}. "
-            f"`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)` records the design and "
+            f"`bugs/formal/FORMAL_module_state_no_storage.md` records the design and "
             f"what would have to be true to close it, and §(2) is this shape")
 
 
@@ -2413,7 +2455,7 @@ def module_global_refusal(name: str, sym, fn_name: str, variables=None,
                 f"a property of the value model rather than of this call: "
                 f"`{mod}.fn(...)` where `{mod}` publishes that function as a "
                 f"function is the same program with a representation. "
-                f"FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) records the design "
+                f"bugs/formal/FORMAL_module_state_no_storage.md records the design "
                 f"and what would have to be true to close it")
     if site == "declared":
         return (f"{who}{name!r} is declared at module level with no value "
@@ -3147,7 +3189,7 @@ def call_graph_depth(edges: dict) -> int:
     """An UPPER BOUND on the number of distinct functions a call chain can have
     live at once, in `edges`.
 
-    The question about guarding an acyclic chain across the stack floor
+    The question `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`
     asks and the guard does not answer: unbounded depth needs a CYCLE, so the
     guard is emitted on the cycles only, but "finite" is not "small" and a DAG
     sixty levels deep spends the same stack as a recursion sixty deep.
@@ -3354,7 +3396,8 @@ def stack_floor_guarded_names(functions, structs: dict = None,
       * **or the body already contains a conditional branch**
         (`body_has_conditional_branch`). This was NOT in the rule that landed
         with the guard, and it is the measured answer to the question
-        spent its life asking. Every formal prologue subtracts a fixed 128 KiB frame on
+        `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` spent its
+        life asking. Every formal prologue subtracts a fixed 128 KiB frame on
         arm64 (16 KiB on x86-64), so the depth at which the stack runs out is a
         constant — 60 frames against `STACK_FLOOR_BUDGET_BYTES` on arm64 — and
         the cycle rule left a DAG of DISTINCT functions free to walk straight
@@ -3539,7 +3582,7 @@ def module_body_store_names(functions) -> set:
     This is why the module body cannot be scoped like an ordinary function.
     Read as one, `G` is a local of `__module_body__`, so `module_slot_for` sends
     its reads and writes to a register — and a register dies with the body,
-    which is the whole of `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)`'s subject: the
+    which is the whole of `bugs/formal/FORMAL_module_state_no_storage.md`'s subject: the
     module's own value computed somewhere nobody can read it. The name needs the
     module's `__DATA` slot for the same reason a name written through
     `global G` inside a function needs one, and it needs it for the same
@@ -3980,7 +4023,7 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
         literal to put at the read — but it IS static data: the blob is a flat
         run of words whose first word is the count, so the linker can place it in
         `__DATA` and the slot can hold its address. `NUMS = [10,20,30]` read from
-        a function is the case `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)` §1
+        a function is the case `bugs/formal/FORMAL_module_state_no_storage.md` §1
         measured as the first one, and it builds and runs correctly now.
         `[0] * 624` is the same value as the written-out literal, and
         `_is_static_container` asks the same question of it — see
@@ -4829,7 +4872,7 @@ def static_initializer_refusal_reason(slot) -> str:
     The zero an unwritten slot gives is therefore not what any read can see, in
     exactly the way it is not what any read can see for a slot that does have an
     initializer. Refusing here would be refusing a value the image computes
-    before its first read, which is the case `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)`
+    before its first read, which is the case `bugs/formal/FORMAL_module_state_no_storage.md`
     §"the exact next step" item 1 is about.
     """
     if slot is None or slot.init[0] != "unknown":
@@ -4933,7 +4976,7 @@ def module_slot_unreadable_refusal(slot, fn) -> str:
                f"the slot holds it. A module-level assignment cannot read, or "
                f"call something that reads, the name it assigns. ")
     return head + why + ("Make the value a literal and the build folds it at "
-                          "every read instead. FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)"
+                          "every read instead. bugs/formal/FORMAL_module_state_no_storage.md"
                           " records the design")
 
 
@@ -5045,7 +5088,7 @@ def global_value_refusal(name: str, fn_name: str, why: str,
             "that module's dylib. A slot in THIS image cannot hold it; what a "
             "cross-module global needs is the other module's slot exported as a "
             "symbol, which this path does not do yet — "
-            "FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)"),
+            "bugs/formal/FORMAL_module_state_no_storage.md"),
         "unknown": (
             "the build cannot compute it from the module-level statement, and "
             "a value it cannot compute has no initializer to write into the "
@@ -5330,38 +5373,6 @@ def global_slot_kind(name: str):
         elem = container_literal_elem_kind(getattr(slot.site, "value", None))
         return list_kind(elem)
     return slot.kind
-
-
-def global_slot_container_init(name: str):
-    """`(shape, init_node)` for a module global whose initializer IS a
-    container literal, or None.
-
-    `global_slot_kind`'s shape half: the kind says `list:K` and cannot say
-    WHICH brackets — a list, a tuple, a set and a dict all classify as
-    `LIST_PREFIX` blobs, and `print`'s container plan writes different
-    brackets (and a dict a different walk) for each. The slot's `site` is the
-    initializer statement, and for a literal it is the literal, so the AST
-    node is the one evidence that separates the four — the same evidence the
-    literal's own spelling is asked of when the container is spelled inline.
-
-    Only the LITERAL initializers answer, for the same reason
-    `global_slot_kind` answers only from a literal: a blob a function fills
-    (`global L; L = …`) states no shape at module level, and a None there is
-    the plan's refusal rather than a guess at the brackets.
-    """
-    slot = module_slot(name)
-    if slot is None or slot.init[0] != "blob":
-        return None
-    val = getattr(getattr(slot, "site", None), "value", None)
-    if isinstance(val, F.ListExpr):
-        return "list", val
-    if isinstance(val, F.TupleExpr):
-        return "tuple", val
-    if isinstance(val, F.SetExpr):
-        return "set", val
-    if isinstance(val, F.DictExpr):
-        return "dict", val
-    return None
 
 
 def module_entry_literal_facts() -> dict:
@@ -5711,7 +5722,7 @@ def function_value_refusal(name: str, fn_name: str) -> str:
             f"a container, or returning one is refused rather than answered "
             f"with a number that means nothing. `formal/hostmods/` has no "
             f"module that hands back a callable for the same reason "
-            f"`. Call "
+            f"(`bugs/formal/FORMAL_functools_is_unbuildable_as_a_host_module.md`). Call "
             f"it directly, or move the work into a `def` and pass its results")
 
 
@@ -6197,7 +6208,7 @@ def undeclared_linked_struct_refusal(struct_name: str, owners: list,
     slot key and nothing else, so its message can only say "this path has no
     way to say what the base holds" — which is true and sends the reader after a
     type inference this backend does not have, when the actual fact is one hop
-    away and checkable (`bugs/FORMAL_field_access_refusal_names_the_wrong_
+    away and checkable (`bugs/formal/FORMAL_field_access_refusal_names_the_wrong_
     module.md`). This one is raised where the construction `S()` itself is, and
     it reports what is actually missing: a DECLARATION, whose field list and
     frame layout are read from the module's source.
@@ -6328,7 +6339,7 @@ def aug_assign_target_refusal(got: str) -> str:
     Both backends reach it, and they used to spell it differently — arm64 "must
     be a plain name", x86-64 "must be a plain name on the formal x86-64 path" —
     which is the same class of defect
-    `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
+    `bugs/formal/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
     function.md` is about: one construct, two sentences, and a reader has to
     guess which machine wrote it. The architecture is not named, for the reason
     `member_access_refusal` does not name one either: the two backends are ONE

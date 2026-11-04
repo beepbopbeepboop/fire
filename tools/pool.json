@@ -46,7 +46,7 @@
     {
       "name": "haiku",
       "model": "claude-haiku-5-5",
-      "count": 0,
+      "count": 1,
       "kind": "claude",
       "recover_hours": 4.23,
       "class": "easy"
@@ -92,7 +92,7 @@
     "bugs/*.md",
     "bugs/mid/*.md",
     "bugs/hard/*.md",
-    "bugs/*.md"
+    "bugs/formal/*.md"
   ],
   "skip": [
     "OPEN_WORK",

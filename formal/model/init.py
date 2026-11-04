@@ -822,16 +822,9 @@ def one_word_store_refusal(name: str, field: str, arg, candidates: dict,
     return None
 
 
-from typing import NamedTuple
-
-
-class InitShape(NamedTuple):
-    method: object
-    params: object
-    positional: object
-    required: object
-    optional: object
-    required_names: object
+InitShape = collections.namedtuple("InitShape",
+                                   "method params positional required optional "
+                                   "required_names")
 InitShape.__doc__ = (
     "One `__init__` this struct declares.  A named tuple and not a bare one "
     "because the arity window below is arithmetic over four of the five "
@@ -1483,7 +1476,7 @@ def _init_store_is_redundant(value, placed_struct: str) -> bool:
         a different struct is a different value, and dropping it would leave the
         field holding the declared type's frame while the source put another
         one there — the two can share a field count and a field list, which is
-        exactly `bugs/FORMAL_declared_parameter_against_its_call_sites.md`'s
+        exactly `bugs/formal/FORMAL_declared_parameter_against_its_call_sites.md`'s
         subject, so "the layout happens to match" is not available as a test.
         `assigned_type_a_declaration_still_wins` is the program that measures
         it: `Outer` declares `var in1: Inner` and `__init__` assigns
@@ -2452,7 +2445,7 @@ def keyword_spread_refusal(subject: str, operand: str) -> str:
     in that caller's own terms — `constructing P`, `call f()` — because the two
     sites that raise it are different constructs and a message that named the
     wrong one would send the reader to the wrong line, which is the failure mode
-    `bugs/FORMAL_known_limits.md` records.
+    `bugs/formal/FORMAL_known_limits.md` records.
 
     ARCH-FREE and asked from the shared plan (`struct_construction_plan`), which
     is where the false sentence it replaces was produced.
@@ -2889,18 +2882,6 @@ def struct_construction_plan(struct_def, call, decls: dict,
                 return (None, construction_copy_source_refusal(
                     name, args[0], [s.name for s in src]))
             return ((CONSTRUCTION_COPY, len(slots)), None)
-        # Also recognize copy construction from a call that returns THIS struct
-        # (reflection table / type information based recognition)
-        if isinstance(args[0], F.CallExpr):
-            callee = call_callee_name(args[0].func)
-            if callee and rets is not None:
-                ret_ann = rets.get(callee) if hasattr(rets, 'get') else None
-                if ret_ann is not None:
-                    ret_base = annotation_base_name(ret_ann)
-                    if ret_base == name:
-                        return ((CONSTRUCTION_COPY, len(slots)), None)
-            # Could also be from a method call or other forms - try to be permissive
-            # if we can determine return type
         if isinstance(args[0], F.IdentExpr):
             # A name, and NOT a holder: a plain word.  `S(x)` with a plain word
             # is an arity error on a multi-field struct and saying so is the
@@ -2993,19 +2974,46 @@ def one_word_construction(struct_def, call, decls: dict, candidates: dict,
     when the call carried an ARGUMENT, and answered `S()` — no argument at all
     — with a fresh zero word without asking.  So a one-field struct whose
     `__init__` takes no required parameter had its constructor body DROPPED at
-    the construction site: ..."""
-    # For copy construction from a call returning the same struct type,
-    # also recognize it even if holder analysis doesn't
-    args = list(getattr(call, "args", None) or [])
-    kwargs = list(getattr(call, "kwargs", None) or [])
-    if len(args) == 1 and not kwargs and isinstance(args[0], F.CallExpr):
-        callee = call_callee_name(args[0].func)
-        if callee and rets is not None:
-            ret_ann = rets.get(callee) if hasattr(rets, 'get') else None
-            if ret_ann is not None:
-                ret_base = annotation_base_name(ret_ann)
-                if ret_base == getattr(struct_def, 'name', None):
-                    return (args[0], None)
+    the construction site:
+
+        class C:
+            def __init__(self):
+                self.n = 20
+            def get(self):
+                return self.n
+
+        def main(n: Int) -> Int:
+            var c = C()
+            return c.get()
+
+    built, ran, and returned 0 on both architectures, where CPython returns 20.
+    Nothing was refused, nothing was printed, the exit status was a plausible
+    small integer, and the two machines AGREED — so no parity row, no
+    `refuse:` row and no engine diff could see it.  A two-field struct with the
+    same constructor answered 203, because the framed emitter has always asked
+    the plan for every shape; the difference was never about `__init__`, it was
+    about which emitter the construction reached.
+
+    Reading the plan for EVERY shape is also what makes the argument-less
+    constructions that already worked here stop being special cases.  `S()`
+    against a struct with no constructor is `CONSTRUCTION_DEFAULT` with no
+    stores, and a constructor that assigns nothing is `CONSTRUCTION_INIT` with
+    no stores: both are None here, which is the fresh word they always were. A
+    constructor the caller left an argument to defaults on is `CONSTRUCTION_INIT`
+    with that default's expression in it, which is a store the previous gate
+    could not see.  And a constructor that REQUIRES a parameter is now the
+    arity refusal the plan has always described ("`Bag4()` against
+    `def __init__(out self, n, m)` is a `TypeError`") instead of a silent zero,
+    which is the same refusal the framed emitter and the build pass have always
+    raised for it.
+
+    The rule that turns a plan into a word is the one `struct_construction_plan`
+    already states for a one-word struct: there is nowhere to STORE the
+    constructor's value — the receiver IS the field — so the LAST of the inlined
+    body's stores is the whole result.  A one-field struct has at most one such
+    store, so "last" is the only one; saying it this way keeps the emitters from
+    having to know that, and keeps a future multi-store body on the same
+    sentence rather than on an assumption about field counts."""
     plan, refusal = struct_construction_plan(struct_def, call, decls, candidates,
                                              rets, mappings)
     if refusal is not None:
@@ -3154,7 +3162,7 @@ def _callee_container_evidence(arg, rets=None, struct_def=None):
     # `call_callee_name`, NOT `isinstance(arg.func, F.IdentExpr)`. It is the
     # tree's one reader of "which function does this call name", and a comptime
     # SPECIALIZATION `f[a]` names the same function as its bare twin —
-    # which is the whole content of `bugs/FORMAL_a_specialization_defeats_the_
+    # which is the whole content of `bugs/formal/FORMAL_a_specialization_defeats_the_
     # frame_escape_refusals.md`, in a reader that decides a REPRESENTATION.
     #
     # Measured here, and it was the permissive direction, which is the expensive
@@ -3801,7 +3809,7 @@ def frame_field_premise_refusal(struct_def) -> str:
         f"in a method would then append into reclaimed stack, which is a "
         f"number the source never wrote rather than a failure. "
         + (f"({note}) " if note else "")
-        + f"FORMAL_wide_receiver_by_reference.md (deleted; fixed) records the premise and "
+        + f"bugs/formal/FORMAL_wide_receiver_by_reference.md records the premise and "
         f"which decisions it currently rests on; the value-method work is what "
         f"has to keep it true")
 

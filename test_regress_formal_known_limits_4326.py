@@ -3,7 +3,7 @@
 
 Before fix: `comptime _s()` evaluates to 0 with no diagnostic.
 After fix: it should either evaluate correctly or emit a diagnostic.
-Pins the one remaining silent cell from bugs/FORMAL_known_limits.md §7.
+Pins the one remaining silent cell from bugs/formal/FORMAL_known_limits.md §7.
 """
 import subprocess, sys, tempfile, textwrap, os
 

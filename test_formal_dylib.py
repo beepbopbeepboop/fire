@@ -502,8 +502,9 @@ def test_dylib_structure_and_exports(tmpdir, shared):
     # file's import closure the formal sweep could not resolve, so the whole
     # file — and the thirteen other files that import IT — was filed under
     # `not-answerable/host-import`, a class the coverage denominator excludes.
-    # Field access through call results is now handled by the compiler
-    # (a generator of 2-tuples is not one 64-bit word), and `test_formal_run.py`'s
+    # `bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md` measures
+    # the row and why no `.mojo` module can answer it (a generator of 2-tuples
+    # is not one 64-bit word), and `test_formal_run.py`'s
     # `_every_type_tag_is_distinct_source` is the same substitution already made
     # in the other direction for the same reason.
     names = sorted(segs)
@@ -975,10 +976,7 @@ def test_several_exports_and_no_derivable_spec(tmpdir, shared):
         # `exportEnd_here` is what says the exit is this export's end, and it is
         # proved by `native_decide` over the image's export table -- so it is a
         # check that the emitter's extent and the library's fold agree.
-        if i + 1 < len(entries):
-            end = entries[i + 1]
-        else:
-            end = base + built["info"].get("exec_code_end", len(built["code"]))
+        end = entries[i + 1] if i + 1 < len(entries) else base + len(built["code"])
         check(f"DylibExport.exportEnd dylib_image {ident} = {end}" in text,
               f"{ident}'s contract is not stated at its OWN end ({end}), so it "
               f"is about the image's exit or another export's code")
@@ -1387,7 +1385,7 @@ NO_API_SHAPES = [
     # CONSTRUCTION, `fold_module_value` has no arm for it, so there is no value
     # to publish and no symbol either — and that is `std/sys/_io.mojo`, which
     # is 23 of the 59 files on the row
-    # (the `b13` round of `bugs/FORMAL_sweep_work_map.md` §4).
+    # (the `b13` round of `bugs/formal/FORMAL_sweep_work_map.md` §4).
     ("constants only, and no value this build can fold",
      "comptime stdin = FileDescriptor(0)\ncomptime stdout = FileDescriptor(1)\n",
      "no function and no type"),
@@ -1455,7 +1453,7 @@ def test_a_proved_dylib_is_an_arm64_artifact_and_says_so(tmpdir, shared):
     whose entire subject is a PER-EXPORT contract that is the silent-wrong-answer
     shape: a reader measuring the x86-64 boundary would get an arm64 answer and
     conclude "the same argument applies", which is exactly the hypothesis
-    `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §OPUS-6 says must be
+    `bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md` §OPUS-6 says must be
     measured rather than assumed.
 
     So: the refusal has to be at the function (every caller goes through it, and

@@ -712,17 +712,6 @@ def doc_class_now(item):
     return item.get("cls")
 
 
-def _rewrite_queued(item):
-    """Write a queued item back to its file (the refill's decisions about it persist from one pass to the next)."""
-    with open(os.path.join(qdir(), item["name"] + ".json"), "w") as f:
-        json.dump(item, f, indent=1)
-
-
-def _commit_exists(ref):
-    return subprocess.run(["git", "rev-parse", "--verify", "-q", ref + "^{commit}"],
-                          capture_output=True, cwd=MAIN).returncode == 0
-
-
 def pick_slot(item, busy):
     """The slot a queued task starts on now: its preferred slot if that is free, else the first free, unbanned slot in
     pool order; None if every slot is full or banned. `busy` is running_by_slot() plus this pass's starts."""
@@ -762,11 +751,7 @@ def cmd_refill(a):
                   open(breaker_path(), "w"))
         print("%s refill: %d worker(s) died on arrival (limit/outage), bounced to the queue; no starts for %d min" % (
             time.strftime("%T"), len(bounced), BREAKER_MIN), flush=True)
-    items_all = []
-    for f in os.listdir(qdir()):
-        if f.endswith(".json"):
-            with open(os.path.join(qdir(), f)) as fh:
-                items_all.append(json.load(fh))
+    items_all = [json.load(open(os.path.join(qdir(), f))) for f in os.listdir(qdir()) if f.endswith(".json")]
     tasks = load()
     live_set = live_names(tasks)
     if live_set is None:
@@ -800,16 +785,9 @@ def cmd_refill(a):
         # still queued, and a stale "mid" started a hard doc on the mid-only iceman slot (2026-11-03, 46 attempts).
         cls = doc_class_now(it)
         if cls != it.get("cls"):
-            print("%s is now %s (queued as %s): it takes a %s slot" % (it["name"], cls, it.get("cls"), cls), flush=True)
+            print("%s refill: %s is now %s (queued as %s); it takes a %s slot" % (
+                time.strftime("%T"), it["name"], cls, it.get("cls"), cls), flush=True)
             it = dict(it, cls=cls)
-            _rewrite_queued(it)           # persisted, so the move is announced once, not on every pass
-        base = it.get("base") or "master"
-        if base != "master" and not _commit_exists(base):
-            # The feed names a base branch (work/formal<N>-docs) that no longer exists; the spawn would fail on every
-            # pass forever. The doc is still there on master, so start from master, once.
-            print("%s: base %s no longer exists; starting from master" % (it["name"], base), flush=True)
-            it = dict(it, base="master")
-            _rewrite_queued(it)
         sl = pick_slot(it, busy)
         if sl is None:
             continue                      # every slot is full or banned: the task waits

@@ -76,7 +76,7 @@ from formal.lean import (lean_refused_on_its_own_memory_ceiling,
 # is not run at all for a stem that is expected to fail (that is the point of
 # the list), so a ceiling that fires would never be observed on a marked stem and
 # the marker would sit there describing a failure nobody is measuring.
-# `bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md`
+# `bugs/formal/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md`
 # §4 is the measurement: `both` and `either` both stop at the same line with
 # `(kernel) excessive memory consumption detected`.
 def classify_stem(stem: str, passed: bool, detail: str,
@@ -90,7 +90,7 @@ def classify_stem(stem: str, passed: bool, detail: str,
     no checker decided the proof at all. Folding it into `FAIL` reports a proof
     that may be entirely correct as one Lean could not check — and `both` and
     `either` both stop at exactly that sentence
-    (`bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_
+    (`bugs/formal/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_
     declared.md` §4). Folding it into `KNOWN-GAP` is worse, because
     "known unproven" is a claim about the proof and the whole content of this
     class is that nobody has one.
@@ -140,6 +140,13 @@ EXPECTED_FAILURES = {
                      "no list domain and the list blob's memory image is not "
                      "derived from the source literal",
 
+    # `struct Point: var x: Int; var y: Int` and `return p.get_x() + p.get_y()`.
+    # Refused at GENERATION time: the frame-receiver proof generator raises
+    # `NotImplementedError: model: a struct field read has no value in the
+    # semantic model` while TRANSLATING, so no proof is generated at all.
+    "wide_recv": "the frame-receiver proof generator refuses it at GENERATION "
+                 "time: a struct field read has no value in the semantic model "
+                 "(the model's environment/domain is not extended for struct fields)",
 
     # `fib(n) = fib(n-1) + fib(n-2)` -- tree recursion, one goal left.
     "fib": "tree-recursion FrameOk window read over a store stack whose "

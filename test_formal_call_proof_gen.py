@@ -165,7 +165,7 @@ REFUSED = {
 # both, and the honest statement is a disjunction over them.
 #
 # This is the PRECONDITION for
-# `bugs/FORMAL_arm64_exit_trap_does_not_flush_so_a_program_that_prints_then_exits_1_
+# `bugs/formal/FORMAL_arm64_exit_trap_does_not_flush_so_a_program_that_prints_then_exits_1_
 # prints_nothing` — an exit that flushes is a `BL fflush`, and every flush site
 # is one more address the walk cannot halt at. So the refusal below is the thing
 # that work is waiting on, and pinning it is how a fix becomes measurable: when
@@ -190,7 +190,7 @@ TWO_OPAQUE_CALLS = {
 }
 
 # Programs with ONE call into a second function of the SAME IMAGE.  This is the
-# shape `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_
+# shape `bugs/formal/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_
 # same_image.md` measured as the largest single cause in the proof-breadth
 # census, and the one the return-address map is exact for: `x30` at the callee's
 # `RET` is the constant `call_pc + 4`, so the callee's blocks are ordinary
@@ -205,7 +205,8 @@ TWO_OPAQUE_CALLS = {
 # conditionals would have.  Measured: the leaf checks (5051 lines, 0 sorries);
 # the branching one exceeds Lean's own `-M 6144` — and so does a program with
 # NO CALL and the same number of conditionals, which is why the boundary is the
-# path count and not the call ((the bug was fixed and its doc deleted)).
+# path count and not the call (`bugs/formal/FORMAL_a_three_branch_certificate_exceeds_
+# the_lean_bound.md`).
 SAME_IMAGE_CALL = {
     "same_image_leaf": (
         "def helper(n):\n"
@@ -2380,7 +2381,7 @@ class TestBitTestBranches(unittest.TestCase):
     proof and that the proposition it emits is the bit test — a generator that
     emitted an `hcond` about the whole register would typecheck and prove
     something false, which is the `either`/`both` failure mode
-    `bugs/FORMAL_arm64_known_proof_gaps.md` exists to prevent. The Lean half is
+    `bugs/formal/FORMAL_arm64_known_proof_gaps.md` exists to prevent. The Lean half is
     `formal/examples/bittest.mojo`, which `test_formal.py` runs.
     """
 
@@ -2733,7 +2734,7 @@ class TestTheRegisterValueReaderReadsEveryWrapper(unittest.TestCase):
     untouched by this block" — while instruction 28 of that block is exactly
     the `LDP` that reloads `x30` from the saved frame. With the reader fixed
     it concludes the load's own expression. That is
-    `bugs/FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md`'s
+    `bugs/formal/FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md`'s
     "decompose the value flow into per-block facts": the per-block chain
     cannot be built for the block that contains the epilogue while the reader
     is blind to that block's writes.
@@ -2855,7 +2856,7 @@ class TestTheRegisterValueReaderReadsEveryWrapper(unittest.TestCase):
     #: `formal/examples/bitops.mojo`, whose RET block ends in the epilogue and
     #: contains the `ldp x29, x30, [sp], #16` that reloads `x30`. That is the
     #: block whose value flow
-    #: `bugs/FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md`
+    #: `bugs/formal/FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md`
     #: wants restated one block at a time, and the one instruction per function
     #: the reader could not read. The block is found by KIND in the test rather
     #: than by a hard-coded number: the prologue's guard decides how many
@@ -3120,19 +3121,25 @@ class TestNestedConditionFactSharing(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_the_increment_not_the_total_is_the_growth_measure(self):
-        """Regression for the stale total-bound: the fixed offset creates a
-        constant offset making total ratios noisy, but the per-path increment
-        is exactly x2. The bound must apply to the increment, not to
-        counts[k]/counts[k-1]."""
+        """Regression for the stale total-bound: the fixed offset (3 per walk)
+        makes total ratios noisy at small k (9 -> 21 reads x2.33), but the
+        per-path increment (12 -> 24) is exactly x2. The bound must apply to
+        the increment, not to counts[k]/counts[k-1]."""
         tmp = tempfile.mkdtemp(prefix="hprior_reg_")
         try:
             counts = {}
             for k in (2, 3, 4):
                 proof = self._proof(tmp, k)
                 counts[k] = proof.count("have hprior_")
+            # The 3 fixed entry-block facts create a constant offset; totals
+            # 9 / 21 / 45 give 2.33, which would falsely fail a total-bound.
+            self.assertEqual(counts[2], 9)
+            self.assertEqual(counts[3], 21)
+            self.assertEqual(counts[4], 45)
             inc = {k: counts[k] - counts[k - 1] for k in (3, 4)}
-            # Per-path increment exactly doubles.
-            self.assertEqual(inc[4], inc[3] * 2)
+            # Per-path increment exactly doubles: 12 -> 24.
+            self.assertEqual(inc[3], 12)
+            self.assertEqual(inc[4], 24)
             for k in (4,):
                 ratio = inc[k] / inc[k - 1]
                 self.assertLessEqual(
@@ -3148,7 +3155,7 @@ class TestACompareWithTheImmediateOnTheLeft(unittest.TestCase):
 
     Two independent defects made the immediate-on-the-left spelling unprovable
     while the immediate-on-the-right one was fine, and each has its own
-    assertion here (`bugs/FORMAL_arm64_proof_a_compare_with_the_immediate_on_
+    assertion here (`bugs/formal/FORMAL_arm64_proof_a_compare_with_the_immediate_on_
     the_left_does_not_elaborate.md`):
 
     1. **The CFG walk.** `_taken_dead`'s statically-dead-taken-arm shortcut
@@ -3857,10 +3864,9 @@ class TestCallProofs(unittest.TestCase):
         """
         err = self.errors["two_args"]
         self.assertIsNotNone(err, "two_args: expected a refusal, got a proof")
-        self.assertTrue(
-            "2 arguments" in err or "cannot be followed" in err or "two-argument" in err.lower(),
-            f"two_args: the refusal must name the arity or follow constraint, which is "
-            f"the whole fact about this program: {err}")
+        self.assertIn("2 arguments", err,
+                      f"two_args: the refusal must name the arity, which is "
+                      f"the whole fact about this program: {err}")
 
     def test_the_plan_declines_exactly_the_shapes_it_cannot_follow(self):
         """The decision, asked directly, so the boundary is one list of cases.
@@ -4290,7 +4296,7 @@ class TestSameImageCallLean(unittest.TestCase):
     not about the call, because a program with NO call and the same number of
     conditionals exceeds Lean's own `-M` on the same proof generator — measured,
     and the reason it belongs to
-    (now closed, doc deleted) rather
+    `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` rather
     than to a row that would read as a call that cannot be proved.
     """
 
@@ -4987,7 +4993,7 @@ class TestAstBridgeCallLimit(unittest.TestCase):
         faithful branch and the omission is right.  With ONE parameter there IS
         one — `_gen_go` already emitted `_bump1_go` — and the bridge used to be
         omitted anyway, which is the gap
-        the one-parameter callee table closed (`bugs/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md`
+        the one-parameter callee table closed (`bugs/formal/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md`
         is the open two-parameter case): `eval_eq_mojo` was FALSE for this
         program, not unproved.
 
@@ -5300,7 +5306,7 @@ class TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath(unittest.TestCase):
     (a source conditional) regenerates its value theorem, and
     `formal/examples/mod_by_var.mojo` no longer has its universal refused by
     the div0 `fflush` — 2026-10-31 the walk closes that trap path instead
-    (`bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md (deleted)`'s step
+    (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s step
     2), and for this example the branch is dead anyway (the divisor register
     holds 4, which the terminal value flow proves), so the example regenerates
     its value theorem too.
@@ -5333,7 +5339,7 @@ class TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath(unittest.TestCase):
             "the div0 `BL fflush` is an opaque-call boundary again: a program "
             "whose only out-of-image call is the compiler's trap has no value "
             "theorem, so the walk-side closure "
-            "(`bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md (deleted)`'s "
+            "(`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s "
             "step 2) has been undone")
         self.assertNotRegex(
             text, r"theorem mod_by_var_reaches_call_at_",
@@ -5451,8 +5457,8 @@ class TestLoopContractBlocks(unittest.TestCase):
                 ("hlc", r"have {n}\s*:?="),
                 ("hc", r"by_cases {n}\s*:")):
             cited = set(re.findall(rf"\b({stem}_\d+)\b", text))
-            if not cited:
-                continue
+            self.assertTrue(cited, f"this test is vacuous for {stem}_: the "
+                           f"emitted proof cites none")
             defined = {n for n in cited
                        if re.search(defines.format(n=re.escape(n)), text)}
             self.assertEqual(cited - defined, set(),
@@ -5460,16 +5466,44 @@ class TestLoopContractBlocks(unittest.TestCase):
                              f"{sorted(cited - defined)}")
 
 
-
-
-
 class TestStructFieldHasNoValueInTheModel(unittest.TestCase):
-    """The wide receiver with struct fields and frame methods now generates proofs.
+    """The refusal `test_formal.py`'s `wide_recv` marker states, pinned.
 
-    With entry_arity passed for frame method contracts, the generator can
-    bind parameters (including `self` and method args) so frame methods like
-    `set_x(self, v)` work correctly. The struct-domain gap that previously
-    caused refusal is addressed by proper parameter binding.
+    `formal/examples/wide_recv.mojo` is the two-field receiver example, and the
+    arm64 proof generator refuses it at GENERATION time:
+
+        NotImplementedError: model: `v` is read here and this generator binds
+        it to nothing (the model's environment is ['self']); answering 0 would
+        be a statement about the source rather than a model of it
+
+    The model is a function of the ENTRY ARGUMENT and nothing else, so a
+    struct's field is not a term in it: `p.x` is 4 and `p.y` is 0 whatever `n`
+    is.  Answering 0 would be a false statement about the source, which is why
+    the arm refuses rather than defaulting — and it is the same gap as
+    `subscript_var`'s ("the semantic model `mojo : UInt64 -> UInt64` has no
+    domain for a list, so `a[i]` has no value in it"), one type further.
+
+    WHICH REFUSAL, since the frame finder went live.  `_frame_methods` used to
+    find no method for this image, so the refusal came from the ordinary model
+    and read "a struct field read has no value".  It now finds `set_x`, `get_x`
+    and `get_y`, and the by-reference frame emitter (`_generate_frame_proof`)
+    refuses the first of them: its contract binds only `self`, so `set_x`'s
+    scalar parameter `v` has no value.  That is the same struct-domain family
+    (a frame method's environment is not a value model), one step earlier.
+    `bugs/FORMAL_arm64_the_frame_method_finder_scans_the_guard_prologue_and_finds_no_method.md`
+    names it as the next step.
+
+    So `wide_recv` is in `test_formal.py`'s `EXPECTED_FAILURES` with that reason,
+    and this class is what keeps the marker honest in both directions:
+
+      * the refusal is still the one the marker names — if the model grows a
+        struct domain the marker goes STALE, `test_formal.py` reports it, and
+        this assertion fails first with the reason spelled out;
+      * the marker names the same reason as this test, so the two cannot drift
+        into two different accounts of one gap;
+      * **the machine half is still fine** — the program builds on BOTH
+        backends, which is what makes the gap a model gap and not a lowering
+        one.  Checked with `prove=False`, so this stays Lean-free.
     """
 
     SOURCE = ("struct Point:\n"
@@ -5484,6 +5518,9 @@ class TestStructFieldHasNoValueInTheModel(unittest.TestCase):
               "    p.set_x(3)\n"
               "    p.set_x(4)\n"
               "    return p.get_x() + p.get_y()\n")
+
+    #: The phrase the refusal must contain, and the phrase the marker states.
+    NEEDLE = "binds it to nothing"
 
     @classmethod
     def setUpClass(cls):
@@ -5506,13 +5543,40 @@ class TestStructFieldHasNoValueInTheModel(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def test_frame_methods_with_params_generate_proofs(self):
-        self.assertIsNone(self.error, self.error)
-        self.assertIsNotNone(self.proof, "frame methods with parameters should generate proofs")
+    def test_the_refusal_is_the_model_domain_one(self):
+        self.assertIsNone(self.proof)
+        self.assertIsNotNone(self.error, "the example generated a proof, so the "
+                           "model has a domain for a struct field read and the "
+                           "marker in test_formal.py is stale")
+        self.assertIn(self.NEEDLE, self.error,
+                      "the refusal is not the one the marker states, so the "
+                      "marker describes a different gap than the one this "
+                      "example hits: %s" % self.error)
+
+    def test_the_marker_states_this_refusal_and_names_the_example(self):
+        import test_formal as T
+        self.assertIn("wide_recv", T.EXPECTED_FAILURES,
+                      "an UNMARKED failure of the `formal` suite job: the next "
+                      "session reads the marker list, sees this file is not in "
+                      "it, and re-derives the whole thing")
+        self.assertIn(self.NEEDLE, T.EXPECTED_FAILURES["wide_recv"],
+                      "the marker's reason and the measured refusal name "
+                      "different gaps: %r" % T.EXPECTED_FAILURES["wide_recv"])
 
     def test_the_machine_half_builds_on_both_backends(self):
+        """The gap is a model domain, not a lowering — measured, not argued.
+
+        `bugs/formal/FORMAL_wide_receiver_by_reference.md` §"The proposition" quotes
+        the mutator's frame contract, and `test_formal_run.py` runs the
+        program on both architectures.  What is checked here is the narrower
+        half that decides which side of the boundary this example is on: both
+        backends compile it, with proof generation switched off.
+        """
         for arch, err in sorted(self.built.items()):
-            self.assertIsNone(err, "%s does not build this program: %s" % (arch, err))
+            self.assertIsNone(err, "%s does not build this program, so the "
+                                "refusal above is not purely a model-domain "
+                                "gap: %s" % (arch, err))
+
 
 class TestAModelRefusalIsABuildRefusalNotATraceback(unittest.TestCase):
     """A refusal the generator already names must arrive as a REFUSAL.
@@ -5526,10 +5590,12 @@ class TestAModelRefusalIsABuildRefusalNotATraceback(unittest.TestCase):
     frames of generator internals, and the sentence that names the construct at
     the bottom of it.
 
-    The reproducer is a float program that BUILDS, RUNS and answers CPython
-    with `--no-prove` — a float literal in a source the machine model describes
-    perfectly well and the semantic model once had no domain for. The gap is
-    real; what is a defect is the DIAGNOSTIC.
+    The reproducer is the one
+    `bugs/formal/FORMAL_float_step_functions.md` §"What was run" quotes, because it is
+    a program that BUILDS, RUNS and answers CPython with `--no-prove` — a
+    float literal in a source the machine model describes perfectly well and the
+    semantic model has no domain for. The gap is real and is that document's
+    subject; what is a defect here is the DIAGNOSTIC.
 
     Four rows, and they are four different ways this could come back:
 
@@ -5595,13 +5661,11 @@ class TestAModelRefusalIsABuildRefusalNotATraceback(unittest.TestCase):
         self.assertTrue(issubclass(fb.FormalBuildError, Exception))
 
     def test_the_message_carries_the_generators_own_sentence(self):
-        # Float step functions are now supported; the refusal may come from
-        # later stages if the program shape is not yet fully supported.
-        # The key property is that it's a clean FormalBuildError, not a bare exception.
-        self.assertIsNotNone(self.error,
-                             "expected an error for this program shape")
-        self.assertTrue(self.error.startswith("FormalBuildError") or "FormalBuildError" in self.error,
-                        "the refusal is not a BUILD refusal: %s" % self.error)
+        self.assertIn("a FloatLiteral has no value in the semantic model",
+                      self.error or "",
+                      "the refusal lost the sentence that names the "
+                      "construct, so a reader is sent to the generator instead "
+                      "of to the float literal: %s" % self.error)
 
     def test_the_message_says_the_image_is_not_what_refused(self):
         self.assertIn("--no-prove", self.error or "",
@@ -5619,7 +5683,7 @@ class TestAModelRefusalIsABuildRefusalNotATraceback(unittest.TestCase):
 class TestACallOnAnUntakenPathIsARefusalNotALeanError(unittest.TestCase):
     """The ONE unfollowable call the test input does not reach.
 
-    `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md (deleted)` measured
+    `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md` measured
     this as a PRE-EXISTING obstacle to its own step 2 and named it exactly: a
     `BL` reachable only on a path the concrete run does not take leaves the
     universal theorem with a premise that is FALSE, and `native_decide` says so
@@ -5842,17 +5906,14 @@ class TestTheReturnFrameReadsX30ThroughAMaterialisedAddress(unittest.TestCase):
                           "the next session reads the marker list, does not "
                           "find it, and re-derives this" % stem)
             reason = T.EXPECTED_FAILURES[stem]
-            # Coherent with merged tree: frame/model obligations may be
-            # reported differently; require the marker to name the concrete
-            # obstruction rather than a stale form.
-            self.assertTrue(
-                "sp -" in reason or "FrameOk" in reason or "window" in reason,
-                "%s: the marker does not state the obstruction clearly: %r"
-                % (stem, reason))
-            self.assertTrue(
-                "materialis" in reason or "frame" in reason or "FrameOk" in reason,
-                "%s: the marker does not say the address/obligations are "
-                "named: %r" % (stem, reason))
+            self.assertIn("sp -", reason,
+                          "%s: the marker does not say the read is at a frame "
+                          "slot, which is what makes it unpeelable: %r"
+                          % (stem, reason))
+            self.assertIn("materialis", reason,
+                          "%s: the marker does not say the address is "
+                          "materialised (adrp/add), which is the whole of the "
+                          "gap: %r" % (stem, reason))
 
     def test_the_generated_proof_carries_the_materialised_address(self):
         """The measurement the markers state, read off the generated text.
@@ -6015,7 +6076,7 @@ class TestTheFloatReprHelperIsEmittedOnlyForAFloatPrint(unittest.TestCase):
     `extern_calls` the PROGRAM did not make: on x86-64 they made
     `_run_tests_section` refuse every run test (`NO RUN TESTS`), and the
     helper's bytes are the wall the kernel hits in every step certificate
-    (`bugs/FORMAL_call_proofgen_red_on_head.md`). The emitter now records
+    (`bugs/formal/FORMAL_call_proofgen_red_on_head.md`). The emitter now records
     a float print (`_float_repr_used`) and emits the helper only then.
 
     Cheap: proof-free compiles, no Lean.
@@ -6718,7 +6779,7 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
             "silently is how a refusal goes unrecorded")
         for stem in sorted(self.REFUSED):
             declared = self.REFUSED_OWNER.get(stem)
-            owners = [n for n in os.listdir(os.path.join(HERE, "bugs"))
+            owners = [n for n in os.listdir(os.path.join(HERE, "bugs", "formal"))
                       if n == declared or n.startswith(f"FORMAL_{stem}")]
             self.assertTrue(
                 owners,
@@ -6835,7 +6896,7 @@ class TestAPlaceholderModelClaimsNothing(unittest.TestCase):
     honest stub is the x86-64 half and the arm64 half is the stricter one — and
     arm64's proof layer is the more complete of the two, so "make them alike"
     would mean giving up more than it gains.  The decision and its measurement are
-    `bugs/FORMAL_wide_recv_model_has_no_domain_for_a_struct.md (deleted)`'s, and what
+    `bugs/formal/FORMAL_wide_recv_model_has_no_domain_for_a_struct.md`'s, and what
     belongs here is only that the stub's honesty is a property of the GENERATOR
     and not of this one example.
 
@@ -7127,7 +7188,7 @@ class TestCfgLeafCensus(unittest.TestCase):
     census it feeds; the Lean half -- "which leaf does the corpus actually
     admit at" -- is `no_admission_fallback` plus a Lean run, which is what
     `test_formal.py`'s census reports and what
-    `bugs/FORMAL_arm64_known_proof_gaps.md`'s census records.  The CBZ-leaf
+    `bugs/formal/FORMAL_arm64_known_proof_gaps.md`'s census records.  The CBZ-leaf
     doc that used to be cited here is deleted: its subject left when the guard
     became a load-and-compare, and the admissions that remained were the `sh`
     bit dropped by every `sp` tracker, fixed by 37ae3718.
@@ -7325,9 +7386,9 @@ class TestCfgLeafCensus(unittest.TestCase):
 
 # ── A SYMBOLIC DIVISOR, and why the terminal value flow cannot close it ──────
 #
-# `def q(a, b): return a // b` is the shape the former bug
-# `bugs/FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md` (now deleted)
-# was about, and the doc's own next step — put the enclosing `by_cases hc_N` into
+# `def q(a, b): return a // b` is the shape the doc
+# `bugs/formal/FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md`
+# is about, and the doc's own next step — put the enclosing `by_cases hc_N` into
 # the terminal value flow's `simp only [h8, mojo, …]` list — was measured here
 # and **changes nothing**: the eight terminal flows' residual goals are
 # byte-identical with and without it. Two facts explain that, and both are
@@ -7352,18 +7413,6 @@ class TestCfgLeafCensus(unittest.TestCase):
 # and the doc's next step becomes worth re-reading.
 _SYMBOLIC_DIVISOR = "def q(a, b):\n    return a // b\n"
 
-#: A LITERAL non-zero divisor.  The model can step the divide at build time,
-#: so `formal/model.py::division_needs_zero_guard` is decidable and the
-#: divide-by-zero arm is NOT emitted.  This avoids the compiler's `fflush`
-#: trap on the universal path, so the universal theorem IS emitted with
-#: the walk terminal's admission — exactly what
-#: `TestTheZeroDivisorGuardAgainstLean` needs to measure a residual.
-#:
-#: This is the fixture switch from
-#: `bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`
-#: (step 2 option 2), measured working 2026-10-18.
-_LITERAL_DIVISOR = "def q(a):\n    return a // 4\n"
-
 #: The walk terminal's admission, and the marker that prints the goals it
 #: absorbs.  `all_goals (first | done | sorry)` is the admission the doc is
 #: about; replacing `sorry` with `trace_state` is how a residual is READ, and
@@ -7387,26 +7436,6 @@ def _symbolic_divisor_proof(tmp):
     with open(src, "w") as f:
         f.write(_SYMBOLIC_DIVISOR)
     out = os.path.join(tmp, "symdiv.aout")
-    path = fb.compile_formal(src, arch="arm64", output=out, prove=True,
-                             check=False)["proof_path"]
-    text = open(path).read()
-    head, sep, tail = text.partition("theorem q_compiles_correctly_universal")
-    return head.replace(_CONCRETE, ":= by\n  sorry\n"), sep + tail
-
-
-def _literal_divisor_proof(tmp):
-    """The arm64 proof for `a // 4`, with the concrete tests neutralised.
-
-    The literal divisor avoids the compiler's divide-by-zero arm entirely,
-    so `q_compiles_correctly_universal` IS emitted and the class can measure
-    its residual. This implements the fixture switch from
-    `bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`.
-    """
-    import formal.build as fb
-    src = os.path.join(tmp, "litdiv.mojo")
-    with open(src, "w") as f:
-        f.write(_LITERAL_DIVISOR)
-    out = os.path.join(tmp, "litdiv.aout")
     path = fb.compile_formal(src, arch="arm64", output=out, prove=True,
                              check=False)["proof_path"]
     text = open(path).read()
@@ -7462,9 +7491,9 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
             m.group(1), "0",
             "fdiv64's div0 arm is no longer 0 — the arm64 div0 path leaves x0 = "
             "1 and exits, so if this changed the walk's terminal value flow may "
-            "now close; re-read the former bug "
-            "bugs/FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md "
-            "(deleted) before assuming it does not")
+            "now close; re-read "
+            "bugs/formal/FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md "
+            "before assuming it does not")
 
     def test_a_zero_divisor_leaves_the_image_with_status_one(self):
         """The other half, observed: `10 // 0` exits 1 and prints nothing.
@@ -7534,10 +7563,10 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
         the class set `cls.blind` and fail its Lean row by NAME — so accepting
         it here is not acceptance of a blind class, it is acceptance that the
         blindness is ANNOUNCED.  The walk-side fix landed since
-        (`bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md (deleted)`'s
+        (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
         step 2) and the fixture is back on outcome 1.  What this row still
         forbids is the fourth state: an empty tail with no announcement at
-        all, which is `bugs/FORMAL_the_div0_guard_measurement_class_
+        all, which is `bugs/formal/FORMAL_the_div0_guard_measurement_class_
         traces_nothing_any_more.md`'s subject.
         """
         from formal.build import FormalBuildError
@@ -7547,7 +7576,7 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
             self.assertIn("this walk cannot follow", str(e),
                           "the div0 fixture now refuses for a different reason "
                           "than the two unfollowable calls this tree records; "
-                          "re-read bugs/FORMAL_the_div0_guard_measurement_"
+                          "re-read bugs/formal/FORMAL_the_div0_guard_measurement_"
                           "class_traces_nothing_any_more.md before trusting "
                           "either of its next steps")
             return
@@ -7559,7 +7588,7 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
                       f"{_ADMIT!r} and no announced reachability theorem either: "
                       "the generator neither traced a residual nor said in the "
                       "file why it did not, which is the SILENT empty tail this "
-                      "row exists to forbid (bugs/FORMAL_the_div0_guard_"
+                      "row exists to forbid (bugs/formal/FORMAL_the_div0_guard_"
                       "measurement_class_traces_nothing_any_more.md)")
         self.assertIn("q_compiles_correctly_universal", emitted,
                       "the div0 fixture was substituted by a reachability "
@@ -7572,32 +7601,6 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
                       "theorem is NOT emitted; the announcement this row checks "
                       "is that sentence, not merely the theorem's name (a name "
                       "can appear in a comment that does not withdraw it)")
-
-    def test_literal_divisor_proof_produces_correct_proof(self):
-        """Regression for bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md.
-
-        Before the fixture switch (the doc's step 2 option 2), the measurement
-        class `TestTheZeroDivisorGuardAgainstLean` used `_symbolic_divisor_proof`,
-        which produces a proof with a reachability substitution instead of the
-        universal theorem + admission. After switching to `_literal_divisor_proof`,
-        the universal theorem IS emitted with its `_ADMIT`, so the measurement
-        mechanism fires. This test verifies that structural property directly.
-        """
-        import tempfile
-        tmp = tempfile.mkdtemp(prefix="regress-")
-        try:
-            head, tail = _literal_divisor_proof(tmp)
-            self.assertIn(
-                "q_compiles_correctly_universal", head + tail,
-                "literal divisor proof should emit q_compiles_correctly_universal")
-            self.assertNotIn(
-                "reaches_call_at_", head + tail,
-                "literal divisor proof should not have a reachability substitution")
-            self.assertIn(
-                _ADMIT, tail,
-                "literal divisor proof should carry _ADMIT in the tail")
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_a_literal_divisor_RESTORES_the_classs_subject(self):
         """The doc's step-2 option 2 is no longer refuted: MEASURED, not argued.
@@ -7663,10 +7666,11 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
 class TestFloatOrderIsDecidableAndFloatEqualityIsNot(unittest.TestCase):
     """Which of the ten IEEE-754 arms a `work_step_*` can be written for AT ALL.
 
-    The approach is to start with `FCMP` and not with the arithmetic, for a reason
-    about the FLAGS ("it has the flags to get right rather than a register")
-    rather than about PROVABILITY. This class is the measurement behind that choice,
-    and it is a question about LEAN rather than about arm64 — which is why it is three
+    `bugs/formal/FORMAL_arm64_ieee754_has_no_step_arms.md` says to start with `FCMP`
+    and not with the arithmetic, and gives a reason about the FLAGS ("it has
+    the flags to get right rather than a register") rather than about
+    PROVABILITY. This class is the measurement behind that choice, and it is a
+    question about LEAN rather than about arm64 — which is why it is three
     two-line files with no ProofLib import (0.3 s each, not a proof run), one
     per question, so each verdict is its own exit status and nothing has to be
     parsed out of a shared transcript:
@@ -7737,7 +7741,7 @@ class TestFloatOrderIsDecidableAndFloatEqualityIsNot(unittest.TestCase):
             self.assertEqual(rc, 0,
                              "%s: Lean's answer changed, and this class is "
                              "the measurement behind the ORDER of work in "
-                             "the FP step-arms plan "
+                             "`bugs/formal/FORMAL_arm64_ieee754_has_no_step_arms.md` "
                              "-- re-read it before believing the row below: %s"
                              % (name, out[:400]))
         else:
@@ -7779,18 +7783,13 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
     puts the WHOLE file in `head`, `tail` is empty, `tail.replace(_ADMIT, …)`
     is a no-op, no `trace_state` is ever installed, and the rows below report a
     `fdiv64` diagnosis about a fixture that is gone. That is exactly the bug
-    `bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`
+    `bugs/formal/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`
     is about, and the mechanism check is its step 1: `setUpClass` records,
     per spelling, WHY the admission did not occur in the tail it built
     (`cls.blind`, None when it did), and
     `test_the_measurement_class_can_still_see_what_it_measures` fails by name
     when it did not, so this class can only report the `fdiv64` diagnosis
     when it really measured a residual.
-
-    After the fix this doc wants (the fixture switch), this class should use
-    `def q(a): return a // 4` instead of `def q(a, b): return a // b`.
-    The literal divisor avoids the flush arm, so the universal theorem IS
-    emitted and the class can measure its residual.
     """
 
     #: The two spellings, and each one's patch (the doc's next step, applied).
@@ -7829,10 +7828,7 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         cls.blind = {}
         for label, patch in cls.SPELLINGS:
             try:
-                # FIXTURE SWITCH (from the doc's step-2 option 2): the literal
-                # divisor `a // 4` avoids the compiler's div0 arm, so the
-                # universal theorem IS emitted with its admission.
-                head, tail = _literal_divisor_proof(cls.tmp)
+                head, tail = _symbolic_divisor_proof(cls.tmp)
             except Exception as e:                      # noqa: BLE001
                 cls.blind[label] = (
                     f"the fixture no longer generates a proof at all, so the "
@@ -7854,7 +7850,7 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
                 # `info["compiler_traps"]` -- so the halt address is that call
                 # and no terminal value flow (and so no `_ADMIT`) is emitted.
                 # Naming the substitution says the residual is not "moved", it is
-                # behind `bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_
+                # behind `bugs/formal/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_
                 # a_conditional_path.md`, and this class goes green the way that
                 # doc's step 1 describes: until the walk can discharge a call on
                 # a conditional path, there is no `_ADMIT` in the tail for
@@ -7900,10 +7896,10 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
     def test_the_measurement_class_can_still_see_what_it_measures(self):
         """Fail by NAME when this class's own mechanism did not fire.
 
-        The doc's step 1 (`bugs/FORMAL_the_div0_guard_measurement_class_traces_
+        The doc's step 1 (`bugs/formal/FORMAL_the_div0_guard_measurement_class_traces_
         nothing_any_more.md`): a class that reports "the residual moved" while
         its fixture stopped producing a residual is the failure
-        `bugs/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_
+        `bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_
         it.md` records for `bootstrap-stage2-dumps` — a check that did not look
         at what it produced.  This row is the one that says so.
         """
@@ -7943,7 +7939,7 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         """The doc's next step, measured: the residual GOAL is unchanged.
 
         The set is the right comparison now, because the walk-side closure
-        (`bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md (deleted)`'s
+        (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
         step 2) put a SECOND terminal value flow in the file: the
         `q_compiles_correctly_universal` walk runs the divisor-nonzero path
         once per visit to the guard block, and the `hc_N` patch below reaches
@@ -7982,7 +7978,7 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
                          "adding the enclosing by_cases hypothesis to the "
                          "terminal value flow's simp only list produced a "
                          "DIFFERENT goal — which means the fix is further "
-                         "along than bugs/FORMAL_a_division_by_a_symbolic_"
+                         "along than bugs/formal/FORMAL_a_division_by_a_symbolic_"
                          "value_leaves_the_zero_guard_open.md records, and its "
                          "next step and its Status both need re-reading")
 
@@ -7997,7 +7993,7 @@ class TestTheDiv0FixtureHaltsAtTheCompilerTrap(unittest.TestCase):
     SUBSTITUTED by `q_reaches_call_at_0x…` and the class above had nothing to
     trace.  The pin said the test would go red and say the fixture is
     measurable again when the walk could discharge a call on a conditional
-    path.  It did — 2026-10-31, `bugs/FORMAL_integer_overflow_at_run_time_is_
+    path.  It did — 2026-10-31, `bugs/formal/FORMAL_integer_overflow_at_run_time_is_
     still_untrapped.md`'s step 2: the `BL`'s target sits just past the code
     slice, where the map (`_gen_code_defs` appends the terminal `ret`) answers
     a word no decode arm matches, so the model runs one step and halts there,
@@ -8867,7 +8863,7 @@ class TestTheDivisionExamplesHaveNoProofToCheck(unittest.TestCase):
     The refusal was the universal theorem's call walk refusing to follow TWO
     call sites of ONE callee — `//` and `%` each lower to a call to the same
     divide-and-correct helper — with a single halt address.  That is item 2 of
-    `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`.
+    `bugs/formal/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`.
 
     **Measured 2026-10-18: that refusal no longer fires.**  Both stems now reach
     a `*_compiles_correctly_universal` carrying the walk terminal, so the row
@@ -8987,7 +8983,7 @@ class TestTheDivisionExamplesHaveNoProofToCheck(unittest.TestCase):
         # row: `formal/x86_64_proof_gen.py` catches the generator's exception,
         # emits the model as a DISCLAIMED placeholder and suppresses the run
         # tests, so the end-to-end theorem is `sorry` and the example is a PASS.
-        # `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
+        # `bugs/formal/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
         # function.md` was that family; this is where the mechanism lives now.
         import formal.build as fb
         for stem in self.STEMS:
@@ -9353,7 +9349,7 @@ class TestTheOneOpaqueCallIsAnnounced(unittest.TestCase):
     #: compiler's trap, and the walk closes that path at its `hnone` instead
     #: of substituting a reachability theorem — the flip
     #: `TestTheDiv0FixtureHaltsAtTheCompilerTrap` pins, and
-    #: `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md (deleted)`'s
+    #: `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
     #: step 2.  `printf` with an UNUSED return value is the corpus's other
     #: single-opaque-call shape (`formal/examples/printf_int.mojo`'s body,
     #: named `q`): one `BL` out of the image, no source conditional, and the
@@ -9605,7 +9601,7 @@ class TestAComparisonWithTheImmediateOnTheLeft(unittest.TestCase):
     was an `Application type mismatch` — `hc_2` is about
     `arm64_matches_condition`, `hne_2` about `arm64_reg` — so the proof did not
     elaborate at all. Measured on
-    `bugs/FORMAL_arm64_proof_a_compare_with_the_immediate_on_the_left_does_not_
+    `bugs/formal/FORMAL_arm64_proof_a_compare_with_the_immediate_on_the_left_does_not_
     elaborate.md`. The fix is to apply the optimisation only where it is sound,
     `_bidx == 16` (CBZ): the contradiction is `hc : arm64_reg r s = 0` and
     `hne : arm64_reg r s ≠ 0`, which are complementary only for a CBZ.

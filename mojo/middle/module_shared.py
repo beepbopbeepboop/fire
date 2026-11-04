@@ -86,20 +86,8 @@ import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 # Memo for _gmi_collect_self_assigns (PERF_struct_self_assign_scan_uncached)
 _SELF_ASSIGN_MEMO: dict = {}
-
-
-def self_assign_memo_get(key):
-    """The memoised answer for `key`, or None. A function, so a caller in another
-    module (module_gen's `_gmi_collect_self_reads`) needs no module-attribute
-    read of the private dict: it used to reach it with
-    `__import__('mojo.middle.module_shared', fromlist=[...])._SELF_ASSIGN_MEMO`,
-    which the compiled compiler cannot evaluate (`AttributeError:
-    _SELF_ASSIGN_MEMO` on every struct-bearing file)."""
-    return _SELF_ASSIGN_MEMO.get(key)
-
-
-def self_assign_memo_set(key, value) -> None:
-    _SELF_ASSIGN_MEMO[key] = value
+# Memo for _gmi_collect_self_assigns (PERF_struct_self_assign_scan_uncached)
+_SELF_ASSIGN_MEMO: dict = {}
 
 def _selfhost_modglobal_is_pathcall(_v) -> bool:
     """`os.path.<fn>(...)` (any nesting) — a char*-producing path expression."""

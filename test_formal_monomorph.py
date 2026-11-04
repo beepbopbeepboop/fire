@@ -6,7 +6,7 @@ is, and this file pins what that means on the formal dylib path: a module that
 declares only `struct Pair[T]` now publishes `prefix_Pair_Int` and its methods,
 and a program that writes `Pair[Int]()` binds them. Before this the module had no
 boundary symbol at all and the whole thing was one refusal — the second wall
-behind the 165-file row in the `b8` round of `bugs/FORMAL_sweep_work_map.md` §4.1,
+behind the 165-file row in the `b8` round of `bugs/formal/FORMAL_sweep_work_map.md` §4.1,
 which sits behind the codegen wall in `std/collections/binary_heap.mojo` and so
 was invisible until that file's own constructs lower.
 
@@ -239,70 +239,56 @@ def main():
 
 
 def test_a_dotted_application_says_which_word_is_the_module(tmpdir):
-    """`L.Pair[Int]()` works through a module alias (fixed)."""
-    cpython = """\
-class Pair:
-    def __init__(self):
-        self.first = 0
-        self.second = 0
+    """`L.Pair[Int]()` is refused, and the refusal names `Pair` as the template.
 
-    def get_first(self):
-        return self.first
-"""
-    cpython_main = """\
-def main():
-    a = Pair()
-    a.first = 7
-    a.second = 3
-    print(a.get_first())
-"""
+    §2's construct, and §2 is not a message problem — it is a recogniser this
+    build does not have: `mojo/middle/comptime.specialization_name` answers
+    `None` for a dotted base BY DESIGN, because both backends'
+    `_specialization_of` and `formal/model.py::subscript_callee_names` consult
+    that one function and a second recogniser that disagreed with it would bind
+    the call to the WRONG MODULE's instantiation. So the construct stays
+    refused, and what this case pins is that the refusal is about the program.
+
+    **It was not.** The scan that raises it names the call by the ROOT of its
+    dotted chain, so `L.Pair[Int]()` arrived as the name `L`, and the message
+    read:
+
+        build: L[…](…) calls a name this unit does not compile … If `L` is a
+        generic of another module … Write it as `L[<a type>](…)`
+
+    Three claims about a program that says none of them: `L` is the MODULE, so
+    it is not a generic of one; `L[<a type>]` is not a spelling of anything;
+    and "the call asked for no instantiation" is precisely the diagnosis this
+    case must not give, because the brackets name a type argument perfectly
+    well. That is the `refuse_without:` class of defect — a repair that is
+    wrong about correct code — and it is why the text is a whole function
+    (`formal/model.py::dotted_specialization_refusal`) rather than a clause.
+
+    Four needles, each for a different false claim above, and the last one is
+    the only part of the message a reader can act on: `from L import Pair` then
+    `Pair[Int]()`, which is the SAME program and is lowered. That is the row
+    below, on this machine, in this tree.
+    """
     for arch in ARCHES:
         fresh_cas()
-        got = run_pair_case(tmpdir, arch, "mm_dottedcallee", DOTTED_LIB,
-                            DOTTED_PROG,
-                            cpython + "\n" + cpython_main)
-        check(got == "7\n",
-              f"[{arch}] dotted module alias application printed {got!r}")
-
-
-def test_dotted_module_alias_generic_regression(tmpdir):
-    """Regression: dotted module alias `L.Pair[Int]()` instantiates correctly."""
-    lib = """\
-struct Pair[T]:
-    var first: T
-    var second: T
-    def get_first(self) -> T:
-        return self.first
-"""
-    prog = """\
-import pairlib as L
-def main():
-    var a = L.Pair[Int]()
-    a.first = 42
-    a.second = 1
-    print(a.get_first())
-"""
-    cpython = """\
-class Pair:
-    def __init__(self):
-        self.first = 0
-        self.second = 0
-    def get_first(self):
-        return self.first
-"""
-    cpython_main = """\
-def main():
-    a = Pair()
-    a.first = 42
-    a.second = 1
-    print(a.get_first())
-"""
-    for arch in ARCHES:
-        fresh_cas()
-        got = run_pair_case(tmpdir, arch, "mm_dottedreg", lib, prog,
-                            cpython + "\n" + cpython_main)
-        check(got == "42\n",
-              f"[{arch}] dotted module alias regression printed {got!r}")
+        text = run_pair_case(tmpdir, arch, "mm_dottedcallee", DOTTED_LIB,
+                             DOTTED_PROG,
+                             None, expect_ok=False)
+        for needle in ("is a bracketed callee spelled THROUGH A MODULE",
+                       "`L` is the module while `Pair` is the template",
+                       "answers `None` for a dotted base BY DESIGN",
+                       "from <the module> import Pair",
+                       "the ALIASED form"):
+            check(needle in text,
+                  f"[{arch}] the dotted application did not say {needle!r}: "
+                  f"{text.strip()[-400:]}")
+        check("L[<a type>](…)" not in text,
+              f"[{arch}] the refusal still recommends `L[<a type>](…)`, which "
+              f"is not a spelling of anything — `L` is the module. That is the "
+              f"sentence this change removes: {text.strip()[-300:]}")
+        check("If `L` is a generic of another module" not in text,
+              f"[{arch}] the refusal still says `L` is a generic of another "
+              f"module. `L` IS the module: {text.strip()[-300:]}")
 
 
 def test_the_dotted_applications_remedy_is_lowered(tmpdir):
@@ -347,7 +333,7 @@ def test_a_generic_struct_template_is_instantiated_at_the_importers_type(
         either.
 
     — `formal/build.py::no_public_api_reason`, which was RIGHT about the file and
-    was also the whole of `bugs/FORMAL_known_limits.md` §1.2's "Stage 5
+    was also the whole of `bugs/formal/FORMAL_known_limits.md` §1.2's "Stage 5
     monomorphization on the formal path … this is weeks, not an afternoon".
 
     Two type arguments in one program, because the failure this feature has to
@@ -581,7 +567,7 @@ def test_a_bare_local_construction_with_no_annotation_is_still_refused(tmpdir):
 
     `var a = Box(7)` writes no bracket anywhere, so there is no type argument to
     demand and this reader invents none — the type-argument INFERENCE a bare call
-    needs is `bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_
+    needs is `bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_
     inferrable.md`, a separate feature. The build must keep the refusal it has,
     which is a fact worth pinning: a reader that turned every bare call to a
     template into a demand would bind an instantiation nobody named.
@@ -929,7 +915,7 @@ def test_a_package_reexport_attributes_the_demand_to_the_defining_module(
 
     — a complaint about the LINK LINE for a library that had been built and was
     simply not on it. 162 of the 165 files in
-    the `b8` round of `bugs/FORMAL_sweep_work_map.md` §3.1 reach
+    the `b8` round of `bugs/formal/FORMAL_sweep_work_map.md` §3.1 reach
     `binary_heap.mojo` through `std/collections/__init__.mojo`'s re-export and
     not by naming it, so this is the shape the row actually has.
 
@@ -1063,7 +1049,7 @@ def test_a_bare_call_to_an_imported_generic_is_still_refused(tmpdir):
     names the library). With a template and nothing else there is no demand at
     all, so nothing is instantiated and the module is refused for having no
     boundary symbol — which is true of it, and is
-    `bugs/FORMAL_known_limits.md` §1.2's original refusal doing exactly its job.
+    `bugs/formal/FORMAL_known_limits.md` §1.2's original refusal doing exactly its job.
     """
     lib = ("def widen[T: Intable](v: T) -> T:\n"
            "    return v\n"
@@ -2696,7 +2682,7 @@ def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
 def test_a_bare_literal_value_parameter_instantiates(tmpdir):
     """`Tagged[Int, 0]` binds a comptime VALUE parameter, on both architectures.
 
-    The end-to-end half of `bugs/FORMAL_an_explicit_parameter_list_naming_a_
+    The end-to-end half of `bugs/formal/FORMAL_an_explicit_parameter_list_naming_a_
     comptime_value.md` §4.1: a bracket whose element is a comptime ARGUMENT
     rather than a type spelling.  A display already reached the boundary symbol
     (`test_a_value_bracket_argument_reaches_the_boundary_symbol` above); a BARE
@@ -3162,7 +3148,7 @@ def test_a_stated_mangled_spelling_is_the_one_the_mangler_produces(tmpdir):
 # The case above is the control: `widen(5)` is refused, and the refusal says the
 # source is right and this path does not infer the type arguments. That is the
 # honest half. The other half is the SIZE of the work, and
-# `bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
+# `bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
 # §3 step 1 asks for it without having it: "derive its type arguments from the
 # call's argument types instead of from a bracket" — where the type argument "is
 # not IN the call, it is a property of the argument's DECLARED TYPE".
@@ -3399,7 +3385,7 @@ def test_the_census_does_not_count_this_worktrees_scratch(tmpdir):
     call to `FormatStruct`, this doc's own subject, in a file that does not
     exist and that no reader will ever find again.
 
-    That is the defect `bugs/FORMAL_a_function_with_no_return_...` §0c already
+    That is the defect `bugs/formal/FORMAL_a_function_with_no_return_...` §0c already
     recorded for the OTHER census over the same corpus ("a census whose numbers
     move with the worktree's scratch is not a measurement"), fixed there with a
     hardcoded `(".tmp", ".git", "__pycache__")`.  Both censuses now ask
@@ -3449,7 +3435,7 @@ def test_the_census_does_not_count_this_worktrees_scratch(tmpdir):
 def test_the_census_reads_the_measured_shapes_out_of_the_corpus(_tmpdir):
     """The three symbols the doc measured, asked of the real stdlib.
 
-    `bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
+    `bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
     §1 measures the row by the callee the refusal names — `FormatStruct` 68
     files, `dealloc` 29, `is_negative` 13 — and §2 says every one of those type
     arguments is inferable from the argument's declared type. Asking this census
@@ -3959,26 +3945,6 @@ def test_a_module_called_through_its_import_alias_loweres_to_that_module(tmpdir)
         check(got == "42\n", f"[{arch}] printed {got!r}, expected '42\\n'")
 
 
-def test_a_bare_call_to_an_imported_template_is_inferred_from_argument_annotation(tmpdir):
-    lib = ("def widen[T: Intable](v: T) -> T:\n"
-           "    return v\n")
-    prog = ("from pairlib import widen\n"
-            "\n"
-            "def main():\n"
-            "    var x: Int = 7\n"
-            "    print(widen(x))\n")
-    cpython = ("def widen(v):\n"
-               "    return v\n"
-               "\n"
-               "def main():\n"
-               "    x = 7\n"
-               "    print(widen(x))\n")
-    for arch in ARCHES:
-        fresh_cas()
-        got = run_pair_case(tmpdir, arch, "mm_bareinfer", lib, prog, cpython)
-        check(got == "7\n", f"[{arch}] printed {got!r}, expected '7\\n'")
-
-
 TESTS = [
     ("a generic struct template is instantiated at the importer's type",
      test_a_generic_struct_template_is_instantiated_at_the_importers_type),
@@ -4008,8 +3974,6 @@ TESTS = [
      test_an_instantiation_agrees_with_the_concrete_struct_of_the_same_shape),
     ("a bare call to an imported generic is still refused",
      test_a_bare_call_to_an_imported_generic_is_still_refused),
-    ("a bare call to an imported template is inferred from argument annotation",
-     test_a_bare_call_to_an_imported_template_is_inferred_from_argument_annotation),
     ("an inferred-parameter function is called without the bracket",
      test_an_inferred_parameter_function_is_called_without_the_bracket),
     ("a constants-only module builds and its constants read back",

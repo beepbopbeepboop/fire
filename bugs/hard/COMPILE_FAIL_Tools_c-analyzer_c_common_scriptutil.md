@@ -175,7 +175,7 @@ family and three of these six files now name it. Second, `c_parser/preprocessor/
 — which this closure reaches — used to contribute ~17 gcc errors and now contributes seven,
 because the 1-slot tuple target over a generator (`for patterns, in _resolve_file_values(...)`)
 is fixed; the detail and the four still-undeclared names are in
-`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md`'s 2026-10-04 status.
+`bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md`'s 2026-10-04 status.
 
 ## Status 2026-10-02 — items 1 and 2 are FIXED; `iter_marks` compiles. ONE blocker left, and it is item 3
 

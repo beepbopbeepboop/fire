@@ -38,10 +38,8 @@ import mlir
 # "unavailable in compiled mode" stub returning 0.
 from fire_compiler import for_target_names
 import mojo.middle.types as gimple_ctypes
-from mojo.middle.types import _FOREIGN_CALLABLES
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
-from mojo.middle.exprtypes import _cpp_word_of_kind, _fstring_field_names
 import mojo.middle.coro as coro_mod
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import gimple_codegen
@@ -319,6 +317,28 @@ def _cpp_except_handler_body(gen, handler, caught_var: str, declared: dict,
 
 
 _Y_SITE = re.compile(r'^(.*?)co_yield /\*Y:([^*]*)\*/ \((.*)\);$')
+
+
+def _cpp_word_of_kind(ctype: str, expr: str) -> str:
+    """`expr` (of scalar C++ type `ctype`) as ONE tagged int64_t word, the form
+    every consumer renders by the kind the box carries: a double as
+    `mojo_box_from_double`, a bool as `mojo_box_from_bool`, a string as
+    `mojo_box_from_str`, None as `mojo_box_none()`, and an int as itself. The
+    single mapping both a tagged yield slot (`_cpp_tag_yield_sites`) and a
+    tagged operand of `and`/`or` (`cpp_core._cpp_tagged_operand_word`) use."""
+    if ctype == 'None':
+        return "mojo_box_none()"
+    if ctype == 'double':
+        return f"mojo_box_from_double((double)({expr}))"
+    if ctype == '_Bool':
+        return f"mojo_box_from_bool((int64_t)({expr}))"
+    if ctype == 'char *':
+        # boxed by kind like the others: a raw pointer is only read as a
+        # string when the runtime registered it (a C++ literal is not)
+        return f"mojo_box_from_str((char *)({expr}))"
+    if ctype == 'MojoBytes *':
+        return f"(int64_t)(intptr_t)({expr})"
+    return f"(int64_t)({expr})"
 
 
 def _cpp_tag_yield_sites(body_lines: list):
@@ -639,7 +659,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             # shape, so nothing can reach _cpp_expr's MemberExpr
             # "non-self member access" fallback (invalid C++ on a
             # scalar) or silently read the placeholder as a real value.
-            # See bugs/hard/CODEGEN_enum_runtime_class_creation.md's
+            # See bugs/mid/CODEGEN_enum_runtime_class_creation.md's
             # 2026-08-21 update for the motivating Lib/enum.py
             # `Flag._iter_member_by_value_` shape (previously refused
             # unconditionally here — see the
@@ -687,28 +707,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             param_ctypes.append((pn[1:], 'MojoList *'))
             continue
         ctype = gen._param_ctype(pn, pt, fn)
-        # For foreign callable defaults used in generators, pass as word
-        try:
-            _fc_tbl = getattr(gimple_ctypes, '_FOREIGN_CALLABLES', {}) or {}
-            if _fc_tbl and ctype in (getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE', None),
-                                     getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE_1ARG', None)):
-                # Check if it's a known foreign callable
-                _pdflt = (getattr(fn, 'param_defaults', None) or {}).get(pn.lstrip('*'))
-                if _pdflt is not None:
-                    from fire_compiler import MemberExpr, IdentExpr, CallExpr, StringLiteral
-                    _qname = None
-                    if isinstance(_pdflt, MemberExpr):
-                        if isinstance(_pdflt.obj, IdentExpr):
-                            _qname = f"{_pdflt.obj.name}.{_pdflt.member}"
-                        elif isinstance(_pdflt.obj, CallExpr) and isinstance(_pdflt.obj.func, IdentExpr) and _pdflt.obj.func.name == '__import__':
-                            if getattr(_pdflt.obj, 'args', None):
-                                _a0 = _pdflt.obj.args[0]
-                                if isinstance(_a0, StringLiteral):
-                                    _qname = f"{getattr(_a0, 'value', '')}.{_pdflt.member}"
-                    if _qname in _fc_tbl or ctype in (getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE', None),):
-                        ctype = 'int64_t'
-        except Exception:
-            pass
         if (ctype == 'char *' and (pt is None or pt == '')
                 and pn in coro_mod._PTR_EVIDENCE.get(fn.name, ())
                 and any(isinstance(_n, gimple_ctypes.CallExpr)
@@ -742,9 +740,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                           and ctype[:-2] in gen.struct_field_types)
         if _is_struct_ptr:
             gen._cpp_param_struct_names.add(ctype[:-2])
-        # Allow foreign callable types (from foreign callable table)
-        _is_foreign_callable = isinstance(ctype, str) and ctype.startswith('std::function')
-        if ctype not in _GENERATOR_PARAM_CTYPES and not _is_struct_ptr and not _is_foreign_callable:
+        if ctype not in _GENERATOR_PARAM_CTYPES and not _is_struct_ptr:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 f"{fn.name}: generator parameter '{pn}' has unsupported "
                 f"type {ctype!r} (only int64_t/double/_Bool/char*/"
@@ -760,8 +756,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # `nonlocal` write cannot reach here.
     if extra_captures:
         for _cap_name, _cap_ctype in extra_captures:
-            _is_foreign_callable_cap = isinstance(_cap_ctype, str) and _cap_ctype.startswith('std::function')
-            if _cap_ctype not in _GENERATOR_PARAM_CTYPES and not _is_foreign_callable_cap:
+            if _cap_ctype not in _GENERATOR_PARAM_CTYPES:
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
                     f"{fn.name}: enclosing-scope variable {_cap_name!r} has "
                     f"type {_cap_ctype!r}, which a nested generator cannot yet "
@@ -1626,6 +1621,31 @@ def _binding_site_count(body: list, name: str) -> int:
                if name in gimple_exprtypes._binding_node_names(n))
 
 
+_FSTRING_FIELD_RE = re.compile(r"\{([^{}]*)\}")
+_FSTRING_QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+_FSTRING_NAME_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*)")
+
+
+def _fstring_field_names(node_list: list) -> set[str]:
+    """Identifiers an f-string in `node_list` reads from its `{...}` fields.
+
+    The parser keeps an f-string as one raw `StringLiteral` (see
+    fire_compiler.is_fstring_literal), so `_used_idents_deep` never sees
+    the names interpolated into it. Those names are real reads: a nested
+    generator that prints `f'{name}:'` reads `name`. Quoted substrings
+    inside a field (`d['key']`) and attribute names after a dot (`x.attr`)
+    are not variable reads and are skipped.
+    """
+    out: set[str] = set()
+    for n in gimple_exprtypes._walk_ast(node_list):
+        if not (isinstance(n, N.StringLiteral) and N.is_fstring_literal(n)):
+            continue
+        for field in _FSTRING_FIELD_RE.findall(str(n.value)):
+            field = _FSTRING_QUOTED_RE.sub('', field)
+            out.update(_FSTRING_NAME_RE.findall(field))
+    return out
+
+
 def _nested_generator_captures(stmts: list) -> dict[int, list[str]]:
     """Map `id(g)` -> the sorted enclosing-scope names a NESTED generator
     `g` reads, for every generator `g` that is defined inside another `def`
@@ -2080,17 +2100,9 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
         params_C = _infer_helper_param_ctypes(C)
         if params_C is None:
             return False
-        # The callable-value model admits parameters/returns that are
-        # pointer-shaped (str/list/dict/struct pointers) in addition to int64.
-        if len(params_C) > 4:
+        # The callable-value model admits one int64 parameter at most.
+        if len(params_C) > 1 or any(ct != 'int64_t' for _, ct in params_C):
             return False
-        if any(ct == 'void' or ct is None for _, ct in params_C):
-            return False
-        # For now, allow int64_t and pointer types
-        for _, ct in params_C:
-            ct_n = 'int64_t' if ct == 'int' else ct
-            if ct_n != 'int64_t' and not (isinstance(ct_n, str) and ct_n.endswith('*')):
-                return False
         if any(isinstance(x, gimple_ctypes.NonlocalStmt)
                for x in gimple_exprtypes._walk_own_body(C.body)):
             return False
@@ -2112,37 +2124,25 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
         if f_emit is None:
             return False
         hC = dict(hF)
-        hC.update({pn: (ct if ct != 'int' else 'int64_t') for pn, ct in params_C})
-        c_ret = _helper_return_ctype(C.body, hC)
-        if c_ret is None:
-            return False
-        c_ret_n = 'int64_t' if c_ret == 'int' else c_ret
-        # Allow int64_t and pointer types as returns
-        if c_ret_n != 'void' and c_ret_n != 'int64_t' and not (isinstance(c_ret_n, str) and c_ret_n.endswith('*')):
+        hC.update({pn: ct for pn, ct in params_C})
+        if _helper_return_ctype(C.body, hC) != 'int64_t':
             return False
         c_kw = _helper_kw_renames(params_C)
         c_emit = _emit_helper_body(C.body, hC, c_kw)
         if c_emit is None:
             return False
-        # Build typed callable
-        try:
-            c_param_list = [(ct if ct != 'int' else 'int64_t') for _, ct in params_C]
-            callable_ct = gimple_ctypes.callable_ctype(c_param_list, c_ret_n if c_ret_n != 'void' else 'int64_t')
-        except Exception:
-            callable_ct = (gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG if params_C
-                           else gimple_ctypes._CPP_CALLABLE_CTYPE)
+        # The returned closure is boxed exactly as a plain function value
+        # already is in this model: an int64 `MojoBoundMethod` (fn = a
+        # trampoline, self = the heap-held lambda), which `mojo_fnptr_call_N`
+        # dispatches on. So the factory's value is an ordinary int64_t slot.
+        callable_ct = (gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG if params_C
+                       else gimple_ctypes._CPP_CALLABLE_CTYPE)
         csym = f"{base}_h_{gimple_ctypes._safe_name(F.name)}"
         tramp = f"{csym}_tramp"
         sig_F = ', '.join(
             f"{gimple_exprtypes._c_to_cpp_scalar_type(ct)} {pn}"
             for pn, ct in params_F) or 'void'
-        # Pass through as-is for pointers, int64_t for ints
-        sig_C_list = []
-        for pn, ct in params_C:
-            pct = ct if ct != 'int' else 'int64_t'
-            pct_cpp = gimple_exprtypes._c_to_cpp_scalar_type(pct)
-            sig_C_list.append(f"{pct_cpp} {c_kw.get(pn, pn)}")
-        sig_C = ', '.join(sig_C_list)
+        sig_C = ', '.join(f"int64_t {c_kw.get(pn, pn)}" for pn, _ in params_C)
         tramp_args = ''.join(f", int64_t _a{k}" for k in range(len(params_C)))
         call_args = ', '.join(f"_a{k}" for k in range(len(params_C)))
         fwd.append(f"static int64_t {csym} ({sig_F});")
@@ -2150,14 +2150,9 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
                    f"return (*({callable_ct} *)env)({call_args}); }}")
         block = [f"static int64_t {csym} ({sig_F}) {{"]
         block += [f"    {x}" for x in f_emit[0] + f_emit[1]]
-        cpp_ret_c = gimple_exprtypes._c_to_cpp_scalar_type(c_ret_n) if c_ret_n != 'void' else 'int64_t'
-        block.append(f"    {callable_ct} *_clo = new {callable_ct}([=]({sig_C}) mutable -> {cpp_ret_c} {{")
+        block.append(f"    {callable_ct} *_clo = new {callable_ct}([=]({sig_C}) mutable -> int64_t {{")
         block += [f"        {x}" for x in c_emit[0] + c_emit[1]]
-        if cpp_ret_c != 'void':
-            dflt = 'nullptr' if cpp_ret_c.endswith('*') else '0'
-            block.append(f"        return ({cpp_ret_c}){dflt};  /* fallthrough guard */")
-        else:
-            pass  # void case shouldn't happen if we require returns, but handle
+        block.append("        return (int64_t)0;  /* fallthrough guard */")
         block.append("    });")
         block.append(f"    return (int64_t)(intptr_t)mojo_bound_method_new((void *){tramp}, (void *)_clo);")
         block.append("}")

@@ -24,7 +24,7 @@ predicate. **Not fixed** — this is a handoff.
 > **Not deleted, and the decision is settled rather than parked.** By this
 > repo's own bug-doc rule a fixed bug's doc is deleted rather than left with a
 > status history — but this is a top-level file, and SIX places cite it *by
-> name*: `bugs/FORMAL_string_value_model.md` (twice), `bugs/
+> name*: `bugs/formal/FORMAL_string_value_model.md` (twice), `bugs/
 > RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md`, and three comments
 > in `mojo/backend_gimple/` (`emit_infra.py` twice, `module_gen.py`) that name
 > it as the source of the argument they are making. Deleting it would turn

@@ -145,7 +145,7 @@ def _first_sentence(e) -> str:
 
 
 def _ast_value(fn, func_name: str, admitted: dict = None, scope=None,
-                callees: dict = None, callees2: dict = None) -> str:
+                callees: dict = None) -> str:
     """The `MojoFunc` value mirroring `fn`'s source AST.
 
     Raises whatever the shared emitter raises for a construct the untyped
@@ -170,18 +170,8 @@ def _ast_value(fn, func_name: str, admitted: dict = None, scope=None,
     resolvable = ({func_name} | set(callees or ())
                   | {c["name"] for c in (admitted or [])
                      if isinstance(c, dict) and c.get("name")})
-    # Include two-parameter callees in resolvable2 so the bridge can state
-    # calls to them.
-    resolvable2 = frozenset(AP._admitted_arity2_map(admitted)) | set(callees2 or ())
-    try:
-        for c in (admitted or []):
-            if isinstance(c, dict) and c.get("name") and c.get("lean_name"):
-                resolvable2 = frozenset(set(resolvable2) | {c.get("name")})
-            elif not isinstance(c, dict) and getattr(c, "name", None) and getattr(c, "lean_name", None):
-                resolvable2 = frozenset(set(resolvable2) | {getattr(c, "name")})
-    except Exception:
-        pass
-    gaps = AP._ast_bridge_gaps(fn, resolvable, resolvable2)
+    gaps = AP._ast_bridge_gaps(fn, resolvable,
+                               frozenset(AP._admitted_arity2_map(admitted)))
     if gaps:
         raise NotImplementedError(AP._ast_gap_message(gaps))
     body = "[" + ", ".join(AP._stmts_ast(fn.body, scope)) + "]"
@@ -195,8 +185,7 @@ def _ast_value(fn, func_name: str, admitted: dict = None, scope=None,
 
 def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
                           go_lemmas: list = None, admitted: dict = None,
-                          arity: int = 1, scope=None, callees: dict = None,
-                          go_defs: str = None, prog: SimpleNamespace = None) -> str:
+                          arity: int = 1, scope=None, callees: dict = None) -> str:
     """`eval_eq_mojo`: the AST interpreter agrees with the source model.
 
     Proved for the shapes the shared generator can close by `simp` (a
@@ -209,14 +198,7 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     if typed:
         return ("/- Typed function: the untyped AST-eval bridge is omitted;\n"
                 "   correctness follows from the machine value flow. -/\n")
-    _callees2_check = None
-    try:
-        if go_defs or prog:
-            from formal import arm64_proof_gen as AP
-            _callees2_check = AP._callee_call_table(go_defs or "", prog or type('P', (), {'functions': []})(), func_name, arity=2)
-    except Exception:
-        _callees2_check = None
-    _ast_value(fn, func_name, admitted, scope, callees, callees2=_callees2_check)
+    _ast_value(fn, func_name, admitted, scope, callees)   # probe: may raise
     from formal import arm64_proof_gen as AP
     if AP._is_recursive(fn) or AP._has_while(fn.body):
         return None       # caller emits the `sorry` form
@@ -256,33 +238,22 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
                            "MojoEnv", "evalBody", "evalBodyEnv", "evalExpr",
                            "u64pow", "u64powGo", "sKey"] + list(go_lemmas or []))
     if not conds:
-        proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  simp +decide [{simp_lems}]"
+        proof = f"simp +decide [{simp_lems}]"
     else:
         by_cases = " ".join(f"by_cases h{i} : {c} <;>"
                             for i, c in enumerate(conds))
         hs = ", ".join(f"h{i}" for i in range(len(conds)))
-                # `AP._eval_eq_conds_tactic`: decide the constant conditions with
-        # `have`/`native_decide` and splits only the argument-dependent ones,
+        # `AP._eval_eq_conds_tactic`: decide the constant conditions with
+        # `have`/`native_decide` and split only the argument-dependent ones,
         # falling back to the historical full-`by_cases` text when the
         # conditions are all beyond its subset (see its docstring).
-        _t = AP._eval_eq_conds_tactic(
-            conds, hs, simp_lems,
-            extra=", u64_lt_iff_false_of_le, u64_le_iff_false_of_lt")
-        if _t is not None:
-            if len(conds) > 4:
-                proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {_t}"
-            else:
-                proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {_t}"
-        else:
-            if len(conds) > 4:
-                mid = len(conds) // 2
-                by_cases1 = " ".join(f"by_cases h{i} : {conds[i]} <;>" for i in range(mid))
-                by_cases2 = " ".join(f"by_cases h{i} : {conds[i]} <;>" for i in range(mid, len(conds)))
-                hs_mid = ", ".join(f"h{i}" for i in range(mid)) + (", " if mid > 0 else "")
-                hs_all = ", ".join(f"h{i}" for i in range(len(conds)))
-                proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {by_cases1} simp_all +decide [{hs_mid}{simp_lems}, u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]\n  {by_cases2} simp_all +decide [{hs_all}, {simp_lems}, u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
-            else:
-                proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {by_cases} simp_all +decide [{hs}, {simp_lems}, u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
+        proof = (
+            AP._eval_eq_conds_tactic(
+                conds, hs, simp_lems,
+                extra=", u64_lt_iff_false_of_le, u64_le_iff_false_of_lt")
+            or f"{by_cases} simp_all +decide [{hs}, {simp_lems}, "
+               "u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
+        )
     # `AP._call_func_lean` rather than a local spelling: this is the sixth copy
     # of this `fun name arg => ...` and it has to be the same function the arm64
     # generator builds, because `eval_eq_mojo` on both sides is the statement
@@ -291,10 +262,10 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     from formal import arm64_proof_gen as AP
     _cf = AP._call_func_lean(func_name, admitted, arity=arity,
                             exports=callees)
-    # build callFunc2: the arity-2 contracts plus every two-parameter callee.
+    # build callFunc2: the arity-2 contracts, the same table the arm64 generator
+    # builds (`AP._admitted_arity2_map`).
     _admitted_calls_map2 = AP._admitted_arity2_map(admitted)
-    _callees2 = AP._callee_call_table(go_defs or "", prog or type('P', (), {'functions': []})(), func_name, arity=2) if (go_defs or prog) else {}
-    _cf2 = AP._call_func2_lean(func_name, _admitted_calls_map2, exports=_callees2)
+    _cf2 = AP._call_func2_lean(func_name, _admitted_calls_map2)
     return (f"/-- eval_eq_mojo: AST evaluation agrees with the semantic model. -/\n"
             f"theorem eval_eq_mojo {AP._entry_binders(arity)} :\n"
             f"  evalFunc ast {_cf} {_cf2} {AP._entry_arg_list(_en)} = "
@@ -925,9 +896,6 @@ def generate_x86_64_proof(prog, code, info) -> str:
     # gap check below is asked with, so this backend cannot resolve a name its
     # `callFunc` has no branch for (or refuse one it has).
     _callees = AP._callee_call_table(go_defs, prog, func_name)
-    # The two-parameter analogue: callFunc2 branches over user functions that
-    # take two arguments, so `eval_eq_mojo` does not ask Lean to prove `0 = ...`.
-    _callees2 = AP._callee_call_table(go_defs, prog, func_name, arity=2)
     # The old one-liner verbatim at arity one, which is every program in the
     # corpus: a comment is not semantics, but re-inking it would invalidate
     # every cached verdict in ~/.gmojo for a wording change.
@@ -973,8 +941,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
             section = _eval_eq_mojo_section(func_name, fn, typed,
                                             go_lemma_names, admitted=_admitted,
                                             arity=arity, scope=_vscope,
-                                            callees=_callees,
-                                            go_defs=go_defs, prog=prog)
+                                            callees=_callees)
         except Exception:                           # noqa: BLE001
             section = None
     if section is None:
@@ -990,8 +957,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
         # described a behaviour the code did not have. Quoting the message
         # means a new gap is described by the gap's own words.
         try:
-            _ast_value(fn, func_name, _admitted, _vscope, _callees,
-                       callees2=_callees2)
+            _ast_value(fn, func_name, _admitted, _vscope, _callees)
             reason = ("this function's shape (recursive/looping): the bridge "
                       "is not closed yet")
         except Exception as e:                      # noqa: BLE001
@@ -1005,7 +971,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
         # instead of omitting the AST.
         try:
             ast_value = _ast_value(fn, func_name, _admitted, _vscope,
-                                   _callees, callees2=_callees2)
+                                   _callees)
         except Exception as e:                      # noqa: BLE001
             section = (f"/- AST omitted: {_first_sentence(e)} -/\n")
         else:

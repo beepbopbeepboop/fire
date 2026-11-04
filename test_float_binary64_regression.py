@@ -1,6 +1,6 @@
 # Regression for FORMAL_float_binary64_only: binary64-only scope, float conversions
 # refused by kind, narrow float constructors refused by name, Float64 lowers.
-# See bugs/FORMAL_float_binary64_only.md (deleted when fixed).
+# See bugs/formal/FORMAL_float_binary64_only.md (deleted when fixed).
 
 def test_float_binary64_refusals_and_controls():
     import sys, os

@@ -17,7 +17,7 @@ from . import *
 # tidying: a byte answer presented where CPython gives a code-point answer is a
 # MISCOMPILE — a program that indexes by the answer then reads out of range,
 # and a program that only prints it is wrong in a way no reader of the output
-# would catch. The representation decision above (`bugs/FORMAL_string_value_model.md`
+# would catch. The representation decision above (`bugs/formal/FORMAL_string_value_model.md`
 # §"The decision": a formal value is one word and a string is a bare `char *`)
 # does not change, and neither does anything above this value model; what
 # changes is that the ONE question "is this byte count a code point count" is
@@ -2155,12 +2155,7 @@ def identity_conversion_operand(expr):
     args = list(getattr(expr, "args", None) or [])
     if len(args) != 1 or getattr(expr, "kwargs", None):
         return None
-    name = expr.func.name
-    # str() is now a real conversion/builtin that produces string representations
-    # for ints (and passes through strings); don't unwrap it as identity here
-    if name == "str":
-        return None
-    tk = type_constructor_kind(name)
+    tk = type_constructor_kind(expr.func.name)
     if tk is None or tk[0] != "identity":
         return None
     return args[0]
@@ -3418,36 +3413,8 @@ STRING_TWO_STRING_ARITHMETIC_OPS = ("+", "+=", "-", "-=")
 # question is decided where the source token is, and an ordinary literal's
 # `value` is its BODY — so a prefix test cannot tell `f"n={n}"` from `'f"n"'`,
 # which is a four-character string.
-def _eval_constant_field_expr(expr: str):
-    """Evaluate a simple constant literal expression in an f-string field.
-
-    Returns (ok, value). ok is True if foldable, value is the Python value.
-    """
-    if not isinstance(expr, str):
-        return (False, None)
-    expr_stripped = expr.strip()
-    if not expr_stripped:
-        return (False, None)
-    # Try ast.literal_eval first (handles most cases)
-    try:
-        import ast
-        try:
-            val = ast.literal_eval(expr_stripped)
-            return (True, val)
-        except Exception:
-            pass
-    except Exception:
-        pass
-    return (False, None)
-
-
 def fold_interpolated_literal(node) -> bool:
     """Rewrite an f-string with NO `{…}` fields into the plain literal it is.
-
-    Also rewrites f-strings where EVERY field is a constant literal expression
-    (like `f"n={5}"`, `f"{'a'}b{None}"`) into the plain literal they denote,
-    since all values are known at compile time and no runtime buffer is needed
-    for composition.
 
     `f"n=7"` has no replacement field, so its value is its text and CPython
     treats it exactly as `"n=7"` — the `f` prefix changes nothing. On this path
@@ -3480,36 +3447,9 @@ def fold_interpolated_literal(node) -> bool:
         segs = interpolated_literal_segments(spelled)
     except CodegenError:
         return False
-    # Check if all segments are literals, or all fields are constant literals
-    result_parts = []
-    for seg in segs:
-        if seg[0] == "lit":
-            result_parts.append(seg[1])
-            continue
-        elif seg[0] == "field":
-            # field is ('field', expr, spec, conv)
-            _kind, expr, spec, conv = seg
-            # Don't fold if there are format specs or conversions
-            if spec or conv:
-                return False
-            ok, val = _eval_constant_field_expr(expr)
-            if not ok:
-                return False
-            # Convert to string as f-strings do by default
-            if val is None:
-                result_parts.append('None')
-            elif isinstance(val, bool):
-                result_parts.append('True' if val else 'False')
-            elif isinstance(val, str):
-                result_parts.append(val)
-            elif isinstance(val, (int, float)):
-                result_parts.append(str(val))
-            else:
-                result_parts.append(str(val))
-            continue
-        else:
-            return False
-    node.value = "".join(result_parts)
+    if any(seg[0] != "lit" for seg in segs):
+        return False
+    node.value = "".join(seg[1] for seg in segs)
     node.is_interpolated = False
     node.is_raw = "r" in prefix or "R" in prefix
     return True
@@ -3552,7 +3492,7 @@ def interpolated_literal_quote_start(spelled: str) -> int:
     `b` and `u` in any order and up to two of them, so `rf"…"` and `fr"…"` both
     open their quote at index **2** while `f"…"` opens it at 1. The reader below
     used to ask `spelled[1]`, which for `rf` is the `f`, and then reported a
-    missing quote that was not missing — `bugs/FORMAL_the_interpolated_literal_
+    missing quote that was not missing — `bugs/formal/FORMAL_the_interpolated_literal_
     reader_assumes_a_one_character_prefix.md`. The lexer above it
     (`fire_compiler.py::_string_prefix_start` / `_prefix_is_interpolated`) has
     known the prefix width since 2026-10-05; this is the one answer the reader
@@ -3587,7 +3527,8 @@ def interpolated_literal_segments(spelled: str) -> list:
     apart: `expr` is a value, `:spec` is a FORMAT (`>3`, `04d`) and `!conv` is a
     CONVERSION (`!r`, `!s`) — and neither of the latter two is a value on this
     path in any case, which is what
-    (string composition) says a lowering has to say rather than answering them as if they were an f-string's field.
+    `bugs/formal/FORMAL_string_composition_has_no_buffer.md` §7.3 says a lowering has
+    to say rather than answering them as if they were an f-string's field.
 
     Brace-depth tracked, so `f"{d['k']}"` and `f"{ {'a': 1}['a'] }"` split
     correctly — a naive `find('}')` truncates the first one at the dict literal.
@@ -3725,7 +3666,8 @@ def interpolated_literal_refusal(node, where: str = "") -> str:
         spec or a conversion, since those are three questions and the old
         sentence merged them into one;
       * the `print` advice, which was wrong and is gone.
-        the earlier bug notes named it as "**NOT the fix** … the message's own advice is wrong", and it is: CPython's
+        `bugs/formal/FORMAL_string_composition_has_no_buffer.md` §6 named it as "**NOT
+        the fix** … the message's own advice is wrong", and it is: CPython's
         `print` puts a `sep` between its operands, so following "Print the parts
         as separate operands" on `f"n={n}"` with `n = 7` gives
 
@@ -3808,7 +3750,7 @@ def _interpolated_shape_sentence(segs: list) -> str:
     The fields are named because they are the thing a reader has to look up in
     their own source, and the count of chunks and their byte lengths is the
     thing that decides the §7.1 bound — `formal/
-    the string composition doc §7.1 asks for "a buffer with a
+    FORMAL_string_composition_has_no_buffer.md` §7.1 asks for "a buffer with a
     compile-time-known bound", and the bound IS the chunk bytes plus the widest
     each field's declared type can render. So the diagnostic now prints the half
     of that arithmetic a reader can check without running anything.
@@ -3910,11 +3852,11 @@ def integer_text_width(bits: int) -> int:
     against `decimal` should find a formula.
 
     This is the number §7.1 of
-    string composition needs and the corpus has
+    `bugs/formal/FORMAL_string_composition_has_no_buffer.md` needs and the corpus has
     never been asked for: a buffer with a COMPILE-TIME-KNOWN bound needs each
     field's WIDTH to be known at compile time, and an integer's width is a
     property of its declared type rather than of its value — which is the only
-    reason the step 1 can promise a bound at all.
+    reason the doc's step 1 can promise a bound at all.
     """
     if not isinstance(bits, int) or bits < 2:
         return 0
@@ -3988,7 +3930,7 @@ def interpolated_literal_bound(spelled: str, field_width=None):
     over its bytes (`formal/model.py`'s text-encoding block and
     `LENGTH_DEPENDENT_METHODS`), so a composition that is not terminated is a
     `len()` that walks past the end of it. That is the obligation
-    `bugs/FORMAL_string_value_model.md`'s "§The cost" states as "whoever adds
+    `bugs/formal/FORMAL_string_value_model.md`'s "§The cost" states as "whoever adds
     the first method which can build a string at run time inherits the
     obligation" — and inheriting it is cheaper than a second word in every
     string value on this path.

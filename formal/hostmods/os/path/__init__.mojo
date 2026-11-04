@@ -10,12 +10,12 @@ deviations that are properties of this target and are stated on each one:
     was false, and it had a cost: `test_formal_os_backing.py` used to skip its
     `os.path` cases on x86-64 for this reason, which is where a silently wrong
     `stat` field survived. What the x86-64 backend has to get right is the
-    symbol each call binds, and `formal/model/builtins.py`'s `target_libc_symbol` is the
+    symbol each call binds, and `formal/model.py`'s `target_libc_symbol` is the
     table that says so.
 
   * A RESULT IS EITHER AN INTERIOR POINTER OR A `malloc`'d BUFFER. A string
     here is a bare NUL-terminated `char *` with no growable buffer of its own
-    (bugs/FORMAL_string_value_model.md), so a function that returns part of its
+    (bugs/formal/FORMAL_string_value_model.md), so a function that returns part of its
     argument returns a pointer into it — no allocation, and the string it
     points into has to outlive the call — and a function that builds a new
     string returns memory from `malloc` that the CALLER OWNS. `os_free` in the

@@ -40,7 +40,7 @@ step functions have something to be `rfl` about.
   **The consequence for the proof budget is stated, not hidden**: a theorem
   about the arithmetic reaches a generated axiom, exactly as the 688 existing
   `bv_decide`/`native_decide` sites in this library do
-  (`bugs/FORMAL_native_decide_axiom.md`, and `NATIVE_DECIDE_ALLOWED` in
+  (`bugs/formal/FORMAL_native_decide_axiom.md`, and `NATIVE_DECIDE_ALLOWED` in
   `test_formal_admitted.py`, which is where a new `native_decide` has to be
   named).  Nothing here is proved with `native_decide` YET, so this module
   adds zero axiom-reaching sites today.
@@ -155,21 +155,6 @@ def geBits (a b : Bits) : Bool := leBits b a
 `eqBits` and this are complements. -/
 def unordered (a b : Bits) : Bool := isNaN a || isNaN b
 
-/-- NZCV for FCMP (flag-setting compare). 
-ARM64 FCMP: if unordered -> NZCV = 0b0011 (C=1, V=1)
-else if equal -> 0b0110 (Z=1, C=1)
-else if less -> 0b1000 (N=1)
-else (greater) -> 0b0010 (C=1) -/
-def fcmp_nzcv (a b : Bits) : UInt8 :=
-  if unordered a b then
-    (0b0011 : UInt8)  -- N=0,Z=0,C=1,V=1
-  else if eqBits a b then
-    (0b0110 : UInt8)  -- N=0,Z=1,C=1,V=0
-  else if ltBits a b then
-    (0b1000 : UInt8)  -- N=1,Z=0,C=0,V=0
-  else
-    (0b0010 : UInt8)  -- greater: N=0,Z=0,C=1,V=0
-
 /-! ## The arithmetic, through Lean's `Float`
 
 `Float.ofBits`/`toBits` are compiled primitives, so this half is decidable
@@ -209,23 +194,6 @@ def fdivBits (a b : Bits) : Bits := Float.toBits (Float.ofBits a / Float.ofBits 
 `+0.0` (`0.0 - 0.0` is `+0.0` in IEEE and in CPython alike, so the subtraction
 is not a negation). -/
 def fnegBits (a : Bits) : Bits := a ^^^ 0x8000000000000000
-
-/-- Signed 64-bit integer to double (SCVTF). -/
-def scvtfBits (a : UInt64) : Bits :=
-  let i : Int := if a >= (0x8000000000000000 : UInt64) then ((a.toNat : Int) - (18446744073709551616 : Int)) else (a.toNat : Int)
-  Float.toBits (Float.ofInt i)
-
-/-- Double to signed 64-bit integer, truncation toward zero (FCVTZS). -/
-def fcvtzsBits (a : Bits) : UInt64 :=
-  let f := Float.ofBits a
-  if f.isNaN then (0x8000000000000000 : UInt64)
-  else if f.isInf then if f < 0.0 then (0x8000000000000000 : UInt64) else (0x7fffffffffffffff : UInt64)
-  else if f >= (9223372036854775807.0 : Float) then (0x7fffffffffffffff : UInt64)
-  else if f < (-9223372036854775808.0 : Float) then (0x8000000000000000 : UInt64)
-  else
-    let t := if f >= 0.0 then Float.floor f else Float.ceil f
-    if t >= 0.0 then t.toUInt64 else (UInt64.ofNat ((18446744073709551616 : Nat) + (t.toUInt64.toNat)))
-
 
 /-- The signed 64-bit integer `a` as a double.  Round-to-nearest-even, so
 `float(2^53 + 1)` is `2^53` — which is why it is not an arithmetic shift. -/
@@ -365,7 +333,7 @@ reflexivity, and the asymmetry/transitivity of `<`.
 `omega` handles `Nat` and `Int` and not `<` on a 64-bit word, and `decide`
 cannot decide a universally quantified `UInt64` comparison at this width, so
 `ltBits a b = true -> ltBits b a = false` is out of reach of both.  This is the same ceiling
-`bugs/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound` is about, and
+`bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound` is about, and
 the honest position is that the model's ORDER is not yet proved to be an order —
 which is a statement about the model's completeness, not about its soundness:
 nothing above depends on it, and every reading above is what the two machines'
@@ -381,7 +349,7 @@ reflexivity, and the asymmetry/transitivity of `<`.
 `omega` handles `Nat` and `Int` and not `<` on a 64-bit word, and `decide`
 cannot decide a universally quantified `UInt64` comparison at this width, so
 `ltBits a b = true -> ltBits b a = false` is out of reach of both.  This is the same ceiling
-`bugs/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound` is about, and
+`bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound` is about, and
 the honest position is that the model's ORDER is not yet proved to be an order —
 which is a statement about the model's completeness, not about its soundness:
 nothing above depends on it, and every reading above is what the two machines'
@@ -414,7 +382,7 @@ Every statement below is ONE ground value, proved by `native_decide`, and they
 are here so that a caller has them — NOT as a claim that the arithmetic is
 verified.  A ground value is what `ProofLib.lean`'s `u64_add_zero_r` and its
 siblings are too, and the difference between that and a proof is
-`bugs/FORMAL_native_decide_axiom.md`.  Nothing is stated here about a general
+`bugs/formal/FORMAL_native_decide_axiom.md`.  Nothing is stated here about a general
 `a`, because a universal statement over the finite patterns is what this
 library's Lean time ceiling does not take. -/
 

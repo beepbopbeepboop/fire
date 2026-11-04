@@ -903,7 +903,7 @@ def is_none_expr(node) -> bool:
 #     slot read through a word that is not a receiver.  Measured: every frame
 #     read this path has lowers from a RECEIVER (`self.f`) or from a name whose
 #     candidate struct is known, and a name declared `Optional[…]` has no
-#     candidate struct here.  See `bugs/FORMAL_a_subscript_on_a_frame_slot_is_a_
+#     candidate struct here.  See `bugs/formal/FORMAL_a_subscript_on_a_frame_slot_is_a_
 #     pointer_dereference_and_the_two_backends_disagree.md` for the shape.
 #   3. `x = None` is then a store of a FRAME into a slot, which is
 #     `_refuse_holder_use`'s case ("it outlives the frame it names"), and that
@@ -938,7 +938,7 @@ def is_none_expr(node) -> bool:
 # `x is None` compare against a niche the pair does not have: for a `Bool`
 # payload it would compare against 2, for a `String` against 0, and in both cases
 # the answer is about a word that is only half the value.  `Some(0)` and `None`
-# being the same word is the ambiguity `bugs/FORMAL_optional_needs_a_niche.md`
+# being the same word is the ambiguity `bugs/formal/FORMAL_optional_needs_a_niche.md`
 # opened this representation to remove, and admitting the two-word sibling under
 # the one-word name puts it back for a reader who annotated `OptionalReg`.
 #
@@ -1110,7 +1110,7 @@ SCALAR_TYPE_WIDTHS = {
 # `Optional[Float32]` and for `Optional[DType]` claimed this build had not read
 # a layout, which is a claim about a C struct and neither name is one.  The
 # verdict was right in both cases and the EXPLANATION was wrong, which is the
-# expensive kind: `doc/ABI.md`'s niche table and `bugs/FORMAL_optional_needs_a_niche.md`
+# expensive kind: `doc/ABI.md`'s niche table and `bugs/formal/FORMAL_optional_needs_a_niche.md`
 # both list these two as refused, so nothing went red.
 #
 # So there are THREE reasons a payload leaves no word for `None`, and each is
@@ -2585,7 +2585,7 @@ def fold_module_int_expr(node, names=None):
     "print() cannot tell whether IdentExpr is a string or a number" — a message
     about print's materialization for a name the build had read and simply could
     not fold. Measured on `test_formal_math.py:isqrt_source`
-    (`MAX64 = 2 ** 63 - 1`)
+    (`MAX64 = 2 ** 63 - 1`, `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md`
     §0.6), where it also made the two backends report DIFFERENT subjects for one
     function: arm64 stopped at the constant, x86-64 got as far as the string
     operand two lines later.
@@ -2867,7 +2867,7 @@ def builtin_module_constants(source_path: str) -> dict:
     **What this is not:** it is not `sys.argv`.  `argv` is the process's command
     line, which arrives in registers the entry stub overwrites before the first
     statement runs, so there is nothing for the build to hold —
-    `FORMAL_module_state_no_storage.md (deleted) (deleted)` §(4) is right about that one and
+    `bugs/formal/FORMAL_module_state_no_storage.md` §(4) is right about that one and
     this doc's author grouped `__file__` with it by shape rather than by cause.
     A source the BUILD was handed is not a source that is gone.
     """

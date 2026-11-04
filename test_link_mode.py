@@ -1779,7 +1779,7 @@ def test_failed_import_attempt_does_not_poison_later_spelling() -> bool:
     `parser__regexes__ind_0f1876` — implicit declaration plus seven
     dangling toplevels in the generated C (the fixed tree unifies all 35
     `_ind` references on 0f1876; see build/remes/r16fix3.log and
-    bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md).
+    bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md).
 
     The fix (mojo/backend_gimple/emit_resolve.py, `_compile_imported_module`
     except handler) snapshots the attempt's guard entries, its

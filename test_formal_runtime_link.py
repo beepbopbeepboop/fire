@@ -470,17 +470,27 @@ def test_link_line_is_the_dylibs_exports():
         check(len(extra) >= 4,
               f'{arch}: the dylib exports names no header declares',
               str(sorted(extra)))
-        # These are names the dylib exports but no header in runtime/ declares.
-        # Some are C symbols used internally or by specific subsystems; the
-        # formal runtime link line must offer them (it's the dylib's table), but
-        # they aren't declared in the ABI headers the model scans.
-        expected_extra = ['MojoParser', 'Python', 'PythonObject',
-                          'compile_to_gimple', 'int64_t_as_unsafe_any_origin',
-                          'note_list_literal', 'scan_expr']
-        check(sorted(extra) == sorted(expected_extra),
-              f'{arch}: the set of names exported with no header declarations '
-              'is as expected (header gap closed for others)',
-              str(extra))
+        # …and the seven that are LEFT are named rather than counted, because
+        # this is the ceiling-2 remainder and it used to be six: `mojo_open` and
+        # `mojo_close` were exported by the library and declared by no header,
+        # so nothing could put them on a formal link line, and they are declared
+        # now (`runtime/fire_runtime.h`). `MojoParser`, `scan_expr`,
+        # `note_list_literal` and `compile_to_gimple` are not in the
+        # `mojo_*` namespace, so `is_gimple_runtime_builtin` answers False for
+        # them and they take the ordinary extern path — they are listed only
+        # because the map carries them. `Python`, `PythonObject` and
+        # `int64_t_as_unsafe_any_origin` are the 2026-10-21 CPython-interop box
+        # primitives (`runtime/fire_runtime.c`'s "PythonObject box
+        # primitives"): the codegen emits them as bare externs and the
+        # definitions are the runtime answer, but no header declares them — the
+        # CPython-bound call sites are stubbed at the codegen level
+        # (`int64_t.cpython() stubbed`), so nothing on this path dereferences
+        # them, and they are listed for the same reason the four above are.
+        check(extra == ['MojoParser', 'Python', 'PythonObject',
+                        'compile_to_gimple', 'int64_t_as_unsafe_any_origin',
+                        'note_list_literal', 'scan_expr'],
+              f'{arch}: …and the seven that remain are the whole of ceiling 2, '
+              'not a count that can drift', str(extra))
         check(all(n in amap for n in extra),
               f'{arch}: and the link line offers them anyway — it is the '
               f"dylib's table, not the header's", str(sorted(extra)[:5]))
@@ -792,7 +802,7 @@ def test_the_tagged_box_accessors_are_declared_and_callable():
     a kind tag beside every element, which is what FORMAL.md §5 converges on —
     written, compiled into the runtime dylib and exported, and refused by
     `gimple_runtime_callable` for want of a DECLARATION.  That is the whole of
-    ceiling 2 in `bugs/FORMAL_runtime_library_on_the_link_line.md`, and it is a
+    ceiling 2 in `bugs/formal/FORMAL_runtime_library_on_the_link_line.md`, and it is a
     header gap rather than a capability limit: five of the six are word-shaped
     and were callable the moment a header said so.
 
@@ -982,7 +992,7 @@ def test_a_void_return_is_a_legal_call_and_an_illegal_value():
     **`'void'` is in `_WORD_SCALARS` for a POINTER's sake** — `MojoFileHandle`
     and `mojo_coro_handle` are both `typedef void*`, and reading either as the
     bare spelling `void` is what made nine entry points look like by-value
-    aggregates (`bugs/FORMAL_runtime_library_on_the_link_line.md` §0.3). Carrying
+    aggregates (`bugs/formal/FORMAL_runtime_library_on_the_link_line.md` §0.3). Carrying
     that membership into RETURN position made **68** entry points word-shaped
     whose callee writes nothing to the return register, so any of them could be
     bound to whatever the call sequence happened to leave there.

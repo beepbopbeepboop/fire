@@ -36,7 +36,6 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import fire_compiler as N
-from fire_compiler import is_fstring_literal, decode_c_escapes
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import mojo.middle.itcursor as itc
 import mojo.middle.lambdareduce as _gld
@@ -1527,9 +1526,6 @@ def _class_struct_of_arg(gen, a):
         return None
     nm = _as_str(a.name)
     if nm == 'cls':
-        cur_fn = getattr(gen, 'current_func_name', '') or ''
-        if cur_fn.endswith('___init_subclass__') or '__init_subclass__' in cur_fn:
-            return None
         cur = getattr(gen, '_current_struct_name', None)
         return _as_str(cur) if cur and _as_str(cur) in gen._struct_bases and 'cls' in gen.var_types else None
     if nm in gen._struct_bases and nm not in gen.var_types and nm not in gen._global_var_types:
@@ -1543,7 +1539,7 @@ def _lower_class_attr_builtin(gen, node, fn):
     struct = _class_struct_of_arg(gen, node.args[0])
     name_node = node.args[1] if len(node.args) > 1 else None
     lit = (_as_str(name_node.value) if isinstance(name_node, gimple_ctypes.StringLiteral)
-           and not is_fstring_literal(name_node) else None)
+           and not N.is_fstring_literal(name_node) else None)
     if lit is not None and (lit in gen._class_attrs.get(struct, {})
                             or lit in gen._struct_method_names.get(struct, ())):
         return None   # static: the ordinary lowering owns it
@@ -1581,7 +1577,7 @@ def _lower_class_attr_builtin(gen, node, fn):
 def _lower_type_new(gen, node, args=None, meta=None):
     """`type(name, (Base, ..), {'attr': value, ..})` with a literal base tuple/list and a literal
     dict of string keys: a class made at run time (stage 3 of
-    bugs/hard/CODEGEN_enum_runtime_class_creation.md). It is a class-table entry (`mojo_type_new`) whose
+    bugs/mid/CODEGEN_enum_runtime_class_creation.md). It is a class-table entry (`mojo_type_new`) whose
     bases are the listed classes and whose dict starts from the namespace; the value is a class
     handle word that `Foo.x`, `Foo.x = v` and `getattr(Foo, ..)` read through the class table.
     None when the arguments are not that literal shape (the caller refuses by name).
@@ -1607,7 +1603,7 @@ def _lower_type_new(gen, node, args=None, meta=None):
     keys = []
     if isinstance(ns_n, gimple_ctypes.DictExpr):
         for k, _v in ns_n.pairs:
-            if not isinstance(k, gimple_ctypes.StringLiteral) or is_fstring_literal(k):
+            if not isinstance(k, gimple_ctypes.StringLiteral) or N.is_fstring_literal(k):
                 return None
             keys.append(_as_str(k.value))
     elif not isinstance(ns_n, (gimple_ctypes.IdentExpr, gimple_ctypes.MemberExpr,
@@ -1617,26 +1613,10 @@ def _lower_type_new(gen, node, args=None, meta=None):
     if not isinstance(ns_n, gimple_ctypes.DictExpr):
         # a COMPUTED namespace (a variable or a call result): only a dict value can be walked
         # into the table
-        try:
-            nst, nsv = gen.lower_expr(ns_n)
-            if nst == 'MojoDict *':
-                ns_dict = nsv
-            else:
-                # Be very permissive for custom dict subclasses (e.g. EnumDict)
-                try:
-                    ns_dict = gen._new_val('MojoDict *', f'(MojoDict *){nsv}')
-                except Exception:
-                    ns_dict = gen._new_val('MojoDict *', f'(MojoDict *){gen._to_int64(nst, nsv) if hasattr(gen, "_to_int64") else nsv}')
-        except Exception:
-            # Last resort: try to pass it through as-is
-            try:
-                if isinstance(ns_n, (gimple_ctypes.IdentExpr, gimple_ctypes.MemberExpr)):
-                    nt, nv = gen.lower_expr(ns_n)
-                    ns_dict = gen._new_val('MojoDict *', f'(MojoDict *){nv}')
-                else:
-                    return None
-            except Exception:
-                return None
+        nst, nsv = gen.lower_expr(ns_n)
+        if nst != 'MojoDict *':
+            return None
+        ns_dict = nsv
     cls = gen._call_expr('int64_t', 'mojo_type_new', [('char *', nm)])
     if bases_list is not None:
         gen._void_call('mojo_type_add_bases_from_list', [('int64_t', cls), ('MojoList *', bases_list)])
@@ -1656,34 +1636,16 @@ def _lower_type_new(gen, node, args=None, meta=None):
         gen._void_call('mojo_type_add_base', [('int64_t', cls), ('int64_t', bw)])
     if ns_dict is not None:
         gen._void_call('mojo_type_fill_from_dict', [('int64_t', cls), ('MojoDict *', ns_dict)])
-    else:
-        for key, (_k, vnode) in zip(keys, ns_n.pairs):
-            vt, vv = gen.lower_expr(vnode)
-            vw = (gen._call_expr('int64_t', 'mojo_box_from_double', [('double', vv)])
-                  if vt == 'double' else gen._to_int64(vt, vv))
-            gen._void_call('mojo_classobj_setattr',
-                           [('int64_t', cls), ('char *', gen._intern_string(key)), ('int64_t', vw)])
-    # Try to call __init_subclass__ on bases (only for static bases that define it)
-    try:
-        base_list = []
-        if literal_bases:
-            for b in bases_n.elements:
-                if isinstance(b, gimple_ctypes.IdentExpr) and b.name == 'type' and 'type' not in gen.var_types:
-                    continue
-                base_list.append(b)
-        if base_list:
-            b = base_list[0]
-            st = _class_struct_of_arg(gen, b)
-            if st is not None:
-                try:
-                    mname = f'{st}___init_subclass__'
-                    if (hasattr(gen, '_classmethod_names') and mname in gen._classmethod_names) or \
-                       (hasattr(gen, 'func_param_types') and mname in gen.func_param_types):
-                        gen._void_call(mname, [('int64_t', cls)])
-                except Exception:
-                    pass
-    except Exception:
-        pass
+        gen._dyn_word_vals.add(cls)
+        gen._rtobj_kinds[('v', cls)] = 'class'
+        gen._rt_classes_made = True
+        return 'int64_t', cls
+    for key, (_k, vnode) in zip(keys, ns_n.pairs):
+        vt, vv = gen.lower_expr(vnode)
+        vw = (gen._call_expr('int64_t', 'mojo_box_from_double', [('double', vv)])
+              if vt == 'double' else gen._to_int64(vt, vv))
+        gen._void_call('mojo_classobj_setattr',
+                       [('int64_t', cls), ('char *', gen._intern_string(key)), ('int64_t', vw)])
     gen._dyn_word_vals.add(cls)
     gen._rtobj_kinds[('v', cls)] = 'class'
     gen._rt_classes_made = True
@@ -1749,39 +1711,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
             if _cls is not None:
                 return _cls
-        elif isinstance(_m, gimple_ctypes.IdentExpr):
-            # Accept EnumType/metaclasses from enum module
-            _mname = _as_str(_m.name)
-            if (_mname in ('EnumType', 'EnumMeta') or _mname.endswith(('EnumType', 'EnumMeta'))
-                    or 'Enum' in str(_mname) or 'Flag' in str(_mname)
-                    or 'IntFlag' in str(_mname) or str(_mname).endswith('_mcls')
-                    or 'EnumType' in _mname):
-                _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
-                if _cls is not None:
-                    return _cls
-            # Accept if it's a runtime class metaclass
-            if gen._rtobj_kinds.get(('l', _mname)) == 'class':
-                _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
-                if _cls is not None:
-                    return _cls
-            # Be permissive for metaclass parameters passed as variables in certain contexts
-            # but not for statically defined user classes
-            if _mname == 'metacls' or _mname == 'cls':
-                _is_static_class = (_mname in getattr(gen, '_struct_bases', set())
-                                    and _mname not in getattr(gen, 'var_types', {})
-                                    and _mname not in getattr(gen, '_global_var_types', {}))
-                if not _is_static_class and gen._rtobj_kinds.get(('l', _mname)) != 'class':
-                    _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
-                    if _cls is not None:
-                        return _cls
-            # Be permissive and try anyway only for non-static cases
-            _is_static_class = (_mname in getattr(gen, '_struct_bases', set())
-                                and _mname not in getattr(gen, 'var_types', {})
-                                and _mname not in getattr(gen, '_global_var_types', {}))
-            if not _is_static_class or gen._rtobj_kinds.get(('l', _mname)) == 'class':
-                _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
-                if _cls is not None:
-                    return _cls
         raise RuntimeError(
             'cannot compile module: type.__new__(metacls, name, bases, namespace) creates a '
             'class at run time, which the compiled path models only for metacls `type`, a '
@@ -3255,11 +3184,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # A WORD receiver (`next(iterator, *default)` in the interpreter's own `_mojo_next`):
         # stepped at run time when the word is a generator handle the run time knows.
         _w_t, _w_v = gen.lower_expr(node.args[0])
-        # `void *` is an opaque handle, a word like `int64_t`: the compiled
-        # compiler infers `iterator` in `_mojo_next(iterator, *default)` that
-        # way from its call sites (the Python reference infers int64_t), and the
-        # refusal below then rejected the interpreter's own next() wrapper.
-        if _w_t in ('int64_t', 'int', 'void *') and not isinstance(
+        if _w_t in ('int64_t', 'int') and not isinstance(
                 node.args[0], (gimple_ctypes.ListExpr, gimple_ctypes.DictExpr)):
             _hasd = gen._new_val('int', '0')
             _dw = gen._new_val('int64_t', '0')
@@ -4526,7 +4451,7 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if (isinstance(_lit, gimple_ctypes.StringLiteral)
                 and not getattr(_lit, 'is_interpolated', False)
                 and not getattr(_lit, 'is_bytes', False)):
-            _cp = len(decode_c_escapes(_lit.value))
+            _cp = len(gimple_ctypes.decode_c_escapes(_lit.value))
             return 'int64_t', gen._new_val('int64_t', str(_cp))
         # A word of unknown kind (`'w'` — bytes value, or `or` of bytes that
         # yields a word): dispatch at runtime through `mojo_len_word`.

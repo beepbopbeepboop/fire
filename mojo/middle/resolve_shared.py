@@ -378,14 +378,6 @@ def _quick_type(gen, node) -> str:
             if ((lt == 'char *' and rt == 'int64_t')
                     or (lt == 'int64_t' and rt == 'char *')):
                 return 'int64_t'
-            # A container pointer against a `_Bool`: the lowering turns the
-            # whole `and`/`or` into a `_Bool` (`_lower_binary`'s `_bool_merge`),
-            # so a CHAIN (`a or b or c`, parsed right-nested) must report
-            # `_Bool` for its inner link too, or the outer link sees a pointer
-            # type for a value that is the bool 1 and runs `mojo_dict_len` on it.
-            if ((lt.endswith(' *') and rt == '_Bool')
-                    or (lt == '_Bool' and rt.endswith(' *') and node.op == 'or')):
-                return '_Bool'
             return gimple_ctypes.TypeLattice.join(lt, rt)
         if node.op == '|':
             # `a | b` on two dicts is `dict.__or__`, and it MATERIALISES a

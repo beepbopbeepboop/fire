@@ -2279,19 +2279,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # degrade gracefully" convention _stub_only_modules below
             # uses for symbols with no native definition, rather than
             # emitting an unresolvable call.
-            if method == '__new__':
-                # Check if it's type.__new__ style call (possibly with **kwargs unpacking)
-                args = list(node.args)
-                # Remove trailing ** unpacking if it's just empty kwargs
-                if args and hasattr(args[-1], 'op') and getattr(args[-1], 'op') == '**':
-                    args = args[:-1]
-                if len(args) == 4:
-                    try:
-                        import mojo.backend_gimple.emit_calls as ggc
-                        fake = gimple_ctypes.CallExpr(func=gimple_ctypes.MemberExpr(obj=gimple_ctypes.IdentExpr(name='type'), member='__new__'), args=args, kwargs=[])
-                        return ggc._lower_call(gen, fake)
-                    except Exception:
-                        pass
             for a in node.args:
                 gen.lower_expr(a)
             return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
@@ -3754,8 +3741,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                               ('char *', gen._intern_string(_as_str(func.member))),
                               ('int64_t', gen._new_val('int64_t', f'(int64_t){len(node.args)}'))]
                              + [('int64_t', w) for w in words])
-        if _as_str(func.member) == '__prepare__':
-            return 'MojoDict *', gen._new_val('MojoDict *', f'(MojoDict *){res}')
         gen._dyn_word_vals.add(res)
         return 'int64_t', res
     # The receiver's RAW lowered pair, before the resolution blocks below
@@ -4002,9 +3987,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `__class_getitem__`), so ordinary methods with a same-named
     # parameter no longer match.
     if (ov == 'cls' and gen.current_func_name
-            and gen.current_func_name in gen._classmethod_names
-            and not gen.current_func_name.endswith('___init_subclass__')
-            and '__init_subclass__' not in gen.current_func_name):
+            and gen.current_func_name in gen._classmethod_names):
         # Derive the enclosing struct name from current_func_name (the
         # mangled `<Struct>_<method>` form). A single rsplit('_', 1) is
         # WRONG when the METHOD name itself contains an underscore —
@@ -4166,7 +4149,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # `*args` callee: pad the fixed slots (self included) up to its slot,
         # then pack the positionals from there on -- see
         # ggc._emit_generator_start_call, which this mirrors.
-        _gm_star = gen._generator_star_slot(_gm_api, node)
+        _gm_star = ggc._generator_star_slot(_gm_api, node)
         _gm_nfixed = _gm_star if _gm_star is not None else len(_gm_expected)
         if _gm_expected and len(all_args) < _gm_nfixed:
             # Explicit loop, NOT `{kn: gen.lower_expr(ke) for kn, ke in
@@ -4209,7 +4192,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             for _, _ke in _gm_kwargs:
                 gen.lower_expr(_ke)
         if _gm_star is not None:
-            all_args = gen._pack_generator_star_args(all_args, _gm_star)
+            all_args = ggc._pack_generator_star_args(gen, all_args, _gm_star)
         t = gen._call_expr('MojoGenerator *', f"{_gm_api['base']}_start", all_args)
         gen._generator_var_api[t] = _gm_api
         return 'MojoGenerator *', t
@@ -5142,35 +5125,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if method in ('to_u32', 'value') and ot in ('int64_t', 'int') \
                 and not node.args:
             return ot, ov_local
-        # `__hash__` with hasher argument on scalar receivers (e.g. Int)
-        if method == '__hash__' and len(node.args) == 1 and not getattr(node, 'kwargs', None):
-            try:
-                mc = gimple_ctypes.CallExpr(
-                    func=gimple_ctypes.MemberExpr(obj=node.args[0], member='_update_with_simd'),
-                    args=[func.obj],
-                    line=getattr(node, 'line', 0),
-                    col=getattr(node, 'col', 0),
-                )
-                return gen._lower_method_call(mc)
-            except Exception:
-                gen.lower_expr(node.args[0])
-                return 'void', gen._new_val('void', '')
-        # _update_with_simd on scalar receivers (hasher objects)
-        if method == '_update_with_simd' and len(node.args) == 1:
-            try:
-                # Try to use mojo_obj_call1 style for Python objects
-                hasher_v = ov_local
-                arg_type, arg_val = gen.lower_expr(node.args[0])
-                obj64 = gen._to_int64(ot, ov)
-                arg64 = gen._new_temp('int64_t')
-                gen._safe_coerce_emit(arg_type, 'int64_t', arg_val, arg64)
-                method_slit = gen._intern_string(gimple_ctypes._c_escape(method))
-                method_key = gen._new_val('char *', f"{method_slit}")
-                t = gen._call_expr('int64_t', 'mojo_obj_call1',
-                                   [('int64_t', obj64), ('char *', method_key), ('int64_t', arg64)])
-                return 'int64_t', t
-            except Exception:
-                pass
         # Other scalar methods: pass the receiver through unchanged
         for ea in node.args[1:]: gen.lower_expr(ea)
         return gen._stub_result(ot, ov_local, f'{ot}.{method}() stubbed')

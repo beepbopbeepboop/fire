@@ -49,22 +49,7 @@ import mojo.middle.coro as gimple_gen_coro
 # deferred. This file is DOWNSTREAM of `gimple_codegen`, so a top-level
 # `import mojo.middle.infra_infer` here starts the chain before
 # `gimple_codegen` has defined anything, and `infra_infer`'s own top-level
-# `import gimple_codegen
-
-_ENUM_BASES = {'Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag', 'ReprEnum'}
-
-
-def _is_enum_class_def(node):
-    try:
-        bases = getattr(node, 'bases', None) or []
-        for b in bases:
-            if isinstance(b, str) and b in _ENUM_BASES:
-                return True
-            # could be other forms
-    except Exception:
-        pass
-    return False
-
+# `import gimple_codegen` then leads `emit_infra`'s top-level
 # `from mojo.middle.infra_infer import _FC_SEP, ...` back into a half-built
 # `infra_infer`:
 #
@@ -1374,14 +1359,7 @@ def _mark_presence_field(sdef, fname):
     so it needs no bit. Every mint site calls this with the StructDef it just
     appended `fname` to, which keeps the tracked set a whole-struct fact that
     every generator reads the same way. Idempotent."""
-    if sdef is None:
-        return
-    # A StructDef the compiled parser built has no `default_factory` list for
-    # `presence_fields` (the field reads back NULL), so appending to it below
-    # crashed the stage2 binary; make it a real list first.
-    if sdef.presence_fields is None:
-        sdef.presence_fields = []
-    if fname in sdef.presence_fields:
+    if sdef is None or fname in sdef.presence_fields:
         return
     for _m in sdef.methods:
         if _m.name != '__init__':
@@ -2057,15 +2035,11 @@ def _emit_reflection_dispatch(self, parts):
         # `mojo_maybe_bound_call_N` consults for a tainted local — so the
         # bound value reaches `mojo_bound_method_call_N`, which re-supplies
         # the bound receiver as the method's implicit first argument.
-        # Typed `dict`, key through `_as_str`: untyped, `_mm_arms[_mm_attr]` was
-        # lowered as a LIST read of a dict and the stage2 binary segfaulted on
-        # any file with a class that has a bound-method getattr arm.
-        _mm_arms: dict = self._getattr_method_arms.get(_as_str(sn))
+        _mm_arms = self._getattr_method_arms.get(_as_str(sn))
         if _mm_arms:
-            for _mm_attr0 in _mm_arms:
-                _mm_attr = _as_str(_mm_attr0)
+            for _mm_attr in _mm_arms:
                 get_lines.append(
-                    f'  if (strcmp(attr, "{_mm_attr}") == 0) '
+                    f'  if (strcmp(attr, "{_as_str(_mm_attr)}") == 0) '
                     f'return (int64_t)(intptr_t)mojo_bound_method_new ('
                     f'(void *){_as_str(_mm_arms[_mm_attr])}, (void *)obj);')
         # Inlined `_fieldnames_append_lines` (was a separate function
@@ -2695,9 +2669,7 @@ def _emit_reflection_dispatch(self, parts):
                 "     * accepts only the canonical decimal, which\n"
                 "     * `mojo_dict_slot_key` already formats from `ikey`. */\n"
                 "    char *_k;\n"
-                "    if (d->slots[_i].keykind == 3) {\n"
-                "      _k = strdup(\"None\");\n"
-                "    } else if (d->slots[_i].keykind == 2 && !d->slots[_i].key_from_str) {\n"
+                "    if (d->slots[_i].keykind == 2 && !d->slots[_i].key_from_str) {\n"
                 "      _k = mojo_repr_int(d->slots[_i].ikey);\n"
                 "    } else {\n"
                 "      _k = mojo_repr_str(mojo_dict_slot_key(d, _i));\n"
@@ -2754,7 +2726,7 @@ def _emit_reflection_dispatch(self, parts):
                "    if (_oi > 0) _buf = mojo_str_cat_free(_buf, \", \");\n"
                "    char *_s = s->slots[_i].tag == 1\n"
                "        ? mojo_repr_str(s->slots[_i].val_s)\n"
-                "        : (s->slots[_i].tag == 3 ? strdup(\"None\") : mojo_repr_int(s->slots[_i].val_i));\n"
+               "        : mojo_repr_int(s->slots[_i].val_i);\n"
                "    _buf = mojo_str_cat_free(_buf, _s);\n"
                "    free(_s);\n"
                "  }\n"
@@ -2908,7 +2880,7 @@ def _ctor_param_evidence(gen, struct_name, param, xf_own) -> str:
 def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_collect_self_assigns`."""
     _key = (id(body), str(_method_names) if isinstance(_method_names, set) else str(_method_names))
-    _hit = self_assign_memo_get((_key, 'reads'))
+    _hit = getattr(__import__('mojo.middle.module_shared', fromlist=['_SELF_ASSIGN_MEMO']), '_SELF_ASSIGN_MEMO', {}).get((_key, 'reads'))
     if _hit is not None:
         for fn in _hit:
             if fn not in found and fn not in _method_names and fn not in _PSEUDO_DUNDER_ATTRS:
@@ -2921,7 +2893,7 @@ def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
                 and fn not in _PSEUDO_DUNDER_ATTRS):
             _reads.append(fn)
             found[fn] = _UNKNOWN_FIELD_CTYPE
-    self_assign_memo_set((_key, 'reads'), _reads)
+    __import__('mojo.middle.module_shared', fromlist=['_SELF_ASSIGN_MEMO'])._SELF_ASSIGN_MEMO[(_key, 'reads')] = _reads
 
 
 
@@ -3761,39 +3733,33 @@ def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) ->
         # cannot be rebound yet: refuse it, rather than let the compiled path
         # call the undecorated body (or a stub for the unbound name).
         for _rb_s in stmts or []:
-            if isinstance(_rb_s, FunctionDef) or isinstance(_rb_s, StructDef):
+            if isinstance(_rb_s, FunctionDef):
                 continue
-            if isinstance(_rb_s, StructDef):
-                continue  # direct decorated classes/structs at module level are handled separately
             for _rb_d in _gmi_scope_defs([_rb_s]):
-                if isinstance(_rb_d, FunctionDef):
-                    for _rb_dec in _rb_d.decorators or []:
-                        if _gmi_is_rebindable(self, _rb_dec, _rb_scope, _rb_d.name):
-                            raise RuntimeError(
-                                f"decorator {_gmi_decorator_head(_rb_dec)!r} on {_rb_d.name!r} is inside a "
-                                f"module-level block, which the compiled path cannot rebind yet; it would "
-                                f"silently call the undecorated function (see "
-                                f"bugs/hard/COMPILE_FAIL_decorator_application_dropped.md)")
+                for _rb_dec in _rb_d.decorators or []:
+                    if _gmi_is_rebindable(_rb_dec, _rb_scope, _rb_d.name):
+                        raise RuntimeError(
+                            f"decorator {_gmi_decorator_head(_rb_dec)!r} on {_rb_d.name!r} is inside a "
+                            f"module-level block, which the compiled path cannot rebind yet; it would "
+                            f"silently call the undecorated function (see "
+                            f"bugs/hard/COMPILE_FAIL_decorator_application_dropped.md)")
     return _gmi_rebind_block(self, stmts, _rb_scope, at_module)
 
 
-def _gmi_is_rebindable(gen, dec, scope: dict, def_name: str) -> bool:
+def _gmi_is_rebindable(dec, scope: dict, def_name: str) -> bool:
+    """True when decorator `dec` on `def_name` names a def in `scope`, so the
+    decoration is applied by rebinding (see `_gmi_decorator_pass`)."""
     _head = _gmi_decorator_head(dec)
-    if _head is None or _head == def_name:
+    if _head is None or _head not in scope or _head == def_name:
         return False
-    _ANNOTATION_DECORATORS = frozenset({
-        'staticmethod', 'classmethod', 'export', 'doc_hidden', 'gpu', 'kernel',
-        'property', 'abstractmethod', 'lldb_formatter_wrapping_type',
-        'stable', 'deprecated', 'value', 'register_passable',
-        'nonmaterializable', 'parameter', 'always_inline',
-    })
-    if _head in _ANNOTATION_DECORATORS:
-        return False
-    if _head in scope:
+    # Don't rebind decorators that are classes/constructors in a way that
+    # would break things? Classes are callable - but the decoration pass
+    # expects to transform function defs. Be permissive.
+    _target = scope.get(_head)
+    if isinstance(_target, StructDef):
+        # A class used as decorator - rare, but treat carefully
         return True
-    if _head in getattr(gen, '_gmi_imported_names', set()):
-        return True
-    return False
+    return True
 
 
 def _gmi_child_blocks(stmt) -> list:
@@ -3895,7 +3861,7 @@ def _gmi_rebind_stmt(self, s, scope: dict, at_module: bool) -> list:
     _rb_applied = []
     _rb_kept = []
     for _rb_dec in s.decorators or []:
-        if _gmi_is_rebindable(self, _rb_dec, scope, s.name):
+        if _gmi_is_rebindable(_rb_dec, scope, s.name):
             _rb_applied.append(_rb_dec)
         else:
             _rb_kept.append(_rb_dec)
@@ -3918,13 +3884,6 @@ def _gmi_rebind_stmt(self, s, scope: dict, at_module: bool) -> list:
         for _rb_dec in reversed(_rb_applied):
             _rb_callee = IdentExpr(_rb_dec, line=s.line, col=s.col) if isinstance(_rb_dec, str) else _rb_dec
             _rb_value = CallExpr(func=_rb_callee, args=[_rb_value], line=s.line, col=s.col)
-        # Imported decorators return closures typed as MojoBoundMethod *;
-        # store the result as the int64_t function value the global holds.
-        _rb_imported_applied = any(
-            (d if isinstance(d, str) else _gmi_decorator_head(d)) in getattr(self, '_gmi_imported_names', set())
-            for d in _rb_applied)
-        if _rb_imported_applied:
-            _rb_value = gimple_ctypes.CastExpr('int64_t', _rb_value, line=s.line, col=s.col)
         _rb_out.append(AssignStmt(target=IdentExpr(s.name, line=s.line, col=s.col),
                                   value=_rb_value, line=s.line, col=s.col))
         if at_module:
@@ -4282,98 +4241,6 @@ def _gmi_mk_call_keys(body: list) -> str:
     return out
 
 
-def _gmi_transform_enum_classes(self, stmts: list) -> list:
-    """Transform Enum subclasses to use runtime class creation via metaclass."""
-    if not stmts:
-        return stmts
-    out = []
-    changed = False
-    for s in stmts:
-        if isinstance(s, StructDef):
-            try:
-                s_node = _as_structdef_node(s)
-                bases = getattr(s_node, 'bases', []) or []
-                # Check if inherits from Enum
-                is_enum = False
-                for b in bases:
-                    try:
-                        bname = _as_str(b)
-                    except Exception:
-                        try:
-                            bname = str(getattr(b, 'name', b))
-                        except Exception:
-                            bname = str(b)
-                    if bname == 'Enum' or (isinstance(bname, str) and (bname.endswith('.Enum') or bname == 'enum')):
-                        is_enum = True
-                        break
-                if is_enum and not getattr(s_node, 'methods', None):
-                    # For simple enums, try to transform to use metaclass
-                    cls_name = _as_str(s_node.name)
-                    # Extract simple assignments
-                    assigns = []
-                    for f in getattr(s_node, 'fields', []) or []:
-                        if isinstance(f, AssignStmt):
-                            try:
-                                if isinstance(f.target, IdentExpr):
-                                    tname = f.target.name
-                                    if isinstance(tname, str) and not tname.startswith('_') and not tname.startswith('__'):
-                                        assigns.append((tname, f.value))
-                            except Exception:
-                                continue
-                    if assigns:
-                        # Try to build AST nodes for transformation
-                        # This is complex, but let's try
-                        try:
-                            line = getattr(s_node, 'line', 0)
-                            col = getattr(s_node, 'col', 0)
-                            # Create: __enum_ns_<name> = __import__('enum').EnumType.__prepare__('<name>', (<bases>))
-                            # Build bases tuple
-                            base_idents = []
-                            for b in bases:
-                                try:
-                                    bname = _as_str(b)
-                                except Exception:
-                                    try:
-                                        bname = str(getattr(b, 'name', b))
-                                    except Exception:
-                                        bname = str(b)
-                                base_idents.append(IdentExpr(name=bname, line=line, col=col))
-                            bases_tuple = TupleExpr(elements=base_idents, line=line, col=col)
-                            # Try different approach
-                            try:
-                                enum_mod = CallExpr(func=IdentExpr(name='__import__', line=line, col=col), args=[StringLiteral(value="'enum'")], line=line, col=col)
-                                enum_type = MemberExpr(obj=enum_mod, member='EnumType', line=line, col=col)
-                                prepare_call = CallExpr(func=MemberExpr(obj=enum_type, member='__prepare__', line=line, col=col),
-                                                       args=[StringLiteral(value=f"'{cls_name}'"), bases_tuple],
-                                                       line=line, col=col)
-                                ns_name = f'__enum_ns_{cls_name}'
-                                out.append(AssignStmt(target=IdentExpr(name=ns_name, line=line, col=col), value=prepare_call, line=line, col=col))
-                                for aname, aval in assigns:
-                                    out.append(AssignStmt(target=SubscriptExpr(obj=IdentExpr(name=ns_name, line=line, col=col), index=StringLiteral(value=f"'{aname}'"), line=line, col=col), value=aval, line=line, col=col))
-                                new_call = CallExpr(func=MemberExpr(obj=enum_type, member='__new__', line=line, col=col),
-                                                   args=[enum_type,
-                                                         StringLiteral(value=f"'{cls_name}'"),
-                                                         bases_tuple,
-                                                         IdentExpr(name=ns_name, line=line, col=col)],
-                                                   line=line, col=col)
-                                out.append(AssignStmt(target=IdentExpr(name=cls_name, line=line, col=col), value=new_call, line=line, col=col))
-                            except Exception:
-                                # Fallback to type()
-                                ns_dict = DictExpr(pairs=[(StringLiteral(value=f"'{aname}'"), aval) for aname, aval in assigns], line=line, col=col)
-                                type_call = CallExpr(func=IdentExpr(name='type', line=line, col=col),
-                                                    args=[StringLiteral(value=f"'{cls_name}'"), bases_tuple, ns_dict],
-                                                    line=line, col=col)
-                                out.append(AssignStmt(target=IdentExpr(name=cls_name, line=line, col=col), value=type_call, line=line, col=col))
-                            changed = True
-                            continue  # skip the original struct def
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-        out.append(s)
-    return out if changed or out != stmts else stmts
-
-
 def gen_module_impl(self, stmts: list):
 
     # A class written INSIDE a function body is a type declaration like any
@@ -4384,20 +4251,6 @@ def gen_module_impl(self, stmts: list):
     stmts = _gmi_hoist_nested_structs(self, stmts)
     _declare_posthoc_class_attrs(stmts)
     _gmi_capture_nested_class_enclosing_reads(stmts)
-    _imported_names = set()
-    for _s in stmts or []:
-        if isinstance(_s, FromImportStmt):
-            for _na in (_s.names or []):
-                _nm = _na[0] if isinstance(_na, (tuple, list)) else _na
-                _al = _na[1] if isinstance(_na, (tuple, list)) and len(_na) > 1 else None
-                _imported_names.add(_al if _al else _nm)
-        elif isinstance(_s, ImportStmt):
-            _al = _s.alias
-            _imported_names.add(_al if _al else _s.module.split('.')[-1])
-            if _s.extra:
-                for _em, _ea in _s.extra:
-                    _imported_names.add(_ea if _ea else _em.split('.')[-1])
-    self._gmi_imported_names = _imported_names
     stmts = _gmi_decorator_pass(self, stmts, {}, True)
     # A function called with a list at one site and a str at another, and
     # iterated in its body, gets one clone per argument kind before any
@@ -4967,11 +4820,6 @@ def gen_module_impl(self, stmts: list):
     # the user-iterator next() bug (doc deleted in db724c4d6) for
     # the experiment this replaces (which narrowed the feature instead of
     # fixing the cause, and so produced `conflicting types` regressions).
-    # Register imported non-generic structs before materialized methods
-    try:
-        self._register_imported_structs(stmts)
-    except Exception:
-        pass
     stmts = list(stmts) + _elab_intu.run(self, stmts)
 
     for _s in stmts:
@@ -13485,30 +13333,7 @@ def gen_module_impl(self, stmts: list):
     # code pointer, and discover_closures passes `ctx` explicitly.
     self.selfhost_param_ctype = _ggf_dup._selfhost_gen_self_param_ctype
     try:
-        # Prevent lifting of closure factories with nonlocal
-        try:
-            from mojo.middle import closures as _closures
-            if not hasattr(self, '_skip_closure_factory_lift'):
-                self._skip_closure_factory_lift = set()
-            for fn in _walk_ast(stmts):
-                if isinstance(fn, FunctionDef):
-                    if _closures._is_closure_factory_with_nonlocal(fn):
-                        self._skip_closure_factory_lift.add(id(fn))
-                        self._skip_closure_factory_lift.add(getattr(fn, 'name'))
-        except Exception:
-            pass
         discover_closures(self, stmts)
-        # Refuse closure factories with nonlocal in returned closure
-        try:
-            from mojo.middle import closures as _closures
-            for fn in _walk_ast(stmts):
-                if isinstance(fn, FunctionDef):
-                    if _closures._is_closure_factory_with_nonlocal(fn):
-                        raise RuntimeError(f"unresolved callee '{fn.name}(...)'")
-        except RuntimeError:
-            raise
-        except Exception:
-            pass
     finally:
         try:
             del self.selfhost_param_ctype
@@ -13598,14 +13423,8 @@ def gen_module_impl(self, stmts: list):
         # and its attributes then read off a mis-typed handle.
         _mkrf_bare: dict = {}
         for _outer_name in sorted(self._all_closures):
-            # Typed `dict` and the key read through `_as_str`: an untyped
-            # `_inner_map` subscripted by an untyped loop key was lowered as a
-            # LIST read (`mojo_list_get_int(inner_map, key)`), a dict read as a
-            # list, and the stage2 binary crashed in this round on any file with
-            # a nested def.
-            _inner_map: dict = self._all_closures[_outer_name]
-            for _bare0 in sorted(_inner_map):
-                _bare = _as_str(_bare0)
+            _inner_map = self._all_closures[_outer_name]
+            for _bare in sorted(_inner_map):
                 _mkrf_bare[_bare] = _inner_map[_bare].lifted_name
         for s in all_functions:
             if not _is_foreign_main(s) and isinstance(s, FunctionDef):
@@ -13952,13 +13771,8 @@ def gen_module_impl(self, stmts: list):
             # use it directly for the C declaration (fixes container-returning
             # calls kept at the int64_t default; see doc: the missing
             # declaration in the middle is the struct field type).
-            # Only the registered answer: the fallback this used to carry,
-            # `self._infer_return_type(<callee NAME>)`, passed a STRING where
-            # that function takes a statement list. CPython walked the name's
-            # characters and found nothing; the compiled compiler read the
-            # string as a list header and segfaulted on any module whose
-            # global is assigned a call (`_C_KEYWORDS = frozenset({...})`).
-            _ret = self.func_return_types.get(_value.func.name)
+            _ret = self.func_return_types.get(_value.func.name) or \
+                self._infer_return_type(_value.func.name)
             if isinstance(_ret, str) and _ret.endswith(' *'):
                 _phase17_set_gtype(_gname, _ret, _own)
                 if _ret in ('MojoDict *', 'MojoList *', 'MojoSet *',
@@ -17144,9 +16958,9 @@ def gen_module_impl(self, stmts: list):
     # dispatch's `_mojo_getattr_<Struct>` reads. Computed and emitted HERE,
     # ahead of both the reflection definitions (which call the arms' symbols)
     # and the function bodies.
-    struct_defs = [s for s in stmts if isinstance(s, StructDef) and not _is_enum_class_def(s)]
+    struct_defs = [s for s in stmts if isinstance(s, StructDef)]
     if not self.do_imports:
-        struct_defs += [s for s in (imported_stmts or []) if isinstance(s, StructDef) and not _is_enum_class_def(s)]
+        struct_defs += [s for s in (imported_stmts or []) if isinstance(s, StructDef)]
     # The method prototypes below can carry a `MojoGenerator *` return
     # (a generator method — row-25 entry C's `Mailbox___iter__`), but the
     # generator block that DEFINES the type emits later in this section.
@@ -17797,12 +17611,8 @@ def gen_module_impl(self, stmts: list):
     # typedef-emission loop just above this one avoids the bug by using
     # a single-target `for ci in inner_map.values():` — mirror that here.
     for outer_name in sorted(self._all_closures):
-        # Typed `dict`, and the key through `_as_str`: untyped, `inner_map[key]`
-        # was lowered as a LIST read of a dict (the stage2 binary segfaulted in
-        # `mojo_list_get_int` for any file with a closure).
-        inner_map: dict = self._all_closures[outer_name]
-        for inner_name0 in sorted(inner_map):
-            inner_name = _as_str(inner_name0)
+        inner_map = self._all_closures[outer_name]
+        for inner_name in sorted(inner_map):
             ci = inner_map[inner_name]
             if ci.env_struct:
                 alloc_fn = f"_alloc_{ci.env_struct}"
@@ -17999,112 +17809,34 @@ def gen_module_impl(self, stmts: list):
             for _bn in self._struct_bases[_cn]:
                 parts.append(f'    mojo_class_register({_ctag}LL, '
                              f'{gimple_exprtypes._struct_type_id(_as_str(_bn))}LL, 0);')
-        # Methods of static classes must be findable through the runtime class
-        # table so that instances of dynamic classes inheriting from static
-        # bases can call them.
-        # `all_struct_defs` is bound earlier in this same function, always. The
-        # `'all_struct_defs' in locals()` guard this replaces called `locals()`,
-        # which the compiled compiler stubs to 0, so the answer was always
-        # "absent": no static class's methods ever reached the runtime class
-        # table in the self-hosted binary.
-        _all_sds = all_struct_defs
-        for _sd in _all_sds:
-            _sdn = _as_str(getattr(_sd, 'name', ''))
-            if not _sdn or _sdn not in self._struct_bases:
-                continue
-            _sdcname = self._struct_cname_by_id.get(id(_sd), _sdn)
-            if self._struct_name_owner.get(_sdcname) is not _sd:
-                continue
-            _sdtag = gimple_exprtypes._struct_type_id(_sdcname)
-            _gen_meths = self._struct_generator_method_names.get(_sdcname, set())
-            for _m in getattr(_sd, 'methods', None) or []:
-                _mname = getattr(_m, 'name', None)
-                if _mname is None:
-                    continue
-                _mname_s = _as_str(_mname)
-                if getattr(_m, 'is_generator', False) or _mname_s in _gen_meths:
-                    continue
-                if _mname_s.startswith('__') and _mname_s.endswith('__') and _mname_s not in ('__init__', '__new__', '__call__'):
-                    continue
-                try:
-                    _msym = self._struct_method_csym(_sdcname, _mname_s, '')
-                except Exception:
-                    try:
-                        _msym = f"{_sdcname}_{_mname_s}"
-                    except Exception:
-                        continue
-                parts.append(f'    mojo_class_setattr({_sdtag}LL, "{_c_escape(_mname_s)}", (int64_t)(intptr_t){_msym});')
         parts.append('}')
         parts.append('')
 
-    if self.emit_struct_defs:
-        _has_classattr_words = bool(getattr(self, '_class_attr_words', None))
-        # Collect methods of static base classes
-        _all_sds2 = all_struct_defs
-        # Formatted lines, not `(tag, name, sym)` tuples: a tuple mixing an int
-        # with two strings was unpacked with three string readers in the compiled
-        # compiler, and `{_sdtag}` was read as a string pointer (SIGSEGV in
-        # `mojo_str_cat`).
-        _method_entries: list = []
-        for _sd in _all_sds2:
-            _sdn = _as_str(getattr(_sd, 'name', ''))
-            if not _sdn:
+    if self.emit_struct_defs and getattr(self, '_class_attr_words', None):
+        # The reader the run-time class table asks for an attribute a class BODY declares:
+        # the live global, as one word (a float boxed, a string/container by address).
+        parts.append('static int _mojo_classattr_read(int64_t tag, char *name, int64_t *out) {')
+        for _wn, _wa, _wm, _wt, _wf in self._class_attr_words:
+            _wn = _as_str(_wn)
+            if _wf is not None:
+                _wexpr = f'mojo_box_from_double({_wf if (chr(46) in _wf or chr(101) in _wf) else _wf + ".0"})'
+            elif _wt == 'int64_t':
+                _wexpr = _wm
+            elif _wt == 'double':
+                _wexpr = f'mojo_box_from_double({_wm})'
+            elif _wt.endswith('*'):
+                _wexpr = f'(int64_t)(intptr_t){_wm}'
+            else:
                 continue
-            try:
-                _sdcname = self._struct_cname_by_id.get(id(_sd), _sdn)
-                if self._struct_name_owner.get(_sdcname) is not _sd:
-                    continue
-                _sdtag = gimple_exprtypes._struct_type_id(_sdcname)
-            except Exception:
-                continue
-            _gen_meths = self._struct_generator_method_names.get(_sdcname, set())
-            for _m in getattr(_sd, 'methods', None) or []:
-                _mname = getattr(_m, 'name', None)
-                if _mname is None:
-                    continue
-                _mname_s = _as_str(_mname)
-                if getattr(_m, 'is_generator', False) or _mname_s in _gen_meths:
-                    continue
-                if _mname_s.startswith('__') and _mname_s.endswith('__') and _mname_s not in ('__init__', '__new__', '__call__'):
-                    continue
-                try:
-                    _msym = self._struct_method_csym(_sdcname, _mname_s, '')
-                except Exception:
-                    try:
-                        _msym = f"{_sdcname}_{_mname_s}"
-                    except Exception:
-                        continue
-                _method_entries.append(
-                    f'    if (tag == {_sdtag}LL && !strcmp(name, "{_c_escape(_mname_s)}")) '
-                    f'{{ *out = (int64_t)(intptr_t){_msym}; return 1; }}')
-        if _has_classattr_words or _method_entries:
-            # The reader the run-time class table asks for an attribute a class BODY declares:
-            # the live global, as one word (a float boxed, a string/container by address).
-            parts.append('static int _mojo_classattr_read(int64_t tag, char *name, int64_t *out) {')
-            if _has_classattr_words:
-                for _wn, _wa, _wm, _wt, _wf in self._class_attr_words:
-                    _wn = _as_str(_wn)
-                    if _wf is not None:
-                        _wexpr = f'mojo_box_from_double({_wf if (chr(46) in _wf or chr(101) in _wf) else _wf + ".0"})'
-                    elif _wt == 'int64_t':
-                        _wexpr = _wm
-                    elif _wt == 'double':
-                        _wexpr = f'mojo_box_from_double({_wm})'
-                    elif _wt.endswith('*'):
-                        _wexpr = f'(int64_t)(intptr_t){_wm}'
-                    else:
-                        continue
-                    parts.append(f'    if (tag == {gimple_exprtypes._struct_type_id(_wn)}LL '
-                                 f'&& !strcmp(name, "{_c_escape(_as_str(_wa))}")) '
-                                 f'{{ *out = {_wexpr}; return 1; }}')
-            for _me_line in _method_entries:
-                parts.append(_me_line)
-            parts.append('    return 0;')
-            parts.append('}')
-            parts.append('static void __attribute__((constructor)) _mojo_register_classattr_reader(void) {')
-            parts.append('    mojo_register_classattr_reader(_mojo_classattr_read);')
-            parts.append('}')
-            parts.append('')
+            parts.append(f'    if (tag == {gimple_exprtypes._struct_type_id(_wn)}LL '
+                         f'&& !strcmp(name, "{_c_escape(_as_str(_wa))}")) '
+                         f'{{ *out = {_wexpr}; return 1; }}')
+        parts.append('    return 0;')
+        parts.append('}')
+        parts.append('static void __attribute__((constructor)) _mojo_register_classattr_reader(void) {')
+        parts.append('    mojo_register_classattr_reader(_mojo_classattr_read);')
+        parts.append('}')
+        parts.append('')
 
     if self.emit_struct_defs:
         class_attr_inits = getattr(self, '_class_attr_inits', [])
@@ -18623,5 +18355,5 @@ def gen_module_impl(self, stmts: list):
     return self._dedup_variadic_externs(_drop_unreferenced_unimpl_stubs(_drop_unreachable_repr_cluster(parts)))
 
 def __getattr__(name):
-    import gimple_codegen
-    return getattr(gimple_codegen, name)
+    import gimple_codegen as _gc
+    return getattr(_gc, name)

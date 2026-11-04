@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _CPP_CALLABLE_CTYPE_STARARGS, _CPP_CALLABLE_CTYPE_KWARGS, _CPP_CALLABLE_CTYPE_STAR_KW, _FLOAT_TYPES, _SIGNED_INT_TRUE_DIV_TYPES
 import dataclasses
-from fire_compiler import is_fstring_literal, for_target_names, AugAssignStmt, MultiAssignStmt, WalrusExpr, VarDecl, WithStmt, TryStmt, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt, IfStmt, MatchStmt, StructDef, AssignStmt
+from fire_compiler import for_target_names, AugAssignStmt, MultiAssignStmt, WalrusExpr, VarDecl, WithStmt, TryStmt, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt, IfStmt, MatchStmt, StructDef, AssignStmt
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
 # Whether a node's CLASS is a dataclass, cached beside the field names for
 # the same reason and on the same key. `dataclasses.is_dataclass` is a pure
@@ -1172,13 +1172,7 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, f
             and isinstance(call.func, MemberExpr)
             and isinstance(call.func.obj, IdentExpr)
             and call.func.obj.name == 'cls'):
-        _mname = call.func.member
-        if _mname == '_iter_member_':
-            for _cand in ('_iter_member_by_def_', '_iter_member_by_value_'):
-                _mapi = generator_method_api.get((self_struct_name, _cand))
-                if _mapi is not None:
-                    return _mapi.get('value_ctype')
-        _mapi = generator_method_api.get((self_struct_name, _mname))
+        _mapi = generator_method_api.get((self_struct_name, call.func.member))
         if _mapi is not None:
             return _mapi.get('value_ctype')
     if generator_api is None:
@@ -1187,22 +1181,7 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, f
         api = generator_api.get(call.func.name)
         if api is not None:
             return api.get('value_ctype')
-    if isinstance(call, CallExpr) and isinstance(call.func, MemberExpr) and isinstance(call.func.obj, IdentExpr) and (call.func.obj.name == 'self'):
-        _mname = call.func.member
-        if _mname == '_iter_member_' and generator_method_api is not None and self_struct_name:
-            for _cand in ('_iter_member_by_def_', '_iter_member_by_value_'):
-                _mapi = generator_method_api.get((self_struct_name, _cand))
-                if _mapi is not None:
-                    return _mapi.get('value_ctype')
-        # try generator method on self
-        if generator_method_api is not None and self_struct_name:
-            _mapi = generator_method_api.get((self_struct_name, _mname))
-            if _mapi is not None:
-                return _mapi.get('value_ctype')
-        et = (field_elem_types or {}).get(_mname)
-        if et is not None:
-            return et if et in ('char *', 'double') else 'int64_t'
-    elif isinstance(call, MemberExpr) and isinstance(call.obj, IdentExpr) and (call.obj.name == 'self'):
+    if isinstance(call, MemberExpr) and isinstance(call.obj, IdentExpr) and (call.obj.name == 'self'):
         et = (field_elem_types or {}).get(call.member)
         if et is not None:
             return et if et in ('char *', 'double') else 'int64_t'
@@ -1247,27 +1226,21 @@ def _walk_own_body(node):
     exact same own-body walk instead of maintaining a second copy — both
     need to see precisely the same set of a generator's own top-level
     YieldExpr sites."""
-    # Built on `_walk_ast` and a prune of nested-def subtrees, NOT a second
-    # reflective walk of its own: the previous form tested
-    # `hasattr(node, '__dataclass_fields__')`, which the self-hosted compiler
-    # answers False for every node, so the walk stopped at the first statement
-    # level and the compiled `_generator_yield_ctype` never saw a `yield` inside
-    # a `for`/`while`/`if` -- every generator with any control flow was refused
-    # as "yields cannot be resolved" and the stage2 binary could not compile
-    # `fire.py`, `fire_compiler.py` or `myinterpreter.py`.
-    if node is None or isinstance(node, (FunctionDef, LambdaExpr)):
+    if isinstance(node, (FunctionDef, LambdaExpr)):
         return []
-    allnodes = _walk_ast(node)
-    inner: dict = {}
-    for n in allnodes:
-        if isinstance(n, (FunctionDef, LambdaExpr)):
-            for m in _walk_ast(n):
-                inner[id(m)] = True
-    out = []
-    for n in allnodes:
-        if id(n) not in inner:
-            out.append(n)
-    return out
+    if node is None:
+        return []
+    if isinstance(node, (list, tuple)):
+        result = []
+        for item in node:
+            result.extend(_walk_own_body(item))
+        return result
+    if hasattr(node, '__dataclass_fields__'):
+        result = [node]
+        for fname in node.__dataclass_fields__:
+            result.extend(_walk_own_body(getattr(node, fname)))
+        return result
+    return [node]
 
 def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, generator_api: dict | None=None) -> tuple[bool, list | None]:
     """Companion to `_generator_yield_ctype` for the tuple-valued-yield
@@ -2242,58 +2215,3 @@ def module_qualifier(q) -> str:
     if not q:
         return q
     return q.lstrip('.').replace('.', '_').replace('-', '_')
-
-# ── moved from backend_gimple/cpp_async.py (2026-11-03) ──────────────────────────
-# Pure helpers that cpp_core.py and middle/coro.py call through a lazily imported
-# `cpp_async` alias. That module sits in an import cycle with both, so the
-# self-hosted closure lowered those calls before cpp_async registered anything
-# and stubbed them (`bootstrap-stage1-transitive` rejects that). A leaf module
-# has no such ordering problem.
-
-def _cpp_word_of_kind(ctype: str, expr: str) -> str:
-    """`expr` (of scalar C++ type `ctype`) as ONE tagged int64_t word, the form
-    every consumer renders by the kind the box carries: a double as
-    `mojo_box_from_double`, a bool as `mojo_box_from_bool`, a string as
-    `mojo_box_from_str`, None as `mojo_box_none()`, and an int as itself. The
-    single mapping both a tagged yield slot (`_cpp_tag_yield_sites`) and a
-    tagged operand of `and`/`or` (`cpp_core._cpp_tagged_operand_word`) use."""
-    if ctype == 'None':
-        return "mojo_box_none()"
-    if ctype == 'double':
-        return f"mojo_box_from_double((double)({expr}))"
-    if ctype == '_Bool':
-        return f"mojo_box_from_bool((int64_t)({expr}))"
-    if ctype == 'char *':
-        # boxed by kind like the others: a raw pointer is only read as a
-        # string when the runtime registered it (a C++ literal is not)
-        return f"mojo_box_from_str((char *)({expr}))"
-    if ctype == 'MojoBytes *':
-        return f"(int64_t)(intptr_t)({expr})"
-    return f"(int64_t)({expr})"
-
-
-_FSTRING_FIELD_RE = re.compile(r"\{([^{}]*)\}")
-_FSTRING_QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
-_FSTRING_NAME_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*)")
-
-
-def _fstring_field_names(node_list: list) -> set[str]:
-    """Identifiers an f-string in `node_list` reads from its `{...}` fields.
-
-    The parser keeps an f-string as one raw `StringLiteral` (see
-    fire_compiler.is_fstring_literal), so `_used_idents_deep` never sees
-    the names interpolated into it. Those names are real reads: a nested
-    generator that prints `f'{name}:'` reads `name`. Quoted substrings
-    inside a field (`d['key']`) and attribute names after a dot (`x.attr`)
-    are not variable reads and are skipped.
-    """
-    out: set[str] = set()
-    for n in _walk_ast(node_list):
-        if not (isinstance(n, StringLiteral) and is_fstring_literal(n)):
-            continue
-        for field in _FSTRING_FIELD_RE.findall(str(n.value)):
-            field = _FSTRING_QUOTED_RE.sub('', field)
-            out.update(_FSTRING_NAME_RE.findall(field))
-    return out
-
-
