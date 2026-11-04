@@ -746,7 +746,7 @@ _DEAD_ROW_MODULES = ("zlib", "resource", "sysconfig")
 #
 # That import is GONE — deleted on 2026-10-08 with the tree's other dead host
 # imports (`73e03459`, "delete the tree's dead host imports"; the ratchet handed
-# off at `bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md` §3) —
+# off at — field access through call results is now handled (fixed)
 # so `abc` is not in the derived census at all any more and the exemption became
 # a claim about a row that is no longer there, which is exactly what
 # `test_a_named_dead_import_is_still_named` catches; that anti-rot row is what

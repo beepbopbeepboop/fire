@@ -6835,7 +6835,7 @@ class TestAPlaceholderModelClaimsNothing(unittest.TestCase):
     honest stub is the x86-64 half and the arm64 half is the stricter one — and
     arm64's proof layer is the more complete of the two, so "make them alike"
     would mean giving up more than it gains.  The decision and its measurement are
-    `bugs/formal/FORMAL_wide_recv_model_has_no_domain_for_a_struct.md`'s, and what
+    `bugs/formal/FORMAL_wide_recv_model_has_no_domain_for_a_struct.md (deleted)`'s, and what
     belongs here is only that the stub's honesty is a property of the GENERATOR
     and not of this one example.
 

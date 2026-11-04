@@ -57,12 +57,11 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_absval_proof_does_not_check.md` | `bug-formal-formal-absval-proof-does-not-1557` | `formal/examples/absval.mojo`'s arm64 proof no longer checks — a frame-slot peel's address does not match the goal |
 | `FORMAL_float_step_functions.md` | `bug-formal-formal-float-step-functions-6979` | The binary64 semantics is modelled; the FP STEP FUNCTIONS are not, and a float program cannot be proved yet |
-
 ### `formal/build` — 3 documents, 3 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_a_call_result_field_access_has_no_representation.md` | `fix-merge-fix-merge-fix-merge-fix-merge-fix-merge--928221` | every remaining host-import row is one capability, and it is not a module |
+| `FORMAL_a_call_result_field_access_has_no_representation.md` | `fix-merge-fix-merge-fix-merge-fix-merge-fix-merge--937688` | every remaining host-import row is one capability, and it is not a module |
 | `FORMAL_a_variadic_parameter_read_has_no_abi.md` | `bug-formal-formal-a-variadic-parameter-r-1927` | the row was unowned, and the refusal in it is CORRECT |
 | `FORMAL_string_value_model.md` | `fix-merge-fix-merge-fix-merge-fix-merge-bug-formal-formal-st` | what a string IS on the formal path, and the two things that want to be one |
 
@@ -79,7 +78,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_known_limits.md` | `fix-merge-bug-formal-formal-known-limits-1382` | the sweep residue, audited — which refusals are true |
 | `FORMAL_model_package_split_left_duplicate_copies.md` | `fix-merge-bug-formal-formal-model-package-split-le` | formal/model/ holds the module three times |
 | `FORMAL_set_value_model.md` | `fix-merge-bug-formal-formal-set-value-model-9076` | A set is a LIST here: insertion order, no hashing, and `for x in s` disagrees with CPython |
-| `FORMAL_sweep_work_map.md` | `bug-formal-formal-sweep-work-map-1927` | the formal sweep series — the current census, the measurements that outlived their round, and the index of the twenty-one rounds it replaces |
+| `FORMAL_sweep_work_map.md` | `bug-formal-formal-sweep-work-map-3414` | the formal sweep series — the current census, the measurements that outlived their round, and the index of the twenty-one rounds it replaces |
 
 ### `formal/peephole` — 1 document, 1 claimed
 

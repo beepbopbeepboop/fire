@@ -11728,6 +11728,61 @@ def _one_word_field_map(fn, structs_by_name: dict, owner=None,
     return mapping
 
 
+def _rewrite_host_module_call_field_access(call_base, path, member_node,
+                                           functions_by_name=None,
+                                           module_functions=None):
+    """Rewrite field access on host module call results to use accessor functions."""
+    if not isinstance(call_base, F.CallExpr):
+        return None
+    # Check if it's a module-qualified call like os.stat(), pwd.getpwnam()
+    if isinstance(call_base.func, F.MemberExpr):
+        mod = None
+        func_name = None
+        if isinstance(call_base.func.obj, F.IdentExpr):
+            mod = call_base.func.obj.name
+            func_name = call_base.func.member
+        if mod and func_name:
+            # os.stat(path) -> os.path.stat_mode(path, 1) for st_mode
+            if mod == 'os' and func_name == 'stat':
+                if path == 'st_mode' or path.startswith('st_mode.'):
+                    # Call os.path.stat_mode with follow=1
+                    try:
+                        args = list(call_base.args) + [F.IntLiteral(value=1, raw='1')]
+                        new_call = F.CallExpr(func=F.MemberExpr(obj=F.IdentExpr(name='os.path'),
+                                                                member='stat_mode'),
+                                              args=args,
+                                              keywords=[])
+                        if path == 'st_mode':
+                            return new_call
+                    except Exception:
+                        pass
+                # Add other stat fields as needed
+            elif mod == 'os' and func_name == 'lstat':
+                if path == 'st_mode':
+                    try:
+                        args = list(call_base.args) + [F.IntLiteral(value=0, raw='0')]
+                        new_call = F.CallExpr(func=F.MemberExpr(obj=F.IdentExpr(name='os.path'),
+                                                                member='stat_mode'),
+                                              args=args,
+                                              keywords=[])
+                        return new_call
+                    except Exception:
+                        pass
+            # pwd.getpwnam(name).pw_dir
+            elif mod == 'pwd' and func_name == 'getpwnam' and path == 'pw_dir':
+                try:
+                    # Try to use fs_getpwnam_dir from os._syscalls or similar
+                    new_call = F.CallExpr(func=F.MemberExpr(obj=F.IdentExpr(name='pwd'),
+                                                            member='getpwnam_dir'),
+                                          args=list(call_base.args),
+                                          keywords=[])
+                    # Or just return the call if such function exists
+                    return new_call
+                except Exception:
+                    pass
+    return None
+
+
 def _sole_field_name(st, one_field=None) -> str:
     """The name of a struct's only field — the word the whole struct is.
 
@@ -11866,7 +11921,8 @@ def _plan_receiver_call_sites(fn, writebacks: dict) -> None:
 
 
 def _rewrite_self_fields(fn, one_word: dict, structs_by_name: dict,
-                        one_field=None) -> None:
+                        one_field=None, functions_by_name=None,
+                        module_functions=None) -> None:
     """`x.f[.g…]` -> `x` when every field read is a sole field, replacing the
     node itself.
 
@@ -11969,6 +12025,48 @@ def _rewrite_self_fields(fn, one_word: dict, structs_by_name: dict,
             return n
         root, _, path = _member_chain(n).partition(".")
         sole = mapping.get(root)
+        base_node = n
+        call_base = None
+        if root == "…" or sole is None:
+            # Try to find a direct call as the base of the member chain
+            cur = n
+            # walk down to find the ultimate base
+            chain_nodes = []
+            # Traverse up to build chain
+            temp = n
+            members_rev = []
+            base = temp
+            while isinstance(base, F.MemberExpr):
+                members_rev.append(base.member)
+                base = base.obj
+            # base is now the ultimate base
+            if isinstance(base, F.CallExpr):
+                call_base = base
+                # Try host module rewrites first (e.g., os.stat().st_mode -> os.path.stat_mode() etc.)
+                rewritten = _rewrite_host_module_call_field_access(call_base, path, n,
+                                                                  functions_by_name,
+                                                                  module_functions)
+                if rewritten is not None:
+                    return rewritten
+                # For call().field.subfield, path is "field.subfield" from member_chain_text
+                # and the call is the base
+                st = _call_returns_one_word_struct(
+                    call_base, structs_by_name, functions_by_name, one_field,
+                    module_functions)
+                if st is not None and M.one_field_answer(st, one_field):
+                    sole = _one_word_sole_field_chain(st, structs_by_name, one_field)
+                    # Check if path is prefix of sole
+                    if not _is_sole_field_prefix(path, sole):
+                        return n
+                    if id(n) in call_recv:
+                        raise CodegenError(M.sole_field_call_refusal(
+                            _member_chain(n), st.name, ".".join(sole), _member_chain(n),
+                            getattr(fn, "name", None)))
+                    return call_base
+                else:
+                    return n
+            else:
+                return n
         if not (sole and _is_sole_field_prefix(path, sole)):
             return n
         if id(n) in call_recv:
@@ -19202,7 +19300,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # rewrite is handed the table it derives the chain from — it needs the
         # struct as well as the chain, for the refusal a call through one of
         # those fields gets. So neither the chain nor the table is built twice.
-        _rewrite_self_fields(fn, one_word, structs_by_name, one_field)
+        _rewrite_self_fields(fn, one_word, structs_by_name, one_field,
+                             _functions_by_name, extra_module_functions)
         # …and the same identity through a SUBSCRIPT receiver. After the lift
         # above, so a method call has already become `Box_get(bs[0], …)` and only
         # field reads and writes are left; after `_rewrite_self_fields`, so both

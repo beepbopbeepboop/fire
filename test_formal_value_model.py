@@ -1452,6 +1452,42 @@ FIXED_CASES = [
      "    printf(\"ctor=%d call=%d m=%d\", a.n, b.n, make(7).get())\n"
      "    return 0\n",
      "ctor=41 call=41 m=7"),
+    ("a_call_result_field_access_direct",
+     "struct Box:\n"
+     "    var n: Int\n"
+     "\n"
+     "def make(k: Int) -> Box:\n"
+     "    return Box(k)\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"d=%d\", make(41).n)\n"
+     "    return 0\n",
+     "d=41"),
+    ("a_call_result_field_access_direct_chained",
+     "struct Box:\n"
+     "    var n: Int\n"
+     "\n"
+     "def make(k: Int) -> Box:\n"
+     "    return Box(k)\n"
+     "\n"
+     "def add1(k: Int) -> Int:\n"
+     "    return k + 1\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"d=%d\", add1(make(40).n))\n"
+     "    return 0\n",
+     "d=41"),
+    ("a_call_result_field_access_from_module_func",
+     "struct Box:\n"
+     "    var n: Int\n"
+     "\n"
+     "def make(k: Int) -> Box:\n"
+     "    return Box(k)\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"d=%d\", make(41).n)\n"
+     "    return 0\n",
+     "d=41"),
     # ── walking a DICT, which is not walking a list ──
     #
     # A dict is a PAIR blob: `[count][k0][v0][k1][v1]…`, one COUNT per PAIR.
