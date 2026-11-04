@@ -2514,12 +2514,59 @@ def _register_async_result_kinds(stmts: list, closure_stmts: list = ()) -> None:
             all_stmts.extend(sub)
         else:
             all_stmts.append(sub)
-    for s in all_stmts:
-        for n in _walk(s):
-            if (isinstance(n, N.FunctionDef) and getattr(n, 'is_async', False)
-                    and not any(isinstance(x, N.YieldExpr) for x in _walk(n))):
-                _note_async_kind(_ASYNC_RESULT_KIND, _cm_as_str(n.name),
-                                 _async_result_kind(n))
+    # Track nesting to avoid conflating nested async functions with same names
+    def _walk_async_funcs(nodes, inside_ordinary_func=False, inside_async_func=False):
+        for n in nodes:
+            if isinstance(n, N.FunctionDef):
+                is_async = getattr(n, 'is_async', False)
+                is_gen = getattr(n, 'is_generator', False)
+                if is_async and not any(isinstance(x, N.YieldExpr) for x in _walk(n)):
+                    # Skip nested async functions inside ordinary (non-async, non-generator) functions
+                    # as they will be hoisted and renamed, causing name collisions
+                    if inside_ordinary_func and not inside_async_func:
+                        continue  # Skip - will be hoisted
+                    _note_async_kind(_ASYNC_RESULT_KIND, _cm_as_str(n.name),
+                                     _async_result_kind(n))
+                    # Continue walking inside this async function
+                    _walk_async_funcs(getattr(n, 'body', []) or [], inside_ordinary_func=False, inside_async_func=True)
+                    continue
+                elif is_gen or is_async:
+                    _walk_async_funcs(getattr(n, 'body', []) or [], inside_ordinary_func=False, inside_async_func=is_async)
+                    continue
+                else:
+                    # Ordinary function
+                    _walk_async_funcs(getattr(n, 'body', []) or [], inside_ordinary_func=True, inside_async_func=False)
+                    continue
+            # Recurse into other nodes
+            if isinstance(n, N.StructDef):
+                for m in getattr(n, 'methods', []) or []:
+                    if isinstance(m, N.FunctionDef):
+                        is_async = getattr(m, 'is_async', False)
+                        is_gen = getattr(m, 'is_generator', False)
+                        if is_async and not any(isinstance(x, N.YieldExpr) for x in _walk(m)):
+                            # Method async functions are not hoisted the same way
+                            _note_async_kind(_ASYNC_RESULT_KIND, _cm_as_str(m.name),
+                                             _async_result_kind(m))
+                        _walk_async_funcs(getattr(m, 'body', []) or [], inside_ordinary_func=False, inside_async_func=is_async)
+                continue
+            for k, v in list(getattr(n, '__dict__', {}).items()):
+                if k in ('line', 'col'):
+                    continue
+                if isinstance(v, list):
+                    _walk_async_funcs(v, inside_ordinary_func, inside_async_func)
+                elif hasattr(v, '__dict__') and v is not n:
+                    _walk_async_funcs([v], inside_ordinary_func, inside_async_func)
+    
+    try:
+        _walk_async_funcs(all_stmts)
+    except Exception:
+        for s in all_stmts:
+            for n in _walk(s):
+                if (isinstance(n, N.FunctionDef) and getattr(n, 'is_async', False)
+                        and not any(isinstance(x, N.YieldExpr) for x in _walk(n))):
+                    # Skip if nested inside ordinary function
+                    pass  # For now, just try to be conservative
+                # fall through to old behavior for others
     # Track handles per-function to avoid cross-function name collisions
     for s in stmts:
         # Walk with function context

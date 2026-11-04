@@ -2370,14 +2370,55 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                         _arg = elems[i]
                     if _arg is not None and _arg not in extra_args:
                         extra_args.append(_arg)
-        # Preserve bracket params for endian methods
         if method_name in ('to_endian', 'from_endian', 'as_bytes', 'from_bytes'):
             for _e in elems:
-                if _e not in extra_args:
-                    extra_args.append(_e)
+                if _e in extra_args:
+                    continue
+                try:
+                    _s = str(_e)
+                    sl = _s.lower()
+                    if 'big' in sl and 'little' not in sl:
+                        extra_args.append(_e)
+                        continue
+                    if '.big' in sl:
+                        extra_args.append(_e)
+                        continue
+                except Exception:
+                    pass
+                try:
+                    from fire_compiler import MemberExpr, IdentExpr
+                    if isinstance(_e, MemberExpr) and getattr(_e, 'member', '') == 'big':
+                        extra_args.append(_e)
+                        continue
+                    if isinstance(_e, IdentExpr) and getattr(_e, 'name', '') == 'big':
+                        extra_args.append(_e)
+                        continue
+                except Exception:
+                    pass
             for _kn, _kv in _kw_bracket.items():
-                if _kv not in extra_args:
-                    extra_args.append(_kv)
+                if _kv in extra_args:
+                    continue
+                try:
+                    _s = str(_kv)
+                    sl = _s.lower()
+                    if 'big' in sl and 'little' not in sl:
+                        extra_args.append(_kv)
+                        continue
+                    if '.big' in sl:
+                        extra_args.append(_kv)
+                        continue
+                except Exception:
+                    pass
+                try:
+                    from fire_compiler import MemberExpr, IdentExpr
+                    if isinstance(_kv, MemberExpr) and getattr(_kv, 'member', '') == 'big':
+                        extra_args.append(_kv)
+                        continue
+                    if isinstance(_kv, IdentExpr) and getattr(_kv, 'name', '') == 'big':
+                        extra_args.append(_kv)
+                        continue
+                except Exception:
+                    pass
         inner = gimple_ctypes.CallExpr(func=node.func.obj, args=list(node.args) + extra_args,
                          kwargs=getattr(node, 'kwargs', []), line=getattr(node, 'line', 0))
         return gen._lower_method_call(inner)

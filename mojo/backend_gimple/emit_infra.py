@@ -1393,6 +1393,8 @@ def _emit_stdlib_import_externs(gen, stmts: list) -> None:
         'in_addr_t', 'in_port_t', 'suseconds_t', 'socklen_t',
         'sa_family_t', 'size_t', 'ssize_t', 'off_t', 'pid_t', 'uid_t', 'gid_t',
         'time_t', 'clock_t', 'useconds_t', 'nfds_t',
+        'intptr_t', 'uintptr_t', 'intmax_t', 'uintmax_t', 'ptrdiff_t',
+        'wchar_t', 'wint_t', 'sig_atomic_t',
     })
 
     def _resolve_relative(mod, pkg_prefix):

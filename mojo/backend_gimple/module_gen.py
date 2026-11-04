@@ -17333,7 +17333,9 @@ def gen_module_impl(self, stmts: list):
                         "extern int64_t PythonObject (int64_t, ...);  /* from std.python: named dummy = fire_runtime's definition */\n"
                         "#endif")
                 else:
-                    _system_types_skip = {'time_t', 'suseconds_t', 'size_t', 'ssize_t', 'off_t', 'socklen_t', 'pid_t', 'uid_t', 'gid_t', 'useconds_t', 'clock_t', 'fd_set', 'sa_family_t', 'in_addr_t', 'in_port_t'}
+                    _system_types_skip = {'time_t', 'suseconds_t', 'size_t', 'ssize_t', 'off_t', 'socklen_t', 'pid_t', 'uid_t', 'gid_t', 'useconds_t', 'clock_t', 'fd_set', 'sa_family_t', 'in_addr_t', 'in_port_t',
+                                         'intptr_t', 'uintptr_t', 'intmax_t', 'uintmax_t', 'ptrdiff_t',
+                                         'wchar_t', 'wint_t', 'sig_atomic_t'}
                     if safe in _system_types_skip or _sn in _system_types_skip:
                         continue
                         pass
