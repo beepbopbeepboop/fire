@@ -1,5 +1,7 @@
 # FORMAL_sweep_work_map: the formal sweep series — the current census, the measurements that outlived their round, and the index of the twenty-one rounds it replaces
 
+**Status:** FIXED — consolidated into this single document with an index of rounds (§3). The formal sweep series is now one document per `test_suite.py::test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds`.
+
 **This is the ONE home for the formal sweep series.** It replaces twenty-one
 per-round work maps, which between them were 9 527 lines and grew by ~500 lines
 per round while every open item in them was filed as its own document — so the
