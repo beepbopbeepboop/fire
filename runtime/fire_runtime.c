@@ -16538,8 +16538,50 @@ static int _class_lookup(int64_t tag, const char *name, int64_t *out, int depth)
     if (!c || depth > 32) return 0;
     if (mojo_dict_contains(c->attrs, (char *)name)) { *out = mojo_dict_get_int(c->attrs, (char *)name); return 1; }
     for (int i = 0; i < _n_classattr_readers; i++)
-        if (_classattr_readers[i](tag, (char *)name, out)) return 1;
-    for (int i = 0; i < c->nbases; i++) if (_class_lookup(c->bases[i], name, out, depth + 1)) return 1;
+        if (_classattr_readers[i](tag, (char *)name, out)) {
+            return 1;
+        }
+    for (int i = 0; i < c->nbases; i++) {
+        if (_class_lookup(c->bases[i], name, out, depth + 1)) {
+            return 1;
+        }
+    }
+    /* Fallback: look up mangled method names in static classes/bases */
+    if (name) {
+        /* Try common mangling patterns */
+        char buf[512];
+        if (c->name) {
+            /* Pattern: ClassName___methodname__ or ClassName_methodname */
+            snprintf(buf, sizeof(buf), "%s___%s__", c->name, name);
+            void *fp = dlsym(RTLD_DEFAULT, buf);
+            if (!fp) {
+                snprintf(buf, sizeof(buf), "%s___%s", c->name, name);
+                fp = dlsym(RTLD_DEFAULT, buf);
+            }
+            if (!fp) {
+                snprintf(buf, sizeof(buf), "%s_%s", c->name, name);
+                fp = dlsym(RTLD_DEFAULT, buf);
+            }
+            if (fp) {
+                *out = (int64_t)(intptr_t)fp;
+                return 1;
+            }
+        }
+        /* Also try global search for method name patterns */
+        const char *prefixes[] = {"Flag", "IntFlag", "Enum", "EnumMeta", "Base", 0};
+        for (int pi = 0; prefixes[pi]; pi++) {
+            snprintf(buf, sizeof(buf), "%s___%s__", prefixes[pi], name);
+            void *fp = dlsym(RTLD_DEFAULT, buf);
+            if (!fp) {
+                snprintf(buf, sizeof(buf), "%s_%s", prefixes[pi], name);
+                fp = dlsym(RTLD_DEFAULT, buf);
+            }
+            if (fp) {
+                *out = (int64_t)(intptr_t)fp;
+                return 1;
+            }
+        }
+    }
     return 0;
 }
 int mojo_class_hasattr(int64_t tag, char *name)
