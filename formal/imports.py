@@ -139,19 +139,7 @@ HOST_UNREACHABLE = frozenset((
     # A thread, and a proved model of one.
     "asyncio",
     # A socket.
-    #
-    # `wsgiref` is the WSGI reference implementation, and it is the one name
-    # the doc's next-step reading list (its §"The next step" in
-    # `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md`) placed
-    # under "a terminal" that the reading itself corrects, the way `posix` was
-    # corrected into `HOST_MODELLED`: the load-bearing half of the package is
-    # the reference SERVER —
-    # `wsgiref.simple_server.WSGIServer` is a subclass of
-    # `http.server.HTTPServer`, measured on the interpreter that runs this tree
-    # — so the object it needs is the socket `http` and `urllib` are here for,
-    # and the two pure halves (`wsgiref.util`, `wsgiref.validate`) are utilities
-    # the server exists to feed rather than the module's reason.
-    "socket", "urllib", "http", "wsgiref",
+    "socket", "urllib", "http",
     # A dynamic loader for foreign code, or an embedded CPython.  `ctypes` moved
     # to HOST_ADMITTED with the rest; what is left here is the embedded CPython.
     "importlib", "importlib.util", "importlib.machinery",
@@ -199,48 +187,6 @@ HOST_UNREACHABLE = frozenset((
     # is written down at the top of the module rather than here, so a reader
     # asking "why is most of this row still refused" has one place to look.
     "getpass", "webbrowser",
-    # THE EIGHT THE DOC'S OWN READING LIST NAMES UNDER THIS HEADING (its
-    # §"The next step" in `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md`),
-    # taken one at a time with the rule at the top of this file applied to each.  The object each needs is a TERMINAL — an interactive input
-    # and display — the same object `getpass` (a prompt) and `webbrowser` (a
-    # window) are here for, and a freestanding image that links libSystem and
-    # nothing else has no controlling terminal, no line discipline and no
-    # stream to carry the dialogue (a stream is the missing object the
-    # `HOST_MODELLED` `io` entry states).  A spec EXISTS for every one of the
-    # eight here — `tools/formal_stdlib_reach.py`'s row for each — so the
-    # no-spec oracle that placed the five 2026-10-07 names does not decide
-    # these; the placement is the per-name reading, and each is private-half
-    # accounted for below rather than by a remembered row.
-    #
-    #   `tty`        — terminal MODE for a descriptor: open `/dev/tty` and put
-    #                  the terminal into raw or cbreak mode.
-    #   `pty`        — a PSEUDO-terminal: a master/slave terminal-device pair.
-    #   `readline`   — line EDITING on the terminal; CPython on this host binds
-    #                  libedit (outside libSystem) for it, so the library
-    #                  reading and the terminal reading agree rather than
-    #                  competing.
-    #   `rlcompleter`— the programmable completion built ON readline.
-    #   `curses`     — terminal user interface; CPython's is a wrapper over
-    #                  `_curses` (libncurses, outside libSystem), and even a
-    #                  pure implementation of the terminal protocol talks TO a
-    #                  terminal that is not here.  Placing the PUBLIC name in
-    #                  this claim tier is what takes `_curses` out of the
-    #                  queue too, by `capability_sibling_tier` — a derivation,
-    #                  so no entry for it exists and none is wanted.
-    #   `tkinter`    — the Tk GUI: the Tcl/Tk runtime its private half
-    #                  `_tkinter` needs (in this set by the 2026-10-07 no-spec
-    #                  measurement) AND a display to draw on.
-    #   `turtle`     — canvas graphics ON `tkinter` — the `HOST_NOT_A_MODULE`
-    #                  comment states the reading verbatim: "`turtle` needs
-    #                  `tkinter` and so is a terminal".
-    #   `cmd`        — a line-oriented command INTERPRETER: an interactive
-    #                  prompt reading commands from the terminal.  This rests
-    #                  on the command STREAM, not on `cmd`'s optional `readline`
-    #                  import — the doc's §0.5 mechanism 2: an optional import
-    #                  is not a dependency, so the placement does not turn on
-    #                  a line-editing library the module tolerates missing.
-    "cmd", "curses", "pty", "readline", "rlcompleter", "tkinter", "tty",
-    "turtle",
     # A library outside libSystem, so linking it would contradict the premise
     # that a formal image links libSystem and nothing else. `zlib` and `gzip`
     # also have an honest route that does NOT link anything — DEFLATE is

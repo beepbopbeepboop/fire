@@ -135,12 +135,6 @@ double   mojo_tagged_double(int64_t box, int64_t p);
    above is why a formal image cannot use either half of this pair. */
 int64_t  mojo_double_bits(double d);
 
-/* Internal coroutine frame/slice helpers used by the coroutine runtime. */
-int      mojo_coro_frame_base(void);
-int      mojo_coro_cleanup_base(void);
-void    *mojo_coro_slice_save(int frame_base, int cleanup_base);
-void     mojo_coro_slice_restore(void *snap);
-
 #ifdef __cplusplus
 }
 #endif

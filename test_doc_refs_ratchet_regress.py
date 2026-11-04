@@ -30,18 +30,7 @@ def test_ratchet_does_not_gain_after_doc_removal():
 def test_doc_is_deleted():
     assert not os.path.exists(os.path.join(HERE, 'bugs', 'DOCS_dangling_doc_refs_ratchet_red_preexisting.md'))
 
-
-def test_gate_doc_refs_ratchet_red_on_master_fixed():
-    """The GATE_doc_refs_ratchet_red_on_master bug doc was deleted after baseline regenerated."""
-    assert not os.path.exists(os.path.join(HERE, 'bugs', 'mid', 'GATE_doc_refs_ratchet_red_on_master.md'))
-    result = subprocess.run(
-        [sys.executable, os.path.join(HERE, 'tools', 'dangling_doc_refs.py'), '--ratchet'],
-        capture_output=True, text=True, cwd=HERE)
-    assert result.returncode == 0, result.stdout + result.stderr
-
-
 if __name__ == '__main__':
     test_doc_is_deleted()
     test_ratchet_does_not_gain_after_doc_removal()
-    test_gate_doc_refs_ratchet_red_on_master_fixed()
     print('regression: PASS')

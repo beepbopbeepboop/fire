@@ -661,32 +661,6 @@ HOST_SET_ADDED_TIERS = {
     "_tkinter": "unreachable",
     "_winapi": "unreachable",
     "_wmi": "unreachable",
-    # ── and the EIGHT the doc's §"The next step" terminal reading names,
-    # added 2026-11-03 by the worker holding `FORMAL_stdlib_module_names_are_
-    # not_classified.md`.  The object each needs is a TERMINAL — `getpass` and
-    # `webbrowser` are this heading's pre-existing rows — and a freestanding
-    # image that links libSystem and nothing else has none.  A spec EXISTS for
-    # every one here, so the no-spec oracle that placed the five above does not
-    # decide these: the placement is the per-name reading the doc's list is,
-    # with the evidence row for each in `formal/imports.py`'s own comment.
-    # `_curses` leaves the queue with `curses` by `capability_sibling_tier` —
-    # a derivation, not a row, which is why it is not in this table.
-    "cmd": "unreachable",
-    "curses": "unreachable",
-    "pty": "unreachable",
-    "readline": "unreachable",
-    "rlcompleter": "unreachable",
-    "tkinter": "unreachable",
-    "tty": "unreachable",
-    "turtle": "unreachable",
-    # …and the ONE the same list carried there that the reading CORRECTS, the
-    # way `posix` was corrected into `HOST_MODELLED`: the doc's list had
-    # `wsgiref` under terminal, but the load-bearing half of the package is
-    # the reference SERVER — `wsgiref.simple_server.WSGIServer` is a subclass
-    # of `http.server.HTTPServer` — so it sits under the SOCKET heading for
-    # the same object as `http`.  Recorded in `formal/imports.py` at the
-    # name, so the correction and the entry cannot drift apart.
-    "wsgiref": "unreachable",
 }
 
 

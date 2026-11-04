@@ -523,20 +523,20 @@ refused, and the refusal now names the *type* mismatch rather than a prefix.
 
 | | arm64 | x86_64 |
 |---|---|---|
-| word-shaped entry points (`runtime_abi`) | 410 | 410 |
-| …of which the runtime dylib actually **exports** | 353 | 353 |
-| …reachable with no heap handle the formal path cannot obtain | **309** | **309** |
+| word-shaped entry points (`runtime_abi`) | 405 | 405 |
+| …of which the runtime dylib actually **exports** | 241 | 241 |
+| …reachable with no heap handle the formal path cannot obtain | **201** | **201** |
 
-So the honest statement of the surface is **309 word-shaped calls are callable
+So the honest statement of the surface is **201 word-shaped calls are callable
 from a formal image today**, not the "0" this document published when the phase
 was written, and not the 219 of §2.2. The two gaps between the
-410 of the row above and 309 are
+405 of the row above and 201 are
 both deliberate and both named:
 
-- **44 of the 353** the library exports take a `void *` parameter the
+- **43 of the 241** the library exports take a `void *` parameter the
   frame-resident value model cannot obtain — a `MojoList *` or `MojoDict *` that
   only the heap could have produced. That is phase 6's work, not a bug.
-- **57 of the 410** the dylib does not export at all, because
+- **53 of the 297** the dylib does not export at all, because
   `runtime_dylib` links `runtime_units(arch, None)` — the core runtime, the
   coroutine runtime and the async scheduler — and not the OPTIONAL units
   (`fire_sqlite3.c`, `fire_ssl.c`, `fire_zlib.c`, `fire_ncurses.c`, which the

@@ -1008,26 +1008,15 @@ def _cond_nodes(fn, param: str, env: dict = None, vtypes: dict = None,
                 # Loop-top condition `i < end`, with the counter bound to its
                 # initial (start) value: the universal walk meets this cbz at
                 # the first visit, where the counter register holds `start`.
-                try:
-                    _rs, _re, _rs_ = _range_bounds(_range_args_of(st))
-                    _env2 = dict(env)
-                    _tname = _target_name(st)
-                    _env2[_tname] = _expr_go(_rs, param, env, vtypes or {},
-                                             call_types or {}, scope)
-                    out.append((BinOp(op="<", left=Var(name=_tname), right=_re),
-                                _env2))
-                    walk(st.body, _env2)
-                    walk((st.else_body or []), _env2)
-                except Exception:
-                    # Could be a blob loop - bind the loop variable
-                    _env2 = dict(env)
-                    _tname = _target_name(st)
-                    try:
-                        _env2[_tname] = "(0 : UInt64)"
-                    except Exception:
-                        pass
-                    walk(st.body, _env2)
-                    walk((st.else_body or []), _env2)
+                _rs, _re, _rs_ = _range_bounds(_range_args_of(st))
+                _env2 = dict(env)
+                _tname = _target_name(st)
+                _env2[_tname] = _expr_go(_rs, param, env, vtypes or {},
+                                         call_types or {}, scope)
+                out.append((BinOp(op="<", left=Var(name=_tname), right=_re),
+                            _env2))
+                walk(st.body, _env2)
+                walk((st.else_body or []), _env2)
 
     walk(fn.body, base)
     return out
@@ -2320,10 +2309,7 @@ def _range_loop_pattern(fn):
     if collect(fn.body) == "while" or len(fors) != 1:
         return None
     f = fors[0]
-    try:
-        rargs = _range_args_of(f)
-    except Exception:
-        return None
+    rargs = _range_args_of(f)
     if len(rargs) not in (1, 2):
         return None
     if len(rargs) == 1:
@@ -2388,112 +2374,13 @@ def _range_loop_pattern(fn):
             and isinstance(fn.body[-1].value, Var)
             and fn.body[-1].value.name == acc):
         return None
-    return {"target": target, "acc": acc, "param": param, "body": body_stmts, "start": start, "range_args": rargs, "kind": "range"}
-
-
-def _blob_loop_pattern(fn):
-    """Detect a fold over a blob/list iterable: `for x in <blob>` with accumulator."""
-    if not fn.params or len(fn.params) != 1:
-        return None
-    param = fn.params[0][0]  # blob base/pointer parameter
-    fors: list = []
-
-    def collect(stmts) -> str:
-        for st in stmts:
-            if isinstance(st, ForStmt):
-                fors.append(st)
-            elif isinstance(st, WhileStmt):
-                return "while"
-            elif isinstance(st, IfStmt):
-                for sub in [st.then_body] + [b for _, b in (st.elifs or [])] + [st.else_body or []]:
-                    if collect(sub) == "while":
-                        return "while"
-        return ""
-    if collect(fn.body) == "while" or len(fors) != 1:
-        return None
-    f = fors[0]
-    # Must not be a range loop
-    try:
-        rargs = _range_args_of(f)
-        if rargs is not None:
-            return None
-    except Exception:
-        pass
-    # Iterable should be the parameter (the blob) or related to it
-    it = getattr(f, 'iterable', None)
-    # Accept if iterable is the parameter
-    if not isinstance(it, Var) or it.name != param:
-        # Could be other forms, but try to be permissive for now
-        pass  # Try to match anyway for now
-    target = f.target  # the loop variable (element)
-
-    def refs(e, names) -> bool:
-        if isinstance(e, Var):
-            return e.name in names
-        if isinstance(e, (Int, Bool)):
-            return True
-        if isinstance(e, Unary):
-            return refs(e.operand, names)
-        if isinstance(e, BinOp):
-            return refs(e.left, names) and refs(e.right, names)
-        return False
-
-    acc = None
-    body_stmts = []
-    for st in f.body:
-        if isinstance(st, AugAssign):
-            if acc is None:
-                acc = _target_name(st)
-            elif _target_name(st) != acc:
-                return None
-            # Allow refs to acc and target (element)
-            if not refs(st.value, {acc, target}):
-                return None
-            body_stmts.append(st)
-        elif isinstance(st, Assign):
-            tgt = _target_name(st)
-            if acc is None:
-                acc = tgt
-            elif tgt != acc:
-                return None
-            val = st.value
-            if isinstance(val, BinOp) and isinstance(val.left, Var) and val.left.name == acc:
-                if val.op in ('+', '-', '*', '&', '|', '^'):
-                    aug = AugAssign(target=val.left, op=val.op + '=', value=val.right)
-                    if not refs(val.right, {acc, target}):
-                        return None
-                    body_stmts.append(aug)
-                    continue
-            return None
-        else:
-            return None
-    if acc is None or not body_stmts:
-        return None
-    # Check for initial assignment to acc
-    # Look in fn.body before the for loop
-    if not (isinstance(fn.body[-1], Return)
-            and isinstance(fn.body[-1].value, Var)
-            and fn.body[-1].value.name == acc):
-        return None
-    return {"target": target, "acc": acc, "param": param, "body": body_stmts,
-            "start": Int(value=0), "kind": "blob", "blob_param": param}
+    return {"target": target, "acc": acc, "param": param, "body": body_stmts, "start": start, "range_args": rargs}
 
 
 def _range_loop_step_lean(body, acc_name: str, target_name: str) -> str:
     """Lean term for the loop body's effect on the accumulator, as a term in
     free vars `acc` (current accumulator) and `i` (current counter)."""
     env = {acc_name: "acc", target_name: "i"}
-    term = "acc"
-    for st in body:
-        if isinstance(st, AugAssign):
-            e = _expr_go(st.value, "n", env)
-            term = f"({term} {st.op.rstrip(chr(61))} {e})"
-    return term
-
-
-def _blob_loop_step_lean(body, acc_name: str, elem_name: str) -> str:
-    """Lean term for blob loop step: element comes from memory read."""
-    env = {acc_name: "acc", elem_name: "elem"}
     term = "acc"
     for st in body:
         if isinstance(st, AugAssign):
@@ -2594,62 +2481,6 @@ def _gen_range_loop_model(fn, info: dict, vregs: dict) -> str:
     return "\n".join(L)
 
 
-def _gen_blob_loop_model(fn, info: dict, vregs: dict) -> str:
-    """Emit the semantic model for a `for x in blob` accumulator loop."""
-    fname = fn.name
-    blob_param = info.get("blob_param") or info.get("param")
-    elem = info["target"]  # loop variable (element)
-    acc = info["acc"]
-    # Try to get registers if available
-    try:
-        reg_b = vregs[blob_param]
-        reg_i = vregs.get(elem) if elem in vregs else None
-        reg_a = vregs[acc]
-    except Exception:
-        reg_b = None
-        reg_i = None
-        reg_a = None
-    step = _blob_loop_step_lean(info["body"], acc, elem)  # element comes from memory
-    L = []
-    A = L.append
-    # Blob layout: [count:i64][elem0:i64]...
-    A(f"def {fname}_loop_go (rem : Nat) (acc : UInt64) (i : UInt64) (blob_base : UInt64) (mem : Nat → UInt8) : UInt64 :=\n"
-      f"  match rem with\n"
-      f"  | 0 => acc\n"
-      f"  | k + 1 =>\n"
-      f"    let elem := mem_read_u64 mem (blob_base.toNat + 8 + i.toNat * 8);\n"
-      f"    {fname}_loop_go k ({step}) (i + UInt64.ofNat 1) blob_base mem")
-    A("")
-    # Top level go takes blob base as parameter (matching function arity)
-    # Try to read memory from state context if possible - but in pure model context,
-    # this is tricky. For now, pass dummy memory; the loop_model will be used in CFG proofs
-    A(f"def {fname}_go ({blob_param} : UInt64) : UInt64 :=\n"
-      f"  let mem := (fun _ : Nat => (0 : UInt8));\n"
-      f"  let count := mem_read_u64 mem ({blob_param}.toNat);\n"
-      f"  {fname}_loop_go count.toNat (0 : UInt64) (0 : UInt64) {blob_param} mem")
-    A("")
-    A(f"theorem {fname}_loop_go_unfold (rem : Nat) (acc : UInt64) (i : UInt64) (blob_base : UInt64) (mem : Nat → UInt8) :\n"
-      f"    {fname}_loop_go (rem + 1) acc i blob_base mem =\n"
-      f"    {fname}_loop_go rem ({step}) (i + UInt64.ofNat 1) blob_base mem := by rfl")
-    A("")
-    A(f"theorem {fname}_loop_go_zero (acc : UInt64) (i : UInt64) (blob_base : UInt64) (mem : Nat → UInt8) :\n"
-      f"    {fname}_loop_go 0 acc i blob_base mem = acc := by rfl")
-    A("")
-    if reg_b is not None and reg_a is not None:
-        A(f"def {fname}_loop_model (st : Arm64State) : UInt64 :=\n"
-          f"  let blob_base := arm64_reg {reg_b} st;\n"
-          f"  let count := mem_read_u64 st.mem blob_base.toNat;\n"
-          f"  {fname}_loop_go count.toNat (arm64_reg {reg_a} st) (0 : UInt64) blob_base st.mem")
-        A("")
-    else:
-        A(f"def {fname}_loop_model (st : Arm64State) : UInt64 :=\n"
-          f"  let blob_base := arm64_reg {reg_b} st if reg_b is not None else (UInt64.ofNat 0);\n"
-          f"  let count := mem_read_u64 st.mem blob_base.toNat;\n"
-          f"  {fname}_loop_go count.toNat (0 : UInt64) (0 : UInt64) blob_base st.mem")
-        A("")
-    return "\n".join(L)
-
-
 def _gen_go(fn, tc: dict = None) -> list:
     """Generate the semantic model (helpers first, then main).
 
@@ -2677,24 +2508,16 @@ def _gen_go(fn, tc: dict = None) -> list:
     sig = (" " + " ".join(f"({p} : UInt64)" for p in params)) if params else ""
     helpers = []
     loop_counter = [0]
-    rpat = _range_loop_pattern(fn)
-    if rpat is not None:
+    if _range_loop_pattern(fn) is not None:
         if len(params) != 1:
             raise NotImplementedError(
                 f"model: {fname} matches the for-range loop pattern with "
                 f"{len(params)} parameters; the pattern's model is defined "
                 f"for one, and widening it is a model change, not a "
                 f"generator fix")
-        helpers.append(_gen_range_loop_model(fn, rpat,
+        helpers.append(_gen_range_loop_model(fn, _range_loop_pattern(fn),
                                              var_register_map(fn)))
         return helpers
-    bpat = _blob_loop_pattern(fn)
-    if bpat is not None:
-        try:
-            helpers.append(_gen_blob_loop_model(fn, bpat, var_register_map(fn)))
-            return helpers
-        except Exception:
-            raise
     if (tc and tc.get("typed") and not _is_recursive(fn)
             and _dec1_pattern(fn) is None and _dec_while_pattern(fn) is None
             and _count_self_calls(fn) < 2):
@@ -3756,9 +3579,41 @@ def _ast_gap_message(gaps: list) -> str:
 
 
 def _ast_model_cannot_state(fn) -> str:
-    """Why the untyped AST model cannot state `fn`'s body, or `''` when it can."""
-    if _range_loop_pattern(fn) is not None or _blob_loop_pattern(fn) is not None:
-        return "a for-range/for-blob loop (`MojoStmt` has no loop form)"
+    """Why the untyped AST model cannot state `fn`'s body, or `''` when it can.
+
+    **One predicate for four decisions**, which used to be three reads of
+    `_range_loop_pattern` and could have been a fourth read of anything else:
+    whether `eval_eq_mojo` is emitted, whether `ast_def` is built at all,
+    whether the call-gap check runs, and whether the concrete
+    `eval_eq_mojo_N` instances are emitted. They are one decision — "is there
+    an AST to cross-check the model against" — and a caller that answers it
+    one way and another caller the other way produces a file whose `ast` value
+    is emitted and never used, or a theorem over an `ast` that was never
+    written (the concrete instances used to be exactly that fourth caller:
+    five theorems referring to an `ast` the file never declared, one Lean
+    `Expected type must not contain free variables` per theorem).
+
+    Two shapes, and the second is new:
+
+      * a `for`-range accumulator loop. `MojoStmt` has no loop form at all, so
+        there is no `MojoFunc` to write and nothing to cross-check.
+      * **a conditional expression in a value position.** The MODEL can state
+        `a if c else b` (`_ternary_go`), and `MojoExpr` cannot, because
+        `if` in this library is a `MojoStmt` and an expression has nowhere to
+        put one. So the model's half of the two layers is real and the bridge's
+        is absent, which is a stated gap rather than a reason to refuse the
+        proof: `bugs/formal/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`
+        records the measurement that a ternary was 37 of 60 generated programs'
+        refusals, and refusing a proof the machine half can carry over the AST
+        model's missing constructor would be refusing it for the wrong reason.
+
+    The search is over the STATEMENTS the AST renders (`_stmts_ast`'s
+    vocabulary) rather than over every node, so a ternary in a position the AST
+    never reaches — the bound of a `for` this predicate has already answered
+    for, a `while` body — does not cost a bridge that was there before.
+    """
+    if _range_loop_pattern(fn) is not None:
+        return "a for-range loop (`MojoStmt` has no loop form)"
 
     def mentions_ternary(node) -> bool:
         if isinstance(node, F.TernaryExpr):
@@ -4163,18 +4018,6 @@ _STEP_CONDS = [
     # class separators are measured with the platform assembler in the arm's
     # own comment.
     (0xffe00c00, 0x9a800000),  # 69 CSEL Xd, Xn, Xm, cond
-    # 70 FCMP Dn, Dm (scalar double): flags only, no result register.
-    (0xffe0fc00, 0x1e602000),
-    # 71-79: scalar double FP arithmetic/conversions/moves
-    (0xffe0fc00, 0x1e602800),  # 71 FADD Dd, Dn, Dm
-    (0xffe0fc00, 0x1e603800),  # 72 FSUB Dd, Dn, Dm
-    (0xffe0fc00, 0x1e600800),  # 73 FMUL Dd, Dn, Dm
-    (0xffe0fc00, 0x1e601800),  # 74 FDIV Dd, Dn, Dm
-    (0xfffffc00, 0x1e614000),  # 75 FNEG Dd, Dn
-    (0xfffffc00, 0x9e670000),  # 76 FMOV Dd, Xn (GPR->V)
-    (0xfffffc00, 0x9e660000),  # 77 FMOV Xd, Dn (V->GPR)
-    (0xfffffc00, 0x9e620000),  # 78 SCVTF Dd, Xn
-    (0xfffffc00, 0x9e780000),  # 79 FCVTZS Xd, Dn
 ]
 
 
@@ -4950,16 +4793,6 @@ _WORK_STEP = [
     # measurement that no earlier row — including the two that share the mask,
     # 64/65 — claims these words.
     (69, "work_step_csel", [(0xffe00c00, 0x9a800000)]),
-    (70, "work_step_fcmp", [(0xffe0fc00, 0x1e602000)]),
-    (71, "work_step_fadd", [(0xffe0fc00, 0x1e602800)]),
-    (72, "work_step_fsub", [(0xffe0fc00, 0x1e603800)]),
-    (73, "work_step_fmul", [(0xffe0fc00, 0x1e600800)]),
-    (74, "work_step_fdiv", [(0xffe0fc00, 0x1e601800)]),
-    (75, "work_step_fneg", [(0xfffffc00, 0x1e614000)]),
-    (76, "work_step_fmov_gpr_v", [(0xfffffc00, 0x9e670000)]),
-    (77, "work_step_fmov_v_gpr", [(0xfffffc00, 0x9e660000)]),
-    (78, "work_step_scvtf", [(0xfffffc00, 0x9e620000)]),
-    (79, "work_step_fcvtzs", [(0xfffffc00, 0x9e780000)]),
 ]
 
 _WORK_STEP_BY_IDX = {idx: (lemma, tests) for idx, lemma, tests in _WORK_STEP}
@@ -8256,27 +8089,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     _reach = [blocks[i] for i in _order if i in _reach_i]
     if fuel is not None:
         _acyclic = all(t > b["instrs"][-1] for b in _reach for t in b["targets"])
-        # Loop-contract machinery (below, ~line 8286/10707) handles cyclic
-        # exports that have a recognized loop shape.  Detect it from the
-        # reachable blocks so the acyclicity bail does not kill them first.
-        # Countdown: a `b` whose target is a `cbz`; bottom-tested: a `cbz`
-        # whose taken edge is its own start.
-        _starts = {b["start"]: i for i, b in enumerate(_reach)}
-        _has_loop = False
-        for _bi_r, _b_r in enumerate(_reach):
-            if _b_r["kind"] == "b" and _b_r.get("targets"):
-                _tgt = _b_r["targets"][0]
-                if _tgt in _starts:
-                    _tgt_b = _reach[_starts[_tgt]]
-                    if _tgt_b["kind"] == "cbz":
-                        _has_loop = True
-                        break
-            elif _b_r["kind"] == "cbz" and len(_b_r.get("targets", [])) > 1:
-                if _b_r["targets"][1] == _b_r["start"]:
-                    _has_loop = True
-                    break
-        if (recursive or (not _acyclic and not _has_loop)
-                or fuel < _TOTAL
+        if (recursive or not _acyclic or fuel < _TOTAL
                 or any(b["kind"] == "bl" for b in _reach)):
             return None
     _RETS = ", ".join(str(b["instrs"][-1]) for b in blocks if b["kind"] == "ret")
@@ -12397,27 +12210,16 @@ def _call_func_lean(func_name: str, admitted: dict = None,
 
 
 def _call_func2_lean(func_name: str, admitted2: dict = None,
-                     wrap: bool = True, exports: dict = None) -> str:
-    """The `callFunc2` for admitted contracts taking 2 arguments.
-
-    `exports` is the arity-2 analogue of `callFunc`'s `exports`: branches over
-    this image's OWN two-parameter callees whose `_go` definition was emitted,
-    so `if name = "_scalar_max2" then _scalar_max2_go arg0 arg1`.  Without them
-    the stub answers `0` for every user callee, and `eval_eq_mojo` asks Lean
-    to prove `0 = <the call's value>` — the false theorem this whole family of
-    bugs is about.
-    """
-    exports = exports or {}
+                     wrap: bool = True) -> str:
+    """The `callFunc2` for admitted contracts taking 2 arguments."""
     admitted2 = admitted2 or {}
-    if not admitted2 and not exports:
+    if not admitted2:
         if wrap:
             return "(fun name arg0 arg1 => 0)"
         return "(fun name arg0 arg1 => 0)"
     arms = "\n  ".join(
         [f'if name = "{spelling}" then {lean} arg0 arg1 else'
-         for spelling, lean in sorted(admitted2.items()) if lean]
-        + [f'if name = "{spelling}" then {go} arg0 arg1 else'
-           for spelling, go in sorted(exports.items())])
+         for spelling, lean in sorted(admitted2.items()) if lean])
     if arms:
         if wrap:
             return f'(fun name arg0 arg1 =>\n  {arms}\n  0)'
@@ -12427,14 +12229,8 @@ def _call_func2_lean(func_name: str, admitted2: dict = None,
     return "(fun name arg0 arg1 => 0)"
 
 
-def _callee_call_table(go_defs: str, prog, func_name: str, arity: int = 1) -> dict:
+def _callee_call_table(go_defs: str, prog, func_name: str) -> dict:
     """`{spelling: the `_go` definition to call}` for every callee with a model.
-
-    `arity` is the argument count the BRANCH must supply. `callFunc` is unary
-    and `callFunc2` is binary — they both answer `0` for names they don't know
-    about, so `callFunc` answers `0` for two-parameter callees, which means
-    `eval_eq_mojo` is FALSE: `0 = <the callee's value>` (measured on
-    `_scalar_max2(x, x)`).
 
     **The one-parameter callee table, and the half that was never a
     `lib/ProofLib.lean` change** (its two-parameter analogue is open:
@@ -12451,9 +12247,10 @@ def _callee_call_table(go_defs: str, prog, func_name: str, arity: int = 1) -> di
       * **not the entry** — its branch is `mojo arg`, which `_call_func_lean`
         already emits, and two branches for one name would be a redefinition of
         the same answer;
-      * **arity parameter matches** — `callFunc` is `String → UInt64 → UInt64`,
-        so a unary branch (`callFunc`) cannot call a binary callee, and a binary
-        branch (`callFunc2`) cannot call a unary callee;
+      * **exactly one parameter** — `callFunc` is `String → UInt64 → UInt64`, so
+        it is handed ONE value, and a two-parameter `_go` has no faithful
+        `f_go arg`.  This is the same limit the entry's own branch has, and for
+        the same reason: the AST layer packs nothing;
       * **the model is IN `go_defs`** — read back off the emitted text rather
         than predicted from the source, because `_gen_go` does not always
         define one: a for-range-loop function returns its loop model and no
@@ -12464,7 +12261,7 @@ def _callee_call_table(go_defs: str, prog, func_name: str, arity: int = 1) -> di
     out = {}
     for g in sorted(getattr(prog, "functions", None) or [],
                     key=lambda f: f.name):
-        if g.name == func_name or _entry_arity(g) != arity:
+        if g.name == func_name or _entry_arity(g) != 1:
             continue
         if re.search(r"^(partial )?def %s_go\b" % re.escape(g.name), go_defs,
                      re.M):
@@ -12785,13 +12582,7 @@ def generate_arm64_proof(prog, code, info) -> str:
                 _admitted_calls_map2[k] = v
     except Exception:
         pass
-    # Also build a callFunc2 branch for every two-parameter callee whose model
-    # is in go_defs.  Without them the stub answers 0 for every user callee, and
-    # eval_eq_mojo asks Lean to prove 0 = <the call's value> — the false theorem
-    # this whole family of bugs is about.
-    _callees2 = _callee_call_table(go_defs, prog, func_name, arity=2)
-    _cf2_text = _call_func2_lean(func_name, _admitted_calls_map2,
-                                exports=_callees2)
+    _cf2_text = _call_func2_lean(func_name, _admitted_calls_map2)
     # The model's arity is the SOURCE arity, so applying it to `n` is wrong for
     # a function that takes no parameters -- `def ret42(): return 42` used to
     # be modelled as `ret42_go (n : UInt64)`, a parameter the source does not
@@ -13216,11 +13007,16 @@ def generate_arm64_proof(prog, code, info) -> str:
     # which is the opposite of what this check is for. `sum_range`'s `range(n)`
     # is the measured loop case: caught by the check, refused, and worth 2
     # holes on both architectures.
-    # Add the two-parameter callee names to the arity-2 handler's resolvable
-    # set: the bridge must know it CAN state a call to them.
-    _resolvable2 = frozenset(_admitted_map2_own) | set(_callees2)
+    _resolvable2_bridge = set(_admitted_map2_own)
+    try:
+        for spelling, lean in (_admitted_calls_map or {}).items():
+            if lean:
+                _resolvable2_bridge.add(spelling)
+    except Exception:
+        pass
     _gaps = ([] if ast_cannot
-             else _ast_bridge_gaps(fn, _resolvable, _resolvable2))
+             else _ast_bridge_gaps(fn, _resolvable,
+                                   frozenset(_resolvable2_bridge)))
     if _gaps:
         raise NotImplementedError(_ast_gap_message(_gaps))
 
@@ -13527,23 +13323,12 @@ def _frame_slot_accesses(words: dict, entry: int, end: int, body: int = None):
                 recv[rd] = recv[rn]
             else:
                 recv.pop(rd, None)
-        elif idx in (18, 31):   # LDR/STR Xt, [Xn, #imm]
-            imm12 = ((w >> 10) & 0xfff) * 8
-            if rn in recv:
-                if in_body:
-                    out.append(((recv[rn] + imm12) // 8, idx == 31))
-                elif idx != 31 and imm12 == 0:
-                    # A one-field mutator by reference: the prologue loads the
-                    # receiver value from the cell pointed to by x0 into rd.
-                    recv[rd] = recv[rn]
-                elif idx == 31:
-                    pass
-                else:
-                    recv.pop(rd, None)
-            else:
-                if in_body:
-                    return None
-                recv.pop(rd, None)
+        elif idx in (18, 31) and in_body:   # LDR/STR Xt, [Xn, #imm]
+            if rn not in recv:
+                return None
+            out.append(((recv[rn] + ((w >> 10) & 0xfff) * 8) // 8, idx == 31))
+        elif idx == 31:                 # a prologue STR writes no register
+            pass
         else:
             recv.pop(rd, None)
         pc += 4
@@ -13667,7 +13452,24 @@ def _frame_methods(prog, code: bytes, info: dict):
     body touching `self.<f>`) and then CONFIRMED against the machine: the two
     lists of accesses have to have the same length, agree on read-vs-write, and
     give distinct slots to distinct fields.  A disagreement drops the method
-    rather than picking a side."""
+    rather than picking a side.
+
+    **A ONE-FIELD struct's mutator is excluded by name, and the exclusion is not
+    tidiness.** `model.receiver_writeback_name` gives such a method a receiver
+    that is the ADDRESS of a one-word cell in the CALLER's frame: the callee
+    reads the word out of that cell at its entry (`LDR X19, [X0]`) and writes it
+    back at every exit, so `x0` at entry is a pointer to the value rather than
+    the frame the `Frame`/`FrameBelow`/`FrameFits` machinery reasons about.  The
+    confirmation below happened to drop these methods anyway — the length
+    disagreed, because the machine's only receiver-relative access is that
+    prologue load — and a property that changed the moment the entry sequence
+    did is not a property to rely on.  `struct_is_one_field` on the OWNING
+    struct, read off `_owner_struct` (published by `formal/build.py` for exactly
+    this), is the question asked instead.
+
+    What a one-field mutator gets instead is stated in
+    `bugs/formal/FORMAL_a_one_field_mutator_has_no_method_contract.md`: nothing today,
+    which is the same as what it had before the by-reference change."""
     base = info["base_addr"]
     words = {base + i: int.from_bytes(code[i:i + 4], "little")
              for i in range(0, len(code) - len(code) % 4, 4)}
@@ -13692,38 +13494,9 @@ def _frame_methods(prog, code: bytes, info: dict):
             continue
         if len(f.params) > 2:
             continue
-        is_one_field = model.struct_is_one_field(getattr(f, "_owner_struct", None))
-        is_byref_onefield = bool(getattr(f, "_recv_ref_receiver", None)) and is_one_field
-        if is_one_field and not is_byref_onefield:
+        if model.struct_is_one_field(getattr(f, "_owner_struct", None)):
             continue              # a one-word CELL, not a frame — see above
         src = _self_accesses(f.body)
-        if is_byref_onefield and not src:
-            # For one-field mutators by reference after rewriting, accesses to
-            # self.<field> become direct uses of self. Model as a single slot
-            # access to the sole field.
-            owner = getattr(f, "_owner_struct", None)
-            field = None
-            if owner is not None:
-                try:
-                    names = model.struct_field_names(owner)
-                    if names:
-                        field = names[0]
-                except Exception:
-                    pass
-            if field is None:
-                field = "v"
-            # Try to infer: if we have a store to self or read of self in effect,
-            # treat as set/get based on body shape
-            has_store = any(isinstance(st, F.AssignStmt) and isinstance(getattr(st, 'target'), F.IdentExpr) and getattr(st.target, 'name') == 'self' for st in f.body)
-            if has_store and len(f.body) == 1:
-                src = [(field, True)]
-            elif (not has_store and len(f.body) == 1 and isinstance(f.body[0], F.ReturnStmt)):
-                src = [(field, False)]
-            elif has_store:
-                # multi-statement mutator; will need different handling
-                src = [(field, True)]  # placeholder, will be adjusted
-            else:
-                src = [(field, False)]
         if not src:
             continue
         # The function ends where the next FUNCTION begins, or where code
@@ -13751,8 +13524,7 @@ def _frame_methods(prog, code: bytes, info: dict):
         end = min(rets) + 4
         if any(_step_branch_index(words[pc]) in (14, 15, 16, 17, 51, 52, 53)
                for pc in words if body_entry <= pc < end):
-            if not is_byref_onefield:
-                continue                      # a branch: not the leaf shape
+            continue                      # a branch: not the leaf shape
         mach = _frame_slot_accesses(words, entry, end, body=body_entry)
         if mach is None or len(mach) != len(src):
             continue
@@ -13768,7 +13540,7 @@ def _frame_methods(prog, code: bytes, info: dict):
         slots = [sl for _f, sl in pairs]
         if len(set(slots)) != len(slots):
             continue                      # two fields, one slot: not a frame
-        if all(stores) and (len(f.body) == 1 or is_byref_onefield):
+        if all(stores) and len(f.body) == 1:
             kind = "set"
         elif (not any(stores) and len(f.body) == 1
               and isinstance(f.body[0], F.ReturnStmt)):

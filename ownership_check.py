@@ -97,14 +97,12 @@ compile-time-type-only accesses being misread as runtime uses of a moved
 value). Re-run that sweep after any change to this file.
 """
 
+import dataclasses
 import fire_compiler as N
 from fire_compiler import conv_is_exclusive
 
 
-from dataclasses import dataclass as _dataclass
-
-
-@_dataclass
+@dataclasses.dataclass
 class Diagnostic:
     message: str
     line: int
@@ -131,17 +129,7 @@ _COMPTIME_TYPE_FUNCS = {'type_of', '__type_of'}
 
 
 def _is_node(x):
-    if isinstance(x, type):
-        return False
-    cls = type(x)
-    try:
-        fields = getattr(cls, "__dataclass_fields__", None)
-        if fields is None:
-            return False
-        # avoid triggering reflection checks in formal backend
-        return True
-    except Exception:
-        return False
+    return dataclasses.is_dataclass(x) and not isinstance(x, type)
 
 
 def _bind_target(target, state):
@@ -330,10 +318,8 @@ def _walk_expr(node, state, diags, funcs, methods):
     # what handles CallExpr's own func/args/kwargs (no move-tracking
     # special-casing needed there — see the module docstring's "IMPORTANT
     # correction" for why that's deliberate, not an omission).
-    for fname in getattr(type(node), "__dataclass_fields__", {}):
-        if fname in ("line", "col"):
-            continue
-        _walk_expr(getattr(node, fname), state, diags, funcs, methods)
+    for f in dataclasses.fields(node):
+        _walk_expr(getattr(node, f.name), state, diags, funcs, methods)
 
 
 def _merge_states(states):
@@ -598,10 +584,8 @@ def _check_stmt(stmt, state, diags, funcs, methods):
     # Generic fallback (comptime-only statement shapes etc.) — visit any
     # nested expression/statement fields, tracked-name-absence keeps this
     # from producing false positives per the module docstring.
-    for fname in getattr(type(stmt), "__dataclass_fields__", {}):
-        if fname in ("line", "col"):
-            continue
-        val = getattr(stmt, fname)
+    for f in dataclasses.fields(stmt):
+        val = getattr(stmt, f.name)
         if isinstance(val, list):
             for item in val:
                 if _is_node(item):

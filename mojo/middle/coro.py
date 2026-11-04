@@ -77,11 +77,12 @@ except Exception:
             if not q:
                 return ''
             return q.replace('.', '_')
-# `module_qualifier` is a module-level name here (the import above binds it), so
-# `coro.module_qualifier` already exists as an attribute. It used to be attached
-# again through `sys.modules[__name__]`, which the compiled compiler has no
-# `modules` attribute for: every compile in the self-hosted binary died with
-# `AttributeError: modules` before emitting anything.
+# Attach for direct attribute access / compatibility
+import sys as _sys
+try:
+    _sys.modules[__name__].module_qualifier = module_qualifier
+except Exception:
+    pass
 from mojo.middle.literal_bindings import binding_index, unique_literal_value
 _ENV = 'MOJO_CORO'
 _MODE = 'stackswitch'

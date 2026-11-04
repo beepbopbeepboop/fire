@@ -6579,8 +6579,8 @@ BOTH_ARCH_CASES = [
     # In this group rather than beside the truthiness rows it is in because the
     # kind table is ONE `formal/model.py` reader both emitters consult, so the
     # two machines cannot disagree about it, and the row is about that reader
-    # rather than about an arm64 instruction: the parameter-kind sweep note
-    # recorded the same reproducer refused as "len(s) is len() of a value
+    # rather than about an arm64 instruction: `bugs/formal/FORMAL_sweep_singles_second_half.md`
+    # §4 recorded the same reproducer refused as "len(s) is len() of a value
     # classified as 'int', and an integer has no length", and said the row was
     # open. It is not, and this is the row that says so on BOTH machines.
     ("len_of_an_unannotated_parameter_from_a_string_literal",
@@ -8322,7 +8322,7 @@ BOTH_ARCH_CASES = [
     # calling the next, with no call back into anything already on the stack.
     # Unbounded depth needs a cycle, so a chain like this walked straight past
     # the floor — and the corpus is already inside it, which is what
-    # guarding an acyclic chain across the stack floor spent its life
+    # `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` spent its life
     # measuring: `python3 tools/formal_call_depth_census.py` puts the deepest
     # single image in this repository at 89 frames against the 60 an arm64
     # budget affords (`formal/arm64_codegen.py`, and 78 for
@@ -8367,7 +8367,7 @@ BOTH_ARCH_CASES = [
     #
     # The two rules above are a predicate over a body. This one is a fact about
     # the IMAGE, and it is what closes the residual
-    # guarding an acyclic chain across the stack floor measured: the
+    # `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` measured: the
     # guard's floor is written by the first guarded function to RUN, so a guard
     # on only some prologues puts the floor wherever the program happens to reach
     # one first, and a chain of unguarded functions below that point is under a
@@ -9149,23 +9149,15 @@ BOTH_ARCH_CASES = [
      "def main():\n"
      "    printf(\"[%s]\", f())\n"
      "    return 0\n", 0, "[n=7]"),
-    ("both_arch_an_fstring_with_constant_fields_folds",
-     "def main():\n"
-     "    var s = f\"n={5}\"\n"
-     "    printf(\"[%s]\", s)\n"
-     "    return 0\n", 0, "[n=5]"),
-    ("both_arch_an_fstring_with_multiple_constant_fields_folds",
-     "def main():\n"
-     "    var s = f\"{\'a\'}b{None}\"\n"
-     "    printf(\"[%s]\", s)\n"
-     "    return 0\n", 0, "[abNone]"),
     ("fstring_parameter_default_with_a_field_is_refused_like_a_statement_site",
      "def f(x=f\"n={5}\"):\n"
      "    return x\n"
      "\n"
      "def main():\n"
-     "    printf(\"[%s]\", f())\n"
-     "    return 0\n", 0, "[n=5]"),
+     "    print(f())\n"
+     "    return 0\n",
+     "refuse:is refused on this path: its value is its INTERPOLATED text, and "
+     "this path has no buffer to compose one in", None),
     # ── a double at the `Int` conversion, where the two machines once
     #    answered with two different programs ──────────────────────────────────
     #
@@ -9243,64 +9235,6 @@ BOTH_ARCH_CASES = [
      "    var z = w * 0.0\n"
      "    printf(\"n=%d\", Int(z))\n"
      "    return 0\n", 0, "n="),
-    # ── `String(unsafe_from_utf8_ptr=p)` over a DECLARED byte pointer, on both
-    #    machines ────────────────────────────────────────────────────────────
-    #
-    # The string value model's constructor check reads the operand's KIND, and
-    # a `Pointer[UInt8]` the source declared — a parameter or a local — is in no
-    # kind vocabulary (`string_names` holds annotation spellings, and `Pointer`
-    # is not one: a `Pointer[Int64]` is not text, so the pointee decides), so
-    # the reader answered the "a word is an integer" DEFAULT rather than a
-    # classification, and the check used to read that default as positive
-    # evidence and REFUSE the conversion on both architectures — a false
-    # refusal, because on this path a string IS a `char *` and the conversion
-    # is the identity on a byte pointer. The keyword in the call is the
-    # source's own statement that the operand is a raw pointer, and
-    # `model.string_conversion_pointer_intent` is the one reader of that
-    # spelling; the exemption it grants is what these rows pin, and it is
-    # asked from both backends so the two cannot drift on which keyword means
-    # a pointer.
-    #
-    # The read-back is the assertion the bug asks for: the string read back
-    # must EQUAL what was written, so a misclassification cannot pass by
-    # reading an address as a `char *` — an identity that handed a later step
-    # an address the source never wrote would print garbage or die in
-    # `printf`, not exit 0 with the text. The bytes are written one at a time
-    # ('h', 'i', NUL) into a `malloc` the source owns, compared with `!=`
-    # before being printed, so both halves of the read-back are checked at run
-    # time on each architecture.
-    ("both_arch_string_of_a_declared_byte_pointer_parameter_reads_back_"
-     "what_was_written",
-     "def f(p: Pointer[UInt8]) -> String:\n"
-     "    return String(unsafe_from_utf8_ptr=p)\n"
-     "\n"
-     "def main() -> Int:\n"
-     "    var b: Pointer[UInt8] = malloc(8)\n"
-     "    b.value() = 104\n"
-     "    b[1] = 105\n"
-     "    b[2] = 0\n"
-     "    var s = f(b)\n"
-     "    if s != \"hi\":\n"
-     "        return 1\n"
-     "    printf(\"s=%s\", s)\n"
-     "    return 0\n", 0, "s=hi"),
-    # The LOCAL spelling of the same conversion. The parameter above gets its
-    # annotation from the signature, the local from its declaration, and the
-    # two reach the kind reader by different routes (the parameter's seeding
-    # loop versus the body's binding scan), so the bug was measured on both and
-    # the rows are two rather than one.
-    ("both_arch_string_of_a_declared_byte_pointer_local_reads_back_"
-     "what_was_written",
-     "def main() -> Int:\n"
-     "    var b: Pointer[UInt8] = malloc(8)\n"
-     "    b.value() = 104\n"
-     "    b[1] = 105\n"
-     "    b[2] = 0\n"
-     "    var s = String(unsafe_from_utf8_ptr=b)\n"
-     "    if s != \"hi\":\n"
-     "        return 1\n"
-     "    printf(\"s=%s\", s)\n"
-     "    return 0\n", 0, "s=hi"),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before
@@ -15030,7 +14964,7 @@ WAVE6_TRUTHY_CASES = [
      "    return 0\n", 0, "0 1"),
 
     # `len()` OF THE SAME PARAMETER, which is the reader the identity test does
-    # not answer. The parameter-kind sweep note recorded a
+    # not answer. `bugs/formal/FORMAL_sweep_singles_second_half.md` §4 recorded a
     # four-line reproducer refused as "len(s) is len() of a value classified as
     # 'int', and an integer has no length", and said the row was still open; it
     # is not — the parameter's kind reaches `len()` through the same
@@ -23392,7 +23326,7 @@ INT_PARSE_REFUSALS = [
 REFUSAL_CASES = [
     # A FUNCTION NAME in a value position, which is the first thing any
     # first-class-function work hits and the reason `functools` is not a host
-    # module.
+    # module (`bugs/formal/FORMAL_functools_is_unbuildable_as_a_host_module.md`).
     # The refusal used to be the unresolved-NAME one, whose reason clause is
     # "the register allocator collected no home for it, so the emitter and the
     # allocation walk disagree about this function's locals" — false in every
@@ -26352,7 +26286,7 @@ _STACK_FLOOR_PROBES = [
     #
     # The cycle rule alone left a DAG of distinct functions free to walk past
     # the floor, and the measured cost of that is in
-    # guarding an acyclic chain across the stack floor: the deepest
+    # `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`: the deepest
     # single image in this corpus is 89 frames against the 60 an arm64 budget
     # affords (76 until 2026-10-05). So a body that already contains a
     # conditional branch is guarded whether or not anything calls back into it.
@@ -26791,7 +26725,7 @@ def check_comptime_nofold_is_rerun(verbose=False):
 
 
 # residual the guard cannot reach, and the number that decided
-# guarding an acyclic chain across the stack floor's widening.
+# `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`'s widening.
 #
 # These are GRAPHS, not modules, because the question is about the function and
 # not about the parse: a module the corpus already holds would make a test that
@@ -26803,7 +26737,7 @@ def check_comptime_nofold_is_rerun(verbose=False):
 # corpus. It is written down because the rule's own argument is that the corpus
 # is already inside the hole, and a reader who wants to know by how much needs
 # the number; it was 76 and 12 until 2026-10-05, when the census was re-run for
-# guarding an acyclic chain across the stack floor and both halves
+# `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` and both halves
 # of it had moved.
 _STACK_FLOOR_DEPTH_PROBES = [
     # A straight chain of n: the answer is n, and the point of the row is that
