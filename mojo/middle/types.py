@@ -2607,6 +2607,14 @@ _CPP_CALLABLE_CTYPE_STARARGS = 'std::function<int64_t(MojoList *)>'
 _CPP_CALLABLE_CTYPE_KWARGS = 'std::function<int64_t(MojoDict *)>'
 _CPP_CALLABLE_CTYPE_STAR_KW = 'std::function<int64_t(MojoList *, MojoDict *)>'
 
+# Foreign-callable signature table (step 1 of the tables.py plan). Maps a
+# callable's qualified name to its declared ctype (from the _CPP_CALLABLE_CTYPE
+# family). Used by _infer_param_types to bind a parameter whose default is a
+# known foreign callable, instead of the int64_t fallback.
+_FOREIGN_CALLABLES = {
+    'csv.reader': _CPP_CALLABLE_CTYPE,
+}
+
 
 def _cpp_lambda_ctype(lam):
     """The callable-value declared ctype for a coroutine-body `lambda`
