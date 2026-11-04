@@ -455,6 +455,8 @@ def specialization_name(func):
     base = func.obj
     if isinstance(base, _fc.IdentExpr):
         return base.name
+    if isinstance(base, _fc.MemberExpr):
+        return base.member
     return None
 
 

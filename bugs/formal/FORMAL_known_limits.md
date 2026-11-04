@@ -1222,8 +1222,7 @@ table's top four are now three:
 the misdiagnosis and **wrong about the cost**, and the second half of that is
 the part that mattered: it said the family is a §1.1 family-1 member and needs
 Stage 5 monomorphization, and it does not. Read the rest of this section for
-why, and `bugs/FORMAL_env_family_next_terminal.md` for the measurement and for
-where the 55 files landed.
+why.
 
 The single largest family in the residue — **55 files, one construct** — was
 refused like this:
@@ -1296,8 +1295,7 @@ architectures take the extern path they already had for every other external
 call — plus the one thing an extern call cannot know and this construct states
 outright, the **declared return type**, which is what says whether the return
 register holds the whole answer or the low half of one. Measured: **55 files
-left the family and 0 entered it.** `bugs/FORMAL_env_family_next_terminal.md`
-has the before/after table and the next terminal.
+left the family and 0 entered it.**
 
 Two things this document should have said and did not, and which are the real
 transferable lesson:

@@ -88,7 +88,7 @@ call site frees nothing, and that is not a leak: it never allocated.
 CPython's signature is `glob(pathname, *, root_dir=None, dir_fd=None,
 recursive=False, include_hidden=False)` — four KEYWORD-ONLY parameters. A
 cross-dylib call reads the callee's parameter NAMES and not its signature
-(`bugs/formal/FORMAL_functools_is_unbuildable_as_a_host_module.md`'s neighbour), so
+, so
 `recursive` and `include_hidden` are declared POSITIONAL here and a caller who
 passes them by name binds. This is a deliberate, documented divergence: it is
 strictly more permissive than CPython (`glob(pat, True)` binds here and is a

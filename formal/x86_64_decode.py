@@ -158,7 +158,7 @@ def decode_one(code: bytes, off: int) -> Insn:
     """Decode the single instruction starting at `off`."""
     def byte(i):
         if off + i >= len(code):
-            raise DecodeError(f"truncated instruction at {off}")
+            raise DecodeError("truncated instruction at " + off)
         return code[off + i]
 
     p = 0
@@ -195,10 +195,23 @@ def decode_one(code: bytes, off: int) -> Insn:
             rex = byte(p)
             p += 1
     op = byte(p)
-    w = bool(rex & W)
+    w = (rex & W) != 0
 
     def insn(length, form, **kw):
-        return Insn(offset=off, length=length, form=form, rex=rex, op=op, **kw)
+        mod = kw.get("mod")
+        reg = kw.get("reg")
+        rm = kw.get("rm")
+        mem_base = kw.get("mem_base")
+        mem_disp = kw.get("mem_disp", 0)
+        imm = kw.get("imm", 0)
+        digit = kw.get("digit", 0)
+        cc = kw.get("cc", 0)
+        rip_rel = kw.get("rip_rel", 0)
+        xmm = kw.get("xmm", 0)
+        return Insn(offset=off, length=length, form=form, rex=rex, op=op,
+                    mod=mod, reg=reg, rm=rm,
+                    mem_base=mem_base, mem_disp=mem_disp, imm=imm, digit=digit,
+                    cc=cc, rip_rel=rip_rel, xmm=xmm)
 
     def modrm_at(i, at_mod=None):
         """(fields..., length) for a ModRM instruction whose ModRM is at p+i."""
@@ -368,7 +381,7 @@ def decode_one(code: bytes, off: int) -> Insn:
             return insn(length, "call_r64", mod=mod, digit=2, rm=rm)
         form = {0x15: "call_rm64", 0x25: "jmp_rm64"}.get(modrm)
         if form is None:
-            raise DecodeError(f"unsupported 0xFF /{modrm & 7} at {off}")
+            raise DecodeError("unsupported 0xFF")
         return insn(p + 6, form, digit=2, rip_rel=_i32(code, off + p + 2))
 
     # ── REX.W forms ────────────────────────────────────────────────
@@ -545,8 +558,8 @@ def decode_one(code: bytes, off: int) -> Insn:
     if w and (alu := _ALU_RR.get(op)) is not None:
         mod, reg, rm, extra, base, disp, length = modrm_at(1)
         if mod != 3:
-            raise DecodeError(f"ALU {alu} with a memory operand is not emitted")
-        return insn(length, f"alu_rr:{alu}", mod=mod, reg=reg, rm=rm)
+            raise DecodeError("ALU with a memory operand is not emitted")
+        return insn(length, "alu_rr:" + alu, mod=mod, reg=reg, rm=rm)
     if w and op in (0x81, 0x83):
         mod, reg, rm, extra, base, disp, length = modrm_at(1)
         if mod != 3:
@@ -554,9 +567,9 @@ def decode_one(code: bytes, off: int) -> Insn:
                               "is not emitted")
         digit = (byte(p + 1) >> 3) & 7
         if op == 0x81:
-            return insn(p + 6, f"alu_ri32:{_DIGIT[digit]}", mod=mod, rm=rm,
+            return insn(p + 6, "alu_ri32:" + _DIGIT[digit], mod=mod, rm=rm,
                         digit=digit, imm=_i32(code, off + p + 2))
-        return insn(p + 3, f"alu_ri8:{_DIGIT[digit]}", mod=mod, rm=rm,
+        return insn(p + 3, "alu_ri8:" + _DIGIT[digit], mod=mod, rm=rm,
                     digit=digit, imm=_s8(byte(p + 2)))
     if w and op in (0xC1, 0xD3):
         mod, reg, rm, extra, base, disp, length = modrm_at(1)
@@ -564,18 +577,18 @@ def decode_one(code: bytes, off: int) -> Insn:
             raise DecodeError("shift with a memory operand is not emitted")
         digit = (byte(p + 1) >> 3) & 7
         if op == 0xC1:
-            return insn(p + 3, f"shift_imm8:{_SHIFT[digit]}", mod=mod, rm=rm,
+            return insn(p + 3, "shift_imm8:" + _SHIFT[digit], mod=mod, rm=rm,
                         digit=digit, imm=byte(p + 2))
-        return insn(p + 2, f"shift_cl:{_SHIFT[digit]}", mod=mod, rm=rm,
+        return insn(p + 2, "shift_cl:" + _SHIFT[digit], mod=mod, rm=rm,
                     digit=digit)
     if w and op == 0xF7:
         mod, reg, rm, extra, base, disp, length = modrm_at(1)
         if mod != 3:
             raise DecodeError("group3 with a memory operand is not emitted")
         digit = (byte(p + 1) >> 3) & 7
-        return insn(length, f"group3:{_GROUP3[digit]}", mod=mod, rm=rm, digit=digit)
+        return insn(length, "group3:" + _GROUP3[digit], mod=mod, rm=rm, digit=digit)
 
-    raise DecodeError(f"undecodable byte 0x{op:02x} (rex 0x{rex:02x}) at {off}")
+    raise DecodeError("undecodable byte")
 
 
 def decode_all(code: bytes, start: int = 0, end: int = None) -> list:
@@ -592,8 +605,7 @@ def decode_all(code: bytes, start: int = 0, end: int = None) -> list:
     while off < end:
         insn = decode_one(code, off)
         if off + insn.length > end:
-            raise DecodeError(
-                f"instruction at {off} runs {insn.length} bytes past the end {end}")
+            raise DecodeError("instruction at " + off + " runs bytes past the end")
         out.append(insn)
         off = insn.next_offset
     return out
@@ -617,7 +629,13 @@ def body_end(info: dict) -> int:
     if info.get("float_repr_addr") is not None:
         ends.append(info["float_repr_addr"])
     ends.append(info["image_end"])
-    return min(ends) - base
+    m = ends[0]
+    i = 1
+    while i < len(ends):
+        if ends[i] < m:
+            m = ends[i]
+        i += 1
+    return m - base
 
 
 def forms(insns: list) -> set:
