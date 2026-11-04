@@ -25,7 +25,7 @@ CPython's own over a corpus that includes the modes no real file has.
     module-level name is not exported as a word across a dylib boundary —
     there is no storage for one, because every value a formal program can name
     lives in a function's own stack scratch
-    (`bugs/formal/FORMAL_module_state_no_storage.md`). So `S_IRUSR()` is a
+    (`(module state/model limits) (deleted)`). So `S_IRUSR()` is a
     zero-argument function and `stat.S_IRUSR` is spelled `S_IRUSR()`. This is
     the same rule `os.sep()` follows and the same reason
     (`formal/hostmods/os/__init__.mojo` says it at length). The
@@ -101,11 +101,11 @@ WHAT IS NOT HERE, AND WHY
 
   * `os.stat_result`, `os.statvfs_result`, `os.lstat` — those are `os`, not
     `stat`, and a stat result is a STRUCT, which is a frame blob that cannot
-    cross a dylib boundary (`bugs/formal/FORMAL_time_struct_shaped_answers.md`).
+    cross a dylib boundary (`(time struct shapes now implemented)`).
     `formal/hostmods/os/_syscalls.mojo` already has the `stat(2)` call and the
     byte-wise reader for its fields (`fs_stat_field64`, `fs_stat_mode`), so
     what is missing there is the `os.stat(...)` SHAPE — a named tuple — and
-    that is `bugs/formal/FORMAL_time_struct_shaped_answers.md`'s subject, not this
+    that is `(time struct shapes now implemented)`'s subject, not this
     one's. This module deliberately does not re-export the syscall under a
     second name: one reader of `struct stat` in this tree is the answer.
 

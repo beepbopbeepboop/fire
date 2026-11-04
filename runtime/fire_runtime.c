@@ -3802,9 +3802,56 @@ char *mojo_cstr_reverse(char *s)
  * immediately strcmp-and-discard it, over and over. gimple_codegen.py's
  * `_lower_binary` special-cases the AST shape `<slice> == / != <string>`
  * to call this instead of the generic slice-then-compare lowering. */
+/* Is every byte of s[0..n) a plain ASCII byte (and not a NUL)? When it is, a
+ * codepoint index equals a byte index across that prefix and the byte-offset
+ * fast paths below are exact. One pass; the NUL-or-high-bit test is the same
+ * "first NUL in s[0..stop)" scan the fast paths already paid for. */
+static int _prefix_is_plain_ascii(const char *s, int64_t n)
+{
+    for (int64_t k = 0; k < n; k++) {
+        unsigned char c = (unsigned char)s[k];
+        if (c == 0 || c >= 0x80) return 0;
+    }
+    return 1;
+}
+
+/* `s[start:stop] == needle` for a string that is NOT plain ASCII in the scanned
+ * prefix: start and stop are CODEPOINT offsets (negative ones count from the
+ * end, in codepoints), so they are mapped to byte offsets before the compare.
+ * The byte-offset fast path read them as bytes, so every scanner that tested
+ * `src[j:j + 3] == '\"\"\"'` after a multi-byte character looked at the wrong
+ * bytes (the compiled tokenizer left `__MOJO_STR_n__` placeholders in a
+ * non-ASCII file's tokens and the stage2 binary refused 8 of the 49 bootstrap
+ * dump inputs). */
+static int _cstr_region_eq_utf8(char *s, int64_t start, int64_t stop, char *needle)
+{
+    int64_t ncp = mojo_str_codepoint_len(s);
+    if (stop == MOJO_SLICE_STOP_OMITTED) stop = ncp;
+    if (start < 0) start += ncp;
+    if (stop  < 0) stop  += ncp;
+    if (start < 0) start = 0;
+    if (stop > ncp) stop = ncp;
+    if (start >= stop) return needle[0] == '\0';
+    int64_t bstart = mojo_utf8_codepoint_to_byte_offset(s, start);
+    int64_t bstop  = (stop >= ncp) ? (int64_t)strlen(s)
+                                   : mojo_utf8_codepoint_to_byte_offset(s, stop);
+    size_t needle_len = strlen(needle);
+    if ((size_t)(bstop - bstart) != needle_len) return 0;
+    return memcmp(s + bstart, needle, needle_len) == 0;
+}
+
 int mojo_cstr_region_eq(char *s, int64_t start, int64_t stop, char *needle)
 {
     if (!s || !needle) return s == needle;
+    {
+        /* Scan only as far as the offsets can reach: the whole string when an
+         * offset is negative or open-ended, else the first `stop` bytes. */
+        int64_t reach = (start < 0 || stop < 0 || stop == MOJO_SLICE_STOP_OMITTED)
+                            ? (int64_t)strlen(s) : stop;
+        if (!_prefix_is_plain_ascii(s, reach)
+                && mojo_str_codepoint_len(s) != (int64_t)strlen(s))
+            return _cstr_region_eq_utf8(s, start, stop, needle);
+    }
     int64_t len;
     if (start < 0 || stop < 0 || stop == MOJO_SLICE_STOP_OMITTED) {
         len = (int64_t)strlen(s);
@@ -6073,13 +6120,28 @@ char *mojo_chr(int64_t code) {
  * count as `stop - start` (negative there means "no room", which is the
  * right answer) rather than as a clamped zero. */
 static void mojo_str_clamp_range(char *s, int64_t *start, int64_t *stop) {
-    int64_t len = s ? (int64_t)strlen(s) : 0;
+    int64_t blen = s ? (int64_t)strlen(s) : 0;
+    /* A window is in CODEPOINTS (`s.startswith(p, j)` with `j` a character
+     * index), and every caller then compares BYTES from the result, so a string
+     * with a multi-byte character has to be mapped: counting `len` and the
+     * offsets in bytes found a delimiter the wrong number of characters early
+     * after any non-ASCII character (the compiled tokenizer's
+     * `src.startswith(delim, j)` ended string literals at the wrong place). */
+    int ascii = 1;
+    for (int64_t k = 0; k < blen; k++)
+        if ((unsigned char)s[k] >= 0x80) { ascii = 0; break; }
+    int64_t len = ascii ? blen : mojo_str_codepoint_len(s);
     int64_t lo = *start, hi = *stop;
     if (hi == MOJO_SLICE_STOP_OMITTED) hi = len;
     if (lo < 0) lo += len;
     if (hi < 0) hi += len;
     if (lo < 0) lo = 0;
     if (hi > len) hi = len;
+    if (!ascii) {
+        if (lo > len) lo = len;
+        lo = (lo >= len) ? blen : mojo_utf8_codepoint_to_byte_offset(s, lo);
+        hi = (hi >= len) ? blen : mojo_utf8_codepoint_to_byte_offset(s, hi);
+    }
     *start = lo; *stop = hi;
 }
 
@@ -6616,7 +6678,14 @@ int64_t mojo_str_count_from(char *s, char *sub, int64_t start, int64_t stop) {
     mojo_str_clamp_range(s, &start, &stop);
     if (stop < start) return 0;
     int64_t nlen = (int64_t)strlen(sub);
-    if (nlen == 0) return stop - start + 1;
+    if (nlen == 0) {
+        /* `stop - start` is a BYTE span here; the empty needle matches at every
+         * CHARACTER boundary of the window plus its end. */
+        int64_t chars = 0;
+        for (int64_t k = start; k < stop; k++)
+            if (((unsigned char)s[k] & 0xC0) != 0x80) chars++;
+        return chars + 1;
+    }
     int64_t n = 0;
     for (int64_t i = start; i + nlen <= stop; i++) {
         if (memcmp(s + i, sub, (size_t)nlen) == 0) { n++; i += nlen - 1; }
@@ -15933,6 +16002,13 @@ int mojo_cstr_region_eq_n(char *s, int64_t slen, int64_t start, int64_t stop,
                           char *needle)
 {
     if (!s || !needle) return s == needle;
+    {
+        int64_t reach = (start < 0 || stop < 0 || stop == MOJO_SLICE_STOP_OMITTED)
+                            ? slen : (stop < slen ? stop : slen);
+        if (!_prefix_is_plain_ascii(s, reach)
+                && mojo_str_codepoint_len(s) != (int64_t)strlen(s))
+            return _cstr_region_eq_utf8(s, start, stop, needle);
+    }
     if (start < 0 || stop < 0 || stop == MOJO_SLICE_STOP_OMITTED) {
         if (start < 0) start += slen;
         if (stop  < 0) stop  += slen;

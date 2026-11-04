@@ -5677,6 +5677,29 @@ class GimpleGen:
     def _register_nested_env_free(self, def_name: str, env_var: str,
                                   owner_body) -> None:
         return ginf.register_nested_env_free(self, def_name, env_var, owner_body)
+    # Thin delegates for the sibling-module helpers that a module EARLIER in the
+    # import cycle calls (emit_funcs, emit_exprs, emit_methods). A direct
+    # `ginf._open_block_scope(gen)` from those modules is lowered while the
+    # callee's module is still mid-import, so its function is not registered
+    # yet and the call becomes a weak "unavailable in compiled mode" stub in the
+    # self-hosted closure (`bootstrap-stage1-transitive` rejects that). A
+    # GimpleGen method is registered with the class, before any body is lowered.
+    def _open_block_scope(self):
+        return ginf._open_block_scope(self)
+    def _close_block_scope(self, scope):
+        return ginf._close_block_scope(self, scope)
+    def _boxed_capture_source(self, name: str, field_ctype: str):
+        return ggc._boxed_capture_source(self, name, field_ctype)
+    def _closure_value(self, name: str, ci):
+        return gex._closure_value(self, name, ci)
+    def _build_outer_closure_env(self, ci):
+        return ggc._build_outer_closure_env(self, ci)
+    def _cpp_sig_default_word(self, dv, is_double: bool = False):
+        return gca._cpp_sig_default_word(self, dv, is_double)
+    def _generator_star_slot(self, api: dict, node):
+        return ggc._generator_star_slot(api, node)
+    def _pack_generator_star_args(self, arg_pairs: list, star: int) -> list:
+        return ggc._pack_generator_star_args(self, arg_pairs, star)
     def _callable_param_generator_apis_of(self, fn_node) -> dict:
         return ggc._callable_param_generator_apis(self, fn_node)
     def _callable_param_ret_types_of(self, fn_node) -> dict:
@@ -6679,10 +6702,6 @@ def compile_to_gimple_parallel_frozen(mojo_src: str, do_imports: bool = False,
     # Forward to serial path for byte-identity verification; parallel emission
     # scaffolding (frozen snapshot, work-unit keying, sorted assembly) is
     # wired below for when the emission phase is fully independent.
-    import multiprocessing
-    # Parallel parse scaffolding: parse imported modules in pool.
-    # For this light-worker round we establish the structure and fall back to
-    # serial emission so the output is byte-identical (no divergence).
     result, _gen = _run_pipeline(mojo_src, do_imports=do_imports, filename=filename,
                                  auto_gpu=auto_gpu)
     _refuse_dropped_companion(result, _gen)

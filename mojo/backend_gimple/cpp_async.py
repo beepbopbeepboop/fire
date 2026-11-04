@@ -40,6 +40,7 @@ from fire_compiler import for_target_names
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+from mojo.middle.exprtypes import _cpp_word_of_kind, _fstring_field_names
 import mojo.middle.coro as coro_mod
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import gimple_codegen
@@ -317,28 +318,6 @@ def _cpp_except_handler_body(gen, handler, caught_var: str, declared: dict,
 
 
 _Y_SITE = re.compile(r'^(.*?)co_yield /\*Y:([^*]*)\*/ \((.*)\);$')
-
-
-def _cpp_word_of_kind(ctype: str, expr: str) -> str:
-    """`expr` (of scalar C++ type `ctype`) as ONE tagged int64_t word, the form
-    every consumer renders by the kind the box carries: a double as
-    `mojo_box_from_double`, a bool as `mojo_box_from_bool`, a string as
-    `mojo_box_from_str`, None as `mojo_box_none()`, and an int as itself. The
-    single mapping both a tagged yield slot (`_cpp_tag_yield_sites`) and a
-    tagged operand of `and`/`or` (`cpp_core._cpp_tagged_operand_word`) use."""
-    if ctype == 'None':
-        return "mojo_box_none()"
-    if ctype == 'double':
-        return f"mojo_box_from_double((double)({expr}))"
-    if ctype == '_Bool':
-        return f"mojo_box_from_bool((int64_t)({expr}))"
-    if ctype == 'char *':
-        # boxed by kind like the others: a raw pointer is only read as a
-        # string when the runtime registered it (a C++ literal is not)
-        return f"mojo_box_from_str((char *)({expr}))"
-    if ctype == 'MojoBytes *':
-        return f"(int64_t)(intptr_t)({expr})"
-    return f"(int64_t)({expr})"
 
 
 def _cpp_tag_yield_sites(body_lines: list):
@@ -1619,31 +1598,6 @@ def _binding_site_count(body: list, name: str) -> int:
     declaration; anything else is a rebinding."""
     return sum(1 for n in gimple_exprtypes._walk_own_body(body)
                if name in gimple_exprtypes._binding_node_names(n))
-
-
-_FSTRING_FIELD_RE = re.compile(r"\{([^{}]*)\}")
-_FSTRING_QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
-_FSTRING_NAME_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*)")
-
-
-def _fstring_field_names(node_list: list) -> set[str]:
-    """Identifiers an f-string in `node_list` reads from its `{...}` fields.
-
-    The parser keeps an f-string as one raw `StringLiteral` (see
-    fire_compiler.is_fstring_literal), so `_used_idents_deep` never sees
-    the names interpolated into it. Those names are real reads: a nested
-    generator that prints `f'{name}:'` reads `name`. Quoted substrings
-    inside a field (`d['key']`) and attribute names after a dot (`x.attr`)
-    are not variable reads and are skipped.
-    """
-    out: set[str] = set()
-    for n in gimple_exprtypes._walk_ast(node_list):
-        if not (isinstance(n, N.StringLiteral) and N.is_fstring_literal(n)):
-            continue
-        for field in _FSTRING_FIELD_RE.findall(str(n.value)):
-            field = _FSTRING_QUOTED_RE.sub('', field)
-            out.update(_FSTRING_NAME_RE.findall(field))
-    return out
 
 
 def _nested_generator_captures(stmts: list) -> dict[int, list[str]]:

@@ -502,9 +502,8 @@ def test_dylib_structure_and_exports(tmpdir, shared):
     # file's import closure the formal sweep could not resolve, so the whole
     # file — and the thirteen other files that import IT — was filed under
     # `not-answerable/host-import`, a class the coverage denominator excludes.
-    # `bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md` measures
-    # the row and why no `.mojo` module can answer it (a generator of 2-tuples
-    # is not one 64-bit word), and `test_formal_run.py`'s
+    # Field access through call results is now handled by the compiler
+    # (a generator of 2-tuples is not one 64-bit word), and `test_formal_run.py`'s
     # `_every_type_tag_is_distinct_source` is the same substitution already made
     # in the other direction for the same reason.
     names = sorted(segs)
@@ -976,7 +975,10 @@ def test_several_exports_and_no_derivable_spec(tmpdir, shared):
         # `exportEnd_here` is what says the exit is this export's end, and it is
         # proved by `native_decide` over the image's export table -- so it is a
         # check that the emitter's extent and the library's fold agree.
-        end = entries[i + 1] if i + 1 < len(entries) else base + len(built["code"])
+        if i + 1 < len(entries):
+            end = entries[i + 1]
+        else:
+            end = base + built["info"].get("exec_code_end", len(built["code"]))
         check(f"DylibExport.exportEnd dylib_image {ident} = {end}" in text,
               f"{ident}'s contract is not stated at its OWN end ({end}), so it "
               f"is about the image's exit or another export's code")

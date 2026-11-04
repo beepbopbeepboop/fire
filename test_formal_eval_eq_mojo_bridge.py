@@ -82,6 +82,39 @@ PROGRAMS = {
              "        return 1\n"
              "    else:\n"
              "        return 0\n",
+    # bigbody: many conditions reading locals - the class the fix targets
+    "bigbody": "def bigbody(n):\n"
+               "    b1 = 0\n"
+               "    b2 = 0\n"
+               "    b3 = 0\n"
+               "    b4 = 0\n"
+               "    b5 = 0\n"
+               "    b6 = 0\n"
+               "    if (n & 1) == 1:\n"
+               "        b1 = 1\n"
+               "    else:\n"
+               "        b1 = 0\n"
+               "    if (n & 2) == 2:\n"
+               "        b2 = 1\n"
+               "    else:\n"
+               "        b2 = 0\n"
+               "    if (n & 4) == 4:\n"
+               "        b3 = 1\n"
+               "    else:\n"
+               "        b3 = 0\n"
+               "    if (n & 8) == 8:\n"
+               "        b4 = 1\n"
+               "    else:\n"
+               "        b4 = 0\n"
+               "    if (n & 16) == 16:\n"
+               "        b5 = 1\n"
+               "    else:\n"
+               "        b5 = 0\n"
+               "    if (n & 32) == 32:\n"
+               "        b6 = 1\n"
+               "    else:\n"
+               "        b6 = 0\n"
+               "    return b1 + b2 + b3 + b4 + b5 + b6\n",
 }
 
 
@@ -727,8 +760,7 @@ class TestAConditionalExpressionIsAValue(unittest.TestCase):
         row 69, `arm64_step`'s last arm and `work_step_csel`, and the program
         GENERATES its proof with the step closed by the library lemma. What
         stays refused, by name, is the certificate wall for a CSEL-carrying
-        MULTI-BRANCH function (`FORMAL_a_three_branch_certificate_exceeds_the_
-        lean_bound.md`) — the certificate's size, not the select.
+        MULTI-BRANCH function (bug fixed, doc deleted) — the certificate's size, not the select.
     """
 
     def test_the_untyped_model_selects_between_the_two_words(self):
@@ -846,7 +878,7 @@ class TestAConditionalExpressionIsAValue(unittest.TestCase):
         What this does not pin: a CSEL-carrying program whose run certificate
         exceeds `formal/lean.py`'s `PROOF_WALL_S` is still refused — the wall
         is the certificate's size, not the select, and
-        `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`
+        (bug fixed, doc deleted)
         is the tracked leaf for it.
         """
         import struct

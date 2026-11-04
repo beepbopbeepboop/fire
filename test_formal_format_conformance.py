@@ -225,6 +225,7 @@ ROWS = [
     # an escape.
     ("str_non_ascii", prog('print("h\\u00e9llo")'.replace("\\u00e9", "é")),
      ("value",)),
+    ("unicode_escape", prog('print("\\u00e9")'), ("value",)),
     ("str_name", in_main('s = "abc"', 'print(s)'), ("value",)),
     ("str_concat_literals", prog('print("a" "b")'), ("value",)),
 
@@ -272,21 +273,46 @@ ROWS = [
     ("print_flush_false", prog('print("a", flush=False)'), ("value",)),
     ("print_sep_mixed", prog('print(1, 2, sep=",")'), ("value",)),
 
-    # ── the shapes this path REFUSES, one row each ────────────────────────
-    # A container, per syntax and through a name: the kind is `list:int` in
-    # every case and the message says so.
-    ("list_refused", prog('print([1, 2])'),
-     ("refuse", "print() of a container is refused")),
-    ("tuple_refused", prog('print((1, 2))'),
-     ("refuse", "print() of a container is refused")),
-    ("dict_refused", prog('print({1: 2})'),
-     ("refuse", "print() of a container is refused")),
-    ("set_refused", prog('print({1, 2})'),
-     ("refuse", "print() of a container is refused")),
-    ("list_name_refused", in_main('xs = [1, 2]', 'print(xs)'),
-     ("refuse", "print() of a container is refused")),
-    ("nested_list_refused", prog('print([[1], [2]])'),
-     ("refuse", "print() of a container is refused")),
+    # ── containers: the text loop, per syntax and through a name ──────────
+    # The loop renders the literal's own brackets and the name's, from the
+    # binding's tables, and the element separator is CPython's ", " at every
+    # nesting — not the call's own `sep`, which joins this container to its
+    # siblings and never enters the brackets.
+    ("list_render", prog('print([1, 2])'), ("value",)),
+    ("tuple_render", prog('print((1, 2))'), ("value",)),
+    ("dict_render", prog('print({1: 2})'), ("value",)),
+    ("set_render", prog('print({1, 2})'), ("value",)),
+    ("list_name_render", in_main('xs = [1, 2]', 'print(xs)'), ("value",)),
+    ("nested_list_render", prog('print([[1], [2]])'), ("value",)),
+    ("empty_list_render", prog('print([])'), ("value",)),
+    ("empty_dict_render", prog('print({})'), ("value",)),
+    ("one_tuple_render", prog('print((5,))'), ("value",)),
+    ("bool_list_render", prog('print([True, False])'), ("value",)),
+    ("mixed_line_render", prog("print('a', [1, 2], 'b')"), ("value",)),
+    ("sep_end_render", prog("print([1, 2], sep='X', end='!')"), ("value",)),
+    ("dict_name_render", in_main('m = {2: 7}', 'print(m)'), ("value",)),
+    ("compr_name_render", in_main('ys = [1, 2, 3]', 'print([x for x in ys])'),
+     ("value",)),
+    # And the shapes the loop REFUSES, one row each with its precise reason:
+    # an element's class (a string, a float), an element reached through a
+    # name, a dict comprehension's pairs, a shape the source does not name,
+    # and the bare `list` whose element kind nothing states.
+    ("str_elem_refused", prog("print(['a', 'b'])"),
+     ("refuse", "its elements hold(s) a string")),
+    ("float_elem_refused", prog('print([1.5, 2.5])'),
+     ("refuse", "its elements hold(s) a float")),
+    ("name_elem_refused", in_main('xs = [1, 2]', 'print([xs, 5])'),
+     ("refuse", "reached through a name")),
+    ("name_nested_refused", in_main('xs = [[1], [2]]', 'print(xs)'),
+     ("refuse", "reached through a name")),
+    ("dict_compr_refused", prog('print({i: i for i in [1, 2]})'),
+     ("refuse", "its pairs are built in a loop")),
+    ("call_result_refused", prog('print(set())'),
+     ("refuse", "print() of a CallExpr is refused")),
+    ("bare_list_elem_refused", prog('print([x * 10 for x in [1, 2]])'),
+     ("refuse", "bare `list`")),
+    ("bytearray_name_refused", in_main("b = bytearray(b'ab')", 'print(b)'),
+     ("refuse", "bytearray")),
     # The formatting MINI-LANGUAGE: the format spec, `%`, `.format()`, the
     # conversions, `!r`/`!s`/`!a`, and `str()`/`repr()`/`format()` by name.
     # Each is a distinct missing thing and each row names its own.
@@ -307,9 +333,9 @@ ROWS = [
     ("format_call_refused", prog('print(format(1, "d"))'),
      ("refuse", "format")),
     ("str_call_refused", prog('print(str(1))'),
-     ("refuse", "`%s` conversion in printf's format string reads `str(...)`")),
+     ("value",)),
     ("repr_call_refused", prog('print(repr(1))'),
-     ("refuse", "`repr(...)` is not lowered on this path")),
+     ("value",)),
     # …and the two `print` keywords whose value must be a literal, which are
     # refused because they are BAKED INTO the format string.
     ("sep_not_a_literal", prog('print("a", "b", sep=1)'),
@@ -334,25 +360,16 @@ ROWS = [
 # names the bug doc; when the doc's fix lands the row becomes `("value",)` and
 # the doc is deleted with it.
 DIVERGENT_ROWS = [
-    # A `\\uXXXX` escape is not decoded by `fire_compiler.decode_c_escapes`, so
-    # the six characters reach stdout. CPython prints the character. The
-    # decoder is SHARED with the interpreter (`python3 fire.py run` prints
-    # `\u00e9` too) and with the compiled path, so this is a FRONT-END
-    # question and not a print one, and it is already filed there with its whole
-    # table: `LEXER unicode escapes are not decoded`.
-    ("unicode_escape", prog('print("\\u00e9")'),
-     ("divergent", "\\u00e9\n", "é\n")),
     # A TYPE VALUE is a 64-bit tag on this path and `is_number_kind` says a tag
     # prints as a number, DELIBERATELY (`formal/model.py`'s `TYPE_KIND`, and
     # `test_formal_run.py`'s `TYPE_VALUE_NUMBER_CASES` pins the tag). CPython's
     # `<class 'int'>` is a NAME chosen by the tag, which is a table this path
-    # does not have. Named in
-    # `bugs/formal/FORMAL_a_print_of_a_container_needs_a_text_loop.md`'s last section,
-    # with the instance row below it.
+    # does not have — a deliberate divergence pinned here, beside the instance
+    # row below it, for the same reason.
     ("type_value", prog('print(int)'),
      ("divergent", "3143511548502526014\n", "<class 'int'>\n")),
     # A class INSTANCE is one word here, and for a one-field struct that word is
-    # its only field, so `print(p)` renders the field. Same section, same doc.
+    # its only field, so `print(p)` renders the field.
     # CPython's answer carries an ADDRESS, which is a fact about the allocator —
     # `judge` masks both sides rather than pinning one machine's heap.
     ("instance", prog('class P:', '    def __init__(self):',

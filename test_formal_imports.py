@@ -1810,10 +1810,8 @@ def test_a_host_module_refusal_says_what_this_target_offers(tmpdir, _shared):
     `collections.namedtuple("Census", "ok detail …")`
     (`formal/lean.py:816`, `formal/model.py:13195`, `tools/formal_sweep.py`),
     and the answer for a compile-time-known record with readable fields is a
-    `struct`. Without that sentence the refusal reads as "this target cannot do
-    records", and the next thing a reader does is file the next bug document
-    about `collections` — which is what
-    `bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` is.
+    `struct`. The advice explains how compile-time-known records map to
+    `struct`s rather than run-time type construction.
 
     **BOTH DIRECTIONS, because advice on every host module is the same noise in a
     different place.** The second row is a host module with no entry: its
@@ -2567,21 +2565,8 @@ def test_host_module_advice_is_honest(tmpdir, _shared):
     check("collections" in I.HOST_MODULE_ADVICE,
           "the `collections` advice was deleted; the five files that stop there "
           "are back to a message that names the module and nothing else")
-    # The `functools` advice named a missing capability that EXISTS. A function
-    # value is a CODE ADDRESS on this path, and `reduce`'s own shape builds and
-    # answers CPython on both architectures (test_formal_specialization.py's
-    # `functools.reduce's own shape runs, on both`), so "a callable this path has
-    # no representation for" sends a reader to add what is already there. The
-    # gate on the module is the DECORATOR half, which is a real and different
-    # defect — checked here because a message that names the wrong capability is
-    # the failure this whole table exists to avoid.
-    _ft = I.HOST_MODULE_ADVICE["functools"]
-    check("callable this path has no representation" not in _ft,
-          f"the `functools` advice claims a callable has no representation, "
-          f"which is false: {_ft!r}")
-    check("decorator" in _ft.lower(),
-          f"the `functools` advice does not name the decorator gate, which is "
-          f"what actually stops the module: {_ft!r}")
+    # `functools` now has a host module in the tree (formal/hostmods/functools.mojo),
+    # so its advice entry was removed as part of merge coherence.
     # A dotted name asks for the same answer, which is the rule that makes a
     # per-spelling table wrong by omission.
     check(I.host_module_advice("collections.abc") ==
@@ -4984,9 +4969,8 @@ def test_the_exclusion_table_does_not_change_the_export_set(tmpdir, _shared):
 # names, which is the question a sweep's `not-answerable/host-import` class
 # cannot answer: the class is one bucket over a queue of unrelated capabilities,
 # and a module landing unmasks the row behind it. The doc that asked for the
-# tool is `bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md` §5, and
-# these are its pins — the properties that make the ranking a MEASUREMENT rather
-# than a second description to drift.
+# tool's behavior is pinned here — the properties that make the ranking a
+# MEASUREMENT rather than a second description to drift.
 #
 # Everything here is Lean-free and builds nothing: the instrument reads the
 # backend's own readers, so a bug in it is a wrong TABLE, not a wrong image, and

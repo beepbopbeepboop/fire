@@ -3610,6 +3610,22 @@ def _local_bindings(gen, name) -> list:
     return found
 
 
+def cur_func_param_set(gen) -> set:
+    """The parameter names of the function being lowered, as a SET.
+
+    Spelled as a function with a `set` annotation instead of
+    `getattr(gen, '_cur_func_params', None) or ()` at each use: that expression
+    joins a set with an empty TUPLE, which the compiled compiler types as a
+    `MojoList *`, so `name in params` ran `mojo_list_contains_str` over a set's
+    memory and the stage2 binary segfaulted on any function with parameters."""
+    out: set = set()
+    if hasattr(gen, '_cur_func_params'):
+        got = gen._cur_func_params
+        if got:
+            out = got
+    return out
+
+
 def tagged_next_bind_name(gen, name, _seen=frozenset()) -> bool:
     """True iff every binding of `name` in THIS function is a tagged word:
     either `name = next(g)` for one and the same generator local `g`, where
@@ -3623,7 +3639,7 @@ def tagged_next_bind_name(gen, name, _seen=frozenset()) -> bool:
     word: the rule guarantees every store into `name` is the same tagged
     word. Anything else (a rebinding to a plain value, a second generator, a
     for target) answers False, and the caller unwraps as it always did."""
-    params = getattr(gen, '_cur_func_params', None) or ()
+    params = cur_func_param_set(gen)
     if name in params:
         return False
     values = _local_bindings(gen, name)
@@ -3698,7 +3714,7 @@ def tagged_mixed_name(gen, name) -> bool:
     if not any((api or {}).get('mixed_slots')
                for api in (getattr(gen, '_generator_api', None) or {}).values()):
         return False
-    params = getattr(gen, '_cur_func_params', None) or ()
+    params = cur_func_param_set(gen)
     if name in params:
         return False
     values = _local_bindings(gen, name)
@@ -3732,7 +3748,7 @@ def _tagged_generator_iterable(gen, node) -> bool:
             and isinstance(node.func, gimple_ctypes.IdentExpr)):
         fname = node.func.name
     elif isinstance(node, gimple_ctypes.IdentExpr):
-        params = getattr(gen, '_cur_func_params', None) or ()
+        params = cur_func_param_set(gen)
         if node.name in params:
             return False
         bound = _local_bindings(gen, node.name)
@@ -3760,7 +3776,7 @@ def tagged_for_target_name(gen, name) -> bool:
     of them, and any plain assignment, tuple target or other binder makes the
     answer False). The loops are found by walking the whole body, so a loop
     emitted after the copy counts too."""
-    params = getattr(gen, '_cur_func_params', None) or ()
+    params = cur_func_param_set(gen)
     if name in params:
         return False
     values = _local_bindings(gen, name)
@@ -3792,7 +3808,7 @@ def tagged_recv_name(gen, name) -> bool:
     renders an unboxed integer as itself (`mojo_repr_boxed`). A name with any
     other binder (a plain store, a copy, a loop target) answers False and the
     bind unwraps as it always did."""
-    params = getattr(gen, '_cur_func_params', None) or ()
+    params = cur_func_param_set(gen)
     if name in params:
         return False
     values = _local_bindings(gen, name)

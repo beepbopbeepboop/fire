@@ -53,7 +53,7 @@ What is asserted here, and why each one is a separate test:
   2. the shapes that must STAY refused stay refused, each for its own reason
      and with a message that names it: a STORE to another module's constant, a
      module-level LIST (a real global with nowhere to live,
-     `bugs/formal/FORMAL_module_state_no_storage.md`), and a name the module does not
+     `(module state/model limits) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)`), and a name the module does not
      publish.
   3. the manifest is the contract, and it says what the consumer needs: which
      module the library IS, the constants it publishes, and the symbol each
@@ -576,7 +576,7 @@ def test_a_store_to_a_module_constant_is_refused(tmpdir, _shared, verbose):
     there, which is the outcome this backend exists to refuse rather than
     produce. A module-level name in another module is a real global, and a real
     global has nowhere to live on this path
-    (`bugs/formal/FORMAL_module_state_no_storage.md`)."""
+    (`(module state/model limits) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)`)."""
     prog = ("import mylib\n\n"
             "def main():\n"
             "  mylib.CONST = 9\n"
@@ -623,7 +623,7 @@ def test_a_module_level_list_is_still_refused(tmpdir, _shared, verbose):
     write_tree(root, {"mylib.mojo": lib, "prog.mojo": prog})
     for arch in ARCHES:
         text = build_expecting_refusal(root, "prog", arch)
-        check("FORMAL_module_state_no_storage.md" in text
+        check("(module state/model limits) (deleted) (deleted) (deleted) (deleted) (deleted)" in text
               or "storage" in text,
               f"{arch}: a list has no storage to cross a dylib boundary and "
               f"the refusal must say so: {text.strip()[-300:]}")
@@ -776,7 +776,7 @@ def test_a_spine_link_that_resolves_to_nothing_is_an_attribute_read(
     link rather than about whatever the rest of the expression happens to do
     with the result. The message must print what `pkg` DOES publish, because
     that is what separates "a capability `pkg` lacks" (`os.environ` is a
-    `char **` walk, `bugs/formal/FORMAL_module_state_no_storage.md`) from "a name it
+    `char **` walk, `(module state/model limits) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)`) from "a name it
     does not have".
     """
     prog = ("import pkg\n\n"
@@ -1086,7 +1086,7 @@ def test_a_module_attribute_read_is_refused_as_an_attribute(
               f"{arch}: the refusal must print what the module DOES publish, "
               f"so a reader can see `ITEMS` is not one of them: "
               f"{text.strip()[-400:]}")
-        check("FORMAL_module_state_no_storage.md" in text,
+        check("(module state/model limits) (deleted) (deleted) (deleted) (deleted) (deleted)" in text,
               f"{arch}: the design note this shape belongs to must be cited: "
               f"{text.strip()[-400:]}")
 
@@ -1113,7 +1113,7 @@ def test_a_name_the_module_does_not_publish_says_so(tmpdir, _shared, verbose):
     reason that name is missing is a SOURCE — `_NSGetExecutablePath` is refused
     by name on this path and the `__file__` route would put one build's `-o`
     into a content-addressed dylib's cache key
-    (`bugs/formal/FORMAL_module_state_no_storage.md`'s `sys.executable` row) — not a
+    (`(module state/model limits) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)`'s `sys.executable` row) — not a
     representation.
 
     So the assertion is threefold and the middle one is the load-bearing: the
@@ -1461,57 +1461,20 @@ def test_the_manifest_names_its_module_and_its_constants(tmpdir, _shared, verbos
 
 def test_a_mutable_global_of_another_module_is_refused_as_a_VARIABLE(
         tmpdir, _shared, verbose):
-    """`mylib.G` where `mylib` also WRITES `G` — the wrong answer, now refused.
-
-    This row is the reason the refusal has its own sentence. `G = 5` in the
-    library is a folded literal, so before this was fixed the manifest published
-    it in `constants` and the importer materialized the 5 — while the library's own
-    `global G` write put a 9 in the slot and `mylib.get()` read it. Measured, both
-    architectures, from a green build:
-
-        # mylib.mojo:  G = 5  /  def get(): global G; return G
-        #              /      def setg(v): global G; G = v
-        # prog.mojo:    mylib.setg(9); print(mylib.get())  -> 9    (correct)
-        #               print(mylib.G)                      -> 5    (WRONG; CPython 9)
-
-    One name with two homes, and the read across the boundary picked the one
-    that never changes. The in-unit substitution already knew better —
-    `_module_constant_sites` excludes slotted names and says why — so this was
-    the SAME question answered two ways, which is the defect class this whole
-    mechanism is arranged to prevent.
-
-    The refusal has to name the SHAPE and not the value: "a list, an object or a
-    stream has no representation as a word" is false of an `Int`, and a reader
-    sent after a missing container for a name that holds an integer is reading
-    the wrong document. So this asserts the message says the module's own
-    functions WRITE the name, and that it offers the accessor — which works, and
-    which the row below runs.
-    """
+    """Cross-module access to writable globals works via auto-generated accessors."""
     lib = ("G = 5\n\n\n"
-           "def get():\n  global G\n  return G\n\n\n"
-           "def setg(v):\n  global G\n  G = v\n")
+           "def bump(v):\n  global G\n  G = v\n")
     prog = ("import mylib\n\n"
             "def main():\n"
-            "  mylib.setg(9)\n"
-            "  printf(\"%d|\", mylib.G)\n"
+            "  mylib.bump(9)\n"
+            "  printf(\"%d\", mylib.G)\n"
             "  return 0\n")
     root = os.path.join(tmpdir, "mutable_global")
     os.makedirs(root)
     write_tree(root, {"mylib.mojo": lib, "prog.mojo": prog})
     fresh_cas()
-    for arch in ARCHES:
-        text = build_expecting_refusal(root, "prog", arch)
-        check("write through `global`" in text,
-              f"{arch}: the refusal must say the module's OWN functions write "
-              f"the name, because that is the reason and not its type: "
-              f"{text.strip()[-400:]}")
-        check("VARIABLE and not a constant" in text,
-              f"{arch}: and it must say the name is a variable rather than a "
-              f"constant even though it is declared at module level with a "
-              f"foldable value: {text.strip()[-400:]}")
-        check("get_G" in text,
-              f"{arch}: and it must offer the accessor, which is the spelling "
-              f"that works: {text.strip()[-400:]}")
+    agrees_with_cpython(root, "prog", {"mylib.mojo": lib, "prog.mojo": prog},
+                        prog, verbose)
 
 
 def test_the_accessor_is_the_spelling_that_reads_the_slot(
@@ -1683,15 +1646,7 @@ def test_the_accessor_is_the_spelling_that_reads_another_modules_container(
 
 def test_a_global_write_still_makes_a_container_a_VARIABLE(
         tmpdir, _shared, verbose):
-    """The CONTROL for the two rows above: same container, one `global` write.
-
-    `collect_global_slots` gives a name a `__DATA` slot for three reasons and
-    only two of them make it a variable, so a fix that split on "has a slot" or
-    on "is a container" would classify this one as a constant and tell the reader
-    its value is fixed when a function rebinds it. The refusal must be the
-    VARIABLE one, and it must not claim the module-level value was foldable — a
-    list literal is not — which is the clause that was wrong about this name.
-    """
+    """Writable globals (including containers written via global) work cross-module."""
     for label, prog in (
             ("dotted", "import mylib\n\n"
                        "def main():\n"
@@ -1707,18 +1662,8 @@ def test_a_global_write_still_makes_a_container_a_VARIABLE(
         os.makedirs(root)
         write_tree(root, {"mylib.mojo": TABLE_WRITTEN_LIB, "prog.mojo": prog})
         fresh_cas()
-        for arch in ARCHES:
-            text = build_expecting_refusal(root, "prog", arch)
-            check("write through `global`" in text,
-                  f"{arch}/{label}: `bump()` writes `TABLE` through `global`, so "
-                  f"it has a second writer and the refusal must say so — that is "
-                  f"the reason, and it is not the name's type: "
-                  f"{text.strip()[-500:]}")
-            check("fold" not in text,
-                  f"{arch}/{label}: and it must not claim the module-level value "
-                  f"was foldable: `[10,20,30]` is not a literal, and the clause "
-                  f"is what sends a reader looking for a second value that does "
-                  f"not exist: {text.strip()[-500:]}")
+        agrees_with_cpython(root, "prog", {"mylib.mojo": TABLE_WRITTEN_LIB, "prog.mojo": prog},
+                            prog, verbose)
 
 
 def test_the_manifest_separates_a_variable_from_a_container_constant(
@@ -1771,6 +1716,24 @@ def test_the_manifest_separates_a_variable_from_a_container_constant(
           f"and the two lists are disjoint, because a name in both would let a "
           f"consumer materialize the value the module started at: "
           f"containers={written.get('containers')!r}")
+
+
+def test_cross_module_writable_global_via_auto_accessors(tmpdir, _shared, verbose):
+    """Writable globals from another module are readable/writable via auto accessors."""
+    lib = ("COUNTER = 0\n\n"
+           "def inc():\n  global COUNTER\n  COUNTER += 1\n  return COUNTER\n")
+    prog = ("import lib\n\n"
+            "def main():\n"
+            "  lib.inc()\n"
+            "  lib.inc()\n"
+            "  printf(\"%d\", lib.COUNTER)\n"
+            "  return 0\n")
+    root = os.path.join(tmpdir, "xmodvar")
+    os.makedirs(root)
+    write_tree(root, {"lib.mojo": lib, "prog.mojo": prog})
+    fresh_cas()
+    agrees_with_cpython(root, "prog", {"lib.mojo": lib, "prog.mojo": prog},
+                        prog, verbose)
 
 
 # A library whose functions take an `Optional[T]` parameter, for the boundary

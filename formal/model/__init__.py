@@ -25,14 +25,10 @@ leading arguments on BOTH paths, so the caller and callee must agree on that
 order in one place, not twice.
 """
 
-import collections
 import dataclasses
 from dataclasses import field
-from contextvars import ContextVar
-import keyword
 import os
 import re
-import threading
 from typing import NamedTuple
 
 import fire_compiler as F

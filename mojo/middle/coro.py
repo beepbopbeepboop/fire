@@ -36,7 +36,7 @@ import dataclasses
 import os
 
 import fire_compiler as N
-from fire_compiler import for_target_names, for_target_is_tuple, method_receiver_kind
+from fire_compiler import for_target_names, for_target_is_tuple, method_receiver_kind, _as_set
 
 
 def _cm_as_str(x) -> str:
@@ -706,7 +706,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     # `_conflicting_names_in` is the one reader that acts on it.
     for nm, eks in str_kinds.items():
         if len(eks) > 1:
-            if eks <= {'i', 'b'}:
+            if _as_set(eks) <= {'i', 'b'}:
                 env[nm] = 'i'
             else:
                 env[nm] = ('conflict', frozenset(eks))
@@ -1770,7 +1770,7 @@ def _generator_value_kind(fn: N.FunctionDef,
     if has_none:
         _tag_kinds = _tag_kinds | {'n'}
     if (None not in kinds
-            and (_tag_kinds <= {'i', 'p', 'd', 'b', 'w', 'n'})
+            and (_as_set(_tag_kinds) <= {'i', 'p', 'd', 'b', 'w', 'n'})
             and ('w' in _tag_kinds or (len(_tag_kinds) >= 2 and _tag_kinds != {'i', 'b'}))
             and not any(isinstance(x, N.YieldFromExpr) and delegated is not None
                         and delegated(x.value, fn) in ('d', 'b')
@@ -5694,7 +5694,7 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
                 # CODEGEN_coro_yield_kind_unresolved_callsite.
                 if (pname in _PTR_EVIDENCE.get(gname, ())
                         and (None in kinds or len(kinds - {None}) > 1)
-                        and (kinds - {None}) <= {'p', 'w'}):
+                        and _as_set(kinds - {None}) <= {'p', 'w'}):
                     # used as a path / sequence word: a pointer word, whatever
                     # an untypable call site passes (see _compute_pointer_evidence)
                     resolved[pname] = 'w'
@@ -6044,7 +6044,6 @@ def _lower_escaping_generators(stmts: list) -> None:
     parameters, one that assigns a `nonlocal`, one that calls an ordinary nested
     helper of the enclosing function, and one reading a name another nested def
     provides."""
-    from mojo.backend_gimple import cpp_async as _ca
     import copy as _copy
     moved = []
     owners = []
@@ -6119,7 +6118,7 @@ def _lower_escaping_generators(stmts: list) -> None:
             if any(isinstance(n, N.NonlocalStmt) for n in _walk(inner)):
                 continue
             escapes = not _only_called_in(outer, inner.name)
-            _fs = _ca._fstring_field_names(inner.body)
+            _fs = gimple_exprtypes._fstring_field_names(inner.body)
             _own = set()
             for _pn, _pa in inner.params:
                 _own.add(_pn)

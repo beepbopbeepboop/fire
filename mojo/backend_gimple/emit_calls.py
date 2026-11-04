@@ -36,6 +36,7 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import fire_compiler as N
+from fire_compiler import is_fstring_literal, decode_c_escapes
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import mojo.middle.itcursor as itc
 import mojo.middle.lambdareduce as _gld
@@ -1539,7 +1540,7 @@ def _lower_class_attr_builtin(gen, node, fn):
     struct = _class_struct_of_arg(gen, node.args[0])
     name_node = node.args[1] if len(node.args) > 1 else None
     lit = (_as_str(name_node.value) if isinstance(name_node, gimple_ctypes.StringLiteral)
-           and not N.is_fstring_literal(name_node) else None)
+           and not is_fstring_literal(name_node) else None)
     if lit is not None and (lit in gen._class_attrs.get(struct, {})
                             or lit in gen._struct_method_names.get(struct, ())):
         return None   # static: the ordinary lowering owns it
@@ -1603,7 +1604,7 @@ def _lower_type_new(gen, node, args=None, meta=None):
     keys = []
     if isinstance(ns_n, gimple_ctypes.DictExpr):
         for k, _v in ns_n.pairs:
-            if not isinstance(k, gimple_ctypes.StringLiteral) or N.is_fstring_literal(k):
+            if not isinstance(k, gimple_ctypes.StringLiteral) or is_fstring_literal(k):
                 return None
             keys.append(_as_str(k.value))
     elif not isinstance(ns_n, (gimple_ctypes.IdentExpr, gimple_ctypes.MemberExpr,
@@ -4493,7 +4494,7 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if (isinstance(_lit, gimple_ctypes.StringLiteral)
                 and not getattr(_lit, 'is_interpolated', False)
                 and not getattr(_lit, 'is_bytes', False)):
-            _cp = len(gimple_ctypes.decode_c_escapes(_lit.value))
+            _cp = len(decode_c_escapes(_lit.value))
             return 'int64_t', gen._new_val('int64_t', str(_cp))
         # A word of unknown kind (`'w'` — bytes value, or `or` of bytes that
         # yields a word): dispatch at runtime through `mojo_len_word`.
