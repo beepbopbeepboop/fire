@@ -204,7 +204,14 @@ def _callable_default_generator(gen, default_node):
         return None
     _fname = _as_str(default_node.name)
     _api = (getattr(gen, '_generator_api', None) or {}).get(_fname)
-    return _api
+    if _api is not None:
+        return _api
+    # Also check async generator APIs (and async function APIs)
+    for _aname in ('_async_gen_api', '_async_api', '_generator_var_api', '_cpp_generator_var_api'):
+        _api = (getattr(gen, _aname, None) or {}).get(_fname)
+        if _api is not None:
+            return _api
+    return None
 
 
 def _callable_param_ret_types(gen, fn_node) -> dict:

@@ -2618,6 +2618,18 @@ _FOREIGN_CALLABLES = {
 }
 
 
+def _get_qualified_name(expr):
+    """Extract a dotted qualified name from an expression (IdentExpr or MemberExpr chain)."""
+    if isinstance(expr, IdentExpr):
+        return expr.name
+    if isinstance(expr, MemberExpr):
+        obj_name = _get_qualified_name(expr.obj)
+        if obj_name is None:
+            return None
+        return obj_name + '.' + expr.member
+    return None
+
+
 def _cpp_lambda_ctype(lam):
     """The callable-value declared ctype for a coroutine-body `lambda`
     literal, or None when the shape is not admitted.
@@ -2650,28 +2662,11 @@ def _cpp_lambda_ctype(lam):
         _n = _p[0]
         _d = _p[1]
         if _d is not None:
-            # Check if it's a known foreign callable
-            _qname = None
-            try:
-                from fire_compiler import MemberExpr, IdentExpr, CallExpr, StringLiteral
-                if isinstance(_d, MemberExpr):
-                    if isinstance(_d.obj, IdentExpr):
-                        _qname = f"{_d.obj.name}.{_d.member}"
-                    elif isinstance(_d.obj, CallExpr) and isinstance(_d.obj.func, IdentExpr) and _d.obj.func.name == '__import__':
-                        if getattr(_d.obj, 'args', None):
-                            _a0 = _d.obj.args[0]
-                            if isinstance(_a0, StringLiteral):
-                                _qname = f"{getattr(_a0, 'value', '')}.{_d.member}"
-                elif isinstance(_d, IdentExpr):
-                    _qname = _d.name
-            except Exception:
-                pass
-            if not (_qname and _qname in _foreign):
-                return None
-            # If it's a foreign callable default, treat as admitted for typing purposes
-            # The actual ctype comes from the table
-            continue  # don't reject
-        if isinstance(_n, str) and _n.startswith('**'):
+            qname = _get_qualified_name(_d)
+            if qname is not None and qname in _FOREIGN_CALLABLES:
+                return _FOREIGN_CALLABLES[qname]
+            return None
+        if _n.startswith('**'):
             _kw.append(_n)
         elif isinstance(_n, str) and _n.startswith('*'):
             _star.append(_n)
