@@ -87,7 +87,7 @@ REFUSAL so an omission cannot read as an implementation.
     here.
   * the CLASSES `uname_result`, `AndroidVer`, `IOSVersionInfo` — a type is not
     a value on this path, which is the same limit
-    `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted)` records.
+    `(module state/model limits) (deleted) (deleted)` records.
   * the TUPLE-SHAPED three: `uname()`, `mac_ver()`, `system_alias()`,
     `java_ver()`, `win32_ver()`, `android_ver()`, `ios_ver()`. A tuple is a
     frame blob carved out of the callee's frame and cannot be returned across a
@@ -162,7 +162,7 @@ from os._syscalls import fs_free
 # Which fact `os._syscalls.fs_macho_field` is asked for, as the two NUMBERS it
 # takes. Numbers here rather than `os._syscalls`'s own names because a
 # module-level constant is not exported as a word across a dylib boundary
-# (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted)`) — which is why `_syscalls.mojo`
+# (module state is not stored in the formal model) — which is why `_syscalls.mojo`
 # spells the same two constants as `MACHO_WIDTH`/`MACHO_EXECUTABLE` for its own
 # callers and this module repeats the numbers it passes. 0 is the pointer width
 # in bits and 1 is "the kind of file `file -b` would call an executable"; both

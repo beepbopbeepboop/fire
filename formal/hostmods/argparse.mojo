@@ -25,7 +25,7 @@ rather than assumed — the reproductions are in the bug doc named at each.
      A module dylib can return one 64-bit word and nothing else: a struct or a
      list is a blob carved out of the frame that made it, so handing one back
      hands over an address that is dead on return
-     (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted)`, measurements (2) and (3)).
+     (module state is not stored in the formal model, measurements (2) and (3)).
   2. A module has no state of its own. A module-level name that is not a
      literal-only constant has nowhere to live, so a parser cannot be a module
      global either (same document, measurement (1)). Every function here is a
@@ -2899,7 +2899,7 @@ def parse(spec, argv, argc, out, err, desc):
     `argv[0]` is the program name and is never consumed as an argument, which is
     the one respect in which `argv` differs from what CPython's `parse_args`
     takes: there is no `sys.argv` here to default to
-    (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted)`, measurement (4)), and passing the
+    (module state is not stored in the formal model, measurement (4)), and passing the
     whole vector is what lets `prog` be `basename(argv[0])` as it is there.
 
     `out` and `err` are caller buffers of at least `BUF_CAP` bytes each. `out`

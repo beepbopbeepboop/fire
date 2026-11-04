@@ -40,10 +40,8 @@ BASELINE = {
     'bugs/formal/FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md': 1,
     'bugs/formal/FORMAL_absval_proof_does_not_check.md': 4,
     'bugs/formal/FORMAL_known_limits.md': 8,
-    'bugs/formal/FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md': 1,
     'bugs/formal/FORMAL_listdir_no_run_time_sequence.md': 1,
     'bugs/formal/FORMAL_model_package_split_left_duplicate_copies.md': 1,
-    'bugs/formal/FORMAL_str_repr_format_and_percent_have_no_lowering.md': 1,
     'bugs/formal/FORMAL_sweep_work_map.md': 1,
     'bugs/formal/FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md': 1,
     'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
@@ -160,7 +158,7 @@ BASELINE = {
 # reason the header above gives for its prefixed entry.
 BARE_BASELINE = {
     'CRASH.md': 1,
-    'bugs/OPEN_WORK.md': 8,
+    'bugs/OPEN_WORK.md': 10,
     'bugs/formal/FORMAL_a_variadic_parameter_read_has_no_abi.md': 1,
     'bugs/formal/FORMAL_absval_proof_does_not_check.md': 1,
     'bugs/formal/FORMAL_arm64_instruction_coverage.md': 1,
@@ -168,7 +166,6 @@ BARE_BASELINE = {
     'bugs/formal/FORMAL_string_value_model.md': 2,
     'bugs/formal/FORMAL_sweep_work_map.md': 5,
     'bugs/formal/FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md': 1,
-    'bugs/formal/FORMAL_time_struct_shaped_answers.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md': 3,
     'doc/POLICY_memory_over_4gb.md': 1,
     'fire.py': 1,
