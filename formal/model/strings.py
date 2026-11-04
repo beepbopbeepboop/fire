@@ -2155,7 +2155,12 @@ def identity_conversion_operand(expr):
     args = list(getattr(expr, "args", None) or [])
     if len(args) != 1 or getattr(expr, "kwargs", None):
         return None
-    tk = type_constructor_kind(expr.func.name)
+    name = expr.func.name
+    # str() is now a real conversion/builtin that produces string representations
+    # for ints (and passes through strings); don't unwrap it as identity here
+    if name == "str":
+        return None
+    tk = type_constructor_kind(name)
     if tk is None or tk[0] != "identity":
         return None
     return args[0]
