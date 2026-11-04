@@ -2633,8 +2633,12 @@ _CPP_CALLABLE_CTYPE_STAR_KW = callable_ctype(['MojoList *', 'MojoDict *'], 'int6
 # callable's qualified name to its declared ctype (from the _CPP_CALLABLE_CTYPE
 # family). Used by _infer_param_types to bind a parameter whose default is a
 # known foreign callable, instead of the int64_t fallback.
+# Extended to optionally carry iterator element ctype for for-loop lowering.
 _FOREIGN_CALLABLES = {
     'csv.reader': _CPP_CALLABLE_CTYPE,
+}
+_FOREIGN_CALLABLE_ITER_ELEM = {
+    'csv.reader': 'MojoList *',
 }
 
 
