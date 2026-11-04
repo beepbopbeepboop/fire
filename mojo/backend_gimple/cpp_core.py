@@ -8361,6 +8361,38 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
         lines.append(f"{indent}}}")
         return lines
+    # `for <target> in <call through callable local>` whose callee's table entry
+    # gives an iterator element ctype. Refuse by name if the entry is absent
+    # (keep current refusal for unknown callees). Names the callable-local case
+    # precisely.
+    if isinstance(s.iterable, gimple_ctypes.CallExpr) and isinstance(s.iterable.func, gimple_ctypes.IdentExpr):
+        _cl_callee = s.iterable.func.name
+        try:
+            import mojo.middle.types as _mtypes_mod
+            _foreign = getattr(_mtypes_mod, '_FOREIGN_CALLABLES', {}) or {}
+            _cpp_callable_ctype = getattr(_mtypes_mod, '_CPP_CALLABLE_CTYPE', None)
+        except Exception:
+            _foreign = {}
+            _cpp_callable_ctype = None
+        _is_callable_local = False
+        if (_cl_callee in getattr(gen, '_cpp_param_names', ()) or
+                (_cl_callee in getattr(gen, '_cpp_word_locals', ()))):
+            _is_callable_local = True
+        if getattr(gen, '_cpp_declared', None) and _cl_callee in gen._cpp_declared:
+            _dct = gen._cpp_declared.get(_cl_callee)
+            if _dct in ('int64_t', 'char *') or (_cpp_callable_ctype and _dct == _cpp_callable_ctype):
+                _is_callable_local = True
+        # Check if callee itself is in foreign table or if it's associated with one
+        if _cl_callee in _foreign or _is_callable_local:
+            # If it's in foreign table and has entry giving iterator element ctype,
+            # we need to handle it; otherwise refuse with precise naming
+            if _cl_callee in _foreign:
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    f"a `for` over a call through the callable-local '{_cl_callee}()' "
+                    f"is not supported in a compiled generator/coroutine body")
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                f"a `for` over a call through the callable-local parameter "
+                f"'{_cl_callee}()' is not supported in a compiled generator/coroutine body")
     # `for <var> in <iterable>` where `<iterable>` is a plain list local —
     # the generic indexed-loop lowering lives further down, after the
     # container-literal / module-global cases; the generator-handle case
@@ -9541,8 +9573,8 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
                 and s.iterable.func.name in declared):
             raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"a `for` over a call through the callable-valued "
-                f"local/parameter '{s.iterable.func.name}(...)' is not "
+                f"a `for` over a call through the callable-local "
+                f"parameter '{s.iterable.func.name}(...)' is not "
                 "supported in a compiled generator/coroutine body: what that "
                 "call RETURNS is not knowable here (it depends on which "
                 "callable the caller passes), and a `for` target needs the "
