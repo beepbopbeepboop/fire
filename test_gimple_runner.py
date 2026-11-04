@@ -14747,6 +14747,29 @@ main()
 """)
 
 
+def test_none_member_of_a_set_is_not_the_int_zero():
+    """A set's `None` member has its own slot tag (3): `0 in {None, 1}` is
+    False, `None in {0}` is False, `None in {None, 0}` is True, and a None
+    local used as a needle against `{0, 1}` is False."""
+    test_gimple_matches_cpython("gimple_set_none_member_distinct_from_zero", """\
+def main():
+    s = {None, 1}
+    print(0 in s, None in s)
+    t = {0, 1}
+    print(None in t)
+    n = None
+    print(n in t)
+    u = {None, 0}
+    print(None in u, 0 in u, len(u))
+    v = set()
+    v.add(None)
+    v.add(None)
+    print(len(v), None in v, 0 in v)
+
+main()
+""")
+
+
 def test_list_slice_of_mixed_list_reads_slots_as_values():
     """A slice of a kind-mixed list must preserve per-slot kinds (bug:CODEGEN_list_slice_of_mixed_list_reads_slot_as_bits)."""
     test_gimple_matches_cpython("gimple_list_slice_mixed", """\

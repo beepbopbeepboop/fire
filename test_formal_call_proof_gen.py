@@ -74,7 +74,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from exec_budget import RUN_TIMEOUT_S
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 PROOF_GEN =os.path.join(HERE, "formal", "arm64_proof_gen.py")
 
@@ -9794,7 +9794,7 @@ class TestDecWhileSignedModelRegression(unittest.TestCase):
         with open(path, "w") as f:
             f.write(m.group(0) + "\n")
         r = subprocess.run(["lean", path], capture_output=True, text=True,
-                           timeout=600, cwd=self.tmp)
+                           timeout=COMPILE_TIMEOUT_S, cwd=self.tmp)
         self.assertEqual(r.returncode, 0,
                          "emitted _go block does not typecheck:\n"
                          + r.stdout + r.stderr)

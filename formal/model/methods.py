@@ -961,7 +961,7 @@ VALUE_METHOD_RECEIVERS = {
 # ── the POINTER VALUE MODEL ─────────────────────────────────────────────────
 #
 # THE DECISION (wave 6, F2; the reasoning is in
-# `bugs/formal/FORMAL_pointer_value_model.md`, which is the long form of this comment).
+# the pointer value model (landed in f69079be0), which is the long form of this comment).
 #
 # A formal value is one 64-bit word.  A pointer is one word.  So what does a
 # pointer need beyond that?
@@ -1972,7 +1972,7 @@ def _pointer_offset_scale(fn, e):
     That is not decoration.  The refusal used to name the address's BASE for
     every failure, so a program whose `p` is a perfectly good `Pointer[Int64]`
     and whose `k` has no annotation — the case
-    `bugs/formal/FORMAL_pointer_value_model.md` §9 calls "the remaining half of this
+    the pointer value model (landed in f69079be0) §9 calls "the remaining half of this
     item" — was refused with the sentence
 
         `p` is declared 'Pointer[Int64]', which is not a pointer to a 8-byte
@@ -2178,7 +2178,7 @@ def _offset_scale(fn, expr, width, seen=()):
                 f"this path only scales an integer offset it can read a "
                 f"POINTER and an ELEMENT WIDTH off a declaration for: {what}. "
                 f"{advice} — see "
-                f"bugs/formal/FORMAL_pointer_value_model.md §9")
+                f"the pointer value model (landed in f69079be0) §9")
     if isinstance(expr, F.CallExpr) and isinstance(expr.func, F.SubscriptExpr) \
             and isinstance(expr.func.obj, F.MemberExpr) \
             and expr.func.obj.member in ("bitcast", "rebind"):

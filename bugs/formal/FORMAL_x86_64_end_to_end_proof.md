@@ -373,7 +373,7 @@ Everything below is the 2026-10-01 state and is left as written.
 One row above is not this pass's doing and is worth saying so: `udivmod` used to
 be the corpus's one WRONG (`real=4 model=7905747460161236410`, blamed on an
 untyped-`n` collapse in `“`formal/`: `DEFAULT_INT_TYPE` became signed `Int`”` and
-`bugs/formal/FORMAL_pointer_value_model.md`, both other workers' claims). Re-measured
+the pointer value model (landed in f69079be0), both other workers' claims). Re-measured
 here for the table and it now answers `ok: 4`, so the suite reads 45/45 agree
 and 0 WRONG. Nothing in this branch touches the model — the two `X86.lean` edits
 are `theorem`s and add no `def` — so this was fixed elsewhere between the
@@ -425,7 +425,7 @@ X86.lean` shows and it is worth checking rather than asserting. The one WRONG in
 `x86_64_model_test.py` is `udivmod` (`real=4 model=7905747460161236410`), it is
 **pre-existing**, and it is already written down twice: see
 `“`formal/`: `DEFAULT_INT_TYPE` became signed `Int`”` ("very likely the same
-untyped-`n` / `int` collapse") and `bugs/formal/FORMAL_pointer_value_model.md`. Both are
+untyped-`n` / `int` collapse") and the pointer value model (landed in f69079be0). Both are
 other workers' claims, so it is neither fixed nor re-filed here. What it does
 mean is that this doc's older "43/43 agree, 0 wrong" line was counting a
 different corpus, and that `udivmod`'s end-to-end proof — the one example left

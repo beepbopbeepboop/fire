@@ -6340,7 +6340,11 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
             gen._emit_call('int', ti, 'mojo_set_contains_bytes',
                            [('MojoSet *', rv), ('MojoBytes *', xv)])
             return 'int', ti
-        if xt == 'char *':
+        if x_is_none:
+            # A None needle owns a slot tag of its own (mojo_set_add_none): the
+            # int 0 it shares a word with is a different member.
+            gen._emit_call('int', ti, 'mojo_set_contains_none', [('MojoSet *', rv)])
+        elif xt == 'char *':
             gen._emit_call('int', ti, 'mojo_set_contains_str', [('MojoSet *', rv), ('char *', xv)])
         elif xt == 'int64_t' and _set_needle_is_word(gen, xv):
             # A word of unknown kind against a set that is not known to hold
@@ -7462,6 +7466,9 @@ def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:
         if elem != 'int64_t':
             gen._elem_types[t] = elem
     for el in node.elements:
+        if _is_none_literal(el):
+            gen._emit_call('void', '', 'mojo_set_add_none', [('MojoSet *', t)])
+            continue
         et, ev = gen.lower_expr(el)
         if et == 'MojoBytes *':
             # A bytes element needs its own set slot domain (tag 2), not the
