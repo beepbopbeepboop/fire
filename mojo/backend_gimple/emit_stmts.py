@@ -3460,14 +3460,22 @@ def _gen_stmt_IfStmt(gen, node):
     # non-terminating branch body keeps it live.
     _merge_reachable = _n_else == 0
 
+    # Save flow state before branches
+    _flow_saved = dict(getattr(gen, '_flow_none_state', {}) or {})
+    _branch_end_states = []
+
     gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
     gen._emit_label(bb_true)
     _narrowed = gen._apply_isinstance_narrowings(node.condition)
     _bscope = ginf._open_block_scope(gen)
+    # Restore to saved state for this branch
+    gen._flow_none_state = dict(_flow_saved)
     for s in node.then_body:
         gen.gen_stmt(s)
     ginf._close_block_scope(gen, _bscope)
     gen._restore_isinstance_narrowings(_narrowed)
+    # Save end state of this branch
+    _branch_end_states.append(dict(getattr(gen, '_flow_none_state', {}) or {}))
     # No `goto {bb_merge}` when the body already ended in `return`/`goto`:
     # a dead `goto` after `return` is not just noise — when GCC INLINES
     # this function it can follow that trailing `goto` (to the next
@@ -3501,10 +3509,12 @@ def _gen_stmt_IfStmt(gen, node):
         gen._emit_label(next_true)
         _elif_narrowed = gen._apply_isinstance_narrowings(ec)
         _bscope = ginf._open_block_scope(gen)
+        gen._flow_none_state = dict(_flow_saved)
         for s in eb:
             gen.gen_stmt(s)
         ginf._close_block_scope(gen, _bscope)
         gen._restore_isinstance_narrowings(_elif_narrowed)
+        _branch_end_states.append(dict(getattr(gen, '_flow_none_state', {}) or {}))
         if not gen._last_was_terminal:
             gen._emit(f"  goto {bb_merge};")
             _merge_reachable = True
@@ -3513,16 +3523,38 @@ def _gen_stmt_IfStmt(gen, node):
     if _n_else > 0:
         gen._emit_label(current_false)
         _bscope = ginf._open_block_scope(gen)
+        gen._flow_none_state = dict(_flow_saved)
         for s in node.else_body:
             gen.gen_stmt(s)
         ginf._close_block_scope(gen, _bscope)
+        _branch_end_states.append(dict(getattr(gen, '_flow_none_state', {}) or {}))
         if not gen._last_was_terminal:
             gen._emit(f"  goto {bb_merge};")
             _merge_reachable = True
+    else:
+        # No else branch - fall-through path keeps saved state
+        _branch_end_states.append(dict(_flow_saved))
 
     if _merge_reachable:
         gen._emit_label(bb_merge)
         gen._last_was_terminal = False
+        # Merge flow states: for variables that were None in saved state and
+        # remain None on any path (to support paths where they weren't reassigned),
+        # keep them as None
+        merged = {}
+        if _branch_end_states:
+            # Start with union of all None variables from all paths
+            # (if it was None on some path and not reassigned there, treat as None)
+            for state in _branch_end_states:
+                for k, v in state.items():
+                    if v is True:
+                        merged[k] = True
+            # Also if a variable was None in saved state and wasn't assigned non-None
+            # in a way that kills it on all paths - but easier to be lenient
+            for k, v in _flow_saved.items():
+                if v is True:
+                    merged[k] = True  # be lenient for join points
+        gen._flow_none_state = merged
     else:
         # Every branch returned/jumped — anything the caller emits after
         # this `if` is unreachable. Drop the orphan `bb_merge` label
