@@ -344,14 +344,15 @@ class AllInputs:
     through.  A `"closed"` row also carries the model BODY it is written for
     (`body`, compared exactly) and the tactic block that closes it (`proof`);
     the two are one row because the proof is only a proof of that body.
+    Optionally `hyp` names a hypothesis binder(s) to add to the statement.
     """
 
     __slots__ = ("word", "nat", "kind", "op", "succ", "lemma", "body",
-                 "proof")
+                 "proof", "hyp")
 
     def __init__(self, word: str, nat: str, kind: str, op: str = "",
                  succ: str = "", lemma: str = "", body: str = "",
-                 proof: str = ""):
+                 proof: str = "", hyp: str = ""):
         self.word = word
         self.nat = nat
         self.kind = kind
@@ -360,6 +361,7 @@ class AllInputs:
         self.lemma = lemma
         self.body = body
         self.proof = proof
+        self.hyp = hyp
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostics only
         return f"AllInputs({self.word!r}, {self.nat!r}, {self.kind!r})"
@@ -437,6 +439,77 @@ ALL_INPUTS = {
                "  simp [mojo, {go}, {word}, {nat}, hw]\n"
                "· have hw : w ≠ 0 := fun e => h (by simpa [e])\n"
                "  simp [mojo, {go}, {word}, {nat}, hw, h]")),
+    "Specs.abs64": AllInputs(
+        word="Specs.abs64", nat="Specs.absInt", kind="closed",
+        body=("(if ((n ^^^ (0x8000000000000000 : UInt64)) > ((UInt64.ofNat 0) ^^^ (0x8000000000000000 : UInt64))) then n else ((UInt64.ofNat 0) - n))"),
+        proof=("by_cases h : ((w ^^^ (0x8000000000000000 : UInt64)) > ((UInt64.ofNat 0) ^^^ (0x8000000000000000 : UInt64)))\n"
+               "· simp [mojo, {go}, {word}, {nat}]\n"
+               "  rw [Specs.asInt]\n"
+               "  by_cases hsign : Specs.signBit ≤ (w.toNat : Int)\n"
+               "  · have hbad : (Specs.signBit : Int) ≤ (w.toNat : Int) → (w.toNat : Int) < (Specs.signBit : Int) := by omega\n"
+               "    omega\n"
+               "  · simp [hsign]\n"
+               "    have hlt : w.toNat < Specs.signBit := by omega\n"
+               "    rw [Specs.asInt_ofNat_of_lt hlt]\n"
+               "    rw [Specs.absInt_of_nonneg (by omega : (0 : Int) ≤ (w.toNat : Int))]\n"
+               "    apply UInt64.toNat_inj.mp\n"
+               "    simp [UInt64.toNat_ofNat']\n"
+               "· simp [mojo, {go}, {word}, {nat}]\n"
+               "  rw [Specs.asInt]\n"
+               "  by_cases hsign : Specs.signBit ≤ (w.toNat : Int)\n"
+               "  · simp [hsign]\n"
+               "    rw [Specs.absInt_of_neg (by omega : ((w.toNat : Int) - (2 ^ 64 : Int)) < 0)]\n"
+               "    apply UInt64.toNat_inj.mp\n"
+               "    simp [UInt64.sub_toNat, UInt64.toNat_ofNat']\n"
+               "    omega\n"
+               "  · have hlt : w.toNat < Specs.signBit := by omega\n"
+               "    rw [Specs.asInt_ofNat_of_lt hlt]\n"
+               "    rw [Specs.absInt_of_nonneg (by omega : (0 : Int) ≤ (w.toNat : Int))]\n"
+               "    apply UInt64.toNat_inj.mp\n"
+               "    simp [UInt64.toNat_ofNat']\n"
+               "    have hbad : ((w ^^^ (0x8000000000000000 : UInt64)) > ((UInt64.ofNat 0) ^^^ (0x8000000000000000 : UInt64))) = False := by simp [h]\n"
+               "    simp [hbad] at h\n"
+               "    omega")),
+    "Specs.stepConst64": AllInputs(
+        word="Specs.stepConst64", nat="Specs.stepConst", kind="closed",
+        body=("(if ((n ^^^ (0x8000000000000000 : UInt64)) ≤ ((UInt64.ofNat 0) ^^^ (0x8000000000000000 : UInt64))) then (UInt64.ofNat 0) else ((UInt64.ofNat 100000) + n))"),
+        hyp="hneg : w.toNat < Specs.signBit",
+        proof=("simp [mojo, {go}, {word}, {nat}]\n"
+               "by_cases h : ((w ^^^ (0x8000000000000000 : UInt64)) ≤ ((UInt64.ofNat 0) ^^^ (0x8000000000000000 : UInt64)))\n"
+               "· have hw0 : w = 0 := by\n"
+               "    apply UInt64.toNat_inj.mp\n"
+               "    have : w.toNat < 2 ^ 63 := hneg\n"
+               "    -- signed <= 0 with top bit clear means unsigned 0\n"
+               "    have h' := h\n"
+               "    simp at h'\n"
+               "    omega\n"
+               "  simp [hw0, Specs.stepConst]\n"
+               "  apply UInt64.toNat_inj.mp\n"
+               "  simp [UInt64.toNat_ofNat']\n"
+               "· simp [h]\n"
+               "  apply UInt64.toNat_inj.mp\n"
+               "  simp [UInt64.add_toNat, UInt64.toNat_ofNat', Specs.stepConst]\n"
+               "  have : w.toNat ≠ 0 := by omega\n"
+               "  simp [this]\n"
+               "  omega")),
+    "Specs.shiftMix64": AllInputs(
+        word="Specs.shiftMix64", nat="Specs.shiftMix", kind="closed",
+        body="((n <<< (UInt64.ofNat 3)) + (asr64 n (UInt64.ofNat 2)))",
+        hyp="hneg : w.toNat < Specs.signBit",
+        proof=("simp [mojo, {go}, {word}, {nat}, ProofLib.asr64]\n"
+               "apply UInt64.toNat_inj.mp\n"
+               "simp [UInt64.add_toNat, UInt64.toNat_ofNat', UInt64.shiftLeft_toNat]\n"
+               "have hs : (w >>> UInt64.ofNat 2).toNat = w.toNat / 2 ^ 2 := by\n"
+               "  rw [UInt64.toNat_shiftRight]\n"
+               "  simp\n"
+               "have hlt : w.toNat < 2 ^ 63 := hneg\n"
+               "have htop : (w >>> 63).toNat = 0 := by\n"
+               "  rw [UInt64.toNat_shiftRight]\n"
+               "  have := Nat.div_lt_div_of_lt_of_pos (by decide : 0 < 2^63) hlt\n"
+               "  simp at this\n"
+               "  omega\n"
+               "simp [htop, hs, Specs.shiftMix]\n"
+               "omega")),
 }
 
 
@@ -536,6 +609,13 @@ def all_inputs_section(func_name: str, ref: Refines, go_defs: str) -> str:
             return ""
         proof = "\n".join("  " + line for line in row.proof.format(
             go=go, word=row.word, nat=row.nat).splitlines())
+        if getattr(row, "hyp", ""):
+            return (
+                head
+                + f"theorem main_refines_all_inputs (w : UInt64)\n"
+                + f"    ({row.hyp}) :\n"
+                + f"    mojo w = {row.word} w := by\n"
+                + proof + "\n")
         return (
             head
             + f"theorem main_refines_all_inputs (w : UInt64) :\n"
