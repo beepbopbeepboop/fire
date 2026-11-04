@@ -16654,9 +16654,16 @@ int64_t mojo_rtobj_method_call(int64_t recv, char *name, int64_t n, int64_t a0, 
         if (!_class_lookup(((MojoClassObj *)(intptr_t)recv)->tag, name, &fn, 0)) {
             /* a method of the METACLASS: bound to the class, which goes first as `self` */
             MojoClassRec *rc = _class_find(((MojoClassObj *)(intptr_t)recv)->tag);
-            if (rc && rc->meta && _class_lookup(rc->meta, name, &fn, 0)) {
-                a[0] = recv; a[1] = a0; a[2] = a1; a[3] = a2; a[4] = a3; a[5] = a4; a[6] = a5; a[7] = a6;
-                return _call_words(fn, n + 1, a);
+            if (rc) {
+                if (rc->meta && _class_lookup(rc->meta, name, &fn, 0)) {
+                    a[0] = recv; a[1] = a0; a[2] = a1; a[3] = a2; a[4] = a3; a[5] = a4; a[6] = a5; a[7] = a6;
+                    return _call_words(fn, n + 1, a);
+                }
+                if (!rc->meta && !strcmp(name, "__prepare__")) {
+                    /* default metaclass type.__prepare__ returns empty dict */
+                    int64_t d = (int64_t)(intptr_t)mojo_dict_new();
+                    return d;
+                }
             }
             mojo_raise_attribute_error(name);
             return 0;
@@ -16758,12 +16765,23 @@ int mojo_classobj_lookup(void *obj, char *attr, int64_t *out)
     if (_class_lookup(((MojoClassObj *)obj)->tag, attr, out, 0)) return 1;
     /* a miss on the class and its bases: the METACLASS answers - its own attributes first,
      * then `Meta.__getattr__(cls, name)` (CPython's `type.__getattribute__` order). */
-    if (c && c->meta) {
-        if (_class_lookup(c->meta, attr, out, 0)) return 1;
-        int64_t ga, a[2] = { (int64_t)(intptr_t)obj, (int64_t)(intptr_t)attr };
-        if (strcmp(attr, "__getattr__") && _class_lookup(c->meta, "__getattr__", &ga, 0)) {
-            *out = _call_words(ga, 2, a);
-            return 1;
+    if (c) {
+        int64_t mtag = c->meta;
+        if (mtag) {
+            if (_class_lookup(mtag, attr, out, 0)) return 1;
+            int64_t ga, a[2] = { (int64_t)(intptr_t)obj, (int64_t)(intptr_t)attr };
+            if (strcmp(attr, "__getattr__") && _class_lookup(mtag, "__getattr__", &ga, 0)) {
+                *out = _call_words(ga, 2, a);
+                return 1;
+            }
+        } else {
+            /* default metaclass is type; __prepare__ and other type attributes */
+            if (!strcmp(attr, "__prepare__")) {
+                /* type.__prepare__ returns an empty dict */
+                int64_t d = (int64_t)(intptr_t)mojo_dict_new();
+                *out = d;
+                return 1;
+            }
         }
     }
     return 0;

@@ -268,6 +268,15 @@ def main():
     print(P.v, Q.v, P.__name__ == Q.__name__)
 main()
 """,
+    'metaclass_prepare_returns_namespace_dict': """\
+def main():
+    Meta = type('Meta', (type,), {})
+    ns = Meta.__prepare__('Foo', ())
+    ns['x'] = 5
+    Foo = type('Foo', (), ns)
+    print(Foo.x)
+main()
+""",
 }
 
 
