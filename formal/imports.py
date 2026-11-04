@@ -2639,7 +2639,7 @@ def instantiation_demands(module_path: str, consumer_src: str,
     found = MM.all_instantiation_calls(consumer_src)
     loose = MM.all_bracketed_calls(consumer_src)
     if not loose and not consumer_src:
-        pass  # Don't return early if there might be variadic calls
+        return {}
     if closure is None:
         templates = module_templates_by_path(module_path, project_root)
     else:
@@ -2660,58 +2660,6 @@ def instantiation_demands(module_path: str, consumer_src: str,
                 for a in args:
                     if a not in got[name]:
                         got[name].append(a)
-        # Collect variadic call demands
-        try:
-            from formal.build import parse_module
-            import fire_compiler as F
-            from formal import model as M
-            mod_src = module_source_text(p)
-            mod_stmts = parse_module(mod_src)
-            # Find variadic functions in this module
-            variadics = {}
-            for st in mod_stmts:
-                if isinstance(st, F.FunctionDef):
-                    # count fixed params before variadic
-                    fixed = 0
-                    var_name = None
-                    for pentry in getattr(st, 'params', []) or []:
-                        if isinstance(pentry, (list, tuple)) and pentry:
-                            pname = pentry[0]
-                            if isinstance(pname, str):
-                                if pname.startswith('**'):
-                                    break
-                                elif pname.startswith('*') and not pname.startswith('**'):
-                                    var_name = pname[1:] or pname
-                                    break
-                                else:
-                                    fixed += 1
-                    if var_name is not None:
-                        variadics[st.name] = fixed
-            if variadics:
-                cons_stmts = parse_module(consumer_src)
-                for st in cons_stmts:
-                    for node in M.iter_nodes(st):
-                        if isinstance(node, F.CallExpr):
-                            func = getattr(node, 'func', None)
-                            if isinstance(func, F.IdentExpr):
-                                bname = func.name
-                                if bname in variadics and bname not in own_here:
-                                    # Don't count if it's bracketed
-                                    if isinstance(getattr(func, 'obj', None), F.SubscriptExpr) or hasattr(node.func, '__class__') and 'Subscript' in str(type(node.func)):
-                                        pass  # might be bracketed
-                                    # Count extras
-                                    nargs = len(getattr(node, 'args', None) or [])
-                                    fixed = variadics[bname]
-                                    extras = nargs - fixed
-                                    if extras >= 0:  # allow zero extras
-                                        # Encode arity as demand args for mangle
-                                        # Use a special encoding - store both extras and fixed for easier matching
-                                        arity_args = (f'__variadic_{extras}_{fixed}__',)
-                                        got.setdefault(bname, [])
-                                        if arity_args not in got[bname]:
-                                            got[bname].append(arity_args)
-        except Exception:
-            pass
         # Also try inferred bare calls
         try:
             try:
@@ -4891,37 +4839,6 @@ def imported_instantiations(source_path: str, stmts: list,
                                    demap, project_root or source_path, stmts))
     if demap:
         MM.rewrite_instantiation_uses(stmts, demap)
-    # Transform original variadic function definitions to be compatible
-    try:
-        import fire_compiler as F
-        from formal.build import parse_module
-        from formal import model as M
-        from formal import monomorph as MM
-        for st in stmts:
-            if isinstance(st, F.FunctionDef):
-                # check if variadic
-                var_name = None
-                fixed_params = []
-                for pentry in getattr(st, 'params', []) or []:
-                    if isinstance(pentry, (list, tuple)) and pentry:
-                        pname = pentry[0]
-                        if isinstance(pname, str):
-                            if pname.startswith('**'):
-                                break
-                            elif pname.startswith('*') and not pname.startswith('**'):
-                                var_name = pname[1:] if len(pname) > 1 else pname
-                                break
-                            else:
-                                fixed_params.append(pentry)
-                if var_name is not None:
-                    # Transform to take only fixed params, assume no extras
-                    st.params = fixed_params
-                    new_body = []
-                    for node in getattr(st, 'body', []) or []:
-                        new_body.append(MM._rewrite_variadic_node(node, var_name, 0))
-                    st.body = new_body
-    except Exception:
-        pass
     return out
 
 

@@ -217,9 +217,8 @@ def test_generator_list_literal_of_structs_ctor_arg_is_valid_cpp():
     assert r.returncode == 0, r.stderr
 
 
-# The closure's RETURN type is a str here. With typed callable values
-# landed, a str-returning factory compiles and is callable through the
-# generator.
+# The closure's RETURN type is a str here. With typed callable values,
+# str-returning (and pointer-returning) closures from factories compile.
 STR_RETURN_SRC = (
     'class Table:\n'
     '    def __init__(self, title: str, calc, mode: int):\n'
@@ -241,9 +240,10 @@ STR_RETURN_SRC = (
     'outer()\n')
 
 
-def test_closure_factory_with_non_int64_return_compiles():
-    cpp = _compile_cpp(STR_RETURN_SRC)
+def test_closure_factory_with_non_int64_return_still_refused():
+    # Now supported with typed callable values
     from build_config import find_gxx
+    cpp = _compile_cpp(STR_RETURN_SRC)
     with tempfile.NamedTemporaryFile('w', suffix='.cpp', delete=False) as f:
         f.write(cpp)
     try:

@@ -4249,23 +4249,6 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
         iter_var  = obj_val
         iter_base = base
 
-    # If __iter__ returned a generator object, iterate it as a generator
-    if iter_type == 'MojoGenerator *' or iter_type.endswith('*MojoGenerator*') or iter_type == 'MojoGenerator':
-        api = getattr(gen, '_generator_var_api', {}).get(iter_var)
-        if api is not None:
-            destroy_after = False
-            gen._gen_for_generator_iter(var, iter_var, api, body,
-                                          destroy_after=destroy_after,
-                                          shadow_name=shadow_name)
-            return
-        # try to find by name
-        api = getattr(gen, '_generator_var_api', {}).get(str(iter_var))
-        if api is not None:
-            gen._gen_for_generator_iter(var, iter_var, api, body,
-                                          destroy_after=False,
-                                          shadow_name=shadow_name)
-            return
-
     has_next_fn = gen._struct_method_csym(iter_base, '__has_next__', '')
     next_fn     = gen._struct_method_csym(iter_base, '__next__', '')
     elem_type   = gen.func_return_types.get(next_fn, 'int64_t')

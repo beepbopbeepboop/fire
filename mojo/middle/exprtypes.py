@@ -1172,13 +1172,7 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, f
             and isinstance(call.func, MemberExpr)
             and isinstance(call.func.obj, IdentExpr)
             and call.func.obj.name == 'cls'):
-        _mname = call.func.member
-        if _mname == '_iter_member_':
-            for _cand in ('_iter_member_by_def_', '_iter_member_by_value_'):
-                _mapi = generator_method_api.get((self_struct_name, _cand))
-                if _mapi is not None:
-                    return _mapi.get('value_ctype')
-        _mapi = generator_method_api.get((self_struct_name, _mname))
+        _mapi = generator_method_api.get((self_struct_name, call.func.member))
         if _mapi is not None:
             return _mapi.get('value_ctype')
     if generator_api is None:
@@ -1187,22 +1181,7 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, f
         api = generator_api.get(call.func.name)
         if api is not None:
             return api.get('value_ctype')
-    if isinstance(call, CallExpr) and isinstance(call.func, MemberExpr) and isinstance(call.func.obj, IdentExpr) and (call.func.obj.name == 'self'):
-        _mname = call.func.member
-        if _mname == '_iter_member_' and generator_method_api is not None and self_struct_name:
-            for _cand in ('_iter_member_by_def_', '_iter_member_by_value_'):
-                _mapi = generator_method_api.get((self_struct_name, _cand))
-                if _mapi is not None:
-                    return _mapi.get('value_ctype')
-        # try generator method on self
-        if generator_method_api is not None and self_struct_name:
-            _mapi = generator_method_api.get((self_struct_name, _mname))
-            if _mapi is not None:
-                return _mapi.get('value_ctype')
-        et = (field_elem_types or {}).get(_mname)
-        if et is not None:
-            return et if et in ('char *', 'double') else 'int64_t'
-    elif isinstance(call, MemberExpr) and isinstance(call.obj, IdentExpr) and (call.obj.name == 'self'):
+    if isinstance(call, MemberExpr) and isinstance(call.obj, IdentExpr) and (call.obj.name == 'self'):
         et = (field_elem_types or {}).get(call.member)
         if et is not None:
             return et if et in ('char *', 'double') else 'int64_t'
