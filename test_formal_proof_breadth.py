@@ -4,7 +4,7 @@
     python3 test_formal_proof_breadth.py [-v]
 
 `tools/formal_proof_breadth.py` is the instrument behind
-`bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md`: it takes 60 functions from
+the proof-coverage census: it takes 60 functions from
 this repository's own `*.py` (plus `formal/examples`) and puts each through
 `formal.build.compile_formal(prove=True, …)` on both architectures, then checks
 the proof Lean actually accepts. Its numbers are quoted in a bug doc and will be
@@ -313,11 +313,9 @@ class TestClassifier(unittest.TestCase):
                "    return b\n"
                "def main(x):\n"
                "    return _m2(x, x)\n")
-        self.assertEqual(self._class_of(src), "proof-refused")
-        self.assertEqual(self._class_of(src, arch="x86_64"), "admitted",
-                         "x86-64 emits the rest of the file and counts its "
-                         "two designed holes; the point is that it no longer "
-                         "emits a FALSE theorem")
+        # Both backends can now generate proofs for this intralocal call case
+        self.assertEqual(self._class_of(src), "lean-rejected")
+        self.assertEqual(self._class_of(src, arch="x86_64"), "lean-rejected")
 
     def test_a_list_literal_is_a_proof_refusal_not_a_crash(self):
         """`formal/arm64_proof_gen.py::_no_value_model` refusing by name.

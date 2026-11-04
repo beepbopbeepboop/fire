@@ -2585,7 +2585,7 @@ def fold_module_int_expr(node, names=None):
     "print() cannot tell whether IdentExpr is a string or a number" — a message
     about print's materialization for a name the build had read and simply could
     not fold. Measured on `test_formal_math.py:isqrt_source`
-    (`MAX64 = 2 ** 63 - 1`, `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md`
+    (`MAX64 = 2 ** 63 - 1`)
     §0.6), where it also made the two backends report DIFFERENT subjects for one
     function: arm64 stopped at the constant, x86-64 got as far as the string
     operand two lines later.

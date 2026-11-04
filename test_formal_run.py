@@ -9318,7 +9318,7 @@ BOTH_ARCH_CASES = [
 # which is false in every clause: `flush` is neither `sep` nor `end`, it is not
 # baked into anything, and it is the commonest keyword in THIS repository's own
 # source — nine of the sixty items `tools/formal_proof_breadth.py` measures land
-# on it (`bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` §0.2's largest
+# on it (the largest formal case in the census
 # `codegen-refused` family), every one of them the same `print(…, flush=True)`
 # in a test's `check` helper.
 #
