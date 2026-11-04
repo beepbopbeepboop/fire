@@ -386,12 +386,12 @@ itself and the fix is in this backend rather than in a module boundary.
 
 | file | the call | what it actually needs |
 |---|---|---|
-| `std/math/polynomial.mojo` | `reversed(range(n))` | a **reversed copy of a run-time sequence** — the same two gaps as `list`, and `FORMAL_listdir_no_run_time_sequence` |
-| `std/utils/_serialize.mojo` | `max(rank - 2, 0)` | **a compare and a select** — `b14` §5, and the fix that section names. This is the ONLY two-argument `max` in the 768-file scope, and it is `for i in range(max(rank - 2, 0))` |
+| std/math/polynomial.mojo | `reversed(range(n))` | a **reversed copy of a run-time sequence** — the same two gaps as `list`, and `FORMAL_listdir_no_run_time_sequence` |
+| std/utils/_serialize.mojo | `max(rank - 2, 0)` | **a compare and a select** — `b14` §5, and the fix that section names. This is the ONLY two-argument `max` in the 768-file scope, and it is `for i in range(max(rank - 2, 0))` |
 | bootstrap-validate.mojo | `sorted(glob.glob(p))` | a **sort with a comparison per element**, and a call through a value is not a thing this path can express |
-| `mojo/middle/metal_ops.py` | `any(g for g in FAMILIES)` | a **fold over a sequence with a short circuit** |
-| `test_formal_int_semantics.py` | `list(ROWS)` | **a run-time blob copy** — the doc says so itself, and `formal40-3` holds `FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time` |
-| `tools/gatewatch.py` | `max(r[1] for r in rows)` | a **fold over a generator**, and `sorted(rows, key=lambda …)` behind it |
+| mojo/middle/metal_ops.py | `any(g for g in FAMILIES)` | a **fold over a sequence with a short circuit** |
+| test_formal_int_semantics.py | `list(ROWS)` | **a run-time blob copy** — the doc says so itself, and `formal40-3` holds `FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time` |
+| tools/gatewatch.py | `max(r[1] for r in rows)` | a **fold over a generator**, and `sorted(rows, key=lambda …)` behind it |
 
 **So: one of the six wanted the compare-and-select and five want a run-time
 sequence, a sort, a fold or a blob copy** — four of which are named projects
@@ -409,9 +409,9 @@ implementation its `--min 1` table is):
 | file | the refusal, in one sentence | what it is |
 |---|---|---|
 | std/builtin/float_literal.mojo | `self.__int_literal__().__int__(…)` cannot be lowered: the receiver's type is written down and the CALLEE is what is missing | **stdlib** — not editable from a worktree |
-| `std/collections/type_dict.mojo` | `Self._index` reads a `comptime` class attribute whose value is `Self.keys`, a PARAMETER of `TypeDict` | **stdlib**; a parameter's value belongs to an instantiation, and there is no monomorphizer here |
-| `std/sys/arg.mojo` | `Span[StaticString, ImmStaticOrigin]` is a compile-time explicit-parameter list on a generic, not a subscript | **stdlib** |
-| `bootstrap_test_classes.mojo` | `create_point` returns a frame address and `create_point` is this image's ENTRY, whose caller is the C runtime | a **correct refusal** — the returned-frame convention needs a caller that reserves a block |
+| std/collections/type_dict.mojo | `Self._index` reads a `comptime` class attribute whose value is `Self.keys`, a PARAMETER of `TypeDict` | **stdlib**; a parameter's value belongs to an instantiation, and there is no monomorphizer here |
+| std/sys/arg.mojo | `Span[StaticString, ImmStaticOrigin]` is a compile-time explicit-parameter list on a generic, not a subscript | **stdlib** |
+| bootstrap_test_classes.mojo | `create_point` returns a frame address and `create_point` is this image's ENTRY, whose caller is the C runtime | a **correct refusal** — the returned-frame convention needs a caller that reserves a block |
 | **`tools/wave2_extract_shared.py`** | **`cannot read an interpolated literal from 'rf"…"': the character after the prefix is not a quote`** | **FIXED 2026-10-07 (`work/formal106-docs`): the reader took `spelled[1]` as the quote, so a two-letter `rf`/`fr` prefix read the `f` as the quote. `formal/model.py::interpolated_literal_quote_start` is now the one reader of the prefix width, and the false sentence and its doc are gone — see below |
 
 **`other refusal` is 7 → 5 and the arithmetic is worth stating**: of the seven at
@@ -630,11 +630,11 @@ All seven are in-file; the bucket's definition is in
 | file | the refusal, in one sentence | what it is |
 |---|---|---|
 | std/builtin/float_literal.mojo | `self.__int_literal__()` used as a receiver for `__int__(…)`, and that is an `IntLiteral` another module declares | **stdlib** — not editable from a worktree |
-| `std/collections/type_dict.mojo` | `Self._index` reads a `comptime` class attribute whose value is a **parameter** of `TypeDict`, and a parameter's value belongs to an instantiation | **stdlib** |
-| `std/sys/arg.mojo` | `Span[StaticString, ImmStaticOrigin]` is a compile-time explicit-parameter list on a generic, not a subscript | **stdlib** |
-| `std/utils/_serialize.mojo` | `p.unsafe_load()` as an **argument**: it reads at an offset from the receiver, which is a different construct from the same call as a statement | **stdlib** |
+| std/collections/type_dict.mojo | `Self._index` reads a `comptime` class attribute whose value is a **parameter** of `TypeDict`, and a parameter's value belongs to an instantiation | **stdlib** |
+| std/sys/arg.mojo | `Span[StaticString, ImmStaticOrigin]` is a compile-time explicit-parameter list on a generic, not a subscript | **stdlib** |
+| std/utils/_serialize.mojo | `p.unsafe_load()` as an **argument**: it reads at an offset from the receiver, which is a different construct from the same call as a statement | **stdlib** |
 | bootstrap-validate.mojo | a container returned by a function is read again after a call | had a claimed doc, since released; the refusal has a doc and no row in either ranking instrument, so it reads as *"nobody has looked"*. Same defect shape as §1.7, one file |
-| `bootstrap_test_classes.mojo` | `create_point` returns a frame address and `create_point` is the image's ENTRY, whose caller is the C runtime and passes no such word | a **correct refusal** — the returned-frame convention needs a caller that reserves a block |
+| bootstrap_test_classes.mojo | `create_point` returns a frame address and `create_point` is the image's ENTRY, whose caller is the C runtime and passes no such word | a **correct refusal** — the returned-frame convention needs a caller that reserves a block |
 | **`test_formal_libc_symbol.py`** | **`parse error: …:483:23: unterminated string literal`** | **a defect in this repository's own lexer** — FIXED on the round that measured it; see below |
 
 **So: of the top unowned row, four are not this worktree's to edit, one is
@@ -950,6 +950,8 @@ reason §3 exists rather than a list of twenty dead filenames.
 | `b14` | §7 | the commands, arm64 and x86-64 — **now §6** |
 
 ---
+
+
 
 ## 4. What is NOT here, and where it went
 

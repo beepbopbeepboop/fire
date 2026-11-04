@@ -52,7 +52,7 @@ BASELINE = {
     'fire.py': 1,
     'formal/admitted.py': 1,
     'formal/arm64_codegen.py': 1,
-    'formal/arm64_proof_gen.py': 10,
+    'formal/arm64_proof_gen.py': 9,
     'formal/build.py': 12,
     'formal/dataclass_transform.py': 4,
     'formal/imports.py': 14,
@@ -168,7 +168,7 @@ BASELINE = {
 # reason the header above gives for its prefixed entry.
 BARE_BASELINE = {
     'CRASH.md': 1,
-    'bugs/OPEN_WORK.md': 39,
+    'bugs/OPEN_WORK.md': 13,
     'bugs/formal/FORMAL_a_variadic_parameter_read_has_no_abi.md': 1,
     'bugs/formal/FORMAL_absval_proof_does_not_check.md': 1,
     'bugs/formal/FORMAL_arm64_instruction_coverage.md': 1,

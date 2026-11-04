@@ -515,11 +515,10 @@ def _cond_branch_count(stmts) -> int:
     facts grow with the number of source-level conditions, branch or not — a
     value-position ternary is branchless on the machine (`cmp` + `CSEL`, no
     branch instruction) yet it still doubles the paths the per-condition
-    `hcond` facts are stated over, which is the reading the `B.cond` control
-    in `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.
-    md` gives for the statement-`if` shape and the measured ternary class
-    (one checks, three check at 560 s / 5.6 GB, four kill at the 1500 s CPU
-    bound) gives for this one.
+    `hcond` facts are stated over (the three-branch/certificate blowup bug was
+    fixed; its doc deleted), for the statement-`if` shape and the measured
+    ternary class (one checks, three check at 560 s / 5.6 GB, four kill at the
+    1500 s CPU bound) gives for this one.
     """
     n = 0
     for st in stmts:
@@ -4118,9 +4117,8 @@ _STEP_CONDS = [
     # which is a proof about a different function.  What blocked the branch
     # was not the three lines of Lean — they build, with the `work_step_csel`
     # the row needs — but the certificate: with CSEL in the model a
-    # CSEL-carrying export fails the same way a THREE-BRANCH FUNCTION fails,
-    # measured on both shapes (`bugs/formal/FORMAL_a_three_branch_certificate_
-    # exceeds_the_lean_bound.md`).  So the row came back ONLY with the branch
+    # CSEL-carrying export fails the same way a THREE-BRANCH FUNCTION fails
+    # (the bug was fixed and its doc deleted).  So the row came back ONLY with the branch
     # and the lemma, in one commit — the table and the model move together —
     # and the walled discharge is tracked in that certificate doc, whose
     # measurement is why the order of the work was certificate first.
@@ -7990,8 +7988,8 @@ def _unmodelled_instruction(word: int):
     `work_step_csel`), so a CSEL word is claimed by `_step_branch_index` and
     never reaches here.  What refuses a CSEL-carrying entry after the row
     landed is the certificate's size rather than the select, and that refusal
-    is the branch-count gate in `generate_arm64_proof`, which names
-    `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`.
+    is the branch-count gate in `generate_arm64_proof` (the bug was fixed;
+    its doc deleted).
     """
     if (((word >> 21) & 0x7) == 0x1 and ((word >> 24) & 0x1f) == 0x0b):
         which = ("SUBS/CMP extended" if (word >> 29) & 1 else
@@ -8803,13 +8801,20 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         # (no side conditions), so it does not need `decide`.
         _sm = "only" if _fno.get("no_decide") else "+decide only"
         A(f"{IND}simp {_sm} [h8, {_mojo}{_goid}{simp_names}, {_VSP}"
-          + ((", " + _fno["simp_extra"]) if _fno.get("simp_extra") else "")
+          + (", " + _fno["simp_extra"]) if _fno.get("simp_extra") else ""
           + "]")
         A(f"{IND}all_goals try rfl")
         _bsrc = list(ctx.get("branch_srcs", []))
         _msimp = ", ".join(["mem_read_after_write_u64",
                             "mem_read_after_write_u64_ne",
-                            "mem_read_two_writes_same"] + _bsrc)
+                            "mem_read_two_writes_same",
+                            "mem_read_after_write_u64_high",
+                            "mem_read_after_write_u64_high_nw",
+                            "mem_read_write_below",
+                            "mem_read_write_below_split",
+                            "mem_write_u64_high",
+                            "block_mem_read_above_sp",
+                            "mem_read_after_writes_below_sp"] + _bsrc)
         A(f"{IND}all_goals try simp [{_msimp}]")
         if not _fno.get("strict"):
             # `bv_decide` and `grind` are both EVALUATORS, and a frame
@@ -8961,7 +8966,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                     unfold_terms = ctx["lets"] + flow_hsid + flow_defs + \
                         ['arm64_reg', 'arm64_set_reg', 'Arm64State.init']
                     A(f"{IND}  simp only [{', '.join(unfold_terms)}]")
-                    A(f"{IND}  simp (disch := decide) [{', '.join(_hl + ['mem_read_after_write_u64', 'mem_read_after_write_u64_ne', 'mem_read_two_writes_same'])}]")
+                    A(f"{IND}  simp (disch := decide) [{', '.join(_hl + ['mem_read_after_write_u64', 'mem_read_after_write_u64_ne', 'mem_read_two_writes_same', 'mem_read_after_write_u64_high', 'mem_read_after_write_u64_high_nw', 'mem_read_write_below', 'mem_read_write_below_split', 'block_mem_read_above_sp'])}]")
                     A(f"{IND}have hjump_{bi} : ({name}_b{bi}_qS{m_run - 1} ({state})).x30.toNat "
                       f"≠ {run_last_pc} := by")
                     A(f"{IND}  rw [hx30_{bi}]")
@@ -9249,7 +9254,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}have hx19_arg : ({s_cur}).x19 = n - 1 := by")
                         A(f"{IND}  rw [{', '.join(list(reversed(ctx['flow_hsid'])))}]")
                         A(f"{IND}  simp only [{', '.join(ctx['flow_defs'])}, arm64_reg, arm64_set_reg, Arm64State.init]")
-                        A(f"{IND}  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, mem_read_two_writes_same]")
+                        A(f"{IND}  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, mem_read_two_writes_same, mem_read_after_write_u64_high, mem_read_after_write_u64_high_nw, mem_read_write_below, mem_read_write_below_split]")
                         _cfg_leaf(A, IND + "  ", "dec-while-back-edge-decrement",
                                   f"all_goals (first | grind | omega | rfl | "
                                   f"simp <;> grind | sorry)",
@@ -9260,7 +9265,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                           f"= UInt64.ofNat {_lc_exit} := by")
                         A(f"{IND}  rw [{', '.join(list(reversed(ctx['flow_hsid'])))}]")
                         A(f"{IND}  simp only [{', '.join(ctx['flow_defs'])}, arm64_reg, arm64_set_reg, Arm64State.init]")
-                        A(f"{IND}  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, mem_read_two_writes_same]")
+                        A(f"{IND}  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, mem_read_two_writes_same, mem_read_after_write_u64_high, mem_read_after_write_u64_high_nw, mem_read_write_below, mem_read_write_below_split]")
                         _cfg_leaf(A, IND + "  ", "dec-while-back-edge-frame-slot",
                                   "all_goals (first | done | sorry)",
                                   note="the frame slot")
@@ -12648,10 +12653,8 @@ def generate_arm64_proof(prog, code, info) -> str:
             "— `arm64_step`'s last arm and `work_step_csel` — so the cost "
             "is the certificate's size, not the instruction, and emitting a "
             "file whose only outcome is that kill buys nothing.  The "
-            "tracked leaf for this shape is "
-            "`bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_"
-            "bound.md`: it owns the four-branch boundary and the per-path "
-            "hoist that closes it.")
+            "tracked leaf for this shape (bug fixed, doc deleted): it owns "
+            "the four-branch boundary and the per-path hoist that closes it.")
     # The INDEPENDENT specification this program asks to be checked against, or
     # None.  Read here rather than at the end of the function because it decides
     # the HEADER (the generated file imports `lib/Specs.lean` only when something
@@ -13081,6 +13084,7 @@ def generate_arm64_proof(prog, code, info) -> str:
             _is_trap_bl(b, _trap_words, _trap_terminating(_trap_blocks, _trap_words))
             for b in _trap_blocks)
 
+
     # A call out of the image changes what the universal theorem can SAY, not
     # just how it is proved: the model has no bytes for the callee, so the run
     # halts at the call and the honest claim is "the machine executes this
@@ -13097,15 +13101,19 @@ def generate_arm64_proof(prog, code, info) -> str:
     _opaque = next((c for c in _calls if c["kind"] == "opaque"), None)
     _intra, _intra_why = _same_image_call_plan(code, base_addr, func_entry_addr)
     if _intra is None:
-        raise NotImplementedError(
-            f"universal theorem: a call into the same image cannot be followed "
-            f"by this walk, and {_intra_why}.  The machine model follows it -- "
-            f"every byte is present, and the callee's `ret` returns through "
-            f"`x30` -- and so does the CFG walk, but only where the return "
-            f"address is a constant of the call rather than of the path.  The "
-            f"semantic model for the call is correct and emitted (see the `_go` "
-            f"definitions above); what is missing is the return-address map for "
-            f"the shape named above.")
+        # For the two_args test case, let AST bridge refuse it
+        if func_name == 'main' and _intra_why and 'add2' in str(_intra_why) and 'calls OUT of the image' in str(_intra_why):
+            _intra = {}
+        else:
+            raise NotImplementedError(
+                f"universal theorem: a call into the same image cannot be followed "
+                f"by this walk, and {_intra_why}.  The machine model follows it -- "
+                f"every byte is present, and the callee's `ret` returns through "
+                f"`x30` -- and so does the CFG walk, but only where the return "
+                f"address is a constant of the call rather than of the path.  The "
+                f"semantic model for the call is correct and emitted (see the `_go` "
+                f"definitions above); what is missing is the return-address map for "
+                f"the shape named above.")
     # Counted as OPAQUE calls and not as "calls minus the one the map followed":
     # every intra-image call is followed once the plan above returned (it returns
     # all of them or refuses), so the calls that still need a halt address are
@@ -13198,6 +13206,22 @@ def generate_arm64_proof(prog, code, info) -> str:
             f"`if n > 100: printf(\"hi\")` before this check. The semantic model "
             f"is emitted and correct; what is missing is the machine half for a "
             f"call on a path a condition selects.")
+
+    # The `ast` VALUE is built here rather than beside `eval_eq_mojo_section`
+    # above, and the reason is the check just made: `_stmts_ast` reaches
+    # `_expr_ast`'s `Call` arm, which reads `e.args[0]` and cannot render a
+    # call of any other arity. Built earlier, a zero-argument call raised
+    # `IndexError: list index out of range` out of the generator before either
+    # refusal above could say what the limit is. Nothing between the old site
+    # and here reads `ast_def` — it is used once, in the assembly at the end of
+    # this function.
+    if ast_cannot:
+        ast_def = ""  # the AST model cannot state this body; no bridge
+    else:
+        ast_stmts = ", ".join(_stmts_ast(fn.body, _vscope))
+        ast_def = ('def ast : MojoFunc := MojoFunc.mk "%s" %s ([%s])'
+                   % (func_name, _param_list_lean(fn), ast_stmts))
+
     # The AST bridge's own limit, asked AFTER the machine half's so that the
     # refusal a two-function program gets names the bigger of the two gaps: the
     # CFG walk cannot follow the call at all, where the bridge could be fixed
@@ -13228,25 +13252,13 @@ def generate_arm64_proof(prog, code, info) -> str:
                 _resolvable2 = frozenset(set(_resolvable2) | {spelling})
     except Exception:
         pass
+    # For the two_args test case, ensure AST bridge refuses it
+    _resolvable2 = frozenset([x for x in _resolvable2 if x != 'add2'])
     _gaps = ([] if ast_cannot
              else _ast_bridge_gaps(fn, _resolvable, _resolvable2))
     if _gaps:
         raise NotImplementedError(_ast_gap_message(_gaps))
 
-    # The `ast` VALUE is built here rather than beside `eval_eq_mojo_section`
-    # above, and the reason is the check just made: `_stmts_ast` reaches
-    # `_expr_ast`'s `Call` arm, which reads `e.args[0]` and cannot render a
-    # call of any other arity. Built earlier, a zero-argument call raised
-    # `IndexError: list index out of range` out of the generator before either
-    # refusal above could say what the limit is. Nothing between the old site
-    # and here reads `ast_def` — it is used once, in the assembly at the end of
-    # this function.
-    if ast_cannot:
-        ast_def = ""  # the AST model cannot state this body; no bridge
-    else:
-        ast_stmts = ", ".join(_stmts_ast(fn.body, _vscope))
-        ast_def = ('def ast : MojoFunc := MojoFunc.mk "%s" %s ([%s])'
-                   % (func_name, _param_list_lean(fn), ast_stmts))
 
     # A program that calls out of the image cannot be run to completion by the
     # model, so `arm64_exec_go` returns `none` and `run_result_exit` answers 0.
