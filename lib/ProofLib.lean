@@ -24,7 +24,7 @@ instruction that performs it. This file's stated rule is that it models every
 instruction form `formal/x86_64.py` can encode and nothing else, so the
 alternative was not "no XMM file" — it was a step that decoded the instruction
 and recorded no effect, which is a FALSE step: it says the machine left XMM0
-alone when it did not, and `FORMAL_x86_64_end_to_end_proof.md`'s B2 and B24 are
+alone when it did not, and the formal x86-64 end-to-end proof bug history's B2 and B24 are
 about exactly how much worse that is than an absent instruction.
 
 Each XMM is one `UInt64` and not a `Vector`, and the reason is that this value
