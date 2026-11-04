@@ -13543,24 +13543,49 @@ def _publish_imported_constants(functions: list, symbols: dict,
     Returns the symbols table the substitution needs the callers to PUBLISH, so
     one function owns both halves and they cannot be applied out of order: the
     rewrite needs the sites, and the checks after it need the table those sites
-    came from."""
+    came from.
+
+    Both spellings of the read are answered, because they are two spellings of
+    one question — what is the value of a module-level name another module
+    declares:
+
+      * a BARE read — `from mod import CONST`, then `CONST` — goes through the
+        module-constant substitution this unit already runs, because a name a
+        linked module publishes as a literal is foldable in exactly the sense
+        that pass means. It is done by re-publishing the table with those names
+        promoted and re-running the pass, rather than by a second rewriter, so
+        the two can never disagree about a name that is BOTH a unit-level
+        constant and an imported one (the unit's own binding wins, which is
+        what the shadowing rule already says) or about a store position.
+      * a DOTTED read — `mod.CONST`, the spelling `import mod` binds and the one
+        this is for — is answered from the module its own qualifier names. There
+        is no bare name in it to fold, so it is its own walk, and it is here
+        rather than in a backend because it is a source-to-source rewrite: both
+        architectures have to see the same literal, and a rewrite performed in
+        an emitter is two implementations of one decision.
+
+    A STORE is not a read and is left alone: `mod.X = 5` writes another
+    module's state, which has nowhere to live and is refused by name
+    (`bugs/formal/FORMAL_module_state_no_storage.md`). Substituting it would trade a
+    refused store for a dropped one.
+
+    `imported` is the link line's `load_dylib_manifests` entries, which is the
+    only place the answer exists: the build that compiled each module is the
+    only place its folded values were ever computed, and it left them in that
+    module's manifest. An empty list is a no-op, so an image with no dylibs on
+    its line behaves exactly as it did before."""
     tables = M.dylib_module_constants(imported)
-    if tables:
-        sites = _imported_constant_sites(imported, symbols)
-        merged = _with_imported_constants(symbols, sites)
-        if sites:
-            M.publish_module_symbols(merged)
-            _substitute_module_constants(functions)
-        for fn in functions:
-            _apply_imported_constant_sites(fn.body, tables,
-                                           _function_locals(fn))
-    # Transform cross-module accesses to writable globals into accessor calls.
-    if imported:
-        try:
-            _apply_imported_variable_accessors(functions, imported, symbols)
-        except Exception as e:
-            pass
-    return symbols
+    if not tables:
+        return symbols
+    sites = _imported_constant_sites(imported, symbols)
+    merged = _with_imported_constants(symbols, sites)
+    if sites:
+        M.publish_module_symbols(merged)
+        _substitute_module_constants(functions)
+    for fn in functions:
+        _apply_imported_constant_sites(fn.body, tables,
+                                       _function_locals(fn))
+    return merged
 
 
 def _imported_constant_sites(imported: list, symbols: dict) -> dict:
@@ -14661,117 +14686,6 @@ def _lower_dialect_casts(functions: list, structs_by_name: dict = None) -> int:
         done += count[0]
     return done
 
-
-def _apply_imported_variable_accessors(functions: list, imported: list,
-                                        symbols: dict = None) -> int:
-    """Transform cross-module accesses to writable globals into accessor calls."""
-    import fire_compiler as F
-    # Build map of module -> set of variable names
-    try:
-        var_tables = M.dylib_module_variables(dylib_export_lists(imported)) if imported else {}
-    except Exception:
-        return 0
-    if not var_tables:
-        return 0
-    # Also build by_module bindings from symbols
-    module_by_local = {}
-    var_names_by_module = {}
-    for name, sym in (symbols or {}).items():
-        if getattr(sym, "site", None) == "imported":
-            mod = getattr(sym, "module", None)
-            if mod:
-                module_by_local[name] = (mod, name)  # local name -> (module, defining name)
-    done = 0
-    for fn in functions:
-        body = getattr(fn, "body", None)
-        if not isinstance(body, list):
-            continue
-        locals_set = _function_locals(fn)
-        def transform(node, parent=None, parent_attr=None):
-            nonlocal done
-            # Check if this is an assignment target
-            if isinstance(node, F.AssignStmt):
-                tgt = getattr(node, "target", None)
-                if isinstance(tgt, F.MemberExpr):
-                    root = tgt.obj
-                    if isinstance(root, F.IdentExpr):
-                        root_name = root.name
-                        if root_name in locals_set:
-                            return node
-                        leaf = tgt.member
-                        is_var = False
-                        for m, vlist in var_tables.items():
-                            if leaf in (vlist or []):
-                                is_var = True
-                                break
-                        if is_var:
-                            call = F.CallExpr(
-                                func=F.MemberExpr(obj=F.IdentExpr(name=root_name),
-                                                  member=f"set_{leaf}"),
-                                args=[getattr(node, "value")],
-                                kwargs=[])
-                            done += 1
-                            return F.ExprStmt(expr=call)
-                elif isinstance(tgt, F.IdentExpr):
-                    tname = tgt.name
-                    if tname in locals_set:
-                        return node
-                    if tname in module_by_local:
-                        mod, defname = module_by_local[tname]
-                        is_var = False
-                        for m, vlist in var_tables.items():
-                            if defname in (vlist or []):
-                                is_var = True
-                                break
-                        if is_var:
-                            call = F.CallExpr(
-                                func=F.MemberExpr(obj=F.IdentExpr(name=mod),
-                                                  member=f"set_{defname}"),
-                                args=[getattr(node, "value")],
-                                kwargs=[])
-                            done += 1
-                            return F.ExprStmt(expr=call)
-            # Handle reads
-            if isinstance(node, F.MemberExpr):
-                root = node.obj
-                if isinstance(root, F.IdentExpr):
-                    root_name = root.name
-                    if root_name in locals_set:
-                        return node
-                    leaf = node.member
-                    is_var = False
-                    for m, vlist in var_tables.items():
-                        if leaf in (vlist or []):
-                            is_var = True
-                            break
-                    if is_var:
-                        call = F.CallExpr(
-                            func=F.MemberExpr(obj=F.IdentExpr(name=root_name),
-                                              member=f"get_{leaf}"),
-                            args=[], kwargs=[])
-                        done += 1
-                        return call
-            if isinstance(node, F.IdentExpr):
-                n = node.name
-                if n in locals_set:
-                    return node
-                if n in module_by_local:
-                    mod, defname = module_by_local[n]
-                    is_var = False
-                    for m, vlist in var_tables.items():
-                        if defname in (vlist or []):
-                            is_var = True
-                            break
-                    if is_var:
-                        call = F.CallExpr(
-                            func=F.MemberExpr(obj=F.IdentExpr(name=mod),
-                                              member=f"get_{defname}"),
-                            args=[], kwargs=[])
-                        done += 1
-                        return call
-            return node
-        M.rewrite_tree(body, transform)
-    return done
 
 
 def _dialect_cast_replacement(node, ctx: dict):
@@ -18438,6 +18352,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # neither is any literal with a field — those reach the refusal, which names
     # the missing buffer.
     M.fold_constant_interpolated_literals(stmts)
+    _transform_interpolated_literals_in_format_calls(stmts)
     M.refuse_interpolated_literals(stmts)
     # A default EXPRESSION lives in a FunctionDef's `param_defaults` DICT, and
     # `iter_nodes` does not descend a dict's values (it recurses through
@@ -18457,6 +18372,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         if isinstance(_defaults, dict) and _defaults:
             _values = list(_defaults.values())
             M.fold_constant_interpolated_literals(_values)
+            _transform_interpolated_literals_in_format_calls(_values)
             M.refuse_interpolated_literals(_values)
     # The unit's STRING TEXT facts, published here for the same reason and in the
     # same place as the two lines above: the consumers are a per-function walk
@@ -23470,34 +23386,6 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     library_containers = sorted(n for n, s in library_slots.items()
                                 if not s.mutable)
 
-    # Auto-generate accessors for writable globals so cross-module access
-    # goes through exported functions (item 2 of FORMAL_module_state_no_storage).
-    existing_names = {getattr(fn, "name", "") for fn in ordered}
-    for varname in library_variables:
-        getter_name = f"get_{varname}"
-        if getter_name not in existing_names:
-            getter = F.FunctionDef(
-                name=getter_name,
-                params=[],
-                return_type=None,
-                body=[F.GlobalStmt(names=[varname]),
-                      F.ReturnStmt(value=F.IdentExpr(name=varname))],
-                line=0, col=0)
-            ordered.append(getter)
-            existing_names.add(getter_name)
-        setter_name = f"set_{varname}"
-        if setter_name not in existing_names:
-            setter = F.FunctionDef(
-                name=setter_name,
-                params=[(f"_{varname}_val", None)],
-                return_type=None,
-                body=[F.GlobalStmt(names=[varname]),
-                      F.AssignStmt(target=F.IdentExpr(name=varname),
-                                   value=F.IdentExpr(name=f"_{varname}_val"))],
-                line=0, col=0)
-            ordered.append(setter)
-            existing_names.add(setter_name)
-
     # The gimple runtime's C library, on THIS library's link line, for the same
     # reason and under the same condition as on the executable path — and here it
     # is not tidiness. A module dylib that binds `mojo_strlen` has a symbol in
@@ -23679,12 +23567,6 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             variables=_namespace_variables(reexports, linked),
             containers=_namespace_containers(reexports, linked),
             traits=traits)
-
-    # Transform cross-module variable accesses to accessors in library code too.
-    try:
-        _apply_imported_variable_accessors(ordered, linked, {})
-    except Exception:
-        pass
 
     # A DYDLIB cannot export a function that returns a frame, and this is the
     # one place that knows it: the convention needs the CALLER to reserve the
@@ -24124,3 +24006,163 @@ def _prove_dylib_result(result: dict, code: bytes, info: dict, exports: list,
         result["proof_sorries"] = n_sorries
         if not ok:
             raise FormalBuildError(f"proof check failed: {detail}")
+
+
+def _transform_interpolated_literals_in_format_calls(stmts):
+    """Transform f-strings in printf/print calls to printf-style format + args."""
+    if not isinstance(stmts, list):
+        return
+    try:
+        # Build simple type hints
+        string_vars = set()
+        int_vars = set()
+        for node in M.iter_nodes(stmts):
+            try:
+                AssignStmt = getattr(F, 'AssignStmt', None)
+                if AssignStmt and isinstance(node, AssignStmt):
+                    target = getattr(node, 'target', None)
+                    value = getattr(node, 'value', None)
+                    if isinstance(value, getattr(F, 'StringLiteral', type(None))):
+                        if isinstance(target, getattr(F, 'IdentExpr', None)):
+                            string_vars.add(target.name)
+                    elif isinstance(value, getattr(F, 'IntLiteral', type(None))):
+                        if isinstance(target, getattr(F, 'IdentExpr', None)):
+                            int_vars.add(target.name)
+                    continue
+                if hasattr(node, 'targets') and hasattr(node, 'value'):
+                    targets = getattr(node, 'targets', []) or []
+                    value = getattr(node, 'value', None)
+                    if isinstance(value, getattr(F, 'StringLiteral', type(None))):
+                        for t in targets:
+                            if isinstance(t, getattr(F, 'IdentExpr', None)):
+                                string_vars.add(t.name)
+                    elif isinstance(value, getattr(F, 'IntLiteral', type(None))):
+                        for t in targets:
+                            if isinstance(t, getattr(F, 'IdentExpr', None)):
+                                int_vars.add(t.name)
+            except Exception:
+                pass
+        for node, parent in M.iter_nodes_with_parent(stmts):
+            if not isinstance(node, F.CallExpr):
+                continue
+            # Check if it's a printf or print call
+            callee_name = None
+            try:
+                if hasattr(M, 'call_callee_name'):
+                    callee_name = M.call_callee_name(getattr(node, 'func', None))
+            except Exception:
+                pass
+            if callee_name is None and isinstance(getattr(node, 'func', None), F.IdentExpr):
+                callee_name = node.func.name
+            try:
+                if (callee_name not in ('printf', 'print')) and hasattr(M, 'printf_callee_name'):
+                    pn = M.printf_callee_name(node)
+                    if pn:
+                        callee_name = pn
+            except Exception:
+                pass
+            if callee_name not in ('printf', 'print'):
+                continue
+            args = list(getattr(node, 'args', []) or [])
+            new_args = []
+            extra_args = []
+            format_replaced = False
+            is_print_call = callee_name == 'print'
+            for arg in args:
+                try:
+                    if M.is_interpolated_literal(arg):
+                        spelled = getattr(arg, 'value', '')
+                        try:
+                            segs = M.interpolated_literal_segments(spelled)
+                        except Exception:
+                            new_args.append(arg)
+                            continue
+                        fmt_parts = []
+                        field_exprs = []
+                        ok = True
+                        for seg in segs:
+                            if seg[0] == 'lit':
+                                fmt_parts.append(seg[1].replace('%', '%%'))
+                            elif seg[0] == 'field':
+                                _kind, expr_str, spec, conv = seg
+                                if spec or conv:
+                                    ok = False
+                                    break
+                                expr_stripped = expr_str.strip()
+                                parsed = None
+                                fmt_spec = '%d'
+                                # Try to detect literal types
+                                try:
+                                    # String literal
+                                    if len(expr_stripped) >= 2 and ((expr_stripped[0] == '"' and expr_stripped[-1] == '"') or (expr_stripped[0] == "'" and expr_stripped[-1] == "'")):
+                                        parsed = F.StringLiteral(expr_stripped[1:-1]) if hasattr(F.StringLiteral, '__init__') else F.StringLiteral(value=expr_stripped[1:-1])
+                                        fmt_spec = '%s'
+                                    # Integer literal
+                                    elif expr_stripped.lstrip('-').isdigit():
+                                        try:
+                                            parsed = F.IntLiteral(int(expr_stripped))
+                                        except Exception:
+                                            parsed = F.IntLiteral(value=int(expr_stripped))
+                                        fmt_spec = '%d'
+                                    # Identifier
+                                    else:
+                                        try:
+                                            parsed = F.IdentExpr(expr_stripped)
+                                        except Exception:
+                                            try:
+                                                parsed = F.IdentExpr(name=expr_stripped)
+                                            except Exception:
+                                                parsed = None
+                                        if isinstance(parsed, getattr(F, 'IdentExpr', None)):
+                                            name = getattr(parsed, 'name', expr_stripped)
+                                            if name in string_vars:
+                                                fmt_spec = '%s'
+                                            elif name in int_vars:
+                                                fmt_spec = '%d'
+                                            else:
+                                                fmt_spec = '%d'
+                                        else:
+                                            fmt_spec = '%d'
+                                except Exception:
+                                    try:
+                                        parsed = F.IdentExpr(expr_stripped)
+                                        fmt_spec = '%d'
+                                    except Exception:
+                                        parsed = None
+                                        ok = False
+                                        break
+                                fmt_parts.append(fmt_spec)
+                                if parsed is not None:
+                                    field_exprs.append(parsed)
+                                else:
+                                    ok = False
+                                    break
+                            else:
+                                ok = False
+                                break
+                        if not ok or not field_exprs:
+                            new_args.append(arg)
+                            continue
+                        fmt_str = ''.join(fmt_parts)
+                        if is_print_call and not fmt_str.endswith('\n'):
+                            fmt_str += '\n'
+                        try:
+                            fmt_node = F.StringLiteral(fmt_str)
+                        except Exception:
+                            fmt_node = F.StringLiteral(value=fmt_str)
+                        new_args.append(fmt_node)
+                        extra_args.extend(field_exprs)
+                        format_replaced = True
+                        continue
+                except Exception:
+                    pass
+                new_args.append(arg)
+            if format_replaced and extra_args:
+                try:
+                    node.args = new_args + extra_args
+                    if is_print_call:
+                        node.func = F.IdentExpr('printf')
+                except Exception:
+                    pass
+    except Exception:
+        pass
