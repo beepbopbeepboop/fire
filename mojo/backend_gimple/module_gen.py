@@ -18389,6 +18389,19 @@ def gen_module_impl(self, stmts: list):
     # bodies exist — a `print(x)` of a list literal in an IMPORTED module is a
     # reference, and that module's text is spliced into this `parts` long after
     # this module's own code was written.
+    try:
+        if hasattr(self, '_module_stmts'):
+            self._module_stmts.clear()
+        if hasattr(self, '_all_transitive_stmts_ordered'):
+            self._all_transitive_stmts_ordered.clear()
+        if hasattr(self, '_all_transitive_stmts_ids'):
+            self._all_transitive_stmts_ids.clear()
+        try:
+            imported_stmts.clear()
+        except Exception:
+            pass
+    except Exception:
+        pass
     return self._dedup_variadic_externs(_drop_unreferenced_unimpl_stubs(_drop_unreachable_repr_cluster(parts)))
 
 def __getattr__(name):
