@@ -8650,6 +8650,24 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
             body=s.body, else_body=s.else_body)
         return _pre + gen._cpp_for_stmt(_inner_for, declared, indent)
+    # Also handle calls through callable locals/params that are std::function
+    # (e.g., foreign callables like csv.reader from the foreign callable table)
+    if (isinstance(s.iterable, gimple_ctypes.CallExpr)
+            and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
+            and s.iterable.func.name in getattr(gen, '_cpp_param_names', ())):
+        _cdecl = declared.get(s.iterable.func.name) if declared else None
+        if isinstance(_cdecl, str) and _cdecl.startswith('std::function'):
+            _wi = gen._cpp_fresh_name("_mg_witer")
+            declared[_wi] = 'MojoList *'
+            if not hasattr(gen, '_cpp_word_iter_locals'):
+                gen._cpp_word_iter_locals = set()
+            gen._cpp_word_iter_locals.add(_wi)
+            _call_txt = gen._cpp_expr(s.iterable)
+            _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
+            _inner_for = gimple_ctypes.ForStmt(
+                target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
+                body=s.body, else_body=s.else_body)
+            return _pre + gen._cpp_for_stmt(_inner_for, declared, indent)
     # `for <var> in <g>:` where `g` is a compiled-generator HANDLE local
     # (bound by `g = <compiled generator>(...)`, tracked in
     # `_cpp_generator_var_api`; same-module, an aliased import, or a
@@ -9925,6 +9943,21 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         if (isinstance(s.iterable, gimple_ctypes.CallExpr)
                 and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
                 and s.iterable.func.name in declared):
+            _cdecl = declared.get(s.iterable.func.name)
+            # Allow foreign callable std::function types
+            if isinstance(_cdecl, str) and _cdecl.startswith('std::function'):
+                # Try to handle like word iterable
+                _wi = gen._cpp_fresh_name("_mg_witer")
+                declared[_wi] = 'MojoList *'
+                if not hasattr(gen, '_cpp_word_iter_locals'):
+                    gen._cpp_word_iter_locals = set()
+                gen._cpp_word_iter_locals.add(_wi)
+                _call_txt = gen._cpp_expr(s.iterable)
+                _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
+                _inner_for = gimple_ctypes.ForStmt(
+                    target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
+                    body=s.body, else_body=s.else_body)
+                return _pre + gen._cpp_for_stmt(_inner_for, declared, indent)
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 f"a `for` over a call through the callable-local "
                 f"parameter '{s.iterable.func.name}(...)' is not "
