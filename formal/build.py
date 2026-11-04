@@ -18513,16 +18513,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         if _own:
             M.publish_module_raisers(_own, raise_graph.raising)
     for fn in functions:
-        # Handler arms with `as e` bindings are refused until the exception
-        # has a representation (§4b).
-        for node in M.iter_nodes(getattr(fn, "body", None)):
-            if isinstance(node, F.TryStmt):
-                for handler in (getattr(node, "handlers", None) or []):
-                    if getattr(handler, "name", None):
-                        body0 = (getattr(handler, "body", None) or [None])[0]
-                        if body0 is None:
-                            body0 = handler
-                        raise CodegenError(M.refuse_dropped_handler_arm(fn, (handler, body0, node)))
+
         found = M.unemitted_handler_arm(fn)
         if found is not None:
             raise CodegenError(M.refuse_dropped_handler_arm(fn, found))
