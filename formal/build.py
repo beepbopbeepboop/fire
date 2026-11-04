@@ -1831,7 +1831,6 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
             [path for _, path in resolved], project_root=source_path)
         demands = {}
         try:
-            import os
             _dbg = os.path.join(os.path.dirname(__file__), '..', '.tmp', 'DEBUG_BUILD.txt')
             os.makedirs(os.path.dirname(_dbg), exist_ok=True)
             with open(_dbg, 'a') as _f:
