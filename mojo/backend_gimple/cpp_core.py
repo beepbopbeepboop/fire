@@ -9,7 +9,6 @@ the class; cross-module references are qualified.
 from __future__ import annotations
 
 import copy
-import dataclasses
 import os
 import re
 
@@ -2073,7 +2072,7 @@ def _cpp_rename_ident_container(v, old: str, new: str):
     if isinstance(v, tuple):
         nv = tuple(_cpp_rename_ident_container(x, old, new) for x in v)
         return nv if nv != v else v
-    if dataclasses.is_dataclass(v):
+    if getattr(type(v), "__dataclass_fields__", None) is not None and not isinstance(v, type):
         return _cpp_rename_ident(v, old, new)
     return v
 
@@ -2093,14 +2092,21 @@ def _cpp_rename_ident(node, old: str, new: str):
     if isinstance(node, gimple_ctypes.IdentExpr):
         return (gimple_ctypes.IdentExpr(new, node.line, node.col)
                 if node.name == old else node)
-    if dataclasses.is_dataclass(node):
+    if getattr(type(node), "__dataclass_fields__", None) is not None and not isinstance(node, type):
         changes = {}
-        for f in dataclasses.fields(node):
-            v = getattr(node, f.name)
+        for fname in getattr(type(node), "__dataclass_fields__", {}):
+            if fname in ("line", "col"):
+                continue
+            v = getattr(node, fname)
             nv = _cpp_rename_ident_container(v, old, new)
             if nv is not v:
-                changes[f.name] = nv
-        return dataclasses.replace(node, **changes) if changes else node
+                changes[fname] = nv
+        if changes:
+            from dataclasses import fields as _dc_fields
+            kwargs = {f.name: changes.get(f.name, getattr(node, f.name))
+                      for f in _dc_fields(type(node))}
+            return type(node)(**kwargs)
+        return node
     return node
 
 
@@ -5442,12 +5448,13 @@ def _cpp_contains_yield(node) -> bool:
     the callers pass expression subtrees)."""
     if isinstance(node, (list, tuple)):
         return any(_cpp_contains_yield(x) for x in node)
-    if isinstance(node, type) or not dataclasses.is_dataclass(node):
+    if isinstance(node, type) or getattr(type(node), "__dataclass_fields__", None) is None:
         return False
     if isinstance(node, gimple_ctypes.YieldExpr):
         return True
+    from dataclasses import fields as _dc_fields
     return any(_cpp_contains_yield(getattr(node, f.name))
-               for f in dataclasses.fields(node))
+               for f in _dc_fields(type(node)))
 
 
 class _YieldWalk:
@@ -5488,7 +5495,7 @@ def _cpp_rewrite_yields(gen, node, w: _YieldWalk, conditional: bool = False):
         return [_cpp_rewrite_yields(gen, x, w, conditional) for x in node]
     if isinstance(node, tuple):
         return tuple(_cpp_rewrite_yields(gen, x, w, conditional) for x in node)
-    if isinstance(node, type) or not dataclasses.is_dataclass(node):
+    if isinstance(node, type) or getattr(type(node), "__dataclass_fields__", None) is None:
         return node
     if isinstance(node, gimple_ctypes.YieldExpr):
         value = (_cpp_rewrite_yields(gen, node.value, w, conditional)
@@ -5529,7 +5536,8 @@ def _cpp_rewrite_yields(gen, node, w: _YieldWalk, conditional: bool = False):
         out.condition, out.then_val, out.else_val = cond, then_v, else_v
         return out
     changes = {}
-    for f in dataclasses.fields(node):
+    from dataclasses import fields as _dc_fields
+    for f in _dc_fields(type(node)):
         v = getattr(node, f.name)
         nv = _cpp_rewrite_yields(gen, v, w, conditional)
         if nv is not v:
@@ -5780,7 +5788,8 @@ def _cpp_hoist_yield_operands(gen, s, declared: dict, indent: str):
         # The root yield stays the statement's own node (its identity is keyed
         # by the yield-site tables); only its operands are rewritten.
         new_stmt = copy.copy(s)
-        for f in dataclasses.fields(s):
+        from dataclasses import fields as _dc_fields
+        for f in _dc_fields(type(s)):
             v = getattr(s, f.name)
             if root is not None and v is root:
                 nv = v
@@ -7368,17 +7377,18 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
 
 
 def _cpp_copy_keep_attrs(node, changes: dict):
-    """`dataclasses.replace(node, **changes)` that also carries over the
-    attributes the pre-passes hang on AST nodes OUTSIDE their dataclass fields
-    (`_mojo_coro_body`, capture markers, ...): a plain `replace` drops them, and
-    a generator copied without them is no longer the generator the earlier
-    passes classified (a refusal that depended on one would silently vanish)."""
-    import dataclasses
-    new = dataclasses.replace(node, **changes)
-    names = set(f.name for f in dataclasses.fields(node))
-    for k in node.__dict__:
+    """Copy node with changes, carrying over attributes outside dataclass fields."""
+    from dataclasses import fields as _dc_fields
+    kwargs = {f.name: changes.get(f.name, getattr(node, f.name))
+              for f in _dc_fields(type(node))}
+    new = type(node)(**kwargs)
+    names = set(f.name for f in _dc_fields(type(node)))
+    for k in getattr(node, "__dict__", {}):
         if k not in names:
-            new.__dict__[k] = node.__dict__[k]
+            try:
+                setattr(new, k, getattr(node, k))
+            except Exception:
+                new.__dict__[k] = getattr(node, k)
     return new
 
 
@@ -7388,17 +7398,17 @@ def _cpp_dirent_rewrite(node, handles: set):
     `entry.is_dir(follow_symlinks=...)` / `is_file` / `is_symlink()` /
     `is_junction()` (always False on POSIX). The handle is the int64_t word
     `mojo_os_scandir` put in its list; nothing else about the body changes."""
-    import dataclasses
     G = gimple_ctypes
     if isinstance(node, list):
         return [_cpp_dirent_rewrite(x, handles) for x in node]
     if isinstance(node, tuple):
         return tuple(_cpp_dirent_rewrite(x, handles) for x in node)
-    if not dataclasses.is_dataclass(node) or isinstance(node, type):
+    if isinstance(node, type) or getattr(type(node), "__dataclass_fields__", None) is None:
         return node
+    from dataclasses import fields as _dc_fields
     new = _cpp_copy_keep_attrs(node, {
         f.name: _cpp_dirent_rewrite(getattr(node, f.name), handles)
-        for f in dataclasses.fields(node)})
+        for f in _dc_fields(type(node))})
     if (isinstance(new, G.MemberExpr) and isinstance(new.obj, G.IdentExpr)
             and new.obj.name in handles and new.member in ('name', 'path')):
         return G.CallExpr(func=G.IdentExpr(name='mojo_dirent_' + new.member),
@@ -7453,7 +7463,6 @@ def _cpp_lower_os_path_aliases(node, aliases: dict):
     solver sees `join(a, b)` as the string-returning call it is (a local that
     held the function would be an `int64_t` word, and `prefix = join(...)`
     would be declared one)."""
-    import dataclasses
     G = gimple_ctypes
     if isinstance(node, list):
         out = []
@@ -7470,11 +7479,12 @@ def _cpp_lower_os_path_aliases(node, aliases: dict):
         return out
     if isinstance(node, tuple):
         return tuple(_cpp_lower_os_path_aliases(x, aliases) for x in node)
-    if not dataclasses.is_dataclass(node) or isinstance(node, type):
+    if isinstance(node, type) or getattr(type(node), "__dataclass_fields__", None) is None:
         return node
+    from dataclasses import fields as _dc_fields
     new = _cpp_copy_keep_attrs(node, {
         f.name: _cpp_lower_os_path_aliases(getattr(node, f.name), aliases)
-        for f in dataclasses.fields(node)})
+        for f in _dc_fields(type(node))})
     if (isinstance(new, G.CallExpr) and isinstance(new.func, G.IdentExpr)
             and new.func.name in aliases):
         return G.CallExpr(
@@ -7535,7 +7545,6 @@ def _cpp_lower_posix_idioms(gen, node, handles=None):
     `path.samestat(a, b)`, `st.S_ISDIR(m)`, the `O_*` constants, `assert` as a
     real check. `handles` is the set of `DirEntry` loop targets (for
     `entry.stat`). Names the body binds itself are left alone."""
-    import dataclasses
     import os as _os
     G = gimple_ctypes
     if handles is None:
@@ -7559,11 +7568,12 @@ def _cpp_lower_posix_idioms(gen, node, handles=None):
         return [_cpp_lower_posix_idioms(gen, x, handles) for x in node]
     if isinstance(node, tuple):
         return tuple(_cpp_lower_posix_idioms(gen, x, handles) for x in node)
-    if not dataclasses.is_dataclass(node) or isinstance(node, type):
+    if isinstance(node, type) or getattr(type(node), "__dataclass_fields__", None) is None:
         return node
+    from dataclasses import fields as _dc_fields
     new = _cpp_copy_keep_attrs(node, {
         f.name: _cpp_lower_posix_idioms(gen, getattr(node, f.name), handles)
-        for f in dataclasses.fields(node)})
+        for f in _dc_fields(type(node))})
     if (isinstance(new, G.ForStmt) and isinstance(new.iterable, G.SliceExpr)
             and new.iterable.step is not None
             and isinstance(new.iterable.obj, G.IdentExpr)):
@@ -7730,7 +7740,6 @@ def _cpp_lower_scandir_withs(gen, node):
     use of a `for entry in entries` target rewritten to its `DirEntry` runtime
     call. Done on the AST BEFORE the generator's yield kinds are solved, so
     `yield entry.name` is a string yield, not an unresolved member read."""
-    import dataclasses
     G = gimple_ctypes
     if isinstance(node, list):
         out = []
@@ -7756,11 +7765,12 @@ def _cpp_lower_scandir_withs(gen, node):
         return out
     if isinstance(node, tuple):
         return tuple(_cpp_lower_scandir_withs(gen, x) for x in node)
-    if not dataclasses.is_dataclass(node) or isinstance(node, type):
+    if isinstance(node, type) or getattr(type(node), "__dataclass_fields__", None) is None:
         return node
+    from dataclasses import fields as _dc_fields
     return _cpp_copy_keep_attrs(node, {
         f.name: _cpp_lower_scandir_withs(gen, getattr(node, f.name))
-        for f in dataclasses.fields(node)})
+        for f in _dc_fields(type(node))})
 
 
 def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
