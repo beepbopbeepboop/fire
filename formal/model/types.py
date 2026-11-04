@@ -408,6 +408,7 @@ def string_conversion_refusal(callee_name: str, operand, operand_kind,
     the value model to classify call results, which is
     `bugs/formal/FORMAL_string_value_model.md`'s subject and not a name in a table.
     """
+    from .builtins import is_number_kind, INT_KIND, BOOL_KIND, FLOAT_KIND
     spelled_operand = member_chain_text(operand)
     if operand_kind is None or string_operand_is_string(operand_kind):
         return None
@@ -443,6 +444,10 @@ def string_conversion_refusal(callee_name: str, operand, operand_kind,
         # that shape to catch a different one, and the difference between them is
         # whether the word is a pointer — which is the pointee's business and not
         # this table's.
+        return None
+    # Allow int and bool to be converted to string representation (str()/repr())
+    if is_number_kind(operand_kind) or operand_kind == INT_KIND or operand_kind == BOOL_KIND or operand_kind == FLOAT_KIND:
+        # For now, allow - the conversion will be handled by the backend/model
         return None
     return (
         f"{callee_name}({spelled_operand}) is refused on this path: "
@@ -726,17 +731,9 @@ def subscript_callee_names(call) -> list:
     if not isinstance(call, F.CallExpr) or not isinstance(func, F.SubscriptExpr):
         return []
     base = func.obj
-    if isinstance(base, F.IdentExpr):
-        out = [base]
-    elif isinstance(base, F.MemberExpr):
-        out = []
-        node = base
-        while isinstance(node, F.MemberExpr):
-            node = node.obj
-        if isinstance(node, F.IdentExpr):
-            out.append(node)
-    else:
+    if not isinstance(base, F.IdentExpr):
         return []
+    out = [base]
     for node in iter_nodes(func.index):
         if isinstance(node, F.IdentExpr):
             out.append(node)

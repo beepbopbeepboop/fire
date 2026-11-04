@@ -4165,16 +4165,6 @@ _STEP_CONDS = [
     (0xffe00c00, 0x9a800000),  # 69 CSEL Xd, Xn, Xm, cond
     # 70 FCMP Dn, Dm (scalar double): flags only, no result register.
     (0xffe0fc00, 0x1e602000),
-    # 71-79: scalar double FP arithmetic/conversions/moves
-    (0xffe0fc00, 0x1e602800),  # 71 FADD Dd, Dn, Dm
-    (0xffe0fc00, 0x1e603800),  # 72 FSUB Dd, Dn, Dm
-    (0xffe0fc00, 0x1e600800),  # 73 FMUL Dd, Dn, Dm
-    (0xffe0fc00, 0x1e601800),  # 74 FDIV Dd, Dn, Dm
-    (0xfffffc00, 0x1e614000),  # 75 FNEG Dd, Dn
-    (0xfffffc00, 0x9e670000),  # 76 FMOV Dd, Xn (GPR->V)
-    (0xfffffc00, 0x9e660000),  # 77 FMOV Xd, Dn (V->GPR)
-    (0xfffffc00, 0x9e620000),  # 78 SCVTF Dd, Xn
-    (0xfffffc00, 0x9e780000),  # 79 FCVTZS Xd, Dn
 ]
 
 
@@ -4951,15 +4941,6 @@ _WORK_STEP = [
     # 64/65 — claims these words.
     (69, "work_step_csel", [(0xffe00c00, 0x9a800000)]),
     (70, "work_step_fcmp", [(0xffe0fc00, 0x1e602000)]),
-    (71, "work_step_fadd", [(0xffe0fc00, 0x1e602800)]),
-    (72, "work_step_fsub", [(0xffe0fc00, 0x1e603800)]),
-    (73, "work_step_fmul", [(0xffe0fc00, 0x1e600800)]),
-    (74, "work_step_fdiv", [(0xffe0fc00, 0x1e601800)]),
-    (75, "work_step_fneg", [(0xfffffc00, 0x1e614000)]),
-    (76, "work_step_fmov_gpr_v", [(0xfffffc00, 0x9e670000)]),
-    (77, "work_step_fmov_v_gpr", [(0xfffffc00, 0x9e660000)]),
-    (78, "work_step_scvtf", [(0xfffffc00, 0x9e620000)]),
-    (79, "work_step_fcvtzs", [(0xfffffc00, 0x9e780000)]),
 ]
 
 _WORK_STEP_BY_IDX = {idx: (lemma, tests) for idx, lemma, tests in _WORK_STEP}

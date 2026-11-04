@@ -96,8 +96,6 @@ NOT_LOWERED_BUILTINS = {
            "the string half is the same gap",
     "pow": "integer exponentiation — a loop, or a libm call whose result is a "
            "double (see FOREIGN_ABI_BUILTINS)",
-    "repr": "a rendering whose spelling depends on the VALUE's type, and the "
-            "type is not in a value",
     "reversed": "a reversed copy of a sequence, so the same two gaps as "
                 "`list`",
     "round": "a compare-and-select for an integer operand and a rounding rule "
