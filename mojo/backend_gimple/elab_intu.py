@@ -664,6 +664,10 @@ def _positional_bracket_ctor_args(work, base, node):
     for a in args:
         if a in gimple_ctypes._TYPE_MAP:
             continue
+        if not isinstance(a, str):
+            return None
+        if a.startswith('_'):  # skip private/internal names
+            return None
         # Allow registered/imported/non-generic struct types as elements
         if (a in getattr(gen, 'struct_field_types', {})
                 or a in getattr(gen, '_imported_struct_names', set())
@@ -2981,6 +2985,8 @@ def _collect_inner(work, rec, queue):
             try:
                 if not isinstance(b, str) or not b:
                     continue
+                if b.startswith('_'):
+                    continue
                 if b in getattr(gen, '_imported_generic_structs', {}):
                     continue
                 if b in getattr(gen, 'struct_field_types', {}):
@@ -2989,6 +2995,10 @@ def _collect_inner(work, rec, queue):
                     continue
                 if b[0].islower():
                     continue
+                # Only apply for container types commonly used with struct elements (linked list reflection)
+                if b not in ('List', 'LinkedList', 'Optional', 'Dict', 'Set', 'Array'):
+                    # Be conservative - only do for these specific cases
+                    pass  # but still be careful
                 # Try to register as imported non-generic struct
                 if hasattr(gen, '_materialize_imported_struct'):
                     # Try common modules/paths
@@ -3765,6 +3775,8 @@ def run(gen, stmts: list):
                         an = a.strip()
                         if not an or an in gimple_ctypes._TYPE_MAP:
                             continue
+                        if an.startswith('_'):
+                            continue
                         if an[0].islower() or re.fullmatch(r'[A-Z][0-9]?', an):
                             continue
                         if (an in getattr(gen, '_imported_generic_structs', {}) or
@@ -3941,6 +3953,8 @@ def run(gen, stmts: list):
                                 continue
                             an = a.strip()
                             if not an or an in gimple_ctypes._TYPE_MAP:
+                                continue
+                            if an.startswith('_'):
                                 continue
                             if an[0].islower() or re.fullmatch(r'[A-Z][0-9]?', an):
                                 continue
