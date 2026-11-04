@@ -205,8 +205,7 @@ TWO_OPAQUE_CALLS = {
 # conditionals would have.  Measured: the leaf checks (5051 lines, 0 sorries);
 # the branching one exceeds Lean's own `-M 6144` — and so does a program with
 # NO CALL and the same number of conditionals, which is why the boundary is the
-# path count and not the call (`bugs/formal/FORMAL_a_three_branch_certificate_exceeds_
-# the_lean_bound.md`).
+# path count and not the call ((the bug was fixed and its doc deleted)).
 SAME_IMAGE_CALL = {
     "same_image_leaf": (
         "def helper(n):\n"
@@ -4290,7 +4289,7 @@ class TestSameImageCallLean(unittest.TestCase):
     not about the call, because a program with NO call and the same number of
     conditionals exceeds Lean's own `-M` on the same proof generator — measured,
     and the reason it belongs to
-    `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` rather
+    (now closed, doc deleted) rather
     than to a row that would read as a call that cannot be proved.
     """
 
@@ -7660,11 +7659,10 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
 class TestFloatOrderIsDecidableAndFloatEqualityIsNot(unittest.TestCase):
     """Which of the ten IEEE-754 arms a `work_step_*` can be written for AT ALL.
 
-    `bugs/formal/FORMAL_arm64_ieee754_has_no_step_arms.md` says to start with `FCMP`
-    and not with the arithmetic, and gives a reason about the FLAGS ("it has
-    the flags to get right rather than a register") rather than about
-    PROVABILITY. This class is the measurement behind that choice, and it is a
-    question about LEAN rather than about arm64 — which is why it is three
+    The approach is to start with `FCMP` and not with the arithmetic, for a reason
+    about the FLAGS ("it has the flags to get right rather than a register")
+    rather than about PROVABILITY. This class is the measurement behind that choice,
+    and it is a question about LEAN rather than about arm64 — which is why it is three
     two-line files with no ProofLib import (0.3 s each, not a proof run), one
     per question, so each verdict is its own exit status and nothing has to be
     parsed out of a shared transcript:
@@ -7735,7 +7733,7 @@ class TestFloatOrderIsDecidableAndFloatEqualityIsNot(unittest.TestCase):
             self.assertEqual(rc, 0,
                              "%s: Lean's answer changed, and this class is "
                              "the measurement behind the ORDER of work in "
-                             "`bugs/formal/FORMAL_arm64_ieee754_has_no_step_arms.md` "
+                             "the FP step-arms plan "
                              "-- re-read it before believing the row below: %s"
                              % (name, out[:400]))
         else:

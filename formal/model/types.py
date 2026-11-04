@@ -726,9 +726,17 @@ def subscript_callee_names(call) -> list:
     if not isinstance(call, F.CallExpr) or not isinstance(func, F.SubscriptExpr):
         return []
     base = func.obj
-    if not isinstance(base, F.IdentExpr):
+    if isinstance(base, F.IdentExpr):
+        out = [base]
+    elif isinstance(base, F.MemberExpr):
+        out = []
+        node = base
+        while isinstance(node, F.MemberExpr):
+            node = node.obj
+        if isinstance(node, F.IdentExpr):
+            out.append(node)
+    else:
         return []
-    out = [base]
     for node in iter_nodes(func.index):
         if isinstance(node, F.IdentExpr):
             out.append(node)
