@@ -6350,6 +6350,10 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
             gen._emit_call('int', ti, 'mojo_dict_contains_bytes',
                            [('MojoDict *', rv), ('MojoBytes *', xv)])
             return 'int', ti
+        if x_is_none:
+            gen._emit_call('int', ti, 'mojo_dict_contains_none',
+                           [('MojoDict *', rv)])
+            return 'int', ti
         # Ensure key is char * for dict operations (all dict keys are strings in runtime)
         xt, xv = gen._char_to_cstr(xt, xv, True, True)
         gen._emit_call('int', ti, 'mojo_dict_contains', [('MojoDict *', rv), (xt, xv)])
@@ -7401,6 +7405,37 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
     runtime KeyError the moment the new dict-keyed `%`-formatting routed
     argparse.py's real `text % dict(prog=self._prog)` shape through it.
     Single source of truth for key coercion + per-type setter dispatch."""
+    if _is_none_literal(key_expr):
+        vt, vv = gen.lower_expr(val_expr)
+        gen._note_container_callable_ret(t, vv, vt, val_expr)
+        if vt == 'char *':
+            if isinstance(vv, str) and vv.startswith('_slit_'):
+                vv = gen._new_val('char *', f"{vv}")
+            gen._emit_call('void', '', 'mojo_dict_set_none_key_str',
+                           [('MojoDict *', t), ('char *', vv)])
+            return
+        if gen._is_none_literal(val_expr) or vt == 'int' and vv == '0' and _is_none_literal(val_expr):
+            gen._emit_call('void', '', 'mojo_dict_set_none_key_none',
+                           [('MojoDict *', t)])
+            return
+        if vt in gimple_ctypes._FLOAT_TYPES:
+            gen._emit_call('void', '', 'mojo_dict_set_none_key_double',
+                           [('MojoDict *', t), (vt, vv)])
+            return
+        _shim = gimple_exprtypes.struct_elem_repr_shim(gen, vt)
+        if _shim:
+            gen._emit_call('void', '', 'mojo_dict_set_none_key_struct',
+                           [('MojoDict *', t), (vt, vv)])
+            return
+        if gimple_exprtypes.is_python_bool_expr(gen, val_expr):
+            vv64 = gen._to_int64(vt, vv)
+            gen._emit_call('void', '', 'mojo_dict_set_none_key_bool',
+                           [('MojoDict *', t), ('int64_t', vv64)])
+            return
+        vv64 = gen._to_int64(vt, vv)
+        gen._emit_call('void', '', 'mojo_dict_set_none_key_int',
+                       [('MojoDict *', t), ('int64_t', vv64)])
+        return
     kt, kv = gen.lower_expr(key_expr)
     vt, vv = gen.lower_expr(val_expr)
     # A bytes key is its OWN key domain in the runtime (see `_DictSlot.keykind`).
