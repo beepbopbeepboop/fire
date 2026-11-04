@@ -2676,7 +2676,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             # `strdup`. Every other kind of box is passed as it was; runtime
             # helpers (`mojo_*`) are box-aware and keep the box.
             _un = gen._new_temp('int64_t')
-            gen._emit(f"  {_un} = mojo_unbox_plain ({aval});")
+            gen._emit(f"  {_un} = mojo_unbox_none ({aval});")
             aval = _un
         if ptype == atype or ptype == '...':
             # Skip coercion only if C types match exactly

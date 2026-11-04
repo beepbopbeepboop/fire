@@ -843,6 +843,10 @@ dylib_exports: list = None, globals_base: int = None,
         # flush (a `return` inside a `finally`) does not emit an inner body the
         # outer flush already ran.
         self._finished_finally = set()
+        self._exception_in_flight = False
+        self._with_suppress_resume_labels = []
+        self._diverged = False
+        self._suppress_to_resume = False
         # Bump cursor into the fixed frame's unused scratch region
         # (grows upward from frame bottom). Reset per function.
         self._list_cursor = 0
@@ -3158,29 +3162,6 @@ dylib_exports: list = None, globals_base: int = None,
             f"arm64 path")
 
     def _flush_pending_finally(self, depth: int = 0) -> bool:
-        """Emit pending try-finally frames with index >= depth (innermost
-        first), X0 saved across them.
-
-        `depth` is 0 for return (run every enclosing finally) and the
-        loop's entry `fin_depth` for break/continue (only frames opened
-        inside that loop).
-
-        Returns whether the flushed bodies ENDED the path (an unconditional
-        `return` inside one of them), so the caller knows not to emit a second
-        epilogue — the double frame teardown that SIGBUSes arm64 (pinned by
-        `test_formal_exceptions.py::a_return_inside_a_finally_wins`).
-
-        **The frames are KEPT, and that is the fix.** This used to
-        `del self._pending_finally[depth:]` first, to stop a `return` inside a
-        `finally` from re-entering the same body; but the truncation removed the
-        frame for every LATER exit site in the same `try` too, so the second
-        `return` reached here with an empty list and emitted no cleanup at all
-        (pinned by
-        `test_formal_match.py::second_exit_from_a_try_runs_the_finally`).
-        Re-entrancy is an identity question — is THIS body already being
-        emitted — and `_emitting_finally`/`_finished_finally` answer it without
-        destroying anything.
-        """
         # A flush started from a statement (not from inside a finally) unwinds
         # a fresh exit path; a nested one (a return/raise inside a finally) is
         # part of the same unwinding and must remember what already ran.
@@ -3191,11 +3172,6 @@ dylib_exports: list = None, globals_base: int = None,
                 and id(f) not in self._finished_finally]
         if not fins:
             return False
-        # An unconditional `return` inside a body transfers control out of the
-        # image, so every frame OUTER to it is dead code and this path needs no
-        # epilogue from the caller. `run` is therefore the frames that actually
-        # execute, innermost first, and `terminated` says one of them ends the
-        # path.
         run = []
         terminated = False
         for fin in reversed(fins):
@@ -3203,24 +3179,55 @@ dylib_exports: list = None, globals_base: int = None,
             if _always_returns(fin):
                 terminated = True
                 break
-        # **X0 is saved only when the path FALLS THROUGH.** A body that returns
-        # supplies its own value, and the `stp`/`ldp` pair would leave SP 16
-        # bytes low when that body's `_emit_epilogue` does its own
-        # `add sp, #_SCRATCH` — the second half of the arm64 double-epilogue
-        # SIGBUS (`test_formal_exceptions.py::a_return_inside_a_finally_wins`).
         saved = not terminated
         if saved:
             self.asm.emit(encode_stp_sp_pre(0, 31))
         for fin in run:
             self._emitting_finally.add(id(fin))
-            try:
+            exc_flight = getattr(self, '_exception_in_flight', False)
+            suppressible_exit = False
+            if exc_flight:
                 for s in fin:
-                    self._emit_stmt(s)
+                    if getattr(s, '_with_exit_suppress', False):
+                        suppressible_exit = True
+                        break
+                    v = getattr(s, 'value', None)
+                    if v is not None and getattr(v, '_with_exit_suppress', False):
+                        suppressible_exit = True
+                        break
+            try:
+                if exc_flight and suppressible_exit and getattr(self, '_with_suppress_resume_labels', None):
+                    for s in fin:
+                        self._emit_stmt(s)
+                    self.asm.emit(encode_cmp_xn_imm(0, 0))
+                    skip_label = f"{self.func_name}_with_nosuppress_{id(fin)}"
+                    nosuppress = f"{self.func_name}_with_nosuppress_cont_{id(fin)}"
+                    self.asm.emit(encode_cbz_xn(0, 0))
+                    self.asm.emit_label_rel(skip_label, here_offset=-4)
+                    # truthy - suppress
+                    self._exception_in_flight = False
+                    if saved:
+                        self.asm.emit(encode_ldp_sp_post(0, 31))
+                    resume = self._with_suppress_resume_labels[-1]
+                    self._suppress_to_resume = True
+                    self.asm.emit(encode_b(0))
+                    self.asm.emit_label_rel(resume, here_offset=-4)
+                    self.asm.label(skip_label)
+                    break  # break only on suppression
+                else:
+                    for s in fin:
+                        self._emit_stmt(s)
             finally:
                 self._emitting_finally.discard(id(fin))
-            self._finished_finally.add(id(fin))
+            if exc_flight:
+                self._finished_finally.add(id(fin))
+            if exc_flight and suppressible_exit and not getattr(self, '_exception_in_flight', True):
+                break
         if saved:
-            self.asm.emit(encode_ldp_sp_post(0, 31))
+            if getattr(self, '_exception_in_flight', False):
+                self.asm.emit(encode_ldp_sp_post(0, 31))
+            else:
+                self.asm.emit(encode_ldp_sp_post(0, 31))
         return terminated
 
     def _emit_exit(self, status) -> None:
@@ -3349,29 +3356,20 @@ dylib_exports: list = None, globals_base: int = None,
             if kind == "bl" and sym == "fflush")
 
     def _emit_diverge(self, status: int | None = 1) -> None:
-        """Leave the machine: run every enclosing finally, then `exit(status)`.
-
-        The ONE way control stops on this path, and both of its callers share
-        it rather than spelling the exit each: a `raise`, which has no unwinder
-        to route to, and a dialect trap used as a statement
-        (`model.mlir_effect_diverge_call`), which has no result and so leaves
-        nothing else to emit. Two copies of the exit is how two of them come to
-        differ, and the finally flush is the part that is easy to drop — a
-        `raise` inside a `try` must still run the `finally` on its way out.
-
-        `status` is a parameter rather than a constant because
-        `raise SystemExit(3)` is CPython's way of saying "exit 3", and
-        `model.raise_exit_status` is where that is decided. Every other caller
-        passes nothing and gets the 1 the whole hierarchy leaves behind.
-
-        **`None` is the COMPUTED status and the caller has already pushed the
-        word**, which is what `_emit_exit` pops. The push is here rather than in
-        `_emit_raise` because the finally flush is here: it is SP-balanced
-        (`stp`/`ldp` around the bodies), so a word pushed before it survives, and
-        a word held in a register would not be guaranteed to.
-        """
-        self._flush_pending_finally()
-        self._emit_exit(status)
+        """Leave the machine: run every enclosing finally, then `exit(status)`."""
+        prev = getattr(self, '_exception_in_flight', False)
+        self._exception_in_flight = True
+        try:
+            self._flush_pending_finally()
+            if getattr(self, '_exception_in_flight', False):
+                self._exception_in_flight = False
+                self._emit_exit(status)
+                return
+            else:
+                self._exception_in_flight = False
+                return
+        finally:
+            self._exception_in_flight = prev
 
     def _emit_diverge_computed(self, value) -> None:
         """`raise SystemExit(<computed>)`: evaluate it, then leave with it.
@@ -3514,6 +3512,13 @@ dylib_exports: list = None, globals_base: int = None,
         has silently not done what its source says. The copy is dead code in
         the unconditional case, which costs bytes and nothing else.
         """
+        suppressible = getattr(stmt, '_with_suppressible', False) or getattr(stmt, '_suppressible', False)
+        resume_label = None
+        if suppressible:
+            resume_label = f"{self.func_name}_with_suppress_resume_{id(stmt)}"
+            if not hasattr(self, '_with_suppress_resume_labels'):
+                self._with_suppress_resume_labels = []
+            self._with_suppress_resume_labels.append(resume_label)
         fin = stmt.finally_body or []
         if fin:
             self._pending_finally.append(fin)
@@ -3526,8 +3531,16 @@ dylib_exports: list = None, globals_base: int = None,
             if fin and self._pending_finally \
                     and self._pending_finally[-1] is fin:
                 self._pending_finally.pop()
-        for s in fin:
-            self._emit_stmt(s)
+        finished = getattr(self, '_finished_finally', None)
+        if fin and finished and id(fin) in finished:
+            pass
+        else:
+            for s in fin:
+                self._emit_stmt(s)
+        if suppressible and resume_label is not None:
+            self.asm.label(resume_label)
+            if hasattr(self, '_with_suppress_resume_labels') and self._with_suppress_resume_labels:
+                self._with_suppress_resume_labels.pop()
 
 
     def _emit_tuple_assign(self, stmt: F.AssignStmt) -> None:

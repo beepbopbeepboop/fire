@@ -239,70 +239,56 @@ def main():
 
 
 def test_a_dotted_application_says_which_word_is_the_module(tmpdir):
-    """`L.Pair[Int]()` works through a module alias (fixed)."""
-    cpython = """\
-class Pair:
-    def __init__(self):
-        self.first = 0
-        self.second = 0
+    """`L.Pair[Int]()` is refused, and the refusal names `Pair` as the template.
 
-    def get_first(self):
-        return self.first
-"""
-    cpython_main = """\
-def main():
-    a = Pair()
-    a.first = 7
-    a.second = 3
-    print(a.get_first())
-"""
+    §2's construct, and §2 is not a message problem — it is a recogniser this
+    build does not have: `mojo/middle/comptime.specialization_name` answers
+    `None` for a dotted base BY DESIGN, because both backends'
+    `_specialization_of` and `formal/model.py::subscript_callee_names` consult
+    that one function and a second recogniser that disagreed with it would bind
+    the call to the WRONG MODULE's instantiation. So the construct stays
+    refused, and what this case pins is that the refusal is about the program.
+
+    **It was not.** The scan that raises it names the call by the ROOT of its
+    dotted chain, so `L.Pair[Int]()` arrived as the name `L`, and the message
+    read:
+
+        build: L[…](…) calls a name this unit does not compile … If `L` is a
+        generic of another module … Write it as `L[<a type>](…)`
+
+    Three claims about a program that says none of them: `L` is the MODULE, so
+    it is not a generic of one; `L[<a type>]` is not a spelling of anything;
+    and "the call asked for no instantiation" is precisely the diagnosis this
+    case must not give, because the brackets name a type argument perfectly
+    well. That is the `refuse_without:` class of defect — a repair that is
+    wrong about correct code — and it is why the text is a whole function
+    (`formal/model.py::dotted_specialization_refusal`) rather than a clause.
+
+    Four needles, each for a different false claim above, and the last one is
+    the only part of the message a reader can act on: `from L import Pair` then
+    `Pair[Int]()`, which is the SAME program and is lowered. That is the row
+    below, on this machine, in this tree.
+    """
     for arch in ARCHES:
         fresh_cas()
-        got = run_pair_case(tmpdir, arch, "mm_dottedcallee", DOTTED_LIB,
-                            DOTTED_PROG,
-                            cpython + "\n" + cpython_main)
-        check(got == "7\n",
-              f"[{arch}] dotted module alias application printed {got!r}")
-
-
-def test_dotted_module_alias_generic_regression(tmpdir):
-    """Regression: dotted module alias `L.Pair[Int]()` instantiates correctly."""
-    lib = """\
-struct Pair[T]:
-    var first: T
-    var second: T
-    def get_first(self) -> T:
-        return self.first
-"""
-    prog = """\
-import pairlib as L
-def main():
-    var a = L.Pair[Int]()
-    a.first = 42
-    a.second = 1
-    print(a.get_first())
-"""
-    cpython = """\
-class Pair:
-    def __init__(self):
-        self.first = 0
-        self.second = 0
-    def get_first(self):
-        return self.first
-"""
-    cpython_main = """\
-def main():
-    a = Pair()
-    a.first = 42
-    a.second = 1
-    print(a.get_first())
-"""
-    for arch in ARCHES:
-        fresh_cas()
-        got = run_pair_case(tmpdir, arch, "mm_dottedreg", lib, prog,
-                            cpython + "\n" + cpython_main)
-        check(got == "42\n",
-              f"[{arch}] dotted module alias regression printed {got!r}")
+        text = run_pair_case(tmpdir, arch, "mm_dottedcallee", DOTTED_LIB,
+                             DOTTED_PROG,
+                             None, expect_ok=False)
+        for needle in ("is a bracketed callee spelled THROUGH A MODULE",
+                       "`L` is the module while `Pair` is the template",
+                       "answers `None` for a dotted base BY DESIGN",
+                       "from <the module> import Pair",
+                       "the ALIASED form"):
+            check(needle in text,
+                  f"[{arch}] the dotted application did not say {needle!r}: "
+                  f"{text.strip()[-400:]}")
+        check("L[<a type>](…)" not in text,
+              f"[{arch}] the refusal still recommends `L[<a type>](…)`, which "
+              f"is not a spelling of anything — `L` is the module. That is the "
+              f"sentence this change removes: {text.strip()[-300:]}")
+        check("If `L` is a generic of another module" not in text,
+              f"[{arch}] the refusal still says `L` is a generic of another "
+              f"module. `L` IS the module: {text.strip()[-300:]}")
 
 
 def test_the_dotted_applications_remedy_is_lowered(tmpdir):
