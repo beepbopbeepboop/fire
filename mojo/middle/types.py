@@ -2616,6 +2616,18 @@ _FOREIGN_CALLABLES = {
 }
 
 
+def _get_qualified_name(expr):
+    """Extract a dotted qualified name from an expression (IdentExpr or MemberExpr chain)."""
+    if isinstance(expr, IdentExpr):
+        return expr.name
+    if isinstance(expr, MemberExpr):
+        obj_name = _get_qualified_name(expr.obj)
+        if obj_name is None:
+            return None
+        return obj_name + '.' + expr.member
+    return None
+
+
 def _cpp_lambda_ctype(lam):
     """The callable-value declared ctype for a coroutine-body `lambda`
     literal, or None when the shape is not admitted.
@@ -2644,6 +2656,9 @@ def _cpp_lambda_ctype(lam):
         _n = _p[0]
         _d = _p[1]
         if _d is not None:
+            qname = _get_qualified_name(_d)
+            if qname is not None and qname in _FOREIGN_CALLABLES:
+                return _FOREIGN_CALLABLES[qname]
             return None
         if _n.startswith('**'):
             _kw.append(_n)
