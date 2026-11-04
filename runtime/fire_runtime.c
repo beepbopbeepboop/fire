@@ -6963,6 +6963,12 @@ static char _ikey_lazy[1] = {0};
 
 static char *_slot_key(_DictSlot *sl)
 {
+    if (sl->keykind == 3) {
+        if (!sl->key || sl->key == _ikey_lazy) {
+            sl->key = strdup("None");
+        }
+        return sl->key;
+    }
     if (sl->key == _ikey_lazy) {
         char tmp[_INT_STR_BLOCK];
         char *p = _fmt_int(sl->ikey, tmp);
@@ -7128,13 +7134,24 @@ static _DictSlot *_dict_find_k(MojoDict *d, char *key, int64_t keykind)
 {
     int64_t iv;
     if (keykind == 0 && _canon_int(key, &iv)) return _dict_find_ik(d, iv);
+    if (keykind == 3) {
+        uint64_t mask = (uint64_t)d->cap - 1;
+        uint64_t h = _ik_hash(0) & mask;
+        for (int64_t i = 0; i < d->cap; i++) {
+            int64_t idx = (int64_t)((h + (uint64_t)i) & mask);
+            _DictSlot *sl = &d->slots[idx];
+            if (!sl->key) return sl;
+            if (sl->keykind == 3) return sl;
+        }
+        return NULL;
+    }
     uint64_t mask = (uint64_t)d->cap - 1;      /* cap is a power of two */
-    uint64_t h = _str_hash(key) & mask;
+    uint64_t h = _str_hash(key ? key : "") & mask;
     for (int64_t i = 0; i < d->cap; i++) {
         int64_t idx = (int64_t)((h + (uint64_t)i) & mask);
         _DictSlot *sl = &d->slots[idx];
         if (!sl->key) return sl;          /* empty — insertion point */
-        if (sl->keykind == keykind && strcmp(sl->key, key) == 0) return sl;
+        if (sl->keykind == keykind && strcmp(sl->key ? sl->key : "", key ? key : "") == 0) return sl;
     }
     return NULL;
 }
@@ -7156,12 +7173,16 @@ static void _dict_set_raw_seq_kind_k(MojoDict *d, char *key, int64_t val,
     _DictSlot *sl = _dict_find_k(d, key, keykind);
     if (!sl->key) {
         int64_t iv;
-        if (keykind == 0 && _canon_int(key, &iv)) {
+        if (keykind == 3) {
+            sl->key = _ikey_lazy ? _ikey_lazy : strdup("");
+            sl->keykind = 3;
+            sl->ikey = 0;
+        } else if (keykind == 0 && key && _canon_int(key, &iv)) {
             sl->key = _ikey_lazy;
             sl->keykind = 2;
             sl->ikey = iv;
         } else {
-            sl->key = strdup(key);
+            sl->key = strdup(key ? key : "");
             sl->keykind = keykind;
         }
         sl->seq = (seq >= 0) ? seq : d->next_seq++;
@@ -7212,6 +7233,7 @@ static void _dict_grow(MojoDict *d)
     for (int64_t i = 0; i < old_cap; i++) {
         if (!old[i].key) continue;
         uint64_t j = (old[i].keykind == 2 ? _ik_hash(old[i].ikey)
+                                          : old[i].keykind == 3 ? (_ik_hash(0) & mask)
                                           : _str_hash(old[i].key)) & mask;
         while (d->slots[j].key) j = (j + 1) & mask;
         d->slots[j] = old[i];
@@ -7302,6 +7324,67 @@ void mojo_dict_set_none(MojoDict *d, char *key)
     _dict_set_raw(d, key, 0, 4);
 }
 
+static void _dict_set_none_key_raw(MojoDict *d, int64_t v, int64_t kind)
+{
+    if (!d) return;
+    if (d->used * 2 >= d->cap) _dict_grow(d);
+    _DictSlot *sl = _dict_find_k(d, "", 3);
+    if (!sl->key) {
+        sl->key = _ikey_lazy ? _ikey_lazy : strdup("");
+        sl->keykind = 3;
+        sl->ikey = 0;
+        sl->seq = d->next_seq++;
+        if (sl->seq >= d->next_seq) d->next_seq = sl->seq + 1;
+        d->used++;
+    }
+    sl->val = v;
+    sl->kind = kind;
+    sl->key_from_str = 0;
+}
+
+void mojo_dict_set_none_key(MojoDict *d, int64_t v)
+{
+    _dict_set_none_key_raw(d, v, 0);
+}
+
+void mojo_dict_set_none_key_int(MojoDict *d, int64_t v)
+{
+    _dict_set_none_key_raw(d, v, 0);
+}
+
+void mojo_dict_set_none_key_str(MojoDict *d, char *v)
+{
+    _dict_set_none_key_raw(d, (int64_t)(uintptr_t)v, 2);
+}
+
+void mojo_dict_set_none_key_double(MojoDict *d, double v)
+{
+    int64_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    _dict_set_none_key_raw(d, bits, 1);
+}
+
+void mojo_dict_set_none_key_bool(MojoDict *d, int v)
+{
+    _dict_set_none_key_raw(d, v ? 1 : 0, 3);
+}
+
+void mojo_dict_set_none_key_none(MojoDict *d)
+{
+    _dict_set_none_key_raw(d, 0, 4);
+}
+
+void mojo_dict_set_none_key_struct(MojoDict *d, void *v)
+{
+    _dict_set_none_key_raw(d, (int64_t)(uintptr_t)v, 5);
+}
+
+void mojo_dict_set_bytes_none_key(MojoDict *d, MojoBytes *key, int64_t v)
+{
+    (void)key;
+    mojo_dict_set_none_key(d, v);
+}
+
 /* A struct stored as a dict VALUE, plus the function that renders it. See
  * MojoDict.val_repr's own comment for why the function travels on the value
  * rather than in a global address->type table.
@@ -7349,6 +7432,17 @@ char *mojo_dict_repr_val(MojoDict *d, int64_t v)
 static _DictSlot *_dict_lookup_k(MojoDict *d, char *key, int64_t keykind)
 {
     if (!d || !d->cap || !d->slots) return NULL;
+    if (keykind == 3) {
+        uint64_t mask = (uint64_t)d->cap - 1;
+        uint64_t h = _ik_hash(0) & mask;
+        for (int64_t i = 0; i < d->cap; i++) {
+            int64_t idx = (int64_t)((h + (uint64_t)i) & mask);
+            _DictSlot *sl = &d->slots[idx];
+            if (!sl->key) return NULL;
+            if (sl->keykind == 3) return sl;
+        }
+        return NULL;
+    }
     /* A NULL key is Python's `None` (or an erased `str` that was never set):
      * no dict holds it -- a NULL `key` field is what marks an EMPTY slot -- so
      * `None in d` / `d.get(None)` are a plain miss, not a `strcmp (…, NULL)`.
@@ -7411,6 +7505,11 @@ char *mojo_dict_repr_slot(MojoDict *d, char *key)
 int mojo_dict_contains(MojoDict *d, char *key)
 {
     return _dict_lookup(d, key) != NULL;
+}
+
+int mojo_dict_contains_none(MojoDict *d)
+{
+    return _dict_lookup_k(d, "", 3) != NULL;
 }
 
 /* ── bytes-keyed dict access ─────────────────────────────────────────────

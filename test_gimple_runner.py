@@ -14773,6 +14773,24 @@ main()
 """)
 
 
+def test_none_member_of_a_dict_is_not_the_int_zero():
+    """A dict's `None` key is distinct from int 0: `0 in {None: 1}` is
+    False, `None in {0: 1}` is False, `None in {None: 0}` is True."""
+    test_gimple_matches_cpython("gimple_dict_none_member_distinct_from_zero", """\
+def main():
+    d = {None: 1, "a": 2}
+    print(0 in d, None in d)
+    t = {0: 1}
+    print(None in t)
+    n = None
+    print(n in t)
+    u = {None: 0}
+    print(None in u, 0 in u, len(u))
+
+main()
+""")
+
+
 def test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool():
     """`a.flag or getattr(a, 'x', False) or a.some_dict`: the middle link is a
     word of unknown kind, and the last link joined it with a dict pointer, so
