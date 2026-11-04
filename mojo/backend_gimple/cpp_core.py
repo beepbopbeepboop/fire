@@ -1714,6 +1714,10 @@ def _cpp_dyn_call_expr(gen, e):
             parts.append(f"mojo_list_append_double_kinded(_a, (double)({gen._cpp_expr(_op)}), 'i'); ")
             continue
         if _fct not in ('int64_t', 'char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
+            try:
+                gimple_ctypes._debug_note(f'[elig-cpp] read_table-like generator callable-valued parameter {_fname!r} bad arg type {_fct!r}')
+            except Exception:
+                pass
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 "a call through the callable-valued parameter "
                 f"'{_fname}' passes an argument whose C type is not "
@@ -1740,6 +1744,10 @@ def _cpp_dyn_call_expr(gen, e):
                          f"(double)({gen._cpp_expr(_kv)})); ")
             continue
         if _kct not in ('int64_t', 'char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
+            try:
+                gimple_ctypes._debug_note(f'[elig-cpp] read_table-like generator callable-valued parameter {_fname!r} bad kwarg type {_kct!r}')
+            except Exception:
+                pass
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 "a call through the callable-valued parameter "
                 f"'{_fname}' passes a keyword argument whose C type is not "
@@ -8725,6 +8733,10 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 _is_callable_local = True
         # Check if callee itself is in foreign table or if it's associated with one
         if _cl_callee in _foreign or _is_callable_local:
+            try:
+                gimple_ctypes._debug_note(f'[elig-cpp] read_table-like generator for-loop over callable parameter/local {_cl_callee!r}')
+            except Exception:
+                pass
             # If it's in foreign table and has entry giving iterator element ctype,
             # we need to handle it; otherwise refuse with precise naming
             if _cl_callee in _foreign:
