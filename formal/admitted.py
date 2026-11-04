@@ -264,9 +264,14 @@ def contracts_in_file(path: str) -> list:
             text = _decorator_text(dec)
             if text is None:
                 continue
+            try:
+                arity = len(getattr(st, "params", None) or [])
+            except Exception:
+                arity = 1
             out.append(Contract(module, st.name, text, path,
                                 _line_for(path, st.name, len(out),
-                                          admitted_lines)))
+                                          admitted_lines),
+                                arity=arity))
             break
     return out
 

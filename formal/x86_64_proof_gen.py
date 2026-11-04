@@ -173,6 +173,14 @@ def _ast_value(fn, func_name: str, admitted: dict = None, scope=None,
     # Include two-parameter callees in resolvable2 so the bridge can state
     # calls to them.
     resolvable2 = frozenset(AP._admitted_arity2_map(admitted)) | set(callees2 or ())
+    try:
+        for c in (admitted or []):
+            if isinstance(c, dict) and c.get("name") and c.get("lean_name"):
+                resolvable2 = frozenset(set(resolvable2) | {c.get("name")})
+            elif not isinstance(c, dict) and getattr(c, "name", None) and getattr(c, "lean_name", None):
+                resolvable2 = frozenset(set(resolvable2) | {getattr(c, "name")})
+    except Exception:
+        pass
     gaps = AP._ast_bridge_gaps(fn, resolvable, resolvable2)
     if gaps:
         raise NotImplementedError(AP._ast_gap_message(gaps))

@@ -60,7 +60,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` | `bug-formal-formal-a-three-branch-certifi` | the cost is the per-PATH value-flow facts, and everything the earlier rounds blamed for it checks in 23 seconds |
 | `FORMAL_absval_proof_does_not_check.md` | `bug-formal-formal-absval-proof-does-not-4544` | `formal/examples/absval.mojo`'s arm64 proof no longer checks — a frame-slot peel's address does not match the goal |
-| `FORMAL_admitted_contract_is_one_word_wide.md` | `bug-formal-formal-admitted-contract-is-o` | An admitted host contract is one WORD wide, because `MojoExpr.call` is |
 | `FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md` | `bug-formal-formal-ast-bridge-carries-one-900` | A call of two or more arguments to a USER function has no stated value: `callFunc2` answers only arity-2 admitted contracts and the callee table is one-parameter only. The node carries every argument; the 2-arg gap regression of `3d32c0e66` is fixed |
 | `FORMAL_dylib_export_loops_and_frame_bounds.md` | `bug-formal-formal-dylib-export-loops-and-5784` | dylib exports: the loop-fuel obligation, and a `FrameBound` that is ALREADY depth-indexed |
 | `FORMAL_float_step_functions.md` | **unclaimed** | The binary64 semantics is modelled; the FP STEP FUNCTIONS are not, and a float program cannot be proved yet |
@@ -68,13 +67,13 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md` | **unclaimed** | ONE opaque `fflush` SILENTLY replaces the universal theorem with `prop := True`, and three rows of `test_formal_call_proof_gen.py` are red because the div0 false goal can no longer be reached |
 | `FORMAL_the_contract_slot_trackers_scale_the_addsub_immediate_by_eight.md` | **unclaimed** | four contract-slot `sp` trackers read the `ADD`/`SUB` immediate and multiply it by 8 |
 | `FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md` | **unclaimed** | the last export of every dylib gets an unprovable `_semantics_total`, and the two `test_formal_dylib.py` hole-count rows are red for it |
-| `FORMAL_wide_recv_model_has_no_domain_for_a_struct.md` | **unclaimed** | `formal/examples/wide_recv.mojo` has no proof because the semantic model has no domain for a STRUCT, and it is not in `EXPECTED_FAILURES` |
+| `FORMAL_wide_recv_model_has_no_domain_for_a_struct.md (deleted)` | — | bug fixed and doc deleted |
 
 ### `formal/build` — 10 documents, 3 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` | `bug-formal-formal-a-module-that-exports-8121` | `std/collections/string/_unicode_lookups.mojo` blocks `_unicode.mojo`, and there are TWO walls behind it |
+| `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md (deleted)` | — | bug fixed and doc deleted |
 | `FORMAL_a_variadic_parameter_read_has_no_abi.md` | `bug-formal-formal-a-variadic-parameter-r` | the row was unowned, and the refusal in it is CORRECT |
 | `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` | **unclaimed** | A `__exit__` whose RETURN VALUE is computed can still suppress, and the gate that catches the foldable half cannot see this one |
 | (removed) | — | bug fixed and doc deleted |
