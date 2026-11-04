@@ -9149,15 +9149,23 @@ BOTH_ARCH_CASES = [
      "def main():\n"
      "    printf(\"[%s]\", f())\n"
      "    return 0\n", 0, "[n=7]"),
+    ("both_arch_an_fstring_with_constant_fields_folds",
+     "def main():\n"
+     "    var s = f\"n={5}\"\n"
+     "    printf(\"[%s]\", s)\n"
+     "    return 0\n", 0, "[n=5]"),
+    ("both_arch_an_fstring_with_multiple_constant_fields_folds",
+     "def main():\n"
+     "    var s = f\"{\'a\'}b{None}\"\n"
+     "    printf(\"[%s]\", s)\n"
+     "    return 0\n", 0, "[abNone]"),
     ("fstring_parameter_default_with_a_field_is_refused_like_a_statement_site",
      "def f(x=f\"n={5}\"):\n"
      "    return x\n"
      "\n"
      "def main():\n"
-     "    print(f())\n"
-     "    return 0\n",
-     "refuse:is refused on this path: its value is its INTERPOLATED text, and "
-     "this path has no buffer to compose one in", None),
+     "    printf(\"[%s]\", f())\n"
+     "    return 0\n", 0, "[n=5]"),
     # ── a double at the `Int` conversion, where the two machines once
     #    answered with two different programs ──────────────────────────────────
     #

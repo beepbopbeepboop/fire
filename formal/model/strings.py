@@ -3413,8 +3413,36 @@ STRING_TWO_STRING_ARITHMETIC_OPS = ("+", "+=", "-", "-=")
 # question is decided where the source token is, and an ordinary literal's
 # `value` is its BODY — so a prefix test cannot tell `f"n={n}"` from `'f"n"'`,
 # which is a four-character string.
+def _eval_constant_field_expr(expr: str):
+    """Evaluate a simple constant literal expression in an f-string field.
+
+    Returns (ok, value). ok is True if foldable, value is the Python value.
+    """
+    if not isinstance(expr, str):
+        return (False, None)
+    expr_stripped = expr.strip()
+    if not expr_stripped:
+        return (False, None)
+    # Try ast.literal_eval first (handles most cases)
+    try:
+        import ast
+        try:
+            val = ast.literal_eval(expr_stripped)
+            return (True, val)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return (False, None)
+
+
 def fold_interpolated_literal(node) -> bool:
     """Rewrite an f-string with NO `{…}` fields into the plain literal it is.
+
+    Also rewrites f-strings where EVERY field is a constant literal expression
+    (like `f"n={5}"`, `f"{'a'}b{None}"`) into the plain literal they denote,
+    since all values are known at compile time and no runtime buffer is needed
+    for composition.
 
     `f"n=7"` has no replacement field, so its value is its text and CPython
     treats it exactly as `"n=7"` — the `f` prefix changes nothing. On this path
@@ -3447,9 +3475,36 @@ def fold_interpolated_literal(node) -> bool:
         segs = interpolated_literal_segments(spelled)
     except CodegenError:
         return False
-    if any(seg[0] != "lit" for seg in segs):
-        return False
-    node.value = "".join(seg[1] for seg in segs)
+    # Check if all segments are literals, or all fields are constant literals
+    result_parts = []
+    for seg in segs:
+        if seg[0] == "lit":
+            result_parts.append(seg[1])
+            continue
+        elif seg[0] == "field":
+            # field is ('field', expr, spec, conv)
+            _kind, expr, spec, conv = seg
+            # Don't fold if there are format specs or conversions
+            if spec or conv:
+                return False
+            ok, val = _eval_constant_field_expr(expr)
+            if not ok:
+                return False
+            # Convert to string as f-strings do by default
+            if val is None:
+                result_parts.append('None')
+            elif isinstance(val, bool):
+                result_parts.append('True' if val else 'False')
+            elif isinstance(val, str):
+                result_parts.append(val)
+            elif isinstance(val, (int, float)):
+                result_parts.append(str(val))
+            else:
+                result_parts.append(str(val))
+            continue
+        else:
+            return False
+    node.value = "".join(result_parts)
     node.is_interpolated = False
     node.is_raw = "r" in prefix or "R" in prefix
     return True
