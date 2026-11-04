@@ -14750,6 +14750,20 @@ main()
 """)
 
 
+def test_none_held_in_local_with_if_join_is_none_needle():
+    """Flow-sensitive None tracking at if/while/try join points: a local that
+    is None on some paths and reassigned on others must still be treated as
+    None on the paths where it remains None."""
+    test_gimple_matches_cpython("gimple_none_held_if_join", """\
+def main():
+    n = None
+    if len("ab") > 5:
+        n = 1
+    print(n in ["a", None])
+main()
+""")
+
+
 def test_none_member_of_a_set_is_not_the_int_zero():
     """A set's `None` member has its own slot tag (3): `0 in {None, 1}` is
     False, `None in {0}` is False, `None in {None, 0}` is True, and a None
