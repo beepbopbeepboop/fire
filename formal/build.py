@@ -1830,6 +1830,11 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
         closure = template_closure(
             [path for _, path in resolved], project_root=source_path)
         demands = {}
+        try:
+            with open('/tmp/DEBUG_BUILD.txt', 'a') as _f:
+                _f.write(f"BUILD: resolved={resolved}\n")
+        except Exception:
+            pass
         for mod, path in resolved:
             for other, wanted in instantiation_demands(
                     path, module_source_text(source_path),
@@ -1838,6 +1843,11 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                 for tmpl, args in wanted.items():
                     merged[tmpl] = sorted(set(merged.get(tmpl, [])) | set(args))
                 demands[other] = merged
+        try:
+            with open('/tmp/DEBUG_BUILD.txt', 'a') as _f:
+                _f.write(f"DEMANDS={demands}\n")
+        except Exception:
+            pass
         # The same PER-EDGE rule the recursion applies to its own imports
         # (`formal/imports.py::library_free_edges`), asked here for the program's
         # OWN imports rather than left to the first level of the closure below.
@@ -1848,8 +1858,18 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
         library_free = library_free_edges(source_path, stmts,
                                           project_root=source_path,
                                           demands=demands)
+        try:
+            with open('/tmp/DEBUG_BUILD.txt', 'a') as _f:
+                _f.write(f"LIBFREE={library_free}\n")
+        except Exception:
+            pass
         check_library_free_calls(source_path, stmts, library_free)
         for mod, path in resolved:
+            try:
+                with open('/tmp/DEBUG_BUILD2.txt', 'a') as _f:
+                    _f.write(f"TRY_BUILD {mod} {path} free={os.path.abspath(path) in library_free}\n")
+            except Exception:
+                pass
             if os.path.abspath(path) in library_free:
                 continue
             try:
@@ -1857,6 +1877,11 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                                            project_root=source_path,
                                            _parent=parent, demands=demands,
                                            closure=closure)
+                try:
+                    with open('/tmp/DEBUG_BUILD2.txt', 'a') as _f:
+                        _f.write(f"BUILT {mod} {dylib}\n")
+                except Exception:
+                    pass
             except ImportBuildError as e:
                 # The dependency's own error names the file that failed, which
                 # is rarely the file the user asked about — and now that a
