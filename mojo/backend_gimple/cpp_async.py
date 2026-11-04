@@ -686,6 +686,28 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             param_ctypes.append((pn[1:], 'MojoList *'))
             continue
         ctype = gen._param_ctype(pn, pt, fn)
+        # For foreign callable defaults used in generators, pass as word
+        try:
+            _fc_tbl = getattr(gimple_ctypes, '_FOREIGN_CALLABLES', {}) or {}
+            if _fc_tbl and ctype in (getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE', None),
+                                     getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE_1ARG', None)):
+                # Check if it's a known foreign callable
+                _pdflt = (getattr(fn, 'param_defaults', None) or {}).get(pn.lstrip('*'))
+                if _pdflt is not None:
+                    from fire_compiler import MemberExpr, IdentExpr, CallExpr, StringLiteral
+                    _qname = None
+                    if isinstance(_pdflt, MemberExpr):
+                        if isinstance(_pdflt.obj, IdentExpr):
+                            _qname = f"{_pdflt.obj.name}.{_pdflt.member}"
+                        elif isinstance(_pdflt.obj, CallExpr) and isinstance(_pdflt.obj.func, IdentExpr) and _pdflt.obj.func.name == '__import__':
+                            if getattr(_pdflt.obj, 'args', None):
+                                _a0 = _pdflt.obj.args[0]
+                                if isinstance(_a0, StringLiteral):
+                                    _qname = f"{getattr(_a0, 'value', '')}.{_pdflt.member}"
+                    if _qname in _fc_tbl or ctype in (getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE', None),):
+                        ctype = 'int64_t'
+        except Exception:
+            pass
         if (ctype == 'char *' and (pt is None or pt == '')
                 and pn in coro_mod._PTR_EVIDENCE.get(fn.name, ())
                 and any(isinstance(_n, gimple_ctypes.CallExpr)

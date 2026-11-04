@@ -1538,11 +1538,33 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # with the signature: `def keep(scale=0.5): return scale` inferred
     # `int64_t` and printed 0 for 0.5. Weaker than any usage evidence above.
     _fdefaults = getattr(func, 'param_defaults', None) or {}
+    _foreign_callables = getattr(gimple_ctypes, '_FOREIGN_CALLABLES', {}) or {}
     for _fp in func.params:
         _fpn = _as_str(_fp[0]).lstrip('*')
-        if (_fp[1] is None and _fpn not in inferred
-                and isinstance(_fdefaults.get(_fpn), FloatLiteral)):
-            inferred[_fpn] = 'double'
+        if _fp[1] is None and _fpn not in inferred:
+            _fdef = _fdefaults.get(_fpn)
+            if isinstance(_fdef, FloatLiteral):
+                inferred[_fpn] = 'double'
+                continue
+            # Foreign-callable signature table (step 2 of the tables.py plan):
+            # bind a parameter whose default names a known foreign callable.
+            if _foreign_callables and _fdef is not None:
+                _qname = None
+                if isinstance(_fdef, MemberExpr):
+                    if isinstance(_fdef.obj, IdentExpr):
+                        _qname = f"{_fdef.obj.name}.{_fdef.member}"
+                    elif isinstance(_fdef.obj, CallExpr) and isinstance(_fdef.obj.func, IdentExpr) and _fdef.obj.func.name == '__import__':
+                        # __import__('csv').reader
+                        if _fdef.obj.args:
+                            _a0 = _fdef.obj.args[0]
+                            if isinstance(_a0, StringLiteral):
+                                _qname = f"{_a0.value}.{_fdef.member}"
+                if _qname is None and isinstance(_fdef, IdentExpr):
+                    # direct name if registered
+                    _qname = _fdef.name
+                if _qname in _foreign_callables:
+                    inferred[_fpn] = _foreign_callables[_qname]
+                    continue
 
     # A container guess is only as good as the body's own use of the name. A
     # parameter the body REBINDS to a container of another kind (`live =
