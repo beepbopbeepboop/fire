@@ -7181,6 +7181,135 @@ ctor_field_value=self._ctor_field_value_for(name),
         stops a bool from being refused with a sentence about `sep`."""
         return M.print_kwargs(e, "arm64")
 
+    def _emit_str(self, e: F.CallExpr) -> None:
+        args = list(e.args or [])
+        if len(args) != 1 or e.kwargs:
+            raise CodegenError("str() takes exactly one argument on this path")
+        operand = args[0]
+        kind = self._expr_str_kind(operand)
+        from formal import model as M
+        if M.string_operand_is_string(kind):
+            self._emit_expr(operand)
+            return
+        if isinstance(operand, F.IntLiteral):
+            try:
+                self.asm.emit(encode_sub_xd_xn_imm(31, 31, 256))
+                buf_reg = 19
+                self.asm.emit(encode_add_xd_xn_imm(buf_reg, 31, 0))
+                self._emit_expr(operand)
+                self.asm.emit(encode_mov_zr_xn(2, 0))
+                self.asm.emit(encode_mov_zr_xn(0, buf_reg))
+                self.asm.emit_adrp_add(1, self._intern_string("%lld"))
+                self._emit_extern_call("sprintf", 3)
+                self.asm.emit(encode_mov_zr_xn(0, buf_reg))
+                self.asm.emit(encode_add_xd_xn_imm(31, 31, 256))
+                return
+            except Exception:
+                pass
+        # For numbers, try to format via print logic first
+        if M.is_number_kind(kind) or kind == M.INT_KIND or kind == M.BOOL_KIND or kind == M.FLOAT_KIND:
+            try:
+                frags, operands = self._print_call([operand])
+                if len(frags) == 1 and (frags[0] == "%lld" or frags[0] == "%llu" or frags[0] == "%ld" or frags[0] == "%lu" or frags[0] == "%d" or frags[0] == "%u") and operands:
+                    fmt = frags[0]
+                    self.asm.emit(encode_sub_xd_xn_imm(31, 31, 256))
+                    buf_reg = 19
+                    self.asm.emit(encode_add_xd_xn_imm(buf_reg, 31, 0))
+                    self._emit_expr(operands[0])
+                    self.asm.emit(encode_mov_zr_xn(2, 0))  # value
+                    self.asm.emit(encode_mov_zr_xn(0, buf_reg))  # buf
+                    self.asm.emit_adrp_add(1, self._intern_string(fmt))  # fmt
+                    self._emit_extern_call("sprintf", 3)
+                    self.asm.emit(encode_mov_zr_xn(0, buf_reg))
+                    self.asm.emit(encode_add_xd_xn_imm(31, 31, 256))
+                    return
+            except Exception:
+                pass
+            # Fallback to our own approach
+            self.asm.emit(encode_sub_xd_xn_imm(31, 31, 256))
+            signed = cmp_signed(self._ttype(operand)) if hasattr(self, '_ttype') else False
+            if kind == M.FLOAT_KIND:
+                fmt = F.StringLiteral(value="%g")
+            elif signed or kind == M.BOOL_KIND:
+                fmt = F.StringLiteral(value="%lld")
+            else:
+                fmt = F.StringLiteral(value="%llu")
+            buf_reg = 19
+            self.asm.emit(encode_add_xd_xn_imm(buf_reg, 31, 0))
+            self._emit_expr(operand)
+            self.asm.emit(encode_mov_zr_xn(2, 0))
+            self.asm.emit(encode_mov_zr_xn(0, buf_reg))
+            self.asm.emit_adrp_add(1, self._intern_string(fmt.value))
+            self._emit_extern_call("sprintf", 3)
+            self.asm.emit(encode_mov_zr_xn(0, buf_reg))
+            self.asm.emit(encode_add_xd_xn_imm(31, 31, 256))
+            return
+        # Try using print logic
+        try:
+            frags, operands = self._print_call([operand])
+            if len(frags) == 1 and frags[0] == "%s" and operands:
+                self._emit_expr(operands[0])
+                return
+            if len(frags) == 1 and (frags[0] == "%lld" or frags[0] == "%llu" or frags[0] == "%ld" or frags[0] == "%lu") and operands:
+                fmt = frags[0].replace('%lld','%ld').replace('%llu','%lu')
+                self.asm.emit(encode_sub_xd_xn_imm(31, 31, 256))
+                self._emit_expr(operands[0])
+                self.asm.emit(encode_mov_zr_xn(3, 0))
+                self.asm.emit(encode_add_xd_xn_imm(0, 31, 0))
+                self._emit_mov_imm("X1", 256)
+                self.asm.emit_adrp_add(2, self._intern_string(fmt))
+                self._emit_extern_call("snprintf", 4)
+                self.asm.emit(encode_add_xd_xn_imm(0, 31, 0))
+                self.asm.emit(encode_add_xd_xn_imm(31, 31, 256))
+                return
+            if len(frags) == 1 and isinstance(frags[0], str) and '%' not in frags[0]:
+                self.asm.emit_adrp_add(0, self._intern_string(frags[0]))
+                return
+        except Exception:
+            pass
+        raise CodegenError(f"str() of {type(operand).__name__} is not supported on this path")
+
+    def _emit_repr(self, e: F.CallExpr) -> None:
+        args = list(e.args or [])
+        if len(args) != 1 or e.kwargs:
+            raise CodegenError("repr() takes exactly one argument on this path")
+        operand = args[0]
+        kind = self._expr_str_kind(operand)
+        from formal import model as M
+        if M.string_operand_is_string(kind):
+            self.asm.emit(encode_sub_xd_xn_imm(31, 31, 512))
+            self._emit_expr(operand)
+            self.asm.emit(encode_mov_zr_xn(3, 0))
+            self.asm.emit(encode_add_xd_xn_imm(0, 31, 0))
+            self._emit_mov_imm("X1", 512)
+            self.asm.emit_adrp_add(2, self._intern_string("'%s'"))
+            self._emit_extern_call("snprintf", 4)
+            self.asm.emit(encode_add_xd_xn_imm(0, 31, 0))
+            self.asm.emit(encode_add_xd_xn_imm(31, 31, 512))
+            return
+        if isinstance(operand, F.IntLiteral):
+            self._emit_expr(operand)
+            return
+        if M.is_number_kind(kind) or kind == M.INT_KIND or kind == M.BOOL_KIND or kind == M.FLOAT_KIND:
+            self.asm.emit(encode_sub_xd_xn_imm(31, 31, 256))
+            signed = cmp_signed(self._ttype(operand)) if hasattr(self, '_ttype') else False
+            if kind == M.FLOAT_KIND:
+                fmt = F.StringLiteral(value="%g")
+            elif signed or kind == M.BOOL_KIND:
+                fmt = F.StringLiteral(value="%lld")
+            else:
+                fmt = F.StringLiteral(value="%llu")
+            self._emit_expr(operand)
+            self.asm.emit(encode_mov_zr_xn(3, 0))
+            self.asm.emit(encode_add_xd_xn_imm(0, 31, 0))
+            self._emit_mov_imm("X1", 256)
+            self.asm.emit_adrp_add(2, self._intern_string(fmt.value))
+            self._emit_extern_call("snprintf", 4)
+            self.asm.emit(encode_add_xd_xn_imm(0, 31, 0))
+            self.asm.emit(encode_add_xd_xn_imm(31, 31, 256))
+            return
+        raise CodegenError(f"repr() of {type(operand).__name__} is not supported on this path")
+
     def _emit_print(self, e: F.CallExpr) -> None:
         """`print(...)` — a real call to the C library's `printf`.
 
@@ -11833,6 +11962,12 @@ ctor_field_value=self._ctor_field_value_for(name),
                 return
             if name == "print":
                 self._emit_print(e)
+                return
+            if name == "str":
+                self._emit_str(e)
+                return
+            if name == "repr":
+                self._emit_repr(e)
                 return
             if name in ("ord", "chr", "hash"):
                 self._emit_text_builtin(e, name)

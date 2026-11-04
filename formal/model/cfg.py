@@ -3068,7 +3068,7 @@ FLOAT_KIND = "float64"
 # because nothing in the source states what the kernel said.  That is also why it
 # cannot be reached by a spelling the way `receiver_is_declared_bytes` reaches a
 # `Pointer[UInt8]`: a loop target over `listdir(p)` has no declaration of its own
-# (`bugs/formal/FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md`), and
+# (and that bug doc was deleted once fixed), and
 # the annotation above it is `-> List[String]`, which is the honest word for a
 # Python-level list of `str`.  The kind is therefore SEEDED where foreign bytes
 # ENTER an image — `FOREIGN_BYTES_EXPORTS` below — and inherits through the
