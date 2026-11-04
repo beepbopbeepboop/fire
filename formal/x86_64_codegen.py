@@ -11130,6 +11130,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             callee_is_bool=lambda callee: self._callee_is_bool(
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
+            callee_returns_none=getattr(self, '_callee_returns_none', None) or (lambda name: False),
             callee_returned_parameter=self._callee_returned_parameter,
             dict_names=DICT_TYPE_NAMES,
             deref_kind=lambda e: M.pointer_deref_kind(
@@ -11591,26 +11592,6 @@ ctor_field_value=self._ctor_field_value_for(name),
         return self._vkinds_for(name, fn, stack).return_is_dict
 
     def _callee_returns_value(self, name):
-        """Whether a call to the local function `name` produces a value at all.
-
-        arm64's `_callee_returns_value` over the same shared reader, and for the
-        same reason the dict-ness hook above is duplicated in that shape and not
-        in its logic: the answer has to be the same on both machines or a
-        construct is printed here and refused there. `model.returnless_function_
-        names` decides it — the names whose calls produce no value, closed over
-        bare-name `return <call>` chains, so `def f(a): return g(a)` with `g`
-        return-less is not read as a value one hop out. Its least fixed point is
-        what keeps a cycle reading as a value rather than as an unwritten word.
-
-        **The answer is carried through `return f(…)`, and the recursion lives in
-        `model.function_returns_a_value_resolver`.** `def h(): return g()` with a
-        return-less `g` is a function whose result is `None` in CPython too, so
-        `print(h(…))` has to be the same refusal `print(g(…))` is — one call
-        deeper, and the shape `v = g(); print(v)` already covers one binding up.
-        The resolver is built over `self._functions` (the emitter's own table)
-        and the cycle stop and the not-of-this-unit default are the shared
-        resolver's, so the two backends cannot answer this one differently.
-        """
         fn = self._functions.get(name)
         if fn is None:
             return True
@@ -11618,6 +11599,17 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._returnless = M.returnless_function_names(
                 self._functions.values())
         return name not in self._returnless
+
+    def _callee_returns_none(self, name):
+        fn = self._functions.get(name)
+        if fn is None:
+            return False
+        try:
+            if hasattr(M, 'function_returns_none'):
+                return M.function_returns_none(fn)
+        except Exception:
+            pass
+        return False
 
     def _callee_returned_parameter(self, name):
         """The positional index of a parameter `name` hands straight back.
