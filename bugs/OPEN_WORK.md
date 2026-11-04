@@ -59,7 +59,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_a_fold_over_a_blob_needs_a_proof_model_and_not_only_codegen.md` | `bug-formal-formal-a-fold-over-a-blob-nee` | FORMAL_a_fold_over_a_blob_needs_a_proof_model_and_not_only_codegen |
 | `FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` | `bug-formal-formal-a-three-branch-certifi` | the cost is the per-PATH value-flow facts, and everything the earlier rounds blamed for it checks in 23 seconds |
 | `FORMAL_absval_proof_does_not_check.md` | `bug-formal-formal-absval-proof-does-not-4544` | `formal/examples/absval.mojo`'s arm64 proof no longer checks — a frame-slot peel's address does not match the goal |
 | `FORMAL_admitted_contract_is_one_word_wide.md` | `bug-formal-formal-admitted-contract-is-o` | An admitted host contract is one WORD wide, because `MojoExpr.call` is |
