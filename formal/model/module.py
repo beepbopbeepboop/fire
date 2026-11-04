@@ -3189,7 +3189,7 @@ def call_graph_depth(edges: dict) -> int:
     """An UPPER BOUND on the number of distinct functions a call chain can have
     live at once, in `edges`.
 
-    The question `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`
+    The question about guarding an acyclic chain across the stack floor
     asks and the guard does not answer: unbounded depth needs a CYCLE, so the
     guard is emitted on the cycles only, but "finite" is not "small" and a DAG
     sixty levels deep spends the same stack as a recursion sixty deep.
@@ -3396,8 +3396,7 @@ def stack_floor_guarded_names(functions, structs: dict = None,
       * **or the body already contains a conditional branch**
         (`body_has_conditional_branch`). This was NOT in the rule that landed
         with the guard, and it is the measured answer to the question
-        `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` spent its
-        life asking. Every formal prologue subtracts a fixed 128 KiB frame on
+        spent its life asking. Every formal prologue subtracts a fixed 128 KiB frame on
         arm64 (16 KiB on x86-64), so the depth at which the stack runs out is a
         constant — 60 frames against `STACK_FLOOR_BUDGET_BYTES` on arm64 — and
         the cycle rule left a DAG of DISTINCT functions free to walk straight
