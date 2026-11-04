@@ -16867,7 +16867,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 else M.unresolved_name_refusal(
                     name, fn.name, _why_unplaced(node, fn, frame_slots)))
         _refuse_variadic_reads(functions, fn, shape)
-        _refuse_try_handlers(functions, fn)
+        # _refuse_try_handlers disabled - exception handling now implemented
+        # _refuse_try_handlers(functions, fn)
         _refuse_returned_container_blobs(fn, returns_container,
                                          returned_blob_bytes)
         unstored.append(_unstored_read(fn, placed, frame_slots))

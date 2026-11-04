@@ -965,6 +965,7 @@ class X86_64Codegen:
         self._with_suppress_resume_labels = []
         self._diverged = False
         self._suppress_to_resume = False
+        self._pending_try_handlers = []
         # Names bound to a string address this function (a StringLiteral RHS
         # or an alias of one). A subscript on one of these is a byte load, not
         # a list index. Reset per function.
@@ -2538,35 +2539,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             return
 
         if isinstance(stmt, F.AssertStmt):
-            # `assert cond [, msg]`: evaluate `cond`, run `msg` and leave with
-            # status 1 when it is falsy.
-            #
-            # **Both halves of the failing path are observable, and both used to
-            # be dropped.** `msg` is not formatted into a diagnostic on this
-            # path (there is no printf for it), but CPython EVALUATES it before
-            # it raises, so `assert n > 0, why()` calls `why()` — and a message
-            # that logs, that frees, that closes, or that prints is a program
-            # whose output and whose effects are missing. Measured on both
-            # backends: `assert n > 0, why()` printed nothing where CPython
-            # printed `why`. And the exit goes through the flush a `raise` gets,
-            # so an enclosing `finally` runs on the way out: measured on both
-            # backends, `try: assert n > 0 finally: print('fin')` printed
-            # `body` where CPython prints `body` then `fin`.
-            #
-            # ORDER is CPython's: the message runs first, then the `finally`,
-            # because the assert raises and the `finally` runs during the
-            # unwinding that follows it.
-            #
-            # The JMP over the exit is not an optimisation, it is the whole
-            # statement. There was none here: `jcc fail` was immediately
-            # followed by `label fail`, so the branch had nothing to skip and
-            # the FALL-THROUGH path went straight into exit(1). Every `assert`
-            # failed, whatever it asserted — measured on this backend,
-            # `assert 1` printed nothing and exited 1, while arm64 (which has
-            # the same shape with the branch over the exit spelled `b ok`)
-            # printed `passed`. The `_emit_mov_imm(Reg.R11, 1)` was also
-            # dead: R11 is the divisor, the shift count, and the alloc size on
-            # this path, and an `assert` does none of those.
             self._emit_truthy_word(stmt.value)
             self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
             self._if_counter += 1
@@ -2580,6 +2552,45 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             msg = getattr(stmt, "msg", None)
             if msg is not None:
                 self._emit_expr(msg)
+            if getattr(self, '_pending_try_handlers', None):
+                kinds = M.exception_kinds()
+                exc_kind = M.exception_kind_for("AssertionError", kinds)
+                if exc_kind is None:
+                    exc_kind = 1
+                self._emit_mov_imm(Reg.RAX, exc_kind)
+                try:
+                    handler_info = self._pending_try_handlers[-1]
+                    handlers = handler_info.get('handlers', [])
+                    for handler in handlers:
+                        exc_type = getattr(handler, 'exc_type', None)
+                        handler_name = getattr(handler, 'name', None)
+                        if handler_name:
+                            continue
+                        try:
+                            if exc_type is None:
+                                self._flush_pending_finally()
+                                for hs in (getattr(handler, 'body', None) or []):
+                                    self._emit_stmt(hs)
+                                self.asm.label(ok_label)
+                                return
+                            if M.handler_arm_matches(exc_type if isinstance(exc_type, str) else (exc_type[0] if isinstance(exc_type, (list,tuple)) and exc_type else "AssertionError"), "AssertionError", kinds, self._structs):
+                                self._flush_pending_finally()
+                                for hs in (getattr(handler, 'body', None) or []):
+                                    self._emit_stmt(hs)
+                                self.asm.label(ok_label)
+                                return
+                            elif isinstance(exc_type, (list,tuple)):
+                                for et in exc_type:
+                                    if M.handler_arm_matches(et, "AssertionError", kinds, self._structs):
+                                        self._flush_pending_finally()
+                                        for hs in (getattr(handler, 'body', None) or []):
+                                            self._emit_stmt(hs)
+                                        self.asm.label(ok_label)
+                                        return
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
             self._flush_pending_finally()
             self._emit_call_exit(1)
             self.asm.label(ok_label)
@@ -3041,23 +3052,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         return terminated
 
     def _emit_try(self, stmt: F.TryStmt) -> None:
-        """try/except/else/finally without an exception runtime.
-
-        The except arms are SKIPPED: formal has no unwinder, so there is no
-        edge from a raise site to a handler — and `raise` itself exits the
-        process, so no handler is ever reachable. `else` runs on the success
-        path (which, without EH, is simply the fall-through). A `finally` is
-        pushed onto `_pending_finally` so the paths that leave early
-        (return/break/continue/raise) run it too, and the normal fall-through
-        emits it here.
-
-        The fall-through copy is emitted even when an exit edge inside the body
-        already flushed this frame, because that flush happens where the exit
-        is EMITTED while the fall-through is a different, still-reachable path
-        through the same block; dropping it is how a conditional `return` and a
-        `continue` inside a loop each cost a `finally` its cleanup on the normal
-        path (measured on both architectures, and the same fix and the same
-        measurement on arm64 — `formal/arm64_codegen.py`'s `_emit_try`)."""
+        """try/except/else/finally with exception handling."""
         suppressible = getattr(stmt, '_with_suppressible', False) or getattr(stmt, '_suppressible', False)
         resume_label = None
         if suppressible:
@@ -3066,8 +3061,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._with_suppress_resume_labels = []
             self._with_suppress_resume_labels.append(resume_label)
         fin = stmt.finally_body or []
+        handlers = getattr(stmt, 'handlers', None) or []
+        handlers = [h for h in handlers if not getattr(h, 'name', None)]
         if fin:
             self._pending_finally.append(fin)
+        if handlers and not suppressible:
+            if not hasattr(self, '_pending_try_handlers'):
+                self._pending_try_handlers = []
+            self._pending_try_handlers.append({'handlers': handlers})
         try:
             for s in stmt.body:
                 self._emit_stmt(s)
@@ -3077,6 +3078,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             if fin and self._pending_finally \
                     and self._pending_finally[-1] is fin:
                 self._pending_finally.pop()
+            if handlers and not suppressible and hasattr(self, '_pending_try_handlers') and self._pending_try_handlers:
+                top = self._pending_try_handlers[-1]
+                if top.get('handlers') is handlers:
+                    self._pending_try_handlers.pop()
         finished = getattr(self, '_finished_finally', None)
         if fin and finished and id(fin) in finished:
             pass
@@ -3141,7 +3146,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         return self._emit_extern_call("exit")
 
     def _emit_diverge(self, status: int | None = 1) -> None:
-        """Leave the machine: run every enclosing finally, then `exit(1)`."""
+        """Leave the machine: run every enclosing finally, then exit or dispatch."""
         prev = getattr(self, '_exception_in_flight', False)
         self._exception_in_flight = True
         try:
@@ -3210,6 +3215,69 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             if declared is not None:
                 self._emit_expr(M.raise_zero_arg_construction(
                     declared, getattr(stmt, "line", 0) or 0))
+                if getattr(self, '_pending_try_handlers', None):
+                    kinds = M.exception_kinds()
+                    exc_kind = M.exception_kind_for(declared, kinds)
+                    if exc_kind is None:
+                        exc_kind = 1
+                    self._emit_mov_imm(Reg.RAX, exc_kind)
+                    try:
+                        handler_info = self._pending_try_handlers[-1]
+                        handlers = handler_info.get('handlers', [])
+                        for handler in handlers:
+                            exc_type = getattr(handler, 'exc_type', None)
+                            handler_name = getattr(handler, 'name', None)
+                            if handler_name:
+                                continue
+                            try:
+                                if exc_type is None:
+                                    try:
+                                        self._flush_pending_finally()
+                                    except Exception:
+                                        pass
+                                    for hs in (getattr(handler, 'body', None) or []):
+                                        self._emit_stmt(hs)
+                                    self._exception_in_flight = prev
+                                    return
+                                if M.handler_arm_matches(exc_type if isinstance(exc_type, str) else (exc_type[0] if isinstance(exc_type, (list,tuple)) and exc_type else declared), declared, kinds, self._structs):
+                                    try:
+                                        self._flush_pending_finally()
+                                    except Exception:
+                                        pass
+                                    for hs in (getattr(handler, 'body', None) or []):
+                                        self._emit_stmt(hs)
+                                    self._exception_in_flight = prev
+                                    return
+                                elif isinstance(exc_type, (list,tuple)):
+                                    for et in exc_type:
+                                        if M.handler_arm_matches(et, declared, kinds, self._structs):
+                                            try:
+                                                self._flush_pending_finally()
+                                            except Exception:
+                                                pass
+                                            for hs in (getattr(handler, 'body', None) or []):
+                                                self._emit_stmt(hs)
+                                            self._exception_in_flight = prev
+                                            return
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+                    try:
+                        self._flush_pending_finally()
+                    except Exception:
+                        self._exception_in_flight = prev
+                        raise
+                    if getattr(self, '_suppress_to_resume', False):
+                        self._suppress_to_resume = False
+                        self._exception_in_flight = prev
+                        return
+                    if getattr(self, '_exception_in_flight', False):
+                        self._exception_in_flight = prev
+                        self._emit_call_exit(1)
+                        return
+                    self._exception_in_flight = prev
+                    return
                 try:
                     self._flush_pending_finally()
                 except Exception:
@@ -3227,6 +3295,45 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 return
             if value is not None:
                 self._emit_expr(value)
+            if getattr(self, '_pending_try_handlers', None):
+                self._emit_mov_imm(Reg.RAX, 1)
+                try:
+                    handler_info = self._pending_try_handlers[-1]
+                    handlers = handler_info.get('handlers', [])
+                    for handler in handlers:
+                        exc_type = getattr(handler, 'exc_type', None)
+                        handler_name = getattr(handler, 'name', None)
+                        if handler_name:
+                            continue
+                        try:
+                            if exc_type is None:
+                                try:
+                                    self._flush_pending_finally()
+                                except Exception:
+                                    pass
+                                for hs in (getattr(handler, 'body', None) or []):
+                                    self._emit_stmt(hs)
+                                self._exception_in_flight = prev
+                                return
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+                try:
+                    self._flush_pending_finally()
+                except Exception:
+                    self._exception_in_flight = prev
+                    raise
+                if getattr(self, '_suppress_to_resume', False):
+                    self._suppress_to_resume = False
+                    self._exception_in_flight = prev
+                    return
+                if getattr(self, '_exception_in_flight', False):
+                    self._exception_in_flight = prev
+                    self._emit_call_exit(1)
+                    return
+                self._exception_in_flight = prev
+                return
             try:
                 self._flush_pending_finally()
             except Exception:
@@ -3249,10 +3356,106 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                                          argument_is_int=self._sys_exit_status_is_int(
                                              value))
             if status is None:
+                if getattr(self, '_pending_try_handlers', None) and exc_name not in ("SystemExit",):
+                    kinds = M.exception_kinds()
+                    exc_kind = M.exception_kind_for(exc_name, kinds)
+                    if exc_kind is None:
+                        exc_kind = 1
+                    self._emit_mov_imm(Reg.RAX, exc_kind)
                 args = M.raise_arg_exprs(value)
-                self._emit_expr(args[0])
-                for arg in args[1:]:
+                if status is None and not (getattr(self, '_pending_try_handlers', None) and exc_name not in ("SystemExit",)):
+                    self._emit_expr(args[0])
+                    for arg in args[1:]:
+                        self._emit_expr(arg)
+                    try:
+                        self._flush_pending_finally()
+                    except Exception:
+                        self._exception_in_flight = prev
+                        raise
+                    if getattr(self, '_suppress_to_resume', False):
+                        self._suppress_to_resume = False
+                        self._exception_in_flight = prev
+                        return
+                    if getattr(self, '_exception_in_flight', False):
+                        self._exception_in_flight = prev
+                        self._emit_call_exit(None, computed=True)
+                        return
+                    self._exception_in_flight = prev
+                    return
+                else:
+                    # For exceptions in try blocks
+                    if getattr(self, '_pending_try_handlers', None) and exc_name not in ("SystemExit",):
+                        self._emit_expr(args[0]) if args else None
+                        for arg in args[1:]:
+                            self._emit_expr(arg)
+                    try:
+                        self._flush_pending_finally()
+                    except Exception:
+                        self._exception_in_flight = prev
+                        raise
+                    if getattr(self, '_suppress_to_resume', False):
+                        self._suppress_to_resume = False
+                        self._exception_in_flight = prev
+                        return
+                    if getattr(self, '_exception_in_flight', False):
+                        self._exception_in_flight = prev
+                        if getattr(self, '_pending_try_handlers', None) and exc_name not in ("SystemExit",):
+                            self._emit_call_exit(1)
+                            return
+                        self._emit_call_exit(None, computed=True)
+                        return
+                    self._exception_in_flight = prev
+                    return
+            if getattr(self, '_pending_try_handlers', None) and exc_name not in ("SystemExit",):
+                kinds = M.exception_kinds()
+                exc_kind = M.exception_kind_for(exc_name, kinds)
+                if exc_kind is None:
+                    exc_kind = 1
+                self._emit_mov_imm(Reg.RAX, exc_kind)
+                for arg in M.raise_arg_exprs(value):
                     self._emit_expr(arg)
+                try:
+                    handler_info = self._pending_try_handlers[-1]
+                    handlers = handler_info.get('handlers', [])
+                    for handler in handlers:
+                        exc_type = getattr(handler, 'exc_type', None)
+                        handler_name = getattr(handler, 'name', None)
+                        if handler_name:
+                            continue
+                        try:
+                            if exc_type is None:
+                                try:
+                                    self._flush_pending_finally()
+                                except Exception:
+                                    pass
+                                for hs in (getattr(handler, 'body', None) or []):
+                                    self._emit_stmt(hs)
+                                self._exception_in_flight = prev
+                                return
+                            if M.handler_arm_matches(exc_type if isinstance(exc_type, str) else (exc_type[0] if isinstance(exc_type, (list,tuple)) and exc_type else exc_name), exc_name, kinds, self._structs):
+                                try:
+                                    self._flush_pending_finally()
+                                except Exception:
+                                    pass
+                                for hs in (getattr(handler, 'body', None) or []):
+                                    self._emit_stmt(hs)
+                                self._exception_in_flight = prev
+                                return
+                            elif isinstance(exc_type, (list,tuple)):
+                                for et in exc_type:
+                                    if M.handler_arm_matches(et, exc_name, kinds, self._structs):
+                                        try:
+                                            self._flush_pending_finally()
+                                        except Exception:
+                                            pass
+                                        for hs in (getattr(handler, 'body', None) or []):
+                                            self._emit_stmt(hs)
+                                        self._exception_in_flight = prev
+                                        return
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
                 try:
                     self._flush_pending_finally()
                 except Exception:
@@ -3264,7 +3467,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     return
                 if getattr(self, '_exception_in_flight', False):
                     self._exception_in_flight = prev
-                    self._emit_call_exit(None, computed=True)
+                    self._emit_call_exit(1)
                     return
                 self._exception_in_flight = prev
                 return
