@@ -6667,21 +6667,19 @@ def _transform_enum_classes(stmts):
             if bases:
                 base_name = bases[0]
                 base_ident = MemberExpr(obj=IdentExpr(name='enum'), member=base_name)
-                mcls_call = CallExpr(func=IdentExpr(name='type'), args=[base_ident])
-                mcls_assign = AssignStmt(target=IdentExpr(name=f'_{name}_mcls'), value=mcls_call)
-                result.append(mcls_assign)
+                mcls_arg = IdentExpr(name='type')
                 type_new_call = CallExpr(
                     func=MemberExpr(obj=IdentExpr(name='type'), member='__new__'),
-                    args=[IdentExpr(name=f'_{name}_mcls'), StringLiteral(value=name),
-                          TupleExpr(elements=[base_ident]), ns_dict]
+                    args=[mcls_arg, StringLiteral(value=name),
+                          TupleExpr(elements=[]), ns_dict]
                 )
                 new_assign = AssignStmt(target=IdentExpr(name=name), value=type_new_call)
                 result.append(new_assign)
                 try:
                     type_init_call = CallExpr(
-                        func=MemberExpr(obj=IdentExpr(name=f'_{name}_mcls'), member='__init__'),
+                        func=MemberExpr(obj=IdentExpr(name='type'), member='__init__'),
                         args=[IdentExpr(name=name), StringLiteral(value=name),
-                              TupleExpr(elements=[base_ident]), ns_dict]
+                              TupleExpr(elements=[]), ns_dict]
                     )
                     result.append(ExprStmt(value=type_init_call))
                 except Exception:

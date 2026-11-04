@@ -3771,6 +3771,8 @@ def _gmi_is_rebindable(gen, dec, scope: dict, def_name: str) -> bool:
     _ANNOTATION_DECORATORS = frozenset({
         'staticmethod', 'classmethod', 'export', 'doc_hidden', 'gpu', 'kernel',
         'property', 'abstractmethod', 'lldb_formatter_wrapping_type',
+        'stable', 'deprecated', 'value', 'register_passable',
+        'nonmaterializable', 'parameter', 'always_inline',
     })
     if _head in _ANNOTATION_DECORATORS:
         return False
@@ -4953,6 +4955,11 @@ def gen_module_impl(self, stmts: list):
     # the experiment this replaces (which narrowed the feature instead of
     # fixing the cause, and so produced `conflicting types` regressions).
     stmts = list(stmts) + _elab_intu.run(self, stmts)
+    # Register imported non-generic structs after materialization (e.g. struct-valued elements)
+    try:
+        self._register_imported_structs(stmts)
+    except Exception:
+        pass
 
     for _s in stmts:
         if isinstance(_s, ComptimeVarStmt) and isinstance(_s.value, ListExpr):
