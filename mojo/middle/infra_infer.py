@@ -1539,6 +1539,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # with the signature: `def keep(scale=0.5): return scale` inferred
     # `int64_t` and printed 0 for 0.5. Weaker than any usage evidence above.
     _fdefaults = getattr(func, 'param_defaults', None) or {}
+    _foreign_callables = getattr(gimple_ctypes, '_FOREIGN_CALLABLES', {}) or {}
 
     def _foreign_callable_qualname(default):
         try:
@@ -1575,21 +1576,54 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
         except Exception:
             pass
         return None
-
     for _fp in func.params:
         _fpn = _as_str(_fp[0]).lstrip('*')
-        # Check for foreign callable default
-        _def = _fp[1] if len(_fp) > 1 else None
-        if _def is None:
-            _def = _fdefaults.get(_fpn)
-        if _def is not None and _fpn not in inferred:
-            _qname = _foreign_callable_qualname(_def)
-            if _qname and _qname in _FOREIGN_CALLABLES:
-                inferred[_fpn] = _FOREIGN_CALLABLES[_qname]
-                continue
+        _fpn = _as_str(_fp[0]).lstrip('*')
+        if _fpn not in inferred:
+            _def = _fp[1] if len(_fp) > 1 else None
+            if _def is None:
+                _def = _fdefaults.get(_fpn)
+            if _def is not None:
+                # Try helper from master approach
+                _qname = _foreign_callable_qualname(_def)
+                if _qname:
+                    if _qname in _FOREIGN_CALLABLES:
+                        inferred[_fpn] = _FOREIGN_CALLABLES[_qname]
+                        continue
+                    if _foreign_callables and _qname in _foreign_callables:
+                        inferred[_fpn] = _foreign_callables[_qname]
+                        continue
+                # HEAD's direct resolution as fallback
+                if _foreign_callables:
+                    _qname2 = None
+                    try:
+                        if isinstance(_def, MemberExpr):
+                            if isinstance(getattr(_def, 'obj'), IdentExpr):
+                                _qname2 = f"{getattr(_def.obj, 'name')}.{getattr(_def, 'member')}"
+                            elif isinstance(getattr(_def, 'obj'), CallExpr):
+                                _obj = _def.obj
+                                if isinstance(getattr(_obj, 'func'), IdentExpr) and getattr(_obj.func, 'name') == '__import__':
+                                    if getattr(_obj, 'args'):
+                                        _a0 = _obj.args[0]
+                                        try:
+                                            _val = getattr(_a0, 'value')
+                                        except Exception:
+                                            _val = _as_str(_a0)
+                                        _qname2 = f"{_val}.{getattr(_def, 'member')}"
+                        elif isinstance(_def, IdentExpr):
+                            _qname2 = getattr(_def, 'name')
+                    except Exception:
+                        _qname2 = None
+                    if _qname2 and _qname2 in _foreign_callables:
+                        inferred[_fpn] = _foreign_callables[_qname2]
+                        continue
+                if isinstance(_def, FloatLiteral):
+                    inferred[_fpn] = 'double'
+                    continue
         if (_fp[1] is None and _fpn not in inferred
                 and isinstance(_fdefaults.get(_fpn), FloatLiteral)):
             inferred[_fpn] = 'double'
+
 
     # A parameter whose declared default is a name present in the foreign-
     # callable table (e.g. `def f(x, _g=csv.reader)`) is a callable-typed

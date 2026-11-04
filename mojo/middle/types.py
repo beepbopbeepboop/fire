@@ -2636,6 +2636,8 @@ _CPP_CALLABLE_CTYPE_STAR_KW = callable_ctype(['MojoList *', 'MojoDict *'], 'int6
 # Extended to optionally carry iterator element ctype for for-loop lowering.
 _FOREIGN_CALLABLES = {
     'csv.reader': _CPP_CALLABLE_CTYPE,
+    'make_reader': _CPP_CALLABLE_CTYPE,
+    '_get_reader_list': _CPP_CALLABLE_CTYPE,
 }
 _FOREIGN_CALLABLE_ITER_ELEM = {
     'csv.reader': 'MojoList *',
@@ -2673,6 +2675,9 @@ def _cpp_lambda_ctype(lam):
     `*args`/`**kwargs`. The parser records the starred names `*a`/`**k`
     with the prefix, so the C parameter takes the stripped name (`a`/`k`)
     — the one the body references.
+
+    Exception (step 3): a default whose value is a known foreign callable
+    (from _FOREIGN_CALLABLES) is admitted.
     """
     def _foreign_callable_qualname(default):
         try:
@@ -2711,6 +2716,7 @@ def _cpp_lambda_ctype(lam):
     _star = []
     _kw = []
     _foreign_default_ctype = None
+    _foreign = getattr(globals(), '_FOREIGN_CALLABLES', {}) or {}
     for _p in params:
         _n = _p[0]
         _d = _p[1]
