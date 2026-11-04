@@ -2616,6 +2616,18 @@ _FOREIGN_CALLABLES = {
 }
 
 
+def _get_qualified_name(expr):
+    """Extract a dotted qualified name from an expression (IdentExpr or MemberExpr chain)."""
+    if isinstance(expr, IdentExpr):
+        return expr.name
+    if isinstance(expr, MemberExpr):
+        obj_name = _get_qualified_name(expr.obj)
+        if obj_name is None:
+            return None
+        return obj_name + '.' + expr.member
+    return None
+
+
 def _cpp_lambda_ctype(lam):
     """The callable-value declared ctype for a coroutine-body `lambda`
     literal, or None when the shape is not admitted.
@@ -2677,12 +2689,13 @@ def _cpp_lambda_ctype(lam):
         _n = _p[0]
         _d = _p[1]
         if _d is not None:
-            # Admit default if it's a known foreign callable
+            # Admit default if it's a known foreign callable (robust extraction)
             _qname = _foreign_callable_qualname(_d)
+            if _qname is None:
+                _qname = _get_qualified_name(_d)
             if _qname and _qname in _FOREIGN_CALLABLES:
-                # Use the foreign callable's ctype
                 _foreign_default_ctype = _FOREIGN_CALLABLES[_qname]
-                continue  # treat as having no blocking default for shape purposes?
+                continue  # treat as having no blocking default for shape purposes
             return None
         if isinstance(_n, str) and _n.startswith('**'):
             _kw.append(_n)
@@ -2691,18 +2704,27 @@ def _cpp_lambda_ctype(lam):
         else:
             _plain.append(_n)
     if len(params) == 0:
+        if _foreign_default_ctype is not None:
+            return _foreign_default_ctype
         return _CPP_CALLABLE_CTYPE
     if len(_plain) == 1 and not _star and not _kw:
-        # If it's a plain param with foreign callable default, return that ctype
         if _foreign_default_ctype is not None:
             return _foreign_default_ctype
         return _CPP_CALLABLE_CTYPE_1ARG
     if len(_star) == 1 and not _plain and not _kw:
+        if _foreign_default_ctype is not None:
+            return _foreign_default_ctype
         return _CPP_CALLABLE_CTYPE_STARARGS
     if len(_kw) == 1 and not _plain and not _star:
+        if _foreign_default_ctype is not None:
+            return _foreign_default_ctype
         return _CPP_CALLABLE_CTYPE_KWARGS
     if len(_star) == 1 and len(_kw) == 1 and not _plain:
+        if _foreign_default_ctype is not None:
+            return _foreign_default_ctype
         return _CPP_CALLABLE_CTYPE_STAR_KW
+    if _foreign_default_ctype is not None:
+        return _foreign_default_ctype
     return None
 
 

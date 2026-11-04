@@ -17,7 +17,7 @@ import ownership_destruct
 from ownership_check import _block_terminates
 from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.types import _struct_value_codes  # underscore name: `import *` won't carry it
-from mojo.middle.types import _FOREIGN_CALLABLES
+from mojo.middle.types import _FOREIGN_CALLABLES  # underscore name: `import *` won't carry it
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
 # NO module-level `import gimple_codegen` here: nothing in this file reads
@@ -1591,8 +1591,25 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                 and isinstance(_fdefaults.get(_fpn), FloatLiteral)):
             inferred[_fpn] = 'double'
 
+    # A parameter whose declared default is a name present in the foreign-
+    # callable table (e.g. `def f(x, _g=csv.reader)`) is a callable-typed
+    # parameter: bind its inferred type to the table's ctype instead of the
+    # int64_t fallback. Mirrors `_param_ctype`'s default-as-evidence rule.
+    _fdefaults = getattr(func, 'param_defaults', None) or {}
+    for _fp in func.params:
+        _fpn = _as_str(_fp[0]).lstrip('*')
+        if _fpn in inferred:
+            continue
+        _pd = _fdefaults.get(_fpn)
+        _qname = None
+        if isinstance(_pd, IdentExpr):
+            _qname = _pd.name
+        elif isinstance(_pd, MemberExpr) and isinstance(_pd.obj, IdentExpr):
+            _qname = f"{_pd.obj.name}.{_pd.member}"
+        if _qname in _FOREIGN_CALLABLES:
+            inferred[_fpn] = _FOREIGN_CALLABLES[_qname]
     # A container guess is only as good as the body's own use of the name. A
-    # parameter the body REBINDS to a container of another kind (`live =
+    # parameter the body REBINDS to a container of another kind (`live =`
     # set(live)` after a `for x in live`, or after `set(live)` alone) has one
     # C variable that must hold both, and no single container pointer does:
     # the store then reaches `_sce_simple_emit`'s container-kind refusal, and

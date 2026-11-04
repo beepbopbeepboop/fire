@@ -268,6 +268,36 @@ def main():
     print(P.v, Q.v, P.__name__ == Q.__name__)
 main()
 """,
+    'methods_of_static_base_reached_through_dynamic_class': """\
+class Base:
+    def foo(self):
+        return 42
+
+    def add(self, x):
+        return self.foo() + x
+
+def main():
+    D = type('D', (Base,), {})
+    d = D()
+    print(d.foo())
+    print(d.add(8))
+    E = type('E', (Base,), {'extra': 5})
+    e = E()
+    print(e.foo())
+    print(e.add(10))
+main()
+""",
+    'metaclass_call_invoked': """\
+def meta_call(cls, x):
+    print('mc')
+    return x + 1
+
+def main():
+    Meta = type('Meta', (type,), {'__call__': meta_call})
+    Foo = type.__new__(Meta, 'Foo', (), {})
+    print(Foo(7))
+main()
+""",
 }
 
 
