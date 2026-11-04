@@ -3733,16 +3733,17 @@ def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) ->
         # cannot be rebound yet: refuse it, rather than let the compiled path
         # call the undecorated body (or a stub for the unbound name).
         for _rb_s in stmts or []:
-            if isinstance(_rb_s, FunctionDef):
+            if isinstance(_rb_s, FunctionDef) or isinstance(_rb_s, StructDef):
                 continue
             for _rb_d in _gmi_scope_defs([_rb_s]):
-                for _rb_dec in _rb_d.decorators or []:
-                    if _gmi_is_rebindable(self, _rb_dec, _rb_scope, _rb_d.name):
-                        raise RuntimeError(
-                            f"decorator {_gmi_decorator_head(_rb_dec)!r} on {_rb_d.name!r} is inside a "
-                            f"module-level block, which the compiled path cannot rebind yet; it would "
-                            f"silently call the undecorated function (see "
-                            f"bugs/hard/COMPILE_FAIL_decorator_application_dropped.md)")
+                if isinstance(_rb_d, FunctionDef):
+                    for _rb_dec in _rb_d.decorators or []:
+                        if _gmi_is_rebindable(self, _rb_dec, _rb_scope, _rb_d.name):
+                            raise RuntimeError(
+                                f"decorator {_gmi_decorator_head(_rb_dec)!r} on {_rb_d.name!r} is inside a "
+                                f"module-level block, which the compiled path cannot rebind yet; it would "
+                                f"silently call the undecorated function (see "
+                                f"bugs/hard/COMPILE_FAIL_decorator_application_dropped.md)")
     return _gmi_rebind_block(self, stmts, _rb_scope, at_module)
 
 
