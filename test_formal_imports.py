@@ -1810,10 +1810,8 @@ def test_a_host_module_refusal_says_what_this_target_offers(tmpdir, _shared):
     `collections.namedtuple("Census", "ok detail …")`
     (`formal/lean.py:816`, `formal/model.py:13195`, `tools/formal_sweep.py`),
     and the answer for a compile-time-known record with readable fields is a
-    `struct`. Without that sentence the refusal reads as "this target cannot do
-    records", and the next thing a reader does is file the next bug document
-    about `collections` — which is what
-    `bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` is.
+    `struct`. The advice explains how compile-time-known records map to
+    `struct`s rather than run-time type construction.
 
     **BOTH DIRECTIONS, because advice on every host module is the same noise in a
     different place.** The second row is a host module with no entry: its
