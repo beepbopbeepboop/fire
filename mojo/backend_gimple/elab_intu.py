@@ -654,12 +654,19 @@ def _positional_bracket_ctor_args(work, base, node):
     if (base in _ERASED_WORD_STRUCTS or base in _IN_TU_LIST_BASES
             or base in gimple_ctypes._TYPE_MAP):
         return None
-    dups =_duplicated_method_names(work.gen, base)
+    dups = _duplicated_method_names(work.gen, base)
     if not dups or dups <= _ITERATION_PROTOCOL:
         return None
     args = _concrete_args(work, 'struct', base, node)
-    if args is None or not all(a in gimple_ctypes._TYPE_MAP for a in args):
+    if args is None:
         return None
+    # Allow scalar types in _TYPE_MAP or struct types (struct-valued elements)
+    for a in args:
+        if a in gimple_ctypes._TYPE_MAP:
+            continue
+        # Allow concrete struct types (not type parameters)
+        if not gimple_exprtypes._is_concrete_type_arg(a):
+            return None
     return args
 
 
