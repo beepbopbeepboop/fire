@@ -249,13 +249,13 @@ left column):
 
 | module | `-13` | **`-14`** | Δ |
 |---|---|---|---|
-| `importlib` | 94 | **98** | +4 |
-| `collections` | 39 | **43** | +4 |
-| `itertools` | 14 | 14 | 0 |
-| `copy` | 13 | **12** | −1 |
-| `unittest` | 18 | **24** | +6 |
-| `atexit`, `resource`, `socket`, `tokenize`, … | | | see the log |
-| `signal` | 0 | **0** | stays gone |
+| importlib | 94 | **98** | +4 |
+| collections | 39 | **43** | +4 |
+| itertools | 14 | 14 | 0 |
+| copy | 13 | **12** | −1 |
+| unittest | 18 | **24** | +6 |
+| atexit, resource, socket, tokenize, … | | | see the log |
+| signal | 0 | **0** | stays gone |
 
 The reach split moves the other way from the file count:
 **90 in reach / 130 not** at `-13` → **72 in reach / 142 not** at `-14`, and the
@@ -388,7 +388,7 @@ itself and the fix is in this backend rather than in a module boundary.
 |---|---|---|
 | `std/math/polynomial.mojo` | `reversed(range(n))` | a **reversed copy of a run-time sequence** — the same two gaps as `list`, and `FORMAL_listdir_no_run_time_sequence` |
 | `std/utils/_serialize.mojo` | `max(rank - 2, 0)` | **a compare and a select** — `b14` §5, and the fix that section names. This is the ONLY two-argument `max` in the 768-file scope, and it is `for i in range(max(rank - 2, 0))` |
-| `bootstrap-validate.mojo` | `sorted(glob.glob(p))` | a **sort with a comparison per element**, and a call through a value is not a thing this path can express |
+| bootstrap-validate.mojo | `sorted(glob.glob(p))` | a **sort with a comparison per element**, and a call through a value is not a thing this path can express |
 | `mojo/middle/metal_ops.py` | `any(g for g in FAMILIES)` | a **fold over a sequence with a short circuit** |
 | `test_formal_int_semantics.py` | `list(ROWS)` | **a run-time blob copy** — the doc says so itself, and `formal40-3` holds `FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time` |
 | `tools/gatewatch.py` | `max(r[1] for r in rows)` | a **fold over a generator**, and `sorted(rows, key=lambda …)` behind it |
@@ -408,7 +408,7 @@ implementation its `--min 1` table is):
 
 | file | the refusal, in one sentence | what it is |
 |---|---|---|
-| `std/builtin/float_literal.mojo` | `self.__int_literal__().__int__(…)` cannot be lowered: the receiver's type is written down and the CALLEE is what is missing | **stdlib** — not editable from a worktree |
+| std/builtin/float_literal.mojo | `self.__int_literal__().__int__(…)` cannot be lowered: the receiver's type is written down and the CALLEE is what is missing | **stdlib** — not editable from a worktree |
 | `std/collections/type_dict.mojo` | `Self._index` reads a `comptime` class attribute whose value is `Self.keys`, a PARAMETER of `TypeDict` | **stdlib**; a parameter's value belongs to an instantiation, and there is no monomorphizer here |
 | `std/sys/arg.mojo` | `Span[StaticString, ImmStaticOrigin]` is a compile-time explicit-parameter list on a generic, not a subscript | **stdlib** |
 | `bootstrap_test_classes.mojo` | `create_point` returns a frame address and `create_point` is this image's ENTRY, whose caller is the C runtime | a **correct refusal** — the returned-frame convention needs a caller that reserves a block |
@@ -629,11 +629,11 @@ All seven are in-file; the bucket's definition is in
 
 | file | the refusal, in one sentence | what it is |
 |---|---|---|
-| `std/builtin/float_literal.mojo` | `self.__int_literal__()` used as a receiver for `__int__(…)`, and that is an `IntLiteral` another module declares | **stdlib** — not editable from a worktree |
+| std/builtin/float_literal.mojo | `self.__int_literal__()` used as a receiver for `__int__(…)`, and that is an `IntLiteral` another module declares | **stdlib** — not editable from a worktree |
 | `std/collections/type_dict.mojo` | `Self._index` reads a `comptime` class attribute whose value is a **parameter** of `TypeDict`, and a parameter's value belongs to an instantiation | **stdlib** |
 | `std/sys/arg.mojo` | `Span[StaticString, ImmStaticOrigin]` is a compile-time explicit-parameter list on a generic, not a subscript | **stdlib** |
 | `std/utils/_serialize.mojo` | `p.unsafe_load()` as an **argument**: it reads at an offset from the receiver, which is a different construct from the same call as a statement | **stdlib** |
-| `bootstrap-validate.mojo` | a container returned by a function is read again after a call | had a claimed doc, since released; the refusal has a doc and no row in either ranking instrument, so it reads as *"nobody has looked"*. Same defect shape as §1.7, one file |
+| bootstrap-validate.mojo | a container returned by a function is read again after a call | had a claimed doc, since released; the refusal has a doc and no row in either ranking instrument, so it reads as *"nobody has looked"*. Same defect shape as §1.7, one file |
 | `bootstrap_test_classes.mojo` | `create_point` returns a frame address and `create_point` is the image's ENTRY, whose caller is the C runtime and passes no such word | a **correct refusal** — the returned-frame convention needs a caller that reserves a block |
 | **`test_formal_libc_symbol.py`** | **`parse error: …:483:23: unterminated string literal`** | **a defect in this repository's own lexer** — FIXED on the round that measured it; see below |
 

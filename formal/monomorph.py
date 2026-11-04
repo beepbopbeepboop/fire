@@ -1770,18 +1770,8 @@ def inferred_demands_for(consumer_src: str, module_src: str, templates,
                          own=()) -> dict:
     """`{template: [(type arg, …), …]}` — bare calls to templates whose type
     arguments can be inferred from argument types."""
-    try:
-        with open('/tmp/DEBUG_INFER.txt', 'a') as _f:
-            _f.write(f"CALLED wanted={templates} own={own}\n")
-    except Exception:
-        pass
     wanted = {n for n in (templates or ()) if n} - {n for n in (own or ()) if n}
     if not wanted:
-        try:
-            with open('/tmp/DEBUG_INFER.txt', 'a') as _f:
-                _f.write("NO_WANTED\n")
-        except Exception:
-            pass
         return {}
     import elaborate
     import re
@@ -1792,17 +1782,7 @@ def inferred_demands_for(consumer_src: str, module_src: str, templates,
     try:
         stmts = _consumer_statements(consumer_src)
     except Exception:
-        try:
-            with open('/tmp/DEBUG_INFER.txt', 'a') as _f:
-                _f.write("ERR_STMTS\n")
-        except Exception:
-            pass
         return {}
-    try:
-        with open('/tmp/DEBUG_INFER.txt', 'a') as _f:
-            _f.write(f"NSTMTS={len(stmts)}\n")
-    except Exception:
-        pass
 
     syms = M.collect_module_symbols(stmts) or {}
     module_level = set()

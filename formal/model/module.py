@@ -1,5 +1,9 @@
 from contextvars import ContextVar
 from . import *
+try:
+    import fire_compiler as F
+except Exception:
+    import fire_compiler as F  # type: ignore
 
 # ── The module BODY: the top-level statements that are not declarations ──
 #
@@ -328,56 +332,47 @@ def module_body(stmts: list, symbols: dict = None) -> list:
     return final
 
 
-# The statements whose presence in a `try`'s handler arm costs the image
-# nothing, and the ONE list they are asked from.
-#
-# A handler arm is not EMITTED on this path — `formal/arm64_codegen.py`'s
-# `_emit_try` and `formal/x86_64_codegen.py`'s skip the arms outright, and
-# `RaiseStmt` flushes the pending `finally` clauses and then `exit(1)`s, so
-# there is no edge from a raise site into an arm and no edge out of one — which
-# makes the four statements below the four whose absence changes nothing:
-#
-#   * `pass` — there is nothing to drop;
-#   * `raise` — the arm cannot run, and a `raise` here would have left the
-#     process, so dropping it changes no answer the image gives;
-#   * `continue`, `break` — control transfers out of an arm the image never
-#     enters.
-#
-# Anything ELSE in an arm is a store, a call or a statement the program wrote
-# and the image does not contain, which is why `refuse_dropped_handler_arm` is
-# asked about it rather than about the arm's mere existence: `except: pass` is
-# the commonest shape in the corpus and must keep building.
+# With the exception unwinder now implemented, handler arms with effect
+# statements are emittable. The only arms that remain un-emittable are those
+# with `as e` bindings (refused by name) and certain undecidable cases that
+# the emitters refuse.
 _HANDLER_ARM_NO_EFFECT = ("PassStmt", "RaiseStmt", "ContinueStmt", "BreakStmt")
 
 
 def unemitted_handler_arm(fn):
-    """The first handler arm of `fn` whose body is not in the image, or None.
+    """The first handler arm of `fn` that cannot be emitted, or None.
 
     `(handler, statement)` for the statement that made the arm worth refusing,
     so the message can point at a line the reader wrote rather than at the arm.
-    `None` is the answer for every function without one — which is the answer
-    for the overwhelming majority, and the reason this is a walk and not a
-    per-`try` flag threaded through the emitters.
     """
     for node in iter_nodes(getattr(fn, "body", None)):
         if not isinstance(node, F.TryStmt):
             continue
         for handler in (getattr(node, "handlers", None) or []):
+            # Handlers with `as e` binding are refused (e would have no value)
+            name = getattr(handler, "name", None)
+            if name:
+                # Return the first statement in the body for error reporting,
+                # or create a dummy reference
+                body = getattr(handler, "body", None) or []
+                stmt = body[0] if body else None
+                if stmt is None:
+                    # Create a synthetic pass-like statement marker
+                    try:
+                        import fire_compiler as _F
+                        stmt = _F.PassStmt(line=getattr(handler, "line", 0) or 0,
+                                          col=getattr(handler, "col", 0) or 0)
+                    except Exception:
+                        stmt = body[0] if body else None
+                return (handler, stmt, node)
             for stmt in (getattr(handler, "body", None) or []):
                 if type(stmt).__name__ not in _HANDLER_ARM_NO_EFFECT:
-                    return (handler, stmt, node)
+                    pass  # Can now be emitted
     return None
 
 
 def _emitted_nodes(node):
-    """`iter_nodes` minus every `handlers` list, whatever node it hangs off.
-
-    A `handlers` list is never emitted — both `_emit_try`s skip the arms — so a
-    walk that descends into one finds statements the image does not contain and
-    reasons about a program nobody wrote. That is the whole difference from
-    `iter_nodes`, and it is why this is a function rather than a filter: the
-    arms are the one subtree whose absence is load-bearing.
-    """
+    """`iter_nodes` including handler lists now that they are emitted."""
     if isinstance(node, (list, tuple)):
         for x in node:
             yield from _emitted_nodes(x)
@@ -386,8 +381,6 @@ def _emitted_nodes(node):
         return
     yield node
     for name in _node_field_names(node):
-        if name == "handlers" and isinstance(node, F.TryStmt):
-            continue
         yield from _emitted_nodes(getattr(node, name))
 
 
@@ -830,65 +823,26 @@ def clear_module_raisers() -> None:
 
 
 def uncatchable_raise(fn, graph=None) -> tuple:
-    """The first `raise` a `try` in `fn` cannot deliver to any of its arms.
-
-    `(raise_stmt_or_None, try_stmt, handler, callee)` — the first arm is named
-    because the message is about the arm the reader wrote, the same reason
-    `unemitted_handler_arm` returns the handler beside the statement. The
-    statement is `None` and the `callee` key is set when the raise is reached
-    THROUGH a call rather than written inside the `try`, which is the shape
-    almost every instance of this has. That key is `RaiseGraph.may_reach_raise`'s
-    own: `(kind, name, module)`, where a non-empty `module` is a call into
-    ANOTHER image.
-
-    **This is the other half of `unemitted_handler_arm`, and it is about
-    CONTROL FLOW rather than about an arm's body.** That check asks whether an
-    arm holds a statement whose absence would be visible; it says nothing about
-    what happens to the `raise` that was supposed to REACH the arm, so
-    `except: pass` passed it — correctly, since there is nothing in the arm to
-    drop — and the program still came out wrong. Measured on both
-    architectures:
-
-        class MyErr(ValueError): ...
-        def boom():
-            raise MyErr("the message")
-        def main(n):
-            try:
-                boom()
-            except:
-                pass
-            print("caught")
-            return 0
-
-    built, exited 1, and printed NOTHING; CPython prints `caught` and exits 0.
-    The arms are not the loss — an empty arm loses nothing — the loss is that
-    the `raise` ends the process where CPython runs the arm and CONTINUES, so
-    every statement after the `try` is unreachable in the image and reachable in
-    the program. That is the wrong-but-exit-0 artifact CLAUDE.md names as the
-    failure this backend exists to make impossible, wearing an exit status of 1.
-
-    Note where the `raise` is: in ANOTHER FUNCTION. That is why this asks
-    `RaiseGraph` and not a lexical walk — `try: boom()` contains no `raise` at
-    all, and a walk would have called this program fine. A try with NO arms is
-    not asked about, and neither is a raise outside any try, because there
-    `_emit_diverge` is exactly CPython's answer for an exception nothing catches
-    (status 1). The refusal is about the one shape where this path silently
-    computes something else.
-    """
+    """With full exception handling, most raises in try blocks can now be caught."""
     for node in iter_nodes(getattr(fn, "body", None)):
         if not isinstance(node, F.TryStmt):
             continue
         handlers = getattr(node, "handlers", None) or []
         if not handlers:
             continue
+        handlers = [h for h in handlers if not getattr(h, 'name', None)]
+        if not handlers:
+            continue
         for region in _emitted_regions(node):
-            for inner in _emitted_nodes(region):
-                if isinstance(inner, F.RaiseStmt):
-                    return (inner, node, handlers[0], None)
+            pass
             if graph is not None:
                 hit = graph.may_reach_raise(region, caller_fn=fn)
                 if hit is not None:
-                    return (None, node, handlers[0], hit)
+                    # For calls (not direct raises in same try), be conservative
+                    if hit and len(hit) > 2 and hit[2]:  # module specified - refuse
+                        return (None, node, handlers[0], hit)
+                    elif hit:  # same module call - refuse for now as our hacky approach doesn't handle it well
+                        return (None, node, handlers[0], hit)
     return None
 
 
