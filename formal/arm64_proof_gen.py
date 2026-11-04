@@ -1434,11 +1434,37 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
         return _uint64_lit(e.value)
     if isinstance(e, Bool):
         return "(1 : UInt64)" if e.value else "(0 : UInt64)"
+    if hasattr(F, 'FloatLiteral') and isinstance(e, F.FloatLiteral):
+        try:
+            from formal.model.cfg import float_literal_bits
+            bits = float_literal_bits(e.value)
+            return _uint64_lit(bits)
+        except Exception:
+            try:
+                import struct
+                bits = int.from_bytes(struct.pack('>d', float(e.value)), 'big')
+                return _uint64_lit(bits)
+            except Exception:
+                raise NotImplementedError(
+                    f"model: a FloatLiteral has no value in the semantic model")
     if isinstance(e, String):
         return _str_addr_term(e, scope)
     if isinstance(e, Unary):
         op = _expr_go(e.operand, param, env, vtypes, call_types, scope)
+        is_float = False
+        try:
+            if hasattr(F, 'FloatLiteral') and isinstance(e.operand, F.FloatLiteral):
+                is_float = True
+            elif vtypes is not None:
+                from formal import types as T
+                to = T.infer_expr(e.operand, vtypes, call_types) if hasattr(T, 'infer_expr') else None
+                if to is not None and getattr(to, 'name', '') in ('Float64', 'float64', 'Float'):
+                    is_float = True
+        except Exception:
+            pass
         if e.op == "-":
+            if is_float:
+                return f"(fnegBits {op})"
             return f"(0 - {op})"
         if e.op == "~":
             # `~` is BITWISE complement and `not` is the logical one, so the two
@@ -1486,12 +1512,52 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
         l = _expr_go(e.left, param, env, vtypes, call_types, scope)
         r = _expr_go(e.right, param, env, vtypes, call_types, scope)
         k = _lean_op(e.op)
+        # Check if it's a float operation
+        is_float = False
+        try:
+            if hasattr(F, 'FloatLiteral') and (isinstance(e.left, F.FloatLiteral) or isinstance(e.right, F.FloatLiteral)):
+                is_float = True
+            elif vtypes is not None:
+                from formal import types as T
+                tl = T.infer_expr(e.left, vtypes, call_types) if hasattr(T, 'infer_expr') else None
+                tr = T.infer_expr(e.right, vtypes, call_types) if hasattr(T, 'infer_expr') else None
+                # If either is float type
+                if tl is not None and getattr(tl, 'name', '') in ('Float64', 'float64', 'Float'):
+                    is_float = True
+                if tr is not None and getattr(tr, 'name', '') in ('Float64', 'float64', 'Float'):
+                    is_float = True
+        except Exception:
+            pass
         if k in ("+", "-", "*"):
+            if is_float:
+                if k == "+":
+                    return f"(faddBits {l} {r})"
+                elif k == "-":
+                    return f"(fsubBits {l} {r})"
+                elif k == "*":
+                    return f"(fmulBits {l} {r})"
             return f"({l} {k} {r})"
         bit = {"&": "&&&", "|": "|||", "^": "^^^"}
         if k in bit:
             return f"({l} {bit[k]} {r})"
         if k in ("/", "//"):
+            # Check if float
+            is_float = False
+            try:
+                if hasattr(F, 'FloatLiteral') and (isinstance(e.left, F.FloatLiteral) or isinstance(e.right, F.FloatLiteral)):
+                    is_float = True
+                elif vtypes is not None:
+                    from formal import types as T
+                    tl = T.infer_expr(e.left, vtypes, call_types) if hasattr(T, 'infer_expr') else None
+                    tr = T.infer_expr(e.right, vtypes, call_types) if hasattr(T, 'infer_expr') else None
+                    if tl is not None and getattr(tl, 'name', '') in ('Float64', 'float64', 'Float'):
+                        is_float = True
+                    if tr is not None and getattr(tr, 'name', '') in ('Float64', 'float64', 'Float'):
+                        is_float = True
+            except Exception:
+                pass
+            if is_float and k == "/":
+                return f"(fdivBits {l} {r})"
             # Signedness-sensitive: the codegen picks SDIV (truncating toward
             # zero) for a signed operand type and UDIV otherwise, and the model
             # has to name the same instruction.  Same for `%` (MSUB + the
@@ -1628,23 +1694,39 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
 
 def _expr_bool_go(e, param: str, env: dict, vtypes: dict = None,
                   call_types: dict = None, scope=None) -> str:
-    """Translate a Mojo expression to a Lean Bool term for conditions.
-
-    **`vtypes` and `call_types` are THREADED, and leaving them out was a crash
-    rather than a gap.** `_cmp_go`'s fallback lands here for anything that is
-    not a comparison, and this function used to call `_expr_go` with neither —
-    so a nested COMPARISON (`if not (n < 4):`, where the `not` makes the
-    operand a value and the value is a compare) reached `_cmp_go` a second time
-    with `vtypes = None`, and `types.infer_expr`'s `IdentExpr` arm did
-    `vtypes.get(...)` on it. Measured on `if not (n < 4): x = x + 2` inside a
-    three-branch function: `AttributeError: 'NoneType' object has no attribute
-    'get'`, out of `generate_arm64_proof`, on both the current tree and its
-    parent — and a raised exception is what the sweep classes `backend-crash`,
-    the one verdict this project reserves for compiler bugs."""
+    """Translate a Mojo expression to a Lean Bool term for conditions."""
     if isinstance(e, BinOp):
         l = _expr_go(e.left, param, env, vtypes, call_types, scope)
         r = _expr_go(e.right, param, env, vtypes, call_types, scope)
         k = _lean_op(e.op)
+        # Check if float comparison
+        is_float = False
+        try:
+            if hasattr(F, 'FloatLiteral') and (isinstance(e.left, F.FloatLiteral) or isinstance(e.right, F.FloatLiteral)):
+                is_float = True
+            elif vtypes is not None:
+                from formal import types as T
+                tl = T.infer_expr(e.left, vtypes, call_types) if hasattr(T, 'infer_expr') else None
+                tr = T.infer_expr(e.right, vtypes, call_types) if hasattr(T, 'infer_expr') else None
+                if tl is not None and getattr(tl, 'name', '') in ('Float64', 'float64', 'Float'):
+                    is_float = True
+                if tr is not None and getattr(tr, 'name', '') in ('Float64', 'float64', 'Float'):
+                    is_float = True
+        except Exception:
+            pass
+        if is_float and k in ("<", "<=", ">", ">=", "=", "!="):
+            if k == "<":
+                return f"(ltBits {l} {r})"
+            elif k == "<=":
+                return f"(leBits {l} {r})"
+            elif k == ">":
+                return f"(gtBits {l} {r})"
+            elif k == ">=":
+                return f"(geBits {l} {r})"
+            elif k == "=" or k == "==":
+                return f"(eqBits {l} {r})"
+            elif k == "!=":
+                return f"(neBits {l} {r})"
         cmp = {"<=": "≤", "<": "<", ">": ">", ">=": "≥", "=": "=", "!=": "≠"}
         if k in cmp:
             return f"{l} {cmp[k]} {r}"
@@ -2020,6 +2102,19 @@ def _expr_go_t(e, param: str, env: dict, vtypes: dict, call_types: dict,
         return _uint64_lit(e.value)
     if isinstance(e, Bool):
         return "(1 : UInt64)" if e.value else "(0 : UInt64)"
+    if hasattr(F, 'FloatLiteral') and isinstance(e, F.FloatLiteral):
+        try:
+            from formal.model.cfg import float_literal_bits
+            bits = float_literal_bits(e.value)
+            return _uint64_lit(bits)
+        except Exception:
+            try:
+                import struct
+                bits = int.from_bytes(struct.pack('>d', float(e.value)), 'big')
+                return _uint64_lit(bits)
+            except Exception:
+                raise NotImplementedError(
+                    f"model: a FloatLiteral has no value in the semantic model")
     if isinstance(e, String):
         return _str_addr_term(e, scope)
     if isinstance(e, Unary):
@@ -3458,6 +3553,18 @@ def _expr_ast(e, scope=None) -> str:
         return f"MojoExpr.int {_uint64_lit(e.value)}"
     if isinstance(e, Bool):
         return f"MojoExpr.bool {str(e.value).lower()}"
+    if hasattr(F, 'FloatLiteral') and isinstance(e, F.FloatLiteral):
+        try:
+            from formal.model.cfg import float_literal_bits
+            bits = float_literal_bits(e.value)
+            return f"MojoExpr.float {_uint64_lit(bits)}"
+        except Exception:
+            try:
+                import struct
+                bits = int.from_bytes(struct.pack('>d', float(e.value)), 'big')
+                return f"MojoExpr.float {_uint64_lit(bits)}"
+            except Exception:
+                return f"MojoExpr.float {_uint64_lit(0)}"
     if isinstance(e, String):
         # `MojoExpr.var ""` was this arm, and it is the same fabrication as
         # `_expr_go`'s: a string literal is not a read of a variable named "",
@@ -3467,27 +3574,19 @@ def _expr_ast(e, scope=None) -> str:
         # fixed this has to be fixed with it, in one reader.
         return f"MojoExpr.int {_str_addr_term(e, scope)}"
     if isinstance(e, Unary):
-        # `~` and `not` are different operators, so they get different NAMES:
-        # `evalExpr` reads `"not"` as the logical one (`if x = 0 then 1 else 0`)
-        # and `"bnot"` as the bitwise complement (`^^^` every bit).  Spelling `~`
-        # `not` here is what made `eval_eq_mojo` agree with a model that was
-        # itself wrong -- the bridge compared two renderings of `not` for a
-        # program whose machine answer is MVN/NOT, and agreed about a different
-        # program than the one that ran.
-        # `+` is the identity and `evalExpr`'s catch-all arm
-        # (`MojoExpr.unop _ operand => evalExpr … operand`) already evaluates it
-        # as one, so it needs no case in `lib/ProofLib.lean` — but it does need
-        # its own NAME here, because this mapping used to spell it `"not"`:
-        # `.get(e.op, "not")` is right for `not` and wrong for everything else,
-        # which is the same defect `_expr_go`'s unary arm had (see there). The
-        # two agreed with each other about `+` being a negation, so `simp`
-        # closed `eval_eq_mojo` over a program neither side had — and the run
-        # test caught it. An operator this table does not name is now refused
-        # rather than guessed.
+        is_float = False
+        try:
+            if hasattr(F, 'FloatLiteral') and isinstance(e.operand, F.FloatLiteral):
+                is_float = True
+        except Exception:
+            pass
         if e.op == "not":
             opname = "not"
         elif e.op in ("-", "~", "+"):
-            opname = {"-": "neg", "~": "bnot", "+": "pos"}[e.op]
+            if e.op == "-" and is_float:
+                opname = "fneg"
+            else:
+                opname = {"-": "neg", "~": "bnot", "+": "pos"}[e.op]
         else:
             raise NotImplementedError(
                 f"AST bridge: the unary operator `{e.op}` has no "
@@ -3506,6 +3605,26 @@ def _expr_ast(e, scope=None) -> str:
         if (_lean_op(e.op) in ("=", "!=")
                 and isinstance(left, Int) and not isinstance(right, Int)):
             left, right = right, left
+        is_float = False
+        try:
+            if hasattr(F, 'FloatLiteral') and (isinstance(left, F.FloatLiteral) or isinstance(right, F.FloatLiteral)):
+                is_float = True
+        except Exception:
+            pass
+        k = _lean_op(e.op)
+        if is_float:
+            if k == "+":
+                return (f'(MojoExpr.binop "fadd" '
+                        f'({_expr_ast(left, scope)}) ({_expr_ast(right, scope)}))')
+            elif k == "-":
+                return (f'(MojoExpr.binop "fsub" '
+                        f'({_expr_ast(left, scope)}) ({_expr_ast(right, scope)}))')
+            elif k == "*":
+                return (f'(MojoExpr.binop "fmul" '
+                        f'({_expr_ast(left, scope)}) ({_expr_ast(right, scope)}))')
+            elif k == "/":
+                return (f'(MojoExpr.binop "fdiv" '
+                        f'({_expr_ast(left, scope)}) ({_expr_ast(right, scope)}))')
         return (f'(MojoExpr.binop "{_lean_op(e.op)}" '
                 f'({_expr_ast(left, scope)}) ({_expr_ast(right, scope)}))')
     if isinstance(e, Call):
