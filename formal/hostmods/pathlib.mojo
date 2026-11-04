@@ -45,7 +45,7 @@ WHAT IS NOT HERE, AND WHY
   * `Path`, `PurePath`, `PurePosixPath`, `PosixPath`, `WindowsPath` — TYPES. A
     type is not a value on this path and cannot be returned from a module
     function, let alone stored in a module-level name
-    (`FORMAL_module_state_no_storage.md (deleted) (deleted)`). Every function here takes a
+    (`(module state/model limits) (deleted)`). Every function here takes a
     path as a `str`, which is the substitution `sys.mojo` makes for
     `sys.argv` and `os.mojo` makes for `os.environ`.
   * `parts`, `parents`, `suffixes` — SEQUENCES. A list is a blob carved out of

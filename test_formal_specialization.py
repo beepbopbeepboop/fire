@@ -223,7 +223,7 @@ def main() -> Int32:
 GLOBAL_SHADOW_CPYTHON = "global-call-ok"
 
 # A word the SOURCE says is not a function's address, at both ends of one call —
-# the decidable half of `bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`.
+# (function value calls — fixed).
 #
 # All three programs below built, branched to whatever word they held, and died
 # of SIGBUS on arm64 / SIGSEGV on x86-64 with nothing on either stream, while

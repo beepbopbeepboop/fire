@@ -14,7 +14,7 @@ CPython's `io` is STREAMS: `open`, `StringIO`, `BytesIO`, `FileIO`, the
 `RawIOBase` / `BufferedIOBase` / `TextIOBase` hierarchy and the `Reader` /
 `Writer` pair. Every one of those is an object with state — a descriptor, a
 cursor and a buffer — and on this path **a value cannot cross a dylib boundary
-unless it is one 64-bit word** (`FORMAL_module_state_no_storage.md (deleted) (deleted)`).
+unless it is one 64-bit word** (`(module state/model limits) (deleted)`).
 `formal/hostmods/sys.mojo` already says what that leaves of CPython's `sys`
 streams, and this is the same statement one level up: `sys` spells
 `sys.stdout.write` as two functions because a stream is not a word, and `io` is

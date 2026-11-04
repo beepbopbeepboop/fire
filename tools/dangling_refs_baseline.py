@@ -164,7 +164,6 @@ BARE_BASELINE = {
     'bugs/formal/FORMAL_known_limits.md': 7,
     'bugs/formal/FORMAL_string_value_model.md': 2,
     'bugs/formal/FORMAL_sweep_work_map.md': 5,
-    'bugs/formal/FORMAL_time_struct_shaped_answers.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md': 3,
     'doc/POLICY_memory_over_4gb.md': 1,
     'fire.py': 1,
