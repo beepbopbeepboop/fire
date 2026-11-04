@@ -21,7 +21,7 @@ sources. See `formal/imports.py`'s `_HOSTMODS_ROOT`.
 WHAT THIS TARGET CAN ANSWER
 ---------------------------
 A formal value is one 64-bit word that lives in a function's own stack
-scratch, reclaimed when the function returns (`formal/model.py`, "no
+scratch, reclaimed when the function returns (`formal/model/builtins.py`, "no
 storage"). Everything below is a consequence of that and nothing here is a
 guess:
 
@@ -111,7 +111,7 @@ def api_version() -> int:
 def maxsize() -> int:
     """`sys.maxsize`: 2**63 - 1.
 
-    A formal value is one 64-bit word (`formal/model.py`, "What a value is"),
+    A formal value is one 64-bit word (`formal/model/builtins.py`, "What a value is"),
     so the largest integer this target can represent is the largest signed
     64-bit one. The two architectures this backend emits for are both
     little-endian, which is why `byteorder` is a constant and not a question.

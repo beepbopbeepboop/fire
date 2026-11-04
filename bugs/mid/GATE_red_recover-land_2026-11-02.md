@@ -54,3 +54,36 @@ simplest use, `./mojoc FILE.py --dump` on a 20-line program: `EXC_BAD_ACCESS (ad
 DEBUGGING METHOD. Next step: build with `-g` frame pointers (`MOJO_OPT`), get the caller chain, and bisect the dict
 whose value is a non-dict. The earlier unpack fix (a list slot returns its own word) is a plausible neighbour, not a
 confirmed cause: master's `mojoc` never built, so there is no baseline binary to compare against.
+
+### 2026-11-03: the mojoc segfault is fixed; `bootstrap-stage1-transitive` is red on 26 unresolved calls
+
+`./mojoc FILE.py --dump` now runs to completion (exit 0): `.tok`, `.ast` and `.pyi` are byte-identical to the
+Python reference's, the `.ci` differs only in its `#line` path. Four defects, found with lldb against an
+`-O0 -g` build and by reading the emitted C (HOW-TO-DEBUG §5), all in master (d674024cc and earlier):
+
+1. `a or b or c` over a bool, a word of unknown kind and a dict stored the bool 1 in a `MojoDict *` slot and ran
+   `mojo_dict_len(1)` (`_gmi_specialize_literal_kind_clones`). `_lower_binary` types that result as a word.
+2. A kind-mixed tuple hands a `None` / `False` / NULL-string slot back as a non-zero BOX, which is truthy:
+   `is_generator, ids = _detect_generator(body)` made every function the compiled parser read a generator, and an
+   unannotated parameter's `None` annotation reached `strdup`. `mojo_unbox_plain` turns those boxes into their plain
+   words at unpack targets and at user-function call sites; `mojo_word_is_none` counts a NULL `p`/`s` box.
+3. `mojo/middle/coro.py` attached `module_qualifier` through `sys.modules[__name__]`, an `AttributeError: modules`
+   in the compiled binary on every compile. The import already binds the name.
+
+NEXT (why the three bootstrap jobs stay OFF): `bootstrap-stage1-transitive` rejects its own output
+(`CLOSURE_INCOMPLETE`): the Python `--dump-full` of `fire.py` contains 26 weak `... unavailable in compiled mode`
+stubs, i.e. calls the closure compile never resolved. 17 of them are PRIVATE (`_`-prefixed) functions called through
+a module alias between this compiler's own modules: `ginf._open_block_scope` / `_close_block_scope`
+(emit_infra, called from emit_stmts and emit_loops), `ggc._boxed_capture_source`, `ggc._build_outer_closure_env`,
+`ggc._generator_star_slot`, `ggc._pack_generator_star_args`, `gex._closure_value`, `_ca._cpp_word_of_kind`,
+`_ca._cpp_sig_default_word`, `_ca._fstring_field_names`, plus `_EXPR_DISPATCH`/`_STMT_DISPATCH`/`_GD_*` tables.
+The PUBLIC sibling `ginf.tagged_for_target_name` resolves to its mangled symbol, and the definition of
+`_open_block_scope` is emitted (`mojo_backend_gimple_emit_infra__open_block_scope_c6639c`), but the call site is
+lowered as the bare name `_open_block_scope`. The suspect is the bare-name lookup in
+`emit_methods._selfhost_sibling_member_kind` (`method_name in func_param_types / func_return_types`) missing a
+private function whose module was compiled after the caller's (the emit_infra <-> emit_stmts cycle). The other
+nine stubs (`append`, `update`, `items`, `object`, `issubclass`, `MojoParser`, `decode_c_escapes`,
+`is_fstring_literal`, `_walk_lists`) need their own reading. Repro: `python3 fire.py --dump-full fire.py` in an empty
+directory, then `grep -c 'unavailable in compiled mode' fire.ci`. Fixing it is what lets
+`bootstrap-stage1-transitive`, then stage2/stage3, run; do that before re-enabling the gate entries.
+
