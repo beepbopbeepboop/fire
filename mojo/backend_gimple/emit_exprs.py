@@ -1780,12 +1780,15 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # (TypeLattice.is_float's `t in cls._FLOAT`, reached lowering any
         # comparison operator).
         _cur_struct = getattr(gen, '_current_struct_name', None)
-        if (module_name == 'cls' and _cur_struct
+        _cur_fn = getattr(gen, 'current_func_name', '') or ''
+        _is_init_subclass = (_cur_fn.endswith('___init_subclass__') or '__init_subclass__' in _cur_fn)
+        if (module_name == 'cls' and _cur_struct and not _is_init_subclass
                 and node.member in gen._class_attrs.get(_cur_struct, {})):
             _gname = gen._class_attrs[_cur_struct][node.member]
             _gtype = gen._global_var_types.get(_gname, 'int64_t')
             return _gtype, gmp._cattr_read(gen, _gname, _gtype)
         if (module_name == 'cls' and _cur_struct and module_name in gen.var_types
+                and not _is_init_subclass
                 and _cur_struct in gen._struct_bases
                 and node.member not in gen._struct_method_names.get(_cur_struct, ())
                 and node.member not in gen.struct_field_types.get(_cur_struct, {})

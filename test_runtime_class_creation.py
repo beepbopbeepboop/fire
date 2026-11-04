@@ -268,6 +268,16 @@ def main():
     print(P.v, Q.v, P.__name__ == Q.__name__)
 main()
 """,
+    'init_subclass_invoked': """\
+class Base:
+    def __init_subclass__(cls):
+        print(cls.__name__)
+
+def main():
+    Derived = type('Derived', (Base,), {})
+    print(Derived.__name__)
+main()
+""",
     'repr_of_instance_of_run_time_class': """\
 def main():
     Foo = type('Foo', (), {'x': 1})

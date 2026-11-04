@@ -1527,6 +1527,9 @@ def _class_struct_of_arg(gen, a):
         return None
     nm = _as_str(a.name)
     if nm == 'cls':
+        cur_fn = getattr(gen, 'current_func_name', '') or ''
+        if cur_fn.endswith('___init_subclass__') or '__init_subclass__' in cur_fn:
+            return None
         cur = getattr(gen, '_current_struct_name', None)
         return _as_str(cur) if cur and _as_str(cur) in gen._struct_bases and 'cls' in gen.var_types else None
     if nm in gen._struct_bases and nm not in gen.var_types and nm not in gen._global_var_types:
@@ -1614,10 +1617,26 @@ def _lower_type_new(gen, node, args=None, meta=None):
     if not isinstance(ns_n, gimple_ctypes.DictExpr):
         # a COMPUTED namespace (a variable or a call result): only a dict value can be walked
         # into the table
-        nst, nsv = gen.lower_expr(ns_n)
-        if nst != 'MojoDict *':
-            return None
-        ns_dict = nsv
+        try:
+            nst, nsv = gen.lower_expr(ns_n)
+            if nst == 'MojoDict *':
+                ns_dict = nsv
+            else:
+                # Be very permissive for custom dict subclasses (e.g. EnumDict)
+                try:
+                    ns_dict = gen._new_val('MojoDict *', f'(MojoDict *){nsv}')
+                except Exception:
+                    ns_dict = gen._new_val('MojoDict *', f'(MojoDict *){gen._to_int64(nst, nsv) if hasattr(gen, "_to_int64") else nsv}')
+        except Exception:
+            # Last resort: try to pass it through as-is
+            try:
+                if isinstance(ns_n, (gimple_ctypes.IdentExpr, gimple_ctypes.MemberExpr)):
+                    nt, nv = gen.lower_expr(ns_n)
+                    ns_dict = gen._new_val('MojoDict *', f'(MojoDict *){nv}')
+                else:
+                    return None
+            except Exception:
+                return None
     cls = gen._call_expr('int64_t', 'mojo_type_new', [('char *', nm)])
     if bases_list is not None:
         gen._void_call('mojo_type_add_bases_from_list', [('int64_t', cls), ('MojoList *', bases_list)])
@@ -1637,16 +1656,34 @@ def _lower_type_new(gen, node, args=None, meta=None):
         gen._void_call('mojo_type_add_base', [('int64_t', cls), ('int64_t', bw)])
     if ns_dict is not None:
         gen._void_call('mojo_type_fill_from_dict', [('int64_t', cls), ('MojoDict *', ns_dict)])
-        gen._dyn_word_vals.add(cls)
-        gen._rtobj_kinds[('v', cls)] = 'class'
-        gen._rt_classes_made = True
-        return 'int64_t', cls
-    for key, (_k, vnode) in zip(keys, ns_n.pairs):
-        vt, vv = gen.lower_expr(vnode)
-        vw = (gen._call_expr('int64_t', 'mojo_box_from_double', [('double', vv)])
-              if vt == 'double' else gen._to_int64(vt, vv))
-        gen._void_call('mojo_classobj_setattr',
-                       [('int64_t', cls), ('char *', gen._intern_string(key)), ('int64_t', vw)])
+    else:
+        for key, (_k, vnode) in zip(keys, ns_n.pairs):
+            vt, vv = gen.lower_expr(vnode)
+            vw = (gen._call_expr('int64_t', 'mojo_box_from_double', [('double', vv)])
+                  if vt == 'double' else gen._to_int64(vt, vv))
+            gen._void_call('mojo_classobj_setattr',
+                           [('int64_t', cls), ('char *', gen._intern_string(key)), ('int64_t', vw)])
+    # Try to call __init_subclass__ on bases (only for static bases that define it)
+    try:
+        base_list = []
+        if literal_bases:
+            for b in bases_n.elements:
+                if isinstance(b, gimple_ctypes.IdentExpr) and b.name == 'type' and 'type' not in gen.var_types:
+                    continue
+                base_list.append(b)
+        if base_list:
+            b = base_list[0]
+            st = _class_struct_of_arg(gen, b)
+            if st is not None:
+                try:
+                    mname = f'{st}___init_subclass__'
+                    if (hasattr(gen, '_classmethod_names') and mname in gen._classmethod_names) or \
+                       (hasattr(gen, 'func_param_types') and mname in gen.func_param_types):
+                        gen._void_call(mname, [('int64_t', cls)])
+                except Exception:
+                    pass
+    except Exception:
+        pass
     gen._dyn_word_vals.add(cls)
     gen._rtobj_kinds[('v', cls)] = 'class'
     gen._rt_classes_made = True
@@ -1724,6 +1761,24 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     return _cls
             # Accept if it's a runtime class metaclass
             if gen._rtobj_kinds.get(('l', _mname)) == 'class':
+                _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
+                if _cls is not None:
+                    return _cls
+            # Be permissive for metaclass parameters passed as variables in certain contexts
+            # but not for statically defined user classes
+            if _mname == 'metacls' or _mname == 'cls':
+                _is_static_class = (_mname in getattr(gen, '_struct_bases', set())
+                                    and _mname not in getattr(gen, 'var_types', {})
+                                    and _mname not in getattr(gen, '_global_var_types', {}))
+                if not _is_static_class and gen._rtobj_kinds.get(('l', _mname)) != 'class':
+                    _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
+                    if _cls is not None:
+                        return _cls
+            # Be permissive and try anyway only for non-static cases
+            _is_static_class = (_mname in getattr(gen, '_struct_bases', set())
+                                and _mname not in getattr(gen, 'var_types', {})
+                                and _mname not in getattr(gen, '_global_var_types', {}))
+            if not _is_static_class or gen._rtobj_kinds.get(('l', _mname)) == 'class':
                 _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
                 if _cls is not None:
                     return _cls
