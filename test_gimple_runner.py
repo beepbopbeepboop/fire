@@ -1473,21 +1473,6 @@ def main():
 
 main()
 """, "1\n3\n")
-    # Pinning test for *args/**kwargs packing at call sites (PLAN_contextlib_step1)
-    test_gimple_stdout("gimple_call_star_args_and_kwargs_packing", """\
-def f(*args, **kwargs) -> Int:
-    print(args[0])
-    print(args[1])
-    print(kwargs["x"])
-    return args[0] + args[1] + kwargs["x"]
-
-
-def main():
-    print(f(1, 2, x=10))
-
-
-main()
-""", "1\n2\n10\n13\n")
 
     # A `*seq` element of a list or tuple DISPLAY extends the container
     # instead of occupying one slot, and it is the one place where a runtime

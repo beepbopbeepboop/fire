@@ -9824,9 +9824,6 @@ char *mojo_repr_int(int64_t obj) {
     return strdup(buffer);
 }
 
-typedef struct MojoClassRec MojoClassRec;
-static MojoClassRec *_class_find(int64_t tag);
-
 char *mojo_repr_str(char *s) {
     /* Python repr() of a string is quoted: repr("hi") == "'hi'", with
      * control characters shown as escapes (repr("a\nb") == "'a\\nb'") rather
@@ -9847,26 +9844,6 @@ char *mojo_repr_str(char *s) {
      * own repr() once self-hosted-compiled and diffed against the
      * interpreted stage1 dump. */
     if (!s) s = "";
-    /* Check if this is actually an instance of a run-time class. */
-    {
-        int64_t addr = (int64_t)(intptr_t)s;
-        if (addr > 65536) {
-            int64_t magic = *(int64_t *)(intptr_t)addr;
-            if (magic == MOJO_INSTOBJ_MAGIC) {
-                int64_t tag = *(int64_t *)(intptr_t)(addr + 8);
-                MojoClassRec *c = _class_find(tag);
-                if (c) {
-                    char *cname = *(char **)((char *)c + 8);
-                    if (cname) {
-                        char *buf = malloc(256);
-                        snprintf(buf, 256, "<%s object at 0x%" PRIx64 ">",
-                                 cname, addr);
-                        return buf;
-                    }
-                }
-            }
-        }
-    }
     int has_squote = 0, has_dquote = 0;
     for (const char *c = s; *c; c++) {
         if (*c == '\'') has_squote = 1;
@@ -10478,9 +10455,6 @@ char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
     return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
 }
 
-typedef struct MojoClassRec MojoClassRec;
-static MojoClassRec *_class_find(int64_t tag);
-
 char *mojo_repr_obj(int64_t addr) {
     /* Fallback for anything that isn't a plain scalar or a string: a real
      * struct/list/dict/set pointer. A full Python-style field-by-field repr
@@ -10489,24 +10463,8 @@ char *mojo_repr_obj(int64_t addr) {
      * mojo_read_type_tag above, which is enough for isinstance() but not for
      * reconstructing field names. Format as an address instead of silently
      * printing a decimal number indistinguishable from real data. */
-    static char buffer[256];
+    static char buffer[40];
     if (!addr) return "None";
-    if (addr > 65536) {
-        /* Check if it's an instance of a run-time class. */
-        int64_t magic = *(int64_t *)(intptr_t)addr;
-        if (magic == MOJO_INSTOBJ_MAGIC) {
-            int64_t tag = *(int64_t *)(intptr_t)(addr + 8);
-            MojoClassRec *c = _class_find(tag);
-            if (c) {
-                char *cname = *(char **)((char *)c + 8);
-                if (cname) {
-                    snprintf(buffer, sizeof(buffer), "<%s object at 0x%" PRIx64 ">",
-                             cname, addr);
-                    return buffer;
-                }
-            }
-        }
-    }
     snprintf(buffer, sizeof(buffer), "<object at 0x%" PRIx64 ">", addr);
     return buffer;
 }
@@ -16679,50 +16637,8 @@ static int _class_lookup(int64_t tag, const char *name, int64_t *out, int depth)
     if (!c || depth > 32) return 0;
     if (mojo_dict_contains(c->attrs, (char *)name)) { *out = mojo_dict_get_int(c->attrs, (char *)name); return 1; }
     for (int i = 0; i < _n_classattr_readers; i++)
-        if (_classattr_readers[i](tag, (char *)name, out)) {
-            return 1;
-        }
-    for (int i = 0; i < c->nbases; i++) {
-        if (_class_lookup(c->bases[i], name, out, depth + 1)) {
-            return 1;
-        }
-    }
-    /* Fallback: look up mangled method names in static classes/bases */
-    if (name) {
-        /* Try common mangling patterns */
-        char buf[512];
-        if (c->name) {
-            /* Pattern: ClassName___methodname__ or ClassName_methodname */
-            snprintf(buf, sizeof(buf), "%s___%s__", c->name, name);
-            void *fp = dlsym(RTLD_DEFAULT, buf);
-            if (!fp) {
-                snprintf(buf, sizeof(buf), "%s___%s", c->name, name);
-                fp = dlsym(RTLD_DEFAULT, buf);
-            }
-            if (!fp) {
-                snprintf(buf, sizeof(buf), "%s_%s", c->name, name);
-                fp = dlsym(RTLD_DEFAULT, buf);
-            }
-            if (fp) {
-                *out = (int64_t)(intptr_t)fp;
-                return 1;
-            }
-        }
-        /* Also try global search for method name patterns */
-        const char *prefixes[] = {"Flag", "IntFlag", "Enum", "EnumMeta", "Base", 0};
-        for (int pi = 0; prefixes[pi]; pi++) {
-            snprintf(buf, sizeof(buf), "%s___%s__", prefixes[pi], name);
-            void *fp = dlsym(RTLD_DEFAULT, buf);
-            if (!fp) {
-                snprintf(buf, sizeof(buf), "%s_%s", prefixes[pi], name);
-                fp = dlsym(RTLD_DEFAULT, buf);
-            }
-            if (fp) {
-                *out = (int64_t)(intptr_t)fp;
-                return 1;
-            }
-        }
-    }
+        if (_classattr_readers[i](tag, (char *)name, out)) return 1;
+    for (int i = 0; i < c->nbases; i++) if (_class_lookup(c->bases[i], name, out, depth + 1)) return 1;
     return 0;
 }
 int mojo_class_hasattr(int64_t tag, char *name)
@@ -16846,16 +16762,9 @@ int64_t mojo_rtobj_method_call(int64_t recv, char *name, int64_t n, int64_t a0, 
         if (!_class_lookup(((MojoClassObj *)(intptr_t)recv)->tag, name, &fn, 0)) {
             /* a method of the METACLASS: bound to the class, which goes first as `self` */
             MojoClassRec *rc = _class_find(((MojoClassObj *)(intptr_t)recv)->tag);
-            if (rc) {
-                if (rc->meta && _class_lookup(rc->meta, name, &fn, 0)) {
-                    a[0] = recv; a[1] = a0; a[2] = a1; a[3] = a2; a[4] = a3; a[5] = a4; a[6] = a5; a[7] = a6;
-                    return _call_words(fn, n + 1, a);
-                }
-                if (!rc->meta && !strcmp(name, "__prepare__")) {
-                    /* default metaclass type.__prepare__ returns empty dict */
-                    int64_t d = (int64_t)(intptr_t)mojo_dict_new();
-                    return d;
-                }
+            if (rc && rc->meta && _class_lookup(rc->meta, name, &fn, 0)) {
+                a[0] = recv; a[1] = a0; a[2] = a1; a[3] = a2; a[4] = a3; a[5] = a4; a[6] = a5; a[7] = a6;
+                return _call_words(fn, n + 1, a);
             }
             mojo_raise_attribute_error(name);
             return 0;
@@ -16986,23 +16895,12 @@ int mojo_classobj_lookup(void *obj, char *attr, int64_t *out)
     if (_class_lookup(((MojoClassObj *)obj)->tag, attr, out, 0)) return 1;
     /* a miss on the class and its bases: the METACLASS answers - its own attributes first,
      * then `Meta.__getattr__(cls, name)` (CPython's `type.__getattribute__` order). */
-    if (c) {
-        int64_t mtag = c->meta;
-        if (mtag) {
-            if (_class_lookup(mtag, attr, out, 0)) return 1;
-            int64_t ga, a[2] = { (int64_t)(intptr_t)obj, (int64_t)(intptr_t)attr };
-            if (strcmp(attr, "__getattr__") && _class_lookup(mtag, "__getattr__", &ga, 0)) {
-                *out = _call_words(ga, 2, a);
-                return 1;
-            }
-        } else {
-            /* default metaclass is type; __prepare__ and other type attributes */
-            if (!strcmp(attr, "__prepare__")) {
-                /* type.__prepare__ returns an empty dict */
-                int64_t d = (int64_t)(intptr_t)mojo_dict_new();
-                *out = d;
-                return 1;
-            }
+    if (c && c->meta) {
+        if (_class_lookup(c->meta, attr, out, 0)) return 1;
+        int64_t ga, a[2] = { (int64_t)(intptr_t)obj, (int64_t)(intptr_t)attr };
+        if (strcmp(attr, "__getattr__") && _class_lookup(c->meta, "__getattr__", &ga, 0)) {
+            *out = _call_words(ga, 2, a);
+            return 1;
         }
     }
     return 0;
