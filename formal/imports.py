@@ -141,10 +141,11 @@ HOST_UNREACHABLE = frozenset((
     # A socket.
     #
     # `wsgiref` is the WSGI reference implementation, and it is the one name
-    # the doc's next-step reading list (`bugs/formal/FORMAL_stdlib_module_names_are_not_
-    # classified.md` §"The next step") placed under "a terminal" that the reading
-    # itself corrects, the way `posix` was corrected into `HOST_MODELLED`: the
-    # load-bearing half of the package is the reference SERVER —
+    # the doc's next-step reading list (its §"The next step" in
+    # `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md`) placed
+    # under "a terminal" that the reading itself corrects, the way `posix` was
+    # corrected into `HOST_MODELLED`: the load-bearing half of the package is
+    # the reference SERVER —
     # `wsgiref.simple_server.WSGIServer` is a subclass of
     # `http.server.HTTPServer`, measured on the interpreter that runs this tree
     # — so the object it needs is the socket `http` and `urllib` are here for,
@@ -198,10 +199,9 @@ HOST_UNREACHABLE = frozenset((
     # is written down at the top of the module rather than here, so a reader
     # asking "why is most of this row still refused" has one place to look.
     "getpass", "webbrowser",
-    # THE EIGHT THE DOC'S OWN READING LIST NAMES UNDER THIS HEADING (`bugs/
-    # formal/FORMAL_stdlib_module_names_are_not_classified.md` §"The next
-    # step"), taken one at a time with the rule at the top of this file applied
-    # to each.  The object each needs is a TERMINAL — an interactive input
+    # THE EIGHT THE DOC'S OWN READING LIST NAMES UNDER THIS HEADING (its
+    # §"The next step" in `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md`),
+    # taken one at a time with the rule at the top of this file applied to each.  The object each needs is a TERMINAL — an interactive input
     # and display — the same object `getpass` (a prompt) and `webbrowser` (a
     # window) are here for, and a freestanding image that links libSystem and
     # nothing else has no controlling terminal, no line discipline and no
