@@ -16624,8 +16624,17 @@ static int64_t _call_words(int64_t fn, int64_t n, const int64_t *a)
 }
 int64_t mojo_classobj_call(int64_t cls, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6)
 {
+    int64_t ctag = ((MojoClassObj *)(intptr_t)cls)->tag;
+    MojoClassRec *rc = _class_find(ctag);
+    if (rc && rc->meta) {
+        int64_t call_fn;
+        if (_class_lookup(rc->meta, "__call__", &call_fn, 0)) {
+            int64_t a[8] = { cls, a0, a1, a2, a3, a4, a5, a6 };
+            return _call_words(call_fn, n + 1, a);
+        }
+    }
     MojoInstObj *o = (MojoInstObj *)malloc(sizeof *o);
-    o->magic = MOJO_INSTOBJ_MAGIC; o->tag = ((MojoClassObj *)(intptr_t)cls)->tag;
+    o->magic = MOJO_INSTOBJ_MAGIC; o->tag = ctag;
     _pr_add(&_reg_instobj, (uint64_t)(uintptr_t)o);
     int64_t self = (int64_t)(intptr_t)o, init;
     if (_class_lookup(o->tag, "__init__", &init, 0)) {
