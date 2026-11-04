@@ -1948,6 +1948,14 @@ int64_t mojo_box_word(int64_t v)
 
 /* See the header. The shared kind-'n' box is the only word that IS None when
  * it is still boxed; a bare word cannot say so (an int 0 has the same bits). */
+int mojo_word_is_none(int64_t v);
+/* A user function's parameter has no None word: the shared kind-'n' box becomes
+ * the 0 a `None` literal argument passes, and every other word is unchanged. */
+int64_t mojo_unbox_none(int64_t v)
+{
+    return mojo_word_is_none(v) ? 0 : v;
+}
+
 int mojo_word_is_none(int64_t v)
 {
     if (!mojo_is_boxed(v)) return 0;

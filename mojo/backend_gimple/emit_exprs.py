@@ -3450,6 +3450,21 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         _mixed_word = (not _bool_merge
                        and ((ltype == 'char *' and _rq == 'int64_t')
                             or (ltype == 'int64_t' and _rq == 'char *')))
+        # A `_Bool` against a word of unknown kind (`gen.is_generator or
+        # getattr(fn, 'is_async', False)`): the result is a word that holds
+        # the bool OR the attribute, so it is one of unknown kind too. And a
+        # word of unknown kind against a container pointer
+        # (`<that> or fn.param_has_default`) is a word, not the pointer the
+        # join would call it: the short-circuit edge stored the bool 1 into the
+        # pointer slot, and the truth test then ran `mojo_dict_len` on the
+        # address 1 (the self-hosted compiler's own crash in
+        # `_gmi_specialize_literal_kind_clones`).
+        _bool_word = (not _bool_merge and not _mixed_word
+                      and ((ltype == '_Bool' and _rq == 'int64_t')
+                           or (ltype == 'int64_t' and _rq in ('MojoDict *', 'MojoList *', 'MojoSet *')
+                               and gen._is_dyn_word(node.left, lval))))
+        if _bool_word:
+            _mixed_word = True
         if _mixed_word:
             res_type = 'int64_t'
         # A BYTES operand against a str or a word (`os.path.split(b'a/b')[0] or
