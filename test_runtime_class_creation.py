@@ -278,6 +278,17 @@ def main():
     print(Derived.__name__)
 main()
 """,
+    'metaclass_call_invoked': """\
+def meta_call(cls, x):
+    print('mc')
+    return x + 1
+
+def main():
+    Meta = type('Meta', (type,), {'__call__': meta_call})
+    Foo = type.__new__(Meta, 'Foo', (), {})
+    print(Foo(7))
+main()
+""",
 }
 
 
