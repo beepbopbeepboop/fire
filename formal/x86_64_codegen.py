@@ -1345,7 +1345,7 @@ class X86_64Codegen:
             # side has to mean the same integer on the other, and `info` is how
             # both proof generators are handed one list instead of each
             # recomputing it. Nothing reads it yet
-            # (`bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5).
+            # (`bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5, deleted).
             "exception_kinds": M.exception_kinds(),
             # The INTERN TABLE, keyed by DECODED text — the same map, from the
             # same `_intern_string`, for the same reason as on arm64: a string
@@ -1891,7 +1891,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         `formal/x86_64_model_coverage_test.py`); what the disp32 form is NOT is
         reachable by a generated end-to-end proof yet, because the path through
         a call this wide does not close —
-        `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
+        `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`.
         """
         self.asm.emit(encode_mov_r64_rm64(
             Reg.R11, Reg.RBP, _STACK_ARG_OFF + 8 * (index - len(ARG_REGS))))
