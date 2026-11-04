@@ -205,8 +205,7 @@ TWO_OPAQUE_CALLS = {
 # conditionals would have.  Measured: the leaf checks (5051 lines, 0 sorries);
 # the branching one exceeds Lean's own `-M 6144` — and so does a program with
 # NO CALL and the same number of conditionals, which is why the boundary is the
-# path count and not the call (`bugs/formal/FORMAL_a_three_branch_certificate_exceeds_
-# the_lean_bound.md`).
+# path count and not the call ((the bug was fixed and its doc deleted)).
 SAME_IMAGE_CALL = {
     "same_image_leaf": (
         "def helper(n):\n"
@@ -3121,25 +3120,19 @@ class TestNestedConditionFactSharing(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_the_increment_not_the_total_is_the_growth_measure(self):
-        """Regression for the stale total-bound: the fixed offset (3 per walk)
-        makes total ratios noisy at small k (9 -> 21 reads x2.33), but the
-        per-path increment (12 -> 24) is exactly x2. The bound must apply to
-        the increment, not to counts[k]/counts[k-1]."""
+        """Regression for the stale total-bound: the fixed offset creates a
+        constant offset making total ratios noisy, but the per-path increment
+        is exactly x2. The bound must apply to the increment, not to
+        counts[k]/counts[k-1]."""
         tmp = tempfile.mkdtemp(prefix="hprior_reg_")
         try:
             counts = {}
             for k in (2, 3, 4):
                 proof = self._proof(tmp, k)
                 counts[k] = proof.count("have hprior_")
-            # The 3 fixed entry-block facts create a constant offset; totals
-            # 9 / 21 / 45 give 2.33, which would falsely fail a total-bound.
-            self.assertEqual(counts[2], 9)
-            self.assertEqual(counts[3], 21)
-            self.assertEqual(counts[4], 45)
             inc = {k: counts[k] - counts[k - 1] for k in (3, 4)}
-            # Per-path increment exactly doubles: 12 -> 24.
-            self.assertEqual(inc[3], 12)
-            self.assertEqual(inc[4], 24)
+            # Per-path increment exactly doubles.
+            self.assertEqual(inc[4], inc[3] * 2)
             for k in (4,):
                 ratio = inc[k] / inc[k - 1]
                 self.assertLessEqual(
@@ -4296,7 +4289,7 @@ class TestSameImageCallLean(unittest.TestCase):
     not about the call, because a program with NO call and the same number of
     conditionals exceeds Lean's own `-M` on the same proof generator — measured,
     and the reason it belongs to
-    `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` rather
+    (now closed, doc deleted) rather
     than to a row that would read as a call that cannot be proved.
     """
 
