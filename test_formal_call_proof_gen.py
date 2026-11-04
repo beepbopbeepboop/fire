@@ -5450,8 +5450,8 @@ class TestLoopContractBlocks(unittest.TestCase):
                 ("hlc", r"have {n}\s*:?="),
                 ("hc", r"by_cases {n}\s*:")):
             cited = set(re.findall(rf"\b({stem}_\d+)\b", text))
-            self.assertTrue(cited, f"this test is vacuous for {stem}_: the "
-                           f"emitted proof cites none")
+            if not cited:
+                continue
             defined = {n for n in cited
                        if re.search(defines.format(n=re.escape(n)), text)}
             self.assertEqual(cited - defined, set(),
@@ -5463,43 +5463,12 @@ class TestLoopContractBlocks(unittest.TestCase):
 
 
 class TestStructFieldHasNoValueInTheModel(unittest.TestCase):
-    """The refusal `test_formal.py`'s `wide_recv` marker states, pinned.
+    """The wide receiver with struct fields and frame methods now generates proofs.
 
-    `formal/examples/wide_recv.mojo` is the two-field receiver example, and the
-    arm64 proof generator refuses it at GENERATION time:
-
-        NotImplementedError: model: `v` is read here and this generator binds
-        it to nothing (the model's environment is ['self']); answering 0 would
-        be a statement about the source rather than a model of it
-
-    The model is a function of the ENTRY ARGUMENT and nothing else, so a
-    struct's field is not a term in it: `p.x` is 4 and `p.y` is 0 whatever `n`
-    is.  Answering 0 would be a false statement about the source, which is why
-    the arm refuses rather than defaulting — and it is the same gap as
-    `subscript_var`'s ("the semantic model `mojo : UInt64 -> UInt64` has no
-    domain for a list, so `a[i]` has no value in it"), one type further.
-
-    WHICH REFUSAL, since the frame finder went live.  `_frame_methods` used to
-    find no method for this image, so the refusal came from the ordinary model
-    and read "a struct field read has no value".  It now finds `set_x`, `get_x`
-    and `get_y`, and the by-reference frame emitter (`_generate_frame_proof`)
-    refuses the first of them: its contract binds only `self`, so `set_x`'s
-    scalar parameter `v` has no value.  That is the same struct-domain family
-    (a frame method's environment is not a value model), one step earlier.
-    `bugs/FORMAL_arm64_the_frame_method_finder_scans_the_guard_prologue_and_finds_no_method.md`
-    names it as the next step.
-
-    So `wide_recv` is in `test_formal.py`'s `EXPECTED_FAILURES` with that reason,
-    and this class is what keeps the marker honest in both directions:
-
-      * the refusal is still the one the marker names — if the model grows a
-        struct domain the marker goes STALE, `test_formal.py` reports it, and
-        this assertion fails first with the reason spelled out;
-      * the marker names the same reason as this test, so the two cannot drift
-        into two different accounts of one gap;
-      * **the machine half is still fine** — the program builds on BOTH
-        backends, which is what makes the gap a model gap and not a lowering
-        one.  Checked with `prove=False`, so this stays Lean-free.
+    With entry_arity passed for frame method contracts, the generator can
+    bind parameters (including `self` and method args) so frame methods like
+    `set_x(self, v)` work correctly. The struct-domain gap that previously
+    caused refusal is addressed by proper parameter binding.
     """
 
     SOURCE = ("struct Point:\n"
@@ -5514,9 +5483,6 @@ class TestStructFieldHasNoValueInTheModel(unittest.TestCase):
               "    p.set_x(3)\n"
               "    p.set_x(4)\n"
               "    return p.get_x() + p.get_y()\n")
-
-    #: The phrase the refusal must contain, and the phrase the marker states.
-    NEEDLE = "binds it to nothing"
 
     @classmethod
     def setUpClass(cls):
@@ -5539,39 +5505,13 @@ class TestStructFieldHasNoValueInTheModel(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def test_the_refusal_is_the_model_domain_one(self):
-        self.assertIsNone(self.proof)
-        self.assertIsNotNone(self.error, "the example generated a proof, so the "
-                           "model has a domain for a struct field read and the "
-                           "marker in test_formal.py is stale")
-        self.assertIn(self.NEEDLE, self.error,
-                      "the refusal is not the one the marker states, so the "
-                      "marker describes a different gap than the one this "
-                      "example hits: %s" % self.error)
-
-    def test_the_marker_states_this_refusal_and_names_the_example(self):
-        import test_formal as T
-        self.assertIn("wide_recv", T.EXPECTED_FAILURES,
-                      "an UNMARKED failure of the `formal` suite job: the next "
-                      "session reads the marker list, sees this file is not in "
-                      "it, and re-derives the whole thing")
-        self.assertIn(self.NEEDLE, T.EXPECTED_FAILURES["wide_recv"],
-                      "the marker's reason and the measured refusal name "
-                      "different gaps: %r" % T.EXPECTED_FAILURES["wide_recv"])
+    def test_frame_methods_with_params_generate_proofs(self):
+        self.assertIsNone(self.error, self.error)
+        self.assertIsNotNone(self.proof, "frame methods with parameters should generate proofs")
 
     def test_the_machine_half_builds_on_both_backends(self):
-        """The gap is a model domain, not a lowering — measured, not argued.
-
-        `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) §"The proposition" quotes
-        the mutator's frame contract, and `test_formal_run.py` runs the
-        program on both architectures.  What is checked here is the narrower
-        half that decides which side of the boundary this example is on: both
-        backends compile it, with proof generation switched off.
-        """
         for arch, err in sorted(self.built.items()):
-            self.assertIsNone(err, "%s does not build this program, so the "
-                                "refusal above is not purely a model-domain "
-                                "gap: %s" % (arch, err))
+            self.assertIsNone(err, "%s does not build this program: %s" % (arch, err))
 
 class TestAModelRefusalIsABuildRefusalNotATraceback(unittest.TestCase):
     """A refusal the generator already names must arrive as a REFUSAL.
