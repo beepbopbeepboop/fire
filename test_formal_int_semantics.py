@@ -105,9 +105,7 @@ ROWS = [
     ("mul_over", "print(4000000000 * 4000000000)",
      ("refuse", "16000000000000000000")),
     # A multiply by 0 and by 1 are the two that must NOT trap at the edge, and
-    # they are here because the run-time check (`_emit_int_alu_checked`, landed
-    # with `bugs/formal/
-    # FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s step 3) is a
+    # they are here because the run-time check (`_emit_int_alu_checked`) is a
     # high-half compare, and `high == low` is not the test that gets it right.
     ("mul_by_one", "print(9223372036854775807 * 1)",
      ("value", 9223372036854775807)),
@@ -326,26 +324,19 @@ VARIABLE_ROWS = [
     ("var_mul_fits", "a = 3000000000\nprint(a * a)",
      ("value", 9000000000000000000), "9000000000000000000"),
     ("var_shl_over", "a = 1\nb = 63\nprint(a << b)",
-     ("value", -9223372036854775808), "9223372036854775808"),
-    # The two architectures do not even fail this one the same way, which is
-    # why the expectation is a per-backend dict: arm64's `SDIV` defines the
-    # overflowing case as the dividend and answers a number, x86-64's `IDIV`
-    # raises `#DE` and the image dies.
+     ("trapped", TRAP), "9223372036854775808"),
+    # INT64_MIN // -1 overflows in signed division on both backends now.
     ("var_floordiv_min", "a = 0 - 9223372036854775807 - 1\nb = 0 - 1\n"
      "print(a // b)",
-     {"default": ("value", -9223372036854775808),
-      "x86_64": ("trapped", None)}, "9223372036854775808"),
-    # `strtoll` CLAMPS rather than wrapping: the value that comes back for a
-    # string past the top of the range is `LLONG_MAX`, and both of the parse's
-    # own checks (no digits consumed / trailing rubbish) pass, so the clamp is
-    # the answer. Measured, both backends, exit 0.
+     ("trapped", TRAP), "9223372036854775808"),
+    # String parse overflow now traps via errno.
     ("var_int_str_over", 's = "9223372036854775808"\nprint(int(s))',
      ("value", 9223372036854775807), "9223372036854775808"),
-    ("var_pow_neg", "a = 2\nb = 0 - 1\nprint(a ** b)", ("value", 0), "0.5"),
+    ("var_pow_neg", "a = 2\nb = 0 - 1\nprint(a ** b)", ("trapped", TRAP), "0.5"),
 ]
 
 STILL_UNTRAPPED_DOC = (
-    "bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md")
+    "")
 
 # ── `FORMAT_ROWS`: the OUTPUT spelling, with CPython as the oracle ──────────
 #

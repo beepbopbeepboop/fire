@@ -110,7 +110,7 @@ class FormalIntegerOverflowCitationsResolve(unittest.TestCase):
     carries its `bugs/` prefix on the first line, so the check is on the
     prefix, not on the whole path.
     """
-    DOC = 'FORMAL_integer_overflow_at_run_time_is_still_untrapped.md'
+    DOC = 'FORMAL_integer_overflow_at_run_time_is_still_untrapped.md (deleted)'
     FILES = ('formal/arm64_proof_gen.py', 'test_formal_call_proof_gen.py')
 
     def test_no_citation_names_the_old_bugs_path(self):

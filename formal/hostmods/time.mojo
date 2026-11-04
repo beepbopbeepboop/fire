@@ -76,7 +76,7 @@ rather than of this module, and every function below is shaped by them.
     module-level name is not exported as a word across a dylib boundary —
     there is no storage for one, because every value a formal program can name
     lives in a function's own stack scratch
-    (`bugs/formal/FORMAL_module_state_no_storage.md`). So each is a zero-argument
+    (`FORMAL_module_state_no_storage.md (deleted) (deleted)`). So each is a zero-argument
     function and `time.CLOCK_REALTIME` is spelled `CLOCK_REALTIME()`. This is
     the same rule `os` follows for `os.sep`, and the same reason.
 
