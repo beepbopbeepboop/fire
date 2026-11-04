@@ -4165,6 +4165,16 @@ _STEP_CONDS = [
     (0xffe00c00, 0x9a800000),  # 69 CSEL Xd, Xn, Xm, cond
     # 70 FCMP Dn, Dm (scalar double): flags only, no result register.
     (0xffe0fc00, 0x1e602000),
+    # 71-79: scalar double FP arithmetic/conversions/moves
+    (0xffe0fc00, 0x1e602800),  # 71 FADD Dd, Dn, Dm
+    (0xffe0fc00, 0x1e603800),  # 72 FSUB Dd, Dn, Dm
+    (0xffe0fc00, 0x1e600800),  # 73 FMUL Dd, Dn, Dm
+    (0xffe0fc00, 0x1e601800),  # 74 FDIV Dd, Dn, Dm
+    (0xfffffc00, 0x1e614000),  # 75 FNEG Dd, Dn
+    (0xfffffc00, 0x9e670000),  # 76 FMOV Dd, Xn (GPR->V)
+    (0xfffffc00, 0x9e660000),  # 77 FMOV Xd, Dn (V->GPR)
+    (0xfffffc00, 0x9e620000),  # 78 SCVTF Dd, Xn
+    (0xfffffc00, 0x9e780000),  # 79 FCVTZS Xd, Dn
 ]
 
 
@@ -4941,6 +4951,15 @@ _WORK_STEP = [
     # 64/65 — claims these words.
     (69, "work_step_csel", [(0xffe00c00, 0x9a800000)]),
     (70, "work_step_fcmp", [(0xffe0fc00, 0x1e602000)]),
+    (71, "work_step_fadd", [(0xffe0fc00, 0x1e602800)]),
+    (72, "work_step_fsub", [(0xffe0fc00, 0x1e603800)]),
+    (73, "work_step_fmul", [(0xffe0fc00, 0x1e600800)]),
+    (74, "work_step_fdiv", [(0xffe0fc00, 0x1e601800)]),
+    (75, "work_step_fneg", [(0xfffffc00, 0x1e614000)]),
+    (76, "work_step_fmov_gpr_v", [(0xfffffc00, 0x9e670000)]),
+    (77, "work_step_fmov_v_gpr", [(0xfffffc00, 0x9e660000)]),
+    (78, "work_step_scvtf", [(0xfffffc00, 0x9e620000)]),
+    (79, "work_step_fcvtzs", [(0xfffffc00, 0x9e780000)]),
 ]
 
 _WORK_STEP_BY_IDX = {idx: (lemma, tests) for idx, lemma, tests in _WORK_STEP}
@@ -7578,7 +7597,7 @@ def _trap_terminating(blocks: list, words: dict) -> set:
     block that ENDS in the raw `SYS_exit` the emitter ends every bounded stop
     with (`_is_svc`), or a block that ends in a `BL` whose fall-through block
     is itself such a block.  The second is the shape of the compiler's own
-    trap — `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+    trap — `integer overflow at runtime (trapped)`'s
     `def q(a, b): return a // b` divides by zero into a block that ends in
     `BL fflush` and then that tail — and it is the shape a `BL` "cannot
     return" means in `_unfollowable_calls`'s terminal rule a few lines below:
@@ -7672,7 +7691,7 @@ def _unfollowable_calls(code: bytes, base: int, func_entry: int,
     the model steps as a no-op but which is the machine's own `SYS_exit`), and a
     block that ends in `svc` has no `RET`, so the call returns nowhere.  The
     compiler's own trap is the measured case: `def q(a, b): return a // b`
-    (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+    (`integer overflow at runtime (trapped)`'s
     fixture) ends its divide-by-zero arm in `BL fflush` followed by that tail,
     and counting the `BL` made the halt address a call the concrete run never
     takes, which is the false `main_pre_0.pc = …` premise the doc names.  The
@@ -7844,7 +7863,7 @@ def _reached_without_a_condition(code: bytes, base: int, func_entry: int,
         is false
 
     Measured on this tree before the check existed, and it is
-    `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s own
+    `integer overflow at runtime (trapped)`'s own
     reproducer — `def main(n): if n > 100: printf("hi"); return 0` at test input
     10 — which is `exit 1` and eleven Lean errors from a program with no integer
     arithmetic in it at all. That is what makes this a limit of the WALK and not
@@ -13042,7 +13061,7 @@ def generate_arm64_proof(prog, code, info) -> str:
     # is the stack-floor guard every compiled function carries, and the model
     # steps through that tail rather than halting in it, so the statement
     # would weaken for a program whose run never does.  See
-    # `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s step
+    # `integer overflow at runtime (trapped)`'s step
     # 2 for the shape: `def q(a, b): return a // b`'s divide-by-zero arm ends
     # in `BL fflush` and the `movz`/`svc` tail.
     _trap_words = {base_addr + i: int.from_bytes(code[i:i + 4], "little")

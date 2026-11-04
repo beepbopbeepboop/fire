@@ -49,7 +49,7 @@ that cannot be reached from a caller is not a capability, it is a comment.
   * `join` — `" ".join(map(quote, argv))`, so it is a generator AND a list, two
     of the three words this path does not have. Absent.
   * `shlex` — the class, a configured parser with instance state. Absent for
-    `textwrap.TextWrapper`'s reason (`formal/model.py`;
+    `textwrap.TextWrapper`'s reason (`formal/model/builtins.py`;
     `bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`).
   * `split` (the public name) — absent, above.
 

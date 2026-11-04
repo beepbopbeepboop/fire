@@ -25,7 +25,7 @@ rather than assumed — the reproductions are in the bug doc named at each.
      A module dylib can return one 64-bit word and nothing else: a struct or a
      list is a blob carved out of the frame that made it, so handing one back
      hands over an address that is dead on return
-     (`bugs/formal/FORMAL_module_state_no_storage.md`, measurements (2) and (3)).
+     (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted)`, measurements (2) and (3)).
   2. A module has no state of its own. A module-level name that is not a
      literal-only constant has nowhere to live, so a parser cannot be a module
      global either (same document, measurement (1)). Every function here is a
@@ -137,7 +137,7 @@ WHAT IS NOT HERE, AND WHY
   * **`type=float` is REFUSED, and that is not an oversight.** A value on this
     path is one 64-bit word holding an INTEGER: `2.5` as a literal is the
     integer 2, `1.0` is 1, and `atof("3.5")` is 1 — measured, and the reason is
-    in `formal/model.py`'s `_FLOAT_SCALARS`. An `argparse` that accepted
+    in `formal/model/builtins.py`'s `_FLOAT_SCALARS`. An `argparse` that accepted
     `--limit-gb 2.5` and answered 2 would be a module computing something other
     than what its name says, so `parse` returns `ST_UNSUPPORTED` and says why.
     One file in the corpus (`tools/memcap.py`) wants it.
@@ -714,7 +714,7 @@ def _name_len(rec, k) -> int:
     `return n` below classifies this callee's result as neither a number nor a
     string, and `_name_len(rec, k) == nlen` in `_lookup` then reads as a
     comparison of two unclassified words — which lowers to an ADDRESS compare
-    and is refused (`formal/model.py`'s `string_compare_word_refusal`). Both
+    and is refused (`formal/model/values.py`'s `string_compare_word_refusal`). Both
     operands really are lengths, so `-> int` is what lets the call site classify
     the result.
     """
@@ -2899,7 +2899,7 @@ def parse(spec, argv, argc, out, err, desc):
     `argv[0]` is the program name and is never consumed as an argument, which is
     the one respect in which `argv` differs from what CPython's `parse_args`
     takes: there is no `sys.argv` here to default to
-    (`bugs/formal/FORMAL_module_state_no_storage.md`, measurement (4)), and passing the
+    (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted)`, measurement (4)), and passing the
     whole vector is what lets `prog` be `basename(argv[0])` as it is there.
 
     `out` and `err` are caller buffers of at least `BUF_CAP` bytes each. `out`
@@ -3285,7 +3285,7 @@ def _check(spec, na, err):
         if t == T_FLOAT:
             _refuse(err, "type=float is not available on this target: a value "
                       "is one 64-bit integer word, so a float would be "
-                      "silently truncated. See formal/model.py's "
+                      "silently truncated. See formal/model/builtins.py's "
                       "_FLOAT_SCALARS.")
             return ST_UNSUPPORTED
         if t == T_BAD:
