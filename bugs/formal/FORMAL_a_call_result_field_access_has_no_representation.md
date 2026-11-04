@@ -176,8 +176,7 @@ The first three are the three shapes `FIELD`, `BARE` and a method call, and the
 fourth is the general statement: **the answer has to be one word, and the thing
 CPython answers with here is not.** A dict (`collections.Counter`) is a frame
 blob; a `struct rusage` (`resource.getrusage`) is a frame blob; a `struct
-passwd` (`pwd.getpwuid`) is a frame blob; a `datetime` is six fields
-(`FORMAL_time_struct_shaped_answers.md`); a `UUID` is 128 bits plus a `.hex`
+passwd` (`pwd.getpwuid`) is a frame blob; a `datetime` is six fields; a `UUID` is 128 bits plus a `.hex`
 method (`uuid.uuid4().hex[:8]`); a plist is a dict
 (`plistlib.load(f)["ProductVersion"]`).
 
@@ -279,8 +278,7 @@ Twenty-two rows. Against them:
   `signature` (a function object and its `co_firstlineno`), `sqlite3.connect`,
   `plistlib.load` (a stream object and a dict), `tokenize.generate_tokens` (a
   generator of 5-tuples, and a `TokenError` exception).
-* **2 need a shaped record**: `resource.getrusage` and `datetime` — both filed
-  at `FORMAL_time_struct_shaped_answers.md`.
+* **2 need a shaped record**: `resource.getrusage` and `datetime`.
 * **2 are decorators and are refused on purpose**: `functools.lru_cache` on
   `version()`, and `unittest.skipUnless`. A decorator on a function OR a class is
   DROPPED, silently, by both backends

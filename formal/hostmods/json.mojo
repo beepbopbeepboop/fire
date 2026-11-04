@@ -14,7 +14,7 @@ CPython's `json` is a MARSHALLER: `json.loads(text)` builds a Python object
 graph out of the text, and `json.dump(obj, fp)` walks one. Neither direction
 is expressible here, and the reason is the one that shapes every module in
 this directory: **a value cannot cross a dylib boundary unless it is one
-64-bit word** (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted)`), while a dict is a
+64-bit word** (module state is not stored in the formal model), while a dict is a
 blob carved out of the frame that built it. So `loads`, `load`, `dump` and
 `dumps` of a container are ABSENT rather than approximated — see "WHAT IS NOT
 HERE" below, where each is named.
@@ -104,7 +104,7 @@ WHAT IS NOT HERE, AND WHY
     function that answers something plausible.
   * `JSONDecodeError`, `JSONEncoder`, `JSONDecoder`, `detect_encoding` — a
     type, two factories and one spelling rule. A type is not a value
-    (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted)`).
+    (module state is not stored in the formal model).
   * `NaN`, `Infinity`, `-Infinity` as INPUT — CPython's `json.loads` accepts
     all three, because its default `parse_constant` does, even though RFC
     8259 does not mention them. This module follows CPython rather than the

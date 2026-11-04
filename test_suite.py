@@ -6030,8 +6030,12 @@ def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
                  encoding='utf-8').read()
     # The tags §3 declares, read out of the index's own first column rather than
     # hand-listed here: a hand-maintained copy of an index is a second copy.
+    # Only scan section 3 (the index) so spurious backticked first cells in
+    # other tables don't get misread as round tags.
+    m3 = re.search(r'^## 3\..*?(?=^## \d+\.|\Z)', index, re.M | re.S)
+    section3 = m3.group(0) if m3 else index
     tags = set()
-    for line in index.splitlines():
+    for line in section3.splitlines():
         m = re.match(r'\|\s*`([^`]+)`\s*\|', line)
         if m:
             tags.add(m.group(1))
@@ -6064,6 +6068,33 @@ def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
           f'walk found {len(cited)} distinct cited tag(s), and fewer than 5 '
           f'means it is not seeing the rewritten spelling and would pass '
           f'vacuously')
+
+
+def test_formal_sweep_work_map_index_tags_only_from_section3():
+    """The index tags must come only from §3, not from other tables in the doc."""
+    import re
+    index = open(os.path.join(HERE, 'bugs', 'formal', 'FORMAL_sweep_work_map.md'),
+                 encoding='utf-8').read()
+    m3 = re.search(r'^## 3\..*?(?=^## \d+\.|\Z)', index, re.M | re.S)
+    assert m3, 'section 3 missing'
+    section3 = m3.group(0)
+    spurious = ['importlib', 'collections', 'itertools', 'copy', 'unittest',
+                'bootstrap-validate.mojo', 'std/builtin/float_literal.mojo']
+    tags_all = set()
+    for line in index.splitlines():
+        m = re.match(r'\|\s*`([^`]+)`\s*\|', line)
+        if m:
+            tags_all.add(m.group(1))
+    tags_s3 = set()
+    for line in section3.splitlines():
+        m = re.match(r'\|\s*`([^`]+)`\s*\|', line)
+        if m:
+            tags_s3.add(m.group(1))
+    # The fix: only section 3 tags are valid
+    assert tags_s3.isdisjoint(set(spurious)), 'spurious tags must not come from §3'
+    assert tags_s3.issuperset({'b14', 'b13'}), 'core round tags missing from §3'
+    # The bug: if reading whole file, spurious leak in
+    assert bool(tags_all & set(spurious)), 'regression: whole-file scan leaks spurious tags'
 
 
 def test_a_verdict_the_ledger_no_longer_agrees_with_is_reported():
