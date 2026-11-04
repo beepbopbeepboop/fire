@@ -48,6 +48,7 @@ BASELINE = {
     'bugs/formal/FORMAL_str_repr_format_and_percent_have_no_lowering.md': 1,
     'bugs/formal/FORMAL_sweep_work_map.md': 1,
     'bugs/formal/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md': 2,
+    'bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md': 1,
     'bugs/formal/FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md': 1,
     'bugs/formal/FORMAL_the_spill_canary_is_red_and_the_row_it_names_is_stale.md': 2,
     'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
@@ -97,7 +98,7 @@ BASELINE = {
     'test_formal_external_call.py': 1,
     'test_formal_fuzz.py': 8,
     'test_formal_host_import_wall.py': 1,
-    'test_formal_imports.py': 5,
+    'test_formal_imports.py': 6,
     'test_formal_link_accounting.py': 1,
     'test_formal_match.py': 1,
     'test_formal_monomorph.py': 1,
@@ -161,6 +162,7 @@ BASELINE = {
 BARE_BASELINE = {
     'CRASH.md': 1,
     'bugs/OPEN_WORK.md': 29,
+
     'bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md': 1,
     'bugs/formal/FORMAL_a_variadic_parameter_read_has_no_abi.md': 1,
     'bugs/formal/FORMAL_absval_proof_does_not_check.md': 1,
