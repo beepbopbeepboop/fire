@@ -81,7 +81,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_print_of_a_container_needs_a_text_loop.md` | `bug-formal-formal-a-print-of-a-container-1349` | `print(<a container>)` is refused: rendering one is a loop emitting text, and `_print_call` builds ONE format |
 | `FORMAL_a_try_handler_arm_is_still_never_emitted.md` | `bug-formal-formal-a-try-handler-arm-is-s-7166` | A `try` handler arm is still never emitted, and the reason it is not worth fixing in one function is that EVERY arm in this repository calls something |
 | `FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` | `fix-merge-fix-merge-fix-merge-bug-formal-formal-a-type-canno` | `collections.namedtuple` and `copy.deepcopy` are one missing capability, and it is a reflection table |
-| `FORMAL_function_value_calls_are_not_proved_to_be_calls.md` | `fix-merge-fix-merge-fix-merge-bug-formal-formal-function-val` | A call through a VALUE is not proved to be a call: the word might not be an address |
+| `FORMAL_function_value_calls_are_not_proved_to_be_calls.md` (deleted) | `fix-merge-fix-merge-fix-merge-bug-formal-formal-function-val` | A call through a VALUE is not proved to be a call: the word might not be an address |
 | `FORMAL_known_limits.md` | `fix-merge-bug-formal-formal-known-limits-1382` | the sweep residue, audited — which refusals are true |
 | `FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md` | `fix-merge-bug-formal-formal-len-of-a-readdir-name-6416` | the ELEMENT half of the foreign-bytes question is closed, and the `len` half is not |
 | `FORMAL_listdir_no_run_time_sequence.md` | `fix-merge-fix-merge-fix-merge-bug-formal-formal-listdir-no-r` | a run-time-length blob is answerable; a run-time-length LIST is not |
