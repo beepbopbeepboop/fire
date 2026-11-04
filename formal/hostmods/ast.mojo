@@ -34,7 +34,7 @@ sometimes rewrites it (`ast.NodeTransformer`, `ast.unparse`). On this target
 every one of those steps is impossible, and each for its own measured reason —
 none of them is a missing feature that more work would supply:
 
-  * **A tree is not a value.** `formal/model/builtins.py`, "What a value is": a formal
+  * **A tree is not a value.** `formal/model.py`, "What a value is": a formal
     value is ONE 64-bit word in a function's own stack scratch, and that
     scratch is reclaimed when the function returns. A container is a
     frame-allocated blob of 8-byte slots, so a node list built inside a callee
@@ -134,7 +134,7 @@ one whose bytes and block structure are sound.
 
 THE MECHANICS, because they are the whole design
 -------------------------------------------------
-A string on this path is a bare `char *` (see `formal/model/cfg.py`'s string representation
+A string on this path is a bare `char *` (see `formal/model.py`'s string
 section), so this module never reads a character: it asks the C library
 questions about a pointer, which is the same answer computed by the same
 algorithm CPython uses rather than a second implementation of it.

@@ -19,7 +19,7 @@ rather than of this module, and every function below is shaped by them.
     function here needs the C library, so what the x86-64 backend has to get
     right is the symbol each call binds — and for `localtime`/`strftime`, whose
     answer is a `struct tm` this target fills in, that is the same
-    dual-spelling table `formal/model/builtins.py`'s `target_libc_symbol` is. A host
+    dual-spelling table `formal/model.py`'s `target_libc_symbol` is. A host
     with no x86-64 support at all still skips the x86-64 half of
     `test_formal_time.py`.
 
@@ -35,7 +35,7 @@ rather than of this module, and every function below is shaped by them.
     before, which is how an arm64-only measurement came to be written down as a
     property of both). On x86-64 that needs the floating conversion placed in
     `XMM0` rather than read out of the integer register the word is in;
-    `formal/model/strings.py`'s `printf_argument_classes` is the reader and
+    `formal/model.py`'s `printf_argument_classes` is the reader and
     `formal/x86_64.py`'s `encode_movq_xmm_rm64` is the move. What is still
     absent, and for a different reason, is every function whose CPython answer
     is a float VALUE rather than a double rendered by a variadic call: a

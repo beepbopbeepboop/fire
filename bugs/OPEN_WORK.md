@@ -51,6 +51,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_calcsize_image_hangs_once_in_several.md` | `bug-formal-formal-a-calcsize-image-hangs` | a `calcsize` image hangs for 60 s about once in six suite runs, and is clean 10/10 standalone |
+| `FORMAL_arm64_ieee754_has_no_step_arms.md` | `bug-formal-formal-arm64-ieee754-has-no-s` | ten IEEE-754 encoders the emitter calls, and no `arm64_step` arm |
 | `FORMAL_no_exceptions.md` | **unclaimed** | a `raise` is a TERMINATION on this path, not a value the caller can catch |
 | `FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md` | **unclaimed** | FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more |
 
@@ -58,13 +59,14 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
+| `FORMAL_a_fold_over_a_blob_needs_a_proof_model_and_not_only_codegen.md` | `bug-formal-formal-a-fold-over-a-blob-nee` | FORMAL_a_fold_over_a_blob_needs_a_proof_model_and_not_only_codegen |
 | `FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` | `bug-formal-formal-a-three-branch-certifi` | the cost is the per-PATH value-flow facts, and everything the earlier rounds blamed for it checks in 23 seconds |
 | `FORMAL_absval_proof_does_not_check.md` | `bug-formal-formal-absval-proof-does-not-4544` | `formal/examples/absval.mojo`'s arm64 proof no longer checks — a frame-slot peel's address does not match the goal |
 | `FORMAL_admitted_contract_is_one_word_wide.md` | `bug-formal-formal-admitted-contract-is-o` | An admitted host contract is one WORD wide, because `MojoExpr.call` is |
 | `FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md` | `bug-formal-formal-ast-bridge-carries-one-900` | A call of two or more arguments to a USER function has no stated value: `callFunc2` answers only arity-2 admitted contracts and the callee table is one-parameter only. The node carries every argument; the 2-arg gap regression of `3d32c0e66` is fixed |
 | `FORMAL_dylib_export_loops_and_frame_bounds.md` | `bug-formal-formal-dylib-export-loops-and-5784` | dylib exports: the loop-fuel obligation, and a `FrameBound` that is ALREADY depth-indexed |
 | `FORMAL_float_step_functions.md` | **unclaimed** | The binary64 semantics is modelled; the FP STEP FUNCTIONS are not, and a float program cannot be proved yet |
-| `FORMAL_integer_overflow_at_run_time_is_still_untrapped.md` | **unclaimed** | Integer overflow at RUN TIME is still a silent wrap on a variable operand |
+| `FORMAL_integer_overflow_at_run_time_is_still_untrapped.md (deleted)` | **unclaimed** | Integer overflow at RUN TIME is still a silent wrap on a variable operand |
 | `FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md` | **unclaimed** | ONE opaque `fflush` SILENTLY replaces the universal theorem with `prop := True`, and three rows of `test_formal_call_proof_gen.py` are red because the div0 false goal can no longer be reached |
 | `FORMAL_the_contract_slot_trackers_scale_the_addsub_immediate_by_eight.md` | **unclaimed** | four contract-slot `sp` trackers read the `ADD`/`SUB` immediate and multiply it by 8 |
 | `FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md` | **unclaimed** | the last export of every dylib gets an unprovable `_semantics_total`, and the two `test_formal_dylib.py` hole-count rows are red for it |
@@ -122,6 +124,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_try_handler_arm_is_still_never_emitted.md` | `bug-formal-formal-a-try-handler-arm-is-s-8121` | A `try` handler arm is still never emitted, and the reason it is not worth fixing in one function is that EVERY arm in this repository calls something |
 | `FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` | **unclaimed** | `collections.namedtuple` and `copy.deepcopy` are one missing capability, and it is a reflection table |
 | `FORMAL_function_value_calls_are_not_proved_to_be_calls.md` | **unclaimed** | A call through a VALUE is not proved to be a call: the word might not be an address |
+| `FORMAL_functools_is_unbuildable_as_a_host_module.md` | **unclaimed** | every name in CPython's `functools` needs a capability this path lacks, and a module that exports nothing is refused |
 | `FORMAL_fuzz_ledger.md` | **unclaimed** | what `tools/formal_fuzz.py` has measured, and what came of it |
 | `FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md` | **unclaimed** | the ELEMENT half of the foreign-bytes question is closed, and the `len` half is not |
 | `FORMAL_listdir_no_run_time_sequence.md` | **unclaimed** | a run-time-length blob is answerable; a run-time-length LIST is not |

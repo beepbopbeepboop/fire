@@ -8875,10 +8875,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # a status code — and the run-time half, the same predicate over a
             # value the build CANNOT know, which a plain `ADD`/`SUB`/`IMUL`
             # used to answer with the hardware's modulo-2^64 wrap (on `//`'s
-            # neighbour the two machines did not even fail the same way —
-            # `bugs/formal/
-            # FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
-            # `VARIABLE_ROWS` table is the measurement that pinned it). That
+            # neighbour the two machines did not even fail the same way); the
+            # integer overflow traps now prevent silent wrap. That
             # half is the flag the ALU leaves plus `_emit_int_overflow_trap`,
             # the branch into the trap block. The build-decidable case that
             # FITS stays on the plain instruction for the reason arm64's arm
@@ -9464,6 +9462,25 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._record_cond_branch()
             self._emit_jcc(COND_E, div0_label)
         if signed:
+            if op != "%":
+                # Check for INT64_MIN / -1 overflow (only for division)
+                self.asm.emit(encode_cmp_r64_imm32(Reg.R11, -1))
+                self._record_cond_branch()
+                self._if_counter += 1
+                divok1 = f"{fn}_dovkok{self._if_counter}"
+                self._emit_jcc(COND_NE, divok1)
+                # divisor is -1, check if dividend (in RAX) is INT64_MIN
+                self.asm.emit(encode_mov_r64_imm64(Reg.RDX, 0x8000000000000000))
+                self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.RDX))
+                self._record_cond_branch()
+                self._if_counter += 1
+                divok1b = f"{fn}_dovkok{self._if_counter}"
+                self._emit_jcc(COND_NE, divok1b)
+                # overflow - trap
+                self._emit_overflow_diagnostic_call(M.int_overflow_trap_message("//"))
+                self._emit_call_exit(M.INT_OVERFLOW_TRAP_STATUS)
+                self.asm.label(divok1b)
+                self.asm.label(divok1)
             self.asm.emit(encode_cqo())
             self.asm.emit(encode_idiv_r64(Reg.R11))
         else:
@@ -9586,8 +9603,7 @@ preference.
         # (`8 >> 64` is 0; `1 << 64` is 18446744073709551616 and the saturating
         # arm answered 0), and an amount in range can still overflow the RESULT
         # (`1 << 63`), so the `0..63` test is not a safety test. The variable
-        # base is `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.
-        # md`.
+        # base is now trapped at runtime for overflow cases.
         reason = M.shift_overflow_refusal(
             op, M.fold_literal_expr(e.right), M.fold_literal_expr(e.left),
             [e.left, e.right])
@@ -9603,8 +9619,30 @@ preference.
         lit = self._static_int(e.right)
         if lit is not None and 0 <= lit <= 63:
             self._emit_expr(e.left)
-            self.asm.emit(encode_shift_r64_imm8(
-                _SHIFT_CL[op] if signed else _SHIFT_IMM[op], Reg.RAX, lit))
+            if op == "<<":
+                shamt = lit
+                self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
+                self.asm.emit(encode_shift_r64_imm8(
+                    _SHIFT_IMM[op], Reg.RAX, shamt))
+                if shamt != 0:
+                    self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.RAX))
+                    self.asm.emit(encode_shift_r64_imm8(">>signed", Reg.RAX, shamt))
+                    self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R11))
+                    self._if_counter += 1
+                    ovf = f"{self.func_name}_shovf{self._if_counter}"
+                    ok = f"{self.func_name}_shok{self._if_counter}"
+                    self._emit_jcc(COND_NE, ovf)
+                    self._emit_jmp(ok)
+                    self.asm.label(ovf)
+                    self._emit_overflow_diagnostic_call(M.int_overflow_trap_message("<<"))
+                    self._emit_call_exit(M.INT_OVERFLOW_TRAP_STATUS)
+                    self.asm.label(ok)
+                    self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R10))
+                else:
+                    pass
+            else:
+                self.asm.emit(encode_shift_r64_imm8(
+                    _SHIFT_CL[op] if signed else _SHIFT_IMM[op], Reg.RAX, lit))
             self._emit_trunc(result_t)
             return
         # A literal amount at or past the word's width, decided HERE with no
@@ -9695,8 +9733,26 @@ preference.
         self.asm.emit(encode_cmp_r64_imm32(Reg.RCX, M.SHIFT_WIDTH))
         self._record_cond_branch()
         self._emit_jcc(COND_GE, sat_label)
-        self.asm.emit(encode_shift_r64_cl(
-            _SHIFT_CL[op] if signed else _SHIFT_IMM[op], Reg.RAX))
+        if op == "<<":
+            self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))  # orig
+            self.asm.emit(encode_mov_r64_r64(Reg.R12, Reg.RCX))  # amount
+            self.asm.emit(encode_shift_r64_cl(_SHIFT_IMM[op], Reg.RAX))  # RAX = orig << amt
+            self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.RAX))  # save result
+            self.asm.emit(encode_shift_r64_cl(_SHIFT_CL[op] if signed else ">>signed", Reg.RAX))  # RAX = result >> amt
+            self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R11))  # compare with orig
+            self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.R12))
+            ovf = f"{fn}_sh{sid}_ovf"
+            ok = f"{fn}_sh{sid}_ok"
+            self._emit_jcc(COND_NE, ovf)
+            self._emit_jmp(ok)
+            self.asm.label(ovf)
+            self._emit_overflow_diagnostic_call(M.int_overflow_trap_message("<<"))
+            self._emit_call_exit(M.INT_OVERFLOW_TRAP_STATUS)
+            self.asm.label(ok)
+            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R10))
+        else:
+            self.asm.emit(encode_shift_r64_cl(
+                _SHIFT_CL[op] if signed else _SHIFT_IMM[op], Reg.RAX))
         self._emit_jmp(end_label)
         self.asm.label(sat_label)
         self._emit_saturated(op, signed)
@@ -9781,9 +9837,9 @@ preference.
             self._emit_trunc(result_t)
             return
         if lit is not None and lit < 0:
-            # Integer ** negative → 0: formal's integer lattice has no
-            # fractions, and 0 matches the toy path for |base| > 1.
-            self._emit_mov_imm(Reg.RAX, 0)
+            # Integer ** negative → trap (no integer answer)
+            self._emit_stop_diagnostic(M.int_overflow_trap_message("**"))
+            self._emit_call_exit(M.INT_OVERFLOW_TRAP_STATUS)
             return
 
         # Binary exponentiation. Stack layout: [rsp] is the accumulator,
@@ -9836,7 +9892,8 @@ preference.
         self._emit_jmp(end_label)
         self.asm.label(neg_label)
         self.asm.emit(encode_add_r64_imm32(Reg.RSP, 2 * _SLOT))
-        self._emit_mov_imm(Reg.RAX, 0)
+        self._emit_stop_diagnostic(M.int_overflow_trap_message("**"))
+        self._emit_call_exit(M.INT_OVERFLOW_TRAP_STATUS)
         self.asm.label(end_label)
 
     def _emit_subscript_store(self, target: F.SubscriptExpr, value) -> None:

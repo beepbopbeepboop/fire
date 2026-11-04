@@ -210,23 +210,6 @@ def fdivBits (a b : Bits) : Bits := Float.toBits (Float.ofBits a / Float.ofBits 
 is not a negation). -/
 def fnegBits (a : Bits) : Bits := a ^^^ 0x8000000000000000
 
-/-- Signed 64-bit integer to double (SCVTF). -/
-def scvtfBits (a : UInt64) : Bits :=
-  let i : Int := if a >= (0x8000000000000000 : UInt64) then ((a.toNat : Int) - (18446744073709551616 : Int)) else (a.toNat : Int)
-  Float.toBits (Float.ofInt i)
-
-/-- Double to signed 64-bit integer, truncation toward zero (FCVTZS). -/
-def fcvtzsBits (a : Bits) : UInt64 :=
-  let f := Float.ofBits a
-  if f.isNaN then (0x8000000000000000 : UInt64)
-  else if f.isInf then if f < 0.0 then (0x8000000000000000 : UInt64) else (0x7fffffffffffffff : UInt64)
-  else if f >= (9223372036854775807.0 : Float) then (0x7fffffffffffffff : UInt64)
-  else if f < (-9223372036854775808.0 : Float) then (0x8000000000000000 : UInt64)
-  else
-    let t := if f >= 0.0 then Float.floor f else Float.ceil f
-    if t >= 0.0 then t.toUInt64 else (UInt64.ofNat ((18446744073709551616 : Nat) + (t.toUInt64.toNat)))
-
-
 /-- The signed 64-bit integer `a` as a double.  Round-to-nearest-even, so
 `float(2^53 + 1)` is `2^53` — which is why it is not an arithmetic shift. -/
 def fromIntBits (i : Int) : Bits := Float.toBits (Float.ofBits 0 + (Float.ofInt i))
