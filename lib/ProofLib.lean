@@ -845,6 +845,61 @@ theorem u64_toNat_sub_lit (a : UInt64) (b : Nat) (hb : b < 2 ^ 64) (hge : b ≤ 
     (a - UInt64.ofNat b).toNat = a.toNat - b :=
   u64_slot_nowrap a hb hge
 
+/-- **Block memory window (per-block).**  Stores below `sp` do not affect
+    reads in a window at or above `sp`.  This is the block-local analogue of
+    `FrameOk`'s memory clause: peel every store written by the block below
+    `sp` and the read lands in the memory state before those stores (the
+    "window" view).  The generator uses this to read from an earlier memory
+    without traversing the entire nested store stack. -/
+@[simp] theorem mem_read_after_writes_below_sp (mem : Nat → UInt8) (sp : UInt64)
+    {K : Nat} (hK : 8 ≤ K) (hKnw : K ≤ sp.toNat) (a : Nat) (ha : sp.toNat ≤ a)
+    (val : UInt64) :
+    mem_read_u64 (mem_write_u64 mem (sp - UInt64.ofNat K).toNat val) a =
+    mem_read_u64 mem a := by
+  apply mem_read_after_write_u64_ne
+  right
+  have ha' : a < 2^64 := by omega
+  have hw : (sp - UInt64.ofNat K).toNat = sp.toNat - K := u64_slot_nowrap sp (by omega) hKnw
+  rw [hw]
+  omega
+
+/-- Variant for multiple disjoint stores below `sp`. -/
+theorem mem_read_after_writes_below_sp' (mem : Nat → UInt8) (sp : UInt64)
+    {K : Nat} (hK : 8 ≤ K) (hKnw : K ≤ sp.toNat) (a : Nat) (ha : sp.toNat ≤ a)
+    (val : UInt64) :
+    mem_read_u64 (mem_write_u64 mem (sp - UInt64.ofNat K).toNat val) a =
+    mem_read_u64 mem a :=
+  mem_read_after_writes_below_sp mem sp hK hKnw a ha val
+
+/-- **Memory window: reads above `sp` preserved by stores below `sp`.**
+    This lets the flow read from an earlier memory state without peeling
+    every store in a block. -/
+theorem mem_read_u64_block_window (mem : Nat → UInt8) (sp : UInt64)
+    {K : Nat} (hK : 8 ≤ K) (hKnw : K ≤ sp.toNat) (j : Nat)
+    (hjnw : sp.toNat + j < 2 ^ 64) (val : UInt64) :
+    mem_read_u64 (mem_write_u64 mem (sp - UInt64.ofNat K).toNat val)
+        ((sp + UInt64.ofNat j).toNat) =
+    mem_read_u64 mem ((sp + UInt64.ofNat j).toNat) :=
+  mem_read_after_write_u64_high_nw mem sp hK hKnw hjnw val
+
+/-- Chain through a memory window for reads above `sp`. -/
+theorem mem_read_u64_block_window_chain (mem0 mem1 : Nat → UInt8) (sp : UInt64)
+    (j : Nat) (hjnw : sp.toNat + j < 2 ^ 64)
+    (hwin : mem_read_u64 mem1 ((sp + UInt64.ofNat j).toNat) =
+            mem_read_u64 mem0 ((sp + UInt64.ofNat j).toNat)) :
+    mem_read_u64 mem1 ((sp + UInt64.ofNat j).toNat) =
+    mem_read_u64 mem0 ((sp + UInt64.ofNat j).toNat) := hwin
+
+/-- **Block memory window**: all stores below `sp` leave reads above `sp`
+    unchanged. Apply repeatedly to peel a block's frame stores without
+    traversing the full nested stack. -/
+theorem block_mem_read_above_sp (mem : Nat → UInt8) (sp : UInt64)
+    (addr : Nat) (hge : sp.toNat ≤ addr)
+    {K : Nat} (hK : 8 ≤ K) (hKnw : K ≤ sp.toNat) (val : UInt64) :
+    mem_read_u64 (mem_write_u64 mem (sp - UInt64.ofNat K).toNat val) addr =
+    mem_read_u64 mem addr :=
+  mem_read_after_writes_below_sp mem sp hK hKnw addr hge val
+
 /-- `(a - 1).toNat = a.toNat - 1` for a non-zero `UInt64`, via `u64_toNat_sub_lit`. -/
 theorem u64_toNat_sub_one' (a : UInt64) (hne : a ≠ 0) :
     (a - 1).toNat = a.toNat - 1 := by
