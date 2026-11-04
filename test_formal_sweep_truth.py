@@ -434,8 +434,7 @@ class TestLeanOutput(unittest.TestCase):
         verdict about a search path.
 
         `repo_root="."` is not an exotic spelling: it is what
-        `bugs/formal/FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`'s own
-        reproduce command writes, so that doc's measurements were taken through
+        an earlier reproduce command wrote, so those measurements were taken through
         this entry point.
 
         **And the false verdict is CACHED**, which is what makes this more than

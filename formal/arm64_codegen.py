@@ -12308,7 +12308,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # lives. `value_callee_can_hold_a_function` above reads the
             # DECLARATION; this reads the FLOW, and neither can see the other:
             # a local bound to `17` has no annotation to refuse on, and
-            # `bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
+            # (function value calls through parameters — fixed)
             # is the doc for what is left when neither has an answer.
             holds = M.callee_word_is_not_an_address(
                 self._cur_fn, name, self._vkinds)
