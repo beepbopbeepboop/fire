@@ -90,7 +90,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_set_value_model.md` | `fix-merge-bug-formal-formal-set-value-model-9076` | A set is a LIST here: insertion order, no hashing, and `for x in s` disagrees with CPython |
 | `FORMAL_str_repr_format_and_percent_have_no_lowering.md` | `bug-formal-formal-str-repr-format-and-pe-2548` | `str()`, `repr()`, `format()`, `%` and `.format()` have no lowering: a value's TEXT is not a compile-time constant |
 | `FORMAL_sweep_work_map.md` | `fix-merge-fix-merge-fix-merge-bug-formal-formal-sweep-work-m` | the formal sweep series — the current census, the measurements that outlived their round, and the index of the twenty-one rounds it replaces |
-| `FORMAL_time_struct_shaped_answers.md` | `fix-merge-fix-merge-bug-formal-formal-time-struct-shaped-ans` | five `time` names are absent because their answer is a struct |
+
 
 ### `formal/peephole` — 1 document, 1 claimed
 
