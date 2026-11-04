@@ -2950,55 +2950,6 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let rm := ((insn >>> 16) &&& 0x1f).toNat
     some { s with nzcv := fcmp_nzcv (arm64_reg_d rn s) (arm64_reg_d rm s) }
-  -- FADD Dd, Dn, Dm (scalar double): 0x1e602800
-  else if (insn &&& 0xffe0fc00) = 0x1e602800 then
-    let rd := (insn &&& 0x1f).toNat
-    let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let rm := ((insn >>> 16) &&& 0x1f).toNat
-    some (arm64_set_reg_d rd s (faddBits (arm64_reg_d rn s) (arm64_reg_d rm s)))
-  -- FSUB Dd, Dn, Dm (scalar double): 0x1e603800
-  else if (insn &&& 0xffe0fc00) = 0x1e603800 then
-    let rd := (insn &&& 0x1f).toNat
-    let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let rm := ((insn >>> 16) &&& 0x1f).toNat
-    some (arm64_set_reg_d rd s (fsubBits (arm64_reg_d rn s) (arm64_reg_d rm s)))
-  -- FMUL Dd, Dn, Dm (scalar double): 0x1e600800
-  else if (insn &&& 0xffe0fc00) = 0x1e600800 then
-    let rd := (insn &&& 0x1f).toNat
-    let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let rm := ((insn >>> 16) &&& 0x1f).toNat
-    some (arm64_set_reg_d rd s (fmulBits (arm64_reg_d rn s) (arm64_reg_d rm s)))
-  -- FDIV Dd, Dn, Dm (scalar double): 0x1e601800
-  else if (insn &&& 0xffe0fc00) = 0x1e601800 then
-    let rd := (insn &&& 0x1f).toNat
-    let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let rm := ((insn >>> 16) &&& 0x1f).toNat
-    some (arm64_set_reg_d rd s (fdivBits (arm64_reg_d rn s) (arm64_reg_d rm s)))
-  -- FNEG Dd, Dn (scalar double): 0x1e614000
-  else if (insn &&& 0xfffffc00) = 0x1e614000 then
-    let rd := (insn &&& 0x1f).toNat
-    let rn := ((insn >>> 5) &&& 0x1f).toNat
-    some (arm64_set_reg_d rd s (fnegBits (arm64_reg_d rn s)))
-  -- FMOV Dd, Xn (GPR to V/D): 0x9e670000
-  else if (insn &&& 0xfffffc00) = 0x9e670000 then
-    let rd := (insn &&& 0x1f).toNat
-    let rn := ((insn >>> 5) &&& 0x1f).toNat
-    some (arm64_set_reg_d rd s (arm64_reg rn s))
-  -- FMOV Xd, Dn (V/D to GPR): 0x9e660000
-  else if (insn &&& 0xfffffc00) = 0x9e660000 then
-    let rd := (insn &&& 0x1f).toNat
-    let rn := ((insn >>> 5) &&& 0x1f).toNat
-    some (arm64_set_reg rd s (arm64_reg_d rn s))
-  -- SCVTF Dd, Xn (signed 64-bit int to double): 0x9e620000
-  else if (insn &&& 0xfffffc00) = 0x9e620000 then
-    let rd := (insn &&& 0x1f).toNat
-    let rn := ((insn >>> 5) &&& 0x1f).toNat
-    some (arm64_set_reg_d rd s (scvtfBits (arm64_reg rn s)))
-  -- FCVTZS Xd, Dn (double to signed 64-bit int, trunc toward zero): 0x9e780000
-  else if (insn &&& 0xfffffc00) = 0x9e780000 then
-    let rd := (insn &&& 0x1f).toNat
-    let rn := ((insn >>> 5) &&& 0x1f).toNat
-    some (arm64_set_reg rd s (fcvtzsBits (arm64_reg_d rn s)))
   else
     none
 
@@ -5436,15 +5387,6 @@ theorem work_step_mov (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
     (h : (w &&& 0xffe00000) = 0x2a00fa00) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s)) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -5454,15 +5396,6 @@ theorem work_step_mov (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
     (h : (w &&& 0xffe00000) = 0x8b000000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat))) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -5473,15 +5406,6 @@ theorem work_step_mov (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
     (h : (w &&& 0xffe00000) = 0xcb000000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat))) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -5493,15 +5417,6 @@ theorem work_step_mov (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
     (h : (w &&& 0xffe07c00) = 0x9b007c00) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s * arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -5514,15 +5429,6 @@ theorem work_step_mov (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
     (h : (w &&& 0xfffffc1f) = 0xcb0003e0) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (-(arm64_reg (((w >>> 16) &&& 0x1f).toNat) s))) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -5537,15 +5443,6 @@ theorem work_step_mov (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
 arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat))) with
       nzcv := arm64_subs_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat)) } := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -5560,15 +5457,6 @@ arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w
     (h : (w &&& 0xffe00000) = 0x8a000000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s &&& arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -5584,15 +5472,6 @@ arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w
     (h : (w &&& 0xffe00000) = 0xca000000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s ^^^ arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -5609,15 +5488,6 @@ arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w
     (h : (w &&& 0xff800000) = 0x11000000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + UInt64.ofNat (arm64_ext_imm12 w))) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -5635,15 +5505,6 @@ arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w
     (h : (w &&& 0xff800000) = 0x91000000) :
     arm64_step s code = (if ((w &&& 0x1f).toNat) = 31 then some { s with sp := (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (arm64_ext_imm12 w) } else some (arm64_set_reg ((w &&& 0x1f).toNat) s ((arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (arm64_ext_imm12 w)))) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -5662,15 +5523,6 @@ arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w
     (h : (w &&& 0xff800000) = 0x51000000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - UInt64.ofNat (arm64_ext_imm12 w))) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -5690,15 +5542,6 @@ arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w
     (h : (w &&& 0xff800000) = 0xd1000000) :
     arm64_step s code = (if ((w &&& 0x1f).toNat) = 31 then some { s with sp := (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat (arm64_ext_imm12 w) } else some (arm64_set_reg ((w &&& 0x1f).toNat) s ((arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat (arm64_ext_imm12 w)))) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -5719,15 +5562,6 @@ arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w
     (h : (w &&& 0xff800000) = 0xf1000000) :
     arm64_step s code = some { s with nzcv := arm64_subs_flags (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) (UInt64.ofNat (arm64_ext_imm12 w)) } := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -5744,7 +5578,7 @@ arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w
   have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
   have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_70, if_neg hne_71, if_neg hne_72, if_neg hne_73, if_neg hne_74, if_neg hne_75, if_neg hne_76, if_neg hne_77, if_neg hne_78, if_neg hne_79, if_pos h]; try dsimp; try rfl; try simp
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_70, if_pos h]; try dsimp; try rfl; try simp
 
 /-- Per-instruction step: `work_step_ldr_uoff`.
 
@@ -5759,15 +5593,6 @@ arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w
       ((arm64_reg_or_sp ((w >>> 5) &&& 0x1f).toNat) s
         + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat)) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -5808,15 +5633,6 @@ arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w
           + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 4)).toNat
         (arm64_reg ((w &&& 0x1f).toNat) s) } := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -5847,15 +5663,6 @@ arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w
     (h : (w &&& 0x9f000000) = 0x90000000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (UInt64.ofNat pc - (UInt64.ofNat pc) % (4096 : UInt64) + (if ((((w >>> 5) &&& 0x7ffff).toNat) * 4 + ((w >>> 29) &&& 0x3).toNat) ≥ 2^20 then UInt64.ofNat ((((w >>> 5) &&& 0x7ffff).toNat) * 4 + ((w >>> 29) &&& 0x3).toNat) - UInt64.ofNat (2^21) else UInt64.ofNat ((((w >>> 5) &&& 0x7ffff).toNat) * 4 + ((w >>> 29) &&& 0x3).toNat)) * (4096 : UInt64))) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -5887,15 +5694,6 @@ arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w
     (h : (w &&& 0xffc00000) = 0xa9800000) :
     arm64_step s code = some { s with sp := (if (((w >>> 15) &&& 0x7f).toNat) ≥ 64 then (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((128 - (((w >>> 15) &&& 0x7f).toNat)) * 8) else (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8)), mem := mem_write_u64 (mem_write_u64 s.mem (if (((w >>> 15) &&& 0x7f).toNat) ≥ 64 then (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((128 - (((w >>> 15) &&& 0x7f).toNat)) * 8) else (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8)).toNat (arm64_reg ((w &&& 0x1f).toNat) s)) ((if (((w >>> 15) &&& 0x7f).toNat) ≥ 64 then (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((128 - (((w >>> 15) &&& 0x7f).toNat)) * 8) else (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8)) + 8).toNat (arm64_reg (((w >>> 10) &&& 0x1f).toNat) s) } := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -5928,15 +5726,6 @@ arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w
     (h : (w &&& 0xffc00000) = 0xa8c00000) :
     arm64_step s code = some { (arm64_set_reg (((w >>> 10) &&& 0x1f).toNat) (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u64 s.mem (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s).toNat)) (mem_read_u64 s.mem ((arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + 8).toNat)) with sp := (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8) } := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -6043,15 +5832,6 @@ theorem work_step_movz (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
     (h : (w &&& 0xffe00000) = 0xaa000000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s ||| arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -6170,15 +5950,6 @@ theorem work_step_movk (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
     (h : (w &&& 0xffe00000) = 0x12800000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (UInt64.ofNat (0xffff_ffff - (((w >>> 5) &&& 0xffff).toNat)))) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -6218,15 +5989,6 @@ theorem work_step_movk (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
     (h : (w &&& 0xffe00000) = 0x92800000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (UInt64.ofNat (0xffff_ffff_ffff_ffff - (((w >>> 5) &&& 0xffff).toNat)))) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -6267,15 +6029,6 @@ theorem work_step_movk (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
     (h : (w &&& 0xffff0fe0) = 0x9a9f07e0) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (if arm64_matches_condition (if ((w >>> 12) &&& 0xf) &&& 0x1 = 0 then (((w >>> 12) &&& 0xf) + 1).toNat else (((w >>> 12) &&& 0xf) - 1).toNat) s.nzcv then 1 else 0)) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -6327,15 +6080,6 @@ theorem work_step_movk (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
           + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat
         (arm64_reg ((w &&& 0x1f).toNat) s) } := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -6378,15 +6122,6 @@ theorem work_step_movk (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
     (h : (w &&& 0xffc00000) = 0xa9400000) :
     arm64_step s code = some (arm64_set_reg (((w >>> 10) &&& 0x1f).toNat) (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u64 s.mem (if (((w >>> 15) &&& 0x7f).toNat) ≥ 64 then (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((128 - (((w >>> 15) &&& 0x7f).toNat)) * 8) else (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8)).toNat)) (mem_read_u64 s.mem ((if (((w >>> 15) &&& 0x7f).toNat) ≥ 64 then (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((128 - (((w >>> 15) &&& 0x7f).toNat)) * 8) else (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8)) + 8).toNat)) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -6430,15 +6165,6 @@ theorem work_step_movk (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
     (h : (w &&& 0xffe0fc00) = 0xaa200000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s ||| ((arm64_reg (((w >>> 16) &&& 0x1f).toNat) s) ^^^ (0xffffffffffffffff : UInt64)))) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -6483,15 +6209,6 @@ theorem work_step_movk (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
     (h : (w &&& 0xfffffc1f) = 0xd61f0000) :
     arm64_step s code = some { s with pc := (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s).toNat } := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -6537,15 +6254,6 @@ theorem work_step_movk (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
     (h : (w &&& 0xffe0001f) = 0xd4000001) :
     arm64_step s code = some s := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -6604,15 +6312,6 @@ set_option maxHeartbeats 4000000 in
     (h : (w &&& 0xffe00000) = 0xab000000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) { s with nzcv := arm64_adds_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat)) } (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat))) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -6681,7 +6380,7 @@ set_option maxHeartbeats 4000000 in
   have hne_63 : ¬ ((w &&& 0xffe0fc00) = 0xf8206800) := by intro t; bv_decide
   have hne_64 : ¬ ((w &&& 0xffe00c00) = 0xf8400000) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_70, if_neg hne_71, if_neg hne_72, if_neg hne_73, if_neg hne_74, if_neg hne_75, if_neg hne_76, if_neg hne_77, if_neg hne_78, if_neg hne_79, if_pos h]; try dsimp; try rfl; try simp
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_70, if_pos h]; try dsimp; try rfl; try simp
 set_option maxHeartbeats 4000000 in
 /-- Per-instruction step: `work_step_tst`.
 
@@ -6696,15 +6395,6 @@ set_option maxHeartbeats 4000000 in
     (h : (w &&& 0xffe00000) = 0xea000000) :
     arm64_step s code = some { s with nzcv := arm64_logic_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s &&& arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat)) } := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -6774,7 +6464,7 @@ set_option maxHeartbeats 4000000 in
   have hne_64 : ¬ ((w &&& 0xffe00c00) = 0xf8400000) := by intro t; bv_decide
   have hne_65 : ¬ ((w &&& 0xffe00000) = 0xab000000) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_70, if_neg hne_71, if_neg hne_72, if_neg hne_73, if_neg hne_74, if_neg hne_75, if_neg hne_76, if_neg hne_77, if_neg hne_78, if_neg hne_79, if_pos h]; try dsimp; try rfl; try simp
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_70, if_pos h]; try dsimp; try rfl; try simp
 set_option maxHeartbeats 4000000 in
 /-- Per-instruction step: `work_step_ldrb`.
 
@@ -6789,15 +6479,6 @@ set_option maxHeartbeats 4000000 in
     (h : (w &&& 0xffd00000) = 0x39400000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u8 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)).toNat)) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -6855,7 +6536,7 @@ set_option maxHeartbeats 4000000 in
   have hne_52 : ¬ ((w &&& 0xffc0fc00) = 0x9340fc00) := by intro t; bv_decide
   have hne_53 : ¬ ((w &&& 0xffc00000) = 0xd3400000) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_70, if_neg hne_71, if_neg hne_72, if_neg hne_73, if_neg hne_74, if_neg hne_75, if_neg hne_76, if_neg hne_77, if_neg hne_78, if_neg hne_79, if_pos h]; try dsimp; try rfl; try simp
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_70, if_pos h]; try dsimp; try rfl; try simp
 set_option maxHeartbeats 4000000 in
 /-- Per-instruction step: `work_step_strb`.
 
@@ -6870,15 +6551,6 @@ set_option maxHeartbeats 4000000 in
     (h : (w &&& 0xffd00000) = 0x39000000) :
     arm64_step s code = some { s with mem := mem_write_u8 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)).toNat (arm64_reg ((w &&& 0x1f).toNat) s) } := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -6937,7 +6609,7 @@ set_option maxHeartbeats 4000000 in
   have hne_53 : ¬ ((w &&& 0xffc00000) = 0xd3400000) := by intro t; bv_decide
   have hne_54 : ¬ ((w &&& 0xffd00000) = 0x39400000) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_70, if_neg hne_71, if_neg hne_72, if_neg hne_73, if_neg hne_74, if_neg hne_75, if_neg hne_76, if_neg hne_77, if_neg hne_78, if_neg hne_79, if_pos h]; try dsimp; try rfl; try simp
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_70, if_pos h]; try dsimp; try rfl; try simp
 set_option maxHeartbeats 4000000 in
 /-- Per-instruction step: `work_step_ldrh`.
 
@@ -6952,15 +6624,6 @@ set_option maxHeartbeats 4000000 in
     (h : (w &&& 0xffd00000) = 0x79400000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u16 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 2)).toNat)) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -7020,7 +6683,7 @@ set_option maxHeartbeats 4000000 in
   have hne_54 : ¬ ((w &&& 0xffd00000) = 0x39400000) := by intro t; bv_decide
   have hne_55 : ¬ ((w &&& 0xffd00000) = 0x39000000) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_70, if_neg hne_71, if_neg hne_72, if_neg hne_73, if_neg hne_74, if_neg hne_75, if_neg hne_76, if_neg hne_77, if_neg hne_78, if_neg hne_79, if_pos h]; try dsimp; try rfl; try simp
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_70, if_pos h]; try dsimp; try rfl; try simp
 set_option maxHeartbeats 4000000 in
 /-- Per-instruction step: `work_step_strh`.
 
@@ -7035,15 +6698,6 @@ set_option maxHeartbeats 4000000 in
     (h : (w &&& 0xffd00000) = 0x79000000) :
     arm64_step s code = some { s with mem := mem_write_u16 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 2)).toNat (arm64_reg ((w &&& 0x1f).toNat) s) } := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -7104,7 +6758,7 @@ set_option maxHeartbeats 4000000 in
   have hne_55 : ¬ ((w &&& 0xffd00000) = 0x39000000) := by intro t; bv_decide
   have hne_56 : ¬ ((w &&& 0xffd00000) = 0x79400000) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_70, if_neg hne_71, if_neg hne_72, if_neg hne_73, if_neg hne_74, if_neg hne_75, if_neg hne_76, if_neg hne_77, if_neg hne_78, if_neg hne_79, if_pos h]; try dsimp; try rfl; try simp
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_70, if_pos h]; try dsimp; try rfl; try simp
 set_option maxHeartbeats 4000000 in
 /-- Per-instruction step: `work_step_ldrsb`.
 
@@ -7119,15 +6773,6 @@ set_option maxHeartbeats 4000000 in
     (h : (w &&& 0xffd00000) = 0x39800000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (t8s (mem_read_u8 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)).toNat))) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -7189,7 +6834,7 @@ set_option maxHeartbeats 4000000 in
   have hne_56 : ¬ ((w &&& 0xffd00000) = 0x79400000) := by intro t; bv_decide
   have hne_57 : ¬ ((w &&& 0xffd00000) = 0x79000000) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_70, if_neg hne_71, if_neg hne_72, if_neg hne_73, if_neg hne_74, if_neg hne_75, if_neg hne_76, if_neg hne_77, if_neg hne_78, if_neg hne_79, if_pos h]; try dsimp; try rfl; try simp
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_70, if_pos h]; try dsimp; try rfl; try simp
 set_option maxHeartbeats 4000000 in
 /-- Per-instruction step: `work_step_ldrsh`.
 
@@ -7204,15 +6849,6 @@ set_option maxHeartbeats 4000000 in
     (h : (w &&& 0xffd00000) = 0x79800000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (t16s (mem_read_u16 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 2)).toNat))) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -7275,7 +6911,7 @@ set_option maxHeartbeats 4000000 in
   have hne_57 : ¬ ((w &&& 0xffd00000) = 0x79000000) := by intro t; bv_decide
   have hne_58 : ¬ ((w &&& 0xffd00000) = 0x39800000) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_70, if_neg hne_71, if_neg hne_72, if_neg hne_73, if_neg hne_74, if_neg hne_75, if_neg hne_76, if_neg hne_77, if_neg hne_78, if_neg hne_79, if_pos h]; try dsimp; try rfl; try simp
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_70, if_pos h]; try dsimp; try rfl; try simp
 set_option maxHeartbeats 4000000 in
 /-- Per-instruction step: `work_step_ldrsw`.
 
@@ -7290,15 +6926,6 @@ set_option maxHeartbeats 4000000 in
     (h : (w &&& 0xffd00000) = 0xb9800000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (t32s (mem_read_u32 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 4)).toNat))) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -7362,7 +6989,7 @@ set_option maxHeartbeats 4000000 in
   have hne_58 : ¬ ((w &&& 0xffd00000) = 0x39800000) := by intro t; bv_decide
   have hne_59 : ¬ ((w &&& 0xffd00000) = 0x79800000) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_70, if_neg hne_71, if_neg hne_72, if_neg hne_73, if_neg hne_74, if_neg hne_75, if_neg hne_76, if_neg hne_77, if_neg hne_78, if_neg hne_79, if_pos h]; try dsimp; try rfl; try simp
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_70, if_pos h]; try dsimp; try rfl; try simp
 set_option maxHeartbeats 4000000 in
 /-- Per-instruction step: `work_step_ldr_uoff32`.
 
@@ -7377,15 +7004,6 @@ set_option maxHeartbeats 4000000 in
     (h : (w &&& 0xffd00000) = 0xb9400000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u32 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 4)).toNat)) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -7450,7 +7068,7 @@ set_option maxHeartbeats 4000000 in
   have hne_59 : ¬ ((w &&& 0xffd00000) = 0x79800000) := by intro t; bv_decide
   have hne_60 : ¬ ((w &&& 0xffd00000) = 0xb9800000) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_70, if_neg hne_71, if_neg hne_72, if_neg hne_73, if_neg hne_74, if_neg hne_75, if_neg hne_76, if_neg hne_77, if_neg hne_78, if_neg hne_79, if_pos h]; try dsimp; try rfl; try simp
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_70, if_pos h]; try dsimp; try rfl; try simp
 set_option maxHeartbeats 4000000 in
 /-- Per-instruction step: `work_step_ldr_regoff`.
 
@@ -7465,15 +7083,6 @@ set_option maxHeartbeats 4000000 in
     (h : (w &&& 0xffe0fc00) = 0xf8606800) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u64 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + arm64_reg (((w >>> 16) &&& 0x1f).toNat) s).toNat)) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -7539,7 +7148,7 @@ set_option maxHeartbeats 4000000 in
   have hne_60 : ¬ ((w &&& 0xffd00000) = 0xb9800000) := by intro t; bv_decide
   have hne_61 : ¬ ((w &&& 0xffd00000) = 0xb9400000) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_70, if_neg hne_71, if_neg hne_72, if_neg hne_73, if_neg hne_74, if_neg hne_75, if_neg hne_76, if_neg hne_77, if_neg hne_78, if_neg hne_79, if_pos h]; try dsimp; try rfl; try simp
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_70, if_pos h]; try dsimp; try rfl; try simp
 set_option maxHeartbeats 4000000 in
 /-- Per-instruction step: `work_step_str_regoff`.
 
@@ -7554,15 +7163,6 @@ set_option maxHeartbeats 4000000 in
     (h : (w &&& 0xffe0fc00) = 0xf8206800) :
     arm64_step s code = some { s with mem := mem_write_u64 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + arm64_reg (((w >>> 16) &&& 0x1f).toNat) s).toNat (arm64_reg ((w &&& 0x1f).toNat) s) } := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -7629,7 +7229,7 @@ set_option maxHeartbeats 4000000 in
   have hne_61 : ¬ ((w &&& 0xffd00000) = 0xb9400000) := by intro t; bv_decide
   have hne_62 : ¬ ((w &&& 0xffe0fc00) = 0xf8606800) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_70, if_neg hne_71, if_neg hne_72, if_neg hne_73, if_neg hne_74, if_neg hne_75, if_neg hne_76, if_neg hne_77, if_neg hne_78, if_neg hne_79, if_pos h]; try dsimp; try rfl; try simp
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_70, if_pos h]; try dsimp; try rfl; try simp
 set_option maxHeartbeats 4000000 in
 /-- Per-instruction step: `work_step_ldur`.
 
@@ -7644,15 +7244,6 @@ set_option maxHeartbeats 4000000 in
     (h : (w &&& 0xffe00c00) = 0xf8400000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u64 s.mem (if (((w >>> 12) &&& 0x1ff).toNat) ≥ 256 then (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((512 - (((w >>> 12) &&& 0x1ff).toNat))) else (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 12) &&& 0x1ff).toNat)).toNat)) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -7720,7 +7311,7 @@ set_option maxHeartbeats 4000000 in
   have hne_62 : ¬ ((w &&& 0xffe0fc00) = 0xf8606800) := by intro t; bv_decide
   have hne_63 : ¬ ((w &&& 0xffe0fc00) = 0xf8206800) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_70, if_neg hne_71, if_neg hne_72, if_neg hne_73, if_neg hne_74, if_neg hne_75, if_neg hne_76, if_neg hne_77, if_neg hne_78, if_neg hne_79, if_pos h]; try dsimp; try rfl; try simp
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_70, if_pos h]; try dsimp; try rfl; try simp
 set_option maxHeartbeats 4000000 in
 /-- Per-instruction step: `work_step_stur`.
 
@@ -7735,15 +7326,6 @@ set_option maxHeartbeats 4000000 in
     (h : (w &&& 0xffe00c00) = 0xf8000000) :
     arm64_step s code = some { s with mem := mem_write_u64 s.mem (if (((w >>> 12) &&& 0x1ff).toNat) ≥ 256 then (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((512 - (((w >>> 12) &&& 0x1ff).toNat))) else (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 12) &&& 0x1ff).toNat)).toNat (arm64_reg ((w &&& 0x1f).toNat) s) } := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -7814,7 +7396,7 @@ set_option maxHeartbeats 4000000 in
   have hne_65 : ¬ ((w &&& 0xffe00000) = 0xab000000) := by intro t; bv_decide
   have hne_66 : ¬ ((w &&& 0xffe00000) = 0xea000000) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_70, if_neg hne_71, if_neg hne_72, if_neg hne_73, if_neg hne_74, if_neg hne_75, if_neg hne_76, if_neg hne_77, if_neg hne_78, if_neg hne_79, if_pos h]; try dsimp; try rfl; try simp
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_70, if_pos h]; try dsimp; try rfl; try simp
 /-! ### CBZ / CBNZ step lemmas
 
   The `work_step_*` family above covers every fixed-shape instruction, but the
@@ -7846,15 +7428,6 @@ def cbnz_off64 (w : UInt32) : UInt64 :=
            then (some { s with pc := (UInt64.ofNat s.pc + cbz_off64 w * 4).toNat } : Option Arm64State)
            else (some { s with pc := s.pc + 4 } : Option Arm64State)) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -7905,15 +7478,6 @@ def cbnz_off64 (w : UInt32) : UInt64 :=
            then (some { s with pc := (UInt64.ofNat s.pc + cbnz_off64 w * 4).toNat } : Option Arm64State)
            else (some { s with pc := s.pc + 4 } : Option Arm64State)) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -8049,15 +7613,6 @@ theorem mem_read_write_pair_below (mem : Nat → UInt8) (sp : UInt64)
       (smulh64 (arm64_reg ((w >>> 5) &&& 0x1f).toNat s)
         (arm64_reg ((w >>> 16) &&& 0x1f).toNat s))) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -8129,7 +7684,7 @@ theorem mem_read_write_pair_below (mem : Nat → UInt8) (sp : UInt64)
   have hne_66 : ¬ ((w &&& 0xffe00000) = 0xea000000) := by intro t; bv_decide
   have hne_67 : ¬ ((w &&& 0xffe00c00) = 0xf8000000) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_67, if_neg hne_70, if_neg hne_71, if_neg hne_72, if_neg hne_73, if_neg hne_74, if_neg hne_75, if_neg hne_76, if_neg hne_77, if_neg hne_78, if_neg hne_79, if_pos h]
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_67, if_neg hne_70, if_pos h]
   try dsimp; try rfl; try simp
 
 set_option maxHeartbeats 4000000 in
@@ -8156,15 +7711,6 @@ set_option maxHeartbeats 4000000 in
        then arm64_reg (((w >>> 5) &&& 0x1f).toNat) s
        else arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -8237,7 +7783,7 @@ set_option maxHeartbeats 4000000 in
   have hne_67 : ¬ ((w &&& 0xffe00c00) = 0xf8000000) := by intro t; bv_decide
   have hne_68 : ¬ ((w &&& 0xffe07c00) = 0x9b407c00) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_67, if_neg hne_68, if_neg hne_70, if_neg hne_71, if_neg hne_72, if_neg hne_73, if_neg hne_74, if_neg hne_75, if_neg hne_76, if_neg hne_77, if_neg hne_78, if_neg hne_79, if_pos h]
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_67, if_neg hne_68, if_neg hne_70, if_pos h]
   try dsimp; try rfl; try simp
 
 /-- **Split offset back into an STP pair's shape.**  `u64_sub_add` rewrites an
@@ -9949,15 +9495,6 @@ theorem evalMFBody_congr (fields : List String) (flds flds' locals locals' : Str
     (h : (w &&& 0xffe0fc00) = 0x38206800) :
     arm64_step s code = some { s with mem := mem_write_u8 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + arm64_reg (((w >>> 16) &&& 0x1f).toNat) s).toNat (arm64_reg ((w &&& 0x1f).toNat) s) } := by
   unfold arm64_step
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t; rw [t] at h; exact absurd h (by decide)
@@ -10025,7 +9562,7 @@ theorem evalMFBody_congr (fields : List String) (flds flds' locals locals' : Str
   have hne_62 : ¬ ((w &&& 0xffe0fc00) = 0xf8606800) := by intro t; bv_decide
   have hne_63 : ¬ ((w &&& 0xffe0fc00) = 0xf8206800) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_70, if_neg hne_71, if_neg hne_72, if_neg hne_73, if_neg hne_74, if_neg hne_75, if_neg hne_76, if_neg hne_77, if_neg hne_78, if_neg hne_79, if_pos h]; try dsimp; try rfl; try simp
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_70, if_pos h]; try dsimp; try rfl; try simp
 
 
 /-- Per-instruction step: `work_step_fcmp`. -/
@@ -10147,670 +9684,5 @@ theorem work_step_fcmp (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
   have hne_67 : ¬ ((w &&& 0xffe00c00) = 0xf8000000) := by intro t; bv_decide
   have hne_68 : ¬ ((w &&& 0xffe07c00) = 0x9b407c00) := by intro t; bv_decide
   have hne_69 : ¬ ((w &&& 0xffe00c00) = 0x9a800000) := by intro t; bv_decide
-  have hne_71 : ¬ ((w &&& 0xffe0fc00) = 0x1e602800) := by intro t; bv_decide
-  have hne_72 : ¬ ((w &&& 0xffe0fc00) = 0x1e603800) := by intro t; bv_decide
-  have hne_73 : ¬ ((w &&& 0xffe0fc00) = 0x1e600800) := by intro t; bv_decide
-  have hne_74 : ¬ ((w &&& 0xffe0fc00) = 0x1e601800) := by intro t; bv_decide
-  have hne_75 : ¬ ((w &&& 0xfffffc00) = 0x1e614000) := by intro t; bv_decide
-  have hne_76 : ¬ ((w &&& 0xfffffc00) = 0x9e670000) := by intro t; bv_decide
-  have hne_77 : ¬ ((w &&& 0xfffffc00) = 0x9e660000) := by intro t; bv_decide
-  have hne_78 : ¬ ((w &&& 0xfffffc00) = 0x9e620000) := by intro t; bv_decide
-  have hne_79 : ¬ ((w &&& 0xfffffc00) = 0x9e780000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_67, if_neg hne_68, if_neg hne_69, if_neg hne_71, if_neg hne_72, if_neg hne_73, if_neg hne_74, if_neg hne_75, if_neg hne_76, if_neg hne_77, if_neg hne_78, if_neg hne_79, if_pos h]
-  try dsimp; try rfl; try simp
-
-
-/-- Per-instruction step: `work_step_fadd`. -/
-theorem work_step_fadd (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
-    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
-    (h : (w &&& 0xffe0fc00) = 0x1e602800) :
-    arm64_step s code = some (arm64_set_reg_d ((w &&& 0x1f).toNat) s (faddBits (arm64_reg_d ((w >>> 5) &&& 0x1f).toNat s) (arm64_reg_d ((w >>> 16) &&& 0x1f).toNat s))) := by
-  unfold arm64_step
-  rw [hpc, hread]
-  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by intro t; rw [t] at h; exact absurd h (by decide)
-  have hne_1 : ¬ ((w &&& 0xffe00000) = 0x2A00FA00) := by intro t; bv_decide
-  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
-  have hne_3 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
-  have hne_4 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
-  have hne_5 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
-  have hne_6 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
-  have hne_7 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
-  have hne_8 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
-  have hne_9 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
-  have hne_10 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
-  have hne_11 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
-  have hne_12 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
-  have hne_13 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
-  have hne_14 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
-  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
-  have hne_16 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
-  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
-  have hne_18 : ¬ ((w &&& 0xff000000) = 0x54000000) := by intro t; bv_decide
-  have hne_19 : ¬ ((w &&& 0xff000000) = 0x36000000) := by intro t; bv_decide
-  have hne_20 : ¬ ((w &&& 0xff000000) = 0x37000000) := by intro t; bv_decide
-  have hne_21 : ¬ ((w &&& 0xffe00000) = 0xF9400000) := by intro t; bv_decide
-  have hne_22 : ¬ ((w &&& 0xffe00000) = 0xB9000000) := by intro t; bv_decide
-  have hne_23 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
-  have hne_24 : ¬ ((w &&& 0xffc00000) = 0xA9800000) := by intro t; bv_decide
-  have hne_25 : ¬ ((w &&& 0xffc00000) = 0xA8C00000) := by intro t; bv_decide
-  have hne_26 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
-  have hne_27 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
-  have hne_28 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
-  have hne_29 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
-  have hne_30 : ¬ ((w &&& 0xff800000) = 0x72800000) := by intro t; bv_decide
-  have hne_31 : ¬ ((w &&& 0xffe00000) = 0x12800000) := by intro t; bv_decide
-  have hne_32 : ¬ ((w &&& 0xffe00000) = 0x92800000) := by intro t; bv_decide
-  have hne_33 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
-  have hne_34 : ¬ ((w &&& 0xffe00000) = 0xF9000000) := by intro t; bv_decide
-  have hne_35 : ¬ ((w &&& 0xffc00000) = 0xA9400000) := by intro t; bv_decide
-  have hne_36 : ¬ ((w &&& 0xffe0fc00) = 0xAA200000) := by intro t; bv_decide
-  have hne_37 : ¬ ((w &&& 0xfffffc1f) = 0xD61F0000) := by intro t; bv_decide
-  have hne_38 : ¬ ((w &&& 0xffe0001f) = 0xD4000001) := by intro t; bv_decide
-  have hne_39 : ¬ ((w &&& 0xffe0fc00) = 0x13001c00) := by intro t; bv_decide
-  have hne_40 : ¬ ((w &&& 0xffe0fc00) = 0x13003c00) := by intro t; bv_decide
-  have hne_41 : ¬ ((w &&& 0xffe0fc00) = 0x93407c00) := by intro t; bv_decide
-  have hne_42 : ¬ ((w &&& 0xffc0fc00) = 0x92401c00) := by intro t; bv_decide
-  have hne_43 : ¬ ((w &&& 0xffc0fc00) = 0x92403c00) := by intro t; bv_decide
-  have hne_44 : ¬ ((w &&& 0xffc0fc00) = 0x92407c00) := by intro t; bv_decide
-  have hne_45 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00800) := by intro t; bv_decide
-  have hne_46 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00c00) := by intro t; bv_decide
-  have hne_47 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02000) := by intro t; bv_decide
-  have hne_48 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02400) := by intro t; bv_decide
-  have hne_49 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02800) := by intro t; bv_decide
-  have hne_50 : ¬ ((w &&& 0xffe08000) = 0x9b008000) := by intro t; bv_decide
-  have hne_51 : ¬ ((w &&& 0xffc0fc00) = 0xd340fc00) := by intro t; bv_decide
-  have hne_52 : ¬ ((w &&& 0xffc0fc00) = 0x9340fc00) := by intro t; bv_decide
-  have hne_53 : ¬ ((w &&& 0xffc00000) = 0xd3400000) := by intro t; bv_decide
-  have hne_54 : ¬ ((w &&& 0xffd00000) = 0x39400000) := by intro t; bv_decide
-  have hne_55 : ¬ ((w &&& 0xffd00000) = 0x39000000) := by intro t; bv_decide
-  have hne_56 : ¬ ((w &&& 0xffd00000) = 0x79400000) := by intro t; bv_decide
-  have hne_57 : ¬ ((w &&& 0xffd00000) = 0x79000000) := by intro t; bv_decide
-  have hne_58 : ¬ ((w &&& 0xffd00000) = 0x39800000) := by intro t; bv_decide
-  have hne_59 : ¬ ((w &&& 0xffd00000) = 0x79800000) := by intro t; bv_decide
-  have hne_60 : ¬ ((w &&& 0xffd00000) = 0xb9800000) := by intro t; bv_decide
-  have hne_61 : ¬ ((w &&& 0xffd00000) = 0xb9400000) := by intro t; bv_decide
-  have hne_62 : ¬ ((w &&& 0xffe0fc00) = 0xf8606800) := by intro t; bv_decide
-  have hne_63 : ¬ ((w &&& 0xffe0fc00) = 0xf8206800) := by intro t; bv_decide
-  have hne_64 : ¬ ((w &&& 0xffe00c00) = 0xf8400000) := by intro t; bv_decide
-  have hne_65 : ¬ ((w &&& 0xffe00000) = 0xab000000) := by intro t; bv_decide
-  have hne_66 : ¬ ((w &&& 0xffe00000) = 0xea000000) := by intro t; bv_decide
-  have hne_67 : ¬ ((w &&& 0xffe00c00) = 0xf8000000) := by intro t; bv_decide
-  have hne_68 : ¬ ((w &&& 0xffe07c00) = 0x9b407c00) := by intro t; bv_decide
-  have hne_69 : ¬ ((w &&& 0xffe00c00) = 0x9a800000) := by intro t; bv_decide
-  have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_67, if_neg hne_68, if_neg hne_69, if_neg hne_70, if_pos h]
-  try dsimp; try rfl; try simp
-
-
-/-- Per-instruction step: `work_step_fsub`. -/
-theorem work_step_fsub (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
-    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
-    (h : (w &&& 0xffe0fc00) = 0x1e603800) :
-    arm64_step s code = some (arm64_set_reg_d ((w &&& 0x1f).toNat) s (fsubBits (arm64_reg_d ((w >>> 5) &&& 0x1f).toNat s) (arm64_reg_d ((w >>> 16) &&& 0x1f).toNat s))) := by
-  unfold arm64_step
-  rw [hpc, hread]
-  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by intro t; rw [t] at h; exact absurd h (by decide)
-  have hne_1 : ¬ ((w &&& 0xffe00000) = 0x2A00FA00) := by intro t; bv_decide
-  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
-  have hne_3 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
-  have hne_4 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
-  have hne_5 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
-  have hne_6 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
-  have hne_7 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
-  have hne_8 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
-  have hne_9 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
-  have hne_10 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
-  have hne_11 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
-  have hne_12 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
-  have hne_13 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
-  have hne_14 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
-  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
-  have hne_16 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
-  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
-  have hne_18 : ¬ ((w &&& 0xff000000) = 0x54000000) := by intro t; bv_decide
-  have hne_19 : ¬ ((w &&& 0xff000000) = 0x36000000) := by intro t; bv_decide
-  have hne_20 : ¬ ((w &&& 0xff000000) = 0x37000000) := by intro t; bv_decide
-  have hne_21 : ¬ ((w &&& 0xffe00000) = 0xF9400000) := by intro t; bv_decide
-  have hne_22 : ¬ ((w &&& 0xffe00000) = 0xB9000000) := by intro t; bv_decide
-  have hne_23 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
-  have hne_24 : ¬ ((w &&& 0xffc00000) = 0xA9800000) := by intro t; bv_decide
-  have hne_25 : ¬ ((w &&& 0xffc00000) = 0xA8C00000) := by intro t; bv_decide
-  have hne_26 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
-  have hne_27 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
-  have hne_28 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
-  have hne_29 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
-  have hne_30 : ¬ ((w &&& 0xff800000) = 0x72800000) := by intro t; bv_decide
-  have hne_31 : ¬ ((w &&& 0xffe00000) = 0x12800000) := by intro t; bv_decide
-  have hne_32 : ¬ ((w &&& 0xffe00000) = 0x92800000) := by intro t; bv_decide
-  have hne_33 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
-  have hne_34 : ¬ ((w &&& 0xffe00000) = 0xF9000000) := by intro t; bv_decide
-  have hne_35 : ¬ ((w &&& 0xffc00000) = 0xA9400000) := by intro t; bv_decide
-  have hne_36 : ¬ ((w &&& 0xffe0fc00) = 0xAA200000) := by intro t; bv_decide
-  have hne_37 : ¬ ((w &&& 0xfffffc1f) = 0xD61F0000) := by intro t; bv_decide
-  have hne_38 : ¬ ((w &&& 0xffe0001f) = 0xD4000001) := by intro t; bv_decide
-  have hne_39 : ¬ ((w &&& 0xffe0fc00) = 0x13001c00) := by intro t; bv_decide
-  have hne_40 : ¬ ((w &&& 0xffe0fc00) = 0x13003c00) := by intro t; bv_decide
-  have hne_41 : ¬ ((w &&& 0xffe0fc00) = 0x93407c00) := by intro t; bv_decide
-  have hne_42 : ¬ ((w &&& 0xffc0fc00) = 0x92401c00) := by intro t; bv_decide
-  have hne_43 : ¬ ((w &&& 0xffc0fc00) = 0x92403c00) := by intro t; bv_decide
-  have hne_44 : ¬ ((w &&& 0xffc0fc00) = 0x92407c00) := by intro t; bv_decide
-  have hne_45 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00800) := by intro t; bv_decide
-  have hne_46 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00c00) := by intro t; bv_decide
-  have hne_47 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02000) := by intro t; bv_decide
-  have hne_48 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02400) := by intro t; bv_decide
-  have hne_49 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02800) := by intro t; bv_decide
-  have hne_50 : ¬ ((w &&& 0xffe08000) = 0x9b008000) := by intro t; bv_decide
-  have hne_51 : ¬ ((w &&& 0xffc0fc00) = 0xd340fc00) := by intro t; bv_decide
-  have hne_52 : ¬ ((w &&& 0xffc0fc00) = 0x9340fc00) := by intro t; bv_decide
-  have hne_53 : ¬ ((w &&& 0xffc00000) = 0xd3400000) := by intro t; bv_decide
-  have hne_54 : ¬ ((w &&& 0xffd00000) = 0x39400000) := by intro t; bv_decide
-  have hne_55 : ¬ ((w &&& 0xffd00000) = 0x39000000) := by intro t; bv_decide
-  have hne_56 : ¬ ((w &&& 0xffd00000) = 0x79400000) := by intro t; bv_decide
-  have hne_57 : ¬ ((w &&& 0xffd00000) = 0x79000000) := by intro t; bv_decide
-  have hne_58 : ¬ ((w &&& 0xffd00000) = 0x39800000) := by intro t; bv_decide
-  have hne_59 : ¬ ((w &&& 0xffd00000) = 0x79800000) := by intro t; bv_decide
-  have hne_60 : ¬ ((w &&& 0xffd00000) = 0xb9800000) := by intro t; bv_decide
-  have hne_61 : ¬ ((w &&& 0xffd00000) = 0xb9400000) := by intro t; bv_decide
-  have hne_62 : ¬ ((w &&& 0xffe0fc00) = 0xf8606800) := by intro t; bv_decide
-  have hne_63 : ¬ ((w &&& 0xffe0fc00) = 0xf8206800) := by intro t; bv_decide
-  have hne_64 : ¬ ((w &&& 0xffe00c00) = 0xf8400000) := by intro t; bv_decide
-  have hne_65 : ¬ ((w &&& 0xffe00000) = 0xab000000) := by intro t; bv_decide
-  have hne_66 : ¬ ((w &&& 0xffe00000) = 0xea000000) := by intro t; bv_decide
-  have hne_67 : ¬ ((w &&& 0xffe00c00) = 0xf8000000) := by intro t; bv_decide
-  have hne_68 : ¬ ((w &&& 0xffe07c00) = 0x9b407c00) := by intro t; bv_decide
-  have hne_69 : ¬ ((w &&& 0xffe00c00) = 0x9a800000) := by intro t; bv_decide
-  have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_67, if_neg hne_68, if_neg hne_69, if_neg hne_70, if_pos h]
-  try dsimp; try rfl; try simp
-
-
-/-- Per-instruction step: `work_step_fdiv`. -/
-theorem work_step_fdiv (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
-    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
-    (h : (w &&& 0xffe0fc00) = 0x1e601800) :
-    arm64_step s code = some (arm64_set_reg_d ((w &&& 0x1f).toNat) s (fdivBits (arm64_reg_d ((w >>> 5) &&& 0x1f).toNat s) (arm64_reg_d ((w >>> 16) &&& 0x1f).toNat s))) := by
-  unfold arm64_step
-  rw [hpc, hread]
-  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by intro t; rw [t] at h; exact absurd h (by decide)
-  have hne_1 : ¬ ((w &&& 0xffe00000) = 0x2A00FA00) := by intro t; bv_decide
-  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
-  have hne_3 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
-  have hne_4 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
-  have hne_5 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
-  have hne_6 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
-  have hne_7 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
-  have hne_8 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
-  have hne_9 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
-  have hne_10 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
-  have hne_11 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
-  have hne_12 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
-  have hne_13 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
-  have hne_14 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
-  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
-  have hne_16 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
-  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
-  have hne_18 : ¬ ((w &&& 0xff000000) = 0x54000000) := by intro t; bv_decide
-  have hne_19 : ¬ ((w &&& 0xff000000) = 0x36000000) := by intro t; bv_decide
-  have hne_20 : ¬ ((w &&& 0xff000000) = 0x37000000) := by intro t; bv_decide
-  have hne_21 : ¬ ((w &&& 0xffe00000) = 0xF9400000) := by intro t; bv_decide
-  have hne_22 : ¬ ((w &&& 0xffe00000) = 0xB9000000) := by intro t; bv_decide
-  have hne_23 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
-  have hne_24 : ¬ ((w &&& 0xffc00000) = 0xA9800000) := by intro t; bv_decide
-  have hne_25 : ¬ ((w &&& 0xffc00000) = 0xA8C00000) := by intro t; bv_decide
-  have hne_26 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
-  have hne_27 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
-  have hne_28 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
-  have hne_29 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
-  have hne_30 : ¬ ((w &&& 0xff800000) = 0x72800000) := by intro t; bv_decide
-  have hne_31 : ¬ ((w &&& 0xffe00000) = 0x12800000) := by intro t; bv_decide
-  have hne_32 : ¬ ((w &&& 0xffe00000) = 0x92800000) := by intro t; bv_decide
-  have hne_33 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
-  have hne_34 : ¬ ((w &&& 0xffe00000) = 0xF9000000) := by intro t; bv_decide
-  have hne_35 : ¬ ((w &&& 0xffc00000) = 0xA9400000) := by intro t; bv_decide
-  have hne_36 : ¬ ((w &&& 0xffe0fc00) = 0xAA200000) := by intro t; bv_decide
-  have hne_37 : ¬ ((w &&& 0xfffffc1f) = 0xD61F0000) := by intro t; bv_decide
-  have hne_38 : ¬ ((w &&& 0xffe0001f) = 0xD4000001) := by intro t; bv_decide
-  have hne_39 : ¬ ((w &&& 0xffe0fc00) = 0x13001c00) := by intro t; bv_decide
-  have hne_40 : ¬ ((w &&& 0xffe0fc00) = 0x13003c00) := by intro t; bv_decide
-  have hne_41 : ¬ ((w &&& 0xffe0fc00) = 0x93407c00) := by intro t; bv_decide
-  have hne_42 : ¬ ((w &&& 0xffc0fc00) = 0x92401c00) := by intro t; bv_decide
-  have hne_43 : ¬ ((w &&& 0xffc0fc00) = 0x92403c00) := by intro t; bv_decide
-  have hne_44 : ¬ ((w &&& 0xffc0fc00) = 0x92407c00) := by intro t; bv_decide
-  have hne_45 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00800) := by intro t; bv_decide
-  have hne_46 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00c00) := by intro t; bv_decide
-  have hne_47 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02000) := by intro t; bv_decide
-  have hne_48 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02400) := by intro t; bv_decide
-  have hne_49 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02800) := by intro t; bv_decide
-  have hne_50 : ¬ ((w &&& 0xffe08000) = 0x9b008000) := by intro t; bv_decide
-  have hne_51 : ¬ ((w &&& 0xffc0fc00) = 0xd340fc00) := by intro t; bv_decide
-  have hne_52 : ¬ ((w &&& 0xffc0fc00) = 0x9340fc00) := by intro t; bv_decide
-  have hne_53 : ¬ ((w &&& 0xffc00000) = 0xd3400000) := by intro t; bv_decide
-  have hne_54 : ¬ ((w &&& 0xffd00000) = 0x39400000) := by intro t; bv_decide
-  have hne_55 : ¬ ((w &&& 0xffd00000) = 0x39000000) := by intro t; bv_decide
-  have hne_56 : ¬ ((w &&& 0xffd00000) = 0x79400000) := by intro t; bv_decide
-  have hne_57 : ¬ ((w &&& 0xffd00000) = 0x79000000) := by intro t; bv_decide
-  have hne_58 : ¬ ((w &&& 0xffd00000) = 0x39800000) := by intro t; bv_decide
-  have hne_59 : ¬ ((w &&& 0xffd00000) = 0x79800000) := by intro t; bv_decide
-  have hne_60 : ¬ ((w &&& 0xffd00000) = 0xb9800000) := by intro t; bv_decide
-  have hne_61 : ¬ ((w &&& 0xffd00000) = 0xb9400000) := by intro t; bv_decide
-  have hne_62 : ¬ ((w &&& 0xffe0fc00) = 0xf8606800) := by intro t; bv_decide
-  have hne_63 : ¬ ((w &&& 0xffe0fc00) = 0xf8206800) := by intro t; bv_decide
-  have hne_64 : ¬ ((w &&& 0xffe00c00) = 0xf8400000) := by intro t; bv_decide
-  have hne_65 : ¬ ((w &&& 0xffe00000) = 0xab000000) := by intro t; bv_decide
-  have hne_66 : ¬ ((w &&& 0xffe00000) = 0xea000000) := by intro t; bv_decide
-  have hne_67 : ¬ ((w &&& 0xffe00c00) = 0xf8000000) := by intro t; bv_decide
-  have hne_68 : ¬ ((w &&& 0xffe07c00) = 0x9b407c00) := by intro t; bv_decide
-  have hne_69 : ¬ ((w &&& 0xffe00c00) = 0x9a800000) := by intro t; bv_decide
-  have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_67, if_neg hne_68, if_neg hne_69, if_neg hne_70, if_pos h]
-  try dsimp; try rfl; try simp
-
-
-/-- Per-instruction step: `work_step_fneg`. -/
-theorem work_step_fneg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
-    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
-    (h : (w &&& 0xfffffc00) = 0x1e614000) :
-    arm64_step s code = some (arm64_set_reg_d ((w &&& 0x1f).toNat) s (fnegBits (arm64_reg_d ((w >>> 5) &&& 0x1f).toNat s))) := by
-  unfold arm64_step
-  rw [hpc, hread]
-  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by intro t; rw [t] at h; exact absurd h (by decide)
-  have hne_1 : ¬ ((w &&& 0xffe00000) = 0x2A00FA00) := by intro t; bv_decide
-  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
-  have hne_3 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
-  have hne_4 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
-  have hne_5 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
-  have hne_6 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
-  have hne_7 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
-  have hne_8 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
-  have hne_9 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
-  have hne_10 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
-  have hne_11 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
-  have hne_12 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
-  have hne_13 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
-  have hne_14 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
-  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
-  have hne_16 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
-  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
-  have hne_18 : ¬ ((w &&& 0xff000000) = 0x54000000) := by intro t; bv_decide
-  have hne_19 : ¬ ((w &&& 0xff000000) = 0x36000000) := by intro t; bv_decide
-  have hne_20 : ¬ ((w &&& 0xff000000) = 0x37000000) := by intro t; bv_decide
-  have hne_21 : ¬ ((w &&& 0xffe00000) = 0xF9400000) := by intro t; bv_decide
-  have hne_22 : ¬ ((w &&& 0xffe00000) = 0xB9000000) := by intro t; bv_decide
-  have hne_23 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
-  have hne_24 : ¬ ((w &&& 0xffc00000) = 0xA9800000) := by intro t; bv_decide
-  have hne_25 : ¬ ((w &&& 0xffc00000) = 0xA8C00000) := by intro t; bv_decide
-  have hne_26 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
-  have hne_27 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
-  have hne_28 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
-  have hne_29 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
-  have hne_30 : ¬ ((w &&& 0xff800000) = 0x72800000) := by intro t; bv_decide
-  have hne_31 : ¬ ((w &&& 0xffe00000) = 0x12800000) := by intro t; bv_decide
-  have hne_32 : ¬ ((w &&& 0xffe00000) = 0x92800000) := by intro t; bv_decide
-  have hne_33 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
-  have hne_34 : ¬ ((w &&& 0xffe00000) = 0xF9000000) := by intro t; bv_decide
-  have hne_35 : ¬ ((w &&& 0xffc00000) = 0xA9400000) := by intro t; bv_decide
-  have hne_36 : ¬ ((w &&& 0xffe0fc00) = 0xAA200000) := by intro t; bv_decide
-  have hne_37 : ¬ ((w &&& 0xfffffc1f) = 0xD61F0000) := by intro t; bv_decide
-  have hne_38 : ¬ ((w &&& 0xffe0001f) = 0xD4000001) := by intro t; bv_decide
-  have hne_39 : ¬ ((w &&& 0xffe0fc00) = 0x13001c00) := by intro t; bv_decide
-  have hne_40 : ¬ ((w &&& 0xffe0fc00) = 0x13003c00) := by intro t; bv_decide
-  have hne_41 : ¬ ((w &&& 0xffe0fc00) = 0x93407c00) := by intro t; bv_decide
-  have hne_42 : ¬ ((w &&& 0xffc0fc00) = 0x92401c00) := by intro t; bv_decide
-  have hne_43 : ¬ ((w &&& 0xffc0fc00) = 0x92403c00) := by intro t; bv_decide
-  have hne_44 : ¬ ((w &&& 0xffc0fc00) = 0x92407c00) := by intro t; bv_decide
-  have hne_45 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00800) := by intro t; bv_decide
-  have hne_46 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00c00) := by intro t; bv_decide
-  have hne_47 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02000) := by intro t; bv_decide
-  have hne_48 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02400) := by intro t; bv_decide
-  have hne_49 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02800) := by intro t; bv_decide
-  have hne_50 : ¬ ((w &&& 0xffe08000) = 0x9b008000) := by intro t; bv_decide
-  have hne_51 : ¬ ((w &&& 0xffc0fc00) = 0xd340fc00) := by intro t; bv_decide
-  have hne_52 : ¬ ((w &&& 0xffc0fc00) = 0x9340fc00) := by intro t; bv_decide
-  have hne_53 : ¬ ((w &&& 0xffc00000) = 0xd3400000) := by intro t; bv_decide
-  have hne_54 : ¬ ((w &&& 0xffd00000) = 0x39400000) := by intro t; bv_decide
-  have hne_55 : ¬ ((w &&& 0xffd00000) = 0x39000000) := by intro t; bv_decide
-  have hne_56 : ¬ ((w &&& 0xffd00000) = 0x79400000) := by intro t; bv_decide
-  have hne_57 : ¬ ((w &&& 0xffd00000) = 0x79000000) := by intro t; bv_decide
-  have hne_58 : ¬ ((w &&& 0xffd00000) = 0x39800000) := by intro t; bv_decide
-  have hne_59 : ¬ ((w &&& 0xffd00000) = 0x79800000) := by intro t; bv_decide
-  have hne_60 : ¬ ((w &&& 0xffd00000) = 0xb9800000) := by intro t; bv_decide
-  have hne_61 : ¬ ((w &&& 0xffd00000) = 0xb9400000) := by intro t; bv_decide
-  have hne_62 : ¬ ((w &&& 0xffe0fc00) = 0xf8606800) := by intro t; bv_decide
-  have hne_63 : ¬ ((w &&& 0xffe0fc00) = 0xf8206800) := by intro t; bv_decide
-  have hne_64 : ¬ ((w &&& 0xffe00c00) = 0xf8400000) := by intro t; bv_decide
-  have hne_65 : ¬ ((w &&& 0xffe00000) = 0xab000000) := by intro t; bv_decide
-  have hne_66 : ¬ ((w &&& 0xffe00000) = 0xea000000) := by intro t; bv_decide
-  have hne_67 : ¬ ((w &&& 0xffe00c00) = 0xf8000000) := by intro t; bv_decide
-  have hne_68 : ¬ ((w &&& 0xffe07c00) = 0x9b407c00) := by intro t; bv_decide
-  have hne_69 : ¬ ((w &&& 0xffe00c00) = 0x9a800000) := by intro t; bv_decide
-  have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_67, if_neg hne_68, if_neg hne_69, if_neg hne_70, if_pos h]
-  try dsimp; try rfl; try simp
-
-
-/-- Per-instruction step: `work_step_fmov_gpr_v`. -/
-theorem work_step_fmov_gpr_v (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
-    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
-    (h : (w &&& 0xfffffc00) = 0x9e670000) :
-    arm64_step s code = some (arm64_set_reg_d ((w &&& 0x1f).toNat) s (arm64_reg ((w >>> 5) &&& 0x1f).toNat s)) := by
-  unfold arm64_step
-  rw [hpc, hread]
-  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by intro t; rw [t] at h; exact absurd h (by decide)
-  have hne_1 : ¬ ((w &&& 0xffe00000) = 0x2A00FA00) := by intro t; bv_decide
-  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
-  have hne_3 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
-  have hne_4 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
-  have hne_5 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
-  have hne_6 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
-  have hne_7 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
-  have hne_8 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
-  have hne_9 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
-  have hne_10 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
-  have hne_11 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
-  have hne_12 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
-  have hne_13 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
-  have hne_14 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
-  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
-  have hne_16 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
-  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
-  have hne_18 : ¬ ((w &&& 0xff000000) = 0x54000000) := by intro t; bv_decide
-  have hne_19 : ¬ ((w &&& 0xff000000) = 0x36000000) := by intro t; bv_decide
-  have hne_20 : ¬ ((w &&& 0xff000000) = 0x37000000) := by intro t; bv_decide
-  have hne_21 : ¬ ((w &&& 0xffe00000) = 0xF9400000) := by intro t; bv_decide
-  have hne_22 : ¬ ((w &&& 0xffe00000) = 0xB9000000) := by intro t; bv_decide
-  have hne_23 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
-  have hne_24 : ¬ ((w &&& 0xffc00000) = 0xA9800000) := by intro t; bv_decide
-  have hne_25 : ¬ ((w &&& 0xffc00000) = 0xA8C00000) := by intro t; bv_decide
-  have hne_26 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
-  have hne_27 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
-  have hne_28 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
-  have hne_29 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
-  have hne_30 : ¬ ((w &&& 0xff800000) = 0x72800000) := by intro t; bv_decide
-  have hne_31 : ¬ ((w &&& 0xffe00000) = 0x12800000) := by intro t; bv_decide
-  have hne_32 : ¬ ((w &&& 0xffe00000) = 0x92800000) := by intro t; bv_decide
-  have hne_33 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
-  have hne_34 : ¬ ((w &&& 0xffe00000) = 0xF9000000) := by intro t; bv_decide
-  have hne_35 : ¬ ((w &&& 0xffc00000) = 0xA9400000) := by intro t; bv_decide
-  have hne_36 : ¬ ((w &&& 0xffe0fc00) = 0xAA200000) := by intro t; bv_decide
-  have hne_37 : ¬ ((w &&& 0xfffffc1f) = 0xD61F0000) := by intro t; bv_decide
-  have hne_38 : ¬ ((w &&& 0xffe0001f) = 0xD4000001) := by intro t; bv_decide
-  have hne_39 : ¬ ((w &&& 0xffe0fc00) = 0x13001c00) := by intro t; bv_decide
-  have hne_40 : ¬ ((w &&& 0xffe0fc00) = 0x13003c00) := by intro t; bv_decide
-  have hne_41 : ¬ ((w &&& 0xffe0fc00) = 0x93407c00) := by intro t; bv_decide
-  have hne_42 : ¬ ((w &&& 0xffc0fc00) = 0x92401c00) := by intro t; bv_decide
-  have hne_43 : ¬ ((w &&& 0xffc0fc00) = 0x92403c00) := by intro t; bv_decide
-  have hne_44 : ¬ ((w &&& 0xffc0fc00) = 0x92407c00) := by intro t; bv_decide
-  have hne_45 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00800) := by intro t; bv_decide
-  have hne_46 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00c00) := by intro t; bv_decide
-  have hne_47 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02000) := by intro t; bv_decide
-  have hne_48 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02400) := by intro t; bv_decide
-  have hne_49 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02800) := by intro t; bv_decide
-  have hne_50 : ¬ ((w &&& 0xffe08000) = 0x9b008000) := by intro t; bv_decide
-  have hne_51 : ¬ ((w &&& 0xffc0fc00) = 0xd340fc00) := by intro t; bv_decide
-  have hne_52 : ¬ ((w &&& 0xffc0fc00) = 0x9340fc00) := by intro t; bv_decide
-  have hne_53 : ¬ ((w &&& 0xffc00000) = 0xd3400000) := by intro t; bv_decide
-  have hne_54 : ¬ ((w &&& 0xffd00000) = 0x39400000) := by intro t; bv_decide
-  have hne_55 : ¬ ((w &&& 0xffd00000) = 0x39000000) := by intro t; bv_decide
-  have hne_56 : ¬ ((w &&& 0xffd00000) = 0x79400000) := by intro t; bv_decide
-  have hne_57 : ¬ ((w &&& 0xffd00000) = 0x79000000) := by intro t; bv_decide
-  have hne_58 : ¬ ((w &&& 0xffd00000) = 0x39800000) := by intro t; bv_decide
-  have hne_59 : ¬ ((w &&& 0xffd00000) = 0x79800000) := by intro t; bv_decide
-  have hne_60 : ¬ ((w &&& 0xffd00000) = 0xb9800000) := by intro t; bv_decide
-  have hne_61 : ¬ ((w &&& 0xffd00000) = 0xb9400000) := by intro t; bv_decide
-  have hne_62 : ¬ ((w &&& 0xffe0fc00) = 0xf8606800) := by intro t; bv_decide
-  have hne_63 : ¬ ((w &&& 0xffe0fc00) = 0xf8206800) := by intro t; bv_decide
-  have hne_64 : ¬ ((w &&& 0xffe00c00) = 0xf8400000) := by intro t; bv_decide
-  have hne_65 : ¬ ((w &&& 0xffe00000) = 0xab000000) := by intro t; bv_decide
-  have hne_66 : ¬ ((w &&& 0xffe00000) = 0xea000000) := by intro t; bv_decide
-  have hne_67 : ¬ ((w &&& 0xffe00c00) = 0xf8000000) := by intro t; bv_decide
-  have hne_68 : ¬ ((w &&& 0xffe07c00) = 0x9b407c00) := by intro t; bv_decide
-  have hne_69 : ¬ ((w &&& 0xffe00c00) = 0x9a800000) := by intro t; bv_decide
-  have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_67, if_neg hne_68, if_neg hne_69, if_neg hne_70, if_pos h]
-  try dsimp; try rfl; try simp
-
-
-/-- Per-instruction step: `work_step_fmov_v_gpr`. -/
-theorem work_step_fmov_v_gpr (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
-    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
-    (h : (w &&& 0xfffffc00) = 0x9e660000) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg_d ((w >>> 5) &&& 0x1f).toNat s)) := by
-  unfold arm64_step
-  rw [hpc, hread]
-  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by intro t; rw [t] at h; exact absurd h (by decide)
-  have hne_1 : ¬ ((w &&& 0xffe00000) = 0x2A00FA00) := by intro t; bv_decide
-  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
-  have hne_3 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
-  have hne_4 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
-  have hne_5 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
-  have hne_6 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
-  have hne_7 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
-  have hne_8 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
-  have hne_9 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
-  have hne_10 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
-  have hne_11 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
-  have hne_12 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
-  have hne_13 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
-  have hne_14 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
-  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
-  have hne_16 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
-  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
-  have hne_18 : ¬ ((w &&& 0xff000000) = 0x54000000) := by intro t; bv_decide
-  have hne_19 : ¬ ((w &&& 0xff000000) = 0x36000000) := by intro t; bv_decide
-  have hne_20 : ¬ ((w &&& 0xff000000) = 0x37000000) := by intro t; bv_decide
-  have hne_21 : ¬ ((w &&& 0xffe00000) = 0xF9400000) := by intro t; bv_decide
-  have hne_22 : ¬ ((w &&& 0xffe00000) = 0xB9000000) := by intro t; bv_decide
-  have hne_23 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
-  have hne_24 : ¬ ((w &&& 0xffc00000) = 0xA9800000) := by intro t; bv_decide
-  have hne_25 : ¬ ((w &&& 0xffc00000) = 0xA8C00000) := by intro t; bv_decide
-  have hne_26 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
-  have hne_27 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
-  have hne_28 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
-  have hne_29 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
-  have hne_30 : ¬ ((w &&& 0xff800000) = 0x72800000) := by intro t; bv_decide
-  have hne_31 : ¬ ((w &&& 0xffe00000) = 0x12800000) := by intro t; bv_decide
-  have hne_32 : ¬ ((w &&& 0xffe00000) = 0x92800000) := by intro t; bv_decide
-  have hne_33 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
-  have hne_34 : ¬ ((w &&& 0xffe00000) = 0xF9000000) := by intro t; bv_decide
-  have hne_35 : ¬ ((w &&& 0xffc00000) = 0xA9400000) := by intro t; bv_decide
-  have hne_36 : ¬ ((w &&& 0xffe0fc00) = 0xAA200000) := by intro t; bv_decide
-  have hne_37 : ¬ ((w &&& 0xfffffc1f) = 0xD61F0000) := by intro t; bv_decide
-  have hne_38 : ¬ ((w &&& 0xffe0001f) = 0xD4000001) := by intro t; bv_decide
-  have hne_39 : ¬ ((w &&& 0xffe0fc00) = 0x13001c00) := by intro t; bv_decide
-  have hne_40 : ¬ ((w &&& 0xffe0fc00) = 0x13003c00) := by intro t; bv_decide
-  have hne_41 : ¬ ((w &&& 0xffe0fc00) = 0x93407c00) := by intro t; bv_decide
-  have hne_42 : ¬ ((w &&& 0xffc0fc00) = 0x92401c00) := by intro t; bv_decide
-  have hne_43 : ¬ ((w &&& 0xffc0fc00) = 0x92403c00) := by intro t; bv_decide
-  have hne_44 : ¬ ((w &&& 0xffc0fc00) = 0x92407c00) := by intro t; bv_decide
-  have hne_45 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00800) := by intro t; bv_decide
-  have hne_46 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00c00) := by intro t; bv_decide
-  have hne_47 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02000) := by intro t; bv_decide
-  have hne_48 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02400) := by intro t; bv_decide
-  have hne_49 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02800) := by intro t; bv_decide
-  have hne_50 : ¬ ((w &&& 0xffe08000) = 0x9b008000) := by intro t; bv_decide
-  have hne_51 : ¬ ((w &&& 0xffc0fc00) = 0xd340fc00) := by intro t; bv_decide
-  have hne_52 : ¬ ((w &&& 0xffc0fc00) = 0x9340fc00) := by intro t; bv_decide
-  have hne_53 : ¬ ((w &&& 0xffc00000) = 0xd3400000) := by intro t; bv_decide
-  have hne_54 : ¬ ((w &&& 0xffd00000) = 0x39400000) := by intro t; bv_decide
-  have hne_55 : ¬ ((w &&& 0xffd00000) = 0x39000000) := by intro t; bv_decide
-  have hne_56 : ¬ ((w &&& 0xffd00000) = 0x79400000) := by intro t; bv_decide
-  have hne_57 : ¬ ((w &&& 0xffd00000) = 0x79000000) := by intro t; bv_decide
-  have hne_58 : ¬ ((w &&& 0xffd00000) = 0x39800000) := by intro t; bv_decide
-  have hne_59 : ¬ ((w &&& 0xffd00000) = 0x79800000) := by intro t; bv_decide
-  have hne_60 : ¬ ((w &&& 0xffd00000) = 0xb9800000) := by intro t; bv_decide
-  have hne_61 : ¬ ((w &&& 0xffd00000) = 0xb9400000) := by intro t; bv_decide
-  have hne_62 : ¬ ((w &&& 0xffe0fc00) = 0xf8606800) := by intro t; bv_decide
-  have hne_63 : ¬ ((w &&& 0xffe0fc00) = 0xf8206800) := by intro t; bv_decide
-  have hne_64 : ¬ ((w &&& 0xffe00c00) = 0xf8400000) := by intro t; bv_decide
-  have hne_65 : ¬ ((w &&& 0xffe00000) = 0xab000000) := by intro t; bv_decide
-  have hne_66 : ¬ ((w &&& 0xffe00000) = 0xea000000) := by intro t; bv_decide
-  have hne_67 : ¬ ((w &&& 0xffe00c00) = 0xf8000000) := by intro t; bv_decide
-  have hne_68 : ¬ ((w &&& 0xffe07c00) = 0x9b407c00) := by intro t; bv_decide
-  have hne_69 : ¬ ((w &&& 0xffe00c00) = 0x9a800000) := by intro t; bv_decide
-  have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_67, if_neg hne_68, if_neg hne_69, if_neg hne_70, if_pos h]
-  try dsimp; try rfl; try simp
-
-
-/-- Per-instruction step: `work_step_scvtf`. -/
-theorem work_step_scvtf (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
-    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
-    (h : (w &&& 0xfffffc00) = 0x9e620000) :
-    arm64_step s code = some (arm64_set_reg_d ((w &&& 0x1f).toNat) s (scvtfBits (arm64_reg ((w >>> 5) &&& 0x1f).toNat s))) := by
-  unfold arm64_step
-  rw [hpc, hread]
-  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by intro t; rw [t] at h; exact absurd h (by decide)
-  have hne_1 : ¬ ((w &&& 0xffe00000) = 0x2A00FA00) := by intro t; bv_decide
-  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
-  have hne_3 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
-  have hne_4 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
-  have hne_5 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
-  have hne_6 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
-  have hne_7 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
-  have hne_8 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
-  have hne_9 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
-  have hne_10 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
-  have hne_11 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
-  have hne_12 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
-  have hne_13 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
-  have hne_14 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
-  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
-  have hne_16 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
-  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
-  have hne_18 : ¬ ((w &&& 0xff000000) = 0x54000000) := by intro t; bv_decide
-  have hne_19 : ¬ ((w &&& 0xff000000) = 0x36000000) := by intro t; bv_decide
-  have hne_20 : ¬ ((w &&& 0xff000000) = 0x37000000) := by intro t; bv_decide
-  have hne_21 : ¬ ((w &&& 0xffe00000) = 0xF9400000) := by intro t; bv_decide
-  have hne_22 : ¬ ((w &&& 0xffe00000) = 0xB9000000) := by intro t; bv_decide
-  have hne_23 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
-  have hne_24 : ¬ ((w &&& 0xffc00000) = 0xA9800000) := by intro t; bv_decide
-  have hne_25 : ¬ ((w &&& 0xffc00000) = 0xA8C00000) := by intro t; bv_decide
-  have hne_26 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
-  have hne_27 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
-  have hne_28 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
-  have hne_29 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
-  have hne_30 : ¬ ((w &&& 0xff800000) = 0x72800000) := by intro t; bv_decide
-  have hne_31 : ¬ ((w &&& 0xffe00000) = 0x12800000) := by intro t; bv_decide
-  have hne_32 : ¬ ((w &&& 0xffe00000) = 0x92800000) := by intro t; bv_decide
-  have hne_33 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
-  have hne_34 : ¬ ((w &&& 0xffe00000) = 0xF9000000) := by intro t; bv_decide
-  have hne_35 : ¬ ((w &&& 0xffc00000) = 0xA9400000) := by intro t; bv_decide
-  have hne_36 : ¬ ((w &&& 0xffe0fc00) = 0xAA200000) := by intro t; bv_decide
-  have hne_37 : ¬ ((w &&& 0xfffffc1f) = 0xD61F0000) := by intro t; bv_decide
-  have hne_38 : ¬ ((w &&& 0xffe0001f) = 0xD4000001) := by intro t; bv_decide
-  have hne_39 : ¬ ((w &&& 0xffe0fc00) = 0x13001c00) := by intro t; bv_decide
-  have hne_40 : ¬ ((w &&& 0xffe0fc00) = 0x13003c00) := by intro t; bv_decide
-  have hne_41 : ¬ ((w &&& 0xffe0fc00) = 0x93407c00) := by intro t; bv_decide
-  have hne_42 : ¬ ((w &&& 0xffc0fc00) = 0x92401c00) := by intro t; bv_decide
-  have hne_43 : ¬ ((w &&& 0xffc0fc00) = 0x92403c00) := by intro t; bv_decide
-  have hne_44 : ¬ ((w &&& 0xffc0fc00) = 0x92407c00) := by intro t; bv_decide
-  have hne_45 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00800) := by intro t; bv_decide
-  have hne_46 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00c00) := by intro t; bv_decide
-  have hne_47 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02000) := by intro t; bv_decide
-  have hne_48 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02400) := by intro t; bv_decide
-  have hne_49 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02800) := by intro t; bv_decide
-  have hne_50 : ¬ ((w &&& 0xffe08000) = 0x9b008000) := by intro t; bv_decide
-  have hne_51 : ¬ ((w &&& 0xffc0fc00) = 0xd340fc00) := by intro t; bv_decide
-  have hne_52 : ¬ ((w &&& 0xffc0fc00) = 0x9340fc00) := by intro t; bv_decide
-  have hne_53 : ¬ ((w &&& 0xffc00000) = 0xd3400000) := by intro t; bv_decide
-  have hne_54 : ¬ ((w &&& 0xffd00000) = 0x39400000) := by intro t; bv_decide
-  have hne_55 : ¬ ((w &&& 0xffd00000) = 0x39000000) := by intro t; bv_decide
-  have hne_56 : ¬ ((w &&& 0xffd00000) = 0x79400000) := by intro t; bv_decide
-  have hne_57 : ¬ ((w &&& 0xffd00000) = 0x79000000) := by intro t; bv_decide
-  have hne_58 : ¬ ((w &&& 0xffd00000) = 0x39800000) := by intro t; bv_decide
-  have hne_59 : ¬ ((w &&& 0xffd00000) = 0x79800000) := by intro t; bv_decide
-  have hne_60 : ¬ ((w &&& 0xffd00000) = 0xb9800000) := by intro t; bv_decide
-  have hne_61 : ¬ ((w &&& 0xffd00000) = 0xb9400000) := by intro t; bv_decide
-  have hne_62 : ¬ ((w &&& 0xffe0fc00) = 0xf8606800) := by intro t; bv_decide
-  have hne_63 : ¬ ((w &&& 0xffe0fc00) = 0xf8206800) := by intro t; bv_decide
-  have hne_64 : ¬ ((w &&& 0xffe00c00) = 0xf8400000) := by intro t; bv_decide
-  have hne_65 : ¬ ((w &&& 0xffe00000) = 0xab000000) := by intro t; bv_decide
-  have hne_66 : ¬ ((w &&& 0xffe00000) = 0xea000000) := by intro t; bv_decide
-  have hne_67 : ¬ ((w &&& 0xffe00c00) = 0xf8000000) := by intro t; bv_decide
-  have hne_68 : ¬ ((w &&& 0xffe07c00) = 0x9b407c00) := by intro t; bv_decide
-  have hne_69 : ¬ ((w &&& 0xffe00c00) = 0x9a800000) := by intro t; bv_decide
-  have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_67, if_neg hne_68, if_neg hne_69, if_neg hne_70, if_pos h]
-  try dsimp; try rfl; try simp
-
-
-/-- Per-instruction step: `work_step_fcvtzs`. -/
-theorem work_step_fcvtzs (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
-    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
-    (h : (w &&& 0xfffffc00) = 0x9e780000) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (fcvtzsBits (arm64_reg_d ((w >>> 5) &&& 0x1f).toNat s))) := by
-  unfold arm64_step
-  rw [hpc, hread]
-  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by intro t; rw [t] at h; exact absurd h (by decide)
-  have hne_1 : ¬ ((w &&& 0xffe00000) = 0x2A00FA00) := by intro t; bv_decide
-  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
-  have hne_3 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
-  have hne_4 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
-  have hne_5 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
-  have hne_6 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
-  have hne_7 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
-  have hne_8 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
-  have hne_9 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
-  have hne_10 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
-  have hne_11 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
-  have hne_12 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
-  have hne_13 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
-  have hne_14 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
-  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
-  have hne_16 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
-  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
-  have hne_18 : ¬ ((w &&& 0xff000000) = 0x54000000) := by intro t; bv_decide
-  have hne_19 : ¬ ((w &&& 0xff000000) = 0x36000000) := by intro t; bv_decide
-  have hne_20 : ¬ ((w &&& 0xff000000) = 0x37000000) := by intro t; bv_decide
-  have hne_21 : ¬ ((w &&& 0xffe00000) = 0xF9400000) := by intro t; bv_decide
-  have hne_22 : ¬ ((w &&& 0xffe00000) = 0xB9000000) := by intro t; bv_decide
-  have hne_23 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
-  have hne_24 : ¬ ((w &&& 0xffc00000) = 0xA9800000) := by intro t; bv_decide
-  have hne_25 : ¬ ((w &&& 0xffc00000) = 0xA8C00000) := by intro t; bv_decide
-  have hne_26 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
-  have hne_27 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
-  have hne_28 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
-  have hne_29 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
-  have hne_30 : ¬ ((w &&& 0xff800000) = 0x72800000) := by intro t; bv_decide
-  have hne_31 : ¬ ((w &&& 0xffe00000) = 0x12800000) := by intro t; bv_decide
-  have hne_32 : ¬ ((w &&& 0xffe00000) = 0x92800000) := by intro t; bv_decide
-  have hne_33 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
-  have hne_34 : ¬ ((w &&& 0xffe00000) = 0xF9000000) := by intro t; bv_decide
-  have hne_35 : ¬ ((w &&& 0xffc00000) = 0xA9400000) := by intro t; bv_decide
-  have hne_36 : ¬ ((w &&& 0xffe0fc00) = 0xAA200000) := by intro t; bv_decide
-  have hne_37 : ¬ ((w &&& 0xfffffc1f) = 0xD61F0000) := by intro t; bv_decide
-  have hne_38 : ¬ ((w &&& 0xffe0001f) = 0xD4000001) := by intro t; bv_decide
-  have hne_39 : ¬ ((w &&& 0xffe0fc00) = 0x13001c00) := by intro t; bv_decide
-  have hne_40 : ¬ ((w &&& 0xffe0fc00) = 0x13003c00) := by intro t; bv_decide
-  have hne_41 : ¬ ((w &&& 0xffe0fc00) = 0x93407c00) := by intro t; bv_decide
-  have hne_42 : ¬ ((w &&& 0xffc0fc00) = 0x92401c00) := by intro t; bv_decide
-  have hne_43 : ¬ ((w &&& 0xffc0fc00) = 0x92403c00) := by intro t; bv_decide
-  have hne_44 : ¬ ((w &&& 0xffc0fc00) = 0x92407c00) := by intro t; bv_decide
-  have hne_45 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00800) := by intro t; bv_decide
-  have hne_46 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00c00) := by intro t; bv_decide
-  have hne_47 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02000) := by intro t; bv_decide
-  have hne_48 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02400) := by intro t; bv_decide
-  have hne_49 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02800) := by intro t; bv_decide
-  have hne_50 : ¬ ((w &&& 0xffe08000) = 0x9b008000) := by intro t; bv_decide
-  have hne_51 : ¬ ((w &&& 0xffc0fc00) = 0xd340fc00) := by intro t; bv_decide
-  have hne_52 : ¬ ((w &&& 0xffc0fc00) = 0x9340fc00) := by intro t; bv_decide
-  have hne_53 : ¬ ((w &&& 0xffc00000) = 0xd3400000) := by intro t; bv_decide
-  have hne_54 : ¬ ((w &&& 0xffd00000) = 0x39400000) := by intro t; bv_decide
-  have hne_55 : ¬ ((w &&& 0xffd00000) = 0x39000000) := by intro t; bv_decide
-  have hne_56 : ¬ ((w &&& 0xffd00000) = 0x79400000) := by intro t; bv_decide
-  have hne_57 : ¬ ((w &&& 0xffd00000) = 0x79000000) := by intro t; bv_decide
-  have hne_58 : ¬ ((w &&& 0xffd00000) = 0x39800000) := by intro t; bv_decide
-  have hne_59 : ¬ ((w &&& 0xffd00000) = 0x79800000) := by intro t; bv_decide
-  have hne_60 : ¬ ((w &&& 0xffd00000) = 0xb9800000) := by intro t; bv_decide
-  have hne_61 : ¬ ((w &&& 0xffd00000) = 0xb9400000) := by intro t; bv_decide
-  have hne_62 : ¬ ((w &&& 0xffe0fc00) = 0xf8606800) := by intro t; bv_decide
-  have hne_63 : ¬ ((w &&& 0xffe0fc00) = 0xf8206800) := by intro t; bv_decide
-  have hne_64 : ¬ ((w &&& 0xffe00c00) = 0xf8400000) := by intro t; bv_decide
-  have hne_65 : ¬ ((w &&& 0xffe00000) = 0xab000000) := by intro t; bv_decide
-  have hne_66 : ¬ ((w &&& 0xffe00000) = 0xea000000) := by intro t; bv_decide
-  have hne_67 : ¬ ((w &&& 0xffe00c00) = 0xf8000000) := by intro t; bv_decide
-  have hne_68 : ¬ ((w &&& 0xffe07c00) = 0x9b407c00) := by intro t; bv_decide
-  have hne_69 : ¬ ((w &&& 0xffe00c00) = 0x9a800000) := by intro t; bv_decide
-  have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_67, if_neg hne_68, if_neg hne_69, if_neg hne_70, if_pos h]
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_67, if_neg hne_68, if_neg hne_69, if_pos h]
   try dsimp; try rfl; try simp
