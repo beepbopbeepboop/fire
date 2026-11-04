@@ -43,7 +43,7 @@ WHAT IS NOT HERE, AND THE REASON IS THE SAME FOR ALL OF IT
     different answer from "no match" and the caller can see the difference.
   * **Compiled-pattern objects.** `_PROTO_RE = re.compile(...)` at module
     level is a module-level binding, and a formal value lives in a function's
-    own stack scratch (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted)`), so there is
+    own stack scratch (module state is not stored in the formal model), so there is
     nowhere for a compiled pattern to live between two calls. Every function
     here therefore takes the pattern SOURCE and compiles it itself, which is
     redundant work and the only spelling available. The cost is stated rather
@@ -194,7 +194,7 @@ from os._syscalls import str_len, str_alloc, str_put, str_copy
 # Every offset below is a literal or literal-only arithmetic, which is what
 # makes a module-level name readable at all on this path: a binding whose
 # value the build can FOLD is substituted at every read, and one it cannot is
-# refused by name (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted)`). The public
+# refused by name (module state is not stored in the formal model). The public
 # constants are re-exported as FUNCTIONS, because a reader in ANOTHER module
 # cannot read a name at all — `MAXPATTERN()` is the spelling that lowers.
 #
