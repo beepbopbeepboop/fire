@@ -8803,13 +8803,20 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         # (no side conditions), so it does not need `decide`.
         _sm = "only" if _fno.get("no_decide") else "+decide only"
         A(f"{IND}simp {_sm} [h8, {_mojo}{_goid}{simp_names}, {_VSP}"
-          + ((", " + _fno["simp_extra"]) if _fno.get("simp_extra") else "")
+          + (", " + _fno["simp_extra"]) if _fno.get("simp_extra") else ""
           + "]")
         A(f"{IND}all_goals try rfl")
         _bsrc = list(ctx.get("branch_srcs", []))
         _msimp = ", ".join(["mem_read_after_write_u64",
                             "mem_read_after_write_u64_ne",
-                            "mem_read_two_writes_same"] + _bsrc)
+                            "mem_read_two_writes_same",
+                            "mem_read_after_write_u64_high",
+                            "mem_read_after_write_u64_high_nw",
+                            "mem_read_write_below",
+                            "mem_read_write_below_split",
+                            "mem_write_u64_high",
+                            "block_mem_read_above_sp",
+                            "mem_read_after_writes_below_sp"] + _bsrc)
         A(f"{IND}all_goals try simp [{_msimp}]")
         if not _fno.get("strict"):
             # `bv_decide` and `grind` are both EVALUATORS, and a frame
@@ -8961,7 +8968,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                     unfold_terms = ctx["lets"] + flow_hsid + flow_defs + \
                         ['arm64_reg', 'arm64_set_reg', 'Arm64State.init']
                     A(f"{IND}  simp only [{', '.join(unfold_terms)}]")
-                    A(f"{IND}  simp (disch := decide) [{', '.join(_hl + ['mem_read_after_write_u64', 'mem_read_after_write_u64_ne', 'mem_read_two_writes_same'])}]")
+                    A(f"{IND}  simp (disch := decide) [{', '.join(_hl + ['mem_read_after_write_u64', 'mem_read_after_write_u64_ne', 'mem_read_two_writes_same', 'mem_read_after_write_u64_high', 'mem_read_after_write_u64_high_nw', 'mem_read_write_below', 'mem_read_write_below_split', 'block_mem_read_above_sp'])}]")
                     A(f"{IND}have hjump_{bi} : ({name}_b{bi}_qS{m_run - 1} ({state})).x30.toNat "
                       f"≠ {run_last_pc} := by")
                     A(f"{IND}  rw [hx30_{bi}]")
@@ -9249,7 +9256,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}have hx19_arg : ({s_cur}).x19 = n - 1 := by")
                         A(f"{IND}  rw [{', '.join(list(reversed(ctx['flow_hsid'])))}]")
                         A(f"{IND}  simp only [{', '.join(ctx['flow_defs'])}, arm64_reg, arm64_set_reg, Arm64State.init]")
-                        A(f"{IND}  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, mem_read_two_writes_same]")
+                        A(f"{IND}  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, mem_read_two_writes_same, mem_read_after_write_u64_high, mem_read_after_write_u64_high_nw, mem_read_write_below, mem_read_write_below_split]")
                         _cfg_leaf(A, IND + "  ", "dec-while-back-edge-decrement",
                                   f"all_goals (first | grind | omega | rfl | "
                                   f"simp <;> grind | sorry)",
@@ -9260,7 +9267,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                           f"= UInt64.ofNat {_lc_exit} := by")
                         A(f"{IND}  rw [{', '.join(list(reversed(ctx['flow_hsid'])))}]")
                         A(f"{IND}  simp only [{', '.join(ctx['flow_defs'])}, arm64_reg, arm64_set_reg, Arm64State.init]")
-                        A(f"{IND}  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, mem_read_two_writes_same]")
+                        A(f"{IND}  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, mem_read_two_writes_same, mem_read_after_write_u64_high, mem_read_after_write_u64_high_nw, mem_read_write_below, mem_read_write_below_split]")
                         _cfg_leaf(A, IND + "  ", "dec-while-back-edge-frame-slot",
                                   "all_goals (first | done | sorry)",
                                   note="the frame slot")
