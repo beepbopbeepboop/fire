@@ -7,7 +7,8 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-REF = os.path.join(ROOT, "..", "new-modular", "Mojo", "stdlib", "std", "collections", "binary_heap.mojo")
+from module_loader import STDLIB_PATH
+REF = os.path.join(STDLIB_PATH, "std", "collections", "binary_heap.mojo") if STDLIB_PATH else os.path.join(ROOT, "..", "..", "modular", "mojo", "stdlib", "std", "collections", "binary_heap.mojo")
 OUT = os.path.join(ROOT, ".tmp", "bh_pinned.out")
 
 

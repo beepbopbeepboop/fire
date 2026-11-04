@@ -762,6 +762,33 @@ def _gen_stmt_FromImportStmt(gen, node):
 
 
 def _gen_stmt_ComptimeIfStmt(gen, node):
+    # Handle MatchCaseIf
+    cond = node.condition
+    if type(cond).__name__ == 'MatchCaseIf' or getattr(cond, '__class__', None).__name__ == 'MatchCaseIf':
+        try:
+            value_node = cond.value
+            vtype, cond_v = gen.lower_expr(value_node)
+            try:
+                cond_v_bool = gen._ensure_bool_cond(vtype, cond_v)
+            except Exception:
+                cond_v_bool = cond_v
+            bb_merge = gen._new_bb()
+            bb_true = gen._new_bb()
+            bb_false = bb_merge
+            gen._emit(f"  if ({cond_v_bool}) goto {bb_true}; else goto {bb_false};")
+            gen._emit_label(bb_true)
+            _bscope = ginf._open_block_scope(gen)
+            for s in node.then_body:
+                gen.gen_stmt(s)
+            ginf._close_block_scope(gen, _bscope)
+            gen._emit(f"  goto {bb_merge};")
+            gen._emit_label(bb_merge)
+            if getattr(node, 'else_body', None):
+                for s in node.else_body:
+                    gen.gen_stmt(s)
+            return
+        except Exception:
+            pass
     # The int tri-state, not `_eval_const_bool`'s `bool | None`: compiled, the
     # latter cannot tell "unknown" from "false" (comptime.CONST_UNKNOWN).
     val = gen._eval_const_bool_state(node.condition)

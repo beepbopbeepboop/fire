@@ -1130,7 +1130,8 @@ def census_is_complete():
     "there is no corpus here" and "the corpus is fully classified" must not
     print the same word.
     """
-    stdlib = os.path.join(HERE, "..", "new-modular", "Mojo", "stdlib", "std")
+    from module_loader import STDLIB_PATH
+    stdlib = os.path.join(STDLIB_PATH, "std") if STDLIB_PATH else os.path.join(HERE, "..", "..", "modular", "mojo", "stdlib", "std")
     if not os.path.isdir(stdlib):
         return None, (f"SKIPPED no classification census — {stdlib} is not "
                       f"present, so the tables cannot be checked against the "

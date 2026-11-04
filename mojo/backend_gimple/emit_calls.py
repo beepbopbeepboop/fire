@@ -1979,12 +1979,16 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # real async functions (not a catch-all for any unresolved
         # name) — an undefined/typo'd name still hits the ordinary
         # hard compile-time refusal below.
-        if inner.func.name in gen._all_async_fn_names:
+        inner_func = getattr(inner, 'func', None)
+        fname_check = getattr(inner_func, 'name', None) if inner_func is not None else None
+        if fname_check is None and inner_func is not None and hasattr(inner_func, 'member'):
+            fname_check = getattr(inner_func, 'member')
+        if fname_check in gen._all_async_fn_names:
             for a in inner.args:
                 gen.lower_expr(a)  # side effects, if any
             gen._emit(
                 f'  fprintf(stderr, "mojo: {_fname}({inner.func.name}(...)) '
-                f'reached at runtime, but {inner.func.name!r} could not be '
+                f'reached at runtime, but {fname_check!r} could not be '
                 'compiled to a real coroutine by this codegen (deliberate '
                 'stub -- see gimple_codegen.py\'s _lower_call comment on '
                 'create_task/create_raising_task) -- aborting\\n");')

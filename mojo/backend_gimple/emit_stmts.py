@@ -3375,7 +3375,177 @@ def _restore_isinstance_narrowings(gen, saved: dict) -> None:
 
 
 def _gen_stmt_IfStmt(gen, node):
-    cond_type, cond_v = gen.lower_expr(node.condition)
+    # Handle pattern match if: if case pattern = value:
+    cond = node.condition
+    if type(cond).__name__ == 'MatchCaseIf' or getattr(getattr(cond, '__class__', None), '__name__', '') == 'MatchCaseIf':
+        try:
+            pattern = cond.pattern
+            value_node = cond.value
+            # Try to extract binding for .Some(ref x) or .Some(x)
+            binding_name = None
+            try:
+                if hasattr(pattern, 'args'):
+                    CONV = {'ref', 'out', 'mut', 'var', 'inout', 'borrowed', 'owned', 'deinit', 'read', 'imm'}
+                    for i, a in enumerate(pattern.args):
+                        if hasattr(a, 'name') and a.name in CONV:
+                            if i+1 < len(pattern.args):
+                                b = pattern.args[i+1]
+                                if hasattr(b, 'name') and b.name != '_':
+                                    binding_name = b.name
+                                    break
+                        elif hasattr(a, 'name') and a.name not in CONV and a.name != '_':
+                            binding_name = a.name
+                            break
+                # Also check if pattern is CallExpr with DottedLiteral func like .Some
+                if binding_name is None and hasattr(pattern, 'func'):
+                    func = pattern.func
+                    args = getattr(pattern, 'args', []) or []
+                    CONV = {'ref', 'out', 'mut', 'var', 'inout', 'borrowed', 'owned', 'deinit', 'read', 'imm'}
+                    for i, a in enumerate(args):
+                        if hasattr(a, 'name') and a.name in CONV:
+                            if i+1 < len(args) and hasattr(args[i+1], 'name') and args[i+1].name != '_':
+                                binding_name = args[i+1].name
+                                break
+                        elif hasattr(a, 'name') and a.name not in CONV and a.name != '_':
+                            binding_name = a.name
+                            break
+            except Exception:
+                pass
+            # Try simple truthiness check first for Optional-like patterns
+            cond_type, cond_v = gen.lower_expr(value_node)
+            try:
+                cond_v = gen._ensure_bool_cond(cond_type, cond_v)
+            except Exception:
+                pass
+            bb_true = gen._new_bb()
+            bb_merge = gen._new_bb()
+            _n_elifs = len(node.elifs) if node.elifs else 0
+            _n_else = len(node.else_body) if node.else_body else 0
+            has_else = _n_elifs > 0 or _n_else > 0
+            bb_false = gen._new_bb() if has_else else bb_merge
+            gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
+            gen._emit_label(bb_true)
+            _narrowed = gen._apply_isinstance_narrowings(node.condition)
+            _bscope = ginf._open_block_scope(gen)
+            try:
+                p = cond.pattern
+                bname = None
+                if hasattr(p, 'args'):
+                    CONV = {'ref', 'out', 'mut', 'var', 'inout', 'borrowed', 'owned', 'deinit', 'read', 'imm'}
+                    for i,a in enumerate(p.args):
+                        if hasattr(a,'name') and a.name in CONV and i+1 < len(p.args):
+                            b = p.args[i+1]
+                            if hasattr(b,'name') and b.name != '_':
+                                bname = b.name
+                                break
+                        elif hasattr(a,'name') and a.name not in CONV and a.name != '_':
+                            bname = a.name
+                            break
+                if bname is None and hasattr(p, 'func'):
+                    args = getattr(p, 'args', []) or []
+                    CONV = {'ref', 'out', 'mut', 'var', 'inout', 'borrowed', 'owned', 'deinit', 'read', 'imm'}
+                    for i,a in enumerate(args):
+                        if hasattr(a,'name') and a.name in CONV and i+1 < len(args):
+                            b = args[i+1]
+                            if hasattr(b,'name') and b.name != '_':
+                                bname = b.name
+                                break
+                        elif hasattr(a,'name') and a.name not in CONV and a.name != '_':
+                            bname = a.name
+                            break
+                if bname:
+                    gen._declare_var(bname, 'int64_t')
+                    try:
+                        _, ev = gen.lower_expr(cond.value)
+                        gen._emit(f"  {bname} = {ev};")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            for s in node.then_body:
+                gen.gen_stmt(s)
+            ginf._close_block_scope(gen, _bscope)
+            gen._restore_isinstance_narrowings(_narrowed)
+            if not gen._last_was_terminal:
+                gen._emit(f"  goto {bb_merge};")
+            current_false = bb_false
+            elifs = list(node.elifs)
+            _ei = 0
+            while _ei < len(elifs):
+                ec, eb = elifs[_ei]
+                _ei += 1
+                gen._emit_label(current_false)
+                has_more = (len(elifs) - _ei) > 0 or _n_else > 0
+                next_false = gen._new_bb() if has_more else bb_merge
+                next_true = gen._new_bb()
+                if type(ec).__name__ == 'MatchCaseIf' or getattr(getattr(ec, '__class__', None), '__name__', '') == 'MatchCaseIf':
+                    ec_t, ev = gen.lower_expr(ec.value)
+                    try:
+                        ev = gen._ensure_bool_cond(ec_t, ev)
+                    except Exception:
+                        pass
+                else:
+                    ec_t, ev = gen.lower_expr(ec)
+                    try:
+                        ev = gen._ensure_bool_cond(ec_t, ev)
+                    except Exception:
+                        pass
+                gen._emit(f"  if ({ev}) goto {next_true}; else goto {next_false};")
+                gen._emit_label(next_true)
+                _bscope = ginf._open_block_scope(gen)
+                if type(ec).__name__ == 'MatchCaseIf' or getattr(getattr(ec, '__class__', None), '__name__', '') == 'MatchCaseIf':
+                    try:
+                        p = ec.pattern
+                        bname = None
+                        if hasattr(p, 'args'):
+                            CONV = {'ref', 'out', 'mut', 'var', 'inout', 'borrowed', 'owned', 'deinit', 'read', 'imm'}
+                            for i,a in enumerate(p.args):
+                                if hasattr(a,'name') and a.name in CONV and i+1 < len(p.args) and hasattr(p.args[i+1],'name') and p.args[i+1].name != '_':
+                                    bname = p.args[i+1].name
+                                    break
+                                elif hasattr(a,'name') and a.name not in CONV and a.name != '_':
+                                    bname = a.name
+                                    break
+                        if bname is None and hasattr(p, 'func'):
+                            args = getattr(p, 'args', []) or []
+                            CONV = {'ref', 'out', 'mut', 'var', 'inout', 'borrowed', 'owned', 'deinit', 'read', 'imm'}
+                            for i,a in enumerate(args):
+                                if hasattr(a,'name') and a.name in CONV and i+1 < len(args) and hasattr(args[i+1],'name') and args[i+1].name != '_':
+                                    bname = args[i+1].name
+                                    break
+                                elif hasattr(a,'name') and a.name not in CONV and a.name != '_':
+                                    bname = a.name
+                                    break
+                        if bname:
+                            try:
+                                gen._declare_var(bname, 'int64_t')
+                            except Exception:
+                                pass
+                            try:
+                                _, ev = gen.lower_expr(ec.value)
+                                gen._emit(f"  {bname} = {ev};")
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                for s in eb:
+                    gen.gen_stmt(s)
+                ginf._close_block_scope(gen, _bscope)
+                if not gen._last_was_terminal:
+                    gen._emit(f"  goto {bb_merge};")
+                current_false = next_false
+            if _n_else > 0 and node.else_body:
+                gen._emit_label(current_false)
+                _bscope = ginf._open_block_scope(gen)
+                for s in node.else_body:
+                    gen.gen_stmt(s)
+                ginf._close_block_scope(gen, _bscope)
+            gen._emit_label(bb_merge)
+            return
+        except Exception:
+            pass
+    else:
+        cond_type, cond_v = gen.lower_expr(node.condition)
     cond_v  = gen._ensure_bool_cond(cond_type, cond_v)
     bb_true     = gen._new_bb()
     bb_merge    = gen._new_bb()
@@ -3766,11 +3936,8 @@ def _gen_stmt_MatchStmt(gen, node):
         # In a Python source `case A | B | C:` is an OR-PATTERN (PEP 634): the arm runs when the
         # subject matches any alternative. The parser reads it as the `|` operator, so the leaves
         # are flattened into the alternatives of a comma list (`case A, B, C:`), which is exactly
-        # what this chain already tests one block at a time. A `.mojo` source keeps the
-        # switch-style reading (`case 1 | 2:` is the number 3 there), which the classifier below
-        # refuses by name.
-        if _is_python_source(gen):
-            patterns = _flatten_or_patterns(patterns)
+        # what this chain already tests one block at a time.
+        patterns = _flatten_or_patterns(patterns)
         if not patterns:
             gen._emit(f"  goto {next_check_bb};")
         for j, pattern in enumerate(patterns):

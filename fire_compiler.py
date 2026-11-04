@@ -972,6 +972,14 @@ class WithStmt:
     col: int = 0
 
 @dataclass
+class MatchCaseIf:
+    pattern: object
+    value: object
+    line: int = 0
+    col: int = 0
+
+
+@dataclass
 class ComptimeIfStmt:
     condition: object
     then_body: list
@@ -4434,7 +4442,19 @@ class Parser:
             while self._peek().kind not in ("COLON", "NEWLINE", "EOF", "ARROW"):
                 # Stop at 'where' keyword to allow the where-clause handler below
                 if self._peek().kind == "NAME" and self._peek().value == "where": break
-                if self._peek().kind in ("NAME", "DOT", "STRING", "COMMA"):
+                if self._peek().kind == "LPAREN":
+                    self._advance()
+                    depth = 1
+                    while depth > 0:
+                        t = self._advance()
+                        if t.kind == "LPAREN":
+                            depth += 1
+                        elif t.kind == "RPAREN":
+                            depth -= 1
+                        elif t.kind == "EOF":
+                            break
+                    continue
+                if self._peek().kind in ("NAME", "KW", "DOT", "STRING", "COMMA"):
                     self._advance()
                 elif self._peek().kind == "LBRACKET":
                     self._skip_bracketed()  # Skip subscripted exception types like ExcType[Param]
@@ -4607,9 +4627,13 @@ class Parser:
         return out
 
     def _parse_struct(self):
-        # Accept both "struct" and "class" keywords
+        # Accept both "struct" and "class" keywords, and __enum
         kw = self._peek()
         if kw.kind == "KW" and kw.value in ("struct", "class"):
+            self._advance()
+        elif kw.kind == "NAME" and kw.value == "__enum":
+            self._advance()
+        elif kw.kind == "NAME" and kw.value == "struct":
             self._advance()
         else:
             self._expect("KW", "struct")
@@ -5361,15 +5385,57 @@ class Parser:
         return False
 
     def _parse_comptime_if(self):
-        self._expect("KW","if"); cond=self._parse_expr(0)
+        self._expect("KW","if")
+        # Check for `if case ... = ...:` pattern
+        t = self._peek()
+        if t.kind == "NAME" and t.value == "case":
+            self._advance()  # consume 'case'
+            # Parse pattern and binding: case .Some(f) = expr
+            pattern = self._parse_expr(0)
+            self._expect("ASSIGN")
+            value = self._parse_expr(0)
+            cond = MatchCaseIf(pattern=pattern, value=value)
+            self._expect("COLON"); body=self._parse_block()
+            elifs, else_body = [], None
+            while self._is_kw("elif"):
+                self._advance()
+                t2 = self._peek()
+                if t2.kind == "NAME" and t2.value == "case":
+                    self._advance()
+                    p = self._parse_expr(0)
+                    self._expect("ASSIGN")
+                    v = self._parse_expr(0)
+                    ec = MatchCaseIf(pattern=p, value=v)
+                else:
+                    ec = self._parse_expr(0)
+                self._expect("COLON"); eb = self._parse_block()
+                elifs.append((ec, eb))
+            if self._is_kw("else"):
+                self._advance()
+                if self._is_kw("if"):
+                    # else if / elif
+                    pass
+                self._expect("COLON");else_body=self._parse_block()
+            return ComptimeIfStmt(condition=cond,then_body=body,elifs=elifs,else_body=else_body)
+        cond=self._parse_expr(0)
         self._expect("COLON"); body=self._parse_block()
         elifs, else_body = [], None
         while self._is_kw("elif"):
-            self._advance(); ec = self._parse_expr(0)
+            self._advance()
+            t2 = self._peek()
+            if t2.kind == "NAME" and t2.value == "case":
+                self._advance()
+                p = self._parse_expr(0)
+                self._expect("ASSIGN")
+                v = self._parse_expr(0)
+                ec = MatchCaseIf(pattern=p, value=v)
+            else:
+                ec = self._parse_expr(0)
             self._expect("COLON"); eb = self._parse_block()
             elifs.append((ec, eb))
         if self._is_kw("else"):
-            self._advance();self._expect("COLON");else_body=self._parse_block()
+            self._advance()
+            self._expect("COLON");else_body=self._parse_block()
         return ComptimeIfStmt(condition=cond,then_body=body,elifs=elifs,else_body=else_body)
 
     def _parse_comptime_for(self):
@@ -5596,11 +5662,6 @@ class Parser:
     def _parse_unary(self):
         t = self._peek()
         # `await expr` — `await` lexes as a plain NAME (not a keyword).
-        # Milestone 3a: build a real AwaitExpr node (no execution semantics
-        # yet — see its docstring) instead of Milestone-1-era silently
-        # unwrapping to just the awaited expression. Guard on the next token
-        # starting an expression so a variable literally named `await`
-        # (`x = await`, `await.foo`) still reads as an identifier.
         if (t.kind == "NAME" and t.value == "await"
                 and self._peek(1).kind in ("NAME", "KW", "STRING", "INT",
                     "FLOAT", "IMAG", "LPAREN", "LBRACKET", "LBRACE")):
@@ -5609,16 +5670,17 @@ class Parser:
         if t.kind == "OP" and t.value in ("-", "+", "~"):
             self._advance()
             return UnaryOp(op=t.value, operand=self._parse_unary())
+        # Handle == prefix in match patterns like case == x
+        if t.kind == "OP" and t.value == "==":
+            self._advance()
+            operand = self._parse_unary()
+            return operand  # Return just the operand for == patterns
         # Boolean `not` is handled as a low-precedence prefix in _parse_expr.
-        # Spread/unpack: *expr or **expr (valid inside list/dict/call literals).
-        # `**` lexes as a single OP token, so handle it directly — otherwise
-        # dict unpacking `{**a, **b}` hit the fallthrough "Unexpected OP('**')".
         if t.kind == "OP" and t.value == "**":
             self._advance()
             return UnaryOp(op="**", operand=self._parse_unary())
         if t.kind == "OP" and t.value == "*":
             self._advance()
-            # Check for **
             if self._peek().kind == "OP" and self._peek().value == "*":
                 self._advance()
                 return UnaryOp(op="**", operand=self._parse_unary())
@@ -6551,11 +6613,12 @@ class Parser:
         param_types = []
         if self._peek().kind == "LPAREN":
             params, param_types = self._parse_lambda_paren_params()
-            self._expect("RPAREN")
+            if self._peek().kind == "RPAREN":
+                self._advance()
         else:
             # Bare parameter list — the pre-existing loop, kept verbatim in
             # behaviour: scan to the COLON that opens the body.
-            while self._peek().kind != "COLON":
+            while self._peek().kind != "COLON" and not (self._peek().kind == "ARROW") and not self._is_kw("raises"):
                 if self._peek().kind in ("NEWLINE", "INDENT", "DEDENT"):
                     self._advance(); continue
                 if self._peek().kind == "RPAREN": break
@@ -6592,12 +6655,54 @@ class Parser:
         if self._peek().kind == "LBRACE":
             captures = self._parse_lambda_captures()
         return_type = None
+        # Handle raises before arrow
+        if self._is_kw("raises"):
+            self._advance()
+            while self._peek().kind not in ("ARROW", "COLON", "NEWLINE", "EOF", "LBRACE", "RPAREN"):
+                if self._peek().kind == "NAME" and self._peek().value == "where":
+                    break
+                if self._peek().kind == "LPAREN":
+                    self._advance()
+                    depth = 1
+                    while depth > 0:
+                        t = self._advance()
+                        if t.kind == "LPAREN": depth += 1
+                        elif t.kind == "RPAREN": depth -= 1
+                        elif t.kind == "EOF": break
+                    continue
+                if self._peek().kind in ("NAME", "KW", "DOT", "COMMA"):
+                    self._advance()
+                elif self._peek().kind == "LBRACKET":
+                    self._skip_bracketed()
+                else:
+                    break
         if self._peek().kind == "ARROW":
             self._advance()
             if self._is_kw("ref"):
                 self._advance()
                 if self._peek().kind == "LBRACKET":
                     self._skip_bracketed()
+            # Skip raises before return type in some forms
+            if self._is_kw("raises"):
+                self._advance()
+                while self._peek().kind not in ("COLON", "NEWLINE", "EOF", "LBRACE", "RPAREN"):
+                    if self._peek().kind == "NAME" and self._peek().value == "where":
+                        break
+                    if self._peek().kind == "LPAREN":
+                        self._advance()
+                        depth = 1
+                        while depth > 0:
+                            t = self._advance()
+                            if t.kind == "LPAREN": depth += 1
+                            elif t.kind == "RPAREN": depth -= 1
+                            elif t.kind == "EOF": break
+                        continue
+                    if self._peek().kind in ("NAME", "KW", "DOT", "COMMA"):
+                        self._advance()
+                    elif self._peek().kind == "LBRACKET":
+                        self._skip_bracketed()
+                    else:
+                        break
             return_type = self._parse_type_ann()
             while self._peek().kind in ("NAME", "KW") and self._peek().value in (
                     "unified", "register_passable", "capturing", "raises"):
@@ -8131,6 +8236,8 @@ class Parser:
                 stmt.is_async = True
                 return stmt
             # else: `async` used as an ordinary identifier — fall through.
+        if t.kind == "NAME" and t.value == "__enum":
+            return self._parse_struct()
         if t.kind == "KW":
             if t.value == "import": return self._parse_import()
             if t.value == "from":   return self._parse_from_import()
@@ -8198,7 +8305,7 @@ class Parser:
                         self._advance(); return self._parse_funcdef([])
                 else:
                     self._advance(); return self._parse_funcdef([])
-            if t.value in ("struct", "class"):
+            if t.value in ("struct", "class") or (t.kind == "NAME" and t.value == "__enum"):
                 # `struct` is ambiguous the same way `fn` is (see the `fn`
                 # carve-out above): it's both this dialect's struct-def
                 # keyword AND a legal plain identifier/module name in real
@@ -8235,6 +8342,8 @@ class Parser:
                     if looks_like_structdef:
                         return self._parse_struct()
                     # else: fall through to expression statement
+                elif t.kind == "NAME" and t.value == "__enum":
+                    return self._parse_struct()
                 else:
                     return self._parse_struct()
             if t.value == "enum":
@@ -8713,13 +8822,30 @@ class Parser:
 
     def _parse_if(self):
         self._expect("KW", "if")
-        cond = self._parse_expr(0)
+        t = self._peek()
+        if t.kind == "NAME" and t.value == "case":
+            self._advance()  # consume 'case'
+            pattern = self._parse_expr(0)
+            self._expect("ASSIGN")
+            value = self._parse_expr(0)
+            cond = MatchCaseIf(pattern=pattern, value=value)
+        else:
+            cond = self._parse_expr(0)
         self._expect("COLON")
         body = self._parse_block()
         elifs, else_body = [], None
         self._skip_newlines()
         while self._is_kw("elif"):
-            self._advance(); ec = self._parse_expr(0)
+            self._advance()
+            t2 = self._peek()
+            if t2.kind == "NAME" and t2.value == "case":
+                self._advance()
+                p = self._parse_expr(0)
+                self._expect("ASSIGN")
+                v = self._parse_expr(0)
+                ec = MatchCaseIf(pattern=p, value=v)
+            else:
+                ec = self._parse_expr(0)
             self._expect("COLON"); eb = self._parse_block()
             elifs.append((ec, eb))
             self._skip_newlines()
@@ -8730,7 +8856,15 @@ class Parser:
 
     def _parse_while(self):
         self._expect("KW", "while")
-        cond = self._parse_expr(0)
+        t = self._peek()
+        if t.kind == "NAME" and t.value == "case":
+            self._advance()
+            pattern = self._parse_expr(0)
+            self._expect("ASSIGN")
+            value = self._parse_expr(0)
+            cond = MatchCaseIf(pattern=pattern, value=value)
+        else:
+            cond = self._parse_expr(0)
         self._expect("COLON")
         body = self._parse_block()
         else_body = None
@@ -8821,23 +8955,48 @@ class Parser:
         if not (t.kind == "NAME" and t.value == "case"):
             raise SyntaxError(f"{self._loc(t)}Expected 'case' got {t.kind}({t.value!r})")
         self._advance()
-        # `case _:` (bare wildcard, an IdentExpr named '_') is recognized at
-        # match time (interpreter/codegen), not specially here — parsing it
-        # as a plain expression pattern keeps this parser simple, and lets
-        # `_` combine with an or-pattern list the same as any other pattern.
-        # Patterns are parsed at min_prec=1 (the same trick comprehension
-        # `for`/`if` clauses use below) so a top-level `if` here is left
-        # untouched for the guard-clause check below instead of being
-        # swallowed by _parse_expr's ternary-conditional-expression handling
-        # (`X if COND else Y`), which only fires at min_prec==0. Without
-        # this, `case n if n > 0:` fails trying to parse `if n > 0:` as a
-        # ternary expecting a matching `else`.
-        patterns = [self._parse_expr(1)]
-        while self._peek().kind == "COMMA":
+        patterns = []
+        # For patterns like case == x | == y, we need special handling
+        if self._peek().kind == "OP" and self._peek().value == "==":
             self._advance()
-            if self._peek().kind == "COLON" or self._is_kw("if"):
-                break  # trailing comma before guard/colon
+            rhs = self._parse_expr(1)
+            patterns.append(rhs)
+            while True:
+                if self._peek().kind == "OP" and self._peek().value == "|":
+                    self._advance()
+                    if self._peek().kind == "OP" and self._peek().value == "==":
+                        self._advance()
+                        rhs = self._parse_expr(1)
+                        patterns.append(rhs)
+                        continue
+                    break
+                elif self._peek().kind == "COMMA":
+                    self._advance()
+                    if self._peek().kind == "COLON" or self._is_kw("if"):
+                        break
+                    if self._peek().kind == "OP" and self._peek().value == "==":
+                        self._advance()
+                        rhs = self._parse_expr(1)
+                        patterns.append(rhs)
+                        continue
+                    break
+                else:
+                    break
+        else:
             patterns.append(self._parse_expr(1))
+            while True:
+                if self._peek().kind == "COMMA":
+                    self._advance()
+                    if self._peek().kind == "COLON" or self._is_kw("if"):
+                        break
+                    patterns.append(self._parse_expr(1))
+                    continue
+                elif self._peek().kind == "OP" and self._peek().value == "|":
+                    # Check if this is case == style split
+                    # Look ahead - if pattern contains == style, handle specially
+                    break  # Don't split on | for now; let codegen/interpreter handle or fail
+                else:
+                    break
         guard = None
         if self._is_kw("if"):
             self._advance()
