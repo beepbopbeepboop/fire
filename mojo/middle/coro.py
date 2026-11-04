@@ -6247,6 +6247,13 @@ def _lift_capture_free_nested_scopes(stmts: list) -> None:
                     continue
                 if getattr(h, 'param_defaults', None):
                     continue
+                # A closure that does `nonlocal` assignment needs shared cells and
+                # is outside the factory model; never lift in that case.
+                try:
+                    if any(isinstance(n, N.NonlocalStmt) for n in _walk(h)):
+                        continue
+                except Exception:
+                    pass
                 # names `m` binds
                 m_bound = set()
                 for pn, _pa in m.params:
