@@ -42,7 +42,7 @@ def test_regression_pins_match_stmt():
     else:
         # Before fix this was FAIL; after fix it must pass.
         assert False, ("FAIL: match_stmt diverged between python and native "
-                        "backends (see bugs/CODEGEN_ab_native_fails.md).")
+                        "backends (see the deleted bug doc for ab-native).")
 
 
 if __name__ == '__main__':
