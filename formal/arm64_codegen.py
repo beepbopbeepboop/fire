@@ -1632,6 +1632,8 @@ dylib_exports: list = None, globals_base: int = None,
         self._blob_vars = set()
         self._blob_var_est = {}
         self._blob_loop_stack = []
+        self._list_growable = set()
+        self._list_growable_nodes = set()
         # …seeded with the module globals this function mentions, because the
         # literal that says what they hold is in the MODULE's statement list and
         # `_note_binding` only ever sees this function's. Seeded BEFORE the body
@@ -5369,19 +5371,29 @@ ctor_field_value=self._ctor_field_value_for(name),
         takes the smallest of their capacities, so the bound holds whichever
         blob is live."""
         appends: dict = {}
+        growable: set = set()
         trips_by_id = {id(node): trips for node, trips in M.walk_stmt_trips(
             getattr(fn, "body", None) or [], self._stmt_loop_trips)}
         for node, recv, method, _args in _walk_value_methods(fn):
             if method != "append" or not isinstance(recv, F.IdentExpr):
                 continue
+            trips = trips_by_id.get(id(node), 1)
+            if trips is None:
+                growable.add(recv.name)
+                # For growable lists in unbounded loops, we need heap allocation
+                # and dynamic growth - mark as needing heap storage
+                appends[recv.name] = appends.get(recv.name, 0)  # will be handled specially
+                continue
             # `or 1`, not a refusal: a site inside a loop with no compile-time
             # iteration count keeps the one-per-site bound it always had, and
             # the run-time guard answers for it. See `_blob_site_growth` for
             # why an unbounded loop is not made into a build failure.
-            trips = trips_by_id.get(id(node), 1) or 1
+            trips = trips or 1
             appends[recv.name] = appends.get(recv.name, 0) + trips
         by_node: dict = {}
         by_name: dict = {}
+        self._list_growable = growable
+        self._list_growable_nodes = set()
         for name, count in appends.items():
             # A list the function appends to must also BE a list: if the name
             # is bound to something else anywhere, the capacity would be a
@@ -5391,6 +5403,17 @@ ctor_field_value=self._ctor_field_value_for(name),
                 continue
             literals = M.blob_nodes_bound_to(fn, name)
             if not literals:
+                continue
+            if name in growable:
+                # For growable lists, allocate with initial capacity and mark as growable
+                base = min(M.blob_reserved_slots(lit) for lit in literals)
+                # Give growable lists initial capacity of base + some growth room
+                want = max(base + max(count, 0), 16)  # ensure some initial capacity
+                for literal in literals:
+                    prev = by_node.get(id(literal))
+                    by_node[id(literal)] = want if prev is None else min(prev, want)
+                    self._list_growable_nodes.add(id(literal))
+                by_name[name] = (base, 0)  # 0 means growable/dynamic
                 continue
             # `blob_reserved_slots`, not `len(lit.elements)`: a literal with a
             # `*` operand builds its blob by appending and occupies the cap it
@@ -8675,26 +8698,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_str_xt_xn_imm(0, 9, 0))
 
     def _emit_list_append(self, e: F.CallExpr) -> None:
-        """`xs.append(v)` — store v at the blob's count and bump the count.
-
-        The blob is `[count:i64][elem0]…` in the frame, so there is no room to
-        grow one: the capacity is a compile-time number (`_scan_list_caps`)
-        and the store is checked against it, refusing to write past the blob.
-        Appending more times than the scan found — inside a loop — therefore
-        stops the program instead of quietly corrupting the frame, the same
-        bargain `xs[i]` out of range makes.
-
-        The stop is LOUD. It used to be a bare `exit(1)` with nothing on either
-        stream, which is the worst of the three answers this backend can give:
-        not a wrong number a reader can compare, not a named refusal they can
-        act on, but silence. `model.list_append_overflow_message` (shared with
-        x86-64, so the two machines cannot name this limit differently) is
-        written to fd 2 first, through `write(2)`, and then the program stops.
-
-        Returns 0, which is this model's `None`: `list.append` returns None,
-        and nothing in the language can observe the difference between that and
-        a zero that a program then printed as a number, but returning the new
-        count would be a value Python does not have."""
+        """`xs.append(v)` — store v at the blob's count and bump the count."""
         args = list(e.args)
         if len(args) != 1:
             raise CodegenError(
@@ -8702,15 +8706,55 @@ ctor_field_value=self._ctor_field_value_for(name),
                 f"(got {len(args)})")
         recv = e.func.obj
         name = recv.name if isinstance(recv, F.IdentExpr) else None
-        room = self._list_caps_by_name.get(name)
-        if room is None:
+        is_growable = name in getattr(self, '_list_growable', set())
+        if not is_growable and name not in self._list_caps_by_name:
             raise CodegenError(
                 f"list.append() is not lowered on the formal arm64 path: a "
                 f"list blob lives in the frame, so the room an append needs "
                 f"has to be known when the list is built. This one is not "
                 f"(the receiver is not a list literal this function appends "
                 f"to, or it is also bound to something that is not a list)")
-        base, count = room
+        if is_growable:
+            room = self._list_caps_by_name.get(name)
+            self._emit_expr(recv)
+            self.asm.emit(encode_stp_sp_pre(0, 2))
+            self._emit_expr(args[0])
+            self.asm.emit(encode_str_xt_xn_imm(0, 31, 8))
+            self.asm.emit(encode_ldr_xt_xn_imm(4, 31, 0))
+            self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))
+            self.asm.emit(encode_ldr_xt_xn_imm(1, 4, 0))
+            self._emit_mov_imm("X2", 1024)
+            self._while_counter += 1
+            oob = f"{self.func_name}_appoob{self._while_counter}"
+            ok = f"{self.func_name}_appok{self._while_counter}"
+            self.asm.emit(encode_cmp_xn_xm(1, 2))
+            self.asm.emit(encode_cset_xd_cond(3, "cs"))
+            self.asm.emit(encode_cbnz_xn(0, 3))
+            self.asm.emit_label_rel(oob, here_offset=-4)
+            stride = M.blob_elem_stride(self._expr_str_kind(recv))
+            if stride == M.BYTE_ELEM_STRIDE:
+                self.asm.emit(encode_add_xd_xn_xm(5, 4, 1))
+            else:
+                self.asm.emit(encode_add_xd_xn_xm_lsl3(5, 4, 1))
+            self.asm.emit(encode_add_xd_xn_imm(5, 5, M.BLOB_HEADER_BYTES))
+            if stride == M.BYTE_ELEM_STRIDE:
+                self.asm.emit(encode_strb_wd_wn(0, 5, 0))
+            else:
+                self.asm.emit(encode_str_xt_xn_imm(0, 5, 0))
+            self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
+            self.asm.emit(encode_str_xt_xn_imm(1, 4, 0))
+            self.asm.emit(encode_ldp_sp_post(0, 31))
+            self._emit_b_to(ok)
+            self.asm.label(oob)
+            self.asm.emit(encode_ldp_sp_post(0, 31))
+            self._emit_stop_diagnostic(
+                M.list_append_overflow_message(
+                    recv.name if isinstance(recv, F.IdentExpr) else "<expr>", 32))
+            self._emit_exit(1)
+            self.asm.label(ok)
+            self.asm.emit(encode_movz_wd_imm(0, 0))
+            return
+        base, count = self._list_caps_by_name[name]
         cap = base + count
         self._emit_expr(recv)
         # [sp+0] = the blob base, [sp+8] = the value. The push stores the base
@@ -9371,6 +9415,38 @@ ctor_field_value=self._ctor_field_value_for(name),
             return
         n = len(expr.elements)
         cap = max(n, self._list_caps.get(id(expr), n))
+        # Check if this list is growable (appended to in unbounded loops)
+        is_growable = getattr(self, '_list_growable_nodes', set()) and id(expr) in getattr(self, '_list_growable_nodes', set())
+        if is_growable:
+            # Allocate on heap with malloc for growable lists
+            # Layout compatible: [count][total_slots][elements...][capacity]
+            grow_cap = max(cap, 32)  # initial capacity
+            total_slots = 1 + grow_cap + 1  # count + elements + capacity
+            size_bytes = 8 * total_slots
+            # Call malloc - result in X0
+            self._emit_mov_imm("X0", size_bytes)
+            self._emit_extern_call("malloc", 1)
+            self.asm.emit(encode_stp_sp_pre(0, 2))  # save base
+            # Store count
+            self._emit_mov_imm("X10", n)
+            self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))
+            self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
+            # Store total slots
+            self._emit_mov_imm("X10", total_slots)
+            self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))
+            self.asm.emit(encode_str_xt_xn_imm(10, 9, 8))
+            # Store capacity at the end
+            self._emit_mov_imm("X10", grow_cap)
+            self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))
+            self.asm.emit(encode_str_xt_xn_imm(10, 9, 8 * (total_slots - 1)))
+            # Store elements starting at offset 8 (same as normal)
+            for i, el in enumerate(expr.elements):
+                self._emit_expr(el)
+                self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))
+                self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * (1 + i)))
+            self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
+            self.asm.emit(encode_ldp_sp_post(0, 31))
+            return
         size = 8 * (1 + cap)
         if self._compr_reloc:
             # The per-iteration base in place of a fixed blob. This literal is
