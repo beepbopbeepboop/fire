@@ -2590,8 +2590,25 @@ def _declared_vars_body(stmts: list) -> set[str]:
             if node.finally_body:
                 result |= _declared_vars_body(node.finally_body)
     return result
-_CPP_CALLABLE_CTYPE = 'std::function<int64_t()>'
-_CPP_CALLABLE_CTYPE_1ARG = 'std::function<int64_t(int64_t)>'
+def callable_ctype(params_ctypes, ret_ctype='int64_t'):
+    """Build a std::function<R(P...)> type string for a callable slot."""
+    if ret_ctype == 'int':
+        ret_ctype = 'int64_t'
+    if params_ctypes is None:
+        params_ctypes = []
+    # params_ctypes may be a list of (name, ctype) pairs or just ctypes
+    ptypes = []
+    for p in params_ctypes:
+        if isinstance(p, (tuple, list)) and len(p) == 2:
+            ptypes.append(p[1])
+        else:
+            ptypes.append(p)
+    pstr = ', '.join(str(pt) for pt in ptypes)
+    return f'std::function<{ret_ctype}({pstr})>'
+
+
+_CPP_CALLABLE_CTYPE = callable_ctype([], 'int64_t')
+_CPP_CALLABLE_CTYPE_1ARG = callable_ctype(['int64_t'], 'int64_t')
 # The `*args` / `**kwargs` family. C++ cannot subscript a native variadic
 # parameter list (`int64_t... a` has no `a[0]`), so a lambda's `*a` / `**k`
 # parameter is modeled as a single CONTAINER parameter, mirroring the plain
@@ -2603,9 +2620,9 @@ _CPP_CALLABLE_CTYPE_1ARG = 'std::function<int64_t(int64_t)>'
 # c_common/fsutil.py`'s `get_files = lambda *a, **k: ...` is the motivating
 # occurrence; see bugs/hard/
 # the (since-fixed) c_common/fsutil.py compile failure.
-_CPP_CALLABLE_CTYPE_STARARGS = 'std::function<int64_t(MojoList *)>'
-_CPP_CALLABLE_CTYPE_KWARGS = 'std::function<int64_t(MojoDict *)>'
-_CPP_CALLABLE_CTYPE_STAR_KW = 'std::function<int64_t(MojoList *, MojoDict *)>'
+_CPP_CALLABLE_CTYPE_STARARGS = callable_ctype(['MojoList *'], 'int64_t')
+_CPP_CALLABLE_CTYPE_KWARGS = callable_ctype(['MojoDict *'], 'int64_t')
+_CPP_CALLABLE_CTYPE_STAR_KW = callable_ctype(['MojoList *', 'MojoDict *'], 'int64_t')
 
 # Foreign-callable signature table (step 1 of the tables.py plan). Maps a
 # callable's qualified name to its declared ctype (from the _CPP_CALLABLE_CTYPE
