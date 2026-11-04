@@ -4018,6 +4018,8 @@ _STEP_CONDS = [
     # class separators are measured with the platform assembler in the arm's
     # own comment.
     (0xffe00c00, 0x9a800000),  # 69 CSEL Xd, Xn, Xm, cond
+    # 70 FCMP Dn, Dm (scalar double): flags only, no result register.
+    (0xffe0fc00, 0x1e602000),
 ]
 
 
@@ -4793,6 +4795,7 @@ _WORK_STEP = [
     # measurement that no earlier row — including the two that share the mask,
     # 64/65 — claims these words.
     (69, "work_step_csel", [(0xffe00c00, 0x9a800000)]),
+    (70, "work_step_fcmp", [(0xffe0fc00, 0x1e602000)]),
 ]
 
 _WORK_STEP_BY_IDX = {idx: (lemma, tests) for idx, lemma, tests in _WORK_STEP}
