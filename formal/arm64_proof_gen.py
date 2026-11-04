@@ -14389,7 +14389,7 @@ def _export_extent(exports: list, entry: int, base: int, code_size: int) -> int:
 
 
 def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
-                       exports: list) -> str:
+                       exports: list, exec_code_end: int = None) -> str:
     """`{ident}_semantics_total`, PROVED where the export's CFG allows it.
 
     The claim is that `runExport` returns `some` for every argument.  It is
@@ -14408,7 +14408,9 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
     arbitrary state's arbitrary `x30` -- so the census was counting two holes
     that no proof could ever fill.
     """
-    func_end = _export_extent(exports, entry, base, len(code))
+    if exec_code_end is None:
+        exec_code_end = _exec_code_limit(code)
+    func_end = _export_extent(exports, entry, base, exec_code_end)
     try:
         walk = _gen_universal_e2e_cfg(
             f"{ident}_walk", code, base, entry, recursive=False, go_lemmas=[],
@@ -15159,12 +15161,15 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
     base = info["base_addr"]
     test_input = info.get("test_input", 10)
     specs = specs or {}
+    exec_code_end = info.get("exec_code_end")
+    if exec_code_end is None:
+        exec_code_end = _exec_code_limit(code)
     # The step lemmas read the EXECUTABLE region only: a dylib whose export
     # prints a literal interns the string, and a data word that decodes as an
     # instruction would otherwise get a step lemma whose corollary is false
     # (measured: `dylib_sr_190`, the TBZ word of `model.stack_trap_message`).
     # `dylib_code` below is the whole thing, which is what the run tests read.
-    step_code = code[:_exec_code_limit(code)]
+    step_code = code[:exec_code_end]
     export_defs = []
     proofs = []
     for index, export in enumerate(exports):
@@ -15221,7 +15226,7 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
         # The export's own extent, `DylibExport.exportEnd`: the contract's
         # `Block` is `pcs` over that range AND the address its `atExit` and
         # `noEarly` are stated at, so it has to be told.
-        func_end = _export_extent(exports, entry, base, len(code))
+        func_end = _export_extent(exports, entry, base, exec_code_end)
         contract = (_dylib_contract_proof(ident, base, entry, code, spec,
                                          func_end) if spec else "")
         if not contract and spec:
@@ -15304,7 +15309,7 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
             f"  rw [h1] at h2\n"
             f"  injection h2 with h\n"
             f"  simp [h]\n\n"
-            f"{_dylib_total_proof(ident, code, base, export['entry'], exports)}\n\n"
+            f"{_dylib_total_proof(ident, code, base, export['entry'], exports, exec_code_end)}\n\n"
             f"def {ident}_prog : Refine.Prog :=\n"
             f"  Refine.dylibExportProg dylib_image {ident}\n\n"
             f"{contract}"
@@ -15344,7 +15349,7 @@ def dylib_observables : List (UInt64 → UInt64) := [id]
 
 def dylib_image : DylibImage :=
   {{ base := {base}
-    codeSize := {len(code)}
+    codeSize := {exec_code_end}
     exports := [{image_exports}]
     code := dylib_code }}
 

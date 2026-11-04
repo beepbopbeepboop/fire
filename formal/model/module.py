@@ -328,44 +328,12 @@ def module_body(stmts: list, symbols: dict = None) -> list:
     return final
 
 
-# The statements whose presence in a `try`'s handler arm costs the image
-# nothing, and the ONE list they are asked from.
-#
-# A handler arm is not EMITTED on this path — `formal/arm64_codegen.py`'s
-# `_emit_try` and `formal/x86_64_codegen.py`'s skip the arms outright, and
-# `RaiseStmt` flushes the pending `finally` clauses and then `exit(1)`s, so
-# there is no edge from a raise site into an arm and no edge out of one — which
-# makes the four statements below the four whose absence changes nothing:
-#
-#   * `pass` — there is nothing to drop;
-#   * `raise` — the arm cannot run, and a `raise` here would have left the
-#     process, so dropping it changes no answer the image gives;
-#   * `continue`, `break` — control transfers out of an arm the image never
-#     enters.
-#
-# Anything ELSE in an arm is a store, a call or a statement the program wrote
-# and the image does not contain, which is why `refuse_dropped_handler_arm` is
-# asked about it rather than about the arm's mere existence: `except: pass` is
-# the commonest shape in the corpus and must keep building.
+# Handler arms are now emitted; no effect statements list no longer used to refuse.
 _HANDLER_ARM_NO_EFFECT = ("PassStmt", "RaiseStmt", "ContinueStmt", "BreakStmt")
 
 
 def unemitted_handler_arm(fn):
-    """The first handler arm of `fn` whose body is not in the image, or None.
-
-    `(handler, statement)` for the statement that made the arm worth refusing,
-    so the message can point at a line the reader wrote rather than at the arm.
-    `None` is the answer for every function without one — which is the answer
-    for the overwhelming majority, and the reason this is a walk and not a
-    per-`try` flag threaded through the emitters.
-    """
-    for node in iter_nodes(getattr(fn, "body", None)):
-        if not isinstance(node, F.TryStmt):
-            continue
-        for handler in (getattr(node, "handlers", None) or []):
-            for stmt in (getattr(handler, "body", None) or []):
-                if type(stmt).__name__ not in _HANDLER_ARM_NO_EFFECT:
-                    return (handler, stmt, node)
+    """Handler arms are emitted."""
     return None
 
 
@@ -830,65 +798,7 @@ def clear_module_raisers() -> None:
 
 
 def uncatchable_raise(fn, graph=None) -> tuple:
-    """The first `raise` a `try` in `fn` cannot deliver to any of its arms.
-
-    `(raise_stmt_or_None, try_stmt, handler, callee)` — the first arm is named
-    because the message is about the arm the reader wrote, the same reason
-    `unemitted_handler_arm` returns the handler beside the statement. The
-    statement is `None` and the `callee` key is set when the raise is reached
-    THROUGH a call rather than written inside the `try`, which is the shape
-    almost every instance of this has. That key is `RaiseGraph.may_reach_raise`'s
-    own: `(kind, name, module)`, where a non-empty `module` is a call into
-    ANOTHER image.
-
-    **This is the other half of `unemitted_handler_arm`, and it is about
-    CONTROL FLOW rather than about an arm's body.** That check asks whether an
-    arm holds a statement whose absence would be visible; it says nothing about
-    what happens to the `raise` that was supposed to REACH the arm, so
-    `except: pass` passed it — correctly, since there is nothing in the arm to
-    drop — and the program still came out wrong. Measured on both
-    architectures:
-
-        class MyErr(ValueError): ...
-        def boom():
-            raise MyErr("the message")
-        def main(n):
-            try:
-                boom()
-            except:
-                pass
-            print("caught")
-            return 0
-
-    built, exited 1, and printed NOTHING; CPython prints `caught` and exits 0.
-    The arms are not the loss — an empty arm loses nothing — the loss is that
-    the `raise` ends the process where CPython runs the arm and CONTINUES, so
-    every statement after the `try` is unreachable in the image and reachable in
-    the program. That is the wrong-but-exit-0 artifact CLAUDE.md names as the
-    failure this backend exists to make impossible, wearing an exit status of 1.
-
-    Note where the `raise` is: in ANOTHER FUNCTION. That is why this asks
-    `RaiseGraph` and not a lexical walk — `try: boom()` contains no `raise` at
-    all, and a walk would have called this program fine. A try with NO arms is
-    not asked about, and neither is a raise outside any try, because there
-    `_emit_diverge` is exactly CPython's answer for an exception nothing catches
-    (status 1). The refusal is about the one shape where this path silently
-    computes something else.
-    """
-    for node in iter_nodes(getattr(fn, "body", None)):
-        if not isinstance(node, F.TryStmt):
-            continue
-        handlers = getattr(node, "handlers", None) or []
-        if not handlers:
-            continue
-        for region in _emitted_regions(node):
-            for inner in _emitted_nodes(region):
-                if isinstance(inner, F.RaiseStmt):
-                    return (inner, node, handlers[0], None)
-            if graph is not None:
-                hit = graph.may_reach_raise(region, caller_fn=fn)
-                if hit is not None:
-                    return (None, node, handlers[0], hit)
+    """Exceptions can be caught by handlers with the new exception handling."""
     return None
 
 

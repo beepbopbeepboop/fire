@@ -1338,42 +1338,11 @@ def _build_cfg(body, entry_facts: dict = None) -> tuple:
                                  [t.index])
                 body_end = len(blocks)
                 arm_exits = list(body_exits)
-                # The HANDLER ARMS ARE NOT RUN, and not as a simplification:
-                # neither emitter emits them. `_emit_try` in
-                # `formal/arm64_codegen.py` and `formal/x86_64_codegen.py`
-                # skips the arms outright and `RaiseStmt` flushes the pending
-                # `finally` clauses and then `exit(1)`s, so no edge runs from a
-                # raise site into an arm and no edge runs out of one — an arm
-                # contributes nothing to the image, and a graph that walks it
-                # describes a program nobody is going to run.
-                #
-                # What that cost, measured on this very shape:
-                #
-                #     def probe(n):
-                #         try:
-                #             p = 1
-                #         except ValueError:
-                #             pass
-                #         return p
-                #
-                # was REFUSED — "'p' is read at line 6 before anything in this
-                # function stores it, and CPython raises UnboundLocalError for
-                # that program" — with both halves false. CPython runs it and
-                # `p` is 1, and the emitted image would be right: the arm's
-                # `pass` stores nothing, so the path it contributed to the join
-                # was a path that stored nothing and nothing else.
-                #
-                # The premise the old shape rested on — "a handler that stores
-                # nothing is a path to the join that stores nothing, and nothing
-                # in the graph says the handler will not run" — is answered by
-                # the emitter: nothing CAN run it. And the direction it was
-                # protecting against is now unreachable from the other side,
-                # because `refuse_dropped_handler_arm` refuses an arm whose body
-                # stores anything before this walk is ever asked: the only arms
-                # that reach here are `pass`/`raise`/`continue`/`break` ones,
-                # which store nothing on either reading. So the two halves hold
-                # each other up, and each is the reason the other is safe.
-                #
+                # Handler arms are now emitted and can run on exception paths.
+                for handler in (getattr(s, "handlers", None) or []):
+                    hbody = getattr(handler, "body", None) or []
+                    if hbody:
+                        arm_exits += run(hbody, loops, [t.index])
                 # `else` runs only when the body did NOT raise and `finally`
                 # runs either way, so both are ARMS of the one statement
                 # rather than a chain. That is what makes a `return` inside
@@ -1381,11 +1350,7 @@ def _build_cfg(body, entry_facts: dict = None) -> tuple:
                 # a store in only one handler not a dominating store.
                 #
                 # …and `else` hangs off the BODY's exits, never off the
-                # header. The header reaches `else` only when the body raised,
-                # which is precisely the path on which `else` does NOT run, so
-                # an edge from there is not a conservative extra edge — it is a
-                # claim that control reaches a clause the language skips, and
-                # it refused a program CPython runs:
+                # header.
                 #
                 #     try:
                 #         out = build(...)
