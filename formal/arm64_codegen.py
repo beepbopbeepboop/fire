@@ -8837,8 +8837,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         nothing on stderr. Detecting it at run time means reading `errno`,
         which is another C library call (`__error`) and therefore another
         unfollowable call in a block the proof framework has to cross — so the
-        foldable case is refused here, precisely, and the rest is
-        `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
+        foldable case is refused here, precisely, and variable cases are trapped at runtime.
         """
         reason = M.int_parse_overflow_refusal(
             M.fold_literal_expr(text_expr), base)
@@ -9433,9 +9432,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             # wrapped number or a status code — and the run-time half, the
             # same predicate over a value the build CANNOT know, which a
             # plain `ADD`/`SUB`/`MUL` used to answer with the hardware's
-            # modulo-2^64 wrap (exit 0, empty stderr, `bugs/formal/
-            # FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
-            # `VARIABLE_ROWS` table is the measurement that pinned it). That
+            # modulo-2^64 wrap (exit 0, empty stderr); the integer overflow traps
+            # now prevent silent wrap. That
             # half is `_emit_int_alu_checked`: the flag-setting instruction
             # and the branch into the trap block, with the trap the one
             # answer this path has for a value the target cannot hold.
@@ -13202,6 +13200,28 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self.asm.emit(encode_cbz_xn(0, 1))
                 self.asm.emit_label_rel(div0_label, here_offset=-4)
             if signed:
+                if op != "%":
+                    # Check for overflow case: INT64_MIN / -1
+                    self.asm.emit(encode_movz_xd_imm(3, 0))
+                    self.asm.emit(encode_mvn_xd_xn(3, 3))  # X3 = -1
+                    self.asm.emit(encode_cmp_xn_xm(1, 3))
+                    self._if_counter += 1
+                    divok1 = f"{fn}_dovkok{self._if_counter}"
+                    self.asm.emit(encode_b_cond("ne", 0))
+                    self.asm.emit_label_rel(divok1, here_offset=-4)
+                    # divisor is -1, check if dividend is INT64_MIN
+                    self.asm.emit(encode_movz_xd_imm(4, 1))
+                    self.asm.emit(encode_lsl_xd_xn_imm(4, 4, 63))
+                    self.asm.emit(encode_cmp_xn_xm(0, 4))
+                    self._if_counter += 1
+                    divok2 = f"{fn}_dovkok2{self._if_counter}"
+                    self.asm.emit(encode_b_cond("ne", 0))
+                    self.asm.emit_label_rel(divok2, here_offset=-4)
+                    # overflow - trap
+                    self._emit_stop_diagnostic(M.int_overflow_trap_message("//"))
+                    self._emit_exit(M.INT_OVERFLOW_TRAP_STATUS)
+                    self.asm.label(divok2)
+                    self.asm.label(divok1)
                 self.asm.emit(encode_sdiv_xd_xn_xm(2, 0, 1))
             else:
                 self.asm.emit(encode_udiv_xd_xn_xm(2, 0, 1))
@@ -13248,7 +13268,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             #
             # Both are decidable when the AMOUNT is a literal and the BASE is
             # not, and precisely decidable when both are; the variable-base case
-            # is `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
+            # traps at runtime when not foldable.
             reason = M.shift_overflow_refusal(
                 op, M.fold_literal_expr(e.right), M.fold_literal_expr(e.left),
                 [e.left, e.right])
@@ -13266,7 +13286,23 @@ ctor_field_value=self._ctor_field_value_for(name),
             if isinstance(imm_r, F.IntLiteral) and 0 <= imm_r.value <= 63:
                 self._emit_expr(e.left)
                 if op == "<<":
-                    self.asm.emit(encode_lsl_xd_xn_imm(0, 0, imm_r.value))
+                    shamt = imm_r.value
+                    self.asm.emit(encode_mov_zr_xn(2, 0))
+                    self.asm.emit(encode_lsl_xd_xn_imm(0, 0, shamt))
+                    if shamt != 0:
+                        self.asm.emit(encode_asr_xd_xn_imm(3, 0, shamt))
+                        self.asm.emit(encode_cmp_xn_xm(3, 2))
+                        self._if_counter += 1
+                        ovf = f"{self.func_name}_shimm{self._if_counter}_ovf"
+                        ok_shift = f"{self.func_name}_shimm{self._if_counter}_ok"
+                        self.asm.emit(encode_b_cond("ne", 0))
+                        self.asm.emit_label_rel(ovf, here_offset=-4)
+                        self.asm.emit(encode_b(0))
+                        self.asm.emit_label_rel(ok_shift, here_offset=-4)
+                        self.asm.label(ovf)
+                        self._emit_stop_diagnostic(M.int_overflow_trap_message("<<"))
+                        self._emit_exit(M.INT_OVERFLOW_TRAP_STATUS)
+                        self.asm.label(ok_shift)
                 elif signed:
                     self.asm.emit(encode_asr_xd_xn_imm(0, 0, imm_r.value))
                 else:
@@ -13450,7 +13486,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_b_to(f"{fn}_pow{pid}_end")
             self.asm.label(neg)
             self.asm.emit(encode_ldp_sp_post(4, 5))
-            self.asm.emit(encode_movz_wd_imm(0, 0))
+            self._emit_stop_diagnostic(M.int_overflow_trap_message("**"))
+            self._emit_exit(M.INT_OVERFLOW_TRAP_STATUS)
             self.asm.label(f"{fn}_pow{pid}_end")
             return
 
@@ -14195,7 +14232,23 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_b_cond("ge", 8))
         self.asm.emit_label_rel(sat_label, here_offset=-4)
         if op == "<<":
+            # Check for signed overflow: if (x << y) >> y != x (signed) then overflow
+            self.asm.emit(encode_mov_zr_xn(2, 0))  # save original
             self.asm.emit(encode_lslv_xd_xn_xm(0, 0, 1))
+            self.asm.emit(encode_asrv_xd_xn_xm(3, 0, 1))  # shift result back arithmetically
+            self.asm.emit(encode_cmp_xn_xm(3, 2))  # compare with original
+            self.asm.emit(encode_b_cond("ne", 0))
+            # branch to overflow trap
+            self._if_counter += 1
+            ovf = f"{fn}_sh{sid}_ovf"
+            ok_shift = f"{fn}_sh{sid}_ok"
+            self.asm.emit_label_rel(ovf, here_offset=-4)
+            self.asm.emit(encode_b(0))
+            self.asm.emit_label_rel(ok_shift, here_offset=-4)
+            self.asm.label(ovf)
+            self._emit_stop_diagnostic(M.int_overflow_trap_message("<<"))
+            self._emit_exit(M.INT_OVERFLOW_TRAP_STATUS)
+            self.asm.label(ok_shift)
         elif signed:
             self.asm.emit(encode_asrv_xd_xn_xm(0, 0, 1))
         else:

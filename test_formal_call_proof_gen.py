@@ -5306,7 +5306,7 @@ class TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath(unittest.TestCase):
     (a source conditional) regenerates its value theorem, and
     `formal/examples/mod_by_var.mojo` no longer has its universal refused by
     the div0 `fflush` — 2026-10-31 the walk closes that trap path instead
-    (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s step
+    (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md (deleted)`'s step
     2), and for this example the branch is dead anyway (the divisor register
     holds 4, which the terminal value flow proves), so the example regenerates
     its value theorem too.
@@ -5339,7 +5339,7 @@ class TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath(unittest.TestCase):
             "the div0 `BL fflush` is an opaque-call boundary again: a program "
             "whose only out-of-image call is the compiler's trap has no value "
             "theorem, so the walk-side closure "
-            "(`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s "
+            "(`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md (deleted)`'s "
             "step 2) has been undone")
         self.assertNotRegex(
             text, r"theorem mod_by_var_reaches_call_at_",
@@ -5683,7 +5683,7 @@ class TestAModelRefusalIsABuildRefusalNotATraceback(unittest.TestCase):
 class TestACallOnAnUntakenPathIsARefusalNotALeanError(unittest.TestCase):
     """The ONE unfollowable call the test input does not reach.
 
-    `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md` measured
+    `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md (deleted)` measured
     this as a PRE-EXISTING obstacle to its own step 2 and named it exactly: a
     `BL` reachable only on a path the concrete run does not take leaves the
     universal theorem with a premise that is FALSE, and `native_decide` says so
@@ -7563,7 +7563,7 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
         the class set `cls.blind` and fail its Lean row by NAME — so accepting
         it here is not acceptance of a blind class, it is acceptance that the
         blindness is ANNOUNCED.  The walk-side fix landed since
-        (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+        (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md (deleted)`'s
         step 2) and the fixture is back on outcome 1.  What this row still
         forbids is the fourth state: an empty tail with no announcement at
         all, which is `bugs/formal/FORMAL_the_div0_guard_measurement_class_
@@ -7938,7 +7938,7 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         """The doc's next step, measured: the residual GOAL is unchanged.
 
         The set is the right comparison now, because the walk-side closure
-        (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+        (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md (deleted)`'s
         step 2) put a SECOND terminal value flow in the file: the
         `q_compiles_correctly_universal` walk runs the divisor-nonzero path
         once per visit to the guard block, and the `hc_N` patch below reaches
@@ -9348,7 +9348,7 @@ class TestTheOneOpaqueCallIsAnnounced(unittest.TestCase):
     #: compiler's trap, and the walk closes that path at its `hnone` instead
     #: of substituting a reachability theorem — the flip
     #: `TestTheDiv0FixtureHaltsAtTheCompilerTrap` pins, and
-    #: `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+    #: `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md (deleted)`'s
     #: step 2.  `printf` with an UNUSED return value is the corpus's other
     #: single-opaque-call shape (`formal/examples/printf_int.mojo`'s body,
     #: named `q`): one `BL` out of the image, no source conditional, and the
