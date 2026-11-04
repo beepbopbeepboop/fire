@@ -3410,6 +3410,12 @@ def print_kwargs(e, backend: str):
 BOOL_TRUE_TEXT = "True"
 BOOL_FALSE_TEXT = "False"
 NONE_TEXT = "None"
+# CPython's element separator, at every nesting. `print`'s OWN sep never
+# enters a container's brackets — `print([1, 2], sep="")` still writes
+# `[1, 2]` — so the loop's separator is this constant rather than the call's
+# keyword, and one spelling is the loop's, the plan's and the tests' shared
+# reader of it.
+CONTAINER_ELEM_SEP = ", "
 
 
 def is_none_expression(e) -> bool:
@@ -3659,11 +3665,18 @@ def bytes_repr_body(value: str) -> str:
 # `-0.0` from the same reader — and `print_call_spelling`'s `FLOAT_KIND` arm
 # hands the value to it through `FloatPrintOperand`.
 #
-# The CONTAINER is still refused, for the shape `container_print_refusal`
-# names: a count this build does not know, a loop rather than a conversion.
-# Its message replaced the generic one that was FALSE about the source in the
-# same way the float's was, and the two sentences are the difference between
-# "this path cannot do it" and "you wrote something wrong".
+# The CONTAINER is RENDERED, and its rendering is a loop that emits text —
+# the open bracket, a `printf` per element, the close bracket — because the
+# count is a run-time fact and no format string can hold it. The decision of
+# WHAT the loop writes (which brackets, which separator, which element
+# conversion, and the shapes it still refuses with a sentence that says what
+# CPython prints) is `container_print_plan`, made in `print_arg_parts` once
+# so the two backends cannot disagree about a bracket. What stays refused are
+# the shapes the loop cannot render: a frame (a struct is a nested frame, not
+# a blob — `container_print_refusal`), a byte blob (CPython wraps it in
+# `bytearray(b'…')`, a text composition — `bytearray_print_refusal`), and the
+# element shapes whose text is not a conversion of the element's own word
+# (strings quote, floats round-trip, bytes wrap — see the plan's refusals).
 
 
 def container_print_refusal(backend: str, kind, node_name: str) -> str:
@@ -3688,6 +3701,683 @@ def container_print_refusal(backend: str, kind, node_name: str) -> str:
         f"emitted as the blob's address, which is what `%s` on that word would "
         f"print. Index it and print the elements, or `len()` it"
     )
+
+
+def container_shape_refusal(backend: str, kind, node_name: str) -> str:
+    """Why a `print` of a container whose brackets this build cannot name is
+    refused.
+
+    The kind says the word is a blob (`list:…`), and a list, a tuple, a set
+    and a dict all carry the same prefix — but CPython writes different
+    brackets for each, and for a dict a `key: value` pair instead of an
+    element, so the brackets have to come from the SOURCE: the literal that
+    spells the container, or the binding that named it. A call result, a `+`
+    of blobs and the like spell none of the four, and picking is guessing the
+    brackets of a value the source did not state — the same class of mistake
+    the whole section exists to stop, with a bracket instead of a digit.
+    """
+    return (
+        f"print() of a {node_name} is refused on the formal {backend} path "
+        f"(of kind {kind!r}): the value is a blob this path CAN read — a count "
+        f"and then the elements — and its rendering is a loop that emits its "
+        f"open bracket, one printf per element and its close bracket. But a "
+        f"list, a tuple, a set and a dict all classify as {kind!r}, and "
+        f"CPython writes different brackets for each (and for a dict a "
+        f"`key: value` pair), so the brackets have to come from the source "
+        f"and this expression spells none of the four. Print the container "
+        f"under the name that bound it, or index it and print the elements"
+    )
+
+
+def bytearray_print_refusal(backend: str, node_name: str) -> str:
+    """Why a `print` of a byte blob (`bytearray`) is refused.
+
+    CPython writes a WRAPPER — `bytearray(b'ab')`, not `ab` — and building
+    that wrapper around a run-time blob is a text composition: the element
+    bytes have to be read, escaped and put between `b'` and `'` with a count
+    this build does not know. That is exactly the buffer
+    `bugs/formal/FORMAL_string_composition_has_no_buffer.md` is about, and
+    the loop this path has emits fixed text around a conversion of a word —
+    it cannot compose one. The `bytes` LITERAL spelling of the same answer is
+    not refused (its bytes are a compile-time constant, so the whole wrapper
+    goes in the format string), which is what makes the two spellings differ:
+    the literal is decided, the name is not.
+    """
+    return (
+        f"print() of a {node_name} is refused on the formal {backend} path: "
+        f"CPython writes `bytearray(b'…')` for a byte blob — the bytes between "
+        f"a wrapper — and composing that wrapper around a run-time blob is a "
+        f"TEXT COMPOSITION, reading the elements, escaping them and joining "
+        f"them into text with a count this build does not know. The loop this "
+        f"path emits writes fixed text around a conversion of a word; it "
+        f"cannot compose one. Print the `bytes` LITERAL instead (its wrapper "
+        f"is a constant this path writes exactly), or `len()` the blob"
+    )
+
+
+def container_str_elem_refusal(backend: str, where: str) -> str:
+    """Why a string element of a printed container is refused.
+
+    CPython writes each string element QUOTED, with its own escape and quote
+    choice (`['a', 'b']`, and `["it's"]` where the apostrophe turns the quote
+    around), and the loop body is ONE block of code shared by every element:
+    it can hand the element's `char *` to `%s` — which writes `ab`, not
+    `'ab'` — or it would have to compose the quotes around each element's
+    run-time text, which is the buffer this path does not have. The two
+    renderings of one element differ, and the wrong one is the plausible one,
+    which is what this section refuses everywhere it appears.
+    """
+    return (
+        f"print() of a container is refused on the formal {backend} path "
+        f"because {where} hold(s) a string: CPython writes each string element "
+        f"QUOTED, with CPython's own escape and quote choice — `['a', 'b']`, "
+        f"and `\"it's\"` where the apostrophe turns the quote around — and "
+        f"the loop this path emits is one block of code shared by every "
+        f"element: it can hand each element to `%s`, which writes the bare "
+        f"text and no quotes (a plausible wrong line), or it would have to "
+        f"compose the quotes around each element's run-time text, and that "
+        f"is a text buffer this path does not have. Index it and print the "
+        f"elements, which print exactly"
+    )
+
+
+def container_float_elem_refusal(backend: str, where: str) -> str:
+    """Why a float element of a printed container is refused.
+
+    A float's text is computed — CPython's shortest-round-trip `repr`, by the
+    backend's `FLOAT_REPR_SYMBOL` helper into a 64-byte buffer (the float
+    half of this section) — and a loop element is evaluated for a COUNT this
+    build does not know, per element, inside a loop body that also owns its
+    own printf's argument slots. Buffer slots are reserved per print call
+    and numbered by the operand list the call machinery sees; a per-element
+    float inside a loop would need a slot the reservation cannot number. The
+    same float OUTSIDE the container is printed, by the helper, in the same
+    call — the refusal is the composition of the two, not the float.
+    """
+    return (
+        f"print() of a container is refused on the formal {backend} path "
+        f"because {where} hold(s) a float: a float prints by its shortest-"
+        f"round-trip `repr`, computed at run time by the backend's helper "
+        f"into a 64-byte buffer whose slot is reserved PER PRINT CALL and "
+        f"numbered by the call's own operand list — and a loop element is "
+        f"evaluated per element, for a count the call list cannot see, so "
+        f"its buffer would have no slot the reservation knows about. The "
+        f"same float outside the container prints in the same call; print "
+        f"the elements separately"
+    )
+
+
+def container_byte_elem_refusal(backend: str, where: str) -> str:
+    """Why a bytes element of a printed container is refused.
+
+    CPython writes a bytes element as its `repr` — `b'ab'`, a wrapper around
+    the escaped bytes — and the loop body is the one shared block of
+    `container_str_elem_refusal`: it can hand the element's `char *` to `%s`
+    (bare text, no wrapper) or it would have to compose the wrapper, which
+    is the buffer this path does not have. Same shape as the string element,
+    one wrapper instead of a pair of quotes.
+    """
+    return (
+        f"print() of a container is refused on the formal {backend} path "
+        f"because {where} hold(s) a `bytes` value: CPython writes a bytes "
+        f"element as its `repr` — `b'ab'`, the bytes between a wrapper — and "
+        f"the loop this path emits is one block of code shared by every "
+        f"element: it can hand the element to `%s`, which writes the bare "
+        f"bytes with no wrapper, or it would have to compose the wrapper "
+        f"around each element's run-time text, which is a text buffer this "
+        f"path does not have. Index it and print the elements"
+    )
+
+
+def container_mixed_refusal(backend: str, where: str, first: str, second: str) -> str:
+    """Why a container whose elements are of two render classes is refused.
+
+    The loop body is ONE block of code that runs for every element, so it
+    can render one class — a `%lld` of a word, a `True`/`False` select, a
+    nested loop of one bracket pair — and two classes are two bodies.
+    `[True, 1]` is the measured shape: CPython writes `[True, 1]`, and the
+    two uniform bodies this path could emit each get one of the two wrong
+    (`[1, 1]` for the int body, `[True, True]` for the bool body). Picking
+    per element would need a branch per element index in a body that runs
+    for a count this build does not know.
+    """
+    return (
+        f"print() of a container is refused on the formal {backend} path: "
+        f"{where} mix {first} and {second}, and the loop this path emits is "
+        f"ONE block of code that runs for every element, so it renders one "
+        f"kind of element — a conversion of the word, a `True`/`False` "
+        f"select, or a nested loop of one bracket pair — and two kinds are "
+        f"two bodies. Picking per element would branch on the element's "
+        f"INDEX inside a body that runs for a count this build does not "
+        f"know. Print the parts separately"
+    )
+
+
+def container_elem_refusal(backend: str, where: str, node_name: str) -> str:
+    """Why an element whose render class this build cannot name is refused.
+
+    The element is a value this build cannot classify — no kind from the
+    source, or a kind this file has no rendering for (a type TAG prints a
+    decimal where CPython writes `<class 'int'>`, which is
+    `test_formal_run.py`'s pinned divergence for a whole value, and it is
+    the same divergence inside a container). The alternative — the `%s` that
+    hands a word to a conversion of a different class — is the plausible
+    wrong line this section refuses everywhere.
+    """
+    return (
+        f"print() of a container is refused on the formal {backend} path: "
+        f"{where} include(s) a {node_name} whose kind this build cannot "
+        f"classify, and the loop this path emits renders one class of "
+        f"element per container — a conversion of the word, a `True`/"
+        f"`False` select, or a nested loop — so an element it cannot "
+        f"classify has no body. Annotate the element's name, or index it "
+        f"and print the elements"
+    )
+
+
+def container_elem_kind_refusal(backend: str, where: str) -> str:
+    """Why a container reached through a name whose element KIND the source
+    does not state is refused.
+
+    A bare `list` kind is "a container, and nothing here says what is in
+    it" — the honest answer `global_slot_kind` gives a blob a function fills
+    — and the loop body needs the element's class to choose its conversion.
+    Refused rather than defaulted to `%lld`, because a container of strings
+    printed as addresses is the measurement this section opened with.
+    """
+    return (
+        f"print() of a container is refused on the formal {backend} path: "
+        f"{where} have no element kind the source states — the container's "
+        f"kind is a bare `list`, which is a blob whose contents nothing "
+        f"declares — and the loop this path emits needs the element's class "
+        f"to choose its conversion. Bind the container to a literal of known "
+        f"elements, or index it and print the elements"
+    )
+
+
+def container_nested_refusal(backend: str, where: str, node_name: str) -> str:
+    """Why a container element reached through a `node_name` is refused.
+
+    The element is a blob — the kind says so — but a list, a tuple, a set
+    and a dict all carry the same kind, and the element here is a RUN-TIME
+    WORD loaded from the outer blob: there is no literal spelling its
+    brackets and no binding naming it, so the four cannot be told apart.
+    The top-level spellings are not refused for this reason precisely
+    because the source names them; the nested one the source left unnamed,
+    and guessing its brackets is the mistake this section refuses.
+    """
+    return (
+        f"print() of a container is refused on the formal {backend} path: "
+        f"{where} include(s) a container reached through a {node_name}, and "
+        f"that element is a run-time word the outer blob hands over — a "
+        f"list, a tuple, a set and a dict all classify the same way, so "
+        f"this build cannot tell which brackets CPython writes for it, and "
+        f"guessing would print one container's brackets around another's "
+        f"elements. Bind the inner container to a name of its own and "
+        f"print it, or print the outer's elements separately"
+    )
+
+
+def container_depth_refusal(backend: str, depth: int) -> str:
+    """Why a container nested past `PRINT_LOOP_MAX_DEPTH` is refused.
+
+    The loop is a nest of loops, one per bracket level, and the backend
+    reserves one pair of loop temporaries per level at allocation time — so
+    the depth is both the cap and the reservation's size, and a plan deeper
+    than the reservation would emit a loop whose temporaries have no home.
+    Refused at the plan with the number named rather than silently
+    truncated, which would drop the tail of the line.
+    """
+    return (
+        f"print() of a container is refused on the formal {backend} path: "
+        f"its nesting reaches depth {depth} and the loop this path emits is "
+        f"a nest of loops — one per bracket level — with one pair of loop "
+        f"temporaries reserved per level, of which {PRINT_LOOP_MAX_DEPTH} "
+        f"is all this path reserves. Flatten the nesting, or print the "
+        f"levels separately"
+    )
+
+
+def dict_comprehension_print_refusal(backend: str) -> str:
+    """Why a `print` of a dict COMPREHENSION is refused.
+
+    A dict comprehension's kind carries its KEY's kind — the value is built
+    at run time and states no kind of its own (`kind_of`'s dict arm says so
+    — the plan cannot read the values' class off the kind, and the
+    comprehension has no initializer literal the keys could be read from
+    either: its pairs are built in a loop, not written by a literal. Both
+    halves of the pair walk would be guessed. The LIST spelling of the same
+    comprehension is not refused — its element is the one expression the
+    source spells, and its kind is read from it.
+    """
+    return (
+        f"print() of a dict comprehension is refused on the formal {backend} "
+        f"path: its pairs are built in a loop rather than written by a "
+        f"literal, so neither half of the pair has a kind the source states "
+        f"— the comprehension's kind carries only its KEY's kind, and the "
+        f"value is computed per iteration — and the loop this path emits "
+        f"needs both to choose its conversions. Bind the comprehension to a "
+        f"name and print a literal of the same shape, or iterate and print "
+        f"the pairs"
+    )
+
+
+def container_dict_pair_refusal(backend: str, where: str) -> str:
+    """Why a dict whose keys or values are themselves containers is refused.
+
+    The pair walk can render a key and a value each with ONE conversion of
+    the pair's word (plus the `: ` between them); a container key or value
+    would need a nested loop INSIDE the pair body, around a word the pair
+    walk loaded as a scalar, and the pair stride (16 bytes, key then value)
+    is not the element stride the nested walk would assume. The scope of
+    the first landing of this fix is scalar keys and values, and the
+    refusal names the alternative rather than emitting a plausible line.
+    """
+    return (
+        f"print() of a dict is refused on the formal {backend} path because "
+        f"{where} hold(s) a container: the pair walk this path emits renders "
+        f"a key and a value each with one conversion of the pair's own word, "
+        f"and a container under a key (or a key that is one) needs a nested "
+        f"loop where the walk reads a scalar. Print the value under the key "
+        f"separately — `d[<key>]` prints exactly"
+    )
+
+
+# ── `print` of a container: the plan the loop emits ─────────────────────
+#
+# The DOC the measurement that opened this came from said the next step is
+# a loop emitting text and does NOT need a buffer: the emitters can already
+# emit a loop and a `printf` per element, so `print(xs)` over a blob lowers
+# to the open bracket, a per-element printf and the close bracket. That is
+# this section, and the one decision the two backends must not make twice —
+# which brackets, which separator, which element conversion, and the shapes
+# it refuses — is made here, once, into a PLAN the backends walk.
+#
+# A plan is a tree with two nodes:
+#
+#   ("cont", shape, open, close, key_plan, elem_plan)
+#       a container: `shape` is `list`/`tuple`/`set`/`dict`, the brackets are
+#       CPython's pair for it, `key_plan` is the key's plan for a dict and
+#       None for the other three, and `elem_plan` the plan of one element —
+#       ONE plan, because the loop body is one block of code shared by every
+#       element, which is what the uniformity below enforces;
+#   ("leaf", conv, is_bool)
+#       an element the body renders with one printf: `conv` is the
+#       conversion (`%lld`, `%s`) and `is_bool` says the word is a 0/1 that
+#       CPython spells `True`/`False` — the render is a select between the
+#       two texts, not a number.
+#
+# The UNIFORMITY is the safety rule, and it is over the WHOLE element tree,
+# brackets included: the body runs for a count this build does not know, so
+# it can render one class of element and two are two bodies (`[True, 1]` is
+# the shape — `container_mixed_refusal`), and a mixed bracket in one level
+# (`[[1], (2,)]`) is the same mismatch one level down. A level whose
+# elements are all containers recurses, and the recursion's plans have to
+# agree with each other the same way — `[[1], [2]]` is one plan twice.
+#
+# WHAT IS REFUSED is the one element or container whose text is not a
+# conversion of its own word: strings (quoted), floats (computed), bytes
+# (wrapped) — `container_{str,float,byte}_elem_refusal` — a nested
+# container reached through a name (no brackets to name it —
+# `container_nested_refusal`), a dict comprehension (no initializer to read
+# the pairs from — `dict_comprehension_print_refusal`) and a container
+# nested past the reservation (`container_depth_refusal`). Each refusal
+# names what CPython writes and what this path would write instead, because
+# the alternative to refusing a shape is printing a plausible line that is
+# not CPython's.
+PRINT_LOOP_MAX_DEPTH = 8
+
+
+class ContainerPrintOperand:
+    """A `print` operand that is a CONTAINER, rendered by a loop of `printf`s.
+
+    The marker the operand slot of `print_arg_parts`'s answer carries, the
+    twin of `FloatPrintOperand` for the third answer: not a fragment (its
+    text is a count long) and not a conversion of one word (it is a loop),
+    so the backends each supply the machine half — the loop's instructions,
+    its labels, the printf per element — while the PLAN is made here once,
+    in `container_print_plan`, and both backends walk the same tree rather
+    than each inventing its own brackets. `expr` is the expression whose
+    blob address the loop walks (materialized under container context, the
+    `_emit_for_list` way), `plan` its plan tree and `kind` what `ValueKinds`
+    classified it as, so a site that still refuses can name both.
+    """
+
+    def __init__(self, expr, plan, kind):
+        self.expr = expr
+        self.plan = plan
+        self.kind = kind
+
+
+# The element's render class, or the refusal: asked of one element of a
+# container being planned, and the answer is what the uniformity below
+# unifies over.
+def _container_elem_class(node, where: str, *, kind_of, container_shape=None,
+                          backend: str) -> str:
+    if isinstance(node, F.BoolLiteral):
+        return "bool"
+    if isinstance(node, F.IntLiteral):
+        return "int"
+    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return "cont:" + {"ListExpr": "list", "TupleExpr": "tuple",
+                          "SetExpr": "set"}[type(node).__name__]
+    if isinstance(node, F.DictExpr):
+        return "cont:dict"
+    if isinstance(node, F.Comprehension):
+        return ("cont:dict" if getattr(node, "kind", "list") == "dict"
+                else "cont:list")
+    if isinstance(node, F.StringLiteral):
+        if getattr(node, "is_bytes", False):
+            raise CodegenError(container_byte_elem_refusal(backend, where))
+        raise CodegenError(container_str_elem_refusal(backend, where))
+    if isinstance(node, F.FloatLiteral):
+        raise CodegenError(container_float_elem_refusal(backend, where))
+    kind = kind_of(node) if kind_of else None
+    if kind == FLOAT_KIND:
+        raise CodegenError(container_float_elem_refusal(backend, where))
+    if string_operand_is_string(kind):
+        raise CodegenError(container_str_elem_refusal(backend, where))
+    if kind is not None and is_byte_blob_kind(kind):
+        raise CodegenError(container_byte_elem_refusal(backend, where))
+    if kind == TYPE_KIND:
+        # A type TAG is a word that prints as a decimal where CPython writes
+        # `<class 'int'>` — the pinned `type_value` divergence for a whole
+        # value, and the same divergence one element in.
+        raise CodegenError(
+            container_elem_refusal(backend, where, type(node).__name__))
+    if is_number_kind(kind):
+        return "int"
+    if is_container_kind(kind):
+        if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr,
+                             F.Comprehension)):
+            # A LITERAL spelling names its own brackets, and the nested plan
+            # walks it — the only element this arm answers with a loop.
+            shape = container_shape(node) if container_shape else None
+            if shape is None:
+                raise CodegenError(container_nested_refusal(
+                    backend, where, type(node).__name__))
+            return "cont:" + shape
+        # A NAME or a call RESULT of container kind is a run-time word the
+        # outer blob hands over, with no literal spelling its brackets here:
+        # the nested loop would have to find the element's own plan and
+        # brackets from a second lookup, and a mismatch between that lookup
+        # and the binding is a plausible wrong answer — the shape the
+        # refusal exists for, so the element is refused on the same terms.
+        node_name = ("name" if isinstance(node, F.IdentExpr)
+                     else type(node).__name__)
+        raise CodegenError(container_nested_refusal(backend, where, node_name))
+    raise CodegenError(
+        container_elem_refusal(backend, where, type(node).__name__))
+
+
+def _container_elem_plan(elems: list, where: str, depth: int, *, kind_of,
+                         container_shape=None, backend: str):
+    """The UNIFORM plan of `elems`, one element plan they all share.
+
+    The classes are collected over every element — nested containers
+    included, and an empty container literal contributes no class because
+    its body never runs, so `[[1], []]` is the int plan twice rather than
+    a mismatch — and two classes is the mixed refusal. The int conversion
+    is `%lld`, the SIGNED default: a loop element is a word the blob hands
+    over and this path's word prints signed (a bare `print(x)` for an
+    unannotated `x` is `%lld` on the same evidence), so the element takes
+    the same default rather than a per-element signedness it cannot have —
+    the element is a load, not an expression the type table can be asked of.
+    """
+    classes = []
+    for el in elems:
+        c = _container_elem_class(el, where, kind_of=kind_of,
+                                  container_shape=container_shape,
+                                  backend=backend)
+        if c.startswith("cont:") and _container_elem_count(el) == 0:
+            continue  # an empty container's body never runs
+        if not classes:
+            classes.append(c)
+        elif c != classes[0]:
+            raise CodegenError(container_mixed_refusal(
+                backend, where, classes[0].replace("cont:", "a container"),
+                c.replace("cont:", "a container")))
+    if not classes:
+        # Nothing constrains the body (no elements, or empty containers
+        # only): a leaf that never runs, under the outer brackets' loop.
+        return ("leaf", "%lld", False)
+    cls = classes[0]
+    if cls == "bool":
+        # The word is a 0/1 CPython spells True/False — a select of the two
+        # texts, not a number. A name-bound list of bools does not get this:
+        # its kind is `list:int` (a Bool's kind IS int) and the element is a
+        # load with no declaration naming it, so it prints 0/1 — the
+        # documented residual, the declaration being the evidence the top
+        # level renders on and a loop element's load has none.
+        return ("leaf", "%s", True)
+    if cls == "int":
+        return ("leaf", "%lld", False)
+    # cont:<shape> — the elements are all containers of one shape, and the
+    # nested plan has to agree across them the same way: the body's nested
+    # loop is one loop, and `[[1], ["a"]]` is a nested mismatch the element
+    # classes alone would miss (both are containers, of one shape each).
+    if depth + 1 > PRINT_LOOP_MAX_DEPTH:
+        raise CodegenError(container_depth_refusal(backend, depth + 1))
+    inner_shape = cls.split(":", 1)[1]
+    plans = []
+    for el in elems:
+        if _container_elem_count(el) == 0:
+            continue  # it takes whatever plan the non-empty ones choose
+        plans.append(_container_node_plan(
+            el, inner_shape, depth + 1, kind_of=kind_of,
+            container_shape=container_shape, backend=backend))
+    if not plans:
+        return ("cont", inner_shape) + _container_brackets(inner_shape) + (None,
+                                                                           ("leaf", "%lld", False))
+    first = plans[0]
+    if any(p != first for p in plans):
+        raise CodegenError(container_mixed_refusal(
+            backend, where, "one shape of nested container",
+            "another shape of nested container"))
+    return first
+
+
+def _container_elem_count(node) -> int:
+    """The number of elements a container literal node spells.
+
+    Only literals count — the class that reaches this is `cont:` from a
+    node the plan walks, and a node the source spells is a literal (a name
+    element of container kind is the nested refusal, not a count). A dict
+    literal's count is its pairs; the rest their `elements`.
+    """
+    if isinstance(node, F.DictExpr):
+        return len(node.pairs or [])
+    return len(node.elements or [])
+
+
+def _container_brackets(shape: str):
+    """CPython's bracket pair for a container shape — the one table the plan
+    and the refusal messages read, so a new shape joins by naming its pair
+    here and nowhere else."""
+    return {"list": ("[", "]"), "tuple": ("(", ")"),
+            "set": ("{", "}"), "dict": ("{", "}")}[shape]
+
+
+def _container_node_plan(node, shape: str, depth: int, *, kind_of,
+                         container_shape=None, backend: str):
+    """The plan of one container LITERAL `node` known to be of `shape`."""
+    open_b, close_b = _container_brackets(shape)
+    if shape == "dict":
+        keys = [p[0] for p in (node.pairs or []) if len(p) >= 2]
+        vals = [p[1] for p in (node.pairs or []) if len(p) >= 2]
+        key_plan = _dict_scalar_plan(keys, "its keys", depth, kind_of=kind_of,
+                                     container_shape=container_shape,
+                                     backend=backend)
+        val_plan = _dict_scalar_plan(vals, "its values", depth, kind_of=kind_of,
+                                     container_shape=container_shape,
+                                     backend=backend)
+        return ("cont", "dict", open_b, close_b, key_plan, val_plan)
+    elem_plan = _container_elem_plan(
+        node.elements or [], "its elements", depth, kind_of=kind_of,
+        container_shape=container_shape, backend=backend)
+    return ("cont", shape, open_b, close_b, None, elem_plan)
+
+
+def _dict_scalar_plan(nodes: list, where: str, depth: int, *, kind_of,
+                      container_shape=None, backend: str):
+    """The UNIFORM SCALAR plan of a dict's keys or values.
+
+    A dict's pair walk renders each half with one conversion of the pair's
+    word — `key: value` — so a container under either half is the nested
+    loop the pair body is not built for (`container_dict_pair_refusal`),
+    and a string or float or bytes under it is the element refusal of this
+    section asked of the pair's half rather than a list's element.
+    """
+    classes = []
+    for node in nodes:
+        c = _container_elem_class(node, where, kind_of=kind_of,
+                                  container_shape=container_shape,
+                                  backend=backend)
+        if c.startswith("cont:"):
+            raise CodegenError(container_dict_pair_refusal(backend, where))
+        if not classes:
+            classes.append(c)
+        elif c != classes[0]:
+            raise CodegenError(container_mixed_refusal(
+                backend, where, classes[0], c))
+    if not classes:
+        return ("leaf", "%lld", False)
+    return {"bool": ("leaf", "%s", True), "int": ("leaf", "%lld", False)}[
+        classes[0]]
+
+
+def _name_kind_elem_plan(kind, where: str, depth: int, *, kind_of,
+                         container_shape=None, backend: str):
+    """The plan of the ELEMENTS of a container reached through a KIND.
+
+    The kind chain, asked of a name (or a comprehension) rather than a
+    literal the plan can walk: the element's class comes off the kind, and
+    every shape the literal walk refuses is refused here on the same terms —
+    a string's kind quotes, a float's is computed, a byte blob's is wrapped,
+    a container's kind has no brackets to name it (`container_nested_
+    refusal`: a list, a tuple, a set and a dict are one kind, and the
+    element is a run-time word no binding names), and a bare `list` is a
+    blob whose contents nothing declares.
+    """
+    if kind is None:
+        raise CodegenError(container_elem_kind_refusal(backend, where))
+    if kind == FLOAT_KIND:
+        raise CodegenError(container_float_elem_refusal(backend, where))
+    if string_operand_is_string(kind):
+        raise CodegenError(container_str_elem_refusal(backend, where))
+    if is_byte_blob_kind(kind):
+        raise CodegenError(container_byte_elem_refusal(backend, where))
+    if kind == TYPE_KIND:
+        raise CodegenError(container_elem_refusal(backend, where, "a name"))
+    if is_number_kind(kind):
+        # The SIGNED default, on the evidence `_container_elem_plan` states
+        # for a literal element: a word this path prints as a number is
+        # printed signed, and a `List[UInt64]` is a bare `list` kind on this
+        # path (`declared_type_kind` reads no element off the brackets), so
+        # a name-bound list of unsigned words is the elem-kind refusal
+        # above, not a silent `%llu`.
+        return ("leaf", "%lld", False)
+    if is_container_kind(kind):
+        raise CodegenError(container_nested_refusal(
+            backend, where, "name"))
+    raise CodegenError(container_elem_kind_refusal(backend, where))
+
+
+def container_print_plan(e, kind, *, kind_of, container_shape=None,
+                         dict_init_of=None, dict_key_kind=None,
+                         backend: str = "this path"):
+    """The rendering plan of a container `print` operand, or the refusal.
+
+    Called from `print_arg_parts` for an operand `kind_of` classifies as a
+    container — the arm the generic message used to refuse — and the answer
+    is the plan tree the backends' loops walk. The SHAPE is the emitter's
+    fact, asked through `container_shape`: the literal's own AST (the four
+    spellings name their own brackets), the name tables for a name (a dict,
+    a set, a tuple, a list, in that precedence — one name is one shape and
+    the tables are mutually exclusive marks), the module slot's initializer
+    for a global the function does not bind, and None for a shape the
+    source does not name — which is the `container_shape_refusal`.
+
+    A dict asks its KEYS separately, because a pair blob's two halves are
+    two different words (`dict_literal_key_value_kind`'s opening): the keys
+    off the initializer literal the binding wrote (a literal is its own
+    initializer), or off `dict_key_kind` for a name — the same question the
+    for-walk asks of the same name, through the one method — and the values
+    off the kind, which is the value's kind. The pair walk renders each
+    half with one conversion, so both must be scalar.
+    """
+    shape = container_shape(e) if container_shape else None
+    if shape is None:
+        if kind == FRAME_KIND:
+            # A struct is a nested FRAME, not a blob: the loop would walk a
+            # frame's fields as elements, and that is the shape the original
+            # refusal names — kept for it.
+            raise CodegenError(
+                container_print_refusal(backend, kind, type(e).__name__))
+        if is_byte_blob_kind(kind):
+            raise CodegenError(
+                bytearray_print_refusal(backend, type(e).__name__))
+        raise CodegenError(
+            container_shape_refusal(backend, kind, type(e).__name__))
+    if shape == "dict" and isinstance(e, F.Comprehension):
+        raise CodegenError(dict_comprehension_print_refusal(backend))
+    if shape == "dict":
+        init = (e if isinstance(e, F.DictExpr)
+                else dict_init_of(e) if dict_init_of else None)
+        if init is not None:
+            return _container_node_plan(init, "dict", 0, kind_of=kind_of,
+                                        container_shape=container_shape,
+                                        backend=backend)
+        key_plan = _name_kind_elem_plan(
+            dict_key_kind(e) if dict_key_kind else None,
+            "its keys", 0, kind_of=kind_of, container_shape=container_shape,
+            backend=backend)
+        val_plan = _name_kind_elem_plan(
+            list_elem_kind(kind), "its values", 0, kind_of=kind_of,
+            container_shape=container_shape, backend=backend)
+        return ("cont", "dict", "{", "}", key_plan, val_plan)
+    if isinstance(e, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return _container_node_plan(e, shape, 0, kind_of=kind_of,
+                                    container_shape=container_shape,
+                                    backend=backend)
+    elem_plan = _name_kind_elem_plan(
+        list_elem_kind(kind) if kind else None, "its elements", 0,
+        kind_of=kind_of, container_shape=container_shape, backend=backend)
+    open_b, close_b = _container_brackets(shape)
+    return ("cont", shape, open_b, close_b, None, elem_plan)
+
+
+def print_container_loop_flags(fn) -> bool:
+    """Whether `fn` prints anything that is not a value literal.
+
+    THE GATE for the `_ppb{i}`/`_ppi{i}` loop temporaries the backends
+    reserve in `_collect_var_names`, and it is a SUPERSET of what emits: a
+    loop is only emitted for an operand a container, and a container is
+    only ever a non-literal (a name, a comprehension, a call — the value
+    literals classify as words and never reach the container arm), so a
+    `print` of nothing but `Int`/`Float`/`Bool`/`String`/`None` literals
+    emits no loop and needs no temporary, while any other argument MIGHT
+    be a container and reserves. `None` spelled as the name it parses to
+    (an `IdentExpr`) also reserves, which is the permissive direction: an
+    unused reserved temporary is a spare local, and a missing one is a loop
+    whose index has no home.
+
+    Asked of the whole function with `iter_nodes` — the shared walker —
+    because a `print` in any position of the body (a statement, a condition,
+    a default) emits in the same function, and the module-level spelling
+    prints in the wrapped module body, which is a function the same way.
+    """
+    for node in iter_nodes(getattr(fn, "body", None) or []):
+        if not (isinstance(node, F.CallExpr)
+                and isinstance(node.func, F.IdentExpr)
+                and node.func.name == "print"):
+            continue
+        for a in node.args or []:
+            if not isinstance(a, (F.IntLiteral, F.FloatLiteral,
+                                  F.BoolLiteral, F.StringLiteral,
+                                  F.NoneLiteral)):
+                return True
+    return False
 
 
 
@@ -3733,35 +4423,54 @@ def container_print_refusal(backend: str, kind, node_name: str) -> str:
 # exists to stop.  For the same reason a value this build knows holds `None` is
 # asked before it too: `n = None; print(n)` classifies as an integer and used
 # to print `0`.
-def print_call_spelling(args, *, no_value_callee=None, kind_of=None,
-                        is_signed=None, is_bool=None, is_none=None,
-                        is_bytes=None, backend="this path"):
-    """`(fragments, operands)` for `print(*args)` — see the section above.
+def print_arg_parts(args, *, no_value_callee=None, kind_of=None,
+                    is_signed=None, is_bool=None, is_none=None,
+                    is_bytes=None, container_shape=None, dict_init_of=None,
+                    dict_key_kind=None, backend="this path"):
+    """One PART per `print(*args)` argument, in order — the shared loop.
 
-    A fragment is a conversion (`%s`, `%lld`, `%llu`) or literal text that has
-    already been through `print_literal`; `print_format` interleaves `sep`
-    between them.  The two lists keep the relation the language has: a literal
-    operand contributes a fragment and NO operand, a value contributes a
-    conversion and ONE operand — because passing the literals as well would ask
-    printf for fewer arguments than it was handed and everything after the first
-    literal would be read one slot late.
+    `print_call_spelling`'s loop, factored into parts so that the projection
+    to ONE format string (the old answer) and the loop emission (the
+    container's answer) read the same decision: which operand is a fragment
+    and which is a value, that a `bool` is `True`/`False` rather than the
+    word's own `1`/`0`, that `None` is the four characters rather than a
+    `0`, that a `bytes` literal is CPython's `repr()` of it, and — new — that
+    a container is a LOOP, planned once here by `container_print_plan`
+    rather than refused. A part is one of:
 
-    Raises `CodegenError` for the shapes this path cannot render, each with
-    a message that says what CPython prints and what is missing here.
+      ("text", escaped)          — a fragment, already through `print_literal`
+      ("value", conv, operand)   — a conversion and the expression it converts
+      ("float", FloatPrintOperand) — a double the helper renders
+      ("container", ContainerPrintOperand) — the loop, and its plan
+
+    The ORDER of the arms is the order of how much is DECIDED, cheapest and
+    most certain first, and it is load-bearing in one place: a `bool` must be
+    asked about BEFORE the kind switch, because its kind is `INT_KIND` and the
+    kind switch would answer `%lld` for it — the wrong number this whole
+    section exists to stop.  For the same reason a value this build knows
+    holds `None` is asked before it too: `n = None; print(n)` classifies as an
+    integer and used to print `0`.
+
+    The hooks are the same ones `print_call_spelling` took, OPTIONAL and
+    `None` the permissive direction, plus the three the container plan asks:
+    `container_shape` (the brackets, the emitter's tables), `dict_init_of`
+    (the dict literal a name bound) and `dict_key_kind` (a dict name's keys,
+    the for-walk's own reader).
     """
-    frags, operands = [], []
+    parts = []
     # The ordinal of a float AMONG THE FLOATS of this print — `index` on the
-    # `FloatPrintOperand` — and the operand list's own length, which is its
+    # `FloatPrintOperand` — and the operand count so far, which is its
     # `position`. Both are needed by the backends' buffer arithmetic (see the
-    # class's docstring), and the operand list is the one this loop builds, so
+    # class's docstring), and the parts list is the one this loop builds, so
     # this loop is the one place both are known together.
     float_index = 0
+    n_values = 0
     for a in args:
         if isinstance(a, F.StringLiteral):
             # `print_literal` renders a `str` literal's text and a `bytes`
             # literal's CPython `repr()`, and refuses the one `bytes` literal
             # whose bytes this path does not hold.
-            frags.append(print_literal(a))
+            parts.append(("text", print_literal(a)))
             continue
         callee = no_value_callee(a) if no_value_callee else None
         if callee is not None:
@@ -3775,7 +4484,7 @@ def print_call_spelling(args, *, no_value_callee=None, kind_of=None,
         if const is None and is_none is not None and is_none(a):
             const = NONE_TEXT
         if const is not None:
-            frags.append(print_literal_text(const))
+            parts.append(("text", print_literal_text(const)))
             continue
         # A bool that is a VALUE and not a constant — a comparison, a `not`, a
         # name a declaration says is one, a call whose callee is declared
@@ -3788,8 +4497,8 @@ def print_call_spelling(args, *, no_value_callee=None, kind_of=None,
         # for names only, because a CALL and a FIELD READ are both bools this
         # build can decide and both are decided in the emitter's tables.
         if is_bool is not None and (bool_valued_shape(a) or is_bool(a)):
-            frags.append("%s")
-            operands.append(bool_print_operand(a))
+            parts.append(("value", "%s", bool_print_operand(a)))
+            n_values += 1
             continue
         # A `bytes`, which is `STR_KIND` and would print its bare text through
         # the arm below. Asked here, after the bool arm and before the kind
@@ -3802,12 +4511,15 @@ def print_call_spelling(args, *, no_value_callee=None, kind_of=None,
             lit = bytes_literal_of(a)
             if lit is None:
                 raise CodegenError(bytes_name_print_refusal(backend, a))
-            frags.append(print_literal_text("b" + bytes_repr_body(lit.value)))
+            parts.append(("text", print_literal_text(
+                "b" + bytes_repr_body(lit.value))))
             continue
         kind = kind_of(a) if kind_of else None
         if string_operand_is_string(kind):
-            frags.append("%s")
-        elif kind == FLOAT_KIND:
+            parts.append(("value", "%s", a))
+            n_values += 1
+            continue
+        if kind == FLOAT_KIND:
             # Its own arm, and it comes BEFORE the generic refusal below for
             # the reason that refusal was FALSE about a float: the model
             # classifies one as `FLOAT_KIND` and `is_number_kind` says no. The
@@ -3816,27 +4528,90 @@ def print_call_spelling(args, *, no_value_callee=None, kind_of=None,
             # decimal that parses back to the same 64 bits, in CPython's
             # own notation — and the slot the `%s` reads is that helper's
             # buffer, not the double's own word.
-            frags.append("%s")
-            operands.append(FloatPrintOperand(a, float_index, len(operands)))
+            parts.append(("float", FloatPrintOperand(a, float_index, n_values)))
             float_index += 1
+            n_values += 1
             continue
-        elif is_number_kind(kind):
+        if is_number_kind(kind):
             # `is_number_kind` and not `== INT_KIND`: a type TAG is a word, so
             # `print(t)` for `t = bool` prints the tag, which is what it
             # printed before `TYPE_KIND` existed (`t` was then an `int` by
             # `_value_kind`'s default).
-            frags.append("%lld" if (is_signed and is_signed(a)) else "%llu")
-        elif is_container_kind(kind):
-            raise CodegenError(
-                container_print_refusal(backend, kind, type(a).__name__))
-        else:
-            raise CodegenError(
-                f"print() cannot tell whether {type(a).__name__} is a "
-                f"string or a number on the formal {backend} path, and "
-                f"guessing would print an address as if it were text (or "
-                f"a number as if it were text). Annotate the name, or "
-                f"print a literal, or bind it to a literal first")
-        operands.append(a)
+            parts.append(("value",
+                          "%lld" if (is_signed and is_signed(a)) else "%llu",
+                          a))
+            n_values += 1
+            continue
+        if is_container_kind(kind):
+            # THE ARM the refusal used to be: a container is a count this
+            # build does not know, so its rendering is a loop — planned here,
+            # once, into the marker the backends' loops walk, with the plan's
+            # own refusals for the shapes it does not render (the messages
+            # name what CPython writes for each).
+            plan = container_print_plan(
+                a, kind, kind_of=kind_of, container_shape=container_shape,
+                dict_init_of=dict_init_of, dict_key_kind=dict_key_kind,
+                backend=backend)
+            parts.append(("container", ContainerPrintOperand(a, plan, kind)))
+            continue
+        raise CodegenError(
+            f"print() cannot tell whether {type(a).__name__} is a "
+            f"string or a number on the formal {backend} path, and "
+            f"guessing would print an address as if it were text (or "
+            f"a number as if it were text). Annotate the name, or "
+            f"print a literal, or bind it to a literal first")
+    return parts
+
+
+def print_call_spelling(args, *, no_value_callee=None, kind_of=None,
+                        is_signed=None, is_bool=None, is_none=None,
+                        is_bytes=None, container_shape=None,
+                        dict_init_of=None, dict_key_kind=None,
+                        backend="this path"):
+    """`(fragments, operands)` for `print(*args)` — see the section above.
+
+    A fragment is a conversion (`%s`, `%lld`, `%llu`) or literal text that has
+    already been through `print_literal`; `print_format` interleaves `sep`
+    between them.  The two lists keep the relation the language has: a literal
+    operand contributes a fragment and NO operand, a value contributes a
+    conversion and ONE operand — because passing the literals as well would ask
+    printf for fewer arguments than it was handed and everything after the first
+    literal would be read one slot late.
+
+    THE PROJECTION of `print_arg_parts` onto that one call: the decision is
+    made in the parts loop (the container included — its plan is made there),
+    and this function is the answer for the caller that renders a `print` as
+    ONE `printf`, which is every caller but the loop. A container part in that
+    projection is refused, because one format string cannot hold a count —
+    the shape `container_print_refusal` names — and the loop is the answer,
+    which the emitter's `print_arg_parts` call makes directly. The function
+    keeps its name and signature for the callers that read it that way, and
+    the container arm is defensive: no in-tree caller passes a container here.
+
+    Raises `CodegenError` for the shapes this path cannot render, each with
+    a message that says what CPython prints and what is missing here.
+    """
+    parts = print_arg_parts(
+        args, no_value_callee=no_value_callee, kind_of=kind_of,
+        is_signed=is_signed, is_bool=is_bool, is_none=is_none,
+        is_bytes=is_bytes, container_shape=container_shape,
+        dict_init_of=dict_init_of, dict_key_kind=dict_key_kind,
+        backend=backend)
+    frags, operands = [], []
+    for part in parts:
+        tag = part[0]
+        if tag == "text":
+            frags.append(part[1])
+        elif tag == "value":
+            frags.append(part[1])
+            operands.append(part[2])
+        elif tag == "float":
+            frags.append("%s")
+            operands.append(part[1])
+        else:  # "container" — one format string cannot hold a count
+            op = part[1]
+            raise CodegenError(container_print_refusal(
+                backend, op.kind, type(op.expr).__name__))
     return frags, operands
 
 

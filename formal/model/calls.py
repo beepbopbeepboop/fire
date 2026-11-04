@@ -1525,6 +1525,19 @@ class ValueKinds:
             return dict_literal_key_kind(self._dict_inits.get(iterable.name))
         return None
 
+    def dict_key_kind(self, iterable):
+        """The KEYS of a dict, asked from outside the class — the public half
+        of `_iterable_dict_key_kind`.
+
+        The for-walk asks it of its own iterable through the private method;
+        `print`'s container plan asks it of a NAME bound to a dict whose
+        values it takes from `list_elem_kind`, because a pair blob's two halves
+        are two different words (`dict_literal_key_value_kind`'s opening
+        sentence) and the plan needs each kind separately. One method, two
+        callers, because the answer has to be the same question either way a
+        reader arrives at it."""
+        return self._iterable_dict_key_kind(iterable)
+
     def _element_kind_in_flow(self, elems):
         """The element kind of a container literal, resolving NAME elements.
 
