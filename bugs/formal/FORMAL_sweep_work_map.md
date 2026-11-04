@@ -2,6 +2,18 @@
 
 **Status:** FIXED — consolidated into this single document with an index of rounds (§3). The formal sweep series is now one document per `test_suite.py::test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds`.
 
+**2026-11-04 (`work/bug-formal-formal-sweep-work-map-7329`):** the pin the
+line above cites was DEFINED and never CALLED — `test_suite.py`'s `main()`
+did not call it, nothing else does, and it ran on no gate while this Status
+line named it as the fix. `test_formal_sweep_work_map_index_tags_only_from_
+section3` went the same way one commit later, committed with the words
+"Add a regression test". Both are called now, with the asserts the second
+carried on arrival converted to the checks the rest of that file runs, and
+`test_every_test_in_this_file_is_called_from_main` is the regression test:
+a `test_*` function in `test_suite.py` that is not in `main()`'s call list
+fails the suite, so a guard cannot go dead again while a Status line reads
+as live.
+
 **This is the ONE home for the formal sweep series.** It replaces twenty-one
 per-round work maps, which between them were 9 527 lines and grew by ~500 lines
 per round while every open item in them was filed as its own document — so the

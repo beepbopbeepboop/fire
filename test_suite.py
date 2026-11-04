@@ -6071,13 +6071,22 @@ def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
 
 
 def test_formal_sweep_work_map_index_tags_only_from_section3():
-    """The index tags must come only from §3, not from other tables in the doc."""
+    """The index tags must come only from §3, not from other tables in the doc.
+
+    Called from `main()` alongside the pin it protects: it was committed as
+    asserts, and an assert that fails inside `main()`'s loop stops the whole
+    run with a traceback instead of a named, counted failure, so the four
+    asserts this carried on arrival are `check()` calls now, with the same
+    conditions.
+    """
     import re
     index = open(os.path.join(HERE, 'bugs', 'formal', 'FORMAL_sweep_work_map.md'),
                  encoding='utf-8').read()
     m3 = re.search(r'^## 3\..*?(?=^## \d+\.|\Z)', index, re.M | re.S)
-    assert m3, 'section 3 missing'
-    section3 = m3.group(0)
+    check('sweep map index: §3, the round index, exists', m3 is not None,
+          'a citation of a round resolves into the index, and a document '
+          'without one is the per-round cluster without its single home')
+    section3 = m3.group(0) if m3 else ''
     spurious = ['importlib', 'collections', 'itertools', 'copy', 'unittest',
                 'bootstrap-validate.mojo', 'std/builtin/float_literal.mojo']
     tags_all = set()
@@ -6091,10 +6100,114 @@ def test_formal_sweep_work_map_index_tags_only_from_section3():
         if m:
             tags_s3.add(m.group(1))
     # The fix: only section 3 tags are valid
-    assert tags_s3.isdisjoint(set(spurious)), 'spurious tags must not come from §3'
-    assert tags_s3.issuperset({'b14', 'b13'}), 'core round tags missing from §3'
+    check('sweep map index: a spurious tag is not a round tag — §3 holds '
+          'only the rounds',
+          tags_s3.isdisjoint(set(spurious)),
+          f'{sorted(tags_s3 & set(spurious))} is a module name or a file, '
+          f'not a round, in the index column a citation resolves into')
+    core = {'b14', 'b13'}
+    check('sweep map index: the core round tags are still rows',
+          tags_s3.issuperset(core),
+          f'{sorted(core - tags_s3)} is gone from the index the citations '
+          f'resolve into')
     # No spurious tags leak outside §3
-    assert not (tags_all & set(spurious)), 'spurious tags must not appear outside §3'
+    check('sweep map index: no backticked first cell outside §3 reads as a '
+          'round tag',
+          not (tags_all & set(spurious)),
+          f'{sorted(tags_all & set(spurious))} sits in a table outside §3; '
+          f'the tag reader scans §3, and a first-column backtick out there '
+          f'is how this document once printed a module name where a round '
+          f'was meant')
+
+
+def _uncalled_and_ghost_tests(source):
+    """`(defined, called)` for one `test_suite.py`-shaped source, read the way
+    the self-check below reads its own file.
+
+    One reader for the live file and for the check's fixture, because a second
+    reader in the fixture is a second copy of the question this check exists
+    to answer. `defined` is the top-level `test_*` functions; `called` is the
+    names `main()`'s body references, which is the whole of the call list:
+    the list is one `for fn in (...)`, so a name is called if and only if it
+    is in that tuple.
+    """
+    tree = ast.parse(source)
+    defined = {n.name for n in tree.body
+               if isinstance(n, ast.FunctionDef)
+               and n.name.startswith('test_')}
+    main_fn = next((n for n in tree.body
+                    if isinstance(n, ast.FunctionDef) and n.name == 'main'),
+                   None)
+    called = set()
+    if main_fn is not None:
+        for node in ast.walk(main_fn):
+            if isinstance(node, ast.Name) and node.id.startswith('test_'):
+                called.add(node.id)
+    return defined, called
+
+
+def test_every_test_in_this_file_is_called_from_main():
+    """A guard that nothing runs reports green forever — here, in the exact
+    mode in which the sweep-map pins went dead.
+
+    `test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds`
+    is the pin `bugs/formal/FORMAL_sweep_work_map.md`'s Status line names as
+    the thing that keeps the formal sweep series one document, and it was
+    DEFINED and never CALLED: it sat outside `main()`'s list, nothing else
+    calls it, and it ran on no gate while its document read as guarded.
+    `test_formal_sweep_work_map_index_tags_only_from_section3` was committed
+    later with the words "Add a regression test" and went the same way, which
+    is the failure those words are for. The memory campaign above this list
+    fixed the same shape for its three tests by adding them to the list, and
+    left no guard against the recurrence. This is the guard: every top-level
+    `test_*` function in THIS file must be in `main()`'s call list, and
+    nothing in the list may be undefined, so a guard cannot go dead again
+    while a Status line reads as live.
+
+    It reads the file it runs from, so the call list stays the single copy of
+    "what the suite runs": a test added here and not there fails the gate,
+    and a test dropped from the list without being dropped from the file does
+    the same. It includes itself, which is what stops this check from being
+    the next dead guard — a file that keeps the definition and drops the call
+    fails, because the definition is what the walk counts.
+    """
+    pins = {'test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds',
+            'test_formal_sweep_work_map_index_tags_only_from_section3',
+            'test_every_test_in_this_file_is_called_from_main'}
+    defined, called = _uncalled_and_ghost_tests(
+        open(os.path.abspath(__file__), encoding='utf-8').read())
+    uncalled, ghosts = sorted(defined - called), sorted(called - defined)
+    check('suite self: every test in this file is called by main(), so a '
+          'guard cannot be defined and never run',
+          not uncalled and not ghosts,
+          f'{uncalled} is defined but never called and {ghosts} is called '
+          f'but not defined; a test that is never called is coverage claimed '
+          f'in a docstring and executed by nobody — the mode the sweep-map '
+          f'pins sat in while their document named the first of them as the '
+          f'fix')
+    check('suite self: the walk is not vacuous — it sees the pins it exists '
+          'for, and it sees itself',
+          pins <= defined and pins <= called,
+          f'of the pins {sorted(pins)}, the walk saw {sorted(pins & defined)} '
+          f'defined and {sorted(pins & called)} called; a reader that sees '
+          f'nothing passes on an empty set, which is the same defect in a '
+          f'smaller body')
+    fixture = ('def test_planted_dead_guard():\n'
+               '    pass\n'
+               'def test_live_guard():\n'
+               '    pass\n'
+               'def main():\n'
+               '    for fn in (test_live_guard,):\n'
+               '        fn()\n')
+    f_defined, f_called = _uncalled_and_ghost_tests(fixture)
+    check('suite self: the reader can fail — a planted dead guard is found, '
+          'and the live one is not',
+          f_defined - f_called == {'test_planted_dead_guard'}
+          and not (f_called - f_defined),
+          f'found {sorted(f_defined - f_called)} uncalled of {sorted(f_defined)} '
+          f'and {sorted(f_called - f_defined)} ghost; a reader that cannot '
+          f'see a dead guard passes on a file it cannot read, which is the '
+          f'shape this check exists to refuse')
 
 
 def test_a_verdict_the_ledger_no_longer_agrees_with_is_reported():
@@ -6522,6 +6635,14 @@ def main():
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
                 test_a_deleted_bug_doc_is_not_still_cited,
                 test_the_formal_doc_index_is_current,
+                # The sweep-map pins were DEFINED and never CALLED — the same
+                # shape as the memory campaign above, one commit each — and
+                # the document they pin named the first of them as the fix
+                # while it ran on no gate. The self-check below is what keeps
+                # a guard from going dead again without being noticed.
+                test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds,
+                test_formal_sweep_work_map_index_tags_only_from_section3,
+                test_every_test_in_this_file_is_called_from_main,
                 test_a_verdict_the_ledger_no_longer_agrees_with_is_reported,
                 test_no_test_preflights_on_an_unbuildable_artifact,
                # A missing DELEGATE is the same class of defect and the same
