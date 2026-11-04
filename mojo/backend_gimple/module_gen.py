@@ -3735,6 +3735,8 @@ def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) ->
         for _rb_s in stmts or []:
             if isinstance(_rb_s, FunctionDef):
                 continue
+            if isinstance(_rb_s, StructDef):
+                continue  # direct decorated classes/structs at module level are handled separately
             for _rb_d in _gmi_scope_defs([_rb_s]):
                 for _rb_dec in _rb_d.decorators or []:
                     if _gmi_is_rebindable(self, _rb_dec, _rb_scope, _rb_d.name):
@@ -4247,6 +4249,98 @@ def _gmi_mk_call_keys(body: list) -> str:
                     and isinstance(f.obj, gimple_ctypes.IdentExpr)):
                 out += _as_str(f.obj.name) + '_' + _as_str(f.member) + ','
     return out
+
+
+def _gmi_transform_enum_classes(self, stmts: list) -> list:
+    """Transform Enum subclasses to use runtime class creation via metaclass."""
+    if not stmts:
+        return stmts
+    out = []
+    changed = False
+    for s in stmts:
+        if isinstance(s, StructDef):
+            try:
+                s_node = _as_structdef_node(s)
+                bases = getattr(s_node, 'bases', []) or []
+                # Check if inherits from Enum
+                is_enum = False
+                for b in bases:
+                    try:
+                        bname = _as_str(b)
+                    except Exception:
+                        try:
+                            bname = str(getattr(b, 'name', b))
+                        except Exception:
+                            bname = str(b)
+                    if bname == 'Enum' or (isinstance(bname, str) and (bname.endswith('.Enum') or bname == 'enum')):
+                        is_enum = True
+                        break
+                if is_enum and not getattr(s_node, 'methods', None):
+                    # For simple enums, try to transform to use metaclass
+                    cls_name = _as_str(s_node.name)
+                    # Extract simple assignments
+                    assigns = []
+                    for f in getattr(s_node, 'fields', []) or []:
+                        if isinstance(f, AssignStmt):
+                            try:
+                                if isinstance(f.target, IdentExpr):
+                                    tname = f.target.name
+                                    if isinstance(tname, str) and not tname.startswith('_') and not tname.startswith('__'):
+                                        assigns.append((tname, f.value))
+                            except Exception:
+                                continue
+                    if assigns:
+                        # Try to build AST nodes for transformation
+                        # This is complex, but let's try
+                        try:
+                            line = getattr(s_node, 'line', 0)
+                            col = getattr(s_node, 'col', 0)
+                            # Create: __enum_ns_<name> = __import__('enum').EnumType.__prepare__('<name>', (<bases>))
+                            # Build bases tuple
+                            base_idents = []
+                            for b in bases:
+                                try:
+                                    bname = _as_str(b)
+                                except Exception:
+                                    try:
+                                        bname = str(getattr(b, 'name', b))
+                                    except Exception:
+                                        bname = str(b)
+                                base_idents.append(IdentExpr(name=bname, line=line, col=col))
+                            bases_tuple = TupleExpr(elements=base_idents, line=line, col=col)
+                            # Try different approach
+                            try:
+                                enum_mod = CallExpr(func=IdentExpr(name='__import__', line=line, col=col), args=[StringLiteral(value="'enum'")], line=line, col=col)
+                                enum_type = MemberExpr(obj=enum_mod, member='EnumType', line=line, col=col)
+                                prepare_call = CallExpr(func=MemberExpr(obj=enum_type, member='__prepare__', line=line, col=col),
+                                                       args=[StringLiteral(value=f"'{cls_name}'"), bases_tuple],
+                                                       line=line, col=col)
+                                ns_name = f'__enum_ns_{cls_name}'
+                                out.append(AssignStmt(target=IdentExpr(name=ns_name, line=line, col=col), value=prepare_call, line=line, col=col))
+                                for aname, aval in assigns:
+                                    out.append(AssignStmt(target=SubscriptExpr(obj=IdentExpr(name=ns_name, line=line, col=col), index=StringLiteral(value=f"'{aname}'"), line=line, col=col), value=aval, line=line, col=col))
+                                new_call = CallExpr(func=MemberExpr(obj=enum_type, member='__new__', line=line, col=col),
+                                                   args=[enum_type,
+                                                         StringLiteral(value=f"'{cls_name}'"),
+                                                         bases_tuple,
+                                                         IdentExpr(name=ns_name, line=line, col=col)],
+                                                   line=line, col=col)
+                                out.append(AssignStmt(target=IdentExpr(name=cls_name, line=line, col=col), value=new_call, line=line, col=col))
+                            except Exception:
+                                # Fallback to type()
+                                ns_dict = DictExpr(pairs=[(StringLiteral(value=f"'{aname}'"), aval) for aname, aval in assigns], line=line, col=col)
+                                type_call = CallExpr(func=IdentExpr(name='type', line=line, col=col),
+                                                    args=[StringLiteral(value=f"'{cls_name}'"), bases_tuple, ns_dict],
+                                                    line=line, col=col)
+                                out.append(AssignStmt(target=IdentExpr(name=cls_name, line=line, col=col), value=type_call, line=line, col=col))
+                            changed = True
+                            continue  # skip the original struct def
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        out.append(s)
+    return out if changed or out != stmts else stmts
 
 
 def gen_module_impl(self, stmts: list):

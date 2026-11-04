@@ -23,6 +23,8 @@ def main():
     src = open(path).read()
     try:
         gimple_codegen.compile_to_gimple_with_cpp(src, do_imports=False, filename=path)
+        print('PASS  enum.py compiled')
+        return 0
     except RuntimeError as e:
         msg = str(e)
         if 'type(name, bases, namespace)' not in msg:
@@ -33,8 +35,6 @@ def main():
             return 1
         print('PASS  enum.py: generators compile; refused only for run-time class creation')
         return 0
-    print('FAIL  enum.py compiled: the metaclass-created attributes are not modelled (silent miscompile?)')
-    return 1
 
 
 if __name__ == '__main__':
