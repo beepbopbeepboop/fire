@@ -68,6 +68,19 @@ from mojo.middle.calls_shared import _struct_operator_receiver
 # for why the two arms treat it differently from a plain `ValueError`.
 from mojo.middle.loops_shared import ZipLongestFillRefusal, desugar_loop_else
 
+_ENUM_BASES = {'Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag', 'ReprEnum'}
+
+
+def _is_enum_class_def(node):
+    try:
+        bases = getattr(node, 'bases', None) or []
+        for b in bases:
+            if isinstance(b, str) and b in _ENUM_BASES:
+                return True
+    except Exception:
+        pass
+    return False
+
 
 def gen_stmt(gen, node):
     # Emit #line directive to track source location. Critical for debugging:
@@ -2102,7 +2115,12 @@ def _gen_stmt_AssignStmt(gen, node):
             _dsn2 = gimple_exprtypes._struct_name_of(ot)
             if _dsn2:
                 gen._field_dict_val_types.setdefault(_dsn2, {})[node.target.member] = gen._dict_val_types[v]
-        if ot in ('int', 'int64_t', 'void *'):
+        _rtobj_inst_assign = False
+        if isinstance(node.target.obj, gimple_ctypes.IdentExpr):
+            _ton = node.target.obj.name
+            if getattr(gen, '_rtobj_kinds', {}).get(('l', _ton)) == 'inst' or getattr(gen, '_rtobj_kinds', {}).get(('v', _ton)) == 'inst':
+                _rtobj_inst_assign = True
+        if _rtobj_inst_assign or ot in ('int', 'int64_t', 'void *'):
             # Opaque Python object (e.g. `s.field = val` where `s`'s
             # static type isn't narrowed past a runtime isinstance()
             # check — this compiler doesn't track that): dispatch via
@@ -3542,6 +3560,36 @@ def _gen_stmt_StructDef(gen, node):
     escapes its function (`return Tag`) and is used in a later call reads that
     later call's cell.
     """
+    if _is_enum_class_def(node):
+        try:
+            bases = getattr(node, 'bases', None) or []
+            if bases:
+                base_name = bases[0]
+                name = node.name
+                base_ident = gimple_ctypes.MemberExpr(obj=gimple_ctypes.IdentExpr(name='enum'), member=base_name, line=getattr(node,'line',0))
+                mcls_call = gimple_ctypes.CallExpr(func=gimple_ctypes.IdentExpr(name='type', line=getattr(node,'line',0)), args=[base_ident], line=getattr(node,'line',0))
+                mcls_assign = gimple_ctypes.AssignStmt(target=gimple_ctypes.IdentExpr(name=f'_{name}_mcls', line=getattr(node,'line',0)), value=mcls_call, line=getattr(node,'line',0))
+                gen._gen_stmt_AssignStmt(mcls_assign)
+                ns_items = []
+                for field in getattr(node, 'fields', []) or []:
+                    if isinstance(field, gimple_ctypes.AssignStmt) and isinstance(field.target, gimple_ctypes.IdentExpr):
+                        ns_items.append((gimple_ctypes.StringLiteral(value=field.target.name, line=getattr(field,'line',0)), field.value))
+                ns_dict = gimple_ctypes.DictExpr(pairs=ns_items, line=getattr(node,'line',0))
+                ns_assign = gimple_ctypes.AssignStmt(target=gimple_ctypes.IdentExpr(name=f'_{name}_ns', line=getattr(node,'line',0)), value=ns_dict, line=getattr(node,'line',0))
+                gen._gen_stmt_AssignStmt(ns_assign)
+                type_new_call = gimple_ctypes.CallExpr(
+                    func=gimple_ctypes.MemberExpr(obj=gimple_ctypes.IdentExpr(name='type', line=getattr(node,'line',0)), member='__new__', line=getattr(node,'line',0)),
+                    args=[gimple_ctypes.IdentExpr(name=f'_{name}_mcls', line=getattr(node,'line',0)), 
+                          gimple_ctypes.StringLiteral(value=name, line=getattr(node,'line',0)),
+                          gimple_ctypes.TupleExpr(elements=[base_ident], line=getattr(node,'line',0)),
+                          gimple_ctypes.IdentExpr(name=f'_{name}_ns', line=getattr(node,'line',0))],
+                    line=getattr(node,'line',0)
+                )
+                cls_assign = gimple_ctypes.AssignStmt(target=gimple_ctypes.IdentExpr(name=name, line=getattr(node,'line',0)), value=type_new_call, line=getattr(node,'line',0))
+                gen._gen_stmt_AssignStmt(cls_assign)
+                return
+        except Exception:
+            pass
     cattrs = gen._class_attrs.get(node.name)
     if not cattrs:
         return

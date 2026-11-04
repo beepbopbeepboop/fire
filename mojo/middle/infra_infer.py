@@ -1539,8 +1539,54 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # with the signature: `def keep(scale=0.5): return scale` inferred
     # `int64_t` and printed 0 for 0.5. Weaker than any usage evidence above.
     _fdefaults = getattr(func, 'param_defaults', None) or {}
+
+    def _foreign_callable_qualname(default):
+        try:
+            if isinstance(default, gimple_ctypes.IdentExpr):
+                return _as_str(getattr(default, 'name'))
+            if isinstance(default, gimple_ctypes.MemberExpr):
+                # Build qualified name like csv.reader
+                mems = []
+                cur = default
+                while isinstance(cur, gimple_ctypes.MemberExpr):
+                    mems.append(_as_str(getattr(cur, 'member')))
+                    cur = getattr(cur, 'obj')
+                # Check for __import__('csv').reader pattern
+                if isinstance(cur, gimple_ctypes.CallExpr):
+                    try:
+                        func = getattr(cur, 'func')
+                        if isinstance(func, gimple_ctypes.IdentExpr) and _as_str(getattr(func, 'name')) == '__import__':
+                            args = getattr(cur, 'args') or []
+                            if args:
+                                arg = args[0]
+                                # String literal
+                                if hasattr(arg, 'value'):
+                                    mod = _as_str(arg.value)
+                                    mems.reverse()
+                                    if mems:
+                                        return mod + '.' + '.'.join(mems)
+                    except Exception:
+                        pass
+                if isinstance(cur, gimple_ctypes.IdentExpr):
+                    mems.append(_as_str(getattr(cur, 'name')))
+                    mems.reverse()
+                    return '.'.join(mems)
+            # also try direct attribute access patterns
+        except Exception:
+            pass
+        return None
+
     for _fp in func.params:
         _fpn = _as_str(_fp[0]).lstrip('*')
+        # Check for foreign callable default
+        _def = _fp[1] if len(_fp) > 1 else None
+        if _def is None:
+            _def = _fdefaults.get(_fpn)
+        if _def is not None and _fpn not in inferred:
+            _qname = _foreign_callable_qualname(_def)
+            if _qname and _qname in _FOREIGN_CALLABLES:
+                inferred[_fpn] = _FOREIGN_CALLABLES[_qname]
+                continue
         if (_fp[1] is None and _fpn not in inferred
                 and isinstance(_fdefaults.get(_fpn), FloatLiteral)):
             inferred[_fpn] = 'double'
