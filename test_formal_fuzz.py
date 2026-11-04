@@ -1511,8 +1511,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-
-def test_formal_fuzz_ledger_deleted_pinning():
-    """Pinning test: FORMAL_fuzz_ledger bug fixed - doc removed."""
-    import os
-    assert not os.path.exists("bugs/formal/FORMAL_fuzz_ledger.md")
