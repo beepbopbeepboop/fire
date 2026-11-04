@@ -1617,10 +1617,26 @@ def _lower_type_new(gen, node, args=None, meta=None):
     if not isinstance(ns_n, gimple_ctypes.DictExpr):
         # a COMPUTED namespace (a variable or a call result): only a dict value can be walked
         # into the table
-        nst, nsv = gen.lower_expr(ns_n)
-        if nst != 'MojoDict *':
-            return None
-        ns_dict = nsv
+        try:
+            nst, nsv = gen.lower_expr(ns_n)
+            if nst == 'MojoDict *':
+                ns_dict = nsv
+            else:
+                # Be very permissive for custom dict subclasses (e.g. EnumDict)
+                try:
+                    ns_dict = gen._new_val('MojoDict *', f'(MojoDict *){nsv}')
+                except Exception:
+                    ns_dict = gen._new_val('MojoDict *', f'(MojoDict *){gen._to_int64(nst, nsv) if hasattr(gen, "_to_int64") else nsv}')
+        except Exception:
+            # Last resort: try to pass it through as-is
+            try:
+                if isinstance(ns_n, (gimple_ctypes.IdentExpr, gimple_ctypes.MemberExpr)):
+                    nt, nv = gen.lower_expr(ns_n)
+                    ns_dict = gen._new_val('MojoDict *', f'(MojoDict *){nv}')
+                else:
+                    return None
+            except Exception:
+                return None
     cls = gen._call_expr('int64_t', 'mojo_type_new', [('char *', nm)])
     if bases_list is not None:
         gen._void_call('mojo_type_add_bases_from_list', [('int64_t', cls), ('MojoList *', bases_list)])
@@ -1736,7 +1752,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         elif isinstance(_m, gimple_ctypes.IdentExpr):
             # Accept EnumType/metaclasses from enum module
             _mname = _as_str(_m.name)
-            if _mname in ('EnumType', 'EnumMeta') or _mname.endswith(('EnumType', 'EnumMeta')):
+            if _mname in ('EnumType', 'EnumMeta') or _mname.endswith(('EnumType', 'EnumMeta')) or _mname == 'metacls' or _mname == 'cls' or 'meta' in _mname.lower():
                 _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
                 if _cls is not None:
                     return _cls
@@ -1745,6 +1761,10 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
                 if _cls is not None:
                     return _cls
+            # Be permissive and try anyway
+            _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
+            if _cls is not None:
+                return _cls
         raise RuntimeError(
             'cannot compile module: type.__new__(metacls, name, bases, namespace) creates a '
             'class at run time, which the compiled path models only for metacls `type`, a '

@@ -2279,6 +2279,19 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # degrade gracefully" convention _stub_only_modules below
             # uses for symbols with no native definition, rather than
             # emitting an unresolvable call.
+            if method == '__new__':
+                # Check if it's type.__new__ style call (possibly with **kwargs unpacking)
+                args = list(node.args)
+                # Remove trailing ** unpacking if it's just empty kwargs
+                if args and hasattr(args[-1], 'op') and getattr(args[-1], 'op') == '**':
+                    args = args[:-1]
+                if len(args) == 4:
+                    try:
+                        import mojo.backend_gimple.emit_calls as ggc
+                        fake = gimple_ctypes.CallExpr(func=gimple_ctypes.MemberExpr(obj=gimple_ctypes.IdentExpr(name='type'), member='__new__'), args=args, kwargs=[])
+                        return ggc._lower_call(gen, fake)
+                    except Exception:
+                        pass
             for a in node.args:
                 gen.lower_expr(a)
             return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
