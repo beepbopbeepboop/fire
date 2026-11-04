@@ -2055,7 +2055,12 @@ def _gen_stmt_AssignStmt(gen, node):
             _dsn2 = gimple_exprtypes._struct_name_of(ot)
             if _dsn2:
                 gen._field_dict_val_types.setdefault(_dsn2, {})[node.target.member] = gen._dict_val_types[v]
-        if ot in ('int', 'int64_t', 'void *'):
+        _rtobj_inst_assign = False
+        if isinstance(node.target.obj, gimple_ctypes.IdentExpr):
+            _ton = node.target.obj.name
+            if getattr(gen, '_rtobj_kinds', {}).get(('l', _ton)) == 'inst' or getattr(gen, '_rtobj_kinds', {}).get(('v', _ton)) == 'inst':
+                _rtobj_inst_assign = True
+        if _rtobj_inst_assign or ot in ('int', 'int64_t', 'void *'):
             # Opaque Python object (e.g. `s.field = val` where `s`'s
             # static type isn't narrowed past a runtime isinstance()
             # check — this compiler doesn't track that): dispatch via
