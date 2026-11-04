@@ -17015,9 +17015,19 @@ POINTER_DEREF_CASES = [
      "    var mid = at(s, 1)\n"
      "    if read_back(mid, 0) != 5786930140093827657:      # …b'IJKLMNOP'\n"
      "        return 1\n"
-      "    if read_back(mid, 1) != 5208208757389214273:      # …b'ABCDEFGH'\n"
-      "        return 2\n"
-      "    return 0\n", 0, None),
+     "    if read_back(mid, 1) != 5208208757389214273:      # …b'ABCDEFGH'\n"
+     "        return 2\n"
+     "    return 0\n", 0, None),
+    # Chained pointer arithmetic must scale at each step for wide pointees.
+    ("deref_offset_scales_in_chained_arithmetic",
+     "def read_at(p: Pointer[Int64], k: Int) -> Int:\n"
+     "    var q = (p + 1) + k\n"
+     "    return Int(q.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGHIJKLMNOPQRSTUVWX\"\n"
+     "    if read_at(s, 1) != 6365651522798441041:      # …b'QRSTUVWX'\n"
+     "        return 1\n"
+     "    return 0\n", 0, None),
 
     # ── `p[i]` reads at the POINTEE'S width, the same width `p.value()` does ─
     #
