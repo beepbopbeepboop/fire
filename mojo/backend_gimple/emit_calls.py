@@ -1662,10 +1662,6 @@ _PY_BUILTIN_NAMES = frozenset(n for n in dir(_py_builtins) if not n.startswith('
 
 
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
-    try:
-        if isinstance(node.func, gimple_ctypes.IdentExpr):
-    except Exception:
-        pass
     _dealloc = gen._lower_dealloc_thin_allocation(node)
     if _dealloc is not None:
         return _dealloc

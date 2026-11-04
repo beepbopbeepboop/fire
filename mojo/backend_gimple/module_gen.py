@@ -15489,10 +15489,12 @@ def gen_module_impl(self, stmts: list):
                 if struct_name in emitted:
                     continue
                 if struct_name in _system_structs:
-                    # Don't redefine system structs; rely on system headers
                     emitted.add(struct_name)
                     self._emitted_structs.add(struct_name)
-                    self._struct_typedef_texts[struct_name] = ''
+                    self._struct_typedef_texts[struct_name] = (
+                        f'typedef struct {struct_name} {struct_name};'
+                    )
+                    parts.append(self._struct_typedef_texts[struct_name])
                     continue
                 fields = _struct_typedef_fields(self, struct_name)
                 dependencies_met = True
