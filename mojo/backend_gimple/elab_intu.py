@@ -1017,7 +1017,7 @@ def _container_home(gen, tname):
 _FACTORY_RETURN_CACHE: dict = {}
 
 
-def _factory_returns(fsrc, path, base):
+def _factory_returns(fsrc: str, path: str, base: str):
     """Every `def base` overload, as a list of {'pr': <parse_return result>,
     'params': [param names]} (overloads whose return is not a dependent one
     dropped), cached per (home, name) — the same factory is called many times
@@ -1026,7 +1026,7 @@ def _factory_returns(fsrc, path, base):
     dependent-return factory, which is the gate that keeps an
     `assert_equal(<list>, ...)` call from ever being misread as a factory
     call site (and from filing a false container-resolution refusal)."""
-    key = path + '\x1f' + base
+    key: str = path + '\x1f' + base
     if key not in _FACTORY_RETURN_CACHE:
         try:
             stmts = Parser(py_tokenize(fsrc)).parse_module()
