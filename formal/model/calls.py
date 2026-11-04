@@ -2602,7 +2602,7 @@ def parameter_kinds_by_call_site(functions, rets=None) -> dict:
     `_parameter_argument_shape` reads the argument's own SHAPE, and a name has
     none — so before this, `f(some_local)` claimed nothing and every name
     reached through one was a word. Measured on both architectures, the shape
-    the sweep filed it on (`bugs/formal/FORMAL_sweep_singles_second_half.md` §4's last
+    the sweep filed it on (the parameter-kind fixpoint sweep note; §4's last
     paragraph, and the limitation this module's own header listed first):
 
         def helper(t):  return len(t)

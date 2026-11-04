@@ -138,7 +138,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_stdlib_optional_needs_a_representation.md` | **unclaimed** | `std/builtin/builtin_slice.mojo` needs a REPRESENTATION for `Optional`, not a lowering — and that is what the 13-file row is really waiting on |
 | `FORMAL_str_repr_format_and_percent_have_no_lowering.md` | **unclaimed** | `str()`, `repr()`, `format()`, `%` and `.format()` have no lowering: a value's TEXT is not a compile-time constant |
 | `FORMAL_string_composition_has_no_buffer.md` | **unclaimed** | 115 files stop at `f"…"`, and the ceiling of closing them is 0 passes |
-| `FORMAL_sweep_singles_second_half.md` | **unclaimed** | four of §3.2's eight remaining single-file causes are not patches, measured |
 | `FORMAL_sweep_work_map.md` | **unclaimed** | the formal sweep series — the current census, the measurements that outlived their round, and the index of the twenty-one rounds it replaces |
 | `FORMAL_test_formal_run_two_cases_red_on_master.md` | **unclaimed** | two cases in test_formal_run.py fail |
 | `FORMAL_time_struct_shaped_answers.md` | **unclaimed** | five `time` names are absent because their answer is a struct |

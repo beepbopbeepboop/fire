@@ -6579,8 +6579,8 @@ BOTH_ARCH_CASES = [
     # In this group rather than beside the truthiness rows it is in because the
     # kind table is ONE `formal/model.py` reader both emitters consult, so the
     # two machines cannot disagree about it, and the row is about that reader
-    # rather than about an arm64 instruction: `bugs/formal/FORMAL_sweep_singles_second_half.md`
-    # §4 recorded the same reproducer refused as "len(s) is len() of a value
+    # rather than about an arm64 instruction: the parameter-kind sweep note
+    # recorded the same reproducer refused as "len(s) is len() of a value
     # classified as 'int', and an integer has no length", and said the row was
     # open. It is not, and this is the row that says so on BOTH machines.
     ("len_of_an_unannotated_parameter_from_a_string_literal",
@@ -15022,7 +15022,7 @@ WAVE6_TRUTHY_CASES = [
      "    return 0\n", 0, "0 1"),
 
     # `len()` OF THE SAME PARAMETER, which is the reader the identity test does
-    # not answer. `bugs/formal/FORMAL_sweep_singles_second_half.md` §4 recorded a
+    # not answer. The parameter-kind sweep note recorded a
     # four-line reproducer refused as "len(s) is len() of a value classified as
     # 'int', and an integer has no length", and said the row was still open; it
     # is not — the parameter's kind reaches `len()` through the same
