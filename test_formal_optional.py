@@ -1108,3 +1108,10 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def test_formal_stdlib_optional_needs_a_representation_deleted_pinning():
+    """Pinning test: FORMAL_stdlib_optional_needs_a_representation bug fixed -
+    niche representation landed; doc removed."""
+    import os
+    assert not os.path.exists("bugs/formal/FORMAL_stdlib_optional_needs_a_representation.md")
