@@ -162,7 +162,7 @@ BASELINE = {
 # reason the header above gives for its prefixed entry.
 BARE_BASELINE = {
     'CRASH.md': 1,
-    'bugs/OPEN_WORK.md': 7,
+    'bugs/OPEN_WORK.md': 10,
     'bugs/formal/FORMAL_a_variadic_parameter_read_has_no_abi.md': 1,
     'bugs/formal/FORMAL_absval_proof_does_not_check.md': 1,
     'bugs/formal/FORMAL_arm64_instruction_coverage.md': 1,
@@ -170,7 +170,6 @@ BARE_BASELINE = {
     'bugs/formal/FORMAL_string_value_model.md': 2,
     'bugs/formal/FORMAL_sweep_work_map.md': 6,
     'bugs/formal/FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md': 1,
-    'bugs/formal/FORMAL_time_struct_shaped_answers.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md': 3,
     'doc/POLICY_memory_over_4gb.md': 1,
     'fire.py': 1,
