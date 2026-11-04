@@ -100,6 +100,7 @@ ADMITTED_COUNTS = {
     "enum": 0,
     "fcntl": 0,                    # the real flock(2); nothing is admitted
     "fnmatch": 0,
+    "functools": 0,
     # `glob` is 0 and the reason is the same one `tempfile`'s zero is: every
     # answer this module gives is computed.  The directory entries come from
     # `readdir(3)` through `os.listdir`, the pattern language is
@@ -1237,7 +1238,7 @@ LIBRARY_TRUST = {
     # is 0 rather than the 1 this table held while its single site was still a
     # `native_decide`.
     # Updated for callFunc2 threading API change required by the admitted contract fix.
-    "ProofLib": (0, 0, 1654, 1654),
+    "ProofLib": (0, 0, 2910, 2910),
     "Refine": (0, 0, 0, 0),
     # **3, and it was 3 before this commit read 7**: four `native_decide` sites
     # landed here (`@[simp] theorem x86_mask_{one,two,four,eight}`, all four on

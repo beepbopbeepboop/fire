@@ -13219,6 +13219,12 @@ def generate_arm64_proof(prog, code, info) -> str:
     # Add the two-parameter callee names to the arity-2 handler's resolvable
     # set: the bridge must know it CAN state a call to them.
     _resolvable2 = frozenset(_admitted_map2_own) | set(_callees2)
+    try:
+        for spelling, lean in (_admitted_calls_map or {}).items():
+            if lean:
+                _resolvable2 = frozenset(set(_resolvable2) | {spelling})
+    except Exception:
+        pass
     _gaps = ([] if ast_cannot
              else _ast_bridge_gaps(fn, _resolvable, _resolvable2))
     if _gaps:
