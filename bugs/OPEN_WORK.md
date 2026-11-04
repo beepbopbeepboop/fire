@@ -67,12 +67,11 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_string_value_model.md` | `fix-merge-fix-merge-fix-merge-fix-merge-bug-formal-formal-st` | what a string IS on the formal path, and the two things that want to be one |
 | `FORMAL_a_call_result_field_access_has_no_representation.md` | **unclaimed** | every remaining host-import row is one capability, and it is not a module |
 
-### `formal/lean` — 3 documents, 2 claimed
+### `formal/lean` — 2 documents, 2 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md` | `fix-merge-bug-formal-formal-a-division-by-a-symbol-7956` | the theorem for `a // b` with a symbolic `b` is ADMITTED **and false**, so no `simp` closes it |
-| `FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md` | `bug-formal-formal-eval-eq-mojo-is-undeci-1593` | An `if` whose condition reads a LOCAL leaves `eval_eq_mojo` unproved, and the goal it leaves is not decidable |
 | `FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md` | **unclaimed** | The arm64 proof-time floor after the step-OK swap is ONE declaration: `compiles_correctly_universal`, at 83% of the file |
 
 ### `formal/model` — 12 documents, 12 claimed
