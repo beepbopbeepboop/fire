@@ -8471,6 +8471,15 @@ def register(gen, meta: list) -> None:
         _by_param = {}
         for _pn, _gn in _cpg.items():
             _api = gen._generator_api.get(_gn)
+            if _api is None:
+                _api = (getattr(gen, '_async_gen_api', None) or {}).get(_gn)
+            if _api is None:
+                _api = (getattr(gen, '_async_api', None) or {}).get(_gn)
+            if _api is None:
+                for _aname in ('_generator_var_api', '_cpp_generator_var_api'):
+                    _api = (getattr(gen, _aname, None) or {}).get(_gn)
+                    if _api is not None:
+                        break
             if _api is not None:
                 _by_param[_pn] = _api
         if _by_param:

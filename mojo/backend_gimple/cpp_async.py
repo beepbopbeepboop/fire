@@ -2045,59 +2045,59 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
         helper path, any shape outside the supported set refuses (returns
         False) and the caller's honest unresolved-callee refusal stands."""
         if C.is_generator or C.is_async or F.is_generator or F.is_async:
-            return False
+            import sys; print("DBG1", file=sys.stderr, flush=True); return False
         if any(pn.startswith('*') for pn, _ in (F.params or []) + (C.params or [])):
-            return False
+            import sys; print("DBG2", file=sys.stderr, flush=True); return False
         params_F = _infer_helper_param_ctypes(F)
         if params_F is None or _helper_kw_renames(params_F):
-            return False
+            import sys; print("DBG3", params_F, file=sys.stderr, flush=True); return False
         params_C = _infer_helper_param_ctypes(C)
         if params_C is None:
-            return False
+            import sys; print("DBG4", file=sys.stderr, flush=True); return False
         # The callable-value model admits parameters/returns that are
         # pointer-shaped (str/list/dict/struct pointers) in addition to int64.
         if len(params_C) > 4:
-            return False
+            import sys; print("DBG5", file=sys.stderr, flush=True); return False
         if any(ct == 'void' or ct is None for _, ct in params_C):
-            return False
+            import sys; print("DBG6", params_C, file=sys.stderr, flush=True); return False
         # For now, allow int64_t and pointer types
         for _, ct in params_C:
             ct_n = 'int64_t' if ct == 'int' else ct
             if ct_n != 'int64_t' and not (isinstance(ct_n, str) and ct_n.endswith('*')):
-                return False
+                import sys; print("DBG7", ct, file=sys.stderr, flush=True); return False
         if any(isinstance(x, gimple_ctypes.NonlocalStmt)
                for x in gimple_exprtypes._walk_own_body(C.body)):
-            return False
+            import sys; print('DBG8', file=sys.stderr, flush=True); return False
         used_C = gimple_exprtypes._used_idents_deep(C.body)
         # A sibling `def` is a call, not a capture, and the factory's own
         # locals are not siblings: calling one from `C` is out of scope.
         if used_C & sibling_names:
-            return False
+            import sys; print('DBG9', file=sys.stderr, flush=True); return False
         c_pnames = {pn for pn, _ in params_C}
         captures = (used_C - c_pnames - _helper_bound_names(C.body)
                     - module_names - _HELPER_FREE_BUILTINS - {C.name})
         f_locals = {pn for pn, _ in params_F} | _helper_bound_names(pre)
         if captures - f_locals:
-            return False
+            import sys; print('DBG10', captures, f_locals, file=sys.stderr, flush=True); return False
         # The factory's own statements land first, in its frame; `C` then
         # sees them as declared locals.
         hF = {pn: ct for pn, ct in params_F}
         f_emit = _emit_helper_body(pre, hF, {})
         if f_emit is None:
-            return False
+            import sys; print('DBG11', file=sys.stderr, flush=True); return False
         hC = dict(hF)
         hC.update({pn: (ct if ct != 'int' else 'int64_t') for pn, ct in params_C})
         c_ret = _helper_return_ctype(C.body, hC)
         if c_ret is None:
-            return False
+            import sys; print('DBG12', file=sys.stderr, flush=True); return False
         c_ret_n = 'int64_t' if c_ret == 'int' else c_ret
         # Allow int64_t and pointer types as returns
         if c_ret_n != 'void' and c_ret_n != 'int64_t' and not (isinstance(c_ret_n, str) and c_ret_n.endswith('*')):
-            return False
+            import sys; print('DBG13', c_ret, c_ret_n, file=sys.stderr, flush=True); return False
         c_kw = _helper_kw_renames(params_C)
         c_emit = _emit_helper_body(C.body, hC, c_kw)
         if c_emit is None:
-            return False
+            import sys; print('DBG14', file=sys.stderr, flush=True); return False
         # Build typed callable
         try:
             c_param_list = [(ct if ct != 'int' else 'int64_t') for _, ct in params_C]

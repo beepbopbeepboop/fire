@@ -248,14 +248,28 @@ def _lambda_free_names(body) -> set:
 def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
     """Discover every nested FunctionDef under `stmts`; fill `ctx._all_closures`.
 
-    Returns `ctx._all_closures`: outer_name -> {inner_name -> ClosureInfo}.
+    Returns `ctx._all_closures`: outer_name -> {inner_name → ClosureInfo}.
     Side effects on ctx: var_types (restored), func_return_types (lifted
     signatures added), _func_param_defaults (lifted defaults), _all_closures.
     """
     ctx._all_closures: dict = {}  # outer_name → {inner_name → ClosureInfo}
+    # Prevent lifting of closure factories with nonlocal in returned closure
+    try:
+        skip = set(getattr(ctx, '_skip_closure_factory_lift', set()))
+        for fn in _walk_ast(stmts):
+            if isinstance(fn, FunctionDef):
+                if _is_closure_factory_with_nonlocal(fn):
+                    skip.add(id(fn))
+                    skip.add(_as_str(fn.name))
+        ctx._skip_closure_factory_lift = skip
+    except Exception:
+        pass
 
     def _scan_for_closures(ctx, outer_name: str, outer_scope: dict, body: list):
         """Scan a function/method body for nested FunctionDefs and register them as closures."""
+        import sys
+        fns = [s.name for s in _gmi_all_stmts_nonfunc(body) if isinstance(s, FunctionDef)]
+        print(f"SCAN: {outer_name} has_fns={fns}", file=sys.stderr, flush=True)
         enriched_scope = dict(outer_scope)
         _saved_vt2 = dict(ctx.var_types)
         ctx.var_types.update(outer_scope)
@@ -335,6 +349,17 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
             inner_body = _as_list(inner.body)
             inner_params = _as_list(inner.params)
             if inner.is_async and not inner.is_generator:
+                continue
+            # Don't lift closure factories with nonlocal in returned closure -
+            # backend's closure factory mechanism needs to refuse them
+            import sys
+            print(f"CHECK_LIFT: {getattr(inner,'name','?')} in {outer_name}", file=sys.stderr, flush=True)
+            if _is_closure_factory_with_nonlocal(inner):
+                print(f"SKIP_LIFT: {getattr(inner,'name','?')}", file=sys.stderr, flush=True)
+                continue
+            skip_set = getattr(ctx, '_skip_closure_factory_lift', set())
+            if id(inner) in skip_set or _as_str(inner.name) in skip_set:
+                print(f"SKIP_LIFT2: {getattr(inner,'name','?')}", file=sys.stderr, flush=True)
                 continue
             lifted    = closure_lifted_name(outer_name, _as_str(inner.name))
             # `_as_str` each element: `_used_idents_node` returns a set whose
@@ -877,3 +902,34 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
                             _changed = True
 
     return ctx._all_closures
+
+
+def _is_closure_factory_with_nonlocal(inner):
+    """If inner is a closure factory returning a closure with nonlocal, 
+    lifting would be wrong - let backend handle (and refuse)."""
+    try:
+        if not getattr(inner, 'body', None):
+            return False
+        if not isinstance(inner.body[-1], ReturnStmt):
+            return False
+        ret = inner.body[-1].value
+        if not isinstance(ret, IdentExpr):
+            return False
+        pre = inner.body[:-1]
+        # find nested function being returned
+        from . import types as gimple_ctypes
+        import mojo.middle.exprtypes as gimple_exprtypes
+        nested = [n for n in gimple_exprtypes._walk_ast(pre)
+                  if isinstance(n, gimple_ctypes.FunctionDef)]
+        if len(nested) != 1 or nested[0].name != ret.name:
+            return False
+        C = nested[0]
+        # check for nonlocal in C
+        for x in gimple_exprtypes._walk_own_body(C.body):
+            if isinstance(x, gimple_ctypes.NonlocalStmt):
+                import sys
+                print(f"PREVENT_LIFT_NONLOCAL: {getattr(inner,'name','?')}", file=sys.stderr, flush=True)
+                return True
+    except Exception:
+        pass
+    return False

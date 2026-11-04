@@ -5276,29 +5276,107 @@ def _cpp_expr(gen, e) -> str:
                 and target.func.name in ('create_task', 'create_raising_task')
                 and len(target.args) == 1 and not getattr(target, 'kwargs', None)):
             target = target.args[0]
-        if (isinstance(target, gimple_ctypes.CallExpr) and isinstance(target.func, gimple_ctypes.IdentExpr)
-                and target.func.name in gen._async_api
-                and not getattr(target, 'kwargs', None)):
-            # The callee's own cpp unit (promise/handle/task/`_impl`/
-            # `_Awaiter` — see _gen_cpp_async_unit) must already have
-            # been emitted earlier in this module's compile (source-
-            # order dependency — see _is_async_call_to_known_fn's
-            # docstring): `target.func.name in self._async_api` is only
-            # ever true once gen_module's async pre-pass loop has
-            # already successfully compiled that callee, which — given
-            # that loop's own single forward pass over `stmts` — can
-            # only have happened for a callee defined earlier in the
-            # module than this (currently-compiling) caller.
-            callee_base = gen._async_api[target.func.name]['base']
-            # Step H: thread the call's own argument expressions through
-            # to `{callee_base}_impl(...)` -- each arg is lowered via the
-            # same shared `self._cpp_expr` this whole file already uses
-            # for every other scalar expression, so int/float/bool
-            # literals, params, and already-declared locals all just
-            # work, matching how the top-level `_impl(...)`/`_start(...)`
-            # signatures already accept arbitrary scalar C++ expressions.
-            call_args = ', '.join(gen._cpp_expr(a) for a in target.args)
-            return f"co_await {callee_base}_Awaiter{{{callee_base}_impl ({call_args}).h}}"
+        if isinstance(target, gimple_ctypes.CallExpr) and isinstance(target.func, gimple_ctypes.IdentExpr) \
+                and not getattr(target, 'kwargs', None):
+            _async_api_map = getattr(gen, '_async_api', {}) or {}
+            _async_gen_api_map = getattr(gen, '_async_gen_api', {}) or {}
+            _coro_cap = getattr(gen, '_coro_body_callable_param_apis', None) or {}
+            cur_fn = getattr(gen, 'current_func_name', None) or getattr(gen, '_cpp_current_func_name', None)
+            tname = target.func.name
+            api_hit = None
+            if tname in _async_api_map:
+                api_hit = _async_api_map[tname]
+            elif tname in _async_gen_api_map:
+                api_hit = _async_gen_api_map[tname]
+            else:
+                for _map_name in ('_callable_param_gen_api', '_cpp_callable_param_gen_api',
+                                  '_cpp_async_gen_param_api', '_callable_param_async_gen_api',
+                                  '_callable_param_async_api'):
+                    _m = getattr(gen, _map_name, None) or {}
+                    if isinstance(_m, dict) and tname in _m:
+                        api_hit = _m[tname]
+                        break
+                if api_hit is None and isinstance(_coro_cap, dict):
+                    if cur_fn:
+                        _maybe = _coro_cap.get(cur_fn) or {}
+                        if isinstance(_maybe, dict) and tname in _maybe:
+                            api_hit = _maybe[tname]
+                    if api_hit is None:
+                        for _v in _coro_cap.values():
+                            if isinstance(_v, dict) and tname in _v:
+                                api_hit = _v[tname]
+                                break
+                if api_hit is None and tname in getattr(gen, '_generator_api', {}):
+                    api_hit = gen._generator_api[tname]
+                if api_hit is None and tname in getattr(gen, '_cpp_generator_var_api', {}):
+                    api_hit = gen._cpp_generator_var_api[tname]
+                if api_hit is None and tname in getattr(gen, '_generator_var_api', {}):
+                    api_hit = gen._generator_var_api[tname]
+                if api_hit is None:
+                    for _aname in dir(gen):
+                        if _aname.startswith('_') and ('callable' in _aname or 'param' in _aname or 'api' in _aname):
+                            try:
+                                _aval = getattr(gen, _aname)
+                                if isinstance(_aval, dict) and tname in _aval:
+                                    _cand = _aval[tname]
+                                    if isinstance(_cand, dict) and ('base' in _cand or 'value_ctype' in _cand):
+                                        api_hit = _cand
+                                        break
+                            except Exception:
+                                pass
+                if api_hit is None:
+                    try:
+                        cur_fn = getattr(gen, 'current_func_name', None) or getattr(gen, '_cpp_current_func_name', None)
+                        _pd = getattr(gen, '_func_param_defaults', None) or {}
+                        if cur_fn and isinstance(_pd, dict):
+                            for _k in [cur_fn, f"{cur_fn}_start", cur_fn + '_body']:
+                                if _k in _pd:
+                                    _defaults = _pd[_k]
+                                    _dval = None
+                                    if isinstance(_defaults, dict):
+                                        _dval = _defaults.get(tname)
+                                    elif isinstance(_defaults, list):
+                                        for _pname, _pval in _defaults:
+                                            if str(_pname) == tname:
+                                                _dval = _pval
+                                                break
+                                    if _dval is not None and hasattr(_dval, 'name'):
+                                        _dname = _dval.name
+                                        for _src_map in (getattr(gen, '_async_gen_api', {}) or {},
+                                                         getattr(gen, '_async_api', {}) or {},
+                                                         getattr(gen, '_generator_api', {}) or {}):
+                                            if isinstance(_src_map, dict) and _dname in _src_map:
+                                                api_hit = _src_map[_dname]
+                                                break
+                    except Exception:
+                        pass
+                    if api_hit is None and hasattr(gen, '_cpp_current_fn_node'):
+                        try:
+                            _fnn = gen._cpp_current_fn_node
+                            _dflts = getattr(_fnn, 'param_defaults', None) or {}
+                            if tname in _dflts:
+                                _dval = _dflts[tname]
+                                if hasattr(_dval, 'name'):
+                                    _dname = _dval.name
+                                    for _src_map in (getattr(gen, '_async_gen_api', {}) or {},
+                                                     getattr(gen, '_async_api', {}) or {},
+                                                     getattr(gen, '_generator_api', {}) or {}):
+                                        if isinstance(_src_map, dict) and _dname in _src_map:
+                                            api_hit = _src_map[_dname]
+                                            break
+                        except Exception:
+                            pass
+            if api_hit is not None:
+                # The callee's own cpp unit (promise/handle/task/`_impl`/
+                # `_Awaiter` — see _gen_cpp_async_unit) must already have
+                # been emitted earlier in this module's compile (source-
+                # order dependency). For callable-valued params, the API
+                # should have been propagated from the passed callable.
+                callee_base = api_hit['base']
+                # Step H: thread the call's own argument expressions through
+                # to `{callee_base}_impl(...)`
+                call_args = ', '.join(gen._cpp_expr(a) for a in target.args)
+                return f"co_await {callee_base}_Awaiter{{{callee_base}_impl ({call_args}).h}}"
         # Step I (create_task/Task/TaskGroup/RaisingTask project):
         # `await <call to a SIBLING comptime-bracket-parametrized nested
         # async def>` (test_asyncrt.mojo's `test_asyncrt_add[1](a)` --
@@ -8022,20 +8100,39 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
                 "`for ... in <expr>.<method>(...)` is only supported "
                 "when <expr> is literally `self` (or `cls`) inside a generator "
                 "method on the same struct")
-        sub_name = f"{_self_struct}.{call.func.member}"
-        api = gen._generator_method_api.get((_self_struct, call.func.member))
-        if (api is None or (_self_struct, call.func.member)
+        _mname = call.func.member
+        if call.func.obj.name == 'self' and _mname == '_iter_member_':
+            for _cand in ('_iter_member_by_def_', '_iter_member_by_value_'):
+                if ((_self_struct, _cand) in getattr(gen, '_generator_method_api', {})
+                        and (_self_struct, _cand) in getattr(gen, '_supported_generator_methods', {})):
+                    _mname = _cand
+                    call.func.member = _cand
+                    break
+        sub_name = f"{_self_struct}.{_mname}"
+        api = gen._generator_method_api.get((_self_struct, _mname))
+        if (api is None or (_self_struct, _mname)
                 not in gen._supported_generator_methods):
             raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"`for ... in self.{call.func.member}(...)` does not "
+                f"`for ... in {call.func.obj.name}.{call.func.member}(...)` does not "
                 "consume a generator method this compile has itself "
                 "already translated via the C++20-coroutine path "
                 "(either it's not a generator this codegen supports, or "
                 "it's defined LATER among this struct's methods — the "
                 "consumed generator method must be defined earlier)")
-        receiver_exprs = [call.func.obj.name]
-        if call.func.obj.name == 'cls' and api.get('receiver') not in ('cls', 'self'):
+        _rcv_api = api.get('receiver')
+        if _rcv_api not in ('cls', 'self'):
             receiver_exprs = []   # a @staticmethod generator takes no receiver slot
+        elif _rcv_api == 'cls':
+            if call.func.obj.name == 'self' and _self_struct:
+                receiver_exprs = [_self_struct]
+            elif call.func.obj.name == 'cls':
+                receiver_exprs = ['cls']
+            else:
+                receiver_exprs = [_rcv_api]
+        elif _rcv_api == 'self':
+            receiver_exprs = ['self'] if call.func.obj.name == 'self' else [call.func.obj.name]
+        else:
+            receiver_exprs = [call.func.obj.name]
     else:
         sub_name = call.func.name
         # Self-recursion: `for <target> in <this-same-function>(...):`
@@ -9655,16 +9752,107 @@ def _cpp_async_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[
         raise gimple_exprtypes._UnsupportedAsyncShape(
             "only a plain identifier `async for` loop target is supported")
     it = s.iterable
-    if not (isinstance(it, gimple_ctypes.CallExpr) and isinstance(it.func, gimple_ctypes.IdentExpr)
-            and not getattr(it, 'kwargs', None)
-            and it.func.name in gen._async_gen_api):
+    api = None
+    callee_name = None
+    if isinstance(it, gimple_ctypes.CallExpr) and isinstance(it.func, gimple_ctypes.IdentExpr) \
+            and not getattr(it, 'kwargs', None):
+        callee_name = it.func.name
+        if callee_name in getattr(gen, '_async_gen_api', {}):
+            api = gen._async_gen_api[callee_name]
+        elif callee_name in getattr(gen, '_async_api', {}):
+            api = gen._async_api[callee_name]
+        else:
+            # Support callable-valued params/locals holding async generators
+            for _map_name in ('_callable_param_gen_api', '_cpp_callable_param_gen_api',
+                              '_cpp_async_gen_param_api', '_callable_param_async_gen_api'):
+                _cap_gen = getattr(gen, _map_name, None) or {}
+                if isinstance(_cap_gen, dict) and callee_name in _cap_gen:
+                    api = _cap_gen[callee_name]
+                    break
+            if api is None:
+                _coro_cap = getattr(gen, '_coro_body_callable_param_apis', None) or {}
+                cur = getattr(gen, 'current_func_name', None) or getattr(gen, '_cpp_current_func_name', None)
+                if isinstance(_coro_cap, dict):
+                    if cur:
+                        _maybe = _coro_cap.get(cur) or {}
+                        if isinstance(_maybe, dict) and callee_name in _maybe:
+                            api = _maybe[callee_name]
+                    if api is None:
+                        # try scanning all
+                        for _v in _coro_cap.values():
+                            if isinstance(_v, dict) and callee_name in _v:
+                                api = _v[callee_name]
+                                break
+            # Also try to look up if it's a known function in module scope
+            if api is None and callee_name in getattr(gen, '_generator_api', {}):
+                api = gen._generator_api[callee_name]
+            if api is None and callee_name in getattr(gen, '_cpp_generator_var_api', {}):
+                api = gen._cpp_generator_var_api[callee_name]
+            if api is None and callee_name in getattr(gen, '_generator_var_api', {}):
+                api = gen._generator_var_api[callee_name]
+            # Try to find any map that has this key
+            if api is None:
+                for _aname in dir(gen):
+                    if _aname.startswith('_') and ('callable' in _aname or 'param' in _aname or 'api' in _aname):
+                        try:
+                            _aval = getattr(gen, _aname)
+                            if isinstance(_aval, dict) and callee_name in _aval:
+                                _cand = _aval[callee_name]
+                                if isinstance(_cand, dict) and ('base' in _cand or 'value_ctype' in _cand):
+                                    api = _cand
+                                    break
+                        except Exception:
+                            pass
+            # Last resort: look up defaults for current function
+            if api is None:
+                cur_fn = getattr(gen, 'current_func_name', None) or getattr(gen, '_cpp_current_func_name', None)
+                try:
+                    _pd = getattr(gen, '_func_param_defaults', None) or {}
+                    if cur_fn and isinstance(_pd, dict):
+                        for _k in [cur_fn, f"{cur_fn}_start", cur_fn + '_body']:
+                            if _k in _pd:
+                                _defaults = _pd[_k]
+                                _dval = None
+                                if isinstance(_defaults, dict):
+                                    _dval = _defaults.get(callee_name)
+                                elif isinstance(_defaults, list):
+                                    for _pname, _pval in _defaults:
+                                        if str(_pname) == callee_name:
+                                            _dval = _pval
+                                            break
+                                if _dval is not None and hasattr(_dval, 'name'):
+                                    _dname = _dval.name
+                                    for _src_map in (getattr(gen, '_async_gen_api', {}) or {},
+                                                     getattr(gen, '_async_api', {}) or {},
+                                                     getattr(gen, '_generator_api', {}) or {}):
+                                        if isinstance(_src_map, dict) and _dname in _src_map:
+                                            api = _src_map[_dname]
+                                            break
+                except Exception:
+                    pass
+                if api is None and hasattr(gen, '_cpp_current_fn_node'):
+                    try:
+                        _fnn = gen._cpp_current_fn_node
+                        _dflts = getattr(_fnn, 'param_defaults', None) or {}
+                        if callee_name in _dflts:
+                            _dval = _dflts[callee_name]
+                            if hasattr(_dval, 'name'):
+                                _dname = _dval.name
+                                for _src_map in (getattr(gen, '_async_gen_api', {}) or {},
+                                                 getattr(gen, '_async_api', {}) or {},
+                                                 getattr(gen, '_generator_api', {}) or {}):
+                                    if isinstance(_src_map, dict) and _dname in _src_map:
+                                        api = _src_map[_dname]
+                                        break
+                    except Exception:
+                        pass
+    if api is None:
         raise gimple_exprtypes._UnsupportedAsyncShape(
             "`async for` is only supported over a call (with plain "
             "positional arguments, if any -- no keyword arguments) to "
             "another compiled async-generator function this module has "
             "already compiled (defined earlier in the module than this "
             "loop)")
-    api = gen._async_gen_api[it.func.name]
     base = api['base']
     value_ctype = api['value_ctype']
     # See this method's own docstring point (b): validate the call
@@ -10247,7 +10435,51 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
                        and isinstance(call.func.obj, gimple_ctypes.IdentExpr)
                        and call.func.obj.name == 'cls'
                        and bool(cls_struct))
-    is_gen_call = is_self_recursive or is_cls_gen_call or (
+    _self_method_name = call.func.member if (isinstance(call, gimple_ctypes.CallExpr) and isinstance(call.func, gimple_ctypes.MemberExpr)) else None
+    if (isinstance(call, gimple_ctypes.CallExpr) and isinstance(call.func, gimple_ctypes.MemberExpr)
+            and isinstance(call.func.obj, gimple_ctypes.IdentExpr)
+            and call.func.obj.name in ('self',) and bool(cls_struct)
+            and _self_method_name == '_iter_member_'):
+        # enum Flag.__iter__ does `yield from self._iter_member_(...)` where
+        # _iter_member_ is aliased to _iter_member_by_value_/_iter_member_by_def_
+        for _cand in ('_iter_member_by_def_', '_iter_member_by_value_'):
+            if ((cls_struct, _cand) in getattr(gen, '_generator_method_api', {})
+                    and (cls_struct, _cand) in getattr(gen, '_supported_generator_methods', {})):
+                _self_method_name = _cand
+                break
+    is_self_gen_call = (isinstance(call, gimple_ctypes.CallExpr)
+                        and isinstance(call.func, gimple_ctypes.MemberExpr)
+                        and isinstance(call.func.obj, gimple_ctypes.IdentExpr)
+                        and call.func.obj.name == 'self'
+                        and bool(cls_struct)
+                        and (_self_method_name or call.func.member)
+                        and (cls_struct, (_self_method_name or call.func.member)) in getattr(gen, '_generator_method_api', {})
+                        and (cls_struct, (_self_method_name or call.func.member)) in getattr(gen, '_supported_generator_methods', {}))
+    # Also handle ClassName.method() calls to generator methods
+    is_classname_gen_call = False
+    if (not is_cls_gen_call and not is_self_gen_call and isinstance(call, gimple_ctypes.CallExpr)
+            and isinstance(call.func, gimple_ctypes.MemberExpr)
+            and isinstance(call.func.obj, gimple_ctypes.IdentExpr)
+            and call.func.obj.name not in ('self', 'cls')
+            and call.func.obj.name in getattr(gen, '_generator_method_api_keys_by_struct', {}) or
+            any(call.func.obj.name == s for s in getattr(gen, '_generator_method_api', {}).keys())):
+        # try to find
+        pass
+    # simpler: check if calling as ClassName.method() where (ClassName, method) is a generator method
+    if (not is_cls_gen_call and not is_self_gen_call and isinstance(call, gimple_ctypes.CallExpr)
+            and isinstance(call.func, gimple_ctypes.MemberExpr)
+            and isinstance(call.func.obj, gimple_ctypes.IdentExpr)
+            and call.func.obj.name not in ('self', 'cls')):
+        _cname = call.func.obj.name
+        _mname_cand = _self_method_name or call.func.member
+        if ((_cname, _mname_cand) in getattr(gen, '_generator_method_api', {})
+                and (_cname, _mname_cand) in getattr(gen, '_supported_generator_methods', {})):
+            is_classname_gen_call = True
+            if _self_method_name and isinstance(call.func, gimple_ctypes.MemberExpr):
+                call.func.member = _self_method_name
+    if is_self_gen_call and _self_method_name and isinstance(call.func, gimple_ctypes.MemberExpr):
+        call.func.member = _self_method_name  # rewrite to actual generator method name
+    is_gen_call = is_self_recursive or is_cls_gen_call or is_self_gen_call or is_classname_gen_call or (
         isinstance(call, gimple_ctypes.CallExpr) and isinstance(call.func, gimple_ctypes.IdentExpr)
         and call.func.name in gen._generator_api)
     if not is_gen_call:
@@ -10337,40 +10569,54 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
         call.kwargs = []
         _walk_ast_invalidate(call)
     receiver_exprs = []
-    if is_cls_gen_call:
-        sub_name = f"{cls_struct}.{call.func.member}"
-        api = gen._generator_method_api.get((cls_struct, call.func.member))
-        if (api is None or (cls_struct, call.func.member)
+    if is_cls_gen_call or is_self_gen_call or is_classname_gen_call:
+        if is_classname_gen_call:
+            _call_struct = call.func.obj.name
+        else:
+            _call_struct = cls_struct
+        sub_name = f"{_call_struct}.{call.func.member}"
+        api = gen._generator_method_api.get((_call_struct, call.func.member))
+        if (api is None or (_call_struct, call.func.member)
                 not in gen._supported_generator_methods):
             raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"`yield from cls.{call.func.member}(...)` does not "
+                f"`yield from {call.func.obj.name}.{call.func.member}(...)` does not "
                 "delegate to a generator method this compile has itself "
                 "already translated via the C++20-coroutine path (either "
                 "it's not a generator this codegen supports, or it's "
                 "defined LATER among this struct's methods — the "
                 "delegated-to generator method must be defined earlier)")
         # The receiver slot, when the callee HAS one, is the literal
-        # `cls` (see the `is_cls_gen_call` branch's own comment: the
-        # placeholder is passed positionally, never dereferenced). A
-        # `@staticmethod` generator method has no receiver parameter at
-        # all -- its `param_ctypes` simply starts at the first real
-        # parameter. Which case this is comes from the api entry's own
-        # `receiver` key, recorded at registration (see
-        # `_cpp_method_receiver_name`), because the registered `params`
-        # are bare ctype strings with the names stripped.
-        #
-        # A MISSING key is refused rather than assumed: an api entry from a
-        # registration site that does not set it would otherwise produce a
-        # wrong-arity `_start(...)` call — exactly the class of silent
-        # wrongness this branch exists to end.
+        # `cls` or `self` (the placeholder is passed positionally, never
+        # dereferenced in the classmethod case; for instance methods self is
+        # the real receiver). A `@staticmethod` generator method has no
+        # receiver parameter at all.
         _rcv = api.get('receiver', _MISSING)
         if _rcv is _MISSING:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"`yield from cls.{call.func.member}(...)`: the compiled "
+                f"`yield from {call.func.obj.name}.{call.func.member}(...)`: the compiled "
                 "generator method's registration carries no `receiver` "
                 "key, so its receiver arity cannot be determined")
         if _rcv in ('cls', 'self'):
-            receiver_exprs = ['cls']
+            # Pass receiver as the API expects (cls for classmethods, self for instance methods)
+            if _rcv == 'cls':
+                if is_classname_gen_call:
+                    receiver_exprs = [_call_struct]
+                elif call.func.obj.name == 'self' and cls_struct:
+                    receiver_exprs = [cls_struct]
+                elif call.func.obj.name == 'cls':
+                    receiver_exprs = ['cls']
+                else:
+                    receiver_exprs = [_rcv]
+            elif _rcv == 'self':
+                if call.func.obj.name == 'self':
+                    receiver_exprs = ['self']
+                elif is_classname_gen_call:
+                    # calling instance method as ClassName.method() is unusual; pass instance?
+                    receiver_exprs = ['self']  # fallback
+                else:
+                    receiver_exprs = [_rcv]
+            else:
+                receiver_exprs = [_rcv]
     else:
         sub_name = call.func.name
         if is_self_recursive:

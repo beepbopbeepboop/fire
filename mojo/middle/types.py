@@ -2598,33 +2598,41 @@ def _c_type_to_cpp(t: str) -> str:
     return t
 
 
-def callable_ctype(param_ctypes, ret_ctype: str = 'int64_t') -> str:
-    """Build a `std::function<R(P...)>` for the given C types."""
-    if ret_ctype == 'int':
-        ret_ctype = 'int64_t'
-    if ret_ctype is None:
-        ret_ctype = 'int64_t'
-    # For backward compat with existing call patterns
-    params = []
-    if param_ctypes:
-        for p in param_ctypes:
-            if isinstance(p, str):
-                pt = p
-            elif isinstance(p, (tuple, list)) and len(p) >= 2:
+def callable_ctype(params, ret='int64_t', ret_ctype=None, param_ctypes=None):
+    """Return `std::function<R(P...)>` for params/ret C types."""
+    if ret_ctype is not None and ret == 'int64_t':
+        ret = ret_ctype
+    # Support both calling conventions for flexibility
+    if param_ctypes is not None and params == []:
+        params = param_ctypes
+    if isinstance(params, str):
+        params = [params]
+    # Normalize params
+    norm_params = []
+    if params:
+        for p in params:
+            if isinstance(p, (tuple, list)) and len(p) >= 2:
                 pt = p[1]
+            elif isinstance(p, str):
+                pt = p
             else:
                 pt = p
+            pt = _as_str(pt)
             if pt == 'int':
                 pt = 'int64_t'
             if pt is None:
                 pt = 'int64_t'
-            params.append(pt)
-    if len(params) == 1 and params[0] == 'int64_t' and ret_ctype == 'int64_t':
-        return 'std::function<int64_t(int64_t)>'
-    if len(params) == 0 and ret_ctype == 'int64_t':
-        return 'std::function<int64_t()>'
-    ps = ', '.join(params) if params else ''
-    return f'std::function<{ret_ctype}({ps})>'
+            norm_params.append(pt)
+    ret_n = _as_str(ret)
+    if ret_n == 'int':
+        ret_n = 'int64_t'
+    if ret_n is None:
+        ret_n = 'int64_t'
+    if not norm_params:
+        ps = ''
+    else:
+        ps = ', '.join(norm_params)
+    return f'std::function<{ret_n}({ps})>'
 
 
 _CPP_CALLABLE_CTYPE = callable_ctype([], 'int64_t')
