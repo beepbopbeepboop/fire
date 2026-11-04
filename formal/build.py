@@ -24039,44 +24039,54 @@ def _transform_interpolated_literals_in_format_calls(stmts):
                                     ok = False
                                     break
                                 expr_stripped = expr_str.strip()
+                                parsed = None
+                                fmt_spec = '%d'
+                                # Try to detect literal types
                                 try:
-                                    if hasattr(F, 'parse_expression'):
-                                        parsed = F.parse_expression(expr_stripped)
+                                    # String literal
+                                    if len(expr_stripped) >= 2 and ((expr_stripped[0] == '"' and expr_stripped[-1] == '"') or (expr_stripped[0] == "'" and expr_stripped[-1] == "'")):
+                                        parsed = F.StringLiteral(expr_stripped[1:-1]) if hasattr(F.StringLiteral, '__init__') else F.StringLiteral(value=expr_stripped[1:-1])
+                                        fmt_spec = '%s'
+                                    # Integer literal
+                                    elif expr_stripped.lstrip('-').isdigit():
+                                        try:
+                                            parsed = F.IntLiteral(int(expr_stripped))
+                                        except Exception:
+                                            parsed = F.IntLiteral(value=int(expr_stripped))
+                                        fmt_spec = '%d'
+                                    # Identifier
                                     else:
                                         try:
                                             parsed = F.IdentExpr(expr_stripped)
                                         except Exception:
-                                            parsed = None
+                                            try:
+                                                parsed = F.IdentExpr(name=expr_stripped)
+                                            except Exception:
+                                                parsed = None
+                                        if isinstance(parsed, getattr(F, 'IdentExpr', None)):
+                                            name = getattr(parsed, 'name', expr_stripped)
+                                            if name in string_vars:
+                                                fmt_spec = '%s'
+                                            elif name in int_vars:
+                                                fmt_spec = '%d'
+                                            else:
+                                                fmt_spec = '%d'
+                                        else:
+                                            fmt_spec = '%d'
                                 except Exception:
                                     try:
                                         parsed = F.IdentExpr(expr_stripped)
+                                        fmt_spec = '%d'
                                     except Exception:
                                         parsed = None
-                                fmt_spec = '%d'
-                                if isinstance(parsed, getattr(F, 'StringLiteral', type(None))):
-                                    fmt_spec = '%s'
-                                elif isinstance(parsed, getattr(F, 'IntLiteral', type(None))):
-                                    fmt_spec = '%d'
-                                elif isinstance(parsed, getattr(F, 'IdentExpr', None)):
-                                    name = getattr(parsed, 'name', '')
-                                    if name in string_vars:
-                                        fmt_spec = '%s'
-                                    elif name in int_vars:
-                                        fmt_spec = '%d'
-                                    else:
-                                        # Try %d first, widening will handle it
-                                        fmt_spec = '%d'
-                                elif len(expr_stripped) >= 2 and ((expr_stripped[0] == '"' and expr_stripped[-1] == '"') or (expr_stripped[0] == "'" and expr_stripped[-1] == "'")):
-                                    fmt_spec = '%s'
+                                        ok = False
+                                        break
                                 fmt_parts.append(fmt_spec)
                                 if parsed is not None:
                                     field_exprs.append(parsed)
                                 else:
-                                    try:
-                                        field_exprs.append(F.IdentExpr(expr_stripped))
-                                    except Exception:
-                                        ok = False
-                                        break
+                                    ok = False
+                                    break
                             else:
                                 ok = False
                                 break
