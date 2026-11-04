@@ -1831,7 +1831,9 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
             [path for _, path in resolved], project_root=source_path)
         demands = {}
         try:
-            with open('/tmp/DEBUG_BUILD.txt', 'a') as _f:
+            _dbg = os.path.join(os.path.dirname(__file__), '..', '.tmp', 'DEBUG_BUILD.txt')
+            os.makedirs(os.path.dirname(_dbg), exist_ok=True)
+            with open(_dbg, 'a') as _f:
                 _f.write(f"BUILD: resolved={resolved}\n")
         except Exception:
             pass
@@ -1844,7 +1846,7 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                     merged[tmpl] = sorted(set(merged.get(tmpl, [])) | set(args))
                 demands[other] = merged
         try:
-            with open('/tmp/DEBUG_BUILD.txt', 'a') as _f:
+            with open(os.path.join(os.path.dirname(__file__), '..', '.tmp', 'DEBUG_BUILD.txt'), 'a') as _f:
                 _f.write(f"DEMANDS={demands}\n")
         except Exception:
             pass
@@ -1859,14 +1861,14 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                                           project_root=source_path,
                                           demands=demands)
         try:
-            with open('/tmp/DEBUG_BUILD.txt', 'a') as _f:
+            with open(os.path.join(os.path.dirname(__file__), '..', '.tmp', 'DEBUG_BUILD.txt'), 'a') as _f:
                 _f.write(f"LIBFREE={library_free}\n")
         except Exception:
             pass
         check_library_free_calls(source_path, stmts, library_free)
         for mod, path in resolved:
             try:
-                with open('/tmp/DEBUG_BUILD2.txt', 'a') as _f:
+                with open(os.path.join(os.path.dirname(__file__), '..', '.tmp', 'DEBUG_BUILD2.txt'), 'a') as _f:
                     _f.write(f"TRY_BUILD {mod} {path} free={os.path.abspath(path) in library_free}\n")
             except Exception:
                 pass
@@ -1878,7 +1880,7 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                                            _parent=parent, demands=demands,
                                            closure=closure)
                 try:
-                    with open('/tmp/DEBUG_BUILD2.txt', 'a') as _f:
+                    with open(os.path.join(os.path.dirname(__file__), '..', '.tmp', 'DEBUG_BUILD2.txt'), 'a') as _f:
                         _f.write(f"BUILT {mod} {dylib}\n")
                 except Exception:
                     pass
@@ -14059,7 +14061,7 @@ def _rewrite_store_target(target, sites: dict, stores: set):
             return out
 
     Which is the `has no home` refusal `tools/memslot.py:448:held_env` measured
-    in `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md`'s round-2 census, and
+    in the proof-coverage census, and
     the third instance of one shape: a position where a name is a READ and the
     walk treated the enclosing node as a store. The two before it are the
     assignment value (`x = G`) and the `elif` arm, both fixed in the branch
