@@ -822,9 +822,16 @@ def one_word_store_refusal(name: str, field: str, arg, candidates: dict,
     return None
 
 
-InitShape = collections.namedtuple("InitShape",
-                                   "method params positional required optional "
-                                   "required_names")
+from typing import NamedTuple
+
+
+class InitShape(NamedTuple):
+    method: object
+    params: object
+    positional: object
+    required: object
+    optional: object
+    required_names: object
 InitShape.__doc__ = (
     "One `__init__` this struct declares.  A named tuple and not a bare one "
     "because the arity window below is arithmetic over four of the five "

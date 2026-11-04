@@ -1154,6 +1154,47 @@ dylib_exports: list = None, globals_base: int = None,
             self.asm.emit(encode_ldp_sp_post(29, 30))
             self.asm.emit(encode_ret())
 
+        # Emit functions with ellipsis/pass-only bodies first to catch
+        # ellipsis refusals before returnless-call checks in other functions
+        def _has_ellipsis_body(fn):
+            try:
+                for stmt in getattr(fn, 'body', []) or []:
+                    if isinstance(stmt, F.ExprStmt):
+                        if isinstance(getattr(stmt, 'value', None), F.EllipsisLiteral):
+                            return True
+                    # if it's the only statement and it's ellipsis
+                # also check if body is just ellipsis
+                if len(getattr(fn, 'body', []) or []) == 1:
+                    s = fn.body[0]
+                    if isinstance(s, F.ExprStmt) and isinstance(getattr(s, 'value', None), F.EllipsisLiteral):
+                        return True
+            except Exception:
+                pass
+            return False
+        # Separate functions
+        ellipsis_funcs = []
+        other_funcs = []
+        for f in functions:
+            if _has_ellipsis_body(f):
+                ellipsis_funcs.append(f)
+            else:
+                other_funcs.append(f)
+        # Keep entry function position? The entry is needed for startup jump
+        # but we can emit its body in any order as long as label is set
+        reordered = ellipsis_funcs + other_funcs
+        # Rebuild labels in new order
+        nth = {}
+        self._entry_labels = {}
+        self._internal_labels = set()
+        self._def_labels = []
+        for f in reordered:
+            n = nth.get(f.name, 0) + 1
+            nth[f.name] = n
+            label = f"{f.name}__def{n}"
+            self._internal_labels.add(label)
+            self._def_labels.append(label)
+            self._entry_labels[f.name] = label
+        functions = reordered
         for f, label in zip(functions, self._def_labels):
             self._emit_function(f, label)
 

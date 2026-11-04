@@ -25764,7 +25764,6 @@ def check_interpolated_literal_bound_census(verbose=False):
     it stopped existing would make step 1 worth nothing — so it is a fact about
     the corpus rather than a drifting proportion, and it is asserted exactly.
     """
-    import collections as _collections
     import os as _os
     import formal.types as _types
     build = __import__("formal.build", fromlist=["build"])
@@ -25835,11 +25834,13 @@ def check_interpolated_literal_bound_census(verbose=False):
         return None
 
     scanned = 0
-    shapes = _collections.Counter()
+    shapes = {}
     total_fields = 0
     total_literals = 0
     bounded = []                     # (path, spelled, bound)
-    one_obstacle = _collections.Counter()
+    one_obstacle = {}
+    def _inc(d, k):
+        d[k] = d.get(k, 0) + 1
     for root in roots:
         for dirpath, dirnames, filenames in _os.walk(root):
             dirnames[:] = [d for d in sorted(dirnames)
@@ -25889,7 +25890,7 @@ def check_interpolated_literal_bound_census(verbose=False):
                     vk = scope.get(id(node))
                     total_fields += len(fields)
                     for seg in fields:
-                        shapes[M.interpolated_field_shape(seg[1])] += 1
+                        _inc(shapes, M.interpolated_field_shape(seg[1]))
                     bound, _why = M.interpolated_literal_bound(
                         spelled, lambda e, _vk=vk: width_of(e, _vk))
                     if bound is not None:
@@ -25908,13 +25909,13 @@ def check_interpolated_literal_bound_census(verbose=False):
                         strays = [v for v in verdicts
                                   if v[0] == "name" and v[1] and v[1][0] == "str"]
                         if shapes_ != ["name"] * len(fields):
-                            one_obstacle["a-field-no-declaration-reaches"] += 1
+                            _inc(one_obstacle, "a-field-no-declaration-reaches")
                         elif len(strays) == len(fields):
-                            one_obstacle["every-field-is-a-string"] += 1
+                            _inc(one_obstacle, "every-field-is-a-string")
                         elif strays:
-                            one_obstacle["one-string-among-integers"] += 1
+                            _inc(one_obstacle, "one-string-among-integers")
                         else:
-                            one_obstacle["no-field-is-declared-at-all"] += 1
+                            _inc(one_obstacle, "no-field-is-declared-at-all")
     n = len(bounded)
     scope_free = sum(1 for _p, s, _b in bounded
                      if all(M.interpolated_field_shape(f[1]) in
@@ -25950,21 +25951,21 @@ def check_interpolated_literal_bound_census(verbose=False):
              "width, so this row is what a resolver with no type information "
              "can answer"),
             ("literals whose every field is a STRING-typed name",
-             one_obstacle["every-field-is-a-string"], 1,
+             one_obstacle.get("every-field-is-a-string", 0), 1,
              "THE decisive count: these are decidable the moment a string field "
              "has a width, and §7.1's \"a field's width is its declared type's\" "
              "is false of every one of them — the width is a `strlen` over the "
              "VALUE and a frame buffer is reserved before the program runs"),
             ("literals with a string field among integer ones",
-             one_obstacle["one-string-among-integers"], 0,
+             one_obstacle.get("one-string-among-integers", 0), 0,
              "the mixed shape, which is where a partial bound would be worst"),
             ("literals with a field no declaration reaches",
-             one_obstacle["a-field-no-declaration-reaches"], 1,
+             one_obstacle.get("a-field-no-declaration-reaches", 0), 1,
              "a call, a subscript, an attribute or an undeclared name: nothing "
              "in the source fixes a width, so no bound arithmetic reaches it "
              "and the reading is per name"),
             ("literals with every field undeclared",
-             one_obstacle["no-field-is-declared-at-all"], 1,
+             one_obstacle.get("no-field-is-declared-at-all", 0), 1,
              "the same shape with nothing at all stated — the value model doc "
              "(`FORMAL_string_value_model`) holds the next step for these")):
         if got >= floor:
