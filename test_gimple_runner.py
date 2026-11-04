@@ -1473,6 +1473,21 @@ def main():
 
 main()
 """, "1\n3\n")
+    # Pinning test for *args/**kwargs packing at call sites (PLAN_contextlib_step1)
+    test_gimple_stdout("gimple_call_star_args_and_kwargs_packing", """\
+def f(*args, **kwargs) -> Int:
+    print(args[0])
+    print(args[1])
+    print(kwargs["x"])
+    return args[0] + args[1] + kwargs["x"]
+
+
+def main():
+    print(f(1, 2, x=10))
+
+
+main()
+""", "1\n2\n10\n13\n")
 
     # A `*seq` element of a list or tuple DISPLAY extends the container
     # instead of occupying one slot, and it is the one place where a runtime
@@ -14750,6 +14765,20 @@ main()
 """)
 
 
+def test_none_held_in_local_with_if_join_is_none_needle():
+    """Flow-sensitive None tracking at if/while/try join points: a local that
+    is None on some paths and reassigned on others must still be treated as
+    None on the paths where it remains None."""
+    test_gimple_matches_cpython("gimple_none_held_if_join", """\
+def main():
+    n = None
+    if len("ab") > 5:
+        n = 1
+    print(n in ["a", None])
+main()
+""")
+
+
 def test_none_member_of_a_set_is_not_the_int_zero():
     """A set's `None` member has its own slot tag (3): `0 in {None, 1}` is
     False, `None in {0}` is False, `None in {None, 0}` is True, and a None
@@ -14768,6 +14797,24 @@ def main():
     v.add(None)
     v.add(None)
     print(len(v), None in v, 0 in v)
+
+main()
+""")
+
+
+def test_none_member_of_a_dict_is_not_the_int_zero():
+    """A dict's `None` key is distinct from int 0: `0 in {None: 1}` is
+    False, `None in {0: 1}` is False, `None in {None: 0}` is True."""
+    test_gimple_matches_cpython("gimple_dict_none_member_distinct_from_zero", """\
+def main():
+    d = {None: 1, "a": 2}
+    print(0 in d, None in d)
+    t = {0: 1}
+    print(None in t)
+    n = None
+    print(n in t)
+    u = {None: 0}
+    print(None in u, 0 in u, len(u))
 
 main()
 """)
