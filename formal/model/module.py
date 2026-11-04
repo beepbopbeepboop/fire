@@ -5722,7 +5722,7 @@ def function_value_refusal(name: str, fn_name: str) -> str:
             f"a container, or returning one is refused rather than answered "
             f"with a number that means nothing. `formal/hostmods/` has no "
             f"module that hands back a callable for the same reason "
-            f"(`bugs/formal/FORMAL_functools_is_unbuildable_as_a_host_module.md`). Call "
+            f"`. Call "
             f"it directly, or move the work into a `def` and pass its results")
 
 
