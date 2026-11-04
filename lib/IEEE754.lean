@@ -155,6 +155,21 @@ def geBits (a b : Bits) : Bool := leBits b a
 `eqBits` and this are complements. -/
 def unordered (a b : Bits) : Bool := isNaN a || isNaN b
 
+/-- NZCV for FCMP (flag-setting compare). 
+ARM64 FCMP: if unordered -> NZCV = 0b0011 (C=1, V=1)
+else if equal -> 0b0110 (Z=1, C=1)
+else if less -> 0b1000 (N=1)
+else (greater) -> 0b0010 (C=1) -/
+def fcmp_nzcv (a b : Bits) : UInt8 :=
+  if unordered a b then
+    (0b0011 : UInt8)  -- N=0,Z=0,C=1,V=1
+  else if eqBits a b then
+    (0b0110 : UInt8)  -- N=0,Z=1,C=1,V=0
+  else if ltBits a b then
+    (0b1000 : UInt8)  -- N=1,Z=0,C=0,V=0
+  else
+    (0b0010 : UInt8)  -- greater: N=0,Z=0,C=1,V=0
+
 /-! ## The arithmetic, through Lean's `Float`
 
 `Float.ofBits`/`toBits` are compiled primitives, so this half is decidable
