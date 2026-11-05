@@ -1661,7 +1661,7 @@ Index a `range()` result rather than measuring it, until that is fixed.
 | 11 | ../new-modular/Mojo/stdlib/std/format/repr.mojo | S | build: value.write_repr_to() is a method call on a value, and this backend lowers only append, clear, close, write and string methods | detailed message lists allowed methods | |
 | 12 | ../new-modular/Mojo/stdlib/std/origin/__init__.mojo | S | build: the module-level comptime binding 'AnyOrigin' is initialized from an MLIR attribute template: __mlir_attr[...] | different full message | |
 | 13 | ../new-modular/Mojo/stdlib/std/os/path/path.mojo | S | build: path.mojo imports string_span which imports hashlib.hasher (missing) | moved to dependency/import chain issue | |
-| 14 | ../new-modular/Mojo/stdlib/std/reflection/function.mojo |  | build: ReflectedFn_display_name: __mlir_attr[`#kgen.get_source_name<`, Self.func, `> : !kgen.string` |  |  |
+| 14 | ../new-modular/Mojo/stdlib/std/reflection/function.mojo | S | build: function.mojo imports sys.info -> dependency chain to FormatStruct bare call | moved to dependency | |
 | 15 | ../new-modular/Mojo/stdlib/std/simd.mojo |  | build: _convert_f32_to_float8_scalar: `_isnan` is called, and it is imported from `std.utils.numeric |  |  |
 | 16 | ../new-modular/Mojo/stdlib/std/sys/arg.mojo |  | build: Span[StaticString, ImmStaticOrigin] is a compile-time explicit-parameter list on a generic, n |  |  |
 | 17 | bootstrap_test_classes.mojo |  | build: create_point returns a frame address, and the returned-frame convention needs a caller to res |  |  |
