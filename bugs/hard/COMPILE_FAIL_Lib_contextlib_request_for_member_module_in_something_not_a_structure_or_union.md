@@ -179,3 +179,20 @@ Implementation plan (ordered):
 1. `cpp_async.py`: add boxed-return branch in `_generator_yield_ctype`-related scalar lattice, emitting a `MojoAsync*` / box slot for `__aenter__`, with read-back at every consumer.
 2. `cpp_async.py`: extend coroutine frame slot table to carry `*args`/`**kwargs` (variable-arity), updating `_exit_wrapper` frame init.
 3. After (1)+(2), rebuild and verify `Lib/contextlib.py` compiles clean; then delete this doc with `python3 tools/dangling_doc_refs.py --ratchet`.
+
+## Repro (this session)
+
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py` still
+exits non-zero. Refusal reproduced verbatim:
+
+```
+cannot compile module: function(s) __aexit__, __aexit__, _exit_wrapper, inner
+(async function(s), declared `async def`) -- this codegen compiles every function
+into a single straight-line C function and has no suspend/resume state-machine
+transform for generators, nor an event loop / suspend-resume codegen for async
+functions, yet, so these cannot be represented as compiled C without emitting
+silently wrong or broken code; falling back to interpreting this module from
+source instead
+```
+
+Blocker unchanged: async/coroutine codegen. No code change attempted this session.
