@@ -1190,8 +1190,9 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                         gen._link_needs_cxx = True
                         gen._link_needs_cxx_box[0] = True
 
-                # Store parsed stmts for this module so parent gens can access them
-                gen._module_stmts[module_name] = stmts
+                # Per-module AST lifetime fix: do NOT retain stmts in
+                # _module_stmts (dropped); reconciliation uses the flat
+                # _all_transitive_stmts_ordered mirror below instead.
                 # Incrementally extend the flat, pre-deduped mirror (see
                 # the `_walk_ast` re-scan bug
                 # Phase 1) — O(this module's own stmt count), done once
