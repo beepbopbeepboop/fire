@@ -6440,6 +6440,16 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
         code = _dedup_guarded_blocks(code)
         code = _relocate_module_instance_defs(code)
     _verify_desugared_genexps(code, gen, _desugared_names)
+    # Release the whole-AST traversal memo (and its parent edges) now that
+    # this compile's emission is complete, so the retained ASTs (and the
+    # strong references that pin their ids) do not survive past the
+    # compile boundary. _walk_ast_reset is idempotent and scoped to one
+    # independent output artifact, exactly the interval _run_pipeline covers.
+    try:
+        from mojo.middle import exprtypes as _exprtypes
+        _exprtypes._walk_ast_reset()
+    except Exception:
+        pass
     return code, gen
 
 
