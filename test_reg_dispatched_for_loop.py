@@ -66,6 +66,32 @@ def main():
         print(x + 1)
 main()
 ''',
+    # Doubles reached through a word of unknown type used to print as their raw
+    # IEEE-754 bits (4609434218613702656); the kind-aware read fixed that, and
+    # the target must then still do INT arithmetic on int slots and float
+    # arithmetic on float slots (a boxed-but-untagged target made `x + 1` 11.0).
+    "float_elements_print_and_compute": '''
+def main():
+    d = {"f": [1.5, 2.5], "i": [10, 20], "s": ["u", "v"]}
+    total = 0
+    for x in d["i"]:
+        total = total + x
+        print(x * 2, x > 12, x - 1)
+    print(total)
+    for y in d["f"]:
+        print(y, y * 2, y + 1, y > 2.0)
+    for z in d["s"]:
+        print(z + "!")
+main()
+''',
+    "floats_through_dispatch_with_dict_and_str_siblings": '''
+def main():
+    d = {"a": [1.5, 2.5], "b": ["u", "v"], "c": {"k": 1}}
+    for key in ["a", "b", "c"]:
+        for x in d[key]:
+            print(x)
+main()
+''',
 }
 
 

@@ -1306,6 +1306,8 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     # An already-materialized items list: its elements are
                     # the same [key, value] pairs.
                     gen._dict_items_val_elems[lp] = 'int64_t'
+                else:
+                    gen._maybe_kinds_vals.add(_as_str(lp))
                 gen._gen_for_list(var, lp, node.body, share_var_with_sibling_arm=True)
                 gen._emit(f"  goto {bb_after};")
                 gen._emit_label(bb_set)
@@ -2624,6 +2626,14 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
             # so it is the cname that the print/str resolution is keyed on
             # (gen._boxed_vals).
             gen._boxed_vals.add(cvar)
+            if share_var_with_sibling_arm:
+                # The dispatch arm of a loop over a word of unknown type: a
+                # slot may be a float box or a bare int, and arithmetic on the
+                # target must pick the int or the double answer by the box's
+                # kind at run time (`_tagged_arith_select`). Without the tag a
+                # boxed target is read as a double, so `x + 1` over `[10, 20]`
+                # printed 11.0.
+                gen._tagged_word_vals.add(cvar)
             gen._emit(f"  {cvar} = (int64_t) {elem64};")
         elif suf == 'double':
             gen._emit(f"  {cvar} = mojo_list_get_double ({list_ptr}, {idx_t});")

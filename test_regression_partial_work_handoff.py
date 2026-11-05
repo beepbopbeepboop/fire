@@ -1,8 +1,7 @@
 # Regression / pinning test for bug:PARTIAL_WORK_HANDOFF
 # bug:PARTIAL_WORK_HANDOFF (handed-off container-typed ctor gap, §2.1)
 # The two-hop container CTYPE gap is fixed (commit 4ee95addd); the
-# element-type half is pinned by test_reg_dispatched_for_loop.py (its float residue is
-# bugs/hard/CODEGEN_float_elements_of_an_untyped_list_print_as_raw_bits.md).
+# element-type half is pinned by test_reg_dispatched_for_loop.py.
 # This test verifies the regression is still pinned in test_gimple_runner.py.
 
 def test_regression_pinned():
