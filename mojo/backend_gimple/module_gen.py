@@ -18618,7 +18618,11 @@ def gen_module_impl(self, stmts: list):
         # Per-module AST lifetime: drop closure/function-AST accumulators now
         # that emission is complete.
         for _acc in ('_all_closures', '_cpp_module_fn_asts',
-                     '_lambda_outer_closures', '_closure_call_stmts'):
+                     '_lambda_outer_closures', '_closure_call_stmts',
+                     '_local_def_nodes', '_analysis_funcs',
+                     '_comptime_list_asts', '_lambda_parts',
+                     '_cpp_module_fn_names', '_global_inline_defs',
+                     '_cur_func_body'):
             try:
                 _v = getattr(self, _acc, None)
                 if isinstance(_v, dict):
