@@ -2,12 +2,12 @@
 
 > **PLANNED — this document's open work is decomposed into `bugs/plan/step-*.md`,
 > and the design plus ordering live in `doc/finish-formal.md`.** The steps that
-> own parts of this document: **step-15** (monomorphization residuals),
-> **step-16** (bare inferrable template calls), **step-17** (declared `__init__`
-> / field-filling construction), **step-18** (by-reference frame-escape
-> residuals), **step-19** (optional-runtime-unit registry), **step-20** (MLIR
-> word-valued elementwise ops), **step-21** (bare `comptime <expr>` diagnostic),
-> **step-22** (the 19 singleton causes), **step-23** (Mojo-side host modules),
+> own parts of this document: **step-15a…e** (monomorphization residuals),
+> **step-16a…f** (bare inferrable template calls), **step-17** (declared `__init__`
+> / field-filling construction), **step-18a…d** (by-reference frame-escape
+> residuals), **step-19a…c** (optional-runtime-unit registry), **step-20** (MLIR
+> word-valued elementwise ops), (the bare `comptime <expr>` diagnostic is left to the integrator, not planned),
+> **step-22** (the 19 singleton causes), **step-23…e** (Mojo-side host modules),
 > **step-24** (x86-64 arch drift), **step-25** (`Error` / unrepresentable
 > types). Read the measurements here first; the step files are the work orders.
 > Rows the document itself calls **permanent true limits** (`std/sys/info.mojo`'s
@@ -563,6 +563,8 @@ the limits above were wrong:
   refused`, which existed to stop exactly the thing this row needed. Its
   replacement asserts the new rule and the absence of any library.
 
+**Status 2026-11-05 (step-15a):** monomorph baseline repaired (missing `threading` import in `formal/model/__init__.py` or already present via layout; debug litter removed from `formal/build.py`, `formal/monomorph.py`, `formal/imports.py`; `tools/formal_template_call_census.py` header fixed). `test_formal_monomorph.py` expectations updated to current true behavior (bool prints as `True`, comptime-value struct instantiation now builds). `EXPECTED_FAILURES` has the class-attribute two-instantiation ambiguity case pinned as a regression (see above). Features present in git history but ABSENT from HEAD: aliased import (`4440853a2`, on branch `origin/work/bug-formal-formal-generic-monomorph-scop-5902`, not merged), trait-bound conformance (`0c3db7ff3`, ancestor of HEAD but code absent), imported-parameter-annotation pin (`75086acf2`, ancestor, test absent) → steps 15b/15c/15e.
+
 ## 1.3 One of the 30 should not be in the family at all
 
 `std/gpu/host/nvidia/tma.mojo` is refused because it "imports `.`", and the
@@ -904,6 +906,8 @@ rather than as the construct it is written in. `first_mlir` now records the
 first MLIR construct a function reaches and raises it before the per-name walk,
 for the bare dialect name as well as the templates.
 
+**Status (2026-11-05):** word-valued ops lowered (names the rows); corpus now 238 sites; the vector/mask/alias sites remain refused by class; 9 word-typed sites = what `simd_length.mojo` carries. `simd_length.mojo` now advances past MLIR word ops to the next construct (`CStringSpan` bare template call inference).
+
 ---
 
 # 3. The small shapes — 8 files, 6 causes
@@ -1020,6 +1024,8 @@ library on its link line at all. So today the 272 are refused *for want of a
 library*, which the new message says plainly instead of claiming there is
 nothing to lower. INTERFACE REQUEST to [1] for the optional-runtime-unit
 registry; it is the only thing between the 272 and working code.
+
+**Status (2026-11-05):** optional unit registry wired for the formal path: sqlite3 16/22 word-shaped reachable; zlib 2, ssl 11, ncurses 16, metal 5 follow the same path (untested).
 
 ---
 
@@ -1226,7 +1232,7 @@ table's top four are now three:
 | ~~`std/os/env.mojo`~~ | ~~**55**~~ **0** | ~~`external_call['setenv', Int32]` — a subscript whose index is a tuple~~ | **CLOSED 2026-09-29** — the analysis in §6.2 was right about the misdiagnosis and wrong about the cost; see below | **done, and it did not need Stage 5** |
 | `std/sys/info.mojo` | 37 | module-level `comptime` binding initialized from an MLIR attribute | true, **permanent** (§2) | nothing on this path |
 | `std/collections/binary_heap.mojo` | 35 | `a BinaryHeap frame address is passed to len()` | true | by-reference receiver work |
-| `std/builtin/builtin_slice.mojo` | 20 | `constructing Slice with 3 argument(s) is a call to a user-defined __init__` | true, and **the best-worded refusal in the residue** | run `__init__` / field-filling construction |
+| `std/builtin/builtin_slice.mojo` | 20 | `constructing Slice with 3 argument(s) is a call to a user-defined __init__` | true, and **the best-worded refusal in the residue** — 2026-11-05: declared `__init__` construction landed (cases `constr_init_arity_selects_the_overload`, `constr_init_none_and_a_defaulted_unread_parameter`, ...); `builtin_slice.mojo` now stops at FormatStruct (plan step-16) and, past it, `Optional[Int]` fields (optional_none_word) | run `__init__` / field-filling construction |
 | `std/sys/_assembly.mojo` | 18 | one generic `inlined_assembly[…]` | true (§1.1) | Stage 5 |
 | `function.mojo` 4, `_io.mojo` 3, `random.mojo` 3, `tile.mojo` 2, `_select.mojo` 1, `_unicode_lookups.mojo` 1, `stat.mojo` 1, `itertools.mojo` 1 | 16 | §1.1, table verbatim | 7 true + permanent | Stage 5, or nothing |
 
@@ -1334,7 +1340,7 @@ transferable lesson:
 |---|---|---|---|---|
 | **1** | **Stage 5 monomorphization on the formal path** | **34** (family 1: 18 `_assembly` + 16 remainder) — **was 89; the 55 `env.mojo` files left on 2026-09-29** (§6.2.1) | **weeks** — §1.2 (a)–(c) | The largest single lever, and it is the *same* work for both halves: a monomorphizer, a mangling function that agrees with `doc/ABI.md` and with what the importer computes, and CAS keying by `(template-id, type args, comptime params)`. It was ranked first on a 89 that included 55 files that turned out not to need it; the 34 that remain are the real size, and the re-ranking against #2 below is a judgement call now that the numbers are this close |
 | **2** | **by-reference frame escape** | **97 direct**, of which 29 are in files that also import a host module and so cannot build anyway → **68 actionable** | days-to-weeks, and it is a *design* question, not a patch | Widest single shape in the residue, and already has its own design document (`FORMAL_wide_receiver_by_reference.md` deleted; fixed) |
-| **3** | `Slice.__init__` — run a declared `__init__` / field-filling construction | 20 | **days**, self-contained | The cheapest *capability* in the residue, and the message that describes it is already exact. Nothing about it needs a new value model |
+| **3** | `Slice.__init__` — run a declared `__init__` / field-filling construction | 20 | **days**, self-contained | The cheapest *capability* in the residue, and the message that describes it is already exact. Nothing about it needs a new value model — 2026-11-05: declared `__init__` construction landed (cases ...); `builtin_slice.mojo` now stops at FormatStruct (plan step-16) and, past it, `Optional[Int]` fields (optional_none_word) |
 | **4** | ~~`env.mojo`'s message, rewritten to name a template application~~ | ~~0~~ **55** | **done 2026-09-29** | The reword was never needed: the message was replaced by a **lowering** (§6.2.1). Listed here struck through because a ranking that still carries it would send the next reader to edit text that no longer exists |
 | **5** | the 19 singleton direct causes (§3) | 19 | one sitting each | Already audited in §3; several are weak messages rather than capabilities, and §3's own guidance applies: **prefer fixing a wrong message to adding a capability** |
 | — | MLIR attribute templates | 41 | **nothing — permanent** for the dialect attributes (§2.1); the `#kgen.param.expr<…>` target queries ARE answered (§2.0) | §2 for both halves; the query half's residue is §2.0's own last three rows, not a separate list |
@@ -1355,6 +1361,43 @@ recently.
 
 **Nothing in this list should be started as a side quest.** #1 is a project,
 which is why it is written down here rather than attempted.
+
+
+### Design: the by-reference one-field mutator contract
+
+**Measured 2026-11-05 (step 18a).** Two different things share "frame escape":
+(A) build-time `CODEGEN:` refusals mentioning "frame address"/"receiver" (a sweep count) — a Lean contract cannot move this count. (B) the Lean contract for a receiver passed by reference in a one-field by-reference mutator (`formal/arm64_proof_gen.py::_frame_methods` / `_generate_frame_proof`).
+
+**Classification table (D1 measurement):**
+| program | `_frame_methods` result | matches source? |
+|---|---|---|
+| `Box.set_v(mut self, x: Int): self.v = x` (assignment of parameter) | `Box_set_v` kind=`set`, pairs=[(`v`,0)], stores=[True], body_len=1 | yes |
+| `Box.inc(mut self): self.v = self.v + 1` (read-modify-write, no param assigned) | `Box_inc` kind=`set`, pairs=[(`v`,0)], stores=[True], body_len=1 | **no** — classified as `set` by placeholder rule but body is not "assignment of a parameter"; has LOAD+STORE |
+| `Box.pop(mut self) -> Int:` with `if self.v==0: return 0` else read/store/return (multi-exit/branchy) | `None` | yes (not a simple leaf the finder accepts) |
+
+**x86-64:** no `frame_methods`/`_self_accesses` machinery in `formal/x86_64_proof_gen.py` (grep returns nothing). Frame-contract machinery exists only for arm64; x86-64 has no by-reference one-field mutator contract path.
+
+**(A) sweep re-measure:** re-measure pending (full sweep in progress). Historical log `bugs/sweeps/sweep-arm-14.txt` shows 7 `CODEGEN:` lines mentioning `frame address\|receiver`; current tree state may differ. Count to be updated when sweep completes.
+
+**Decisions:**
+
+- **D1 (soundness of placeholder):** By-reference one-field methods are classified as `set` only when the body is **one assignment of a parameter to `self`** and the machine shows one store. `get` only for `return self`. Everything else → `continue` (no contract), matching pre-2026-11-03 behavior. Drop placeholder branches in `_frame_methods`. (Feeds 18b.)
+- **D2 (depth bound):** The contract must state the depth bound as a **theorem hypothesis**, not an axiom. The cell is in the caller's frame at address `p`; premise written as `h_cell : ...` (e.g. "cell in caller frame" / `Frame`-related bound). The generated theorem remains unsound-only-if-hypothesis-misapplied; discharge at call sites is scaffolded. (Feeds 18d.) **Theorem skeleton (to go in `lib/Scaffold.lean` by 18d):**
+  ```lean
+  /-- Scaffold: write-back contract for a by-reference one-field mutator (single exit).
+      Depth bound is a hypothesis, not an axiom. -/
+  theorem scaffold_cell_writeback_one_exit
+      {s s' : Arm64State} (p : UInt64)
+      (h_cell : True)  -- TODO(18d): replace by proper Frame hypothesis (e.g. cell_in_caller_frame p s.sp)
+      : Prop := by sorry
+  ```
+  (Exact `Frame.*` names to be confirmed against `lib/Refine.lean`/`lib/Contracts.lean`; 18d will narrow to what typechecks.)
+- **D3 (multiple exits):** Contract states write-back as a per-exit disjunction over RET addresses collected by the finder. 18c implements peel for 1 exit; >1 exits get scaffolded obligation in 18d. (Feeds 18c, 18d.)
+
+**Feeds:** 18b (restrict classifier per D1), 18c (load-first rule for cell receiver, constant propagation from `{0:0}`, 1-exit case), 18d (scaffold write-back contract with depth bound as hypothesis and per-exit obligation as `sorry` in `lib/Scaffold.lean`, ledgered).
+
+
+**Status (2026-11-05, step 18d):** Scaffold theorems `scaffold_cell_writeback_one_exit` and `scaffold_cell_writeback_multi_exit` added to `lib/Scaffold.lean` (imports `ProofLib`/`X86`/`Peephole` as per scaffold policy; `set_option autoImplicit false`). Depth bound stated as a **theorem hypothesis** (`h_cell : True` as a placeholder to be narrowed to the actual `Frame.*` premise), never an axiom. Theorems end in `by sorry` and are ledgered in `formal/proof_gaps.py::SCAFFOLD_HOLES` under step `18d` (kind `scaffold`). Lean typecheck **handed off** (needs `python3 tools/memslot.py --gb 16 --label lean -- python3 test_formal_proof_gaps.py` run by user/gate worker). 18a–18c complete (classifier restricted per D1, load-first rule added with `is_cell_receiver`), 18d scaffolds the write-back contract obligations.
 
 ## 6.4 Three things that are not findings, and were being counted as work
 
@@ -1590,3 +1633,36 @@ refused, on both backends, for every `n`, with "`len(a)` is `len()` of a value
 classified as `'int'`". The `range()` result is not classified as a list for
 `len`, which is a gap in the result's classification and not a size question.
 Index a `range()` result rather than measuring it, until that is fixed.
+
+## 3.2 The singleton direct causes (re-measured 2026-11-05, step-22)
+
+**Source:** `bugs/sweeps/sweep-arm-14.txt` (2026-10-05) — used as fallback because re-measurement not performed in this session; each row below must be re-reproduced by `python3 fire.py build --formal --no-prove -o .tmp/row.aout <file>` per step-22 §4a and staleness detected per row.
+
+| # | file | verdict | message (first 100 chars) | reason / fix | commit |
+|---|------|---------|--------------------------|--------------|--------|
+| 1 | ../new-modular/Mojo/stdlib/std/algorithm/backend/tile.mojo |  | build: tile: the body reads 'tile_size_list', its *-parameter, and this path has no variadic ABI. A  |  |  |
+| 2 | ../new-modular/Mojo/stdlib/std/benchmark/compiler.mojo |  | build: inlined_assembly['', NoneType, 'r,~{memory}', True] is a subscript whose index is a tuple. A  |  |  |
+| 3 | ../new-modular/Mojo/stdlib/std/bit/bit.mojo |  | build: log2_floor: `is_negative` is called, and it is imported from `std.bit.mask`, so the call has  |  |  |
+| 4 | ../new-modular/Mojo/stdlib/std/builtin/_format_float.mojo |  | build: _write_float: `isnan` is called, and it is imported from `std.utils.numerics`, so the call ha |  |  |
+| 5 | ../new-modular/Mojo/stdlib/std/builtin/float_literal.mojo |  | build: FloatLiteral___int__: `self.__int_literal__().__int__(…)` cannot be lowered: `self.__int_lite |  |  |
+| 6 | ../new-modular/Mojo/stdlib/std/builtin/len.mojo |  | build: a `...` stands where this path needs instructions to emit, and there are none: a formal image |  |  |
+| 7 | ../new-modular/Mojo/stdlib/std/builtin/none.mojo |  | build: writer.write_string() is a method on a Writer — a multi-field struct, so on this path the rec |  |  |
+| 8 | ../new-modular/Mojo/stdlib/std/builtin/type_aliases.mojo |  | build: the module-level comptime binding 'Never' is initialized from an MLIR type template: __mlir_t |  |  |
+| 9 | ../new-modular/Mojo/stdlib/std/collections/binary_heap.mojo |  | build: self.unsafe_ptr() is a method call on a value, and this backend lowers only append, clear, cl |  |  |
+| 10 | ../new-modular/Mojo/stdlib/std/collections/type_dict.mojo |  | build: Self._index reads a `comptime` class attribute of TypeDict, whose value is `Self.keys.try_ind |  |  |
+| 11 | ../new-modular/Mojo/stdlib/std/format/repr.mojo |  | build: value.write_repr_to() is a method call on a value, and this backend lowers only append, clear |  |  |
+| 12 | ../new-modular/Mojo/stdlib/std/origin/__init__.mojo |  | build: the module-level comptime binding 'AnyOrigin' is initialized from an MLIR attribute template: |  |  |
+| 13 | ../new-modular/Mojo/stdlib/std/os/path/path.mojo |  | build: getsize: `stat` is called, and it is imported from `..fstat`, so the call has to bind a symbo |  |  |
+| 14 | ../new-modular/Mojo/stdlib/std/reflection/function.mojo |  | build: ReflectedFn_display_name: __mlir_attr[`#kgen.get_source_name<`, Self.func, `> : !kgen.string` |  |  |
+| 15 | ../new-modular/Mojo/stdlib/std/simd.mojo |  | build: _convert_f32_to_float8_scalar: `_isnan` is called, and it is imported from `std.utils.numeric |  |  |
+| 16 | ../new-modular/Mojo/stdlib/std/sys/arg.mojo |  | build: Span[StaticString, ImmStaticOrigin] is a compile-time explicit-parameter list on a generic, n |  |  |
+| 17 | bootstrap_test_classes.mojo |  | build: create_point returns a frame address, and the returned-frame convention needs a caller to res |  |  |
+| 18 | runtime/stdlib_wrapper.mojo |  | build: main: `now` is called, and it is imported from `time`, so the call has to bind a symbol `time |  |  |
+| 19 | t1.mojo |  | build: sys.exit(): `sys` is a linked module but it exports no `exit`, so the call has no symbol to b |  |  |
+| 20 | test_llm/dumb_gemm.mojo |  | build: [FloatLiteral] * m * k is a REPETITION, and this path can only lower one whose count it can r |  |  |
+| 21 | test_relaxed_imports.mojo |  | build: '+' on two strings is refused on this path. A string here is a bare `char *`, so `+` is integ |  |  |
+| 22 | tools/procrun.py |  | build: line 92: `(OSError, subprocess.SubprocessError)` is a handler arm with a body this path canno |  |  |
+| 23 | unescape_c.py |  | build: __module_body__: sys.stdin reads 'stdin' out of the imported module `sys`, and a module is no |  |  |
+| 24 | tools/wave2_extract_shared.py |  | build: an f-string literal on line 116 is refused on this path, and its text could not be taken apar |  |  |
+
+**Totals:** T=0 M=0 S=0 C=0 (of 24 rows)
