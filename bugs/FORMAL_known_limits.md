@@ -1652,7 +1652,7 @@ Index a `range()` result rather than measuring it, until that is fixed.
 | 4 | ../new-modular/Mojo/stdlib/std/builtin/_format_float.mojo | S | build: _write_float: `isnan` is called from `std.utils.numerics` (bare call to generic template, | longer message about bare call inference (step-16 family) | |
 | 5 | ../new-modular/Mojo/stdlib/std/builtin/float_literal.mojo | S | builds successfully (exit 0) | file now builds | |
 | 6 | ../new-modular/Mojo/stdlib/std/builtin/len.mojo | S | build: a `...` stands where this path needs instructions to emit, and there are none: a forma | different full message (explains trait vs function) | |
-| 7 | ../new-modular/Mojo/stdlib/std/builtin/none.mojo |  | build: writer.write_string() is a method on a Writer — a multi-field struct, so on this path the rec |  |  |
+| 7 | ../new-modular/Mojo/stdlib/std/builtin/none.mojo | S | build: writer.write_string() is a method on a Writer — multi-field struct, receiver is frame addr | detailed message about fd vs frame address | |
 | 8 | ../new-modular/Mojo/stdlib/std/builtin/type_aliases.mojo |  | build: the module-level comptime binding 'Never' is initialized from an MLIR type template: __mlir_t |  |  |
 | 9 | ../new-modular/Mojo/stdlib/std/collections/binary_heap.mojo |  | build: self.unsafe_ptr() is a method call on a value, and this backend lowers only append, clear, cl |  |  |
 | 10 | ../new-modular/Mojo/stdlib/std/collections/type_dict.mojo |  | build: Self._index reads a `comptime` class attribute of TypeDict, whose value is `Self.keys.try_ind |  |  |
