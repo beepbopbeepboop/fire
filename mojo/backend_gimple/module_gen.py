@@ -1374,7 +1374,14 @@ def _mark_presence_field(sdef, fname):
     so it needs no bit. Every mint site calls this with the StructDef it just
     appended `fname` to, which keeps the tracked set a whole-struct fact that
     every generator reads the same way. Idempotent."""
-    if sdef is None or fname in sdef.presence_fields:
+    if sdef is None:
+        return
+    # A StructDef the compiled parser built has no `default_factory` list for
+    # `presence_fields` (the field reads back NULL), so appending to it below
+    # crashed the stage2 binary; make it a real list first.
+    if sdef.presence_fields is None:
+        sdef.presence_fields = []
+    if fname in sdef.presence_fields:
         return
     for _m in sdef.methods:
         if _m.name != '__init__':
