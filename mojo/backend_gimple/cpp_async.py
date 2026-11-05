@@ -2379,12 +2379,18 @@ def _enclosing_scope_with_locals(gen, outer_fn: gimple_ctypes.FunctionDef) -> di
                 and isinstance(stmt.target.name, str)
                 and ',' not in stmt.target.name
                 and stmt.target.name not in scope
-                and stmt.target.name not in widened
                 and stmt.value is not None):
             name = stmt.target.name
             from mojo.middle import resolve_shared as _rs
             ctype = _rs._local_value_type(gen, stmt.value)
-            if ctype in _GENERATOR_PARAM_CTYPES and _binding_site_count(outer_fn.body, name) == 1:
+            # First-bound plain-assignment local: only when it is bound exactly
+            # once (no rebind), so the snapshot taken at call time stays equal
+            # to Python's read-at-each-resume. Reconsider even names that the
+            # widened-type pass recorded, as long as the plain assignment's own
+            # lowered type agrees (the widened pass may have recorded a type
+            # that the body's declaration does not use).
+            if (ctype in _GENERATOR_PARAM_CTYPES
+                    and _binding_site_count(outer_fn.body, name) == 1):
                 scope[name] = ctype
     return scope
 
