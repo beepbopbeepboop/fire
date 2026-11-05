@@ -2179,23 +2179,11 @@ class GimpleGen:
         # per-compile-unit gating, not a blanket "always emit", is the
         # correct fix for a helper this genuinely optional.
         self._asdict_dispatch_needed: set = set()
-        self._module_stmts: dict[str, list] = {}    # module_name → parsed stmts (shared across all gens)
-        # Flattened, incrementally-maintained mirror of the UNION of every
-        # list ever stored into `self._module_stmts` (see the `_walk_ast` re-scan
-        # bug, Phase 1)
-        # — shared by reference into every nested temp_gen exactly like
-        # `_module_stmts` itself (see `_compile_imported_module`'s sharing
-        # block). Appended to ONCE per statement, ever, right where
-        # `_module_stmts[module_name] = stmts` is set — so `gen_module`'s
-        # own Phase-0 reconciliation loop (which needs "every transitively
-        # compiled module's stmts not already in THIS level's local
-        # `imported_stmts`") can do a single incremental pass over this
-        # pre-flattened list instead of re-flattening the whole (by then
-        # much larger) `_module_stmts` dict from scratch at EVERY one of
-        # the N nesting levels in a transitive-import tree — that repeated
-        # O(current total tree size) re-flattening, happening once per
-        # level, is what the doc profiles as an O(N^2) `_walk_ast` blowup
-        # (4.47M calls for a 36-module graph in Lib/contextlib.py).
+        # Per-module AST lifetime fix: the module ASTs were previously accumulated
+        # in _module_stmts (and mirrored via _all_transitive_stmts_ordered) for the
+        # whole process lifetime causing resource blowup. We now only keep the
+        # flattened ordered list needed for reconciliation; module ASTs can be
+        # dropped after emission. See bugs/hard/CODEGEN_bootstrap_resource_blowup.md
         self._all_transitive_stmts_ordered: list = []
         self._all_transitive_stmts_ids: set = set()
         # Phase 2 (same doc as above): per-top-level-statement memoization

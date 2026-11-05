@@ -18605,8 +18605,6 @@ def gen_module_impl(self, stmts: list):
     # reference, and that module's text is spliced into this `parts` long after
     # this module's own code was written.
     try:
-        if hasattr(self, '_module_stmts'):
-            self._module_stmts.clear()
         if hasattr(self, '_all_transitive_stmts_ordered'):
             self._all_transitive_stmts_ordered.clear()
         if hasattr(self, '_all_transitive_stmts_ids'):
