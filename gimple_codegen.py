@@ -6450,6 +6450,95 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
         _exprtypes._walk_ast_reset()
     except Exception:
         pass
+    # Clear module-level caches/accumulators that retain ASTs or per-compile
+    # state, so they do not survive past the compile boundary (next step).
+    try:
+        import mojo.middle.coro as _coro
+        for _c in ('_LIST_RET_KINDS', '_PTR_RET_KINDS', '_PTR_EVIDENCE',
+                   '_PTR_FORWARDED', '_GEN_REC_ASSUME', '_MODULE_STMTS',
+                   '_ASYNC_RESULT_KIND', '_ASYNC_HANDLE_KIND', '_BOX_STRUCT_OF',
+                   '_WIRED_CAPTURES'):
+            _v = getattr(_coro, _c, None)
+            if isinstance(_v, (dict, list, set)):
+                try: _v.clear()
+                except Exception: pass
+    except Exception:
+        pass
+    try:
+        import mojo.middle.funcs_shared as _fs
+        for _c in ('_PARSER_NODE_CLASSES', '_SELFHOST_FNIDX_VALIDATED',
+                   '_SELFHOST_PARSE_CACHE', '_SELFHOST_EXTRA_FIELD_CACHE'):
+            _v = getattr(_fs, _c, None)
+            if isinstance(_v, (dict, list, set)):
+                try: _v.clear()
+                except Exception: pass
+    except Exception:
+        pass
+    try:
+        import mojo.middle.itcursor as _it
+        _v = getattr(_it, '_ESCAPING_ITER_CACHE', None)
+        if isinstance(_v, (dict, list, set)):
+            try: _v.clear()
+            except Exception: pass
+    except Exception:
+        pass
+    try:
+        import mojo.middle.methods_shared as _ms
+        _v = getattr(_ms, '_REALPATH_MEMO', None)
+        if isinstance(_v, (dict, list, set)):
+            try: _v.clear()
+            except Exception: pass
+    except Exception:
+        pass
+    try:
+        import mojo.middle.module_shared as _mos
+        _v = getattr(_mos, '_SELF_ASSIGN_MEMO', None)
+        if isinstance(_v, (dict, list, set)):
+            try: _v.clear()
+            except Exception: pass
+    except Exception:
+        pass
+    try:
+        import mojo.middle.types as _ty
+        for _c in ('_TUPLE_ANN_BY_NAME',):
+            _v = getattr(_ty, _c, None)
+            if isinstance(_v, (dict, list, set)):
+                try: _v.clear()
+                except Exception: pass
+    except Exception:
+        pass
+    try:
+        import mojo.middle.offload as _off
+        _v = getattr(_off, '_OFFLOAD_STATE', None)
+        if isinstance(_v, (dict, list, set)):
+            try: _v.clear()
+            except Exception: pass
+    except Exception:
+        pass
+    try:
+        for _modname, _names in (
+            ('mojo.backend_gimple.emit_infra', ('_DEDUP_EXTERN_PARTS_CACHE',)),
+            ('mojo.backend_gimple.elab_intu', ('_OVERLOAD_CACHE', '_FN_NEEDS_CACHE', '_FACTORY_RETURN_CACHE')),
+            ('mojo.backend_gimple.device_glue', ('_GRID',)),
+        ):
+            import importlib as _il
+            _m = _il.import_module(_modname)
+            for _c in _names:
+                _v = getattr(_m, _c, None)
+                if isinstance(_v, (dict, list, set)):
+                    try: _v.clear()
+                    except Exception: pass
+    except Exception:
+        pass
+    try:
+        for _c in ('_SELFHOST_FUNC_RETURN_TYPES', '_SELFHOST_PARAM_TYPES',
+                   '_SELFHOST_GG_CACHE'):
+            _v = globals().get(_c, None)
+            if isinstance(_v, (dict, list, set)):
+                try: _v.clear()
+                except Exception: pass
+    except Exception:
+        pass
     return code, gen
 
 
