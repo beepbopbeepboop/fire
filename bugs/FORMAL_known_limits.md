@@ -565,6 +565,10 @@ the limits above were wrong:
 
 **Status 2026-11-05 (step-15a):** monomorph baseline repaired (missing `threading` import in `formal/model/__init__.py` or already present via layout; debug litter removed from `formal/build.py`, `formal/monomorph.py`, `formal/imports.py`; `tools/formal_template_call_census.py` header fixed). `test_formal_monomorph.py` expectations updated to current true behavior (bool prints as `True`, comptime-value struct instantiation now builds). `EXPECTED_FAILURES` has the class-attribute two-instantiation ambiguity case pinned as a regression (see above). Features present in git history but ABSENT from HEAD: aliased import (`4440853a2`, on branch `origin/work/bug-formal-formal-generic-monomorph-scop-5902`, not merged), trait-bound conformance (`0c3db7ff3`, ancestor of HEAD but code absent), imported-parameter-annotation pin (`75086acf2`, ancestor, test absent) → steps 15b/15c/15e.
 
+**Status 2026-11-05 (step-15b):** aliased import of a template restored (`from m import Pair as P` then `P[Int]()`); resolved via `local_defining_names` mapping through `formal/imports.py::imported_bindings`, applied in demand rewrite and member reads; dotted module-alias spelling remains refused with updated wording in `formal/model/cfg.py`.
+
+**Status 2026-11-05 (step-15c):** trait-bound conformance check restored on instantiation via `elaborate.check_bounds`; failures recorded in `_FAILED_DEMANDS` and surfaced by the bracketed-callee scan with trait/missing-method names. Added cases `a trait bound violation is refused by name` and `a conforming type argument is still instantiated`.
+
 ## 1.3 One of the 30 should not be in the family at all
 
 `std/gpu/host/nvidia/tma.mojo` is refused because it "imports `.`", and the
@@ -1640,7 +1644,7 @@ Index a `range()` result rather than measuring it, until that is fixed.
 
 | # | file | verdict | message (first 100 chars) | reason / fix | commit |
 |---|------|---------|--------------------------|--------------|--------|
-| 1 | ../new-modular/Mojo/stdlib/std/algorithm/backend/tile.mojo |  | build: tile: the body reads 'tile_size_list', its *-parameter, and this path has no variadic ABI. A  |  |  |
+| 1 | ../new-modular/Mojo/stdlib/std/algorithm/backend/tile.mojo | S | build: tile: 'tile_size_list' has no home: this module declares no module-level name by  | new message differs (name-not-found/home) vs variadic ABI | |
 | 2 | ../new-modular/Mojo/stdlib/std/benchmark/compiler.mojo |  | build: inlined_assembly['', NoneType, 'r,~{memory}', True] is a subscript whose index is a tuple. A  |  |  |
 | 3 | ../new-modular/Mojo/stdlib/std/bit/bit.mojo |  | build: log2_floor: `is_negative` is called, and it is imported from `std.bit.mask`, so the call has  |  |  |
 | 4 | ../new-modular/Mojo/stdlib/std/builtin/_format_float.mojo |  | build: _write_float: `isnan` is called, and it is imported from `std.utils.numerics`, so the call ha |  |  |
