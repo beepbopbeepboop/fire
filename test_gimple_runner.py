@@ -14467,6 +14467,7 @@ def main():
                   test_namedtuple_shaped_class_runs_regression,
                   test_none_bound_local_is_none_not_zero_in_membership,
                   test_none_member_of_a_set_is_not_the_int_zero,
+                  test_none_held_in_local_with_if_join_is_none_needle,
                   test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool,
                   test_slice_equals_after_a_multibyte_character):
         try:

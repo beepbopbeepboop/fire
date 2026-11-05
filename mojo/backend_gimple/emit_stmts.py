@@ -4306,6 +4306,7 @@ def _gen_stmt_WhileStmt(gen, node):
         for _le_st in desugar_loop_else(node):
             gen.gen_stmt(_le_st)
         return
+    _flow_saved = dict(getattr(gen, '_flow_none_state', {}) or {})
     bb_cond  = gen._new_bb()
     bb_body  = gen._new_bb()
     bb_after = gen._new_bb()
@@ -4317,11 +4318,19 @@ def _gen_stmt_WhileStmt(gen, node):
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
     gen.loop_stack.append((bb_cond, bb_after))
+    gen._flow_none_state = dict(_flow_saved)
     gen._gen_loop_body(node.body)
+    _body_end_state = dict(getattr(gen, '_flow_none_state', {}) or {})
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
+    # Join: keep None on any path (zero or more iterations).
+    _merged = dict(_flow_saved)
+    for _k, _v in _body_end_state.items():
+        if _v is True:
+            _merged[_k] = True
+    gen._flow_none_state = _merged
 
 
 def _gen_stmt_MultiAssignStmt(gen, node):
@@ -5609,6 +5618,7 @@ def _gen_stmt_TryStmt(gen, node):
     # run (`ModuleLoader.load_module_from_path`'s `try: ... for _l in
     # src.split(): ... continue`).
     _entry_loop_depth = len(getattr(gen, 'loop_stack', []))
+    gen._try_flow_saved = dict(getattr(gen, '_flow_none_state', {}) or {})
     sj_ret = gen._new_temp('int')
     cond_t = gen._new_temp('_Bool')
     bb_try   = gen._new_bb()
@@ -5915,6 +5925,14 @@ def _gen_stmt_TryStmt(gen, node):
             gen._emit(f"  goto {bb_after};")
 
     gen._emit_label(bb_after)
+
+    # Flow-sensitive join: keep None on any path through the try.
+    _try_flow_saved = dict(getattr(gen, '_try_flow_saved', {}) or {})
+    _merged = dict(_try_flow_saved)
+    for _k, _v in (getattr(gen, '_flow_none_state', {}) or {}).items():
+        if _v is True:
+            _merged[_k] = True
+    gen._flow_none_state = _merged
 
 
 def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs):

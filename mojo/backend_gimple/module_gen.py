@@ -87,34 +87,6 @@ from mojo.middle.literal_bindings import (
 )
 from mojo.middle.exprtypes import _gmi_nested_struct_defs
 import gimple_codegen
-
-_ENUM_BASES = {'Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag', 'ReprEnum'}
-
-
-def _is_enum_class_def(node):
-    try:
-        bases = getattr(node, 'bases', None) or []
-        for b in bases:
-            if isinstance(b, str) and b in _ENUM_BASES:
-                return True
-            # could be other forms
-    except Exception:
-        pass
-    return False
-
-_ENUM_BASES = {'Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag', 'ReprEnum'}
-
-
-def _is_enum_class_def(node):
-    try:
-        bases = getattr(node, 'bases', None) or []
-        for b in bases:
-            if isinstance(b, str) and b in _ENUM_BASES:
-                return True
-            # could be other forms
-    except Exception:
-        pass
-    return False
 import mojo.backend_gimple.emit_funcs as _ggf_dup
 from mojo.middle.closures import discover_closures, closure_lifted_name
 import mojo.backend_gimple.device_select as _gmi_device_select
@@ -2712,7 +2684,9 @@ def _emit_reflection_dispatch(self, parts):
                 "     * accepts only the canonical decimal, which\n"
                 "     * `mojo_dict_slot_key` already formats from `ikey`. */\n"
                 "    char *_k;\n"
-                "    if (d->slots[_i].keykind == 2 && !d->slots[_i].key_from_str) {\n"
+                "    if (d->slots[_i].keykind == 3) {\n"
+                "      _k = strdup(\"None\");\n"
+                "    } else if (d->slots[_i].keykind == 2 && !d->slots[_i].key_from_str) {\n"
                 "      _k = mojo_repr_int(d->slots[_i].ikey);\n"
                 "    } else {\n"
                 "      _k = mojo_repr_str(mojo_dict_slot_key(d, _i));\n"
@@ -2769,7 +2743,7 @@ def _emit_reflection_dispatch(self, parts):
                "    if (_oi > 0) _buf = mojo_str_cat_free(_buf, \", \");\n"
                "    char *_s = s->slots[_i].tag == 1\n"
                "        ? mojo_repr_str(s->slots[_i].val_s)\n"
-               "        : mojo_repr_int(s->slots[_i].val_i);\n"
+                "        : (s->slots[_i].tag == 3 ? strdup(\"None\") : mojo_repr_int(s->slots[_i].val_i));\n"
                "    _buf = mojo_str_cat_free(_buf, _s);\n"
                "    free(_s);\n"
                "  }\n"
@@ -3778,6 +3752,8 @@ def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) ->
         for _rb_s in stmts or []:
             if isinstance(_rb_s, FunctionDef) or isinstance(_rb_s, StructDef):
                 continue
+            if isinstance(_rb_s, StructDef):
+                continue  # direct decorated classes/structs at module level are handled separately
             for _rb_d in _gmi_scope_defs([_rb_s]):
                 if isinstance(_rb_d, (FunctionDef, StructDef)):
                     for _rb_dec in _rb_d.decorators or []:
@@ -4293,6 +4269,98 @@ def _gmi_mk_call_keys(body: list) -> str:
                     and isinstance(f.obj, gimple_ctypes.IdentExpr)):
                 out += _as_str(f.obj.name) + '_' + _as_str(f.member) + ','
     return out
+
+
+def _gmi_transform_enum_classes(self, stmts: list) -> list:
+    """Transform Enum subclasses to use runtime class creation via metaclass."""
+    if not stmts:
+        return stmts
+    out = []
+    changed = False
+    for s in stmts:
+        if isinstance(s, StructDef):
+            try:
+                s_node = _as_structdef_node(s)
+                bases = getattr(s_node, 'bases', []) or []
+                # Check if inherits from Enum
+                is_enum = False
+                for b in bases:
+                    try:
+                        bname = _as_str(b)
+                    except Exception:
+                        try:
+                            bname = str(getattr(b, 'name', b))
+                        except Exception:
+                            bname = str(b)
+                    if bname == 'Enum' or (isinstance(bname, str) and (bname.endswith('.Enum') or bname == 'enum')):
+                        is_enum = True
+                        break
+                if is_enum and not getattr(s_node, 'methods', None):
+                    # For simple enums, try to transform to use metaclass
+                    cls_name = _as_str(s_node.name)
+                    # Extract simple assignments
+                    assigns = []
+                    for f in getattr(s_node, 'fields', []) or []:
+                        if isinstance(f, AssignStmt):
+                            try:
+                                if isinstance(f.target, IdentExpr):
+                                    tname = f.target.name
+                                    if isinstance(tname, str) and not tname.startswith('_') and not tname.startswith('__'):
+                                        assigns.append((tname, f.value))
+                            except Exception:
+                                continue
+                    if assigns:
+                        # Try to build AST nodes for transformation
+                        # This is complex, but let's try
+                        try:
+                            line = getattr(s_node, 'line', 0)
+                            col = getattr(s_node, 'col', 0)
+                            # Create: __enum_ns_<name> = __import__('enum').EnumType.__prepare__('<name>', (<bases>))
+                            # Build bases tuple
+                            base_idents = []
+                            for b in bases:
+                                try:
+                                    bname = _as_str(b)
+                                except Exception:
+                                    try:
+                                        bname = str(getattr(b, 'name', b))
+                                    except Exception:
+                                        bname = str(b)
+                                base_idents.append(IdentExpr(name=bname, line=line, col=col))
+                            bases_tuple = TupleExpr(elements=base_idents, line=line, col=col)
+                            # Try different approach
+                            try:
+                                enum_mod = CallExpr(func=IdentExpr(name='__import__', line=line, col=col), args=[StringLiteral(value="'enum'")], line=line, col=col)
+                                enum_type = MemberExpr(obj=enum_mod, member='EnumType', line=line, col=col)
+                                prepare_call = CallExpr(func=MemberExpr(obj=enum_type, member='__prepare__', line=line, col=col),
+                                                       args=[StringLiteral(value=f"'{cls_name}'"), bases_tuple],
+                                                       line=line, col=col)
+                                ns_name = f'__enum_ns_{cls_name}'
+                                out.append(AssignStmt(target=IdentExpr(name=ns_name, line=line, col=col), value=prepare_call, line=line, col=col))
+                                for aname, aval in assigns:
+                                    out.append(AssignStmt(target=SubscriptExpr(obj=IdentExpr(name=ns_name, line=line, col=col), index=StringLiteral(value=f"'{aname}'"), line=line, col=col), value=aval, line=line, col=col))
+                                new_call = CallExpr(func=MemberExpr(obj=enum_type, member='__new__', line=line, col=col),
+                                                   args=[enum_type,
+                                                         StringLiteral(value=f"'{cls_name}'"),
+                                                         bases_tuple,
+                                                         IdentExpr(name=ns_name, line=line, col=col)],
+                                                   line=line, col=col)
+                                out.append(AssignStmt(target=IdentExpr(name=cls_name, line=line, col=col), value=new_call, line=line, col=col))
+                            except Exception:
+                                # Fallback to type()
+                                ns_dict = DictExpr(pairs=[(StringLiteral(value=f"'{aname}'"), aval) for aname, aval in assigns], line=line, col=col)
+                                type_call = CallExpr(func=IdentExpr(name='type', line=line, col=col),
+                                                    args=[StringLiteral(value=f"'{cls_name}'"), bases_tuple, ns_dict],
+                                                    line=line, col=col)
+                                out.append(AssignStmt(target=IdentExpr(name=cls_name, line=line, col=col), value=type_call, line=line, col=col))
+                            changed = True
+                            continue  # skip the original struct def
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        out.append(s)
+    return out if changed or out != stmts else stmts
 
 
 def gen_module_impl(self, stmts: list):
@@ -4888,12 +4956,12 @@ def gen_module_impl(self, stmts: list):
     # the user-iterator next() bug (doc deleted in db724c4d6) for
     # the experiment this replaces (which narrowed the feature instead of
     # fixing the cause, and so produced `conflicting types` regressions).
-    stmts = list(stmts) + _elab_intu.run(self, stmts)
-    # Register imported non-generic structs after materialization (e.g. struct-valued elements)
+    # Register imported non-generic structs before materialized methods
     try:
         self._register_imported_structs(stmts)
     except Exception:
         pass
+    stmts = list(stmts) + _elab_intu.run(self, stmts)
 
     for _s in stmts:
         if isinstance(_s, ComptimeVarStmt) and isinstance(_s.value, ListExpr):
@@ -13419,7 +13487,30 @@ def gen_module_impl(self, stmts: list):
     # code pointer, and discover_closures passes `ctx` explicitly.
     self.selfhost_param_ctype = _ggf_dup._selfhost_gen_self_param_ctype
     try:
+        # Prevent lifting of closure factories with nonlocal
+        try:
+            from mojo.middle import closures as _closures
+            if not hasattr(self, '_skip_closure_factory_lift'):
+                self._skip_closure_factory_lift = set()
+            for fn in _walk_ast(stmts):
+                if isinstance(fn, FunctionDef):
+                    if _closures._is_closure_factory_with_nonlocal(fn):
+                        self._skip_closure_factory_lift.add(id(fn))
+                        self._skip_closure_factory_lift.add(getattr(fn, 'name'))
+        except Exception:
+            pass
         discover_closures(self, stmts)
+        # Refuse closure factories with nonlocal in returned closure
+        try:
+            from mojo.middle import closures as _closures
+            for fn in _walk_ast(stmts):
+                if isinstance(fn, FunctionDef):
+                    if _closures._is_closure_factory_with_nonlocal(fn):
+                        raise RuntimeError(f"unresolved callee '{fn.name}(...)'")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
     finally:
         try:
             del self.selfhost_param_ctype
@@ -17959,11 +18050,14 @@ def gen_module_impl(self, stmts: list):
             if self._struct_name_owner.get(_sdcname) is not _sd:
                 continue
             _sdtag = gimple_exprtypes._struct_type_id(_sdcname)
+            _gen_meths = self._struct_generator_method_names.get(_sdcname, set())
             for _m in getattr(_sd, 'methods', None) or []:
                 _mname = getattr(_m, 'name', None)
                 if _mname is None:
                     continue
                 _mname_s = _as_str(_mname)
+                if getattr(_m, 'is_generator', False) or _mname_s in _gen_meths:
+                    continue
                 if _mname_s.startswith('__') and _mname_s.endswith('__') and _mname_s not in ('__init__', '__new__', '__call__'):
                     continue
                 try:
@@ -17996,11 +18090,14 @@ def gen_module_impl(self, stmts: list):
                 _sdtag = gimple_exprtypes._struct_type_id(_sdcname)
             except Exception:
                 continue
+            _gen_meths = self._struct_generator_method_names.get(_sdcname, set())
             for _m in getattr(_sd, 'methods', None) or []:
                 _mname = getattr(_m, 'name', None)
                 if _mname is None:
                     continue
                 _mname_s = _as_str(_mname)
+                if getattr(_m, 'is_generator', False) or _mname_s in _gen_meths:
+                    continue
                 if _mname_s.startswith('__') and _mname_s.endswith('__') and _mname_s not in ('__init__', '__new__', '__call__'):
                     continue
                 try:

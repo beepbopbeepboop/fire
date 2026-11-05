@@ -268,6 +268,23 @@ def main():
     print(P.v, Q.v, P.__name__ == Q.__name__)
 main()
 """,
+    'init_subclass_invoked': """\
+class Base:
+    def __init_subclass__(cls):
+        print(cls.__name__)
+
+def main():
+    Derived = type('Derived', (Base,), {})
+    print(Derived.__name__)
+main()
+""",
+    'repr_of_instance_of_run_time_class': """\
+def main():
+    Foo = type('Foo', (), {'x': 1})
+    o = Foo()
+    print('Foo' in repr(o))
+main()
+""",
     'metaclass_prepare_returns_namespace_dict': """\
 def main():
     Meta = type('Meta', (type,), {})
@@ -329,7 +346,33 @@ def main():
     print(Color.__name__)
 main()
 """,
+    'set_name_called_for_descriptors_in_namespace': """\
+def sn(self, owner, name):
+    self.owner_name = owner.__name__
+    self.attr_name = name
+
+def main():
+    Desc = type('Desc', (), {'__set_name__': sn})
+    d = Desc()
+    C = type('C', (), {'x': d})
+    print(d.attr_name)
+    print(d.owner_name)
+main()
+""",
 }
+
+
+def _check_module_gen_enum_helper_not_triplicated():
+    import os
+    path = os.path.join(os.path.dirname(__file__), 'mojo', 'backend_gimple', 'module_gen.py')
+    with open(path) as f:
+        content = f.read()
+    count = content.count("def _is_enum_class_def(")
+    if count != 1:
+        print(f'_is_enum_class_def defined {count} times (expected 1)')
+        R._FAIL += 1
+    else:
+        R._PASS += 1
 
 
 def main():
@@ -346,6 +389,7 @@ def main():
     print(Foo.x)
 main()
 """, 'type.__new__(metacls')
+    _check_module_gen_enum_helper_not_triplicated()
     print(f'\n{R._PASS} passed, {R._FAIL} failed')
     return 1 if (R._FAIL or R._TIMEOUT) else 0
 

@@ -654,7 +654,7 @@ def _positional_bracket_ctor_args(work, base, node):
     if (base in _ERASED_WORD_STRUCTS or base in _IN_TU_LIST_BASES
             or base in gimple_ctypes._TYPE_MAP):
         return None
-    dups =_duplicated_method_names(work.gen, base)
+    dups = _duplicated_method_names(work.gen, base)
     if not dups or dups <= _ITERATION_PROTOCOL:
         return None
     args = _concrete_args(work, 'struct', base, node)
@@ -663,6 +663,36 @@ def _positional_bracket_ctor_args(work, base, node):
     # Be permissive for LinkedList/List (needed for struct element registration)
     if isinstance(base, str) and base in ('List', 'LinkedList'):
         gen = work.gen
+        # Register imported non-generic struct elements before checking
+        try:
+            for a in args:
+                if not isinstance(a, str):
+                    continue
+                an = a.strip()
+                if not an or an in gimple_ctypes._TYPE_MAP:
+                    continue
+                if an.startswith('_'):
+                    continue
+                if an[0].islower() or re.fullmatch(r'[A-Z][0-9]?', an):
+                    continue
+                if (an in getattr(gen, '_imported_generic_structs', {}) or
+                        an in getattr(gen, 'struct_field_types', {}) or
+                        an in getattr(gen, '_imported_struct_names', set()) or
+                        an in getattr(gen, '_intu_structs', {})):
+                    continue
+                if hasattr(gen, '_materialize_imported_struct'):
+                    tried = False
+                    for mod in set(getattr(gen, '_imported_struct_home', {}).values()) | set(getattr(gen, '_imported_generic_structs', {}).values()) | {'test_utils', 'test_utils.types'}:
+                        try:
+                            if gen._materialize_imported_struct(mod, an, an):
+                                tried = True
+                                break
+                        except Exception:
+                            continue
+                    if tried:
+                        continue
+        except Exception:
+            pass
         for a in args:
             if a in gimple_ctypes._TYPE_MAP:
                 continue
@@ -3059,6 +3089,27 @@ def _collect_inner(work, rec, queue):
         args = _concrete_args(work, kind, base, n)
         if args is None:
             return
+        # Register element types for LinkedList (struct-valued elements)
+        if base == 'LinkedList' and args:
+            for a in args:
+                try:
+                    a_base = a.split('[')[0].strip()
+                    if a_base and a_base != base and a_base not in _IN_TU_LIST_BASES and a_base not in _ERASED_WORD_STRUCTS:
+                        try:
+                            _register_named(gen, gen._imported_generic_structs.get(base) or rec['src_path'], [a_base])
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(gen, '_materialize_imported_struct'):
+                                # Try to find where it's imported from
+                                if hasattr(gen, '_imported_struct_home'):
+                                    for name, path in getattr(gen, '_imported_struct_home').items():
+                                        if name == a_base:
+                                            break
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
         work.enqueue((kind, base, tuple(args)), depth + 1, queue)
     _walk(rec['parsed'], visit)
 
@@ -3615,6 +3666,20 @@ def _materialize(work, key):
     import elaborate
     import monomorphize as mm
     kind, base, args = key
+    # Register element types for LinkedList before materializing
+    if base == 'LinkedList' and args:
+        for a in args:
+            try:
+                a_base = str(a).split('[')[0].strip()
+                if a_base and a_base not in _IN_TU_LIST_BASES and a_base not in _ERASED_WORD_STRUCTS and a_base not in gimple_ctypes._TYPE_MAP:
+                    try:
+                        if hasattr(work.gen, '_imported_generic_structs'):
+                            # Try to register as generic if it is
+                            _register_named(work.gen, work.gen._imported_generic_structs.get(a_base) or _module_src(work.gen, a_base, 'struct'), [a_base])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
     module_src = _module_src(work.gen, base, kind)
     if module_src is None:
         work.refuse(f'no source for {base!r}')
