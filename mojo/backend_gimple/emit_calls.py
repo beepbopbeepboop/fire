@@ -1698,8 +1698,11 @@ import builtins as _py_builtins
 _PY_BUILTIN_NAMES = frozenset(n for n in dir(_py_builtins) if not n.startswith('_'))
 
 
+# Deliberately NOT `int64_t`: that is also the erased word for any value this
+# backend has no struct type for (a `Coord[...]`, a tuple), so `c.cast[.uint32]()`
+# on one would be read as an integer conversion and break it (test_coord).
 _CAST_SCALAR_CTYPES = frozenset({
-    '_Bool', 'int8_t', 'int16_t', 'int32_t', 'int64_t', 'uint8_t', 'uint16_t',
+    '_Bool', 'int8_t', 'int16_t', 'int32_t', 'uint8_t', 'uint16_t',
     'uint32_t', 'uint64_t', 'float', 'double', '__fp16'})
 
 _DTYPE_CAST_CTYPES = {
