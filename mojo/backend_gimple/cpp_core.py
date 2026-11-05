@@ -1693,7 +1693,8 @@ def _cpp_dyn_call_expr(gen, e):
     if not (isinstance(e.func, gimple_ctypes.IdentExpr)
             and gen._cpp_declared is not None
             and gen._cpp_declared.get(e.func.name) in ('int64_t', 'char *')
-            and e.func.name in getattr(gen, '_cpp_param_names', ())):
+            and (e.func.name in getattr(gen, '_cpp_param_names', ())
+                 or e.func.name in getattr(gen, '_cpp_word_locals', ()))):
         return None
     _fname = e.func.name
     parts = []
@@ -8645,7 +8646,8 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                  and declared.get(s.iterable.name) == 'int64_t')
     if _wl_ident or (isinstance(s.iterable, gimple_ctypes.CallExpr)
             and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
-            and s.iterable.func.name in getattr(gen, '_cpp_param_names', ())
+            and (s.iterable.func.name in getattr(gen, '_cpp_param_names', ())
+                 or s.iterable.func.name in getattr(gen, '_cpp_word_locals', ()))
             and declared.get(s.iterable.func.name) in ('int64_t', 'char *')):
         _wi = gen._cpp_fresh_name("_mg_witer")
         declared[_wi] = 'MojoList *'
