@@ -83,16 +83,31 @@ anywhere else), these rules override any instinct to move on quickly:
   interim gate runs and interim check-ins were seen as wasted tokens/time
   when the intent was always to gate once at the end anyway.
 
-## Process safety — NEVER kill processes (`pkill`/`kill` are forbidden)
+## Process safety — agents do not kill processes; the OWNER may authorise it
 The user's machine runs many other worktrees and lanes at the same time.
-Agents in this tree must NEVER run `pkill`, `kill`, `killall`, or any
+By default agents in this tree must NOT run `pkill`, `kill`, `killall`, or any
 process-kill — not on `fire`/`python`/`lean` processes, not on orphaned
 processes from a previous session, not "to free memory". A still-running
 process belongs to someone (the user, another lane, a verification the user
 is watching): wait on it, work around it, or REPORT it in the round's
-output. The only sanctioned killing mechanism is `tools/memcap.py`'s own
-ceiling, and only inside the `tools/memslot.py` wrappers the tree's tests
-use. Recorded 2026-11-02 after a near-miss report.
+output (pid, age, memory, what started it). The only sanctioned automatic
+killing mechanism is `tools/memcap.py`'s own ceiling, and only inside the
+`tools/memslot.py` wrappers the tree's tests use.
+
+**The owner can authorise a kill.** When the user (the owner of the machine)
+explicitly tells an agent to kill a process, that is permission for exactly
+what they named, and nothing wider:
+- kill only the pid(s) the user pointed at, or the ones the agent started
+  itself and the user told it to stop; look at `ps -o pid,etime,rss,command`
+  first so the target is the one reported;
+- use a plain `kill <pid>` (SIGTERM) and confirm it exited; never `kill -9`,
+  `pkill`, `killall` or a pattern/name match, which can reach another lane's
+  processes;
+- the authorisation is for that request only; the next stray process is
+  reported again, not killed.
+Recorded 2026-11-02 after a near-miss report; the owner exception added
+2026-11-05, when the user asked for a runaway 46 GB `fire.py --dump-full`
+(left by an agent's own aborted build) to be killed.
 
 ## Bug rounds — every round must move us closer to the end
 Base directive (user, 2026-10-31): one work round handles ONE bug, fully
