@@ -569,6 +569,8 @@ the limits above were wrong:
 
 **Status 2026-11-05 (step-15c):** trait-bound conformance check restored on instantiation via `elaborate.check_bounds`; failures recorded in `_FAILED_DEMANDS` and surfaced by the bracketed-callee scan with trait/missing-method names. Added cases `a trait bound violation is refused by name` and `a conforming type argument is still instantiated`.
 
+**Status 2026-11-05 (step-15e):** pinned `a parameter annotation of an imported instantiation` (one-field value builds and agrees with CPython; two-field frame remains refused by the cross-image frame contract naming `Pair_1_T_3_Int`). The reader `formal/model/structs.py::parameter_declared_structs` unchanged.
+
 ## 1.3 One of the 30 should not be in the family at all
 
 `std/gpu/host/nvidia/tma.mojo` is refused because it "imports `.`", and the
@@ -1645,7 +1647,7 @@ Index a `range()` result rather than measuring it, until that is fixed.
 | # | file | verdict | message (first 100 chars) | reason / fix | commit |
 |---|------|---------|--------------------------|--------------|--------|
 | 1 | ../new-modular/Mojo/stdlib/std/algorithm/backend/tile.mojo | S | build: tile: 'tile_size_list' has no home: this module declares no module-level name by  | new message differs (name-not-found/home) vs variadic ABI | |
-| 2 | ../new-modular/Mojo/stdlib/std/benchmark/compiler.mojo |  | build: inlined_assembly['', NoneType, 'r,~{memory}', True] is a subscript whose index is a tuple. A  |  |  |
+| 2 | ../new-modular/Mojo/stdlib/std/benchmark/compiler.mojo | S | build: compiler.mojo imports 'std.sys._assembly', which cannot be built either: Slice.write | moved to dependency on std.sys._assembly (FormatStruct bare call) | |
 | 3 | ../new-modular/Mojo/stdlib/std/bit/bit.mojo |  | build: log2_floor: `is_negative` is called, and it is imported from `std.bit.mask`, so the call has  |  |  |
 | 4 | ../new-modular/Mojo/stdlib/std/builtin/_format_float.mojo |  | build: _write_float: `isnan` is called, and it is imported from `std.utils.numerics`, so the call ha |  |  |
 | 5 | ../new-modular/Mojo/stdlib/std/builtin/float_literal.mojo |  | build: FloatLiteral___int__: `self.__int_literal__().__int__(…)` cannot be lowered: `self.__int_lite |  |  |
