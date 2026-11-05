@@ -10236,9 +10236,11 @@ def _cpp_async_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[
                                 if isinstance(_defaults, dict):
                                     _dval = _defaults.get(callee_name)
                                 elif isinstance(_defaults, list):
-                                    for _pname, _pval in _defaults:
-                                        if str(_pname) == callee_name:
-                                            _dval = _pval
+                                    # Index the pair, don't unpack it (see the
+                                    # same loop above in this file).
+                                    for _pair in _defaults:
+                                        if str(_pair[0]) == callee_name:
+                                            _dval = _pair[1]
                                             break
                                 if _dval is not None and hasattr(_dval, 'name'):
                                     _dname = _dval.name

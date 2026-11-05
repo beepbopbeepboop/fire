@@ -7752,6 +7752,57 @@ def _repack_method_call_spread_args(gen, mangled: str, struct_name: str,
     return fixed_pairs
 
 
+def _imported_method_declared_ret(gen, struct_name: str, method: str):
+    """C return type of `struct_name.method` read from the method's DECLARED
+    `-> T` annotation in its home module, or None.
+
+    The ordinary answer is `func_return_types[<mangled>]`, which the HOME
+    module's own emission writes. In a whole-closure compile the importing
+    module can be emitted BEFORE its import is (`emit_funcs` calls
+    `LayoutSolver.solve`, `solvers` is emitted later), so the slot is still
+    empty and the call used to be typed `int64_t` while the extern prototype
+    said `MojoDict *`: gcc's `assignment to 'int64_t' from 'MojoDict *'`. The
+    annotation is the same fact the definition will publish, so reading it
+    here cannot disagree with it; an unannotated method, an overloaded name,
+    or an unresolvable home keeps the old answer (None)."""
+    _homes = []
+    _h0 = gen._imported_struct_home.get(struct_name)
+    if _h0:
+        _homes.append(_h0)
+    try:
+        _h1 = gen._struct_method_qualifier(struct_name)
+    except Exception:
+        _h1 = ''
+    if _h1 and _h1 not in _homes:
+        _homes.append(_h1)
+    _imp = None
+    for _home in _homes:
+        try:
+            _imp = gen._parsed_import(_home)
+        except Exception:
+            _imp = None
+        if _imp and _imp[2]:
+            break
+    _stmts = _imp[2] if _imp else None
+    if not _stmts:
+        return None
+    for _st in _stmts:
+        if isinstance(_st, gimple_ctypes.StructDef) and _st.name == struct_name:
+            _cands = [_m for _m in _st.methods if _m.name == method]
+            if len(_cands) != 1 or not _cands[0].return_type:
+                return None
+            _ann = str(_cands[0].return_type).strip()
+            if not _ann:
+                return None
+            if _ann == 'None':
+                return 'void'
+            _ct = gen._resolve_type(_ann)
+            if _ct and _ct != 'unknown':
+                return _ct
+            return None
+    return None
+
+
 def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple:
     """Lower struct/class method calls: obj.method(args) → StructName_method(self, args)."""
     func = node.func
@@ -7933,6 +7984,8 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
             gen.func_return_types.get(f"{struct_name}_{method}{_method_overload_suffix}", None))
     if ret_type is None and mangled in gen._KNOWN_SIGS:
         ret_type = gen._KNOWN_SIGS[mangled][0]
+    if ret_type is None:
+        ret_type = _imported_method_declared_ret(gen, struct_name, method)
     if (ret_type is None and method == 'copy'
             and f"{struct_name}_copy" not in gen.func_return_types
             and f"{struct_name}_copy" not in gen._KNOWN_SIGS):

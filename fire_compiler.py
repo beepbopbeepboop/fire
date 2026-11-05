@@ -4244,6 +4244,14 @@ def _canon_conv(conv: str):
 
 
 class Parser:
+    _tok: list
+    _pos: int
+    _filename: str
+    _pending_decs: list
+    _comptime_rhs_failures: list
+    _struct_param_names: list
+    _known_traits: set
+
     def __init__(self, tokens: list[Token]):
         self._tok = tokens
         self._pos = 0

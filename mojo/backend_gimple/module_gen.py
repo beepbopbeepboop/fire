@@ -5806,6 +5806,12 @@ def gen_module_impl(self, stmts: list):
             '_filename': 'char *',
             '_pending_decs': 'MojoList *',
             '_known_traits': 'MojoSet *',
+            # Both are assigned in `Parser.__init__` (fire_compiler.py) and
+            # declared at class level, so a hardcoded layout that omits them
+            # makes gcc reject every access: `'Parser' has no member named
+            # '_comptime_rhs_failures'` / `'_struct_param_names'`.
+            '_comptime_rhs_failures': 'MojoList *',
+            '_struct_param_names': 'MojoList *',
             # NOT `_CONV_KWS`: that is a CLASS-level constant
             # (`Parser._CONV_KWS = {...}`, fire_compiler.py), not an instance
             # field. Listing it here made `self._CONV_KWS` read this
@@ -6559,7 +6565,7 @@ def gen_module_impl(self, stmts: list):
     # resolves identically — every site runs before the emission loop's
     # module-level comptime registrations, the one write that could change
     # a resolution verdict mid-function).
-    def _flatten_resolved_conditionals(_root_list):
+    def _flatten_resolved_conditionals(_root_list: list) -> list:
         _out = []
         _stack = [(_root_list, 0)]
         while _stack:
@@ -9464,7 +9470,7 @@ def gen_module_impl(self, stmts: list):
             # arithmetic, printing `43634604000`.
             from mojo.middle.module_shared import module_qualifier as _gmiq
             _xg_body = (gimple_gen_coro.generator_base_name(
-                            _xg_hfn, _gmiq(self.module_name))
+                            _xg_hfn, _gmiq(_as_str(self.module_name)))
                         + '_body')
             for _xg_pn in _xg_pmap:
                 _xg_ct = _xg_pmap[_xg_pn]
@@ -13798,7 +13804,7 @@ def gen_module_impl(self, stmts: list):
             _ggf_dup._record_home_def_return_type(
                 self, _p3b_raw, _p3b_s.name, inferred)
 
-    def _flatten_resolved_conditionals(_root_list):
+    def _flatten_resolved_conditionals(_root_list: list) -> list:
         _out = []
         _stack = [(_root_list, 0)]
         while _stack:
@@ -17493,6 +17499,33 @@ def gen_module_impl(self, stmts: list):
                         else:
                             _sig_ret = 'int64_t'
                         signature = f'{_sig_ret} {safe} ({", ".join(_as_list(_sig_pts))})'
+                # The scan's PARAMETER types are a second inference too: an
+                # unannotated parameter (`def module_qualifier(q)`) is
+                # `int64_t` to the importer's text scan and `char *` to the
+                # definition, which is typed from the body. The mangled name's
+                # overload hash is already computed from the definer's list
+                # (`_overload_suffix` -> `_imported_def_pts`), so name and
+                # extern must not disagree about the very list the name was
+                # hashed from: gcc rejects the unit with `conflicting types
+                # for 'mojo_middle_exprtypes_module_qualifier_d719e0'; have
+                # 'char *(int64_t)'` against the definition's `char *(char *)`,
+                # and every call through the extern then fails too. Only the
+                # DEFINER's committed list counts (`definer_only`): with no
+                # definition in this closure (a dylib link) nothing is written
+                # there and the scan stays the only evidence, as before.
+                # The scan can also DROP parameters (3 scanned, 5 defined for
+                # `user_dunder_repr_call`), so the definer's list replaces the
+                # scan's whole parameter list rather than being matched to it.
+                # Never a variadic.
+                if (sym_info.get('parameters') or sym_info.get('c_parameters')) \
+                        and not sym_info.get('variadic'):
+                    _def_pts = _ggf_dup._imported_def_pts(self, _sn, True)
+                    if _def_pts:
+                        _m_sig = re.match(r'^(.*?\b' + re.escape(safe) + r'\s*)\(.*\)\s*$',
+                                          signature)
+                        if _m_sig:
+                            signature = (_m_sig.group(1) + '('
+                                         + ', '.join(_as_list(_def_pts)) + ')')
                 if signature.startswith('MojoTuple_'):
                     # Part 4 (measured 2026-10-21 integration, `split`'s
                     # `-> Tuple[String, String]`): the scanned/resolved

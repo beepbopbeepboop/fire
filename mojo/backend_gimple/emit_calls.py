@@ -4766,8 +4766,12 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
             # an instance of a class made at run time that derives this static class: its
             # header is not a struct tag, the class table knows the bases
             rt = gen._call_expr('int', 'mojo_isinstance_rtclass', [('int64_t', addr), ('int64_t', target)])
+            # The cast goes in its own statement: a GIMPLE binary operand must
+            # be a bare SSA name, so `a | (_Bool)b` is `expected expression
+            # before '(' token` in every function that reaches this arm.
+            rt_b = gen._new_val('_Bool', f'(_Bool){rt}')
             both = gen._new_temp('_Bool')
-            gen._emit(f'  {both} = {cmp_t} | (_Bool){rt};')
+            gen._emit(f'  {both} = {cmp_t} | {rt_b};')
             return both
         return cmp_t
     _TYPE_IDS = {'bool': '1', 'int': '2', 'float': '3', 'str': '4',

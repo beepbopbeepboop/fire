@@ -2138,7 +2138,7 @@ def _home_def_return_type(gen, qualifier: str, bare_name: str):
     return store.get(_pair_key(qualifier, bare_name))
 
 
-def _imported_def_pts(gen, bare_name: str) -> list | None:
+def _imported_def_pts(gen, bare_name: str, definer_only: bool = False) -> list | None:
     """BUG-2026-024 helper: the parameter ctypes recorded for `bare_name` by
     its HOME module at FromImportStmt registration time
     (_imported_home_param_types, keyed (sanitized_home_qualifier, name)),
@@ -2156,6 +2156,11 @@ def _imported_def_pts(gen, bare_name: str) -> list | None:
     whichever module compiled last (mod.computer.computer_case.get_energy
     vs mod.computer.network.get_energy -> call sites emitted
     computer_case_get_energy_77b31a against definition ..._0ed997).
+
+    `definer_only=True` skips the importer's own snapshot tier, so a hit means
+    a unit that DEFINES the name committed this signature (module_gen's extern
+    block uses it: an extern may only be re-typed from a definition that is
+    really in the translation unit).
 
     Never raises: an _AMBIGUOUS_FUNC_HOME entry resolves to None here so
     the caller falls through to the shared-slot tier; the authoritative
@@ -2220,7 +2225,7 @@ def _imported_def_pts(gen, bare_name: str) -> list | None:
             pts = _def_store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts
-        if store:
+        if store and not definer_only:
             pts = store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts
