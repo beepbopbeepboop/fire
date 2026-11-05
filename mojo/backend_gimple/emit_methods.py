@@ -3878,7 +3878,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _fut_recv_obj = getattr(func, 'obj', None)
         if (not isinstance(_fut_recv_sem, str)
                 or _fut_recv_sem not in ('MojoDict *', 'MojoList *', 'MojoSet *')):
-            if isinstance(_fut_recv_obj, IdentExpr):
+            if isinstance(_fut_recv_obj, gimple_ctypes.IdentExpr):
                 _fut_recv_sem = (gen.var_types.get(_fut_recv_obj.name)
                                  or gen._global_var_types.get(_fut_recv_obj.name)
                                  or _fut_recv_sem)
@@ -5282,7 +5282,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # that have their own as_bytes method
             try:
                 from fire_compiler import IdentExpr
-                if isinstance(func.obj, IdentExpr) and func.obj.name == 'unsafe_from_utf8':
+                if isinstance(func.obj, gimple_ctypes.IdentExpr) and func.obj.name == 'unsafe_from_utf8':
                     # Let it fall through to struct method dispatch
                     pass
                 else:
@@ -5300,7 +5300,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                             if isinstance(a, MemberExpr) and getattr(a, 'member', '') == 'big':
                                 is_big = True
                                 continue
-                            if isinstance(a, IdentExpr) and getattr(a, 'name', '') == 'big':
+                            if isinstance(a, gimple_ctypes.IdentExpr) and getattr(a, 'name', '') == 'big':
                                 is_big = True
                                 continue
                         except Exception:
