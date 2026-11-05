@@ -1,5 +1,19 @@
 # FORMAL_known_limits: the sweep residue, audited — which refusals are true
 
+> **PLANNED — this document's open work is decomposed into `bugs/plan/step-*.md`,
+> and the design plus ordering live in `doc/finish-formal.md`.** The steps that
+> own parts of this document: **step-15** (monomorphization residuals),
+> **step-16** (bare inferrable template calls), **step-17** (declared `__init__`
+> / field-filling construction), **step-18** (by-reference frame-escape
+> residuals), **step-19** (optional-runtime-unit registry), **step-20** (MLIR
+> word-valued elementwise ops), **step-21** (bare `comptime <expr>` diagnostic),
+> **step-22** (the 19 singleton causes), **step-23** (Mojo-side host modules),
+> **step-24** (x86-64 arch drift), **step-25** (`Error` / unrepresentable
+> types). Read the measurements here first; the step files are the work orders.
+> Rows the document itself calls **permanent true limits** (`std/sys/info.mojo`'s
+> `_TargetType`, `current_target` as a value, `target_has_feature`, the MLIR
+> dialect attributes) are read as facts and are not work.
+
 **Last audited: 2026-09-27 (the five-agent round 1, agent [5] — §6 added).**
 Sections 1–5 are wave 5's audit and are **not** re-measured here; §6 is a
 separate, later measurement of the same sweep on a tree four other agents were

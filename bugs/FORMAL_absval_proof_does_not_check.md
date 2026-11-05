@@ -1,5 +1,10 @@
 # `formal/examples/absval.mojo`'s arm64 proof no longer checks — a frame-slot peel's address does not match the goal
 
+> **PLANNED — this document's open work is decomposed into `bugs/plan/step-*.md`,
+> and the design plus ordering live in `doc/finish-formal.md`.** The step that
+> owns it is **step-28** (the frame-peel `K` reconciliation and corpus
+> re-measure). Read the measurements here first; the step file is the work order.
+
 ## Status
 
 **OPEN, MEASURED 2026-10-12 (`work/formal303-docs`).** `absval` is NOT in

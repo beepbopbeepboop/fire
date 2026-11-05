@@ -1,5 +1,12 @@
 # Peephole rules that are not proved: arm64 `store_load`/`mem_pair`/`movz_pair`, x86-64 `imm_zero`/`store_load`/`mem_pair`
 
+> **PLANNED — this document's open work is decomposed into `bugs/plan/step-*.md`,
+> and the design plus ordering live in `doc/finish-formal.md`.** The steps that
+> own parts of this document: **step-02** (the memory lemmas), **step-03**
+> (arm64 rule theorems), **step-04** (x86-64 rule theorems), **step-05**
+> (licence/register/enable). Read the measurements here first; the step files are
+> the work orders.
+
 **Status 2026-10-05 (`work/formal268-docs`): §1 (`arm64/copy_chain`) and §3's
 `x86_64/mov_self` are FIXED and ENABLED; this doc is now the work list for the
 rules that remain unproved (§2, §3's remaining x86 rules, §4's note).**

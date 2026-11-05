@@ -1,5 +1,12 @@
 # FORMAL_no_exceptions: a `raise` is a TERMINATION on this path, not a value the caller can catch
 
+> **PLANNED — this document's open work is decomposed into `bugs/plan/step-*.md`,
+> and the design plus ordering live in `doc/finish-formal.md`.** The steps that
+> own parts of this document: **step-26** (one discoverable host-module failure
+> convention, item 1) and **step-27** (the EH-runtime / `try`-handler-arm
+> scaffold, item 2). Read the measurements here first; the step files are the
+> work orders. Item 3 (pin the behaviour) is already DONE.
+
 **Status 2026-10-31 (`formal2059-docs`): item 3 of "The next step" remains
 DONE; steps 1 and 2 (discoverable convention; EH runtime) remain open design
 projects. `test_formal_exceptions.py` is 331 checks, 0 failures (both

@@ -1,5 +1,10 @@
 # A set is a LIST here: insertion order, no hashing, and `for x in s` disagrees with CPython
 
+> **PLANNED — this document's open work is decomposed into `bugs/plan/step-*.md`,
+> and the design plus ordering live in `doc/finish-formal.md`.** The step that
+> owns it is **step-14** (a set runtime on both backends). Read the measurements
+> here first; the step file is the work order.
+
 ## Status 2026-10-12 (`work/formal314-docs`): ONE DISAGREEMENT THIS FILE CALLED "AGREED" WAS REAL, AND THE WORD-CANONICAL HALF IS FIXED
 
 **This file's table said `len(s)` was "the element count" on all three engines

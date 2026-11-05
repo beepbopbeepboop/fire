@@ -1,5 +1,12 @@
 # FORMAL_string_value_model: what a string IS on the formal path, and the two things that want to be one
 
+> **PLANNED — this document's open work is decomposed into `bugs/plan/step-*.md`,
+> and the design plus ordering live in `doc/finish-formal.md`.** The steps that
+> own parts of this document: **step-10** (the `String` frame-vs-`char *`
+> collision), **step-11** (the runtime string buffer), **step-12** (a `strlen`
+> in the proof model), **step-13** (Unicode `s[i]`/`%<w>s`). Read the
+> measurements here first; the step files are the work orders.
+
 **Status:** the representation question is DECIDED and the decision is landed.
 The string stays a bare `char *`; the length and the content equality are
 recovered as *computations* over that one word rather than as fields, and the
