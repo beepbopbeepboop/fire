@@ -1657,7 +1657,7 @@ Index a `range()` result rather than measuring it, until that is fixed.
 | 9 | ../new-modular/Mojo/stdlib/std/collections/binary_heap.mojo | S | builds successfully (exit 0) | file now builds | |
 | 10 | ../new-modular/Mojo/stdlib/std/collections/type_dict.mojo | S | builds successfully (exit 0) | file now builds | |
 | 11 | ../new-modular/Mojo/stdlib/std/format/repr.mojo | S | build: value.write_repr_to() is a method call on a value, and this backend lowers only append, clear, close, write and string methods | detailed message lists allowed methods | |
-| 12 | ../new-modular/Mojo/stdlib/std/origin/__init__.mojo |  | build: the module-level comptime binding 'AnyOrigin' is initialized from an MLIR attribute template: |  |  |
+| 12 | ../new-modular/Mojo/stdlib/std/origin/__init__.mojo | S | build: the module-level comptime binding 'AnyOrigin' is initialized from an MLIR attribute template: __mlir_attr[...] | different full message | |
 | 13 | ../new-modular/Mojo/stdlib/std/os/path/path.mojo |  | build: getsize: `stat` is called, and it is imported from `..fstat`, so the call has to bind a symbo |  |  |
 | 14 | ../new-modular/Mojo/stdlib/std/reflection/function.mojo |  | build: ReflectedFn_display_name: __mlir_attr[`#kgen.get_source_name<`, Self.func, `> : !kgen.string` |  |  |
 | 15 | ../new-modular/Mojo/stdlib/std/simd.mojo |  | build: _convert_f32_to_float8_scalar: `_isnan` is called, and it is imported from `std.utils.numeric |  |  |
