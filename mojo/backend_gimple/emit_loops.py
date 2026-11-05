@@ -1306,7 +1306,14 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     # An already-materialized items list: its elements are
                     # the same [key, value] pairs.
                     gen._dict_items_val_elems[lp] = 'int64_t'
-                else:
+                elif not for_target_is_tuple(var):
+                    # A SINGLE-name target over a word of unknown type: nothing
+                    # says what the elements are, and `mojo_list_get_int`
+                    # returns a double's raw bits, so read through the
+                    # kind-aware accessor (the target is then tagged, see
+                    # `_gen_for_list`, so int slots keep int arithmetic). A
+                    # tuple target keeps its per-slot reads: marking it boxed
+                    # retyped slots of `for a, b, c in self._table` loops.
                     gen._maybe_kinds_vals.add(_as_str(lp))
                 gen._gen_for_list(var, lp, node.body, share_var_with_sibling_arm=True)
                 gen._emit(f"  goto {bb_after};")

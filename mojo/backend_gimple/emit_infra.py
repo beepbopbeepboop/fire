@@ -6955,7 +6955,9 @@ def _float_operand_as_double(gen, ctype: str, val: str, maybe_box: bool) -> str:
         return _as_str(gen._call_expr('double', 'mojo_box_double', [('int64_t', val)]))
     if ctype == 'double':
         return _as_str(val)
-    return _as_str(gen._new_val('double', f'(double) ({_as_str(val)})'))
+    # Operands are bare names: a parenthesised operand is `expected expression
+    # before '(' token` inside a `__GIMPLE` function.
+    return _as_str(gen._new_val('double', f'(double){_as_str(val)}'))
 
 
 def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv: str,
@@ -6991,12 +6993,20 @@ def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv
         dres = gen._call_expr('double', 'mojo_div_double',
                               [('double', _as_str(dl)), ('double', _as_str(dr))])
         return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', _as_str(dres))])
-    if op == '//':
-        dres = gen._new_val('double', f'floor(({_as_str(dl)}) / ({_as_str(dr)}))')
-    elif op == '%':
-        dres = gen._new_val('double', f'({_as_str(dl)} - ({_as_str(dr)}) * floor(({_as_str(dl)}) / ({_as_str(dr)})))')
+    if op == '//' or op == '%':
+        # `mojo_div_double` for the quotient (gcc -fgimple ICEs on an inline
+        # double `/`, and it raises ZeroDivisionError on a zero divisor), then
+        # one operation per statement so every operand is a bare name.
+        dq = gen._call_expr('double', 'mojo_div_double',
+                            [('double', _as_str(dl)), ('double', _as_str(dr))])
+        dfl = gen._call_expr('double', 'floor', [('double', _as_str(dq))])
+        if op == '//':
+            dres = dfl
+        else:
+            dprod = gen._new_val('double', f'{_as_str(dr)} * {_as_str(dfl)}')
+            dres = gen._new_val('double', f'{_as_str(dl)} - {_as_str(dprod)}')
     else:
-        dres = gen._new_val('double', f'({dl}) {op} ({dr})')
+        dres = gen._new_val('double', f'{_as_str(dl)} {op} {_as_str(dr)}')
     if lt == 'double' or rt == 'double':
         return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', _as_str(dres))])
     # The integer answer reads a maybe-box operand as its integer
@@ -7006,7 +7016,7 @@ def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv
     if op == '//':
         ires = gen._new_val('int64_t', f'__mojo_floordiv ({_as_str(ilv)}, {_as_str(irv)})')
     else:
-        ires = gen._new_val('int64_t', f'({_as_str(ilv)}) {op} ({_as_str(irv)})')
+        ires = gen._new_val('int64_t', f'{_as_str(ilv)} {op} {_as_str(irv)}')
     return gen._call_expr('int64_t', 'mojo_float_arith_select', [
         ('int64_t', _as_str(lv) if lp else '0'),
         ('int64_t', _as_str(rv) if rp else '0'),

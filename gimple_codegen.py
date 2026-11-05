@@ -6309,6 +6309,7 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).with_filename(filename).parse_module()
     _check_ownership(stmts, filename)
+    stmts = ast_rewriter.desugar_enums(stmts)
     try:
         stmts = _transform_enum_classes(stmts)
     except Exception:

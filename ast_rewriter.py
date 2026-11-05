@@ -36,7 +36,9 @@ import dataclasses
 
 from fire_compiler import (
     IdentExpr, BinaryOp, CallExpr, MemberExpr, SubscriptExpr, TernaryExpr,
-    AssignStmt, ExprStmt, IntLiteral, UnaryOp, _as_str, _as_list, _as_dict,
+    AssignStmt, ExprStmt, IntLiteral, FloatLiteral, StringLiteral, UnaryOp,
+    StructDef, FunctionDef, ForStmt, Generator, Parser, py_tokenize,
+    _as_str, _as_list, _as_dict,
 )
 
 # Position metadata every AST node carries; never part of a pattern's shape.
@@ -961,3 +963,186 @@ def rewrite_node(node) -> object:
     StringLiteral node) rather than upfront alongside the rest of the module,
     so they never pass through rewrite() otherwise."""
     return _rewrite_node(node, TRIE)
+
+
+# ─── Plain `Enum` classes ──────────────────────────────────────────────────
+#
+# `class Color(Enum): RED = 1` used to go through the run-time metaclass
+# transform (gimple_codegen._transform_enum_classes), which leaves a member as
+# the bare value: `Color.RED` was the int 1, so `.name`, `.value`, `str()`,
+# iteration and `Color(2)` all failed or printed the number.
+#
+# The desugar below gives a member real identity with nothing but features the
+# compiler already types well: an ordinary class (`name`, `value`, `__str__`,
+# `__repr__`), one typed module global per member (`Color__RED`), the member
+# list (`Color__members`) and a lookup function (`Color__lookup`). References
+# are then rewritten to those globals: `Color.RED` -> `Color__RED`,
+# `Color(2)` -> `Color__lookup(2)`, and an iteration over the class itself
+# (`for c in Color`, `[c for c in Color]`, `list(Color)`, `len(Color)`) ->
+# `Color__members`.
+#
+# Deliberately narrow, so a shape this does not model keeps the old transform
+# instead of being modelled wrongly: base exactly `Enum`; body only
+# `NAME = <int|float|str literal or its negation>` members and `def` methods;
+# no `auto()`, no `Flag` / `IntEnum` (an `IntEnum` member must also be an int).
+# Aliases (a repeated value) resolve to the first member, as in CPython.
+
+_ENUM_ITER_BUILTINS = frozenset({'list', 'tuple', 'len', 'sorted', 'enumerate', 'reversed', 'set', 'iter'})
+
+
+def _enum_literal_src(expr):
+    """Python source for a literal member value, or None when it is not one."""
+    if isinstance(expr, IntLiteral):
+        return str(expr.value)
+    if isinstance(expr, FloatLiteral):
+        return repr(expr.value)
+    if isinstance(expr, StringLiteral) and not getattr(expr, 'is_bytes', False):
+        return repr(_as_str(expr.value))
+    if (isinstance(expr, UnaryOp) and expr.op == '-'
+            and isinstance(expr.operand, (IntLiteral, FloatLiteral))):
+        return '-' + _enum_literal_src(expr.operand)
+    return None
+
+
+def _plain_enum_members(sd):
+    """[(NAME, value-source)] for a plain `Enum` StructDef this pass models,
+    else None."""
+    if not isinstance(sd, StructDef) or list(sd.bases or []) != ['Enum']:
+        return None
+    out = []
+    for f in sd.fields or []:
+        if not (isinstance(f, AssignStmt) and isinstance(f.target, IdentExpr)):
+            return None
+        name = _as_str(f.target.name)
+        src = _enum_literal_src(f.value)
+        if src is None or name.startswith('_'):
+            return None
+        out.append((name, src))
+    if not out:
+        return None
+    if getattr(sd, 'comptime_aliases', None):
+        return None
+    # One `value` field has one C type: an enum mixing int, float and str
+    # members would store some of them as the wrong kind, so it keeps the
+    # old transform.
+    kinds = set()
+    for (_n, v) in out:
+        kinds.add('s' if v[:1] in ('"', "'") else ('f' if ('.' in v or 'e' in v) else 'i'))
+    if len(kinds) != 1:
+        return None
+    return out
+
+
+def _desugar_one_enum(sd, members):
+    """The statements replacing one plain-Enum StructDef, and its member names
+    (aliases included)."""
+    cls = _as_str(sd.name)
+    first_by_value = {}
+    lines = [
+        'class %s:' % cls,
+        '    def __init__(self, name: str, value):',
+        '        self.name = name',
+        '        self.value = value',
+    ]
+    own = set(_as_str(m.name) for m in sd.methods or [])
+    if '__str__' not in own:
+        lines += ['    def __str__(self) -> str:', '        return "%s." + self.name' % cls]
+    if '__repr__' not in own:
+        lines += ['    def __repr__(self) -> str:',
+                  '        return "<%s." + self.name + ": " + repr(self.value) + ">"' % cls]
+    ordered = []
+    names = []
+    for (n, v) in members:
+        names.append(n)
+        if v in first_by_value:
+            lines.append('%s__%s = %s__%s' % (cls, n, cls, first_by_value[v]))
+        else:
+            first_by_value[v] = n
+            ordered.append(n)
+            lines.append('%s__%s = %s("%s", %s)' % (cls, n, cls, n, v))
+    lines.append('%s__members = [%s]' % (cls, ', '.join('%s__%s' % (cls, n) for n in ordered)))
+    lines += [
+        'def %s__lookup(v) -> %s:' % (cls, cls),
+        '    for m in %s__members:' % cls,
+        '        if m.value == v:',
+        '            return m',
+        '    raise ValueError(repr(v) + " is not a valid %s")' % cls,
+    ]
+    stmts = Parser(py_tokenize('\n'.join(lines) + '\n')).parse_module()
+    for st in stmts:
+        if isinstance(st, StructDef) and _as_str(st.name) == cls:
+            for m in sd.methods or []:
+                st.methods.append(m)
+            st.decorators = list(sd.decorators or [])
+            break
+    return stmts, names
+
+
+def _iter_enum_name(node, enums):
+    """The enum class a bare `IdentExpr` iterable names, else None."""
+    if isinstance(node, IdentExpr) and _as_str(node.name) in enums:
+        return _as_str(node.name)
+    return None
+
+
+def _rewrite_enum_node(node, enums):
+    if not dataclasses.is_dataclass(node):
+        return node
+    for f in dataclasses.fields(node):
+        if f.name in _SKIP_FIELDS:
+            continue
+        val = getattr(node, f.name)
+        if dataclasses.is_dataclass(val):
+            setattr(node, f.name, _rewrite_enum_node(val, enums))
+        elif isinstance(val, list):
+            for i in range(len(val)):
+                if dataclasses.is_dataclass(val[i]):
+                    val[i] = _rewrite_enum_node(val[i], enums)
+    if isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr):
+        en = _as_str(node.obj.name)
+        if en in enums and _as_str(node.member) in ('__name__', '__qualname__'):
+            # The metaclass path answered this; a plain class has no static
+            # `__name__`, and for an enum it is just the class's own name.
+            return StringLiteral(value=en, line=node.line, col=node.col)
+        if en in enums and _as_str(node.member) in enums[en]:
+            return IdentExpr(name='%s__%s' % (en, _as_str(node.member)),
+                             line=node.line, col=node.col)
+    if isinstance(node, CallExpr) and isinstance(node.func, IdentExpr) and not node.kwargs:
+        fn = _as_str(node.func.name)
+        if fn in enums and len(node.args) == 1:
+            return CallExpr(func=IdentExpr(name=fn + '__lookup', line=node.line, col=node.col),
+                            args=list(node.args), kwargs=[], line=node.line, col=node.col)
+        if fn in _ENUM_ITER_BUILTINS and len(node.args) >= 1:
+            en = _iter_enum_name(node.args[0], enums)
+            if en is not None:
+                node.args[0] = IdentExpr(name=en + '__members', line=node.line, col=node.col)
+    if isinstance(node, ForStmt):
+        en = _iter_enum_name(node.iterable, enums)
+        if en is not None:
+            node.iterable = IdentExpr(name=en + '__members', line=node.line, col=node.col)
+    if isinstance(node, Generator):
+        en = _iter_enum_name(node.iterable, enums)
+        if en is not None:
+            node.iterable = IdentExpr(name=en + '__members')
+    return node
+
+
+def desugar_enums(stmts: list) -> list:
+    """Replace every module-level plain `Enum` class by the class, member
+    globals and helpers described above, and rewrite the references to it.
+    Enums this does not model are left untouched for the old transform."""
+    enums = {}
+    out = []
+    for st in stmts:
+        members = _plain_enum_members(st)
+        if members is None:
+            out.append(st)
+            continue
+        new_stmts, names = _desugar_one_enum(st, members)
+        enums[_as_str(st.name)] = set(names)
+        out.extend(new_stmts)
+    if not enums:
+        return stmts
+    for i in range(len(out)):
+        out[i] = _rewrite_enum_node(out[i], enums)
+    return out

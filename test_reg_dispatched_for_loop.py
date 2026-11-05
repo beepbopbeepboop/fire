@@ -84,6 +84,16 @@ def main():
         print(z + "!")
 main()
 ''',
+    # `+ - * / %` on a float slot reached through the dispatch (the target is a tagged word,
+    # `emit_infra._float_param_arith`). Float `//` is NOT here: the dict arm lowers the shared
+    # variable as a `char *` key and `y // 2` does not compile (see the bug doc).
+    "float_slot_arithmetic": '''
+def main():
+    d = {"f": [7.5, 2.5], "s": "z"}
+    for y in d["f"]:
+        print(y % 2, y - 1, y * 3, y + 1, y / 2)
+main()
+''',
     "floats_through_dispatch_with_dict_and_str_siblings": '''
 def main():
     d = {"a": [1.5, 2.5], "b": ["u", "v"], "c": {"k": 1}}
