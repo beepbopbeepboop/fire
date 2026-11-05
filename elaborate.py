@@ -1154,7 +1154,7 @@ class Elaborator:
         self.gcc = gcc
 
     def elaborate_generic_call(self, module_src: str, fn_name: str, type_args, arg_count: int | None = None,
-                               arg_ctypes=None):
+                               arg_ctypes=None) -> dict:
         """Instantiate `fn_name` for `type_args` (a list of concrete type strings)
         via the CAS. Returns a dict {symbol, object, ret, params} or None.
 
@@ -1193,7 +1193,7 @@ class Elaborator:
                 'ret': ret, 'params': ptypes}
 
     def elaborate_generic_struct(self, module_src: str, struct_name: str,
-                                 type_args, nested=None):
+                                 type_args, nested=None) -> dict:
         """Instantiate a generic struct `Struct[TypeArgs]` (slice 5): monomorphize
         the struct + its methods for the type args (CAS-cached), and report the
         concrete name, field layout, method signatures, and object so the codegen
@@ -1253,7 +1253,7 @@ class Elaborator:
                 'symbols': symbols}
 
     def elaborate_generic_struct_inferred(self, module_src: str, struct_name: str,
-                                          arg_ctypes):
+                                          arg_ctypes) -> dict:
         """`Struct(...)` with no bracket arguments: infer the type args from the
         constructor's own parameter annotations (`infer_struct_type_args`), then
         elaborate exactly as the explicit form does."""
@@ -1262,7 +1262,7 @@ class Elaborator:
             return None
         return self.elaborate_generic_struct(module_src, struct_name, type_args)
 
-    def elaborate_overload_call(self, module_src: str, fn_name: str, arg_ctypes):
+    def elaborate_overload_call(self, module_src: str, fn_name: str, arg_ctypes) -> dict:
         """Resolve an overloaded call (slice 4): pick the `fn_name` overload whose
         parameter types match the argument C types, mangle it by signature, and
         compile that one concrete function (CAS-cached). Returns
@@ -1293,7 +1293,7 @@ class Elaborator:
                 'ret': _mojo_type(ret) if ret else 'void',
                 'params': [_mojo_type(p) for p in ptypes]}
 
-    def elaborate_generic_call_inferred(self, module_src: str, fn_name: str, arg_ctypes):
+    def elaborate_generic_call_inferred(self, module_src: str, fn_name: str, arg_ctypes) -> dict:
         """Like elaborate_generic_call but infers the type args from the call
         argument C types (slice 2): `box(42)` with no explicit `[Int64]`."""
         tmpl = extract_fn_source(module_src, fn_name, arg_count=len(arg_ctypes),
