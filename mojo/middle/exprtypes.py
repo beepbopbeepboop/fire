@@ -1247,21 +1247,27 @@ def _walk_own_body(node):
     exact same own-body walk instead of maintaining a second copy — both
     need to see precisely the same set of a generator's own top-level
     YieldExpr sites."""
-    if isinstance(node, (FunctionDef, LambdaExpr)):
+    # Built on `_walk_ast` and a prune of nested-def subtrees, NOT a second
+    # reflective walk of its own: the previous form tested
+    # `hasattr(node, '__dataclass_fields__')`, which the self-hosted compiler
+    # answers False for every node, so the walk stopped at the first statement
+    # level and the compiled `_generator_yield_ctype` never saw a `yield` inside
+    # a `for`/`while`/`if` -- every generator with any control flow was refused
+    # as "yields cannot be resolved" and the stage2 binary could not compile
+    # `fire.py`, `fire_compiler.py` or `myinterpreter.py`.
+    if node is None or isinstance(node, (FunctionDef, LambdaExpr)):
         return []
-    if node is None:
-        return []
-    if isinstance(node, (list, tuple)):
-        result = []
-        for item in node:
-            result.extend(_walk_own_body(item))
-        return result
-    if hasattr(node, '__dataclass_fields__'):
-        result = [node]
-        for fname in node.__dataclass_fields__:
-            result.extend(_walk_own_body(getattr(node, fname)))
-        return result
-    return [node]
+    allnodes = _walk_ast(node)
+    inner: dict = {}
+    for n in allnodes:
+        if isinstance(n, (FunctionDef, LambdaExpr)):
+            for m in _walk_ast(n):
+                inner[id(m)] = True
+    out = []
+    for n in allnodes:
+        if id(n) not in inner:
+            out.append(n)
+    return out
 
 def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, generator_api: dict | None=None) -> tuple[bool, list | None]:
     """Companion to `_generator_yield_ctype` for the tuple-valued-yield
