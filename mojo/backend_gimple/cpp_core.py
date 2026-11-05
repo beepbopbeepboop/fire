@@ -8671,7 +8671,26 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         if not hasattr(gen, '_cpp_word_iter_locals'):
             gen._cpp_word_iter_locals = set()
         gen._cpp_word_iter_locals.add(_wi)
-        _call_txt = gen._cpp_expr(s.iterable)
+        try:
+            _pos_parts = []
+            for _aa in (s.iterable.args or []):
+                _pos_parts.append(gen._cpp_expr(_aa))
+            for _kn, _kv in (getattr(s.iterable, 'kwargs', None) or []):
+                _pos_parts.append(gen._cpp_expr(_kv))
+            _callee_name = s.iterable.func.name
+            _call_txt = (
+                "[&]() { struct _W { int64_t w; "
+                "operator int64_t() const { return w; } "
+                "operator char *() const { return (char *)w; } "
+                "operator MojoList *() const { return (MojoList *)w; } "
+                "operator MojoDict *() const { return (MojoDict *)w; } "
+                "operator MojoSet *() const { return (MojoSet *)w; } "
+                "}; "
+                "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
+                + ''.join(f"mojo_list_append_int(_a, (int64_t)(intptr_t)({_e})); " for _e in _pos_parts)
+                + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_callee_name}), _a, _k)}}; }}()")
+        except Exception:
+            _call_txt = gen._cpp_expr(s.iterable)
         _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
         _inner_for = gimple_ctypes.ForStmt(
             target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
@@ -8689,7 +8708,26 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             if not hasattr(gen, '_cpp_word_iter_locals'):
                 gen._cpp_word_iter_locals = set()
             gen._cpp_word_iter_locals.add(_wi)
-            _call_txt = gen._cpp_expr(s.iterable)
+            try:
+                _pos_parts = []
+                for _aa in (s.iterable.args or []):
+                    _pos_parts.append(gen._cpp_expr(_aa))
+                for _kn, _kv in (getattr(s.iterable, 'kwargs', None) or []):
+                    _pos_parts.append(gen._cpp_expr(_kv))
+                _callee_name = s.iterable.func.name
+                _call_txt = (
+                    "[&]() { struct _W { int64_t w; "
+                    "operator int64_t() const { return w; } "
+                    "operator char *() const { return (char *)w; } "
+                    "operator MojoList *() const { return (MojoList *)w; } "
+                    "operator MojoDict *() const { return (MojoDict *)w; } "
+                    "operator MojoSet *() const { return (MojoSet *)w; } "
+                    "}; "
+                    "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
+                    + ''.join(f"mojo_list_append_int(_a, (int64_t)(intptr_t)({_e})); " for _e in _pos_parts)
+                    + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_callee_name}), _a, _k)}}; }}()")
+            except Exception:
+                _call_txt = gen._cpp_expr(s.iterable)
             _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
             _inner_for = gimple_ctypes.ForStmt(
                 target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
@@ -8807,8 +8845,27 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             # Call the foreign callable
             _call_res = f"{_cpp_fc}({_args})"
             lines = [f"{indent}MojoList *{_itvar} = mojo_list_new();"]
+            # Build a positional-only call through mojo_dyn_call: kwargs passed
+            # as a non-empty dict require the callee's sig registration, which
+            # ordinary (non-generator) functions do not have, so flatten every
+            # argument (positional + keyword values) into the positional list
+            # and pass an empty kwargs dict.
             try:
-                _call_res = gen._cpp_expr(s.iterable)
+                _parts = []
+                for _ae in _argstrs:
+                    _parts.append(
+                        f"mojo_list_append_int(_a, (int64_t)(intptr_t)({_ae})); ")
+                _call_res = (
+                    "[&]() { struct _W { int64_t w; "
+                    "operator int64_t() const { return w; } "
+                    "operator char *() const { return (char *)w; } "
+                    "operator MojoList *() const { return (MojoList *)w; } "
+                    "operator MojoDict *() const { return (MojoDict *)w; } "
+                    "operator MojoSet *() const { return (MojoSet *)w; } "
+                    "}; "
+                    "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
+                    + ''.join(_parts)
+                    + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_cpp_fc}), _a, _k)}}; }}()")
             except Exception:
                 _call_res = f"{_cpp_fc}({_args})"
             # For csv.reader style, we need to iterate over its result
@@ -8889,7 +8946,27 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             if not hasattr(gen, '_cpp_word_iter_locals'):
                 gen._cpp_word_iter_locals = set()
             gen._cpp_word_iter_locals.add(_wi)
-            _call_txt = gen._cpp_expr(s.iterable)
+            # Build positional-only call (flatten kwargs) to avoid runtime sig lookup.
+            try:
+                _pos_parts = []
+                for _aa in (s.iterable.args or []):
+                    _pos_parts.append(gen._cpp_expr(_aa))
+                for _kn, _kv in (getattr(s.iterable, 'kwargs', None) or []):
+                    _pos_parts.append(gen._cpp_expr(_kv))
+                _callee_name = s.iterable.func.name
+                _call_txt = (
+                    "[&]() { struct _W { int64_t w; "
+                    "operator int64_t() const { return w; } "
+                    "operator char *() const { return (char *)w; } "
+                    "operator MojoList *() const { return (MojoList *)w; } "
+                    "operator MojoDict *() const { return (MojoDict *)w; } "
+                    "operator MojoSet *() const { return (MojoSet *)w; } "
+                    "}; "
+                    "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
+                    + ''.join(f"mojo_list_append_int(_a, (int64_t)(intptr_t)({_e})); " for _e in _pos_parts)
+                    + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_callee_name}), _a, _k)}}; }}()")
+            except Exception:
+                _call_txt = gen._cpp_expr(s.iterable)
             _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
             _inner_for = gimple_ctypes.ForStmt(
                 target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
