@@ -2469,7 +2469,7 @@ def _used_idents_generic(node) -> set[str]:
         out |= _used_idents_node(getattr(node, f.name, None))
     return out
 
-def _compute_exc_descendants(all_struct_defs):
+def _compute_exc_descendants(all_struct_defs: list) -> dict:
     """For each struct name, the set of all struct names that transitively
     inherit from it (including itself) — used so a compiled `except
     BaseError:` handler matches any raised subclass of BaseError, not just
