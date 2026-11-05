@@ -8,7 +8,7 @@ deleted in the same commit, as for any bug.
 |---|---|---|
 | `CODEGEN_a_none_held_in_an_int64_local_is_indistinguishable_from_zero_in_membership.md` | see doc | workers |
 | `CODEGEN_bootstrap_resource_blowup.md` | see doc | workers |
-| `CODEGEN_dispatched_for_loop_shares_one_var_between_dict_and_list_arms.md` | see doc | workers |
+| `CODEGEN_float_elements_of_an_untyped_list_print_as_raw_bits.md` | see doc | workers |
 | `CODEGEN_enum_runtime_class_creation.md` | see doc | workers |
 | `CODEGEN_linked_list_reflection_and_struct_elements.md` | see doc | workers |
 | `COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md` | see doc | workers |

@@ -1,17 +1,19 @@
-# Regression for bug:CODEGEN_dispatched_for_loop_shares_one_var_between_dict_and_list_arms
-# Repro from bugs/hard/CODEGEN_dispatched_for_loop_shares_one_var_between_dict_and_list_arms.md
-# Expected: for i in o.read(): print(i) produces 10 / 20, not SIGSEGV.
-
-import os, sys, tempfile, subprocess
+# Pin for the dict/list runtime dispatch in emit_loops._gen_for_iter (the arm taken when a
+# loop's iterable is a word of unknown type). One C variable is shared by the dict arm
+# (string keys, `char *`) and the list arm (any element), and the doc that tracked this
+# (a `for i in o.read(): print(i)` SIGSEGV) described the list-of-ints crash. Every program
+# below goes through that arm or its static neighbours and must print exactly what CPython
+# prints; a regression to `char *` for the shared variable shows up as a crash or as a
+# pointer-decimal in the output.
+import os, subprocess, sys, tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from build_config import find_gcc
 from gimple_codegen import compile_to_gimple
 from test_dict_tuple_key import RUNTIME
 
-
-def test_dispatched_for_loop_regression():
-    src = '''
+PROGRAMS = {
+    "doc_repro_two_hop_field": '''
 class Reader:
     def __init__(self, items):
         self.items = items
@@ -25,28 +27,75 @@ def main():
     for i in o.read():
         print(i)
 main()
-'''
+''',
+    "untyped_param_list_dict_str_float": '''
+def show(xs):
+    for i in xs:
+        print(i)
+def main():
+    show([10, 20])
+    show({"a": 1, "b": 2})
+    show(["x", "y"])
+    show([1.5, 2.5])
+main()
+''',
+    "word_iterables": '''
+class R:
+    def __init__(self, items):
+        self.items = items
+def main():
+    r = R([10, 20])
+    for i in getattr(r, 'items'):
+        print(i)
+    d = {"a": [1, 2], "b": "s"}
+    for i in d["a"]:
+        print(i)
+    box = [[3, 4]]
+    w = box[0]
+    for i in w:
+        print(i)
+    t = (1, [7, 8])
+    for i in t[1]:
+        print(i)
+main()
+''',
+    "int_elements_keep_int_arithmetic": '''
+def main():
+    q = {"n": [10, 20], "s": "z"}
+    for x in q["n"]:
+        print(x + 1)
+main()
+''',
+}
+
+
+def _run_compiled(src):
     tmp = tempfile.mkdtemp(dir=HERE)
     try:
-        c = compile_to_gimple(src)
-        cfile = os.path.join(tmp, "t.c")
-        exe = os.path.join(tmp, "t")
+        cfile, exe = os.path.join(tmp, "t.c"), os.path.join(tmp, "t")
         with open(cfile, "w") as f:
-            f.write(c)
-        sources = [cfile, os.path.join(RUNTIME, "fire_runtime.c")]
-        r = subprocess.run([find_gcc(), "-fgimple", "-I" + RUNTIME, "-o", exe, *sources],
-                           capture_output=True, text=True)
+            f.write(compile_to_gimple(src))
+        r = subprocess.run([find_gcc(), "-fgimple", "-I" + RUNTIME, "-o", exe, cfile,
+                            os.path.join(RUNTIME, "fire_runtime.c")], capture_output=True, text=True)
         assert r.returncode == 0, r.stderr[-500:]
-        p = subprocess.run([exe], capture_output=True, text=True)
-        assert p.returncode == 0, p.stderr
-        out = p.stdout.strip().replace('\r\n', '\n')
-        assert out == "10\n20" or out == "10\n20\n" or out == "10\n20", f"got {p.stdout!r}"
+        return subprocess.run([exe], capture_output=True, text=True)
     finally:
         for f in os.listdir(tmp):
             os.unlink(os.path.join(tmp, f))
         os.rmdir(tmp)
 
 
+def _cpython(src):
+    return subprocess.run([sys.executable, "-c", src], capture_output=True, text=True).stdout
+
+
+def test_dispatched_for_loop_matches_cpython():
+    for name, src in PROGRAMS.items():
+        p = _run_compiled(src)
+        assert p.returncode == 0, f"{name}: exit {p.returncode}: {p.stderr[-200:]}"
+        assert p.stdout == _cpython(src), f"{name}: got {p.stdout!r}, CPython {_cpython(src)!r}"
+
+
 if __name__ == "__main__":
-    test_dispatched_for_loop_regression()
+    test_dispatched_for_loop_matches_cpython()
     print("PASS")
