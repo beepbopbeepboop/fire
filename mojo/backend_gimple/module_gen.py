@@ -13472,7 +13472,30 @@ def gen_module_impl(self, stmts: list):
     # code pointer, and discover_closures passes `ctx` explicitly.
     self.selfhost_param_ctype = _ggf_dup._selfhost_gen_self_param_ctype
     try:
+        # Prevent lifting of closure factories with nonlocal
+        try:
+            from mojo.middle import closures as _closures
+            if not hasattr(self, '_skip_closure_factory_lift'):
+                self._skip_closure_factory_lift = set()
+            for fn in _walk_ast(stmts):
+                if isinstance(fn, FunctionDef):
+                    if _closures._is_closure_factory_with_nonlocal(fn):
+                        self._skip_closure_factory_lift.add(id(fn))
+                        self._skip_closure_factory_lift.add(getattr(fn, 'name'))
+        except Exception:
+            pass
         discover_closures(self, stmts)
+        # Refuse closure factories with nonlocal in returned closure
+        try:
+            from mojo.middle import closures as _closures
+            for fn in _walk_ast(stmts):
+                if isinstance(fn, FunctionDef):
+                    if _closures._is_closure_factory_with_nonlocal(fn):
+                        raise RuntimeError(f"unresolved callee '{fn.name}(...)'")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
     finally:
         try:
             del self.selfhost_param_ctype

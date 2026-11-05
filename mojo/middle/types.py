@@ -2590,26 +2590,43 @@ def _declared_vars_body(stmts: list) -> set[str]:
             if node.finally_body:
                 result |= _declared_vars_body(node.finally_body)
     return result
-def callable_ctype(params, ret='int64_t'):
+def _c_type_to_cpp(t: str) -> str:
+    """Normalize a pythonic ctype name for C++ emission: the bare `'int'`
+    and a missing (None) type both mean `int64_t`."""
+    if t == 'int':
+        t = 'int64_t'
+    if t is None:
+        return 'int64_t'
+    return t
+
+
+def callable_ctype(params, ret='int64_t', ret_ctype=None, param_ctypes=None):
     """Build a `std::function<R(P...)>` ctype string for a callable slot.
 
     `params` may be a list of ctypes, a list of `(name, ctype)` pairs, a bare
     ctype string, or `None`; `ret` is the return ctype, with the pythonic
-    `'int'` normalized to `'int64_t'`."""
-    if ret == 'int':
-        ret = 'int64_t'
+    `'int'` (and a missing type) normalized to `'int64_t'`. `ret_ctype`
+    overrides `ret` when the declared return is the int64_t default, and
+    `param_ctypes` supplies precomputed ctypes when `params` is an empty
+    list (both call conventions the closure factory and the foreign
+    callable table use)."""
+    if ret_ctype is not None and ret == 'int64_t':
+        ret = ret_ctype
+    # Support both calling conventions for flexibility
+    if param_ctypes is not None and params == []:
+        params = param_ctypes
     if isinstance(params, str):
         params = [params]
     if params is None:
         params = []
     ptypes = []
     for p in params:
-        if isinstance(p, (tuple, list)) and len(p) == 2:
-            ptypes.append(_as_str(p[1]))
+        if isinstance(p, (tuple, list)) and len(p) >= 2:
+            ptypes.append(_c_type_to_cpp(_as_str(p[1])))
         else:
-            ptypes.append(_as_str(p))
+            ptypes.append(_c_type_to_cpp(_as_str(p)))
     ps = ', '.join(ptypes)
-    return f'std::function<{_as_str(ret)}({ps})>'
+    return f'std::function<{_c_type_to_cpp(_as_str(ret))}({ps})>'
 
 
 _CPP_CALLABLE_CTYPE = callable_ctype([], 'int64_t')

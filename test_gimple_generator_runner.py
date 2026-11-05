@@ -1170,58 +1170,6 @@ main()
 """)
 
 
-def _get_reader_list(lines, delimiter='\t'):
-    res = []
-    for line in lines:
-        if delimiter in line:
-            res.append(line.split(delimiter))
-        else:
-            res.append([line])
-    return res
-
-def read_table(infile, header, *, sep='\t',
-               _get_reader=_get_reader_list):
-    lines = infile.splitlines()
-    for row in _get_reader(lines, delimiter=sep):
-        yield row
-
-def main():
-    data = "a\tb\n1\t2\n3\t4\n"
-    for r in read_table(data, "a\tb", sep='\t'):
-        print(r[0], r[1])
-main()
-""",
-        """\
-def _get_reader_list(lines, delimiter='\t'):
-    res = []
-    for line in lines:
-        if delimiter in line:
-            res.append(line.split(delimiter))
-        else:
-            res.append([line])
-    return res
-
-def read_table(infile, header, *, sep='\t',
-               _get_reader=_get_reader_list):
-    lines = infile.splitlines()
-    for row in _get_reader(lines, delimiter=sep):
-        yield row
-
-def main():
-    data = "a\tb\n1\t2\n3\t4\n"
-    for r in read_table(data, "a\tb", sep='\t'):
-        print(r[0], r[1])
-main()
-""")
-def read_table(infile, header, *, sep='\\t',
-               _get_reader=_get_reader_list):
-    lines = infile.splitlines()
-    for row in _get_reader(lines, delimiter=sep):
-        yield row
-
-def main():
-
-
 def _cpp_coroutine_builtin_module_constant():
     # A constant read off a module MARKER that is NEVER INLINED — `os` and
     # `signal` bind to an opaque marker with no compiled body in this TU, so

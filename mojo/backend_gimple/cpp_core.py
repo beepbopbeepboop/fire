@@ -5214,6 +5214,8 @@ def _cpp_expr(gen, e) -> str:
                     actype = gimple_exprtypes._infer_simple_expr_ctype(
                         a, gen._cpp_declared or {},
                         getattr(gen, '_cpp_gen_self_fields', None), gen._async_api)
+                    if actype == 'int':
+                        actype = 'int64_t'
                     ae = gen._cpp_expr(a)
                     # Use expected param type if known
                     expected_pt = None
@@ -5224,13 +5226,14 @@ def _cpp_expr(gen, e) -> str:
                         if expected_pt == 'double':
                             arg_exprs.append(f"(double)({ae})" if actype != 'double' else ae)
                             continue
-                        elif expected_pt in ('char *',) or (isinstance(expected_pt, str) and expected_pt.endswith(' *')):
+                        elif isinstance(expected_pt, str) and expected_pt.endswith('*'):
                             arg_exprs.append(f"({expected_pt})({ae})")
                             continue
                         elif expected_pt in ('int64_t', 'int', '_Bool', 'bool'):
                             if actype == '_Bool' or expected_pt in ('_Bool', 'bool'):
                                 arg_exprs.append(f"(int64_t)({ae})")
-                            elif actype == 'char *' and expected_pt in ('int64_t', 'int'):
+                            elif isinstance(actype, str) and actype.endswith('*'):
+                                # pointer argument into an int64 slot: word-pack
                                 arg_exprs.append(f"(int64_t)(intptr_t)({ae})")
                             else:
                                 arg_exprs.append(f"({expected_pt})({ae})" if expected_pt != 'int64_t' else (ae if actype in ('int64_t', 'int') else f"(int64_t)({ae})"))
@@ -5238,8 +5241,10 @@ def _cpp_expr(gen, e) -> str:
                         else:
                             arg_exprs.append(f"({expected_pt})({ae})")
                             continue
-                    # Fallback to old behavior
-                    if actype not in ('int64_t', 'int', '_Bool', 'char *', 'double'):
+                    # Fallback to old behavior: int/bool args, plus any
+                    # pointer-shaped arg passed as an int64_t word.
+                    if (actype not in ('int64_t', 'int', '_Bool', 'char *', 'double')
+                            and not (isinstance(actype, str) and actype.endswith('*'))):
                         raise gimple_exprtypes._UnsupportedGeneratorShape(
                             f"calling the closure returned by '{factory_name}': "
                             "argument must be an int or bool expression")
@@ -5247,7 +5252,8 @@ def _cpp_expr(gen, e) -> str:
                         arg_exprs.append(f"(int64_t)({ae})")
                     elif actype == 'double':
                         arg_exprs.append(f"(double)({ae})")
-                    elif actype == 'char *':
+                    elif isinstance(actype, str) and actype.endswith('*'):
+                        # pass pointer as int64_t word
                         arg_exprs.append(f"(int64_t)(intptr_t)({ae})")
                     else:
                         arg_exprs.append(ae)  # pass as-is for int/int64_t to match old behavior
@@ -5256,7 +5262,8 @@ def _cpp_expr(gen, e) -> str:
                     helper = f"mojo_fnptr_call_d{len(arg_exprs)}"
                     call = f"{helper}((void *)({inner}){''.join(', ' + x for x in arg_exprs)})"
                     return call
-                elif c_ret in ('char *',) or (isinstance(c_ret, str) and c_ret.endswith(' *') and c_ret not in ('MojoList *', 'MojoDict *', 'MojoSet *')):
+                elif (isinstance(c_ret, str) and c_ret.endswith('*')
+                        and c_ret not in ('MojoList *', 'MojoDict *', 'MojoSet *')):
                     helper = f"mojo_fnptr_call_{len(arg_exprs)}"
                     call = f"{helper}((void *)({inner}){''.join(', ' + x for x in arg_exprs)})"
                     return f"({c_ret})({call})"
@@ -5264,6 +5271,7 @@ def _cpp_expr(gen, e) -> str:
                     helper = f"mojo_fnptr_call_{len(arg_exprs)}"
                     return (f"{helper}"
                             f"((void *)({inner}){''.join(', ' + x for x in arg_exprs)})")
+
             # Call of a call result: f()(args)  →  (f())(args)
             inner = gen._cpp_expr(e.func)
             args = ', '.join(gen._cpp_expr(a) for a in e.args)
