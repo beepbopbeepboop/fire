@@ -12734,7 +12734,11 @@ def gen_module_impl(self, stmts: list):
     # names are claimed here, BEFORE the generic passes below would refuse
     # them and before the module-level registration could take them by bare
     # name (see cpp_async._compile_nested_generator_closures).
-    for _od in stmts:
+    # Walk EVERY FunctionDef in the module, not only the top-level ones:
+    # a generator nested two levels deep (e.g. `traceback_cm` inside
+    # `process_args` inside `add_traceback_cli`) is otherwise never reached
+    # by this pass and stays refused as an unclaimed nested generator.
+    for _od in gimple_exprtypes._walk_ast(stmts):
         if isinstance(_od, FunctionDef):
             self._compile_nested_generator_closures(_od, _generator_fns)
 
