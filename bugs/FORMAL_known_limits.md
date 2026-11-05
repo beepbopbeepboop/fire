@@ -1651,7 +1651,7 @@ Index a `range()` result rather than measuring it, until that is fixed.
 | 3 | ../new-modular/Mojo/stdlib/std/bit/bit.mojo | S | MonomorphError: count_leading_zeros[...] comptime specialization of a FUNCTION template  | different failure (monomorph) vs missing export is_negative | |
 | 4 | ../new-modular/Mojo/stdlib/std/builtin/_format_float.mojo | S | build: _write_float: `isnan` is called from `std.utils.numerics` (bare call to generic template, | longer message about bare call inference (step-16 family) | |
 | 5 | ../new-modular/Mojo/stdlib/std/builtin/float_literal.mojo | S | builds successfully (exit 0) | file now builds | |
-| 6 | ../new-modular/Mojo/stdlib/std/builtin/len.mojo |  | build: a `...` stands where this path needs instructions to emit, and there are none: a formal image |  |  |
+| 6 | ../new-modular/Mojo/stdlib/std/builtin/len.mojo | S | build: a `...` stands where this path needs instructions to emit, and there are none: a forma | different full message (explains trait vs function) | |
 | 7 | ../new-modular/Mojo/stdlib/std/builtin/none.mojo |  | build: writer.write_string() is a method on a Writer — a multi-field struct, so on this path the rec |  |  |
 | 8 | ../new-modular/Mojo/stdlib/std/builtin/type_aliases.mojo |  | build: the module-level comptime binding 'Never' is initialized from an MLIR type template: __mlir_t |  |  |
 | 9 | ../new-modular/Mojo/stdlib/std/collections/binary_heap.mojo |  | build: self.unsafe_ptr() is a method call on a value, and this backend lowers only append, clear, cl |  |  |
