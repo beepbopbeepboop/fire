@@ -10854,6 +10854,15 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         t = gen._new_val('int64_t', f"mojo_memoryview_get ({ov}, {idx64})")
         return 'int64_t', t
 
+    if ot == 'MojoDict *' and gen._is_none_literal(node.index):
+        # `d[None]`: the None-key entry (keykind 3), not the integer-0 one.
+        val_ctype = gen._dict_val_of(ov)
+        if val_ctype == 'double':
+            return 'double', gen._call_expr('double', 'mojo_dict_get_none_key_double', [('MojoDict *', ov)])
+        if val_ctype == 'char *':
+            return 'char *', gen._call_expr('char *', 'mojo_dict_get_none_key_str', [('MojoDict *', ov)])
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_dict_get_none_key_int', [('MojoDict *', ov)])
+
     if ot == 'MojoDict *':
         # A bytes KEY reads from its own key domain (see _DictSlot.keykind);
         # `_char_to_cstr` on a `MojoBytes *` would cast the POINTER to char*

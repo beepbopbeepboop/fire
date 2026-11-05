@@ -6547,6 +6547,44 @@ def elem_repr_operand(gen, shim: str) -> str:
     return gen._new_val('void *', f'_funcptr_{shim}')
 
 
+def emit_dict_none_key_store(gen, dict_val: str, val_ctype: str, val: str, val_node) -> None:
+    """The store of a value under the `None` KEY (`{None: v}`, `d[None] = v`).
+
+    A `None` key is its own key domain in the runtime (keykind 3), distinct from
+    the integer 0 that `None` lowers to, so it cannot go through the ordinary
+    key-conversion chain: every value kind has its own `mojo_dict_set_none_key_*`
+    setter, chosen here exactly as `emit_dict_int_value_store` chooses for a
+    string key. The one spelling, shared by the dict literal and the subscript
+    store, which had only the former (so `d[None] = 5` made a separate int-0
+    entry and `{None: 1, 0: 2}` could not round-trip)."""
+    gen._note_container_callable_ret(dict_val, val, val_ctype, val_node)
+    if val_ctype == 'char *':
+        if isinstance(val, str) and val.startswith('_slit_'):
+            val = gen._new_val('char *', f"{val}")
+        gen._emit_call('void', '', 'mojo_dict_set_none_key_str',
+                       [('MojoDict *', dict_val), ('char *', val)])
+        return
+    if gen._is_none_literal(val_node):
+        gen._emit_call('void', '', 'mojo_dict_set_none_key_none', [('MojoDict *', dict_val)])
+        return
+    if val_ctype in gimple_ctypes._FLOAT_TYPES:
+        gen._emit_call('void', '', 'mojo_dict_set_none_key_double',
+                       [('MojoDict *', dict_val), (val_ctype, val)])
+        return
+    _shim = gimple_exprtypes.struct_elem_repr_shim(gen, val_ctype)
+    if _shim:
+        gen._emit_call('void', '', 'mojo_dict_set_none_key_struct',
+                       [('MojoDict *', dict_val), (val_ctype, val)])
+        return
+    vv64 = gen._to_int64(val_ctype, val)
+    if gimple_exprtypes.is_python_bool_expr(gen, val_node):
+        gen._emit_call('void', '', 'mojo_dict_set_none_key_bool',
+                       [('MojoDict *', dict_val), ('int64_t', vv64)])
+        return
+    gen._emit_call('void', '', 'mojo_dict_set_none_key_int',
+                   [('MojoDict *', dict_val), ('int64_t', vv64)])
+
+
 def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
                               val_ctype: str, val: str, val_node) -> None:
     """The one dict store, for EVERY value kind, shared by the dict literal
