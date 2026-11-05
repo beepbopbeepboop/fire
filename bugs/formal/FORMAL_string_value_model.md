@@ -956,7 +956,7 @@ struct's receiver takes one hidden trailing argument — the address of a block
 the CALLER reserved, per call site, in the prologue — and `return <frame>`
 becomes "copy the block there and return that word". Full design, the three
 properties that make it work, the refusals that remain and the measured sweep
-numbers on both machines: `bugs/formal/FORMAL_wide_receiver_by_reference.md`, wave 8.
+numbers on both machines: `FORMAL_wide_receiver_by_reference.md` (deleted; fixed), wave 8.
 
 Measured on this repository's own arm64 sweep: the family
 `frame address escapes: returned by its creator` went from **11 files to 0** and

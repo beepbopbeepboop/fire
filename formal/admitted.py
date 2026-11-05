@@ -91,7 +91,7 @@ answer is a claim about a host nobody checked.
 # missing one and costs the same. `tools/formal_host_import_shapes.py`
 # reads it as `DEAD` and `formal_sweep_causes.py`'s `mentions` column is
 # the older measure of the same thing; see
-# `bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md` §3.
+# `bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md (deleted)` §3.
 import os
 import re
 import sys
@@ -264,9 +264,14 @@ def contracts_in_file(path: str) -> list:
             text = _decorator_text(dec)
             if text is None:
                 continue
+            try:
+                arity = len(getattr(st, "params", None) or [])
+            except Exception:
+                arity = 1
             out.append(Contract(module, st.name, text, path,
                                 _line_for(path, st.name, len(out),
-                                          admitted_lines)))
+                                          admitted_lines),
+                                arity=arity))
             break
     return out
 

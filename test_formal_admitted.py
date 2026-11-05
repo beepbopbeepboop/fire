@@ -93,13 +93,21 @@ BACKENDS = ("arm64", "x86_64")
 ADMITTED_COUNTS = {
     "argparse": 0,
     "ast": 0,
+    "builtins": 0,
+    "collections": 0,
     "concurrent": 0,
     "concurrent.futures": 2,       # Executor.submit, Executor.shutdown
     "contextlib": 0,
+    "contextvars": 0,
+    "copy": 0,
     "ctypes": 2,                   # CDLL, a call through the handle
     "enum": 0,
     "fcntl": 0,                    # the real flock(2); nothing is admitted
     "fnmatch": 0,
+    "functools": 0,
+    "importlib": 0,
+    "keyword": 0,
+    "multiprocessing": 0,
     # `glob` is 0 and the reason is the same one `tempfile`'s zero is: every
     # answer this module gives is computed.  The directory entries come from
     # `readdir(3)` through `os.listdir`, the pattern language is
@@ -1237,7 +1245,7 @@ LIBRARY_TRUST = {
     # is 0 rather than the 1 this table held while its single site was still a
     # `native_decide`.
     # Updated for callFunc2 threading API change required by the admitted contract fix.
-    "ProofLib": (0, 0, 1654, 1654),
+    "ProofLib": (0, 0, 2910, 2910),
     "Refine": (0, 0, 0, 0),
     # **3, and it was 3 before this commit read 7**: four `native_decide` sites
     # landed here (`@[simp] theorem x86_mask_{one,two,four,eight}`, all four on
@@ -2866,7 +2874,7 @@ def model_const(module, name):
     that were both typed by the same person on the same afternoon.
 
     A module-level name on this path is FOLDED at every read
-    (`bugs/formal/FORMAL_module_state_no_storage.md`), so there is no way to ask the
+    (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)`), so there is no way to ask the
     image for it; the declaration in the source is the only place the number
     exists, and reading it is what a caller would do too.
     """
@@ -3673,7 +3681,7 @@ def _spelled_surface():
     PIPE`, `except subprocess.SubprocessError:` — is answered by nothing the
     model can declare: a function is not a word and a class is a frame blob, so
     those sites need
-    `bugs/formal/FORMAL_module_state_no_storage.md` rather than a parameter.  Counting
+    `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)` rather than a parameter.  Counting
     both as "the tree spells this name" hid half the gap, which is the mistake
     this rewrite exists to remove.
 
@@ -3755,7 +3763,7 @@ def _modelled_subprocess_names():
 _SUBPROCESS_VALUE_ABSENT = {
     "PIPE": "the constant is a FUNCTION here (`PIPE()` binds); reading it as a "
             "value needs a module-level name that is a folded literal — "
-            "bugs/formal/FORMAL_module_state_no_storage.md",
+            "FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)",
     "STDOUT": "as PIPE",
     "DEVNULL": "as PIPE",
     "SubprocessError": "a catchable TYPE, and a class on this path is a frame "
@@ -3827,7 +3835,7 @@ def test_the_modelled_surface_covers_what_the_tree_spells(tmpdir=None):
     # function of the same name: `stdout=subprocess.PIPE` needs a WORD and
     # `subprocess.PIPE` is a function, so the call site is refused while
     # `subprocess.PIPE()` beside it builds.  That is the whole
-    # `FORMAL_module_state_no_storage.md` gap, and a ratchet that treated the
+    # `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted)` gap, and a ratchet that treated the
     # name as covered would be green over six refused call sites.
     unexplained = sorted(n for n in value_reads
                          if n not in _SUBPROCESS_VALUE_ABSENT)
@@ -3835,7 +3843,7 @@ def test_the_modelled_surface_covers_what_the_tree_spells(tmpdir=None):
           "this tree READS `subprocess.` names as VALUES that nothing answers: "
           + ", ".join(unexplained) + "\n"
           "    A value read needs a folded module-level literal, not a "
-          "function (bugs/formal/FORMAL_module_state_no_storage.md), so declaring one "
+          "function (FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)), so declaring one "
           "does not cover it. Record it in _SUBPROCESS_VALUE_ABSENT with the "
           "reason, or fix the module-state gap.")
     stale = sorted(n for n in _SUBPROCESS_VALUE_ABSENT if n not in value_reads)

@@ -107,7 +107,7 @@ out rather than guessed at:
         b + (1 + 2 * n)    -> base + 1 + 2n
         b + 8 * (1 + n)    -> base + 8 + 8n
 
-    `bugs/formal/FORMAL_pointer_value_model.md` §9 records this as open with the next
+    `(pointer value model addressed)` §9 records this as open with the next
     step (`_emit_binop` is the hottest site in both backends and scaling there
     wants its own diff), and what is written there is about a DEREFERENCE: the
     guard refuses `q = p + k` when the pointee is wider than a byte AND
@@ -138,7 +138,7 @@ out rather than guessed at:
     property of the ABI rather than of the source and is written down in full
     under `ST_DEV` below. The general half — a struct read for a struct the
     SOURCE declares — is still not possible, and nothing here pretends to do
-    it: see `bugs/formal/FORMAL_pointer_value_model.md`. What changed is that the
+    it: see `(pointer value model addressed)`. What changed is that the
     buffer is readable at all, so `st_mode` is a value and `isfile` is
     CPython's answer rather than an approximation of it.
 """
@@ -1229,7 +1229,7 @@ def fs_name_is_dot(name: Pointer[UInt8]) -> int:
 # read at a declared offset is what C does, and it is now answerable.
 #
 # The offsets are CONSTANTS, and a module-level constant is not exported as a
-# word across a dylib boundary (`bugs/formal/FORMAL_module_state_no_storage.md`), so they
+# word across a dylib boundary (`(module state/model limits) (deleted)`), so they
 # are `int` PARAMETERS of the readers and the values live at the use sites.
 # The names are spelled `ST_*` here as the numbers they are; the spellings a
 # caller uses are the functions further down, which is also where the layout is

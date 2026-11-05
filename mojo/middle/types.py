@@ -22,7 +22,7 @@ import os
 import re
 import sys
 import dataclasses
-from fire_compiler import split_top_level_commas, target_slots, for_target_is_tuple, for_target_names, for_target_single_name, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, DottedLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, MatchCase, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal, decode_c_escapes
+from fire_compiler import split_top_level_commas, target_slots, for_target_is_tuple, for_target_names, for_target_single_name, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, DottedLiteral, NoneLiteral, CastExpr, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, MatchCase, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal, decode_c_escapes
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
 import mlir
@@ -2590,8 +2590,47 @@ def _declared_vars_body(stmts: list) -> set[str]:
             if node.finally_body:
                 result |= _declared_vars_body(node.finally_body)
     return result
-_CPP_CALLABLE_CTYPE = 'std::function<int64_t()>'
-_CPP_CALLABLE_CTYPE_1ARG = 'std::function<int64_t(int64_t)>'
+def _c_type_to_cpp(t: str) -> str:
+    """Normalize a pythonic ctype name for C++ emission: the bare `'int'`
+    and a missing (None) type both mean `int64_t`."""
+    if t == 'int':
+        t = 'int64_t'
+    if t is None:
+        return 'int64_t'
+    return t
+
+
+def callable_ctype(params, ret='int64_t', ret_ctype=None, param_ctypes=None):
+    """Build a `std::function<R(P...)>` ctype string for a callable slot.
+
+    `params` may be a list of ctypes, a list of `(name, ctype)` pairs, a bare
+    ctype string, or `None`; `ret` is the return ctype, with the pythonic
+    `'int'` (and a missing type) normalized to `'int64_t'`. `ret_ctype`
+    overrides `ret` when the declared return is the int64_t default, and
+    `param_ctypes` supplies precomputed ctypes when `params` is an empty
+    list (both call conventions the closure factory and the foreign
+    callable table use)."""
+    if ret_ctype is not None and ret == 'int64_t':
+        ret = ret_ctype
+    # Support both calling conventions for flexibility
+    if param_ctypes is not None and params == []:
+        params = param_ctypes
+    if isinstance(params, str):
+        params = [params]
+    if params is None:
+        params = []
+    ptypes = []
+    for p in params:
+        if isinstance(p, (tuple, list)) and len(p) >= 2:
+            ptypes.append(_c_type_to_cpp(_as_str(p[1])))
+        else:
+            ptypes.append(_c_type_to_cpp(_as_str(p)))
+    ps = ', '.join(ptypes)
+    return f'std::function<{_c_type_to_cpp(_as_str(ret))}({ps})>'
+
+
+_CPP_CALLABLE_CTYPE = callable_ctype([], 'int64_t')
+_CPP_CALLABLE_CTYPE_1ARG = callable_ctype(['int64_t'], 'int64_t')
 # The `*args` / `**kwargs` family. C++ cannot subscript a native variadic
 # parameter list (`int64_t... a` has no `a[0]`), so a lambda's `*a` / `**k`
 # parameter is modeled as a single CONTAINER parameter, mirroring the plain
@@ -2603,9 +2642,35 @@ _CPP_CALLABLE_CTYPE_1ARG = 'std::function<int64_t(int64_t)>'
 # c_common/fsutil.py`'s `get_files = lambda *a, **k: ...` is the motivating
 # occurrence; see bugs/hard/
 # the (since-fixed) c_common/fsutil.py compile failure.
-_CPP_CALLABLE_CTYPE_STARARGS = 'std::function<int64_t(MojoList *)>'
-_CPP_CALLABLE_CTYPE_KWARGS = 'std::function<int64_t(MojoDict *)>'
-_CPP_CALLABLE_CTYPE_STAR_KW = 'std::function<int64_t(MojoList *, MojoDict *)>'
+_CPP_CALLABLE_CTYPE_STARARGS = callable_ctype(['MojoList *'], 'int64_t')
+_CPP_CALLABLE_CTYPE_KWARGS = callable_ctype(['MojoDict *'], 'int64_t')
+_CPP_CALLABLE_CTYPE_STAR_KW = callable_ctype(['MojoList *', 'MojoDict *'], 'int64_t')
+
+# Foreign-callable signature table (step 1 of the tables.py plan). Maps a
+# callable's qualified name to its declared ctype (from the _CPP_CALLABLE_CTYPE
+# family). Used by _infer_param_types to bind a parameter whose default is a
+# known foreign callable, instead of the int64_t fallback.
+# Extended to optionally carry iterator element ctype for for-loop lowering.
+_FOREIGN_CALLABLES = {
+    'csv.reader': _CPP_CALLABLE_CTYPE,
+    'make_reader': _CPP_CALLABLE_CTYPE,
+    '_get_reader_list': _CPP_CALLABLE_CTYPE,
+}
+_FOREIGN_CALLABLE_ITER_ELEM = {
+    'csv.reader': 'MojoList *',
+}
+
+
+def _get_qualified_name(expr):
+    """Extract a dotted qualified name from an expression (IdentExpr or MemberExpr chain)."""
+    if isinstance(expr, IdentExpr):
+        return expr.name
+    if isinstance(expr, MemberExpr):
+        obj_name = _get_qualified_name(expr.obj)
+        if obj_name is None:
+            return None
+        return obj_name + '.' + expr.member
+    return None
 
 
 def _cpp_lambda_ctype(lam):
@@ -2627,32 +2692,88 @@ def _cpp_lambda_ctype(lam):
     `*args`/`**kwargs`. The parser records the starred names `*a`/`**k`
     with the prefix, so the C parameter takes the stripped name (`a`/`k`)
     — the one the body references.
+
+    Exception (step 3): a default whose value is a known foreign callable
+    (from _FOREIGN_CALLABLES) is admitted.
     """
+    def _foreign_callable_qualname(default):
+        try:
+            if isinstance(default, IdentExpr):
+                return _as_str(getattr(default, 'name'))
+            if isinstance(default, MemberExpr):
+                mems = []
+                cur = default
+                while isinstance(cur, MemberExpr):
+                    mems.append(_as_str(getattr(cur, 'member')))
+                    cur = getattr(cur, 'obj')
+                if isinstance(cur, CallExpr):
+                    try:
+                        func = getattr(cur, 'func')
+                        if isinstance(func, IdentExpr) and _as_str(getattr(func, 'name')) == '__import__':
+                            args = getattr(cur, 'args') or []
+                            if args:
+                                arg = args[0]
+                                if hasattr(arg, 'value'):
+                                    mod = _as_str(arg.value)
+                                    mems.reverse()
+                                    if mems:
+                                        return mod + '.' + '.'.join(mems)
+                    except Exception:
+                        pass
+                if isinstance(cur, IdentExpr):
+                    mems.append(_as_str(getattr(cur, 'name')))
+                    mems.reverse()
+                    return '.'.join(mems)
+        except Exception:
+            pass
+        return None
+
     params = lam.params or []
     _plain = []
     _star = []
     _kw = []
+    _foreign_default_ctype = None
+    _foreign = getattr(globals(), '_FOREIGN_CALLABLES', {}) or {}
     for _p in params:
         _n = _p[0]
         _d = _p[1]
         if _d is not None:
+            # Admit default if it's a known foreign callable (robust extraction)
+            _qname = _foreign_callable_qualname(_d)
+            if _qname is None:
+                _qname = _get_qualified_name(_d)
+            if _qname and _qname in _FOREIGN_CALLABLES:
+                _foreign_default_ctype = _FOREIGN_CALLABLES[_qname]
+                continue  # treat as having no blocking default for shape purposes
             return None
-        if _n.startswith('**'):
+        if isinstance(_n, str) and _n.startswith('**'):
             _kw.append(_n)
-        elif _n.startswith('*'):
+        elif isinstance(_n, str) and _n.startswith('*'):
             _star.append(_n)
         else:
             _plain.append(_n)
     if len(params) == 0:
+        if _foreign_default_ctype is not None:
+            return _foreign_default_ctype
         return _CPP_CALLABLE_CTYPE
     if len(_plain) == 1 and not _star and not _kw:
+        if _foreign_default_ctype is not None:
+            return _foreign_default_ctype
         return _CPP_CALLABLE_CTYPE_1ARG
     if len(_star) == 1 and not _plain and not _kw:
+        if _foreign_default_ctype is not None:
+            return _foreign_default_ctype
         return _CPP_CALLABLE_CTYPE_STARARGS
     if len(_kw) == 1 and not _plain and not _star:
+        if _foreign_default_ctype is not None:
+            return _foreign_default_ctype
         return _CPP_CALLABLE_CTYPE_KWARGS
     if len(_star) == 1 and len(_kw) == 1 and not _plain:
+        if _foreign_default_ctype is not None:
+            return _foreign_default_ctype
         return _CPP_CALLABLE_CTYPE_STAR_KW
+    if _foreign_default_ctype is not None:
+        return _foreign_default_ctype
     return None
 
 

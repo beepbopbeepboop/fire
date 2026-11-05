@@ -324,7 +324,7 @@ def conflict_markers(text):
 # STRUCTURAL, not a regex over the whole line. A regex was tried and it is wrong
 # in two ways at once: it blanks the doc-name cell (which is also a backticked
 # token followed by a `|`), and it blanks backticked words inside the TITLE
-# column — so "neither is in `FORMAL_x86_64_end_to_end_proof`" became "neither is
+# column — so "neither is in the formal x86-64 end-to-end proof bug doc" became "neither is
 # in `—`" and the comparison stopped being about the claim column. Only a table
 # row's SECOND cell is the claim, so only that cell is replaced.
 def _is_row(line):

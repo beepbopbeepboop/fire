@@ -71,7 +71,7 @@ WHAT THIS MODULE PROVIDES
 
 Every one of these is a FUNCTION. There is no module-level state (a name that
 outlives the frame that made it has nowhere to live —
-`bugs/formal/FORMAL_module_state_no_storage.md`), so nothing here remembers anything
+`(module state/model limits) (deleted)`), so nothing here remembers anything
 between calls, and `ast.parse` is a call like every other. The kind-code
 constants at the top of this file are module-level literals, which means they
 are substituted HERE and are not readable from another module — `token_name` is

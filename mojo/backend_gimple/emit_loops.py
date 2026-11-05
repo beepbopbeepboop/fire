@@ -2425,6 +2425,11 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # pre-rename `x`, never the shadow copy -- a hard `gcc -fgimple`
         # "makes integer from pointer without a cast" once the arms'
         # element types actually differed, str key vs int64 element).
+        if share_var_with_sibling_arm and _fl_ctype is None:
+            # In shared dispatch, ensure compatibility with dict arm
+            if var not in gen.var_types:
+                gen._declare_var(var, 'int64_t')
+            _fl_ctype = gen.var_types.get(var) or 'int64_t'
         _fl_retype = (not share_var_with_sibling_arm
                       and gen.var_types.get(var) not in (None, _fl_ctype))
         gen._declare_var(var, _fl_ctype, force=(var == shadow_name) or _fl_retype)
@@ -2441,6 +2446,10 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                      or _as_str(it_val) in getattr(gen, '_maybe_kinds_vals', ()))
                 and gen.var_types.get(var) != 'int64_t'):
             gen._declare_var(var, 'int64_t', force=True)
+        elif share_var_with_sibling_arm and (it_val in getattr(gen, '_maybe_kinds_vals', ())
+                     or _as_str(it_val) in getattr(gen, '_maybe_kinds_vals', ())):
+            if gen.var_types.get(var) != 'int64_t':
+                gen._declare_var(var, 'int64_t', force=True)
         # A list whose element kind nothing recorded yields words of unknown
         # kind (see `_dyn_word_locals`): `for pname in d[k]:` over a dict
         # value built from unpacked names has to stringify `pname` by asking
@@ -3075,9 +3084,18 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     else:
         # ...and the reverse: a name an Int-keyed loop declared int64_t must
         # become a string again, not box the string pointer into an integer.
-        gen._declare_var(var, 'char *', force=(var == shadow_name)
-                         or var in gen._int_key_loop_vars
-                         or gen.var_types.get(var, 'char *') != 'char *')
+        # In the boxed runtime-dispatch sibling case (split_key=False), the
+        # variable is shared with list/set arms and must be compatible with
+        # both dict keys and list elements; declare as int64_t and let
+        # _dyn_word_locals/runtime dispatch handle the kind.
+        if not split_key and not int_keys:
+            gen._declare_var(var, 'int64_t', force=(var == shadow_name)
+                             or var in gen._int_key_loop_vars
+                             or gen.var_types.get(var, 'int64_t') != 'int64_t')
+        else:
+            gen._declare_var(var, 'char *', force=(var == shadow_name)
+                             or var in gen._int_key_loop_vars
+                             or gen.var_types.get(var, 'char *') != 'char *')
         gen._int_key_loop_vars.discard(var)
     # If it_val is int64_t (boxed pointer), cast to MojoDict *
     if it_val in gen.var_types and gen.var_types[it_val] == 'int64_t':
@@ -4230,6 +4248,23 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
         iter_type = struct_type
         iter_var  = obj_val
         iter_base = base
+
+    # If __iter__ returned a generator object, iterate it as a generator
+    if iter_type == 'MojoGenerator *' or iter_type.endswith('*MojoGenerator*') or iter_type == 'MojoGenerator':
+        api = getattr(gen, '_generator_var_api', {}).get(iter_var)
+        if api is not None:
+            destroy_after = False
+            gen._gen_for_generator_iter(var, iter_var, api, body,
+                                          destroy_after=destroy_after,
+                                          shadow_name=shadow_name)
+            return
+        # try to find by name
+        api = getattr(gen, '_generator_var_api', {}).get(str(iter_var))
+        if api is not None:
+            gen._gen_for_generator_iter(var, iter_var, api, body,
+                                          destroy_after=False,
+                                          shadow_name=shadow_name)
+            return
 
     has_next_fn = gen._struct_method_csym(iter_base, '__has_next__', '')
     next_fn     = gen._struct_method_csym(iter_base, '__next__', '')
