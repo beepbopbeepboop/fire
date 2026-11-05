@@ -2743,7 +2743,7 @@ def _emit_reflection_dispatch(self, parts):
                "    if (_oi > 0) _buf = mojo_str_cat_free(_buf, \", \");\n"
                "    char *_s = s->slots[_i].tag == 1\n"
                "        ? mojo_repr_str(s->slots[_i].val_s)\n"
-               "        : mojo_repr_int(s->slots[_i].val_i);\n"
+                "        : (s->slots[_i].tag == 3 ? strdup(\"None\") : mojo_repr_int(s->slots[_i].val_i));\n"
                "    _buf = mojo_str_cat_free(_buf, _s);\n"
                "    free(_s);\n"
                "  }\n"
