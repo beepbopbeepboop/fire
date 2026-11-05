@@ -258,6 +258,8 @@ class StringLiteral:
     # `formal/model.py:is_interpolated_literal`.
     # `False` for every literal with no f/t prefix, and for every literal this
     # parser does not build (a fold, a manifest value, a synthesized format),
+    is_interpolated: bool = False
+    is_tstring: bool = False
     # which are all already-decoded text.
     is_interpolated: bool = False
     # True if this is a t-string (template string) rather than an f-string

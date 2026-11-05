@@ -5878,28 +5878,40 @@ def gen_module_impl(self, stmts: list):
             'func': 'int64_t',
             'args': 'MojoList *',
             'kwargs': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
         }
         self.struct_field_types['BinaryOp'] = {
             'op': 'char *',
             'left': 'int64_t',
             'right': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
         }
         self.struct_field_types['CompareChain'] = {
             'operands': 'MojoList *',
             'ops': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
         }
         self.struct_field_types['UnaryOp'] = {
             'op': 'char *',
             'operand': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
         }
         self.struct_field_types['TernaryExpr'] = {
             'condition': 'int64_t',
             'then_val': 'int64_t',
             'else_val': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
         }
         self.struct_field_types['MemberExpr'] = {
             'obj': 'int64_t',
             'member': 'char *',
+        'line': 'int64_t',
+        'col': 'int64_t',
         }
         self.struct_boxed_fields['CallExpr'] = {'func'}
         self.struct_boxed_fields['BinaryOp'] = {'left', 'right'}
@@ -6013,17 +6025,23 @@ def gen_module_impl(self, stmts: list):
     }
     self.struct_field_types['RaiseStmt'] = {
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['TryStmt'] = {
         'body': 'MojoList *',
         'handlers': 'MojoList *',
         'else_body': 'MojoList *',
         'finally_body': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['WithStmt'] = {
         'items': 'MojoList *',
         'body': 'MojoList *',
         'is_async': '_Bool',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['ImportStmt'] = {
         'module': 'char *',
@@ -6047,18 +6065,26 @@ def gen_module_impl(self, stmts: list):
         'then_body': 'MojoList *',
         'elifs': 'MojoList *',
         'else_body': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['ComptimeForStmt'] = {
         'target': 'char *',
         'iterable': 'int64_t',
         'body': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['ComptimeVarStmt'] = {
         'target': 'char *',
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['GlobalStmt'] = {
         'names': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     # `NonlocalStmt` / `DottedLiteral` were missing from this table, so every
     # `isinstance(x, NonlocalStmt)` in the compiled compiler lowered to the
@@ -6067,16 +6093,24 @@ def gen_module_impl(self, stmts: list):
     # read its captured cell by value.
     self.struct_field_types['NonlocalStmt'] = {
         'names': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['DottedLiteral'] = {
         'path': 'char *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['DelStmt'] = {
         'targets': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['MatchStmt'] = {
         'subject': 'int64_t',
         'cases': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     # `MatchCase` must be registered (and `MatchStmt.cases`'s element type
     # seeded below) or `for i, match_case in enumerate(node.cases):` binds
@@ -6095,17 +6129,27 @@ def gen_module_impl(self, stmts: list):
     self.struct_field_types['LambdaExpr'] = {
         'params': 'MojoList *',
         'body': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
+        'param_types': 'MojoList *',
+        'return_type': 'int64_t',
+        'comptime_params': 'MojoList *',
+        'captures': 'char *',
     }
     self.struct_field_types['SubscriptExpr'] = {
         'obj': 'int64_t',
         'index': 'int64_t',
         'attrs': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['SliceExpr'] = {
         'obj': 'int64_t',
         'start': 'int64_t',
         'stop': 'int64_t',
         'step': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     # `value`, NOT the long-gone `key`: the dataclass declares (kind, element,
     # value, generators, line, col) and this seed fixes the field ORDER of the
@@ -6117,6 +6161,8 @@ def gen_module_impl(self, stmts: list):
         'element': 'int64_t',
         'value': 'int64_t',
         'generators': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     # `Generator` (fire_compiler.py) — the comprehension's per-`for`-clause
     # node (`target`/`iterable`/`conditions`), and the struct
@@ -6140,15 +6186,21 @@ def gen_module_impl(self, stmts: list):
     }
     self.struct_field_types['IdentExpr'] = {
         'name': 'char *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['IntLiteral'] = {
         'value': 'int64_t', 'line': 'int64_t', 'col': 'int64_t', 'raw': 'char *',
     }
     self.struct_field_types['FloatLiteral'] = {
         'value': 'double',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['BoolLiteral'] = {
         'value': '_Bool',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['EllipsisLiteral'] = {}
     self.struct_field_types['NoneLiteral'] = {}
@@ -6158,59 +6210,75 @@ def gen_module_impl(self, stmts: list):
         # reflection repr iterates `struct_field_types` in insertion order
         # and the later self-host augmentation appends any missing dataclass
         # fields, so the seed has to remain a PREFIX of
-        # `StringLiteral(value, line, col, is_bytes, is_raw)` or the native
-        # repr emits `value, is_bytes, line, col` and every file with a
-        # string literal diverges from the reference (64 `.ast` diffs).
-        # `is_raw` is appended at the END for the same reason: it was added
-        # after `is_bytes` (it records an `r` prefix, so
-        # `_strip_string_prefix_and_quotes` no longer carries it), and putting
-        # it anywhere else would reorder the fields the prefix rule protects.
+        # `StringLiteral(value, line, col, is_bytes, is_raw, ...)` or the
+        # native repr emits fields in the wrong order and `.ast` dumps diverge.
+        # `is_raw` and the interpolation flags are appended at the END.
         'line': 'int64_t',
         'col': 'int64_t',
         'is_bytes': '_Bool',
         'is_raw': '_Bool',
+        'is_interpolated': '_Bool',
+        'is_tstring': '_Bool',
     }
     self.struct_field_types['TstringLiteral'] = {
         'value': 'char *',
     }
     self.struct_field_types['ImagLiteral'] = {
         'value': 'double',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['TupleLiteral'] = {
         'elements': 'MojoList *',
     }
     self.struct_field_types['TupleExpr'] = {
         'elements': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['ListLiteral'] = {
         'elements': 'MojoList *',
     }
     self.struct_field_types['ListExpr'] = {
         'elements': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['SetLiteral'] = {
         'elements': 'MojoList *',
     }
     self.struct_field_types['SetExpr'] = {
         'elements': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['DictLiteral'] = {
         'pairs': 'MojoList *',
     }
     self.struct_field_types['DictExpr'] = {
         'pairs': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['WalrusExpr'] = {
         'name': 'char *', 'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['YieldExpr'] = {
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['YieldFromExpr'] = {
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['AwaitExpr'] = {
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['StructDef'] = {
         'name': 'char *', 'fields': 'MojoList *', 'methods': 'MojoList *',
