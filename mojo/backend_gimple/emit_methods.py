@@ -3883,7 +3883,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                                  or gen._global_var_types.get(_fut_recv_obj.name)
                                  or _fut_recv_sem)
             elif (isinstance(_fut_recv_obj, MemberExpr)
-                  and isinstance(_fut_recv_obj.obj, IdentExpr)
+                  and isinstance(_fut_recv_obj.obj, gimple_ctypes.IdentExpr)
                   and _fut_recv_obj.obj.name == 'self'
                   and gen._current_struct_name):
                 _fut_recv_sem = (gen.struct_field_types.get(_gmm_as_str(gen._current_struct_name), {})
@@ -5195,7 +5195,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                         if isinstance(a, MemberExpr) and getattr(a, 'member', '') == 'big':
                             is_big = True
                             continue
-                        if isinstance(a, IdentExpr):
+                        if isinstance(a, gimple_ctypes.IdentExpr):
                             name = getattr(a, 'name', '')
                             if name == 'big':
                                 is_big = True
