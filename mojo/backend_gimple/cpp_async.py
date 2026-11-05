@@ -2373,6 +2373,19 @@ def _enclosing_scope_with_locals(gen, outer_fn: gimple_ctypes.FunctionDef) -> di
             ctype = gimple_exprtypes._local_literal_ctype(stmt.value)
             if ctype is not None:
                 scope[stmt.name] = ctype
+    for stmt in outer_fn.body:
+        if (isinstance(stmt, gimple_ctypes.AssignStmt)
+                and isinstance(stmt.target, gimple_ctypes.IdentExpr)
+                and isinstance(stmt.target.name, str)
+                and ',' not in stmt.target.name
+                and stmt.target.name not in scope
+                and stmt.target.name not in widened
+                and stmt.value is not None):
+            name = stmt.target.name
+            from mojo.middle import resolve_shared as _rs
+            ctype = _rs._local_value_type(gen, stmt.value)
+            if ctype in _GENERATOR_PARAM_CTYPES and _binding_site_count(outer_fn.body, name) == 1:
+                scope[name] = ctype
     return scope
 
 
