@@ -4981,7 +4981,7 @@ class Interpreter:
                             matched = True
                             break
                         if getattr(pval, '_is_none', False) or getattr(type(pval), '__name__', '') == 'NoneType' or value is None:
-                            if value is None or (hasattr(value, '_is_none', False)):
+                            if value is None or getattr(value, '_is_none', False):
                                 matched = True
                                 break
                             try:
@@ -5058,7 +5058,7 @@ class Interpreter:
                                         pass
                                 break
                             if func.path == 'None':
-                                if value is None or (hasattr(value, '_is_none', False)):
+                                if value is None or getattr(value, '_is_none', False):
                                     matched = True
                                     break
                                 continue
@@ -6359,8 +6359,8 @@ class Interpreter:
             return func(self, *args, **kwargs)
         args = _mojo_builtin_args(func, args)
         tls = self._gen_tls
-        if getattr(tls, 'is_coroutine', False):
-            yield_fn = getattr(tls, 'yield_fn', None)
+        if hasattr(tls, 'is_coroutine') and tls.is_coroutine:
+            yield_fn = getattr(tls, 'yield_fn') if hasattr(tls, 'yield_fn') else None
             if yield_fn is not None:
                 return yield_fn(_RealThreadCall(func, args, kwargs))
         return func(*args, **kwargs)

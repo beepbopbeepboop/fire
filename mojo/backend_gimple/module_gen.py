@@ -5917,11 +5917,15 @@ def gen_module_impl(self, stmts: list):
         'then_body': 'MojoList *',
         'elifs': 'MojoList *',
         'else_body': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['WhileStmt'] = {
         'condition': 'int64_t',
         'body': 'MojoList *',
         'else_body': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['ForStmt'] = {
         'target': 'int64_t',
@@ -5929,6 +5933,8 @@ def gen_module_impl(self, stmts: list):
         'body': 'MojoList *',
         'else_body': 'MojoList *',
         'is_async': '_Bool',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['FunctionDef'] = {
         'name': 'char *',
@@ -5960,6 +5966,8 @@ def gen_module_impl(self, stmts: list):
     }
     self.struct_field_types['ExprStmt'] = {
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['AssignStmt'] = {
         'target': 'int64_t',
@@ -5972,26 +5980,36 @@ def gen_module_impl(self, stmts: list):
         'target': 'int64_t',
         'op': 'char *',
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['ReturnStmt'] = {
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['VarDecl'] = {
         'name': 'char *',
         'type_ann': 'int64_t',
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['MultiAssignStmt'] = {
         'targets': 'MojoList *',
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
-    self.struct_field_types['BreakStmt'] = {}
-    self.struct_field_types['ContinueStmt'] = {}
-    self.struct_field_types['PassStmt'] = {}
+    self.struct_field_types['BreakStmt'] = {'line': 'int64_t', 'col': 'int64_t'}
+    self.struct_field_types['ContinueStmt'] = {'line': 'int64_t', 'col': 'int64_t'}
+    self.struct_field_types['PassStmt'] = {'line': 'int64_t', 'col': 'int64_t'}
     self.struct_field_types['AssertStmt'] = {
         'value': 'int64_t',
         'msg': 'int64_t',
         'is_comptime': '_Bool',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['RaiseStmt'] = {
         'value': 'int64_t',
@@ -6011,11 +6029,18 @@ def gen_module_impl(self, stmts: list):
         'module': 'char *',
         'alias': 'char *',
         'extra': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+        'decorators': 'MojoList *',
     }
     self.struct_field_types['FromImportStmt'] = {
         'module': 'char *',
         'names': 'MojoList *',
         'wildcard': '_Bool',
+        'line': 'int64_t',
+        'col': 'int64_t',
+        'name_alias_strs': 'MojoList *',
+        'decorators': 'MojoList *',
     }
     self.struct_field_types['ComptimeIfStmt'] = {
         'condition': 'int64_t',
@@ -6192,9 +6217,12 @@ def gen_module_impl(self, stmts: list):
         'decorators': 'MojoList *', 'comptime_aliases': 'MojoDict *',
         'bases': 'MojoList *', 'line': 'int64_t', 'col': 'int64_t',
         '_fieldwise_ctor_synthesized': '_Bool',
+        'bracket_params': 'MojoList *',
+        'type_param_names': 'MojoList *',
     }
     self.struct_field_types['TraitDef'] = {
         'name': 'char *', 'methods': 'MojoList *', 'decorators': 'MojoList *',
+        'line': 'int64_t', 'col': 'int64_t',
     }
     self.struct_boxed_fields['IfStmt'] = {'condition'}
     self.struct_boxed_fields['WhileStmt'] = {'condition'}
