@@ -16925,6 +16925,24 @@ void mojo_type_add_base(int64_t cls, int64_t base)
 void mojo_classobj_setattr(int64_t cls, char *name, int64_t word)
 {
     mojo_class_setattr(mojo_classobj_tag(cls), name, word);
+    /* Call __set_name__ on descriptors assigned to dynamic/runtime class attributes */
+    {
+        int saved = _mojo_getattr_nothrow;
+        _mojo_getattr_nothrow = 1;
+        _mojo_getattr_missed = 0;
+        (void)mojo_obj_getattr((void *)(intptr_t)word, "__set_name__");
+        if (!_mojo_getattr_missed) {
+            /* owner is the class object/handle */
+            int64_t owner = cls;
+            if (mojo_is_instobj(word) || mojo_is_classobj(word)) {
+                mojo_rtobj_method_call(word, "__set_name__", 2, owner, (int64_t)(intptr_t)name, 0, 0, 0, 0, 0);
+            } else {
+                mojo_rtobj_method_call(word, "__set_name__", 2, owner, (int64_t)(intptr_t)name, 0, 0, 0, 0, 0);
+            }
+        }
+        _mojo_getattr_nothrow = saved;
+        _mojo_getattr_missed = 0;
+    }
 }
 /* `type(name, bases, ns)` with COMPUTED bases: every element of the list `bases` is a class
  * word (a handle from `mojo_type_new`, or a static class's tag), added in order. */
@@ -16973,6 +16991,26 @@ void mojo_type_fill_from_dict(int64_t cls, MojoDict *ns)
             w = s->val;
         }
         mojo_classobj_setattr(cls, _slot_key(s), w);
+        /* Call __set_name__ on descriptors assigned to dynamic class attributes */
+        {
+            int saved = _mojo_getattr_nothrow;
+            _mojo_getattr_nothrow = 1;
+            _mojo_getattr_missed = 0;
+            (void)mojo_obj_getattr((void *)(intptr_t)w, "__set_name__");
+            if (!_mojo_getattr_missed) {
+                char *name = _slot_key(s);
+                /* Try to call as method */
+                if (mojo_is_instobj(w) || mojo_is_classobj(w)) {
+                    mojo_rtobj_method_call(w, "__set_name__", 2, cls, (int64_t)(intptr_t)name, 0, 0, 0, 0, 0);
+                } else {
+                    /* For other object types, try to get the method and call it */
+                    /* As a fallback, attempt rtobj method call */
+                    mojo_rtobj_method_call(w, "__set_name__", 2, cls, (int64_t)(intptr_t)name, 0, 0, 0, 0, 0);
+                }
+            }
+            _mojo_getattr_nothrow = saved;
+            _mojo_getattr_missed = 0;
+        }
     }
     free(order);
 }

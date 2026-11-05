@@ -346,6 +346,19 @@ def main():
     print(Color.__name__)
 main()
 """,
+    'set_name_called_for_descriptors_in_namespace': """\
+def sn(self, owner, name):
+    self.owner_name = owner.__name__
+    self.attr_name = name
+
+def main():
+    Desc = type('Desc', (), {'__set_name__': sn})
+    d = Desc()
+    C = type('C', (), {'x': d})
+    print(d.attr_name)
+    print(d.owner_name)
+main()
+""",
 }
 
 
