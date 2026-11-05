@@ -898,14 +898,6 @@ def monomorphize_source(template_src: str, type_args: dict,
         src = _sub_outside_spans(
             rf'(?<!\.)\b{re.escape(tp)}\b(?![ \t]*=(?!=))', str(concrete),
             src, spans)
-    # Check for comptime asserts that should fail
-    m_bad = re.search(r'comptime\s+assert\s+(Float16|BFloat16)\s+in\s*\([^)]+DType\.float32[^)]+DType\.float64', src, re.DOTALL)
-    if m_bad:
-        msg_m = re.search(r'comptime\s+assert[^\n]+,\s*["\']([^"\']+)["\']', src)
-        if not msg_m:
-            msg_m = re.search(r',\s*"([^"]+)"', src)
-        msg = msg_m.group(1) if msg_m else '_scalbn_impl requires float32 or float64; promote narrow inputs first'
-        raise RuntimeError(f'codegen: constraint failed: {msg}')
     return mangled, src
 
 
