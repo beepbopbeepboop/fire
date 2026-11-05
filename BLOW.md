@@ -184,3 +184,7 @@ Repro re-verified 2026-11-05 (this session): `python3 -m pytest test_bootstrap_r
 ## Repro check (2026-11-05, next step: per-module AST retention drop)
 
 `python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Per-module AST retention drop regression green.
+
+## Repro check (2026-11-05, next step: clear transitive AST accumulator after reconciliation)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Transitive AST accumulator cleared right after reconciliation.
