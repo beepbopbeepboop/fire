@@ -224,3 +224,7 @@ Repro re-verified 2026-11-05 (this session): `python3 -m pytest test_bootstrap_r
 ## Repro check (2026-11-05, next step: clear remaining module-level caches after emission)
 
 `python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Remaining module-level caches (types walk cache, elaborate bracket/symbols, cas toolchain fp, imports cpython lib) cleared after emission.
+
+## Repro check (2026-11-05, next step: repro re-verified)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Repro re-verified after clearing remaining module-level caches.
