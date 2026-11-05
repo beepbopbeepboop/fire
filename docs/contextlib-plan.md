@@ -36,3 +36,10 @@ cannot compile module: function(s) __aexit__, __aexit__, _exit_wrapper, inner (a
 cannot compile module: function(s) __aexit__, __aexit__, _exit_wrapper, inner (async function(s), declared `async def`) — this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for generators, nor an event loop / suspend/resume codegen for async functions, yet, so these cannot be represented as compiled C without emitting silently wrong or broken code; falling back to interpreting this module from source instead
 ```
 No code change this round; blocker remains async/coroutine codegen (cpp_async.py eligibility: `__aenter__` non-scalar return + `*args`/`**kwargs` in coroutine frame).
+
+## Repro (next step, 2026-11-05, this session)
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py` exits 1 (~233s); refusal verbatim unchanged:
+```
+cannot compile module: function(s) __aexit__, __aexit__, _exit_wrapper, inner (async function(s), declared `async def`) — this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for generators, nor an event loop / suspend-resume codegen for async functions, yet, so these cannot be represented as compiled C without emitting silently wrong or broken code; falling back to interpreting this module from source instead
+```
+No code change this round; blocker remains async/coroutine codegen (cpp_async.py eligibility: `__aenter__` non-scalar return + `*args`/`**kwargs` in coroutine frame).
