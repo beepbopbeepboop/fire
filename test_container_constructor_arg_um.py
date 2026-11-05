@@ -6,7 +6,6 @@
 #    does not SIGSEGV at small scale (bug 2 did NOT reproduce at small append count).
 
 import subprocess, sys, os
-from exec_budget import RUN_TIMEOUT_S
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 def run(source):
@@ -15,7 +14,7 @@ def run(source):
     with open(p, "w") as f:
         f.write(source)
     r = subprocess.run([sys.executable, "fire.py", "run", p],
-                       capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+                       capture_output=True, text=True, timeout=30)
     return r.returncode, r.stdout, r.stderr
 
 def test_list_append_read_roundtrip():

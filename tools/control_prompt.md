@@ -41,14 +41,6 @@ and gates everyone's finished branches. Your job is to land one focused change.
    what you expected, and the exact next step — and commit it. Check `bugs/`
    first so you do not duplicate an existing doc. If your task fully fixes a
    bug that has a doc in `bugs/`, `git rm` that doc in the same commit.
-   **One doc per bug.** If you reformulate or replace a doc, you resolve the old
-   one in the same commit: edit it in place, or `git rm` it (and any parts it
-   split into) after carrying over what is still true. Never file a second doc
-   for the same bug, job or failing test and leave the first beside it: the
-   swarm cannot read a sentence like "this replaces that", so both docs get
-   worked, and two lanes fix one bug (2026-11-12: `SUITE_gimplerunner` and
-   `SUITE_gimplerunner_21_failing`). Search `bugs/` for the job, test name and
-   symptom before you file.
 7. **Tests belong with the change.** Add or update a test for behaviour you
    changed, next to the existing tests for that area (`test_*.py`). Do not
    register anything in `tools/suite.py` unless your task says so.

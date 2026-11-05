@@ -537,7 +537,8 @@ CASES = [
     # as "a call to 'P'", found no frame there, and refused the program as a
     # declaration no call site agrees with — which is the opposite of what the
     # call site does.  `formal/types.py`'s `mask_of(IntType(w, False))` is the
-    # shipped instance of a false refusal fixed by 3e8b0803's `_frame_valued_calls`
+    # shipped instance (`bugs/FORMAL_declared_parameter_against_its_call_sites.md`
+    # §2), and `mask_of` is `formal/types.py` in this tree.
     #
     # `p.a * 10 + p.b` rather than a sum, so a read at the wrong SLOT says which
     # field moved: 34 for (3, 4), 43 if the two were transposed.
@@ -1131,12 +1132,12 @@ CASES = [
      "    var pad: Int\n"
      "    var inner: Opt\n"
      "\n"
-     "    def set(mut self, n: Int):\n"
+     "    def set(out self, n: Int):\n"
      "        self.inner = Opt()\n"
      "        self.inner.v = n\n"
      "        self.inner.has = 1\n"
      "\n"
-     "    def get(mut self) -> Int:\n"
+     "    def get(out self) -> Int:\n"
      "        return self.inner.v * 10 + self.inner.has\n"
      "\n"
      "def main() -> int:\n"
@@ -1176,7 +1177,7 @@ CASES = [
      "    def __init__(out self, o: Opt):\n"
      "        self.inner = o\n"
      "\n"
-     "    def get(mut self) -> Int:\n"
+     "    def get(out self) -> Int:\n"
      "        return self.inner.v * 10 + self.inner.has\n"
      "\n"
      "def mk(n: Int) -> Opt:\n"
@@ -1244,7 +1245,7 @@ CASES = [
     # READER's evidence alone.  It is the pin that the seeding declines — which
     # is the property, rather than the fact that some refusal fires — and it is
     # a different program from the frame-storing writer two rows below, which is
-    # what `FORMAL_wide_receiver_by_reference` (deleted; fixed) refuses on its own account.
+    # what `FORMAL_wide_receiver_by_reference` refuses on its own account.
     #
     # The NEEDLE is `DELEGATING_FIELD_ADVICE` rather than the emitter's
     # "'t.v' is a field access through 't'", and that is a merge, not a
@@ -1267,7 +1268,7 @@ CASES = [
      "    var pad: Int\n"
      "    var inner: Opt\n"
      "\n"
-     "    def get(mut self) -> Int:\n"
+     "    def get(out self) -> Int:\n"
      "        var t = self.inner\n"
      "        return t.v * 10 + t.has\n"
      "\n"
@@ -1315,7 +1316,7 @@ CASES = [
      "    def __init__(out self, o: Opt):\n"
      "        self.inner = o\n"
      "\n"
-     "    def get(mut self) -> Int:\n"
+     "    def get(out self) -> Int:\n"
      "        var t = self.inner\n"
      "        return t.v * 10 + t.has\n"
      "\n"
@@ -1357,11 +1358,11 @@ CASES = [
      "    var pad: Int\n"
      "    var inner: Opt\n"
      "\n"
-     "    def get(mut self) -> Int:\n"
+     "    def get(out self) -> Int:\n"
      "        var t = self.inner\n"
      "        return t.v * 10 + t.has\n"
      "\n"
-     "    def blank(mut self, k: Int) -> Int:\n"
+     "    def blank(out self, k: Int) -> Int:\n"
      "        self.inner = k\n"
      "        return 0\n"
      "\n"
@@ -1445,7 +1446,7 @@ CASES = [
      "    var pad: Int\n"
      "    var mid: Mid\n"
      "\n"
-     "    def get(mut self) -> Int:\n"
+     "    def get(out self) -> Int:\n"
      "        var m = self.mid\n"
      "        var i = m.deep\n"
      "        return i.a * 10 + i.b\n"
@@ -1496,12 +1497,12 @@ CASES = [
      "    var pad: Int\n"
      "    var inner: Opt\n"
      "\n"
-     "    def set(mut self, n: Int):\n"
+     "    def set(out self, n: Int):\n"
      "        self.inner = Opt()\n"
      "        self.inner.v = n\n"
      "        self.inner.has = 1\n"
      "\n"
-     "    def get(mut self) -> Int:\n"
+     "    def get(out self) -> Int:\n"
      "        var t = self.inner\n"
      "        return t.v * 10 + t.has\n"
      "\n"
@@ -1527,7 +1528,7 @@ CASES = [
     # So the shape that now BUILDS gets its own EXECUTED rows, both against
     # CPython and both architectures, because a lowering that reads a setter's
     # frame at the wrong slot or from the wrong scratch computes a number and
-    # exits 0 — the failure `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) exists
+    # exits 0 — the failure `bugs/FORMAL_wide_receiver_by_reference.md` exists
     # to prevent, and the only way to see it is to run it.
     ("a_delegating_setter_is_readable_through_the_field",
      "struct Opt:\n"
@@ -1538,10 +1539,10 @@ CASES = [
      "    var pad: Int\n"
      "    var inner: Opt\n"
      "\n"
-     "    def set(mut self, o: Opt):\n"
+     "    def set(out self, o: Opt):\n"
      "        self.inner = o\n"
      "\n"
-     "    def get(mut self) -> Int:\n"
+     "    def get(out self) -> Int:\n"
      "        return self.inner.v * 10 + self.inner.has\n"
      "\n"
      "def mk(n: Int) -> Opt:\n"
@@ -1590,10 +1591,10 @@ CASES = [
      "    var pad: Int\n"
      "    var inner: Opt\n"
      "\n"
-     "    def set(mut self, o: Opt):\n"
+     "    def set(out self, o: Opt):\n"
      "        self.inner = o\n"
      "\n"
-     "    def get(mut self) -> Int:\n"
+     "    def get(out self) -> Int:\n"
      "        var t = self.inner\n"
      "        return t.v * 10 + t.has\n"
      "\n"
@@ -1650,7 +1651,7 @@ CASES = [
      "    var pad: Int\n"
      "    var inner: Opt\n"
      "\n"
-     "    def get(mut self) -> Int:\n"
+     "    def get(out self) -> Int:\n"
      "        return self.inner.v * 10 + self.inner.has\n"
      "\n"
      "def steal(o: Opt) -> Box:\n"
@@ -1701,7 +1702,7 @@ CASES = [
      "    var pad: Int\n"
      "    var inner: Opt\n"
      "\n"
-     "    def get(mut self) -> Int:\n"
+     "    def get(out self) -> Int:\n"
      "        var t = self.inner\n"
      "        for t in [7]:\n"
      "            t = t + 1\n"

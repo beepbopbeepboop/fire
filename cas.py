@@ -146,12 +146,6 @@ for _p in _list_py_files(HERE, prefix='gimple_', recursive=False):
 # repo-relative with forward slashes so the fingerprint is host-OS-stable.
 for _p in _list_py_files(os.path.join(HERE, 'mojo')):
     _COMPILER_SOURCES.append(os.path.relpath(_p, HERE).replace(os.sep, '/'))
-# `formal/` is imported by fire.py (the proof/model side of the compiler), so a
-# change there changes the compiler a cached artifact was built by. It was
-# outside this key, which the self-host-key completeness check catches: the
-# import walk reached 21 `formal/*.py` modules with no hash covering them.
-for _p in _list_py_files(os.path.join(HERE, 'formal')):
-    _COMPILER_SOURCES.append(os.path.relpath(_p, HERE).replace(os.sep, '/'))
 
 # Runtime ABI: every cached object is compiled against this header (and links the
 # runtime). A change to either MUST invalidate the cache, or stale objects link

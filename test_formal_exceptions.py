@@ -72,7 +72,9 @@ def kind_table_checks():
     """The EXCEPTION KIND TABLE, asked as a pure function. No build, no Lean.
 
     **This is shared infrastructure and it fixes nothing yet**, and the rows say
-    so: it is shared infrastructure for the exception unwinder. It is pinned
+    so: it is step 2 of six in
+    `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md`, and the dispatch,
+    the raise sites, the CFG and the Lean model are steps 3-6. It is pinned
     because it is the one place a future unwinder's correctness rests, and the
     property that matters there is not "does it produce a number" but "do two
     images agree about which number means the same class".
@@ -1116,10 +1118,6 @@ CASES = [
      "    except ValueError:\n"
      "        pass\n"
      "    return 0\n", 3),
-    # ("except_handler_catches_valueerror", ...) moved to REFUSALS
-    # ("an_except_arm_with_a_print_is_caught", ...) moved to REFUSALS
-    # ("bare_except_handler_catches", ...) moved to REFUSALS
-    # ("a_bare_except_with_a_body_is_caught", ...) moved to REFUSALS
     ("else_runs_when_the_body_completed",
      "def main(n):\n"
      "    try:\n"
@@ -1232,9 +1230,9 @@ REFUSALS = [
      "    try:\n"
      "        raise ValueError('m')\n"
      "    except ValueError:\n"
-     "        print('caught')\n"
+     "        print('HANDLER RAN')\n"
      "    return 0\n",
-     "`except ValueError`"),
+     "is a handler arm with a body this path cannot put in the image"),
     ("an_except_as_binding_is_refused_by_name",
      "def main(n):\n"
      "    try:\n"
@@ -1251,7 +1249,8 @@ REFUSALS = [
      "    except:\n"
      "        print('caught')\n"
      "    return 0\n",
-     "a bare `except:`"),
+     "a bare `except:` is a handler arm with a body this path cannot put in "
+     "the image"),
 ]
 
 
@@ -1402,9 +1401,17 @@ def run_refusal(name, source, needle, tmpdir, verbose):
 # NOTHING and exited 1, where CPython prints `caught` and exits 0 — every
 # statement after the `try` missing from the image because the `raise` left it.
 CROSS_MODULE_REFUSALS = [
+    # The bare spelling, `from h2 import boom`, which is the commonest one and
+    # the one that needed `model.imported_module_bindings` to carry: `boom(…)` is
+    # a bare callee, so without the binding it is the same unresolved name as
+    # `dict.get`.
     ("a_try_over_a_raising_callee_in_an_imported_module",
      {"h2.mojo": 'def boom():\n'
-                 '    raise ValueError("x")\n',
+                 '    raise ValueError("the message")\n'
+                 '\n'
+                 '\n'
+                 'def quiet():\n'
+                 '    return 1\n',
       "main.mojo": 'from h2 import boom\n'
                    '\n'
                    'def main(n):\n'
@@ -1412,12 +1419,16 @@ CROSS_MODULE_REFUSALS = [
                    '        boom()\n'
                    '    except:\n'
                    '        pass\n'
-                   '    printf("after\\n")\n'
+                   '    printf("caught\\n")\n'
                    '    return 0\n'},
-     "a bare `except:`"),
+     "h2.boom(…)` , which can end the process".replace("` ", "`")),
+    # The dotted spelling, `import h2` then `h2.boom()`, which needs no binding
+    # at all — the qualifier is in the AST — so it is the row that would still
+    # pass if `imported_module_bindings` were deleted, and the pair is what says
+    # both spellings of one cross-module call are answered.
     ("a_try_over_a_dotted_raising_callee_in_an_imported_module",
      {"h2.mojo": 'def boom():\n'
-                 '    raise ValueError("x")\n',
+                 '    raise ValueError("the message")\n',
       "main.mojo": 'import h2\n'
                    '\n'
                    'def main(n):\n'
@@ -1425,9 +1436,9 @@ CROSS_MODULE_REFUSALS = [
                    '        h2.boom()\n'
                    '    except:\n'
                    '        pass\n'
-                   '    printf("after\\n")\n'
+                   '    printf("caught\\n")\n'
                    '    return 0\n'},
-     "a bare `except:`"),
+     "h2.boom(…)` , which can end the process".replace("` ", "`")),
 ]
 
 
@@ -1490,8 +1501,6 @@ CROSS_MODULE_ANSWERED = [
                    '    printf("after\\n")\n'
                    '    return 0\n'},
      "after\n"),
-    # ("a_try_over_a_raising_callee_in_an_imported_module", ...) moved to CROSS_MODULE_REFUSALS
-    # ("a_try_over_a_dotted_raising_callee_in_an_imported_module", ...) moved to CROSS_MODULE_REFUSALS
 ]
 
 

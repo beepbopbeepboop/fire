@@ -21,9 +21,7 @@ import monomorphize as mm
 from elaborate import extract_struct_source
 from fire_compiler import py_tokenize, Parser
 
-from module_loader import STDLIB_PATH
-import os
-STDLIB = os.path.join(STDLIB_PATH, 'std') if STDLIB_PATH else '/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/std'
+STDLIB = '/Users/mrs/net/chatgpt/claude/new-modular/Mojo/stdlib/std'
 
 # (rel, struct, targs, expect_parse_ok, tag)
 CASES = [

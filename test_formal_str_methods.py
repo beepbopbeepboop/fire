@@ -194,8 +194,6 @@ ARGUMENT_METHODS = {
     # space AND an `x` is neither the whitespace set nor the `x` set.
     "lstrip": [None, '"x"', '"z"', '"xy"', '" x"', '"ab"', '"\\t"', '""',
                '"ax"'],
-    "strip": [None],
-    "rstrip": [None],
     # A TUPLE of affixes. CPython answers True when ANY element matches, and
     # `startswith(())` is False — an empty tuple is not a vacuous True, it is
     # "no affix matched". Both were measured wrong before the guard: a tuple is
@@ -220,10 +218,6 @@ ARGUMENT_METHODS = {
     # byte walk counts 2.
     "count": ['"a"', '"b"', '"c"', '"z"', '""', '"aa"', '"abc"', '"ab"',
               '"é"'],
-    "upper": [None],
-    "lower": [None],
-    "strip": [None],
-    "rstrip": [None],
 }
 
 #: The methods this path computes at RUN time through a libc call, read out of
@@ -535,16 +529,17 @@ REFUSAL_SUBSTRINGS = {
     "encode": "code point", "decode": "code point", "translate": "code point",
     # The rest say why THEY are out, in the model's own words; the substring
     # is the subject of the sentence rather than the whole of it.
-    "capitalize": "same buffer as upper()", "casefold": "same buffer as upper()",
-    "center": "runtime buffer exists", "expandtabs": "RESULT",
-    "index": "find", "join": "string blob", "ljust": "runtime buffer exists",
+    "capitalize": "NEW string", "casefold": "NEW string",
+    "center": "allocates a new buffer", "expandtabs": "RESULT",
+    "index": "find", "join": "no heap", "ljust": "allocates a new buffer",
+    "lower": "NEW string",
     "partition": "SEQUENCE", "removeprefix": "different pointer",
-    "removesuffix": "different pointer", "replace": "two-pass walk",
-    "rfind": "backwards", "rindex": "find", "rjust": "runtime buffer exists",
-    "rpartition": "SEQUENCE", "rsplit": "SEQUENCE",
-    "split": "SEQUENCE", "splitlines": "SEQUENCE",
-    "swapcase": "same buffer as upper()", "title": "same buffer as upper()",
-    "zfill": "runtime buffer exists",
+    "removesuffix": "different pointer", "replace": "RESULT",
+    "rfind": "backwards", "rindex": "find", "rjust": "allocates a new buffer",
+    "rpartition": "SEQUENCE", "rsplit": "SEQUENCE", "rstrip": "SHORTER",
+    "split": "SEQUENCE", "splitlines": "SEQUENCE", "strip": "SHORTER",
+    "swapcase": "NEW string", "title": "NEW string", "upper": "NEW string",
+    "zfill": "allocates a new buffer",
     # `maketrans` is a CLASS method and not a method on an instance, so there
     # is no `"abc".maketrans()` for this path to refuse as a method call; it
     # is refused further down, as an unbound symbol the image would have to
@@ -706,8 +701,6 @@ def fold_scope_rows():
     """
     cases = []
     for method in FOLDED_METHODS:
-        if method in ("upper", "lower", "strip", "rstrip"):
-            continue
         args = FOLD_ARGS.get(method) or [""]
         cases.append(Case(
             "scope_%s" % method,

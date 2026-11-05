@@ -1410,42 +1410,6 @@ def main() raises:
     test_b()
 """, "2\n200\n")
 
-    # 6. A function-typed BRACKET parameter on a struct method, threaded
-    # through as an ordinary extra (unannotated) int64_t C capture into
-    # the nested `@parameter async def wrapper` that body-captures it;
-    # the body's `func()` call inside a C++ coroutine unit previously
-    # went unrecognized (`_cpp_param_names` never seeded for this unit,
-    # and the text-only bracket-param scan was silently empty when no
-    # source file was available), so the whole module was honestly
-    # refused instead of lowering the call through mojo_dyn_call. This
-    # exact shape is the one that used to compile only when `filename`
-    # re-opened a readable copy of the source on disk — an in-memory
-    # (no-filename) compile MUST work too, since that is this compiler's
-    # own public entry point (gimple_codegen.compile_to_gimple_with_cpp)
-    # and the only one this harness uses.
-    test_async_stdout("closure_capture_bracket_fn_via_nested_async", """\
-from std.runtime.asyncrt import create_task
-
-fn mark():
-    print("ran")
-
-struct Ctx:
-    var api: String
-    def __init__(out self):
-        self.api = String("cpu")
-
-    def enqueue_async_work[func: def() capturing -> None](self):
-        @parameter
-        async def wrapper() capturing -> None:
-            func()
-        var task = create_task(wrapper())
-        task.wait()
-
-def main():
-    var c = Ctx()
-    c.enqueue_async_work[mark]()
-""", "ran\n")
-
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

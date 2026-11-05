@@ -26,7 +26,6 @@ import re
 import subprocess
 import sys
 import tempfile
-from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BUGS = [os.path.join(HERE, 'bugs'), os.path.join(HERE, 'bugs', 'hard')]
@@ -81,7 +80,7 @@ def _classify(report, src):
     try:
         cp = subprocess.run([sys.executable, os.path.join(HERE, 'fire.py'),
                              'build', src, '-o', exe],
-                            capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S, cwd=wd, env=env)
+                            capture_output=True, text=True, timeout=600, cwd=wd, env=env)
     except subprocess.TimeoutExpired:
         return report, 'timeout', ''
     blob = (cp.stdout + cp.stderr)
@@ -98,7 +97,7 @@ def _classify(report, src):
             b = 'build-fail'
         return report, b, blob[-600:]
     try:
-        rp = subprocess.run([exe], capture_output=True, text=True, timeout=RUN_TIMEOUT_S, cwd=wd)
+        rp = subprocess.run([exe], capture_output=True, text=True, timeout=90, cwd=wd)
         return report, ('run-ok' if rp.returncode == 0 else 'run-nonzero'), \
             (rp.stdout + rp.stderr)[-400:]
     except subprocess.TimeoutExpired:

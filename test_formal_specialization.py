@@ -56,7 +56,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from test_formal_dylib import TestFailure, check, run_fire
-from exec_budget import RUN_TIMEOUT_S  # per-child budgets
 
 FIRE = os.path.join(HERE, "fire.py")
 
@@ -157,7 +156,7 @@ TWO_BRACKET_CALL_CPYTHON = "7"           # add(2, 5) — the 10 is a third argum
 BARE_AND_VIA_LOCAL_CPYTHON = "406\n107"  # bare: 100+101+102+103; local: 7+100
 
 # `functools.reduce`'s own shape, which is the ONE host-module function in
-# that a
+# `bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md`'s census that a
 # first-class callable plus a LIST PARAMETER would make writable — and which was
 # refused until 2026-10-05 on the second half alone:
 #
@@ -223,7 +222,7 @@ def main() -> Int32:
 GLOBAL_SHADOW_CPYTHON = "global-call-ok"
 
 # A word the SOURCE says is not a function's address, at both ends of one call —
-# (function value calls — fixed).
+# the decidable half of `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`.
 #
 # All three programs below built, branched to whatever word they held, and died
 # of SIGBUS on arm64 / SIGSEGV on x86-64 with nothing on either stream, while
@@ -708,7 +707,7 @@ def text_of(result):
 
 def run_image(root, arch="arm64"):
     out = os.path.join(root, "prog.aout")
-    r = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+    r = subprocess.run([out], capture_output=True, text=True, timeout=120)
     return r.returncode, (r.stderr or r.stdout).strip()
 
 
@@ -719,7 +718,7 @@ def cpython(root, sources=("prog.mojo",)):
         [sys.executable, "-c",
          "import sys,runpy;sys.argv=['prog'];runpy.run_path(sys.argv[0])",
          os.path.join(root, sources[0])],
-        capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+        capture_output=True, text=True, timeout=120)
     return r.returncode, (r.stderr or r.stdout).strip()
 
 
@@ -1270,7 +1269,7 @@ def test_the_reduce_shape_runs_on_both_architectures(tmpdir):
 
     It is here rather than in a host-module suite because no `functools` module
     exists and may not until decorator application lands
-    (`bugs/hard/COMPILE_FAIL_decorator_application_dropped.md`), so without a row
+    (`bugs/COMPILE_FAIL_decorator_application_dropped.md`), so without a row
     nothing would notice the capability this doc's census is waiting on
     regressing.
     """

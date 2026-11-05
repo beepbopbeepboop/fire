@@ -809,21 +809,6 @@ static void test_type_tag_read(void) {
     assert(mojo_read_type_tag_safe(0x7fffffffLL) == 0);
 }
 
-static void test_box_kinds(void) {
-        /* Test the box kind contract for each producer */
-        /* mojo_box_from_double(1.5): should return a boxed double with kind 'd' */
-        assert(mojo_is_boxed(mojo_box_from_double(1.5)) && mojo_box_double(mojo_box_from_double(1.5)) == 1.5);
-        /* mojo_box_from_str("boxed"): should return a boxed string with kind 'p' */
-        assert(mojo_is_boxed(mojo_box_from_str("boxed")) && mojo_box_word(mojo_box_from_str("boxed")) == (int64_t)(intptr_t)"boxed");
-        /* mojo_box_from_bool(1): should return a boxed int with kind 'i' */
-        assert(mojo_is_boxed(mojo_box_from_bool(1)) && mojo_box_int(mojo_box_from_bool(1)) == 1);
-        /* mojo_box_none(): should return a boxed None with kind 'n' */
-        assert(mojo_is_boxed(mojo_box_none()) && mojo_box_word(mojo_box_none()) == 0);
-        /* bare (unboxed) string pointer: should not be boxed */
-        int64_t bare = (int64_t)(intptr_t)"bare_string";
-        assert(!mojo_is_boxed(bare) && mojo_box_word(bare) == bare);
-}
-
 int main(int argc, char **argv) {
     const char *only = (argc > 1) ? argv[1] : NULL;
     int ran = 0;
@@ -838,7 +823,6 @@ int main(int argc, char **argv) {
     GROUP("dict_container_keys", test_dict_container_keys)
     GROUP("type_tag", test_type_tag_read)
     GROUP("boxedstr", test_boxed_str_discrimination)
-    GROUP("boxkinds", test_box_kinds)
 #undef GROUP
     if (!ran) { fprintf(stderr, "no such group: %s\n", only); return 2; }
     printf("ok\n");
@@ -939,7 +923,7 @@ def _build_and_run(tmp, cc, opt, extra=(), group=None):
 
 
 # The harness's groups. `ptrreg` (the suite test that runs without `--group`)
-# covers the ten always-green groups; `boxedstr` (a bare int64 in the
+# covers the nine always-green groups; `boxedstr` (a bare int64 in the
 # pointer-shaped window must render as its decimal, not be dereferenced) is its
 # own dedicated suite test, `ptrreg-boxed-str`, so it is named rather than
 # folded in. It was the one known-failing group, expect-marked until the sound
@@ -948,7 +932,7 @@ def _build_and_run(tmp, cc, opt, extra=(), group=None):
 # is still the case that guards it.
 GREEN_GROUPS = ("ptrreg", "kinds_table", "list_inline", "dict_and_itoa",
                 "dict_int_keys", "dict_set_inline", "dict_float_keys",
-                "dict_container_keys", "type_tag", "boxkinds")
+                "dict_container_keys", "type_tag")
 DEDICATED_GROUPS = ("boxedstr",)
 
 

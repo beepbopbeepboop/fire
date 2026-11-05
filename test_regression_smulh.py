@@ -22,7 +22,7 @@ class TestSMULHNotReverted(unittest.TestCase):
                              "SMULH arm missing from arm64_step")
 
     def test_smulh_lemma_exists(self):
-        src = __import__("formal.lean", fromlist=["x"]).prooflib_text()
+        src = open(HERE + "/lib/ProofLib.lean").read()
         self.assertIn("theorem work_step_smulh (s : Arm64State)", src)
 
     def test_smulh_definition_has_no_int_division(self):
