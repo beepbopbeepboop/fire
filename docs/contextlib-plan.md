@@ -17,3 +17,9 @@ cannot compile module: function(s) __aexit__, __aexit__, _exit_wrapper, inner (a
 ```
 
 The stdlib dylib is still dragged in (many unrelated module errors precede it), but the gate fires and names exactly `__aenter__`/`__aexit__`/`_exit_wrapper`/`inner`. Step 2 (async for / await through callable-valued params) and Step 3 (kwonly params) are prerequisites; the refusal itself is the Step 4 gate and remains open.
+
+## Repro (this session, re-run)
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py` exits 1 (~193s); refusal verbatim unchanged:
+```
+cannot compile module: function(s) __aexit__, __aexit__, _exit_wrapper, inner (async function(s), declared `async def`) — this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for generators, nor an event loop / suspend-resume codegen for async functions, yet, so these cannot be represented as compiled C without emitting silently wrong or broken code; falling back to interpreting this module from source instead
+```
