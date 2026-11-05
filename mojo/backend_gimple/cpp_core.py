@@ -4089,6 +4089,23 @@ def _cpp_expr(gen, e) -> str:
                 # error (Tools/gdb/libpython.py's `PyDictObjectPtr.
                 # iteritems`: `has_values = int(values)`).
                 _int_arg = e.args[0]
+                # int(x) on a user struct whose declared type is a struct
+                # pointer that defines `__int__` is the dunder protocol, not
+                # a numeric cast: call the struct's own `__int__` C method,
+                # mirroring the `__getitem__` dispatch above (and the ordinary
+                # GIMPLE path). Real shape: Tools/gdb/libpython.py's
+                # `has_values = int(values)` on a gdb.Value-shaped struct.
+                if isinstance(_int_arg, gimple_ctypes.IdentExpr):
+                    _int_struct = gen._cpp_struct_ptr_local(_int_arg.name)
+                    if _int_struct and gen._struct_defines_method(
+                            _int_struct, '__int__'):
+                        _sym = gen._struct_method_csym(_int_struct, '__int__', '')
+                        gen._cpp_struct_method_refs.add((_int_struct, '__int__'))
+                        _int_args = _cpp_pad_struct_method_call_args(
+                            gen, _sym,
+                            f"{_int_struct}_{gimple_ctypes._safe_name('__int__')}",
+                            [])
+                        return f"{_sym}({gen._cpp_expr(_int_arg)}, {', '.join(_int_args)})"
                 _ict = (gen._cpp_declared.get(_int_arg.name)
                         if gen._cpp_declared is not None
                         and isinstance(_int_arg, gimple_ctypes.IdentExpr) else None)
