@@ -1120,20 +1120,54 @@ def main():
 def _regression_read_table_callable_reader():
     # Root-cause regression for bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
     # `_get_reader` is a callable-valued parameter (default csv.reader); the
-    # loop `for row in _get_reader(lines, ...):` in `read_table` must be
-    # refused honestly (not silently wrong) until callable-local loop typing
-    # lands — this test captures the refusal so a future fix can prove it passes.
-    test_generator_refused(
-        "cpp_for_callable_param_read_table_like", """\
-def read_table(infile, header, *, sep='\\t',
-               _get_reader=__import__('csv').reader):
+    # loop `for row in _get_reader(lines, ...):` in `read_table` must compile
+    # and run correctly.
+    test_generator_matches_cpython(
+        "cpp_for_callable_param_read_table_like",
+        """\
+def _get_reader_list(lines, delimiter='\t'):
+    res = []
+    for line in lines:
+        if delimiter in line:
+            res.append(line.split(delimiter))
+        else:
+            res.append([line])
+    return res
+
+def read_table(infile, header, *, sep='\t',
+               _get_reader=_get_reader_list):
     lines = infile.splitlines()
-    for row in _get_reader(lines, delimiter=sep or '\\t'):
+    for row in _get_reader(lines, delimiter=sep):
         yield row
 
 def main():
-    pass
-""", "callable-valued parameter '_get_reader'")
+    data = "a\tb\n1\t2\n3\t4\n"
+    for r in read_table(data, "a\tb", sep='\t'):
+        print(r[0], r[1])
+main()
+""",
+        """\
+def _get_reader_list(lines, delimiter='\t'):
+    res = []
+    for line in lines:
+        if delimiter in line:
+            res.append(line.split(delimiter))
+        else:
+            res.append([line])
+    return res
+
+def read_table(infile, header, *, sep='\t',
+               _get_reader=_get_reader_list):
+    lines = infile.splitlines()
+    for row in _get_reader(lines, delimiter=sep):
+        yield row
+
+def main():
+    data = "a\tb\n1\t2\n3\t4\n"
+    for r in read_table(data, "a\tb", sep='\t'):
+        print(r[0], r[1])
+main()
+""")
 
 
 def _cpp_coroutine_builtin_module_constant():

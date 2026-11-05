@@ -2695,6 +2695,22 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
     if struct_name is None:
         _pnames = {p[0] for p in fn.params}
         for _n in _walk(fn):
+            if isinstance(_n, N.CallExpr) and isinstance(_n.func, N.IdentExpr) and _n.func.name in _pnames:
+                try:
+                    from mojo.middle.types import _debug_note
+                    _debug_note(f'[elig] read_table-like generator {getattr(fn, "name", "?")} calls callable parameter {_n.func.name!r}')
+                except Exception:
+                    pass
+            # Measure read_table-like: for over call through callable parameter
+            if isinstance(_n, N.ForStmt) and isinstance(getattr(_n, 'iterable', None), N.CallExpr):
+                _it = _n.iterable
+                if isinstance(getattr(_it, 'func', None), N.IdentExpr) and _it.func.name in _pnames:
+                    try:
+                        from mojo.middle.types import _debug_note
+                        _debug_note(f'[elig] read_table-like generator {getattr(fn, "name", "?")} iterates over call to callable parameter {_it.func.name!r}')
+                    except Exception:
+                        pass
+        for _n in _walk(fn):
             if (isinstance(_n, N.CallExpr) and isinstance(_n.func, N.IdentExpr)
                     and _n.func.name in _pnames):
                 return False, ('calls a parameter (a function value: driven '
@@ -6247,6 +6263,13 @@ def _lift_capture_free_nested_scopes(stmts: list) -> None:
                     continue
                 if getattr(h, 'param_defaults', None):
                     continue
+                # A closure that does `nonlocal` assignment needs shared cells and
+                # is outside the factory model; never lift in that case.
+                try:
+                    if any(isinstance(n, N.NonlocalStmt) for n in _walk(h)):
+                        continue
+                except Exception:
+                    pass
                 # names `m` binds
                 m_bound = set()
                 for pn, _pa in m.params:

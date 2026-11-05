@@ -58,7 +58,7 @@ from mojo.middle.types import _BOXED_CONTAINER_CTYPES
 from mojo.middle.calls_shared import _callable_value_symbol
 from mojo.middle.calls_shared import _RUNTIME_CALLABLE_VALUES as _RUNTIME_CALLABLE_VALUES_NAMES
 from mojo.middle.calls_shared import _py_box_expr
-from mojo.middle.calls_shared import _struct_operator_receiver
+from mojo.middle.calls_shared import _struct_operator_receiver, _STRUCT_OP_DUNDER
 from mojo.middle.calls_shared import FRAME_SETTABLE_IDS
 
 def _lower_strided(gen, node, store: bool):
@@ -3563,6 +3563,29 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         return gen.lower_expr(gimple_ctypes.CallExpr(
             gimple_ctypes.MemberExpr(node.left, _sop, node.line, node.col),
             [node.right], [], node.line, node.col))
+    # Runtime objects (instances of dynamically created classes): dispatch
+    # binary operators to the corresponding dunder method via the runtime
+    # method-call path (mojo_rtobj_method_call). This enables Flag/IntFlag
+    # combination (|, &) and other operator overloading on runtime classes.
+    _rt_dunder = _STRUCT_OP_DUNDER.get(node.op)
+    if _rt_dunder is not None:
+        _try_rt = False
+        if isinstance(node.left, gimple_ctypes.IdentExpr):
+            _lname = _as_str(node.left.name)
+            if gen._rtobj_kinds.get(('l', _lname)) or gen._rtobj_kinds.get(('v', _lname)):
+                _try_rt = True
+        elif isinstance(node.left, gimple_ctypes.MemberExpr):
+            if isinstance(node.left.obj, gimple_ctypes.IdentExpr):
+                _oname = _as_str(node.left.obj.name)
+                if gen._rtobj_kinds.get(('l', _oname)) or gen._rtobj_kinds.get(('v', _oname)):
+                    _try_rt = True
+        if _try_rt:
+            try:
+                return gen.lower_expr(gimple_ctypes.CallExpr(
+                    gimple_ctypes.MemberExpr(node.left, _rt_dunder, node.line, node.col),
+                    [node.right], [], node.line, node.col))
+            except Exception:
+                pass
     lt, lv = gen.lower_expr(node.left)
     rt, rv = gen.lower_expr(node.right)
     if ginf._float_param_arith_applies(gen, node.op, node.left, lt, node.right, rt):
@@ -7132,22 +7155,17 @@ def none_only_locals(gen) -> set:
 
 def is_none_needle(gen, e) -> bool:
     """Is the membership NEEDLE `e` the value `None`? True for a `None`
-    literal, and for a local that holds `None` on every path (see
-    `none_only_locals`). Such a needle must not reach the int path: its
-    int64_t word is the same as an int 0's, which matched a `0` slot."""
+    literal, and for a local that holds `None` at join points (flow-sensitive)."""
     if _is_none_literal(e):
         return True
     if isinstance(e, IdentExpr):
         name = _as_str(_as_ident_node(e).name)
-        # Check flow state first
         try:
             flow_state = getattr(gen, '_flow_none_state', {}) or {}
             if flow_state.get(name) is True:
                 return True
         except Exception:
             pass
-        if name in none_only_locals(gen):
-            return True
     return False
 
 

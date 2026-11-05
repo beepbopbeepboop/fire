@@ -38,6 +38,7 @@ import mlir
 # "unavailable in compiled mode" stub returning 0.
 from fire_compiler import for_target_names
 import mojo.middle.types as gimple_ctypes
+from mojo.middle.types import _FOREIGN_CALLABLES
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 from mojo.middle.exprtypes import _cpp_word_of_kind, _fstring_field_names
@@ -686,6 +687,28 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             param_ctypes.append((pn[1:], 'MojoList *'))
             continue
         ctype = gen._param_ctype(pn, pt, fn)
+        # For foreign callable defaults used in generators, pass as word
+        try:
+            _fc_tbl = getattr(gimple_ctypes, '_FOREIGN_CALLABLES', {}) or {}
+            if _fc_tbl and ctype in (getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE', None),
+                                     getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE_1ARG', None)):
+                # Check if it's a known foreign callable
+                _pdflt = (getattr(fn, 'param_defaults', None) or {}).get(pn.lstrip('*'))
+                if _pdflt is not None:
+                    from fire_compiler import MemberExpr, IdentExpr, CallExpr, StringLiteral
+                    _qname = None
+                    if isinstance(_pdflt, MemberExpr):
+                        if isinstance(_pdflt.obj, IdentExpr):
+                            _qname = f"{_pdflt.obj.name}.{_pdflt.member}"
+                        elif isinstance(_pdflt.obj, CallExpr) and isinstance(_pdflt.obj.func, IdentExpr) and _pdflt.obj.func.name == '__import__':
+                            if getattr(_pdflt.obj, 'args', None):
+                                _a0 = _pdflt.obj.args[0]
+                                if isinstance(_a0, StringLiteral):
+                                    _qname = f"{getattr(_a0, 'value', '')}.{_pdflt.member}"
+                    if _qname in _fc_tbl or ctype in (getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE', None),):
+                        ctype = 'int64_t'
+        except Exception:
+            pass
         if (ctype == 'char *' and (pt is None or pt == '')
                 and pn in coro_mod._PTR_EVIDENCE.get(fn.name, ())
                 and any(isinstance(_n, gimple_ctypes.CallExpr)
@@ -719,7 +742,9 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                           and ctype[:-2] in gen.struct_field_types)
         if _is_struct_ptr:
             gen._cpp_param_struct_names.add(ctype[:-2])
-        if ctype not in _GENERATOR_PARAM_CTYPES and not _is_struct_ptr:
+        # Allow foreign callable types (from foreign callable table)
+        _is_foreign_callable = isinstance(ctype, str) and ctype.startswith('std::function')
+        if ctype not in _GENERATOR_PARAM_CTYPES and not _is_struct_ptr and not _is_foreign_callable:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 f"{fn.name}: generator parameter '{pn}' has unsupported "
                 f"type {ctype!r} (only int64_t/double/_Bool/char*/"
@@ -735,7 +760,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # `nonlocal` write cannot reach here.
     if extra_captures:
         for _cap_name, _cap_ctype in extra_captures:
-            if _cap_ctype not in _GENERATOR_PARAM_CTYPES:
+            _is_foreign_callable_cap = isinstance(_cap_ctype, str) and _cap_ctype.startswith('std::function')
+            if _cap_ctype not in _GENERATOR_PARAM_CTYPES and not _is_foreign_callable_cap:
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
                     f"{fn.name}: enclosing-scope variable {_cap_name!r} has "
                     f"type {_cap_ctype!r}, which a nested generator cannot yet "
@@ -2045,59 +2071,59 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
         helper path, any shape outside the supported set refuses (returns
         False) and the caller's honest unresolved-callee refusal stands."""
         if C.is_generator or C.is_async or F.is_generator or F.is_async:
-            import sys; print("DBG1", file=sys.stderr, flush=True); return False
+            return False
         if any(pn.startswith('*') for pn, _ in (F.params or []) + (C.params or [])):
-            import sys; print("DBG2", file=sys.stderr, flush=True); return False
+            return False
         params_F = _infer_helper_param_ctypes(F)
         if params_F is None or _helper_kw_renames(params_F):
-            import sys; print("DBG3", params_F, file=sys.stderr, flush=True); return False
+            return False
         params_C = _infer_helper_param_ctypes(C)
         if params_C is None:
-            import sys; print("DBG4", file=sys.stderr, flush=True); return False
+            return False
         # The callable-value model admits parameters/returns that are
         # pointer-shaped (str/list/dict/struct pointers) in addition to int64.
         if len(params_C) > 4:
-            import sys; print("DBG5", file=sys.stderr, flush=True); return False
+            return False
         if any(ct == 'void' or ct is None for _, ct in params_C):
-            import sys; print("DBG6", params_C, file=sys.stderr, flush=True); return False
+            return False
         # For now, allow int64_t and pointer types
         for _, ct in params_C:
             ct_n = 'int64_t' if ct == 'int' else ct
             if ct_n != 'int64_t' and not (isinstance(ct_n, str) and ct_n.endswith('*')):
-                import sys; print("DBG7", ct, file=sys.stderr, flush=True); return False
+                return False
         if any(isinstance(x, gimple_ctypes.NonlocalStmt)
                for x in gimple_exprtypes._walk_own_body(C.body)):
-            import sys; print('DBG8', file=sys.stderr, flush=True); return False
+            return False
         used_C = gimple_exprtypes._used_idents_deep(C.body)
         # A sibling `def` is a call, not a capture, and the factory's own
         # locals are not siblings: calling one from `C` is out of scope.
         if used_C & sibling_names:
-            import sys; print('DBG9', file=sys.stderr, flush=True); return False
+            return False
         c_pnames = {pn for pn, _ in params_C}
         captures = (used_C - c_pnames - _helper_bound_names(C.body)
                     - module_names - _HELPER_FREE_BUILTINS - {C.name})
         f_locals = {pn for pn, _ in params_F} | _helper_bound_names(pre)
         if captures - f_locals:
-            import sys; print('DBG10', captures, f_locals, file=sys.stderr, flush=True); return False
+            return False
         # The factory's own statements land first, in its frame; `C` then
         # sees them as declared locals.
         hF = {pn: ct for pn, ct in params_F}
         f_emit = _emit_helper_body(pre, hF, {})
         if f_emit is None:
-            import sys; print('DBG11', file=sys.stderr, flush=True); return False
+            return False
         hC = dict(hF)
         hC.update({pn: (ct if ct != 'int' else 'int64_t') for pn, ct in params_C})
         c_ret = _helper_return_ctype(C.body, hC)
         if c_ret is None:
-            import sys; print('DBG12', file=sys.stderr, flush=True); return False
+            return False
         c_ret_n = 'int64_t' if c_ret == 'int' else c_ret
         # Allow int64_t and pointer types as returns
         if c_ret_n != 'void' and c_ret_n != 'int64_t' and not (isinstance(c_ret_n, str) and c_ret_n.endswith('*')):
-            import sys; print('DBG13', c_ret, c_ret_n, file=sys.stderr, flush=True); return False
+            return False
         c_kw = _helper_kw_renames(params_C)
         c_emit = _emit_helper_body(C.body, hC, c_kw)
         if c_emit is None:
-            import sys; print('DBG14', file=sys.stderr, flush=True); return False
+            return False
         # Build typed callable
         try:
             c_param_list = [(ct if ct != 'int' else 'int64_t') for _, ct in params_C]

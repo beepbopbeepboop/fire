@@ -3949,7 +3949,11 @@ def _register_imported_structs(gen, stmts: list) -> None:
                     or local in gen._imported_generic_structs
                     or any(w in nm for w in gen._IMPORTED_STRUCT_SKIP_BASENAMES)):
                 continue
-            if local not in param_type_names and nm not in _locally_constructed:
+            # Also check if used as type argument to LinkedList or other generic containers
+            _used_as_element = False
+            if local in src and 'LinkedList' in src and re.search(r'\b' + re.escape(local) + r'\b', src):
+                _used_as_element = True
+            if local not in param_type_names and nm not in _locally_constructed and not _used_as_element:
                 continue
             sdef = gen._find_imported_struct(st.module, nm)
             if sdef is None:
@@ -3966,11 +3970,16 @@ def _register_imported_structs(gen, stmts: list) -> None:
             _uncommon = [m.name for m in sdef.methods
                          if m.name not in gimple_ctypes._COMMON_METHOD_NAMES]
             _called_uncommon = any(f".{mn}(" in src for mn in _uncommon)
-            if not fields and not _called_uncommon:
+            if _used_as_element and not _field_accessed and not _called_uncommon:
+                pass  # allow registration
+            elif not fields and not _called_uncommon:
                 continue
-            if not _field_accessed and not _called_uncommon:
+            elif not _field_accessed and not _called_uncommon:
                 continue  # struct is merely passed through, untouched
-            gen._materialize_imported_struct(st.module, nm, local)
+            try:
+                gen._materialize_imported_struct(st.module, nm, local)
+            except Exception:
+                pass
 
 
 

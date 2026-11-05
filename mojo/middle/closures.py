@@ -267,9 +267,6 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
 
     def _scan_for_closures(ctx, outer_name: str, outer_scope: dict, body: list):
         """Scan a function/method body for nested FunctionDefs and register them as closures."""
-        import sys
-        fns = [s.name for s in _gmi_all_stmts_nonfunc(body) if isinstance(s, FunctionDef)]
-        print(f"SCAN: {outer_name} has_fns={fns}", file=sys.stderr, flush=True)
         enriched_scope = dict(outer_scope)
         _saved_vt2 = dict(ctx.var_types)
         ctx.var_types.update(outer_scope)
@@ -352,14 +349,10 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
                 continue
             # Don't lift closure factories with nonlocal in returned closure -
             # backend's closure factory mechanism needs to refuse them
-            import sys
-            print(f"CHECK_LIFT: {getattr(inner,'name','?')} in {outer_name}", file=sys.stderr, flush=True)
             if _is_closure_factory_with_nonlocal(inner):
-                print(f"SKIP_LIFT: {getattr(inner,'name','?')}", file=sys.stderr, flush=True)
                 continue
             skip_set = getattr(ctx, '_skip_closure_factory_lift', set())
             if id(inner) in skip_set or _as_str(inner.name) in skip_set:
-                print(f"SKIP_LIFT2: {getattr(inner,'name','?')}", file=sys.stderr, flush=True)
                 continue
             lifted    = closure_lifted_name(outer_name, _as_str(inner.name))
             # `_as_str` each element: `_used_idents_node` returns a set whose
@@ -927,8 +920,6 @@ def _is_closure_factory_with_nonlocal(inner):
         # check for nonlocal in C
         for x in gimple_exprtypes._walk_own_body(C.body):
             if isinstance(x, gimple_ctypes.NonlocalStmt):
-                import sys
-                print(f"PREVENT_LIFT_NONLOCAL: {getattr(inner,'name','?')}", file=sys.stderr, flush=True)
                 return True
     except Exception:
         pass

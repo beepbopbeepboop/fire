@@ -132,6 +132,38 @@ def test_erased_word_structs_not_materialized():
     assert 'Optional_1_T_3_Int' not in c
 
 
+def test_linked_list_struct_elements():
+    """Struct-valued elements in LinkedList."""
+    from build_stdlib_dylib import compile_module_to_c
+    src = '''from std.collections import LinkedList
+
+struct CopyCountedStruct:
+    var count: Int
+
+    def __init__(inout self):
+        self.count = 1
+
+
+def main():
+    var l = LinkedList[CopyCountedStruct](CopyCountedStruct())
+    var it = l.__iter__()
+    var x = it.__next__()
+    print(x.count)
+'''
+    c = compile_module_to_c(src, os.path.join(HERE, '.tmp', 'll_struct_probe.mojo'),
+                            'll_struct_probe', linkable=False)
+    # Find main function
+    for name in ['ll_struct_probe_main', '_ll_probe_main', 'main_func']:
+        if f'void {name}' in c:
+            i = c.index(f'void {name}')
+            body = c[i:c.index('\n}\n', i)]
+            break
+    else:
+        body = c
+    assert 'int64_t l;' not in body
+    assert '__next__() stubbed' not in c
+
+
 if __name__ == '__main__':
     test_linked_list_local_is_a_struct()
     test_node_pointer_alias_is_typed()
@@ -141,4 +173,5 @@ if __name__ == '__main__':
     test_iterator_local_is_the_materialized_iterator()
     test_repro_path_has_no_stub()
     test_erased_word_structs_not_materialized()
+    test_linked_list_struct_elements()
     print('PASS: generic-struct local is a struct')

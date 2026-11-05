@@ -268,6 +268,26 @@ def main():
     print(P.v, Q.v, P.__name__ == Q.__name__)
 main()
 """,
+    'metaclass_prepare_returns_namespace_dict': """\
+def main():
+    Meta = type('Meta', (type,), {})
+    ns = Meta.__prepare__('Foo', ())
+    ns['x'] = 5
+    Foo = type('Foo', (), ns)
+    print(Foo.x)
+main()
+""",
+    'rt_instance_dynamic_attrs_setattr_and_assign': """\
+def main():
+    Foo = type('Foo', (), {'x': 1})
+    o = Foo()
+    o.y = 3
+    setattr(o, 'z', 9)
+    print(o.x, o.y, o.z)
+    p = Foo()
+    print(hasattr(p, 'y'), hasattr(p, 'z'))
+main()
+""",
     'methods_of_static_base_reached_through_dynamic_class': """\
 class Base:
     def foo(self):
@@ -296,6 +316,17 @@ def main():
     Meta = type('Meta', (type,), {'__call__': meta_call})
     Foo = type.__new__(Meta, 'Foo', (), {})
     print(Foo(7))
+main()
+""",
+    'enum_via_metaclass_transformation': """\
+import enum
+
+class Color(enum.Enum):
+    RED = 1
+    BLUE = 2
+
+def main():
+    print(Color.__name__)
 main()
 """,
 }

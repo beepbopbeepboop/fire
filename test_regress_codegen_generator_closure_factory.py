@@ -115,11 +115,75 @@ def test_generator_closure_factory_cpp_is_valid():
 
 
 def test_generator_closure_factory_value_is_callable():
-    # The value the factory returns is a live closure
-    cpp = _compile_cpp(FACTORY_SRC)
-    # Should compile and contain closure factory functionality
-    assert 'MojoBoundMethod' in cpp or '__lift_' in cpp
-
+    # The value the factory returns is a live closure: calling it through
+    # the runtime's function-value dispatch (`mojo_fnptr_call_1`, the same
+    # path a plain function value takes) yields `stats * key + den` for the
+    # captured key/den, and each factory call keeps its own captures.
+    # The lifted factory (`__lift_outer_calc_hist_*`) is DEFINED in the
+    # module's GIMPLE output and only DECLARED in the companion .cpp, so
+    # the harness links the two outputs — the generated `main` excised —
+    # with its own main() that calls the factory twice and dispatches each
+    # returned closure through `mojo_fnptr_call_1`.
+    import re
+    from build_config import find_gcc, find_gxx
+    ci, cpp = gimple_codegen.compile_to_gimple_with_cpp(FACTORY_SRC, do_imports=False)
+    m = re.search(r'extern "C" MojoBoundMethod \* (__lift_outer_calc_hist_[a-f0-9]+)', cpp)
+    assert m is not None, cpp
+    sym = m.group(1)
+    main_block = (
+        'int main (int argc, const char **argv) {\n'
+        '  mojo_set_argv(argc, argv);\n'
+        '#if USE_PYTHON\n'
+        '  Py_Initialize ();\n'
+        '#endif\n'
+        '  _toplevel ();\n'
+        '#if USE_PYTHON\n'
+        '  Py_Finalize ();\n'
+        '#endif\n'
+        '  return 0;\n'
+        '}\n')
+    assert main_block in ci, 'generated main block changed'
+    ci = ci.replace(main_block, '')
+    harness = cpp + (
+        '\n#include <cstdio>\n'
+        'int main() {\n'
+        f'    MojoBoundMethod *f1 = {sym}(5, 2);\n'
+        f'    MojoBoundMethod *f2 = {sym}(3, 4);\n'
+        '    printf("%lld %lld\\n", (long long)mojo_fnptr_call_1((void *)f1, 10),\n'
+        '           (long long)mojo_fnptr_call_1((void *)f2, 10));\n'
+        '    return 0;\n'
+        '}\n')
+    with tempfile.TemporaryDirectory() as d:
+        src_path = os.path.join(d, 'factory_harness.cpp')
+        ci_path = os.path.join(d, 'factory_ci.c')
+        rt_obj = os.path.join(d, 'fire_runtime.o')
+        exe_path = os.path.join(d, 'factory_main')
+        with open(src_path, 'w') as f:
+            f.write(harness)
+        with open(ci_path, 'w') as f:
+            f.write(ci)
+        # `mojo_bound_method_new` and the registry live in fire_runtime.c.
+        r = subprocess.run([find_gcc(), '-O0', '-w', f'-I{_RUNTIME_INC}', '-c',
+                            os.path.join(_RUNTIME_INC, 'fire_runtime.c'), '-o', rt_obj],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        # The lifted factory is a GIMPLE definition in the module's .ci.
+        r = subprocess.run([find_gcc(), '-fgimple', '-fPIC', f'-I{_RUNTIME_INC}',
+                            '-O0', '-w', '-c', ci_path, '-o', os.path.join(d, 'factory_ci.o')],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        r = subprocess.run([find_gxx(), '-std=c++20', '-O0', '-w', f'-I{_RUNTIME_INC}',
+                            '-c', src_path, '-o', os.path.join(d, 'harness.o')],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        r = subprocess.run([find_gxx(), '-std=c++20', '-O0', '-w',
+                            os.path.join(d, 'harness.o'), os.path.join(d, 'factory_ci.o'),
+                            rt_obj, '-o', exe_path],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        out = subprocess.run([exe_path], capture_output=True, text=True)
+    # 10*5+2 and 10*3+4: each factory call keeps its own captured key/den.
+    assert out.stdout.strip() == '52 34', out.stdout + out.stderr
 
 
 def test_closure_factory_with_nonlocal_closure_still_refused():
@@ -143,7 +207,6 @@ def test_closure_factory_call_of_call_compiles():
         os.unlink(f.name)
     # Accept either the old pattern or lifted pattern
     assert r.returncode == 0 or '__lift_' in cpp, r.stderr
-
 
 
 # The real summarize_stats.py shape after the closure-factory fix: a generator
@@ -189,8 +252,9 @@ def test_generator_list_literal_of_structs_ctor_arg_is_valid_cpp():
     assert r.returncode == 0, r.stderr
 
 
-# The closure's RETURN type is a str here. With typed callable values,
-# str-returning (and pointer-returning) closures from factories compile.
+# The closure's RETURN type is a str here. With typed callable values
+# landed, a str-returning (and pointer-returning) factory compiles and is
+# callable through the generator.
 STR_RETURN_SRC = (
     'class Table:\n'
     '    def __init__(self, title: str, calc, mode: int):\n'
@@ -212,10 +276,9 @@ STR_RETURN_SRC = (
     'outer()\n')
 
 
-def test_closure_factory_with_non_int64_return_still_refused():
-    # Now supported with typed callable values
-    from build_config import find_gxx
+def test_closure_factory_with_non_int64_return_compiles():
     cpp = _compile_cpp(STR_RETURN_SRC)
+    from build_config import find_gxx
     with tempfile.NamedTemporaryFile('w', suffix='.cpp', delete=False) as f:
         f.write(cpp)
     try:
