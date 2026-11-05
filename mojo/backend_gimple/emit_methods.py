@@ -3882,7 +3882,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _fut_recv_sem = (gen.var_types.get(_fut_recv_obj.name)
                                  or gen._global_var_types.get(_fut_recv_obj.name)
                                  or _fut_recv_sem)
-            elif (isinstance(_fut_recv_obj, MemberExpr)
+            elif (isinstance(_fut_recv_obj, gimple_ctypes.MemberExpr)
                   and isinstance(_fut_recv_obj.obj, gimple_ctypes.IdentExpr)
                   and _fut_recv_obj.obj.name == 'self'
                   and gen._current_struct_name):
@@ -5192,7 +5192,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     # Check AST
                     try:
                         from fire_compiler import MemberExpr, IdentExpr
-                        if isinstance(a, MemberExpr) and getattr(a, 'member', '') == 'big':
+                        if isinstance(a, gimple_ctypes.MemberExpr) and getattr(a, 'member', '') == 'big':
                             is_big = True
                             continue
                         if isinstance(a, gimple_ctypes.IdentExpr):
@@ -5297,7 +5297,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                             continue
                         try:
                             from fire_compiler import MemberExpr, IdentExpr
-                            if isinstance(a, MemberExpr) and getattr(a, 'member', '') == 'big':
+                            if isinstance(a, gimple_ctypes.MemberExpr) and getattr(a, 'member', '') == 'big':
                                 is_big = True
                                 continue
                             if isinstance(a, gimple_ctypes.IdentExpr) and getattr(a, 'name', '') == 'big':

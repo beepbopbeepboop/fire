@@ -6661,6 +6661,8 @@ def _transform_enum_classes(stmts):
     from fire_compiler import DictExpr, StringLiteral, TupleExpr, SubscriptExpr, ExprStmt
     from fire_compiler import _as_str
     import copy
+    if not isinstance(stmts, list):
+        return stmts
     result = []
     for stmt in stmts:
         if isinstance(stmt, StructDef) and _is_enum_class_def(stmt):
@@ -6693,22 +6695,32 @@ def _transform_enum_classes(stmts):
                     pass
             else:
                 result.append(stmt)
-        elif hasattr(stmt, 'body') and isinstance(stmt.body, list):
+        elif hasattr(stmt, 'body'):
             try:
-                new_stmt = copy.copy(stmt)
-                new_stmt.body = _transform_enum_classes(stmt.body)
-                result.append(new_stmt)
+                body = getattr(stmt, 'body')
+                if isinstance(body, list):
+                    new_stmt = copy.copy(stmt)
+                    new_stmt.body = _transform_enum_classes(body)
+                    if hasattr(stmt, 'orelse'):
+                        orelse = getattr(stmt, 'orelse')
+                        if isinstance(orelse, list):
+                            new_stmt.orelse = _transform_enum_classes(orelse)
+                    result.append(new_stmt)
+                    continue
             except Exception:
-                result.append(stmt)
-        elif hasattr(stmt, 'orelse') and isinstance(getattr(stmt, 'orelse'), list):
+                pass
+            result.append(stmt)
+        elif hasattr(stmt, 'orelse'):
             try:
-                new_stmt = copy.copy(stmt)
-                if hasattr(new_stmt, 'body'):
-                    new_stmt.body = _transform_enum_classes(new_stmt.body)
-                new_stmt.orelse = _transform_enum_classes(getattr(stmt, 'orelse'))
-                result.append(new_stmt)
+                orelse = getattr(stmt, 'orelse')
+                if isinstance(orelse, list):
+                    new_stmt = copy.copy(stmt)
+                    new_stmt.orelse = _transform_enum_classes(orelse)
+                    result.append(new_stmt)
+                    continue
             except Exception:
-                result.append(stmt)
+                pass
+            result.append(stmt)
         else:
             result.append(stmt)
     return result
