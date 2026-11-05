@@ -233,26 +233,8 @@ def _check_no_value_shadow(src: str, type_params) -> None:
         # <inner>.Element`, which is exactly what the substituted annotation
         # should read. A real statement-level `var T` / `for T` is followed
         # by `=`, `in`, or end-of-line, never `.`.
-        var_for_binding = re.search(rf'\b(?:var|for)\s+{e}\b(?!\s*\.)', src)
-        assignment_binding = re.search(rf'(?m)^\s*{e}\s*=(?!=)', src)
-        # An `identifier = ...` line is only an unsafe *binding* if the name is
-        # actually read as a bare value somewhere else. A line like
-        # `length = end - start,` inside a braced constructor/struct literal is
-        # a keyword-argument LABEL, not a variable binding; the substitution
-        # pass already skips labels (see the `(?![ \t]*=(?!=))` guard), and
-        # such a label has no subsequent bare read of the name. Treat those as
-        # safe so templates like Array (whose Span slice constructor uses
-        # `length = end - start`) can be monomorphized.
-        if assignment_binding:
-            # A keyword-argument label inside a braced constructor/call
-            # (e.g. `length = end - start,` in `return { ... }`) is not a
-            # binding; the substitution pass skips labels and there is no bare
-            # read of the name as a variable.
-            pos = assignment_binding.start()
-            depth = src[:pos].count('{') - src[:pos].count('}')
-            if depth > 0:
-                assignment_binding = None
-        if var_for_binding or assignment_binding:
+        if re.search(rf'\b(?:var|for)\s+{e}\b(?!\s*\.)', src) or \
+           re.search(rf'(?m)^\s*{e}\s*=(?!=)', src):
             raise ValueError(
                 f"monomorphize: type parameter {tp!r} is used as a value/binding "
                 f"name; cannot textually instantiate this template")
