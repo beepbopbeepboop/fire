@@ -291,7 +291,7 @@ def narrow_float_ctor_refusal(callee_name: str) -> str:
     one float kind `FLOAT_TYPE_CTORS` carries, `FLOAT_TYPE_NAMES` is its two
     spellings, and `FLOAT_KIND` is it.  Everything here is narrower than it or
     wider than one word, which is the whole of the boundary this document owns —
-    `bugs/formal/FORMAL_float_binary64_only.md`.
+    `bugs/FORMAL_float_binary64_only.md`.
     """
     if callee_name == "UInt128":
         what = ("128 bits, and a formal value is one 64-bit word — so it is "
@@ -406,7 +406,7 @@ def string_conversion_refusal(callee_name: str, operand, operand_kind,
     `str(<call>)` whose result kind is unknown — is still the identity, and
     still faults at its first use. Closing that is not this rule's job: it needs
     the value model to classify call results, which is
-    `bugs/formal/FORMAL_string_value_model.md`'s subject and not a name in a table.
+    `bugs/FORMAL_string_value_model.md`'s subject and not a name in a table.
     """
     from .builtins import is_number_kind, INT_KIND, BOOL_KIND, FLOAT_KIND
     spelled_operand = member_chain_text(operand)
@@ -756,7 +756,7 @@ def subscript_callee_names(call) -> list:
 # hold — which is why every name in the tables above used to be refused with
 # "'Int32' has no home", a sentence that is false about the program: `Int32` is
 # not a name that was left without a register, it is a TYPE, and the source
-# says so in the position it stands in. `bugs/formal/FORMAL_dtype_object_as_a_value.md`
+# says so in the position it stands in. `bugs/FORMAL_dtype_object_as_a_value.md`
 # is the long form.
 #
 # The answer here is that a type IS a word on this path, and the word is a TAG:
@@ -1064,7 +1064,7 @@ def call_lowers_as_framed_construction(callee: str, structs: dict, nargs: int,
     The emitters route a call in one order and it is worth writing the order down
     once, here, because the build pass has to answer the SAME question the
     emitter answers and the two disagreeing about it is the collision in
-    `bugs/formal/FORMAL_string_constructor_collision`:
+    `bugs/FORMAL_string_constructor_collision`:
 
     ```
     if name not in functions and not type_constructor_prefers_local_struct(…)
@@ -2258,7 +2258,7 @@ CPYTHON_EXCEPTION_BASES = frozenset({
     # anywhere in the subclass. Modelling that as a field is what gives the
     # message a SLOT: a class whose body is a docstring and nothing else has
     # nowhere to put one otherwise, and the construction was refused for
-    # exactly that (`bugs/formal/FORMAL_an_exception_constructed_with_its_message_has_
+    # exactly that (`bugs/FORMAL_an_exception_constructed_with_its_message_has_
     # no_field_to_hold_it.md`, whose fix this is).
     "ArithmeticError", "AssertionError", "AttributeError",
     "BaseException", "BaseExceptionGroup", "BlockingIOError",
@@ -2316,7 +2316,7 @@ def builtin_base_fields(base: str) -> tuple:
 #
 # Shared infrastructure for the unwinder, landed on its own and fixing nothing
 # by itself — which is the honest description and the reason it is worth having
-# separately. `bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §4
+# separately. `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §4
 # designs the convention: one callee-visible word per function meaning "an
 # exception is in flight", holding the KIND of the current exception, and §5
 # step 2 is this. The dispatch, the raise sites, the CFG and the Lean model are
@@ -2434,7 +2434,7 @@ def exception_kind_for(name: str, kinds: dict = None):
 
 # ── §4's SUPERCLASS question, ANSWERED: the table grows a base relation ──────
 #
-# `bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §4 asks for the one
+# `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §4 asks for the one
 # design decision in that document with no answer in the code, and §5 step 1
 # says to decide it BEFORE the emitters are written: "either the kind table
 # grows a `SUPERCLASS_OF` bit, or the word is a pointer and the base walk moves

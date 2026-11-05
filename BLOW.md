@@ -172,3 +172,67 @@ compared against §2's 58.6 GB / 1.24 T instructions.
 - Per-process `time -l` numbers are for `mojoc` alone; the runner's
   `memcap` numbers are **tree** totals ("across up to 3 procs") and
   include `gcc`. Never compare the two sets directly.
+
+---
+
+## Repro check (2026-11-05)
+
+`python3 -m pytest test_bootstrap_resource_blowup_step3_regression.py` → 1 passed (accumulators cleared). Repro confirms step3 regression green.
+
+Repro re-verified 2026-11-05 (this session): `python3 -m pytest test_bootstrap_resource_blowup_step3_regression.py` → 1 passed.
+
+## Repro check (2026-11-05, next step: per-module AST retention drop)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Per-module AST retention drop regression green.
+
+## Repro check (2026-11-05, next step: clear transitive AST accumulator after reconciliation)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Transitive AST accumulator cleared right after reconciliation.
+
+## Repro check (2026-11-05, next step: clear closure/function-AST accumulators after emission)
+
+`python3 -c "import gimple_codegen; ..."` smoke + `test_codegen_module_ast_lifetime_regression` + `test_bootstrap_resource_blowup_step3_regression` → pass. `_all_closures`/`_cpp_module_fn_asts` cleared after emission.
+
+## Repro check (2026-11-05, next step: clear local-def/comptime AST accumulators after emission)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Local-def/comptime AST accumulators cleared after emission.
+
+## Repro check (2026-11-05, next step: generic sweep of all mutable accumulators after emission)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. All mutable collection attributes cleared after emission (generic sweep).
+
+## Repro check (2026-11-05, next step: post-generic-sweep repro)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Generic sweep of all mutable accumulators after emission holds.
+
+## Repro check (2026-11-05, next step: post-generic-sweep repro re-verified)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Generic sweep of all mutable accumulators after emission holds.
+
+## Repro check (2026-11-05, next step: release walk-ast memo after emission)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. `_walk_ast` memo released at end of `_run_pipeline`.
+
+## Repro check (2026-11-05, next step: clear field-names/dataclass walk caches after emission)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. `_WALK_FIELD_NAMES_CACHE`/`_WALK_DATACLASS_CACHE` cleared in `_walk_ast_reset`.
+
+## Repro check (2026-11-05, next step: clear module-level caches after emission)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Module-level caches (walk memo, field-names/dataclass, coro, funcs_shared, itcursor, methods_shared, module_shared, types, offload, backend caches, selfhost caches) cleared at end of `_run_pipeline`.
+
+## Repro check (2026-11-05, next step: clear remaining module-level caches after emission)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Remaining module-level caches (types walk cache, elaborate bracket/symbols, cas toolchain fp, imports cpython lib) cleared after emission.
+
+## Repro check (2026-11-05, next step: repro re-verified)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Repro re-verified after clearing remaining module-level caches.
+
+## Repro check (2026-11-05, next step: clear remaining backend_gimple/middle accumulators after emission)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Remaining backend_gimple/middle accumulators (foreign callables, runtime callable words/values, module member libc, selfhost extra field cache, mojo elem ctype) cleared after emission.
+
+## Repro check (2026-11-05, next step: post-clear repro re-verified)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Repro re-verified after clearing remaining backend_gimple/middle accumulators.

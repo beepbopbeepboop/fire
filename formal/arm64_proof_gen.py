@@ -405,7 +405,7 @@ def _str_addr_term(e, scope) -> str:
     through every renderer.
 
     **What the fabricated `0` cost, measured on both architectures.** It is not
-    a hole, it is a proof of something FALSE, and `bugs/formal/FORMAL_string_value_
+    a hole, it is a proof of something FALSE, and `bugs/FORMAL_string_value_
     model.md` names the rule the rest of this file already follows ("a stated
     gap costs a program its proof, and a fabricated model costs it a proof of
     something FALSE"):
@@ -1326,7 +1326,7 @@ def eval_split_conds(fn, param: str, env: dict, vtypes: dict = None,
     `def f(n): if n > 10 or n == 0 or n < -4:` — arm64 and x86-64, both
     generators — the `eval_eq_mojo` goal is left open with exactly that
     hypothesis in scope, and the machine half fails on the same program for the
-    same reason (`bugs/formal/FORMAL_nested_short_circuit_chain_in_a_condition.md`).
+    same reason (`bugs/FORMAL_nested_short_circuit_chain_in_a_condition.md`).
 
     So a chain's own OPERANDS and SUB-CHAINS are appended after the source
     conditions, rendered the way `_truth_go` renders an operand of a chain (a
@@ -2063,7 +2063,7 @@ def _cmp_term_t(l: str, r: str, t, op: str) -> str:
     variable to a numeral), so a `by_cases h : 0 = n` leaves `n` unreduced and
     the bridge cannot close; with `n = 0` the same `h` rewrites `n → 0` and it
     does.  This is the operand-order half of
-    `bugs/formal/FORMAL_arm64_proof_a_compare_with_the_immediate_on_the_left_does_not_
+    `bugs/FORMAL_arm64_proof_a_compare_with_the_immediate_on_the_left_does_not_
     elaborate.md`, normalised HERE rather than at each consumer so `_src`, the
     `by_cases` list and the emitted `ast` cannot disagree about the spelling.
     Only a bare literal (`0`, or the `UInt64.ofNat 0` this runs on before
@@ -3651,7 +3651,7 @@ def _expr_ast(e, scope=None) -> str:
         # the model's half of the two layers can already state the construct.
         # Adding the constructor instead is a `lib/ProofLib.lean` change, which
         # invalidates every cached proof verdict —
-        # `bugs/formal/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`
+        # `bugs/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`
         # §"Why closing it is not a patch" item 1, and the reason this is a
         # refusal rather than a library edit.
         raise NotImplementedError(_ternary_ast_gap_message())
@@ -3675,7 +3675,7 @@ def _ternary_ast_gap_message() -> str:
             "`evalExpr`, not a shape this generator can translate "
             "(`MojoStmt.ifstmt` is a STATEMENT, and an expression has nowhere "
             "to put one). See "
-            "`bugs/formal/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`")
+            "`bugs/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`")
 
 
 def _admitted_arity2_map(admitted) -> dict:
@@ -3731,7 +3731,7 @@ def _ast_bridge_gaps(fn, resolvable, resolvable2=frozenset()) -> list:
         admitted contract. One-parameter callees are answered by the model's
         own function table (`_callee_call_table`); a callee the table does not
         cover is refused here by name. The two-parameter case is open:
-        `bugs/formal/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md`.
+        `bugs/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md`.
       * an ARITY other than one. `MojoExpr.call` carries a `List MojoExpr`, so
         the AST is FAITHFUL for any arity (widened 2026-10-05; before that a
         zero-argument call reached `e.args[0]` and raised `IndexError: list index
@@ -3869,7 +3869,7 @@ def _ast_gap_message(gaps: list) -> str:
               "product is not what a callee of this arity returns -- until "
               "the handler is widened too, the bridge can only speak about a "
               "function that calls nothing but itself with one argument. "
-              "`bugs/formal/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md` has "
+              "`bugs/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md` has "
               "the measurement and the two routes.")
 
 
@@ -4229,7 +4229,7 @@ _STEP_CONDS = [
     (0xffe00000, 0xea000000),  # 67 TST Xn, Xm (ANDS XZR, Xn, Xm)
     # CSEL: EMITTED and, until 2026-11-01, UNMODELLED.  The row this comment
     # once guarded was removed rather than left when it landed WITHOUT
-    # `arm64_step`'s branch (2026-10-03, `bugs/formal/FORMAL_arm64_csel_is_not_
+    # `arm64_step`'s branch (2026-10-03, `bugs/FORMAL_arm64_csel_is_not_
     # modelled_so_the_step_table_cannot_claim_it.md`): an entry here with no
     # branch in the model is a generator that would describe a CSEL's effect
     # while the function being proved takes no step at all for that word,
@@ -5381,7 +5381,7 @@ def _bit_test_condtxt(reg: int, state: str, w: int, bidx: int) -> str:
     SOURCE condition (`(<taken test>) ↔ ¬(<source condition>)`). Two spellings
     that could differ are how a proof gets stated about an instruction other
     than the one emitted — which is the failure mode
-    `bugs/formal/FORMAL_arm64_known_proof_gaps.md` records for `either`/`both`.
+    `bugs/FORMAL_arm64_known_proof_gaps.md` records for `either`/`both`.
 
     The bit is masked to `= 0` / `≠ 0` on `((x >>> b) &&& 1)` rather than
     compared against a literal `1`, because `arm64_step` states it that way
@@ -7064,7 +7064,7 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     PREHEADER — `start: <test> B false / init: i = start_val / body: … / step:
     i += step; <test> B body` — because a `for` binds its target only when the
     iteration produces a value, so the counter must not be stored before the
-    test (see that method's docstring, and `bugs/formal/FORMAL_stdlib_module_names…`
+    test (see that method's docstring, and `bugs/FORMAL_stdlib_module_names…`
     for the CPython measurement behind it).  The block partitioner splits at
     branch targets, and `step:` is not one: so the body, the increment, the
     comparison and the back edge are all ONE `cbz`-kinded block whose TAKEN
@@ -7867,7 +7867,7 @@ def _same_image_call_plan(code: bytes, base: int, func_entry: int,
     caller returns from itself.  For such a call `x30` at the callee's `RET` is
     the constant `call_pc + 4`, so the callee's blocks are ordinary blocks with
     an ordinary edge — no dispatch, no disjunction, no second induction chain.
-    The doc named this the whole limit (`bugs/formal/FORMAL_arm64_the_universal_theorem_
+    The doc named this the whole limit (`bugs/FORMAL_arm64_the_universal_theorem_
     cannot_follow_a_call_into_the_same_image.md` step 1) and it is.
 
     **More than one such call is followable when their CALLEES are DISTINCT, and
@@ -8088,7 +8088,7 @@ def _unmodelled_instruction(word: int):
         12-bit-offset access cannot express, which in practice means a NEGATIVE
         frame offset (measured: `0xf81a83a0` is `stur x0, [x29, #-0x58]`, and
         `#-0x58` is exactly what a spill below the frame base needs).
-        `bugs/formal/FORMAL_arm64_instruction_coverage.md` lists this pair as the one
+        `bugs/FORMAL_arm64_instruction_coverage.md` lists this pair as the one
         instruction whose emission carried a real bug, and the step table still
         has no arm for it.
       * **the EXTENDED-register `ADD`/`SUB`** — bits 28..23 = `010111`, bit 21
@@ -8127,7 +8127,7 @@ def _unmodelled_instruction(word: int):
                 "backend emits is in this class today (every SP add or subtract "
                 "it wants is spelled as the immediate form), so this is a "
                 "coverage gap rather than a mis-read — the census that would "
-                "close it is `bugs/formal/FORMAL_arm64_instruction_coverage.md`.")
+                "close it is `bugs/FORMAL_arm64_instruction_coverage.md`.")
     top = word & 0xffc00000
     if top in (0xf8000000, 0xf8400000):
         which = "STUR" if top == 0xf8000000 else "LDUR"
@@ -8135,7 +8135,7 @@ def _unmodelled_instruction(word: int):
                 f"the unscaled (9-bit displacement) form, which is how a "
                 f"frame access at a NEGATIVE offset is reached; the step table "
                 f"has arms for the scaled `STR`/`LDR` and not for these, and "
-                f"`bugs/formal/FORMAL_arm64_instruction_coverage.md` lists the pair "
+                f"`bugs/FORMAL_arm64_instruction_coverage.md` lists the pair "
                 f"as uncovered.")
     return (None, "")
 
@@ -8332,7 +8332,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # into every generated proof's kernel working set: the whnf timeout at
     # `print1_b4_self1` and the excessive-memory in `mod_proof`'s b6/b7 chain
     # (b7 is the helper's `fr_copy1` byte-copy loop) are those certificates
-    # (`bugs/formal/FORMAL_call_proofgen_red_on_head.md`, 2026-10-31).  The
+    # (`bugs/FORMAL_call_proofgen_red_on_head.md`, 2026-10-31).  The
     # loop now skips them to the placeholder, and the loop-discovery passes
     # below skip them the same way, so the helper's own loops can no longer
     # shadow a real one (the `sum_range` symptom in the same doc).
@@ -9510,7 +9510,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 # and `trivial` discharges it) rather than certifying a block
                 # the model cannot step — which is the walk's own half of the
                 # rule `_unfollowable_calls` states a few functions up, and the
-                # thing `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_
+                # thing `bugs/FORMAL_integer_overflow_at_run_time_is_still_
                 # untrapped.md`'s step 2 asks for: the divide-by-zero arm's
                 # `BL fflush` is no longer an unfollowable call, it is a
                 # terminus the walk closes.
@@ -12560,7 +12560,7 @@ def _callee_call_table(go_defs: str, prog, func_name: str, arity: int = 1) -> di
 
     **The one-parameter callee table, and the half that was never a
     `lib/ProofLib.lean` change** (its two-parameter analogue is open:
-    `bugs/formal/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md`): `callFunc` is a
+    `bugs/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md`): `callFunc` is a
     stub that answers `0` for every name it was not told about, so a call to a
     function of this image evaluated to `0` while `_gen_go`'s model evaluated it
     to the callee's value — and `eval_eq_mojo`, which says the AST and the model
@@ -12723,7 +12723,7 @@ def generate_arm64_proof(prog, code, info) -> str:
                 f"is a by-reference receiver's method contract: it has no "
                 f"`mojo`, no `runProg`, and no end-to-end theorem, so there is "
                 f"nothing to state a refinement over.  See "
-                f"`bugs/formal/FORMAL_a_specification_layer_that_stops_at_a_finite_"
+                f"`bugs/FORMAL_a_specification_layer_that_stops_at_a_finite_"
                 f"range.md`. -/\n")
         return text
 
@@ -13306,7 +13306,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         #      "Tactic `native_decide` evaluated that the proposition
         #         main_pre_0.pc = 4294968392 is false"
         #
-        # which is `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_
+        # which is `bugs/FORMAL_integer_overflow_at_run_time_is_still_
         # trapped.md`'s measured obstacle, named there as PRE-EXISTING and as the
         # thing standing in front of its own step 2.  What is still missing is
         # the other half of that doc's step 2 — a trap BLOCK the walk treats as
@@ -13447,7 +13447,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         concrete_test = (
             f"/- NO CONCRETE RUN TEST for {func_name}: the function ends a "
             f"path in the\n"
-            f"   compiler's bounded-stop trap (`bugs/formal/FORMAL_integer_overflow_"
+            f"   compiler's bounded-stop trap (`bugs/FORMAL_integer_overflow_"
             f"at_run_time_is_still_\nuntrapped.md`: a guard branch into a "
             f"block ending in `BL fflush` and the\n"
             f"   `movz`/`svc` tail), and the model ends it earlier — its `BL` "
@@ -14948,7 +14948,7 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
     # substring could not tell them from `B.cond`, so every export whose code
     # contained a `cset` got NO contract at all -- measured on
     # `var b = not n; var m = n * 3; return m`, whose eighth instruction is a
-    # `cset` and which computes `n * 3` in both architectures.  `bugs/formal/FORMAL_
+    # `cset` and which computes `n * 3` in both architectures.  `bugs/FORMAL_
     # dylib_block_layer_is_not_the_ceiling.md` recorded the same confusion from
     # the other side ("its own check is textual ... and a CSEL's effect contains
     # an `if` while writing no `pc`, which is the whole distinction the block
@@ -15013,7 +15013,7 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
     # `noEarly`'s blocks the next cost centre), with `maxHeartbeats`,
     # `maxSteps` and `maxRecDepth` all measured FAILING to fire.  The numbers
     # and the two cost centres are in `FORMAL.md` §12 and
-    # `bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md` §1.
+    # `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1.
     #
     # The two forms are the same function: for a step whose effect is
     # `{s with sp := v}`, `(st_i s).pc = s.pc` holds by `rfl`, which is the

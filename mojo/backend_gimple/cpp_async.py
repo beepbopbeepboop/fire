@@ -2359,11 +2359,11 @@ def _enclosing_scope_with_locals(gen, outer_fn: gimple_ctypes.FunctionDef) -> di
         # (mojo/middle/funcs_shared.py) exposed on the generator, so call
         # it as a method.
         ctype = gen._param_ctype(pname, ptype, outer_fn)
-        if ctype in ('int64_t', 'int', 'double', '_Bool'):
+        if ctype in _GENERATOR_PARAM_CTYPES:
             scope[pname] = ctype
     widened = gen._inferred_var_types.get(outer_fn.name, {})
     for name, ctype in widened.items():
-        if ctype in ('int64_t', 'int', 'double', '_Bool') and name not in scope:
+        if ctype in _GENERATOR_PARAM_CTYPES and name not in scope:
             scope[name] = ctype
     for stmt in outer_fn.body:
         if (isinstance(stmt, gimple_ctypes.VarDecl) and isinstance(stmt.name, str)
@@ -2373,6 +2373,25 @@ def _enclosing_scope_with_locals(gen, outer_fn: gimple_ctypes.FunctionDef) -> di
             ctype = gimple_exprtypes._local_literal_ctype(stmt.value)
             if ctype is not None:
                 scope[stmt.name] = ctype
+    for stmt in outer_fn.body:
+        if (isinstance(stmt, gimple_ctypes.AssignStmt)
+                and isinstance(stmt.target, gimple_ctypes.IdentExpr)
+                and isinstance(stmt.target.name, str)
+                and ',' not in stmt.target.name
+                and stmt.target.name not in scope
+                and stmt.value is not None):
+            name = stmt.target.name
+            from mojo.middle import resolve_shared as _rs
+            ctype = _rs._local_value_type(gen, stmt.value)
+            # First-bound plain-assignment local: only when it is bound exactly
+            # once (no rebind), so the snapshot taken at call time stays equal
+            # to Python's read-at-each-resume. Reconsider even names that the
+            # widened-type pass recorded, as long as the plain assignment's own
+            # lowered type agrees (the widened pass may have recorded a type
+            # that the body's declaration does not use).
+            if (ctype in _GENERATOR_PARAM_CTYPES
+                    and _binding_site_count(outer_fn.body, name) == 1):
+                scope[name] = ctype
     return scope
 
 

@@ -42,7 +42,7 @@ set literal is a list of the DISTINCT words it was written with.
 was added by the fuzz-5 sweep in the same session that added `--mix sets`,
 because a corpus that could not produce a set could not notice the day this
 changed — which is the only moment the row is for, and the same argument
-`bugs/formal/FORMAL_string_value_model.md` makes for `s[i]`.
+`bugs/FORMAL_string_value_model.md` makes for `s[i]`.
 
 ## What the model is, in the one line that states it
 

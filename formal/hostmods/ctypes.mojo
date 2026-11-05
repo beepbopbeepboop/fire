@@ -276,7 +276,7 @@ def create_zeroed_buffer(size: int) -> str:
 def string_at(pointer: str) -> str:
     """`ctypes.string_at(addr)`: the NUL-terminated string AT an address.
 
-    Dereferences, which is the operation `bugs/formal/FORMAL_string_value_model.md`
+    Dereferences, which is the operation `bugs/FORMAL_string_value_model.md`
     describes: a string on this path is a bare `char *` into a read-only text
     section, and reading the bytes at an arbitrary word is a fact about the
     address rather than about the value.  It is real rather than admitted

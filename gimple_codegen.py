@@ -2179,23 +2179,11 @@ class GimpleGen:
         # per-compile-unit gating, not a blanket "always emit", is the
         # correct fix for a helper this genuinely optional.
         self._asdict_dispatch_needed: set = set()
-        self._module_stmts: dict[str, list] = {}    # module_name → parsed stmts (shared across all gens)
-        # Flattened, incrementally-maintained mirror of the UNION of every
-        # list ever stored into `self._module_stmts` (see the `_walk_ast` re-scan
-        # bug, Phase 1)
-        # — shared by reference into every nested temp_gen exactly like
-        # `_module_stmts` itself (see `_compile_imported_module`'s sharing
-        # block). Appended to ONCE per statement, ever, right where
-        # `_module_stmts[module_name] = stmts` is set — so `gen_module`'s
-        # own Phase-0 reconciliation loop (which needs "every transitively
-        # compiled module's stmts not already in THIS level's local
-        # `imported_stmts`") can do a single incremental pass over this
-        # pre-flattened list instead of re-flattening the whole (by then
-        # much larger) `_module_stmts` dict from scratch at EVERY one of
-        # the N nesting levels in a transitive-import tree — that repeated
-        # O(current total tree size) re-flattening, happening once per
-        # level, is what the doc profiles as an O(N^2) `_walk_ast` blowup
-        # (4.47M calls for a 36-module graph in Lib/contextlib.py).
+        # Per-module AST lifetime fix: the module ASTs were previously accumulated
+        # in _module_stmts (and mirrored via _all_transitive_stmts_ordered) for the
+        # whole process lifetime causing resource blowup. We now only keep the
+        # flattened ordered list needed for reconciliation; module ASTs can be
+        # dropped after emission. See bugs/hard/CODEGEN_bootstrap_resource_blowup.md
         self._all_transitive_stmts_ordered: list = []
         self._all_transitive_stmts_ids: set = set()
         # Phase 2 (same doc as above): per-top-level-statement memoization
@@ -6459,6 +6447,205 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
         code = _dedup_guarded_blocks(code)
         code = _relocate_module_instance_defs(code)
     _verify_desugared_genexps(code, gen, _desugared_names)
+    # Release the whole-AST traversal memo (and its parent edges) now that
+    # this compile's emission is complete, so the retained ASTs (and the
+    # strong references that pin their ids) do not survive past the
+    # compile boundary. _walk_ast_reset is idempotent and scoped to one
+    # independent output artifact, exactly the interval _run_pipeline covers.
+    try:
+        from mojo.middle import exprtypes as _exprtypes
+        _exprtypes._walk_ast_reset()
+    except Exception:
+        pass
+    # Clear module-level caches/accumulators that retain ASTs or per-compile
+    # state, so they do not survive past the compile boundary (next step).
+    try:
+        import mojo.middle.coro as _coro
+        for _c in ('_LIST_RET_KINDS', '_PTR_RET_KINDS', '_PTR_EVIDENCE',
+                   '_PTR_FORWARDED', '_GEN_REC_ASSUME', '_MODULE_STMTS',
+                   '_ASYNC_RESULT_KIND', '_ASYNC_HANDLE_KIND', '_BOX_STRUCT_OF',
+                   '_WIRED_CAPTURES'):
+            _v = getattr(_coro, _c, None)
+            if isinstance(_v, (dict, list, set)):
+                try: _v.clear()
+                except Exception: pass
+    except Exception:
+        pass
+    try:
+        import mojo.middle.funcs_shared as _fs
+        for _c in ('_PARSER_NODE_CLASSES', '_SELFHOST_FNIDX_VALIDATED',
+                   '_SELFHOST_PARSE_CACHE', '_SELFHOST_EXTRA_FIELD_CACHE'):
+            _v = getattr(_fs, _c, None)
+            if isinstance(_v, (dict, list, set)):
+                try: _v.clear()
+                except Exception: pass
+    except Exception:
+        pass
+    try:
+        import mojo.middle.itcursor as _it
+        _v = getattr(_it, '_ESCAPING_ITER_CACHE', None)
+        if isinstance(_v, (dict, list, set)):
+            try: _v.clear()
+            except Exception: pass
+    except Exception:
+        pass
+    try:
+        import mojo.middle.methods_shared as _ms
+        _v = getattr(_ms, '_REALPATH_MEMO', None)
+        if isinstance(_v, (dict, list, set)):
+            try: _v.clear()
+            except Exception: pass
+    except Exception:
+        pass
+    try:
+        import mojo.middle.module_shared as _mos
+        _v = getattr(_mos, '_SELF_ASSIGN_MEMO', None)
+        if isinstance(_v, (dict, list, set)):
+            try: _v.clear()
+            except Exception: pass
+    except Exception:
+        pass
+    try:
+        import mojo.middle.types as _ty
+        for _c in ('_TUPLE_ANN_BY_NAME', '_type_walk_cache'):
+            _v = getattr(_ty, _c, None)
+            if isinstance(_v, (dict, list, set)):
+                try: _v.clear()
+                except Exception: pass
+    except Exception:
+        pass
+    try:
+        import elaborate as _el
+        for _c in ('_BRACKET_DEPTH_CACHE', '_BRACKET_DEPTH_ORDER', '_SYMBOLS_CACHE'):
+            _v = getattr(_el, _c, None)
+            if isinstance(_v, (dict, list, set)):
+                try: _v.clear()
+                except Exception: pass
+    except Exception:
+        pass
+    try:
+        import cas as _cas
+        _v = getattr(_cas, '_toolchain_fp_cache', None)
+        if isinstance(_v, (dict, list, set)):
+            try: _v.clear()
+            except Exception: pass
+    except Exception:
+        pass
+    try:
+        import imports as _imp
+        _v = getattr(_imp, '_cpython_lib_cache', None)
+        if isinstance(_v, (dict, list, set)):
+            try: _v.clear()
+            except Exception: pass
+    except Exception:
+        pass
+    try:
+        import mojo.middle.offload as _off
+        _v = getattr(_off, '_OFFLOAD_STATE', None)
+        if isinstance(_v, (dict, list, set)):
+            try: _v.clear()
+            except Exception: pass
+    except Exception:
+        pass
+    try:
+        for _modname, _names in (
+            ('mojo.backend_gimple.emit_infra', ('_DEDUP_EXTERN_PARTS_CACHE',)),
+            ('mojo.backend_gimple.elab_intu', ('_OVERLOAD_CACHE', '_FN_NEEDS_CACHE', '_FACTORY_RETURN_CACHE')),
+            ('mojo.backend_gimple.device_glue', ('_GRID',)),
+        ):
+            import importlib as _il
+            _m = _il.import_module(_modname)
+            for _c in _names:
+                _v = getattr(_m, _c, None)
+                if isinstance(_v, (dict, list, set)):
+                    try: _v.clear()
+                    except Exception: pass
+    except Exception:
+        pass
+    try:
+        for _c in ('_SELFHOST_FUNC_RETURN_TYPES', '_SELFHOST_PARAM_TYPES',
+                   '_SELFHOST_GG_CACHE', '_compile_cache'):
+            _v = globals().get(_c, None)
+            if isinstance(_v, (dict, list, set)):
+                try: _v.clear()
+                except Exception: pass
+    except Exception:
+        pass
+    # Clear remaining module-level caches/accumulators (coro, types, monomorphize,
+    # loops_shared, etc.) so they do not survive past the compile boundary (next step).
+    try:
+        import mojo.middle.coro as _coro2
+        for _c in ('_GEN_VALUE_KINDS', '_GEN_DEFS', '_PARAM_NAMES',
+                   '_CALLSITE_PARAM_KINDS', '_PLAIN_CALLSITE_PARAM_KINDS',
+                   '_CALLSITE_PARAM_CONFLICTS', '_TASK_VARS', '_ASYNC_METHOD_NAMES',
+                   '_ASYNC_FN_NAMES', '_STRUCT_NAMES',
+                   '_UNTHREADABLE_NESTED_ASYNC_GENS', '_NATIVE_FUTURE_CLASSES',
+                   '_NO_WD_FORWARD', '_VALUE_USED_FUNCS', '_FUNC_RET_KIND',
+                   '_MODULE_FUNC_NAMES', '_GEN_RESOLVING', '_GEN_REC_ASSUME'):
+            _v = getattr(_coro2, _c, None)
+            if isinstance(_v, (dict, list, set)):
+                try: _v.clear()
+                except Exception: pass
+    except Exception:
+        pass
+    try:
+        import mojo.middle.types as _ty2
+        for _c in ('_overload_hash_registry', '_MODULE_ATTR_CTYPES'):
+            _v = getattr(_ty2, _c, None)
+            if isinstance(_v, (dict, list, set)):
+                try: _v.clear()
+                except Exception: pass
+    except Exception:
+        pass
+    try:
+        import monomorphize as _mono
+        _v = getattr(_mono, '_IN_PROGRESS', None)
+        if isinstance(_v, (dict, list, set)):
+            try: _v.clear()
+            except Exception: pass
+    except Exception:
+        pass
+    try:
+        import mojo.middle.loops_shared as _ls
+        _v = getattr(_ls, '_LOOP_ELSE_COUNTER', None)
+        if isinstance(_v, (list,)):
+            try:
+                if _v:
+                    _v[0] = 0
+            except Exception: pass
+    except Exception:
+        pass
+    # Clear per-instance accumulators on the returned generator.
+    try:
+        for _attr in list(getattr(gen, '__dict__', {}).keys()):
+            _val = getattr(gen, _attr, None)
+            if isinstance(_val, (dict, list, set)) and _attr.startswith('_'):
+                try: _val.clear()
+                except Exception: pass
+    except Exception:
+        pass
+    # Clear remaining backend_gimple/middle module-level accumulators (foreign
+    # callables, runtime callable words/values, module member libc, selfhost
+    # extra field cache, mojo elem ctype map) so they do not survive past the
+    # compile boundary (next step).
+    try:
+        for _modname, _names in (
+            ('mojo.backend_gimple.cpp_async', ('_FOREIGN_CALLABLES', '_RUNTIME_CALLABLE_WORDS')),
+            ('mojo.backend_gimple.emit_exprs', ('_RUNTIME_CALLABLE_VALUES_NAMES',)),
+            ('mojo.backend_gimple.emit_methods', ('_MODULE_MEMBER_LIBC',)),
+            ('mojo.backend_gimple.emit_funcs', ('_SELFHOST_EXTRA_FIELD_CACHE',)),
+            ('mojo.middle.calls_shared', ('_RUNTIME_CALLABLE_VALUES',)),
+            ('mojo.middle.iter_factory', ('_MOJO_ELEM_C',)),
+        ):
+            import importlib as _il2
+            _m = _il2.import_module(_modname)
+            for _c in _names:
+                _v = getattr(_m, _c, None)
+                if isinstance(_v, (dict, list, set)):
+                    try: _v.clear()
+                    except Exception: pass
+    except Exception:
+        pass
     return code, gen
 
 

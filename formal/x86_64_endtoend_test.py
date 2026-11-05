@@ -935,7 +935,7 @@ def _body(code, info):
     wrong function.  Widening this is therefore half of what a call to a function
     the compiler emitted BEFORE its caller needs, and not all of it; the other
     half, and what is left after this, is in
-    `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`.
+    `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`.
     """
     base, entry = info["base_addr"], info["func_offset"]
     end = D.body_end(info)
@@ -2846,7 +2846,7 @@ def _tree(code, info, shapes):
             # a goal that is not true until a heartbeat or wall bound fires, and
             # that reads as "the chain is too long" rather than "the chain
             # claims something untrue" -- which is the diagnosis the 24-argument
-            # program in `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`
+            # program in `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`
             # was filed with, and it is not what is wrong.
             #
             # So the return is FOLLOWED, which is the fix, and it is not free.
@@ -3794,7 +3794,7 @@ def emit_terminates(path):
         # the outermost `ret`, which pops the zero `X86State.init` leaves on the
         # stack and so ends the run at the exit sentinel. `_tree` tells them
         # apart by exactly this, and the difference is the whole of
-        # bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted):
+        # bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted):
         # treating the first as the second is what emitted `s_N.rip = 0` where
         # the machine pops the address the `call` pushed.
         ret_to = node.succ if node.kind == "ret" else None

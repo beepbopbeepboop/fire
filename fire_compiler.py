@@ -2528,7 +2528,7 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                     # depth; without that this branch is dead code, which is the
                     # shape the bug had — the first of the two halves was
                     # missing and this is the second. Fixed at `cca2a17f` (the
-                    # `b13` round's §5, now `bugs/formal/FORMAL_sweep_work_map.md`
+                    # `b13` round's §5, now `bugs/FORMAL_sweep_work_map.md`
                     # §3.1's `b13` row), and held by
                     # `test_string_literal_lexing.py`.
                     interpolated = _prefix_is_interpolated(src[start:i])

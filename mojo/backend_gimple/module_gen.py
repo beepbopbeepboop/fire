@@ -5662,6 +5662,12 @@ def gen_module_impl(self, stmts: list):
                 if id(s) not in already_in_stmts:
                     imported_stmts.append(s)
                     already_in_stmts.add(id(s))
+            # Per-module AST lifetime: reconciliation done; drop the transitive
+            # AST accumulator now rather than at end of gen_module_impl.
+            if hasattr(self, '_all_transitive_stmts_ordered'):
+                self._all_transitive_stmts_ordered.clear()
+            if hasattr(self, '_all_transitive_stmts_ids'):
+                self._all_transitive_stmts_ids.clear()
 
     # No epoch bump here, and the absence is worth stating because it looks
     # like the omission a reader would expect to correct. Every nested
@@ -12856,7 +12862,11 @@ def gen_module_impl(self, stmts: list):
     # names are claimed here, BEFORE the generic passes below would refuse
     # them and before the module-level registration could take them by bare
     # name (see cpp_async._compile_nested_generator_closures).
-    for _od in stmts:
+    # Walk EVERY FunctionDef in the module, not only the top-level ones:
+    # a generator nested two levels deep (e.g. `traceback_cm` inside
+    # `process_args` inside `add_traceback_cli`) is otherwise never reached
+    # by this pass and stays refused as an unclaimed nested generator.
+    for _od in gimple_exprtypes._walk_ast(stmts):
         if isinstance(_od, FunctionDef):
             self._compile_nested_generator_closures(_od, _generator_fns)
 
@@ -18804,6 +18814,40 @@ def gen_module_impl(self, stmts: list):
     # bodies exist — a `print(x)` of a list literal in an IMPORTED module is a
     # reference, and that module's text is spliced into this `parts` long after
     # this module's own code was written.
+    try:
+        if hasattr(self, '_module_stmts'):
+            self._module_stmts.clear()
+        if hasattr(self, '_all_transitive_stmts_ordered'):
+            self._all_transitive_stmts_ordered.clear()
+        if hasattr(self, '_all_transitive_stmts_ids'):
+            self._all_transitive_stmts_ids.clear()
+        # Per-module AST lifetime: drop closure/function-AST accumulators now
+        # that emission is complete.
+        for _acc in ('_all_closures', '_cpp_module_fn_asts',
+                     '_lambda_outer_closures', '_closure_call_stmts',
+                     '_local_def_nodes', '_analysis_funcs',
+                     '_comptime_list_asts', '_lambda_parts',
+                     '_cpp_module_fn_names', '_global_inline_defs',
+                     '_cur_func_body', '_nested_gen_captures',
+                     '_nested_gen_sibling_defs', '_calls_in_stmts',
+                     '_analysis_structs', '_fresh_returning',
+                     '_fresh_closure_returning'):
+            try:
+                _v = getattr(self, _acc, None)
+                if isinstance(_v, dict):
+                    _v.clear()
+                elif isinstance(_v, list):
+                    _v.clear()
+                elif isinstance(_v, set):
+                    _v.clear()
+            except Exception:
+                pass
+        try:
+            imported_stmts.clear()
+        except Exception:
+            pass
+    except Exception:
+        pass
     return self._dedup_variadic_externs(_drop_unreferenced_unimpl_stubs(_drop_unreachable_repr_cluster(parts)))
 
 def __getattr__(name):

@@ -76,7 +76,7 @@ WHAT A CALL ACTUALLY DOES AT RUN TIME
 diagnostic naming the contract they rest on and exit with `ADMITTED_EXIT_STATUS`.
 A program that calls `subprocess.run` on this target stops with a number that says
 so, rather than printing a number the source never wrote — the failure this
-project treats as its worst, recorded in `bugs/formal/FORMAL_known_limits.md`
+project treats as its worst, recorded in `bugs/FORMAL_known_limits.md`
 §"fabricated a value".
 
 **What that status can and cannot do**, because this file's earlier version of
@@ -142,7 +142,7 @@ WHAT IS NOT HERE, AND WHY
   * The `**kwargs` half of `run`/`call`/`check_call`/`check_output`.  `**` is a
     run-time-length mapping, and a mapping on this path is a bump-allocated blob
     in the frame of the function that built it
-    (`bugs/formal/FORMAL_listdir_no_run_time_sequence.md`).  Each keyword CPython's
+    (`bugs/FORMAL_listdir_no_run_time_sequence.md`).  Each keyword CPython's
     callers in this tree actually pass is a NAMED parameter instead, and
     `validate_args`' `ARG_UNKNOWN_KEYWORD` is where a keyword that is neither
     named nor variadic is reported.

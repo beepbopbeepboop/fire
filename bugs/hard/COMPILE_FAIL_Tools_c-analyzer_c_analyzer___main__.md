@@ -1,3 +1,7 @@
+## Status 2026-11-05 — repro run on this tree
+
+Ran `python3 fire.py build` on `.tmp/ca/c_analyzer/__main__.py` (sources copied from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/`); build did not complete within the tool timeout and emitted the usual cascade of imported-module compile errors (clsutil/iterutil/fsutil/strutil/tables/info/parser), consistent with the documented imported-module floor. No code change attempted this round; the capture-model lane remains blocked on the nested-generator claim.
+
 # COMPILE_FAIL: Tools/c-analyzer/c_analyzer/__main__.py
 
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__main__.py`

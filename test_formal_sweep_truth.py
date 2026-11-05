@@ -4919,7 +4919,7 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
             f"reader needs to know which: the stack-floor guard left the "
             f"prologue, or its two branches were DECIDED rather than walked — "
             f"the second is what "
-            f"bugs/formal/FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_"
+            f"bugs/FORMAL_x86_64_the_stack_floor_guards_exit_call_leaves_the_"
             f"image.md asks for, and the first is a much larger change. Either "
             f"way `emit()`'s coverage number in that doc is now stale.")
         not_the_guard = [(s, b) for s, b in refused if "call_rel32" not in b]

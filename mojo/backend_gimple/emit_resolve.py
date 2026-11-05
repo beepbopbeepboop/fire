@@ -875,11 +875,8 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # the caller.
                 temp_gen._c_helpers_needed = gen._c_helpers_needed
                 temp_gen._emitted_c_helpers = gen._emitted_c_helpers
-                temp_gen._module_stmts = gen._module_stmts  # share: track all transitive stmts
-                # share: incrementally-maintained flat mirror of
-                # _module_stmts' union (see the `_walk_ast` re-scan bug,
-                # Phase 1) — same sharing
-                # pattern as _module_stmts itself, just above.
+                # Per-module AST lifetime fix: drop _module_stmts retention; use
+                # _all_transitive_stmts_ordered for reconciliation only.
                 temp_gen._all_transitive_stmts_ordered = gen._all_transitive_stmts_ordered
                 temp_gen._all_transitive_stmts_ids = gen._all_transitive_stmts_ids
                 # share: Phase 2 per-statement field-access-scan caches
@@ -1206,7 +1203,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                     if _tsid not in gen._all_transitive_stmts_ids:
                         gen._all_transitive_stmts_ids.add(_tsid)
                         gen._all_transitive_stmts_ordered.append(_ts)
-
                 # Return both code and parsed statements
                 return (code, stmts)
             except Exception as e:

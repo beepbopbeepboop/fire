@@ -1141,7 +1141,7 @@ def read_table(infile, header, *, sep='\t',
         yield row
 
 def main():
-    data = "a\tb\n1\t2\n3\t4\n"
+    data = "a\\tb\\n1\\t2\\n3\\t4\\n"
     for r in read_table(data, "a\tb", sep='\t'):
         print(r[0], r[1])
 main()
@@ -1163,7 +1163,7 @@ def read_table(infile, header, *, sep='\t',
         yield row
 
 def main():
-    data = "a\tb\n1\t2\n3\t4\n"
+    data = "a\\tb\\n1\\t2\\n3\\t4\\n"
     for r in read_table(data, "a\tb", sep='\t'):
         print(r[0], r[1])
 main()

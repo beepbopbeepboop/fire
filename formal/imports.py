@@ -142,7 +142,7 @@ HOST_UNREACHABLE = frozenset((
     #
     # `wsgiref` is the WSGI reference implementation, and it is the one name
     # the doc's next-step reading list (its §"The next step" in
-    # `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md`) placed
+    # `bugs/FORMAL_stdlib_module_names_are_not_classified.md`) placed
     # under "a terminal" that the reading itself corrects, the way `posix` was
     # corrected into `HOST_MODELLED`: the load-bearing half of the package is
     # the reference SERVER —
@@ -200,7 +200,7 @@ HOST_UNREACHABLE = frozenset((
     # asking "why is most of this row still refused" has one place to look.
     "getpass", "webbrowser",
     # THE EIGHT THE DOC'S OWN READING LIST NAMES UNDER THIS HEADING (its
-    # §"The next step" in `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md`),
+    # §"The next step" in `bugs/FORMAL_stdlib_module_names_are_not_classified.md`),
     # taken one at a time with the rule at the top of this file applied to each.  The object each needs is a TERMINAL — an interactive input
     # and display — the same object `getpass` (a prompt) and `webbrowser` (a
     # window) are here for, and a freestanding image that links libSystem and
@@ -296,7 +296,7 @@ HOST_UNREACHABLE = frozenset((
     "msvcrt", "winreg", "winsound", "nt",
     # THE FIVE THE SAME ORACLE DECIDES OF THE UNCLASSIFIED SET, and they are the
     # first entries a worker can add with a measurement behind each rather than a
-    # reading — `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md` §0.5's
+    # reading — `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0.5's
     # next step, taken. `importlib.util.find_spec` on the interpreter that runs
     # this tree returns NO SPEC for each, which is the rule at the top of this
     # section applied: the object is missing from the target. `_gdbm` and
@@ -355,7 +355,7 @@ HOST_MODELLED = frozenset((
 #     cases; what is still absent is an EXPORTED slot, so each call is its
 #     own view. The accounting, and what the four sweep files the row was
 #     worth are actually worth, is in
-#     `bugs/formal/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`.
+#     `bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`.
     #   `io`  — `formal/hostmods/io.mojo`, in the part of CPython's `io` that
     #     is not streams: `SEEK_SET`, `SEEK_CUR`, `SEEK_END` and
     #     `DEFAULT_BUFFER_SIZE`, each checked against CPython's own `io` by
@@ -403,7 +403,7 @@ HOST_MODELLED = frozenset((
     "errno", "select",
     # PURE COMPUTATION over values a word already is, with nothing platform-
     # specific to reach — and this row is a CORRECTION, because
-    # `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md` §"The next step"
+    # `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §"The next step"
     # listed `posix`, `genericpath`, `ntpath` and `nturl2path` together with
     # `msvcrt`/`winreg` as "a Windows-only / POSIX-only module that is not this
     # host's". Three of those four are wrong for that reading and the measurement
@@ -461,7 +461,7 @@ HOST_MODELLED = frozenset((
     #     **The record that said this row was blocked on a CAPABILITY was half
     #     wrong, and the half that was wrong is what made it possible.** It held
     #     that `glob.glob` returns a run-time-length list and a list cannot be
-    #     one here (`bugs/formal/FORMAL_listdir_no_run_time_sequence.md` items 2 and
+    #     one here (`bugs/FORMAL_listdir_no_run_time_sequence.md` items 2 and
     #     3). True of a LIST and irrelevant: `os.listdir` already answers a
     #     run-time-length container, because `malloc` takes a run-time size and
     #     its memory outlives the function that asked for it. So `glob` builds
@@ -639,7 +639,7 @@ HOST_MODELLED = frozenset((
     #     **It is 2 of the 8 files the row was worth, and the other six are not
     #     a module.** Five of them spell `random.Random(seed)` — an OBJECT with
     #     624 words of state behind a pointer, which is
-    #     `bugs/formal/FORMAL_module_state_no_storage.md` and not something a `.mojo`
+    #     `bugs/FORMAL_module_state_no_storage.md` and not something a `.mojo`
     #     file changes; the sixth is closure. What made the module reachable at
     #     all is that a module's OWN globals DO have storage: measured, both
     #     architectures, a module-level `var` written through `global` by one
@@ -738,7 +738,7 @@ HOST_MODELLED = frozenset((
     #     CPython's own on both backends, over 56 corpus cases and every byte
     #     1..255 alone and after a safe byte. What is STILL absent and why is at
     #     the top of that module: `split` and `join` answer a LIST or a
-    #     generator (`bugs/formal/FORMAL_listdir_no_run_time_sequence.md`), and
+    #     generator (`bugs/FORMAL_listdir_no_run_time_sequence.md`), and
     #     `shlex.shlex` is a streaming reader over `readline`, which is the
     #     `fnmatch.iglob` shape.
     #
@@ -1056,7 +1056,7 @@ def _admitted_tier_conflicts() -> list:
 # target cannot run anyway. There is nothing to implement and nothing missing,
 # so putting them in either tier states a falsehood and leaving them in NO tier
 # makes a coverage report count them as "no verdict" — which is the defect
-# `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md` §"The next step"
+# `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §"The next step"
 # named and said "should be recorded as one, not left to look like an
 # oversight".
 #
@@ -1244,7 +1244,7 @@ def capability_sibling_tier(name: str) -> str:
 
     `''` — nothing derived — is the answer for every other name, which is where
     the rest of
-    `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md`'s queue lives. The
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md`'s queue lives. The
     derivation is deliberately NOT applied to a name with a Mojo source: a name
     this tree has written is answered by `host_module_verdict`'s own source arm,
     and `host_module_tier`'s rule that "a name LEAVES a tier by being WRITTEN"
@@ -1308,7 +1308,7 @@ def host_module_tier(name: str) -> str:
     `hashlib` is answered here, `_socket` answers `unreachable` because `socket`
     is in the table. It is a table of nothing and a rule, so a name it settles
     is settled by the rule rather than remembered, and the 216-name queue in
-    `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md` is 30 names shorter
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` is 30 names shorter
     for a reason no reader has to take on trust. What it deliberately does NOT
     do is guess for the rest: `''` still means "CPython ships it and nothing
     here says which of the two claim tiers it is", and the tripwire that keeps
@@ -1421,7 +1421,7 @@ def host_module_verdict(name: str, relative_to: str = None,
     unclassified standard-library module as "reachable", and each of those is a
     statement about the target that the table does not support. The doc that
     records the whole area is
-    `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md`, whose §0.1 calls
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md`, whose §0.1 calls
     the ambiguous `''` "the load-bearing half".
 
     **`'unclassified'` is the answer that makes the queue decidable.** The 217
@@ -2114,7 +2114,7 @@ def module_raising_names(path: str, _seen=None) -> ModuleRaises:
     certain tier is what refuses, and an unresolvable name is not certain. What
     is left of the unplaceable tier is written down, with the measurement that
     says which of its five shapes is a hazard and which four are not, in
-    `bugs/formal/FORMAL_a_callee_that_is_an_expression_in_a_try_cannot_be_placed.md`.
+    `bugs/FORMAL_a_callee_that_is_an_expression_in_a_try_cannot_be_placed.md`.
     """
     try:
         stmts = module_statements(path)
@@ -2584,7 +2584,7 @@ def module_templates_by_path(path: str, project_root: str = None) -> dict:
     the demand belongs to the module that owns the definition, not to the one
     whose name the importer happened to import. `std/collections/__init__.mojo`
     re-exporting `BinaryHeap` is the measured case, and it is 162 of the 165
-    files in the `b8` round of `bugs/formal/FORMAL_sweep_work_map.md` §3.1.
+    files in the `b8` round of `bugs/FORMAL_sweep_work_map.md` §3.1.
 
     Which declared names are templates is `formal/monomorph.py`'s question and is
     answered there by `reflect.export_exclusions` — the same rule the export
@@ -2927,7 +2927,7 @@ def _relative_candidates(module_name: str, relative_to: str, ext: str) -> list:
 
     so `from .. import DeviceBuffer` imported nvidia's own package instead of
     its parent, and the file was refused for a module that resolves perfectly
-    well (bugs/formal/FORMAL_known_limits.md 1.3).
+    well (bugs/FORMAL_known_limits.md 1.3).
 
     The rule, which is Python's and needs no special case: **the containing
     package's directory is the importing file's own directory, whatever the file
@@ -3116,7 +3116,7 @@ HOST_MODULE_ADVICE = {
         "repository's own tooling import it (`formal/lean.py`'s `Census`, "
         "`formal/model.py`'s `InitShape`, `tools/formal_sweep.py`'s three). "
         "`Counter` is a dict rather than a record, so it is the other question: "
-        "see bugs/formal/FORMAL_listdir_no_run_time_sequence.md",
+        "see bugs/FORMAL_listdir_no_run_time_sequence.md",
     "copy":
         "a field-wise copy of a type the COMPILER KNOWS at the call site is a "
         "struct construction: build a new one and assign the fields. A copy "
@@ -3228,7 +3228,7 @@ def unresolvable_import_error(source_path: str, module_name: str) -> str:
         # two differ in something a reader acts on: a name in a tier has an
         # owner and a next step (`host_module_advice` below, and
         # `host_module_tier` for a coverage report), and a name in NO tier has
-        # neither — `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md` is
+        # neither — `bugs/FORMAL_stdlib_module_names_are_not_classified.md` is
         # the queue for the rest, and it records that ZERO of them is imported
         # by any file in this repository or the stdlib, which is what makes the
         # classification a bounded piece of work rather than a coverage
@@ -3893,7 +3893,7 @@ def library_free_edges(importer_path: str, stmts: list,
     `binary_heap.mojo` exports. Before this, that one edge's non-symbol cost 163
     swept files their build, because `build_module_dylib` refused the library
     whether or not the importing chain wanted it
-    (the `b9` round of `bugs/formal/FORMAL_sweep_work_map.md` §4.1).
+    (the `b9` round of `bugs/FORMAL_sweep_work_map.md` §4.1).
 
     **Which names are templates is read from `reflect.export_exclusions`**, by
     `formal/monomorph.py::template_names`, which is the SAME rule
@@ -4433,7 +4433,7 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     here = os.path.abspath(source_path)
     mine = dict((demands or {}).get(here) or {})
     # …plus what this module asks of the templates IT DECLARES, and this is
-    # §9a of `bugs/formal/FORMAL_generic_monomorph_scope.md`: `instantiation_demands`
+    # §9a of `bugs/FORMAL_generic_monomorph_scope.md`: `instantiation_demands`
     # below is asked with `own_templates=`, which empties the own set on purpose
     # (a local specialisation covers a FUNCTION template), so the one demand set
     # no importer could see was this module's own and a library that APPLIES its
@@ -4785,7 +4785,7 @@ def _instantiated_sources(source_path: str, wanted: dict, prefix: str) -> tuple:
     the symbol appear — an importer spelling the type argument), and
     `formal/build.py`'s bracketed-callee check can name the call. Raising here
     would report a demand's failure in place of both, which is the "a message
-    that is false about the file" defect `bugs/formal/FORMAL_known_limits.md` opens
+    that is false about the file" defect `bugs/FORMAL_known_limits.md` opens
     with — and it would do it on a module that HAS a concrete API and is
     refused for a specialization of one line of it.
 

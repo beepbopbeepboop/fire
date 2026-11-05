@@ -8702,6 +8702,9 @@ void mojo_set_iter_free(MojoSetIter *it) { free(it->order); free(it); }
 int mojo_in_dispatch_str(int64_t container, char *needle)
 {
     if (container == 0) return 0;
+    if (mojo_boxed_is_str(container)) {
+        return mojo_str_contains((char *)(intptr_t)container, needle);
+    }
     if (mojo_is_registered_dict(container)) {
         /* The needle can be a CONTAINER even on this "str" view: `k in d`
          * where `k` is a tuple leaves the dict ambiguous but types the needle
