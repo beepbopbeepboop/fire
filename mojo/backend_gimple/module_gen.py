@@ -18616,13 +18616,17 @@ def gen_module_impl(self, stmts: list):
         if hasattr(self, '_all_transitive_stmts_ids'):
             self._all_transitive_stmts_ids.clear()
         # Per-module AST lifetime: drop closure/function-AST accumulators now
-        # that emission is complete.
+        # that emission is complete. Clear every mutable collection on the gen
+        # so no per-module AST/state survives past emission (next step).
         for _acc in ('_all_closures', '_cpp_module_fn_asts',
                      '_lambda_outer_closures', '_closure_call_stmts',
                      '_local_def_nodes', '_analysis_funcs',
                      '_comptime_list_asts', '_lambda_parts',
                      '_cpp_module_fn_names', '_global_inline_defs',
-                     '_cur_func_body'):
+                     '_cur_func_body', '_nested_gen_captures',
+                     '_nested_gen_sibling_defs', '_calls_in_stmts',
+                     '_analysis_structs', '_fresh_returning',
+                     '_fresh_closure_returning'):
             try:
                 _v = getattr(self, _acc, None)
                 if isinstance(_v, dict):
@@ -18633,6 +18637,16 @@ def gen_module_impl(self, stmts: list):
                     _v.clear()
             except Exception:
                 pass
+        # Generic sweep: clear any remaining mutable collections.
+        try:
+            for _attr, _v in list(getattr(self, '__dict__', {}).items()):
+                if _attr.startswith('_') and isinstance(_v, (dict, list, set)):
+                    try:
+                        _v.clear()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         try:
             imported_stmts.clear()
         except Exception:
