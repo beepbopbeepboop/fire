@@ -3938,16 +3938,30 @@ def _gen_stmt_MatchStmt(gen, node):
             if kind == "class pattern (type test)":
                 # `case C():` or positional-capture-only `case C(x):` — isinstance
                 # guard; positional args bind the subject's __match_args__[i]
-                # attribute via runtime getattr so the refusal is cleared.
-                # Positional captures: binding via __match_args__ is a
-                # next-step feature; the instance guard is sufficient to
-                # lift the refusal for now.
+                # attribute via runtime getattr.
                 isinstance_node = gimple_ctypes.CallExpr(
                     func=gimple_ctypes.IdentExpr(name="isinstance"),
                     args=[subj_ref, pattern.func],
                 )
                 ict, icv = gen._lower_builtin_isinstance(isinstance_node)
                 cv = gen._ensure_bool_cond(ict, icv)
+                args = getattr(pattern, 'args', []) or []
+                if args:
+                    # Only bind when the isinstance guard holds: bail to fail_bb
+                    # otherwise, so the attribute read never runs on a non-instance.
+                    gen._emit(f"  if (!{cv}) goto {fail_bb};")
+                    for i, subpat in enumerate(args):
+                        cname = getattr(subpat, 'name', None)
+                        gen._emit("  _mojo_getattr_missed = 0;")
+                        attr_val = gen._call_expr('int64_t', 'mojo_getattr_any',
+                                                 [('void *', f"(void *){subj_v}"),
+                                                  ('char *', gen._intern_string(cname if cname else '_'))])
+                        if cname is not None and cname not in gen.var_types:
+                            gen._declare_var(cname, 'int64_t')
+                        if cname is not None:
+                            gen._emit(f"  {cname} = {attr_val};")
+                    gen._emit(f"  goto {arm_bb};")
+                    cv = None
             elif kind in formal_model.MATCH_REFUSED_KINDS:
                 # Emit a refusal error message and raise.
                 raise formal_model.CodegenError(formal_model.match_pattern_refusal(
@@ -3969,7 +3983,8 @@ def _gen_stmt_MatchStmt(gen, node):
                 # 'name' or 'value': compare subject with pattern via ==.
                 ct, cv = gen.lower_expr(gimple_ctypes.BinaryOp(op='==', left=subj_ref, right=pattern))
                 cv = gen._ensure_bool_cond(ct, cv)
-            gen._emit(f"  if ({cv}) goto {arm_bb}; else goto {fail_bb};")
+            if cv is not None:
+                gen._emit(f"  if ({cv}) goto {arm_bb}; else goto {fail_bb};")
             if j + 1 < len(patterns):
                 gen._emit_label(fail_bb)
         if guard_bb is not None:
