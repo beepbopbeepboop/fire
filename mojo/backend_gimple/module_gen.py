@@ -5651,6 +5651,12 @@ def gen_module_impl(self, stmts: list):
                 if id(s) not in already_in_stmts:
                     imported_stmts.append(s)
                     already_in_stmts.add(id(s))
+            # Per-module AST lifetime: reconciliation done; drop the transitive
+            # AST accumulator now rather than at end of gen_module_impl.
+            if hasattr(self, '_all_transitive_stmts_ordered'):
+                self._all_transitive_stmts_ordered.clear()
+            if hasattr(self, '_all_transitive_stmts_ids'):
+                self._all_transitive_stmts_ids.clear()
 
     # No epoch bump here, and the absence is worth stating because it looks
     # like the omission a reader would expect to correct. Every nested
