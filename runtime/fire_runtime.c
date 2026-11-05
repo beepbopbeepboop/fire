@@ -1999,7 +1999,11 @@ int64_t mojo_unbox_plain(int64_t v)
     MojoBox *bx = (MojoBox *)(intptr_t)v;
     if (bx->kind == 'n') return 0;
     if (bx->kind == 'b') return bx->bits ? 1 : 0;
-    if ((bx->kind == 'p' || bx->kind == 's') && bx->bits == 0) return 0;
+    /* A string / bytes slot is its own pointer: the box only carried the kind.
+     * Handing the box on made a tuple-unpacked `char *` target (the type name
+     * in `at, av = gen.lower_expr(...)`) compare unequal to every literal, so
+     * the compiled compiler's `at == 'MojoGenerator *'` was never true. */
+    if (bx->kind == 'p' || bx->kind == 's') return bx->bits;
     return v;
 }
 

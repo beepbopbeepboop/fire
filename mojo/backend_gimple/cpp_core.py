@@ -5547,9 +5547,12 @@ def _cpp_expr(gen, e) -> str:
                                     if isinstance(_defaults, dict):
                                         _dval = _defaults.get(tname)
                                     elif isinstance(_defaults, list):
-                                        for _pname, _pval in _defaults:
-                                            if str(_pname) == tname:
-                                                _dval = _pval
+                                        # Index, don't unpack: a 2-tuple target over an
+                                        # untyped list declares no `_pval` in the
+                                        # compiled compiler.
+                                        for _pp in _defaults:
+                                            if str(_pp[0]) == tname:
+                                                _dval = _pp[1]
                                                 break
                                     if _dval is not None and hasattr(_dval, 'name'):
                                         _dname = _dval.name

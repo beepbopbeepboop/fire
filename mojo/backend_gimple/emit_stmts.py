@@ -2709,10 +2709,12 @@ def _gen_stmt_AugAssignStmt(gen, node):
                 res = gen.lower_expr(gimple_ctypes.CallExpr(
                     gimple_ctypes.MemberExpr(node.target, _rt_dunder, node.line, node.col),
                     [node.value], [], node.line, node.col))
-                # Rebind target if it's a simple assignment
-                if isinstance(node.target, gimple_ctypes.IdentExpr):
-                    tname = node.target.name
-                    gen._assign_to_name(tname, res[0], res[1]) if hasattr(gen, '_assign_to_name') else None
+                # (A "rebind the target" call to `gen._assign_to_name` stood here,
+                # guarded by `hasattr`. No such method exists, so in Python the guard
+                # was always False; the compiled compiler lowers the call itself and
+                # the stage2 link failed on `_GimpleGen__assign_to_name`. The result
+                # of the dunder call is the object the operator produced, so there is
+                # nothing to rebind.)
                 return
             except Exception:
                 pass
@@ -5087,12 +5089,17 @@ def _gen_stmt_RaiseStmt(gen, node):
             args_list = gen._new_temp('MojoList *')
             gen._emit(f"  {args_list} = mojo_list_new ();")
             gen._emit(f"  mojo_list_append_str ({args_list}, {mv});")
-            type_tag = gen._exc_type_id(exc_name) if exc_name else "0"
+            # A STRING in both arms: `_exc_type_id` is an int and "0" is a str,
+            # which the compiled compiler joins into one slot, so `str(type_tag)`
+            # below read a number as text and crashed in `new_val`.
+            type_tag: str = "0"
+            if exc_name:
+                type_tag = f"{gen._exc_type_id(exc_name)}"
             # The object is the message text with the args list in a header
             # before it (`mojo_exc_text_new`), so the handler's bound `e` is the
             # string every consumer expects and `e.args` is still reachable.
             exc_text = gen._call_expr('char *', 'mojo_exc_text_new',
-                                      [('int64_t', gen._new_val('int64_t', str(type_tag))), ('char *', mv),
+                                      [('int64_t', gen._new_val('int64_t', type_tag)), ('char *', mv),
                                        ('MojoList *', args_list)])
             gen._emit(f"  mojo_exc_obj_set ({exc_text});")
             gen._emit(f"  mojo_exc_msg_set ({exc_text});")
