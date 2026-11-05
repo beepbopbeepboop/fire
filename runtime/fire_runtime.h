@@ -687,6 +687,8 @@ typedef struct {
 
 /* Exception object with args (for e.args / StopIteration.value). */
 typedef struct { int64_t type; char *msg; MojoList *args; } MojoExc;
+char *mojo_str_dup_registered(char *s);
+char *mojo_exc_text_new(int64_t type, char *msg, MojoList *args);
 MojoExc *mojo_exc_new(int64_t type, char *msg, MojoList *args);
 MojoList *mojo_exc_args(void *obj);
 

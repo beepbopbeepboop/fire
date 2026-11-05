@@ -737,6 +737,16 @@ void *_mojo_exc_obj = NULL;
 void mojo_exc_obj_set(void *obj) { _mojo_exc_obj = obj; }
 void *mojo_exc_obj_get(void) { return _mojo_exc_obj; }
 
+/* A heap copy of `s` the runtime owns: registered so it is recognised as a
+ * string, and never freed by an unwind, which is what makes it safe to hand to
+ * an exception that outlives the frame that built the text. */
+char *mojo_str_dup_registered(char *s) {
+    if (!s) return NULL;
+    char *d = strdup(s);
+    if (d) mojo_str_register(d);
+    return d;
+}
+
 MojoExc *mojo_exc_new(int64_t type, char *msg, MojoList *args) {
     MojoExc *exc = (MojoExc *)malloc(sizeof(MojoExc));
     if (!exc) return NULL;
@@ -746,10 +756,36 @@ MojoExc *mojo_exc_new(int64_t type, char *msg, MojoList *args) {
     return exc;
 }
 
+/* The exception OBJECT a handler binds (`except E as e`) is the message text
+ * itself: every consumer of `e` -- `str(e)`, `print(e)`, an f-string, a
+ * concatenation -- treats the bound `char *` as the message, and the object
+ * slot used to be exactly that. The args list rides in a header in FRONT of the
+ * text, so `e.args` is recoverable from the same pointer and no consumer has to
+ * know there is anything more than a string. (Binding the bare `MojoExc *`
+ * instead made every `str(e)` print the struct's first bytes.) */
+#define MOJO_EXC_TEXT_MAGIC 0x4d4a455854455854LL  /* "MJEXTEXT" */
+typedef struct { int64_t magic; int64_t type; MojoList *args; } _MojoExcTextHdr;
+
+char *mojo_exc_text_new(int64_t type, char *msg, MojoList *args) {
+    size_t n = msg ? strlen(msg) : 0;
+    char *blk = (char *)malloc(sizeof(_MojoExcTextHdr) + n + 1);
+    if (!blk) return NULL;
+    _MojoExcTextHdr *h = (_MojoExcTextHdr *)blk;
+    h->magic = MOJO_EXC_TEXT_MAGIC;
+    h->type = type;
+    h->args = args;
+    char *text = blk + sizeof(_MojoExcTextHdr);
+    if (msg) memcpy(text, msg, n);
+    text[n] = '\0';
+    mojo_str_register(text);
+    return text;
+}
+
 MojoList *mojo_exc_args(void *obj) {
     if (!obj) return NULL;
-    MojoExc *exc = (MojoExc *)obj;
-    return (MojoList *)exc->args;
+    _MojoExcTextHdr *h = (_MojoExcTextHdr *)((char *)obj - sizeof(_MojoExcTextHdr));
+    if (h->magic != MOJO_EXC_TEXT_MAGIC) return NULL;
+    return h->args;
 }
 
 /* Exception type tag: a small int id (assigned per exception class name at
@@ -1963,7 +1999,11 @@ int64_t mojo_unbox_plain(int64_t v)
     MojoBox *bx = (MojoBox *)(intptr_t)v;
     if (bx->kind == 'n') return 0;
     if (bx->kind == 'b') return bx->bits ? 1 : 0;
-    if ((bx->kind == 'p' || bx->kind == 's') && bx->bits == 0) return 0;
+    /* A string / bytes slot is its own pointer: the box only carried the kind.
+     * Handing the box on made a tuple-unpacked `char *` target (the type name
+     * in `at, av = gen.lower_expr(...)`) compare unequal to every literal, so
+     * the compiled compiler's `at == 'MojoGenerator *'` was never true. */
+    if (bx->kind == 'p' || bx->kind == 's') return bx->bits;
     return v;
 }
 

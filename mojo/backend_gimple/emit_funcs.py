@@ -3029,19 +3029,24 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # inference sees the real scalar (must precede return-type inference).
     # (Iterate keys + index, not `for k, (e, ne) in .items()`: a nested tuple
     # for-target over .items() isn't lowered correctly when self-compiled.)
-    _pe = getattr(gen, '_param_elem_types', {}).get(node.name, {})
-    for bare in _pe:
+    # `_pe` is typed `dict` and its key is a fresh `_as_str` name: untyped, and
+    # with the loop key reusing the earlier `bare` (a str), `_pe[bare]` was
+    # lowered as a LIST read of a dict and the stage2 binary segfaulted here for
+    # any function that has a parameter-element record.
+    _pe: dict = getattr(gen, '_param_elem_types', {}).get(node.name, {})
+    for _pe_key in _pe:
+        _pe_bare = _as_str(_pe_key)
         # `_pe[bare]` is a 2-tuple; `e, ne = _pe[bare]` boxes both slots
         # on the self-hosted path, so `_elem_types[bare]` got a garbage
         # ctype string and `_declare_var`'s `mojo_str_cat` ran `strlen()`
         # on it — a hard segfault on the single-TU `--dump myinterpreter.py`.
-        _pe_v = _pe[bare]
+        _pe_v = _pe[_pe_bare]
         e = _as_str(_pe_v[0])
         ne = _as_str(_pe_v[1])
         if e:
-            gen._elem_types[bare] = e
+            gen._elem_types[_pe_bare] = e
             if ne:
-                gen._nested_elem_types[bare] = ne
+                gen._nested_elem_types[_pe_bare] = ne
     # ...and the dict-VALUE half of the same contract, for the same reason and
     # beside it. A dict parameter has no binding site inside the callee, so
     # without this every `d[k]` / `d.items()` in the body fell to the
@@ -3058,14 +3063,15 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     _pem = getattr(gen, '_param_elem_mixed', {}).get(node.name, ())
     for _pem_bare in _pem:
         gen._maybe_kinds_vals.add(_as_str(_pem_bare))
-    _pdv = getattr(gen, '_param_dict_val_types', {}).get(node.name, {})
-    for bare in _pdv:
+    _pdv: dict = getattr(gen, '_param_dict_val_types', {}).get(node.name, {})
+    for _pdv_key in _pdv:
+        _pdv_bare = _as_str(_pdv_key)
         # '' is the conflicting-call-sites marker (see _record_param_dict_val),
         # and an unseeded slot is already the `int64_t` default, so both are
         # no-ops here -- deliberately, rather than seeding a lie.
-        _pdv_v = _as_str(_pdv[bare])
+        _pdv_v = _as_str(_pdv[_pdv_bare])
         if _pdv_v:
-            gen._dict_val_types[bare] = _pdv_v
+            gen._dict_val_types[_pdv_bare] = _pdv_v
     # Seed local container element types too, so return inference can see
     # through nested subscripts on locals (e.g. `return bodies[0][0]` where
     # bodies is a local list-of-double-lists). Lowering re-derives the same.
@@ -4208,8 +4214,9 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # call-site pre-pass records under.
     _seed_annotated_param_elem_types(gen, node)
     _mkey = f"{_as_str(struct_name)}_{_as_str(node.name)}"
-    _mpe = getattr(gen, '_param_elem_types', {}).get(_mkey, {})
-    for _mbare in _mpe:
+    _mpe: dict = getattr(gen, '_param_elem_types', {}).get(_mkey, {})
+    for _mbare0 in _mpe:
+        _mbare = _as_str(_mbare0)
         _mpe_v = _mpe[_mbare]
         _me = _as_str(_mpe_v[0])
         _mne = _as_str(_mpe_v[1])
@@ -4222,8 +4229,9 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     _mpmx = getattr(gen, '_param_nested_mixed', {}).get(_mkey, ())
     for _mpmx_bare in _mpmx:
         gen._nested_mixed_names.add(_as_str(_mpmx_bare))
-    _mpdv = getattr(gen, '_param_dict_val_types', {}).get(_mkey, {})
-    for _mbare2 in _mpdv:
+    _mpdv: dict = getattr(gen, '_param_dict_val_types', {}).get(_mkey, {})
+    for _mbare20 in _mpdv:
+        _mbare2 = _as_str(_mbare20)
         _mpdv_v = _as_str(_mpdv[_mbare2])
         if _mpdv_v:
             gen._dict_val_types[_mbare2] = _mpdv_v

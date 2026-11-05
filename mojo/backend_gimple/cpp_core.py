@@ -3946,8 +3946,12 @@ def _cpp_expr(gen, e) -> str:
                                 'generator-body .close() on opaque handle')
                     return '0'
             obj = gen._cpp_expr(e.func.obj)
-            args = ', '.join(gen._cpp_expr(a) for a in e.args)
-            return f"{obj}.{e.func.member}({args})"
+            # `args_text`, not `args`: `args` is a LIST elsewhere in this
+            # function, and the compiled compiler gives one name one declared
+            # type, so formatting the joined string through `{args}` called
+            # `_mojo_repr_list` on text and segfaulted.
+            args_text = ', '.join(gen._cpp_expr(a) for a in e.args)
+            return f"{obj}.{e.func.member}({args_text})"
         if isinstance(e.func, gimple_ctypes.IdentExpr):
             fname = e.func.name
             # Module-level `X = Y` identifier alias to a plain module
@@ -5274,8 +5278,8 @@ def _cpp_expr(gen, e) -> str:
 
             # Call of a call result: f()(args)  →  (f())(args)
             inner = gen._cpp_expr(e.func)
-            args = ', '.join(gen._cpp_expr(a) for a in e.args)
-            return f"({inner})({args})"
+            args_text = ', '.join(gen._cpp_expr(a) for a in e.args)
+            return f"({inner})({args_text})"
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"unsupported call expression in generator body")
     if isinstance(e, gimple_ctypes.SliceExpr):
@@ -5543,9 +5547,12 @@ def _cpp_expr(gen, e) -> str:
                                     if isinstance(_defaults, dict):
                                         _dval = _defaults.get(tname)
                                     elif isinstance(_defaults, list):
-                                        for _pname, _pval in _defaults:
-                                            if str(_pname) == tname:
-                                                _dval = _pval
+                                        # Index, don't unpack: a 2-tuple target over an
+                                        # untyped list declares no `_pval` in the
+                                        # compiled compiler.
+                                        for _pp in _defaults:
+                                            if str(_pp[0]) == tname:
+                                                _dval = _pp[1]
                                                 break
                                     if _dval is not None and hasattr(_dval, 'name'):
                                         _dname = _dval.name

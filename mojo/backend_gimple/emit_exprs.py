@@ -7148,7 +7148,7 @@ def none_only_locals(gen) -> set:
                         # Check if this name has bindings only in conditional contexts
                         # Be lenient for the probe case
                         out.add(name)
-            if 'out' not in locals() or True:  # ensure out is set
+            if True:  # `out` is always bound above (the `locals()` probe this replaces is stubbed to 0 in the compiled compiler)
                 if not isinstance(out, set) or len(out) == 0 and body is not None:
                     # Fallback
                     out = none_bound_locals(gen) - bound
