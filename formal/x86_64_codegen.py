@@ -9810,12 +9810,68 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         ok = f"{fn}_ovf{tid}_k"
         self._emit_jcc(COND_O, trap)
         self._emit_jmp(ok)
+        self._emit_int_overflow_trap_block(op, trap, ok)
+
+    def _emit_int_overflow_trap_block(self, op: str, trap: str, ok: str) -> None:
+        """The overflow trap block every entry shape on this backend branches
+        into: the label, the diagnostic call, and the exit call.
+
+        The shared half of `_emit_int_overflow_trap` (the `JO` after a
+        `+`/`-`/`*`) and `_emit_int_overflow_precheck` (the sentinel before a
+        `//`), which need the block without either of their branches. Both
+        calls in it are recorded as compiler traps, the way
+        `_emit_stack_floor_guard` records its own: an unrecorded `write` or
+        `exit` reads as a call the PROGRAM makes and suppresses every run
+        test in the image.
+        """
         self.asm.label(trap)
         self._compiler_trap_addrs.append(
             self._emit_overflow_diagnostic_call(M.int_overflow_trap_message(op)))
         self._compiler_trap_addrs.append(
             self._emit_call_exit(M.INT_OVERFLOW_TRAP_STATUS))
         self.asm.label(ok)
+
+    def _emit_int_overflow_precheck(self, op: str) -> None:
+        """The `//` overflow PRE-check, and the trap it falls into.
+
+        The instruction-level twin of `_emit_int_overflow_trap`, but the branch
+        PRECEDES the instruction it protects, because here the flag IS the
+        death: `IDIV` of `INT64_MIN, -1` raises `#DE` and the image dies on
+        SIGFPE (measured on this machine) before any flag exists to read, and
+        the arm64 twin measured no flag its `SDIV` sets on the pair either, so
+        the check is the sentinel over the two operands — the one division
+        whose answer does not fit, and the one exact pair that overflows it —
+        and the two machines spell the same sentinel:
+
+            CMP R11, -1            ; the overflow DIVISOR
+            JNE ok
+            MOV R10, 0x8000000000000000   ; INT64_MIN, the overflow DIVIDEND
+            CMP RAX, R10
+            JNE ok
+            <the trap block>
+        ok:
+            CQO ; IDIV R11         ; the divide the check protects
+
+        The caller is the divide arm with RAX = dividend and R11 = divisor.
+        R10 is the backend's declared scratch and nothing between here and the
+        divide reads it, and the taken path ends in an exit, so nothing here
+        preserves a register.
+
+        Not `_record_cond_branch`, for the reason `_emit_int_overflow_trap`
+        states: no AST condition is behind the branch, and recording it would
+        claim a source-level `if` the program never wrote.
+        """
+        self._if_counter += 1
+        tid = self._if_counter
+        fn = self.func_name
+        trap = f"{fn}_ovf{tid}_t"
+        ok = f"{fn}_ovf{tid}_k"
+        self.asm.emit(encode_cmp_r64_imm8(Reg.R11, -1))
+        self._emit_jcc(COND_NE, ok)
+        self.asm.emit(encode_mov_r64_imm64(Reg.R10, M.INT64_MIN))
+        self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R10))
+        self._emit_jcc(COND_NE, ok)
+        self._emit_int_overflow_trap_block(op, trap, ok)
 
     def _emit_strcmp(self, l, r, op: str) -> bool:
         """`l == r` / `l != r` on two STRINGS as `strcmp(l, r) == 0`.
@@ -10262,11 +10318,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         is, is `model.division_floors` — the same decision arm64 asks, so the
         two machines cannot answer one dividing program from two notions of
         Python's integer division."""
-        signed = cmp_signed(common_type(self._ttype(e.left),
-                                        self._ttype(e.right)))
+        result_t = common_type(self._ttype(e.left),
+                               self._ttype(e.right))
+        signed = cmp_signed(result_t)
+        folded_left = M.fold_literal_expr(e.left)
         folded_right = M.fold_literal_expr(e.right)
         reason = M.division_overflow_refusal(
-            M.fold_literal_expr(e.left), folded_right,
+            folded_left, folded_right,
             op if op != "/" else "//", [e.left, e.right])
         if reason:
             raise CodegenError(reason)
@@ -10276,6 +10334,26 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # same unfollowable-call shape arm64's `bl fflush` is.
         # `model.division_needs_zero_guard` is the shared decision.
         needs_guard = M.division_needs_zero_guard(folded_right)
+        # `model.int_overflow_traps`'s run-time half for `//`, the shape the
+        # `+`/`-`/`*` ALU arm landed for (2026-11-02): the build-time half is
+        # `division_overflow_refusal` above, and when THAT has just decided the
+        # pair the plain `IDIV` below stays the byte-identical emission — a
+        # folded case never carries the check. The run-time half fires when the
+        # build cannot decide, and on THIS machine it is a PRE-check rather
+        # than the `JO` the ALU arm reads, for the reason the ALU arm's own
+        # refusal comment gives: `IDIV` of `INT64_MIN, -1` raises `#DE` and
+        # the image dies on SIGFPE (measured) before any flag exists to read,
+        # and arm64's `SDIV` leaves no flag that names the case either, so the
+        # one check BOTH backends emit is the sentinel over the two operands,
+        # in the trap rather than in a wider word. `model.
+        # division_needs_overflow_precheck` adds the sentinel's deadness — the
+        # taken arm is the trap's own exit, the same cost the zero guard above
+        # refuses to pay for a divisor that cannot be zero, and a `// 4` image
+        # carrying a dead sentinel re-puts the universal theorem behind the
+        # two-calls rule.
+        checked = (M.int_overflow_traps(op, result_t)
+                   and M.division_needs_overflow_precheck(
+                       folded_left, folded_right))
         self._if_counter += 1
         cid = self._if_counter
         fn = self.func_name
@@ -10290,6 +10368,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self.asm.emit(encode_test_r64_r64(Reg.R11, Reg.R11))
             self._record_cond_branch()
             self._emit_jcc(COND_E, div0_label)
+        if checked:
+            # `checked` implies `signed` (the predicate asks the RESULT type),
+            # so the divide below is the `IDIV` the pre-check protects.
+            self._emit_int_overflow_precheck(op)
         if signed:
             if op != "%":
                 # Check for INT64_MIN / -1 overflow (only for division)

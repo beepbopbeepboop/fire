@@ -2014,8 +2014,9 @@ def test_no_unclassified_stdlib_name_is_imported_by_anything(tmpdir, _shared):
           "names are in no tier, so this row is about the names in no tier "
           "only if there are many of them")
     roots = [(HERE, "this repository")]
-    stdlib = os.path.join(HERE, "..", "new-modular", "Mojo", "stdlib", "std")
-    if os.path.isdir(stdlib):
+    from module_loader import STDLIB_PATH
+    stdlib = os.path.join(STDLIB_PATH, "std") if STDLIB_PATH else None
+    if stdlib and os.path.isdir(stdlib):
         roots.append((stdlib, "the stdlib"))
     consumers = []
     scanned = 0
@@ -5278,8 +5279,7 @@ def test_a_dead_import_is_not_a_wall_this_tree_has_to_climb(tmpdir, _shared):
     straight back on the wall with nothing failing here.
     """
     root = HERE
-    stdlib = os.environ.get("MOJO_STDLIB") or os.path.join(
-        os.path.dirname(HERE), "new-modular", "Mojo", "stdlib", "std")
+    stdlib = os.environ.get("MOJO_STDLIB") or (os.environ.get("MOJO_STDLIB") or os.path.join(STDLIB_PATH, "std") if STDLIB_PATH else os.path.join(os.path.dirname(os.path.dirname(HERE)), "modular", "mojo", "stdlib", "std"))
 
     def closure_unresolved(path):
         seen, stack, out = set(), [path], set()
@@ -5383,8 +5383,7 @@ def test_a_memo_replaces_the_decorator_the_corpus_cannot_climb(tmpdir, _shared):
          regression in every caller.
     """
     root = HERE
-    stdlib = os.environ.get("MOJO_STDLIB") or os.path.join(
-        os.path.dirname(HERE), "new-modular", "Mojo", "stdlib", "std")
+    stdlib = os.environ.get("MOJO_STDLIB") or (os.environ.get("MOJO_STDLIB") or os.path.join(STDLIB_PATH, "std") if STDLIB_PATH else os.path.join(os.path.dirname(os.path.dirname(HERE)), "modular", "mojo", "stdlib", "std"))
 
     def closure_unresolved(path):
         seen, stack, out = set(), [path], set()

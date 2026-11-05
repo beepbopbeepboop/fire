@@ -6584,6 +6584,11 @@ def _lower_external_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # diff still pinpointing this exact line.
             gen.func_param_types[cname] = [_as_str(_ap[0]) for _ap in arg_pairs]
 
+    if cname == 'clock_gettime' and len(arg_pairs) >= 2:
+        at, av = arg_pairs[1]
+        arg_pairs = [(arg_pairs[0][0], arg_pairs[0][1]), ('struct timespec *', f'(struct timespec *){av}')]
+    if cname == 'clock_gettime_nsec_np' and len(arg_pairs) >= 1:
+        pass  # signature should be fine from headers
     if ret_ct == 'void':
         gen._emit_call('', '', cname, arg_pairs)
         t = gen._new_temp('int')

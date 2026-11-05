@@ -62,7 +62,7 @@ import fire_compiler as F
 
 STDLIB = pathlib.Path(
     os.environ.get("MOJO_STDLIB")
-    or (pathlib.Path(HERE).parent / "new-modular" / "Mojo" / "stdlib")
+    or (pathlib.Path(HERE).parent / "modular" / "Mojo" / "stdlib")
 ).resolve()
 
 # The six refusals a 46-file `std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu}`

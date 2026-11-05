@@ -233,8 +233,17 @@ def _check_no_value_shadow(src: str, type_params) -> None:
         # <inner>.Element`, which is exactly what the substituted annotation
         # should read. A real statement-level `var T` / `for T` is followed
         # by `=`, `in`, or end-of-line, never `.`.
-        if re.search(rf'\b(?:var|for)\s+{e}\b(?!\s*\.)', src) or \
-           re.search(rf'(?m)^\s*{e}\s*=(?!=)', src):
+        var_for_binding = re.search(rf'\b(?:var|for)\s+{e}\b(?!\s*\.)', src)
+        assignment_binding = re.search(rf'(?m)^\s*{e}\s*=(?!=)', src)
+        # An `identifier = ...` line inside a braced constructor/call literal
+        # (e.g. `length = end - start,` in `return { ... }`) is a keyword-
+        # argument label, not a binding; the substitution pass skips labels.
+        if assignment_binding is not None:
+            pos = assignment_binding.start()
+            depth = src[:pos].count('{') - src[:pos].count('}')
+            if depth > 0:
+                assignment_binding = None
+        if var_for_binding or assignment_binding:
             raise ValueError(
                 f"monomorphize: type parameter {tp!r} is used as a value/binding "
                 f"name; cannot textually instantiate this template")
@@ -979,6 +988,13 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
     see bugs/CODEGEN_comptime_bracket_parametrized_function_calls_
     silently_wrong.md's test_tracing.mojo analysis)."""
     gcc = gcc or find_gcc()
+    # Check where clause constraints before instantiation
+    try:
+        import elaborate as _elab
+        _elab.check_where_clauses('', template_src, type_args or {})
+    except Exception as e:
+        if 'ConformanceError' in str(type(e)) or getattr(e, '__class__', None) and 'Conformance' in e.__class__.__name__:
+            raise
     mangled, concrete = monomorphize_source(template_src, type_args)
     # A nested generic-struct TYPE ARGUMENT (a mention like `_ListIter[True,
     # Int, ...]` substituted for the template's parameter) does not resolve in

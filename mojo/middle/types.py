@@ -1023,7 +1023,7 @@ def dispatch_table_global_ctype(name) -> str | None:
     function nor its callers may be "simplified" into either."""
     return _DISPATCH_TABLE_GLOBAL_CTYPES.get(name)
 
-_SCALAR_CTORS = {'Float32': 'float', 'Float64': 'double', 'Float16': '__fp16', 'BFloat16': '__fp16', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Int': 'int64_t', 'UInt': 'uint64_t', 'Bool': '_Bool'}
+_SCALAR_CTORS = {'Float32': 'float', 'Float64': 'double', 'Float16': '__fp16', 'BFloat16': '__fp16', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Int': 'int64_t', 'UInt': 'uint64_t', 'Bool': '_Bool', 'socklen_t': 'uint32_t'}
 _STR_WRAPPER_CTORS = frozenset({'StringSlice', 'StaticString'})
 
 def _split_top_level_commas(s: str) -> list[str]:
@@ -1348,7 +1348,11 @@ def _mojo_type(ann: str | type | None) -> str:
             if 'Self.' not in inner:
                 return _tuple_cname(inner)
             return 'int64_t'
-        if base in ('Span', 'StringSlice'):
+        # `ImmSpan` / `MutSpan` are the stdlib's aliases of `Span` with the
+        # origin mutability fixed (std/collections/span.mojo); left out, a
+        # parameter `digits: ImmSpan[Byte, _]` was an untyped word and
+        # `for b in digits` lowered to a runtime dict walk.
+        if base in ('Span', 'ImmSpan', 'MutSpan', 'StringSlice'):
             return 'Span *'
         if base == 'Optional':
             return _mojo_type(_split_top_level_commas(inner)[0].strip())

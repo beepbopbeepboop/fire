@@ -92,14 +92,14 @@ discarded.
 THE STDLIB IS ONLY EVER READ
 ----------------------------
 The copy is under `.tmp/chain-probe` and is rewritten every run; the real
-`../new-modular/Mojo/stdlib` is never written to. `MOJO_STDLIB` points the copy
+`../new-modular/mojo/stdlib` is never written to. `MOJO_STDLIB` points the copy
 for the builds, which is the same switch `module_loader.py` reads, so the chain
 is walked against a stdlib and not against a mixture of two.
 
     python3 tools/memslot.py --gb 8 --label chain -- \
         python3 tools/formal_chain_probe.py 9 arm64 \
-        ../new-modular/Mojo/stdlib/std/os \
-        ../new-modular/Mojo/stdlib/std/sys
+        ../new-modular/mojo/stdlib/std/os \
+        ../new-modular/mojo/stdlib/std/sys
 
 Exit 0 unless a build CRASHED the backend, which is a finding about this tree
 rather than about the chain (`formal_sweep.py`'s own `backend-crash` class), and
@@ -271,7 +271,7 @@ def _resolve_module(name, importer, probe):
     **A path outside `probe` is None**, and that is a safety property rather
     than a tidiness one. The resolver is pointed at the real stdlib by
     `MOJO_STDLIB`, which this process sets for its BUILDS and not for itself, so
-    an unfiltered answer names a file in `../new-modular/Mojo/stdlib` — which
+    an unfiltered answer names a file in `../new-modular/mojo/stdlib` — which
     exists, so a naive `is_file()` check passes, and the next thing the tool does
     is `write_text` over it. This module's contract is that the real stdlib is
     only ever read, so a resolution the walk may not act on is discarded here and
@@ -404,14 +404,14 @@ def main() -> int:
     ap.add_argument("--stdlib", default=None, metavar="PATH",
                     help="stdlib root to copy and rewrite (default: the "
                          "checkout module_loader finds, i.e. MOJO_STDLIB or "
-                         "../new-modular/Mojo/stdlib)")
+                         "../new-modular/mojo/stdlib)")
     ap.add_argument("paths", nargs="*",
                     help="files or directories to measure (default: this "
                          "repository's own *.py and *.mojo)")
     args = ap.parse_args()
 
     stdlib = pathlib.Path(args.stdlib or os.environ.get("MOJO_STDLIB")
-                          or (HERE.parent / "new-modular" / "Mojo"
+                          or (HERE.parent / "modular" / "Mojo"
                               / "stdlib")).resolve()
     if not stdlib.is_dir():
         raise SystemExit(f"no stdlib at {stdlib}; pass --stdlib PATH")

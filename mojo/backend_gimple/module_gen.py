@@ -3766,7 +3766,7 @@ def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) ->
             if isinstance(_rb_s, StructDef):
                 continue  # direct decorated classes/structs at module level are handled separately
             for _rb_d in _gmi_scope_defs([_rb_s]):
-                if isinstance(_rb_d, FunctionDef):
+                if isinstance(_rb_d, (FunctionDef, StructDef)):
                     for _rb_dec in _rb_d.decorators or []:
                         if _gmi_is_rebindable(self, _rb_dec, _rb_scope, _rb_d.name):
                             raise RuntimeError(
@@ -5812,6 +5812,12 @@ def gen_module_impl(self, stmts: list):
             '_filename': 'char *',
             '_pending_decs': 'MojoList *',
             '_known_traits': 'MojoSet *',
+            # Both are assigned in `Parser.__init__` (fire_compiler.py) and
+            # declared at class level, so a hardcoded layout that omits them
+            # makes gcc reject every access: `'Parser' has no member named
+            # '_comptime_rhs_failures'` / `'_struct_param_names'`.
+            '_comptime_rhs_failures': 'MojoList *',
+            '_struct_param_names': 'MojoList *',
             # NOT `_CONV_KWS`: that is a CLASS-level constant
             # (`Parser._CONV_KWS = {...}`, fire_compiler.py), not an instance
             # field. Listing it here made `self._CONV_KWS` read this
@@ -5895,28 +5901,40 @@ def gen_module_impl(self, stmts: list):
             'func': 'int64_t',
             'args': 'MojoList *',
             'kwargs': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
         }
         self.struct_field_types['BinaryOp'] = {
             'op': 'char *',
             'left': 'int64_t',
             'right': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
         }
         self.struct_field_types['CompareChain'] = {
             'operands': 'MojoList *',
             'ops': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
         }
         self.struct_field_types['UnaryOp'] = {
             'op': 'char *',
             'operand': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
         }
         self.struct_field_types['TernaryExpr'] = {
             'condition': 'int64_t',
             'then_val': 'int64_t',
             'else_val': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
         }
         self.struct_field_types['MemberExpr'] = {
             'obj': 'int64_t',
             'member': 'char *',
+        'line': 'int64_t',
+        'col': 'int64_t',
         }
         self.struct_boxed_fields['CallExpr'] = {'func'}
         self.struct_boxed_fields['BinaryOp'] = {'left', 'right'}
@@ -5934,11 +5952,15 @@ def gen_module_impl(self, stmts: list):
         'then_body': 'MojoList *',
         'elifs': 'MojoList *',
         'else_body': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['WhileStmt'] = {
         'condition': 'int64_t',
         'body': 'MojoList *',
         'else_body': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['ForStmt'] = {
         'target': 'int64_t',
@@ -5946,6 +5968,8 @@ def gen_module_impl(self, stmts: list):
         'body': 'MojoList *',
         'else_body': 'MojoList *',
         'is_async': '_Bool',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['FunctionDef'] = {
         'name': 'char *',
@@ -5974,9 +5998,13 @@ def gen_module_impl(self, stmts: list):
         # is — it is a real Python bool on the dataclass.
         'captures': 'MojoList *',
         'has_capture_list': '_Bool',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['ExprStmt'] = {
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['AssignStmt'] = {
         'target': 'int64_t',
@@ -5989,68 +6017,99 @@ def gen_module_impl(self, stmts: list):
         'target': 'int64_t',
         'op': 'char *',
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['ReturnStmt'] = {
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['VarDecl'] = {
         'name': 'char *',
         'type_ann': 'int64_t',
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['MultiAssignStmt'] = {
         'targets': 'MojoList *',
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
-    self.struct_field_types['BreakStmt'] = {}
-    self.struct_field_types['ContinueStmt'] = {}
-    self.struct_field_types['PassStmt'] = {}
+    self.struct_field_types['BreakStmt'] = {'line': 'int64_t', 'col': 'int64_t'}
+    self.struct_field_types['ContinueStmt'] = {'line': 'int64_t', 'col': 'int64_t'}
+    self.struct_field_types['PassStmt'] = {'line': 'int64_t', 'col': 'int64_t'}
     self.struct_field_types['AssertStmt'] = {
         'value': 'int64_t',
         'msg': 'int64_t',
         'is_comptime': '_Bool',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['RaiseStmt'] = {
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['TryStmt'] = {
         'body': 'MojoList *',
         'handlers': 'MojoList *',
         'else_body': 'MojoList *',
         'finally_body': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['WithStmt'] = {
         'items': 'MojoList *',
         'body': 'MojoList *',
         'is_async': '_Bool',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['ImportStmt'] = {
         'module': 'char *',
         'alias': 'char *',
         'extra': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
+        'decorators': 'MojoList *',
     }
     self.struct_field_types['FromImportStmt'] = {
         'module': 'char *',
         'names': 'MojoList *',
         'wildcard': '_Bool',
+        'line': 'int64_t',
+        'col': 'int64_t',
+        'name_alias_strs': 'MojoList *',
+        'decorators': 'MojoList *',
     }
     self.struct_field_types['ComptimeIfStmt'] = {
         'condition': 'int64_t',
         'then_body': 'MojoList *',
         'elifs': 'MojoList *',
         'else_body': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['ComptimeForStmt'] = {
         'target': 'char *',
         'iterable': 'int64_t',
         'body': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['ComptimeVarStmt'] = {
         'target': 'char *',
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['GlobalStmt'] = {
         'names': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     # `NonlocalStmt` / `DottedLiteral` were missing from this table, so every
     # `isinstance(x, NonlocalStmt)` in the compiled compiler lowered to the
@@ -6059,16 +6118,24 @@ def gen_module_impl(self, stmts: list):
     # read its captured cell by value.
     self.struct_field_types['NonlocalStmt'] = {
         'names': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['DottedLiteral'] = {
         'path': 'char *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['DelStmt'] = {
         'targets': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['MatchStmt'] = {
         'subject': 'int64_t',
         'cases': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     # `MatchCase` must be registered (and `MatchStmt.cases`'s element type
     # seeded below) or `for i, match_case in enumerate(node.cases):` binds
@@ -6087,17 +6154,27 @@ def gen_module_impl(self, stmts: list):
     self.struct_field_types['LambdaExpr'] = {
         'params': 'MojoList *',
         'body': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
+        'param_types': 'MojoList *',
+        'return_type': 'int64_t',
+        'comptime_params': 'MojoList *',
+        'captures': 'char *',
     }
     self.struct_field_types['SubscriptExpr'] = {
         'obj': 'int64_t',
         'index': 'int64_t',
         'attrs': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['SliceExpr'] = {
         'obj': 'int64_t',
         'start': 'int64_t',
         'stop': 'int64_t',
         'step': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     # `value`, NOT the long-gone `key`: the dataclass declares (kind, element,
     # value, generators, line, col) and this seed fixes the field ORDER of the
@@ -6109,6 +6186,8 @@ def gen_module_impl(self, stmts: list):
         'element': 'int64_t',
         'value': 'int64_t',
         'generators': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     # `Generator` (fire_compiler.py) — the comprehension's per-`for`-clause
     # node (`target`/`iterable`/`conditions`), and the struct
@@ -6132,86 +6211,111 @@ def gen_module_impl(self, stmts: list):
     }
     self.struct_field_types['IdentExpr'] = {
         'name': 'char *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['IntLiteral'] = {
         'value': 'int64_t', 'line': 'int64_t', 'col': 'int64_t', 'raw': 'char *',
     }
     self.struct_field_types['FloatLiteral'] = {
         'value': 'double',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['BoolLiteral'] = {
         'value': '_Bool',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
-    self.struct_field_types['EllipsisLiteral'] = {}
-    self.struct_field_types['NoneLiteral'] = {}
+    self.struct_field_types['EllipsisLiteral'] = {'line': 'int64_t', 'col': 'int64_t'}
+    self.struct_field_types['NoneLiteral'] = {'line': 'int64_t', 'col': 'int64_t'}
     self.struct_field_types['StringLiteral'] = {
         'value': 'char *',
         # `line`/`col` must stay in the seed AHEAD of `is_bytes`: the
         # reflection repr iterates `struct_field_types` in insertion order
         # and the later self-host augmentation appends any missing dataclass
         # fields, so the seed has to remain a PREFIX of
-        # `StringLiteral(value, line, col, is_bytes, is_raw)` or the native
-        # repr emits `value, is_bytes, line, col` and every file with a
-        # string literal diverges from the reference (64 `.ast` diffs).
-        # `is_raw` is appended at the END for the same reason: it was added
-        # after `is_bytes` (it records an `r` prefix, so
-        # `_strip_string_prefix_and_quotes` no longer carries it), and putting
-        # it anywhere else would reorder the fields the prefix rule protects.
+        # `StringLiteral(value, line, col, is_bytes, is_raw, ...)` or the
+        # native repr emits fields in the wrong order and `.ast` dumps diverge.
+        # `is_raw` and the interpolation flags are appended at the END.
         'line': 'int64_t',
         'col': 'int64_t',
         'is_bytes': '_Bool',
         'is_raw': '_Bool',
+        'is_interpolated': '_Bool',
+        'is_tstring': '_Bool',
     }
     self.struct_field_types['TstringLiteral'] = {
         'value': 'char *',
     }
     self.struct_field_types['ImagLiteral'] = {
         'value': 'double',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['TupleLiteral'] = {
         'elements': 'MojoList *',
     }
     self.struct_field_types['TupleExpr'] = {
         'elements': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['ListLiteral'] = {
         'elements': 'MojoList *',
     }
     self.struct_field_types['ListExpr'] = {
         'elements': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['SetLiteral'] = {
         'elements': 'MojoList *',
     }
     self.struct_field_types['SetExpr'] = {
         'elements': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['DictLiteral'] = {
         'pairs': 'MojoList *',
     }
     self.struct_field_types['DictExpr'] = {
         'pairs': 'MojoList *',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['WalrusExpr'] = {
         'name': 'char *', 'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['YieldExpr'] = {
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['YieldFromExpr'] = {
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['AwaitExpr'] = {
         'value': 'int64_t',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['StructDef'] = {
         'name': 'char *', 'fields': 'MojoList *', 'methods': 'MojoList *',
         'decorators': 'MojoList *', 'comptime_aliases': 'MojoDict *',
         'bases': 'MojoList *', 'line': 'int64_t', 'col': 'int64_t',
         '_fieldwise_ctor_synthesized': '_Bool',
+        'bracket_params': 'MojoList *',
+        'type_param_names': 'MojoList *',
     }
     self.struct_field_types['TraitDef'] = {
         'name': 'char *', 'methods': 'MojoList *', 'decorators': 'MojoList *',
+        'line': 'int64_t', 'col': 'int64_t',
     }
     self.struct_boxed_fields['IfStmt'] = {'condition'}
     self.struct_boxed_fields['WhileStmt'] = {'condition'}
@@ -6467,7 +6571,7 @@ def gen_module_impl(self, stmts: list):
     # resolves identically — every site runs before the emission loop's
     # module-level comptime registrations, the one write that could change
     # a resolution verdict mid-function).
-    def _flatten_resolved_conditionals(_root_list):
+    def _flatten_resolved_conditionals(_root_list: list) -> list:
         _out = []
         _stack = [(_root_list, 0)]
         while _stack:
@@ -7403,6 +7507,19 @@ def gen_module_impl(self, stmts: list):
                         _ind = f_name in self.struct_field_types[s.name]
                     if f_name not in self.struct_field_types[s.name]:
                         ft = _mojo_type(_as_str(field.type_ann))
+                        # System/POSIX typedefs (time_t, suseconds_t, size_t,
+                        # ...) are spelled in the stdlib as Mojo aliases that
+                        # resolve to widened ints (Scalar[DType.int32] -> int64_t),
+                        # but the real C struct field has the typedef's own width.
+                        # Keep the typedef name as the field's C type so stores
+                        # cast explicitly instead of a non-trivial var_decl.
+                        _ann_bare_sys = _as_str(field.type_ann).strip() if field.type_ann else ''
+                        _SYSTEM_TYPEDEFS = {'time_t', 'suseconds_t', 'size_t', 'ssize_t', 'off_t', 'socklen_t', 'pid_t', 'uid_t', 'gid_t', 'useconds_t', 'clock_t', 'fd_set', 'in_addr_t', 'in_port_t', 'intptr_t', 'uintptr_t', 'intmax_t', 'uintmax_t', 'ptrdiff_t', 'wchar_t', 'wint_t', 'sig_atomic_t', 'nfds_t'}
+                        if _ann_bare_sys in _SYSTEM_TYPEDEFS:
+                            ft = _ann_bare_sys
+                        # linger's real C fields are `int`, not the widened int64.
+                        if _as_str(s.name) == 'linger' and _as_str(field.type_ann).strip() == 'c_int':
+                            ft = 'int'
                         # BUG-2026-014 (box.3d/game): a bare capitalized
                         _fann_s = _as_str(field.type_ann).strip() if field.type_ann else ''
                         # `X | None` / `Optional[X]` on a struct field (very
@@ -9206,7 +9323,7 @@ def gen_module_impl(self, stmts: list):
             if _oid:
                 no_oid = self._struct_method_csym(s.name, m.name, '')
                 bare_guard = _stub_guard_name(no_oid)
-                bare_decl = f"#ifndef {bare_guard}\n#define {bare_guard}\nextern {ret_type} {no_oid} (...);\n#endif"
+                bare_decl = f"#ifndef {bare_guard}\n#define {bare_guard}\nextern {ret_type} {no_oid} ();\n#endif"
                 if bare_decl not in self._elaborated_externs:
                     self._elaborated_externs.append(bare_decl)
 
@@ -9359,7 +9476,7 @@ def gen_module_impl(self, stmts: list):
             # arithmetic, printing `43634604000`.
             from mojo.middle.module_shared import module_qualifier as _gmiq
             _xg_body = (gimple_gen_coro.generator_base_name(
-                            _xg_hfn, _gmiq(self.module_name))
+                            _xg_hfn, _gmiq(_as_str(self.module_name)))
                         + '_body')
             for _xg_pn in _xg_pmap:
                 _xg_ct = _xg_pmap[_xg_pn]
@@ -13697,7 +13814,7 @@ def gen_module_impl(self, stmts: list):
             _ggf_dup._record_home_def_return_type(
                 self, _p3b_raw, _p3b_s.name, inferred)
 
-    def _flatten_resolved_conditionals(_root_list):
+    def _flatten_resolved_conditionals(_root_list: list) -> list:
         _out = []
         _stack = [(_root_list, 0)]
         while _stack:
@@ -15120,13 +15237,19 @@ def gen_module_impl(self, stmts: list):
         '/* Generated by gimple_codegen.py */',
         '/* Compile with: gcc -fgimple -fsyntax-only file.c (uses gcc-15 if available) */',
         '#define USE_PYTHON 1' if self._python_api_needed else '#define USE_PYTHON 0',
+        '#define _MOJO_NO_SOCKET_HEADERS 1',
         '#include <stdint.h>',
         '#include <stdlib.h>',
         '#include <string.h>',
         '#include <math.h>',
+        'extern double copysign(double, double);',
         '#include <stdio.h>',
         '#include <setjmp.h>',
         '#include <dlfcn.h>',
+        '#include <sys/time.h>',
+        '#include <sys/types.h>',
+        'struct linger { int l_onoff; int l_linger; };',
+        '#include <time.h>',
         '#if USE_PYTHON',
         '#include <Python.h>',
         '#endif',
@@ -15475,6 +15598,12 @@ def gen_module_impl(self, stmts: list):
         *([] if ('open' in self.func_return_types or 'open' in self.imported_symbols) else ['void *mojo_open(char *filename, char *mode);']),
         'int64_t int_write (int64_t, char *);',
         'int64_t int_parse_module (int);',
+        # `ImmSpan` / `MutSpan` parameters are `Span *` now, and an extern or
+        # stub prototype naming one precedes the module's own `typedef struct
+        # Span {...}`: without this forward typedef gcc says `unknown type name
+        # 'Span'` (std/base64, string, iterators, string_span). A repeated
+        # typedef of the same type is legal C11.
+        'typedef struct Span Span;',
         '#ifndef _MOJO_UNIMPL_STUBS',
         '#define _MOJO_UNIMPL_STUBS',
         'static char * _ReflectTable_in_dll (int64_t a, int64_t b, char * c) { return (char *)dlsym((void *)b, c); }',
@@ -15582,12 +15711,26 @@ def gen_module_impl(self, stmts: list):
     if self.emit_struct_defs and hasattr(self, 'struct_field_types') and self.struct_field_types:
         parts.append('')
         emitted = set()
+        _system_structs = {
+            'timeval', 'linger', 'timespec', 'timezone',
+            'fd_set', 'rusage', 'rlimit', 'stat', 'stat64', 'dirent', 'dirent64',
+            'msghdr', 'cmsghdr', 'iovec', 'pollfd', 'sigaction', 'sigset_t',
+            'termios', 'winsize', 'passwd', 'group', 'utimbuf', 'tm'
+        }
         max_iterations = len(self.struct_field_types) + 1
         iteration = 0
         while emitted != set(self.struct_field_types.keys()) and iteration < max_iterations:
             iteration += 1
             for struct_name in sorted(self.struct_field_types.keys()):
                 if struct_name in emitted:
+                    continue
+                if struct_name in _system_structs:
+                    emitted.add(struct_name)
+                    self._emitted_structs.add(struct_name)
+                    self._struct_typedef_texts[struct_name] = (
+                        f'typedef struct {struct_name} {struct_name};'
+                    )
+                    parts.append(self._struct_typedef_texts[struct_name])
                     continue
                 fields = _struct_typedef_fields(self, struct_name)
                 dependencies_met = True
@@ -17285,6 +17428,9 @@ def gen_module_impl(self, stmts: list):
             continue
         if _sn in self._LIBC_DECLARED and _sn not in _C_RESERVED_FUNCS:
             continue
+        _system_types_skip = {'time_t', 'suseconds_t', 'size_t', 'ssize_t', 'off_t', 'socklen_t', 'pid_t', 'uid_t', 'gid_t', 'useconds_t', 'clock_t', 'fd_set', 'sa_family_t', 'in_addr_t', 'in_port_t'}
+        if _sn in _system_types_skip or _as_str(sym_name) in _system_types_skip:
+            continue
 
         module = _as_str(sym_info.get('module', ''))
         if module in _stub_only_modules:
@@ -17306,13 +17452,17 @@ def gen_module_impl(self, stmts: list):
         safe = self._func_csym(_as_str(sym_name))
         if 'signature' in sym_info:
             if _sn in _C_RESERVED_FUNCS:
-                ret_type = _as_str(sym_info.get('c_return_type')) or _as_str(sym_info.get('return_type', 'int64_t'))
-                if ret_type and ret_type != 'unknown' and not any(
-                        c in ret_type for c in ('*', ' ', 'int', 'char', 'void', 'float', 'double')):
-                    ret_type = self._resolve_type(ret_type)
-                elif not ret_type or ret_type == 'unknown':
-                    ret_type = 'int64_t'
-                parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
+                _system_types_skip = {'time_t', 'suseconds_t', 'size_t', 'ssize_t', 'off_t', 'socklen_t', 'pid_t', 'uid_t', 'gid_t', 'useconds_t', 'clock_t', 'fd_set', 'sa_family_t', 'in_addr_t', 'in_port_t'}
+                if _sn in _system_types_skip or safe in _system_types_skip:
+                    continue
+                else:
+                    ret_type = _as_str(sym_info.get('c_return_type')) or _as_str(sym_info.get('return_type', 'int64_t'))
+                    if ret_type and ret_type != 'unknown' and not any(
+                            c in ret_type for c in ('*', ' ', 'int', 'char', 'void', 'float', 'double')):
+                        ret_type = self._resolve_type(ret_type)
+                    elif not ret_type or ret_type == 'unknown':
+                        ret_type = 'int64_t'
+                    parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
             else:
                 signature = _as_str(sym_info['signature'])
                 orig_name = sym_info.get('original_name', _sn)
@@ -17365,6 +17515,33 @@ def gen_module_impl(self, stmts: list):
                         else:
                             _sig_ret = 'int64_t'
                         signature = f'{_sig_ret} {safe} ({", ".join(_as_list(_sig_pts))})'
+                # The scan's PARAMETER types are a second inference too: an
+                # unannotated parameter (`def module_qualifier(q)`) is
+                # `int64_t` to the importer's text scan and `char *` to the
+                # definition, which is typed from the body. The mangled name's
+                # overload hash is already computed from the definer's list
+                # (`_overload_suffix` -> `_imported_def_pts`), so name and
+                # extern must not disagree about the very list the name was
+                # hashed from: gcc rejects the unit with `conflicting types
+                # for 'mojo_middle_exprtypes_module_qualifier_d719e0'; have
+                # 'char *(int64_t)'` against the definition's `char *(char *)`,
+                # and every call through the extern then fails too. Only the
+                # DEFINER's committed list counts (`definer_only`): with no
+                # definition in this closure (a dylib link) nothing is written
+                # there and the scan stays the only evidence, as before.
+                # The scan can also DROP parameters (3 scanned, 5 defined for
+                # `user_dunder_repr_call`), so the definer's list replaces the
+                # scan's whole parameter list rather than being matched to it.
+                # Never a variadic.
+                if (sym_info.get('parameters') or sym_info.get('c_parameters')) \
+                        and not sym_info.get('variadic'):
+                    _def_pts = _ggf_dup._imported_def_pts(self, _sn, True)
+                    if _def_pts:
+                        _m_sig = re.match(r'^(.*?\b' + re.escape(safe) + r'\s*)\(.*\)\s*$',
+                                          signature)
+                        if _m_sig:
+                            signature = (_m_sig.group(1) + '('
+                                         + ', '.join(_as_list(_def_pts)) + ')')
                 if signature.startswith('MojoTuple_'):
                     # Part 4 (measured 2026-10-21 integration, `split`'s
                     # `-> Tuple[String, String]`): the scanned/resolved
@@ -17504,7 +17681,14 @@ def gen_module_impl(self, stmts: list):
                         "extern int64_t PythonObject (int64_t, ...);  /* from std.python: named dummy = fire_runtime's definition */\n"
                         "#endif")
                 else:
-                    parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
+                    _system_types_skip = {'time_t', 'suseconds_t', 'size_t', 'ssize_t', 'off_t', 'socklen_t', 'pid_t', 'uid_t', 'gid_t', 'useconds_t', 'clock_t', 'fd_set', 'sa_family_t', 'in_addr_t', 'in_port_t',
+                                         'intptr_t', 'uintptr_t', 'intmax_t', 'uintmax_t', 'ptrdiff_t',
+                                         'wchar_t', 'wint_t', 'sig_atomic_t'}
+                    if safe in _system_types_skip or _sn in _system_types_skip:
+                        continue
+                        pass
+                    else:
+                        parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
 
     if self.imported_symbols:
         parts.append('')
