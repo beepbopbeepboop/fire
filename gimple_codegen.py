@@ -6557,10 +6557,63 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
         pass
     try:
         for _c in ('_SELFHOST_FUNC_RETURN_TYPES', '_SELFHOST_PARAM_TYPES',
-                   '_SELFHOST_GG_CACHE'):
+                   '_SELFHOST_GG_CACHE', '_compile_cache'):
             _v = globals().get(_c, None)
             if isinstance(_v, (dict, list, set)):
                 try: _v.clear()
+                except Exception: pass
+    except Exception:
+        pass
+    # Clear remaining module-level caches/accumulators (coro, types, monomorphize,
+    # loops_shared, etc.) so they do not survive past the compile boundary (next step).
+    try:
+        import mojo.middle.coro as _coro2
+        for _c in ('_GEN_VALUE_KINDS', '_GEN_DEFS', '_PARAM_NAMES',
+                   '_CALLSITE_PARAM_KINDS', '_PLAIN_CALLSITE_PARAM_KINDS',
+                   '_CALLSITE_PARAM_CONFLICTS', '_TASK_VARS', '_ASYNC_METHOD_NAMES',
+                   '_ASYNC_FN_NAMES', '_STRUCT_NAMES',
+                   '_UNTHREADABLE_NESTED_ASYNC_GENS', '_NATIVE_FUTURE_CLASSES',
+                   '_NO_WD_FORWARD', '_VALUE_USED_FUNCS', '_FUNC_RET_KIND',
+                   '_MODULE_FUNC_NAMES', '_GEN_RESOLVING', '_GEN_REC_ASSUME'):
+            _v = getattr(_coro2, _c, None)
+            if isinstance(_v, (dict, list, set)):
+                try: _v.clear()
+                except Exception: pass
+    except Exception:
+        pass
+    try:
+        import mojo.middle.types as _ty2
+        for _c in ('_overload_hash_registry', '_MODULE_ATTR_CTYPES'):
+            _v = getattr(_ty2, _c, None)
+            if isinstance(_v, (dict, list, set)):
+                try: _v.clear()
+                except Exception: pass
+    except Exception:
+        pass
+    try:
+        import monomorphize as _mono
+        _v = getattr(_mono, '_IN_PROGRESS', None)
+        if isinstance(_v, (dict, list, set)):
+            try: _v.clear()
+            except Exception: pass
+    except Exception:
+        pass
+    try:
+        import mojo.middle.loops_shared as _ls
+        _v = getattr(_ls, '_LOOP_ELSE_COUNTER', None)
+        if isinstance(_v, (list,)):
+            try:
+                if _v:
+                    _v[0] = 0
+            except Exception: pass
+    except Exception:
+        pass
+    # Clear per-instance accumulators on the returned generator.
+    try:
+        for _attr in list(getattr(gen, '__dict__', {}).keys()):
+            _val = getattr(gen, _attr, None)
+            if isinstance(_val, (dict, list, set)) and _attr.startswith('_'):
+                try: _val.clear()
                 except Exception: pass
     except Exception:
         pass
