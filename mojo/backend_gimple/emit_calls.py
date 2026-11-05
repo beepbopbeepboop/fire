@@ -3419,6 +3419,21 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         at, av = gen.lower_expr(node.args[0])
         av64 = av if at == 'int64_t' else gen._new_val('int64_t', f'(int64_t){av}')
         return 'char *', gen._call_expr('char *', 'mojo_chr', [('int64_t', av64)])
+    # `_floor` is defined generically over `SIMD`, so a call on a scalar
+    # argument (a `Scalar`/float word, not a `SIMD *`) reaches the generic
+    # lowering as a pointer cast of a non-pointer value — \"cannot convert to
+    # a pointer type\". Bridge scalars to C's `floor` directly. (stdlib
+    # std/simd.mojo `_powf_scalar` is the trigger.)
+    if fname_raw == '_floor' and len(node.args) == 1:
+        at, av = gen.lower_expr(node.args[0])
+        _int_types = {'int8_t','uint8_t','int16_t','uint16_t','int32_t','uint32_t','int64_t','uint64_t','int','unsigned','long','size_t','_Bool'}
+        if at in _int_types:
+            return at, av
+        dv = av if at == 'double' else gen._new_val('double', f'(double){av}')
+        if at == 'float':
+            dv = gen._new_val('double', f'(double){av}')
+        res = gen._new_val('double', f'floor({dv})')
+        return 'int64_t', gen._new_val('int64_t', f'(int64_t){res}')
     if fname_raw == 'isinstance'      and len(node.args) == 2:  return gen._lower_builtin_isinstance(node)
     # `_locally_binds_name` gate: a module can define its OWN top-level
     # `any`/`all` (e.g. tokenize.py's `def any(*choices): return
