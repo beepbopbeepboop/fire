@@ -10874,8 +10874,8 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
             and isinstance(call.func, gimple_ctypes.MemberExpr)
             and isinstance(call.func.obj, gimple_ctypes.IdentExpr)
             and call.func.obj.name not in ('self', 'cls')
-            and call.func.obj.name in getattr(gen, '_generator_method_api_keys_by_struct', {}) or
-            any(call.func.obj.name == s for s in getattr(gen, '_generator_method_api', {}).keys())):
+            and (call.func.obj.name in getattr(gen, '_generator_method_api_keys_by_struct', {})
+                 or any(call.func.obj.name == s for s in getattr(gen, '_generator_method_api', {}).keys()))):
         # try to find
         pass
     # simpler: check if calling as ClassName.method() where (ClassName, method) is a generator method

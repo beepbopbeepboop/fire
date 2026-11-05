@@ -2359,11 +2359,11 @@ def _enclosing_scope_with_locals(gen, outer_fn: gimple_ctypes.FunctionDef) -> di
         # (mojo/middle/funcs_shared.py) exposed on the generator, so call
         # it as a method.
         ctype = gen._param_ctype(pname, ptype, outer_fn)
-        if ctype in ('int64_t', 'int', 'double', '_Bool'):
+        if ctype in _GENERATOR_PARAM_CTYPES:
             scope[pname] = ctype
     widened = gen._inferred_var_types.get(outer_fn.name, {})
     for name, ctype in widened.items():
-        if ctype in ('int64_t', 'int', 'double', '_Bool') and name not in scope:
+        if ctype in _GENERATOR_PARAM_CTYPES and name not in scope:
             scope[name] = ctype
     for stmt in outer_fn.body:
         if (isinstance(stmt, gimple_ctypes.VarDecl) and isinstance(stmt.name, str)
