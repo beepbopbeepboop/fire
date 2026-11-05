@@ -2359,7 +2359,12 @@ def _gen_stmt_AssignStmt(gen, node):
             # dict[key] = val → mojo_dict_set_str_* (key coerced via
             # _char_to_cstr, the single dict-key-to-string conversion
             # used by both read and write sides — see its docstring).
-            if it == 'MojoBytes *':
+            if gen._is_none_literal(node.target.index):
+                # `d[None] = v`: the None-key domain, not the integer 0 that
+                # `None` lowers to (see `emit_dict_none_key_store`).
+                ginf.emit_dict_none_key_store(gen, obj_v, vtype, v, node.value)
+                key_tmp = None
+            elif it == 'MojoBytes *':
                 # A bytes KEY is its own key domain in the runtime (see
                 # _DictSlot.keykind), not a char* one: routing it through
                 # _char_to_cstr cast the MojoBytes POINTER to char*, so the
@@ -3810,22 +3815,31 @@ def _gen_stmt_IfStmt(gen, node):
     if _merge_reachable:
         gen._emit_label(bb_merge)
         gen._last_was_terminal = False
-        # Merge flow states: for variables that were None in saved state and
-        # remain None on any path (to support paths where they weren't reassigned),
-        # keep them as None
+        # Merge flow states. A name held in a POINTER local (`char *`, a
+        # container) is known to be None after the join only if it is None at
+        # the end of EVERY path: None is NULL there, so a later `x in d` can
+        # test the pointer at run time, and calling a maybe-None str "None"
+        # lowered the test as a None-membership one (printed False for a str
+        # key that was present). A name in a WORD local (`int64_t`) cannot be
+        # told from 0 at run time, so it stays None when ANY path leaves it
+        # None (the lenient rule; see bugs/hard/CODEGEN_a_none_held...).
         merged = {}
-        if _branch_end_states:
-            # Start with union of all None variables from all paths
-            # (if it was None on some path and not reassigned there, treat as None)
-            for state in _branch_end_states:
-                for k, v in state.items():
-                    if v is True:
+        _vt = getattr(gen, 'var_types', {}) or {}
+        for state in _branch_end_states:
+            for k, v in state.items():
+                if v is not True or k in merged:
+                    continue
+                _ct = _vt.get(k)
+                if isinstance(_ct, str) and _ct.endswith('*'):
+                    if all(st.get(k) is True for st in _branch_end_states):
                         merged[k] = True
-            # Also if a variable was None in saved state and wasn't assigned non-None
-            # in a way that kills it on all paths - but easier to be lenient
-            for k, v in _flow_saved.items():
-                if v is True:
-                    merged[k] = True  # be lenient for join points
+                else:
+                    merged[k] = True
+        for k, v in _flow_saved.items():
+            if v is True and k not in merged:
+                _ct = _vt.get(k)
+                if not (isinstance(_ct, str) and _ct.endswith('*')):
+                    merged[k] = True
         gen._flow_none_state = merged
     else:
         # Every branch returned/jumped — anything the caller emits after

@@ -6424,7 +6424,14 @@ int64_t mojo_strlen(char *s) {
  * byte_offset. */
 int64_t mojo_utf8_codepoint_index(char *s, int64_t byte_offset) {
     int64_t count = 0;
-    for (int64_t i = 0; i < byte_offset; i++)
+    int64_t i = 0;
+    for (; i + 8 <= byte_offset; i += 8) {          /* 8 bytes at a time: all-ASCII blocks */
+        uint64_t w;
+        memcpy(&w, s + i, 8);
+        if (w & 0x8080808080808080ULL) break;
+        count += 8;
+    }
+    for (; i < byte_offset; i++)
         if ((s[i] & 0xC0) != 0x80) count++;
     return count;
 }
@@ -6442,45 +6449,29 @@ int64_t mojo_str_codepoint_len(char *s) {
 int64_t mojo_utf8_codepoint_to_byte_offset(char *s, int64_t cp_idx) {
     if (!s) return 0;
     if (cp_idx <= 0) return 0;
+    int64_t len = (int64_t)strlen(s);
     int64_t byte_off = 0;
     int64_t cp_count = 0;
-    int64_t len = (int64_t)strlen(s);
-    while (byte_off < len && cp_count < cp_idx) {
-        unsigned char c = (unsigned char)s[byte_off];
-        if (c == 0) break;
-        if ((c & 0xC0) != 0x80) {
-            cp_count++;
-            if (cp_count == cp_idx) break;
-        }
-        byte_off++;
+    /* The tokenizer indexes a source string one character at a time, so this
+     * is O(n) per call and O(n^2) per file: skip ASCII 8 bytes at a time (each
+     * such byte is exactly one code point) before the per-byte walk. */
+    while (byte_off + 8 <= len && cp_count + 8 <= cp_idx) {
+        uint64_t w;
+        memcpy(&w, s + byte_off, 8);
+        if (w & 0x8080808080808080ULL) break;
+        byte_off += 8;
+        cp_count += 8;
     }
-    /* Advance past the start byte of the codepoint we just counted */
-    if (cp_count == cp_idx && byte_off < len) {
-        unsigned char c = (unsigned char)s[byte_off];
-        if ((c & 0xC0) != 0x80) {
-            /* This is the start byte of codepoint cp_idx; we need to return its byte offset */
-            /* Count up to but not including this position? Wait - let's trace: when we see
-             * a non-continuation byte and cp_count becomes cp_idx, we break. But byte_off
-             * is pointing at that start byte. So we need to return byte_off. */
-            /* Actually let us compute differently */
-        }
-    }
-    /* Better implementation: iterate and track */
-    byte_off = 0;
-    cp_count = 0;
     while (byte_off < len) {
         unsigned char c = (unsigned char)s[byte_off];
-        if (c == 0) break;
         if ((c & 0xC0) != 0x80) {
-            if (cp_count == cp_idx) {
-                return byte_off;
-            }
+            if (cp_count == cp_idx) return byte_off;
             cp_count++;
         }
         byte_off++;
     }
     /* If past end, return end of string */
-    return (int64_t)strlen(s);
+    return len;
 }
 
 /* Get a codepoint as a string at codepoint index i (not byte index) */
@@ -7550,6 +7541,26 @@ int mojo_dict_contains(MojoDict *d, char *key)
 int mojo_dict_contains_none(MojoDict *d)
 {
     return _dict_lookup_k(d, "", 3) != NULL;
+}
+
+/* Reads of the None-key entry (keykind 3, see `_dict_set_none_key_raw`). A missing entry
+ * answers 0 / NULL exactly as the string-keyed getters do; `None in d` is the presence test. */
+int64_t mojo_dict_get_none_key_int(MojoDict *d)
+{
+    _DictSlot *sl = _dict_lookup_k(d, "", 3);
+    return sl ? sl->val : 0;
+}
+char *mojo_dict_get_none_key_str(MojoDict *d)
+{
+    _DictSlot *sl = _dict_lookup_k(d, "", 3);
+    return sl ? (char *)(uintptr_t)sl->val : NULL;
+}
+double mojo_dict_get_none_key_double(MojoDict *d)
+{
+    _DictSlot *sl = _dict_lookup_k(d, "", 3);
+    double v = 0.0;
+    if (sl) memcpy(&v, &sl->val, sizeof(v));
+    return v;
 }
 
 /* ── bytes-keyed dict access ─────────────────────────────────────────────

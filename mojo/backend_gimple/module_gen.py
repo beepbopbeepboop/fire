@@ -13617,8 +13617,11 @@ def gen_module_impl(self, stmts: list):
             from mojo.middle import closures as _closures
             if not hasattr(self, '_skip_closure_factory_lift'):
                 self._skip_closure_factory_lift = set()
-            for fn in _walk_ast(stmts):
-                if isinstance(fn, FunctionDef):
+            _fns0 = [fn for fn in _walk_ast(stmts) if isinstance(fn, FunctionDef)]
+            # Only a module with a generator/async function takes the coroutine
+            # lift (captures copied by value); see the refusal below.
+            if any(getattr(fn, 'is_generator', False) or getattr(fn, 'is_async', False) for fn in _fns0):
+                for fn in _fns0:
                     if _closures._is_closure_factory_with_nonlocal(fn):
                         self._skip_closure_factory_lift.add(id(fn))
                         self._skip_closure_factory_lift.add(getattr(fn, 'name'))
@@ -13628,8 +13631,13 @@ def gen_module_impl(self, stmts: list):
         # Refuse closure factories with nonlocal in returned closure
         try:
             from mojo.middle import closures as _closures
-            for fn in _walk_ast(stmts):
-                if isinstance(fn, FunctionDef):
+            # Only the coroutine path lifts a factory and copies its captures
+            # by value, which is wrong for a `nonlocal` cell. A plain module
+            # keeps the factory as an ordinary function: its `{mut}` local is
+            # heap-boxed and shared by every call of the returned closure.
+            _fns = [fn for fn in _walk_ast(stmts) if isinstance(fn, FunctionDef)]
+            if any(getattr(fn, 'is_generator', False) or getattr(fn, 'is_async', False) for fn in _fns):
+                for fn in _fns:
                     if _closures._is_closure_factory_with_nonlocal(fn):
                         raise RuntimeError(f"unresolved callee '{fn.name}(...)'")
         except RuntimeError:
@@ -18226,6 +18234,8 @@ def gen_module_impl(self, stmts: list):
                 _mname_s = _as_str(_mname)
                 if getattr(_m, 'is_generator', False) or _mname_s in _gen_meths:
                     continue
+                if _mname_s == '__new__' and _sdcname in getattr(self, '_bytes_subclass_structs', ()):
+                    continue   # handled inline at the construction site; no C function exists
                 if _mname_s.startswith('__') and _mname_s.endswith('__') and _mname_s not in ('__init__', '__new__', '__call__'):
                     continue
                 if _mname_s in _rc_seen:
@@ -18276,6 +18286,8 @@ def gen_module_impl(self, stmts: list):
                 _mname_s = _as_str(_mname)
                 if getattr(_m, 'is_generator', False) or _mname_s in _gen_meths:
                     continue
+                if _mname_s == '__new__' and _sdcname in getattr(self, '_bytes_subclass_structs', ()):
+                    continue   # handled inline at the construction site; no C function exists
                 if _mname_s.startswith('__') and _mname_s.endswith('__') and _mname_s not in ('__init__', '__new__', '__call__'):
                     continue
                 if _mname_s in _me_seen:
