@@ -7318,6 +7318,19 @@ def gen_module_impl(self, stmts: list):
                         _ind = f_name in self.struct_field_types[s.name]
                     if f_name not in self.struct_field_types[s.name]:
                         ft = _mojo_type(_as_str(field.type_ann))
+                        # System/POSIX typedefs (time_t, suseconds_t, size_t,
+                        # ...) are spelled in the stdlib as Mojo aliases that
+                        # resolve to widened ints (Scalar[DType.int32] -> int64_t),
+                        # but the real C struct field has the typedef's own width.
+                        # Keep the typedef name as the field's C type so stores
+                        # cast explicitly instead of a non-trivial var_decl.
+                        _ann_bare_sys = _as_str(field.type_ann).strip() if field.type_ann else ''
+                        _SYSTEM_TYPEDEFS = {'time_t', 'suseconds_t', 'size_t', 'ssize_t', 'off_t', 'socklen_t', 'pid_t', 'uid_t', 'gid_t', 'useconds_t', 'clock_t', 'fd_set', 'in_addr_t', 'in_port_t', 'intptr_t', 'uintptr_t', 'intmax_t', 'uintmax_t', 'ptrdiff_t', 'wchar_t', 'wint_t', 'sig_atomic_t', 'nfds_t'}
+                        if _ann_bare_sys in _SYSTEM_TYPEDEFS:
+                            ft = _ann_bare_sys
+                        # linger's real C fields are `int`, not the widened int64.
+                        if _as_str(s.name) == 'linger' and _as_str(field.type_ann).strip() == 'c_int':
+                            ft = 'int'
                         # BUG-2026-014 (box.3d/game): a bare capitalized
                         _fann_s = _as_str(field.type_ann).strip() if field.type_ann else ''
                         # `X | None` / `Optional[X]` on a struct field (very
@@ -15019,6 +15032,7 @@ def gen_module_impl(self, stmts: list):
         '#include <dlfcn.h>',
         '#include <sys/time.h>',
         '#include <sys/types.h>',
+        'struct linger { int l_onoff; int l_linger; };',
         '#include <time.h>',
         '#if USE_PYTHON',
         '#include <Python.h>',
