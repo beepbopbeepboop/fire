@@ -1698,6 +1698,32 @@ import builtins as _py_builtins
 _PY_BUILTIN_NAMES = frozenset(n for n in dir(_py_builtins) if not n.startswith('_'))
 
 
+_CAST_SCALAR_CTYPES = frozenset({
+    '_Bool', 'int8_t', 'int16_t', 'int32_t', 'int64_t', 'uint8_t', 'uint16_t',
+    'uint32_t', 'uint64_t', 'float', 'double', '__fp16'})
+
+_DTYPE_CAST_CTYPES = {
+    'bool': '_Bool', 'int8': 'int8_t', 'int16': 'int16_t', 'int32': 'int32_t',
+    'int64': 'int64_t', 'uint8': 'uint8_t', 'uint16': 'uint16_t',
+    'uint32': 'uint32_t', 'uint64': 'uint64_t', 'float16': '__fp16',
+    'float32': 'float', 'float64': 'double', 'index': 'int64_t',
+    'uindex': 'uint64_t',
+}
+
+
+def _dtype_cast_ctype(e):
+    """C type named by a dtype bracket argument — `DType.int32` or the
+    dot-relative `.int32` — or None when it is anything else (a parameter, an
+    expression)."""
+    if isinstance(e, gimple_ctypes.DottedLiteral):
+        return _DTYPE_CAST_CTYPES.get(_as_str(e.path))
+    if (isinstance(e, gimple_ctypes.MemberExpr)
+            and isinstance(e.obj, gimple_ctypes.IdentExpr)
+            and _as_str(e.obj.name) == 'DType'):
+        return _DTYPE_CAST_CTYPES.get(_as_str(e.member))
+    return None
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     _dealloc = gen._lower_dealloc_thin_allocation(node)
     if _dealloc is not None:
@@ -2485,6 +2511,24 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                         continue
                 except Exception:
                     pass
+        # `x.cast[DType.int32]()` / `x.cast[.int32]()` on a plain scalar: convert
+        # to the named dtype's C type. The generic method path below echoed the
+        # receiver back with its OWN type, so the cast was a no-op and the
+        # result kept the source width — which then chose the wrong overload
+        # (`readfirstlane(id.cast[.int32]())` picked the pointer overload and
+        # passed a uint64 as `int64_t *`). Only a statically scalar receiver and
+        # a dtype that resolves to a fixed C type; anything else (SIMD, a
+        # dtype that is a parameter) keeps the old path.
+        if (method_name == 'cast' and not node.args and not extra_args
+                and len(elems) == 1 and not _kw_bracket
+                and _recv_ct in _CAST_SCALAR_CTYPES):
+            _cast_target = _dtype_cast_ctype(elems[0])
+            if _cast_target is not None:
+                _cot, _cov = gen.lower_expr(node.func.obj.obj)
+                if _cot == _cast_target:
+                    return _cot, _cov
+                return _cast_target, gen._new_val(
+                    _cast_target, gen._coerce_to_type(_cot, _cast_target, _cov))
         inner = gimple_ctypes.CallExpr(func=node.func.obj, args=list(node.args) + extra_args,
                          kwargs=getattr(node, 'kwargs', []), line=getattr(node, 'line', 0))
         return gen._lower_method_call(inner)

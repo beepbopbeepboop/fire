@@ -1348,7 +1348,11 @@ def _mojo_type(ann: str | type | None) -> str:
             if 'Self.' not in inner:
                 return _tuple_cname(inner)
             return 'int64_t'
-        if base in ('Span', 'StringSlice'):
+        # `ImmSpan` / `MutSpan` are the stdlib's aliases of `Span` with the
+        # origin mutability fixed (std/collections/span.mojo); left out, a
+        # parameter `digits: ImmSpan[Byte, _]` was an untyped word and
+        # `for b in digits` lowered to a runtime dict walk.
+        if base in ('Span', 'ImmSpan', 'MutSpan', 'StringSlice'):
             return 'Span *'
         if base == 'Optional':
             return _mojo_type(_split_top_level_commas(inner)[0].strip())

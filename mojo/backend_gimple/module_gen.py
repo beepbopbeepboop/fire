@@ -15588,6 +15588,12 @@ def gen_module_impl(self, stmts: list):
         *([] if ('open' in self.func_return_types or 'open' in self.imported_symbols) else ['void *mojo_open(char *filename, char *mode);']),
         'int64_t int_write (int64_t, char *);',
         'int64_t int_parse_module (int);',
+        # `ImmSpan` / `MutSpan` parameters are `Span *` now, and an extern or
+        # stub prototype naming one precedes the module's own `typedef struct
+        # Span {...}`: without this forward typedef gcc says `unknown type name
+        # 'Span'` (std/base64, string, iterators, string_span). A repeated
+        # typedef of the same type is legal C11.
+        'typedef struct Span Span;',
         '#ifndef _MOJO_UNIMPL_STUBS',
         '#define _MOJO_UNIMPL_STUBS',
         'static char * _ReflectTable_in_dll (int64_t a, int64_t b, char * c) { return (char *)dlsym((void *)b, c); }',
