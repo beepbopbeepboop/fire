@@ -1648,7 +1648,7 @@ Index a `range()` result rather than measuring it, until that is fixed.
 |---|------|---------|--------------------------|--------------|--------|
 | 1 | ../new-modular/Mojo/stdlib/std/algorithm/backend/tile.mojo | S | build: tile: 'tile_size_list' has no home: this module declares no module-level name by  | new message differs (name-not-found/home) vs variadic ABI | |
 | 2 | ../new-modular/Mojo/stdlib/std/benchmark/compiler.mojo | S | build: compiler.mojo imports 'std.sys._assembly', which cannot be built either: Slice.write | moved to dependency on std.sys._assembly (FormatStruct bare call) | |
-| 3 | ../new-modular/Mojo/stdlib/std/bit/bit.mojo |  | build: log2_floor: `is_negative` is called, and it is imported from `std.bit.mask`, so the call has  |  |  |
+| 3 | ../new-modular/Mojo/stdlib/std/bit/bit.mojo | S | MonomorphError: count_leading_zeros[...] comptime specialization of a FUNCTION template  | different failure (monomorph) vs missing export is_negative | |
 | 4 | ../new-modular/Mojo/stdlib/std/builtin/_format_float.mojo |  | build: _write_float: `isnan` is called, and it is imported from `std.utils.numerics`, so the call ha |  |  |
 | 5 | ../new-modular/Mojo/stdlib/std/builtin/float_literal.mojo |  | build: FloatLiteral___int__: `self.__int_literal__().__int__(…)` cannot be lowered: `self.__int_lite |  |  |
 | 6 | ../new-modular/Mojo/stdlib/std/builtin/len.mojo |  | build: a `...` stands where this path needs instructions to emit, and there are none: a formal image |  |  |
