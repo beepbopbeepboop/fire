@@ -6617,6 +6617,28 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
                 except Exception: pass
     except Exception:
         pass
+    # Clear remaining backend_gimple/middle module-level accumulators (foreign
+    # callables, runtime callable words/values, module member libc, selfhost
+    # extra field cache, mojo elem ctype map) so they do not survive past the
+    # compile boundary (next step).
+    try:
+        for _modname, _names in (
+            ('mojo.backend_gimple.cpp_async', ('_FOREIGN_CALLABLES', '_RUNTIME_CALLABLE_WORDS')),
+            ('mojo.backend_gimple.emit_exprs', ('_RUNTIME_CALLABLE_VALUES_NAMES',)),
+            ('mojo.backend_gimple.emit_methods', ('_MODULE_MEMBER_LIBC',)),
+            ('mojo.backend_gimple.emit_funcs', ('_SELFHOST_EXTRA_FIELD_CACHE',)),
+            ('mojo.middle.calls_shared', ('_RUNTIME_CALLABLE_VALUES',)),
+            ('mojo.middle.iter_factory', ('_MOJO_ELEM_C',)),
+        ):
+            import importlib as _il2
+            _m = _il2.import_module(_modname)
+            for _c in _names:
+                _v = getattr(_m, _c, None)
+                if isinstance(_v, (dict, list, set)):
+                    try: _v.clear()
+                    except Exception: pass
+    except Exception:
+        pass
     return code, gen
 
 

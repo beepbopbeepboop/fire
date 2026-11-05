@@ -229,6 +229,6 @@ Repro re-verified 2026-11-05 (this session): `python3 -m pytest test_bootstrap_r
 
 `python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Repro re-verified after clearing remaining module-level caches.
 
-## Repro check (2026-11-05, next step: clear remaining caches/accumulators after emission)
+## Repro check (2026-11-05, next step: clear remaining backend_gimple/middle accumulators after emission)
 
-`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Remaining module-level caches (coro, types, monomorphize, loops_shared) and per-instance accumulators cleared after emission.
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Remaining backend_gimple/middle accumulators (foreign callables, runtime callable words/values, module member libc, selfhost extra field cache, mojo elem ctype) cleared after emission.
