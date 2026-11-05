@@ -1,5 +1,9 @@
 ## Status 2026-11-05 — repro run on this tree (next step)
 
+Ran `python3 fire.py build` on `.tmp/ca/c_analyzer/__main__.py`; build failed fast (exit 1) with the documented refusals: `fmt_summary`: unresolved callee `section(...)`; `section`: nested generator reading enclosing-scope `items` with no capture model. Imported-module cascade (clsutil/iterutil/fsutil/strutil/tables/info/parser) also present. No code change this round; capture-model lane remains blocked on container capture + directly-called nested generator claim.
+
+## Status 2026-11-05 — repro run on this tree (next step)
+
 Ran `python3 fire.py build` on `.tmp/ca/c_analyzer/__main__.py`; build did not complete within timeout, emitted imported-module cascade (clsutil/iterutil/fsutil/strutil/tables/info/parser), consistent with documented floor. No code change this round; capture-model lane remains blocked on nested-generator claim.
 
 ## Status 2026-11-05 — repro run on this tree
