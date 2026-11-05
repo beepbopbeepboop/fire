@@ -1262,7 +1262,7 @@ def test_the_reduce_shape_runs_on_both_architectures(tmpdir):
 
     The host-module doc's census says `reduce` is "two small steps from
     writable" and names the second step — `len(seq)` over a list PARAMETER — as
-    the one `bugs/formal/FORMAL_len_of_a_list_parameter_is_refused_though_the_same_
+    the one `bugs/FORMAL_len_of_a_list_parameter_is_refused_though_the_same_
     parameter_subscripts.md` owned.  That step landed
     (`formal/model.py::parameter_kinds_by_call_site`), so this row is what the
     claim is now measured by: a two-argument call through an unannotated
@@ -1292,7 +1292,7 @@ def test_a_specialization_through_a_value_runs_on_both_architectures(tmpdir):
     """THE ROW: `workgroup_function[tile_size](offset)`, both machines, CPython.
 
     `std/algorithm/backend/tile.mojo:83`, and the shape the 163-file chain in
-    the `b9` round of `bugs/formal/FORMAL_sweep_work_map.md` §4.1 lands on: a
+    the `b9` round of `bugs/FORMAL_sweep_work_map.md` §4.1 lands on: a
     specialization whose CALLEE is a word. Three things have to be true at once
     and none of them is implied by the other two, which is why this is one case
     and not three:

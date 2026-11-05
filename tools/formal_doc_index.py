@@ -217,9 +217,8 @@ def rows():
     """[(name, area, runner_up, how, claimed_by, title)] — sorted."""
     claims = live_claims()
     out = []
-    # the formal documents live in bugs/formal/ (moved there 2026-10-31); the index reads both places
+    # the formal documents live in bugs/ (moved there 2026-10-31); all in one directory
     entries = [(n, os.path.join(BUGS, n)) for n in os.listdir(BUGS)]
-    entries += [(n, os.path.join(BUGS, 'formal', n)) for n in os.listdir(os.path.join(BUGS, 'formal'))]
     for name, path in sorted(entries):
         if not name.endswith('.md') or name == 'OPEN_WORK.md':
             continue

@@ -1483,7 +1483,7 @@ def _init_store_is_redundant(value, placed_struct: str) -> bool:
         a different struct is a different value, and dropping it would leave the
         field holding the declared type's frame while the source put another
         one there — the two can share a field count and a field list, which is
-        exactly `bugs/formal/FORMAL_declared_parameter_against_its_call_sites.md`'s
+        exactly `bugs/FORMAL_declared_parameter_against_its_call_sites.md`'s
         subject, so "the layout happens to match" is not available as a test.
         `assigned_type_a_declaration_still_wins` is the program that measures
         it: `Outer` declares `var in1: Inner` and `__init__` assigns
@@ -2452,7 +2452,7 @@ def keyword_spread_refusal(subject: str, operand: str) -> str:
     in that caller's own terms — `constructing P`, `call f()` — because the two
     sites that raise it are different constructs and a message that named the
     wrong one would send the reader to the wrong line, which is the failure mode
-    `bugs/formal/FORMAL_known_limits.md` records.
+    `bugs/FORMAL_known_limits.md` records.
 
     ARCH-FREE and asked from the shared plan (`struct_construction_plan`), which
     is where the false sentence it replaces was produced.
@@ -3154,7 +3154,7 @@ def _callee_container_evidence(arg, rets=None, struct_def=None):
     # `call_callee_name`, NOT `isinstance(arg.func, F.IdentExpr)`. It is the
     # tree's one reader of "which function does this call name", and a comptime
     # SPECIALIZATION `f[a]` names the same function as its bare twin —
-    # which is the whole content of `bugs/formal/FORMAL_a_specialization_defeats_the_
+    # which is the whole content of `bugs/FORMAL_a_specialization_defeats_the_
     # frame_escape_refusals.md`, in a reader that decides a REPRESENTATION.
     #
     # Measured here, and it was the permissive direction, which is the expensive

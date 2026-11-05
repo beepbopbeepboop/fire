@@ -1190,9 +1190,14 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                         gen._link_needs_cxx = True
                         gen._link_needs_cxx_box[0] = True
 
-                # Per-module AST lifetime fix: do not retain module ASTs in
-                # _module_stmts; only add to the flattened ordered list for
-                # reconciliation. The module ASTs are not needed after emission.
+                # Store parsed stmts for this module so parent gens can access them
+                gen._module_stmts[module_name] = stmts
+                # Incrementally extend the flat, pre-deduped mirror (see
+                # the `_walk_ast` re-scan bug
+                # Phase 1) — O(this module's own stmt count), done once
+                # per module ever, instead of leaving every ancestor
+                # level to re-flatten the whole (growing) _module_stmts
+                # dict from scratch on its own way through gen_module.
                 for _ts in stmts:
                     _tsid = id(_ts)
                     if _tsid not in gen._all_transitive_stmts_ids:

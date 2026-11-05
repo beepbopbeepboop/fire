@@ -346,7 +346,7 @@ CASES = [
     # the same way `_iterable_kind` asks it for a `for` over the same container.
     #
     # Found by `tools/formal_fuzz.py` widening its corpus to tuple unpacking
-    # (see `bugs/formal/FORMAL_fuzz_ledger.md` §3).
+    # (see `bugs/FORMAL_fuzz_ledger.md` §3).
     ("a_tuple_unpack_target_holds_an_element",
      "def main(n):\n"
      "    var t = (3, 4, 5)\n"

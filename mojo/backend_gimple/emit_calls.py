@@ -3255,7 +3255,11 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # A WORD receiver (`next(iterator, *default)` in the interpreter's own `_mojo_next`):
         # stepped at run time when the word is a generator handle the run time knows.
         _w_t, _w_v = gen.lower_expr(node.args[0])
-        if _w_t in ('int64_t', 'int') and not isinstance(
+        # `void *` is an opaque handle, a word like `int64_t`: the compiled
+        # compiler infers `iterator` in `_mojo_next(iterator, *default)` that
+        # way from its call sites (the Python reference infers int64_t), and the
+        # refusal below then rejected the interpreter's own next() wrapper.
+        if _w_t in ('int64_t', 'int', 'void *') and not isinstance(
                 node.args[0], (gimple_ctypes.ListExpr, gimple_ctypes.DictExpr)):
             _hasd = gen._new_val('int', '0')
             _dw = gen._new_val('int64_t', '0')

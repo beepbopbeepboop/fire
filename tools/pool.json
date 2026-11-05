@@ -92,7 +92,7 @@
     "bugs/*.md",
     "bugs/mid/*.md",
     "bugs/hard/*.md",
-    "bugs/formal/*.md"
+    "bugs/*.md"
   ],
   "skip": [
     "OPEN_WORK",

@@ -739,7 +739,7 @@ class TestAConditionalExpressionIsAValue(unittest.TestCase):
     machine half's select — modelled, stepped, and generating.
 
     A conditional expression is the construct this file's sibling
-    `bugs/formal/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`
+    `bugs/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`
     is about, and it is here rather than in that file because the subject is the
     same one this file is about: two renderings of a source construct that have
     to agree, and what happens when one of them cannot exist.
@@ -991,7 +991,7 @@ class TestTheConditionalExpressionModelTypechecks(unittest.TestCase):
     x86-64, and the reason is economy rather than a wall: arm64 models the
     select now (row 69, `work_step_csel` — the row above pins the generation,
     and the whole-file check of that file is the 12 GB line in
-    `bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_
+    `bugs/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_
     claim_it.md`'s Status). What this pins on x86-64 is the half this file's
     subject is about — that the model a conditional expression produces is a
     term the generated file accepts, that the bridge really is absent rather
@@ -1106,7 +1106,7 @@ class TestBitwiseNotTheRunTestTypechecks(unittest.TestCase):
 #
 # The AST node is `MojoExpr.call name (args : List MojoExpr)` now, and the
 # bridge refuses a call whose arguments no handler takes
-# (`bugs/formal/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md`).
+# (`bugs/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md`).
 # The widening named three routes, and the first was a "0.3-second experiment"
 # (route 1, the one `lib/ProofLib.lean` uses). This class is those experiments:
 # three Lean files, each answering one question, all of them

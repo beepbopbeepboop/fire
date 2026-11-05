@@ -3004,7 +3004,7 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
     #
     # The body used to be REFUSED here, on the reasoning that a library has
     # nowhere to run it — which was the largest unowned row of the formal sweep
-    # (the `b7` round of `bugs/formal/FORMAL_sweep_work_map.md` §6): 16 files in this
+    # (the `b7` round of `bugs/FORMAL_sweep_work_map.md` §6): 16 files in this
     # repository refused for importing one of four modules, 15 of them for
     # nothing they used. The absence was the entry point and it now exists, so
     # the body is lowered here like any other function and the library carries a
@@ -3682,7 +3682,7 @@ def _frame_valued_calls(site_fn, structs_by_name, returns_frame, fns):
     promised.  That is `formal/types.py`'s `mask_of(IntType(w, False))` and it
     is the whole of the false-refusal half of the 13-file
     `frame_declared_parameter_refusal` row in
-    `bugs/formal/FORMAL_declared_parameter_against_its_call_sites.md` §2.
+    `bugs/FORMAL_declared_parameter_against_its_call_sites.md` §2.
 
     **So the recogniser is shared, not parallel.**  `struct_constructor_sites`
     and `struct_returned_frame_sites` are the tables both backends reserve their
@@ -4193,7 +4193,7 @@ def _returns_frame_by_name(name_defs: dict, returns_frame: dict) -> tuple:
     and `std/python/bindings.mojo` now refuses in 2.0 s with a specific message
     (the next real finding: calling a compile-time `def` parameter means
     MONOMORPHISING it, and this path does not instantiate type parameters —
-    `bugs/formal/FORMAL_known_limits.md` §1.1).
+    `bugs/FORMAL_known_limits.md` §1.1).
 
     The per-function table it reads is keyed by `_fn_key`, like every other
     per-function table here, so one definition's answer can no longer overwrite
@@ -4281,7 +4281,7 @@ def _widen_printf_integer_conversions(functions: list) -> int:
       would be two answers to one question, and this file already carries the
       scar: `fire.py dylib --formal --backend=x86_64` built an **arm64** image
       because the architecture flag was parsed and dropped
-      (`bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md` §3). One rewrite,
+      (`bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §3). One rewrite,
       in the shared pipeline, is what makes the two architectures unable to
       disagree.
     * **Not in the emitters.** Doing it here means the emitters'
@@ -6079,7 +6079,7 @@ def _park_construction_mismatches(functions, framed) -> None:
 
     **Only when the name is used as a RECEIVER.**  `var s = String()` on its own
     is a `char *` and is correct on this path — that is the whole of
-    `bugs/formal/FORMAL_string_value_model.md`'s decision, and a program that builds one
+    `bugs/FORMAL_string_value_model.md`'s decision, and a program that builds one
     of those and never writes a field through it must keep building.  So the
     finding needs a `MemberExpr` rooted at the name, which is the use that has no
     reading.
@@ -6435,7 +6435,7 @@ def _collect_receiver_rebinds(functions, structs_by_name: dict,
 
     **Two of "everything else" are answered here rather than refused, and both
     are the 2026-10-04 narrowing of a rule that was over-broad for a
-    multi-field receiver** (`bugs/formal/FORMAL_one_field_receiver_rebound_
+    multi-field receiver** (`bugs/FORMAL_one_field_receiver_rebound_
     propagates.md` §3). A name of the receiver's own type that the method binds
     for ITSELF is a copy like a parameter is, and a rebinding nothing reads
     afterwards drops no store — the two exemptions are spelled out where they
@@ -7274,7 +7274,7 @@ def _rewrite_literal_attribute_reads(functions, stmts) -> None:
     `getattr(p, "a" + b)` all still refuse — and those are the shapes the
     `dataclasses.fields()` loops in `ownership_check.py` and
     `mojo/backend_gimple/cpp_core.py` actually write, which is why
-    `bugs/formal/FORMAL_dataclass_runtime_reflection.md`'s answer is unchanged: the
+    `bugs/FORMAL_dataclass_runtime_reflection.md`'s answer is unchanged: the
     field to read is not known until the loop runs. Widening the rewrite to keep
     the table small is what leaves the real cases refused.
 
@@ -9746,7 +9746,7 @@ def check_subscript_through_an_unclassified_import(functions, link_line) -> None
     `int64_t` there. So the signature reads `MojoList *`, this check found a
     POINTER with no kind behind it, and `names[0]` was refused for want of an
     answer the CALLEE'S OWN SOURCE states
-    (`bugs/formal/FORMAL_listdir_no_run_time_sequence.md`'s item 1, and the row
+    (`bugs/FORMAL_listdir_no_run_time_sequence.md`'s item 1, and the row
     `test_formal_os_backing.py`'s `listdir_is_a_python_level_list` pins —
     measured red on `master`, both architectures, 0 of its ten answers).
 
@@ -10670,7 +10670,7 @@ def check_one_word_frame_receivers(functions) -> None:
     whole-image question `_check_frame_escapes` answers for containers and this
     pass cannot.  So the parameter case keeps today's behaviour rather than
     gaining a refusal that would be wrong for every working program of that
-    shape; `bugs/formal/FORMAL_a_method_of_a_one_field_holder_reads_a_nested_frame_
+    shape; `bugs/FORMAL_a_method_of_a_one_field_holder_reads_a_nested_frame_
     nothing_built.md` recorded the crash and this is the half of it that is
     decidable here."""
     for fn in functions:
@@ -11603,7 +11603,7 @@ def _call_returns_one_word_struct(value, structs_by_name: dict,
     its first field read — "a field access through 'r'" — even though the
     image had the declaration in hand, which is the cross-module half of the
     same-image fix the 2026-10-08 Status of
-    `bugs/formal/FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md`
+    `bugs/FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md`
     records.
 
     **A `MODULE.member` chain is claimed only when no struct of this image
@@ -13669,7 +13669,7 @@ def _publish_imported_constants(functions: list, symbols: dict,
 
     A STORE is not a read and is left alone: `mod.X = 5` writes another
     module's state, which has nowhere to live and is refused by name
-    (`bugs/formal/FORMAL_module_state_no_storage.md`). Substituting it would trade a
+    (`bugs/FORMAL_module_state_no_storage.md`). Substituting it would trade a
     refused store for a dropped one.
 
     `imported` is the link line's `load_dylib_manifests` entries, which is the
@@ -16582,7 +16582,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # is the type's TAG, so it has a home — the same one a folded
         # module-level constant has, which is the fourth of the four this walk
         # already accepts, and both backends materialise it where they
-        # materialise the others. `bugs/formal/FORMAL_dtype_object_as_a_value.md` is the
+        # materialise the others. `bugs/FORMAL_dtype_object_as_a_value.md` is the
         # long form; `model.TYPE_VALUE_NAMES` is the name space and
         # `model.type_value_tag` the one reader both backends ask, so the two
         # architectures cannot disagree about what a type is.
@@ -16867,7 +16867,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             # not a value, so that sentence is false about the file and sends
             # the reader to the register allocator for a fact about the
             # language. The census behind this is in
-            # bugs/formal/FORMAL_dtype_object_as_a_value.md.
+            # bugs/FORMAL_dtype_object_as_a_value.md.
             #
             # Asked AFTER the module-symbol question, not before, and the
             # ordering is not a compromise — it is what the measurement forced.
@@ -17746,7 +17746,7 @@ def _constant_read_spelling(node) -> str:
 # unannotated predicate in a corpus that annotates almost nothing, and the
 # obligation this pass can discharge is the one the SOURCE took on itself by
 # writing the type.  That residual is recorded, with its measurement, in
-# `bugs/formal/FORMAL_optional_needs_a_niche.md`.
+# `bugs/FORMAL_optional_needs_a_niche.md`.
 _OPTIONAL_COMPARISON_OPS = ("==", "!=", "is", "is not")
 
 
@@ -17898,7 +17898,7 @@ def _optional_call_argument_none(call, callee_defs, structs_by_name):
     limitation rather than a decision: a build compiles each module nested, so
     an imported function's `Optional` parameter has no signature in hand here,
     and the `None` keeps folding to 0 inside the argument. It is recorded in
-    `bugs/formal/FORMAL_optional_needs_a_niche.md` with the shape that reaches it, and
+    `bugs/FORMAL_optional_needs_a_niche.md` with the shape that reaches it, and
     it is the same limitation `function_value_argument_refusal` states rather
     than a new one — the alternative is guessing a parameter's type from the
     call, which is how a payload is built with the wrong width.
@@ -18782,7 +18782,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     #
     # **This fixes nothing on its own, and that is the point of landing it
     # separately.** It is the shared infrastructure the unwinder design asks for
-    # (`bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5 step 2), and
+    # (`bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5 step 2), and
     # nothing reads it yet: the dispatch, the raise sites, the CFG and the Lean
     # model are steps 3-6. It is here, in the one pipeline both front ends go
     # through, so that when step 3 lands there is ONE list rather than one per
@@ -19454,7 +19454,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # below already knows how to classify (or refuse), and leaving the call in
     # the tree meant every one of those checks saw a call nothing classifies.
     # Gated on this module not DEFINING `getattr`, and on the name being a bare
-    # string literal — `bugs/formal/FORMAL_dataclass_runtime_reflection.md`'s three
+    # string literal — `bugs/FORMAL_dataclass_runtime_reflection.md`'s three
     # `fields()` loops all name a field with `f.name`, and those keep refusing.
     _rewrite_literal_attribute_reads(functions, stmts)
     # …and a target query IN a body, which the constant substitution cannot
@@ -19654,7 +19654,7 @@ def _receiverless_methods(owners: dict, structs_by_name: dict) -> set:
     — the decorator first, then the first parameter — which is the same answer
     `struct_receivers` derives the field set from, so the receiver this decides
     and the receiver the callee declares cannot drift apart. It also covers the
-    other half of `bugs/formal/FORMAL_staticmethod_is_compiled_as_an_instance_method
+    other half of `bugs/FORMAL_staticmethod_is_compiled_as_an_instance_method
     .md`: a `@staticmethod` with PARAMETERS takes no receiver either, and an
     empty parameter list (`def first():`, the shape this was written for) is
     already the same case there. `def import_module(var module: String)` in
@@ -19996,7 +19996,7 @@ def _ambiguous_method_owners(base, structs_by_name: dict) -> list:
 #     `formal/x86_64_proof_gen.py` already generate and discharge the conditional
 #     statements for `if`. A new emitter arm would be a new BLOCK SHAPE in the
 #     step function, which is the expensive half of the proof work
-#     (`bugs/formal/FORMAL_arm64_known_proof_gaps.md`), and it would have to be built
+#     (`bugs/FORMAL_arm64_known_proof_gaps.md`), and it would have to be built
 #     twice — once per architecture — for the same language construct. It also
 #     would not have elaborated: the operand order arm64's generator accepts is
 #     the one `if <expr> == <literal>` produces, which is the second bullet of
@@ -21897,7 +21897,7 @@ def _runtime_library_for(ordered: list, arch: str, fmt: str):
     it is not written down here: a figure in this paragraph was 51 entry points
     on the tree that measured it and means nothing to a reader on any other
     one. The tree-level figures live in one place and are checked against the
-    live census by `test_runtime_header_scan.py` — `bugs/formal/FORMAL_known_limits.md`
+    live census by `test_runtime_header_scan.py` — `bugs/FORMAL_known_limits.md`
     §3.1 for the word-shaped surface (871 entry points, 405 of them word-shaped,
     measured over every header in `runtime/`).
 
@@ -22117,7 +22117,7 @@ def _publishable_constant_values_module(source_paths: list, constants: dict) -> 
     `std/math/constants.mojo` is the measured case: eight `comptime` constants
     and no declaration at all, refused as "declares no function and no type at
     all" and taking **33 of the 59 files** on the export-gate row with it
-    (the `b13` round of `bugs/formal/FORMAL_sweep_work_map.md` §4 — the row is that
+    (the `b13` round of `bugs/FORMAL_sweep_work_map.md` §4 — the row is that
     document's `module exports no public functions`, and the basename the map
     could not resolve is this file). The refusal was CORRECT about the module —
     there is no symbol to bind — and wrong about the consequence, because the
@@ -22369,7 +22369,7 @@ def no_public_api_reason(source_paths: list) -> str:
                 f"(`(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`) — and a BACKEND "
                 f"rule that a module nothing binds needs no library at all, an "
                 f"importer reading the constant directly instead of linking a "
-                f"library for it (`bugs/formal/FORMAL_a_module_that_exports_nothing_"
+                f"library for it (`bugs/FORMAL_a_module_that_exports_nothing_"
                 f"cannot_be_a_dylib.md`). Neither exists here, so this is "
                 f"refused at the build rather than linked as a library with "
                 f"nothing in it, and nothing here is waiting on this file.")
@@ -23581,7 +23581,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # 2026-10-05 on both architectures: `std/math/constants.mojo` declares eight
     # `comptime` constants and nothing else, was refused here, and took **33 of
     # the 59 files** on the `module exports no public functions` row with it
-    # (the `b13` round of `bugs/formal/FORMAL_sweep_work_map.md` §4 — and the
+    # (the `b13` round of `bugs/FORMAL_sweep_work_map.md` §4 — and the
     # `constants.mojo` that row could not resolve by basename is this one, which
     # is what
     # made the row look unmeasurable). The module's API is four folded VALUES,
@@ -24075,7 +24075,7 @@ def _prove_dylib_result(result: dict, code: bytes, info: dict, exports: list,
     property of the CODE and not of the container: it takes `code` and `info`
     and knows nothing about Mach-O or ELF, and a second copy for the ELF
     library is a second place for the spec set to differ between two libraries
-    built from one source — which is exactly what `bugs/formal/FORMAL_opus_dylib
+    built from one source — which is exactly what `bugs/FORMAL_opus_dylib
     _termination_handoff.md` §OPUS-2 records an equality check already being
     unable to distinguish.
     """

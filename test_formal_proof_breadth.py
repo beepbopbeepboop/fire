@@ -596,7 +596,7 @@ class TestClassifier(unittest.TestCase):
         later, and the census's class column said `codegen-refused` for both. A
         cross-architecture column is only worth reading if its cells are about
         the same thing, so the report names the items where they are not —
-        `bugs/formal/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
+        `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
         function.md` is the finding and this is the instrument for it.
 
         The other half of the rule matters as much: an arm64 refusal beside an
@@ -981,7 +981,7 @@ class TestAReplayedVerdictSaysSo(unittest.TestCase):
     `bugs/sweeps/proof_breadth_2026-10-03.jsonl` records
     `formal/examples/either.mojo` as `{"cls": "pass", "wall_s": 0.1}` on a date
     it was never checked, and a proof regression the size of
-    `bugs/formal/FORMAL_a_generated_proof_over_leans_memory_ceiling_is_rejected.md`'s
+    `bugs/FORMAL_a_generated_proof_over_leans_memory_ceiling_is_rejected.md`'s
     was recorded as coverage. "The corpus still measures this construct" is the
     claim every `KNOWN_DIVERGENCES` discipline here rests on, and a replayed
     verdict does not support it.

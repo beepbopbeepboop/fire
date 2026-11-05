@@ -2096,7 +2096,7 @@ CASES = [
     # disappearance of is indistinguishable from a limit nobody re-checked.
     #
     # What closes each one, and what it costs, is in
-    # bugs/formal/FORMAL_known_limits.md §2 and §3. The short version: the MLIR one
+    # bugs/FORMAL_known_limits.md §2 and §3. The short version: the MLIR one
     # cannot be closed on this path at all (there is no MLIR in a freestanding
     # image for the template to become); the other three are shape and
     # comptime-folding rules that a fuller value model would replace.
@@ -2113,7 +2113,7 @@ CASES = [
     # conversion.
     #
     # A fifth entry was here until 2026-09-30 — `__mlir_op.`…`[n]` "builds and
-    # segfaults" — and it was TRUE when written (bugs/formal/FORMAL_known_limits.md
+    # segfaults" — and it was TRUE when written (bugs/FORMAL_known_limits.md
     # §2.2 measured exit 139 on both architectures) and stopped being true
     # before this note was corrected. It is now refused by
     # `model.mlir_dialect_refusal` on both, and is pinned where the refusal
@@ -2138,7 +2138,7 @@ CASES = [
     # already pinned by `struct_ctor_args_both_backends` (same needle, both
     # backends, same refusal) and a second case asserting the same thing is a
     # parallel implementation of a pin that exists, not extra coverage. It is
-    # listed in bugs/formal/FORMAL_known_limits.md §3 with that case's name.
+    # listed in bugs/FORMAL_known_limits.md §3 with that case's name.
     # A `comptime` binding whose right-hand side mentions a RUNTIME parameter
     # cannot be folded, and this path has no comptime evaluator that could
     # resolve it. Guessing a value would be a fabricated answer.
@@ -2149,7 +2149,7 @@ CASES = [
     # lowering at all and says "unsupported statement ComptimeVarStmt". Both
     # are honest, and the shared-text rule that `refuse:` enforces cannot
     # apply — but the DRIFT is real and is recorded in
-    # bugs/formal/FORMAL_known_limits.md §3 as arch drift, not as agreement.
+    # bugs/FORMAL_known_limits.md §3 as arch drift, not as agreement.
     ("limit_comptime_over_a_runtime_parameter",
      "def poly(coefficients):\n"
      "    comptime num_coefficients = len(coefficients)\n"
@@ -3109,7 +3109,7 @@ CASES = [
     # `~s` lexes as `s` and the parser never sees a UnaryOp at all. The model's
     # `~` refusal is landed and both backends already ask for it, so the day
     # the lexer's OP group gains a `~` the refusal fires with no further work;
-    # see bugs/formal/FORMAL_string_value_model.md for the measured consequence today
+    # see bugs/FORMAL_string_value_model.md for the measured consequence today
     # (`~s` returns the POINTER, 77693904 on arm64 and 74486761 on x86-64 for
     # the same source, and the `~` is nowhere in the AST).
     ("str_unary_negation_refused",
@@ -3336,7 +3336,7 @@ CASES = [
     #
     # `List.clear` is `count = 0`: one store to the word `len` of the same
     # receiver reads, with no capacity, no element type and no traversal, which
-    # is why it lowers where `append` cannot (`bugs/formal/FORMAL_binary_heap_mojo_
+    # is why it lowers where `append` cannot (`bugs/FORMAL_binary_heap_mojo_
     # after_the_len_value.md` \u00a73 row 1, which is this construct in the
     # stdlib).  The two numbers are BEFORE and AFTER because a `clear` that did
     # nothing would still print `0` for the second one: the first is what makes
@@ -4262,7 +4262,7 @@ BYREF_REFUSALS = [
     # not an `Int` parameter: this is the shape
     # `ownership_check.py`/`mojo/backend_gimple/cpp_core.py` write
     # (`getattr(node, f.name)`) and the one
-    # `bugs/formal/FORMAL_dataclass_runtime_reflection.md` is about.
+    # `bugs/FORMAL_dataclass_runtime_reflection.md` is about.
     ("byref_refuse_getattr_of_a_computed_name",
      "struct P:\n"
      "    var a: Int\n"
@@ -7197,7 +7197,7 @@ BOTH_ARCH_CASES = [
     # 46 = `scaled(Reg.RSP, 3)`'s 36, `is_bp(Reg.RBP)`'s 10, `is_bp(Reg.RAX)`'s
     # 0 — under 256 because the exit status is a byte, and a weighted sum wide
     # enough to overflow it would compare against `expected & 0xFF` and invent a
-    # mismatch (the lesson `bugs/formal/FORMAL_arm64_instruction_coverage.md` §"Every
+    # mismatch (the lesson `bugs/FORMAL_arm64_instruction_coverage.md` §"Every
     # expected value must fit in a byte" records, having been learned there).
     # `is_bp` is a COMPARISON and `scaled` is arithmetic on purpose: the rewrite
     # has to put the bare name where an operand goes, and a row that only
@@ -8685,7 +8685,7 @@ BOTH_ARCH_CASES = [
     # The PROOF layer modelled `~x` as `x = 0` -- Python's `not`, not its `~` --
     # so the source model of every program using `~` was a model of a different
     # program, on both backends at once, and `eval_eq_mojo` did not catch it
-    # because `evalExpr` made the same mistake (`bugs/formal/FORMAL_the_semantic_model_
+    # because `evalExpr` made the same mistake (`bugs/FORMAL_the_semantic_model_
     # renders_a_bitwise_not_as_a_logical_one.md`). The MACHINE half was right all
     # along, which is what makes these rows the ones that had to be written: the
     # fix was a model fix, and a model fix with no executed case beside it is a
@@ -9814,7 +9814,7 @@ ASSIGNED_TYPE_REFUSALS = [
 #
 # The second evidence source for `model.struct_field_declared_type`, and the one
 # that makes a class which assigns its fields in `__init__` and declares none a
-# lowerable program rather than a refusal by name. `bugs/formal/FORMAL_class_assigns_its_
+# lowerable program rather than a refusal by name. `bugs/FORMAL_class_assigns_its_
 # fields_in_init.md` is the finding and the measurement; what is here is the
 # evidence that the change is both sound and narrow.
 #
@@ -14007,7 +14007,7 @@ SUBSCRIPT_CASES = [
     # A single-index read, with the index in a VARIABLE rather than a literal
     # because that is the shape nothing in formal/examples covers: all 65 of
     # them index with a literal, which is why an arm64 proof gap on
-    # `a[i]` (see bugs/formal/FORMAL_arm64_known_proof_gaps.md) went unregistered.
+    # `a[i]` (see bugs/FORMAL_arm64_known_proof_gaps.md) went unregistered.
     # The exit status is the assertion: 20, not a frame address.
     ("sub_single_index_var",
      "def main(n):\n"
@@ -15088,7 +15088,7 @@ WAVE6_TRUTHY_CASES = [
 
     # ── the BLOB row of the same table ──
     #
-    # `bugs/formal/FORMAL_len_of_a_list_parameter_is_refused_though_the_same_parameter_
+    # `bugs/FORMAL_len_of_a_list_parameter_is_refused_though_the_same_parameter_
     # subscripts.md`: `def total(xs): … len(xs) …` called `total([1, 2, 3, 4])`
     # was REFUSED on both architectures with "len(xs) is len() of a value
     # classified as 'int', and an integer has no length" — about a list the same
@@ -16659,7 +16659,7 @@ def reduced_stack_reads_the_limit(tmpdir, verbose=False):
     """The threshold DEPENDS on the limit: one build, two limits, two answers.
 
     The `reduced_stack_cases` group above pins the outcome at one limit; this
-    pins the dependence. `bugs/formal/FORMAL_arm64_the_compiler_trap_recording_is_
+    pins the dependence. `bugs/FORMAL_arm64_the_compiler_trap_recording_is_
     lost_and_the_stack_guards_getrlimit_is_a_program_call.md` is the
     model/proof side of the same read on the merged tree (the branch named the
     same subject `FORMAL_arm64_stack_floor_getrlimit_is_the_opaque_call_for_
@@ -17921,7 +17921,7 @@ POINTER_DEREF_REFUSALS = [
     # the needle pins that, because the sentence used to name the address's
     # BASE instead and so claimed that a `p` declared `Pointer[Int64]` "is not
     # a pointer to a 8-byte element", which is false and tells the reader to
-    # declare the one thing that is already declared.  (`bugs/formal/FORMAL_pointer_
+    # declare the one thing that is already declared.  (`bugs/FORMAL_pointer_
     # value_model.md` §9's first item, fixed; its "remaining half".)
     ("deref_refuse_offset_with_an_undeclared_offset",
      "def read_at(p: Pointer[Int64], k) -> Int:\n"
@@ -20669,7 +20669,7 @@ WAVE6_NAME_CASES = [
      "refuse:is a field access through 'h'", None),
     # ── ONE construct, THREE spellings, ONE refusal ──
     #
-    # `bugs/formal/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
+    # `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
     # function.md` is the census finding that a class is not a subject: three of
     # round 2's 78 items were `codegen-refused` on BOTH machines for three
     # different reasons, and one of them was `m.x += 1` — an AUGMENTED
@@ -22632,7 +22632,7 @@ EQ_DISPATCH_CASES = [
     # first line, so CPython raises UnboundLocalError and the program has no
     # number.  What this path did was read the local's uninitialised register —
     # 78152773 on arm64 and 11 on x86-64 from identical source.  It is also where
-    # bugs/formal/FORMAL_local_shadows_module_global's proposed fix is corrected:
+    # bugs/FORMAL_local_shadows_module_global's proposed fix is corrected:
     # making the gate order-dependent would answer 6, a number CPython never
     # produces.
     ("a_local_read_before_its_assignment_is_refused",
@@ -23236,7 +23236,7 @@ TYPE_ARGUMENT_LIST_CASES = [
     # …and it is now an ANSWER rather than a refusal, which is what the rows
     # above are still refusals for. `struct Box[T: AnyType, U: AnyType]` is a
     # template the module DECLARES and APPLIES, which
-    # `bugs/formal/FORMAL_generic_monomorph_scope.md` §9 made a thing this path
+    # `bugs/FORMAL_generic_monomorph_scope.md` §9 made a thing this path
     # instantiates rather than refusing by name ("`Box[…](…) calls a name this
     # unit does not compile"). So `Box[Int, Int]` is two concrete type
     # arguments, the instantiation is emitted, and the program computes 7 —
@@ -23324,7 +23324,7 @@ TYPE_ARGUMENT_LIST_CASES = [
 # `Box[Int, Int]` was refused WITHOUT "whose index is a tuple" — the sentence
 # that describes a container lookup, which cannot happen when the base is a
 # TYPE. The program no longer refuses at all (§9 of
-# `bugs/formal/FORMAL_generic_monomorph_scope.md`: the module both declares and
+# `bugs/FORMAL_generic_monomorph_scope.md`: the module both declares and
 # applies the template, so the instantiation is emitted and `Box[Int, Int](7)`
 # computes 7), so there is no sentence to be right or wrong about. Its twin
 # assertion is not lost with it: the row above it is the same bracket over the
@@ -24085,7 +24085,7 @@ REFUSAL_CASES = [
 #     answered on both, by the same two shared predicates rather than by a third
 #     private copy of the flattening.
 #
-# the `2026-09-30` round of `bugs/formal/FORMAL_sweep_work_map.md` §3.1 is where the "worth 41 files
+# the `2026-09-30` round of `bugs/FORMAL_sweep_work_map.md` §3.1 is where the "worth 41 files
 # and 0 coverage" is measured: `binary_heap.mojo` is behind two further limits
 # (premise B2, and an `Optional` niche), so all 41 files stay refused and the
 # value of this fix is the diagnostic and the construct, not the count.
@@ -24576,11 +24576,11 @@ SOLE_FIELD_CALLEE_REFUSALS = [
     # -- was reported as a field READ of a method, with the message "Call it
     # (`self.clear(...)`), which is a receiver and a call and lowers" about an
     # expression that IS already a call.  This is the construct
-    # `bugs/formal/FORMAL_binary_heap_mojo_after_the_len_value.md` §3 row 0a names, and
+    # `bugs/FORMAL_binary_heap_mojo_after_the_len_value.md` §3 row 0a names, and
     # it is the file's reported verdict.
     #
     # The expectation WAS the METHOD-TABLE refusal and is now a BUILD, because
-    # `List.clear` landed (row 1 of `bugs/formal/FORMAL_binary_heap_mojo_after_the_len_
+    # `List.clear` landed (row 1 of `bugs/FORMAL_binary_heap_mojo_after_the_len_
     # value.md`'s table).  Two things in the note above were corrected by that
     # landing, and both are worth the row staying here as a build rather than
     # moving out of the group: the collapsed receiver is NOT one "the emitter
@@ -24692,7 +24692,7 @@ SOLE_FIELD_CALLEE_CASES = [
     # -- was reported as a field READ of a method, with the message "Call it
     # (`self.clear(...)`), which is a receiver and a call and lowers" about an
     # expression that IS already a call
-    # (`bugs/formal/FORMAL_binary_heap_mojo_after_the_len_value.md` §3 row 0a).
+    # (`bugs/FORMAL_binary_heap_mojo_after_the_len_value.md` §3 row 0a).
     #
     # It sat in the REFUSALS table for two rounds, on the METHOD-TABLE
     # refusal: with `_data` collapsed into `self`, the emitter was asked for
@@ -25188,7 +25188,7 @@ TYPE_APPLICATION_REFUSALS = [
 
 # ── a TYPE as a VALUE ──────────────────────────────────────────────────────
 #
-# `bugs/formal/FORMAL_dtype_object_as_a_value.md` is the long form. A type on this path
+# `bugs/FORMAL_dtype_object_as_a_value.md` is the long form. A type on this path
 # is a word, and the word is a TAG: one number per type, computed from the
 # type's name by `model.type_tag`, the same number in every unit of the image
 # and on both architectures. So `t == Int32` is an integer comparison, a type
@@ -25792,7 +25792,7 @@ def check_interpolated_literal_bound_census(verbose=False):
     bound, and which single field stops each one that does not.
 
     Returns `(passed, failures)`. This is the measurement
-    `bugs/formal/FORMAL_string_composition_has_no_buffer.md` §7.1 asks for and does not
+    `bugs/FORMAL_string_composition_has_no_buffer.md` §7.1 asks for and does not
     have. Its step 1 says: *"A buffer with a compile-time-known bound, in the
     frame scratch … The bound is computable at compile time (chunk lengths are
     known; a field's width is its declared type's)"* — and the half in
@@ -26043,7 +26043,7 @@ def check_interpolated_literal_census(verbose=False):
     """What the corpus's interpolated literals are MADE OF, over every file here.
 
     Returns `(passed, failures)`. This is the measurement
-    `bugs/formal/FORMAL_string_composition_has_no_buffer.md` took with a throwaway
+    `bugs/FORMAL_string_composition_has_no_buffer.md` took with a throwaway
     script, and the reason it is committed is §7.1's own instruction: *"Do not
     start with an f-string … Start with the ONE case that has a decidable answer
     and no lifetime question … Then measure the residue with the same method as

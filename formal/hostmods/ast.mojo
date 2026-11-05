@@ -39,7 +39,7 @@ none of them is a missing feature that more work would supply:
     scratch is reclaimed when the function returns. A container is a
     frame-allocated blob of 8-byte slots, so a node list built inside a callee
     is a read of a frame the caller does not own (struct.mojo's limit 4, and
-    `bugs/formal/FORMAL_known_limits.md` §6.1's frame-escape family).
+    `bugs/FORMAL_known_limits.md` §6.1's frame-escape family).
   * **`isinstance` cannot be called.** `isinstance(x, int)` is refused BY NAME:
     "int has no home: the module-level symbol table is empty for this unit".
     `int` is a type, a type is not a word, and there is no storage for one.

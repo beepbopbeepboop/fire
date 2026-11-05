@@ -24,7 +24,7 @@ each of them was a SILENT WRONG ANSWER rather than a refusal:
     (“FORMAL_stat_out_parameter_is_unreadable: `isfile` cannot be exact”).
   * `readdir(3)`'s `d_name` is a `char[]` inside a struct the source never
     declares, so there was no name to read and therefore no `listdir`
-    (bugs/formal/FORMAL_listdir_no_run_time_sequence.md — the name half of it).
+    (bugs/FORMAL_listdir_no_run_time_sequence.md — the name half of it).
 
 Why an ORACLE and not a table. Every case here that has a CPython answer is
 checked against CPython running the same computation, and every case that has a
@@ -378,7 +378,7 @@ def main(n):
 # The three shapes above read a blob through the module's own accessors,
 # because that is what it published: `listdir` was declared `-> int` and a
 # caller could do nothing else with the word. That was the half of
-# `bugs/formal/FORMAL_listdir_no_run_time_sequence.md` that was open, and it was a
+# `bugs/FORMAL_listdir_no_run_time_sequence.md` that was open, and it was a
 # KIND and not a representation — the value has been one word pointing at
 # `[count][element]…` since the blob landed. With `-> List[String]` on the
 # declaration the annotation says so across the dylib boundary, and the three

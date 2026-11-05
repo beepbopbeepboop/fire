@@ -76,7 +76,7 @@ def walk_stride(is_dict: bool, elem_stride: int = ELEM_STRIDE) -> int:
     COUNT of the result was right, because three PAIRS and three WORDS are the
     same number, so a measurement that looked only at `len` agreed with CPython
     on the buggy programs.  The finding and its four sites are
-    `bugs/formal/FORMAL_fuzz_ledger.md` §3.10.  So this docstring enumerating its
+    `bugs/FORMAL_fuzz_ledger.md` §3.10.  So this docstring enumerating its
     consumers is load-bearing rather than decorative: a consumer not named here
     is a consumer that will not be audited.
     """
@@ -165,7 +165,7 @@ def key_compare_is_structural(needle) -> bool:
 # The `external_call` is called out because it was the expensive mistake here,
 # and the shape is why: its bracket is the SAME AST node as a generic's, so
 # lumping it in with them looked free and cost a 55-file family several waves
-# of re-derivation (bugs/formal/FORMAL_known_limits.md §6.2.1). A shared shape is not
+# of re-derivation (bugs/FORMAL_known_limits.md §6.2.1). A shared shape is not
 # a shared meaning. What the bracket holds is what decides it, and for
 # `external_call` it holds a C SYMBOL and a declared return type — see that
 # section below, which is not a comptime parameter list and does not need a
@@ -2708,7 +2708,7 @@ def multi_index_refusal_for(e, base_is_dict: bool, callee_defs: dict = None,
     a malformed one is refused by `external_call_refusal` with the reason that
     shape is malformed. Routing it through the kind table would have made a
     refused template read as a two-dimensional index, which is the
-    misdiagnosis §6.2 of bugs/formal/FORMAL_known_limits.md is about.
+    misdiagnosis §6.2 of bugs/FORMAL_known_limits.md is about.
 
     The module's OWN `external_call` declaration wins over the language's
     template, which is why `callee_defs` is consulted first: a module that
@@ -2752,7 +2752,7 @@ def multi_index_refusal_for(e, base_is_dict: bool, callee_defs: dict = None,
 # files, one terminal module: `std/os/env.mojo`), and the one multi-element
 # subscript in the whole corpus that is NOT a generic's explicit-parameter list.
 # The tuple-index refusal above is true of the SHAPE and wrong about the
-# MECHANISM, which §6.2 of bugs/formal/FORMAL_known_limits.md is the audit of: the base
+# MECHANISM, which §6.2 of bugs/FORMAL_known_limits.md is the audit of: the base
 # is a function-like template, the first bracket element is the SYMBOL to call
 # and the second is the declared return type. Neither is a coordinate, and
 # `external_call` is not a dict.
@@ -2878,7 +2878,7 @@ def external_call_return_kind(text):
         rest of the runtime's void entry points).
 
     **What "at a C boundary" is doing in that list, and why it is not a claim
-    about `Optional`.** `bugs/formal/FORMAL_stdlib_optional_needs_a_representation.md`
+    about `Optional`.** `bugs/FORMAL_stdlib_optional_needs_a_representation.md`
     measures `Optional[Pointer[T]]` as one word whose payload is the address and
     whose TAG lives a second frame away, so `if not ptr:` cannot be answered from
     the word: `Some(null)` and `None` are two Mojo values of one word. That is a
@@ -3965,7 +3965,7 @@ def division_needs_zero_guard(denominator) -> bool:
     `test_formal.py` for exactly this and for nothing about a floor correction.
 
     So the fix available without the `lib/ProofLib.lean` change
-    `bugs/formal/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`
+    `bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`
     asks for is to stop emitting a guard that cannot fire: for `// 7` there is
     no zero to trap, and the `bl fflush` that made the theorem unprovable goes
     with it. **What this does NOT do is fix a two-call program whose calls are

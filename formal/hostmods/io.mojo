@@ -39,7 +39,7 @@ WHAT IS NOT HERE, AND WHY
     this one. A file's CONTENTS are the missing half, and they are a stream.
   * `StringIO`, `BytesIO` — a MUTABLE BUFFER WITH A CURSOR. A buffer that grows
     is a run-time-length sequence, which is the same limit that stops
-    `os.listdir` and SHAKE (`bugs/formal/FORMAL_listdir_no_run_time_sequence.md`): a
+    `os.listdir` and SHAKE (`bugs/FORMAL_listdir_no_run_time_sequence.md`): a
     list's capacity is the number of `append` SITES in the function that builds
     it, so a buffer whose length is only known at run time cannot be built.
     `test_formal_sweep_truth.py` is the one file in this tree blocked on `io`,
