@@ -1655,7 +1655,7 @@ Index a `range()` result rather than measuring it, until that is fixed.
 | 7 | ../new-modular/Mojo/stdlib/std/builtin/none.mojo | S | build: writer.write_string() is a method on a Writer — multi-field struct, receiver is frame addr | detailed message about fd vs frame address | |
 | 8 | ../new-modular/Mojo/stdlib/std/builtin/type_aliases.mojo | S | build: the module-level comptime binding 'Never' is initialized from an MLIR type template: __mlir_type.`!kgen.never` names an MLIR TYPE | different full message | |
 | 9 | ../new-modular/Mojo/stdlib/std/collections/binary_heap.mojo | S | builds successfully (exit 0) | file now builds | |
-| 10 | ../new-modular/Mojo/stdlib/std/collections/type_dict.mojo |  | build: Self._index reads a `comptime` class attribute of TypeDict, whose value is `Self.keys.try_ind |  |  |
+| 10 | ../new-modular/Mojo/stdlib/std/collections/type_dict.mojo | S | builds successfully (exit 0) | file now builds | |
 | 11 | ../new-modular/Mojo/stdlib/std/format/repr.mojo |  | build: value.write_repr_to() is a method call on a value, and this backend lowers only append, clear |  |  |
 | 12 | ../new-modular/Mojo/stdlib/std/origin/__init__.mojo |  | build: the module-level comptime binding 'AnyOrigin' is initialized from an MLIR attribute template: |  |  |
 | 13 | ../new-modular/Mojo/stdlib/std/os/path/path.mojo |  | build: getsize: `stat` is called, and it is imported from `..fstat`, so the call has to bind a symbo |  |  |
