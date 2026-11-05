@@ -6500,11 +6500,36 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
         pass
     try:
         import mojo.middle.types as _ty
-        for _c in ('_TUPLE_ANN_BY_NAME',):
+        for _c in ('_TUPLE_ANN_BY_NAME', '_type_walk_cache'):
             _v = getattr(_ty, _c, None)
             if isinstance(_v, (dict, list, set)):
                 try: _v.clear()
                 except Exception: pass
+    except Exception:
+        pass
+    try:
+        import elaborate as _el
+        for _c in ('_BRACKET_DEPTH_CACHE', '_BRACKET_DEPTH_ORDER', '_SYMBOLS_CACHE'):
+            _v = getattr(_el, _c, None)
+            if isinstance(_v, (dict, list, set)):
+                try: _v.clear()
+                except Exception: pass
+    except Exception:
+        pass
+    try:
+        import cas as _cas
+        _v = getattr(_cas, '_toolchain_fp_cache', None)
+        if isinstance(_v, (dict, list, set)):
+            try: _v.clear()
+            except Exception: pass
+    except Exception:
+        pass
+    try:
+        import imports as _imp
+        _v = getattr(_imp, '_cpython_lib_cache', None)
+        if isinstance(_v, (dict, list, set)):
+            try: _v.clear()
+            except Exception: pass
     except Exception:
         pass
     try:
