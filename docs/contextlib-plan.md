@@ -26,3 +26,6 @@ cannot compile module: function(s) __aexit__, __aexit__, _exit_wrapper, inner (a
 
 ## Repro (next step, 2026-11-05)
 `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py` exits 1 (~193s); refusal verbatim unchanged (exit 1, ~193s). No code change this round; blocker remains async/coroutine codegen (cpp_async.py eligibility: `__aenter__` non-scalar return + `*args`/`**kwargs` in coroutine frame).
+
+## Repro (next step, 2026-11-05, this session)
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py` exits 1 (~193s); refusal verbatim unchanged. No code change this round; blocker remains async/coroutine codegen (cpp_async.py eligibility: `__aenter__` non-scalar return + `*args`/`**kwargs` in coroutine frame).
