@@ -253,11 +253,17 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
     signatures added), _func_param_defaults (lifted defaults), _all_closures.
     """
     ctx._all_closures: dict = {}  # outer_name → {inner_name → ClosureInfo}
-    # `ctx._skip_closure_factory_lift` (closure factories with a `nonlocal` in
-    # the returned closure) is filled by gen_module_impl, and only for a module
-    # with a generator/async function; this pass just reads it.
-    if not hasattr(ctx, '_skip_closure_factory_lift'):
-        ctx._skip_closure_factory_lift = set()
+    # Prevent lifting of closure factories with nonlocal in returned closure
+    try:
+        skip = set(getattr(ctx, '_skip_closure_factory_lift', set()))
+        for fn in _walk_ast(stmts):
+            if isinstance(fn, FunctionDef):
+                if _is_closure_factory_with_nonlocal(fn):
+                    skip.add(id(fn))
+                    skip.add(_as_str(fn.name))
+        ctx._skip_closure_factory_lift = skip
+    except Exception:
+        pass
 
     def _scan_for_closures(ctx, outer_name: str, outer_scope: dict, body: list):
         """Scan a function/method body for nested FunctionDefs and register them as closures."""
@@ -341,10 +347,10 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
             inner_params = _as_list(inner.params)
             if inner.is_async and not inner.is_generator:
                 continue
-            # A closure factory with a `nonlocal` in its returned closure is
-            # skipped via `_skip_closure_factory_lift` below, which the module
-            # sets only when it has a generator/async function (the coroutine
-            # lift copies captures by value, wrong for a `nonlocal` cell).
+            # Don't lift closure factories with nonlocal in returned closure -
+            # backend's closure factory mechanism needs to refuse them
+            if _is_closure_factory_with_nonlocal(inner):
+                continue
             skip_set = getattr(ctx, '_skip_closure_factory_lift', set())
             if id(inner) in skip_set or _as_str(inner.name) in skip_set:
                 continue

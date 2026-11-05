@@ -217,7 +217,7 @@ def scoped_calls(stmts: list) -> list:
     return out
 
 
-def unique_literal_value(name: str, enc_idx: dict, mod_index: dict):
+def unique_literal_value(name, enc_idx: dict, mod_index: dict):
     """The literal VALUE node bound to identifier `name`, when its one binder
     in scope is `name = <value>` or `var name = <value>`; otherwise None.
 

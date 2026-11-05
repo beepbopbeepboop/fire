@@ -1,3 +1,4 @@
+import threading
 from . import *
 
 # ── Aggregate layout ──────────────────────────────────────────────────────
@@ -3974,47 +3975,6 @@ def division_needs_zero_guard(denominator) -> bool:
     return not (isinstance(denominator, int) and denominator != 0)
 
 
-def division_needs_overflow_precheck(numerator, denominator) -> bool:
-    """Must this `//` emit the overflow pre-check, or has the build already
-    decided the one overflowing pair cannot be the pair?
-
-    The pre-check is the sentinel `dividend == INT64_MIN and divisor == -1` —
-    the one exact pair whose quotient, 2**63, does not fit
-    (`division_overflow_refusal` is the build-time spelling of the same
-    decision, and it has already raised by the time the emitter asks this).
-    Each half of the sentinel is dead as soon as the build decides the operand
-    away from the overflowing value:
-
-      * a LITERAL denominator that is not `-1` kills the first half — no such
-        division can overflow, whatever the dividend;
-      * a LITERAL numerator that is not `INT64_MIN` kills the second half — no
-        such division can overflow, whatever the divisor.
-
-    Everything else needs the check, because the build cannot decide either
-    half and the word the hardware computes is the trap's subject.
-
-    **Why it is asked at all, which is the cost side.** The pre-check is not
-    two compares. Its taken arm is the overflow TRAP, and on arm64
-    `_emit_exit` begins with a `bl fflush` — an extern call, which
-    `arm64_proof_gen.py::_unfollowable_calls` classifies as `opaque` because
-    the target is outside the image — exactly the shape
-    `division_needs_zero_guard` refuses to emit for a divisor that cannot be
-    zero. `test_formal_call_proof_gen.py`'s
-    `TestTheZeroDivisorGuardIsAFalseGoal` measures it for the sibling row: a
-    `// 4` image must carry no out-of-image call, and a sentinel whose divisor
-    half is dead by a literal re-adds the trap's flush and puts the universal
-    theorem back behind the two-calls rule. The decision is the WHOLE pair's
-    deadness rather than per half, because the emission is one block: a
-    `// -1` program's dividend is still unknown, so the check goes, and a
-    `// 4` program's whole sentinel is dead, so it does not.
-    """
-    if isinstance(denominator, int) and denominator != -1:
-        return False
-    if isinstance(numerator, int) and numerator != INT64_MIN:
-        return False
-    return True
-
-
 
 
 # ── Integer OVERFLOW: CPython is unbounded and a word is 64 bits ──────────
@@ -4101,8 +4061,8 @@ INT64_MAX = 2 ** 63 - 1
 INT_WORD_WIDTH = 64
 
 #: The operators whose word result can leave the signed 64-bit range. `&`, `|`,
-#: `^`, `~`, `>>`, `%`, `/` and unary `-` are NOT here and the reasons are worth
-#: the space, because "the same rule for every operator" is the obvious mistake:
+#: `^`, `~`, `>>` and unary `-` are NOT here and the reasons are worth the
+#: space, because "the same rule for every operator" is the obvious mistake:
 #:
 #:   * `&` `|` `^` `~` are BITWISE — every answer is a function of the same bit
 #:     positions of the operands, so the result is in range whenever the
@@ -4115,20 +4075,7 @@ INT_WORD_WIDTH = 64
 #:     is a build-time decidable constant whenever the source writes it; the
 #:     runtime spelling reads a variable and is handled by `abs`/negation of a
 #:     value that is already in range.
-#:   * `//` IS here, and in exactly ONE case: `INT64_MIN // -1` is 2**63, one
-#:     past the largest word — the only division whose answer does not fit,
-#:     which is why `division_overflow_refusal` is so narrow. The `+`/`-`/`*`
-#:     relatives overflow on ANY pair of large enough operands; this one needs
-#:     the one exact pair.
-#:   * `%` is NOT: the floored remainder is always in range — it is below
-#:     `|divisor|` in magnitude — so `INT64_MIN % -1` is 0 and the division
-#:     arm must not trap it. (x86-64's `IDIV` still raises `#DE` before it can
-#:     answer that 0; the pinned divergence is `test_formal_int_semantics.py`'s
-#:     `mod_min_by_minus_one` row, and it is not this predicate's.)
-#:   * `/` is NOT: it is this path's DOCUMENTED int-only truncation (the
-#:     `slash_truncates` row) — a divergence with its own pinned row, not a
-#:     miscompile to trap.
-INT_OVERFLOW_OPS = ("+", "-", "*", "//")
+INT_OVERFLOW_OPS = ("+", "-", "*", "<<", "**", "//", "/")
 
 
 def int_value_fits(result_type, value) -> bool:
@@ -4207,7 +4154,7 @@ def int_overflow_traps(op: str, result_type, *,
     `division_floors` gives above: a rule written per backend is two rules that
     agree until one of them is edited.
 
-    The answer is True for `+`, `-`, `*` and `//` on a result the word cannot
+    The answer is True for exactly `+`, `-`, `*` on a result the word cannot
     hold — a signed 64-bit one — and False for every case the "What is NOT
     trapped" list above gives a reason for. Read in order, that is:
 
@@ -4431,7 +4378,7 @@ def shift_overflow_refusal(op: str, amount, base=None,
         which does not saturate and still overflows, so the immediate form's
         `0..63` range test is not a safety test and cannot be made into one.
         Decided only when the base folds; a variable base is the subject of
-        `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
+        `integer overflow at runtime (trapped)`.
 
     `None` in any argument means "the build does not know", and every such case
     returns None rather than guessing: a refusal that fires on half a fact is a
@@ -4530,7 +4477,7 @@ def power_overflow_refusal(base, exponent, operands=None) -> str | None:
     is no question to refuse: `b ** n` overflows for some `b` and not for
     others, and a build that cannot say which has no answer to give. So the
     foldable case is refused precisely, and the variable case is what
-    `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md` is about.
+    `integer overflow at runtime (trapped)` is about.
 
     `None` means "answerable": a non-negative exponent whose exact value fits,
     or the `0 ** 0` / `1 ** anything` shapes that never overflow.
@@ -4595,11 +4542,9 @@ def division_overflow_refusal(numerator, denominator, op="/",
     number on arm64, which is the worst pair of answers one construct can have.
 
     Refused when the build knows both operands, which is the only case it can
-    be sure of: a variable denominator may be `-1` and a variable numerator may
-    be `INT64_MIN`, and the run-time half of that pair is the overflow pre-check
-    the division arms now emit before the divide (the checked spelling of the
-    same one-pair decision — the build decidable, the build unknown, the trap
-    is the answer).
+    be sure of: a variable denominator may be `-1` and a variable numerator may be
+    `INT64_MIN`, and the emitter's `CMP`-the-denominator-by-zero guard is the wrong
+    place to add a second test (see the bug doc for the run-time half).
     """
     if not isinstance(numerator, int) or not isinstance(denominator, int):
         return None

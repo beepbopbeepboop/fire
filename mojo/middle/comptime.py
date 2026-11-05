@@ -54,9 +54,6 @@ UnaryOp = _fc.UnaryOp
 BinaryOp = _fc.BinaryOp
 CompareChain = _fc.CompareChain
 CallExpr = _fc.CallExpr
-TupleExpr = getattr(_fc, 'TupleExpr', None)
-ListExpr = getattr(_fc, 'ListExpr', None)
-DottedLiteral = getattr(_fc, 'DottedLiteral', None)
 
 
 def compare_op(op: str, left, right):
@@ -78,16 +75,6 @@ def compare_op(op: str, left, right):
     if op == '<=':  return left <= right
     if op == '>':   return left > right
     if op == '>=':  return left >= right
-    if op == 'in':
-        try:
-            return left in right
-        except Exception:
-            return None
-    if op == 'not in':
-        try:
-            return left not in right
-        except Exception:
-            return None
     return None
 
 
@@ -181,15 +168,6 @@ def fold_unary_sign(op: str, value: int):
     return None
 
 
-# Fixed-width integer constructors `eval_const` can fold: name -> (bits, signed).
-_SCALAR_CTOR_BITS = {
-    'Int': (64, True), 'Int8': (8, True), 'Int16': (16, True),
-    'Int32': (32, True), 'Int64': (64, True),
-    'UInt': (64, False), 'UInt8': (8, False), 'UInt16': (16, False),
-    'UInt32': (32, False), 'UInt64': (64, False), 'Byte': (8, False),
-}
-
-
 def eval_const(node, bindings: dict, platform: str = None):
     """Evaluate `node` as any compile-time constant (int, bool, or str) — or
     None if it isn't foldable.
@@ -222,28 +200,6 @@ def eval_const(node, bindings: dict, platform: str = None):
     if isinstance(node, BoolLiteral): return node.value
     if isinstance(node, IntLiteral):  return node.value
     if isinstance(node, StringLiteral): return node.value
-    if DottedLiteral is not None and isinstance(node, DottedLiteral):
-        # .name - for enum/DType values, return a marker
-        try:
-            return ('.', getattr(node, 'name'))
-        except Exception:
-            return None
-    if TupleExpr is not None and isinstance(node, TupleExpr):
-        res = []
-        for e in getattr(node, 'elements', []) or []:
-            v = eval_const(e, bindings, platform)
-            if v is None:
-                return None
-            res.append(v)
-        return tuple(res)
-    if ListExpr is not None and isinstance(node, ListExpr):
-        res = []
-        for e in getattr(node, 'elements', []) or []:
-            v = eval_const(e, bindings, platform)
-            if v is None:
-                return None
-            res.append(v)
-        return res
     # PART 6 (2026-10-23, family S): the string-wrapping CONSTRUCTOR over a
     # single foldable argument — `StringSlice("x")`, `StaticString("x")`,
     # `String("x")`, `StringSpan("x")`. In every backend of this tree the
@@ -264,32 +220,6 @@ def eval_const(node, bindings: dict, platform: str = None):
             and node.func.name in ('String', 'StringSlice', 'StaticString',
                                    'StringSpan')):
         return eval_const(node.args[0], bindings, platform)
-    # `ord("0")` of a one-character constant, and a fixed-width scalar
-    # constructor over a foldable integer — `comptime ord_0 = Byte(ord("0"))`
-    # is the idiom (std/collections/string/_parsing_numbers/parsing_floats).
-    # Neither folded, so the ComptimeVarStmt dropped the name and every read
-    # inside a function emitted `(int64_t)0  /* ct param or undeclared */`:
-    # `byte == ord_dot` compared against 0 and `byte - ord_0` subtracted 0,
-    # i.e. silently wrong digits, with a `-Wpointer-to-int-cast` warning as
-    # the only symptom. The constructor wraps to its width, as the runtime
-    # constructor does.
-    if (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
-            and len(node.args) == 1 and not node.kwargs):
-        _cfn = node.func.name
-        if _cfn == 'ord':
-            _ov = eval_const(node.args[0], bindings, platform)
-            if isinstance(_ov, str) and len(_ov) == 1:
-                return ord(_ov)
-            return None
-        _bits = _SCALAR_CTOR_BITS.get(_cfn)
-        if _bits is not None:
-            _iv = eval_const(node.args[0], bindings, platform)
-            if isinstance(_iv, int) and not isinstance(_iv, (bool, str)):
-                _w = _iv & ((1 << _bits[0]) - 1)
-                if _bits[1] and _w >= (1 << (_bits[0] - 1)):
-                    _w -= (1 << _bits[0])
-                return _w
-            return None
     if isinstance(node, IdentExpr):
         return bindings.get(node.name)
     if isinstance(node, UnaryOp) and node.op in FOLD_UNARY_OPS:

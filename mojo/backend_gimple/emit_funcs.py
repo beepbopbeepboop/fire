@@ -762,33 +762,6 @@ def _gen_stmt_FromImportStmt(gen, node):
 
 
 def _gen_stmt_ComptimeIfStmt(gen, node):
-    # Handle MatchCaseIf
-    cond = node.condition
-    if type(cond).__name__ == 'MatchCaseIf' or getattr(cond, '__class__', None).__name__ == 'MatchCaseIf':
-        try:
-            value_node = cond.value
-            vtype, cond_v = gen.lower_expr(value_node)
-            try:
-                cond_v_bool = gen._ensure_bool_cond(vtype, cond_v)
-            except Exception:
-                cond_v_bool = cond_v
-            bb_merge = gen._new_bb()
-            bb_true = gen._new_bb()
-            bb_false = bb_merge
-            gen._emit(f"  if ({cond_v_bool}) goto {bb_true}; else goto {bb_false};")
-            gen._emit_label(bb_true)
-            _bscope = ginf._open_block_scope(gen)
-            for s in node.then_body:
-                gen.gen_stmt(s)
-            ginf._close_block_scope(gen, _bscope)
-            gen._emit(f"  goto {bb_merge};")
-            gen._emit_label(bb_merge)
-            if getattr(node, 'else_body', None):
-                for s in node.else_body:
-                    gen.gen_stmt(s)
-            return
-        except Exception:
-            pass
     # The int tri-state, not `_eval_const_bool`'s `bool | None`: compiled, the
     # latter cannot tell "unknown" from "false" (comptime.CONST_UNKNOWN).
     val = gen._eval_const_bool_state(node.condition)
@@ -897,20 +870,6 @@ def _gen_stmt_ComptimeVarStmt(gen, node):
         if isinstance(val, str):
             gen._comptime_str_names.add(_ct_target)
         gen._comptime_vals[_ct_target] = val
-    else:
-        # Handle type aliases like `comptime socklen_t = c_uint` where
-        # c_uint is itself a comptime alias to UInt32 (a scalar type).
-        rhs = _ct_node.value
-        if isinstance(rhs, IdentExpr):
-            rhs_name = _as_str(rhs.name)
-            # Direct scalar type constructor
-            if rhs_name in gimple_ctypes._SCALAR_CTORS:
-                gen._comptime_vals[_ct_target] = rhs_name
-            # Follow comptime alias chain
-            elif rhs_name in getattr(gen, '_comptime_vals', {}):
-                _aliased = gen._comptime_vals[rhs_name]
-                if isinstance(_aliased, str) and _aliased in gimple_ctypes._SCALAR_CTORS:
-                    gen._comptime_vals[_ct_target] = _aliased
     if isinstance(_ct_node.value, gimple_ctypes.ListExpr):
         gen._comptime_list_asts[_ct_target] = _ct_node.value
     return
@@ -2138,7 +2097,7 @@ def _home_def_return_type(gen, qualifier: str, bare_name: str):
     return store.get(_pair_key(qualifier, bare_name))
 
 
-def _imported_def_pts(gen, bare_name: str, definer_only: bool = False) -> list | None:
+def _imported_def_pts(gen, bare_name: str) -> list | None:
     """BUG-2026-024 helper: the parameter ctypes recorded for `bare_name` by
     its HOME module at FromImportStmt registration time
     (_imported_home_param_types, keyed (sanitized_home_qualifier, name)),
@@ -2156,11 +2115,6 @@ def _imported_def_pts(gen, bare_name: str, definer_only: bool = False) -> list |
     whichever module compiled last (mod.computer.computer_case.get_energy
     vs mod.computer.network.get_energy -> call sites emitted
     computer_case_get_energy_77b31a against definition ..._0ed997).
-
-    `definer_only=True` skips the importer's own snapshot tier, so a hit means
-    a unit that DEFINES the name committed this signature (module_gen's extern
-    block uses it: an extern may only be re-typed from a definition that is
-    really in the translation unit).
 
     Never raises: an _AMBIGUOUS_FUNC_HOME entry resolves to None here so
     the caller falls through to the shared-slot tier; the authoritative
@@ -2225,7 +2179,7 @@ def _imported_def_pts(gen, bare_name: str, definer_only: bool = False) -> list |
             pts = _def_store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts
-        if store and not definer_only:
+        if store:
             pts = store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts

@@ -437,7 +437,7 @@ class DispatchSolver:
         self.struct_methods: dict[str, dict] = {}
         self._pattern_counter = 0
 
-    def analyze(self, all_stmts: list) -> None:
+    def analyze(self, all_stmts: list):
         """Run complete dispatch analysis on entire closure.
 
         Includes three core dispatch analyses plus new complementary analyses:
@@ -871,7 +871,7 @@ class FunctionCompilability:
         self.compilable_funcs: set = set()
         self.uncompilable_funcs: dict = {}
 
-    def analyze(self, stmts: list) -> None:
+    def analyze(self, stmts: list):
         """Determine which functions are C-compilable."""
         candidates = self._find_candidates(stmts)
         for func_name, func_def, is_method in candidates:
@@ -1014,7 +1014,7 @@ class TypePromotionSolver:
         self.promoted_types: dict = {}
         self.type_conflicts: dict = {}
 
-    def analyze(self, stmts: list, all_funcs: dict) -> None:
+    def analyze(self, stmts: list, all_funcs: dict):
         """Propagate types across closure.
 
         Args:

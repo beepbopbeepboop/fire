@@ -538,19 +538,6 @@ def last_degradations() -> list:
 _stdlib_compile_cache: dict = {}  # in-process L1 for compile_module_to_c_cached
 
 
-def stdlib_codegen_key(src: str, path: str, module_name: str,
-                       linkable: bool = True) -> str:
-    """The CAS key `compile_module_to_c_cached` stores a module's C under.
-
-    One definition, because a caller that wants to know "would this be a hit?"
-    (compile_stdlib.py's hit/miss counters) has to build the SAME key. It built
-    the linkable one while compiling with `linkable=False`, whose key carries
-    the `|nolink` suffix, so its pre-check never matched and the report said
-    `Codegen CAS: 0/679 hits` for a sweep that was 100% cached."""
-    return cas.stdlib_compile_key(src, path, module_name,
-                                  extra='' if linkable else '|nolink')
-
-
 def compile_module_to_c_cached(src: str, path: str, module_name: str,
                               linkable: bool = True) -> str:
     """Like compile_module_to_c but CAS-cached under stdlib-compile/<hash>.
@@ -584,7 +571,8 @@ def compile_module_to_c_cached(src: str, path: str, module_name: str,
     # it, and handing it to `build()` would republish the very hole the refusal
     # exists to refuse. One extra character in the key, and the two artifacts
     # can never be confused for each other.
-    key = stdlib_codegen_key(src, path, module_name, linkable)
+    key = cas.stdlib_compile_key(src, path, module_name,
+                                 extra='' if linkable else '|nolink')
     if key in _stdlib_compile_cache:
         return _stdlib_compile_cache[key]
     cached = cas.lookup(key, '.ci')

@@ -2179,7 +2179,6 @@ class GimpleGen:
         # per-compile-unit gating, not a blanket "always emit", is the
         # correct fix for a helper this genuinely optional.
         self._asdict_dispatch_needed: set = set()
-        self._module_stmts: dict[str, list] = {}    # module_name → parsed stmts (shared across all gens)
         # Per-module AST lifetime fix: the module ASTs were previously accumulated
         # in _module_stmts (and mirrored via _all_transitive_stmts_ordered) for the
         # whole process lifetime causing resource blowup. We now only keep the
@@ -4147,7 +4146,6 @@ class GimpleGen:
         # Time functions
         'time', 'clock', 'difftime', 'mktime', 'strftime',
         'gmtime', 'localtime', 'asctime', 'ctime',
-        'clock_gettime', 'clock_gettime_nsec_np',
         # Signal
         'signal', 'raise',
         # Wide char (wchar.h)
@@ -4247,8 +4245,6 @@ class GimpleGen:
         'chdir': ('int', ['char *']),
         'execve': ('int', ['char *', 'char *', 'char *']),
         'unsetenv': ('int', ['char *']),
-        'clock_gettime': ('int', ['int', 'struct timespec *']),
-        'clock_gettime_nsec_np': ('int64_t', ['int']),
     }
 
     # ── _lower_call sub-handlers ──────────────────────────────────────────
@@ -4337,10 +4333,6 @@ class GimpleGen:
         'Dict', 'List', 'Set', 'Array', 'Map', 'Kwargs', 'Tuple', 'Span',
         'Optional', 'Pointer', 'StringSlice', 'UnsafePointer', 'OwnedPointer',
         'ArcPointer', 'MojoList', 'MojoDict', 'MojoSet',
-        'timeval', 'timespec', 'linger', 'timezone',
-        'sockaddr', 'sockaddr_in', 'sockaddr_in6', 'sockaddr_un', 'sockaddr_storage',
-        'msghdr', 'cmsghdr', 'iovec', 'pollfd', 'fd_set', 'rusage', 'rlimit',
-        'stat', 'stat64', 'dirent', 'dirent64', 'termios', 'winsize',
     })
 
     # Generic free functions available without an explicit import — real Mojo
@@ -6273,11 +6265,6 @@ def _relocate_module_instance_defs(code: str) -> str:
     return '\n'.join(final_lines)
 
 
-# Attributes of the returned generator that are compile RESULTS, not working state: the
-# end-of-compile cleanup in `_run_pipeline` must leave them alone.
-_PIPELINE_RESULT_ATTRS = frozenset({'_link_dylibs', '_link_objects', '_link_needs_cxx_box'})
-
-
 def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = "",
                   link_mode: bool = False, auto_gpu: bool = True):
     """Shared driver behind every public compile_* entry point.
@@ -6314,7 +6301,6 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).with_filename(filename).parse_module()
     _check_ownership(stmts, filename)
-    stmts = ast_rewriter.desugar_enums(stmts)
     try:
         stmts = _transform_enum_classes(stmts)
     except Exception:
@@ -6622,17 +6608,9 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
             except Exception: pass
     except Exception:
         pass
-    # Clear per-instance accumulators on the returned generator -- except the
-    # link RESULTS the callers read off it after this returns (`compile_linked`
-    # and `compile_to_gimple_with_cpp` take `_link_dylibs` / `_link_objects` /
-    # `_link_needs_cxx_box[0]`). Clearing those made every link-mode compile
-    # raise `IndexError: list index out of range` on the box, so
-    # `driver.compile_program` failed and `fire.py build` fell back to its slow
-    # inline pipeline.
+    # Clear per-instance accumulators on the returned generator.
     try:
         for _attr in list(getattr(gen, '__dict__', {}).keys()):
-            if _attr in _PIPELINE_RESULT_ATTRS:
-                continue
             _val = getattr(gen, _attr, None)
             if isinstance(_val, (dict, list, set)) and _attr.startswith('_'):
                 try: _val.clear()
@@ -6863,8 +6841,6 @@ def _transform_enum_classes(stmts: list) -> list:
     from fire_compiler import DictExpr, StringLiteral, TupleExpr, SubscriptExpr, ExprStmt
     from fire_compiler import _as_str
     import copy
-    if not isinstance(stmts, list):
-        return stmts
     result = []
     for stmt in stmts:
         if isinstance(stmt, StructDef) and _is_enum_class_def(stmt):
@@ -6897,32 +6873,22 @@ def _transform_enum_classes(stmts: list) -> list:
                     pass
             else:
                 result.append(stmt)
-        elif hasattr(stmt, 'body'):
+        elif hasattr(stmt, 'body') and isinstance(stmt.body, list):
             try:
-                body = getattr(stmt, 'body')
-                if isinstance(body, list):
-                    new_stmt = copy.copy(stmt)
-                    new_stmt.body = _transform_enum_classes(body)
-                    if hasattr(stmt, 'orelse'):
-                        orelse = getattr(stmt, 'orelse')
-                        if isinstance(orelse, list):
-                            new_stmt.orelse = _transform_enum_classes(orelse)
-                    result.append(new_stmt)
-                    continue
+                new_stmt = copy.copy(stmt)
+                new_stmt.body = _transform_enum_classes(stmt.body)
+                result.append(new_stmt)
             except Exception:
-                pass
-            result.append(stmt)
-        elif hasattr(stmt, 'orelse'):
+                result.append(stmt)
+        elif hasattr(stmt, 'orelse') and isinstance(getattr(stmt, 'orelse'), list):
             try:
-                orelse = getattr(stmt, 'orelse')
-                if isinstance(orelse, list):
-                    new_stmt = copy.copy(stmt)
-                    new_stmt.orelse = _transform_enum_classes(orelse)
-                    result.append(new_stmt)
-                    continue
+                new_stmt = copy.copy(stmt)
+                if hasattr(new_stmt, 'body'):
+                    new_stmt.body = _transform_enum_classes(new_stmt.body)
+                new_stmt.orelse = _transform_enum_classes(getattr(stmt, 'orelse'))
+                result.append(new_stmt)
             except Exception:
-                pass
-            result.append(stmt)
+                result.append(stmt)
         else:
             result.append(stmt)
     return result

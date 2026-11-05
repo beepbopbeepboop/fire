@@ -1567,9 +1567,6 @@ void        mojo_dict_set_none_key_double(MojoDict *d, double v);
 void        mojo_dict_set_none_key_bool(MojoDict *d, int v);
 void        mojo_dict_set_none_key_none(MojoDict *d);
 void        mojo_dict_set_none_key_struct(MojoDict *d, void *v);
-int64_t     mojo_dict_get_none_key_int(MojoDict *d);
-char       *mojo_dict_get_none_key_str(MojoDict *d);
-double      mojo_dict_get_none_key_double(MojoDict *d);
 void        mojo_dict_set_bytes_none_key(MojoDict *d, MojoBytes *key, int64_t v);
 
 /* A STRUCT stored as a dict VALUE: the boxed pointer, tagged `kind == 5` so
@@ -2318,11 +2315,7 @@ static ssize_t _mojo_getline(void *lp, void *n, void *f) {
  * `mach_absolute_time` is declared signed for the same reason and on the same
  * reasoning; nothing in the stdlib calls it today, so nothing constrains it
  * yet, and consistency is the safer default for a future `external_call`. */
-#include <time.h>
-#include <stdint.h>
-#ifndef clock_gettime_nsec_np
-__uint64_t clock_gettime_nsec_np(clockid_t __clock_id);
-#endif
+long long clock_gettime_nsec_np(int clockid);
 long long mach_absolute_time(void);
 #endif
 static int _mojo_vprintf(char *fmt, void *ap) {

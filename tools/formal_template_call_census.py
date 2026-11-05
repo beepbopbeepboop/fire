@@ -1,6 +1,3 @@
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from module_loader import STDLIB_PATH
 #!/usr/bin/env python3
 """Which BARE calls to a declared template could have their type arguments
 inferred, and what each one would take — the measurement
@@ -123,7 +120,7 @@ import formal.monomorph as MM                                # noqa: E402
 DEFAULT_PATHS = [
     os.path.join(ROOT, "formal", "hostmods"),
     ROOT,
-    (os.path.join(STDLIB_PATH, "std") if STDLIB_PATH else os.path.join(ROOT, "..", "..", "modular", "mojo", "stdlib", "std")),
+    os.path.join(ROOT, "..", "new-modular", "Mojo", "stdlib", "std"),
 ]
 
 # Bounds that unification can satisfy WITHOUT choosing between candidates, in

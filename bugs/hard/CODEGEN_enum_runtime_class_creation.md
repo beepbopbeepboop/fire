@@ -116,23 +116,3 @@ every module is reachable from a word with `mojo_getattr_any(obj, attr)`
 
 Quick test for the first stage that remains: an `Enum` subclass with two members compiled and
 printed, diffed against CPython.
-
-## Status 2026-11-05 — plain `Enum` classes desugared (stage 5, first piece)
-
-`ast_rewriter.desugar_enums` (called from `compile_to_gimple` ahead of the old
-`_transform_enum_classes`) turns `class Color(Enum): RED = 1 ...` into an ordinary class with
-`name` / `value` / `__str__` / `__repr__`, one typed module global per member (`Color__RED`), the
-member list (`Color__members`) and `Color__lookup` (a `ValueError` for a bad value), then rewrites
-`Color.RED`, `Color(v)`, `Color.__name__` and iteration over the class (`for`, comprehension,
-`list/len/...`). Aliases resolve to the first member. Pinned against CPython by
-`test_enum_desugar.py`; `test_runtime_class_creation.py` still 30/30.
-
-Narrow on purpose (anything else keeps the metaclass transform): base exactly `Enum`, body only
-`NAME = int|float|str literal` members and methods, one literal kind per enum. Not covered:
-`auto()`, `Flag` / `IntFlag` / `IntEnum` / `StrEnum` (members must also be ints/strs), mixed-kind
-values, `Color['RED']`, `Color.__members__`, enums nested in functions/classes, `print(list(Color))`
-(a list of user objects prints the dataclass-style repr instead of calling `__repr__` - a
-general list-repr gap, not enum-specific), members as dict keys (hash by identity returns None).
-
-Remaining stages are unchanged: the run-time metaclass protocol (4) for a user-written
-`class Meta(type)`, and flipping `enum.py` itself from interpreted to compiled.

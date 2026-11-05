@@ -6584,11 +6584,6 @@ def _lower_external_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # diff still pinpointing this exact line.
             gen.func_param_types[cname] = [_as_str(_ap[0]) for _ap in arg_pairs]
 
-    if cname == 'clock_gettime' and len(arg_pairs) >= 2:
-        at, av = arg_pairs[1]
-        arg_pairs = [(arg_pairs[0][0], arg_pairs[0][1]), ('struct timespec *', f'(struct timespec *){av}')]
-    if cname == 'clock_gettime_nsec_np' and len(arg_pairs) >= 1:
-        pass  # signature should be fine from headers
     if ret_ct == 'void':
         gen._emit_call('', '', cname, arg_pairs)
         t = gen._new_temp('int')
@@ -7433,7 +7428,34 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
     Single source of truth for key coercion + per-type setter dispatch."""
     if _is_none_literal(key_expr):
         vt, vv = gen.lower_expr(val_expr)
-        ginf.emit_dict_none_key_store(gen, t, vt, vv, val_expr)
+        gen._note_container_callable_ret(t, vv, vt, val_expr)
+        if vt == 'char *':
+            if isinstance(vv, str) and vv.startswith('_slit_'):
+                vv = gen._new_val('char *', f"{vv}")
+            gen._emit_call('void', '', 'mojo_dict_set_none_key_str',
+                           [('MojoDict *', t), ('char *', vv)])
+            return
+        if gen._is_none_literal(val_expr) or vt == 'int' and vv == '0' and _is_none_literal(val_expr):
+            gen._emit_call('void', '', 'mojo_dict_set_none_key_none',
+                           [('MojoDict *', t)])
+            return
+        if vt in gimple_ctypes._FLOAT_TYPES:
+            gen._emit_call('void', '', 'mojo_dict_set_none_key_double',
+                           [('MojoDict *', t), (vt, vv)])
+            return
+        _shim = gimple_exprtypes.struct_elem_repr_shim(gen, vt)
+        if _shim:
+            gen._emit_call('void', '', 'mojo_dict_set_none_key_struct',
+                           [('MojoDict *', t), (vt, vv)])
+            return
+        if gimple_exprtypes.is_python_bool_expr(gen, val_expr):
+            vv64 = gen._to_int64(vt, vv)
+            gen._emit_call('void', '', 'mojo_dict_set_none_key_bool',
+                           [('MojoDict *', t), ('int64_t', vv64)])
+            return
+        vv64 = gen._to_int64(vt, vv)
+        gen._emit_call('void', '', 'mojo_dict_set_none_key_int',
+                       [('MojoDict *', t), ('int64_t', vv64)])
         return
     kt, kv = gen.lower_expr(key_expr)
     vt, vv = gen.lower_expr(val_expr)

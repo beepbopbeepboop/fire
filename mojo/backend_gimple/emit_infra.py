@@ -1401,12 +1401,6 @@ def _emit_stdlib_import_externs(gen, stmts: list) -> None:
         # Linux-specific libc wrappers that collide with GCC declarations
         'get_errno', 'set_errno', '_getpw_linux', '_lstat_linux_x86_64',
         '_stat_linux_x86_64', '_fstat_linux_x86_64',
-        # POSIX typedefs that come from system headers
-        'in_addr_t', 'in_port_t', 'suseconds_t', 'socklen_t',
-        'sa_family_t', 'size_t', 'ssize_t', 'off_t', 'pid_t', 'uid_t', 'gid_t',
-        'time_t', 'clock_t', 'useconds_t', 'nfds_t',
-        'intptr_t', 'uintptr_t', 'intmax_t', 'uintmax_t', 'ptrdiff_t',
-        'wchar_t', 'wint_t', 'sig_atomic_t',
     })
 
     def _resolve_relative(mod, pkg_prefix):
@@ -5190,7 +5184,7 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
             return gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', ev)])
         nv = gen._to_int64(et, ev)
         return gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
-    if et in ('double', 'float', '__fp16'):
+    if et in ('double', 'float'):
         fv = ev if et == 'double' else gen._new_val('double', f'(double){ev}')
         return gen._call_expr('char *', 'mojo_repr_float', [('double', fv)])
     if et.endswith(' *') and et != 'void *':
@@ -6547,44 +6541,6 @@ def elem_repr_operand(gen, shim: str) -> str:
     return gen._new_val('void *', f'_funcptr_{shim}')
 
 
-def emit_dict_none_key_store(gen, dict_val: str, val_ctype: str, val: str, val_node) -> None:
-    """The store of a value under the `None` KEY (`{None: v}`, `d[None] = v`).
-
-    A `None` key is its own key domain in the runtime (keykind 3), distinct from
-    the integer 0 that `None` lowers to, so it cannot go through the ordinary
-    key-conversion chain: every value kind has its own `mojo_dict_set_none_key_*`
-    setter, chosen here exactly as `emit_dict_int_value_store` chooses for a
-    string key. The one spelling, shared by the dict literal and the subscript
-    store, which had only the former (so `d[None] = 5` made a separate int-0
-    entry and `{None: 1, 0: 2}` could not round-trip)."""
-    gen._note_container_callable_ret(dict_val, val, val_ctype, val_node)
-    if val_ctype == 'char *':
-        if isinstance(val, str) and val.startswith('_slit_'):
-            val = gen._new_val('char *', f"{val}")
-        gen._emit_call('void', '', 'mojo_dict_set_none_key_str',
-                       [('MojoDict *', dict_val), ('char *', val)])
-        return
-    if gen._is_none_literal(val_node):
-        gen._emit_call('void', '', 'mojo_dict_set_none_key_none', [('MojoDict *', dict_val)])
-        return
-    if val_ctype in gimple_ctypes._FLOAT_TYPES:
-        gen._emit_call('void', '', 'mojo_dict_set_none_key_double',
-                       [('MojoDict *', dict_val), (val_ctype, val)])
-        return
-    _shim = gimple_exprtypes.struct_elem_repr_shim(gen, val_ctype)
-    if _shim:
-        gen._emit_call('void', '', 'mojo_dict_set_none_key_struct',
-                       [('MojoDict *', dict_val), (val_ctype, val)])
-        return
-    vv64 = gen._to_int64(val_ctype, val)
-    if gimple_exprtypes.is_python_bool_expr(gen, val_node):
-        gen._emit_call('void', '', 'mojo_dict_set_none_key_bool',
-                       [('MojoDict *', dict_val), ('int64_t', vv64)])
-        return
-    gen._emit_call('void', '', 'mojo_dict_set_none_key_int',
-                   [('MojoDict *', dict_val), ('int64_t', vv64)])
-
-
 def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
                               val_ctype: str, val: str, val_node) -> None:
     """The one dict store, for EVERY value kind, shared by the dict literal
@@ -6993,9 +6949,7 @@ def _float_operand_as_double(gen, ctype: str, val: str, maybe_box: bool) -> str:
         return _as_str(gen._call_expr('double', 'mojo_box_double', [('int64_t', val)]))
     if ctype == 'double':
         return _as_str(val)
-    # Operands are bare names: a parenthesised operand is `expected expression
-    # before '(' token` inside a `__GIMPLE` function.
-    return _as_str(gen._new_val('double', f'(double){_as_str(val)}'))
+    return _as_str(gen._new_val('double', f'(double) ({_as_str(val)})'))
 
 
 def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv: str,
@@ -7031,20 +6985,12 @@ def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv
         dres = gen._call_expr('double', 'mojo_div_double',
                               [('double', _as_str(dl)), ('double', _as_str(dr))])
         return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', _as_str(dres))])
-    if op == '//' or op == '%':
-        # `mojo_div_double` for the quotient (gcc -fgimple ICEs on an inline
-        # double `/`, and it raises ZeroDivisionError on a zero divisor), then
-        # one operation per statement so every operand is a bare name.
-        dq = gen._call_expr('double', 'mojo_div_double',
-                            [('double', _as_str(dl)), ('double', _as_str(dr))])
-        dfl = gen._call_expr('double', 'floor', [('double', _as_str(dq))])
-        if op == '//':
-            dres = dfl
-        else:
-            dprod = gen._new_val('double', f'{_as_str(dr)} * {_as_str(dfl)}')
-            dres = gen._new_val('double', f'{_as_str(dl)} - {_as_str(dprod)}')
+    if op == '//':
+        dres = gen._new_val('double', f'floor(({_as_str(dl)}) / ({_as_str(dr)}))')
+    elif op == '%':
+        dres = gen._new_val('double', f'({_as_str(dl)} - ({_as_str(dr)}) * floor(({_as_str(dl)}) / ({_as_str(dr)})))')
     else:
-        dres = gen._new_val('double', f'{_as_str(dl)} {op} {_as_str(dr)}')
+        dres = gen._new_val('double', f'({dl}) {op} ({dr})')
     if lt == 'double' or rt == 'double':
         return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', _as_str(dres))])
     # The integer answer reads a maybe-box operand as its integer
@@ -7054,7 +7000,7 @@ def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv
     if op == '//':
         ires = gen._new_val('int64_t', f'__mojo_floordiv ({_as_str(ilv)}, {_as_str(irv)})')
     else:
-        ires = gen._new_val('int64_t', f'{_as_str(ilv)} {op} {_as_str(irv)}')
+        ires = gen._new_val('int64_t', f'({_as_str(ilv)}) {op} ({_as_str(irv)})')
     return gen._call_expr('int64_t', 'mojo_float_arith_select', [
         ('int64_t', _as_str(lv) if lp else '0'),
         ('int64_t', _as_str(rv) if rp else '0'),

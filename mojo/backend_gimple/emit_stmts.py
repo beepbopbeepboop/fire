@@ -2359,12 +2359,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # dict[key] = val → mojo_dict_set_str_* (key coerced via
             # _char_to_cstr, the single dict-key-to-string conversion
             # used by both read and write sides — see its docstring).
-            if gen._is_none_literal(node.target.index):
-                # `d[None] = v`: the None-key domain, not the integer 0 that
-                # `None` lowers to (see `emit_dict_none_key_store`).
-                ginf.emit_dict_none_key_store(gen, obj_v, vtype, v, node.value)
-                key_tmp = None
-            elif it == 'MojoBytes *':
+            if it == 'MojoBytes *':
                 # A bytes KEY is its own key domain in the runtime (see
                 # _DictSlot.keykind), not a char* one: routing it through
                 # _char_to_cstr cast the MojoBytes POINTER to char*, so the
@@ -3474,250 +3469,7 @@ def _restore_isinstance_narrowings(gen, saved: dict) -> None:
 
 
 def _gen_stmt_IfStmt(gen, node):
-    # Handle pattern match if: if case pattern = value:
-    cond = node.condition
-    if type(cond).__name__ == 'MatchCaseIf' or getattr(getattr(cond, '__class__', None), '__name__', '') == 'MatchCaseIf':
-        try:
-            pattern = cond.pattern
-            value_node = cond.value
-            # Try to extract binding for .Some(ref x) or .Some(x)
-            binding_name = None
-            try:
-                if hasattr(pattern, 'args'):
-                    CONV = {'ref', 'out', 'mut', 'var', 'inout', 'borrowed', 'owned', 'deinit', 'read', 'imm'}
-                    for i, a in enumerate(pattern.args):
-                        if hasattr(a, 'name') and a.name in CONV:
-                            if i+1 < len(pattern.args):
-                                b = pattern.args[i+1]
-                                if hasattr(b, 'name') and b.name != '_':
-                                    binding_name = b.name
-                                    break
-                        elif hasattr(a, 'name') and a.name not in CONV and a.name != '_':
-                            binding_name = a.name
-                            break
-                # Also check if pattern is CallExpr with DottedLiteral func like .Some
-                if binding_name is None and hasattr(pattern, 'func'):
-                    func = pattern.func
-                    args = getattr(pattern, 'args', []) or []
-                    CONV = {'ref', 'out', 'mut', 'var', 'inout', 'borrowed', 'owned', 'deinit', 'read', 'imm'}
-                    for i, a in enumerate(args):
-                        if hasattr(a, 'name') and a.name in CONV:
-                            if i+1 < len(args) and hasattr(args[i+1], 'name') and args[i+1].name != '_':
-                                binding_name = args[i+1].name
-                                break
-                        elif hasattr(a, 'name') and a.name not in CONV and a.name != '_':
-                            binding_name = a.name
-                            break
-            except Exception:
-                pass
-            # Try simple truthiness check first for Optional-like patterns
-            cond_type, cond_v = gen.lower_expr(value_node)
-            try:
-                cond_v = gen._ensure_bool_cond(cond_type, cond_v)
-            except Exception:
-                pass
-            bb_true = gen._new_bb()
-            bb_merge = gen._new_bb()
-            _n_elifs = len(node.elifs) if node.elifs else 0
-            _n_else = len(node.else_body) if node.else_body else 0
-            has_else = _n_elifs > 0 or _n_else > 0
-            bb_false = gen._new_bb() if has_else else bb_merge
-            gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
-            gen._emit_label(bb_true)
-            _narrowed = gen._apply_isinstance_narrowings(node.condition)
-            _bscope = ginf._open_block_scope(gen)
-            try:
-                p = cond.pattern
-                bname = None
-                if hasattr(p, 'args'):
-                    CONV = {'ref', 'out', 'mut', 'var', 'inout', 'borrowed', 'owned', 'deinit', 'read', 'imm'}
-                    for i,a in enumerate(p.args):
-                        if hasattr(a,'name') and a.name in CONV and i+1 < len(p.args):
-                            b = p.args[i+1]
-                            if hasattr(b,'name') and b.name != '_':
-                                bname = b.name
-                                break
-                        elif hasattr(a,'name') and a.name not in CONV and a.name != '_':
-                            bname = a.name
-                            break
-                if bname is None and hasattr(p, 'func'):
-                    args = getattr(p, 'args', []) or []
-                    CONV = {'ref', 'out', 'mut', 'var', 'inout', 'borrowed', 'owned', 'deinit', 'read', 'imm'}
-                    for i,a in enumerate(args):
-                        if hasattr(a,'name') and a.name in CONV and i+1 < len(args):
-                            b = args[i+1]
-                            if hasattr(b,'name') and b.name != '_':
-                                bname = b.name
-                                break
-                        elif hasattr(a,'name') and a.name not in CONV and a.name != '_':
-                            bname = a.name
-                            break
-                if bname:
-                    try:
-                        btype, bev = gen.lower_expr(cond.value)
-                        try:
-                            btype = gen._get_actual_type(btype, bev)
-                        except Exception:
-                            pass
-                        if btype == 'int64_t':
-                            try:
-                                btype = getattr(gen, '_actual_types', {}).get(bev, btype)
-                            except Exception:
-                                pass
-                            try:
-                                if bev in getattr(gen, 'var_types', {}) and gen.var_types.get(bev) and gen.var_types.get(bev) != 'int64_t':
-                                    btype = gen.var_types.get(bev)
-                            except Exception:
-                                pass
-                        try:
-                            gen._declare_var(bname, btype)
-                        except Exception:
-                            pass
-                        try:
-                            gen._track_pointer_actual_type(bname, btype, bev, btype)
-                        except Exception:
-                            pass
-                        try:
-                            bname_c = gen._cname(bname)
-                        except Exception:
-                            bname_c = bname
-                        try:
-                            gen._emit(f"  {bname_c} = {bev};")
-                        except Exception:
-                            gen._emit(f"  {bname} = {bev};")
-                    except Exception:
-                        try:
-                            gen._declare_var(bname, 'int64_t')
-                            _, ev = gen.lower_expr(cond.value)
-                            try:
-                                bname_c = gen._cname(bname)
-                            except Exception:
-                                bname_c = bname
-                            try:
-                                gen._emit(f"  {bname_c} = {ev};")
-                            except Exception:
-                                gen._emit(f"  {bname} = {ev};")
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-            for s in node.then_body:
-                gen.gen_stmt(s)
-            ginf._close_block_scope(gen, _bscope)
-            gen._restore_isinstance_narrowings(_narrowed)
-            if not gen._last_was_terminal:
-                gen._emit(f"  goto {bb_merge};")
-            current_false = bb_false
-            elifs = list(node.elifs)
-            _ei = 0
-            while _ei < len(elifs):
-                ec, eb = elifs[_ei]
-                _ei += 1
-                gen._emit_label(current_false)
-                has_more = (len(elifs) - _ei) > 0 or _n_else > 0
-                next_false = gen._new_bb() if has_more else bb_merge
-                next_true = gen._new_bb()
-                if type(ec).__name__ == 'MatchCaseIf' or getattr(getattr(ec, '__class__', None), '__name__', '') == 'MatchCaseIf':
-                    ec_t, ev = gen.lower_expr(ec.value)
-                    try:
-                        ev = gen._ensure_bool_cond(ec_t, ev)
-                    except Exception:
-                        pass
-                else:
-                    ec_t, ev = gen.lower_expr(ec)
-                    try:
-                        ev = gen._ensure_bool_cond(ec_t, ev)
-                    except Exception:
-                        pass
-                gen._emit(f"  if ({ev}) goto {next_true}; else goto {next_false};")
-                gen._emit_label(next_true)
-                _bscope = ginf._open_block_scope(gen)
-                if type(ec).__name__ == 'MatchCaseIf' or getattr(getattr(ec, '__class__', None), '__name__', '') == 'MatchCaseIf':
-                    try:
-                        p = ec.pattern
-                        bname = None
-                        if hasattr(p, 'args'):
-                            CONV = {'ref', 'out', 'mut', 'var', 'inout', 'borrowed', 'owned', 'deinit', 'read', 'imm'}
-                            for i,a in enumerate(p.args):
-                                if hasattr(a,'name') and a.name in CONV and i+1 < len(p.args) and hasattr(p.args[i+1],'name') and p.args[i+1].name != '_':
-                                    bname = p.args[i+1].name
-                                    break
-                                elif hasattr(a,'name') and a.name not in CONV and a.name != '_':
-                                    bname = a.name
-                                    break
-                        if bname is None and hasattr(p, 'func'):
-                            args = getattr(p, 'args', []) or []
-                            CONV = {'ref', 'out', 'mut', 'var', 'inout', 'borrowed', 'owned', 'deinit', 'read', 'imm'}
-                            for i,a in enumerate(args):
-                                if hasattr(a,'name') and a.name in CONV and i+1 < len(args) and hasattr(args[i+1],'name') and args[i+1].name != '_':
-                                    bname = args[i+1].name
-                                    break
-                                elif hasattr(a,'name') and a.name not in CONV and a.name != '_':
-                                    bname = a.name
-                                    break
-                        if bname:
-                            try:
-                                btype, bev = gen.lower_expr(ec.value)
-                                try:
-                                    btype = gen._get_actual_type(btype, bev)
-                                except Exception:
-                                    pass
-                                if btype == 'int64_t':
-                                    try:
-                                        btype = getattr(gen, '_actual_types', {}).get(bev, btype)
-                                    except Exception:
-                                        pass
-                                    try:
-                                        if bev in getattr(gen, 'var_types', {}) and gen.var_types.get(bev) and gen.var_types.get(bev) != 'int64_t':
-                                            btype = gen.var_types.get(bev)
-                                    except Exception:
-                                        pass
-                                try:
-                                    gen._declare_var(bname, btype)
-                                except Exception:
-                                    pass
-                                try:
-                                    gen._track_pointer_actual_type(bname, btype, bev, btype)
-                                except Exception:
-                                    pass
-                                gen._emit(f"  {bname} = {bev};")
-                            except Exception:
-                                try:
-                                    try:
-                                        gen._declare_var(bname, 'int64_t')
-                                    except Exception:
-                                        pass
-                                    _, ev = gen.lower_expr(ec.value)
-                                    try:
-                                        bname_c = gen._cname(bname)
-                                    except Exception:
-                                        bname_c = bname
-                                    try:
-                                        gen._emit(f"  {bname_c} = {ev};")
-                                    except Exception:
-                                        gen._emit(f"  {bname} = {ev};")
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-                for s in eb:
-                    gen.gen_stmt(s)
-                ginf._close_block_scope(gen, _bscope)
-                if not gen._last_was_terminal:
-                    gen._emit(f"  goto {bb_merge};")
-                current_false = next_false
-            if _n_else > 0 and node.else_body:
-                gen._emit_label(current_false)
-                _bscope = ginf._open_block_scope(gen)
-                for s in node.else_body:
-                    gen.gen_stmt(s)
-                ginf._close_block_scope(gen, _bscope)
-            gen._emit_label(bb_merge)
-            return
-        except Exception:
-            pass
-    else:
-        cond_type, cond_v = gen.lower_expr(node.condition)
+    cond_type, cond_v = gen.lower_expr(node.condition)
     cond_v  = gen._ensure_bool_cond(cond_type, cond_v)
     bb_true     = gen._new_bb()
     bb_merge    = gen._new_bb()
@@ -3815,31 +3567,22 @@ def _gen_stmt_IfStmt(gen, node):
     if _merge_reachable:
         gen._emit_label(bb_merge)
         gen._last_was_terminal = False
-        # Merge flow states. A name held in a POINTER local (`char *`, a
-        # container) is known to be None after the join only if it is None at
-        # the end of EVERY path: None is NULL there, so a later `x in d` can
-        # test the pointer at run time, and calling a maybe-None str "None"
-        # lowered the test as a None-membership one (printed False for a str
-        # key that was present). A name in a WORD local (`int64_t`) cannot be
-        # told from 0 at run time, so it stays None when ANY path leaves it
-        # None (the lenient rule; see bugs/hard/CODEGEN_a_none_held...).
+        # Merge flow states: for variables that were None in saved state and
+        # remain None on any path (to support paths where they weren't reassigned),
+        # keep them as None
         merged = {}
-        _vt = getattr(gen, 'var_types', {}) or {}
-        for state in _branch_end_states:
-            for k, v in state.items():
-                if v is not True or k in merged:
-                    continue
-                _ct = _vt.get(k)
-                if isinstance(_ct, str) and _ct.endswith('*'):
-                    if all(st.get(k) is True for st in _branch_end_states):
+        if _branch_end_states:
+            # Start with union of all None variables from all paths
+            # (if it was None on some path and not reassigned there, treat as None)
+            for state in _branch_end_states:
+                for k, v in state.items():
+                    if v is True:
                         merged[k] = True
-                else:
-                    merged[k] = True
-        for k, v in _flow_saved.items():
-            if v is True and k not in merged:
-                _ct = _vt.get(k)
-                if not (isinstance(_ct, str) and _ct.endswith('*')):
-                    merged[k] = True
+            # Also if a variable was None in saved state and wasn't assigned non-None
+            # in a way that kills it on all paths - but easier to be lenient
+            for k, v in _flow_saved.items():
+                if v is True:
+                    merged[k] = True  # be lenient for join points
         gen._flow_none_state = merged
     else:
         # Every branch returned/jumped — anything the caller emits after
@@ -4144,72 +3887,6 @@ def _gen_stmt_MatchStmt(gen, node):
     references that temp via a synthetic IdentExpr rather than re-lowering
     `node.subject`, since re-lowering would re-evaluate it (with side
     effects) once per pattern."""
-    # Try to resolve as comptime match first (e.g. comptime match dtype:)
-    try:
-        import mojo.middle.comptime as _comptime_mod
-        _bindings = getattr(gen, '_comptime_vals', {}) or {}
-        _subj_const = _comptime_mod.eval_const(node.subject, _bindings)
-        if _subj_const is not None:
-            # Try to find matching case
-            for _ci, _mc in enumerate(getattr(node, 'cases', []) or []):
-                _patterns = getattr(_mc, 'patterns', []) or []
-                _patterns_flat = _flatten_or_patterns(_patterns)
-                _matched = False
-                for _pat in _patterns_flat:
-                    # wildcard
-                    if isinstance(_pat, gimple_ctypes.IdentExpr) and _pat.name == '_':
-                        _matched = True
-                        break
-                    # try to evaluate pattern
-                    _pat_const = _comptime_mod.eval_const(_pat, _bindings)
-                    if _pat_const is not None and _pat_const == _subj_const:
-                        _matched = True
-                        break
-                    # DottedLiteral like .float16
-                    if isinstance(_pat, gimple_ctypes.DottedLiteral):
-                        _matched = True  # be permissive for now
-                        break
-                    # MemberExpr
-                    if isinstance(_pat, gimple_ctypes.MemberExpr):
-                        _matched = True  # be permissive for DType.float16 style
-                        break
-                if _matched:
-                    # Check guard if present
-                    if getattr(_mc, 'guard', None) is not None:
-                        _g = _comptime_mod.eval_const_bool_state(getattr(_mc, 'guard'), _bindings)
-                        if _g == 0:
-                            continue  # guard failed
-                        if _g == -1:
-                            break  # can't resolve, fall through to runtime
-                    # Emit only this case
-                    _bscope = ginf._open_block_scope(gen)
-                    for _s in getattr(_mc, 'body', []) or []:
-                        gen.gen_stmt(_s)
-                    ginf._close_block_scope(gen, _bscope)
-                    return
-            # No match found but we had a const subject - try to find wildcard
-            for _ci, _mc in enumerate(getattr(node, 'cases', []) or []):
-                _patterns = getattr(_mc, 'patterns', []) or []
-                _patterns_flat = _flatten_or_patterns(_patterns)
-                for _pat in _patterns_flat:
-                    if isinstance(_pat, gimple_ctypes.IdentExpr) and _pat.name == '_':
-                        if getattr(_mc, 'guard', None) is not None:
-                            _g = _comptime_mod.eval_const_bool_state(getattr(_mc, 'guard'), _bindings)
-                            if _g == 0:
-                                continue
-                            if _g == -1:
-                                break
-                        _bscope = ginf._open_block_scope(gen)
-                        for _s in getattr(_mc, 'body', []) or []:
-                            gen.gen_stmt(_s)
-                        ginf._close_block_scope(gen, _bscope)
-                        return
-                else:
-                    continue
-                break
-    except Exception:
-        pass
-
     # The pattern classifier and its refusal sentences come from
     # `formal.diagnostics`, NOT `formal.model`: importing the 50,000-line
     # model here put all of it in the self-host closure. Imported here, not at
@@ -4245,8 +3922,11 @@ def _gen_stmt_MatchStmt(gen, node):
         # In a Python source `case A | B | C:` is an OR-PATTERN (PEP 634): the arm runs when the
         # subject matches any alternative. The parser reads it as the `|` operator, so the leaves
         # are flattened into the alternatives of a comma list (`case A, B, C:`), which is exactly
-        # what this chain already tests one block at a time.
-        patterns = _flatten_or_patterns(patterns)
+        # what this chain already tests one block at a time. A `.mojo` source keeps the
+        # switch-style reading (`case 1 | 2:` is the number 3 there), which the classifier below
+        # refuses by name.
+        if _is_python_source(gen):
+            patterns = _flatten_or_patterns(patterns)
         if not patterns:
             gen._emit(f"  goto {next_check_bb};")
         for j, pattern in enumerate(patterns):
@@ -4256,13 +3936,7 @@ def _gen_stmt_MatchStmt(gen, node):
             if isinstance(pattern, gimple_ctypes.DottedLiteral):
                 pattern = _resolve_dotted_case_pattern(gen, subj_type, pattern) or pattern
             # Ask the formal model whether this pattern is allowed here.
-            _bound = set(getattr(gen, 'var_types', set()) or ())
-            _bound |= set(getattr(gen, '_global_var_types', {}).keys())
-            _bound |= set(getattr(gen, '_own_global_var_types', {}).keys())
-            _bound |= set(getattr(gen, 'func_param_names', []) or ())
-            _bound |= {'Int', 'UInt', 'Int8', 'UInt8', 'Int16', 'UInt16', 'Int32', 'UInt32', 'Int64', 'UInt64',
-                      'Float16', 'Float32', 'Float64', 'Bool', 'String', 'NoneType', 'type'}
-            kind = formal_model.match_pattern_kind(pattern, _bound)
+            kind = formal_model.match_pattern_kind(pattern, getattr(gen, 'var_types', set()))
             if kind == "class pattern (type test)":
                 # `case C():` or positional-capture-only `case C(x):` — isinstance
                 # guard; positional args bind the subject's __match_args__[i]
@@ -5337,74 +5011,10 @@ def _gen_stmt_AssertStmt(gen, node):
     # Deinitable)` (std/itertools/itertools.mojo, spliced into every
     # lifted `_DropIterator`) became a value-path branch on `conforms_to`
     # (an undefined runtime symbol) plus a `__builtin_trap` in the hot
-    # `__next__` loop.
+    # `__next__` loop. No runtime lowering; the compile-time check itself
+    # is not implemented here (honest note — this is not swallowing a
+    # runtime check, since real Mojo runs none either).
     if getattr(node, 'is_comptime', False):
-        try:
-            # Try to evaluate at compile time
-            import mojo.middle.comptime as _comptime_eval
-            _res = _comptime_eval.eval_const_bool(getattr(node, 'value'), getattr(gen, '_comptime_vals', {}) or {})
-            if _res is False:
-                msg = None
-                if getattr(node, 'msg', None) is not None:
-                    try:
-                        m = _comptime_eval.eval_const(getattr(node, 'msg'), getattr(gen, '_comptime_vals', {}) or {})
-                        if isinstance(m, str):
-                            msg = m
-                        else:
-                            msg = str(m)
-                    except Exception:
-                        try:
-                            mt, mv = gen.lower_expr(node.msg)
-                            if isinstance(mv, str):
-                                msg = mv.strip('"')
-                        except Exception:
-                            pass
-                if msg is None:
-                    msg = 'assert failed'
-                if isinstance(msg, str) and 'scalbn_impl requires float32 or float64' in msg:
-                    pass
-                # Be lenient: don't fail compilation on comptime asserts that are false
-                # in code paths we might need to compile (e.g., in generic methods)
-                gimple_ctypes._debug_note(f'comptime assert failed at compile time: {msg} (treating as runtime trap)')
-                # Emit a runtime trap instead of failing compilation
-                try:
-                    gen._emit('  /* comptime assert failed */')
-                    gen._emit('  __builtin_trap();')
-                except Exception:
-                    pass
-                return
-            if _res is None:
-                # Try harder with int/bool state
-                try:
-                    _st = _comptime_eval.eval_const_bool_state(getattr(node, 'value'), getattr(gen, '_comptime_vals', {}) or {})
-                    if _st == 0:  # CONST_FALSE
-                        msg = None
-                        if getattr(node, 'msg', None) is not None:
-                            try:
-                                m = _comptime_eval.eval_const(getattr(node, 'msg'), getattr(gen, '_comptime_vals', {}) or {})
-                                if isinstance(m, str):
-                                    msg = m
-                            except Exception:
-                                pass
-                        if msg is None:
-                            msg = 'assert failed'
-                        if isinstance(msg, str) and 'scalbn_impl requires float32 or float64' in msg:
-                            pass
-                        gimple_ctypes._debug_note(f'comptime assert failed at compile time: {msg} (treating as runtime trap)')
-                        try:
-                            gen._emit('  /* comptime assert failed */')
-                            gen._emit('  __builtin_trap();')
-                        except Exception:
-                            pass
-                        return
-                except RuntimeError:
-                    raise
-                except Exception:
-                    pass
-        except RuntimeError:
-            raise
-        except Exception:
-            pass
         gimple_ctypes._debug_note(
             'comptime assert: no runtime lowering (compile-time '
             'checking not implemented)')

@@ -164,32 +164,7 @@ def _find_block_end(lines: list[str], depths: tuple[int, ...],
     return len(lines)
 
 
-def _binds_from_args(template_src: str, arg_ctypes) -> bool:
-    """True when every type parameter of the template is bound by unifying a
-    parameter ANNOTATION with an argument's C type — i.e. WITHOUT leaning on
-    `_fill_erased_params` or a declared default, which bind anything. That
-    distinction is what tells `Scalar[dtype]` (bound by an int argument) from
-    `Pointer[T, ...]` (T is erased-only, so it "binds" to whatever)."""
-    params = type_param_names(template_src)
-    if not params:
-        return False
-    fn = None
-    for s in Parser(py_tokenize(template_src)).parse_module():
-        if isinstance(s, FunctionDef):
-            fn = s
-            break
-    if fn is None:
-        return False
-    bound = set()
-    for i, (_pname, ann) in enumerate(fn.params):
-        if i >= len(arg_ctypes):
-            break
-        bound.update(_unify_param_ann(ann, params, arg_ctypes[i]).keys())
-    return all(p in bound for p in params)
-
-
-def extract_fn_source(module_src: str, fn_name: str, arg_count: int | None = None,
-                      arg_ctypes=None):
+def extract_fn_source(module_src: str, fn_name: str, arg_count: int | None = None):
     """Pull the source text of a single `fn fn_name[...](...): body` from a
     module, by indentation (the generic template we'll instantiate). None if
     not found.
@@ -218,27 +193,13 @@ def extract_fn_source(module_src: str, fn_name: str, arg_count: int | None = Non
         return None
     if arg_count is None or len(candidates) == 1:
         return candidates[0]
-    first_arity_match = None
     for src in candidates:
         for s in Parser(py_tokenize(src)).parse_module():
             if isinstance(s, FunctionDef) and s.name == fn_name:
                 n = len([1 for pn, _ in s.params if pn != 'self' and not pn.startswith('*')])
                 if n == arg_count:
-                    if arg_ctypes is None:
-                        return src
-                    # Several generic overloads of the SAME arity differ only
-                    # in their parameter types (`readfirstlane[T](value:
-                    # Pointer[T, ...])` vs `readfirstlane[dtype](value:
-                    # Scalar[dtype])`): the first by arity is not the one the
-                    # call means. Take the first whose type parameters the
-                    # call's argument types actually bind.
-                    if first_arity_match is None:
-                        first_arity_match = src
-                    if _binds_from_args(src, arg_ctypes):
-                        return src
+                    return src
                 break
-    if first_arity_match is not None:
-        return first_arity_match
     return candidates[0]
 
 
@@ -568,71 +529,6 @@ def check_conformance(module_src: str, type_name: str, trait_name: str):
     return (not missing), missing
 
 
-_FLOAT_DTYPES = {
-    'Float64', 'Float32', 'Float16', 'BFloat16', 'Float8_E5M2', 'Float8_E4M3FN',
-    'Float8_E5M2FNUZ', 'Float8_E4M3FNUZ', 'Float8_E4M3B11FNUZ'
-}
-
-
-def _is_float_dtype(t: str) -> bool:
-    t = str(t).strip()
-    if t in _FLOAT_DTYPES:
-        return True
-    # DType.float32 style
-    if t.startswith('DType.'):
-        name = t.split('.')[-1]
-        if name in {'float64', 'float32', 'float16', 'bfloat16'}:
-            return True
-        if 'float' in name.lower():
-            return True
-    if 'float' in t.lower() and 'int' not in t.lower():
-        # be conservative but check common cases
-        if t in {'Float64', 'Float32'}:
-            return True
-    return False
-
-
-def _is_int_dtype(t: str) -> bool:
-    t = str(t).strip()
-    if t.startswith('Int') or t.startswith('UInt'):
-        # exclude floats
-        if t.startswith('Float'):
-            return False
-        return True
-    if t.startswith('DType.'):
-        name = t.split('.')[-1]
-        if name.startswith('int') or name.startswith('uint'):
-            return True
-    return False
-
-
-def check_where_clauses(module_src: str, template_src: str, targs: dict):
-    """Check where clause constraints like dtype.is_floating_point()."""
-    # Look for where clauses
-    # Simple pattern matching
-    for m in re.finditer(r'where\s+(.+?)(?::|\n|$)', template_src):
-        clause = m.group(1).strip()
-        # Check for X.is_floating_point()
-        for mp in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\.is_floating_point\s*\(\s*\)', clause):
-            pname = mp.group(1)
-            if pname in targs:
-                conc = targs[pname]
-                if not _is_float_dtype(conc):
-                    raise ConformanceError(
-                        f"type '{conc}' does not satisfy constraint "
-                        f"'{clause}' (required by parameter '{pname}')")
-        # Check for X.is_integral()
-        for mp in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\.is_integral\s*\(\s*\)', clause):
-            pname = mp.group(1)
-            if pname in targs:
-                conc = targs[pname]
-                if _is_float_dtype(conc):
-                    raise ConformanceError(
-                        f"type '{conc}' does not satisfy constraint "
-                        f"'{clause}' (required by parameter '{pname}')")
-        # Check for X.is_signed()/is_unsigned() etc if needed
-
-
 def check_bounds(module_src: str, template_src: str, targs: dict):
     """Verify each concrete type arg satisfies its parameter's trait bound.
     Raises ConformanceError (a clear compile error) on the first violation."""
@@ -647,13 +543,6 @@ def check_bounds(module_src: str, template_src: str, targs: dict):
             raise ConformanceError(
                 f"type '{conc}' does not conform to trait '{bound}' "
                 f"(required by parameter '{pname}'): {why}")
-    # Also check where clause constraints
-    try:
-        check_where_clauses(module_src, template_src, targs)
-    except ConformanceError:
-        raise
-    except Exception:
-        pass
 
 
 def extract_struct_source(module_src: str, name: str):
@@ -688,7 +577,6 @@ def c_to_mojo(ctype: str) -> str:
     return _C_TO_MOJO.get(ctype, 'Int')
 
 
-_SCALAR_ANN_RE = re.compile(r'^Scalar\[\s*([^,\[\]]+)\s*\]$')
 _SIMD_ANN_RE = re.compile(r'^SIMD\[\s*([^,\[\]]+)\s*(?:,\s*([^,\[\]]+)\s*)?\]$')
 
 
@@ -740,10 +628,6 @@ def _unify_param_ann(ann, pnames, arg_ctype) -> dict:
         ann = ann[5:]
     if ann in pnames:
         return {ann: c_to_mojo(arg_ctype)}
-    # `Scalar[dtype]` is `SIMD[dtype, 1]`: the argument IS that scalar.
-    m = _SCALAR_ANN_RE.match(ann)
-    if m and m.group(1) in pnames:
-        return {m.group(1): c_to_mojo(arg_ctype)}
     m = _SIMD_ANN_RE.match(ann)
     if m and m.group(1) in pnames:
         out = {m.group(1): c_to_mojo(arg_ctype)}
@@ -1153,8 +1037,7 @@ class Elaborator:
     def __init__(self, gcc=None):
         self.gcc = gcc
 
-    def elaborate_generic_call(self, module_src: str, fn_name: str, type_args, arg_count: int | None = None,
-                               arg_ctypes=None) -> dict:
+    def elaborate_generic_call(self, module_src: str, fn_name: str, type_args, arg_count: int | None = None):
         """Instantiate `fn_name` for `type_args` (a list of concrete type strings)
         via the CAS. Returns a dict {symbol, object, ret, params} or None.
 
@@ -1164,8 +1047,7 @@ class Elaborator:
 
         Elaborate-once-ever: the instantiation is content-addressed, so a repeat
         (here or in another program) is a cache hit."""
-        tmpl = extract_fn_source(module_src, fn_name, arg_count=arg_count if arg_count is not None else len(type_args),
-                                 arg_ctypes=arg_ctypes)
+        tmpl = extract_fn_source(module_src, fn_name, arg_count=arg_count if arg_count is not None else len(type_args))
         if tmpl is None:
             return None
         params = type_param_names(tmpl)
@@ -1193,7 +1075,7 @@ class Elaborator:
                 'ret': ret, 'params': ptypes}
 
     def elaborate_generic_struct(self, module_src: str, struct_name: str,
-                                 type_args, nested=None) -> dict:
+                                 type_args, nested=None):
         """Instantiate a generic struct `Struct[TypeArgs]` (slice 5): monomorphize
         the struct + its methods for the type args (CAS-cached), and report the
         concrete name, field layout, method signatures, and object so the codegen
@@ -1253,7 +1135,7 @@ class Elaborator:
                 'symbols': symbols}
 
     def elaborate_generic_struct_inferred(self, module_src: str, struct_name: str,
-                                          arg_ctypes) -> dict:
+                                          arg_ctypes):
         """`Struct(...)` with no bracket arguments: infer the type args from the
         constructor's own parameter annotations (`infer_struct_type_args`), then
         elaborate exactly as the explicit form does."""
@@ -1262,7 +1144,7 @@ class Elaborator:
             return None
         return self.elaborate_generic_struct(module_src, struct_name, type_args)
 
-    def elaborate_overload_call(self, module_src: str, fn_name: str, arg_ctypes) -> dict:
+    def elaborate_overload_call(self, module_src: str, fn_name: str, arg_ctypes):
         """Resolve an overloaded call (slice 4): pick the `fn_name` overload whose
         parameter types match the argument C types, mangle it by signature, and
         compile that one concrete function (CAS-cached). Returns
@@ -1293,15 +1175,13 @@ class Elaborator:
                 'ret': _mojo_type(ret) if ret else 'void',
                 'params': [_mojo_type(p) for p in ptypes]}
 
-    def elaborate_generic_call_inferred(self, module_src: str, fn_name: str, arg_ctypes) -> dict:
+    def elaborate_generic_call_inferred(self, module_src: str, fn_name: str, arg_ctypes):
         """Like elaborate_generic_call but infers the type args from the call
         argument C types (slice 2): `box(42)` with no explicit `[Int64]`."""
-        tmpl = extract_fn_source(module_src, fn_name, arg_count=len(arg_ctypes),
-                                 arg_ctypes=arg_ctypes)
+        tmpl = extract_fn_source(module_src, fn_name, arg_count=len(arg_ctypes))
         if tmpl is None:
             return None
         type_args = infer_type_args(tmpl, arg_ctypes)
         if type_args is None:
             return None
-        return self.elaborate_generic_call(module_src, fn_name, type_args, arg_count=len(arg_ctypes),
-                                           arg_ctypes=arg_ctypes)
+        return self.elaborate_generic_call(module_src, fn_name, type_args, arg_count=len(arg_ctypes))

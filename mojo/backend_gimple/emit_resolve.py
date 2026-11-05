@@ -875,7 +875,8 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # the caller.
                 temp_gen._c_helpers_needed = gen._c_helpers_needed
                 temp_gen._emitted_c_helpers = gen._emitted_c_helpers
-                temp_gen._module_stmts = gen._module_stmts  # share: track all transitive stmts
+                # Per-module AST lifetime fix: drop _module_stmts retention; use
+                # _all_transitive_stmts_ordered for reconciliation only.
                 temp_gen._all_transitive_stmts_ordered = gen._all_transitive_stmts_ordered
                 temp_gen._all_transitive_stmts_ids = gen._all_transitive_stmts_ids
                 # share: Phase 2 per-statement field-access-scan caches
@@ -1190,8 +1191,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                         gen._link_needs_cxx_box[0] = True
 
                 # Store parsed stmts for this module so parent gens can access them
-                # (importers read imported modules' signatures from it; without
-                # it every cross-module call got an int64_t prototype).
                 gen._module_stmts[module_name] = stmts
                 # Incrementally extend the flat, pre-deduped mirror (see
                 # the `_walk_ast` re-scan bug

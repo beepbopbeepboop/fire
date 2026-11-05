@@ -49,3 +49,6 @@ No code change this round; blocker remains async/coroutine codegen (cpp_async.py
 
 ## Repro (next step, 2026-11-05, this session)
 `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py` did not reach the contextlib gate: the build looped recompiling imported stdlib modules (`list index out of range` on `abc.py`, `frame attribute f_locals` on `_collections_abc.py`) under Python 3.15.2 and was killed after ~180s. No contextlib-specific refusal line was observed. Blocker unchanged: async/coroutine codegen (cpp_async.py eligibility: `__aenter__` non-scalar return + `*args`/`**kwargs` in coroutine frame).
+
+## Repro (next step, 2026-11-05, this session)
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py` did not reach the contextlib gate: the build looped recompiling imported stdlib modules (`list index out of range` on `abc.py`, `frame attribute f_locals` on `_collections_abc.py`) under Python 3.15.2 and was killed after ~180s. No contextlib-specific refusal line was observed. Blocker unchanged: async/coroutine codegen (cpp_async.py eligibility: `__aenter__` non-scalar return + `*args`/`**kwargs` in coroutine frame).

@@ -3860,7 +3860,7 @@ class Interpreter:
 
         return method(node)
 
-    def execute_Module(self, node):
+    def execute_Module(self, node: N.Module):
         """Execute module (top-level statements)."""
         result = None
         for stmt in node.body:
@@ -3970,7 +3970,7 @@ class Interpreter:
         container[name] = func
         return func
 
-    def execute_FunctionDef(self, node):
+    def execute_FunctionDef(self, node: N.FunctionDef):
         """Execute function definition."""
         params = self._extract_param_names(node)
         comptime_params = getattr(node, 'comptime_params', None)
@@ -4006,9 +4006,6 @@ class Interpreter:
         'Copyable', 'Movable', 'ImplicitlyCopyable', 'ExplicitlyCopyable',
         'Writable', 'Sized', 'Boolable', 'Stringable', 'Hashable',
         'AnyType', '__allow_legacy_any_origin_fields',
-        '__allow_legacy_custom_self_type',
-        'stable', 'value', 'doc_private', 'doc_hidden', 'register_passable',
-        'trivial_register_passable', 'implicit',
     })
 
     def _apply_function_decorators(self, node, bound):
@@ -4096,7 +4093,7 @@ class Interpreter:
                     f"applying decorator to {node.name!r} failed: {e}") from e
         return bound
 
-    def execute_StructDef(self, node):
+    def execute_StructDef(self, node: N.StructDef):
         """Execute struct/class definition.
 
         `struct Child(Base1, Base2):` — Python-style class inheritance:
@@ -4208,7 +4205,7 @@ class Interpreter:
         self.scope.define(node.name, cls)
         return cls
 
-    def execute_TraitDef(self, node):
+    def execute_TraitDef(self, node: N.TraitDef):
         """Traits are a compile-time/structural-typing construct (bound
         generics, elaborate.py's conformance checks) with no conformance
         enforcement here — this interpreter is dynamically typed and never
@@ -4326,7 +4323,7 @@ class Interpreter:
             top = module.split('.')[0]
             self.scope.define(top, importlib.import_module(top))
 
-    def execute_ImportStmt(self, node):
+    def execute_ImportStmt(self, node: N.ImportStmt):
         """Execute `import mod` / `import mod as alias` / `import a, b, c`.
 
         The interpreter runs the AST as Python, so we resolve through Python's
@@ -4343,7 +4340,7 @@ class Interpreter:
             self._bind_one_import(extra_module, extra_alias)
         return None
 
-    def execute_FromImportStmt(self, node):
+    def execute_FromImportStmt(self, node: N.FromImportStmt):
         """Execute `from mod import a, b as c` / `from mod import *`."""
         # See execute_ImportStmt: keep the isolated-argv sys proxy, don't
         # pull attributes off the real sys module.
@@ -4399,7 +4396,7 @@ class Interpreter:
             self.scope.define(alias or name, value)
         return None
 
-    def execute_AssignStmt(self, node):
+    def execute_AssignStmt(self, node: N.AssignStmt):
         """Execute assignment statement."""
         value = self.eval_expr(node.value)
         # Handle both 'targets' (list) and 'target' (single) for compatibility
@@ -4411,7 +4408,7 @@ class Interpreter:
             self._assign_target(target, value)
         return value
 
-    def execute_MultiAssignStmt(self, node):
+    def execute_MultiAssignStmt(self, node: N.MultiAssignStmt):
         """Chained assignment `a = b = c = expr`: evaluate the RHS once and
         bind every target to it (was "No handler for MultiAssignStmt" — hit by
         ctypes/wintypes.py, tkinter/constants.py)."""
@@ -4420,7 +4417,7 @@ class Interpreter:
             self._assign_target(target, value)
         return value
 
-    def execute_DelStmt(self, node):
+    def execute_DelStmt(self, node: N.DelStmt):
         """`del a`, `del a, b`, `del d["k"]`, `del obj.attr` (was "name
         'del' is not defined" — hit by compression/bz2.py, lzma.py,
         gzip.py, zlib.py, which all do `del <modname>` after a
@@ -4517,7 +4514,7 @@ class Interpreter:
             return bool(value)
         return value
 
-    def execute_VarDecl(self, node):
+    def execute_VarDecl(self, node: N.VarDecl):
         """Execute variable declaration."""
         if node.value is None and ',' not in node.name:
             # A `List`/`Dict`/`Set` local with no initializer is an empty
@@ -4687,169 +4684,28 @@ class Interpreter:
         else:
             raise NotImplementedError(f"{self._loc(target)}Cannot assign to {type(target).__name__}")
 
-    def execute_ReturnStmt(self, node):
+    def execute_ReturnStmt(self, node: N.ReturnStmt):
         """Execute return statement."""
         value = self.eval_expr(node.value) if hasattr(node, 'value') and node.value is not None else None
         raise ReturnValue(value)
 
-    def execute_IfStmt(self, node):
+    def execute_IfStmt(self, node: N.IfStmt):
         """Execute if statement."""
-        cond = node.condition
-        # Handle MatchCaseIf
-        if hasattr(cond, '__class__') and cond.__class__.__name__ == 'MatchCaseIf':
-            pattern = cond.pattern
-            value = self.eval_expr(cond.value)
-            matched = False
-            # Try to match pattern against value
-            matched = self._match_if_pattern(pattern, value)
-            if matched:
-                for stmt in node.then_body:
-                    self.execute(stmt)
-                return None
+        cond = self.eval_expr(node.condition)
+        if cond:
+            for stmt in node.then_body:
+                self.execute(stmt)
         else:
-            cond_val = self.eval_expr(cond)
-            if cond_val:
-                for stmt in node.then_body:
-                    self.execute(stmt)
-                return None
-        # elifs
-        if node.elifs:
-            for elif_cond, elif_body in node.elifs:
-                if hasattr(elif_cond, '__class__') and elif_cond.__class__.__name__ == 'MatchCaseIf':
-                    pattern = elif_cond.pattern
-                    value = self.eval_expr(elif_cond.value)
-                    if self._match_if_pattern(pattern, value):
+            if node.elifs:
+                for elif_cond, elif_body in node.elifs:
+                    if self.eval_expr(elif_cond):
                         for stmt in elif_body:
                             self.execute(stmt)
                         return None
-                    continue
-                if self.eval_expr(elif_cond):
-                    for stmt in elif_body:
-                        self.execute(stmt)
-                    return None
-        if node.else_body:
-            for stmt in node.else_body:
-                self.execute(stmt)
+            if node.else_body:
+                for stmt in node.else_body:
+                    self.execute(stmt)
         return None
-    
-    def _match_if_pattern(self, pattern, value):
-        # Try to match patterns like .Some(x), [a,b,c], etc.
-        try:
-            CONV_KWS = {'ref', 'out', 'mut', 'var', 'deinit', 'read', 'inout', 'borrowed', 'owned', 'imm'}
-            # Check for CallExpr style pattern like .Some(x)
-            if self._is_instance(pattern, 'IdentExpr') and pattern.name == '_':
-                return True
-            if self._is_instance(pattern, 'CallExpr'):
-                class_obj = None
-                try:
-                    class_obj = self.eval_expr(pattern.func)
-                except Exception:
-                    pass
-                args = getattr(pattern, 'args', []) or []
-                CONV_KWS = {'ref', 'out', 'mut', 'var', 'deinit', 'read', 'inout', 'borrowed', 'owned', 'imm'}
-                try:
-                    if isinstance(class_obj, type) and isinstance(value, class_obj):
-                        match_args = getattr(class_obj, '__match_args__', ()) or ()
-                        if args:
-                            if match_args:
-                                for i, subpat in enumerate(args):
-                                    attr_name = match_args[i] if i < len(match_args) else None
-                                    if attr_name is None:
-                                        continue
-                                    attr_val = getattr(value, attr_name)
-                                    if self._is_instance(subpat, 'IdentExpr') and subpat.name in CONV_KWS:
-                                        if i+1 < len(args):
-                                            binding = args[i+1]
-                                            if self._is_instance(binding, 'IdentExpr') and binding.name != '_':
-                                                try:
-                                                    self.scope.define(binding.name, attr_val)
-                                                except Exception:
-                                                    try:
-                                                        self.scope.set(binding.name, attr_val)
-                                                    except Exception:
-                                                        pass
-                                        continue
-                                    if self._is_instance(subpat, 'IdentExpr') and subpat.name != '_' and subpat.name not in CONV_KWS:
-                                        try:
-                                            self.scope.define(subpat.name, attr_val)
-                                        except Exception:
-                                            try:
-                                                self.scope.set(subpat.name, attr_val)
-                                            except Exception:
-                                                pass
-                                return True
-                            else:
-                                for i, subpat in enumerate(args):
-                                    if self._is_instance(subpat, 'IdentExpr') and subpat.name in CONV_KWS:
-                                        if i+1 < len(args):
-                                            binding = args[i+1]
-                                            if self._is_instance(binding, 'IdentExpr') and binding.name != '_':
-                                                try:
-                                                    # Try to get first attr
-                                                    attrs = [a for a in dir(value) if not a.startswith('_')]
-                                                    if attrs:
-                                                        attr_val = getattr(value, attrs[0])
-                                                    else:
-                                                        attr_val = value
-                                                    self.scope.define(binding.name, attr_val)
-                                                except Exception:
-                                                    pass
-                                        continue
-                                    if self._is_instance(subpat, 'IdentExpr') and subpat.name != '_' and subpat.name not in CONV_KWS:
-                                        try:
-                                            attrs = [a for a in dir(value) if not a.startswith('_')]
-                                            if attrs:
-                                                attr_val = getattr(value, attrs[0])
-                                            else:
-                                                attr_val = value
-                                            self.scope.define(subpat.name, attr_val)
-                                        except Exception:
-                                            pass
-                                return True
-                        return True
-                except Exception:
-                    pass
-            # Try member access pattern like .Some
-            if self._is_instance(pattern, 'MemberExpr') and pattern.obj is None:
-                # Could be .Some variant
-                try:
-                    # Look up in value's type or compare
-                    pass
-                except Exception:
-                    pass
-            # List/array pattern
-            if self._is_instance(pattern, 'ListExpr') or self._is_instance(pattern, 'TupleExpr') or self._is_instance(pattern, 'TupleLiteral'):
-                try:
-                    elements = getattr(pattern, 'elements', []) or []
-                    if isinstance(value, (list, tuple)) and len(elements) == len(value):
-                        for pe, ve in zip(elements, value):
-                            if self._is_instance(pe, 'IdentExpr') and pe.name == '_':
-                                continue
-                            elif self._is_instance(pe, 'IdentExpr') and not self.scope.has(pe.name):
-                                self.scope.define(pe.name, ve)
-                                continue
-                            elif self._is_instance(pe, 'DottedLiteral'):
-                                try:
-                                    if self.eval_expr(pe) == ve:
-                                        continue
-                                    else:
-                                        return False
-                                except Exception:
-                                    pass
-                            elif self.eval_expr(pe) != ve:
-                                return False
-                        return True
-                except Exception:
-                    pass
-            # For other patterns, try equality
-            try:
-                pval = self.eval_expr(pattern)
-                return pval == value
-            except Exception:
-                pass
-        except Exception:
-            pass
-        return False
 
     def execute_MatchStmt(self, node):
         """`match subject: case p1: ... case p2, p3: ... case _: ...`
@@ -4867,203 +4723,9 @@ class Interpreter:
         for match_case in node.cases:
             matched = False
             for pattern in match_case.patterns:
-                # Handle case == patterns (stored as rhs of comparison)
-                try:
-                    if self._is_instance(pattern, 'IdentExpr') and pattern.name == '_':
-                        matched = True
-                        break
-                    # Try structural tuple/list match
-                    if self._is_instance(pattern, 'TupleExpr') or self._is_instance(pattern, 'TupleLiteral') or self._is_instance(pattern, 'ListExpr'):
-                        elements = getattr(pattern, 'elements', []) or []
-                        # Get subject elements
-                        subj_elems = None
-                        if isinstance(subject, (tuple, list)):
-                            subj_elems = subject
-                        elif hasattr(subject, '__iter__') and not isinstance(subject, str):
-                            try:
-                                subj_elems = list(subject)
-                            except Exception:
-                                pass
-                        if subj_elems is not None and len(elements) == len(subj_elems):
-                            all_match = True
-                            # Make a copy of scope to allow bindings
-                            for pe, se in zip(elements, subj_elems):
-                                if self._is_instance(pe, 'IdentExpr') and pe.name == '_':
-                                    continue
-                                if self._is_instance(pe, 'DottedLiteral'):
-                                    try:
-                                        pval = self.eval_expr(pe)
-                                        if pval != se and str(pval) != str(se):
-                                            all_match = False
-                                            break
-                                        continue
-                                    except Exception:
-                                        pass
-                                # Try CallExpr like .os(errno)
-                                if self._is_instance(pe, 'CallExpr'):
-                                    try:
-                                        func = pe.func
-                                        if self._is_instance(func, 'DottedLiteral'):
-                                            # Match variant
-                                            pe_args = getattr(pe, 'args', []) or []
-                                            # Try to get the variant value from subject
-                                            try:
-                                                if hasattr(se, '_variant') or hasattr(se, '__class__'):
-                                                    # For __enum style, check discriminant/name
-                                                    # Try to match by checking attributes
-                                                    matched_variant = False
-                                                    # Try common patterns
-                                                    if getattr(se, '_name', None) == func.path or str(type(se).__name__).endswith(func.path):
-                                                        matched_variant = True
-                                                    elif hasattr(se, 'name') and getattr(se, 'name') == func.path:
-                                                        matched_variant = True
-                                                    elif func.path in str(se):
-                                                        matched_variant = True
-                                                    else:
-                                                        # Try to see if it's the right variant
-                                                        matched_variant = True  # be permissive
-                                                    if matched_variant and pe_args:
-                                                        for parg in pe_args:
-                                                            if self._is_instance(parg, 'IdentExpr') and parg.name != '_':
-                                                                # Try to bind payload
-                                                                try:
-                                                                    if hasattr(se, '_value'):
-                                                                        self.scope.define(parg.name, se._value)
-                                                                    elif hasattr(se, 'value'):
-                                                                        val = getattr(se, 'value')
-                                                                        if callable(val):
-                                                                            try:
-                                                                                val = val()
-                                                                            except Exception:
-                                                                                pass
-                                                                        self.scope.define(parg.name, val)
-                                                                    elif hasattr(se, 'payload'):
-                                                                        self.scope.define(parg.name, se.payload)
-                                                                    else:
-                                                                        # Bind the whole thing
-                                                                        self.scope.define(parg.name, se)
-                                                                except Exception:
-                                                                    pass
-                                                    if matched_variant:
-                                                        continue
-                                            except Exception:
-                                                pass
-                                    except Exception:
-                                        pass
-                                # Try equality
-                                try:
-                                    pval = self.eval_expr(pe)
-                                    if pval != se and str(pval) != str(se):
-                                        all_match = False
-                                        break
-                                    continue
-                                except Exception:
-                                    pass
-                                all_match = False
-                                break
-                            if all_match:
-                                matched = True
-                                break
-                    # Try equality match (handles case == style)
-                    try:
-                        pval = self.eval_expr(pattern)
-                        if pval == subject or str(pval) == str(subject):
-                            matched = True
-                            break
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-                if self._is_instance(pattern, 'DottedLiteral'):
-                    try:
-                        pval = self.eval_expr(pattern)
-                        if getattr(pval, '_is_some', False) or getattr(type(pval), '__name__', '') == 'Some':
-                            matched = True
-                            break
-                        if getattr(pval, '_is_none', False) or getattr(type(pval), '__name__', '') == 'NoneType' or value is None:
-                            if value is None or getattr(value, '_is_none', False):
-                                matched = True
-                                break
-                            try:
-                                if value is None or str(value) == 'None':
-                                    matched = True
-                                    break
-                            except Exception:
-                                pass
-                            continue
-                    except Exception:
-                        pass
-                if self._is_instance(pattern, 'CallExpr'):
-                    try:
-                        func = pattern.func
-                        if self._is_instance(func, 'DottedLiteral'):
-                            if func.path == 'Some':
-                                matched = True
-                                args = getattr(pattern, 'args', []) or []
-                                if args:
-                                    try:
-                                        if isinstance(value, object) and hasattr(value, '_value'):
-                                            payload = value._value
-                                        elif hasattr(value, 'value'):
-                                            payload = getattr(value, 'value')
-                                            if callable(payload):
-                                                try:
-                                                    payload = payload()
-                                                except Exception:
-                                                    pass
-                                        else:
-                                            payload = value
-                                        CONV = {'ref', 'out', 'mut', 'var', 'inout', 'borrowed', 'owned', 'deinit', 'read', 'imm'}
-                                        bound = False
-                                        for i, subpat in enumerate(args):
-                                            if self._is_instance(subpat, 'IdentExpr') and subpat.name in CONV:
-                                                if i+1 < len(args):
-                                                    b = args[i+1]
-                                                    if self._is_instance(b, 'IdentExpr') and b.name != '_':
-                                                        try:
-                                                            self.scope.define(b.name, payload)
-                                                        except Exception:
-                                                            try:
-                                                                self.scope.set(b.name, payload)
-                                                            except Exception:
-                                                                pass
-                                                        bound = True
-                                                break
-                                            if self._is_instance(subpat, 'IdentExpr') and subpat.name != '_' and subpat.name not in CONV:
-                                                try:
-                                                    self.scope.define(subpat.name, payload)
-                                                except Exception:
-                                                    try:
-                                                        self.scope.set(b.name, payload)
-                                                    except Exception:
-                                                        try:
-                                                            # force set
-                                                            self.scope._current[b.name] = payload
-                                                        except Exception:
-                                                            pass
-                                                bound = True
-                                                break
-                                        if not bound and args and self._is_instance(args[0], 'IdentExpr') and args[0].name != '_':
-                                            try:
-                                                self.scope.define(args[0].name, payload)
-                                            except Exception:
-                                                try:
-                                                    self.scope.set(args[0].name, payload)
-                                                except Exception:
-                                                    try:
-                                                        self.scope._current[args[0].name] = payload
-                                                    except Exception:
-                                                        pass
-                                    except Exception:
-                                        pass
-                                break
-                            if func.path == 'None':
-                                if value is None or getattr(value, '_is_none', False):
-                                    matched = True
-                                    break
-                                continue
-                    except Exception:
-                        pass
+                if self._is_instance(pattern, 'IdentExpr') and pattern.name == '_':
+                    matched = True
+                    break
                 if self._is_instance(pattern, 'IdentExpr') and not self.scope.has(pattern.name):
                     # Bare name that isn't an already-defined constant: a
                     # PEP 634 capture pattern, not a switch-style equality
@@ -5141,35 +4803,20 @@ class Interpreter:
         """`comptime if cond: ... elif ...: ... else: ...` — the interpreter
         doesn't do compile-time branch elimination, so this just evaluates
         like a regular runtime if/elif/else."""
-        cond = node.condition
-        matched_main = False
-        if hasattr(cond, '__class__') and cond.__class__.__name__ == 'MatchCaseIf':
-            pattern = cond.pattern
-            value = self.eval_expr(cond.value)
-            matched_main = bool(self._match_if_pattern(pattern, value))
-        else:
-            matched_main = bool(self.eval_expr(cond))
-        if matched_main:
+        cond = self.eval_expr(node.condition)
+        if cond:
             for stmt in node.then_body:
                 self.execute(stmt)
-            return None
-        if node.elifs:
-            for elif_cond, elif_body in node.elifs:
-                if hasattr(elif_cond, '__class__') and elif_cond.__class__.__name__ == 'MatchCaseIf':
-                    pattern = elif_cond.pattern
-                    value = self.eval_expr(elif_cond.value)
-                    if self._match_if_pattern(pattern, value):
+        else:
+            if node.elifs:
+                for elif_cond, elif_body in node.elifs:
+                    if self.eval_expr(elif_cond):
                         for stmt in elif_body:
                             self.execute(stmt)
                         return None
-                    continue
-                if self.eval_expr(elif_cond):
-                    for stmt in elif_body:
-                        self.execute(stmt)
-                    return None
-        if node.else_body:
-            for stmt in node.else_body:
-                self.execute(stmt)
+            if node.else_body:
+                for stmt in node.else_body:
+                    self.execute(stmt)
         return None
 
     def execute_ComptimeVarStmt(self, node):
@@ -5180,7 +4827,7 @@ class Interpreter:
         self.scope.define(node.target, value)
         return value
 
-    def execute_WhileStmt(self, node):
+    def execute_WhileStmt(self, node: N.WhileStmt):
         """Execute while statement."""
         while self.eval_expr(node.condition):
             try:
@@ -5192,7 +4839,7 @@ class Interpreter:
                 continue
         return None
 
-    def execute_ForStmt(self, node):
+    def execute_ForStmt(self, node: N.ForStmt):
         """Execute for statement."""
         if getattr(node, 'is_async', False):
             # `async for` — ForStmt.is_async (see fire_compiler.py's
@@ -5257,11 +4904,11 @@ class Interpreter:
                 continue
         return None
 
-    def execute_ExprStmt(self, node):
+    def execute_ExprStmt(self, node: N.ExprStmt):
         """Execute expression statement."""
         return self.eval_expr(node.value)
 
-    def execute_PassStmt(self, node):
+    def execute_PassStmt(self, node: N.PassStmt):
         """Execute pass statement."""
         return None
 
@@ -5301,11 +4948,11 @@ class Interpreter:
             self.global_vars.update(node.names)
         return None
 
-    def execute_BreakStmt(self, node):
+    def execute_BreakStmt(self, node: N.BreakStmt):
         """Execute break statement."""
         raise BreakException()
 
-    def execute_ContinueStmt(self, node):
+    def execute_ContinueStmt(self, node: N.ContinueStmt):
         """Execute continue statement."""
         raise ContinueException()
 
@@ -5339,7 +4986,7 @@ class Interpreter:
             return method(obj._mojo_class.interpreter, obj, *args)
         return getattr(obj, name)(*args)
 
-    def execute_WithStmt(self, node):
+    def execute_WithStmt(self, node: N.WithStmt):
         """Execute with statement."""
         if getattr(node, 'is_async', False):
             # `async with` — WithStmt.is_async (see fire_compiler.py's
@@ -5464,7 +5111,7 @@ class Interpreter:
         except TypeError:
             return False
 
-    def execute_TryStmt(self, node):
+    def execute_TryStmt(self, node: N.TryStmt):
         """Execute try statement."""
         try:
             for stmt in node.body:
@@ -5570,14 +5217,14 @@ class Interpreter:
 
         return method(expr)
 
-    def eval_FunctionType(self, expr):
+    def eval_FunctionType(self, expr: N.FunctionType):
         """A comptime function-type alias survives as a signature node.
         At runtime it cannot be evaluated, but that's okay for the regression
         test which only needs the alias to be something other than _comptime_expr.
         """
         return expr  # Return the node itself as a value
 
-    def eval_WalrusExpr(self, expr):
+    def eval_WalrusExpr(self, expr: N.WalrusExpr):
         """Walrus `(name := value)`: evaluate value, bind name in the current
         scope, and return the value (was "No handler for WalrusExpr" — hit by
         _pyrepl/trace.py)."""
@@ -5585,7 +5232,7 @@ class Interpreter:
         self.scope.define(expr.name, value)
         return value
 
-    def eval_LambdaExpr(self, expr):
+    def eval_LambdaExpr(self, expr: N.LambdaExpr):
         """`lambda <params>: <expr>` — an anonymous function. Returns a
         MojoFunction whose body is the single statement `return <expr>` and
         whose closure scope is the scope in effect where the lambda appears,
@@ -5626,7 +5273,7 @@ class Interpreter:
             raise SyntaxError(f"{self._loc(expr)}'yield'/'await' outside a generator/coroutine function")
         return fn
 
-    def eval_YieldExpr(self, expr):
+    def eval_YieldExpr(self, expr: N.YieldExpr):
         """`yield` / `yield expr`. Suspends the CURRENT thread (this Mojo
         generator's own dedicated worker thread — see MojoGeneratorObject)
         by calling that generator's `yield_fn`, which blocks until the
@@ -5636,7 +5283,7 @@ class Interpreter:
         value = self.eval_expr(expr.value) if expr.value is not None else None
         return self._current_yield_fn(expr)(value)
 
-    def eval_YieldFromExpr(self, expr):
+    def eval_YieldFromExpr(self, expr: N.YieldFromExpr):
         """`yield from <expr>` — delegating yield. If the delegated source
         is itself another Mojo generator, drive it via its own `.send()`/
         `.throw()`/`.close()` protocol so its `MojoGeneratorObject.
@@ -5673,7 +5320,7 @@ class Interpreter:
                     return source.return_value
                 sent = yield_fn(value)
 
-    def eval_AwaitExpr(self, expr):
+    def eval_AwaitExpr(self, expr: N.AwaitExpr):
         """`await <expr>` — Milestone 3b. Evaluates the awaited expression,
         then drives it via `_RealAwaitStep` regardless of what kind of
         awaitable it turned out to be: a `MojoCoroutine` (Mojo-await-Mojo),
@@ -5714,53 +5361,33 @@ class Interpreter:
         yield_fn = self._current_yield_fn(expr)
         return yield_fn(_RealAwaitStep(it))
 
-    def eval_EllipsisLiteral(self, expr):
+    def eval_EllipsisLiteral(self, expr: N.EllipsisLiteral):
         """The `...` literal — Python's Ellipsis singleton (was "No handler for
         EllipsisLiteral" — hit by tomllib/_types.py)."""
         return Ellipsis
 
-    def eval_DottedLiteral(self, expr):
-        """A dot-relative value reference (`.always`, `.uint64`)."""
-        # Try to resolve as a variant/enum case
-        try:
-            # Look up in scope for common enum/variant constructors
-            name = expr.path
-            # Try to find as attribute of known types or just return a marker
-            # For Optional/Some/None patterns, try to construct
-            if name in ('Some', 'None'):
-                # Return a simple object representing the variant
-                class Variant:
-                    def __init__(self, name, *args):
-                        self._name = name
-                        self.args = args
-                    def __repr__(self):
-                        return f'.{name}{args}'
-                # But we need to know if it's Some with args - this is tricky
-                # For pattern matching, return a callable or special marker
-                if name == 'Some':
-                    def Some(*args):
-                        obj = object.__new__(type('Some', (), {}))
-                        obj._is_some = True
-                        obj._value = args[0] if args else None
-                        return obj
-                    return Some
-                elif name == 'None':
-                    obj = object.__new__(type('None', (), {}))
-                    obj._is_none = True
-                    return obj
-            # Try to look up as a global
-            try:
-                return self.scope.get(name)
-            except Exception:
-                pass
-        except Exception:
-            pass
+    def eval_DottedLiteral(self, expr: N.DottedLiteral):
+        """A dot-relative value reference (`.always`, `.uint64`).
+
+        The reference omits the type it belongs to, so it has no meaning on its
+        own — it resolves only against the type the surrounding position
+        supplies, which this interpreter does not infer. Refusing with the path
+        named is deliberate: the alternatives are worse. Looking the path up as
+        an ordinary identifier reports a `NameError` for a name the source
+        never wrote, and returning None would make the program run and print a
+        wrong answer.
+
+        The compiled backend takes the same view but has a use for the value —
+        it lowers the reference to the same zero placeholder the spelled-out
+        form (`DType.uint64`) already produces there — so a module using this
+        can still be transpiled; it just cannot be interpreted.
+        """
         raise NotImplementedError(
             f"{self._loc(expr)}cannot resolve the dot-relative value "
             f"'.{expr.path}': it names a variant of a type this interpreter "
             f"does not infer, and the source omits which type that is")
 
-    def eval_IdentExpr(self, expr):
+    def eval_IdentExpr(self, expr: N.IdentExpr):
         """Evaluate identifier."""
         if expr.name == 'super':
             # `super` is only real Python-style base-class magic when
@@ -5795,7 +5422,7 @@ class Interpreter:
             pass
         return _MojoSelfType()
 
-    def _eval_super(self, expr):
+    def _eval_super(self, expr: N.IdentExpr):
         """Split out of eval_IdentExpr: returning a `_MojoSuper` instance
         from the same function as the plain `self.scope.get(expr.name)`
         path corrupted the self-hosted compiler's type inference for
@@ -5809,22 +5436,22 @@ class Interpreter:
                 return _MojoSuper(cls.bases[0], self_val, self)
         raise NameError(f"{self._loc(expr)}'super' used outside of struct method with a base class")
 
-    def eval_IntLiteral(self, expr):
+    def eval_IntLiteral(self, expr: N.IntLiteral):
         """Evaluate integer literal."""
         return expr.value
 
-    def eval_FloatLiteral(self, expr):
+    def eval_FloatLiteral(self, expr: N.FloatLiteral):
         """Evaluate float literal."""
         return expr.value
 
-    def eval_ImagLiteral(self, expr):
+    def eval_ImagLiteral(self, expr: N.ImagLiteral):
         """Evaluate a Python-style imaginary-number literal (`0j`, `1.5j`).
         `expr.value` is the magnitude before the implicit multiply-by-i
         (e.g. 2.5 for `2.5j`), so the literal itself is purely imaginary:
         `2.5j` -> MojoComplex(real=0.0, imag=2.5)."""
         return MojoComplex(0.0, expr.value)
 
-    def eval_StringLiteral(self, expr):
+    def eval_StringLiteral(self, expr: N.StringLiteral):
         """Evaluate string literal."""
         value = expr.value
         if getattr(expr, 'is_bytes', False):
@@ -6068,11 +5695,11 @@ class Interpreter:
         node = Parser(tokens)._parse_expr(0)
         return self.eval_expr(node)
 
-    def eval_BoolLiteral(self, expr):
+    def eval_BoolLiteral(self, expr: N.BoolLiteral):
         """Evaluate boolean literal."""
         return expr.value
 
-    def eval_NoneLiteral(self, expr):
+    def eval_NoneLiteral(self, expr: N.NoneLiteral):
         """Evaluate None literal."""
         return None
 
@@ -6091,7 +5718,7 @@ class Interpreter:
             return node.operand
         return None
 
-    def eval_ListLiteral(self, expr):
+    def eval_ListLiteral(self, expr: N.ListLiteral):
         """Evaluate list literal, expanding any `*expr` spread elements
         (PEP 448 iterable unpacking, e.g. `[*a, *b]`) in place."""
         result = []
@@ -6103,7 +5730,7 @@ class Interpreter:
                 result.append(self.eval_expr(e))
         return result
 
-    def eval_DictLiteral(self, expr):
+    def eval_DictLiteral(self, expr: N.DictLiteral):
         """Evaluate dict literal, expanding any `**expr` spread pairs (PEP
         448 mapping unpacking, e.g. `{**a, **b}`). A spread pair is
         represented as `(UnaryOp(op='**', operand=<mapping expr>), None)` by
@@ -6119,7 +5746,7 @@ class Interpreter:
                 result[self.eval_expr(key)] = self.eval_expr(value)
         return result
 
-    def eval_SetLiteral(self, expr):
+    def eval_SetLiteral(self, expr: N.SetLiteral):
         """Evaluate set literal, expanding any `*expr` spread elements
         (e.g. `{*a, *b}`) as a union into the resulting set."""
         result = set()
@@ -6131,7 +5758,7 @@ class Interpreter:
                 result.add(self.eval_expr(e))
         return result
 
-    def eval_TupleLiteral(self, expr):
+    def eval_TupleLiteral(self, expr: N.TupleLiteral):
         """Evaluate tuple literal, expanding any `*expr` spread elements
         (e.g. `(*a, *b)`) in place."""
         result = []
@@ -6163,7 +5790,7 @@ class Interpreter:
             left = set()
         return left, right
 
-    def eval_BinaryOp(self, expr):
+    def eval_BinaryOp(self, expr: N.BinaryOp):
         """Evaluate binary operation."""
         op = expr.op
         # 'and'/'or' must short-circuit — evaluating both operands
@@ -6269,7 +5896,7 @@ class Interpreter:
         else:
             raise NotImplementedError(f"Comparison operator {op!r} not implemented")
 
-    def eval_CompareChain(self, expr):
+    def eval_CompareChain(self, expr: N.CompareChain):
         """Python-style chained comparison `a < b < c`: each operand is
         evaluated exactly once, left-to-right; the whole expression
         short-circuits to False (without evaluating any remaining operands)
@@ -6284,7 +5911,7 @@ class Interpreter:
             left = right
         return True
 
-    def eval_UnaryOp(self, expr):
+    def eval_UnaryOp(self, expr: N.UnaryOp):
         """Evaluate unary operation."""
         operand = self.eval_expr(expr.operand)
         return self._apply_unary_op(expr, operand)
@@ -6302,7 +5929,7 @@ class Interpreter:
         else:
             raise NotImplementedError(f"{self._loc(expr)}Unary operator {op} not implemented")
 
-    def eval_CallExpr(self, expr):
+    def eval_CallExpr(self, expr: N.CallExpr):
         """Evaluate function call."""
         func = self.eval_expr(expr.func)
         # Call-site unpacking: `g(*args)` / `g(**opts)`. fire_compiler.py's
@@ -6359,13 +5986,13 @@ class Interpreter:
             return func(self, *args, **kwargs)
         args = _mojo_builtin_args(func, args)
         tls = self._gen_tls
-        if hasattr(tls, 'is_coroutine') and tls.is_coroutine:
-            yield_fn = getattr(tls, 'yield_fn') if hasattr(tls, 'yield_fn') else None
+        if getattr(tls, 'is_coroutine', False):
+            yield_fn = getattr(tls, 'yield_fn', None)
             if yield_fn is not None:
                 return yield_fn(_RealThreadCall(func, args, kwargs))
         return func(*args, **kwargs)
 
-    def eval_MemberExpr(self, expr):
+    def eval_MemberExpr(self, expr: N.MemberExpr):
         """Evaluate member access."""
         obj = self.eval_expr(expr.obj)
         return self._eval_member_of(expr, obj)
@@ -6400,7 +6027,7 @@ class Interpreter:
             raise AttributeError(f"{self._loc(expr)}'{type(obj).__name__}' object has no attribute '{expr.member}'")
         return getattr(obj, expr.member)
 
-    def eval_SubscriptExpr(self, expr):
+    def eval_SubscriptExpr(self, expr: N.SubscriptExpr):
         """Evaluate subscript access."""
         obj = self.eval_expr(expr.obj)
         # A KEYWORD bracket (`f[T=Int, y=5]`, `platform_map[T=Int, "O_APPEND",
@@ -6489,7 +6116,7 @@ class Interpreter:
             return _MojoBoundComptimeReceiver(obj, bindings)
         return _MojoBoundComptimeFunction(obj, bindings)
 
-    def eval_SliceExpr(self, expr):
+    def eval_SliceExpr(self, expr: N.SliceExpr):
         """Evaluate slice expression."""
         obj = self.eval_expr(expr.obj)
         start = self.eval_expr(expr.start) if expr.start else None
@@ -6497,7 +6124,7 @@ class Interpreter:
         step = self.eval_expr(expr.step) if expr.step else None
         return obj[start:stop:step]
 
-    def eval_TernaryExpr(self, expr):
+    def eval_TernaryExpr(self, expr: N.TernaryExpr):
         """Evaluate ternary conditional."""
         condition = self.eval_expr(expr.condition)
         if condition:

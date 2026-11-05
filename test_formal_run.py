@@ -25825,7 +25825,7 @@ def check_interpolated_literal_bound_census(verbose=False):
     M = _TYPE_VALUE_MODEL
     here = _os.path.dirname(_os.path.abspath(__file__))
     roots = [here]
-    stdlib = (os.path.join(STDLIB_PATH, "std") if STDLIB_PATH else _os.path.join(here, "..", "..", "modular", "mojo", "stdlib", "std"))
+    stdlib = _os.path.join(here, "..", "new-modular", "Mojo", "stdlib", "std")
     if _os.path.isdir(stdlib):
         roots.append(stdlib)
 
@@ -26083,7 +26083,7 @@ def check_interpolated_literal_census(verbose=False):
     passed, failures = 0, []
     here = _os.path.dirname(_os.path.abspath(__file__))
     roots = [here]
-    stdlib = (os.path.join(STDLIB_PATH, "std") if STDLIB_PATH else _os.path.join(here, "..", "..", "modular", "mojo", "stdlib", "std"))
+    stdlib = _os.path.join(here, "..", "new-modular", "Mojo", "stdlib", "std")
     if _os.path.isdir(stdlib):
         roots.append(stdlib)
     scanned, rows, unquotable = 0, [], []
@@ -27115,7 +27115,7 @@ def check_type_value_tag_generator(verbose=False):
     here = os.path.abspath(__file__)
     stdlib = os.environ.get("MOJO_STDLIB") or os.path.join(
         os.path.dirname(os.path.dirname(here)),
-        "modular", "mojo", "stdlib", "std")
+        "new-modular", "Mojo", "stdlib", "std")
     seen, stack, unresolved = set(), [here], set()
     while stack:
         p = stack.pop()

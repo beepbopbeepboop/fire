@@ -2207,7 +2207,7 @@ def _binding_node_names(n) -> set:
     return bound
 
 
-def module_qualifier(q: str) -> str:
+def module_qualifier(q) -> str:
     """The ONE module-string -> C-qualifier sanitization every cross-module
     registry key and symbol prefix in this codegen must agree on.
 

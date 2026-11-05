@@ -1,6 +1,3 @@
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from module_loader import STDLIB_PATH
 #!/usr/bin/env python3
 """Which call sites CONSUME the value of a function that returns nothing — the
 list behind `model`'s `None` refusal, and the number `make gate` has to be asked
@@ -62,7 +59,7 @@ import formal.model as M                                    # noqa: E402
 DEFAULT_PATHS = [
     os.path.join(ROOT, "formal", "hostmods"),
     ROOT,
-    (os.path.join(STDLIB_PATH, "std") if STDLIB_PATH else os.path.join(ROOT, "..", "..", "modular", "mojo", "stdlib", "std")),
+    os.path.join(ROOT, "..", "new-modular", "Mojo", "stdlib", "std"),
 ]
 
 

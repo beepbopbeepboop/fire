@@ -384,10 +384,14 @@ class _ReflectTable(ctypes.Structure):
                 ('syms', ctypes.POINTER(_ReflectSym))]
 
 # The Mojo library checkouts this tree can be built against, most-preferred
-# first.
+# first. `new-modular` is the current one; `modular` is the older copy and is
+# kept so the tree still resolves when the newer checkout is absent. Each entry
+# is (checkout_dir_name, path_within_checkout) — the two trees spell the stdlib
+# root differently (`Mojo/stdlib` vs `mojo/stdlib`), so the pair has to travel
+# together. MOJO_STDLIB overrides the whole list.
 _STDLIB_CHECKOUTS = (
-    ('modular', 'mojo/stdlib'),
     ('new-modular', 'Mojo/stdlib'),
+    ('modular', 'mojo/stdlib'),
 )
 
 

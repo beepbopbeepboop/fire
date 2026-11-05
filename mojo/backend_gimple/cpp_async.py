@@ -3157,12 +3157,6 @@ def _resolve_and_start_task(gen, inner) -> tuple[str, dict] | None:
         base_name = inner.func.obj.name
         api = gen._async_closure_api.get((gen.current_func_name, base_name))
         if api is None:
-            # Fallback: search all async_closure_api entries for matching name
-            for (encl, name), cand in getattr(gen, '_async_closure_api', {}).items():
-                if name == base_name:
-                    api = cand
-                    break
-        if api is None:
             return None
         idx = inner.func.index
         elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
@@ -3181,12 +3175,6 @@ def _resolve_and_start_task(gen, inner) -> tuple[str, dict] | None:
             and not getattr(inner, 'kwargs', None)):
         _acl_fallback = gen._async_closure_api.get((gen.current_func_name, inner.func.name))
         api = gen._async_api.get(inner.func.name) or _acl_fallback
-        if api is None:
-            # Fallback: search all async_closure_api entries for matching name
-            for (encl, name), cand in getattr(gen, '_async_closure_api', {}).items():
-                if name == inner.func.name:
-                    api = cand
-                    break
         if api is None:
             return None
         base = api['base']

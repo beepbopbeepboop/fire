@@ -16,7 +16,7 @@ from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from module_loader import STDLIB_PATH
 from build_config import find_gcc
-from build_stdlib_dylib import compile_module_to_c_cached, stdlib_codegen_key
+from build_stdlib_dylib import compile_module_to_c_cached
 
 import cas
 
@@ -808,7 +808,7 @@ def transpile_file(mojo_file):
         # Pre-check codegen CAS key so we can report hit-or-miss (the
         # pre-check stat call is ~1 ms; the actual function reads/writes
         # the same key, so the cost is negligible compared to codegen).
-        codegen_key = stdlib_codegen_key(src, str(mojo_file), name, linkable=False)
+        codegen_key = cas.stdlib_compile_key(src, str(mojo_file), name)
         cg_was_hit = cas.lookup(codegen_key, '.ci') is not None
 
         # Stage 1: Python codegen (CAS-cached)

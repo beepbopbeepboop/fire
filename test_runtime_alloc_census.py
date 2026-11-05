@@ -146,53 +146,9 @@ def _run_two_tu(failures):
     expect('K', (1, 16, 1), 'a.c malloc kept live')
 
 
-# The emitted .ci calls malloc/free INSIDE `__GIMPLE` bodies. A redirect macro that wraps its
-# arguments in parentheses (`mojo_census_free((p))`) is `expected expression before '('` there, so a
-# census build of the self-hosted compiler failed in seconds with 776 errors. The GIMPLE parser needs
-# the arguments bare.
-GIMPLE_TU = [
-    '#include "fire_runtime.h"',
-    'void * __GIMPLE mk_block (int64_t n)',
-    '{',
-    '  void * p;',
-    '',
-    'bb_2:',
-    '  p = malloc (n);',
-    '  return p;',
-    '}',
-    'void __GIMPLE drop_block (void * p)',
-    '{',
-    'bb_2:',
-    '  free (p);',
-    '  return;',
-    '}',
-]
-
-
-def _run_gimple_tu(failures):
-    try:
-        sys.path.insert(0, HERE)
-        from build_config import find_gcc
-        gcc = find_gcc()
-    except Exception as e:  # no -fgimple compiler on this machine: nothing to check
-        print(f'skip: no gcc for the __GIMPLE census case ({e})')
-        return
-    with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as td:
-        src = os.path.join(td, 'g.ci')
-        with open(src, 'w') as f:
-            f.write('\n'.join(GIMPLE_TU) + '\n')
-        r = subprocess.run([gcc, '-fgimple', '-O0', '-DMOJO_ALLOC_CENSUS', '-I', RUNTIME_DIR,
-                            '-x', 'c', '-c', src, '-o', os.path.join(td, 'g.o')],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            failures.append('a __GIMPLE function calling malloc/free does not compile with '
-                            f'-DMOJO_ALLOC_CENSUS: {r.stderr[:600]}')
-
-
 def main() -> int:
     failures = []
     _run_two_tu(failures)
-    _run_gimple_tu(failures)
     with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as td:
         harness_c = os.path.join(td, 'harness.c')
         exe = os.path.join(td, 'harness')

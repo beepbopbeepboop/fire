@@ -178,36 +178,3 @@ KEY needs its own `keykind` (3 is the tuple domain, so use 4), a family of
 `mojo_dict_contains_none`, and a key-repr arm in the dict repr (keys are
 printed as quoted strings today, so a None key would print `''`). The
 flow-sensitive local case (an `if` join) is also unchanged.
-
-### 2026-11-05: the DICT side landed; what is left is one question, and it needs the tagged word
-
-Landed (pinned by `test_dict_none_key.py`, diffed against CPython):
-- The runtime's None key is keykind 3 (the plan above said "use 4"; 3 was never the tuple domain
-  for this purpose - `_dict_set_none_key_raw` / `mojo_dict_contains_none` already used it).
-  `mojo_dict_get_none_key_{int,str,double}` were the missing readers.
-- `emit_infra.emit_dict_none_key_store` is the one value-kind dispatch for a None KEY (it was inline
-  in the dict-literal pair store only); the subscript store `d[None] = v` (`emit_stmts`) now uses
-  it, `d[None]` reads (`emit_calls._lower_subscript`) and `d.get(None[, default])`
-  (`emit_methods`) read the None-key entry. Before, all three used the integer-0 entry:
-  `d[None] = 5` made a second entry and `d[None]` / `d.get(None)` read another slot.
-- Not fixed, by the representation: `d.get(0)` on a miss returns "None", which prints `0` (a None
-  result is the word 0); `pop(None)` / `setdefault(None, v)` were not touched.
-
-**The flow-sensitive local is not decidable statically, which settles the option choice.** The
-probe above (`n = None`, then `if cond: n = 1`, then `n in ["a", None]`) has BOTH a None and a 1
-reaching the membership, so no analysis of join points - option (1) - can answer it: the word is
-0 or 1 and nothing at the membership says which assignment ran. (1) can only improve
-"every reaching assignment is None / none is", which `none_only_locals` already covers for the
-flow-insensitive case. The probe needs the value itself to say what it is: option (2).
-
-Guide for (2), using machinery that exists: a box of kind `'n'` is already a None
-(`mojo_unbox_plain`, `mojo_box_none` in the runtime; the generator-yield fix and the kind-mixed
-tuple reads use it, and `_tagged_word_vals` + `_tagged_arith_select` / `mojo_box_int` are how a
-tagged word is consumed). Steps: (a) a per-function "maybe None" set - locals with at least one
-`None` binding AND at least one non-None binding (the complement of `none_only_locals`, same
-walker); (b) lower `x = None` for those locals as `mojo_box_none()`, other bindings unchanged;
-(c) add each to `gen._tagged_word_vals` / `gen._boxed_vals` so reads go through the existing
-tagged-word consumers; (d) in `emit_exprs`' list `in` arm, a tagged needle calls a boxed-needle
-membership (`mojo_list_contains_boxed`: None box matches a None slot, an int needle matches by
-value). Test: the probe (CPython True, compiled False today) plus the two reaching-assignment
-orders and the `not in` form, in `test_none_key`-style CPython-diffed programs.

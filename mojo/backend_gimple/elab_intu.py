@@ -3157,86 +3157,94 @@ def _rewrite_inner_bodies(work, base, concrete):
     lowerable expressions. Returns the rewritten concrete source, or None
     with the reason refused if an expected anchor is missing (the stdlib
     source moved — do NOT silently materialize the unlowerable body).
+
+    Every replacement is an EXACT substring of the monomorphized source
+    (measured, 2026-10-20), so the rewrite is valid in BOTH `comptime if
+    Self.forward` branches of `_ListIter.__next__`/`bounds`: the comptime if
+    stays in the concrete source and is folded downstream by
+    `_gen_stmt_ComptimeIfStmt`'s `_eval_const_bool`.
+
+    The replacements, and the lowering each one lands on:
+      _ListIter.__next__  `self._data[unsafe_offset=<i>]`  ->  `self._data[<i>]`
+          the `unsafe_offset=` kwarg subscript has NO lowering (grep: zero
+          hits); a plain subscript on the `int64_t *` `_data` field takes
+          _lower_subscript's generic pointer fallback (_mojo_at_ + deref).
+      _ListIterOwned.__next__  `self._list.unsafe_ptr().unsafe_offset(<i>)
+          .unsafe_take_pointee()`  ->  `self._list[<i>]`
+          the field is `MojoList *` (List is not registered in-TU); a plain
+          field subscript takes _lower_subscript's MojoList * branch
+          (mojo_list_get_*). The old chain emitted a declaration-only
+          `int64_t_unsafe_offset` stub + a 0-stubbed `unsafe_take_pointee`.
+      both __deinit__ / bounds  `{iter_len}` set literal  ->  `iter_len`
+          the `Optional[Int]` slot is a raw int64 word in this codegen
+          (0 = None, else the value): the wrapper's `bounds` consumer reads
+          it with mojo_list_get_int and `upper.value()` lowers to identity.
+          A set literal produced a MojoSet * pointer word — nonzero-but-
+          garbage through that consumer (measured, hole d).
+      _ListIterOwned.__deinit__  body  ->  `pass`
+          the remaining-element Span span-destroy (`Span(...)._
+          unchecked_subspan(...).unsafe_deinit_elements()`) has no
+          lowering; it is a no-op for the Int/Bool elements the lift
+          targets, and the pipeline never calls `__deinit__` on these
+          in-TU iterators in the lifted TUs. Documented leak for other
+          element kinds (the in-TU protocol is Int/Bool/String-only here).
     """
-    if base in ('_ListIter', '_ListIterOwned'):
-        pairs = {
-            '_ListIter': (
-                ('self._data[unsafe_offset=self._index - 1]',
-                 'self._data[self._index - 1]'),
-                ('self._data[unsafe_offset=self._index]',
-                 'self._data[self._index]'),
-                ('return (iter_len, {iter_len})',
-                 'return (iter_len, iter_len)'),
-            ),
-            '_ListIterOwned': (
-                ('    def __deinit__(deinit self):\n'
-                 '        # Destroy the remaining elements that have not yet been\n'
-                 '        # iterated over.\n'
-                 '        Span(self._list)._unchecked_subspan(\n'
-                 '            start=self._index, end=len(self._list)\n'
-                 '        ).unsafe_deinit_elements()\n'
-                 '        self._list._len = 0',
-                 '    def __deinit__(deinit self):\n'
-                 '        pass'),
-                ('        return (\n'
-                 '            self._list.unsafe_ptr()\n'
-                 '            .unsafe_offset(self._index - 1)\n'
-                 '            .unsafe_take_pointee()\n'
-                 '        )',
-                 '        return self._list[self._index - 1]'),
-                ('return (iter_len, {iter_len})',
-                 'return (iter_len, iter_len)'),
-            ),
-        }[base]
-        for old, new in pairs:
-            if concrete.count(old) != 1:
-                work.refuse(f'{base}: body rewrite anchor missing or ambiguous '
-                            f'({concrete.count(old)} hit(s)) for {old[:40]!r}...')
-                return None
-            concrete = concrete.replace(old, new)
-        return concrete
-    elif base == '_TakeIterator':
-        # Try multiple patterns - be flexible about formatting
-        # Pattern 1: old style with .value()
-        old1 = re.compile(r"(\n[ \t]*)if\s+upper\s*:\s*\n([ \t]*)return\s*\(\s*lower\s*,\s*min\s*\(\s*upper\.value\(\)\s*,\s*remaining\s*\)\s*\)\s*\n([ \t]*)return\s*\(\s*lower\s*,\s*remaining\s*\)", re.M)
-        if old1.search(concrete):
-            concrete = old1.sub(r'\1return (lower, min(upper, remaining))', concrete)
-            return concrete
-        # Pattern 2: new style with match/case
-        old2 = re.compile(r"(\n[ \t]*)if\s+case\s+\.Some\([^)]*\)\s*=\s*upper\s*:\s*\n([ \t]*)return\s*\(\s*lower\s*,\s*min\s*\(\s*upper\s*,\s*remaining\s*\)\s*\)\s*\n([ \t]*)return\s*\(\s*lower\s*,\s*remaining\s*\)", re.M)
-        if old2.search(concrete):
-            concrete = old2.sub(r'\1return (lower, min(upper, remaining))', concrete)
-            return concrete
-        # Pattern 3: try to find bounds method and rewrite more aggressively
-        # Look for any if checking upper/Some pattern
-        old3 = re.compile(r"if\s+(?:case\s+\.Some\([^)]+\)\s*=\s*)?upper\b[^\n]*\n[^\n]*return\s*\([^,]+,\s*min\([^)]+\)\)[^\n]*\n[^\n]*return\s*\([^,]+,\s*remaining\s*\)", re.M | re.S)
-        if old3.search(concrete):
-            concrete = old3.sub('return (lower, min(upper, remaining))', concrete)
-            return concrete
-        # Try simpler - just collapse the if branches
-        old4 = re.compile(r"if\s+upper\s*:\s*\n\s*return\s*\(\s*lower\s*,\s*min\s*\(\s*upper[^)]*\)\s*,\s*remaining\s*\)\s*\n\s*else\s*:.*?return.*?remaining.*?(?=\n    def |\n\Z)", re.M | re.S)
-        if old4.search(concrete):
-            concrete = old4.sub('        return (lower, min(upper, remaining))', concrete)
-            return concrete
-        work.refuse(f'{base}: body rewrite anchor missing or ambiguous for bounds pattern')
-        return None
-    elif base == '_DropIterator':
-        old1 = re.compile(r"(\n[ \t]*)if\s+upper\s*:\s*\n([ \t]*)return\s*\(\s*lower\s*,\s*max\s*\(\s*0\s*,\s*upper\.value\(\)\s*-\s*to_drop\s*\)\s*\)\s*\n([ \t]*)return\s*\(\s*lower\s*,\s*None\s*\)", re.M)
-        if old1.search(concrete):
-            concrete = old1.sub(r'\1return (lower, max(0, upper - to_drop))', concrete)
-            return concrete
-        old2 = re.compile(r"(\n[ \t]*)if\s+case\s+\.Some\([^)]*\)\s*=\s*upper\s*:\s*\n([ \t]*)return\s*\(\s*lower\s*,\s*max\s*\(\s*0\s*,\s*upper\s*-\s*to_drop\s*\)\s*\)\s*\n([ \t]*)return\s*\(\s*lower\s*,\s*None\s*\)", re.M)
-        if old2.search(concrete):
-            concrete = old2.sub(r'\1return (lower, max(0, upper - to_drop))', concrete)
-            return concrete
-        old3 = re.compile(r"if\s+(?:case\s+\.Some\([^)]+\)\s*=\s*)?upper\b[^\n]*\n[^\n]*return\s*\([^,]+,\s*max\([^)]+\)\)[^\n]*\n[^\n]*return\s*\([^,]+,\s*None\s*\)", re.M | re.S)
-        if old3.search(concrete):
-            concrete = old3.sub('return (lower, max(0, upper - to_drop))', concrete)
-            return concrete
-        work.refuse(f'{base}: body rewrite anchor missing or ambiguous for bounds pattern')
-        return None
-    else:
-        return concrete
+    pairs = {
+        '_ListIter': (
+            ('self._data[unsafe_offset=self._index - 1]',
+             'self._data[self._index - 1]'),
+            ('self._data[unsafe_offset=self._index]',
+             'self._data[self._index]'),
+            ('return (iter_len, {iter_len})',
+             'return (iter_len, iter_len)'),
+        ),
+        '_ListIterOwned': (
+            ('    def __deinit__(deinit self):\n'
+             '        # Destroy the remaining elements that have not yet been\n'
+             '        # iterated over.\n'
+             '        Span(self._list)._unchecked_subspan(\n'
+             '            start=self._index, end=len(self._list)\n'
+             '        ).unsafe_deinit_elements()\n'
+             '        self._list._len = 0',
+             '    def __deinit__(deinit self):\n'
+             '        pass'),
+            ('        return (\n'
+             '            self._list.unsafe_ptr()\n'
+             '            .unsafe_offset(self._index - 1)\n'
+             '            .unsafe_take_pointee()\n'
+             '        )',
+             '        return self._list[self._index - 1]'),
+            ('return (iter_len, {iter_len})',
+             'return (iter_len, iter_len)'),
+        ),
+        '_TakeIterator': (
+            # bounds: the inner's upper slot is a raw word (Some = the
+            # value, and the source's `{iter_len}` producer is a 1-element
+            # set = always Some) — `if upper:` lowers to int-truthiness of
+            # the value and misbranches at 0 (measured, test_take_bounds
+            # it4). The branches are value-identical in every lifted
+            # shape, so fold them.
+            ('        if upper:\n'
+             '            return (lower, min(upper.value(), remaining))\n'
+             '        return (lower, remaining)',
+             '        return (lower, min(upper, remaining))'),
+        ),
+        '_DropIterator': (
+            # Same slot semantics as _TakeIterator; here the branches
+            # converge even at Some(0) (max(0, 0 - to_drop) == 0 == None).
+            ('        if upper:\n'
+             '            return (lower, max(0, upper.value() - to_drop))\n'
+             '        return (lower, None)',
+             '        return (lower, max(0, upper - to_drop))'),
+        ),
+    }[base]
+    for old, new in pairs:
+        if concrete.count(old) != 1:
+            work.refuse(f'{base}: body rewrite anchor missing or ambiguous '
+                        f'({concrete.count(old)} hit(s)) for {old[:40]!r}...')
+            return None
+        concrete = concrete.replace(old, new)
+    return concrete
 
 
 # ── part 6 family A: comptime type-alias evaluation (2026-10-23) ────────────

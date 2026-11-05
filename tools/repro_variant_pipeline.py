@@ -8,8 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from build_stdlib_dylib import compile_module_to_c_cached
 
-from module_loader import STDLIB_PATH
-SRC = os.path.join(STDLIB_PATH, 'test/utils/test_variant.mojo') if STDLIB_PATH else '/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib/test/utils/test_variant.mojo'
+SRC = '/Users/mrs/net/chatgpt/claude/new-modular/Mojo/stdlib/test/utils/test_variant.mojo'
 path = SRC
 src = open(SRC).read()
 try:
