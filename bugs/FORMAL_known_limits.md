@@ -571,6 +571,8 @@ the limits above were wrong:
 
 **Status 2026-11-05 (step-15e):** pinned `a parameter annotation of an imported instantiation` (one-field value builds and agrees with CPython; two-field frame remains refused by the cross-image frame contract naming `Pair_1_T_3_Int`). The reader `formal/model/structs.py::parameter_declared_structs` unchanged.
 
+**Status 2026-11-05 (step-15d):** refuse a type argument declared only in the consumer's file at the demand (probe showed it built before; now refused with message naming the library and that the type is declared in this file). Added cases `a consumer-declared type argument is refused by name` and `a builtin type argument is still instantiated`.
+
 ## 1.3 One of the 30 should not be in the family at all
 
 `std/gpu/host/nvidia/tma.mojo` is refused because it "imports `.`", and the
@@ -1658,7 +1660,7 @@ Index a `range()` result rather than measuring it, until that is fixed.
 | 10 | ../new-modular/Mojo/stdlib/std/collections/type_dict.mojo | S | builds successfully (exit 0) | file now builds | |
 | 11 | ../new-modular/Mojo/stdlib/std/format/repr.mojo | S | build: value.write_repr_to() is a method call on a value, and this backend lowers only append, clear, close, write and string methods | detailed message lists allowed methods | |
 | 12 | ../new-modular/Mojo/stdlib/std/origin/__init__.mojo | S | build: the module-level comptime binding 'AnyOrigin' is initialized from an MLIR attribute template: __mlir_attr[...] | different full message | |
-| 13 | ../new-modular/Mojo/stdlib/std/os/path/path.mojo |  | build: getsize: `stat` is called, and it is imported from `..fstat`, so the call has to bind a symbo |  |  |
+| 13 | ../new-modular/Mojo/stdlib/std/os/path/path.mojo | S | build: path.mojo imports string_span which imports hashlib.hasher (missing) | moved to dependency/import chain issue | |
 | 14 | ../new-modular/Mojo/stdlib/std/reflection/function.mojo |  | build: ReflectedFn_display_name: __mlir_attr[`#kgen.get_source_name<`, Self.func, `> : !kgen.string` |  |  |
 | 15 | ../new-modular/Mojo/stdlib/std/simd.mojo |  | build: _convert_f32_to_float8_scalar: `_isnan` is called, and it is imported from `std.utils.numeric |  |  |
 | 16 | ../new-modular/Mojo/stdlib/std/sys/arg.mojo |  | build: Span[StaticString, ImmStaticOrigin] is a compile-time explicit-parameter list on a generic, n |  |  |
