@@ -8979,6 +8979,30 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             except Exception:
                 _call_txt = gen._cpp_expr(s.iterable)
             _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
+            # Tuple-unpacking target shape over a callable-local mojo_iter_word
+            # result: each drained element is itself a boxed row (MojoList *),
+            # unpacked per slot as a word. Handle directly here instead of
+            # recursing, because the recursive tuple path has no case for a
+            # plain MojoList * iterable produced by mojo_iter_word.
+            if for_target_is_tuple(s.target):
+                _names = target_slots(s.target[1:-1].strip())
+                _ctr = gen._cpp_fresh_name("_mg_i")
+                _tup = gen._cpp_fresh_name("_mg_tup")
+                _lines = []
+                for _nm in _names:
+                    if _nm not in declared:
+                        declared[_nm] = 'int64_t'
+                        _lines.append(f"{indent}int64_t {_nm};")
+                _lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                             f"{_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
+                _lines.append(f"{indent}    MojoList *{_tup} = "
+                             + f"(MojoList *)mojo_list_get_int({_wi}, {_ctr});")
+                for _si, _nm in enumerate(_names):
+                    _lines.append(f"{indent}    {_nm} = mojo_list_get_int({_tup}, {_si});")
+                for inner in s.body:
+                    _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                _lines.append(f"{indent}}}")
+                return _pre + _lines
             _inner_for = gimple_ctypes.ForStmt(
                 target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
                 body=s.body, else_body=s.else_body)
