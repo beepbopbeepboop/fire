@@ -1374,14 +1374,7 @@ def _mark_presence_field(sdef, fname):
     so it needs no bit. Every mint site calls this with the StructDef it just
     appended `fname` to, which keeps the tracked set a whole-struct fact that
     every generator reads the same way. Idempotent."""
-    if sdef is None:
-        return
-    # A StructDef the compiled parser built has no `default_factory` list for
-    # `presence_fields` (the field reads back NULL), so appending to it below
-    # crashed the stage2 binary; make it a real list first.
-    if sdef.presence_fields is None:
-        sdef.presence_fields = []
-    if fname in sdef.presence_fields:
+    if sdef is None or fname in sdef.presence_fields:
         return
     for _m in sdef.methods:
         if _m.name != '__init__':
@@ -2057,15 +2050,11 @@ def _emit_reflection_dispatch(self, parts):
         # `mojo_maybe_bound_call_N` consults for a tainted local — so the
         # bound value reaches `mojo_bound_method_call_N`, which re-supplies
         # the bound receiver as the method's implicit first argument.
-        # Typed `dict`, key through `_as_str`: untyped, `_mm_arms[_mm_attr]` was
-        # lowered as a LIST read of a dict and the stage2 binary segfaulted on
-        # any file with a class that has a bound-method getattr arm.
-        _mm_arms: dict = self._getattr_method_arms.get(_as_str(sn))
+        _mm_arms = self._getattr_method_arms.get(_as_str(sn))
         if _mm_arms:
-            for _mm_attr0 in _mm_arms:
-                _mm_attr = _as_str(_mm_attr0)
+            for _mm_attr in _mm_arms:
                 get_lines.append(
-                    f'  if (strcmp(attr, "{_mm_attr}") == 0) '
+                    f'  if (strcmp(attr, "{_as_str(_mm_attr)}") == 0) '
                     f'return (int64_t)(intptr_t)mojo_bound_method_new ('
                     f'(void *){_as_str(_mm_arms[_mm_attr])}, (void *)obj);')
         # Inlined `_fieldnames_append_lines` (was a separate function
@@ -18002,12 +17991,10 @@ def gen_module_impl(self, stmts: list):
         # Methods of static classes must be findable through the runtime class
         # table so that instances of dynamic classes inheriting from static
         # bases can call them.
-        # `all_struct_defs` is bound earlier in this same function, always. The
-        # `'all_struct_defs' in locals()` guard this replaces called `locals()`,
-        # which the compiled compiler stubs to 0, so the answer was always
-        # "absent": no static class's methods ever reached the runtime class
-        # table in the self-hosted binary.
-        _all_sds = all_struct_defs
+        try:
+            _all_sds = all_struct_defs if 'all_struct_defs' in locals() else []
+        except Exception:
+            _all_sds = []
         for _sd in _all_sds:
             _sdn = _as_str(getattr(_sd, 'name', ''))
             if not _sdn or _sdn not in self._struct_bases:
@@ -18040,12 +18027,11 @@ def gen_module_impl(self, stmts: list):
     if self.emit_struct_defs:
         _has_classattr_words = bool(getattr(self, '_class_attr_words', None))
         # Collect methods of static base classes
-        _all_sds2 = all_struct_defs
-        # Formatted lines, not `(tag, name, sym)` tuples: a tuple mixing an int
-        # with two strings was unpacked with three string readers in the compiled
-        # compiler, and `{_sdtag}` was read as a string pointer (SIGSEGV in
-        # `mojo_str_cat`).
-        _method_entries: list = []
+        try:
+            _all_sds2 = all_struct_defs if 'all_struct_defs' in locals() else []
+        except Exception:
+            _all_sds2 = []
+        _method_entries = []
         for _sd in _all_sds2:
             _sdn = _as_str(getattr(_sd, 'name', ''))
             if not _sdn:
@@ -18074,9 +18060,7 @@ def gen_module_impl(self, stmts: list):
                         _msym = f"{_sdcname}_{_mname_s}"
                     except Exception:
                         continue
-                _method_entries.append(
-                    f'    if (tag == {_sdtag}LL && !strcmp(name, "{_c_escape(_mname_s)}")) '
-                    f'{{ *out = (int64_t)(intptr_t){_msym}; return 1; }}')
+                _method_entries.append((_sdtag, _mname_s, _msym))
         if _has_classattr_words or _method_entries:
             # The reader the run-time class table asks for an attribute a class BODY declares:
             # the live global, as one word (a float boxed, a string/container by address).
@@ -18097,8 +18081,8 @@ def gen_module_impl(self, stmts: list):
                     parts.append(f'    if (tag == {gimple_exprtypes._struct_type_id(_wn)}LL '
                                  f'&& !strcmp(name, "{_c_escape(_as_str(_wa))}")) '
                                  f'{{ *out = {_wexpr}; return 1; }}')
-            for _me_line in _method_entries:
-                parts.append(_me_line)
+            for _sdtag, _mname_s, _msym in _method_entries:
+                parts.append(f'    if (tag == {_sdtag}LL && !strcmp(name, "{_c_escape(_mname_s)}")) {{ *out = (int64_t)(intptr_t){_msym}; return 1; }}')
             parts.append('    return 0;')
             parts.append('}')
             parts.append('static void __attribute__((constructor)) _mojo_register_classattr_reader(void) {')
@@ -18620,6 +18604,19 @@ def gen_module_impl(self, stmts: list):
     # bodies exist — a `print(x)` of a list literal in an IMPORTED module is a
     # reference, and that module's text is spliced into this `parts` long after
     # this module's own code was written.
+    try:
+        if hasattr(self, '_module_stmts'):
+            self._module_stmts.clear()
+        if hasattr(self, '_all_transitive_stmts_ordered'):
+            self._all_transitive_stmts_ordered.clear()
+        if hasattr(self, '_all_transitive_stmts_ids'):
+            self._all_transitive_stmts_ids.clear()
+        try:
+            imported_stmts.clear()
+        except Exception:
+            pass
+    except Exception:
+        pass
     return self._dedup_variadic_externs(_drop_unreferenced_unimpl_stubs(_drop_unreachable_repr_cluster(parts)))
 
 def __getattr__(name):

@@ -37,7 +37,7 @@ throughout.
 
 **What is here and what is not.**  The uncaught half of the exception contract
 is answered and asserted below.  The CAUGHT half is not: a `try`/`except` arm
-with a body is still refused by name, and `bugs/FORMAL_a_try_handler_arm_is_
+with a body is still refused by name, and `bugs/formal/FORMAL_a_try_handler_arm_is_
 still_never_emitted.md` is that subject — it carries the measured table for both
 halves, the status-word design, and the measurement that says the same-function
 slice is worth zero files in this repository.  The three REFUSED rows below keep
@@ -154,7 +154,7 @@ def kind_table_checks():
 def handler_arm_matching_checks():
     """§4's SUPERCLASS question, answered and pinned. No build, no Lean.
 
-    **`bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5 step 1 is
+    **`bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5 step 1 is
     "decide §4's two design questions", and this is the first one with an
     answer.** `handler_arm_matches` is CPython's own question ("does this arm
     catch that class?") and `handler_arm_kinds` is the dispatch's ("which
@@ -494,7 +494,7 @@ CASES = [
      "    return 0\n", 3),
     # A subclass of a builtin base — the spelling a user writes when they want
     # their own exception type, and the one
-    # `bugs/FORMAL_an_exception_subclass_of_a_builtin_base_builds_and_then_
+    # `bugs/formal/FORMAL_an_exception_subclass_of_a_builtin_base_builds_and_then_
     # dies.md` measured (it built and then died; it is still refused for the
     # CATCHING half, which is a different question and is pinned below).
     ("raise_a_subclass_of_a_builtin_base",
@@ -1304,7 +1304,7 @@ def run_matching_oracle():
 
     Why the rule is worth pinning here rather than when the unwinder lands: it is
     the answer to the one design question
-    `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §4 records as having
+    `bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §4 records as having
     no answer in the code — whether a status word saying "this is exactly
     `ZeroDivisionError`" can answer `except Exception:`. It cannot, and
     `GeneratorExit` is the row that proves it: it derives from

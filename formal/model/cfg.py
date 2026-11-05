@@ -2667,7 +2667,7 @@ def specialization_call_refusal(name: str) -> str:
         instantiation: an argument that is a value rather than a type, a
         dotted `module.name[…]`, or a template in a type ANNOTATION rather
         than a callee position.
-        `bugs/FORMAL_generic_monomorph_scope.md` lists each with its next step.
+        `bugs/formal/FORMAL_generic_monomorph_scope.md` lists each with its next step.
       * the name is a function of another module whose generic parameter is
         IMPLICIT — `def name(x: Box[T])`, with the parameter written in the
         SIGNATURE and no bracket to bind. There the type is INFERRED from the
@@ -2715,7 +2715,7 @@ def specialization_call_refusal(name: str) -> str:
         f"refused and the inferred one builds and answers CPython on both "
         f"architectures). **Do not add `[<a type>]` — that is the spelling that "
         f"arrived here.** The ways this can still be reached, with the spelling "
-        f"that works for each, are in bugs/FORMAL_generic_monomorph_scope.md. "
+        f"that works for each, are in bugs/formal/FORMAL_generic_monomorph_scope.md. "
         f"If `{name}` is instead an ordinary value then the brackets are a "
         f"subscript, which is not a call this path can name at all. Refused "
         f"rather than emitted with the brackets dropped: that builds, runs, and "
@@ -2754,7 +2754,7 @@ def dotted_specialization_refusal(name: str) -> str:
     MODULE's instantiation — a wrong answer rather than a refusal, which is the
     one direction this backend must never take. So the dotted application is not
     a gap in a message, it is a gap in the mechanism, and §2 of
-    `bugs/FORMAL_generic_monomorph_scope.md` is where it is written down with
+    `bugs/formal/FORMAL_generic_monomorph_scope.md` is where it is written down with
     the ABI decision it needs.
 
     **The remedy is the one spelling measured to work, and nothing else is
@@ -2788,7 +2788,7 @@ def dotted_specialization_refusal(name: str) -> str:
         f"`from {module} import {leaf}`, or `{module}` bound to `{leaf}`) was "
         f"measured on this tree and is still refused, so do not stop there. "
         f"The dotted application itself, and the ABI question a fix needs, are "
-        f"§2 of bugs/FORMAL_generic_monomorph_scope.md. Refused rather than "
+        f"§2 of bugs/formal/FORMAL_generic_monomorph_scope.md. Refused rather than "
         f"emitted with the brackets dropped: that builds, runs, and returns a "
         f"number the source never wrote, with nothing on the link line to catch "
         f"it"
@@ -2894,7 +2894,7 @@ def sole_field_call_refusal(spelling: str, struct: str, chain: str, root: str,
     collapse the CALLEE as well: by the time a backend saw `c.f(5)` the node it
     held was `IdentExpr('c')`, and the only name it could print was `c`.  A
     refusal naming a name the reader did not write is
-    `bugs/FORMAL_known_limits.md`'s failure mode — it costs a second build to
+    `bugs/formal/FORMAL_known_limits.md`'s failure mode — it costs a second build to
     discover that `f` is the field, and a reader who does not check concludes
     that `c` is the problem.  `callee_value_refusal` above is what a backend
     reaches for on the collapsed node and it is TRUE of it (`c` is a name the
@@ -3037,7 +3037,7 @@ TYPE_KIND = "type"
 # holding one cannot be a `FLOAT_KIND` here: `Float32` is deliberately not in
 # `formal.types.FLOAT_TYPE_NAMES` and is refused by name rather than accepted
 # and misread.  `float16`/`bfloat16` and the `float8_*` family are the same
-# story.  See `bugs/FORMAL_float_binary64_only.md`.
+# story.  See `bugs/formal/FORMAL_float_binary64_only.md`.
 FLOAT_KIND = "float64"
 
 # BYTES THE KERNEL SUPPLIED, as a kind, which is new and is the whole of what a
@@ -4295,7 +4295,7 @@ LENGTH_DEPENDENT_METHODS = {
 # `char *` builds and runs on both backends. Note that the length is RIGHT
 # THERE, in slot 1 — so "a string needs a length" is not the problem these 16
 # files have; they have a length and cannot keep it. See
-# bugs/FORMAL_string_value_model.md, which records the decision, the cost, and
+# bugs/formal/FORMAL_string_value_model.md, which records the decision, the cost, and
 # the two representations' collision.
 
 # The two libc symbols this representation makes available, named once so a
@@ -4319,7 +4319,7 @@ LENGTH_DEPENDENT_METHODS = {
 # compared `b`'s NUL, so it cannot succeed unless `a` ends there too. One extra
 # `strlen` and one extra `add`, no new symbol, and both halves are the same
 # libc calls the same two backends already make. See
-# bugs/FORMAL_string_value_model.md for the x86-64 observation and what it does
+# bugs/formal/FORMAL_string_value_model.md for the x86-64 observation and what it does
 # and does not establish.
 STRING_LENGTH_SYMBOL = "strlen"
 STRING_COMPARE_SYMBOL = "strncmp"

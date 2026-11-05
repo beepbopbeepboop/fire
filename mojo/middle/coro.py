@@ -2750,11 +2750,7 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
                                f'{pann!r} (v0: numeric or unannotated only)')
     # v0: remaining params must be simple positional scalars (or none)
     for pname, pann in params:
-        # `pann is not None` first: `_SCALARISH` lists None, but the compiled
-        # compiler reads an absent annotation as the word 0, and a set's None
-        # member is now its own slot (distinct from the int 0), so the lookup
-        # missed and every unannotated generator parameter was refused.
-        if pann is not None and pann not in _SCALARISH:
+        if pann not in _SCALARISH:
             return False, f'param {pname!r} type {pann!r} (v0 scalar-only)'
     if getattr(fn, 'kwonly', None):
         _kwbad = _unrepresentable_kwonly(fn)
@@ -3706,7 +3702,7 @@ def _eligible_async_common(fn: N.FunctionDef, nested: bool = False,
             return False, 'async method without a plain `self` first param (v0)'
         _params = _params[1:]   # self is typed by the codegen from the struct
     for pname, pann in _params:
-        if pann is not None and pann not in _SCALARISH and not _is_struct_param(pann):
+        if pann not in _SCALARISH and not _is_struct_param(pann):
             return False, f'param {pname!r} type {pann!r} (v0 scalar / struct only)'
     if getattr(fn, 'kwonly', None):
         _kwbad = _unrepresentable_kwonly(fn)

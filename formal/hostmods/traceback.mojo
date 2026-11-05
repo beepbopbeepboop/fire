@@ -52,7 +52,7 @@ WHAT IS NOT HERE, AND WHY
     have; the answer does not fit. Each line is the frame's file, its line
     number, its function name and its text joined into one string, and
     composing a string out of parts is refused on this path
-    (`bugs/FORMAL_string_composition_has_no_buffer.md` — the row the 2026-10-04
+    (`bugs/formal/FORMAL_string_composition_has_no_buffer.md` — the row the 2026-10-04
     sweep measured at 115 files). A stack printer that printed a fixed string
     would be a plausible wrong answer about the program it claimed to describe.
   * `print_tb`, `format_tb`, `extract_tb`, `walk_tb`, `clear_frames` — take or
@@ -63,7 +63,7 @@ WHAT IS NOT HERE, AND WHY
   * `TracebackException`, `FrameSummary`, `StackSummary` — three record types
     over exactly those frames. `namedtuple` cannot be built at run time either
     (there is no word that denotes a type,
-    `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`).
+    `bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`).
   * `print_exception_only` — does not exist in CPython 3.14; it was removed in
     3.13. Naming it here would be advertising a name the host does not have.
 

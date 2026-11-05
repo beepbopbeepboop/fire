@@ -17,7 +17,7 @@ from . import *
 # tidying: a byte answer presented where CPython gives a code-point answer is a
 # MISCOMPILE — a program that indexes by the answer then reads out of range,
 # and a program that only prints it is wrong in a way no reader of the output
-# would catch. The representation decision above (`bugs/FORMAL_string_value_model.md`
+# would catch. The representation decision above (`bugs/formal/FORMAL_string_value_model.md`
 # §"The decision": a formal value is one word and a string is a bare `char *`)
 # does not change, and neither does anything above this value model; what
 # changes is that the ONE question "is this byte count a code point count" is
@@ -3552,7 +3552,7 @@ def interpolated_literal_quote_start(spelled: str) -> int:
     `b` and `u` in any order and up to two of them, so `rf"…"` and `fr"…"` both
     open their quote at index **2** while `f"…"` opens it at 1. The reader below
     used to ask `spelled[1]`, which for `rf` is the `f`, and then reported a
-    missing quote that was not missing — `bugs/FORMAL_the_interpolated_literal_
+    missing quote that was not missing — `bugs/formal/FORMAL_the_interpolated_literal_
     reader_assumes_a_one_character_prefix.md`. The lexer above it
     (`fire_compiler.py::_string_prefix_start` / `_prefix_is_interpolated`) has
     known the prefix width since 2026-10-05; this is the one answer the reader
@@ -3988,7 +3988,7 @@ def interpolated_literal_bound(spelled: str, field_width=None):
     over its bytes (`formal/model.py`'s text-encoding block and
     `LENGTH_DEPENDENT_METHODS`), so a composition that is not terminated is a
     `len()` that walks past the end of it. That is the obligation
-    `bugs/FORMAL_string_value_model.md`'s "§The cost" states as "whoever adds
+    `bugs/formal/FORMAL_string_value_model.md`'s "§The cost" states as "whoever adds
     the first method which can build a string at run time inherits the
     obligation" — and inheriting it is cheaper than a second word in every
     string value on this path.

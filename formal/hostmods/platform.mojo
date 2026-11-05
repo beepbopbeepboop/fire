@@ -454,7 +454,7 @@ def _int_value(s) -> int:
 
     `%lld` and not `%d` in the digit-to-string spelling in `system_alias`: a
     `%d` conversion is 32 bits wide on this path
-    (`bugs/FORMAL_string_value_model.md` §2), and this value is small enough
+    (`bugs/formal/FORMAL_string_value_model.md` §2), and this value is small enough
     that it would not have shown — which is why it is spelled correctly rather
     than left to be discovered by a large release number later.
     """
@@ -736,7 +736,7 @@ def platform_string(p0, p1, p2, p3, p4, p5) -> str:
     in CPython by convention and reachable, because CPython has no cross-module
     ABI to satisfy; here a name beginning with `_` is denied by
     `doc/ABI.md`'s rule (`reflect.export_exclusions`'s `EXCL_PRIVATE`, measured
-    and settled in `bugs/FORMAL_known_limits.md` §1.1) with no opt-in, so a
+    and settled in `bugs/formal/FORMAL_known_limits.md` §1.1) with no opt-in, so a
     caller cannot import it and the corner cases below could not be tested. One
     public name rather than a private definition and a public alias, because two
     names for one function is one implementation and one place to keep it right.

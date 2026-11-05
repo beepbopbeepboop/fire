@@ -1359,7 +1359,7 @@ def is_set_expr(e) -> bool:
 
     **Set-ness is a question nothing else asked, and the reason it has to be
     asked is that the value model does not keep it.** A set lowers as a list
-    (`bugs/FORMAL_set_value_model.md` says so and `container_literal_elem_kind`
+    (`bugs/formal/FORMAL_set_value_model.md` says so and `container_literal_elem_kind`
     is why: a `SetExpr`, a `ListExpr` and a `DictExpr` all classify as
     `list:<elem>`), so `_blob_vars` holds all three and `ValueKinds` cannot
     tell them apart. The one operator that CAN tell them apart is `|`, because
@@ -2895,7 +2895,7 @@ def string_unary_refusal(op: str, kind, spelled_operand: str) -> str | None:
     the same `strlen` the refusal told the reader to write by hand, and the
     empty string is the case that tells a correct lowering from a null test.
     One table, three or four spellings of one question; see
-    bugs/FORMAL_string_value_model.md ("found and not fixed").
+    bugs/formal/FORMAL_string_value_model.md ("found and not fixed").
     """
     if op not in STRING_ARITHMETIC_UNARY_OPS:
         return None
@@ -3085,7 +3085,7 @@ def truthy_lowering(kind, expr=None) -> str:
 # `len` read the count and a subscript read one byte), and by both emitters.
 # One set for all three, because a constructor that reserved word slots while
 # the kind said `byte` would build a blob whose COUNT and whose ELEMENTS
-# disagree — the exact defect `bugs/FORMAL_bytearray_and_bytes_have_no_
+# disagree — the exact defect `bugs/formal/FORMAL_bytearray_and_bytes_have_no_
 # representation.md` was filed for.
 BYTE_BLOB_CTORS = frozenset({"bytearray"})
 
@@ -3801,7 +3801,7 @@ def string_slice_refusal(base_kind, spelled_obj: str) -> str | None:
 
     A crash, not a wrong answer, and that is worth saying plainly: a segfault is
     at least loud, and this is the mildest member of the family in
-    bugs/FORMAL_string_value_model.md. It is refused rather than lowered because
+    bugs/formal/FORMAL_string_value_model.md. It is refused rather than lowered because
     the result would have to be a NEW container, and the one shape a slice of a
     string can have — an interior pointer `s + k` for a suffix, or the NUL-
     terminated bytes up to an end offset for a bounded one — is a string whose
@@ -3833,7 +3833,7 @@ def string_slice_refusal(base_kind, spelled_obj: str) -> str | None:
         f"capability — but a BOUNDED slice has no representation here at all, "
         f"so neither does. Index with an integer offset (`{spelled_obj}[i]`, "
         f"which yields the byte) or use a method; see "
-        f"bugs/FORMAL_string_value_model.md")
+        f"bugs/formal/FORMAL_string_value_model.md")
 
 
 
@@ -3868,7 +3868,7 @@ def string_slice_refusal(base_kind, spelled_obj: str) -> str | None:
 # the `lstrip` loop: it IS the algorithm, it cannot be half-right, and there is
 # then nothing to keep in step between two architectures. `strchr` was checked
 # to BIND on both backends before being relied on here (the x86-64 `strcmp`
-# observation in bugs/FORMAL_string_value_model.md is why that is worth a
+# observation in bugs/formal/FORMAL_string_value_model.md is why that is worth a
 # measurement rather than an assumption): with `STRING_COMPARE_SYMBOL` pointed
 # at it, a program that calls it ran to completion and returned a non-NULL
 # pointer on arm64 and on x86-64.
@@ -4171,7 +4171,7 @@ def string_element_refusal(base, index, fn=None, decls=None,
     "A character test with no byte load, which is the only way to ask this
     question on this target". So the byte subscript is not this path's way of
     reading a character, in this module or in this corpus; what a `str` element
-    read costs is still recorded in `bugs/FORMAL_string_value_model.md` and is
+    read costs is still recorded in `bugs/formal/FORMAL_string_value_model.md` and is
     still refused everywhere else.
 
     **This is a REFUSAL and not a fold, and the difference from `len` is the
@@ -4255,7 +4255,7 @@ def string_index_refusal(base_kind, index_kind,
     NOT the same refusal as `string_operand_is_string(base_kind)` being false:
     this is about the INDEX. A string base with an integer index is `s + i`,
     which is real C pointer arithmetic and is lowered, giving the byte at that
-    offset — see the `s[0]` case in bugs/FORMAL_string_value_model.md for why
+    offset — see the `s[0]` case in bugs/formal/FORMAL_string_value_model.md for why
     that byte rather than a one-character String is a recorded divergence
     rather than a refusal.
     """

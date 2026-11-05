@@ -6648,7 +6648,7 @@ def _is_enum_class_def(node):
     return False
 
 
-def _transform_enum_classes(stmts: list) -> list:
+def _transform_enum_classes(stmts):
     """Transform enum class statements to go through metaclass mechanism."""
     from fire_compiler import StructDef, AssignStmt, IdentExpr, CallExpr, MemberExpr
     from fire_compiler import DictExpr, StringLiteral, TupleExpr, SubscriptExpr, ExprStmt

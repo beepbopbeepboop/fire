@@ -517,7 +517,7 @@ def _seg(s, i, j) -> str:
 
     A slice is refused on this path — the count would be read from offset 0 of a
     `char *`, which is the first eight CHARACTERS
-    (`bugs/FORMAL_string_value_model.md`) — so every substring here is a
+    (`bugs/formal/FORMAL_string_value_model.md`) — so every substring here is a
     `memmove` and a terminator. `formal/hostmods/os/_syscalls.mojo`'s
     `str_prefix` is the `s[0:j]` case and `str_dup` is the whole string; this is
     the middle.

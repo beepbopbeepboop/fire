@@ -133,7 +133,7 @@ REFUSED = [
      "    return 0\n",
      "is a dialect OPERATION"),
     # `__mlir_op` with no bracket at all, which is the spelling §2.2 of
-    # bugs/FORMAL_known_limits.md measured building, linking and SEGFAULTING at
+    # bugs/formal/FORMAL_known_limits.md measured building, linking and SEGFAULTING at
     # the first instruction, and which no suite case pinned. It is a limit, and
     # `test_formal_run.py`'s own note says what an unpinned limit is worth. It
     # passes reverse-applied too — nothing about it changed — which is the point

@@ -781,7 +781,7 @@ class TestRunnerClassification(unittest.TestCase):
     had no third answer at all, so `both` and `either` were `FAIL` in the suite
     and `too-large` in the census for the same sentence. That is the
     disagreement
-    `bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md`
+    `bugs/formal/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md`
     §4 is about, and it is why the SENTENCE has one reader (`formal.lean`) and
     both questions are asked of it.
 
@@ -817,7 +817,7 @@ class TestRunnerClassification(unittest.TestCase):
             "KNOWN-GAP")
 
     def test_the_seven_declared_stems_are_known_gaps(self):
-        # Regression for bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md:
+        # Regression for bugs/formal/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md:
         # count, countdown, fib, subscript_var, wge, wide_recv must be in EXPECTED_FAILURES
         # and classified as KNOWN-GAP when they fail to build/check (pow2 now passes with sorry holes).
         declared = {"count", "countdown", "fib", "subscript_var", "wge", "wide_recv"}

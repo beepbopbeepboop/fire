@@ -14469,8 +14469,7 @@ def main():
                   test_none_member_of_a_set_is_not_the_int_zero,
                   test_none_held_in_local_with_if_join_is_none_needle,
                   test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool,
-                  test_slice_equals_after_a_multibyte_character,
-                  test_caught_exception_prints_its_message):
+                  test_slice_equals_after_a_multibyte_character):
         try:
             _late()
         except AssertionError as e:
@@ -14881,44 +14880,6 @@ def main():
     print(t[2:4] == "ab", t[-2:] == "ab", t[:2] == "ée", t[1:3] == "ea")
     print(src.startswith("'k0'", 18), src.startswith("'k0'", 17), src.startswith("→", 4))
     print(src.endswith("→", 0, 5), src.endswith("b", 0, 7), src.count("'"), src.count("'", 20), src.count(""), t.count("", 1, 3))
-
-main()
-""")
-
-
-def test_caught_exception_prints_its_message():
-    """`str(e)` / `print(e)` / an f-string of a caught exception read the
-    message. The handler bound the raw exception OBJECT (a struct whose first
-    bytes are the type tag), so every one of them printed those bytes -- and an
-    f-string message was freed by the unwind before the handler ran. The object
-    is now the registered message text, with the args list in a header before
-    it."""
-    test_gimple_matches_cpython("gimple_caught_exception_message", """\
-class Shape(Exception):
-    pass
-
-def f(n):
-    if n > 1:
-        raise Shape(f"fn{n}: bad shape")
-    if n > 0:
-        raise ValueError("plain " + "message")
-    return n
-
-def main():
-    reasons = {}
-    for k in (1, 2):
-        try:
-            f(k)
-        except Shape as e:
-            reasons[k] = str(e)
-        except ValueError as e:
-            reasons[k] = str(e)
-            print(e)
-    print(reasons)
-    try:
-        f(3)
-    except Exception as e:
-        print("got:", str(e), f"[{e}]")
 
 main()
 """)

@@ -15,7 +15,7 @@ deviations that are properties of this target and are stated on each one:
 
   * A RESULT IS EITHER AN INTERIOR POINTER OR A `malloc`'d BUFFER. A string
     here is a bare NUL-terminated `char *` with no growable buffer of its own
-    (bugs/FORMAL_string_value_model.md), so a function that returns part of its
+    (bugs/formal/FORMAL_string_value_model.md), so a function that returns part of its
     argument returns a pointer into it — no allocation, and the string it
     points into has to outlive the call — and a function that builds a new
     string returns memory from `malloc` that the CALLER OWNS. `os_free` in the

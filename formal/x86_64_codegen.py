@@ -1061,7 +1061,7 @@ class X86_64Codegen:
         both backends through one `_codegen_and_link` and hands both the same
         list). Accepting it here is what keeps `--backend=x86_64` from dying
         with a TypeError on a keyword meant for the other backend (see
-        bugs/FORMAL_arm64_instruction_coverage.md, "Landed alongside: dylib_syms"),
+        bugs/formal/FORMAL_arm64_instruction_coverage.md, "Landed alongside: dylib_syms"),
         and USING it is what keeps the two backends from disagreeing about
         which callee names are types: without it a struct constructor fell
         through to the extern path and became a `call _Point` against a symbol
@@ -1345,7 +1345,7 @@ class X86_64Codegen:
             # side has to mean the same integer on the other, and `info` is how
             # both proof generators are handed one list instead of each
             # recomputing it. Nothing reads it yet
-            # (`bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5, deleted).
+            # (`bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5, deleted).
             "exception_kinds": M.exception_kinds(),
             # The INTERN TABLE, keyed by DECODED text — the same map, from the
             # same `_intern_string`, for the same reason as on arm64: a string
@@ -1891,7 +1891,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         `formal/x86_64_model_coverage_test.py`); what the disp32 form is NOT is
         reachable by a generated end-to-end proof yet, because the path through
         a call this wide does not close —
-        `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`.
+        `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`.
         """
         self.asm.emit(encode_mov_r64_rm64(
             Reg.R11, Reg.RBP, _STACK_ARG_OFF + 8 * (index - len(ARG_REGS))))
@@ -2915,7 +2915,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         rather than a runtime local, because a runtime local would give the
         program different behaviour than the source declares.
 
-        This is the refusal `bugs/FORMAL_known_limits.md` §3 records as ARCH
+        This is the refusal `bugs/formal/FORMAL_known_limits.md` §3 records as ARCH
         DRIFT. x86-64 used to refuse every `comptime` binding one layer up, at
         the statement dispatch, with "unsupported statement ComptimeVarStmt" —
         a different limit for the same construct on the two architectures, and
@@ -3632,7 +3632,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # premise is the BINDING OF THE BASE — and the same program written
             # `gen.temp_counter = 1` or `gen.temp_counter, x = 1, 2` already
             # produced arm64's sentence on BOTH machines. Filed as
-            # `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_
+            # `bugs/formal/FORMAL_the_two_backends_refuse_different_constructs_in_the_
             # same_function.md`.
             key = self._frame_member_slot(stmt.target)
             if key is None:
@@ -8215,7 +8215,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         a symmetric difference append into one result.
 
         The elements are read as whole 8-byte slots, which is what a set means
-        on this path (`bugs/FORMAL_set_value_model.md`: a set lowers as a
+        on this path (`bugs/formal/FORMAL_set_value_model.md`: a set lowers as a
         LIST), so an element is a word and `1 in {1, 2}` is a word compare.
 
         REGISTER PLAN.  src/other/src_n/other_n are the caller's; R10 is the
@@ -9514,7 +9514,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # value, x86-64 raised `unsupported unary operator '^' on the formal
             # x86-64 path`) for a construct with one meaning. It refused correct
             # stdlib Mojo: `std/builtin/swap.mojo` builds on arm64 and is refused
-            # here, and `bugs/FORMAL_known_limits.md` §6.5 has carried it as
+            # here, and `bugs/formal/FORMAL_known_limits.md` §6.5 has carried it as
             # "x86-64-side work of a sitting" since. It is the same shape as the
             # `~` case above, and for the same reason: the ARM side names both
             # operators it lowers rather than falling through to a refusal.
@@ -14435,7 +14435,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `struct Outer: n: Inner` with `o.n.d.x = 5` built, ran and died of
             # SIGSEGV (exit 139), while the depth-1 and depth-2 reads of the same
             # three structs answered correctly.
-            # `bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
+            # `bugs/formal/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
             # frame.md` §2 has the disassembly.
             #
             # AFTER the defaults above and for the framed path's reason

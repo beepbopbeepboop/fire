@@ -1985,7 +1985,7 @@ def _generic_inference_tail(name: str) -> str:
         f"pipeline reads type arguments off an explicit bracket, so a bare call "
         f"arrives here with no instantiation to bind; the inference, the 123 "
         f"measured files it is worth, and the shape of the missing piece are "
-        f"in bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_"
+        f"in bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_"
         f"inferrable.md. So write the operation in this module, or call a "
         f"public function that does it — which is the same program with a "
         f"definition this image can bind. Spelling it `{name}[<a type>](…)` "
@@ -2048,7 +2048,7 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
     `var t = Float64` above it) has no concrete spelling to mangle, and a
     DOTTED application `mod.G[T]()` is refused by
     `comptime.specialization_name` by design.  All three are listed with the
-    exact next step in `bugs/FORMAL_generic_monomorph_scope.md`, which is the
+    exact next step in `bugs/formal/FORMAL_generic_monomorph_scope.md`, which is the
     single home for what the mechanism does not cover.
 
     **And the last sentence says the BARE case is CORRECT SOURCE, because it
@@ -2060,7 +2060,7 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
     `refuse_without:` defect in its purest form: a repair that is wrong about
     correct code. So the sentence now names what is missing (the inference),
     points at the measured 123 files and the inference's shape
-    (`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`),
+    (`bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`),
     and says the bracket is a WORKAROUND rather than the fix.
     """
     who = f"{fn_name}: " if fn_name else ""
@@ -2096,7 +2096,7 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
                     f"a bare call arrives here with no instantiation to bind; "
                     f"the inference, the 123 measured files it is worth, and the "
                     f"shape of the missing piece are in "
-                    f"bugs/FORMAL_a_bare_call_to_a_template_whose_type_"
+                    f"bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_"
                     f"arguments_are_inferrable.md. So write the operation in this "
                     f"module, or call a public function that does it — which is "
                     f"the same program with a definition this image can bind. "
@@ -2107,7 +2107,7 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
                 f"the call has to bind a symbol `{mod}` exports. That module "
                 f"does not export it, and the reason is `doc/ABI.md`'s export "
                 f"rule applied to the DECLARATION: {why}. The exclusion is "
-                f"measured and settled in bugs/FORMAL_known_limits.md §1.1, and "
+                f"measured and settled in bugs/formal/FORMAL_known_limits.md §1.1, and "
                 f"the generic case in §1.2.")
     # …and the case that is NOT an exclusion at all: the module's own source
     # declares no such name. `runtime/stdlib_wrapper.mojo`'s `from time import
@@ -2134,14 +2134,14 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
             f"both at once), an overload has no single symbol, and a C library "
             f"name like `exit` or `write` is provided by libSystem. The "
             f"exclusion is measured and settled in "
-            f"bugs/FORMAL_known_limits.md §1.1, and the generic case in §1.2. "
+            f"bugs/formal/FORMAL_known_limits.md §1.1, and the generic case in §1.2. "
             + _generic_inference_tail(name))
     if clause is not None:
         return head + (
             f"That module does not export it, and the reason is `doc/ABI.md`'s "
             f"export rule rather than anything about this call: {clause}. The "
             f"exclusion is measured and settled in "
-            f"bugs/FORMAL_known_limits.md §1.1.")
+            f"bugs/formal/FORMAL_known_limits.md §1.1.")
     return head + (
         f"That module does not export it, and the reason is `doc/ABI.md`'s "
         f"export rule rather than anything about this call: a name with a "
@@ -2149,7 +2149,7 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
         f"per instantiation (`_get_kgen_string[asm]()` is the measured case — "
         f"both at once), an overload has no single symbol, and a C library "
         f"name like `exit` or `write` is provided by libSystem. The exclusion "
-        f"is measured and settled in bugs/FORMAL_known_limits.md §1.1, and the "
+        f"is measured and settled in bugs/formal/FORMAL_known_limits.md §1.1, and the "
         f"generic case in §1.2. " + _generic_inference_tail(name))
 
 
@@ -6197,7 +6197,7 @@ def undeclared_linked_struct_refusal(struct_name: str, owners: list,
     slot key and nothing else, so its message can only say "this path has no
     way to say what the base holds" — which is true and sends the reader after a
     type inference this backend does not have, when the actual fact is one hop
-    away and checkable (`bugs/FORMAL_field_access_refusal_names_the_wrong_
+    away and checkable (`bugs/formal/FORMAL_field_access_refusal_names_the_wrong_
     module.md`). This one is raised where the construction `S()` itself is, and
     it reports what is actually missing: a DECLARATION, whose field list and
     frame layout are read from the module's source.
@@ -6328,7 +6328,7 @@ def aug_assign_target_refusal(got: str) -> str:
     Both backends reach it, and they used to spell it differently — arm64 "must
     be a plain name", x86-64 "must be a plain name on the formal x86-64 path" —
     which is the same class of defect
-    `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
+    `bugs/formal/FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
     function.md` is about: one construct, two sentences, and a reader has to
     guess which machine wrote it. The architecture is not named, for the reason
     `member_access_refusal` does not name one either: the two backends are ONE

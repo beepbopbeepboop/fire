@@ -278,7 +278,7 @@ def returnless_printf_argument_refusal(name: str, args, no_value_callee_of):
     operands and refuses each of them in `_print_call`; a `printf` the SOURCE
     wrote was only checked for a usable FORMAT, so `printf("%d", g(…))` for a `g`
     with no `return` built and printed the leftover word — the same divergence
-    `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_
+    `bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_
     None.md` refuses for `print(g(…))`, at the same position (the value's word
     becoming text) and one call spelling away.
 
@@ -2438,7 +2438,7 @@ def _parameter_argument_shape(arg, rets=None):
 
     **The container row is the one `len()` of a LIST PARAMETER needs, and it is
     here rather than in the `len` reader for the reason
-    `bugs/FORMAL_len_of_a_list_parameter_is_refused_though_the_same_parameter_
+    `bugs/formal/FORMAL_len_of_a_list_parameter_is_refused_though_the_same_parameter_
     subscripts.md` gives: the parameter is a blob, `xs[i]` on it already lowers
     through the blob path (`subscript_base_lowering`'s own answer for a base no
     declaration makes a pointer), and only `len` — the one reader that insists
@@ -2950,7 +2950,7 @@ class ParameterKindReader:
 # modules that both define `helper` cannot cross-bind, and a bare `f()` cannot
 # reach either of them through the dotted table. (The flat bare-name map is a
 # different, older, coarser answer and stays where it is;
-# `bugs/FORMAL_known_limits.md` §1.1 is why a `_CLIB_SYMS` name is not
+# `bugs/formal/FORMAL_known_limits.md` §1.1 is why a `_CLIB_SYMS` name is not
 # advertised there at all.)
 
 
@@ -3430,7 +3430,7 @@ def imported_callee_kind(entry, declaration, int_names=(), string_names=(),
     this path cannot tell an integer from a frame address and the unclassified
     answer is the one that refuses rather than guessing; widening this to the
     scalars is a decision with its own blast radius, and the measured gap this
-    closes is the container one (`bugs/FORMAL_listdir_no_run_time_sequence.md`'s
+    closes is the container one (`bugs/formal/FORMAL_listdir_no_run_time_sequence.md`'s
     item 1: `len()` of a value the callee's declaration says is a list).
 
     `declaration` may be None — a library shipped without its sources, or one
@@ -4022,7 +4022,7 @@ def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,
             f"leading `_`, a generic template, an overload, or a C library "
             f"symbol such as `exit` or `write`) is not advertised, so a module "
             f"that defines one cannot be called by that name. The exclusion is "
-            f"measured and settled in bugs/FORMAL_known_limits.md 1.1; a module "
+            f"measured and settled in bugs/formal/FORMAL_known_limits.md 1.1; a module "
             f"that needs to publish mutable state rather than functions is a "
             f"different gap, written down in "
             f"FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)")

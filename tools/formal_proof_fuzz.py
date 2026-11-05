@@ -80,7 +80,7 @@ floor now (`formal/model.py::division_floors` and `lib/ProofLib.lean`'s
 dividend over a signed divisor through the RUNTIME half with 100/100 matches.
 It is here because of the PROOF half: a signed dividend over a free `n` reaches
 `eval_eq_mojo`, whose rewrite was not decidable over a free `UInt64`
-(and the sweep ledger `bugs/FORMAL_fuzz_ledger.md` §2.1a for the runtime side).  Lifting the
+(and the sweep ledger `bugs/formal/FORMAL_fuzz_ledger.md` §2.1a for the runtime side).  Lifting the
 restriction is no longer required, not this file's.
 
 One thing is generated ON PURPOSE and is the reason a corpus of unsigned words
@@ -134,7 +134,7 @@ WHAT A FINDING IS, AND WHAT IT IS NOT
 EXIT STATUS: 1 when an unexplained `SOUNDNESS-MISMATCH` is reported.  A refusal,
 a rejection, a bound and a known divergence are all reported and counted, and
 none of them is a finding — a fuzzer that counted those would spend its whole
-budget re-discovering `bugs/FORMAL_known_limits.md`.
+budget re-discovering `bugs/formal/FORMAL_known_limits.md`.
 
 WHAT IS NOT HERE, so the next reader does not have to measure it
 ----------------------------------------------------------------

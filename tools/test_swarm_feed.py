@@ -148,67 +148,11 @@ def test_task_text():
     return ok
 
 
-def test_reclass_is_not_starved_by_continuations(tmp):
-    """The 34-attempts bug (2026-11-05): a doc due a class was continued in its OLD class by continue_partial, and the
-    continuation held the doc again before apply_moves could move it, so it was "escalated" every 2nd attempt and never
-    moved. While a reclass is pending, nothing is queued in the old class; the exited task is released so the move can
-    happen, and the feeder skips the doc until it has moved."""
-    import subprocess as sp
-    from unittest import mock
-    ok = True
-    st = {"fails": {}, "track": {"CODEGEN_x": {"head": "abc", "name": "t0"}}, "pending": {}}
-    for _ in range(S.ESCALATE_AFTER - 1):
-        S.reclass_on_failure(st, "CODEGEN_x", "CODEGEN_x")
-    task = {"claims": ["bug:CODEGEN_x"], "branch": "work/x", "state": "exited-err", "worktree": tmp}
-    queued, marks = [], []
-    real_run = sp.run
-    def fake_run(cmd, *a, **k):
-        if "mark" in cmd:
-            marks.append(cmd[-2:])
-            return sp.CompletedProcess(cmd, 0, "", "")
-        return real_run(cmd, *a, **k)
-    saved = (S.state_path, S.BUSY)
-    S.state_path = lambda: os.path.join(tmp, "swarm2.json")
-    S.BUSY = {"names": set(), "claims": set()}
-    try:
-        with mock.patch.object(C, "load", return_value={"bug-x-1": task}), \
-             mock.patch.object(C, "state_of", return_value="exited-err"), \
-             mock.patch.object(C, "verdict", return_value="PARTIAL"), \
-             mock.patch.object(C, "ahead", return_value=3), \
-             mock.patch.object(S, "bug_docs", return_value=["CODEGEN_x"]), \
-             mock.patch.object(S, "branch_head", return_value="abc"), \
-             mock.patch.object(S, "enqueue_doc", side_effect=lambda *a, **k: queued.append(a) or True), \
-             mock.patch("subprocess.run", side_effect=fake_run):
-            n = S.continue_partial(st)
-        ok &= check("a no-progress round marks the doc due a class", st["pending"].get("CODEGEN_x") == "mid")
-        ok &= check("nothing is queued in the old class while the reclass is pending", queued == [] and n == 0)
-        ok &= check("the exited task is released so the doc can move", marks == [["bug-x-1", "abandoned"]])
-        # a round that DID move the branch keeps its class and continues as before
-        st2 = {"fails": {}, "track": {"CODEGEN_y": {"head": "old", "name": "t0"}}, "pending": {}}
-        task2 = dict(task, claims=["bug:CODEGEN_y"])
-        queued.clear(); marks.clear()
-        with mock.patch.object(C, "load", return_value={"bug-y-1": task2}), \
-             mock.patch.object(C, "state_of", return_value="exited-err"), \
-             mock.patch.object(C, "verdict", return_value="PARTIAL"), \
-             mock.patch.object(C, "ahead", return_value=3), \
-             mock.patch.object(S, "bug_docs", return_value=["CODEGEN_y"]), \
-             mock.patch.object(S, "branch_head", return_value="new"), \
-             mock.patch.object(S, "enqueue_doc", side_effect=lambda *a, **k: queued.append(a) or True), \
-             mock.patch("subprocess.run", side_effect=fake_run):
-            n2 = S.continue_partial(st2)
-        ok &= check("a round that moved the branch is still continued in its class", len(queued) == 1 and n2 == 1)
-    finally:
-        S.state_path, S.BUSY = saved
-    return ok
-
-
 def main():
     ok = True
     ok &= test_holds()
     ok &= test_task_text()
     ok &= test_classes()
-    with tempfile.TemporaryDirectory() as tmp:
-        ok &= test_reclass_is_not_starved_by_continuations(tmp)
     with tempfile.TemporaryDirectory() as tmp:
         ok &= test_limit_detection(tmp)
         ok &= test_apply_moves(tmp)

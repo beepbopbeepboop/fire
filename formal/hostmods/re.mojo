@@ -58,7 +58,7 @@ WHAT IS NOT HERE, AND THE REASON IS THE SAME FOR ALL OF IT
     default for a `str` pattern is Unicode, so `\\w` matches U+00AA there and
     does not here. That is a real difference and it is a property of matching
     bytes rather than code points, which is what a `char *` IS on this path
-    (`bugs/FORMAL_string_value_model.md`). Each of these has an INLINE spelling
+    (`bugs/formal/FORMAL_string_value_model.md`). Each of these has an INLINE spelling
     too -- `(?i)`, `(?x)`, `(?s)`, `(?m)`, `(?a)`, `(?u)` -- and both forms of
     that are implemented, by `_p_flaggroup`: the global `(?x) a` sets the flags
     for the rest of the pattern, and CPython allows it only where nothing but
@@ -156,7 +156,7 @@ LIMITS, MEASURED, NOT ASSUMED
    `Pointer[UInt8].value()` at offset 0 reads them — but the LENGTH is zero
    and a caller that measures with `str_len` sees an empty string. This is the
    string value model, not a decision of this module
-   (`bugs/FORMAL_string_value_model.md`); `test_re_formal.py`'s
+   (`bugs/formal/FORMAL_string_value_model.md`); `test_re_formal.py`'s
    `test_escape_every_byte` reads that one byte directly and says why.
 
 6. **A LIST ON THIS PATH HAS NO READABLE CAPACITY** — `[7, 8, 9][0]` is 7 and
@@ -891,7 +891,7 @@ def _p_flagok(c: Int) -> Int:
     documented position rather than a shrug: the engine matches BYTES, so it
     already is what `(?a)` asks for, and `(?u)` cannot make the word class match
     U+00AA because there is no U+00AA here
-    (`bugs/FORMAL_string_value_model.md`). `L` is NOT accepted: CPython refuses
+    (`bugs/formal/FORMAL_string_value_model.md`). `L` is NOT accepted: CPython refuses
     it for a `str` pattern, and this engine has only bytes.
 
     Separate from `_p_flagbit` because "accepted and sets nothing" and "not a
@@ -994,7 +994,7 @@ def _p_flaggroup(a, code, nxt: Int, at_head: Int) -> Int:
     `a` and `u` are accepted and change nothing, which is this module's
     documented position rather than a shrug: the engine matches BYTES, so it is
     already what `(?a)` asks for, and `(?u)` cannot make the word class match U+00AA
-    because there is no U+00AA here (`bugs/FORMAL_string_value_model.md`).
+    because there is no U+00AA here (`bugs/formal/FORMAL_string_value_model.md`).
     """
     set = 0
     clr = 0

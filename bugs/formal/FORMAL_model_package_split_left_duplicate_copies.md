@@ -37,5 +37,5 @@ split of ONE source, not a copy.
 
 ## Related
 
-`bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md` was removed by the
+`bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md` was removed by the
 fix that merged here; its citations in the package copies were rewritten to name the bug.

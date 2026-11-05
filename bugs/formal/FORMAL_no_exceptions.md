@@ -96,7 +96,7 @@ conventions and items 1 and 2 of "The next step" are unchanged.**
 * **A `try`/`except` whose arm has a NON-EMPTY body is refused at BUILD time, by
   name, on both architectures and byte-identically** —
   `formal/model.py::refuse_dropped_handler_arm`, which
-  `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` owns. So §"What I
+  `bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md` owns. So §"What I
   ran" (a)'s measurement ("the arm is never entered, and the output is lost",
   exit 1 with no `before`) describes a tree that no longer exists: that program
   does not build. The empty-body shapes still build and run — `except: pass`, and
@@ -185,7 +185,7 @@ would be silently absent from the image that runs), so (a) and (c) below are
 historical readings and not the current answers.  The flush half of the reading
 is separately fixed — the control (b) and the bare raise (d) both print the line
 now — and the live subject for the `try` half is
-`bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md`.
+`bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md`.
 
 **(b) the control — the same program with `return 1`, no raise:**
 

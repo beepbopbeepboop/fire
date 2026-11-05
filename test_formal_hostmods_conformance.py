@@ -767,7 +767,7 @@ def build_cases(spec):
             continue
         if any(isinstance(v, str) and "\x00" in v for v in bound):
             # A formal string is a bare NUL-TERMINATED `char *`
-            # (`bugs/FORMAL_string_value_model.md`), so a NUL inside an
+            # (`bugs/formal/FORMAL_string_value_model.md`), so a NUL inside an
             # argument truncates it and the model would be asked about a
             # DIFFERENT input rather than about this one. CPython's
             # `test_re.py` has two cases that are exactly this --

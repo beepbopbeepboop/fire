@@ -101,7 +101,7 @@ FOUR LIMITS THIS FILE IS WRITTEN AROUND — all measured
    sound, and it is the form the tests below pin hardest. `pack` returns a
    list built in its own frame; the corpus consumes a `pack` result
    immediately (`.extend` into the buffer that is about to be returned), so
-   it is correct in that shape, and `bugs/FORMAL_known_limits.md` is where a
+   it is correct in that shape, and `bugs/formal/FORMAL_known_limits.md` is where a
    reader should look for the general case.
 
 ERRORS

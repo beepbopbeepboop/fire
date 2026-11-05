@@ -1308,7 +1308,7 @@ def test_the_store_value_side_goes_through_the_one_test(tmpdir, _shared,
         # this position only because `_fold_target_queries` normalizes every pair
         # into a list earlier in the same pipeline, for its own reasons. Nothing
         # recorded the dependency, and the two walks that run BEFORE that
-        # normalization did miss their arms (`bugs/FORMAL_elif_arms_and_random_
+        # normalization did miss their arms (`bugs/formal/FORMAL_elif_arms_and_random_
         # mojo_remainder.md`), so the position is asserted here rather than left
         # to a pass that happens to run first.
         "elif_arm":  "  if x == 1:\n    x = 2\n  elif x == 3:\n"

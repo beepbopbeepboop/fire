@@ -361,7 +361,7 @@ def _emit(lines, k, call, kind, nparts):
     """The Mojo lines that evaluate one case and print it. How many records.
 
     `%lld` and not `%d` for the case NUMBER because a `%d` conversion is 32 bits
-    wide on this path (`bugs/FORMAL_string_value_model.md` §2) and the corpus
+    wide on this path (`bugs/formal/FORMAL_string_value_model.md` §2) and the corpus
     runs to 484 cases — which is worth saying because the first version of
     this file printed it with `%d`.
 

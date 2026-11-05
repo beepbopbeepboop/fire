@@ -723,7 +723,7 @@ def affix_tuple_fold(dotted: str, method: str, recv, arg):
 # table is, and whose real content is that the conversion is already a no-op.
 #
 # `as_c_string_slice` is the stdlib's PREVIOUS name for the same conversion
-# (`bugs/FORMAL_env_family_next_terminal.md` records the old spelling's
+# (`bugs/formal/FORMAL_env_family_next_terminal.md` records the old spelling's
 # `unsafe_ptr()` blocker, and `test_formal_external_call.py` still transcribes
 # it), so both are here: a rename is not a reason to refuse a construct whose
 # lowering did not change.
@@ -1093,14 +1093,14 @@ VALUE_METHOD_RECEIVERS = {
 # boundary a nullable pointer is one word, while as a value a MOJO function
 # built it is an `Optional` whose tag lives a second frame away, so `if not
 # ptr:` is not answerable from the word and `Some(null)` is not `None`
-# (`bugs/FORMAL_stdlib_optional_needs_a_representation.md`).
+# (`bugs/formal/FORMAL_stdlib_optional_needs_a_representation.md`).
 #
 # **So the other half of a nullable pointer is its own table, named for the
 # question it answers**, and this is the note that says so at the point where a
 # future reader adds one: `NULLABLE_POINTER_UNWRAP_ALIASES` below is what makes
 # `value()` the UNWRAP rather than a LOAD, and adding a name to THIS table does
 # not make its `value()` an unwrap. One name per question, and the name says
-# which question it answers — which is what `bugs/FORMAL_nullable_pointer_
+# which question it answers — which is what `bugs/formal/FORMAL_nullable_pointer_
 # aliases_is_defined_twice.md` is about, and what
 # `test_formal_external_call.py`'s `no_module_level_name_is_bound_twice` keeps
 # true from then on.
@@ -1888,7 +1888,7 @@ def _declared_annotations(fn) -> dict:
     body.  A name bound by an assignment with no annotation is absent, and that
     absence is the answer every consumer here wants — a width or an integer-ness
     that no declaration states is not established, and this path refuses rather
-    than guesses (`bugs/FORMAL_known_limits.md`'s rule).
+    than guesses (`bugs/formal/FORMAL_known_limits.md`'s rule).
 
     **Agree-or-refuse, not last-write-wins**, for the reason `_name_bindings`
     gives: two declarations that name two different pointees are a
@@ -2250,7 +2250,7 @@ def nullable_pointer_unwrap(fn, expr, decls: dict, functions: dict = None):
 
     **The identity is the correct VALUE, and it is correct for a reason that is
     about the representation rather than about the source**: `Optional[T]`'s
-    payload here is one word (`bugs/FORMAL_stdlib_optional_needs_a_representation.md`
+    payload here is one word (`bugs/formal/FORMAL_stdlib_optional_needs_a_representation.md`
     measures `Optional` at one field), so the pointer and its wrapper are the
     same storage, and unwrapping is the identity on it — exactly the identity
     `Pointer()` already is on this path (wave 4's D4) and the same one
@@ -2750,7 +2750,7 @@ def _rhs_declared_text(fn, expr, decls, functions):
 #     `Scalar[Self.dtype]`), or a struct field.  So a table whose `value` entry
 #     says "it is a load from the address the receiver holds" is FALSE about
 #     ~527 of 528 files it is reported against, which
-#     `bugs/FORMAL_known_limits.md` opens by calling "worse than no message".
+#     `bugs/formal/FORMAL_known_limits.md` opens by calling "worse than no message".
 #   * `unsafe_value` is BOTH: ~33 of its 47 sites are `Optional.unsafe_value`,
 #     which is an UNWRAP (see UNWRAP_METHODS), and ~14 are a pointer load.
 #

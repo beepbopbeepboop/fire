@@ -5,7 +5,7 @@
 
 One pass, repeated:
   1. FEED    keep the queue stocked: each missing worker slot gets the next free bugs/ doc, formal docs included
-             (bugs/ is easy class); not a doc any live task, queued task or external `control.py claim` holds. A doc
+             (bugs/formal/ is easy class); not a doc any live task, queued task or external `control.py claim` holds. A doc
              is re-fed as long as nothing says stop. A doc whose bug report carries a line `STOP: <reason>` is NOT fed:
              the feeder logs the reason every pass it reaches that doc. That line is the only stop: there is no retry
              count. Each re-feed logs what the previous attempt produced (commits, or none).
@@ -152,7 +152,7 @@ CLASS_DIR = {"easy": "", "mid": "mid/", "hard": "hard/"}   # the class IS the di
 
 
 def dir_class(doc):
-    """A doc's class is where its file sits: bugs/<doc>.md is easy, bugs/mid/ mid, bugs/hard/ hard. bugs/ is the
+    """A doc's class is where its file sits: bugs/<doc>.md is easy, bugs/mid/ mid, bugs/hard/ hard. bugs/formal/ is the
     formal lane's and is not in the swarm's feed globs, so it has no class here."""
     head = doc.split("/", 1)[0] if "/" in doc else ""
     return {"mid": "mid", "hard": "hard"}.get(head, "easy")
@@ -211,9 +211,6 @@ def feed():
         if any(base.startswith(x) or x in base for x in skips):
             continue
         if "bug:" + base in held:
-            continue
-        if base in st.get("pending", {}):
-            log("held %s: due a move to %s (queued only after it moves)" % (doc, st["pending"][base]))
             continue
         why = stop_reason(doc)
         if why:
@@ -417,18 +414,6 @@ def continue_partial(st):
         if not moved:
             reclass_on_failure(st, base, doc)
             log("no progress on %s: its round made no commits; the doc moves up a class" % doc)
-        if base in st.get("pending", {}):
-            # The doc is due a class and cannot move while a worker or an unlanded branch holds it
-            # (apply_moves: _busy_bases). Queueing the next worker here, in the OLD class, is what made the
-            # move impossible: the new worker held the doc again before apply_moves could run, so a doc was
-            # "escalated" every 2nd attempt and never moved (34 attempts on one bug, all in its first class).
-            # Release the exited task instead and queue nothing: the doc moves on the next pass, and the
-            # feeder then queues it in the NEW class, resuming from the newest unlanded branch (task_text.plan).
-            subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "mark", name, "abandoned"],
-                           capture_output=True, cwd=C.MAIN)
-            log("hold %s for its reclass to %s: released %s, nothing queued in the old class"
-                % (doc, st["pending"][base], name))
-            continue
         cls = doc_class(doc, st, base)
         cont = task_name(doc)
         if cont in C.load():

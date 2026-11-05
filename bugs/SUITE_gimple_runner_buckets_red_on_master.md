@@ -89,29 +89,3 @@ smells like the recent enum-runtime-class integrations (class registration
 emission); the starargs-lambda `g++ compile failed` cluster like the
 variadic-lambda work; the `expected a refusal, but it compiled` cluster is
 a gate that silently opened.
-
-## Status (2026-11-05, hard worker)
-
-Moved to bugs/hard: the orchestrator made 34 no-progress attempts on this doc
-because a pending reclass was starved by continuations (fixed in 061dc9410,
-`tools/swarm.py` + `test_swarm_feed.py`).
-
-Measured on master 6d11db6af, `test_gimple_runner.py`: 21 failures. The
-self-host work (89df5bea3..c1d8466fc) fixed `multi_item_with_unwinds_in_reverse`
-and introduced none. Failures present on master 821c12dfd before that work and
-still open:
-- `boxed_mut_local_escapes_is_kept` / `_is_flat` / `held_by_a_returned_inner`:
-  "unresolved callee 'make_counter(...)'" (a function returning a nested def
-  that mutates a `nonlocal`; the interpreter runs it fine).
-- `bytes_subclass_shape` / `_method_override` / `_join`: gcc error, `Extra___init__`.
-- `none_store_does_not_mark_str_local_as_int`: `callee in known` prints False
-  (a str joined with None at an if/else is treated as a word).
-- plus the 15 older ones (list_slice_mixed, for_over_a_call_through_a_function_value,
-  check_all_idiom, match_or_pattern, str_encode_errors..., char_scan..., generator
-  context managers x2, char_concat..., runtime_string_tuple_key..., str_window...,
-  struct_mixed_int_float_formats, struct_class_attribute_handle_format_known,
-  nested_class_var_attr_from_str_param).
-Next step: take the three families above, each reproducible with a one-file
-program through `T.compile_mojo_to_gimple_exe`.
-
-Co-owned by: no one (claim released).

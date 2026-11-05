@@ -334,7 +334,7 @@ def _word_count(n: int) -> int:
     count: a zero seed is ONE key word, and that word is 0. The key is never
     MATERIALISED as a list — `_seed_by_array` reads word `j` out of `n` with a
     shift — because a run-time-length list is not a value this path has
-    (`bugs/FORMAL_listdir_no_run_time_sequence.md`) and the words are the same
+    (`bugs/formal/FORMAL_listdir_no_run_time_sequence.md`) and the words are the same
     two lines either way.
     """
     var w = 1

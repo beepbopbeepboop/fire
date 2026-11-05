@@ -562,7 +562,7 @@ MEASURED_PEAK_GB = {
     # (93 generated proofs, one after another) resembles. The `memwhy` on its
     # registration says the same thing and points at the doc that owns the
     # cause: `mem_read_bytes`'s `ite` chain over a 113-equation successor nest,
-    # which `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`
+    # which `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`
     # is about and which a class change would not fix.
     'formal-x86-endtoend': (6.1, 'measured'),
     # The eleven `expect=`-marked tests that were registered and in NO BUCKET,
@@ -1773,7 +1773,7 @@ test('comptime-parity', [PY, 'test_comptime_parity.py'],
 test('returned-frame-layout', [PY, 'test_returned_frame_layout.py'],
      deps=['preflight'], mem='tiny',
      desc="a frame that outlives its creator has a place to live, or is refused by name")
-# `formal/model.py`, `bugs/FORMAL_known_limits.md` and
+# `formal/model.py`, `bugs/formal/FORMAL_known_limits.md` and
 # `build_stdlib_dylib.py` are in `extra` because the check READS them, not
 # because the scanner does: `test_runtime_header_scan.py`'s census check
 # compares the figures those three quote in prose with `runtime_abi()`, and an
@@ -1787,7 +1787,7 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
             RUNTIME_HDR, 'runtime/fire_sqlite3.h', 'runtime/fire_zlib.h',
             'runtime/fire_ssl.h', 'runtime/fire_ncurses.h',
             'runtime/fire_python.h',
-            'formal/model', 'bugs/FORMAL_known_limits.md',
+            'formal/model', 'bugs/formal/FORMAL_known_limits.md',
             'build_stdlib_dylib.py'],
      desc='runtime header export scan sees every declaration')
 # `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
@@ -2736,7 +2736,7 @@ test('prooflib', [PY, '-c',
 #      around the whole composed `Arm64State`, which `bv_decide`'s internal
 #      normalisation cannot be configured out of, and three budgets were
 #      measured failing to fire (`FORMAL.md` §12,
-#      `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
+#      `bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
 #      `formal/arm64_proof_gen.py` now
 #      emits the `if` resolved for every step it knows moves no pc, and keeps
 #      it only for the closing `ret`, which `BlockCert` genuinely cannot
@@ -2984,7 +2984,7 @@ test('formal-x86', [PY, 'test_formal.py', '--backend', 'x86_64'], j=True,
 # `formal/x86_64_endtoend_test.py`'s successor table against a corrected model —
 # and the only report of it was a bug doc. Fixed 2026-10-05
 # (`formal43-x86-endtoend-red`): 26 -> 1, and what is left is `wide_recv`'s
-# `lean::memory_exception`, which `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`
+# `lean::memory_exception`, which `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`
 # owns and which is a resource ceiling rather than a wrong proof. That doc's own
 # 2026-10-05 Status entry carries this branch's measurement.
 #
@@ -3009,14 +3009,14 @@ test('formal-x86-endtoend', [PY, 'formal/x86_64_endtoend_test.py'],
             'debt line in ' + MEM_DEBT_DOC + ' because the generated proofs are '
             '~700 KB of `native_decide` goals and `mem_read_bytes`\'s `ite` '
             'chain, which is the subject of '
-            '`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)` '
+            '`bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)` '
             'and not something a class change would fix.',
      expect='1 of 65: `wide_recv` only, and it is a resource ceiling rather '
             'than a wrong proof — `lean` aborts with '
             '`lean::memory_exception: excessive memory consumption detected at '
             '\'interpreter\'` (`rc=-6`) while evaluating this emitter\'s closing '
             'read over a 113-equation chain. See '
-            '`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`. '
+            '`bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`. '
             'The other 64 are 58 proved with no sorry and 6 proved with a '
             'counted hole; the 28 that build no path tree are reported by the '
             'harness itself (19 loop, 9 uncovered form) and are not cases.',

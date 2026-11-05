@@ -903,7 +903,7 @@ def is_none_expr(node) -> bool:
 #     slot read through a word that is not a receiver.  Measured: every frame
 #     read this path has lowers from a RECEIVER (`self.f`) or from a name whose
 #     candidate struct is known, and a name declared `Optional[…]` has no
-#     candidate struct here.  See `bugs/FORMAL_a_subscript_on_a_frame_slot_is_a_
+#     candidate struct here.  See `bugs/formal/FORMAL_a_subscript_on_a_frame_slot_is_a_
 #     pointer_dereference_and_the_two_backends_disagree.md` for the shape.
 #   3. `x = None` is then a store of a FRAME into a slot, which is
 #     `_refuse_holder_use`'s case ("it outlives the frame it names"), and that
@@ -938,7 +938,7 @@ def is_none_expr(node) -> bool:
 # `x is None` compare against a niche the pair does not have: for a `Bool`
 # payload it would compare against 2, for a `String` against 0, and in both cases
 # the answer is about a word that is only half the value.  `Some(0)` and `None`
-# being the same word is the ambiguity `bugs/FORMAL_optional_needs_a_niche.md`
+# being the same word is the ambiguity `bugs/formal/FORMAL_optional_needs_a_niche.md`
 # opened this representation to remove, and admitting the two-word sibling under
 # the one-word name puts it back for a reader who annotated `OptionalReg`.
 #
@@ -1110,7 +1110,7 @@ SCALAR_TYPE_WIDTHS = {
 # `Optional[Float32]` and for `Optional[DType]` claimed this build had not read
 # a layout, which is a claim about a C struct and neither name is one.  The
 # verdict was right in both cases and the EXPLANATION was wrong, which is the
-# expensive kind: `doc/ABI.md`'s niche table and `bugs/FORMAL_optional_needs_a_niche.md`
+# expensive kind: `doc/ABI.md`'s niche table and `bugs/formal/FORMAL_optional_needs_a_niche.md`
 # both list these two as refused, so nothing went red.
 #
 # So there are THREE reasons a payload leaves no word for `None`, and each is

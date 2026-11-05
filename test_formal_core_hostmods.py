@@ -968,7 +968,7 @@ def group_sig_absent(tmpdir, verbose):
 #                        one arithmetic rule a truncating implementation gets
 #                        wrong and it is in the table for that;
 #   an operand PAST 32 BITS — `%lld` and not `%d`, for the reason every other
-#                        test in this tree gives (`bugs/FORMAL_string_value_model.md`
+#                        test in this tree gives (`bugs/formal/FORMAL_string_value_model.md`
 #                        §2): `%d` is 32 bits on this path, so the first version of
 #                        this corpus printed `operator.lshift(1, 40)` as 0 where
 #                        CPython says 1099511627776, and the test was comparing a

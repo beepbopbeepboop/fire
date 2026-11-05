@@ -1597,7 +1597,7 @@ def runtime_export_entries(gcc: str, objs: list) -> tuple:
     # Iterating a list this function builds by `append` lowers correctly --
     # `mojo_list_get_str`, with `line` typed `char *` -- so the loop lives
     # where the list is built. The real fix is in the codegen, not here; see
-    # bugs/FORMAL_known_limits.md.
+    # bugs/formal/FORMAL_known_limits.md.
     #
     # A caller that wants the lines as a VALUE still gets them: the tuple is
     # returned unchanged, and test_runtime_dylib.py reads report[0].

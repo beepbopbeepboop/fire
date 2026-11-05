@@ -2709,12 +2709,10 @@ def _gen_stmt_AugAssignStmt(gen, node):
                 res = gen.lower_expr(gimple_ctypes.CallExpr(
                     gimple_ctypes.MemberExpr(node.target, _rt_dunder, node.line, node.col),
                     [node.value], [], node.line, node.col))
-                # (A "rebind the target" call to `gen._assign_to_name` stood here,
-                # guarded by `hasattr`. No such method exists, so in Python the guard
-                # was always False; the compiled compiler lowers the call itself and
-                # the stage2 link failed on `_GimpleGen__assign_to_name`. The result
-                # of the dunder call is the object the operator produced, so there is
-                # nothing to rebind.)
+                # Rebind target if it's a simple assignment
+                if isinstance(node.target, gimple_ctypes.IdentExpr):
+                    tname = node.target.name
+                    gen._assign_to_name(tname, res[0], res[1]) if hasattr(gen, '_assign_to_name') else None
                 return
             except Exception:
                 pass
@@ -5046,18 +5044,6 @@ def _gen_stmt_RaiseStmt(gen, node):
         exc_name = val.func.name
         if len(val.args) == 1:
             msg_arg = val.args[0]
-    elif (isinstance(val, gimple_ctypes.CallExpr)
-            and isinstance(val.func, gimple_ctypes.MemberExpr)
-            and isinstance(val.func.obj, gimple_ctypes.IdentExpr)
-            and gen._is_exc_class_name(val.func.member)):
-        # `raise mod.SomeError(msg)`: the class is named through its module
-        # (`gimple_exprtypes._UnsupportedGeneratorShape(...)`). It is the same
-        # exception as the bare spelling and is caught by the same name, so it
-        # takes the same type tag and carries the same message; before this the
-        # raise set neither, and the handler's `str(e)` was empty.
-        exc_name = val.func.member
-        if len(val.args) == 1:
-            msg_arg = val.args[0]
     elif isinstance(val, gimple_ctypes.IdentExpr) and gen._is_exc_class_name(val.name):
         # `raise SomeExceptionClass` with no call — legal Python,
         # equivalent to `raise SomeExceptionClass()`.
@@ -5073,43 +5059,18 @@ def _gen_stmt_RaiseStmt(gen, node):
         _sv_t, _sv_v = gen.lower_expr(val.args[0])
         if _sv_t != 'double':
             gen._void_call('mojo_exc_value_set', [('int64_t', gen._to_int64(_sv_t, _sv_v))])
-    # The message shapes whose lowering was already exercised: a literal (incl.
-    # an f-string), a name, a concatenation. A CALL message (`String.format(...)`,
-    # `str(e)`) is not lowered here: evaluating it exposed latent type
-    # mismatches in code that had never been lowered (std/python/python_object's
-    # `_get_type_name` call: a gcc int-from-pointer error), so a call message
-    # keeps carrying no text, as before.
-    if isinstance(msg_arg, (gimple_ctypes.StringLiteral, gimple_ctypes.IdentExpr,
-                            gimple_ctypes.BinaryOp)):
+    if isinstance(msg_arg, (gimple_ctypes.StringLiteral, gimple_ctypes.IdentExpr)):
         mt, mv = gen.lower_expr(msg_arg)
         if mt == 'char *':
-            # The message must OUTLIVE the raise. An f-string / concatenation is
-            # a fresh heap temp (and a message held in a local is owned by its
-            # frame), and the unwind that follows `mojo_raise` frees both -- so
-            # `str(e)` / `e.args[0]` read freed memory (garbage text, or empty).
-            # The exception object and the runtime's message slot get their own
-            # registered copy. Any expression is handled, not just a literal or
-            # a name: `raise X(f"...")` and `raise X(a + b)` carried no message
-            # at all before.
-            mv = gen._call_expr('char *', 'mojo_str_dup_registered', [('char *', mv)])
             # Build exception object with args list (root cause: args must travel with object)
             args_list = gen._new_temp('MojoList *')
             gen._emit(f"  {args_list} = mojo_list_new ();")
             gen._emit(f"  mojo_list_append_str ({args_list}, {mv});")
-            # A STRING in both arms: `_exc_type_id` is an int and "0" is a str,
-            # which the compiled compiler joins into one slot, so `str(type_tag)`
-            # below read a number as text and crashed in `new_val`.
-            type_tag: str = "0"
-            if exc_name:
-                type_tag = f"{gen._exc_type_id(exc_name)}"
-            # The object is the message text with the args list in a header
-            # before it (`mojo_exc_text_new`), so the handler's bound `e` is the
-            # string every consumer expects and `e.args` is still reachable.
-            exc_text = gen._call_expr('char *', 'mojo_exc_text_new',
-                                      [('int64_t', gen._new_val('int64_t', type_tag)), ('char *', mv),
-                                       ('MojoList *', args_list)])
-            gen._emit(f"  mojo_exc_obj_set ({exc_text});")
-            gen._emit(f"  mojo_exc_msg_set ({exc_text});")
+            exc_obj = gen._new_temp('MojoExc *')
+            type_tag = gen._exc_type_id(exc_name) if exc_name else "0"
+            gen._emit(f"  {exc_obj} = mojo_exc_new ({type_tag}, {mv}, {args_list});")
+            gen._emit(f"  mojo_exc_obj_set ({exc_obj});")
+            gen._emit(f"  mojo_exc_msg_set ({mv});")
 
     gen._emit("  mojo_raise ();")
 
@@ -5160,13 +5121,7 @@ def _emit_except_handler(gen, handler, node, bb_after: str):
     if bind_name:
         # Exception handlers are typed as pointers to exception objects.
         exc_type_name = gen._handler_exc_name(handler)
-        # A user exception class WITHOUT fields of its own (`class Shape(Exception):
-        # pass`) is raised as a plain message object like a builtin one
-        # (`_gen_stmt_RaiseStmt` builds a MojoExc, never a `Shape`), so it is
-        # bound as the message too: casting that object to `Shape *` made
-        # `str(e)` read freed or foreign memory.
-        if (exc_type_name and exc_type_name in gen.struct_field_types
-                and len(gen.struct_field_types[exc_type_name]) > 0):
+        if exc_type_name and exc_type_name in gen.struct_field_types:
             exc_ctype = f"{exc_type_name} *"
         else:
             # Builtin exceptions (ValueError, KeyError, ...) and bare

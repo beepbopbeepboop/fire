@@ -4519,7 +4519,7 @@ UNREGISTERED = {
         'call, a struct construction) and the three that would otherwise '
         "invent 456 — generators, coroutines, and a name whose definitions "
         'disagree about whether it returns, which is the defect the census it '
-        'replaces had (`bugs/FORMAL_a_function_with_no_return_yields_a_word_'
+        'replaces had (`bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_'
         'where_cpython_yields_None.md` §0), as a case.',
 
     # `test_formal_proof_breadth.py` was listed here when it landed on
@@ -4540,7 +4540,7 @@ UNREGISTERED = {
     'test_formal_comptime_string.py': 'A comptime string MATERIALIZED: a '
         'module-level `comptime` bound to a string reaches the image as the '
         'bytes it is, on both architectures, with the escapes decoded rather '
-        'than printed back (bugs/FORMAL_string_literal_escape_is_not_'
+        'than printed back (bugs/formal/FORMAL_string_literal_escape_is_not_'
         'decoded.md). Build-and-RUN, because a substitution that is wrong in '
         'the last byte is indistinguishable from a right one in a refusal.',
     'test_formal_mlir_precedence.py': 'WHICH of the two MLIR refusals answers a '
@@ -5568,7 +5568,7 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'({sorted(outside)[:8]}); a new one is a ratchet failure')
     check('dangling refs: it does not invent one — a cited doc that EXISTS is '
           'not reported',
-          'bugs/FORMAL_known_limits.md' in have
+          'bugs/formal/FORMAL_known_limits.md' in have
           and 'FORMAL_known_limits.md' not in by_doc
           and 'CODEGEN_ab_native_fails.md' not in by_doc,
           f'the walk found {len(have)} docs under bugs/; a walk that reports '
@@ -5993,12 +5993,12 @@ def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
     "current" one from and no way to tell which was current except the base
     commit inside each.
 
-    They are now `bugs/FORMAL_sweep_work_map.md`: §1 is the latest census,
+    They are now `bugs/formal/FORMAL_sweep_work_map.md`: §1 is the latest census,
     §2 is what the earlier rounds established and still holds, and §3 is an
     INDEX of the twenty rounds with the base commit, the scope, and — because
     seventy-odd files in this tree cite a round by its section number — what
     each cited section carried. The citations were rewritten to "the `b9` round
-    of `bugs/FORMAL_sweep_work_map.md` §4.1", which resolves into §3.1.
+    of `bugs/formal/FORMAL_sweep_work_map.md` §4.1", which resolves into §3.1.
 
     So two properties, and both are checked here because the failure mode that
     produced twenty documents is not a crash:
@@ -6014,7 +6014,7 @@ def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
        that check cannot see because the path it names DOES resolve.
     """
     import glob
-    maps = sorted(glob.glob(os.path.join(HERE, 'bugs',
+    maps = sorted(glob.glob(os.path.join(HERE, 'bugs', 'formal',
                                         'FORMAL_sweep_work_map*.md')))
     canonical = 'FORMAL_sweep_work_map.md'
     check('sweep maps: there is exactly ONE per-round map, and it is the '
@@ -6026,7 +6026,7 @@ def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
 
     if not maps:
         return
-    index = open(os.path.join(HERE, 'bugs', canonical),
+    index = open(os.path.join(HERE, 'bugs', 'formal', canonical),
                  encoding='utf-8').read()
     # The tags §3 declares, read out of the index's own first column rather than
     # hand-listed here: a hand-maintained copy of an index is a second copy.
@@ -6046,7 +6046,7 @@ def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
             sorted(glob.glob(os.path.join(HERE, '**', '*.md'),
                              recursive=True)):
         if not os.path.isfile(rel) or rel.endswith(
-                os.path.join('bugs', canonical)):
+                os.path.join('bugs', 'formal', canonical)):
             continue
         if 'build/' in rel or '__pycache__' in rel:
             continue
@@ -6080,7 +6080,7 @@ def test_formal_sweep_work_map_index_tags_only_from_section3():
     conditions.
     """
     import re
-    index = open(os.path.join(HERE, 'bugs', 'FORMAL_sweep_work_map.md'),
+    index = open(os.path.join(HERE, 'bugs', 'formal', 'FORMAL_sweep_work_map.md'),
                  encoding='utf-8').read()
     m3 = re.search(r'^## 3\..*?(?=^## \d+\.|\Z)', index, re.M | re.S)
     check('sweep map index: §3, the round index, exists', m3 is not None,
@@ -6151,7 +6151,7 @@ def test_every_test_in_this_file_is_called_from_main():
     mode in which the sweep-map pins went dead.
 
     `test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds`
-    is the pin `bugs/FORMAL_sweep_work_map.md`'s Status line names as
+    is the pin `bugs/formal/FORMAL_sweep_work_map.md`'s Status line names as
     the thing that keeps the formal sweep series one document, and it was
     DEFINED and never CALLED: it sat outside `main()`'s list, nothing else
     calls it, and it ran on no gate while its document read as guarded.
