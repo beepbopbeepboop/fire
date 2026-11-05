@@ -4269,6 +4269,7 @@ class Parser:
         # and NOT raised — it is the deliberate case, and its placeholder is
         # still what part 3 of that doc has to replace.
         self._comptime_rhs_failures: list = []
+        self._struct_param_names = []
         # `struct Box[T: Movable]:` — a generic TYPE parameter bound by a
         # trait, syntactically identical to `struct SIMD[width: Int]:`'s
         # genuine comptime VALUE parameter (`name: Ident` either way). This

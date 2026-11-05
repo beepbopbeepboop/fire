@@ -5975,6 +5975,8 @@ def gen_module_impl(self, stmts: list):
         # is — it is a real Python bool on the dataclass.
         'captures': 'MojoList *',
         'has_capture_list': '_Bool',
+        'line': 'int64_t',
+        'col': 'int64_t',
     }
     self.struct_field_types['ExprStmt'] = {
         'value': 'int64_t',
@@ -6202,8 +6204,8 @@ def gen_module_impl(self, stmts: list):
         'line': 'int64_t',
         'col': 'int64_t',
     }
-    self.struct_field_types['EllipsisLiteral'] = {}
-    self.struct_field_types['NoneLiteral'] = {}
+    self.struct_field_types['EllipsisLiteral'] = {'line': 'int64_t', 'col': 'int64_t'}
+    self.struct_field_types['NoneLiteral'] = {'line': 'int64_t', 'col': 'int64_t'}
     self.struct_field_types['StringLiteral'] = {
         'value': 'char *',
         # `line`/`col` must stay in the seed AHEAD of `is_bytes`: the
