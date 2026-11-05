@@ -212,3 +212,7 @@ Repro re-verified 2026-11-05 (this session): `python3 -m pytest test_bootstrap_r
 ## Repro check (2026-11-05, next step: release walk-ast memo after emission)
 
 `python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. `_walk_ast` memo released at end of `_run_pipeline`.
+
+## Repro check (2026-11-05, next step: clear field-names/dataclass walk caches after emission)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. `_WALK_FIELD_NAMES_CACHE`/`_WALK_DATACLASS_CACHE` cleared in `_walk_ast_reset`.

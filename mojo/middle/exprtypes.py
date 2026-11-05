@@ -118,6 +118,12 @@ def _walk_ast_reset() -> None:
     walked."""
     _WALK_AST_MEMO.clear()
     _WALK_AST_PARENTS.clear()
+    # The field-names / dataclass caches are also keyed on node types and
+    # retain (type -> tuple/bool) entries for every node type ever walked;
+    # drop them at the same compile boundary so they do not accumulate
+    # across compiles in a long-running process.
+    _WALK_FIELD_NAMES_CACHE.clear()
+    _WALK_DATACLASS_CACHE.clear()
 
 def _walk_ast_into(node, out, _depth=0, _from=0):
     """Append to `out` every AST node `_walk_ast(node)` would return, in
