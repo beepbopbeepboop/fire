@@ -1312,7 +1312,7 @@ dylib_exports: list = None, globals_base: int = None,
             # in `info` for both proof generators to read, because the word an
             # unwinder writes on one side has to mean the same integer on the
             # other (`model.exception_kind_table`'s docstring). Nothing reads it
-            # yet — see `bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md`
+            # yet — see `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md`
             # §5, where this is step 2 of 6. `info` rather than a re-derivation
             # here is the point: x86-64's `info` carries the same table from the
             # same publisher, so a proof that reads one cannot drift from the
@@ -1838,7 +1838,7 @@ dylib_exports: list = None, globals_base: int = None,
         # right about the ABI and wrong about the consequence: `pack(fmt, v0..v7)`
         # is nine arguments, and it is `formal/hostmods/struct.mojo`'s OWN
         # documented "a format I cannot serve returns an empty list" contract
-        # that the caller could never reach.  `bugs/formal/FORMAL_struct_pack_over_eight_
+        # that the caller could never reach.  `bugs/FORMAL_struct_pack_over_eight_
         # arguments.md` has the measurement and both halves of the mechanism.
         for i, (pname, ptype) in enumerate(incoming):
             if i >= _ABI_ARG_REGS:
@@ -6290,7 +6290,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         shared text, so x86-64 cannot describe the same construct differently,
         and both backends ask it at BOTH comparison sites (`_emit_binop` for a
         value and `_emit_branch_unless_cmp` for a condition) — the choke-point
-        argument `bugs/formal/FORMAL_string_value_model.md` makes for `if s < t:`
+        argument `bugs/FORMAL_string_value_model.md` makes for `if s < t:`
         bypassing `_emit_binop`, which is exactly how a string comparison came
         to be a diagnostic in one context and a branch in the other.
         """
@@ -12237,7 +12237,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `struct Outer: n: Inner` with `o.n.d.x = 5` built, ran and died of
             # SIGSEGV (exit 139), while the depth-1 and depth-2 reads of the same
             # three structs answered correctly.
-            # `bugs/formal/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
+            # `bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
             # frame.md` §2 has the disassembly.
             #
             # AFTER the defaults above, not before: the slot this stores into is
@@ -14110,7 +14110,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             #
             # All three are decidable here whenever both operands fold, which
             # is the case the corpus and a reader hit first. The variable-base
-            # case is `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_
+            # case is `bugs/FORMAL_integer_overflow_at_run_time_is_still_
             # untrapped.md`.
             reason = M.power_overflow_refusal(
                 M.fold_literal_expr(e.left), M.fold_literal_expr(exp),
@@ -15546,14 +15546,14 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         `base_reg` points at the blob's COUNT word, so the elements start at
         `base_reg + 8` and each element is one 8-byte word -- a set lowers as a
-        list of words on this path (`bugs/formal/FORMAL_set_value_model.md`).  This is
+        list of words on this path (`bugs/FORMAL_set_value_model.md`).  This is
         the linear scan `_emit_set_op` runs per element of the other operand,
         lifted out so `&`, `-`, `^` and `|` share one implementation rather
         than four copies of the same loop.
 
         The comparison is element WORD to element WORD, which for a set of
         strings is a comparison of `char *` ADDRESSES; that is the same limit
-        the union's dedup always had, and `bugs/formal/FORMAL_set_value_model.md`
+        the union's dedup always had, and `bugs/FORMAL_set_value_model.md`
         owns it.
 
         Clobbers X10/X11/X12 and `out_reg`; X0-X9 and the caller's registers
@@ -15630,7 +15630,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         The scan is over `other[0..other_n)`, and the element is read as a whole
         8-byte slot, which is `_emit_set_union`'s dedup compare and the same
         thing CPython means by membership here — a set lowers as a list on this
-        path (`bugs/formal/FORMAL_set_value_model.md`), so the elements are words and
+        path (`bugs/FORMAL_set_value_model.md`), so the elements are words and
         the compare is a word compare."""
         self.asm.emit(encode_movz_wd_imm(5, 0))          # i = 0
         self._while_counter += 1

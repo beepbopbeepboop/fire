@@ -58,7 +58,7 @@ WHAT IS NOT HERE, AND WHY
     `is_file` and the size are `os.path`'s; the rest need a stream, a
     directory listing, or an inode, and a directory listing is a run-time-length
     sequence this path cannot build
-    (`bugs/formal/FORMAL_listdir_no_run_time_sequence.md`).
+    (`bugs/FORMAL_listdir_no_run_time_sequence.md`).
   * `is_absolute` (`os.path.isabs`), `joinpath` (`os.path.join`), `as_uri`
     (a percent-encoding, and a str is one so it is not written here rather
     than written twice), `drive` / `root` / `anchor` (a Windows question, and

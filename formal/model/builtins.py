@@ -59,7 +59,7 @@ NOT_LOWERED_BUILTINS = {
            "`all`",
     "bin": "a base-2 rendering into a buffer: a digit table and a loop, and "
            "the ANSWER is a run-time string, which is "
-           "`bugs/formal/FORMAL_string_value_model.md`",
+           "`bugs/FORMAL_string_value_model.md`",
     "bool": "a compare against zero and a normalize — but the name is also in "
             "`FRAME_VALUE_ONLY_CALLS`, so the frame-address half of the answer "
             "is settled and the value half is not",
@@ -413,7 +413,7 @@ def not_lowered_builtin_refusal(functions, module_names=()) -> str | None:
 #     a variadic of values and belongs to `FORMAL_string_value_model.md`. The
 #     arguments are still EVALUATED (they are ordinary Python argument
 #     expressions, and evaluating them is what keeps a side effect from being
-#     dropped), but nothing is formatted from them. `bugs/formal/FORMAL_ast_module_
+#     dropped), but nothing is formatted from them. `bugs/FORMAL_ast_module_
 #     subset.md` and `FORMAL_known_limits.md` §1.1 are that neighbourhood.
 #
 # The two spellings are ONE construct with one predicate, because two private
@@ -1066,7 +1066,7 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
     This is `frame_receiver_escape_refusal`'s fifth case, split — it was one
     sentence over five different facts, and four of the five were false of the
     program in front of the reader.  Measured on the 12 files the sweep files
-    under it (the `2026-09-30` round of `bugs/formal/FORMAL_sweep_work_map.md` row 8), and on the 41
+    under it (the `2026-09-30` round of `bugs/FORMAL_sweep_work_map.md` row 8), and on the 41
     over all roots — the population and the per-arm classification are both in
     `test_refusal_taxonomy.py::_no_def_callee_arm_checks`, one callee per arm:
 
@@ -2455,7 +2455,7 @@ def gimple_runtime_void_result_refusal(name: str, signature: str = "") -> str:
     the difference in direction is what makes this a refusal rather than a
     deletion: taking `void` out of `_WORD_SCALARS` outright would break the
     `void *` spellings that section 0.3 of
-    `bugs/formal/FORMAL_runtime_library_on_the_link_line.md` landed, so the membership
+    `bugs/FORMAL_runtime_library_on_the_link_line.md` landed, so the membership
     stays and this rule reads `returns_void` instead.
 
     **It is asked about the POSITION, not the callee**, so the negative is
@@ -2870,7 +2870,7 @@ def variadic_named_args(symbol: str):
 # `d_name` at 21 for the second (the `__DARWIN_STRUCT_DIRENTRY` spelling in the
 # same header). `os.listdir` read `d_name` at 21 and got `.` for the 12th byte
 # of the other layout, so it returned `cc.txt` where CPython returns `ccc.txt`
-# and a count one too high — `bugs/formal/FORMAL_x86_64_byte_read_of_a_libc_returned_
+# and a count one too high — `bugs/FORMAL_x86_64_byte_read_of_a_libc_returned_
 # pointer_reads_the_wrong_bytes.md`, whose first three candidate causes (the
 # byte read, the element read, the copy) were all measured and all wrong.
 #
@@ -3736,7 +3736,7 @@ def bytearray_print_refusal(backend: str, node_name: str) -> str:
     that wrapper around a run-time blob is a text composition: the element
     bytes have to be read, escaped and put between `b'` and `'` with a count
     this build does not know. That is exactly the buffer
-    `bugs/formal/FORMAL_string_composition_has_no_buffer.md` is about, and
+    `bugs/FORMAL_string_composition_has_no_buffer.md` is about, and
     the loop this path has emits fixed text around a conversion of a word —
     it cannot compose one. The `bytes` LITERAL spelling of the same answer is
     not refused (its bytes are a compile-time constant, so the whole wrapper
@@ -5120,7 +5120,7 @@ def _kind_of_nested_elements(elems, resolve=None) -> str | None:
     with its fix, which is this arm.
 
     Measured, both architectures, before this existed — and it is the
-    comprehension row of `bugs/formal/FORMAL_string_value_model.md`, found with the
+    comprehension row of `bugs/FORMAL_string_value_model.md`, found with the
     `for` row beside it: a `for` target over `["p", "", "q"]` classified as
     `list:str` and the empty string was TRUTHY, because the count-field load
     reads the eight bytes of `__TEXT` that follow the terminating NUL. The kind

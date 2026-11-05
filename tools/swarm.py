@@ -5,7 +5,7 @@
 
 One pass, repeated:
   1. FEED    keep the queue stocked: each missing worker slot gets the next free bugs/ doc, formal docs included
-             (bugs/formal/ is easy class); not a doc any live task, queued task or external `control.py claim` holds. A doc
+             (bugs/ is easy class); not a doc any live task, queued task or external `control.py claim` holds. A doc
              is re-fed as long as nothing says stop. A doc whose bug report carries a line `STOP: <reason>` is NOT fed:
              the feeder logs the reason every pass it reaches that doc. That line is the only stop: there is no retry
              count. Each re-feed logs what the previous attempt produced (commits, or none).
@@ -152,7 +152,7 @@ CLASS_DIR = {"easy": "", "mid": "mid/", "hard": "hard/"}   # the class IS the di
 
 
 def dir_class(doc):
-    """A doc's class is where its file sits: bugs/<doc>.md is easy, bugs/mid/ mid, bugs/hard/ hard. bugs/formal/ is the
+    """A doc's class is where its file sits: bugs/<doc>.md is easy, bugs/mid/ mid, bugs/hard/ hard. bugs/ is the
     formal lane's and is not in the swarm's feed globs, so it has no class here."""
     head = doc.split("/", 1)[0] if "/" in doc else ""
     return {"mid": "mid", "hard": "hard"}.get(head, "easy")

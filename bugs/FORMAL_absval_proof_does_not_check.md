@@ -6,14 +6,14 @@
 `test_formal.py`'s `EXPECTED_FAILURES`, and it used to pass: the 2026-10-04
 sweeps under `bugs/sweeps/proof_breadth_2026-10-04*.jsonl` record
 `examples/absval.mojo` / `arm64` as `cls: "pass"`, `n_sorries: 0`, `5660`
-proof lines, and `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`
+proof lines, and `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`
 line 117 states "proof emitted and **accepted by Lean** (3.1 GB peak, exit 0)".
 On this tree the proof is emitted and Lean REJECTS it. The `formal` gate row
 that would have caught it is disabled (the task's environment), so nothing in
 the gate sees it.
 
 Found while running the corpus for the `maxRecDepth` fix in
-`bugs/formal/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`
+`bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md`
 (`python3 test_formal.py --backend arm64 -j 2 ...`: `absval` reported `FAIL`).
 
 ## What I ran
@@ -52,8 +52,8 @@ in the target expression
 The peel lemma's pattern names a slot at `s_0.sp - 32 - 16`; the goal's store
 chain is at `s_0.sp - 131072 - 16`. The addresses differ by the emitter's
 128 KiB frame stride (`_SCRATCH`), so this is the same class as
-`bugs/formal/FORMAL_arm64_x30_is_reloaded_from_the_frame.md` and
-`bugs/formal/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`:
+`bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md` and
+`bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`:
 the frame/window canonicalisation emits a peel whose `K` does not match the
 address the goal actually carries.
 

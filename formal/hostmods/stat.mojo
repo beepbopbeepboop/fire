@@ -39,7 +39,7 @@ CPython's own over a corpus that includes the modes no real file has.
     == S_IFxxx`, which is one `and` and one compare.
 
   * A PREDICATE RETURNS 1 OR 0, never a bool. `bool` is a type this path
-    erases to a word (`bugs/formal/FORMAL_bool_...` — see `test_formal_os.py`'s
+    erases to a word (`bugs/FORMAL_bool_...` — see `test_formal_os.py`'s
     `isfile`, which has the same shape), and every host module here returns
     the integer.
 
@@ -555,7 +555,7 @@ def _filemode_type(mode) -> str:
     ONE character in a buffer of two, so the caller can append it with
     `str_put(out, u, s, 1)`: a string on this path is a NUL-terminated
     `char *`, so even one character needs somewhere to live
-    (`bugs/formal/FORMAL_string_value_model.md`).
+    (`bugs/FORMAL_string_value_model.md`).
     """
     var p: Pointer[UInt8] = str_alloc(1)
     var t = mode & 61440

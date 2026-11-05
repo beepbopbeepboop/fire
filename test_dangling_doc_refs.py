@@ -100,33 +100,6 @@ class StaleVerdictRows(unittest.TestCase):
                          'rewrite by symptom (commit or doc name)')
 
 
-class FormalIntegerOverflowCitationsResolve(unittest.TestCase):
-    """Regression: `doc-refs --ratchet` red on master for two formal files.
-
-    The 2026-10-31 move of `bugs/FORMAL_*.md` to `bugs/formal/` rewrote most
-    path citations but missed these two files, which still named the old
-    `bugs/` path (the ratchet ceiling was then raised to 3 to absorb them,
-    which banked the stale path instead of fixing it). A wrapped citation
-    carries its `bugs/` prefix on the first line, so the check is on the
-    prefix, not on the whole path.
-    """
-    DOC = 'FORMAL_integer_overflow_at_run_time_is_still_untrapped.md (deleted)'
-    FILES = ('formal/arm64_proof_gen.py', 'test_formal_call_proof_gen.py')
-
-    def test_no_citation_names_the_old_bugs_path(self):
-        # Bug fixed; doc removed. Ensure no citations use the old bugs/ prefix
-        # without formal/ subdirectory.
-        stale = []
-        for rel in self.FILES:
-            with open(os.path.join(HERE, rel), encoding='utf-8') as f:
-                for n, line in enumerate(f, 1):
-                    if f'bugs/{self.DOC[:len("FORMAL_integer_overflow")]}' in line and 'bugs/formal/' not in line:
-                        stale.append(f'{rel}:{n}')
-        self.assertEqual(stale, [],
-                         'cite the moved path bugs/formal/ (or the bug by '
-                         'symptom) instead of the deleted bugs/ path')
-
-
 # The hard-bug index is hand-maintained prose, so nothing but these two checks
 # ever compares it with the directory it indexes. Both were false at once on
 # 2026-10-29: nine of the names it cited were deleted docs, and three live docs

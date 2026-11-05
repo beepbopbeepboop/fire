@@ -979,7 +979,7 @@ KNOWN_DEFECT_ROWS = []
 # here rather than left to be discovered: it is a pre-existing gap in arm64's
 # generator for a three-block conditional chain (both spellings — the `elif`
 # chain and the nested `else: if` — were measured), it is in the family
-# `bugs/formal/FORMAL_arm64_known_proof_gaps.md` censuses, and the property this
+# `bugs/FORMAL_arm64_known_proof_gaps.md` censuses, and the property this
 # section asserts is PARITY with the `if`, not that every `match` elaborates.
 PROOF_PAIRS = [
     ("two_cases",

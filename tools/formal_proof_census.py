@@ -553,7 +553,7 @@ def _classify_failure(runs, detail):
       here**, because `formal/lean.py` is what SETS that `-M` and a second copy
       of the sentence is a second answer to "is this a verdict or an absence" —
       which is the disagreement this classification exists to end
-      (`bugs/formal/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_
+      (`bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_
       declared.md`).
     * anything else — Lean elaborated the file and said no. That IS a verdict,
       and Lean's own message is the finding.

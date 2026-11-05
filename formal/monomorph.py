@@ -16,7 +16,7 @@ of any kind and was refused by the dylib export gate with
 `formal/build.py::no_public_api_reason`'s "a parametric type has no single
 boundary layout either".  That refusal is correct about the file and it is also
 the second wall behind the 165-file row in
-the `b8` round of `bugs/formal/FORMAL_sweep_work_map.md` §4.1: past every codegen refusal
+the `b8` round of `bugs/FORMAL_sweep_work_map.md` §4.1: past every codegen refusal
 in `binary_heap.mojo`, the module-dylib build still failed there.
 
 THE SHAPE OF THE ANSWER, and why it is a generated source file rather than a
@@ -70,7 +70,7 @@ be built first.  A comptime specialization of a template defined in ANOTHER
 module (`tile[2, 3](…)`) is likewise not a demand here — its bracket items are
 values rather than types, and the local-specialization machinery
 (`mojo/middle/comptime.specialization_args` on both backends) already owns the
-answer for a template this unit compiles.  `bugs/formal/FORMAL_generic_monomorph_scope.md`
+answer for a template this unit compiles.  `bugs/FORMAL_generic_monomorph_scope.md`
 records what that leaves.
 """
 
@@ -905,7 +905,7 @@ def type_arg_text(expr, values=()) -> str:
     so asking it would refuse `Pair2[Float32]()`, which is correct Mojo.  A name that nothing
     binds is a type; a name something binds is a value unless a type is
     declared with that spelling, and the second half of that sentence is the
-    documented limit (`bugs/formal/FORMAL_generic_monomorph_scope.md`): a type
+    documented limit (`bugs/FORMAL_generic_monomorph_scope.md`): a type
     declared in the CONSUMER's own file is refused rather than instantiated.
 
     `F.IntLiteral` and every expression form are refused at the TOP LEVEL, which
@@ -1325,7 +1325,7 @@ def demands(consumer_src: str, templates, own=()) -> dict:
 
     An argument that is not a concrete type spelling is DROPPED, not refused,
     and the distinction is worth stating: the consumer is not wrong, this module
-    simply does not cover that construct (`bugs/formal/FORMAL_generic_monomorph_scope.md`
+    simply does not cover that construct (`bugs/FORMAL_generic_monomorph_scope.md`
     names what it is), and a build that refused here would refuse correct Mojo.
     The gap is reported by the export gate or by the bracketed-callee check, both
     of which ask a better question than this one.

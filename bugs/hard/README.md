@@ -19,4 +19,4 @@ deleted in the same commit, as for any bug.
 | `COMPILE_FAIL_Tools_cases_generator_analyzer.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_gdb_libpython.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_scripts_summarize_stats.md` | see doc | workers |
-| `COMPILE_FAIL_decorator_application_dropped.md` | see doc | workers |
+| `SUITE_gimple_runner_buckets_red_on_master.md` | see doc | workers |

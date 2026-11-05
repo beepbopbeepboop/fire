@@ -88,7 +88,7 @@ into a spec, so the escape rule does not reach it.
 
 `add(spec, record)` appends one record and returns a new spec, which
 is the alternative to one long literal — string `+` is refused on this path
-(`bugs/formal/FORMAL_string_value_model.md`), so a spec cannot be concatenated in the
+(`bugs/FORMAL_string_value_model.md`), so a spec cannot be concatenated in the
 source.
 
 `add_argument` on the CPython side also takes `prog`, `description` and
@@ -172,7 +172,7 @@ ERRORS
 ------
 CPython raises `SystemExit(2)` from `ArgumentParser.error`, printing the usage
 line and then `prog: error: message`. There is no `raise` on this path and no
-`sys.exit` (a settled decision, `bugs/formal/FORMAL_known_limits.md` 1.1), so `parse`
+`sys.exit` (a settled decision, `bugs/FORMAL_known_limits.md` 1.1), so `parse`
 RETURNS 2 with the same text in its `err` buffer, and the caller ends the
 process with the one spelling that works on this target:
 
@@ -2840,7 +2840,7 @@ def add(spec, record):
     """`spec` with `record` appended as one more action, as a new buffer.
 
     The way to build a spec without writing one long literal, because string `+`
-    is refused on this path (`bugs/formal/FORMAL_string_value_model.md`) — so a caller
+    is refused on this path (`bugs/FORMAL_string_value_model.md`) — so a caller
     writes `s = argparse.add(s, "--jobs|-j|store|int|||8")` once per action. The
     result is a `malloc`'d buffer the caller owns, like every other string this
     backend's modules return. A `record` containing `;` is returned unchanged:
@@ -2886,7 +2886,7 @@ def error(spec, argv, msg, err):
 
     Returns `ST_ERROR`, which is 2 — the status CPython exits with. The caller
     ends the process with `exit(2)`, the only spelling that works on this target
-    (`bugs/formal/FORMAL_known_limits.md` 1.1); this function does not exit because a
+    (`bugs/FORMAL_known_limits.md` 1.1); this function does not exit because a
     module that ends its caller's process cannot also be tested against CPython.
     """
     _compose(spec, argv, msg, err)
