@@ -18219,7 +18219,15 @@ def gen_module_impl(self, stmts: list):
                 continue
             _sdtag = gimple_exprtypes._struct_type_id(_sdcname)
             _gen_meths = self._struct_generator_method_names.get(_sdcname, set())
-            for _m in getattr(_sd, 'methods', None) or []:
+            # The symbol of an OVERLOADED method carries its overload id, so an
+            # empty id names a function that does not exist (`LinkedList_..._pop`
+            # against the defined `..._pop_fc238a`: an undefined symbol at link).
+            # One class-table slot per name: the first overload.
+            _rc_moids = self._struct_method_overload_ids(_sd)
+            _rc_seen: set = set()
+            _rc_meths = getattr(_sd, 'methods', None) or []
+            for _rck in range(len(_rc_meths)):
+                _m = _rc_meths[_rck]
                 _mname = getattr(_m, 'name', None)
                 if _mname is None:
                     continue
@@ -18230,8 +18238,12 @@ def gen_module_impl(self, stmts: list):
                     continue   # handled inline at the construction site; no C function exists
                 if _mname_s.startswith('__') and _mname_s.endswith('__') and _mname_s not in ('__init__', '__new__', '__call__'):
                     continue
+                if _mname_s in _rc_seen:
+                    continue
+                _rc_seen.add(_mname_s)
+                _rc_oid = _as_str(_rc_moids[_rck]) if _rck < len(_rc_moids) else ''
                 try:
-                    _msym = self._struct_method_csym(_sdcname, _mname_s, '')
+                    _msym = self._struct_method_csym(_sdcname, _mname_s, _rc_oid)
                 except Exception:
                     try:
                         _msym = f"{_sdcname}_{_mname_s}"
@@ -18262,7 +18274,12 @@ def gen_module_impl(self, stmts: list):
             except Exception:
                 continue
             _gen_meths = self._struct_generator_method_names.get(_sdcname, set())
-            for _m in getattr(_sd, 'methods', None) or []:
+            # Overload id per method, as for `mojo_class_setattr` above.
+            _me_moids = self._struct_method_overload_ids(_sd)
+            _me_seen: set = set()
+            _me_meths = getattr(_sd, 'methods', None) or []
+            for _mek in range(len(_me_meths)):
+                _m = _me_meths[_mek]
                 _mname = getattr(_m, 'name', None)
                 if _mname is None:
                     continue
@@ -18273,8 +18290,12 @@ def gen_module_impl(self, stmts: list):
                     continue   # handled inline at the construction site; no C function exists
                 if _mname_s.startswith('__') and _mname_s.endswith('__') and _mname_s not in ('__init__', '__new__', '__call__'):
                     continue
+                if _mname_s in _me_seen:
+                    continue
+                _me_seen.add(_mname_s)
+                _me_oid = _as_str(_me_moids[_mek]) if _mek < len(_me_moids) else ''
                 try:
-                    _msym = self._struct_method_csym(_sdcname, _mname_s, '')
+                    _msym = self._struct_method_csym(_sdcname, _mname_s, _me_oid)
                 except Exception:
                     try:
                         _msym = f"{_sdcname}_{_mname_s}"
