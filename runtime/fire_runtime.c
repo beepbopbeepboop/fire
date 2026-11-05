@@ -8671,6 +8671,7 @@ int64_t mojo_set_iter_val_int(MojoSetIter *it)
 char *mojo_set_iter_val_str(MojoSetIter *it)
 {
     _SetSlot *sl = &it->set->slots[it->order[it->pos]];
+    if (sl->tag == 3) return NULL;
     return sl->val_s ? sl->val_s : "";
 }
 
