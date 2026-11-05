@@ -3491,6 +3491,18 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (fname_raw == 'len' and node.args
             and not gen._locally_binds_name('len')):
         return gen._lower_builtin_len(node)
+    # `index(x)` (std.builtin.int `index[T: Indexer]`) on an integer is the
+    # integer. The free function is renamed `mojo_index` (C's `index`) and no
+    # library defines it, so an elaborated generic that calls it
+    # (`LinkedList.pop`/`insert`/`_get_node_ptr`: `self._get_node_ptr(index(i))`)
+    # left an undefined `_mojo_index` at link. A local or imported `index` wins.
+    if (fname_raw == 'index' and len(node.args) == 1 and not node.kwargs
+            and not gen._locally_binds_name('index')
+            and 'index' not in gen.imported_symbols):
+        _ix_t, _ix_v = gen.lower_expr(node.args[0])
+        if _ix_t in ('int64_t', 'int', 'uint64_t', 'int32_t', 'uint32_t',
+                     'int16_t', 'uint16_t', 'int8_t', 'uint8_t', '_Bool'):
+            return 'int64_t', gen._coerce_to_type(_ix_t, 'int64_t', _ix_v)
     # BUG-2026-028: `addr(x)` had NO real lowering at all — any call fell
     # through to a declared-but-never-defined variadic stub
     # (`int64_t addr(...);`), an undefined symbol at link time (same shape

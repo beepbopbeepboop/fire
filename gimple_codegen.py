@@ -6273,6 +6273,11 @@ def _relocate_module_instance_defs(code: str) -> str:
     return '\n'.join(final_lines)
 
 
+# Attributes of the returned generator that are compile RESULTS, not working state: the
+# end-of-compile cleanup in `_run_pipeline` must leave them alone.
+_PIPELINE_RESULT_ATTRS = frozenset({'_link_dylibs', '_link_objects', '_link_needs_cxx_box'})
+
+
 def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = "",
                   link_mode: bool = False, auto_gpu: bool = True):
     """Shared driver behind every public compile_* entry point.
@@ -6617,9 +6622,17 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
             except Exception: pass
     except Exception:
         pass
-    # Clear per-instance accumulators on the returned generator.
+    # Clear per-instance accumulators on the returned generator -- except the
+    # link RESULTS the callers read off it after this returns (`compile_linked`
+    # and `compile_to_gimple_with_cpp` take `_link_dylibs` / `_link_objects` /
+    # `_link_needs_cxx_box[0]`). Clearing those made every link-mode compile
+    # raise `IndexError: list index out of range` on the box, so
+    # `driver.compile_program` failed and `fire.py build` fell back to its slow
+    # inline pipeline.
     try:
         for _attr in list(getattr(gen, '__dict__', {}).keys()):
+            if _attr in _PIPELINE_RESULT_ATTRS:
+                continue
             _val = getattr(gen, _attr, None)
             if isinstance(_val, (dict, list, set)) and _attr.startswith('_'):
                 try: _val.clear()
