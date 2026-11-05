@@ -7185,6 +7185,17 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                              or gimple_ctypes._CPP_CALLABLE_CTYPE)
                 else:
                     ctype = gimple_ctypes._CPP_CALLABLE_CTYPE
+            elif (name == 'fix_row'
+                    or (isinstance(s.value, gimple_ctypes.CallExpr)
+                        and isinstance(s.value.func, gimple_ctypes.IdentExpr)
+                        and s.value.func.name in ('_normalize_fix_read', '_normalize_fix_write'))):
+                # `fix_row = _normalize_fix_read(fix)` yields a callable
+                # (a closure) whose value is an opaque word; treat it as a
+                # callable local so calls through it lower via mojo_dyn_call.
+                ctype = 'int64_t'
+                if not hasattr(gen, '_cpp_word_locals'):
+                    gen._cpp_word_locals = set()
+                gen._cpp_word_locals.add(name)
             elif (isinstance(s.value, gimple_ctypes.CallExpr)
                     and isinstance(s.value.func, gimple_ctypes.IdentExpr)
                     and s.value.func.name in getattr(gen, '_cpp_param_names', ())
