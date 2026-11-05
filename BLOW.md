@@ -172,3 +172,9 @@ compared against §2's 58.6 GB / 1.24 T instructions.
 - Per-process `time -l` numbers are for `mojoc` alone; the runner's
   `memcap` numbers are **tree** totals ("across up to 3 procs") and
   include `gcc`. Never compare the two sets directly.
+
+---
+
+## Repro check (2026-11-05)
+
+`python3 -m pytest test_bootstrap_resource_blowup_step3_regression.py` → 1 passed (accumulators cleared). Repro confirms step3 regression green.
