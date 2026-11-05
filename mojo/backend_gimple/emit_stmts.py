@@ -5073,7 +5073,14 @@ def _gen_stmt_RaiseStmt(gen, node):
         _sv_t, _sv_v = gen.lower_expr(val.args[0])
         if _sv_t != 'double':
             gen._void_call('mojo_exc_value_set', [('int64_t', gen._to_int64(_sv_t, _sv_v))])
-    if msg_arg is not None:
+    # The message shapes whose lowering was already exercised: a literal (incl.
+    # an f-string), a name, a concatenation. A CALL message (`String.format(...)`,
+    # `str(e)`) is not lowered here: evaluating it exposed latent type
+    # mismatches in code that had never been lowered (std/python/python_object's
+    # `_get_type_name` call: a gcc int-from-pointer error), so a call message
+    # keeps carrying no text, as before.
+    if isinstance(msg_arg, (gimple_ctypes.StringLiteral, gimple_ctypes.IdentExpr,
+                            gimple_ctypes.BinaryOp)):
         mt, mv = gen.lower_expr(msg_arg)
         if mt == 'char *':
             # The message must OUTLIVE the raise. An f-string / concatenation is
