@@ -2179,6 +2179,7 @@ class GimpleGen:
         # per-compile-unit gating, not a blanket "always emit", is the
         # correct fix for a helper this genuinely optional.
         self._asdict_dispatch_needed: set = set()
+        self._module_stmts: dict[str, list] = {}    # module_name → parsed stmts (shared across all gens)
         # Per-module AST lifetime fix: the module ASTs were previously accumulated
         # in _module_stmts (and mirrored via _all_transitive_stmts_ordered) for the
         # whole process lifetime causing resource blowup. We now only keep the
