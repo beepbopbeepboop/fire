@@ -180,3 +180,7 @@ compared against §2's 58.6 GB / 1.24 T instructions.
 `python3 -m pytest test_bootstrap_resource_blowup_step3_regression.py` → 1 passed (accumulators cleared). Repro confirms step3 regression green.
 
 Repro re-verified 2026-11-05 (this session): `python3 -m pytest test_bootstrap_resource_blowup_step3_regression.py` → 1 passed.
+
+## Repro check (2026-11-05, next step: per-module AST retention drop)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Per-module AST retention drop regression green.
