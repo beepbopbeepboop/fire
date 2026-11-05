@@ -58,7 +58,7 @@ from mojo.middle.types import _BOXED_CONTAINER_CTYPES
 from mojo.middle.calls_shared import _callable_value_symbol
 from mojo.middle.calls_shared import _RUNTIME_CALLABLE_VALUES as _RUNTIME_CALLABLE_VALUES_NAMES
 from mojo.middle.calls_shared import _py_box_expr
-from mojo.middle.calls_shared import _struct_operator_receiver, _STRUCT_OP_DUNDER
+from mojo.middle.calls_shared import _struct_operator_receiver
 from mojo.middle.calls_shared import FRAME_SETTABLE_IDS
 
 def _lower_strided(gen, node, store: bool):
@@ -104,11 +104,6 @@ def lower_expr(gen, node) -> tuple[str, str]:
         return gen._lower_StringLiteral(node)
     elif isinstance(node, gimple_ctypes.IdentExpr):
         return gen._lower_IdentExpr(node)
-    elif isinstance(node, gimple_ctypes.CastExpr):
-        _ct, _cv = gen.lower_expr(node.value)
-        _tmp = gen._new_temp(node.ctype)
-        gen._emit(f'  {_tmp} = ({node.ctype})({_cv});')
-        return node.ctype, _tmp
     elif isinstance(node, gimple_ctypes.WalrusExpr):
         return gen._lower_WalrusExpr(node)
     elif isinstance(node, gimple_ctypes.BinaryOp):
@@ -1780,15 +1775,12 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # (TypeLattice.is_float's `t in cls._FLOAT`, reached lowering any
         # comparison operator).
         _cur_struct = getattr(gen, '_current_struct_name', None)
-        _cur_fn = getattr(gen, 'current_func_name', '') or ''
-        _is_init_subclass = (_cur_fn.endswith('___init_subclass__') or '__init_subclass__' in _cur_fn)
-        if (module_name == 'cls' and _cur_struct and not _is_init_subclass
+        if (module_name == 'cls' and _cur_struct
                 and node.member in gen._class_attrs.get(_cur_struct, {})):
             _gname = gen._class_attrs[_cur_struct][node.member]
             _gtype = gen._global_var_types.get(_gname, 'int64_t')
             return _gtype, gmp._cattr_read(gen, _gname, _gtype)
         if (module_name == 'cls' and _cur_struct and module_name in gen.var_types
-                and not _is_init_subclass
                 and _cur_struct in gen._struct_bases
                 and node.member not in gen._struct_method_names.get(_cur_struct, ())
                 and node.member not in gen.struct_field_types.get(_cur_struct, {})
@@ -3566,29 +3558,6 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         return gen.lower_expr(gimple_ctypes.CallExpr(
             gimple_ctypes.MemberExpr(node.left, _sop, node.line, node.col),
             [node.right], [], node.line, node.col))
-    # Runtime objects (instances of dynamically created classes): dispatch
-    # binary operators to the corresponding dunder method via the runtime
-    # method-call path (mojo_rtobj_method_call). This enables Flag/IntFlag
-    # combination (|, &) and other operator overloading on runtime classes.
-    _rt_dunder = _STRUCT_OP_DUNDER.get(node.op)
-    if _rt_dunder is not None:
-        _try_rt = False
-        if isinstance(node.left, gimple_ctypes.IdentExpr):
-            _lname = _as_str(node.left.name)
-            if gen._rtobj_kinds.get(('l', _lname)) or gen._rtobj_kinds.get(('v', _lname)):
-                _try_rt = True
-        elif isinstance(node.left, gimple_ctypes.MemberExpr):
-            if isinstance(node.left.obj, gimple_ctypes.IdentExpr):
-                _oname = _as_str(node.left.obj.name)
-                if gen._rtobj_kinds.get(('l', _oname)) or gen._rtobj_kinds.get(('v', _oname)):
-                    _try_rt = True
-        if _try_rt:
-            try:
-                return gen.lower_expr(gimple_ctypes.CallExpr(
-                    gimple_ctypes.MemberExpr(node.left, _rt_dunder, node.line, node.col),
-                    [node.right], [], node.line, node.col))
-            except Exception:
-                pass
     lt, lv = gen.lower_expr(node.left)
     rt, rv = gen.lower_expr(node.right)
     if ginf._float_param_arith_applies(gen, node.op, node.left, lt, node.right, rt):
@@ -6376,10 +6345,6 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
             gen._emit_call('int', ti, 'mojo_dict_contains_bytes',
                            [('MojoDict *', rv), ('MojoBytes *', xv)])
             return 'int', ti
-        if x_is_none:
-            gen._emit_call('int', ti, 'mojo_dict_contains_none',
-                           [('MojoDict *', rv)])
-            return 'int', ti
         # Ensure key is char * for dict operations (all dict keys are strings in runtime)
         xt, xv = gen._char_to_cstr(xt, xv, True, True)
         gen._emit_call('int', ti, 'mojo_dict_contains', [('MojoDict *', rv), (xt, xv)])
@@ -7046,54 +7011,6 @@ def _names_bound_by(node) -> set:
     return out
 
 
-def _walk_bindings_flow_sensitive(stmts, conditional_depth=0):
-    """Walk statements and track bindings, being sensitive to control flow."""
-    bound = set()
-    if stmts is None:
-        return bound
-    if isinstance(stmts, (list, tuple)):
-        for s in stmts:
-            bound |= _walk_bindings_flow_sensitive(s, conditional_depth)
-        return bound
-    # For control flow structures, bindings inside them are in conditional contexts
-    if isinstance(stmts, IfStmt):
-        # Check all branches
-        if stmts.then_body:
-            bound |= _walk_bindings_flow_sensitive(stmts.then_body, conditional_depth + 1)
-        if stmts.elifs:
-            for ec, eb in stmts.elifs:
-                bound |= _walk_bindings_flow_sensitive(eb, conditional_depth + 1)
-        if stmts.else_body:
-            bound |= _walk_bindings_flow_sensitive(stmts.else_body, conditional_depth + 1)
-        return bound
-    elif isinstance(stmts, (WhileStmt, ForStmt)):
-        if hasattr(stmts, 'body') and stmts.body:
-            bound |= _walk_bindings_flow_sensitive(stmts.body, conditional_depth + 1)
-        if hasattr(stmts, 'else_body') and stmts.else_body:
-            bound |= _walk_bindings_flow_sensitive(stmts.else_body, conditional_depth + 1)
-        return bound
-    elif isinstance(stmts, TryStmt):
-        if hasattr(stmts, 'body') and stmts.body:
-            bound |= _walk_bindings_flow_sensitive(stmts.body, conditional_depth + 1)
-        if hasattr(stmts, 'handlers'):
-            for h in stmts.handlers:
-                if hasattr(h, 'body') and h.body:
-                    bound |= _walk_bindings_flow_sensitive(h.body, conditional_depth + 1)
-        if hasattr(stmts, 'orelse') and stmts.orelse:
-            bound |= _walk_bindings_flow_sensitive(stmts.orelse, conditional_depth + 1)
-        if hasattr(stmts, 'finalbody') and stmts.finalbody:
-            bound |= _walk_bindings_flow_sensitive(stmts.finalbody, conditional_depth + 1)
-        return bound
-    # For regular statements, get bindings
-    b = _names_bound_by(stmts)
-    if conditional_depth > 0:
-        # In conditional context, be lenient - don't count as disqualifying for flow-sensitive cases
-        # But we still need to track them; we'll handle differently
-        pass  # For now, still count them but analysis will be smarter
-    bound |= b
-    return bound
-
-
 def none_only_locals(gen) -> set:
     """The locals of the function being lowered that hold `None` at EVERY
     read: each binding of the name is the literal `None`, and there is no
@@ -7120,56 +7037,22 @@ def none_only_locals(gen) -> set:
         nodes = gimple_exprtypes._walk_ast(body)
         if not any(isinstance(n, MatchStmt) for n in nodes):
             bound: set = set(ginf.cur_func_param_set(gen))
-            flow_state = getattr(gen, '_flow_none_state', {}) or {}
-            # Try flow-sensitive analysis
-            try:
-                bound_cond = _walk_bindings_flow_sensitive(body, 0)
-                # Be more lenient for step 1: bindings in branches don't disqualify
-                # as much as before for flow-sensitive join point tracking
-                bound = bound | (bound_cond - set())  # collect all bindings
-            except Exception:
-                for n in nodes:
-                    b = _names_bound_by(n)
-                    bound |= b
-            else:
-                # For step 1, don't disqualify variables that were assigned None
-                # if the only other bindings are in conditional branches
-                nbl = none_bound_locals(gen)
-                # Start with flow-insensitive result
-                out = nbl - bound
-                # Add back those in nbl that might be flow-sensitively None
-                for name in nbl:
-                    if name not in out and name not in ginf.cur_func_param_set(gen):
-                        # Check if this name has bindings only in conditional contexts
-                        # Be lenient for the probe case
-                        out.add(name)
-            if 'out' not in locals() or True:  # ensure out is set
-                if not isinstance(out, set) or len(out) == 0 and body is not None:
-                    # Fallback
-                    out = none_bound_locals(gen) - bound
-            # Add back variables that are definitely None in flow state
-            for name, is_none in flow_state.items():
-                if is_none and name in none_bound_locals(gen) and name not in ginf.cur_func_param_set(gen):
-                    if name not in bound or True:  # be lenient
-                        out.add(name)
+            for n in nodes:
+                bound |= _names_bound_by(n)
+            out = none_bound_locals(gen) - bound
     gen._none_only_names = out
     return out
 
 
 def is_none_needle(gen, e) -> bool:
     """Is the membership NEEDLE `e` the value `None`? True for a `None`
-    literal, and for a local that holds `None` at join points (flow-sensitive)."""
+    literal, and for a local that holds `None` on every path (see
+    `none_only_locals`). Such a needle must not reach the int path: its
+    int64_t word is the same as an int 0's, which matched a `0` slot."""
     if _is_none_literal(e):
         return True
-    if isinstance(e, IdentExpr):
-        name = _as_str(_as_ident_node(e).name)
-        try:
-            flow_state = getattr(gen, '_flow_none_state', {}) or {}
-            if flow_state.get(name) is True:
-                return True
-        except Exception:
-            pass
-    return False
+    return (isinstance(e, IdentExpr)
+            and _as_str(_as_ident_node(e).name) in none_only_locals(gen))
 
 
 def _list_literal_slot_kind(gen, el, et) -> str:
@@ -7426,37 +7309,6 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
     runtime KeyError the moment the new dict-keyed `%`-formatting routed
     argparse.py's real `text % dict(prog=self._prog)` shape through it.
     Single source of truth for key coercion + per-type setter dispatch."""
-    if _is_none_literal(key_expr):
-        vt, vv = gen.lower_expr(val_expr)
-        gen._note_container_callable_ret(t, vv, vt, val_expr)
-        if vt == 'char *':
-            if isinstance(vv, str) and vv.startswith('_slit_'):
-                vv = gen._new_val('char *', f"{vv}")
-            gen._emit_call('void', '', 'mojo_dict_set_none_key_str',
-                           [('MojoDict *', t), ('char *', vv)])
-            return
-        if gen._is_none_literal(val_expr) or vt == 'int' and vv == '0' and _is_none_literal(val_expr):
-            gen._emit_call('void', '', 'mojo_dict_set_none_key_none',
-                           [('MojoDict *', t)])
-            return
-        if vt in gimple_ctypes._FLOAT_TYPES:
-            gen._emit_call('void', '', 'mojo_dict_set_none_key_double',
-                           [('MojoDict *', t), (vt, vv)])
-            return
-        _shim = gimple_exprtypes.struct_elem_repr_shim(gen, vt)
-        if _shim:
-            gen._emit_call('void', '', 'mojo_dict_set_none_key_struct',
-                           [('MojoDict *', t), (vt, vv)])
-            return
-        if gimple_exprtypes.is_python_bool_expr(gen, val_expr):
-            vv64 = gen._to_int64(vt, vv)
-            gen._emit_call('void', '', 'mojo_dict_set_none_key_bool',
-                           [('MojoDict *', t), ('int64_t', vv64)])
-            return
-        vv64 = gen._to_int64(vt, vv)
-        gen._emit_call('void', '', 'mojo_dict_set_none_key_int',
-                       [('MojoDict *', t), ('int64_t', vv64)])
-        return
     kt, kv = gen.lower_expr(key_expr)
     vt, vv = gen.lower_expr(val_expr)
     # A bytes key is its OWN key domain in the runtime (see `_DictSlot.keykind`).

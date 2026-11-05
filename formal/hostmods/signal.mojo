@@ -76,7 +76,7 @@ WHAT IS NOT HERE, AND WHY
   * `alarm`, `setitimer`, `getitimer` — an ITIMER the kernel arms against this
     process. `getitimer` is the sharpest omission: its answer is a
     `(delay, interval)` PAIR, and a pair is a frame-allocated blob that dies on
-    return (`(time struct shapes now implemented)` says the same about
+    return (`bugs/formal/FORMAL_time_struct_shaped_answers.md` says the same about
     `time.get_clock_info`). `alarm(seconds)` alone would return a scalar and be
     the more useful of the two, and is left out for a reason of its own that is
     not capability: the name `alarm` is also the C library function that

@@ -173,14 +173,6 @@ def _ast_value(fn, func_name: str, admitted: dict = None, scope=None,
     # Include two-parameter callees in resolvable2 so the bridge can state
     # calls to them.
     resolvable2 = frozenset(AP._admitted_arity2_map(admitted)) | set(callees2 or ())
-    try:
-        for c in (admitted or []):
-            if isinstance(c, dict) and c.get("name") and c.get("lean_name"):
-                resolvable2 = frozenset(set(resolvable2) | {c.get("name")})
-            elif not isinstance(c, dict) and getattr(c, "name", None) and getattr(c, "lean_name", None):
-                resolvable2 = frozenset(set(resolvable2) | {getattr(c, "name")})
-    except Exception:
-        pass
     gaps = AP._ast_bridge_gaps(fn, resolvable, resolvable2)
     if gaps:
         raise NotImplementedError(AP._ast_gap_message(gaps))
@@ -209,14 +201,7 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     if typed:
         return ("/- Typed function: the untyped AST-eval bridge is omitted;\n"
                 "   correctness follows from the machine value flow. -/\n")
-    _callees2_check = None
-    try:
-        if go_defs or prog:
-            from formal import arm64_proof_gen as AP
-            _callees2_check = AP._callee_call_table(go_defs or "", prog or type('P', (), {'functions': []})(), func_name, arity=2)
-    except Exception:
-        _callees2_check = None
-    _ast_value(fn, func_name, admitted, scope, callees, callees2=_callees2_check)
+    _ast_value(fn, func_name, admitted, scope, callees, callees2=callees2)
     from formal import arm64_proof_gen as AP
     if AP._is_recursive(fn) or AP._has_while(fn.body):
         return None       # caller emits the `sorry` form
@@ -256,33 +241,22 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
                            "MojoEnv", "evalBody", "evalBodyEnv", "evalExpr",
                            "u64pow", "u64powGo", "sKey"] + list(go_lemmas or []))
     if not conds:
-        proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  simp +decide [{simp_lems}]"
+        proof = f"simp +decide [{simp_lems}]"
     else:
         by_cases = " ".join(f"by_cases h{i} : {c} <;>"
                             for i, c in enumerate(conds))
         hs = ", ".join(f"h{i}" for i in range(len(conds)))
-                # `AP._eval_eq_conds_tactic`: decide the constant conditions with
-        # `have`/`native_decide` and splits only the argument-dependent ones,
+        # `AP._eval_eq_conds_tactic`: decide the constant conditions with
+        # `have`/`native_decide` and split only the argument-dependent ones,
         # falling back to the historical full-`by_cases` text when the
         # conditions are all beyond its subset (see its docstring).
-        _t = AP._eval_eq_conds_tactic(
-            conds, hs, simp_lems,
-            extra=", u64_lt_iff_false_of_le, u64_le_iff_false_of_lt")
-        if _t is not None:
-            if len(conds) > 4:
-                proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {_t}"
-            else:
-                proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {_t}"
-        else:
-            if len(conds) > 4:
-                mid = len(conds) // 2
-                by_cases1 = " ".join(f"by_cases h{i} : {conds[i]} <;>" for i in range(mid))
-                by_cases2 = " ".join(f"by_cases h{i} : {conds[i]} <;>" for i in range(mid, len(conds)))
-                hs_mid = ", ".join(f"h{i}" for i in range(mid)) + (", " if mid > 0 else "")
-                hs_all = ", ".join(f"h{i}" for i in range(len(conds)))
-                proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {by_cases1} simp_all +decide [{hs_mid}{simp_lems}, u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]\n  {by_cases2} simp_all +decide [{hs_all}, {simp_lems}, u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
-            else:
-                proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {by_cases} simp_all +decide [{hs}, {simp_lems}, u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
+        proof = (
+            AP._eval_eq_conds_tactic(
+                conds, hs, simp_lems,
+                extra=", u64_lt_iff_false_of_le, u64_le_iff_false_of_lt")
+            or f"{by_cases} simp_all +decide [{hs}, {simp_lems}, "
+               "u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
+        )
     # `AP._call_func_lean` rather than a local spelling: this is the sixth copy
     # of this `fun name arg => ...` and it has to be the same function the arm64
     # generator builds, because `eval_eq_mojo` on both sides is the statement

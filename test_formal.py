@@ -140,6 +140,13 @@ EXPECTED_FAILURES = {
                      "no list domain and the list blob's memory image is not "
                      "derived from the source literal",
 
+    # `struct Point: var x: Int; var y: Int` and `return p.get_x() + p.get_y()`.
+    # Refused at GENERATION time: the frame-receiver proof generator raises
+    # `NotImplementedError: model: a struct field read has no value in the
+    # semantic model` while TRANSLATING, so no proof is generated at all.
+    "wide_recv": "the frame-receiver proof generator refuses it at GENERATION "
+                 "time: a struct field read has no value in the semantic model "
+                 "(the model's environment/domain is not extended for struct fields)",
 
     # `fib(n) = fib(n-1) + fib(n-2)` -- tree recursion, one goal left.
     "fib": "tree-recursion FrameOk window read over a store stack whose "

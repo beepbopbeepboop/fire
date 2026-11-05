@@ -1447,9 +1447,12 @@ DIFF_CASES = [
     # from an alias, because an aliased copy prints the same numbers. This one
     # mutates the copy and reads the ORIGINAL, which is the only arrangement
     # that separates them — and it is the representation rule
-    # ("a clone of a framed struct is a fresh frame") — present on both
-    # architectures (measured: `S(x)` builds, runs, copies every field, and
-    # leaves the original untouched).
+    # `bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` §2
+    # names ("a clone of a framed struct is a fresh frame"), for a feature that
+    # doc recorded as MISSING and that is in fact present on both architectures
+    # (measured: `S(x)` builds, runs, copies every field, and leaves the
+    # original untouched). That doc's item 2 is closed BY this row rather than
+    # deleted — its item 3, the reflection table, is still open.
     #
     # **The oracle writes the copy out field by field, and that is not a
     # shortcut — it is the only spelling that exists in the other language.**
@@ -1457,9 +1460,10 @@ DIFF_CASES = [
     # `__init__(self, t)` and raises `TypeError` for the two arguments it is
     # missing (measured, and it is why this row's first draft failed its own
     # oracle). Mojo's shallow n-slot copy is `copy.copy(t)`, which needs a host
-    # module this path does not have — a backend-level refusal rather than one
-    # this row can lean on.  So the oracle states the same PROGRAM, which is
-    # what a DIFF case compares:
+    # module this path does not have — the very gap
+    # `bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` §1 is
+    # about, and a backend-level refusal rather than one this row can lean on.
+    # So the oracle states the same PROGRAM, which is what a DIFF case compares:
     # three assignments that copy every field, exactly what the lowering does.
     ("a_copy_construction_is_a_fresh_block_not_an_alias",
      "struct Wide:\n"

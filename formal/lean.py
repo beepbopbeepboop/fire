@@ -135,7 +135,7 @@ import time
 # semantics and 1/200th of the edit surface does not belong inside it.  Nothing
 # imports it yet: the FP step functions that would are `arm64_step`'s and
 # `x86_64_step`'s, and giving either state a second register file is the step
-# that has been implemented for float step functions.
+# that has to land first (`bugs/formal/FORMAL_float_step_functions.md`).  Until then it
 # is INFRASTRUCTURE, and it is in this tuple rather than unbuilt because the
 # hole census and the `.olean` currency check read the tuple — a module outside
 # it is a module nothing checks.
@@ -1704,8 +1704,9 @@ def lean_version(lean: str, timeout: float = 120.0) -> str:
 # `1:0`, before the theorem is read, and **that false verdict was published and
 # is content-addressed on inputs that do not change when the path is fixed**:
 # the proof's bytes and the library's `.olean` digests are identical either way,
-# so every later caller with the same file replayed it. Earlier measurements
-# were taken through that entry point, which is why this bump and not a cache flush: a
+# so every later caller with the same file replayed it. `bugs/
+# FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`'s measurements were taken
+# through that entry point, which is why this bump and not a cache flush: a
 # flush cannot be done from a worktree (the CAS is machine-wide and shared), and
 # a version bump retires exactly the entries whose key cannot tell the two runs
 # apart.

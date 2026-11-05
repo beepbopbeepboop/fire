@@ -293,7 +293,7 @@ Ordered by what unblocks the most:
    landing-pad table, a personality routine per catch type, and a place for the
    exception object to live — and `FORMAL.md`'s own arithmetic says
    "adding a capability whose value model does not exist yet" is the wall
-   (`FORMAL_module_state_no_storage.md (deleted) (deleted)` is the specific reason: an
+   (`bugs/formal/FORMAL_module_state_no_storage.md` is the specific reason: an
    exception object is more than one 64-bit word). That is a real programme,
    not an afternoon, and until it is worth doing the honest thing is what the
    four modules above already do: refuse to raise, and say so at the function.

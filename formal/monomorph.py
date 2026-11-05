@@ -76,7 +76,6 @@ records what that leaves.
 
 import hashlib
 import re
-import copy
 
 import fire_compiler as F
 
@@ -197,29 +196,9 @@ def template_names(src: str) -> list:
     so that a caller mutating what it got back cannot reach into the cached one.
     """
     import reflect                                  # lazy — see the module docstring
-    from formal.build import parse_module
-    out = list(_derived_from_source("template_names", src, lambda: tuple(sorted(
+    return list(_derived_from_source("template_names", src, lambda: tuple(sorted(
         name for name, why in reflect.export_exclusions(src).items()
         if why == reflect.EXCL_GENERIC))))
-    # Also include variadic functions (*args) - they are specialized per call site arity
-    try:
-        stmts = parse_module(src)
-        for st in stmts:
-            if isinstance(st, F.FunctionDef):
-                # check if variadic
-                is_var = False
-                for p in getattr(st, 'params', []) or []:
-                    if isinstance(p, (list, tuple)) and p:
-                        pname = p[0]
-                        if isinstance(pname, str) and (pname.startswith('*') and not pname.startswith('**')):
-                            is_var = True
-                            break
-                if is_var and st.name not in out:
-                    out.append(st.name)
-        out = sorted(set(out))
-    except Exception:
-        pass
-    return out
 
 
 def template_struct_names(src: str) -> list:
@@ -640,92 +619,6 @@ def instantiate(src: str, name: str, args) -> tuple:
     declaration, whatever the declaration says.
     """
     import elaborate, monomorphize                 # lazy — module docstring
-    args_list = [str(a) for a in args]
-    # Check if this is a variadic function specialization request
-    if args_list and len(args_list) == 1 and args_list[0].startswith('__variadic_') and args_list[0].endswith('__'):
-        try:
-            arity_str = args_list[0][len('__variadic_'):-len('__')]
-            # Could be just extras, or extras_fixed
-            if '_' in arity_str:
-                extras_str, fixed_str = arity_str.split('_')
-                extras = int(extras_str)
-                fixed_orig = int(fixed_str)
-            else:
-                extras = int(arity_str)
-                fixed_orig = None
-        except Exception:
-            extras = 0
-            fixed_orig = None
-        arity = extras
-        # Handle variadic function specialization
-        try:
-            kind = template_kind(src, name)
-        except Exception:
-            kind = KIND_FN
-        try:
-            template_src = _template_source(src, name, KIND_FN)
-        except Exception:
-            raise MonomorphError(f"no fn template {name!r} for variadic specialization")
-        # Use monomorphize.mangle for the mangled name
-        mangled = monomorphize.mangle(name, {"__variadic_arity": str(extras)})
-        # Parse and rewrite the function
-        try:
-            from formal.build import parse_module
-            import fire_compiler as F
-            from formal import model as M
-            stmts = parse_module(template_src)
-            # Find the function
-            fn = None
-            for st in stmts:
-                if isinstance(st, F.FunctionDef) and st.name == name:
-                    fn = st
-                    break
-            if fn is None:
-                raise MonomorphError(f"could not find function {name}")
-            # Determine variadic param name and fixed params
-            var_name = None
-            fixed_params = []
-            for pentry in getattr(fn, 'params', []) or []:
-                if isinstance(pentry, (list, tuple)) and pentry:
-                    pname = pentry[0]
-                    if isinstance(pname, str):
-                        if pname.startswith('**'):
-                            break
-                        elif pname.startswith('*') and not pname.startswith('**'):
-                            var_name = pname[1:] if len(pname) > 1 else pname
-                            break
-                        else:
-                            fixed_params.append(pentry)
-            if var_name is None:
-                raise MonomorphError(f"{name} is not variadic")
-            # Create new function with fixed + extra params
-            new_params = list(fixed_params)
-            for i in range(extras):
-                new_params.append((f'{var_name}_{i}', None))
-            new_fn = F.FunctionDef(
-                name=mangled,
-                params=new_params,
-                body=list(fn.body or []),
-                return_type=getattr(fn, 'return_type', None),
-                kwonly=getattr(fn, 'kwonly', None),
-                param_has_default=getattr(fn, 'param_has_default', None),
-                param_defaults=getattr(fn, 'param_defaults', None),
-                decorators=getattr(fn, 'decorators', None),
-                line=getattr(fn, 'line', 0),
-                col=getattr(fn, 'col', 0),
-            )
-            # Rewrite body: len(var_name) -> extras, var_name[i] -> var_name_i
-            new_body = []
-            for node in new_fn.body:
-                new_body.append(_rewrite_variadic_node(node, var_name, extras))
-            new_fn.body = new_body
-            # Render back to source (simple approach)
-            concrete = _render_function(new_fn)
-            return mangled, concrete
-        except MonomorphError:
-            raise
-        except Exception as e:
-            raise MonomorphError(str(e))
     kind = template_kind(src, name)
     template_src = _template_source(src, name, kind)
     params = elaborate.type_param_names(template_src)
@@ -734,7 +627,7 @@ def instantiate(src: str, name: str, args) -> tuple:
             f"{name!r} is excluded from the export set as a generic template "
             f"but its declaration has no type parameter, so there is nothing to "
             f"substitute and no instantiation is a different function")
-    args = args_list
+    args = [str(a) for a in args]
     fixed, variadic = split_variadic_params(params)
     if variadic is not None and variadic[0] == "**":
         raise MonomorphError(
@@ -1052,96 +945,14 @@ def _bracketed_calls_pair(consumer_src: str) -> tuple:
                 if not isinstance(node, F.CallExpr):
                     continue
                 base = _callee_base(node)
-                if base is not None:
-                    loose = _bracket_all_args(node.func, values)
-                    if loose:
-                        permissive.setdefault(base, set()).add(tuple(loose))
-                    args = _bracket_type_args(node.func, values)
-                    if args:
-                        typed.setdefault(base, set()).add(tuple(args))
-                else:
-                    # Try bare call inference
-                    func = getattr(node, "func", None)
-                    if isinstance(func, F.IdentExpr):
-                        bname = func.name
-                        # Try to infer if it's a template in this module
-                        try:
-                            # Check if it's a template declared here
-                            tnames = template_names(consumer_src)
-                            if bname in tnames:
-                                try:
-                                    kind = template_kind(consumer_src, bname)
-                                    import elaborate
-                                    if kind == KIND_FN:
-                                        tmpl = _template_source(consumer_src, bname, KIND_FN)
-                                        arg_ctypes = []
-                                        declared = {}
-                                        if isinstance(st, F.FunctionDef):
-                                            for entry in (getattr(st, "params", None) or []):
-                                                if isinstance(entry, (list, tuple)) and entry:
-                                                    declared[entry[0]] = entry[1] if len(entry) > 1 else None
-                                            for n in M.iter_nodes(st.body or []):
-                                                if isinstance(n, F.VarDecl) and getattr(n, "name", None) and getattr(n, "type_ann", None):
-                                                    declared.setdefault(n.name, n.type_ann)
-                                        else:
-                                            for n in M.iter_nodes(stmts):
-                                                if isinstance(n, F.VarDecl) and getattr(n, "name", None) and getattr(n, "type_ann", None):
-                                                    declared.setdefault(n.name, n.type_ann)
-                                        for arg in (getattr(node, "args", None) or []):
-                                            if isinstance(arg, F.IdentExpr):
-                                                ann = declared.get(arg.name)
-                                                if isinstance(ann, str) and ann.strip():
-                                                    arg_ctypes.append(ann)
-                                                else:
-                                                    arg_ctypes.append(None)
-                                            elif hasattr(arg, '__class__') and arg.__class__.__name__.endswith('Literal'):
-                                                arg_ctypes.append(type(arg).__name__)
-                                            else:
-                                                arg_ctypes.append(None)
-                                        inferred = elaborate.infer_type_args(tmpl, arg_ctypes)
-                                        if inferred:
-                                            try:
-                                                instantiate(consumer_src, bname, tuple(inferred))
-                                                typed.setdefault(bname, set()).add(tuple(inferred))
-                                            except Exception:
-                                                pass
-                                    elif kind == KIND_STRUCT:
-                                        tmpl = _template_source(consumer_src, bname, KIND_STRUCT)
-                                        arg_ctypes = []
-                                        declared = {}
-                                        if isinstance(st, F.FunctionDef):
-                                            for entry in (getattr(st, "params", None) or []):
-                                                if isinstance(entry, (list, tuple)) and entry:
-                                                    declared[entry[0]] = entry[1] if len(entry) > 1 else None
-                                            for n in M.iter_nodes(st.body or []):
-                                                if isinstance(n, F.VarDecl) and getattr(n, "name", None) and getattr(n, "type_ann", None):
-                                                    declared.setdefault(n.name, n.type_ann)
-                                        else:
-                                            for n in M.iter_nodes(stmts):
-                                                if isinstance(n, F.VarDecl) and getattr(n, "name", None) and getattr(n, "type_ann", None):
-                                                    declared.setdefault(n.name, n.type_ann)
-                                        for arg in (getattr(node, "args", None) or []):
-                                            if isinstance(arg, F.IdentExpr):
-                                                ann = declared.get(arg.name)
-                                                if isinstance(ann, str) and ann.strip():
-                                                    arg_ctypes.append(ann)
-                                                else:
-                                                    arg_ctypes.append(None)
-                                            elif hasattr(arg, '__class__') and arg.__class__.__name__.endswith('Literal'):
-                                                arg_ctypes.append(type(arg).__name__)
-                                            else:
-                                                arg_ctypes.append(None)
-                                        inferred = elaborate.infer_struct_type_args(consumer_src, bname, arg_ctypes)
-                                        if inferred:
-                                            try:
-                                                instantiate(consumer_src, bname, tuple(inferred))
-                                                typed.setdefault(bname, set()).add(tuple(inferred))
-                                            except Exception:
-                                                pass
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
+                if base is None:
+                    continue
+                loose = _bracket_all_args(node.func, values)
+                if loose:
+                    permissive.setdefault(base, set()).add(tuple(loose))
+                args = _bracket_type_args(node.func, values)
+                if args:
+                    typed.setdefault(base, set()).add(tuple(args))
         return ({k: tuple(sorted(v)) for k, v in typed.items()},
                 {k: tuple(sorted(v)) for k, v in permissive.items()})
     return _derived_from_source("all_instantiation_calls", consumer_src, derive)
@@ -1426,49 +1237,6 @@ def own_demands(module_src: str) -> dict:
         for a in args:
             if a not in want[name]:
                 want[name].append(a)
-    # Collect variadic calls in own module
-    try:
-        from formal.build import parse_module
-        import fire_compiler as F
-        from formal import model as M
-        stmts = parse_module(module_src)
-        # Find variadic functions in this module
-        variadics = {}
-        for st in stmts:
-            if isinstance(st, F.FunctionDef):
-                fixed = 0
-                var_name = None
-                for pentry in getattr(st, 'params', []) or []:
-                    if isinstance(pentry, (list, tuple)) and pentry:
-                        pname = pentry[0]
-                        if isinstance(pname, str):
-                            if pname.startswith('**'):
-                                break
-                            elif pname.startswith('*') and not pname.startswith('**'):
-                                var_name = pname[1:] or pname
-                                break
-                            else:
-                                fixed += 1
-                if var_name is not None and st.name in names:
-                    variadics[st.name] = fixed
-        if variadics:
-            for st in stmts:
-                for node in M.iter_nodes(st):
-                    if isinstance(node, F.CallExpr):
-                        func = getattr(node, 'func', None)
-                        if isinstance(func, F.IdentExpr):
-                            bname = func.name
-                            if bname in variadics:
-                                nargs = len(getattr(node, 'args', None) or [])
-                                fixed = variadics[bname]
-                                extras = nargs - fixed
-                                if extras >= 0:
-                                    arity_args = (f'__variadic_{extras}_{fixed}__',)
-                                    want.setdefault(bname, [])
-                                    if arity_args not in want[bname]:
-                                        want[bname].append(arity_args)
-    except Exception:
-        pass
     return want
 
 
@@ -1587,12 +1355,89 @@ def instantiations_by_base(demap: dict) -> dict:
 
 def rewrite_instantiation_uses(stmts, demap: dict) -> int:
     """Rewrite every USE of a generic template to the mangled instantiation, in
-    place: `Base[Args](…)` and `Base.<attr>` alike."""
+    place: `Base[Args](…)` and `Base.<attr>` alike.
+
+    `demap` is `{(base, (arg, …)): mangled name}` — the same key
+    `all_instantiation_calls` produces, and the same table the exporting side
+    compiled from, so a use rewritten here names a definition the library
+    on the link line actually has.  Returns the number of call sites rewritten,
+    which is what the caller asserts on: a demand that produced a declaration and
+    no rewrite (or the reverse) is a bug in the table, and the count is how that
+    would be noticed.
+
+    On the AST, not the text.  `Pair[Int]` inside a comment, a docstring or an
+    `` `…` `` MLIR literal is not a call, and a textual rewrite would have had to
+    re-implement the tokenizer's knowledge to leave it alone; the parser has
+    already thrown those away, so there is nothing here to corrupt.  The
+    replacement node carries the ORIGINAL's line and column, because every
+    diagnostic downstream reports position and a substitution that moved the
+    callee to line 0 would send the reader to the top of the file.
+
+    Only a call whose callee is the subscript itself.  A subscript in a value
+    position (`len(List)`, `var xs: Pair[Int]`) is not a constructor and is left
+    exactly as it was, which is the same distinction
+    `formal/model.py::subscript_callee_names` exists to make — see its own
+    docstring for why exempting by NAME rather than by position exempts every
+    read of that name in the function.  What a bare type ANNOTATION binds to is
+    not covered here; `bugs/formal/FORMAL_generic_monomorph_scope.md` records it.
+
+    The position copied onto the replacement is the SUBSCRIPT'S BASE's, not the
+    subscript's: `fire_compiler.Parser` leaves `SubscriptExpr.line`/`col` at 0
+    (measured — the whole expression is positioned by its `obj`), so copying
+    the subscript's own position would report every rewritten call at line 0.
+
+    The bracket is read through the scope-aware `_bracket_all_args`, which is
+    `all_bracketed_calls`'s reader: a `demap` built by `value_demands_for`
+    carries a VALUE argument (`(base, ("Int", "0"))`), so the rewrite has to
+    spell a bare literal the same way the permissive walk did or the entry it
+    is looking for is never found.  A call site whose bracket names something
+    with no spelling at all (`Pair[t]()` with `var t = Float64`) has no entry
+    in `demap`, so it is left alone and keeps its brackets to be refused with
+    the sentence that is true of it.  Reading the bracket differently here than
+    in `all_bracketed_calls` would be the one way a rewrite could name a
+    definition the library was never asked for.
+
+    **A `Base.<member>` READ is rewritten too, and it is the same rewrite
+    because it is the same fact.**  `TypeDict.length` names a class attribute of
+    a struct TEMPLATE, and the value that answers it lives in the class BODY —
+    which is only published per instantiation, so the template's own copy still
+    reads the unsubstituted `len(Self.values)`.  That was a refusal: the
+    consumer's read found the bare `TypeDict` while the consumer's struct table
+    held the mangled instantiation, and the sentence it got described the class
+    BODY of the template rather than the read the source wrote.  Rewriting the
+    OBJECT rather than answering the read is what makes the declaration and the
+    rewrite one table: the substituted attribute is in the same `demap` the
+    constructor came out of.
+
+    **Only when the base has exactly ONE instantiation.**  `demap` carries the
+    arguments the consumer WROTE, and a consumer that asks for `TypeDict` at two
+    lengths and then reads `TypeDict.length` has asked an ambiguous question
+    that has no answer in this table — the read keeps its brackets-free spelling
+    and is refused, which is the same refusal the value-model answer would have
+    been replaced by and is now a refusal for a reason that is TRUE of the
+    source.  Two rows pin both directions.
+
+    The base name is checked against what the SCOPE binds by value, and the
+    check is deliberately not the one the call-site arm uses: `TypeDict` is
+    routinely a module-level IMPORT, and `collect_module_symbols` reports an
+    import, so using that set whole would exempt the one spelling the rewrite
+    exists for.  `imported` is excluded from it (`_shadowed_here`) and a name a
+    function binds by assignment is excluded as well, so a local
+    `TypeDict = 5` cannot have its `TypeDict.length` rewritten into a class
+    attribute read — which would replace today's refusal with a plausible
+    number.
+    """
     from formal import model as M                  # lazy — cycle
     from formal.build import _names_bound_in       # lazy — cycle
     uniq = _unique_instantiation(demap)
     n = 0
-    # The ANNOTATION half
+    # The ANNOTATION half, and it is a separate pass because its call site has
+    # no bracket: `var x: Base[Int] = Base(…)` writes the type argument in the
+    # declaration and the call is bare, so the bracket-reading loop below cannot
+    # see it.  `annotated_construction_demands` reads the same annotation the
+    # demand side read, so the two cannot disagree about the arguments; the
+    # `demap` lookup is what makes this a rewrite of a demand that was actually
+    # built rather than of every annotation that happens to name a template.
     for base, args, call in annotated_construction_demands(stmts):
         mangled = demap.get((base, args))
         if mangled is None:
@@ -1622,71 +1467,16 @@ def rewrite_instantiation_uses(stmts, demap: dict) -> int:
             if not isinstance(node, F.CallExpr):
                 continue
             base = _callee_base(node)
-            if base is not None:
-                args = tuple(_bracket_all_args(node.func, values))
-                mangled = demap.get((base, args))
-                if mangled is None:
-                    continue
-                node.func = F.IdentExpr(name=mangled,
-                                        line=getattr(node.func.obj, "line", 0),
-                                        col=getattr(node.func.obj, "col", 0))
-                n += 1
+            if base is None:
                 continue
-            # Try bare call
-            func = getattr(node, "func", None)
-            if isinstance(func, F.IdentExpr):
-                bname = func.name
-                if bname in shadowed:
-                    continue
-                # If there's exactly one instantiation for this base in demap, use it
-                candidates = [(k[1], v) for k, v in demap.items() if k[0] == bname]
-                if len(candidates) == 1:
-                    _args_cand, mangled = candidates[0]
-                    node.func = F.IdentExpr(name=mangled,
-                                            line=getattr(func, "line", 0),
-                                            col=getattr(func, "col", 0))
-                    n += 1
-                    continue
-                # Or if there's any entry, try to match
-                if candidates:
-                    nargs = len(getattr(node, "args", None) or [])
-                    # Try to find variadic match
-                    for _args_cand, mangled in candidates:
-                        try:
-                            if _args_cand and len(_args_cand) == 1:
-                                s = str(_args_cand[0])
-                                if s.startswith('__variadic_') and s.endswith('__'):
-                                    inner = s[len('__variadic_'):-len('__')]
-                                    if '_' in inner:
-                                        extras_s, fixed_s = inner.split('_')
-                                        fixed_c = int(fixed_s)
-                                        extras_c = int(extras_s)
-                                        if fixed_c + extras_c == nargs:
-                                            node.func = F.IdentExpr(name=mangled,
-                                                                    line=getattr(func, "line", 0),
-                                                                    col=getattr(func, "col", 0))
-                                            n += 1
-                                            break
-                                    else:
-                                        extras_c = int(inner)
-                                        # try to match if extras_c == nargs - something
-                                        # or just use it
-                                        node.func = F.IdentExpr(name=mangled,
-                                                                line=getattr(func, "line", 0),
-                                                                col=getattr(func, "col", 0))
-                                        n += 1
-                                        break
-                        except Exception:
-                            continue
-                    else:
-                        # Try to pick the first one if unambiguous
-                        _args_cand, mangled = candidates[0]
-                        node.func = F.IdentExpr(name=mangled,
-                                                line=getattr(func, "line", 0),
-                                                col=getattr(func, "col", 0))
-                        n += 1
-                        continue
-                    continue
+            args = tuple(_bracket_all_args(node.func, values))
+            mangled = demap.get((base, args))
+            if mangled is None:
+                continue
+            node.func = F.IdentExpr(name=mangled,
+                                    line=getattr(node.func.obj, "line", 0),
+                                    col=getattr(node.func.obj, "col", 0))
+            n += 1
     return n
 
 
@@ -1945,471 +1735,3 @@ def supplied_bracket_args(call) -> list:
     expansion happens here (`bracket_items`) rather than in each reader.
     """
     return bracket_items(getattr(call, "func", None))
-
-
-def inferred_demands_for(consumer_src: str, module_src: str, templates,
-                         own=()) -> dict:
-    """`{template: [(type arg, …), …]}` — bare calls to templates whose type
-    arguments can be inferred from argument types."""
-    wanted = {n for n in (templates or ()) if n} - {n for n in (own or ()) if n}
-    if not wanted:
-        return {}
-    import elaborate
-    import re
-    from formal import model as M
-    from formal.build import _names_bound_in
-
-    out: dict = {}
-    try:
-        stmts = _consumer_statements(consumer_src)
-    except Exception:
-        return {}
-
-    syms = M.collect_module_symbols(stmts) or {}
-    module_level = set()
-    for name, sym in syms.items():
-        if getattr(sym, "site", None) == "comptime" and getattr(sym, "literal", None) is None:
-            continue
-        module_level.add(name)
-
-    for st in stmts:
-        # Collect declared types in scope
-        declared = {}
-        if isinstance(st, F.FunctionDef):
-            for entry in (getattr(st, "params", None) or []):
-                if isinstance(entry, (list, tuple)) and entry:
-                    declared[entry[0]] = entry[1] if len(entry) > 1 else None
-            for n in M.iter_nodes(st.body or []):
-                if isinstance(n, F.VarDecl) and getattr(n, "name", None) and getattr(n, "type_ann", None):
-                    declared.setdefault(n.name, n.type_ann)
-        else:
-            for n in M.iter_nodes(st):
-                if isinstance(n, F.VarDecl) and getattr(n, "name", None) and getattr(n, "type_ann", None):
-                    declared.setdefault(n.name, n.type_ann)
-            for n in M.iter_nodes(stmts):
-                if isinstance(n, F.VarDecl) and getattr(n, "name", None) and getattr(n, "type_ann", None):
-                    declared.setdefault(n.name, n.type_ann)
-
-        for node in M.iter_nodes(st):
-            if not isinstance(node, F.CallExpr):
-                continue
-            func = node.func
-            if not isinstance(func, F.IdentExpr):
-                continue
-            base = func.name
-            try:
-                with open('/tmp/DEBUG_INFER.txt', 'a') as _f:
-                    _f.write(f"CALL_FND {base} wanted_has={base in wanted}\n")
-            except Exception:
-                pass
-            if base not in wanted:
-                continue
-            # Skip if it's bracketed
-            if isinstance(getattr(func, "index", None), F.SubscriptExpr) or isinstance(func, F.SubscriptExpr):
-                continue
-            try:
-                kind = template_kind(module_src, base)
-            except Exception:
-                continue
-            try:
-                if kind == KIND_FN:
-                    try:
-                        tmpl = _template_source(module_src, base, KIND_FN)
-                    except Exception:
-                        continue
-                    params = elaborate.type_param_names(tmpl)
-                    if not params:
-                        continue
-                    # Try to infer by matching argument annotations
-                    binding = {}
-                    fn = None
-                    try:
-                        from fire_compiler import Parser, py_tokenize
-                        for s in Parser(py_tokenize(tmpl)).parse_module():
-                            if isinstance(s, F.FunctionDef):
-                                fn = s
-                                break
-                    except Exception:
-                        continue
-                    if fn is None:
-                        continue
-                    # Match arguments to parameters
-                    for i, arg in enumerate(getattr(node, "args", None) or []):
-                        if i >= len(getattr(fn, "params", None) or []):
-                            break
-                        pentry = fn.params[i]
-                        pann = pentry[1] if isinstance(pentry, (list, tuple)) and len(pentry) > 1 else None
-                        if not isinstance(pann, str):
-                            continue
-                        # Get argument's declared type
-                        arg_ann = None
-                        if isinstance(arg, F.IdentExpr):
-                            arg_ann = declared.get(arg.name)
-                        elif isinstance(arg, F.VarDecl):  # shouldn't happen
-                            arg_ann = getattr(arg, "type_ann", None)
-                        if not isinstance(arg_ann, str) or not arg_ann.strip():
-                            continue
-                        # Try to unify pann (template param annotation) with arg_ann
-                        # Simple case: pann is just T, arg_ann is the concrete type
-                        pann_s = pann.strip()
-                        # Remove Self. prefix
-                        if pann_s.startswith('Self.'):
-                            pann_s = pann_s[5:]
-                        # Check if pann_s is a template param
-                        if pann_s in params:
-                            # arg_ann is the concrete type
-                            binding[pann_s] = arg_ann.strip()
-                            continue
-                        # Check SIMD pattern
-                        m = re.match(r'^SIMD\[\s*([^,\[\]]+)\s*(?:,\s*([^,\[\]]+)\s*)?\]$', pann_s)
-                        if m:
-                            tp = m.group(1).strip()
-                            if tp in params:
-                                binding[tp] = arg_ann.strip()
-                                if m.group(2) and m.group(2).strip() in params:
-                                    binding[m.group(2).strip()] = '1'
-                                continue
-                        # More general: look for param names in pann_s
-                        for tp in params:
-                            if re.search(r'\b' + re.escape(tp) + r'\b', pann_s):
-                                # Try to extract from arg_ann if it matches pattern
-                                binding[tp] = arg_ann.strip()
-                                break
-                    # Check defaults
-                    defaults = elaborate.type_param_defaults(tmpl)
-                    for p in params:
-                        if p not in binding:
-                            d = elaborate._default_type_arg(defaults.get(p, ''))
-                            if d is not None:
-                                binding[p] = d
-                    if all(p in binding for p in params):
-                        inferred = [binding[p] for p in params]
-                        try:
-                            instantiate(module_src, base, tuple(inferred))
-                            out.setdefault(base, []).append(tuple(inferred))
-                        except Exception:
-                            continue
-                elif kind == KIND_STRUCT:
-                    try:
-                        tmpl = _template_source(module_src, base, KIND_STRUCT)
-                    except Exception:
-                        continue
-                    params = elaborate.type_param_names(tmpl)
-                    if not params:
-                        continue
-                    binding = {}
-                    try:
-                        from fire_compiler import Parser, py_tokenize
-                        ctors = []
-                        for s in Parser(py_tokenize(module_src)).parse_module():
-                            if isinstance(s, F.StructDef) and s.name == base:
-                                ctors = [m for m in getattr(s, 'methods', []) if getattr(m, 'name', '') == '__init__' or getattr(m, 'name', '').startswith('__init__')]
-                                break
-                    except Exception:
-                        continue
-                    if not ctors:
-                        continue
-                    # Try first matching ctor
-                    fn = ctors[0]
-                    for i, arg in enumerate(getattr(node, "args", None) or []):
-                        if i >= len(getattr(fn, "params", None) or []):
-                            break
-                        pentry = fn.params[i]
-                        pann = pentry[1] if isinstance(pentry, (list, tuple)) and len(pentry) > 1 else None
-                        if not isinstance(pann, str):
-                            continue
-                        arg_ann = None
-                        if isinstance(arg, F.IdentExpr):
-                            arg_ann = declared.get(arg.name)
-                        if not isinstance(arg_ann, str) or not arg_ann.strip():
-                            continue
-                        pann_s = pann.strip()
-                        if pann_s.startswith('Self.'):
-                            pann_s = pann_s[5:]
-                        if pann_s in params:
-                            binding[pann_s] = arg_ann.strip()
-                            continue
-                        m = re.match(r'^SIMD\[\s*([^,\[\]]+)\s*(?:,\s*([^,\[\]]+)\s*)?\]$', pann_s)
-                        if m and m.group(1).strip() in params:
-                            binding[m.group(1).strip()] = arg_ann.strip()
-                            if m.group(2) and m.group(2).strip() in params:
-                                binding[m.group(2).strip()] = '1'
-                            continue
-                    defaults = elaborate.type_param_defaults(tmpl)
-                    for p in params:
-                        if p not in binding:
-                            d = elaborate._default_type_arg(defaults.get(p, ''))
-                            if d is not None:
-                                binding[p] = d
-                    if all(p in binding for p in params):
-                        inferred = [binding[p] for p in params]
-                        try:
-                            instantiate(module_src, base, tuple(inferred))
-                            out.setdefault(base, []).append(tuple(inferred))
-                        except Exception:
-                            continue
-            except Exception:
-                continue
-    # Deduplicate
-    result = {}
-    for k, v in out.items():
-        # deduplicate while preserving order
-        seen = set()
-        res = []
-        for a in v:
-            if a not in seen:
-                res.append(a)
-                seen.add(a)
-        result[k] = res
-    return result
-
-
-def _rewrite_variadic_node(node, var_name, arity):
-    """Rewrite a node in a variadic function body for specialization."""
-    try:
-        import fire_compiler as F_mod
-        F = F_mod
-        # Check for len(var_name)
-        if isinstance(node, F.CallExpr):
-            func = getattr(node, 'func', None)
-            if isinstance(func, F.IdentExpr) and func.name == 'len':
-                args = getattr(node, 'args', None) or []
-                if len(args) == 1 and isinstance(args[0], F.IdentExpr) and args[0].name == var_name:
-                    return F.IntLiteral(value=arity, line=getattr(node, 'line', 0), col=getattr(node, 'col', 0))
-            # Rewrite inside
-            new_node = copy.copy(node)
-            new_args = []
-            for a in getattr(node, 'args', None) or []:
-                new_args.append(_rewrite_variadic_node(a, var_name, arity))
-            new_node.args = new_args
-            if hasattr(new_node, 'func'):
-                new_node.func = _rewrite_variadic_node(new_node.func, var_name, arity)
-            return new_node
-        if isinstance(node, F.SubscriptExpr):
-            obj = getattr(node, 'obj', None)
-            if isinstance(obj, F.IdentExpr) and obj.name == var_name:
-                idx = getattr(node, 'index', None)
-                if isinstance(idx, F.IntLiteral):
-                    i = idx.value
-                    if 0 <= i < arity:
-                        return F.IdentExpr(name=f'{var_name}_{i}', line=getattr(node, 'line', 0), col=getattr(node, 'col', 0))
-                    elif arity == 0:  # original function stub case
-                        return F.IntLiteral(value=0, line=getattr(node, 'line', 0), col=getattr(node, 'col', 0))
-            new_node = copy.copy(node)
-            if getattr(node, 'obj') is not None:
-                new_node.obj = _rewrite_variadic_node(node.obj, var_name, arity)
-            if getattr(node, 'index') is not None:
-                new_node.index = _rewrite_variadic_node(node.index, var_name, arity)
-            return new_node
-        if isinstance(node, F.IdentExpr):
-            return node
-        if isinstance(node, F.ReturnStmt):
-            new_node = copy.copy(node)
-            if getattr(node, 'value') is not None:
-                new_node.value = _rewrite_variadic_node(node.value, var_name, arity)
-            return new_node
-        if isinstance(node, F.AssignStmt):
-            new_node = copy.copy(node)
-            if getattr(node, 'value') is not None:
-                new_node.value = _rewrite_variadic_node(node.value, var_name, arity)
-            if getattr(node, 'target') is not None:
-                new_node.target = _rewrite_variadic_node(node.target, var_name, arity)
-            return new_node
-        if isinstance(node, F.ExprStmt):
-            new_node = copy.copy(node)
-            if getattr(node, 'expr') is not None:
-                new_node.expr = _rewrite_variadic_node(node.expr, var_name, arity)
-            return new_node
-        if isinstance(node, F.IfStmt):
-            try:
-                new_node = copy.copy(node)
-                if getattr(node, 'condition') is not None:
-                    try:
-                        new_node.condition = _rewrite_variadic_node(node.condition, var_name, arity)
-                    except Exception:
-                        pass
-                elif getattr(node, 'test') is not None:
-                    try:
-                        new_node.test = _rewrite_variadic_node(node.test, var_name, arity)
-                    except Exception:
-                        pass
-                try:
-                    if hasattr(new_node, 'then_body'):
-                        new_node.then_body = [_rewrite_variadic_node(n, var_name, arity) for n in (getattr(new_node, 'then_body') or [])]
-                    elif hasattr(new_node, 'body'):
-                        new_node.body = [_rewrite_variadic_node(n, var_name, arity) for n in (getattr(new_node, 'body') or [])]
-                except Exception:
-                    pass
-                try:
-                    if getattr(node, 'else_body') not in (None, []):
-                        else_b = getattr(node, 'else_body')
-                        if isinstance(else_b, list):
-                            new_node.else_body = [_rewrite_variadic_node(n, var_name, arity) for n in else_b]
-                        else:
-                            new_node.else_body = else_b
-                    elif getattr(new_node, 'orelse') not in (None, []):
-                        orelse = getattr(new_node, 'orelse')
-                        if isinstance(orelse, list):
-                            new_node.orelse = [_rewrite_variadic_node(n, var_name, arity) for n in orelse]
-                except Exception:
-                    pass
-                # elifs
-                try:
-                    elifs = getattr(new_node, 'elifs', None)
-                    if elifs:
-                        new_elifs = []
-                        for e in elifs:
-                            if isinstance(e, tuple) and len(e) >= 2:
-                                try:
-                                    cond_e = _rewrite_variadic_node(e[0], var_name, arity) if hasattr(e[0], '__class__') and not isinstance(e[0], (str,)) else e[0]
-                                except Exception:
-                                    cond_e = e[0]
-                                try:
-                                    body_e = [_rewrite_variadic_node(x, var_name, arity) if hasattr(x, '__class__') and not isinstance(x, (str,)) else x for x in e[1]]
-                                except Exception:
-                                    body_e = e[1]
-                                new_elifs.append((cond_e, body_e, *e[2:]))
-                            else:
-                                new_elifs.append(e)
-                        new_node.elifs = new_elifs
-                except Exception:
-                    pass
-                return new_node
-            except Exception:
-                return node
-        try:
-            new_node = copy.copy(node)
-            for attr in ['value', 'test', 'cond', 'expr', 'operand', 'left', 'right', 'iterable', 'target', 'iter']:
-                if hasattr(new_node, attr):
-                    val = getattr(new_node, attr)
-                    if val is not None and hasattr(val, '__class__') and not isinstance(val, (str, int, float, bool)):
-                        try:
-                            setattr(new_node, attr, _rewrite_variadic_node(val, var_name, arity))
-                        except Exception:
-                            pass
-            for attr in ['body', 'orelse', 'stmts', 'finally_body']:
-                if hasattr(new_node, attr):
-                    val = getattr(new_node, attr)
-                    if isinstance(val, list):
-                        try:
-                            setattr(new_node, attr, [_rewrite_variadic_node(v, var_name, arity) if hasattr(v, '__class__') and not isinstance(v, (str,)) else v for v in val])
-                        except Exception:
-                            pass
-            # Also handle elifs etc if they exist
-            if hasattr(new_node, 'elifs') and new_node.elifs:
-                try:
-                    new_elifs = []
-                    for e in new_node.elifs:
-                        if isinstance(e, tuple) and len(e) >= 2:
-                            new_elifs.append((e[0], [_rewrite_variadic_node(x, var_name, arity) if hasattr(x, '__class__') and not isinstance(x, (str,)) else x for x in e[1]], *e[2:]))
-                        else:
-                            new_elifs.append(e)
-                    new_node.elifs = new_elifs
-                except Exception:
-                    pass
-            return new_node
-        except Exception:
-            return node
-    except Exception:
-        return node
-
-
-def _render_function(fn):
-    """Render a FunctionDef back to source code (simple renderer)."""
-    try:
-        # Try to use a simple string representation
-        params = []
-        for p in getattr(fn, 'params', []) or []:
-            if isinstance(p, (list, tuple)):
-                if len(p) == 2 and p[1] is not None:
-                    params.append(f"{p[0]}: {p[1]}")
-                elif len(p) == 2 and p[1] is None:
-                    params.append(p[0])
-                elif len(p) == 1:
-                    params.append(p[0])
-                else:
-                    params.append(str(p[0]))
-            else:
-                params.append(str(p))
-        params_str = ', '.join(params)
-        ret = ''
-        rt = getattr(fn, 'return_type', None)
-        if rt is not None:
-            ret = f' -> {rt}'
-        out = []
-        out.append(f"def {fn.name}({params_str}){ret}:")
-        for stmt in getattr(fn, 'body', []) or []:
-            out.append(_render_stmt(stmt, 1))
-        return '\n'.join(out) + '\n'
-    except Exception as e:
-        # Fallback: try to reconstruct from template
-        return f"def {fn.name}():\n    pass\n"
-
-
-def _render_stmt(stmt, indent=0):
-    try:
-        sp = '    ' * indent
-        import fire_compiler as F
-        if isinstance(stmt, F.ReturnStmt):
-            if getattr(stmt, 'value') is None:
-                return sp + 'return'
-            return sp + f'return {_render_expr(stmt.value)}'
-        if isinstance(stmt, F.ExprStmt):
-            return sp + _render_expr(getattr(stmt, 'expr'))
-        if isinstance(stmt, F.AssignStmt):
-            target = _render_expr(getattr(stmt, 'target'))
-            value = _render_expr(getattr(stmt, 'value'))
-            return sp + f'{target} = {value}'
-        if isinstance(stmt, F.IfStmt):
-            test = _render_expr(getattr(stmt, 'test'))
-            lines = [sp + f'if {test}:']
-            for s in getattr(stmt, 'body') or []:
-                lines.append(_render_stmt(s, indent+1))
-            if getattr(stmt, 'orelse'):
-                lines.append(sp + 'else:')
-                for s in stmt.orelse:
-                    lines.append(_render_stmt(s, indent+1))
-            return '\n'.join(lines)
-        # default
-        return sp + 'pass'
-    except Exception:
-        return '    ' * indent + 'pass'
-
-
-def _render_expr(expr):
-    try:
-        import fire_compiler as F
-        if expr is None:
-            return 'None'
-        # Try to match by class name too
-        clsname = type(expr).__name__
-        if isinstance(expr, F.IdentExpr) or clsname == 'IdentExpr':
-            return getattr(expr, 'name')
-        if isinstance(expr, F.IntLiteral) or clsname == 'IntLiteral':
-            return str(getattr(expr, 'value'))
-        if isinstance(expr, F.StringLiteral) or clsname == 'StringLiteral':
-            return repr(getattr(expr, 'value'))
-        if isinstance(expr, F.BoolLiteral) or clsname == 'BoolLiteral':
-            return 'True' if getattr(expr, 'value') else 'False'
-        if isinstance(expr, F.FloatLiteral) or clsname == 'FloatLiteral':
-            return str(getattr(expr, 'value'))
-        if isinstance(expr, F.CallExpr) or clsname == 'CallExpr':
-            func = _render_expr(getattr(expr, 'func'))
-            args = ', '.join(_render_expr(a) for a in (getattr(expr, 'args') or []))
-            return f'{func}({args})'
-        if isinstance(expr, F.SubscriptExpr) or clsname == 'SubscriptExpr':
-            obj = _render_expr(getattr(expr, 'obj'))
-            idx = _render_expr(getattr(expr, 'index'))
-            return f'{obj}[{idx}]'
-        if isinstance(expr, F.BinaryOp) or clsname == 'BinaryOp' or isinstance(expr, getattr(F, 'BinOp', None)) or clsname == 'BinOp':
-            left = _render_expr(getattr(expr, 'left'))
-            right = _render_expr(getattr(expr, 'right'))
-            op = getattr(expr, 'op', '+')
-            return f'{left} {op} {right}'
-        if isinstance(expr, getattr(F, 'UnaryOp', None)) or clsname == 'UnaryOp':
-            op = getattr(expr, 'op', '-')
-            operand = _render_expr(getattr(expr, 'operand'))
-            return f'{op}{operand}'
-        return str(expr)
-    except Exception:
-        return str(expr)

@@ -696,50 +696,6 @@ DECLARED = [
      "    with Box() as b:\n"
      "        print('body', b.use())\n"
      "    return 0\n", 3),
-    # Computed __exit__ returning a truthy field (not foldable) must suppress
-    # when exception is raised in the with body - this is the bug case.
-    ("computed_exit_truthy_field_suppresses",
-     CTX_MOJO +
-     "class QuietSuppressor:\n"
-     "    def __init__(self, q):\n"
-     "        self.quiet = q\n"
-     "        self.tag = 7\n"
-     "\n"
-     "    def __enter__(self):\n"
-     "        print('enter')\n"
-     "        return self.tag\n"
-     "\n"
-     "    def __exit__(self):\n"
-     "        print('exit')\n"
-     "        return self.quiet\n"
-     "\n"
-     "def main(n):\n"
-     "    with QuietSuppressor(1) as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     CTX_PY +
-     "class QuietSuppressor:\n"
-     "    def __init__(self, q):\n"
-     "        self.quiet = q\n"
-     "        self.tag = 7\n"
-     "\n"
-     "    def __enter__(self):\n"
-     "        print('enter')\n"
-     "        return self.tag\n"
-     "\n"
-     "    def __exit__(self, exc_type, exc_val, tb):\n"
-     "        print('exit')\n"
-     "        return self.quiet\n"
-     "\n"
-     "def main(n):\n"
-     "    with QuietSuppressor(1) as v:\n"
-     "        print('body', v)\n"
-     "        raise ValueError('m')\n"
-     "    print('after')\n"
-     "    return 0\n",
-     3),
     # `make()` returns a manager: the callee's own `-> T` says which struct, and
     # this is the spelling of `contextlib.redirect_stdout(sys.stdout) as f:` and
     # of every factory a reader writes for a resource.

@@ -1547,7 +1547,7 @@ def disagreements(results, arch_list):
 
     Only rows where BOTH machines REFUSED are listed, and that word is doing the
     work. An arm64 refusal beside an x86-64 `proof-emitted` is x86-64's
-    documented degradation
+    documented degradation (`bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md`
     §6's last bullet), which is expected and is not a disagreement about a
     construct; and two `proof-emitted` rows differ in their detail because the
     two generators wrote proofs of different LENGTHS (`--no-check`'s own line

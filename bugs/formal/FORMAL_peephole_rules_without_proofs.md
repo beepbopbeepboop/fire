@@ -272,7 +272,7 @@ examples. 62 `STR (immediate-offset)`, 60 `LDR`, 306 `MOVZ` — and no two
 adjacent ones that touch the same base and offset. These rules are the ones
 that would pay on real code and there is nothing in the corpus to develop them
 against; `formal/examples` is register-only, which is the same fact
-`FORMAL_wide_receiver_by_reference.md` (deleted; fixed) records about the memory forms.
+`bugs/formal/FORMAL_wide_receiver_by_reference.md` records about the memory forms.
 
 ## 3. x86-64: `x86_64/mov_self` is enabled and proved
 

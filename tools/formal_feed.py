@@ -28,7 +28,7 @@ CONTEXT = ("Context: formal backend (arm64 + x86-64 Mach-O, Lean proofs). `expor
            "no gate for formal; >3-4 GB is a bug; never `git checkout <path>`/`git stash`. Check `python3 tools/control.py "
            "claims` and `git branch --no-merged master | grep formal` first (a merger may be landing overlapping work). "
            "Every fix gets a test and a commit; file what you cannot fix as bugs/formal/FORMAL_*.md (no duplicates). "
-           "The latest sweep map (`ls -t bugs/formal/FORMAL_sweep_work_map*.md | head -1`) says where the corpus stands.\n\n")
+           "The latest sweep map (`ls -t bugs/formal/FORMAL_sweep_work_map_*.md | head -1`) says where the corpus stands.\n\n")
 
 
 def state_path():

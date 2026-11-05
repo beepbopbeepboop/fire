@@ -9,11 +9,10 @@ artefact and reading it is cheaper and more exact than reasoning about the
 generator.
 
 **Why it exists.** `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`
-(bug fixed, doc deleted) measured the growth and named ONE family as the cause:
-"`hprior` is the only row that grows faster than 2x per branch". That is true
-and it is not sufficient, which is what this tool shows. Every per-path block
-local grows 2x per branch too — `hsid`, `hexit`, `h_adv`, `hrun_ex`, `hcert`
-are all emitted once per PATH
+measured the growth and named ONE family as the cause: "`hprior` is the only row
+that grows faster than 2x per branch". That is true and it is not sufficient,
+which is what this tool shows. Every per-path block local grows 2x per branch
+too — `hsid`, `hexit`, `h_adv`, `hrun_ex`, `hcert` are all emitted once per PATH
 that reaches their block — so the exponential is structural and `hprior` is one
 consumer of it. At five conditional branches `hprior` is 384 of 7 329 `have`
 lines: 5%. Hoisting the `hprior` facts alone, which is what the doc's step 1

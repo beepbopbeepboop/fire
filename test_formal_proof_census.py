@@ -11,7 +11,7 @@ and compares the result against a committed JSON baseline, failing when an
 example's status gets worse, when a hole or an admitted contract appears, or
 when a proof costs more than twice what it cost.
 
-Its verdicts are recorded in the proof-coverage census and
+Its verdicts are quoted in `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` and
 will be re-quoted, and the baseline is a COMMITTED FILE, so six things have to
 hold or the numbers mean nothing:
 

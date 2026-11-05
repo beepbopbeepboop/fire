@@ -59,11 +59,11 @@ WHAT IS NOT HERE, AND WHY — each measured or each a fact about the target
 
   * `disk_usage` — its answer is a NAMED TUPLE `(total, used, free)` of three
     numbers, and a tuple is a frame blob that cannot cross a dylib boundary
-    (`(module state/model limits) (deleted)`); `statfs(2)` is available and
+    (`bugs/formal/FORMAL_module_state_no_storage.md`); `statfs(2)` is available and
     `formal/hostmods/os/_syscalls.mojo` already reads `struct stat` byte-wise,
     so `struct statfs` is the same exercise. What is missing is not the syscall
     but a way to return three words, and that is
-    `(time struct shapes now implemented)`'s subject rather than this
+    `bugs/formal/FORMAL_time_struct_shaped_answers.md`'s subject rather than this
     one's.
 
   * `get_terminal_size`, `get_terminal_size`, `chown`, `chown_follow_symlinks` —

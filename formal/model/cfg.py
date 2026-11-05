@@ -1338,13 +1338,42 @@ def _build_cfg(body, entry_facts: dict = None) -> tuple:
                                  [t.index])
                 body_end = len(blocks)
                 arm_exits = list(body_exits)
-                # Handler arms are now emitted and can be entered on exception
-                # paths; run them and add their exits to arm_exits.
-                for handler in (getattr(s, "handlers", None) or []):
-                    handler_body = getattr(handler, "body", None) or []
-                    if handler_body:
-                        h_exits = run(handler_body, loops, body_exits)
-                        arm_exits += h_exits
+                # The HANDLER ARMS ARE NOT RUN, and not as a simplification:
+                # neither emitter emits them. `_emit_try` in
+                # `formal/arm64_codegen.py` and `formal/x86_64_codegen.py`
+                # skips the arms outright and `RaiseStmt` flushes the pending
+                # `finally` clauses and then `exit(1)`s, so no edge runs from a
+                # raise site into an arm and no edge runs out of one — an arm
+                # contributes nothing to the image, and a graph that walks it
+                # describes a program nobody is going to run.
+                #
+                # What that cost, measured on this very shape:
+                #
+                #     def probe(n):
+                #         try:
+                #             p = 1
+                #         except ValueError:
+                #             pass
+                #         return p
+                #
+                # was REFUSED — "'p' is read at line 6 before anything in this
+                # function stores it, and CPython raises UnboundLocalError for
+                # that program" — with both halves false. CPython runs it and
+                # `p` is 1, and the emitted image would be right: the arm's
+                # `pass` stores nothing, so the path it contributed to the join
+                # was a path that stored nothing and nothing else.
+                #
+                # The premise the old shape rested on — "a handler that stores
+                # nothing is a path to the join that stores nothing, and nothing
+                # in the graph says the handler will not run" — is answered by
+                # the emitter: nothing CAN run it. And the direction it was
+                # protecting against is now unreachable from the other side,
+                # because `refuse_dropped_handler_arm` refuses an arm whose body
+                # stores anything before this walk is ever asked: the only arms
+                # that reach here are `pass`/`raise`/`continue`/`break` ones,
+                # which store nothing on either reading. So the two halves hold
+                # each other up, and each is the reason the other is safe.
+                #
                 # `else` runs only when the body did NOT raise and `finally`
                 # runs either way, so both are ARMS of the one statement
                 # rather than a chain. That is what makes a `return` inside
@@ -1352,7 +1381,11 @@ def _build_cfg(body, entry_facts: dict = None) -> tuple:
                 # a store in only one handler not a dominating store.
                 #
                 # …and `else` hangs off the BODY's exits, never off the
-                # header.
+                # header. The header reaches `else` only when the body raised,
+                # which is precisely the path on which `else` does NOT run, so
+                # an edge from there is not a conservative extra edge — it is a
+                # claim that control reaches a clause the language skips, and
+                # it refused a program CPython runs:
                 #
                 #     try:
                 #         out = build(...)
@@ -1497,7 +1530,6 @@ def _build_cfg(body, entry_facts: dict = None) -> tuple:
                 # reach nothing, because each of those copies is emitted at a
                 # point the function or the loop leaves.
                 fin = getattr(s, "finally_body", None)
-                suppressible = getattr(s, '_with_suppressible', False) or getattr(s, '_suppressible', False)
                 if fin is not None:
                     early = _leaves_early(blocks, body_start, body_end,
                                            outer_loops)
@@ -1515,29 +1547,7 @@ def _build_cfg(body, entry_facts: dict = None) -> tuple:
                     # every path leaves is exactly where the clause's reads have
                     # to be checked.
                     if early:
-                        if suppressible:
-                            # For suppressible with blocks, only exception raises
-                            # can be suppressed; returns must return from function
-                            raise_early = []
-                            return_early = []
-                            for bidx in early:
-                                b = blocks[bidx]
-                                # Check if it's a raise
-                                is_raise = False
-                                for st in getattr(b, 'stmts', []):
-                                    if isinstance(st, F.RaiseStmt):
-                                        is_raise = True
-                                        break
-                                if is_raise:
-                                    raise_early.append(bidx)
-                                else:
-                                    return_early.append(bidx)
-                            if raise_early:
-                                pending = list(pending) + run(fin, loops, raise_early)
-                            if return_early:
-                                run(fin, loops, return_early)
-                        else:
-                            run(fin, loops, early)
+                        run(fin, loops, early)
                 else:
                     pending = arm_exits
                 cur = None
@@ -3070,7 +3080,7 @@ FLOAT_KIND = "float64"
 # because nothing in the source states what the kernel said.  That is also why it
 # cannot be reached by a spelling the way `receiver_is_declared_bytes` reaches a
 # `Pointer[UInt8]`: a loop target over `listdir(p)` has no declaration of its own
-# (and that bug doc was deleted once fixed), and
+# (`bugs/formal/FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md`), and
 # the annotation above it is `-> List[String]`, which is the honest word for a
 # Python-level list of `str`.  The kind is therefore SEEDED where foreign bytes
 # ENTER an image — `FOREIGN_BYTES_EXPORTS` below — and inherits through the

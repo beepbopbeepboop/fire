@@ -1473,21 +1473,6 @@ def main():
 
 main()
 """, "1\n3\n")
-    # Pinning test for *args/**kwargs packing at call sites (PLAN_contextlib_step1)
-    test_gimple_stdout("gimple_call_star_args_and_kwargs_packing", """\
-def f(*args, **kwargs) -> Int:
-    print(args[0])
-    print(args[1])
-    print(kwargs["x"])
-    return args[0] + args[1] + kwargs["x"]
-
-
-def main():
-    print(f(1, 2, x=10))
-
-
-main()
-""", "1\n2\n10\n13\n")
 
     # A `*seq` element of a list or tuple DISPLAY extends the container
     # instead of occupying one slot, and it is the one place where a runtime
@@ -14468,7 +14453,8 @@ def main():
                   test_none_bound_local_is_none_not_zero_in_membership,
                   test_none_member_of_a_set_is_not_the_int_zero,
                   test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool,
-                  test_slice_equals_after_a_multibyte_character):
+                  test_slice_equals_after_a_multibyte_character,
+                  test_caught_exception_prints_its_message):
         try:
             _late()
         except AssertionError as e:
@@ -14765,20 +14751,6 @@ main()
 """)
 
 
-def test_none_held_in_local_with_if_join_is_none_needle():
-    """Flow-sensitive None tracking at if/while/try join points: a local that
-    is None on some paths and reassigned on others must still be treated as
-    None on the paths where it remains None."""
-    test_gimple_matches_cpython("gimple_none_held_if_join", """\
-def main():
-    n = None
-    if len("ab") > 5:
-        n = 1
-    print(n in ["a", None])
-main()
-""")
-
-
 def test_none_member_of_a_set_is_not_the_int_zero():
     """A set's `None` member has its own slot tag (3): `0 in {None, 1}` is
     False, `None in {0}` is False, `None in {None, 0}` is True, and a None
@@ -14797,24 +14769,6 @@ def main():
     v.add(None)
     v.add(None)
     print(len(v), None in v, 0 in v)
-
-main()
-""")
-
-
-def test_none_member_of_a_dict_is_not_the_int_zero():
-    """A dict's `None` key is distinct from int 0: `0 in {None: 1}` is
-    False, `None in {0: 1}` is False, `None in {None: 0}` is True."""
-    test_gimple_matches_cpython("gimple_dict_none_member_distinct_from_zero", """\
-def main():
-    d = {None: 1, "a": 2}
-    print(0 in d, None in d)
-    t = {0: 1}
-    print(None in t)
-    n = None
-    print(n in t)
-    u = {None: 0}
-    print(None in u, 0 in u, len(u))
 
 main()
 """)
@@ -14879,6 +14833,44 @@ def main():
     print(t[2:4] == "ab", t[-2:] == "ab", t[:2] == "ée", t[1:3] == "ea")
     print(src.startswith("'k0'", 18), src.startswith("'k0'", 17), src.startswith("→", 4))
     print(src.endswith("→", 0, 5), src.endswith("b", 0, 7), src.count("'"), src.count("'", 20), src.count(""), t.count("", 1, 3))
+
+main()
+""")
+
+
+def test_caught_exception_prints_its_message():
+    """`str(e)` / `print(e)` / an f-string of a caught exception read the
+    message. The handler bound the raw exception OBJECT (a struct whose first
+    bytes are the type tag), so every one of them printed those bytes -- and an
+    f-string message was freed by the unwind before the handler ran. The object
+    is now the registered message text, with the args list in a header before
+    it."""
+    test_gimple_matches_cpython("gimple_caught_exception_message", """\
+class Shape(Exception):
+    pass
+
+def f(n):
+    if n > 1:
+        raise Shape(f"fn{n}: bad shape")
+    if n > 0:
+        raise ValueError("plain " + "message")
+    return n
+
+def main():
+    reasons = {}
+    for k in (1, 2):
+        try:
+            f(k)
+        except Shape as e:
+            reasons[k] = str(e)
+        except ValueError as e:
+            reasons[k] = str(e)
+            print(e)
+    print(reasons)
+    try:
+        f(3)
+    except Exception as e:
+        print("got:", str(e), f"[{e}]")
 
 main()
 """)

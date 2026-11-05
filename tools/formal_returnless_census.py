@@ -6,8 +6,8 @@ for.
     python3 tools/formal_returnless_census.py [--files N] [--rows 40]
     python3 tools/formal_returnless_census.py --paths DIR [DIR …]
 
-# Bug doc removed (fixed by returning None from functions falling off the end); kept as reference for census history
-(formerly `bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`, deleted)
+# DELETED doc (refusal fixed on master); kept as reference for census history
+`bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md` (DELETED; refusal fixed)
 §0 asks for exactly this and explains why the census it ran is not the answer:
 that one was NAME-keyed per file, and every row it reported was an artefact of
 it. `utils/coord.mojo` declares `def value` three times (lines 59, 150, 395) and
@@ -163,10 +163,11 @@ def position_file_table(rows, same_file_only: bool = True, limit: int = 6):
     costs is decided by which files it lands in: the `returned` bucket is 76
     sites over 19 files on this corpus, and 62 of them are in one host module the
     gate compiles — so the same 76 is a decision in one file or in nineteen, and
-    only the second reading is the one a reader can act on. (The related bug
-    is now fixed: functions falling off the end return None.) This is what
-    it costs to learn that for one of them, and it costs one walk of rows already
-    collected.
+    only the second reading is the one a reader can act on. `bugs/
+    FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
+    §"What is still not fixed" asks for a liveness pass before any of these
+    positions can be asked at; this is what it costs to learn that for one of
+    them, and it costs one walk of rows already collected.
 
     A bucket spread over fewer than `limit` files is reported whole, so the
     spread line is only ever printed when there is something it is summarising,
@@ -220,7 +221,7 @@ def decided_names(index) -> dict:
     `_declares_a_return`'s docstring states the second half in its own words ("it
     states a type, so this path has said what it means even where the value is not
     what CPython's is"), and §0b of
-    (formerly `bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`, deleted; fixed by None return)
+    `bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md` (DELETED; refusal fixed)
     measures the rule with that half switched OFF, which is only a measurement if
     it is ON by default.
 

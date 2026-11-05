@@ -1960,87 +1960,82 @@ def _is_integer_expression(fn, e, depth=0) -> bool:
     return False
 
 
-def _pointer_base_info(fn, expr, seen=()):
-    """Find the base pointer declaration info for pointer arithmetic.
-    Returns (name, pointee_width, pointee_name) or (None, None, None)."""
-    if seen is None:
-        seen = ()
-    if isinstance(expr, F.IdentExpr):
-        name = expr.name
-        if name in seen:
-            return (None, None, None)
-        ann = _only_declared(fn, name)
-        if ann is None:
-            # Try to follow bindings
-            for _ann2, rhs in _name_bindings(fn, name):
-                if rhs is not None:
-                    res = _pointer_base_info(fn, rhs, seen + (name,))
-                    if res[0] is not None or res[1] is not None:
-                        return res
-            return (None, None, None)
-        pointee, _why = pointee_of_type_text(ann)
-        if pointee is None:
-            return (None, None, None)
-        info = POINTEE_WIDTHS.get(pointee)
-        if info is None:
-            return (None, None, None)
-        return (name, info[0], pointee)
-    if isinstance(expr, F.BinaryOp) and expr.op in ("+", "-"):
-        # For pointer arithmetic, the base is in the left operand
-        return _pointer_base_info(fn, expr.left, seen)
-    if isinstance(expr, F.CallExpr) and isinstance(expr.func, F.SubscriptExpr) \
-            and isinstance(expr.func.obj, F.MemberExpr) \
-            and expr.func.obj.member in ("bitcast", "rebind"):
-        # pass through
-        if expr.args:
-            return _pointer_base_info(fn, expr.args[0], seen)
-    if isinstance(expr, F.CallExpr):
-        # Try to see if it's a method call that returns a pointer
-        return (None, None, None)
-    return (None, None, None)
-
-
 def _pointer_offset_scale(fn, e):
     """`(scale, why)` — what the ALU will multiply this offset by, and if it
-    will not, the sentence that says which declaration is missing."""
+    will not, the sentence that says which declaration is missing.
+
+    **`pointer_offset_scale` is this function's `[0]`, and it stays one
+    predicate**, because the width half is load-bearing in the direction that is
+    a wrong answer rather than a refusal (see that function's docstring).  What
+    this adds is the OTHER half, for the one reader that has to speak.
+
+    That is not decoration.  The refusal used to name the address's BASE for
+    every failure, so a program whose `p` is a perfectly good `Pointer[Int64]`
+    and whose `k` has no annotation — the case
+    the pointer value model (landed in f69079be0) §9 calls "the remaining half of this
+    item" — was refused with the sentence
+
+        `p` is declared 'Pointer[Int64]', which is not a pointer to a 8-byte
+        element
+
+    which is FALSE, names the wrong variable, and sends the reader to declare
+    what is already declared.  The conditions are `pointer_offset_scale`'s, in
+    the order it lists them, and each answers a question about a DIFFERENT
+    name:
+
+      * not a `p ± k` — a call, a subscript, a container.  About the address,
+        not a declaration, and named by node type.
+      * the BASE — no annotation, or two that disagree, or one that names no
+        pointee, or a pointee whose width this model does not establish.  No
+        scale is emitted, so a hand-scaled offset is correct advice here.
+      * the OFFSET — the base is fine and `k` is not an integer by declaration.
+        Still no scale is emitted, so hand-scaling is correct advice here too,
+        and declaring the offset is the better one.
+      * none of the above, and the scale they establish is not the width the
+        reader's load wants.  `why` is None because the scale WAS established —
+        that is the case where the advice inverts, because the emitters are
+        scaling already and a hand-scaled offset would be scaled twice.
+
+    `why` is None exactly when the scale was established, which is what
+    `_offset_scale`'s branch reads; `_emit_binop` reads `[0]` and nothing else.
+    """
     if not isinstance(e, F.BinaryOp) or e.op not in ("+", "-"):
         return (None, f"the address is a {type(e).__name__}, not a `p ± k` this "
                       f"path can scale")
     left = e.left
-    name, width, pointee = _pointer_base_info(fn, e)
-    if name is None and width is None:
-        # Try old behavior for better error messages
-        if not isinstance(left, F.IdentExpr):
-            return (None, f"the address's base is a {type(left).__name__}, not a "
-                          f"NAME this path has a declared pointee for")
-        name = left.name
-        ann = _only_declared(fn, name)
-        if ann is None:
-            return (None, f"`{name}` is declared nothing, or two things that "
-                          f"disagree, so there is no pointee to scale by")
-        pointee, _why = pointee_of_type_text(ann)
-        if pointee is None:
-            return (None, f"`{name}` is declared {ann!r}, which does not name a "
-                          f"pointee, so there is no element width to scale by")
-        info = POINTEE_WIDTHS.get(pointee)
-        if info is None:
-            return (None, f"the pointee of `{name}` is {pointee}, a width this "
-                          f"model does not establish, so there is no element width "
-                          f"to scale by")
-        width = info[0]
-    if width == 1:
-        return (None, f"the pointee is one byte wide, and "
+    if not isinstance(left, F.IdentExpr):
+        return (None, f"the address's base is a {type(left).__name__}, not a "
+                      f"NAME this path has a declared pointee for")
+    name = left.name
+    ann = _only_declared(fn, name)
+    if ann is None:
+        return (None, f"`{name}` is declared nothing, or two things that "
+                      f"disagree, so there is no pointee to scale by")
+    pointee, _why = pointee_of_type_text(ann)
+    if pointee is None:
+        return (None, f"`{name}` is declared {ann!r}, which does not name a "
+                      f"pointee, so there is no element width to scale by")
+    info = POINTEE_WIDTHS.get(pointee)
+    if info is None:
+        return (None, f"the pointee of `{name}` is {pointee}, a width this "
+                      f"model does not establish, so there is no element width "
+                      f"to scale by")
+    if info[0] == 1:
+        # Not a refusal on this path at all — `_offset_scale` returns before it
+        # asks when `width == 1`, because the identity scale is every
+        # `char *`'s.  It is here so the chain is total, not so this sentence
+        # is ever read.
+        return (None, f"the pointee of `{name}` is {pointee}, one byte wide, and "
                       f"a one-byte element needs no scale")
     if not _is_integer_expression(fn, e.right):
         offset = _offset_text(e.right)
-        base_name = name if name else _offset_text(left)
         return (None,
                 f"the offset is `{offset}`, and this path scales only an offset "
                 f"it can establish as an INTEGER by declaration, so there is "
                 f"nothing to say whether `{offset}` counts ELEMENTS or BYTES — "
-                f"`{base_name} {e.op} {offset}` has the POINTER and the ELEMENT WIDTH "
+                f"`{name} {e.op} {offset}` has the POINTER and the ELEMENT WIDTH "
                 f"off a declaration and only the offset is missing")
-    return (width, None)
+    return (info[0], None)
 
 
 def _offset_text(e) -> str:
@@ -4387,8 +4382,6 @@ EMITTER_BUILTINS = {
     "range": "range_list",
     "len": "len",
     "print": "print",
-    "str": "str",
-    "repr": "repr",
     # `ord`, `chr` and `hash` are here for a reason that is not "the backend can
     # do them": ONE of them can and two cannot, and all three reached the LINKER
     # as dangling symbols before, because a name absent from this table is a

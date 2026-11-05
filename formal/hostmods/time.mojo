@@ -52,7 +52,7 @@ rather than of this module, and every function below is shaped by them.
     with a `struct tm` or a named tuple, and a struct is a frame blob (see
     `os/_syscalls.mojo`'s note on `stat`), so they are absent rather than
     answered with a plausible number — and each one is named in
-    `(time struct shapes now implemented)`.
+    `bugs/formal/FORMAL_time_struct_shaped_answers.md`.
 
     What that doc has since MEASURED is worth stating here, because it is what a
     reader has to check before deciding what the fix is: **reading** a C
@@ -76,7 +76,7 @@ rather than of this module, and every function below is shaped by them.
     module-level name is not exported as a word across a dylib boundary —
     there is no storage for one, because every value a formal program can name
     lives in a function's own stack scratch
-    (`(module state/model limits) (deleted)`). So each is a zero-argument
+    (`bugs/formal/FORMAL_module_state_no_storage.md`). So each is a zero-argument
     function and `time.CLOCK_REALTIME` is spelled `CLOCK_REALTIME()`. This is
     the same rule `os` follows for `os.sep`, and the same reason.
 
@@ -404,139 +404,3 @@ def rne_scaled(a, k, den):
     elif 2 * rem == den and (q % 2) == 1:
         q = q + 1
     return q
-
-
-# ── localtime, gmtime, mktime, strftime, get_clock_info ────────────────────
-
-def localtime(secs) -> struct_time:
-    """`time.localtime([secs])`. Returns a `struct_time`."""
-    var t = secs
-    var buf: Pointer[UInt8] = malloc(8)
-    _put64_le(buf, t)
-    var tm: Pointer[UInt8] = external_call["localtime", Pointer[UInt8]](buf)
-    return _tm_to_struct_time(tm)
-
-
-def gmtime(secs) -> struct_time:
-    """`time.gmtime([secs])`. Returns a `struct_time`."""
-    var t = secs
-    var buf: Pointer[UInt8] = malloc(8)
-    _put64_le(buf, t)
-    var tm: Pointer[UInt8] = external_call["gmtime", Pointer[UInt8]](buf)
-    return _tm_to_struct_time(tm)
-
-
-def mktime(t) -> float:
-    """`time.mktime(tuple)`. Convert a time tuple in local time to seconds."""
-    var tm: Pointer[UInt8] = malloc(56)
-    var i = 0
-    while i < 56:
-        tm[i] = 0
-        i = i + 1
-    var tm_sec = t[5]
-    var tm_min = t[4]
-    var tm_hour = t[3]
-    var tm_mday = t[2]
-    var tm_mon = t[1] - 1
-    var tm_year = t[0] - 1900
-    var tm_wday = t[6]
-    var tm_yday = t[7]
-    var tm_isdst = t[8]
-    # Write little endian
-    tm[0] = tm_sec % 256
-    tm[1] = (tm_sec / 256) % 256
-    tm[2] = (tm_sec / 65536) % 256
-    tm[3] = (tm_sec / 16777216) % 256
-    tm[4] = tm_min % 256
-    tm[5] = (tm_min / 256) % 256
-    tm[6] = (tm_min / 65536) % 256
-    tm[7] = (tm_min / 16777216) % 256
-    tm[8] = tm_hour % 256
-    tm[9] = (tm_hour / 256) % 256
-    tm[10] = (tm_hour / 65536) % 256
-    tm[11] = (tm_hour / 16777216) % 256
-    tm[12] = tm_mday % 256
-    tm[13] = (tm_mday / 256) % 256
-    tm[14] = (tm_mday / 65536) % 256
-    tm[15] = (tm_mday / 16777216) % 256
-    tm[16] = tm_mon % 256
-    tm[17] = (tm_mon / 256) % 256
-    tm[18] = (tm_mon / 65536) % 256
-    tm[19] = (tm_mon / 16777216) % 256
-    tm[20] = tm_year % 256
-    tm[21] = (tm_year / 256) % 256
-    tm[22] = (tm_year / 65536) % 256
-    tm[23] = (tm_year / 16777216) % 256
-    tm[24] = tm_wday % 256
-    tm[25] = (tm_wday / 256) % 256
-    tm[26] = (tm_wday / 65536) % 256
-    tm[27] = (tm_wday / 16777216) % 256
-    tm[28] = tm_yday % 256
-    tm[29] = (tm_yday / 256) % 256
-    tm[30] = (tm_yday / 65536) % 256
-    tm[31] = (tm_yday / 16777216) % 256
-    tm[32] = tm_isdst % 256
-    tm[33] = (tm_isdst / 256) % 256
-    tm[34] = (tm_isdst / 65536) % 256
-    tm[35] = (tm_isdst / 16777216) % 256
-    var res = external_call["mktime", Int](tm)
-    return res
-
-
-def strftime(format, t) -> str:
-    """`time.strftime(format[, tuple])`."""
-    return ""
-
-
-struct ClockInfo:
-    var _dummy: Int
-
-
-def get_clock_info(name) -> ClockInfo:
-    """`time.get_clock_info(name)`. Return information about a clock."""
-    var info = ClockInfo(0)
-    return info
-
-
-# ── helpers for struct tm ───────────────────────────────────────────────────
-
-def _put64_le(p: Pointer[UInt8], v) -> int:
-    p[0] = v % 256
-    p[1] = (v / 256) % 256
-    p[2] = (v / 65536) % 256
-    p[3] = (v / 16777216) % 256
-    p[4] = (v / 4294967296) % 256
-    p[5] = (v / 1099511627776) % 256
-    p[6] = (v / 281474976710656) % 256
-    p[7] = (v / 72057594037927936) % 256
-    return 0
-
-
-def _le32(p: Pointer[UInt8], k) -> int:
-    return p[k] + p[k + 1] * 256 + p[k + 2] * 65536 + p[k + 3] * 16777216
-
-
-struct struct_time:
-    var tm_year: Int
-    var tm_mon: Int
-    var tm_mday: Int
-    var tm_hour: Int
-    var tm_min: Int
-    var tm_sec: Int
-    var tm_wday: Int
-    var tm_yday: Int
-    var tm_isdst: Int
-
-
-def _tm_to_struct_time(tm: Pointer[UInt8]) -> struct_time:
-    var t = struct_time(
-        _le32(tm, 20) + 1900,
-        _le32(tm, 16) + 1,
-        _le32(tm, 12),
-        _le32(tm, 8),
-        _le32(tm, 4),
-        _le32(tm, 0),
-        _le32(tm, 24),
-        _le32(tm, 28),
-        _le32(tm, 32))
-    return t

@@ -21,8 +21,8 @@ class ArcPointer(_MojoPointerBase): pass
 class UnsafePointer(_MojoPointerBase): pass
 
 # ── Mojo Python interop helpers ────────────────────────────────────
-def _python_import(name): 
-    return __import__(name, fromlist=[''])
+import importlib as _importlib
+def _python_import(name): return _importlib.import_module(name)
 
 # ── Mojo testing helpers ───────────────────────────────────────────
 def assert_equal(a, b, msg=""): assert a == b, msg or f"{a!r} != {b!r}"
@@ -309,13 +309,6 @@ class EllipsisLiteral:
 @dataclass
 class IdentExpr:
     name: str
-    line: int = 0
-    col: int = 0
-
-@dataclass
-class CastExpr:
-    ctype: str
-    value: object
     line: int = 0
     col: int = 0
 

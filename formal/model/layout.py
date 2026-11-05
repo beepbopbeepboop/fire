@@ -1,4 +1,3 @@
-import threading
 from . import *
 
 # ── Aggregate layout ──────────────────────────────────────────────────────
@@ -4075,7 +4074,7 @@ INT_WORD_WIDTH = 64
 #:     is a build-time decidable constant whenever the source writes it; the
 #:     runtime spelling reads a variable and is handled by `abs`/negation of a
 #:     value that is already in range.
-INT_OVERFLOW_OPS = ("+", "-", "*", "<<", "**", "//", "/")
+INT_OVERFLOW_OPS = ("+", "-", "*")
 
 
 def int_value_fits(result_type, value) -> bool:
@@ -4378,7 +4377,7 @@ def shift_overflow_refusal(op: str, amount, base=None,
         which does not saturate and still overflows, so the immediate form's
         `0..63` range test is not a safety test and cannot be made into one.
         Decided only when the base folds; a variable base is the subject of
-        `integer overflow at runtime (trapped)`.
+        `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
 
     `None` in any argument means "the build does not know", and every such case
     returns None rather than guessing: a refusal that fires on half a fact is a
@@ -4477,7 +4476,7 @@ def power_overflow_refusal(base, exponent, operands=None) -> str | None:
     is no question to refuse: `b ** n` overflows for some `b` and not for
     others, and a build that cannot say which has no answer to give. So the
     foldable case is refused precisely, and the variable case is what
-    `integer overflow at runtime (trapped)` is about.
+    `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md` is about.
 
     `None` means "answerable": a non-negative exponent whose exact value fits,
     or the `0 ** 0` / `1 ** anything` shapes that never overflow.

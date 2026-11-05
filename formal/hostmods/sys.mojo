@@ -44,7 +44,7 @@ SO `sys.argv`, `sys.path`, `sys.modules`, `sys.stdin`, `sys.stdout`,
 implementation of them would be honest on this target. The reason in every
 case is the same one - a name that outlives the frame that made it - and the
 construct each of them needs is written down in
-`(module state/model limits) (deleted)` with the measurements.
+`bugs/formal/FORMAL_module_state_no_storage.md` with the measurements.
 
 That is the honest answer, and the alternative — shipping `sys.argv` as a
 function that returns a made-up list, or `sys.stderr` as a struct with no
