@@ -657,10 +657,18 @@ def _positional_bracket_ctor_args(work, base, node):
     dups = _duplicated_method_names(work.gen, base)
     if not dups or dups <= _ITERATION_PROTOCOL:
         return None
-    args = _concrete_args(work, 'struct', base, node)
-    if args is None:
-        return None
-    # Be permissive for LinkedList/List (needed for struct element registration)
+    # Be permissive for LinkedList/List (needed for struct element registration):
+    # compute the bracket args directly so a single-letter struct element name
+    # (e.g. `S`) is not rejected as an unbound type parameter by
+    # `_is_concrete_type_arg`.
+    if isinstance(base, str) and base in ('List', 'LinkedList'):
+        args = _bracket_args(work.gen, node.func)
+        if not args:
+            return None
+    else:
+        args = _concrete_args(work, 'struct', base, node)
+        if args is None:
+            return None
     if isinstance(base, str) and base in ('List', 'LinkedList'):
         gen = work.gen
         # Register imported non-generic struct elements before checking
@@ -707,8 +715,14 @@ def _positional_bracket_ctor_args(work, base, node):
                     or a in getattr(gen, '_imported_struct_home', {})):
                 continue
             # Also allow if it looks like a struct name (capitalized, not a type param)
-            if isinstance(a, str) and a and a[0].isupper() and not re.fullmatch(r'[A-Z][0-9]?', a):
-                continue
+            # or a single-letter local/imported struct name (e.g. `S`).
+            if isinstance(a, str) and a and a[0].isupper():
+                if (not re.fullmatch(r'[A-Z][0-9]?', a)
+                        or a in getattr(gen, '_local_struct_names', set())
+                        or a in getattr(gen, 'struct_field_types', {})
+                        or a in getattr(gen, '_imported_struct_names', set())
+                        or a in getattr(gen, '_intu_structs', {})):
+                    continue
             return None
         return args
     if not all(a in gimple_ctypes._TYPE_MAP for a in args):
