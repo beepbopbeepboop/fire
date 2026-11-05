@@ -164,7 +164,32 @@ def _find_block_end(lines: list[str], depths: tuple[int, ...],
     return len(lines)
 
 
-def extract_fn_source(module_src: str, fn_name: str, arg_count: int | None = None):
+def _binds_from_args(template_src: str, arg_ctypes) -> bool:
+    """True when every type parameter of the template is bound by unifying a
+    parameter ANNOTATION with an argument's C type — i.e. WITHOUT leaning on
+    `_fill_erased_params` or a declared default, which bind anything. That
+    distinction is what tells `Scalar[dtype]` (bound by an int argument) from
+    `Pointer[T, ...]` (T is erased-only, so it "binds" to whatever)."""
+    params = type_param_names(template_src)
+    if not params:
+        return False
+    fn = None
+    for s in Parser(py_tokenize(template_src)).parse_module():
+        if isinstance(s, FunctionDef):
+            fn = s
+            break
+    if fn is None:
+        return False
+    bound = set()
+    for i, (_pname, ann) in enumerate(fn.params):
+        if i >= len(arg_ctypes):
+            break
+        bound.update(_unify_param_ann(ann, params, arg_ctypes[i]).keys())
+    return all(p in bound for p in params)
+
+
+def extract_fn_source(module_src: str, fn_name: str, arg_count: int | None = None,
+                      arg_ctypes=None):
     """Pull the source text of a single `fn fn_name[...](...): body` from a
     module, by indentation (the generic template we'll instantiate). None if
     not found.
@@ -193,13 +218,27 @@ def extract_fn_source(module_src: str, fn_name: str, arg_count: int | None = Non
         return None
     if arg_count is None or len(candidates) == 1:
         return candidates[0]
+    first_arity_match = None
     for src in candidates:
         for s in Parser(py_tokenize(src)).parse_module():
             if isinstance(s, FunctionDef) and s.name == fn_name:
                 n = len([1 for pn, _ in s.params if pn != 'self' and not pn.startswith('*')])
                 if n == arg_count:
-                    return src
+                    if arg_ctypes is None:
+                        return src
+                    # Several generic overloads of the SAME arity differ only
+                    # in their parameter types (`readfirstlane[T](value:
+                    # Pointer[T, ...])` vs `readfirstlane[dtype](value:
+                    # Scalar[dtype])`): the first by arity is not the one the
+                    # call means. Take the first whose type parameters the
+                    # call's argument types actually bind.
+                    if first_arity_match is None:
+                        first_arity_match = src
+                    if _binds_from_args(src, arg_ctypes):
+                        return src
                 break
+    if first_arity_match is not None:
+        return first_arity_match
     return candidates[0]
 
 
@@ -649,6 +688,7 @@ def c_to_mojo(ctype: str) -> str:
     return _C_TO_MOJO.get(ctype, 'Int')
 
 
+_SCALAR_ANN_RE = re.compile(r'^Scalar\[\s*([^,\[\]]+)\s*\]$')
 _SIMD_ANN_RE = re.compile(r'^SIMD\[\s*([^,\[\]]+)\s*(?:,\s*([^,\[\]]+)\s*)?\]$')
 
 
@@ -700,6 +740,10 @@ def _unify_param_ann(ann, pnames, arg_ctype) -> dict:
         ann = ann[5:]
     if ann in pnames:
         return {ann: c_to_mojo(arg_ctype)}
+    # `Scalar[dtype]` is `SIMD[dtype, 1]`: the argument IS that scalar.
+    m = _SCALAR_ANN_RE.match(ann)
+    if m and m.group(1) in pnames:
+        return {m.group(1): c_to_mojo(arg_ctype)}
     m = _SIMD_ANN_RE.match(ann)
     if m and m.group(1) in pnames:
         out = {m.group(1): c_to_mojo(arg_ctype)}
@@ -1109,7 +1153,8 @@ class Elaborator:
     def __init__(self, gcc=None):
         self.gcc = gcc
 
-    def elaborate_generic_call(self, module_src: str, fn_name: str, type_args, arg_count: int | None = None):
+    def elaborate_generic_call(self, module_src: str, fn_name: str, type_args, arg_count: int | None = None,
+                               arg_ctypes=None):
         """Instantiate `fn_name` for `type_args` (a list of concrete type strings)
         via the CAS. Returns a dict {symbol, object, ret, params} or None.
 
@@ -1119,7 +1164,8 @@ class Elaborator:
 
         Elaborate-once-ever: the instantiation is content-addressed, so a repeat
         (here or in another program) is a cache hit."""
-        tmpl = extract_fn_source(module_src, fn_name, arg_count=arg_count if arg_count is not None else len(type_args))
+        tmpl = extract_fn_source(module_src, fn_name, arg_count=arg_count if arg_count is not None else len(type_args),
+                                 arg_ctypes=arg_ctypes)
         if tmpl is None:
             return None
         params = type_param_names(tmpl)
@@ -1250,10 +1296,12 @@ class Elaborator:
     def elaborate_generic_call_inferred(self, module_src: str, fn_name: str, arg_ctypes):
         """Like elaborate_generic_call but infers the type args from the call
         argument C types (slice 2): `box(42)` with no explicit `[Int64]`."""
-        tmpl = extract_fn_source(module_src, fn_name, arg_count=len(arg_ctypes))
+        tmpl = extract_fn_source(module_src, fn_name, arg_count=len(arg_ctypes),
+                                 arg_ctypes=arg_ctypes)
         if tmpl is None:
             return None
         type_args = infer_type_args(tmpl, arg_ctypes)
         if type_args is None:
             return None
-        return self.elaborate_generic_call(module_src, fn_name, type_args, arg_count=len(arg_ctypes))
+        return self.elaborate_generic_call(module_src, fn_name, type_args, arg_count=len(arg_ctypes),
+                                           arg_ctypes=arg_ctypes)
