@@ -233,8 +233,17 @@ def _check_no_value_shadow(src: str, type_params) -> None:
         # <inner>.Element`, which is exactly what the substituted annotation
         # should read. A real statement-level `var T` / `for T` is followed
         # by `=`, `in`, or end-of-line, never `.`.
-        if re.search(rf'\b(?:var|for)\s+{e}\b(?!\s*\.)', src) or \
-           re.search(rf'(?m)^\s*{e}\s*=(?!=)', src):
+        var_for_binding = re.search(rf'\b(?:var|for)\s+{e}\b(?!\s*\.)', src)
+        assignment_binding = re.search(rf'(?m)^\s*{e}\s*=(?!=)', src)
+        # An `identifier = ...` line inside a braced constructor/call literal
+        # (e.g. `length = end - start,` in `return { ... }`) is a keyword-
+        # argument label, not a binding; the substitution pass skips labels.
+        if assignment_binding is not None:
+            pos = assignment_binding.start()
+            depth = src[:pos].count('{') - src[:pos].count('}')
+            if depth > 0:
+                assignment_binding = None
+        if var_for_binding or assignment_binding:
             raise ValueError(
                 f"monomorphize: type parameter {tp!r} is used as a value/binding "
                 f"name; cannot textually instantiate this template")
