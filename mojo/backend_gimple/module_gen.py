@@ -18615,6 +18615,20 @@ def gen_module_impl(self, stmts: list):
             self._all_transitive_stmts_ordered.clear()
         if hasattr(self, '_all_transitive_stmts_ids'):
             self._all_transitive_stmts_ids.clear()
+        # Per-module AST lifetime: drop closure/function-AST accumulators now
+        # that emission is complete.
+        for _acc in ('_all_closures', '_cpp_module_fn_asts',
+                     '_lambda_outer_closures', '_closure_call_stmts'):
+            try:
+                _v = getattr(self, _acc, None)
+                if isinstance(_v, dict):
+                    _v.clear()
+                elif isinstance(_v, list):
+                    _v.clear()
+                elif isinstance(_v, set):
+                    _v.clear()
+            except Exception:
+                pass
         try:
             imported_stmts.clear()
         except Exception:

@@ -188,3 +188,7 @@ Repro re-verified 2026-11-05 (this session): `python3 -m pytest test_bootstrap_r
 ## Repro check (2026-11-05, next step: clear transitive AST accumulator after reconciliation)
 
 `python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Transitive AST accumulator cleared right after reconciliation.
+
+## Repro check (2026-11-05, next step: clear closure/function-AST accumulators after emission)
+
+`python3 -c "import gimple_codegen; ..."` smoke + `test_codegen_module_ast_lifetime_regression` + `test_bootstrap_resource_blowup_step3_regression` → pass. `_all_closures`/`_cpp_module_fn_asts` cleared after emission.
