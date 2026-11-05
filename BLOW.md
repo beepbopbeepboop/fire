@@ -204,3 +204,7 @@ Repro re-verified 2026-11-05 (this session): `python3 -m pytest test_bootstrap_r
 ## Repro check (2026-11-05, next step: post-generic-sweep repro)
 
 `python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Generic sweep of all mutable accumulators after emission holds.
+
+## Repro check (2026-11-05, next step: post-generic-sweep repro re-verified)
+
+`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Generic sweep of all mutable accumulators after emission holds.
