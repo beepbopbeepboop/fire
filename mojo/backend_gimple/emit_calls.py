@@ -10447,13 +10447,9 @@ def _struct_data_field(gen, ctype: str):
         # through the bytes-subclass path, not `_mojo_at_` arithmetic.
         return None, None
     sft = gen.struct_field_types.get(sn, {})
-    for fname in ('_data', 'data', '_array', 'array', 'buffer', 'storage', '_ptr', 'ptr', '_storage', 'values', '_values', '_items', 'items'):
+    for fname in ('_data', 'data'):
         ft = sft.get(fname, '')
-        if ft and isinstance(ft, str) and (ft.endswith(' *') or ft in ('int64_t', 'int')):
-            return fname, ft
-    # Also look for any pointer field as a possible backing store
-    for fname, ft in sft.items():
-        if isinstance(ft, str) and (ft.endswith(' *') or ft in ('int64_t', 'int')) and fname not in ('__vtable',) and not fname.startswith('_mangled'):
+        if ft and isinstance(ft, str) and ft.endswith(' *'):
             return fname, ft
     return None, None
 
