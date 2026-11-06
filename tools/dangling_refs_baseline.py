@@ -36,7 +36,6 @@ BASELINE = {
     'CRASH.md': 1,
     'FORMAL.md': 5,
     'OPUS.md': 2,
-    'bugs/FORMAL_absval_proof_does_not_check.md': 4,
     'bugs/FORMAL_known_limits.md': 8,
     'bugs/FORMAL_no_exceptions.md': 2,
     'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
@@ -184,7 +183,6 @@ BASELINE = {
 BARE_BASELINE = {
     'CRASH.md': 1,
     'bugs/OPEN_WORK.md': 19,
-    'bugs/FORMAL_absval_proof_does_not_check.md': 1,
     'bugs/FORMAL_arm64_instruction_coverage.md': 1,
     'bugs/FORMAL_known_limits.md': 7,
     'bugs/FORMAL_string_value_model.md': 2,

@@ -19,7 +19,6 @@ all read in full for this plan:
 |---|---|
 | `bugs/FORMAL_arm64_instruction_coverage.md` | the arm64 encoder/machine-model/lowering survey and its gap list |
 | `bugs/FORMAL_peephole_rules_without_proofs.md` | the unproved arm64 and x86-64 peephole rules and the memory lemmas they need |
-| `bugs/FORMAL_absval_proof_does_not_check.md` | a formerly-passing arm64 example whose proof now fails on a frame-peel address |
 | `bugs/FORMAL_string_value_model.md` | what a string IS: representation, methods, the `String`-struct collision, the proof model |
 | `bugs/FORMAL_set_value_model.md` | a set is a list: order, dedup, the missing set runtime |
 | `bugs/FORMAL_known_limits.md` | the sweep residue: which refusals are true, and the ranked levers |
@@ -115,9 +114,9 @@ a counted hole; (c) the named test(s) exist and pass; (d) the step doc's
    `tools/dangling_doc_refs.py` are the authority.
 6. **`EXPECTED_FAILURES`/`KNOWN-GAP` must be moved deliberately.** A formerly
    passing example that a scaffolded hole makes red is either fixed or declared,
-   never ignored; `step-28` is the specific instance (`absval`), and the general
-   rule is `FORMAL_absval_proof_does_not_check.md`'s "a formerly-passing
-   example that now fails is a regression".
+   never ignored; `step-28` fixed the `absval` frame-peel regression (commit
+   `2e585ba4c`), and the general rule is that a formerly-passing example that
+   now fails is a regression.
 
 ---
 
@@ -194,6 +193,19 @@ it. A step must also be small enough to land in one commit; if it is not, it is
 split (`step-NNa`, `step-NNb`, …). The step numbers 01–28 are stable names;
 suffix letters are the splits.
 
+**S0. The tree is not green at the start (measured 2026-11-05).** Two
+prerequisite steps exist because of it. **`00a`**: `lib/ProofLib.lean` does not
+elaborate at HEAD (commit `bd61c9036` spliced ~39 `work_step_*` theorems into
+the middle of `rw [...]` lines, `work_step_fmul` is missing, and `ProofLib.olean`
+is absent), so *every* Lean-touching step is blocked on it. **`00b`**:
+`formal/arm64_proof_gen.py::_STEP_CONDS` has a mis-ordered row (index drift),
+which turns `test_csel_is_modelled…` red. `15a` repairs the monomorph baseline
+(a missing `import threading` in `formal/model/layout.py`, debug litter,
+stale expectations). Other workers are editing this tree concurrently
+(`lib/Scaffold.lean`, `formal/proof_gaps.py`, `tools/lean_hne_chain.py` already
+exist from steps 01a/01b/03a): a step starts by `git status` and checking
+whether its deliverable is already there.
+
 **S7. Honest numbering of what was stale in the first draft** (kept so a reader
 of an old copy can translate): line `lib/X86.lean:2830` is `:3016`; the "two
 `ProofLib` sorries at ~4510" do not exist; `test_formal_string_methods.py` is
@@ -219,26 +231,85 @@ numbered step; the numbers 01-28 are the first draft's names.
 
 | step | class | size | depends | title |
 |---|---|---|---|---|
-| [`01a`](../bugs/plan/step-01a-scaffold-module.md) | mid | M | none | `lib/Scaffold.lean` — the one home of scaffold `sorry` |
-| [`01b`](../bugs/plan/step-01b-proof-gap-ledger.md) | mid | M | 01a | the proof-gap ledger and its census test |
-| [`02`](../bugs/plan/step-02-peephole-memory-lemmas.md) | mid | S | 01a, 01b | the two memory lemmas the peephole store rules actually lack |
+| [`00a`](../bugs/plan/step-00a-repair-prooflib-splice.md) | mid | M | none | repair `lib/ProofLib.lean` so the library elaborates again (mangled `work_step_*` region + earlier errors) |
+| [`00b`](../bugs/plan/step-00b-step-conds-index-drift.md) | easy | S | none | `_STEP_CONDS` index drift — the STRB register-offset row sits in the middle of the table |
+| [`01a`](../bugs/plan/step-01a-scaffold-module.md) | mid | M | 00a | `lib/Scaffold.lean` — the one home of scaffold `sorry` |
+| [`01b`](../bugs/plan/step-01b-proof-gap-ledger.md) | mid | M | 00a, 01a | the proof-gap ledger and its census test |
+| [`02`](../bugs/plan/step-02-peephole-memory-lemmas.md) | mid | S | 00a, 01a, 01b | the two memory lemmas the peephole store rules actually lack |
 | [`03a`](../bugs/plan/step-03a-hne-chain-generator.md) | mid | S | none | a generator for the `hne_` negation chain of an `arm64_step` arm lemma |
-| [`03b`](../bugs/plan/step-03b-arm64-movz-pair.md) | mid | M | 01a, 01b, 03a | `arm64/movz_pair` — step lemma and rule theorem |
-| [`03c`](../bugs/plan/step-03c-arm64-store-load.md) | mid | M | 02, 03a | `arm64/store_load` — `STR Xt,[Xn,#o] ; LDR Xt,[Xn,#o]` |
-| [`03d`](../bugs/plan/step-03d-arm64-mem-pair.md) | mid | M | 02, 03c | `arm64/mem_pair` — duplicate `STR;STR` and `LDR;LDR` |
-| [`04a`](../bugs/plan/step-04a-x86-mov-self-rev.md) | easy | S | 01a, 01b | `x86_64/mov_self_rev` — `mov r, r` spelled `48 8b c0` |
-| [`04b`](../bugs/plan/step-04b-x86-store-load.md) | mid | M | 02, 01b | `x86_64/store_load` — `mov [b+d], r ; mov r, [b+d]` (no SIB, disp8/disp32/none) |
-| [`04c`](../bugs/plan/step-04c-x86-mem-pair.md) | mid | M | 02, 04b | `x86_64/mem_pair` — duplicate store, duplicate load (no SIB) |
-| [`04d`](../bugs/plan/step-04d-x86-imm-zero.md) | mid | M | 01a, 01b | `x86_64/imm_zero` — `add r, 0` / `sub r, 0` with dead flags |
+| [`03b`](../bugs/plan/step-03b-arm64-movz-pair.md) | mid | M | 00a, 01a, 01b, 03a | `arm64/movz_pair` — step lemma and rule theorem |
+| [`03c`](../bugs/plan/step-03c-arm64-store-load.md) | mid | M | 00a, 02, 03a | `arm64/store_load` — `STR Xt,[Xn,#o] ; LDR Xt,[Xn,#o]` |
+| [`03d`](../bugs/plan/step-03d-arm64-mem-pair.md) | mid | M | 00a, 02, 03c | `arm64/mem_pair` — duplicate `STR;STR` and `LDR;LDR` |
+| [`04a`](../bugs/plan/step-04a-x86-mov-self-rev.md) | easy | S | 00a, 01a, 01b | `x86_64/mov_self_rev` — `mov r, r` spelled `48 8b c0` |
+| [`04b`](../bugs/plan/step-04b-x86-store-load.md) | mid | M | 00a, 02, 01b | `x86_64/store_load` — `mov [b+d], r ; mov r, [b+d]` (no SIB; disp8 form first) |
+| [`04c`](../bugs/plan/step-04c-x86-mem-pair.md) | mid | M | 00a, 02, 04b | `x86_64/mem_pair` — duplicate store, duplicate load (no SIB) |
+| [`04d`](../bugs/plan/step-04d-x86-imm-zero.md) | mid | M | 00a, 01a, 01b | `x86_64/imm_zero` — `add r, 0` / `sub r, 0` with dead flags |
 | [`05a`](../bugs/plan/step-05a-arm64-rule-registry.md) | mid | M | 03b, 03c, 03d | register the arm64 rules the Lean side now proves |
 | [`05b`](../bugs/plan/step-05b-x86-rule-registry.md) | mid | M | 04a, 04b, 04c, 04d | register the x86-64 rules, and fix three latent soundness holes in their matchers |
+| [`06a`](../bugs/plan/step-06a-arm64-ccmp-encoders.md) | easy | S | none | arm64 `ccmp` encoders (register and immediate), byte-exact against `as` |
+| [`06b`](../bugs/plan/step-06b-arm64-ccmp-model.md) | mid | M | 00a, 00b, 06a | `ccmp` in the machine model: `arm64_step` arms, `_STEP_CONDS` rows, `_step_rhs`, `_regs_written` |
+| [`06c`](../bugs/plan/step-06c-arm64-ccmp-lowering.md) | hard | L | 06a, 06b | lower `if A and B:` (two integer comparisons) to `cmp` + `ccmp` + one `b.cond` |
+| [`07a`](../bugs/plan/step-07a-arm64-csinc-family-model.md) | mid | M | 00a, 00b | `csinc` / `csinv` / `csneg` in the machine model, step table and fuzzer |
+| [`07b`](../bugs/plan/step-07b-arm64-csinc-family-lowering.md) | hard | M | 07a | lower `a if c else ~a` to `csinv` (and `+1` / `-a` to `csinc`/`csneg` where no overflow trap is lost) |
+| [`08a`](../bugs/plan/step-08a-arm64-blr-named-unmodelled.md) | easy | S | none | name `BLR` in `_unmodelled_instruction` (the emitted indirect call has no step and no name) |
+| [`08b`](../bugs/plan/step-08b-arm64-br-audit-scope.md) | easy | S | none | `br` is emitted (the Mach-O stub) — fix the audit's scope and the stale "uncalled" claims |
+| [`08c`](../bugs/plan/step-08c-arm64-indirect-call-design.md) | hard | M | 08a | DESIGN MEMO — how the proof model treats `BLR` (indirect call) and `BR` |
+| [`09`](../bugs/plan/step-09-arm64-extended-add-sub.md) | mid | M | 00a, 00b | arm64 extended-register `ADD`/`SUB`/`SUBS(CMP)` with `UXTX` (the SP class), modelled, no lowering |
+| [`10`](../bugs/plan/step-10-string-struct-collision.md) | mid | M | 01a, 01b | the `String` frame-vs-`char *` collision (zero-argument `String()` used as a receiver) |
+| [`11a`](../bugs/plan/step-11a-string-buffer-upper-lower.md) | mid | M | 10 | the runtime string buffer (libc `strdup`, never freed) and `upper`/`lower` as its first clients |
+| [`11b`](../bugs/plan/step-11b-string-strip-rstrip.md) | mid | M | 11a | `strip()` / `rstrip()` on the runtime buffer |
+| [`11c`](../bugs/plan/step-11c-chr-fold-and-remaining-methods.md) | mid | S | 11a | `chr(<constant>)` folds; `replace`/`join`/the case-variants refuse naming the buffer correctly |
+| [`12a`](../bugs/plan/step-12a-len-of-known-string.md) | mid | M | 01a, 01b | `len(<string the image holds>)` is a numeral in the proof model; any other string `len` is refused; the post-extern theorem is not emitted for `strlen` |
+| [`12b`](../bugs/plan/step-12b-strlen-contract-memo.md) | hard | M | 12a, 01a, 01b | DECISION MEMO — the Lean contract for an extern whose result is the program's answer (`strlen`) |
+| [`12c`](../bugs/plan/step-12c-strlen-contract.md) | mid | M | 12a, 12b, 01a, 01b | Lean contract for `strlen` as the program's answer (extern contract) |
+| [`13a`](../bugs/plan/step-13a-printf-text-fold.md) | mid | M | 10 | `%<w>s`, `%-<w>s`, `%.<p>s` on a non-ASCII text the build can SEE are folded to the CPython answer |
+| [`13b`](../bugs/plan/step-13b-subscript-literal-fold.md) | mid | M | 10 | `<literal>[<int literal>]` on non-ASCII text folds to the one-character string |
+| [`13c`](../bugs/plan/step-13c-runtime-unicode-memo.md) | hard | M | 11a, 13a, 13b | DECISION MEMO — `%<w>s` / `%.<p>s` and `s[i]` on non-ASCII text the build CANNOT see |
+| [`14a`](../bugs/plan/step-14a-restore-set-literal-dedup.md) | easy | S | none | RESTORE the compile-time set-literal dedup that the `formal/model/` package split lost |
+| [`14b`](../bugs/plan/step-14b-set-runtime-dedup-literal.md) | mid | L | 14a | run-time distinctness for a set literal with non-canonical elements (`{x, x, 2}`), both backends |
+| [`14c`](../bugs/plan/step-14c-set-add.md) | mid | M | 14b | `set.add(x)` on both backends |
+| [`14d`](../bugs/plan/step-14d-set-comprehension-dedup.md) | mid | M | 14b | a set COMPREHENSION is distinct (`{x % 2 for x in range(6)}` has len 2) |
+| [`14e`](../bugs/plan/step-14e-set-order-pin.md) | easy | S | 14a, 14b, 14c, 14d | pin the set iteration order (insertion order) and re-word the `set_order` neutraliser; close the doc |
+| [`15a`](../bugs/plan/step-15a-monomorph-baseline.md) | mid | M | none | repair the monomorph baseline (import errors, debug litter, stale test expectations) |
+| [`15b`](../bugs/plan/step-15b-restore-aliased-import.md) | mid | M | 15a | restore the ALIASED import of a template (`from m import Pair as P` then `P[Int]()`) |
+| [`15c`](../bugs/plan/step-15c-restore-trait-bound-check.md) | mid | M | 15a | restore the trait-bound conformance check on an instantiation |
+| [`15d`](../bugs/plan/step-15d-consumer-declared-type-argument.md) | mid | S | 15a | refuse, by name, a type argument declared only in the consumer's file |
+| [`15e`](../bugs/plan/step-15e-pin-imported-parameter-annotation.md) | easy | S | 15a | re-pin the imported-instantiation parameter annotation (value vs frame) |
+| [`16a`](../bugs/plan/step-16a-bare-call-design-memo.md) | hard | M | 15a | DESIGN MEMO — what a bare template call's type arguments may be inferred from |
+| [`16b`](../bugs/plan/step-16b-consolidate-bare-inference.md) | mid | M | 15a | fold the two copies of bare-call inference into one function (behaviour-preserving) |
+| [`16c`](../bugs/plan/step-16c-matcher-keywords-defaults.md) | mid | S | 16a, 16b | bare-call inference — keyword arguments and type-spelled defaults |
+| [`16d`](../bugs/plan/step-16d-return-type-inference.md) | mid | L | 16a, 16b | bare-call inference through declared types (the `dealloc(allocation^)` row) |
+| [`16e`](../bugs/plan/step-16e-bound-resolution.md) | mid | M | 16a, 16b | bare-call inference against a trait bound (the `FormatStruct(writer, ...)` row) |
+| [`16f`](../bugs/plan/step-16f-reconcile-export-pins.md) | easy | S | 16c, 16d, 16e | reconcile the two export pins and the refusal wording with the inference |
+| [`17`](../bugs/plan/step-17-declared-init-construction.md) | easy | S | 15a | close out declared-`__init__` construction (it landed; pin it and fix the doc) |
+| [`18a`](../bugs/plan/step-18a-frame-contract-memo.md) | hard | M | 15a, 01b | DESIGN MEMO — what the one-field by-reference mutator's Lean contract may say |
+| [`18b`](../bugs/plan/step-18b-frame-methods-restrict.md) | mid | M | 18a | make `_frame_methods` classify only the shapes whose contract is true |
+| [`18c`](../bugs/plan/step-18c-load-first-rule.md) | mid | M | 18b | constant propagation learns the load-first rule for a by-reference receiver |
+| [`18d`](../bugs/plan/step-18d-scaffold-writeback-contract.md) | mid | M | 18a, 18c, 01b | scaffold the write-back contract (depth bound as a hypothesis, per-exit obligation as `sorry`) |
+| [`19a`](../bugs/plan/step-19a-optional-unit-dylib.md) | mid | M | 15a | build an OPTIONAL runtime unit (sqlite3 first) as a loadable dylib for the formal link line |
+| [`19b`](../bugs/plan/step-19b-link-line-opt-in.md) | mid | M | 19a | the formal link line opts into the optional unit a word-shaped call names |
+| [`19c`](../bugs/plan/step-19c-sqlite-end-to-end.md) | easy | S | 19b | a real sqlite3 word-shaped call through a formal executable, and the census numbers |
+| [`20`](../bugs/plan/step-20-mlir-word-ops.md) | mid | S | 15a | close out the word-valued MLIR ops (the lowering landed; fix the 3 reds and the stale census) |
+| [`22`](../bugs/plan/step-22-singleton-causes.md) | mid | L | 15a, 16f, 17, 20 | the singleton direct causes — re-measure, then one verdict per row (LOOP STEP) |
+| [`23`](../bugs/plan/step-23-host-modules.md) | mid | S | 26 | host-module growth: the per-module round template and the ranked queue |
+| [`23a`](../bugs/plan/step-23a-os-process-identity.md) | mid | S | 26 | os process identity: getpid, getppid, getuid, getpgid, cpu_count |
+| [`23b`](../bugs/plan/step-23b-os-fs-metadata.md) | mid | M | 26 | os filesystem metadata: access + R_OK/W_OK/X_OK/F_OK, utime, symlink, link, mkfifo, umask |
+| [`23c`](../bugs/plan/step-23c-os-stat-times.md) | mid | M | 26 | os.path.getmtime/commonpath/sep and os.stat/lstat as per-field functions |
+| [`23d`](../bugs/plan/step-23d-os-fd-io.md) | mid | M | 26 | os file-descriptor I/O: close, read, write, fsync, ftruncate, dup2, pipe, O_*/SEEK_SET constants |
+| [`23e`](../bugs/plan/step-23e-os-process-and-refusals.md) | mid | S | 26, 23a | os signals/process-group wrappers and the documented NOT-PROVIDED table |
+| [`24`](../bugs/plan/step-24-x86-arch-drift.md) | easy | S | none | x86-64 arch drift is mostly ALREADY CLOSED: pin it and correct the doc |
+| [`25`](../bugs/plan/step-25-unrepresentable-types.md) | mid | S | none | `Error` stays unrepresentable: make the refusal true, pin it on both backends |
+| [`26`](../bugs/plan/step-26-host-exception-convention.md) | mid | M | none | one discoverable host-module failure convention (`hoststatus`) |
+| [`27a`](../bugs/plan/step-27a-eh-design-memo.md) | hard | M | 25 | EH runtime design memo (exception object storage, `as e`, superclass matching) |
+| [`27b`](../bugs/plan/step-27b-try-model-translation.md) | mid | M | 27a | `TryStmt` in the semantic model (`arm64_proof_gen.py`): the sound flat slice |
+| [`27c`](../bugs/plan/step-27c-landing-pad-tables.md) | mid | M | 27a | landing-pad / personality data structures (pure Python table + test, NO codegen change) |
+| [`28`](../bugs/plan/step-28-absval-frame-peel.md) | mid | M | 00a | `absval` frame-peel `K` — verify the same-day fix, pin it with a Lean-free test, then close or localise |
 
-**13 step files:** 1 easy, 12 mid, 0 hard. (Generated by `python3 tools/plan_index.py --write`; do not edit by hand.)
+**73 step files:** 12 easy, 53 mid, 8 hard. (Generated by `python3 tools/plan_index.py --write`; do not edit by hand.)
 
 <!-- END generated by tools/plan_index.py -->
 
-**Waves** (what can run in parallel; recomputed by hand when the index changes):
-see the "Waves" section at the end of this file.
+**Waves**: see the section at the end of this file.
 
 ---
 
@@ -268,10 +339,9 @@ python3 tools/formal_doc_index.py --check         # the queue stays current
 python3 tools/dangling_doc_refs.py --ratchet      # no new dangling citations
 ```
 
-Run each under `python3 tools/memslot.py --gb 8 --label t --` where the doc says
-the build is memory-heavy (`FORMAL_absval_proof_does_not_check.md` is explicit
-that a first pass over the 31 declared gaps belongs to whoever can run the
-corpus).
+Run each under `python3 tools/memslot.py --gb 8 --label t --` where the build is
+memory-heavy (a first pass over many declared gaps may belong to whoever can
+run the corpus).
 
 **When a step closes a `FORMAL_*.md` entirely:** update that doc's top-of-file
 status, or delete it if the project's rule applies (`CLAUDE.md`: a fixed bug doc
@@ -289,3 +359,33 @@ is deleted, not kept with a history), and rewrite every citation. Re-run
   `target_has_feature`, the MLIR dialect attributes, the `_assembly.mojo`
   inline-asm module). Those are read as facts about the modules, not as work;
   the steps above say so where it matters (step-20, step-22).
+
+## Not in this plan: the bare `comptime <expr>` diagnostic
+
+The first draft's step 21 (give the bare spelling `comptime expr` the
+"unavailable in compiled mode" diagnostic, `FORMAL_known_limits.md` §7) is
+**left to the integrator**. It changes `mojo/backend_gimple/`, which CLAUDE.md
+puts behind a full `make gate`, so no worker in this plan owns it. The number 21
+is retired; the file is removed.
+
+## Waves
+
+Parallel groups, derived from the Depends column (recompute when the index
+changes; `tools/plan_index.py --check` rejects cycles). Everything in one wave
+can run at the same time on different workers.
+
+| wave | steps | note |
+|---|---|---|
+| 0 | `00a`, `00b`, `15a`, `03a`, `06a`, `08a`, `08b`, `14a`, `24`, `25`, `26` | no dependencies. `00a` unblocks all Lean work. |
+| 1 | `01a`, `28`, `09`, `07a`, `06b`, `14b`, `15b-e`, `16a`*, `16b`, `17`, `19a`, `20`, `23`, `23a-d`, `27a`* | `*` = hard (opus/sonnet). |
+| 2 | `01b`, `10`, `12a`, `06c`*, `07b`*, `08c`*, `14c`, `14d`, `16c-e`, `18a`*, `19b`, `23e`, `27b`, `27c` | |
+| 3 | `02`, `04a`, `04d`, `11a`, `13a`, `13b`, `12b`*, `18b`, `19c`, `14e`, `16f` | |
+| 4 | `03b`, `03c`, `04b`, `11b`, `11c`, `13c`*, `18c`, `22` | |
+| 5 | `03d`, `04c`, `18d` | |
+| 6 | `05a`, `05b` | peephole rules register only the theorems proved by then |
+
+**Iceman-suitable** (`easy` + `mid`, no open design question): everything not
+marked hard. **Hard (memo or deep Lean):** `06c`, `07b`, `08c`, `12b`, `13c`,
+`16a`, `18a`, `27a`. Each hard step's output is a committed decision that
+unblocks mid steps; none of them is on the critical path of the peephole
+work (`00a → 01 → 02 → 03/04 → 05`), which is entirely iceman-class.
