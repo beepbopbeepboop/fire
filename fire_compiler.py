@@ -143,33 +143,6 @@ def _signed_int64_c_literal(value: int) -> str:
         return '(-0x7FFFFFFFFFFFFFFFLL - 1)'
     return f'{value}LL'
 
-def _float_c_literal(value: float) -> str:
-    """The C spelling of `value`, denoting the same `double`.
-
-    `repr()` is an exact round-trip for finite values, but its spellings of
-    the non-finite ones are PYTHON names: `repr(float('inf'))` is `'inf'`,
-    and emitting that into generated C made gcc report "'inf' undeclared"
-    (a float literal that overflows, e.g. `999e9000`, parses to exactly
-    that value). Every generated C file includes `<math.h>`, which spells
-    them `INFINITY`/`-INFINITY`/`NAN`; the casts make the expression a
-    `double` rather than a `float` constant in every context it lands in.
-
-    This is the ONE spelling of a float literal for the C/GIMPLE backends —
-    `_lower_FloatLiteral`, the call-default padding and the C++ fallback all
-    go through it, so a non-finite value cannot be right in one and invalid
-    C in another.
-    """
-    s = repr(value)
-    if s == 'inf':
-        return '(double)INFINITY'
-    if s == '-inf':
-        return '(double)(-INFINITY)'
-    if s == 'nan':
-        return '(double)NAN'
-    if '.' not in s and 'e' not in s.lower():
-        s += '.0'
-    return s
-
 def _parse_int_literal(text: str) -> int:
     """Parse an INT token's source text (decimal / 0x / 0o / 0b, underscores
     allowed) into its signed 64-bit value, WITHOUT `int(text, 0)`.
@@ -1627,7 +1600,7 @@ def format_token(tok: Token) -> str:
 
 # ── Layout helpers ──────────────────────────────────────────────────
 def _strip_inline_comment(s: str) -> str:
-    """Remove trailing # comment, respecting quoted strings (including backtick strings and f/r/b prefixes)."""
+    """Remove trailing # or // comment, respecting quoted strings (including backtick strings and f/r/b prefixes)."""
     in_str = None
     i = 0
     while i < len(s):
@@ -1641,6 +1614,8 @@ def _strip_inline_comment(s: str) -> str:
             # f"..." prefix: already entered via the quote char above
             in_str = c
         elif c == _CMT_CHAR:
+            return s[:i]
+        elif c == '/' and i + 1 < len(s) and s[i + 1] == '/':
             return s[:i]
         i += 1
     return s
@@ -2346,7 +2321,7 @@ def py_tokenize(src: str) -> list[Token]:
     """Tokenize with layout rules derived from the .md spec:
         - Indentation (4 spaces) → INDENT/DEDENT
         - ';' → statement separator
-        - '#' → end-of-line comment
+        - '#' or '//' → end-of-line comment
         - Multi-line statements use indentation (no backslash continuation)
 
     The one-argument entry point, and the one every caller but two uses. It
@@ -2426,6 +2401,10 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                 # reaching here means we're in plain code. Comments can
                 # contain stray quote characters (e.g. `# say "hi"`) that
                 # must not be mistaken for string delimiters.
+                j = src.find('\n', i)
+                i = n if j == -1 else j
+                continue
+            if c == '/' and i + 1 < n and src[i + 1] == '/':
                 j = src.find('\n', i)
                 i = n if j == -1 else j
                 continue
@@ -2664,7 +2643,7 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
         physical_line = line_nums[line_idx]
         expanded = _indent_expanded(line)
         raw_content = expanded.lstrip()
-        if not raw_content or raw_content.startswith(_CMT_CHAR): continue
+        if not raw_content or raw_content.startswith(_CMT_CHAR) or raw_content.startswith('//'): continue
         content = _strip_inline_comment(raw_content).rstrip()
         if not content: continue
         indent = len(expanded) - len(raw_content)
@@ -4619,11 +4598,6 @@ class Parser:
             # body references" — 42 occurrences in the stdlib, so it is a form
             # with its own meaning and not a typo for a missing name).
             conv = None
-            moved_bare = False
-            # Allow leading `^` in capture lists
-            if self._peek().kind == "OP" and self._peek().value == "^":
-                self._advance()
-                moved_bare = True
             # A KW from the convention set at the START of an entry is always a
             # prefix, never the captured name — the same disambiguation the
             # parameter loop uses (KW followed by COLON/ASSIGN is a name), with
@@ -4636,14 +4610,6 @@ class Parser:
                    and self._peek().value in self._CONV_KWS
                    and self._peek(1).kind not in ("COLON", "ASSIGN")):
                 conv = _as_str(self._advance().value)
-                if self._peek().kind == "OP" and self._peek().value == "^":
-                    self._advance()
-                    moved_bare = True
-                    break
-            moved_bare = False
-            if self._peek().kind == "OP" and self._peek().value == "^":
-                self._advance()
-                moved_bare = True
             if self._peek().kind in ("COMMA", "RBRACE"):
                 # `{mut}` / `{var}` — a convention with NO name: "capture
                 # whatever this body references, under this convention" (42
@@ -4652,13 +4618,8 @@ class Parser:
                 # that happens to be called `mut`, and so the consumer can
                 # tell "infer the names, this is the convention" from an
                 # ordinary named capture.
-                _cc = _as_str(_canon_conv(conv)) if conv is not None else None
-                if _cc is None and moved_bare:
-                    _cc = 'owned'
-                elif moved_bare and _cc is not None:
-                    # moved bare convention: treat as owned/move
-                    _cc = 'owned'
-                out.append((None, _cc))
+                out.append((None, _as_str(_canon_conv(conv))
+                            if conv is not None else None))
                 self._skip_newlines()
                 if self._peek().kind == "COMMA":
                     self._advance(); self._skip_newlines()
