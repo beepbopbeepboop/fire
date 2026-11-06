@@ -529,6 +529,14 @@ def test_used_idents_covers_new_syntax():
           free('def f(s):\n    match s:\n        case [x, y]:\n            return x + a\n'
                '        case _:\n            return 0\n') == {'s', 'a'},
           "sequence-pattern elements bind")
+    check("match_seq_pattern_binds_star",
+          free('def f(s):\n    match s:\n        case [x, *rest]:\n            return x + a\n'
+               '        case _:\n            return 0\n') == {'s', 'a'},
+          "sequence-pattern starred element binds")
+    check("match_tuple_pattern_binds",
+          free('def f(s):\n    match s:\n        case (x, y):\n            return x + a\n'
+               '        case _:\n            return 0\n') == {'s', 'a'},
+          "tuple-pattern elements bind")
     check("match_dict_pattern_binds",
           free('def f(s):\n    match s:\n        case {"k": z}:\n            return z + a\n'
                '        case _:\n            return 0\n') == {'s', 'a'},

@@ -74,7 +74,6 @@ class CodegenError(Exception):
 # other fails at the first pattern that carries it.
 MATCH_REFUSED_KINDS = (
     "or-pattern",
-    "sequence pattern",
     "mapping pattern",
     "class pattern",
     # `case C():` is refused by the FORMAL path, which has no isinstance in its
@@ -144,7 +143,7 @@ def match_pattern_kind(pattern, bound=frozenset()) -> str:
                 return "value"  # Try to treat as value comparison
         except Exception:
             pass
-        return "sequence pattern"
+        return "value"
     if isinstance(pattern, F.DictExpr):
         return "mapping pattern"
     if isinstance(pattern, F.CallExpr):

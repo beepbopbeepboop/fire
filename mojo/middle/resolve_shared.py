@@ -1765,21 +1765,29 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
                     collect_assigned_types(node.finally_body)
             elif isinstance(node, gimple_ctypes.WithStmt):
                 collect_assigned_types(node.body)
-            elif isinstance(node, gimple_ctypes.ExprStmt) and isinstance(node.value, gimple_ctypes.WalrusExpr):
-                # `name := expr` used as a bare statement (e.g. `r :=
-                # ShapedRecipe()`) parses as an ExprStmt wrapping a
-                # WalrusExpr, NOT an AssignStmt -- unlike a walrus used
-                # inside a larger expression, this shape was invisible
-                # to this scan entirely, so a local first bound only via
-                # a statement-level `:=` (never a plain `=`) never got an
-                # inferred type here. See box.3d/game/bugs/DYLIB_struct_
-                # list_index_reads_first_field_only_wrong_craft_results.md.
-                vname = _as_str(node.value.name)
-                if vname not in inferred:
-                    inferred[vname] = []
-                inferred[vname].append(gen._quick_type(node.value.value))
-                if _is_confident_scalar(gen, node.value.value):
-                    confident_scalars.add(vname)
+            elif isinstance(node, gimple_ctypes.ExprStmt):
+                if isinstance(node.value, gimple_ctypes.WalrusExpr):
+                    # `name := expr` used as a bare statement (e.g. `r :=
+                    # ShapedRecipe()`) parses as an ExprStmt wrapping a
+                    # WalrusExpr, NOT an AssignStmt -- unlike a walrus used
+                    # inside a larger expression, this shape was invisible
+                    # to this scan entirely, so a local first bound only via
+                    # a statement-level `:=` (never a plain `=`) never got an
+                    # inferred type here. See box.3d/game/bugs/DYLIB_struct_
+                    # list_index_reads_first_field_only_wrong_craft_results.md.
+                    vname = _as_str(node.value.name)
+                    if vname not in inferred:
+                        inferred[vname] = []
+                    inferred[vname].append(gen._quick_type(node.value.value))
+                    if _is_confident_scalar(gen, node.value.value):
+                        confident_scalars.add(vname)
+                elif isinstance(node.value, gimple_ctypes.BinaryOp) and getattr(node.value, 'op', None) == ':=' and isinstance(node.value.left, gimple_ctypes.IdentExpr):
+                    vname = _as_str(node.value.left.name)
+                    if vname not in inferred:
+                        inferred[vname] = []
+                    inferred[vname].append(gen._quick_type(node.value.right))
+                    if _is_confident_scalar(gen, node.value.right):
+                        confident_scalars.add(vname)
 
     try:
         collect_assigned_types(func.body)
