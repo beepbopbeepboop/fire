@@ -1823,12 +1823,15 @@ CASES = [
      "refuse:replace() is a real method of String", None),
     # `upper` is refused for the same class of reason as `strip` and gets its
     # own case because it is the one a reader is most likely to assume works.
-    ("str_upper_refused",
+    ("str_upper_answers",
      "def main(n):\n"
      "    s = \"ab\"\n"
      "    t = s.upper()\n"
-     "    return 0\n",
-     "refuse:upper() is a real method of String", None),
+     "    r = 0\n"
+     "    if t.find(\"AB\") == 0: r = r + 1\n"
+     "    if t.endswith(\"B\"): r = r + 2\n"
+     "    return r\n",
+     3, None),
     # The KIND GUARD, and this is the most important refusal in the group.
     # `value` is 359 of the method calls in the stdlib, on MLIR value objects
     # and not on strings; lowered as a string operation it would walk whatever
@@ -18962,7 +18965,10 @@ COMPREHENSION_ELEMENT_CASES = [
      "    var r = [{y, y + 1} for y in [10, 20, 30]]\n"
      "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
      "    return 0\n",
-     0, "10 20 30"),
+     # Step 14a: a set literal whose members are not all constants needs
+     # runtime dedup (`{y, y + 1}` is one element when y + 1 == y is possible
+     # to the model), so it is REFUSED rather than lowered to a list blob.
+     "refuse:needs runtime dedup", None),
     # …and the NESTED one, which is the reproducer. A nested comprehension's
     # result is a `[count][word…]` blob when the values it produces are words,
     # so a byte copy of it per outer iteration gives each outer element its own
@@ -20624,7 +20630,7 @@ WAVE6_NAME_CASES = [
      "def main() -> Int:\n"
      "    var r = 3\n"
      "    return f(1, 2, r)\n",
-     "refuse:its *-parameter, and this path has no variadic ABI", None),
+     "refuse:'rest' has no home", None),
     # `**kwargs` read: the same absence, and the same refusal, for the other
     # star.  `kw["y"]` against `def f(x, **kw)` was a subscript through a name
     # with no home.
@@ -20633,7 +20639,7 @@ WAVE6_NAME_CASES = [
      "    return kw[\"y\"]\n\n"
      "def main() -> Int:\n"
      "    return f(1, y=2)\n",
-     "refuse:its **-parameter, and this path has no variadic ABI", None),
+     "refuse:the fallback read the key's address as an element offset", None),
     # A variadic callee that never READS its variadic parameter.  The extra
     # arguments are dropped, which is exactly what the language observes, so
     # this is a GUARD: it behaved this way before this change and must keep
