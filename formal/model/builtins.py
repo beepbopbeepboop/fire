@@ -4928,6 +4928,8 @@ def _kind_of_call(callee: str, kind_int_call) -> str | None:
     builtins whose result this model fixes are decided here."""
     if callee == "len":
         return INT_KIND      # a blob's count field; len of a string is refused
+    if callee == "ord":
+        return INT_KIND
     tkind = type_constructor_kind(callee)
     if tkind is not None:
         what = tkind[0]

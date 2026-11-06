@@ -49,3 +49,13 @@ No code change this round; blocker remains async/coroutine codegen (cpp_async.py
 
 ## Repro (next step, 2026-11-05, this session)
 `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py` did not reach the contextlib gate: the build looped recompiling imported stdlib modules (`list index out of range` on `abc.py`, `frame attribute f_locals` on `_collections_abc.py`) under Python 3.15.2 and was killed after ~180s. No contextlib-specific refusal line was observed. Blocker unchanged: async/coroutine codegen (cpp_async.py eligibility: `__aenter__` non-scalar return + `*args`/`**kwargs` in coroutine frame).
+
+## Repro (next step, 2026-11-05, this session)
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py` did not reach the contextlib gate: the build looped recompiling imported stdlib modules (`list index out of range` on `abc.py`, `frame attribute f_locals` on `_collections_abc.py`) under Python 3.15.2 and was killed after ~180s. No contextlib-specific refusal line was observed. Blocker unchanged: async/coroutine codegen (cpp_async.py eligibility: `__aenter__` non-scalar return + `*args`/`**kwargs` in coroutine frame).
+
+## Repro (next step, 2026-11-05, this session)
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py` exits 1 (~367s); refusal verbatim unchanged:
+```
+cannot compile module: function(s) __aexit__, __aexit__, _exit_wrapper, inner (async function(s), declared `async def`) — this codegen compiles every function into a single straight-line C function and has no suspend/resume state-machine transform for generators, nor an event loop / suspend/resume codegen for async functions, yet, so these cannot be represented as compiled C without emitting silently wrong or broken code; falling back to interpreting this module from source instead
+```
+Unblocked build reaching the contextlib gate by removing stale `_module_stmts[module_name] = stmts` store in emit_resolve.py (AST lifetime fix had dropped the attribute). Blocker unchanged: async/coroutine codegen (cpp_async.py eligibility: `__aenter__` non-scalar return + `*args`/`**kwargs` in coroutine frame).

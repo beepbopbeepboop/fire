@@ -1,5 +1,15 @@
 # FORMAL_string_value_model: what a string IS on the formal path, and the two things that want to be one
 
+> **PLANNED — this document's open work is decomposed into `bugs/plan/step-*.md`,
+> and the design plus ordering live in `doc/finish-formal.md`.** The steps that
+> own parts of this document: **step-10** (the `String` frame-vs-`char *`
+> collision), **step-11a…c** (the runtime string buffer), **step-12a…b** (a `strlen`
+> in the proof model), **step-13a…c** (Unicode `s[i]`/`%<w>s`). Read the
+> measurements here first; the step files are the work orders.
+
+**2026-11-05 (step-11a):** runtime string buffer via libc `strdup` (never freed), process lifetime for computed strings; `upper()`/`lower()` lowered on non-literal receivers when the image has no non-ASCII literals (ASCII-only; toupper/tolower). NUL obligation recorded in `STRING_BUFFER_NUL_OBLIGATION` (chr(0)/replace-to-NUL refuse).  
+**2026-11-05 (step-11b):** `strip()`/`rstrip()` lowered on the runtime buffer (both/backends), whitespace set `STRIP_CHARS`, ASCII-only image rule shared with case methods. Remaining: step-11c `chr()` fold and other case variants/replacements.
+
 **Status:** the representation question is DECIDED and the decision is landed.
 The string stays a bare `char *`; the length and the content equality are
 recovered as *computations* over that one word rather than as fields, and the
@@ -19,8 +29,7 @@ a different hook rather than a smaller version of the same one). What
 is still NOT fixed, and is the larger thing, is the collision between that
 representation and the stdlib's own `String` struct — which is what all 16 of
 the "a String receiver is returned/passed" refusals in the stdlib sweep actually
-are, and which is not a string-value-model problem at all. Two regressions that
-arrived from outside this work, with a merge, are at the bottom. **`not <string>`
+are, and which is not a string-value-model problem at all. **2026-11-05 (step-10):** zero-argument `String()` bound to a local used as a receiver (`a.f`) is now treated as a framed struct construction on both backends (node-marked in `formal/model`, wired through build pass and both emitters); the reproducer `var a = String(); a._len_or_data = 5; return a.size()` now exits 5 on both backends. A one-argument `String("x")` remains a TEXT conversion and still refuses via the construction-mismatch path. The control `var s = String(); printf("[%s]\n", s)` still prints `[]`. Remaining: the 16 stdlib files still hit a second refusal (unmeasured). Two regressions that arrived from outside this work, with a merge, are at the bottom. **`not <string>`
 — the one item this document left as "a choice rather than a limit" — landed
 2026-10-02 on `work/formal8-11` (see "Sites deliberately NOT routed" below), and
 the `%s` family that reached a non-text value through a one-field struct, through a
@@ -791,17 +800,8 @@ disagree, which is the `_emit_binop` / `_emit_branch_unless` lesson twice over.
   below gives. And the run-time BUFFER is still missing, so `s[i]` above and
   `upper`/`strip`/`join` below it are unchanged: none of them became easier
   because the model stopped lying about where a string is.
-- **The proving arm64 build cannot prove `len` or any string method.** Re-measured
-  2026-10-01, and re-measured again 2026-10-03: **the transcript quoted below
-  no longer reproduces, and for a better reason than a fix.** `len(s)` is now
-  refused at GENERATION time (`model: call to 'len' has no model in this image
-  (an extern, or a function this generator emits no '_go' for); refusing rather
-  than inventing its return value`) instead of emitting a theorem that is false,
-  so the build is red rather than green-and-wrong. The bullet's prescribed fix
-  (suppress the post-extern theorem on `_call_boundary`) was therefore not
-  needed for `len` — the `_call_go` refusal upstream of it already says what
-  this model cannot do — and the remaining text below is kept for the case that
-  is still live, an argument the model has no value for.
+- **The proving arm64 build cannot prove `len` or any string method.**  
+  **Status (2026-11-05, step 12a):** Re-measured on `def main(n: Int)->Int: var s="hello"; return len(s)`. The old claim "refused at GENERATION time" was FALSE on this tree; arm64 and x86-64 *generated* proofs containing `(strlen (UInt64.ofNat ...))` and `MojoExpr.call "strlen" [...]` with `lib/ProofLib.lean`'s constant-zero `strlen` (a fabricated value) and `post_extern_given_callee_returns` emitted for `strlen` — i.e. green-and-wrong. Step 12a fixes this: `len` of a string whose bytes/identity are known to the image (string literal, or a local assigned a string literal, or inverted via `str_addrs`) is folded to the numeral `(UInt64.ofNat N)` with `N = len(text)` in `_call_go`, `_expr_go`, and `_expr_ast`; `strlen` is suppressed from `post_extern_given_callee_returns` via `RESULT_BEARING_EXTERNS`; `len` of an unknown string raises `NotImplementedError("model: len(<name>) of a string whose bytes are not in this image...")` (no fabrication). The stub in `lib/ProofLib.lean` remains (step 12b). The earlier text below is historical; the remaining live case is an argument the model has no value for.
 
   What was there, and the `len_go` half of the original report is STALE — there
   is no `len_go` in `formal/arm64_proof_gen.py` any more and no `Unknown
@@ -849,6 +849,51 @@ disagree, which is the `_emit_binop` / `_emit_branch_unless` lesson twice over.
 - **`lib/ProofLib.lean` still carries two `sorry`s**, at `InImage` and
   `Semantics` (line ~4510). Pre-existing, and recorded here only so the next
   reader of the Lean side knows they are there.
+
+
+## Extern-result contract
+
+**Status (2026-11-05, step-12b memo):** design only, no code landed. This section is the contract that a follow-up step will implement.
+
+### 1) Measurement that fixes the current state
+The three commands (to be run as part of verification for step-12c) that print:
+1. The proof of `len(local)` from 12a (a program like `def main(n: Int) -> Int:\n    var s = "hello"\n    return len(s)`) — after 12a this is folded to `(UInt64.ofNat 5)` in the model/AST, with no `(strlen ...)` call and no `post_extern_given_callee_returns`.
+2. The halt-at-call theorem name — `extern_<sym>_step<idx>` (emitted at call sites) and the reachability/termination theorems; for a call that returns a value and is outside the image, the "post-extern given callee returns" theorem name is `*_post_extern_given_callee_returns` (see `formal/arm64_proof_gen.py:12260`).
+3. The absence of the post-extern theorem for `strlen` — when `RESULT_BEARING_EXTERNS` suppresses it (see below), that theorem is not emitted for `strlen` calls that are the program's answer.
+
+### 2) Decision (readings and recommendation)
+**(A) Recommended (axiom-free):** add an axiom-free `structure ExternContract` in `lib/Scaffold.lean` with
+- `pre`: registers/memory state at the `BL` (call site),
+- `post`: `x0 = f(args)`, all callee-saved registers and `SP` preserved, memory unchanged (calling convention / ABI contract).
+
+Instantiate for `strlen` with `f` = length of the NUL-terminated byte run at the argument address read from the **IMAGE's text** (a `Nat -> UInt8` memory plus a `cstring_at mem addr n` predicate). The post-extern theorem will be restated with `x0 = n` where `n` is the numeral from step 12a (character/byte count of the known string in the image). Its proof is `by sorry` in `lib/Scaffold.lean`, and a ledger row is added in `formal/proof_gaps.py::SCAFFOLD_HOLES` (following S1/S2 of `doc/finish-formal.md`).
+
+**(B) Rejected:** change `ProofLib.strlen` to take the image text. Rejected on cost (S4 repins: touching `lib/ProofLib.lean`/`lib/X86.lean` is expensive and requires repinning `test_formal_admitted.py` and caches).
+
+**Recommendation:** (A).
+
+### 3) Exact files/functions
+- `lib/Scaffold.lean` (new theorem names for the `strlen` extern contract; `by sorry`)
+- `formal/proof_gaps.py` (add ledger rows in `SCAFFOLD_HOLES`)
+- `formal/arm64_proof_gen.py` at the `RESULT_BEARING_EXTERNS` guard from 12a (generator branch that emits the restated theorem for `strlen` when its result is the program's answer / under the new contract)
+- `formal/x86_64_proof_gen.py` if/where it emits similar post-extern theorems (check parity)
+- Tests: `test_formal_call_proof_gen.py` (and possibly `test_formal_proof_gaps.py`)
+
+### 4) Statement-truth check
+- **ASCII literals / image strings:** `x0 = n` is true on the machine because `strlen` returns the length of the NUL-terminated byte sequence at the argument address; for ASCII text interned in `__TEXT,__text` (read-only image bytes, NUL-terminated), `strlen` of that pointer equals the character count `n` that step 12a folds to. This matches `formal/model/strings.py` TEXT ENCODING block (ASCII: `strlen == len()` in bytes/chars; non-ASCII cases are handled per that block's rules).
+- **Wave-9 folded non-ASCII case:** the same holds when the build/folding sees the text and the image contains the corresponding NUL-terminated bytes; the model must be consistent with `formal/model/strings.py` TEXT ENCODING.
+- **Not claimed for a run-time string:** no claim is made when the string comes from an extern call result, a computed string, a parameter whose bytes are not in the image, or any case where `n` is unknown — in those cases we refuse (invariant 3) rather than fabricating a value.
+
+### 5) Pins that will move and commands
+- `test_formal_proof_gaps.py` ledger must be updated (new `SCAFFOLD_HOLES` entries). `test_formal_admitted.py` `AXIOM_CLOSURE` moves only if `lib/Scaffold.lean` is counted by the census; follow S2/S4 of `doc/finish-formal.md`.
+- Verification commands (run under memslot as per S5):
+  ```
+  export PATH=/opt/homebrew/bin:$PATH
+  python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_call_proof_gen.py
+  python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_proof_gaps.py
+  python3 tools/memslot.py --gb 8 --label t -- python3 test_formal.py --backend arm64
+  python3 tools/memslot.py --gb 8 --label t -- python3 test_formal.py --backend x86_64
+  ```
 
 ## Two regressions that arrived from OUTSIDE this work, during this wave
 

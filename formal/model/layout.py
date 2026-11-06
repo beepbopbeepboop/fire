@@ -1,4 +1,5 @@
 from . import *
+import threading
 
 # ── Aggregate layout ──────────────────────────────────────────────────────
 #
@@ -148,6 +149,63 @@ def key_compare_is_structural(needle) -> bool:
     return static_key_elements(needle) is not None
 
 
+def set_literal_word_key(e):
+    """The 64-bit WORD a set-literal element is known to have at compile time,
+    as a hashable key, or None when this path cannot know it.
+
+    `CANONICAL_ELEM_TYPES` is the same statement one level up: an `IntLiteral`,
+    a `BoolLiteral` and a `StringLiteral` are the elements this path compares as
+    a raw word — a string literal is INTERNED BY CONTENT (`_str_intern`), so two
+    equal texts are one address and the word comparison is a content comparison.
+    That is why a key here is a key over the WORD rather than over the syntax.
+    """
+    if isinstance(e, F.IntLiteral):
+        return ("int", int(e.value))
+    if isinstance(e, F.BoolLiteral):
+        return ("bool", bool(e.value))
+    if isinstance(e, F.StringLiteral):
+        return ("str", F.decoded_literal(e))
+    return None
+
+
+def set_literal_distinct_elements(elements):
+    """A set literal's elements with compile-time-equal WORDS removed.
+
+    Returns `(kept, dropped)`: the element list with the duplicates of a word
+    already seen removed, and how many were removed. `(None, 0)` when ANY
+    element's word is not known here, which is the signal that this literal
+    cannot be deduplicated at compile time.
+    """
+    keys = [set_literal_word_key(e) for e in elements]
+    if any(k is None for k in keys):
+        return None, 0
+    seen = set()
+    kept = []
+    for e, k in zip(elements, keys):
+        if k in seen:
+            continue
+        seen.add(k)
+        kept.append(e)
+    return kept, len(elements) - len(kept)
+
+
+def set_runtime_element_refusal(spelled_elem, kind):
+    """A set literal element whose equality cannot be decided by a word scan."""
+    return (
+        f"{spelled_elem} is a set element whose equality is not a word "
+        f"comparison: a string that is not a literal may be a computed "
+        f"(non-interned) string, and a float's `==` is not bit equality "
+        f"(-0.0, nan). The word kind seen here is {kind!r}; this path "
+        f"refuses it rather than answering wrongly.")
+
+
+def set_runtime_element_refusal_in_comprehension(spelled_elem):
+    return (f"{spelled_elem} is a set literal in a comprehension element "
+            f"position that needs runtime dedup; this path refuses it rather "
+            f"than answering wrongly.")
+
+
+
 
 
 # ── A subscript with more than one index ──────────────────────────────────
@@ -258,7 +316,7 @@ MLIR_ATTR_ROOT = "__mlir_attr"
 # the TARGET where the property belongs to the OPERATION. Measured over the
 # stdlib (`../new-modular`), where that one sentence was false for a quarter of
 # the arithmetic operations:
-# 259 `__mlir_op` sites over 104 distinct operations in 49 files. Sorted by what
+# 259 `__mlir_op` sites (measured 2026-10-02; 238 on the 2026-11-05 checkout) over 104 distinct operations in 49 files. Sorted by what
 # each one DENOTES, not by what it is called:
 #
 #   * 14 operations / 76 sites denote NO VALUE at all — an effect. A store, a
@@ -405,7 +463,7 @@ MLIR_ELEMENTWISE_OPS = frozenset((
 # MEMBERSHIP IS MEASURED: these are the operations that, at EVERY site in the
 # stdlib corpus, carry such a bracket — `_type=`, `pred=`, `bin_op=`, `mask=`,
 # `weak=`, `intrin=`, a `variant` discriminant, or a `kgen.struct` index. 31
-# operations over 71 of the 259 sites. That is a property of the SOURCE SPELLING
+# operations over 71 of the 259 sites (measured 2026-10-02). That is a property of the SOURCE SPELLING
 # rather than of this path, which is what makes it safe to key on the name: the
 # same spelling appears at every site, so a reader can find the bracket.
 MLIR_TYPED_RESULT_OPS = frozenset((
@@ -2988,6 +3046,15 @@ BARE_C_RETURN_KINDS = {
     "fflush": (32, True),
     "flock": (32, True),
     "getpid": (32, True),
+    "getpgid": (32, True),        # pid_t is int
+    "getppid": (32, True),        # pid_t is int
+    "getuid": (32, False),        # uid_t is unsigned int: zero-extend, never sign-extend
+    "link": (32, True),
+    "killpg": (32, True),
+    "setsid": (32, True),         # pid_t is int
+    "mkfifo": (32, True),
+    "symlink": (32, True),
+    "umask": (16, False),         # mode_t is __uint16_t on Darwin
     "kill": (32, True),
     "memcmp": (32, True),
     "mkdir": (32, True),
@@ -3023,6 +3090,7 @@ BARE_C_RETURN_KINDS = {
     # ── 64-bit integers and sizes: the whole register is the answer. The
     # `clock_gettime_nsec_np` row is the one that says why this group exists.
     "clock_gettime_nsec_np": EXTERN_RETURN_WORD,
+    "sysconf": EXTERN_RETURN_WORD,   # long
     "fread": EXTERN_RETURN_WORD,
     "fwrite": EXTERN_RETURN_WORD,
     "lseek": EXTERN_RETURN_WORD,

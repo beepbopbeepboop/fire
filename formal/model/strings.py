@@ -382,6 +382,38 @@ def codepoint_refusal(construct: str, spelled: str) -> str:
         f"`strstr` offset and a `%s` width mean what Python means by them")
 
 
+def buffer_case_refusal(dotted: str) -> str:
+    """Why buffer methods cannot be lowered on a non-ASCII image."""
+    examples = _non_ascii_examples(non_ascii_strings())
+    if examples:
+        return (
+            f"{dotted}() is refused: this image holds a non-ASCII string "
+            f"literal ({examples}) and this path only change/strip ASCII "
+            f"letters/whitespace, where CPython changes every cased character "
+            f"and strips Unicode whitespace"
+        )
+    return (
+        f"{dotted}() is refused: this image holds a non-ASCII string "
+        f"literal and this path only change/strip ASCII letters/whitespace, "
+        f"where CPython changes every cased character and strips Unicode "
+        f"whitespace"
+    )
+
+
+# ── THE RUNTIME STRING BUFFER (step 11a) ──────────────────────────────────
+STRING_BUFFER_ALLOCATOR = "strdup"
+STRING_BUFFER_NUL_OBLIGATION = (
+    "The NUL ends a string; producers must emit NUL-free bytes. "
+    "`chr(0)` and `replace(..., \"\\0\")` produce NUL bytes and must refuse."
+)
+STRING_BUFFER_LIFETIME = "program"
+
+
+def string_buffer_methods() -> tuple:
+    """Methods lowered onto the runtime string buffer (strdup)."""
+    return ("upper", "lower", "strip", "rstrip")
+
+
 
 
 # ── `ord` / `chr` / `hash`: a character as a NUMBER, and back ───────────────
@@ -451,6 +483,34 @@ def ord_fold(args: list):
     return ord(text)
 
 
+def chr_fold(args: list):
+    """The one-character string for `chr(k)` when the build knows it, else None.
+
+    `k` must be a compile-time INTEGER LITERAL with `1 <= k <= 127`. `chr(0)`
+    and `chr(>= 128)` are refused by `text_builtin_refusal`. A fold produces an
+    interned ASCII literal (no heap buffer required).
+    """
+    if len(args) != 1:
+        return None
+    a = args[0]
+    if isinstance(a, F.UnaryOp) and getattr(a, "op", None) == "-":
+        inner = getattr(a, "operand", None)
+        if isinstance(inner, F.IntLiteral):
+            return None
+        return None
+    if isinstance(a, F.UnaryOp) and getattr(a, "op", None) == "+":
+        a = getattr(a, "operand", None)
+    if isinstance(a, F.IntLiteral):
+        try:
+            k = int(getattr(a, "value"))
+        except Exception:
+            return None
+        if k < 1 or k > 127:
+            return None
+        return chr(k)
+    return None
+
+
 def text_builtin_refusal(name: str, args: list) -> str:
     """Why `name(...)` is refused here, with the reason that is specific to it.
 
@@ -493,19 +553,15 @@ def text_builtin_refusal(name: str, args: list) -> str:
             f"and the arithmetic is written out")
     if name == "chr":
         return (
-            f"chr({shown}) is refused: its answer is a NEW one-character "
-            f"`String`, and a string on this path is a bare `char *` to bytes "
-            f"in the image's own text section — which is mapped read+execute "
-            f"and interned BY CONTENT, so there is nowhere to put one and "
-            f"nothing to intern it into. `ord`, the other direction, is folded, "
-            f"and the asymmetry is the representation rather than the effort: a "
-            f"number is one word and a character is an object. This is the same "
-            f"missing buffer `upper()`/`join()`/`replace()` are refused for "
-            f"(`LENGTH_DEPENDENT_METHODS`), reached from the other side. What "
-            f"this path CAN do: build the character from its code point as "
-            f"bytes the program already has — `String([n as UInt8])` over a "
-            f"list you built — for a character below 128, where one byte is "
-            f"the whole of it")
+            f"chr({shown}) is refused: a run-time or non-ASCII code point has "
+            f"no representation: the result would break the rule that an "
+            f"all-ASCII image holds only ASCII strings (and chr(0) the NUL "
+            f"rule). Its answer would be a NEW one-character `String` with "
+            f"nowhere to put one in the image model after 11a, and this is the "
+            f"same class as `upper()`/`join()`/`replace()` (`LENGTH_DEPENDENT_METHODS`). "
+            f"What this path CAN do: `chr` of a compile-time integer literal "
+            f"in 1..127 folds to that ASCII character; for others use bytes "
+            f"the program already has")
     if name == "hash":
         return (
             f"hash({shown}) is refused, and the reason is not a gap: "
@@ -2035,6 +2091,71 @@ def printf_text_width_refusal(callee: str, fmt_text, args: list,
             f"the `%{width}s` conversion in {callee}'s format string",
             spelled(args[operand]))
     return None
+
+
+def printf_fold_text_widths(callee: str, fmt_text, args: list,
+                            text_of_arg):
+    """Fold width/precision on `%s` of known non-ASCII text to a plain `%s`."""
+    if text_of_arg is None or callee not in PRINTF_TEXT_CONVERSIONS_CALLEES:
+        return None
+    if not isinstance(fmt_text, str):
+        return None
+    specs = _printf_specs(fmt_text)
+    if specs is None:
+        return None
+    # Find which operands to fold and what the replacement strings are
+    fold_info = {}  # operand -> replacement_string_R
+    arg = 0
+    for s in specs:
+        operand = arg + s["stars"]
+        arg = operand + 1
+        if s["conv"] != "s":
+            continue
+        width = s["quant"]
+        if width is None or width == "*" or operand >= len(args):
+            continue
+        text = text_of_arg(args[operand])
+        if text is None or text_is_ascii(text):
+            continue
+        try:
+            R = ("%" + width + "s") % text
+        except Exception:
+            continue
+        fold_info[operand] = R
+    if not fold_info:
+        return None
+    # Build new format by replacing folded specs with %s, keeping everything else
+    new_fmt_parts = []
+    pos = 0
+    arg = 0
+    for s in specs:
+        operand = arg + s["stars"]
+        arg = operand + 1
+        new_fmt_parts.append(fmt_text[pos:s["start"]])
+        if operand in fold_info:
+            new_fmt_parts.append("%s")
+        else:
+            new_fmt_parts.append(s["text"])
+        pos = s["end"]
+    new_fmt_parts.append(fmt_text[pos:])
+    new_fmt = "".join(new_fmt_parts)
+    # Build new args list
+    new_args = list(args)
+    try:
+        import fire_compiler as F
+    except Exception:
+        F = None
+    for operand, R in fold_info.items():
+        try:
+            if F is not None:
+                new_args[operand] = F.StringLiteral(R)
+            else:
+                # fallback
+                import fire_compiler as _F
+                new_args[operand] = _F.StringLiteral(R)
+        except Exception:
+            pass
+    return (new_fmt, new_args)
 
 
 def printf_text_conversion_refusal(callee: str, fmt_text, args: list,

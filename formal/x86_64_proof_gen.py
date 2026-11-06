@@ -380,7 +380,7 @@ def _compile_correct_section(func_name: str, arity: int = 1) -> str:
         f"      ({func_name}_exec_seq s {func_name}_code {func_name}_offset steps).isSome) :\n"
         f"  ∀ steps : Nat,\n"
         f"    match {func_name}_exec_seq s {func_name}_code {func_name}_offset steps with\n"
-        f"    | some s' => s'.rax = evalExpr {_handler} e env\n"
+        f"    | some s' => s'.rax = evalExpr {_handler} noCall2 e env\n"
         f"    | none => False := by\n"
         f"  sorry\n")
 

@@ -263,15 +263,16 @@ def unrepresentable_type_ctor_refusal(callee_name: str) -> str:
     if callee_name in NARROW_FLOAT_TYPE_NAMES:
         return narrow_float_ctor_refusal(callee_name)
     return (
-        f"constructing {callee_name} has no representation on this path: this "
-        f"image has no declaration of {callee_name} to construct — it is not a "
-        f"struct in this module or in anything it imports, so there is no field "
-        f"list to bring up, and a formal value is one 64-bit word. A name that "
-        f"IS declared as a struct here is decided by `_emit_struct_constructor` "
-        f"instead, which asks the struct: a one-field struct is a plain word and "
-        f"constructs. (Emitting a call to a symbol named {callee_name!r} that "
-        f"nothing defines is not the alternative — that built and then failed "
-        f"to load.)")
+        f"constructing {callee_name} has no representation on this path: "
+        f"{callee_name} is a real type this path has no representation for "
+        f"at all — this image has no declaration of {callee_name} to construct "
+        f"— it is not a struct in this module or in anything it imports, so "
+        f"there is no field list to bring up, and a formal value is one 64-bit "
+        f"word. A name that IS declared as a struct here is decided by "
+        f"`_emit_struct_constructor` instead, which asks the struct: a one-field "
+        f"struct is a plain word and constructs. (Emitting a call to a symbol "
+        f"named {callee_name!r} that nothing defines is not the alternative — "
+        f"that built and then failed to load.)")
 
 
 def narrow_float_ctor_refusal(callee_name: str) -> str:
@@ -1056,8 +1057,17 @@ def dtype_member_refusal(spelled: str, member: str) -> str:
             f"value and always works")
 
 
+def call_is_string_frame_reading(call) -> bool:
+    try:
+        return bool(getattr(call, "_string_frame_reading", False))
+    except Exception:
+        return False
+
+
 def call_lowers_as_framed_construction(callee: str, structs: dict, nargs: int,
-                                       functions=()) -> bool:
+                                       functions=(), call=None) -> bool:
+    if call is not None and call_is_string_frame_reading(call):
+        return True
     """Whether a call to `callee` reaches `_emit_struct_constructor` on EITHER
     backend.
 
@@ -3799,6 +3809,44 @@ _CONTAINER_BUILDING_NODES = (
     F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr, F.Comprehension,
     F.SliceExpr, F.CallExpr,
 )
+
+
+def template_attribute_read_ambiguous(template: str, attr: str,
+                                      instantiations) -> str:
+    """The diagnostic for `{template}.{attr}` where the consumer applies that
+    template at MORE THAN ONE instantiation.
+
+    A class-level value belongs to an INSTANTIATION and not to the template —
+    `comptime length = len(Self.values)` is `4` in the instantiation of
+    `[1, 2, 3, 4]` and `1` in the instantiation of `[9]`, and the two are two
+    separate declarations under two mangled names
+    (`formal/monomorph.py::instantiate_all`). So a read spelled through the
+    template's own name names a value only when the program says which
+    instantiation it means, and `formal/monomorph.py::rewrite_instantiation_uses`
+    answers it exactly when this unit applies the template once. At two or more
+    there is nothing to answer with, and the two ways of proceeding are both
+    wrong: the template's own unsubstituted alias is a number no instantiation
+    stands behind, and the first instantiation built is an order the source does
+    not state.
+
+    Named, not counted, because the repair is a spelling rather than a number:
+    the value is reachable through an INSTANCE (`d.{attr}`) or through the
+    mangled name of the instantiation meant, and the reader can see which
+    instantiations this file has. the general shape (recorded in `bugs/plan/step-15a-monomorph-baseline.md`)
+    a type argument in a NON-CALL position is not a
+    demand — and this is the one spelling of it where the consumer supplies the
+    argument somewhere else in the file and here supplies none."""
+    shown = ", ".join(instantiations[:3])
+    more = "" if len(instantiations) <= 3 else ", …"
+    return (f"{template}.{attr} reads a `comptime` class attribute of "
+            f"{template}, and a class attribute belongs to an INSTANTIATION, "
+            f"not to the generic template — this file "
+            f"applies {template} at {len(instantiations)} of them ({shown}"
+            f"{more}), each with its own value for `{attr}`, so the read names "
+            f"none of them in particular. Reading it through an instance "
+            f"(`d.{attr}`) names one; reading it through one instantiation's own "
+            f"name does too. Guessing the first one built would answer with a "
+            f"number the source never wrote")
 
 
 def _expr_builds_a_container(e) -> bool:

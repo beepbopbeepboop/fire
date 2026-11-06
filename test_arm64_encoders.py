@@ -463,6 +463,17 @@ def cases():
     for imm8 in (0, 1, 60, 255):
         c.append((f"svc #{imm8}", A.encode_svc(imm8)))
     c.append(("ret", A.encode_ret()))
+    # ── CCMP ────────────────────────────────────────────────────────────
+    conds = ("eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
+             "hi", "ls", "ge", "lt", "gt", "le")
+    for cond in conds:
+        for (xn, xm, nzcv) in ((1, 2, 4), (30, 31, 15), (0, 0, 0), (5, 31, 8)):
+            xm_text = "xzr" if xm == 31 else f"x{xm}"
+            c.append((f"ccmp x{xn}, {xm_text}, #{nzcv}, {cond}",
+                      A.encode_ccmp_xn_xm(xn, xm, nzcv, cond)))
+        for (xn, imm5, nzcv) in ((1, 5, 0), (30, 31, 15), (0, 0, 2), (7, 16, 9)):
+            c.append((f"ccmp x{xn}, #{imm5}, #{nzcv}, {cond}",
+                      A.encode_ccmp_xn_imm5(xn, imm5, nzcv, cond)))
     return c
 
 
@@ -589,6 +600,66 @@ def test_range_is_enforced():
     except AssertionError:
         return
     raise TestFailure("encode_b_cond accepted an offset past its imm19 range")
+
+
+def test_ccmp_range_is_enforced():
+    """CCMP rejects out of range immediates and nzcv."""
+    try:
+        A.encode_ccmp_xn_imm5(1, 32, 0, "eq")
+    except AssertionError:
+        pass
+    else:
+        raise TestFailure("encode_ccmp_xn_imm5 accepted imm5==32")
+    try:
+        A.encode_ccmp_xn_xm(1, 2, 16, "eq")
+    except AssertionError:
+        return
+    raise TestFailure("encode_ccmp_xn_xm accepted nzcv==16")
+
+
+def test_ccmp_false_nzcv_makes_condition_false():
+    """_ccmp_false_nzcv returns nzcv such that the condition is false."""
+    conds = ("eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
+             "hi", "ls", "ge", "lt", "gt", "le")
+    for cond in conds:
+        nzcv = A._ccmp_false_nzcv(cond)
+        assert 0 <= nzcv <= 15
+        N = ((nzcv >> 3) & 1)
+        Z = ((nzcv >> 2) & 1)
+        C = ((nzcv >> 1) & 1)
+        V = (nzcv & 1)
+        # Evaluate condition
+        def cond_true(c, N, Z, C, V):
+            if c == "eq":
+                return Z == 1
+            if c == "ne":
+                return Z == 0
+            if c == "cs" or c == "hs":
+                return C == 1
+            if c == "cc" or c == "lo":
+                return C == 0
+            if c == "mi":
+                return N == 1
+            if c == "pl":
+                return N == 0
+            if c == "vs":
+                return V == 1
+            if c == "vc":
+                return V == 0
+            if c == "hi":
+                return (C == 1) and (Z == 0)
+            if c == "ls":
+                return (C == 0) or (Z == 1)
+            if c == "ge":
+                return N == V
+            if c == "lt":
+                return N != V
+            if c == "gt":
+                return (Z == 0) and (N == V)
+            if c == "le":
+                return (Z == 1) or (N != V)
+            raise AssertionError(c)
+        assert cond_true(cond, N, Z, C, V) is False, (cond, nzcv)
 
 
 def test_a_base_mnemonic_is_either_wired_or_named():
@@ -769,13 +840,18 @@ def test_a_reference_from_something_that_cannot_emit_is_not_a_caller():
     # property of the FUNCTION rather than of the two names above, so a third
     # proof-layer reference cannot slip in unnoticed.
     check(set(audit.lowering_files()) and
-          all(os.path.basename(p) in ("arm64_codegen.py", "arm64.py")
+          all(os.path.basename(p) in ("arm64_codegen.py", "arm64.py",
+                                      "macho_linker.py")
               for p in audit.lowering_files()),
           f"the files the survey treats as lowerings are {audit.lowering_files()}"
           f", which is not the set this test was written against: a file that "
           f"renders Lean about instructions must not be one of them, or "
           f"`cmn` and `tst` are covered by a reference that cannot emit an "
           f"instruction again")
+    unwired_now = set(audit.unwired_encoders())
+    check("encode_br_xn" not in unwired_now,
+          f"encode_br_xn is emitted by the Mach-O linker stub and must not "
+          f"be reported as unwired; current unwired: {sorted(unwired_now)}")
     arm64_py = open(os.path.join(HERE, "formal", "arm64.py")).read()
     # The CODE of `arm64.py`, by the tool's own rule: prose and `def` lines
     # dropped. Asking "is `encode_adrp(` called?" of the raw text is answered by

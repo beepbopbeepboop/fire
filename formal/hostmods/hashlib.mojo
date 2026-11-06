@@ -10,6 +10,8 @@ captured `import os` in the compiler's own sources.
 
 WHAT IS HERE, AND WHY IT IS THE RIGHT SUBSET
 --------------------------------------------
+
+total function; no failure status (convention: hoststatus.mojo).
 CPython's `hashlib` is a factory: `hashlib.sha256(b"...")` constructs a hash
 OBJECT with `.update()`, `.digest()` and `.hexdigest()`. None of that is
 expressible here, and the reason is the same one that shapes every other
@@ -46,7 +48,7 @@ because a `bytes` object cannot cross the boundary either.
     at length: a module dylib that calls into the C library builds and runs
     under `--backend=x86_64` as well, and the claim this replaces was false.
     BLAKE2b itself is pure integer arithmetic and never needed the C library;
-    it is in this file because `hashlib` is the name a caller reaches for.
+    it is in this file because `hashlib` is the name a caller reaches for. Total function; no failure status (convention: hoststatus.mojo).
 
 WHAT IS NOT HERE, AND WHY
 -------------------------

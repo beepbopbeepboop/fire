@@ -693,6 +693,30 @@ SET_CASES = [
      "`difference` is `-` under another name"),
     ("s_symdiff_m_r", ["s = {1, 2}", "t = s.symmetric_difference({2})"], None,
      "`symmetric_difference` is `^` under another name"),
+    ("s_len_dups", ["s = {1, 1, 2, 3, 3}"], "len(s)",
+     "a set literal's repeats are dropped at compile time so the count agrees "
+     "with CPython"),
+    ("s_walk_dups", ["s = {1, 1, 2, 3, 3}", "u = 0", "for x in s:", "    u = u + x"],
+     ("sum=%d len=%d\\n", ["u", "len(s)"]),
+     "a walk over a deduplicated set sums the DISTINCT elements"),
+    ("s_len_dups_str", ['s = {"a", "a", "b"}'], "len(s)",
+     "string-literal elements deduplicate by their word (interned address/content), "
+     "not by syntax"),
+    ("s_len_name_dups", ["x = 7", "s = {x, x, 2}"], "len(s)",
+     "runtime dedup for set literals with non-canonical (name) elements"),
+    ("s_walk_name_dups", ["x = 7", "s = {x, x, 2}", "u = 0", "for v in s:", "    u = u + v"],
+     ("sum=%d len=%d\\n", ["u", "len(s)"]),
+     "runtime dedup keeps first-occurrence order and distinct elements"),
+    ("s_len_mixed_dups", ["x = 2", "s = {2, x, 3, x}"], "len(s)",
+     "mixed literals and names deduplicated at runtime"),
+    ("s_in_after_runtime_dedup", ["x = 7", "s = {x, x, 2}", "v = 1 if 2 in s else 0"],
+     "v",
+     "membership works after runtime dedup"),
+    ("s_float_elem_r", ["x = 1", "s = {1.5, x}"], None,
+     "float elements refused in set literals (word equality is not float equality)"),
+    ("s_computed_str_elem_r", ["def f(name: String) -> Int:", "    s = {name, \"a\"}", "    return len(s)"],
+     None,
+     "computed/non-literal string elements refused in runtime set literals"),
 ]
 
 TUPLE_CASES = [
@@ -1060,6 +1084,7 @@ _NAMED_REFUSAL_FRAGMENTS = (
     "RuntimeError: dictionary changed size during iteration",
     # string_compare_word_refusal's own table, for the string ORDERING row.
     "Python orders strings lexicographically",
+    "set element whose equality is not a word comparison",
 )
 
 

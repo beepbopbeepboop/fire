@@ -2714,30 +2714,73 @@ def instantiation_demands(module_path: str, consumer_src: str,
             pass
         # Also try inferred bare calls
         try:
-            try:
-                with open('/tmp/DEBUG_ID.txt', 'a') as _f:
-                    _f.write(f"CALL {p} names={names}\n")
-            except Exception:
-                pass
             res = MM.inferred_demands_for(
                     consumer_src, module_source_text(p), names,
                     own=own_here)
-            try:
-                with open('/tmp/DEBUG_ID.txt', 'a') as _f:
-                    _f.write(f"GOT {res}\n")
-            except Exception:
-                pass
             for name, args in res.items():
                 got.setdefault(name, [])
                 for a in args:
                     if a not in got[name]:
                         got[name].append(a)
-        except Exception as e:
-            try:
-                with open('/tmp/DEBUG_ID.txt', 'a') as _f:
-                    _f.write(f"ERR {e}\n")
-            except Exception:
-                pass
+        except Exception:
+            pass
+        # Refuse type arguments declared only in the consumer's file
+        try:
+            import fire_compiler as F
+            from formal.build import parse_module
+            cons_stmts = parse_module(consumer_src) if consumer_src else []
+            mod_src = module_source_text(p)
+            mod_stmts = parse_module(mod_src) if mod_src else []
+            consumer_structs = set()
+            for st in cons_stmts:
+                if isinstance(st, F.StructDef):
+                    consumer_structs.add(st.name)
+            module_structs = set()
+            for st in mod_stmts:
+                if isinstance(st, F.StructDef):
+                    module_structs.add(st.name)
+            # Builtins are fine
+            builtins = {'Int', 'Bool', 'String', 'Float64', 'Float32', 'UInt', 'UInt64', 'Int64'}
+            failed_list = []
+            filtered_got = {}
+            for tname, targs_list in got.items():
+                kept_args = []
+                for targs in targs_list:
+                    bad = False
+                    if isinstance(targs, (list, tuple)):
+                        for ta in targs:
+                            ta_str = str(ta)
+                            # Skip builtins and names that look like types we don't need to check
+                            if ta_str in builtins:
+                                continue
+                            # Check if it's a simple identifier (struct name)
+                            # Could be dotted or complex
+                            if '.' in ta_str or '[' in ta_str or '(' in ta_str:
+                                continue
+                            # If it's all letters/numbers/underscore and starts with letter
+                            if ta_str.replace('_', '').isalnum() and ta_str[0].isalpha():
+                                if ta_str in consumer_structs and ta_str not in module_structs:
+                                    bad = True
+                                    break
+                    if bad:
+                        msg = (f"{tname}[{', '.join(str(x) for x in targs)}] is compiled into "
+                               f"{os.path.basename(p)}'s library, and one of its type arguments "
+                               f"is declared in this file, which that library cannot see; "
+                               f"declare it in a module both import")
+                        failed_list.append((tname, tuple(targs) if isinstance(targs, (list,tuple)) else targs, msg))
+                    else:
+                        kept_args.append(targs)
+                if kept_args:
+                    filtered_got[tname] = kept_args
+            got = filtered_got
+            if failed_list:
+                try:
+                    import formal.monomorph as _MM2
+                    if hasattr(_MM2, '_record_failed_demands'):
+                        _MM2._record_failed_demands(failed_list)
+                except Exception:
+                    pass
+        except Exception:
             pass
         if got:
             out[p] = got
@@ -5088,7 +5131,7 @@ def _own_instantiations(consumer_src: str, source_path: str, demap: dict,
                 entries.append(a)
     if not wanted:
         return {}
-    made, _failed = MM.instantiate_all(consumer_src, wanted)
+    made, _failed = MM.instantiate_all(consumer_src, wanted, record=True)
     for key, mangled in MM.demap_from(made).items():
         demap.setdefault(key, mangled)
     out: dict = {}

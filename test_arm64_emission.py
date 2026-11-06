@@ -58,7 +58,38 @@ def build_and_run(source, tmpdir, name):
     r = subprocess.run([exe], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     dis = subprocess.run(["otool", "-tv", exe], capture_output=True,
                          text=True).stdout
-    return r.returncode, dis, r.stdout
+    return r.returncode, _code_only(dis), r.stdout
+
+
+_BRANCH = re.compile(r"^([0-9a-f]{8,})\t+(?:b|bl|b\.[a-z]+|cbz|cbnz|tbz|tbnz)\t.*?"
+                     r"(0x[0-9a-f]+)\s*$")
+
+
+def _code_only(dis):
+    """`otool -tv` output without the DATA it decodes as instructions.
+
+    The image keeps string literals and tables in the same section as the
+    code, so `otool` prints them too, as whatever instruction those bytes
+    happen to spell — including `tbz w1, #0xd, 0xffffb5ec`. A test that counts
+    `tbz` over the whole listing then counts noise, and the noise changes
+    whenever any string in the image changes (a new diagnostic message was
+    enough to turn three tests red). A genuine branch lands inside the image;
+    a decoded string almost never does, so a branch whose target is outside the
+    listed addresses is dropped.
+    """
+    lines = dis.splitlines()
+    addrs = [int(m.group(1), 16) for l in lines
+             if (m := re.match(r"^([0-9a-f]{8,})\t", l))]
+    if not addrs:
+        return dis
+    lo, hi = min(addrs), max(addrs)
+    keep = []
+    for l in lines:
+        m = _BRANCH.match(l)
+        if m and not (lo <= int(m.group(2), 16) <= hi + 4):
+            continue
+        keep.append(l)
+    return "\n".join(keep) + "\n"
 
 
 def mnemonics(dis):
@@ -96,6 +127,16 @@ CSEL_CASES = [
     ("csel_and_chained", "def f(n):\n    a = 3\n    b = 4\n    return a and b and 6\n",
      6, ("csel",)),
 ]
+
+# CSINC family: ternary forms that fold to csinv/csinc/csneg
+CSEL_FAMILY_CASES = [
+    # Shape 1: T if c else ~T -> csinv (always allowed)
+    ("csinv_ternary_true", "def f(n):\n    c = 5\n    t = 7\n    return t if c else ~t\n",
+     7, ("csinv",)),
+    ("csinv_ternary_false", "def f(n):\n    c = 0\n    t = 7\n    r = t if c else ~t\n    return 0\n",  # just check emission
+     0, ("csinv",)),
+]
+
 
 # Cases that MUST NOT take the branchless path, because CSEL evaluates both
 # arms. Each one would print if the discarded arm ran.
@@ -137,6 +178,29 @@ BCOND_CASES = [
     # B.cond off the flags -- there are no flags to read.
     ("bcond_call_still_cset", "def f(n):\n    if side(1):\n        return 5\n"
      "    return 0\ndef side(v):\n    return v\n", 5),
+]
+
+
+# CCMP: `if A and B:` where both are comparisons lowered to cmp + ccmp + b.cond
+CCMP_CASES = [
+    ("ccmp_and_simple", "def f(n):\n    a = 3\n    b = 9\n    c = 5\n"
+     "    if a < b and c == 0:\n        return 1\n    return 0\n", 0, ("ccmp",)),
+    ("ccmp_and_both_true", "def f(n):\n    a = 3\n    b = 9\n    if a < b and b > a:\n"
+     "        return 7\n    return 0\n", 7, ("ccmp",)),
+    ("ccmp_and_a_false", "def f(n):\n    a = 9\n    b = 3\n    if a < b and b > 0:\n"
+     "        return 1\n    return 0\n", 0, ("ccmp",)),
+    ("ccmp_and_b_false", "def f(n):\n    a = 3\n    b = 9\n    if a < b and b > 20:\n"
+     "        return 1\n    return 0\n", 0, ("ccmp",)),
+    ("ccmp_mixed_signed", "def f(n):\n    a = -1\n    b = 5\n    if a < b and b > 0:\n"
+     "        return 3\n    return 0\n", 3, ("ccmp",)),
+    ("ccmp_imm31_right", "def f(n):\n    a = 5\n    b = 31\n    if a < 10 and b == 31:\n"
+     "        return 11\n    return 0\n", 11, ("ccmp",)),
+    # literal 32 must fall back to a register (not use immediate form)
+    ("ccmp_imm32_right_fallback", "def f(n):\n    a = 5\n    b = 32\n    if a < 10 and b == 32:\n"
+     "        return 13\n    return 0\n", 13, ("ccmp",)),
+    # call in B must NOT use ccmp (B operands must be flag-neutral)
+    ("ccmp_call_in_b_not_used", "def f(n):\n    a = 5\n    if a < 10 and side(1):\n"
+     "        return 1\n    return 0\ndef side(v):\n    return v\n", 1, ()),
 ]
 
 
@@ -267,6 +331,47 @@ def test_csel_emitted_and_correct(tmpdir, verbose):
                   f"{name}: expected {want} to be emitted, got {sorted(set(ms))}"
                   f" — the encoder is correct but nothing calls it, which is "
                   f"the whole failure this file exists to catch")
+        if verbose:
+            print(f"  ok   {name} (exit {code}, {len(ms)} instructions)")
+
+
+def test_ccmp_emitted_and_correct(tmpdir, verbose):
+    for name, src, want_exit, want_mn in CCMP_CASES:
+        code, dis, out = build_and_run(src, tmpdir, name)
+        check(code == want_exit,
+              f"{name}: returned {code}, expected {want_exit}")
+        ms = mnemonics(dis)
+        for want in want_mn:
+            check(any(m == want or m.startswith(want) for m in ms),
+                  f"{name}: expected {want} to be emitted, got {sorted(set(ms))}"
+                  f" — the encoder is correct but nothing calls it, which is "
+                  f"the whole failure this file exists to catch")
+        if verbose:
+            print(f"  ok   {name} (exit {code}, {len(ms)} instructions)")
+
+
+def test_csel_family_emitted_and_correct(tmpdir, verbose):
+    for case in CSEL_FAMILY_CASES:
+        if len(case) == 4:
+            name, src, want_exit, want_mn = case
+        else:
+            continue
+        code, dis, out = build_and_run(src, tmpdir, name)
+        check(code == want_exit,
+              f"{name}: returned {code}, expected {want_exit}")
+        ms = mnemonics(dis)
+        if want_mn:
+            for want in want_mn:
+                # Accept aliases
+                aliases = {
+                    'csinv': ['csinv', 'cinv'],
+                    'csinc': ['csinc', 'cinc'],
+                    'csneg': ['csneg', 'cneg'],
+                    'csel': ['csel'],
+                }
+                ok_list = aliases.get(want, [want])
+                check(any(any(m == a or m.startswith(a) for a in ok_list) for m in ms),
+                      f"{name}: expected {want} to be emitted, got {sorted(set(ms))}")
         if verbose:
             print(f"  ok   {name} (exit {code}, {len(ms)} instructions)")
 
@@ -556,6 +661,8 @@ TESTS = [
      test_bcond_emitted_and_patched),
     ("CSEL is emitted and computes the right value",
      test_csel_emitted_and_correct),
+    ("CSEL family is emitted and computes the right value",
+     test_csel_family_emitted_and_correct),
     ("TBZ is emitted, tests the right bit, and its displacement is patched",
      test_tbz_emitted_and_correct),
     ("TST and CMN are emitted and answer CPython",

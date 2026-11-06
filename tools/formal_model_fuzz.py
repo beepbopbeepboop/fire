@@ -272,6 +272,23 @@ def _rn(r):
     return "sp" if r == 31 else "x" + str(r)
 
 
+def gen_ext_sp(rng, free):
+    d = rng.choice([r for r in free if r != 31])  # never 31, SP is the harness anchor and must not move
+    m = _r(rng, free)
+    k = rng.randrange(0, 5)
+    op = rng.randrange(0, 3)
+    if op == 0:
+        return ("add x%d, sp, x%d, lsl #%d" % (d, m, k),
+                struct.pack("<I", 0x8b206000 | (m << 16) | (k << 10) | (31 << 5) | d))
+    elif op == 1:
+        return ("sub x%d, sp, x%d, lsl #%d" % (d, m, k),
+                struct.pack("<I", 0xcb206000 | (m << 16) | (k << 10) | (31 << 5) | d))
+    else:
+        # subs/cmp
+        return ("cmp sp, x%d, lsl #%d" % (m, k),
+                struct.pack("<I", 0xeb206000 | (m << 16) | (k << 10) | (31 << 5) | 31))
+
+
 def gen_alu(rng, free):
     d, n, m = _dst(rng, free), _r(rng, free), _r(rng, free)
     i = rng.randrange(0x1000)
@@ -353,6 +370,18 @@ def gen_flags(rng, free):
     if k == 2:
         return "subs x%d, x%d, x%d" % (d, n, m), A.encode_subs_xd_xn_xm(d, n, m)
     return "cmn x%d, x%d" % (n, m), A.encode_cmn_xn_xm(n, m)
+
+
+def gen_ccmp(rng, free):
+    n, m = _r(rng, free), _r(rng, free)
+    cond = rng.choice(CONDS)
+    nzcv = rng.randrange(16)
+    if rng.random() < 0.5:
+        imm5 = rng.randrange(32)
+        return ("ccmp x%d, #%d, #%d, %s" % (n, imm5, nzcv, cond),
+                A.encode_ccmp_xn_imm5(n, imm5, nzcv, cond))
+    return ("ccmp x%d, x%d, #%d, %s" % (n, m, nzcv, cond),
+            A.encode_ccmp_xn_xm(n, m, nzcv, cond))
 
 
 def gen_shifts(rng, free):
@@ -496,10 +525,23 @@ def gen_flagged_alu(rng, free):
 def gen_select(rng, free):
     d, n, m = _dst(rng, free), _r(rng, free), _r(rng, free)
     c = rng.choice(CONDS)
-    if rng.random() < 0.5:
+    k = rng.randrange(5)
+    if k == 0:
         return "csel x%d, x%d, x%d, %s" % (d, n, m, c), \
             A.encode_csel_xd_xm_cond(d, n, m, c)
-    return "cset x%d, %s" % (d, c), A.encode_cset_xd_cond(d, c)
+    if k == 1:
+        return "cset x%d, %s" % (d, c), A.encode_cset_xd_cond(d, c)
+    if k == 2:
+        return "csinc x%d, x%d, x%d, %s" % (d, n, m, c), \
+            A.encode_csinc_xd_xm_cond(d, n, m, c)
+    if k == 3:
+        return "csinv x%d, x%d, x%d, %s" % (d, n, m, c), \
+            A.encode_csinv_xd_xm_cond(d, n, m, c)
+    if k == 4:
+        return "csneg x%d, x%d, x%d, %s" % (d, n, m, c), \
+            A.encode_csneg_xd_xm_cond(d, n, m, c)
+    return "csel x%d, x%d, x%d, %s" % (d, n, m, c), \
+        A.encode_csel_xd_xm_cond(d, n, m, c)
 
 
 def gen_ext(rng, free):
@@ -644,8 +686,8 @@ def gen_memreg(rng, free):
 #:     lowering wants the form, and the byte-exact `ldp`/`stp` cases in
 #:     `test_arm64_encoders.py` are what would catch it if one landed wrong.
 MIXES = {
-    "alu": (gen_alu, gen_moves),
-    "flags": (gen_flags, gen_alu),
+    "alu": (gen_alu, gen_moves, gen_ext_sp),
+    "flags": (gen_flags, gen_alu, gen_ccmp),
     "shifts": (gen_shifts, gen_alu),
     "muldiv": (gen_muldiv, gen_alu),
     "select": (gen_select, gen_flags),

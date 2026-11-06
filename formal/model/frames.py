@@ -1,5 +1,20 @@
 from . import *
 
+
+def root_ident(node):
+    """`(name, depth)` for a chain of `.member` hops over a plain name, else None.
+
+    Moved here from `formal/build.py` so both the build pass and the model can
+    use it for the same definition (the "used as a receiver" test)."""
+    depth = 0
+    while isinstance(node, F.MemberExpr):
+        depth += 1
+        node = node.obj
+    if isinstance(node, F.IdentExpr):
+        return (node.name, depth)
+    return None
+
+
 # ── A frame that OUTLIVES the function that built it ─────────────────────
 #
 # `struct_constructor_sites` above is the whole of a frame's placement today,
@@ -184,6 +199,62 @@ def frame_binding_value(node):
     return None
 
 
+def string_frame_reading_calls(fn, structs, functions=()) -> list:
+    """Call nodes that must read `String()` as a framed struct, not a char*.
+
+    A zero-arg `String()` bound to a local that is later used as a receiver
+    (`a.f` / passed in a way that makes it a frame root used as receiver)
+    is treated as a framed struct construction on both backends. Everything
+    else keeps the TEXT reading."""
+    out = []
+    if fn is None:
+        return out
+    body = getattr(fn, "body", None)
+    functions_set = set(functions or ())
+    # Find all bindings of zero-arg String() calls
+    string_ctor_bindings = []  # (target_name, call_node)
+    for node in iter_nodes(body):
+        target = frame_binding_target(node)
+        value = frame_binding_value(node)
+        if not target or not isinstance(value, F.CallExpr):
+            continue
+        if not isinstance(value.func, F.IdentExpr):
+            continue
+        callee = value.func.name
+        if callee not in STRING_TYPE_CTORS:
+            continue
+        # must be zero args
+        nargs = len(value.args or []) + len(value.kwargs or [])
+        if nargs != 0:
+            continue
+        # this module declares struct C and struct_is_framed(C)
+        if (structs or {}).get(callee) is None:
+            continue
+        try:
+            if not struct_is_framed(callee):
+                continue
+        except Exception:
+            pass
+        # C is not a function name in the image
+        if callee in functions_set:
+            continue
+        string_ctor_bindings.append((target, value))
+    if not string_ctor_bindings:
+        return out
+    # Find which of those bindings are used as receivers somewhere in the function
+    used_as_receiver_targets = set()
+    for node in iter_nodes(body):
+        if not isinstance(node, F.MemberExpr):
+            continue
+        r = root_ident(node)
+        if r is not None and r[1] >= 1:
+            used_as_receiver_targets.add(r[0])
+    for target, value in string_ctor_bindings:
+        if target in used_as_receiver_targets:
+            out.append(value)
+    return out
+
+
 def struct_constructor_bindings(fn, framed, functions=()) -> dict:
     """`{name: [struct, …]}` for locals bound from a framed struct's constructor.
 
@@ -250,7 +321,7 @@ def struct_constructor_bindings(fn, framed, functions=()) -> dict:
             if not call_lowers_as_framed_construction(
                     value.func.name, framed,
                     len(value.args or []) + len(value.kwargs or []),
-                    functions):
+                    functions, call=value):
                 continue
             # De-duplicated, order kept: `x = A()` twice on two paths is ONE
             # candidate, and a refusal that printed "a A, A receiver" because it
