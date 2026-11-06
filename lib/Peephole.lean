@@ -291,6 +291,76 @@ theorem arm64_step_str64 (s : Arm64State) (code : Nat → UInt8)
   rw [hpc, hread]
   rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_pos h]
 
+/-! ### Memory write idempotence (step 02)
+
+A store of the same value to the same place twice is one store. These three are
+the lemmas the duplicate-store peephole rules lack:
+
+* `mem_write_u64_idem` ← `arm64/mem_pair` (`STR;STR`), step 03d;
+* `mem_write_bytes8_idem` ← `x86_64/mem_pair` (duplicate store), step 04c;
+* `arm64_set_reg_self` ← `arm64/store_load` and `LDR;LDR`, steps 03c/03d.
+
+Read-after-write already exists (`mem_read_after_write_u64`, ProofLib; X86's
+`mem_read_bytes_write_same`); what was missing was write IDEMPOTENCE. They are
+proved through the window split (inside the written window the base memory is
+irrelevant; outside it the write is invisible), not by unfolding 8 nested
+`if`s, which `simp` does not finish. -/
+
+theorem mem_write_u64_outside (mem : Nat → UInt8) (addr : Nat) (v : UInt64) (i : Nat)
+    (h : i < addr ∨ addr + 8 ≤ i) : mem_write_u64 mem addr v i = mem i := by
+  simp only [mem_write_u64]
+  repeat (rw [if_neg (by omega)])
+
+theorem mem_write_u64_inside (mem mem2 : Nat → UInt8) (addr : Nat) (v : UInt64) (i : Nat)
+    (h : addr ≤ i ∧ i < addr + 8) :
+    mem_write_u64 mem addr v i = mem_write_u64 mem2 addr v i := by
+  rcases (by omega : i = addr ∨ i = addr + 1 ∨ i = addr + 2 ∨ i = addr + 3 ∨ i = addr + 4 ∨ i = addr + 5 ∨ i = addr + 6 ∨ i = addr + 7) with h | h | h | h | h | h | h | h <;> subst h <;> simp [mem_write_u64]
+
+theorem mem_write_u64_idem (mem : Nat → UInt8) (addr : Nat) (v : UInt64) :
+    mem_write_u64 (mem_write_u64 mem addr v) addr v = mem_write_u64 mem addr v := by
+  funext i
+  by_cases hw : addr ≤ i ∧ i < addr + 8
+  · exact mem_write_u64_inside _ _ addr v i hw
+  · have ho : i < addr ∨ addr + 8 ≤ i := by omega
+    rw [mem_write_u64_outside _ addr v i ho, mem_write_u64_outside _ addr v i ho]
+
+theorem mem_write_bytes_outside (mem : Nat → UInt8) (addr : Nat) (v : UInt64) (n i : Nat)
+    (h : i < addr ∨ addr + n ≤ i) : mem_write_bytes mem addr v n i = mem i := by
+  induction n generalizing addr v with
+  | zero => rfl
+  | succ k ih =>
+    simp only [mem_write_bytes]
+    rw [if_neg (by omega)]
+    exact ih (addr + 1) (v >>> 8) (by omega)
+
+theorem mem_write_bytes_inside (mem mem2 : Nat → UInt8) (addr : Nat) (v : UInt64) (n i : Nat)
+    (h : addr ≤ i ∧ i < addr + n) :
+    mem_write_bytes mem addr v n i = mem_write_bytes mem2 addr v n i := by
+  induction n generalizing addr v with
+  | zero => omega
+  | succ k ih =>
+    simp only [mem_write_bytes]
+    by_cases hi : i = addr
+    · simp [hi]
+    · rw [if_neg hi, if_neg hi]
+      exact ih (addr + 1) (v >>> 8) (by omega)
+
+theorem mem_write_bytes_idem (mem : Nat → UInt8) (addr : Nat) (v : UInt64) (n : Nat) :
+    mem_write_bytes (mem_write_bytes mem addr v n) addr v n = mem_write_bytes mem addr v n := by
+  funext i
+  by_cases hw : addr ≤ i ∧ i < addr + n
+  · exact mem_write_bytes_inside _ _ addr v n i hw
+  · have ho : i < addr ∨ addr + n ≤ i := by omega
+    rw [mem_write_bytes_outside _ addr v n i ho, mem_write_bytes_outside _ addr v n i ho]
+
+theorem mem_write_bytes8_idem (mem : Nat → UInt8) (addr : Nat) (v : UInt64) :
+    mem_write_bytes (mem_write_bytes mem addr v 8) addr v 8 = mem_write_bytes mem addr v 8 :=
+  mem_write_bytes_idem mem addr v 8
+
+theorem arm64_set_reg_self (s : Arm64State) (k : Nat) (hk : k < 31) :
+    arm64_set_reg k s (arm64_reg k s) = s := by
+  rcases (by omega : k = 0 ∨ k = 1 ∨ k = 2 ∨ k = 3 ∨ k = 4 ∨ k = 5 ∨ k = 6 ∨ k = 7 ∨ k = 8 ∨ k = 9 ∨ k = 10 ∨ k = 11 ∨ k = 12 ∨ k = 13 ∨ k = 14 ∨ k = 15 ∨ k = 16 ∨ k = 17 ∨ k = 18 ∨ k = 19 ∨ k = 20 ∨ k = 21 ∨ k = 22 ∨ k = 23 ∨ k = 24 ∨ k = 25 ∨ k = 26 ∨ k = 27 ∨ k = 28 ∨ k = 29 ∨ k = 30) with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;> simp [arm64_set_reg, arm64_reg]
+
 /-- The pc a SEQUENTIAL step leaves behind, and the advance `arm64_steps`
 performs for it.
 

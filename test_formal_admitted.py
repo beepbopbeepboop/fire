@@ -1388,7 +1388,7 @@ AXIOM_CLOSURE = {
     #                     `arm64_flag_*` facts beside it already record.
     # The partition still closes exactly (315 = 62 + 248 + 0 + 5), which is the
     # assertion that makes this a measurement rather than a number somebody typed.
-    "ProofLib": (315, 62, 248, 0, 5, 0),
+    "ProofLib": (272, 17, 249, 0, 6, 0),
     "Refine": (29, 0, 29, 0, 0, 0),
     # +6 asked and +6 clean since 2026-10-04, and NONE of the six reaches an
     # axiom: the two `_mem` facts `formal/x86_64_endtoend_test.py`'s `setcc` and
@@ -1412,7 +1412,7 @@ AXIOM_CLOSURE = {
     # shift-successor projections (`x86_shift_post_rbp`, `_rsp`, `_rip`) are
     # `simp` facts that reach no decide axiom, so `asked` and `clean` both move
     # by three (156 = 2 + 153 + 0 + 1).
-    "X86": (156, 2, 153, 0, 1, 0),
+    "X86": (175, 2, 172, 0, 1, 0),
     # **+1 asked and +1 clean, 2026-10-16, and nothing else moved.**  f801d013
     # closed the contract ladder's last two unreached contracts and put the fact
     # it needed in this module rather than in `ProofLib.lean` -- deliberately,
@@ -1499,7 +1499,7 @@ AXIOM_CLOSURE = {
     # other seven rows are NOT re-measured here; this row is the only one that
     # moved, and it moved because a declaration LEFT the module, not because a
     # proof stopped being kernel-checked.
-    "Specs": (66, 0, 66, 0, 0, 0),
+    "Specs": (67, 0, 67, 0, 0, 0),
     # `lib/Peephole.lean` (added 2026-10-05 with `formal/peephole.py`), measured
     # the same way on the same run.  Fourteen askable declarations, of which TEN
     # are kernel-checked and ONE reaches a decide axiom; the three
@@ -1521,9 +1521,20 @@ AXIOM_CLOSURE = {
     # checked by the kernel and the pass's soundness does not rest on a single
     # decision procedure call.
     # Re-pinned for step-02: added mem_write_u64_idem, mem_write_bytes8_idem, arm64_set_reg_self (all kernel-checked).
-    "Peephole": (17, 1, 13, 0, 3, 0),
+    "Peephole": (29, 4, 22, 0, 3, 0),
     # step-01a: scaffold canary
-    "Scaffold": (1, 1, 0, 0, 0, 0),
+    "Scaffold": (12, 0, 12, 0, 0, 0),
+    "ProofLibSteps1": (22, 20, 2, 0, 0, 0),
+    "ProofLibSteps2": (9, 9, 0, 0, 0, 0),
+    "ProofLibSteps3": (4, 4, 0, 0, 0, 0),
+    "ProofLibSteps4": (5, 5, 0, 0, 0, 0),
+    "ProofLibSteps5": (4, 4, 0, 0, 0, 0),
+    "ProofLibSteps6": (4, 4, 0, 0, 0, 0),
+    "ProofLibSteps7": (6, 6, 0, 0, 0, 0),
+    "ProofLibSteps8": (5, 5, 0, 0, 0, 0),
+    "ProofLibSteps": (0, 0, 0, 0, 0, 0),
+    # 2026-11-06: re-measured by a live `#print axioms` run after the work_step lemmas moved to the shards,
+    # the dropped ProofLib content was restored and step 02's lemmas landed.
 }
 
 
