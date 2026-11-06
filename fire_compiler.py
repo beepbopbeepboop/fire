@@ -4592,6 +4592,11 @@ class Parser:
             # body references" — 42 occurrences in the stdlib, so it is a form
             # with its own meaning and not a typo for a missing name).
             conv = None
+            moved_bare = False
+            # Allow leading `^` in capture lists
+            if self._peek().kind == "OP" and self._peek().value == "^":
+                self._advance()
+                moved_bare = True
             # A KW from the convention set at the START of an entry is always a
             # prefix, never the captured name — the same disambiguation the
             # parameter loop uses (KW followed by COLON/ASSIGN is a name), with
@@ -4604,6 +4609,14 @@ class Parser:
                    and self._peek().value in self._CONV_KWS
                    and self._peek(1).kind not in ("COLON", "ASSIGN")):
                 conv = _as_str(self._advance().value)
+                if self._peek().kind == "OP" and self._peek().value == "^":
+                    self._advance()
+                    moved_bare = True
+                    break
+            moved_bare = False
+            if self._peek().kind == "OP" and self._peek().value == "^":
+                self._advance()
+                moved_bare = True
             if self._peek().kind in ("COMMA", "RBRACE"):
                 # `{mut}` / `{var}` — a convention with NO name: "capture
                 # whatever this body references, under this convention" (42
@@ -4612,8 +4625,13 @@ class Parser:
                 # that happens to be called `mut`, and so the consumer can
                 # tell "infer the names, this is the convention" from an
                 # ordinary named capture.
-                out.append((None, _as_str(_canon_conv(conv))
-                            if conv is not None else None))
+                _cc = _as_str(_canon_conv(conv)) if conv is not None else None
+                if _cc is None and moved_bare:
+                    _cc = 'owned'
+                elif moved_bare and _cc is not None:
+                    # moved bare convention: treat as owned/move
+                    _cc = 'owned'
+                out.append((None, _cc))
                 self._skip_newlines()
                 if self._peek().kind == "COMMA":
                     self._advance(); self._skip_newlines()
