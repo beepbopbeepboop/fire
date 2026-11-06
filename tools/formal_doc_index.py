@@ -210,6 +210,17 @@ def live_claims():
             if key.endswith('.md'):
                 key = key[:-3]
             out.setdefault(key, []).append(name)
+    # Claims held by work control did not start (a Claude Code session, a
+    # hand-run worker): `control.py claim`. They lapse with their pid / hours,
+    # exactly like `claims` shows them, so a stale one reads `unclaimed`.
+    for name, ext in sorted(control.external().items()):
+        for claim in ext.get('claims') or ():
+            parts = claim.split(':', 1)
+            key = parts[1] if len(parts) > 1 else parts[0]
+            if key.endswith('.md'):
+                key = key[:-3]
+            who = ext.get('who') or 'external'
+            out.setdefault(key, []).append(f'{name} [{who}]')
     return out
 
 
