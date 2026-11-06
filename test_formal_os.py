@@ -1298,12 +1298,77 @@ def group_inplace(tmpdir, verbose):
     return True, ""
 
 
+PROC_PROGRAM = """\
+import os
+
+def main():
+    printf("pid=%d@@", os.getpid())
+    printf("ppid=%d@@", os.getppid())
+    printf("uid=%d@@", os.getuid())
+    printf("pgid0=%d@@", os.getpgid(0))
+    printf("pgidpid=%d@@", os.getpgid(os.getpid()))
+    printf("cpus=%d@@", os.cpu_count())
+    return 0
+"""
+
+
+def group_proc(tmpdir, verbose):
+    """`getpid`/`getppid`/`getuid`/`getpgid`/`cpu_count`, against the OS.
+
+    The test cannot compare a pid with its own, so it RUNS the image as a child
+    and asks CPython about that child: the image's `getpid()` must equal the
+    `Popen`'s pid, its `getppid()` must be THIS process, its `getpgid(0)` must
+    equal this process's own group (inherited), and `getuid`/`cpu_count` are the same
+    numbers CPython reports. Both backends: the x86-64 image runs under
+    Rosetta, which is the same kernel answering the same calls.
+    """
+    src = os.path.join(tmpdir, "os_proc.mojo")
+    with open(src, "w") as f:
+        f.write(PROC_PROGRAM)
+    bad = []
+    for backend, prefix in (("arm64", []), ("x86_64", ["arch", "-x86_64"])):
+        out = os.path.join(tmpdir, f"os_proc_{backend}")
+        rc, text = build(src, out, backend=backend)
+        if rc != 0:
+            return False, f"[{backend}] build failed: {text.strip()[-400:]}"
+        child = subprocess.Popen(prefix + [out], stdout=subprocess.PIPE,
+                                 text=True, cwd=tmpdir)
+        outtext, _ = child.communicate(timeout=RUN_TIMEOUT)
+        if child.returncode != 0:
+            return False, f"[{backend}] exit {child.returncode}"
+        got = parse_kv(outtext)
+        ref = {
+            # CPython's view of the CHILD: it was spawned directly, so for the
+            # x86-64 case `arch` has exec'd into the image and kept the pid.
+            "pid": str(child.pid),
+            "ppid": str(os.getpid()),
+            "uid": str(os.getuid()),
+            # A child inherits its parent's process group, and it has exited by
+            # the time it can be asked, so the reference is this process's own.
+            "pgid0": str(os.getpgid(0)),
+            "pgidpid": str(os.getpgid(0)),
+            "cpus": str(os.cpu_count() or 1),
+        }
+        for k, v in ref.items():
+            if got.get(k) != v:
+                bad.append(f"[{backend}] {k}: image says {got.get(k)!r}, "
+                           f"CPython says {v!r}")
+    if bad:
+        return False, ("%d disagreements:\n      %s"
+                       % (len(bad), "\n      ".join(bad)))
+    if verbose:
+        print("      pid/ppid/uid/pgid/cpu_count agree with CPython on both "
+              "backends")
+    return True, ""
+
+
 GROUPS = {
     "inplace": group_inplace,
     "strings": group_strings,
     "posixpath": group_posixpath,
     "fs": group_fs,
     "env": group_env,
+    "proc": group_proc,
     "dirs": group_dirs,
     "blob": group_blob,
 }

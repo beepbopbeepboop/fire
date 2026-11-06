@@ -999,6 +999,29 @@ def fs_getpid() -> int:
     return getpid()
 
 
+def fs_getppid() -> int:
+    """`getppid()`: the parent's pid (1 once the parent has gone), never negative."""
+    return getppid()
+
+
+def fs_getuid() -> int:
+    """`getuid()`: the real user id, which has no failure value."""
+    return getuid()
+
+
+def fs_getpgid(pid) -> int:
+    """`getpgid(pid)`: the process-group id of `pid` (0 means this process), or
+    -1 with ESRCH if there is no such process."""
+    return getpgid(pid)
+
+
+def fs_sysconf(name) -> int:
+    """`sysconf(name)`: the system value for a `_SC_*` constant, or -1 when the
+    name is not one this platform knows (a limit that is indeterminate is also
+    -1; the two are not distinguished here, as in the C API without `errno`)."""
+    return sysconf(name)
+
+
 def fs_kill(pid, sig) -> int:
     """`kill(pid, sig)`: 0 on success, -1 with ESRCH if there is no such process.
 

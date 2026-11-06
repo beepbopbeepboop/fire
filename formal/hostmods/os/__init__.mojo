@@ -135,6 +135,7 @@ from ._syscalls import fs_mkdir, fs_free, str_build, str_dup
 from ._syscalls import fs_readdir, fs_rewinddir, fs_closedir
 from ._syscalls import fs_dirent_name, fs_name_is_dot, fs_opendir
 from ._syscalls import fs_environ_vec, str_find, str_cmp
+from ._syscalls import fs_getpid, fs_getppid, fs_getuid, fs_getpgid, fs_sysconf
 from .path import exists, isfile, isdir, islink, lexists, getsize
 from .path import join
 from hoststatus import status_ok, status_err
@@ -226,6 +227,40 @@ def chdir(path) -> int:
 # `getenv`/`putenv`/`unsetenv` are the three POSIX calls, and they are ONE KEY at
 # a time.  Everything under them is `os.environ`, CPython's dict-like view over
 # the process environment, and the whole of it is below.
+
+def getpid() -> int:
+    """`os.getpid()`: this process's pid. Never a constant and never cached: a
+    process that forked would otherwise report its parent's."""
+    return fs_getpid()
+
+
+def getppid() -> int:
+    """`os.getppid()`: the parent's pid (1 once the parent has exited)."""
+    return fs_getppid()
+
+
+def getuid() -> int:
+    """`os.getuid()`: the real user id."""
+    return fs_getuid()
+
+
+def getpgid(pid) -> int:
+    """`os.getpgid(pid)`: the process-group id of `pid`; 0 means this process.
+    A pid that names no process is -1 here (CPython raises `ProcessLookupError`;
+    a failure is a return value on this path, as everywhere in this module)."""
+    return fs_getpgid(pid)
+
+
+def cpu_count() -> int:
+    """`os.cpu_count()`: the number of CPUs online, always >= 1. CPython may
+    return `None` when it cannot tell; a `None` has no word representation on
+    this path, so the answer is 1 in that case rather than an absent value.
+    `_SC_NPROCESSORS_ONLN` is 58 on Darwin."""
+    n = fs_sysconf(58)
+    if n < 1:
+        return 1
+    return n
+
 
 def getenv(name) -> str:
     """The value of the environment variable `name`, or `""` when it is unset.

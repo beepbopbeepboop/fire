@@ -3046,6 +3046,9 @@ BARE_C_RETURN_KINDS = {
     "fflush": (32, True),
     "flock": (32, True),
     "getpid": (32, True),
+    "getpgid": (32, True),        # pid_t is int
+    "getppid": (32, True),        # pid_t is int
+    "getuid": (32, False),        # uid_t is unsigned int: zero-extend, never sign-extend
     "kill": (32, True),
     "memcmp": (32, True),
     "mkdir": (32, True),
@@ -3081,6 +3084,7 @@ BARE_C_RETURN_KINDS = {
     # ── 64-bit integers and sizes: the whole register is the answer. The
     # `clock_gettime_nsec_np` row is the one that says why this group exists.
     "clock_gettime_nsec_np": EXTERN_RETURN_WORD,
+    "sysconf": EXTERN_RETURN_WORD,   # long
     "fread": EXTERN_RETURN_WORD,
     "fwrite": EXTERN_RETURN_WORD,
     "lseek": EXTERN_RETURN_WORD,
