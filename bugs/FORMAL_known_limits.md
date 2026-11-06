@@ -1667,7 +1667,7 @@ Index a `range()` result rather than measuring it, until that is fixed.
 | 17 | bootstrap_test_classes.mojo | S | build: create_point returns a frame address, and the returned-frame convention needs a caller to reserve a block and pass its address — entry point issue | different full message | |
 | 18 | runtime/stdlib_wrapper.mojo | S | build: main: `now` is called from `time` but `time` declares no function or struct named `now` at all | different reason (name not found) | |
 | 19 | t1.mojo | S | build: sys.exit(): `sys` is a linked module but it exports no `exit` (exit may be excluded by export rule or not defined) | different detailed message | |
-| 20 | test_llm/dumb_gemm.mojo |  | build: [FloatLiteral] * m * k is a REPETITION, and this path can only lower one whose count it can r |  |  |
+| 20 | test_llm/dumb_gemm.mojo | S | build: [FloatLiteral] * m * k is a REPETITION, count not statically known | different detailed message | |
 | 21 | test_relaxed_imports.mojo |  | build: '+' on two strings is refused on this path. A string here is a bare `char *`, so `+` is integ |  |  |
 | 22 | tools/procrun.py |  | build: line 92: `(OSError, subprocess.SubprocessError)` is a handler arm with a body this path canno |  |  |
 | 23 | unescape_c.py |  | build: __module_body__: sys.stdin reads 'stdin' out of the imported module `sys`, and a module is no |  |  |
