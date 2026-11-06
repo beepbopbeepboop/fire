@@ -1669,7 +1669,7 @@ Index a `range()` result rather than measuring it, until that is fixed.
 | 19 | t1.mojo | S | build: sys.exit(): `sys` is a linked module but it exports no `exit` (exit may be excluded by export rule or not defined) | different detailed message | |
 | 20 | test_llm/dumb_gemm.mojo | S | build: [FloatLiteral] * m * k is a REPETITION, count not statically known | different detailed message | |
 | 21 | test_relaxed_imports.mojo | S | build: imports glob -> dependency chain issue | moved to dependency | |
-| 22 | tools/procrun.py |  | build: line 92: `(OSError, subprocess.SubprocessError)` is a handler arm with a body this path canno |  |  |
+| 22 | tools/procrun.py | S | build: imports os -> dependency chain issue | moved to dependency | |
 | 23 | unescape_c.py |  | build: __module_body__: sys.stdin reads 'stdin' out of the imported module `sys`, and a module is no |  |  |
 | 24 | tools/wave2_extract_shared.py |  | build: an f-string literal on line 116 is refused on this path, and its text could not be taken apar |  |  |
 
