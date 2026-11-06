@@ -1,5 +1,5 @@
 # plan/step-25: `Error` stays unrepresentable: make the refusal true, pin it on both backends
-**Status: DONE (verified by agent, work landed)**
+**Status: DONE 2026-11-06 (measured).** The three pin rows `byref_refuse_error_literal_argument`, `byref_refuse_error_no_argument` (refused, `is a real type this path has no representation`, both backends, identical text) and `local_two_field_error_struct_keeps_refusal_arity` (a local 2-field `struct Error` builds, exit 0) pass; `test_formal_optional.py` 27/0. The §3 row of `bugs/FORMAL_known_limits.md` was not re-measured with the stdlib sweep (not run).
 
 Class: mid      Size: S      Depends: none      Blocks: 27a
 Source: `bugs/FORMAL_known_limits.md` §3 table row "`constructing X has no representation`" (3 files: `std/testing/prop/{__init__,random,runner}.mojo`; NOT 6 — the draft's number was wrong)
