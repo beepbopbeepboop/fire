@@ -8810,7 +8810,14 @@ class Parser:
         # If not just dots, parse the module name. Accept a keyword-named
         # module (e.g. `from struct import pack` — `struct` lexes as KW), but
         # never swallow the `import` keyword itself as the module name.
-        if self._peek().kind == "NAME" or (self._peek().kind == "KW" and not self._is_kw("import")):
+        # Also accept backtick-quoted identifiers (STRING starting with `).
+        tcur = self._peek()
+        if tcur.kind == "NAME" or (tcur.kind == "KW" and not self._is_kw("import")):
+            module += self._advance().value
+            while self._peek().kind == "DOT":
+                self._advance()
+                module += "." + self._ident()
+        elif tcur.kind == "STRING" and tcur.value.startswith("`"):
             module += self._advance().value
             while self._peek().kind == "DOT":
                 self._advance()
