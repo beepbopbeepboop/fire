@@ -14904,7 +14904,6 @@ def _generate_frame_proof(prog, code, info, methods, func_name, base_addr,
                    + _gen_step_lemmas(stem, code, base_addr, _code_end))
     frame_section = _frame_section(prog, code, info, methods, stem)
     return f"""import ProofLib
-import ProofLibSteps
 import work
 import Refine
 
@@ -15917,7 +15916,6 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
     export_defs_text = "\n\n".join(export_defs)
     proofs_text = "\n\n".join(proofs)
     return f"""import ProofLib
-import ProofLibSteps
 import work
 import Refine
 import Contracts

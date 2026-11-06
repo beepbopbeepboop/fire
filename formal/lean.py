@@ -55,8 +55,8 @@ have seen" would have been set at 93 s and would have fired on a legitimate
 proof.
 
 So `PROOF_WALL_S = 1500` / `PROOF_CPU_S = 1500` is **5x the slowest legitimate
-proof measured** (6.8x its CPU), and `LIBRARY_WALL_S = 10800` /
-`LIBRARY_CPU_S = 30000` is **~2x the full ProofLib build measured on 2026-11-06 (~85 min)** — both far below
+proof measured** (6.8x its CPU), and `LIBRARY_WALL_S = 3600` /
+`LIBRARY_CPU_S = 3600` is **16x the slowest module build** — both far below
 `tools/control.py guard`'s 45 min wall / 90 min CPU net, which exists to catch a
 launcher that was never taught these bounds, not to be the bound.
 
@@ -150,10 +150,8 @@ import time
 # `work` does — because the peephole rules are stated over the machine model's
 # step functions (`arm64_step`, `x86_step`), so build order puts it after `X86`
 # and there is nothing in it that could import `Specs`.
-LIBRARY_STEP_SHARDS = tuple(f"ProofLibSteps{i}" for i in range(1, 9))
-LIBRARY_MODULES = ("IEEE754", "ProofLib") + LIBRARY_STEP_SHARDS + (
-    "ProofLibSteps", "X86", "work", "Refine", "Contracts",
-    "Peephole", "Specs", "Scaffold")
+LIBRARY_MODULES = ("IEEE754", "ProofLib", "X86", "work", "Refine", "Contracts",
+                   "Peephole", "Specs", "Scaffold")
 VERDICT_EXT = ".leanverdict"
 # Where a library module's own hole census is stored, beside the .olean it was
 # measured from and under the same key — so a cas HIT on the .olean is a hit on
@@ -264,14 +262,8 @@ from tools import procrun  # noqa: E402 — the tree walk and the kill, shared
 # every launcher that never got here.
 PROOF_WALL_S = 1500.0
 PROOF_CPU_S = 1500.0
-# MEASURED 2026-11-06: the full `lib/ProofLib.lean` (580 KB after the work-step
-# regeneration) takes ~85 min wall to elaborate with other jobs on the box, and
-# the 3600 s these used to be killed it ("NOT a verdict on the proof"). The old
-# basis, "16x the slowest module build (112 s)", described a file a fraction of
-# the size. 10800 s is ~2x the measured wall; the CPU bound is looser because
-# Lean meters every thread.
-LIBRARY_WALL_S = 10800.0
-LIBRARY_CPU_S = 30000.0
+LIBRARY_WALL_S = 3600.0
+LIBRARY_CPU_S = 3600.0
 # Lean's own bounds.  `-M` is Lean's own memory ceiling and it is NOT the
 # project's 4 GB line: that line is a DEBT standard for what a job should cost
 # (`doc/POLICY_memory_over_4gb.md`), and enforcing it by capping Lean is
@@ -1555,16 +1547,15 @@ def ensure_library(lean: str, lib_dir: str, timeout: int | None = None,
         build_cpu = cpu_s if cpu_s is not None else library_bounds()[1]
     env = os.environ.copy()
     env["LEAN_PATH"] = lib_dir
-
-    def ensure_one(stem):
+    for stem in LIBRARY_MODULES:
         source = os.path.join(lib_dir, stem + ".lean")
         olean = os.path.join(lib_dir, stem + ".olean")
         stamp = olean + ".srcsha256"
         if not os.path.isfile(source):
-            return
+            continue
         digest = _effective_digest(stem, lib_dir)
         if _library_is_current(source, olean, stamp, digest):
-            return
+            continue
         # Pre-stamp trees (fresh clone, or an olean built by the Makefile):
         # accept it if it is newer than the source, then record its digests so
         # later touches are free. Stamp-only, so no lock needed — and
@@ -1572,7 +1563,7 @@ def ensure_library(lean: str, lib_dir: str, timeout: int | None = None,
         if (not os.path.isfile(stamp) and os.path.isfile(olean)
                 and os.path.getmtime(olean) >= os.path.getmtime(source)):
             _write_stamp(stamp, source, olean, digest)
-            return
+            continue
         key = _olean_key(stem, source, lean, digest)
         fd = _acquire_build_lock(olean, timeout)
         try:
@@ -1580,7 +1571,7 @@ def ensure_library(lean: str, lib_dir: str, timeout: int | None = None,
             # doing the same thing, and the whole point of the lock is that
             # exactly one of them proceeds past here.
             if _library_is_current(source, olean, stamp, digest):
-                return
+                continue
             hit = cas.lookup(key, ".olean")
             if hit:
                 shutil.copyfile(hit, olean)
@@ -1619,69 +1610,6 @@ def ensure_library(lean: str, lib_dir: str, timeout: int | None = None,
             _write_stamp(stamp, source, olean, digest)
         finally:
             _release_build_lock(fd)
-
-    # BUILD ORDER IS THE IMPORT GRAPH, NOT THE TUPLE. Modules whose imports are
-    # all current are independent of each other, so each LEVEL of the graph is
-    # built concurrently: the eight `ProofLibSteps<k>` shards (which hold ~98 % of
-    # `ProofLib`'s old 85-minute elaboration and import only `ProofLib`) run side
-    # by side after the ~100 s core, instead of one after another. The per-.olean
-    # lock above is untouched, so this composes with peers doing the same.
-    present = [m for m in LIBRARY_MODULES
-               if os.path.isfile(os.path.join(lib_dir, m + ".lean"))]
-    deps = {m: _module_imports(os.path.join(lib_dir, m + ".lean")) & set(present)
-            for m in present}
-    done: set = set()
-    jobs = library_jobs()
-    while len(done) < len(present):
-        level = [m for m in present
-                 if m not in done and deps[m] <= done]
-        if not level:  # an import cycle: fall back to the declared order
-            level = [next(m for m in present if m not in done)]
-        if len(level) == 1 or jobs == 1:
-            for m in level:
-                ensure_one(m)
-        else:
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=min(jobs, len(level))) as pool:
-                for fut in [pool.submit(ensure_one, m) for m in level]:
-                    fut.result()
-        done.update(level)
-
-
-def prooflib_text(lib_dir: str | None = None) -> str:
-    """The text of `ProofLib` AND its `ProofLibSteps<k>` shards, concatenated.
-
-    The `work_step_*` lemmas used to live in `lib/ProofLib.lean`; they moved to
-    the shards so the library builds in parallel, and a reader that greps for a
-    lemma by name (a test, a census) must look in all of them. `ProofLib.lean`
-    alone is still the right file for the machine model (`arm64_step`, the
-    definitions), and a reader that wants only that keeps reading it."""
-    d = lib_dir or os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "lib")
-    parts = []
-    for stem in ("ProofLib",) + LIBRARY_STEP_SHARDS:
-        path = os.path.join(d, stem + ".lean")
-        if os.path.isfile(path):
-            with open(path, encoding="utf-8") as f:
-                parts.append(f.read())
-    return "\n".join(parts)
-
-
-def library_jobs() -> int:
-    """How many library modules may be elaborated at once.
-
-    `FORMAL_LEAN_LIBRARY_JOBS` overrides. The default is half the cores, capped
-    at 6: each `lean -o` of a shard is a few GB (the whole old file peaked at
-    11 GB) and the machine-wide budget is `tools/memslot.py`'s, so this is a
-    ceiling on THIS process and not a reservation."""
-    raw = (os.environ.get("FORMAL_LEAN_LIBRARY_JOBS") or "").strip()
-    try:
-        n = int(raw)
-        if n > 0:
-            return n
-    except ValueError:
-        pass
-    return max(1, min(6, (os.cpu_count() or 2) // 2))
 
 
 # ── verdict cache ───────────────────────────────────────────────────────────

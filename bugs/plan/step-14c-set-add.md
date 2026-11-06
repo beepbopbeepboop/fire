@@ -1,5 +1,4 @@
 # plan/step-14c: `set.add(x)` on both backends
-**Status: DONE 2026-11-06 (measured).** `BUILTIN_VALUE_METHODS["add"]="set_add"`; `_emit_list_append(distinct=True)` on both backends (scan before the capacity guard, so a member add to a full set is a no-op); `_scan_list_caps` counts `add`; receiver must be `_expr_is_set_like` else `set_add_receiver_refusal`. Rows `s_add_new/dup/loop/in/walk_sum`, `s_add_after_dedup_literal` (the literal-dedup replacement list now carries the append cap), `s_add_on_list_r` pass. User-struct `add` guard measured by hand (struct Acc, exit 2; harness setup cannot declare a struct); append-overflow message measured on arm64 (`{1,2}` + n adds).
 Class: mid      Size: M      Depends: 14b      Blocks: none
 Source: `bugs/FORMAL_set_value_model.md` table row `s.add(x)` ("REFUSED; `add` is not in `model.BUILTIN_VALUE_METHODS`").
 

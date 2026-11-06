@@ -10447,9 +10447,13 @@ def _struct_data_field(gen, ctype: str):
         # through the bytes-subclass path, not `_mojo_at_` arithmetic.
         return None, None
     sft = gen.struct_field_types.get(sn, {})
-    for fname in ('_data', 'data'):
+    for fname in ('_data', 'data', '_array', 'array', 'buffer', 'storage', '_ptr', 'ptr', '_storage', 'values', '_values', '_items', 'items'):
         ft = sft.get(fname, '')
-        if ft.endswith(' *'):
+        if ft and isinstance(ft, str) and ft.endswith(' *'):
+            return fname, ft
+    # Also look for any pointer field as a possible backing store
+    for fname, ft in sft.items():
+        if isinstance(ft, str) and ft.endswith(' *') and fname not in ('__vtable',) and not fname.startswith('_mangled'):
             return fname, ft
     return None, None
 
@@ -10817,13 +10821,6 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             gen._actual_types[cast_t] = elem
             # Propagate nested element types for MojoList* (list-of-lists)
             if elem == 'MojoList *':
-                # A list of HETEROGENEOUS tuples (`[(body, 0)]`): the container
-                # carries each inner slot's own type, so the element read
-                # inherits them and `body, idx = stack[-1]` reads `idx` as an
-                # int, not as the joined list element type.
-                if ov in gen._tuple_slot_types:
-                    gen._tuple_slot_types[cast_t] = gen._tuple_slot_types[ov]
-                    gen._tuple_slot_types[t] = gen._tuple_slot_types[ov]
                 if ov in gen._nested_elem_types:
                     gen._elem_types[cast_t] = gen._nested_elem_types[ov]
                     gen._elem_types[t] = gen._nested_elem_types[ov]
@@ -11028,9 +11025,6 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             cast_t = gen._new_val(elem, f'({elem}){t}')
             gen._actual_types[cast_t] = elem
             if elem == 'MojoList *':
-                if ov in gen._tuple_slot_types:
-                    gen._tuple_slot_types[cast_t] = gen._tuple_slot_types[ov]
-                    gen._tuple_slot_types[t] = gen._tuple_slot_types[ov]
                 if ov in gen._nested_elem_types:
                     gen._elem_types[cast_t] = gen._nested_elem_types[ov]
                     gen._elem_types[t] = gen._nested_elem_types[ov]

@@ -951,72 +951,8 @@ RULES = [
 TRIE = build_trie(RULES)
 
 
-def _field_call_default(value):
-    """What a dataclass `field(...)` default stands for, as `(kind, expr)`:
-    ('value', V) for `field(default=V)`, ('list' | 'dict' | 'set', None) for the
-    matching `default_factory`, or None when `value` is not such a call (or a
-    factory this does not model)."""
-    if not isinstance(value, CallExpr):
-        return None
-    fn = value.func
-    is_field = False
-    if isinstance(fn, IdentExpr):
-        is_field = fn.name == 'field'
-    elif isinstance(fn, MemberExpr):
-        is_field = fn.member == 'field' and isinstance(fn.obj, IdentExpr) and fn.obj.name == 'dataclasses'
-    if not is_field or len(value.args) != 0:
-        return None
-    for kw in value.kwargs:
-        kname = kw[0]
-        kval = kw[1]
-        if kname == 'default':
-            return ('value', kval)
-        if kname == 'default_factory' and isinstance(kval, IdentExpr):
-            if kval.name == 'list' or kval.name == 'dict' or kval.name == 'set':
-                return (kval.name, None)
-    return None
-
-
-_CONTAINER_ANN_PREFIXES = {'list': ('list', 'List'), 'dict': ('dict', 'Dict'), 'set': ('set', 'Set')}
-
-
-def desugar_field_defaults(stmts: list) -> list:
-    """Make a dataclass `field(...)` default mean what it says.
-
-    The call was never evaluated, so `items: list = field(default_factory=list)`
-    left the member NULL and the first `.append` crashed (31 such fields in
-    fire_compiler.py alone, which the self-hosted compiler reads as NULL).
-    `default=V` becomes the plain default `= V`. A `list` / `dict` / `set`
-    factory becomes a field with NO initializer and a container annotation,
-    which is the shape `_alloc_<S>` already builds as a fresh container for every
-    instance (a literal `= []` would be one object shared by all instances).
-    Nested classes (inside function bodies) are rewritten too."""
-    for st in stmts:
-        if isinstance(st, StructDef):
-            for fd in st.fields:
-                res = _field_call_default(fd.value)
-                if res is None:
-                    continue
-                kind = res[0]
-                if kind == 'value':
-                    fd.value = res[1]
-                else:
-                    fd.value = None
-                    ann = _as_str(fd.type_ann) if fd.type_ann is not None else ''
-                    ok = False
-                    for pre in _CONTAINER_ANN_PREFIXES[kind]:
-                        if ann.startswith(pre):
-                            ok = True
-                    if not ok:
-                        fd.type_ann = kind
-        elif isinstance(st, FunctionDef):
-            desugar_field_defaults(st.body)
-    return stmts
-
-
 def rewrite(stmts: list) -> list:
     """Entry point: run the full registered ruleset over a parsed module."""
-    stmts = desugar_field_defaults(stmts)
     return rewrite_module(stmts, TRIE)
 
 
