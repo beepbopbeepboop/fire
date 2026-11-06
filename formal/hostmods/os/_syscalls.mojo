@@ -1623,6 +1623,24 @@ def fs_stat_field64(p, follow, at) -> int:
     return le64(buf, at)
 
 
+def fs_stat_time_ns(p, follow, at) -> int:
+    """`stat`/`lstat`'s `struct timespec` at byte `at`, as NANOSECONDS, or -1.
+
+    `st_atimespec` is at 32, `st_mtimespec` at 48 and `st_ctimespec` at 64 in the
+    64-bit `struct stat` this module reads (`st_size` is at 96, which
+    `fs_stat_layout_ok` checks against `lseek` on every call). The seconds are
+    the first eight bytes and the nanoseconds the next eight. One `stat` call
+    produces BOTH halves, so the pair cannot straddle a change: two separate
+    reads (seconds, then nanoseconds) could. A 64-bit nanosecond count holds
+    dates up to the year 2262.
+    """
+    var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
+    if buf == 0:
+        return 0 - 1
+    ns = le64(buf, at) * 1000000000 + le64(buf, at + 8)
+    return ns
+
+
 def fs_stat_field16(p, follow, at) -> int:
     """The 16-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
 

@@ -1448,6 +1448,83 @@ def group_fsmeta(tmpdir, verbose):
     return True, ""
 
 
+STATTIMES_PROGRAM = """\
+import os
+
+def main():
+    printf("at=%d@@", os.path.stat_atime("{f}", 1))
+    printf("mt=%d@@", os.path.stat_mtime("{f}", 1))
+    printf("ct=%d@@", os.path.stat_ctime("{f}", 1))
+    printf("atns=%d@@", os.path.stat_atime_ns("{f}", 1))
+    printf("mtns=%d@@", os.path.stat_mtime_ns("{f}", 1))
+    printf("ctns=%d@@", os.path.stat_ctime_ns("{f}", 1))
+    printf("gm=%d@@", os.path.getmtime_ns("{f}"))
+    printf("lmt=%d@@", os.path.stat_mtime_ns("{l}", 0))
+    printf("none=%d@@", os.path.stat_mtime_ns("{f}.none", 1))
+    printf("sep=%s@@", os.path.sep())
+    return 0
+"""
+
+
+def group_stattimes(tmpdir, verbose):
+    """The `stat_*time` accessors, against `os.stat` at NANOSECOND precision.
+
+    The times are set by the TEST (`os.utime(ns=...)`) to values with all nine
+    digits significant, so a reader that dropped the nanoseconds, swapped the
+    access and modification fields, or added the halves in the wrong order is
+    caught. `st_ctime` cannot be set, so it is compared with what `os.stat`
+    says right after. `lstat` of a symlink is the link's own time.
+    """
+    bad = []
+    for backend, prefix in (("arm64", []), ("x86_64", ["arch", "-x86_64"])):
+        d = os.path.join(tmpdir, f"stattimes_{backend}")
+        os.makedirs(d)
+        f = os.path.join(d, "f")
+        link = os.path.join(d, "l")
+        with open(f, "w") as fh:
+            fh.write("x")
+        os.utime(f, ns=(1500000000123456789, 1600000000987654321))
+        os.symlink(f, link)
+        src = os.path.join(tmpdir, f"os_stattimes_{backend}.mojo")
+        with open(src, "w") as fh:
+            fh.write(STATTIMES_PROGRAM.replace("{f}", f).replace("{l}", link))
+        out = os.path.join(tmpdir, f"os_stattimes_{backend}")
+        rc, text = build(src, out, backend=backend)
+        if rc != 0:
+            return False, f"[{backend}] build failed: {text.strip()[-400:]}"
+        p = subprocess.run(prefix + [out], capture_output=True, text=True,
+                           timeout=RUN_TIMEOUT, cwd=tmpdir)
+        if p.returncode != 0:
+            return False, f"[{backend}] exit {p.returncode}"
+        got = parse_kv(p.stdout)
+        st = os.stat(f)
+        lst = os.lstat(link)
+        want = {
+            "at": str(int(st.st_atime_ns // 10**9)),
+            "mt": str(int(st.st_mtime_ns // 10**9)),
+            "ct": str(int(st.st_ctime_ns // 10**9)),
+            "atns": str(st.st_atime_ns),
+            "mtns": str(st.st_mtime_ns),
+            "ctns": str(st.st_ctime_ns),
+            "gm": str(st.st_mtime_ns),
+            "lmt": str(lst.st_mtime_ns),
+            "none": "-1",
+            "sep": os.path.sep,
+        }
+        for k, v in want.items():
+            if got.get(k) != v:
+                bad.append(f"[{backend}] {k}: image says {got.get(k)!r}, CPython {v!r}")
+        if want["atns"] != "1500000000123456789" or want["mtns"] != "1600000000987654321":
+            bad.append(f"[{backend}] the fixture's own times were not set exactly")
+    if bad:
+        return False, ("%d disagreements:\n      %s"
+                       % (len(bad), "\n      ".join(bad)))
+    if verbose:
+        print("      atime/mtime/ctime in seconds and nanoseconds, getmtime_ns, "
+              "lstat of a link and sep agree with os.stat on both backends")
+    return True, ""
+
+
 GROUPS = {
     "inplace": group_inplace,
     "strings": group_strings,
@@ -1456,6 +1533,7 @@ GROUPS = {
     "env": group_env,
     "proc": group_proc,
     "fsmeta": group_fsmeta,
+    "stattimes": group_stattimes,
     "dirs": group_dirs,
     "blob": group_blob,
 }
