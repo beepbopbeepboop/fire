@@ -1665,7 +1665,7 @@ Index a `range()` result rather than measuring it, until that is fixed.
 | 15 | ../new-modular/Mojo/stdlib/std/simd.mojo | S | likely bare call to generic in std.utils.numerics (like row 4) | pattern match to row 4 | |
 | 16 | ../new-modular/Mojo/stdlib/std/sys/arg.mojo | S | build: arg.mojo imports ffi -> dependency chain (missing modules) | moved to dependency | |
 | 17 | bootstrap_test_classes.mojo | S | build: create_point returns a frame address, and the returned-frame convention needs a caller to reserve a block and pass its address — entry point issue | different full message | |
-| 18 | runtime/stdlib_wrapper.mojo |  | build: main: `now` is called, and it is imported from `time`, so the call has to bind a symbol `time |  |  |
+| 18 | runtime/stdlib_wrapper.mojo | S | build: main: `now` is called from `time` but `time` declares no function or struct named `now` at all | different reason (name not found) | |
 | 19 | t1.mojo |  | build: sys.exit(): `sys` is a linked module but it exports no `exit`, so the call has no symbol to b |  |  |
 | 20 | test_llm/dumb_gemm.mojo |  | build: [FloatLiteral] * m * k is a REPETITION, and this path can only lower one whose count it can r |  |  |
 | 21 | test_relaxed_imports.mojo |  | build: '+' on two strings is refused on this path. A string here is a bare `char *`, so `+` is integ |  |  |
