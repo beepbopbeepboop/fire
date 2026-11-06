@@ -1,4 +1,5 @@
 # plan/step-11c: `chr(<constant>)` folds; `replace`/`join`/the case-variants refuse naming the buffer correctly
+**Status: DONE 2026-11-06 (measured).** `chr(65)` prints `A` on arm64 and x86-64; the refusal rows are unchanged and green in `test_formal_str_methods.py`.
 Class: mid      Size: S      Depends: 11a      Blocks: 13
 Source: `bugs/FORMAL_string_value_model.md` § "`ord`, `chr` and `hash` were not an encoding question at all" (line ~1118).
 

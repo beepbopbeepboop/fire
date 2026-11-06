@@ -1,4 +1,5 @@
 # plan/step-14a: RESTORE the compile-time set-literal dedup that the `formal/model/` package split lost
+**Status: DONE 2026-11-06 (measured).** `set_literal_word_key`/`set_literal_distinct_elements` are in `formal/model/layout.py:152,171`; both emitters call them (arm64 `:4451`, x86-64 `:9572`); `s_len_dups`, `s_walk_dups`, `s_len_dups_str` are in `test_formal_container_methods.py`; `len({1,1,2,3,3})` exits 3; container-methods 6/0.
 Class: easy      Size: S      Depends: none      Blocks: 14b, 14c, 14d
 Source: `bugs/FORMAL_set_value_model.md` top Status (2026-10-12): "word-canonical half is fixed" — which is FALSE on this tree.
 

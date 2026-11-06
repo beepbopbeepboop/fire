@@ -1,4 +1,5 @@
 # plan/step-15d: refuse, by name, a type argument declared only in the consumer's file
+**Status: DONE 2026-11-06 (measured).** 'a consumer-declared type argument is refused by name' PASSES; `test_formal_monomorph.py` 60/0/0 on 2026-11-06.
 Class: mid      Size: S      Depends: 15a      Blocks: none
 Source: deleted `bugs/formal/FORMAL_generic_monomorph_scope.md` §4 and §5 (`git show 4fdf0a95d^:...`).
 

@@ -4401,7 +4401,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     global _IMAGE_FUNCTIONS
     _IMAGE_FUNCTIONS = tuple(functions)
     framed = M.framed_struct_names(structs)
-    _mark_string_frame_readings(functions, structs)
+    _mark_string_frame_readings(functions, framed)
     # …and the module's ONE-FIELD structs, the third predicate of the same
     # partition, on the same terms as `framed` and for the same reason: the
     # three arms below ask it PER FUNCTION (`struct_is_one_field` is
@@ -6107,24 +6107,13 @@ def check_construction_mismatches(functions) -> None:
             target, callee, summary, fn.name))
 
 
-def _mark_string_frame_readings(functions, structs):
-    try:
-        fns = [getattr(f, "name") for f in (functions or [])]
-    except Exception:
-        fns = []
-    try:
-        for fn in (functions or []):
-            try:
-                nodes = M.string_frame_reading_calls(fn, structs, fns)
-            except Exception:
-                nodes = []
-            for n in nodes or []:
-                try:
-                    setattr(n, "_string_frame_reading", True)
-                except Exception:
-                    pass
-    except Exception:
-        pass
+def _mark_string_frame_readings(functions, framed):
+    """Put `_string_frame_reading` on every call `string_frame_reading_calls`
+    names, BEFORE any binding analysis runs (step 10)."""
+    names = [fn.name for fn in functions]
+    for fn in functions:
+        for call in M.string_frame_reading_calls(fn, framed, names):
+            call._string_frame_reading = True
 
 
 def _value_may_be_a_frame(value, structs_by_name, holders, alias=None,

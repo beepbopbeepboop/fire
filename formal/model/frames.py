@@ -199,20 +199,28 @@ def frame_binding_value(node):
     return None
 
 
-def string_frame_reading_calls(fn, structs, functions=()) -> list:
-    """Call nodes that must read `String()` as a framed struct, not a char*.
+def string_frame_reading_calls(fn, framed, functions=()) -> list:
+    """The zero-argument `String()` calls that must be a FRAME, not a `char *`.
 
-    A zero-arg `String()` bound to a local that is later used as a receiver
-    (`a.f` / passed in a way that makes it a frame root used as receiver)
-    is treated as a framed struct construction on both backends. Everything
-    else keeps the TEXT reading."""
-    out = []
-    if fn is None:
-        return out
+    One rule, per call node (step 10). A call `C()` has the frame reading iff
+    all of: `C` is a string-type constructor name (`STRING_TYPE_CTORS`); this
+    module declares a FRAMED `struct C` (`framed` is `framed_struct_names`'s
+    mapping); `C` is not also a function in the image; the call is the value of
+    a single-name binding; and that name is the root of a `MemberExpr` somewhere
+    in the same body, i.e. it is used as a receiver. Everything else keeps the
+    TEXT reading, so `var s = String(); printf("%s", s)` is unchanged.
+
+    The verdict is put on the node by the build pass
+    (`_string_frame_reading`) so the five analysis sites and both emitters read
+    one fact and cannot disagree, which is the defect this fixes: the build
+    pass made `a` a three-slot frame while the emitter produced the address of
+    an interned `char *`, and the field store landed in read-only text (SIGBUS).
+    """
     body = getattr(fn, "body", None)
-    functions_set = set(functions or ())
-    # Find all bindings of zero-arg String() calls
-    string_ctor_bindings = []  # (target_name, call_node)
+    if not body or not framed:
+        return []
+    image_functions = set(functions or ())
+    bindings = []
     for node in iter_nodes(body):
         target = frame_binding_target(node)
         value = frame_binding_value(node)
@@ -221,38 +229,21 @@ def string_frame_reading_calls(fn, structs, functions=()) -> list:
         if not isinstance(value.func, F.IdentExpr):
             continue
         callee = value.func.name
-        if callee not in STRING_TYPE_CTORS:
+        if (callee not in STRING_TYPE_CTORS or callee not in framed
+                or callee in image_functions):
             continue
-        # must be zero args
-        nargs = len(value.args or []) + len(value.kwargs or [])
-        if nargs != 0:
+        if value.args or value.kwargs:
             continue
-        # this module declares struct C and struct_is_framed(C)
-        if (structs or {}).get(callee) is None:
-            continue
-        try:
-            if not struct_is_framed(callee):
-                continue
-        except Exception:
-            pass
-        # C is not a function name in the image
-        if callee in functions_set:
-            continue
-        string_ctor_bindings.append((target, value))
-    if not string_ctor_bindings:
-        return out
-    # Find which of those bindings are used as receivers somewhere in the function
-    used_as_receiver_targets = set()
+        bindings.append((target, value))
+    if not bindings:
+        return []
+    receivers = set()
     for node in iter_nodes(body):
-        if not isinstance(node, F.MemberExpr):
-            continue
-        r = root_ident(node)
-        if r is not None and r[1] >= 1:
-            used_as_receiver_targets.add(r[0])
-    for target, value in string_ctor_bindings:
-        if target in used_as_receiver_targets:
-            out.append(value)
-    return out
+        if isinstance(node, F.MemberExpr):
+            root = root_ident(node)
+            if root is not None and root[1] >= 1:
+                receivers.add(root[0])
+    return [value for target, value in bindings if target in receivers]
 
 
 def struct_constructor_bindings(fn, framed, functions=()) -> dict:

@@ -1053,16 +1053,13 @@ def dtype_member_refusal(spelled: str, member: str) -> str:
 
 
 def call_is_string_frame_reading(call) -> bool:
-    try:
-        return bool(getattr(call, "_string_frame_reading", False))
-    except Exception:
-        return False
+    """Whether the build pass marked this call node as the FRAME reading of a
+    zero-argument `String()` (`frames.string_frame_reading_calls`, step 10)."""
+    return bool(getattr(call, "_string_frame_reading", False))
 
 
 def call_lowers_as_framed_construction(callee: str, structs: dict, nargs: int,
                                        functions=(), call=None) -> bool:
-    if call is not None and call_is_string_frame_reading(call):
-        return True
     """Whether a call to `callee` reaches `_emit_struct_constructor` on EITHER
     backend.
 
@@ -1101,6 +1098,8 @@ def call_lowers_as_framed_construction(callee: str, structs: dict, nargs: int,
     call to a type this module does not declare is not a construction of
     anything, and the emitter's own answer about it is unchanged.
     """
+    if call is not None and call_is_string_frame_reading(call):
+        return True
     if (structs or {}).get(callee) is None:
         return False
     if callee in (functions or ()):
@@ -1108,6 +1107,8 @@ def call_lowers_as_framed_construction(callee: str, structs: dict, nargs: int,
     if type_constructor_prefers_local_struct(callee, structs, nargs):
         return True
     return type_constructor_kind(callee) is None
+
+
 def type_constructor_prefers_local_struct(callee_name: str, structs: dict,
                                           nargs: int) -> bool:
     """Whether THIS MODULE's own `struct N` beats `N`'s place in
