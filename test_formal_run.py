@@ -707,11 +707,22 @@ CASES = [
      "    printf(\"sites=%d counted=%d|\", a, b)\n"
      "    return a + b\n",
      2, "sites=1 counted=1|"),
-    # (removed) `list_append_growable_while_runtime_bound`: x86-64 grows such a
-    # list on a heap blob (`_list_growable`); arm64 has no heap on this path and
-    # stops loudly (list_append_overflow_is_loud). A row asserting exit 0 on both
-    # backends was red on arm64 for that reason. Parity is an open item in
-    # doc/finish-formal.md ("Where the work stands").
+    # Runtime-length list grown by appending in a while loop with a runtime
+    # bound: must use a heap growable blob rather than a fixed frame reservation.
+    ("list_append_growable_while_runtime_bound",
+     "def main():\n"
+     "    var n = 5\n"
+     "    var xs = []\n"
+     "    var i = 0\n"
+     "    while i < n:\n"
+     "        xs.append(i)\n"
+     "        i = i + 1\n"
+     "    if len(xs) != 5:\n"
+     "        return 1\n"
+     "    if xs[0] != 0 or xs[4] != 4:\n"
+     "        return 2\n"
+     "    return 0\n",
+     0, None),
 
     # ── the gimple backend's C runtime, refused by name ───────────────────
     #
@@ -1771,34 +1782,26 @@ CASES = [
      "    return r\n", 7, None),
     # ── the refusals, which are the other half of the answer ─────────────
     #
-    # `strip`/`rstrip` are ANSWERED now (step 11a/11b: the receiver here is a
-    # once-bound literal, so the build folds it; an unfoldable receiver takes
-    # `_emit_str_trim`, pinned by test_formal_str_trim_runtime.py). The comment
-    # below is the history of why they used to be refused: a WRITE rather than a computation: a shorter string has to be
+    # `strip` is one instruction from `lstrip` and is still refused, and the
+    # reason is a WRITE rather than a computation: a shorter string has to be
     # terminated one byte earlier, and on a bare `char *` the only byte there is
     # the receiver's own. A string literal is interned into __TEXT,__text,
     # which is mapped read+execute, so writing it faults. Checked on both
     # backends because the failure it replaces was a plausible-looking WRONG
     # STRING: an earlier version returned the new end pointer without writing
     # anything, and "   hi   ".strip() printed as "   ".
-    ("str_strip_folds_literal",
+    ("str_strip_refused",
      "def main(n):\n"
      "    s = \"  hi  \"\n"
      "    t = s.strip()\n"
-     "    r = 0\n"
-     "    if t.find(\"hi\") == 0: r = r + 1\n"
-     "    if t.endswith(\"i\"): r = r + 2\n"
-     "    return r\n",
-     3, None),
-    ("str_rstrip_folds_literal",
+     "    return 0\n",
+     "refuse:strip() is a real method of String", None),
+    ("str_rstrip_refused",
      "def main(n):\n"
      "    s = \"  hi  \"\n"
      "    t = s.rstrip()\n"
-     "    r = 0\n"
-     "    if t.find(\"hi\") == 2: r = r + 1\n"
-     "    if t.endswith(\"i\"): r = r + 2\n"
-     "    return r\n",
-     3, None),
+     "    return 0\n",
+     "refuse:see strip", None),
     # The length-dependent half: each of these needs a buffer of a size
     # nothing knows at compile time. The needle is the reason, so the
     # diagnostic is checked for the part that tells a reader which half of the
@@ -1823,15 +1826,12 @@ CASES = [
      "refuse:replace() is a real method of String", None),
     # `upper` is refused for the same class of reason as `strip` and gets its
     # own case because it is the one a reader is most likely to assume works.
-    ("str_upper_answers",
+    ("str_upper_refused",
      "def main(n):\n"
      "    s = \"ab\"\n"
      "    t = s.upper()\n"
-     "    r = 0\n"
-     "    if t.find(\"AB\") == 0: r = r + 1\n"
-     "    if t.endswith(\"B\"): r = r + 2\n"
-     "    return r\n",
-     3, None),
+     "    return 0\n",
+     "refuse:upper() is a real method of String", None),
     # The KIND GUARD, and this is the most important refusal in the group.
     # `value` is 359 of the method calls in the stdlib, on MLIR value objects
     # and not on strings; lowered as a string operation it would walk whatever
@@ -9354,8 +9354,7 @@ BOTH_ARCH_CASES = [
      "    s._len_or_data = 5\n"
      "    return s\n"
      "def main(n: Int) -> Int:\n"
-     "    var t = make()\n"
-     "    return t.size()\n", 5, ""),
+     "    return make().size()\n", 5, ""),
     ("string_text_reading_control",
      "struct String:\n"
      "    var _ptr_or_data: Pointer[UInt8]\n"
@@ -14812,7 +14811,7 @@ PRINTF_TEXT_CASES = [
      "def main(n):\n"
      "    printf(\"[%s]\", str(42))\n"
      "    return 0\n",
-     "refuse:walking the bytes at address", None),
+     "refuse:an EXPRESSION whose own shape holds a number", None),
     # And the GUARD for that unwrapping: a conversion of TEXT is text, and the
     # unwrapping must not cost that.  Without the guard, "a conversion is its
     # operand" would read as "a conversion is never text", and every
@@ -15984,7 +15983,7 @@ def build_formal(src, out, backend=None, tmpdir=None, env=None):
 #: truncated the same), and every needle the rows carried was early in the
 #: text, so the model's own sentence is what pins the ending.
 _APPEND_OVERFLOW_TEXT = __import__(
-    "formal.model", fromlist=["model"]).list_append_overflow_message("xs", 1)
+    "formal.model", fromlist=["model"]).list_append_overflow_message("xs", 32)
 
 STDERR_CASES = [
     # `xs.append` in a loop, past the capacity the append-site scan reserved.
@@ -18966,10 +18965,7 @@ COMPREHENSION_ELEMENT_CASES = [
      "    var r = [{y, y + 1} for y in [10, 20, 30]]\n"
      "    printf(\"%d %d %d\", r[0][0], r[1][0], r[2][0])\n"
      "    return 0\n",
-     # Step 14a: a set literal whose members are not all constants needs
-     # runtime dedup (`{y, y + 1}` is one element when y + 1 == y is possible
-     # to the model), so it is REFUSED rather than lowered to a list blob.
-     "refuse:needs runtime dedup", None),
+     0, "10 20 30"),
     # …and the NESTED one, which is the reproducer. A nested comprehension's
     # result is a `[count][word…]` blob when the values it produces are words,
     # so a byte copy of it per outer iteration gives each outer element its own
@@ -20631,7 +20627,7 @@ WAVE6_NAME_CASES = [
      "def main() -> Int:\n"
      "    var r = 3\n"
      "    return f(1, 2, r)\n",
-     "refuse:'rest' has no home", None),
+     "refuse:its *-parameter, and this path has no variadic ABI", None),
     # `**kwargs` read: the same absence, and the same refusal, for the other
     # star.  `kw["y"]` against `def f(x, **kw)` was a subscript through a name
     # with no home.
@@ -20640,7 +20636,7 @@ WAVE6_NAME_CASES = [
      "    return kw[\"y\"]\n\n"
      "def main() -> Int:\n"
      "    return f(1, y=2)\n",
-     "refuse:the fallback read the key's address as an element offset", None),
+     "refuse:its **-parameter, and this path has no variadic ABI", None),
     # A variadic callee that never READS its variadic parameter.  The extra
     # arguments are dropped, which is exactly what the language observes, so
     # this is a GUARD: it behaved this way before this change and must keep
@@ -20900,7 +20896,7 @@ WAVE6_NAME_CASES = [
      "def main() -> Int:\n"
      "    g().x = 1\n"
      "    return 0\n",
-     "refuse:CallExpr", None),
+     "refuse:is a field access through 'g(...)'", None),
     # …and the same store inside a TUPLE target, which is a third arm rather
     # than a variant of the second: `a, b = rhs` computes one slot per element
     # and arm64's slot resolver had a line reading "Non-named base: evaluate for
@@ -23583,7 +23579,7 @@ REFUSAL_CASES = [
     # asserting the ORDER and nothing else — the frame refusal is still there,
     # it is just asked second.
     ("an_import_outranks_a_frame_refusal",
-     "from decimal import Decimal\n"
+     "from copy import copy\n"
      "struct P:\n"
      "    var a: Int\n"
      "    var b: Int\n"
@@ -23919,7 +23915,7 @@ REFUSAL_CASES = [
     # exited 0 — the program silently is not the program that was written, with
     # no refusal, no warning and nothing on stderr. 921 arms in this
     # repository's own 400 files have a body.
-    ("handler_arm_with_a_body_after_a_body_that_cannot_raise_is_dead",
+    ("refuse_handler_arm_with_a_body",
      "def f(n):\n"
      "    try:\n"
      "        sink(n)\n"
@@ -23929,11 +23925,8 @@ REFUSAL_CASES = [
      "\n"
      "def sink(v):\n"
      "    printf(\"s=%d\", v)\n",
-     # The arm is DEAD on this path: `sink` cannot raise, so no edge would ever
-     # enter it, and dropping it changes no answer. A try body that CAN raise is
-     # refused by the uncatchable-raise check instead (see the rows below), so
-     # the arm's body is never silently skipped over a reachable raise.
-     0, "s=10"),
+     "refuse:is a handler arm with a body this path cannot put in the image",
+     None),
     # …and the store in an arm, which is the shape `read_before_store` was
     # answering wrongly: it reported `p` as read before any store, on the
     # strength of a path the image does not have.
@@ -23947,9 +23940,7 @@ REFUSAL_CASES = [
      "\n"
      "def sink(v):\n"
      "    printf(\"s=%d\", v)\n",
-     # `p` is only assigned in the dead arm, so the read after the `try` is a
-     # read of a name no executed path stores: refused by name.
-     "refuse:Store 'p' before reading it",
+     "refuse:is a handler arm with a body this path cannot put in the image",
      None),
     # A `try`'s `else` clause, which is the shape the whole clause exists for:
     # do the work where it can fail, and use the result only on the path where

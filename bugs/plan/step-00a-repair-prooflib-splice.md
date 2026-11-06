@@ -1,5 +1,4 @@
 # plan/step-00a: `lib/ProofLib.lean` elaborates again (umbrella: gate for every Lean step)
-**Status: DONE 2026-11-06 (measured).** a full-file elaboration of `lib/IEEE754.lean` + `lib/ProofLib.lean` (580,157 bytes, as of 2026-11-06 11:35, `lean -o`, 24 GB cap, wall 9000 s) returned rc 0 with 0 `error` lines (~1 h 25 m).
 Class: mid      Size: M      Depends: 00c, 00d, 00e, 00f, 00g      Blocks: every step that edits or builds a Lean library
 Source: measured 2026-11-05 (this file); `doc/finish-formal.md` S0.
 

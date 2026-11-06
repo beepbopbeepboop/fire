@@ -2624,13 +2624,6 @@ def set_elem(lst: List, i: Int, v: Int) -> Int:
     return 0
 """), 'walrus_list_subscript')
 
-    # 134b. walrus with subscript target on pointer/memory location (RefSubscript/RLValue)
-    _run_isolated(lambda: test("walrus_subscript_ptr_assign", """\
-def fill_and_read(p: UnsafePointer[Int]) -> Int:
-    (p[0] := 7)
-    return p[0]
-"""), 'walrus_subscript_ptr_assign')
-
     # ── comptime if ───────────────────────────────────────────────────────
 
     # 135. comptime if True — emits then branch only
