@@ -6785,10 +6785,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._push_slot(Reg.RAX)  # save recv
             self._emit_expr(set_lit)
             self._push_slot(Reg.RAX)  # save set
-            self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RSP, 8))  # recv
-            self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.RSP, 0))  # set
+            # `_push_slot` reserves a 16-BYTE slot, so the receiver pushed first
+            # sits at rsp+16 behind the set at rsp+0 (it was read at rsp+8, which
+            # is padding).
+            self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RSP, 16))  # recv
+            self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.RSP, 0))   # set
             self._emit_extern_call("strspn")
-            self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RSP, 8))
+            self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RSP, 16))
             self.asm.emit(encode_add_r64_r64(Reg.RDI, Reg.RAX))
             self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDI))
         else:
@@ -6803,14 +6806,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 0))
         self.asm.emit(encode_cmp_r64_imm8(Reg.RAX, 0))
         self._emit_jcc(COND_E, done)
+        # The set is built FIRST and moved to RDI; the byte is read after, into
+        # RSI, with nothing between it and the call that could clobber it
+        # (building the literal first and holding the byte in RCX across it lost
+        # the byte whenever the literal's address needed a scratch register).
+        self._emit_expr(set_lit)  # set in RAX
+        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
         self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 16))  # p
         self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.RSP, 0))   # n
         self.asm.emit(encode_sub_r64_imm8(Reg.RCX, 1))
         self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.RCX))       # p+n-1
-        self.asm.emit(encode_movzx_r64_rm8(Reg.RCX, Reg.RAX, 0))   # byte in RCX
-        self._emit_expr(set_lit)  # set in RAX
-        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
-        self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RCX))
+        self.asm.emit(encode_movzx_r64_rm8(Reg.RSI, Reg.RAX, 0))   # byte in RSI
         self._emit_extern_call("strchr")
         self.asm.emit(encode_cmp_r64_imm8(Reg.RAX, 0))
         self._emit_jcc(COND_E, done)  # not whitespace
@@ -6825,11 +6831,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_mov_r64_imm32(Reg.RCX, 0))
         self.asm.emit(encode_mov_rm8_r8(Reg.RAX, 0, Reg.RCX))
         self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 16))
+        # Slots pushed: recv, [set if leading], p, n -- pop exactly those.
+        # (This popped FIVE for the leading form after pushing four, which moved
+        # the stack pointer above the caller's frame.)
         self._pop_slot(Reg.R11)
         self._pop_slot(Reg.R11)
         self._pop_slot(Reg.R11)
         if leading:
-            self._pop_slot(Reg.R11)
             self._pop_slot(Reg.R11)
 
     def _emit_str_membership(self, left, right, invert: bool) -> None:

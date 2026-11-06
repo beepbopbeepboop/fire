@@ -2964,6 +2964,9 @@ test('formal-proof-gaps', [PY, 'test_formal_proof_gaps.py'],
 test('formal-once-bound-strings', [PY, 'test_formal_once_bound_strings.py'],
      deps=['preflight'], mem='tiny',
      desc='only once-bound string literals may be folded through a name')
+test('formal-str-trim-runtime', [PY, 'test_formal_str_trim_runtime.py'],
+     deps=['preflight'], mem='tiny',
+     desc='strip()/rstrip() on an unfoldable receiver, arm64 and x86-64 vs CPython')
 test('lean-hne-chain', [PY, 'test_lean_hne_chain.py'],
      deps=['preflight'], mem='tiny',
      desc='arm64_step hne negation chain generator')

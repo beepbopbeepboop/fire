@@ -8619,9 +8619,13 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 8))
         self.asm.emit(encode_sub_xd_xn_imm(1, 1, 1))
         self.asm.emit(encode_add_xd_xn_xm(1, 0, 1))  # p + n - 1
-        self.asm.emit(encode_ldrb_wd_wn(9, 1, 0))  # load byte into W9/X9
+        self.asm.emit(encode_ldrb_wd_wn(1, 1, 0))  # W1 = the byte (zero-extended)
+        # Parked in the FRAME, not left in a scratch register: building the set
+        # literal below is free to use any caller-saved register, and a byte
+        # held in X9 across it was trimmed against whatever that left behind.
+        self.asm.emit(encode_str_xt_xn_imm(1, 31, 24))
         self._emit_expr(set_lit)  # X0 = set
-        self.asm.emit(encode_mov_zr_xn(1, 9))  # X1 = byte
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 24))  # X1 = byte
         self._emit_extern_call("strchr")
         self.asm.emit(encode_cbz_xn(0, 0))
         self.asm.emit_label_rel(done, here_offset=-4)  # if not found
@@ -8633,7 +8637,11 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
         self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 8))
         self.asm.emit(encode_add_xd_xn_xm(1, 0, 1))
-        self.asm.emit(encode_mov_zr_xn(2, 0))
+        # A real ZERO. `encode_mov_zr_xn(2, 0)` is `mov x2, x0` (the second
+        # argument is a REGISTER NUMBER, not the zero register), so this used to
+        # terminate the string with the low byte of its own address: `pad0 `,
+        # `padP`, `pad\``, `padp`, a different byte per run.
+        self.asm.emit(encode_movz_wd_imm(2, 0))
         self.asm.emit(encode_strb_wd_wn(2, 1, 0))
         self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))
         _emit_add_imm(self.asm, 31, 31, 32)
