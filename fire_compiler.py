@@ -143,6 +143,33 @@ def _signed_int64_c_literal(value: int) -> str:
         return '(-0x7FFFFFFFFFFFFFFFLL - 1)'
     return f'{value}LL'
 
+def _float_c_literal(value: float) -> str:
+    """The C spelling of `value`, denoting the same `double`.
+
+    `repr()` is an exact round-trip for finite values, but its spellings of
+    the non-finite ones are PYTHON names: `repr(float('inf'))` is `'inf'`,
+    and emitting that into generated C made gcc report "'inf' undeclared"
+    (a float literal that overflows, e.g. `999e9000`, parses to exactly
+    that value). Every generated C file includes `<math.h>`, which spells
+    them `INFINITY`/`-INFINITY`/`NAN`; the casts make the expression a
+    `double` rather than a `float` constant in every context it lands in.
+
+    This is the ONE spelling of a float literal for the C/GIMPLE backends —
+    `_lower_FloatLiteral`, the call-default padding and the C++ fallback all
+    go through it, so a non-finite value cannot be right in one and invalid
+    C in another.
+    """
+    s = repr(value)
+    if s == 'inf':
+        return '(double)INFINITY'
+    if s == '-inf':
+        return '(double)(-INFINITY)'
+    if s == 'nan':
+        return '(double)NAN'
+    if '.' not in s and 'e' not in s.lower():
+        s += '.0'
+    return s
+
 def _parse_int_literal(text: str) -> int:
     """Parse an INT token's source text (decimal / 0x / 0o / 0b, underscores
     allowed) into its signed 64-bit value, WITHOUT `int(text, 0)`.
