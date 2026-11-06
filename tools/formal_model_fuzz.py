@@ -273,20 +273,33 @@ def _rn(r):
 
 
 def gen_ext_sp(rng, free):
-    d = rng.choice([r for r in free if r != 31])  # never 31, SP is the harness anchor and must not move
+    """The EXTENDED-register class (`option = 011`, UXTX): `add`/`sub`/`subs`.
+
+    The class exists in the model for its SP encoding, but the SP-BASED forms
+    cannot be compared differentially: the model's SP is the fixed stand-in
+    `MODEL_SP` and the hardware's is a real stack address, so `add x0, sp, x1`
+    differs by construction in any case that lets the result reach a compared
+    register (measured: 57 of 100 two-instruction `alu` cases "disagreed" with
+    SP as the base, none with a register base). So the base is a register here,
+    which exercises the same decode row and the same shift/flag arithmetic, and
+    the SP forms are pinned at the proof level (`arm64_step`'s UXTX arms read
+    `arm64_reg_or_sp`) rather than by this oracle. Spelt `uxtx #k` explicitly:
+    with registers only, `lsl #k` would assemble to the SHIFTED class.
+    """
+    d = _dst(rng, free)
+    n = rng.choice([r for r in free if r != 31])
     m = _r(rng, free)
     k = rng.randrange(0, 5)
     op = rng.randrange(0, 3)
     if op == 0:
-        return ("add x%d, sp, x%d, lsl #%d" % (d, m, k),
-                struct.pack("<I", 0x8b206000 | (m << 16) | (k << 10) | (31 << 5) | d))
+        return ("add x%d, x%d, x%d, uxtx #%d" % (d, n, m, k),
+                struct.pack("<I", 0x8b206000 | (m << 16) | (k << 10) | (n << 5) | d))
     elif op == 1:
-        return ("sub x%d, sp, x%d, lsl #%d" % (d, m, k),
-                struct.pack("<I", 0xcb206000 | (m << 16) | (k << 10) | (31 << 5) | d))
-    else:
-        # subs/cmp
-        return ("cmp sp, x%d, lsl #%d" % (m, k),
-                struct.pack("<I", 0xeb206000 | (m << 16) | (k << 10) | (31 << 5) | 31))
+        return ("sub x%d, x%d, x%d, uxtx #%d" % (d, n, m, k),
+                struct.pack("<I", 0xcb206000 | (m << 16) | (k << 10) | (n << 5) | d))
+    # subs with a real destination (Rd = 31 is the CMP spelling)
+    return ("subs x%d, x%d, x%d, uxtx #%d" % (d, n, m, k),
+            struct.pack("<I", 0xeb206000 | (m << 16) | (k << 10) | (n << 5) | d))
 
 
 def gen_alu(rng, free):
@@ -1148,6 +1161,9 @@ def stOf (c : Case) : Arm64State :=
     x20 := c.regs.getD 20 0, x21 := c.regs.getD 21 0, x22 := c.regs.getD 22 0, x23 := c.regs.getD 23 0
     x24 := c.regs.getD 24 0, x25 := c.regs.getD 25 0, x26 := c.regs.getD 26 0, x27 := c.regs.getD 27 0
     x28 := c.regs.getD 28 0, x29 := c.regs.getD 29 0, x30 := c.regs.getD 30 0
+    -- The FP file (`d0..d7`) exists since the model grew binary64 arms; the
+    -- integer fuzz leaves it zero, and the FP mixes (if any) set it themselves.
+    d0 := 0, d1 := 0, d2 := 0, d3 := 0, d4 := 0, d5 := 0, d6 := 0, d7 := 0
     sp := UInt64.ofNat MODEL_SP, pc := MODEL_PC, nzcv := c.nzcv, mem := memOf c.mem }
 
 def HEX : List Char := "0123456789abcdef".toList
