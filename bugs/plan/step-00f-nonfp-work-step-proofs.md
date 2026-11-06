@@ -1,5 +1,5 @@
 # plan/step-00f: broken non-FP `work_step_*` proofs — `cmn`, `tst`, `ldur`, `stur`, `smulh`, `csel`
-**Status: DONE 2026-11-06 (measured).** The regenerated non-FP work-step proofs elaborate: a full-file elaboration of `lib/IEEE754.lean` + `lib/ProofLib.lean` (580,157 bytes, as of 2026-11-06 11:35, `lean -o`, 24 GB cap, wall 9000 s) returned rc 0 with 0 `error` lines (~1 h 25 m).
+**Status: regenerated, awaiting the full-file build (2026-11-05).** cmn, tst, ldur, stur, smulh, csel were rebuilt with `tools/lean_hne_chain.py` (the old chains negated the theorem's OWN arm and the `ide` splice fragment inside `work_step_csel` is gone). A full-file elaboration of that state showed ldur/stur elaborating and cmn/tst/smulh/csel failing ONLY with `No goals to be solved` on the trailing `rfl` (the `rw [..., if_pos h]` already closes the goal); the redundant `rfl` was removed in `1fa7eb31c`. Note: lib/ProofLib.lean also lost `cbz_off64`/`cbnz_off64` and a module doc to the regeneration script, restored from the backup before commit.
 Class: mid      Size: L      Depends: none      Blocks: 00a
 Source: build/probe_head 2026-11-05: `ProofLib.lean:6402` (`work_step_cmn`), `:6486` (`work_step_tst`), `:7346` (`work_step_ldur`), `:7429` (`work_step_stur`), `:7740` (`work_step_smulh`), `:7839`, `:7916`, `:7958` (`work_step_csel`).
 

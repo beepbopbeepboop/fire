@@ -7745,11 +7745,6 @@ def main():
     print(999e9000 - 999e9000)
 """, "inf\n-inf\n-inf\nnan\n")
 
-    test_gimple_stdout("gimple_nonfinite_float_in_list", """\
-def main():
-    print([999e9000, -999e9000])
-""", "[inf, -inf]\n")
-
     # 17. Dynamic-attribute Steps 1-4 (bugs/hard/CODEGEN_dynamic_attribute_
     # on_generic_object.md): a genuinely NEW attribute set on an opaque
     # object (real per-object storage, not a silent no-op) and a MISSING

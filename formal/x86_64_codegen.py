@@ -6203,11 +6203,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                or M.string_identity_method(method))
         if how == "list_append":
             self._emit_list_append(e)
-        elif how == "set_add":
-            if not self._expr_is_set_like(obj):
-                raise CodegenError(M.set_add_receiver_refusal(
-                    _dotted(e.func), M.receiver_shape(obj)))
-            self._emit_list_append(e, distinct=True)
         elif how == "list_clear":
             self._emit_list_clear(e)
         elif how == "file_write":
@@ -7021,13 +7016,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_mov_r64_imm64(Reg.RAX, 0))       # count = 0
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.RAX))
 
-    def _emit_list_append(self, e, *, distinct: bool = False) -> None:
+    def _emit_list_append(self, e) -> None:
         """`xs.append(v)` — store v at the blob's count and bump the count.
-
-        `distinct=True` is `set.add(v)`: the same store and capacity guard,
-        preceded by the word scan (`_emit_set_contains`) and skipped when the
-        word is already there. The scan comes BEFORE the guard, so adding a
-        member to a full set is the no-op CPython makes of it.
 
         The blob is `[count][elem0]…` in the frame, so there is no room to
         grow one: the capacity is a compile-time number (`_scan_list_caps`) and
@@ -7068,25 +7058,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._push_slot(Reg.R11)                   # [rsp] = base
         self._emit_expr(args[0])                   # RAX = value
         self._push_slot(Reg.RAX)                   # [rsp] = value
-        self._while_counter += 1
-        wid = self._while_counter
-        fn = self.func_name
-        dup = f"{fn}_appdup{wid}"
-        if distinct:
-            self._require_set_word_element(args[0])
-            # `_emit_set_contains` clobbers R10/R11, so the operands come
-            # from the stack slots into registers it leaves alone.
-            self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 0))   # value
-            self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RSP, 16))  # base
-            self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RDI, 0))    # count
-            self._emit_set_contains(Reg.RDI, Reg.R8, Reg.RAX, Reg.R9)
-            self.asm.emit(encode_test_r64_r64(Reg.R9, Reg.R9))
-            self._emit_jcc(COND_NE, dup)
         self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RSP, 0))   # value
         self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.RSP, 16))  # base
         self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.R11, 0))   # count
         self.asm.emit(encode_cmp_r64_imm32(Reg.R8, cap))
         self._emit_setcc_bool(Reg.R8, "setae")
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
         oob = f"{fn}_appoob{wid}"
         ok = f"{fn}_appok{wid}"
         self._emit_jcc_bool(Reg.R8, COND_NE, oob)
@@ -7116,14 +7095,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._pop_slot(Reg.RAX)
         self._pop_slot(Reg.RAX)
         self._pop_slot(Reg.RAX)
-        if distinct:
-            done = f"{fn}_appdone{wid}"
-            self._emit_jmp(done)
-            self.asm.label(dup)          # already a member: unwind, store nothing
-            self._pop_slot(Reg.RAX)
-            self._pop_slot(Reg.RAX)
-            self._pop_slot(Reg.RAX)
-            self.asm.label(done)
         self._emit_mov_imm(Reg.RAX, 0)             # None
 
     def _emit_list_clear(self, e) -> None:
@@ -8548,34 +8519,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._emit_jmp(top)
         self.asm.label(done)
 
-    def _require_set_word_element(self, el) -> None:
-        """Refuse a set element whose equality is not a word comparison (the
-        twin of the arm64 method of the same name; the rule is the model's
-        `set_runtime_element_refusal`)."""
-        if isinstance(el, F.FloatLiteral):
-            raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), "float"))
-        if isinstance(el, F.StringLiteral):
-            return
-        kind = self._expr_str_kind(el)
-        if kind == "str" or (kind is None and not isinstance(
-                el, (F.IntLiteral, F.BoolLiteral, F.IdentExpr))):
-            raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), kind))
-
-    def _emit_deduped_set(self, expr, kept, dropped) -> None:
-        """A set literal whose element words are known at compile time: the
-        list blob of its distinct elements (cap carried to the replacement)."""
-        if not dropped:
-            self._emit_list(expr)
-            return
-        lst = F.ListExpr(elements=kept, line=expr.line, col=expr.col)
-        cap = self._list_caps.get(id(expr))
-        if cap is not None:
-            self._list_caps[id(lst)] = cap
-        try:
-            self._emit_list(lst)
-        finally:
-            self._list_caps.pop(id(lst), None)
-
     def _emit_set_literal(self, expr) -> None:
         """Set literal with runtime deduplication for non-canonical elements."""
         if getattr(self, '_compr_reloc', None):
@@ -8594,7 +8537,18 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._emit_mov_imm(Reg.R10, 0)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
         for i, el in enumerate(elements):
-            self._require_set_word_element(el)
+            if isinstance(el, F.FloatLiteral):
+                raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), "float"))
+            kind = self._expr_str_kind(el)
+            if isinstance(el, F.StringLiteral):
+                pass
+            elif kind == "str":
+                raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), kind))
+            elif kind is None:
+                if isinstance(el, (F.IntLiteral, F.BoolLiteral, F.IdentExpr)):
+                    pass
+                else:
+                    raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), kind))
             # Evaluate element -> RAX
             self._emit_expr(el)
             elem_reg = Reg.RAX
@@ -9617,7 +9571,9 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # time are deduplicated before the list is emitted.
             kept, dropped = M.set_literal_distinct_elements(expr.elements)
             if kept is not None:
-                self._emit_deduped_set(expr, kept, dropped)
+                if dropped:
+                    expr = F.ListExpr(elements=kept, line=expr.line, col=expr.col)
+                self._emit_list(expr)
                 return
             self._emit_set_literal(expr)
             return
@@ -12140,10 +12096,7 @@ preference.
                 # emitters that this element is that shape, and the decision
                 # is `model.comprehension_element_is_relocatable`'s so both
                 # backends relocate the same elements.
-                is_set = expr.kind == "set"
-                if is_set:
-                    self._require_set_comprehension_element(expr.element)
-                reloc = (cap > 1 and not is_set
+                reloc = (cap > 1
                          and M.comprehension_element_is_relocatable(
                              expr.element))
                 if reloc:
@@ -12155,7 +12108,7 @@ preference.
                         self._compr_reloc.pop()
                 self._materialize_compr_element(
                     expr.element, res_offset, cap, _before)
-                self._compr_append_elem(res_offset, cap, distinct=is_set)
+                self._compr_append_elem(res_offset, cap)
             return
 
         gen = gens[gi]
@@ -12340,24 +12293,9 @@ preference.
         self._emit_jcc(COND_B, loop)
         self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R11))   # RAX = the copy
 
-    def _require_set_comprehension_element(self, el) -> None:
-        """Twin of the arm64 method: containers refused (unhashable / not a
-        word compare), floats and non-literal strings refused, computed
-        integer expressions accepted."""
-        if M.set_element_is_container(el):
-            raise CodegenError(M.set_comprehension_element_refusal(M.spelled(el)))
-        if isinstance(el, F.FloatLiteral):
-            raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), "float"))
-        if self._expr_str_kind(el) == "str" and not isinstance(el, F.StringLiteral):
-            raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), "str"))
-
     def _compr_append_elem(self, res_offset: int, cap: int,
-                           copies=None, *, distinct: bool = False) -> None:
+                           copies=None) -> None:
         """Append RAX to the list result; exit(1) past the reserved capacity.
-
-        `distinct=True` (a set comprehension) scans the result so far first
-        (`_emit_set_contains`) and appends nothing when the word is there; the
-        capacity bounds appends, so skipping is always safe.
 
         `copies` is `_emit_compr_element`'s `(base, span)` for an element that
         reserved a container of its own; `None` for every other caller and for
@@ -12375,20 +12313,14 @@ preference.
         element region existed — which is the point: a comprehension of integers
         produces exactly the code it always did.
         """
-        self._while_counter += 1
-        wid = self._while_counter
-        fn = self.func_name
-        if distinct:
-            self._emit_blob_base(res_offset, Reg.RDI)
-            self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RDI, 0))    # count
-            self._emit_set_contains(Reg.RDI, Reg.R8, Reg.RAX, Reg.R9)
-            self.asm.emit(encode_test_r64_r64(Reg.R9, Reg.R9))
-            self._emit_jcc(COND_NE, f"{fn}_cgskip{wid}")
         self._push_slot(Reg.RAX)                     # the element
         self._emit_blob_base(res_offset, Reg.R11)
         self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))   # count
         self.asm.emit(encode_cmp_r64_imm32(Reg.R10, cap))
         self._emit_setcc_bool(Reg.R8, "setae")
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
         oob = f"{fn}_cgoob{wid}"
         ok = f"{fn}_cgok{wid}"
         self._emit_jcc_bool(Reg.R8, COND_NE, oob)
@@ -12404,8 +12336,6 @@ preference.
         self.asm.emit(encode_add_r64_imm8(Reg.R10, 1))
         self._emit_blob_base(res_offset, Reg.R11)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
-        if distinct:
-            self.asm.label(f"{fn}_cgskip{wid}")
 
     def _compr_append_pair(self, res_offset: int, cap: int,
                            key_copies=None, val_copies=None) -> None:
@@ -13086,8 +13016,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         trips_by_id = {id(node): trips for node, trips in M.walk_stmt_trips(
             getattr(fn, "body", None) or [], self._stmt_loop_trips)}
         for node, recv, method, _args in _walk_value_methods(fn):
-            if method not in ("append", "add") \
-                    or not isinstance(recv, F.IdentExpr):
+            if method != "append" or not isinstance(recv, F.IdentExpr):
                 continue
             # `or 1`, not a refusal: a site inside a loop with no compile-time
             # iteration count keeps the one-per-site bound it always had, and

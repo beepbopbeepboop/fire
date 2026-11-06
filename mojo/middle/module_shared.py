@@ -424,6 +424,12 @@ _BUILTIN_MODULE_CONSTANTS = {
         'SIGALRM': ('int64_t', 14),
         'SIGTERM': ('int64_t', 15),
     },
+    'FloatLiteral': {
+        'infinity': ('double', float('inf')),
+        'negative_infinity': ('double', float('-inf')),
+        'negative_zero': ('double', -0.0),
+        'nan': ('double', float('nan')),
+    },
 }
 
 

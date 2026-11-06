@@ -230,13 +230,13 @@ numbered step; the numbers 01-28 are the first draft's names.
 
 | step | status | class | size | depends | title |
 |---|---|---|---|---|---|
-| [`00a`](../bugs/plan/step-00a-repair-prooflib-splice.md) | DONE | mid | M | 00c, 00d, 00e, 00f, 00g | `lib/ProofLib.lean` elaborates again (umbrella: gate for every Lean step) |
+| [`00a`](../bugs/plan/step-00a-repair-prooflib-splice.md) | OPEN | mid | M | 00c, 00d, 00e, 00f, 00g | `lib/ProofLib.lean` elaborates again (umbrella: gate for every Lean step) |
 | [`00b`](../bugs/plan/step-00b-step-conds-index-drift.md) | DONE | easy | S | none | `_STEP_CONDS` index drift — the STRB register-offset row sits in the middle of the table |
 | [`00c`](../bugs/plan/step-00c-arm64state-fp-fields.md) | DONE | easy | S | none | struct literals that predate the FP register fields (`d0`-`d7`) |
 | [`00d`](../bugs/plan/step-00d-callfunc2-migration.md) | DONE | mid | M | none | finish the `callFunc2` migration (`runF`, `evalFuncF`, the `runF_*` lemmas, the generator templates) |
 | [`00e`](../bugs/plan/step-00e-contract-and-cmp-proofs.md) | DONE | mid | L | 00d | proofs broken by the shifted-register model — `arm64_step_cmp_reg_n31_reads_zero`, `while_lt_exit_contract_*` |
-| [`00f`](../bugs/plan/step-00f-nonfp-work-step-proofs.md) | DONE | mid | L | none | broken non-FP `work_step_*` proofs — `cmn`, `tst`, `ldur`, `stur`, `smulh`, `csel` |
-| [`00g`](../bugs/plan/step-00g-fp-work-steps.md) | DONE | mid | L | 00f | the FP `work_step_*` block — duplicates, timeouts, fragments |
+| [`00f`](../bugs/plan/step-00f-nonfp-work-step-proofs.md) | REGENERATED | mid | L | none | broken non-FP `work_step_*` proofs — `cmn`, `tst`, `ldur`, `stur`, `smulh`, `csel` |
+| [`00g`](../bugs/plan/step-00g-fp-work-steps.md) | REGENERATED | mid | L | 00f | the FP `work_step_*` block — duplicates, timeouts, fragments |
 | [`01a`](../bugs/plan/step-01a-scaffold-module.md) | CLAIMED | mid | M | 00a | `lib/Scaffold.lean` — the one home of scaffold `sorry` |
 | [`01b`](../bugs/plan/step-01b-proof-gap-ledger.md) | CLAIMED | mid | M | 00a, 01a | the proof-gap ledger and its census test |
 | [`02`](../bugs/plan/step-02-peephole-memory-lemmas.md) | CLAIMED | mid | S | 00a, 01a, 01b | the two memory lemmas the peephole store rules actually lack |
@@ -263,7 +263,7 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`11a`](../bugs/plan/step-11a-string-buffer-upper-lower.md) | DONE | mid | M | 10 | the runtime string buffer (libc `strdup`, never freed) and `upper`/`lower` as its first clients |
 | [`11b`](../bugs/plan/step-11b-string-strip-rstrip.md) | DONE | mid | M | 11a | `strip()` / `rstrip()` on the runtime buffer |
 | [`11c`](../bugs/plan/step-11c-chr-fold-and-remaining-methods.md) | DONE | mid | S | 11a | `chr(<constant>)` folds; `replace`/`join`/the case-variants refuse naming the buffer correctly |
-| [`12a`](../bugs/plan/step-12a-len-of-known-string.md) | DONE | mid | M | 01a, 01b | `len(<string the image holds>)` is a numeral in the proof model; any other string `len` is refused; the post-extern theorem is not emitted for `strlen` |
+| [`12a`](../bugs/plan/step-12a-len-of-known-string.md) | OPEN | mid | M | 01a, 01b | `len(<string the image holds>)` is a numeral in the proof model; any other string `len` is refused; the post-extern theorem is not emitted for `strlen` |
 | [`12b`](../bugs/plan/step-12b-strlen-contract-memo.md) | OPEN | hard | M | 12a, 01a, 01b | DECISION MEMO — the Lean contract for an extern whose result is the program's answer (`strlen`) |
 | [`12c`](../bugs/plan/step-12c-strlen-contract.md) | OPEN | mid | M | 12a, 12b, 01a, 01b | Lean contract for `strlen` as the program's answer (extern contract) |
 | [`13a`](../bugs/plan/step-13a-printf-text-fold.md) | DONE | mid | M | 10 | `%<w>s`, `%-<w>s`, `%.<p>s` on a non-ASCII text the build can SEE are folded to the CPython answer |
@@ -280,7 +280,7 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`15d`](../bugs/plan/step-15d-consumer-declared-type-argument.md) | DONE | mid | S | 15a | refuse, by name, a type argument declared only in the consumer's file |
 | [`15e`](../bugs/plan/step-15e-pin-imported-parameter-annotation.md) | DONE | easy | S | 15a | re-pin the imported-instantiation parameter annotation (value vs frame) |
 | [`16a`](../bugs/plan/step-16a-bare-call-design-memo.md) | OPEN | hard | M | 15a | DESIGN MEMO — what a bare template call's type arguments may be inferred from |
-| [`16b`](../bugs/plan/step-16b-consolidate-bare-inference.md) | DONE | mid | M | 15a | fold the two copies of bare-call inference into one function (behaviour-preserving) |
+| [`16b`](../bugs/plan/step-16b-consolidate-bare-inference.md) | OPEN | mid | M | 15a | fold the two copies of bare-call inference into one function (behaviour-preserving) |
 | [`16c`](../bugs/plan/step-16c-matcher-keywords-defaults.md) | OPEN | mid | S | 16a, 16b | bare-call inference — keyword arguments and type-spelled defaults |
 | [`16d`](../bugs/plan/step-16d-return-type-inference.md) | OPEN | mid | L | 16a, 16b | bare-call inference through declared types (the `dealloc(allocation^)` row) |
 | [`16e`](../bugs/plan/step-16e-bound-resolution.md) | OPEN | mid | M | 16a, 16b | bare-call inference against a trait bound (the `FormatStruct(writer, ...)` row) |
@@ -302,14 +302,14 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`23d`](../bugs/plan/step-23d-os-fd-io.md) | CLOSED AS 'NOT PROVIDED' | mid | M | 26 | os file-descriptor I/O: close, read, write, fsync, ftruncate, dup2, pipe, O_*/SEEK_SET constants |
 | [`23e`](../bugs/plan/step-23e-os-process-and-refusals.md) | DONE | mid | S | 26, 23a | os signals/process-group wrappers and the documented NOT-PROVIDED table |
 | [`24`](../bugs/plan/step-24-x86-arch-drift.md) | DONE | easy | S | none | x86-64 arch drift is mostly ALREADY CLOSED: pin it and correct the doc |
-| [`25`](../bugs/plan/step-25-unrepresentable-types.md) | DONE | mid | S | none | `Error` stays unrepresentable: make the refusal true, pin it on both backends |
+| [`25`](../bugs/plan/step-25-unrepresentable-types.md) | CLAIMED | mid | S | none | `Error` stays unrepresentable: make the refusal true, pin it on both backends |
 | [`26`](../bugs/plan/step-26-host-exception-convention.md) | DONE | mid | M | none | one discoverable host-module failure convention (`hoststatus`) |
 | [`27a`](../bugs/plan/step-27a-eh-design-memo.md) | CLAIMED | hard | M | 25 | EH runtime design memo (exception object storage, `as e`, superclass matching) |
 | [`27b`](../bugs/plan/step-27b-try-model-translation.md) | DONE | mid | M | 27a | `TryStmt` in the semantic model (`arm64_proof_gen.py`): the sound flat slice |
 | [`27c`](../bugs/plan/step-27c-landing-pad-tables.md) | DONE | mid | M | 27a | landing-pad / personality data structures (pure Python table + test, NO codegen change) |
 | [`28`](../bugs/plan/step-28-absval-frame-peel.md) | CLAIMED | mid | M | 00a | `absval` frame-peel `K` — verify the same-day fix, pin it with a Lean-free test, then close or localise |
 
-**78 step files:** 13 easy, 57 mid, 8 hard. Status: claimed 15, closed as 'not provided' 1, done 36, open 26. (Generated by `python3 tools/plan_index.py --write`; do not edit by hand.)
+**78 step files:** 13 easy, 57 mid, 8 hard. Status: claimed 16, closed as 'not provided' 1, done 30, open 29, regenerated 2. (Generated by `python3 tools/plan_index.py --write`; do not edit by hand.)
 
 <!-- END generated by tools/plan_index.py -->
 
@@ -415,16 +415,6 @@ agent" by the first execution wave WITHOUT a measurement, so treat as unproven;
   `test_formal_run.py` still has stale "refused" rows for constructs that now
   build (`upper`, f/t-strings) and changed refusal wording on the vararg and
   set-comprehension rows.
-* **Known backend divergence (one red row):** x86-64 lowers `str(<int>)` through a
-  `%ld` format into a buffer and prints `[42]` (correct); arm64 refuses it
-  (`string_conversion_refusal`). `printf_s_of_a_conversion_of_a_number_is_refused`
-  pins the refusal and is red on x86-64 only (`test_formal_run.py` 1361/1). The fix
-  is to port the lowering to arm64 (then flip the row to an oracle row), or to
-  remove it from x86-64; the buffer's lifetime on x86-64 has not been audited.
-  Also still red and pre-existing: `test_formal_value_model.py`'s two x86-64
-  comprehension-element rows (65,536-byte element array) and
-  `a_string_conversion_of_an_integer_is_refused` (x86-64 does not classify an
-  unannotated parameter).
 * **Not run:** `test_formal_admitted.py` / `test_formal_axiom_closure_pinned.py`
   (need the library build; pins will move), the `make gate` bucket.
 

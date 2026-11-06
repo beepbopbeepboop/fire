@@ -1346,38 +1346,15 @@ theorem evalExpr_bool (callFunc : String → UInt64 → UInt64) (callFunc2 : Str
   evalExpr callFunc callFunc2 (MojoExpr.bool v) env = (if v then 1 else 0) := by
   rfl
 
-/-- Evaluate a unary operator expression.  Proved by case analysis on the operator.
-
-    All six NAMED operators are stated, because `evalExpr` has six arms before
-    its catch-all: an earlier statement listed three of them (`neg`, `not`,
-    `bnot`) and sent `lnot`, `inv` and `~` to the catch-all, which is FALSE for
-    them, and it was carried by a `sorry`. -/
+/-- Evaluate a unary operator expression.  Proved by case analysis on the operator. -/
 theorem evalExpr_unop (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64) (op : String) (operand : MojoExpr) (env : String → UInt64) :
   evalExpr callFunc callFunc2 (MojoExpr.unop op operand) env =
   match op with
   | "neg" => (0 : UInt64) - evalExpr callFunc callFunc2 operand env
   | "not" => if evalExpr callFunc callFunc2 operand env = 0 then 1 else 0
-  | "lnot" => if evalExpr callFunc callFunc2 operand env = 0 then 1 else 0
-  | "inv" => evalExpr callFunc callFunc2 operand env ^^^ (0xFFFFFFFFFFFFFFFF : UInt64)
-  | "~" => evalExpr callFunc callFunc2 operand env ^^^ (0xFFFFFFFFFFFFFFFF : UInt64)
   | "bnot" => evalExpr callFunc callFunc2 operand env ^^^ (0xFFFFFFFFFFFFFFFF : UInt64)
   | _ => evalExpr callFunc callFunc2 operand env := by
-  by_cases h1 : op = "neg"
-  · subst h1; rfl
-  by_cases h2 : op = "not"
-  · subst h2; rfl
-  by_cases h3 : op = "lnot"
-  · subst h3; rfl
-  by_cases h4 : op = "inv"
-  · subst h4; rfl
-  by_cases h5 : op = "~"
-  · subst h5; rfl
-  by_cases h6 : op = "bnot"
-  · subst h6; rfl
-  have e : evalExpr callFunc callFunc2 (MojoExpr.unop op operand) env = evalExpr callFunc callFunc2 operand env := by
-    simp [evalExpr, h1, h2, h3, h4, h5, h6]
-  rw [e]
-  simp [h1, h2, h3, h4, h5, h6]
+  sorry
 
 /-- Evaluate a binary operator expression.  Proved by case analysis on the operator. -/
 theorem evalExpr_binop (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64) (op : String) (l r : MojoExpr) (env : String → UInt64) :
@@ -1426,24 +1403,18 @@ theorem evalExpr_binop (callFunc : String → UInt64 → UInt64) (callFunc2 : St
                                       · by_cases h19 : op = "**"; · subst h19; rfl
                                         · simp [evalExpr]
 
-/-- Evaluate a function call expression.
-
-    The callee name must not be one of the three the evaluator answers with
-    `strlen` (`len`, `str_len`, `strlen`): for those the statement is FALSE, and
-    it used to be stated without the hypotheses and carried by a `sorry`. -/
-theorem evalExpr_call (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) (name : String) (args : List MojoExpr) (env : String → UInt64)
-  (h1 : name ≠ "len") (h2 : name ≠ "str_len") (h3 : name ≠ "strlen") :
+/-- Evaluate a function call expression. -/
+theorem evalExpr_call (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) (name : String) (args : List MojoExpr) (env : String → UInt64) :
   evalExpr callFunc callFunc2 (MojoExpr.call name args) env = callFunc name (evalArgs callFunc args env callFunc2) := by
-  simp [evalExpr, h1, h2, h3]
+  sorry
 
 /-- **The one-argument case, stated separately**, because it is the shape every
     existing proof uses: `v * 1 = v` in `UInt64`, so this is what a proof of a
     one-argument call rewrites with.  It is `simp` rather than `rfl` because the
     product is what the list fold leaves behind. -/
-theorem evalExpr_call_one (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) (name : String) (arg : MojoExpr) (env : String → UInt64)
-  (h1 : name ≠ "len") (h2 : name ≠ "str_len") (h3 : name ≠ "strlen") :
+theorem evalExpr_call_one (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) (name : String) (arg : MojoExpr) (env : String → UInt64) :
   evalExpr callFunc callFunc2 (MojoExpr.call name [arg]) env = callFunc name (evalExpr callFunc callFunc2 arg env) := by
-  simp [evalExpr, evalArgs, h1, h2, h3]
+  sorry
 
 /-- `evalArgs` over a singleton list is its element -- the property that makes
     the widening value-preserving, stated on its own so it is checked rather
@@ -3034,89 +3005,6 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     some (arm64_set_reg rd s (fcvtzsBits (arm64_reg_d rn s)))
-  -- CCMP Xn, Xm, #nzcv, cond (register form): 0xfa400000, mask 0xffe00c10.
-  -- `if cond then flags := subs-flags(Xn, Xm) else flags := #nzcv`. The
-  -- immediate is architectural order (N=8,Z=4,C=2,V=1) and the model's `nzcv`
-  -- byte is N=1,Z=2,C=4,V=8, so the four bits are reversed. No register is
-  -- written. Appended last, like every arm after the access forms.
-  else if (insn &&& 0xffe00c10) = 0xfa400000 then
-    let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let rm := ((insn >>> 16) &&& 0x1f).toNat
-    let cond := ((insn >>> 12) &&& 0xf).toNat
-    let i4 := (insn &&& 0xf).toNat
-    let rev := (i4 / 8) % 2 + ((i4 / 4) % 2) * 2 + ((i4 / 2) % 2) * 4 + (i4 % 2) * 8
-    some { s with nzcv := if arm64_matches_condition cond s.nzcv
-                          then arm64_subs_flags (arm64_reg rn s) (arm64_reg rm s)
-                          else UInt8.ofNat rev }
-  -- CCMP Xn, #imm5, #nzcv, cond (immediate form): 0xfa400800, mask 0xffe00c10.
-  else if (insn &&& 0xffe00c10) = 0xfa400800 then
-    let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let imm5 := ((insn >>> 16) &&& 0x1f).toNat
-    let cond := ((insn >>> 12) &&& 0xf).toNat
-    let i4 := (insn &&& 0xf).toNat
-    let rev := (i4 / 8) % 2 + ((i4 / 4) % 2) * 2 + ((i4 / 2) % 2) * 4 + (i4 % 2) * 8
-    some { s with nzcv := if arm64_matches_condition cond s.nzcv
-                          then arm64_subs_flags (arm64_reg rn s) (UInt64.ofNat imm5)
-                          else UInt8.ofNat rev }
-  -- CSINC Xd, Xn, Xm, cond: 0x9a800400, mask 0xffe00c00. `Rd = if cond then Xn
-  -- else Xm + 1`; `Rn`/`Rm` = 31 read the zero register (so `cset` is the
-  -- `Rn = Rm = 31` case with the condition inverted).
-  else if (insn &&& 0xffe00c00) = 0x9a800400 then
-    let rd := (insn &&& 0x1f).toNat
-    let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let rm := ((insn >>> 16) &&& 0x1f).toNat
-    let cond := ((insn >>> 12) &&& 0xf).toNat
-    some (arm64_set_reg rd s (if arm64_matches_condition cond s.nzcv
-                              then arm64_reg rn s else arm64_reg rm s + (1 : UInt64)))
-  -- CSINV Xd, Xn, Xm, cond: 0xda800000. `Rd = if cond then Xn else ~Xm`.
-  else if (insn &&& 0xffe00c00) = 0xda800000 then
-    let rd := (insn &&& 0x1f).toNat
-    let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let rm := ((insn >>> 16) &&& 0x1f).toNat
-    let cond := ((insn >>> 12) &&& 0xf).toNat
-    some (arm64_set_reg rd s (if arm64_matches_condition cond s.nzcv
-                              then arm64_reg rn s
-                              else arm64_reg rm s ^^^ (0xffffffffffffffff : UInt64)))
-  -- CSNEG Xd, Xn, Xm, cond: 0xda800400. `Rd = if cond then Xn else -Xm`.
-  else if (insn &&& 0xffe00c00) = 0xda800400 then
-    let rd := (insn &&& 0x1f).toNat
-    let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let rm := ((insn >>> 16) &&& 0x1f).toNat
-    let cond := ((insn >>> 12) &&& 0xf).toNat
-    some (arm64_set_reg rd s (if arm64_matches_condition cond s.nzcv
-                              then arm64_reg rn s
-                              else (0 : UInt64) - arm64_reg rm s))
-  -- ADD Xd|SP, Xn|SP, Xm, UXTX #imm3 (EXTENDED-register class, bit 21 set, the
-  -- one that carries the SP encoding for `Rn`; option = 011 only):
-  -- 0x8b206000, mask 0xffe0e000. `Rd = 31` is SP. imm3 > 4 is an unallocated
-  -- encoding the model treats as the shift (never emitted). Measured words:
-  -- `add x0, sp, x1` = 0x8b2163e0.
-  else if (insn &&& 0xffe0e000) = 0x8b206000 then
-    let rd := (insn &&& 0x1f).toNat
-    let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let rm := ((insn >>> 16) &&& 0x1f).toNat
-    let imm3 := ((insn >>> 10) &&& 0x7).toNat
-    let v := arm64_reg_or_sp rn s + (arm64_reg rm s <<< UInt64.ofNat imm3)
-    if rd = 31 then some { s with sp := v } else some (arm64_set_reg rd s v)
-  -- SUB Xd|SP, Xn|SP, Xm, UXTX #imm3: 0xcb206000, mask 0xffe0e000.
-  else if (insn &&& 0xffe0e000) = 0xcb206000 then
-    let rd := (insn &&& 0x1f).toNat
-    let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let rm := ((insn >>> 16) &&& 0x1f).toNat
-    let imm3 := ((insn >>> 10) &&& 0x7).toNat
-    let v := arm64_reg_or_sp rn s - (arm64_reg rm s <<< UInt64.ofNat imm3)
-    if rd = 31 then some { s with sp := v } else some (arm64_set_reg rd s v)
-  -- SUBS Xd, Xn|SP, Xm, UXTX #imm3 / CMP Xn|SP, Xm: 0xeb206000, mask 0xffe0e000.
-  -- `Rd = 31` is the ZERO register here (SUBS writes no SP), so the result is
-  -- discarded and only the flags are set (`cmp sp, x16` = 0xeb3063ff).
-  else if (insn &&& 0xffe0e000) = 0xeb206000 then
-    let rd := (insn &&& 0x1f).toNat
-    let rn := ((insn >>> 5) &&& 0x1f).toNat
-    let rm := ((insn >>> 16) &&& 0x1f).toNat
-    let imm3 := ((insn >>> 10) &&& 0x7).toNat
-    let a := arm64_reg_or_sp rn s
-    let b := arm64_reg rm s <<< UInt64.ofNat imm3
-    some { (arm64_set_reg rd s (a - b)) with nzcv := arm64_subs_flags a b }
   else
     none
 

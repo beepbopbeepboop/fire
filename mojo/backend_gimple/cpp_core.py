@@ -1506,6 +1506,8 @@ def _cpp_module_global_field(gen, marker, name):
             # VALUE (os.linesep and friends), not a source token, so there is
             # no prefix to take off and nothing to interpolate.
             return _bm_ctype, _cpp_string_literal_expr(gen, _bm_val, '')
+        if _bm_ctype == 'double':
+            return _bm_ctype, _float_c_literal(_bm_val)
         return _bm_ctype, f'({_bm_ctype}){_bm_val}'
     found = gen._module_global_field_type(bound, name)
     key = bound
@@ -3139,45 +3141,6 @@ def _cpp_expr(gen, e) -> str:
         name = e.name
         val = gen._cpp_expr(e.value)
         return f"({name} = {val})"
-    if isinstance(e, gimple_ctypes.BinaryOp) and e.op == ':=':
-        val = gen._cpp_expr(e.right)
-        if isinstance(e.left, gimple_ctypes.IdentExpr):
-            name = e.left.name
-            return f"({name} = {val})"
-        if isinstance(e.left, gimple_ctypes.MemberExpr):
-            # struct field assignment
-            struct_name = getattr(gen, '_cpp_gen_self_struct', None)
-            if struct_name and isinstance(e.left.obj, gimple_ctypes.IdentExpr) and e.left.obj.name == 'self':
-                return f"(self->{gimple_ctypes._safe_field(e.left.member)} = {val})"
-            obj_expr = gen._cpp_expr(e.left.obj) if not isinstance(e.left.obj, gimple_ctypes.IdentExpr) else e.left.obj.name
-            if isinstance(e.left.obj, gimple_ctypes.IdentExpr):
-                _ptr_struct = gen._cpp_struct_ptr_local(e.left.obj.name)
-                if _ptr_struct:
-                    return f"({obj_expr}->{gimple_ctypes._safe_field(e.left.member)} = {val})"
-            return f"({obj_expr}.{gimple_ctypes._safe_field(e.left.member)} = {val})"
-        if isinstance(e.left, gimple_ctypes.SubscriptExpr):
-            obj = gen._cpp_expr(e.left.obj)
-            idx = gen._cpp_expr(e.left.index)
-            obj_ct = None
-            if gen._cpp_declared is not None and isinstance(e.left.obj, gimple_ctypes.IdentExpr):
-                obj_ct = gen._cpp_declared.get(e.left.obj.name)
-            if obj_ct == 'MojoList *':
-                # try to use appropriate setter based on element type
-                self_fields = getattr(gen, '_cpp_gen_self_fields', None)
-                vctype = gimple_exprtypes._infer_simple_expr_ctype(
-                    e.right, gen._cpp_declared, self_fields, gen._async_api)
-                suf = gimple_ctypes.TypeLattice.list_suffix(vctype) if vctype else 'int'
-                idx64 = f"(int64_t)({idx})"
-                if suf == 'str' or vctype == 'char *':
-                    return f"(mojo_list_set_str({obj}, {idx64}, (char *)({val})))"
-                elif suf == 'double':
-                    return f"(mojo_list_set_double({obj}, {idx64}, (double)({val})))"
-                else:
-                    return f"(mojo_list_set_int({obj}, {idx64}, (int64_t)({val})))"
-            elif obj_ct == 'MojoDict *':
-                return f"(mojo_dict_set_int_kw({obj}, (int64_t)({idx}), (int64_t)({val})))"
-            return f"(*(&({obj}[{idx}])) = {val})"
-        return f"({gen._cpp_expr(e.left)} = {val})"
     if isinstance(e, gimple_ctypes.CallExpr):
         # A call through a local that is a compile-time ALIAS of an
         # `os.path.<fn>` (`islink, join = path.islink, path.join` at the head
@@ -6946,7 +6909,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     if vctype == 'double':
                         return [f"{indent}mojo_dict_set_double(({obj}), {key_expr}, {val});"]
                     return [f"{indent}mojo_dict_set_int(({obj}), {key_expr}, (int64_t)({val}));"]
-                return [f"{indent}*(&({obj}[{idx}])) = {val};"]
+                return [f"{indent}{obj}[{idx}] = {val};"]
             # sys.stderr/stdout/stdin = val (task #150's remaining
             # non-self-MemberExpr gap, e.g. test_faulthandler.py's
             # `sys.stderr = None`): `sys` has no real backing value

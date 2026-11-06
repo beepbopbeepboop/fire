@@ -464,11 +464,8 @@ KNOWN_DIVERGENCES = {
     # same elements, which keeps the walk and drops the set-ness — the same
     # "same arity, same operand types" discipline every other row uses.
     "set_order": (
-        "a set lowers as a LIST in FIRST-OCCURRENCE INSERTION order (distinct by "
-        "compile-time word dedup for literals and a run-time word scan for "
-        "names, `.add` and comprehensions, steps 14a-14d), where CPython "
-        "iterates in hash order; the pin is a deliberate model choice "
-        "(bugs/FORMAL_set_value_model.md)"),
+        "a set lowers as a LIST, so it iterates in INSERTION order where CPython "
+        "iterates in hash order (bugs/FORMAL_set_value_model.md)"),
     "no_return_call": (
         "a `def` with no `return` yields a word where CPython yields None, "
         "so `f() == 0` takes this path's arm and CPython's takes the "
@@ -4920,24 +4917,15 @@ class Gen:
     # generated ON PURPOSE, for the reason `str_subscript` is: the corpus is the
     # only thing that can notice the day the model changes.
     #
-    # Most literals have DISTINCT small integers; about a third repeat one
-    # element, so `len` and the walk exercise the dedup (steps 14a-14d).
+    # The elements are DISTINCT small integers, so a `set` literal has no
+    # duplicates to disagree about and `len` is the count of elements rather
+    # than the count of a literal CPython de-duplicated.
     def set_stmt(self, indent, kind):
         if kind == "set_build" or not self.sets:
             name = self.fresh("S")
             n = self.rng.randint(2, 4)
             elems = self.rng.sample(range(1, 30), n)
-            if self.rng.random() < 0.3:
-                # A literal WITH a repeat, so the corpus can see the dedup
-                # (steps 14a-14d): one element is written a second time at a
-                # random position. `elems` stays the DISTINCT values (the
-                # membership needles below draw from it).
-                spelled = list(elems)
-                spelled.insert(self.rng.randint(0, len(spelled)),
-                               self.rng.choice(elems))
-            else:
-                spelled = elems
-            literal = "{" + ", ".join(str(v) for v in spelled) + "}"
+            literal = "{" + ", ".join(str(v) for v in elems) + "}"
             # Bound ONCE, in the preamble, and never rebound by the body — the
             # discipline `build_dict` states and for the same class of reason:
             # `model._note_dict_init` keeps the initializer a name was bound to
