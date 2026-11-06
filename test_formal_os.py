@@ -1298,12 +1298,385 @@ def group_inplace(tmpdir, verbose):
     return True, ""
 
 
+PROC_PROGRAM = """\
+import os
+
+def main():
+    printf("pid=%d@@", os.getpid())
+    printf("ppid=%d@@", os.getppid())
+    printf("uid=%d@@", os.getuid())
+    printf("pgid0=%d@@", os.getpgid(0))
+    printf("pgidpid=%d@@", os.getpgid(os.getpid()))
+    printf("cpus=%d@@", os.cpu_count())
+    return 0
+"""
+
+
+def group_proc(tmpdir, verbose):
+    """`getpid`/`getppid`/`getuid`/`getpgid`/`cpu_count`, against the OS.
+
+    The test cannot compare a pid with its own, so it RUNS the image as a child
+    and asks CPython about that child: the image's `getpid()` must equal the
+    `Popen`'s pid, its `getppid()` must be THIS process, its `getpgid(0)` must
+    equal this process's own group (inherited), and `getuid`/`cpu_count` are the same
+    numbers CPython reports. Both backends: the x86-64 image runs under
+    Rosetta, which is the same kernel answering the same calls.
+    """
+    src = os.path.join(tmpdir, "os_proc.mojo")
+    with open(src, "w") as f:
+        f.write(PROC_PROGRAM)
+    bad = []
+    for backend, prefix in (("arm64", []), ("x86_64", ["arch", "-x86_64"])):
+        out = os.path.join(tmpdir, f"os_proc_{backend}")
+        rc, text = build(src, out, backend=backend)
+        if rc != 0:
+            return False, f"[{backend}] build failed: {text.strip()[-400:]}"
+        child = subprocess.Popen(prefix + [out], stdout=subprocess.PIPE,
+                                 text=True, cwd=tmpdir)
+        outtext, _ = child.communicate(timeout=RUN_TIMEOUT)
+        if child.returncode != 0:
+            return False, f"[{backend}] exit {child.returncode}"
+        got = parse_kv(outtext)
+        ref = {
+            # CPython's view of the CHILD: it was spawned directly, so for the
+            # x86-64 case `arch` has exec'd into the image and kept the pid.
+            "pid": str(child.pid),
+            "ppid": str(os.getpid()),
+            "uid": str(os.getuid()),
+            # A child inherits its parent's process group, and it has exited by
+            # the time it can be asked, so the reference is this process's own.
+            "pgid0": str(os.getpgid(0)),
+            "pgidpid": str(os.getpgid(0)),
+            "cpus": str(os.cpu_count() or 1),
+        }
+        for k, v in ref.items():
+            if got.get(k) != v:
+                bad.append(f"[{backend}] {k}: image says {got.get(k)!r}, "
+                           f"CPython says {v!r}")
+    if bad:
+        return False, ("%d disagreements:\n      %s"
+                       % (len(bad), "\n      ".join(bad)))
+    if verbose:
+        print("      pid/ppid/uid/pgid/cpu_count agree with CPython on both "
+              "backends")
+    return True, ""
+
+
+FSMETA_PROGRAM = """\
+import os
+
+def main():
+    printf("acc_r=%d@@", os.access("{d}/f", os.R_OK()))
+    printf("acc_w=%d@@", os.access("{d}/f", os.W_OK()))
+    printf("acc_x=%d@@", os.access("{d}/f", os.X_OK()))
+    printf("acc_none=%d@@", os.access("{d}/none", os.F_OK()))
+    printf("sym=%d@@", os.symlink("{d}/f", "{d}/s"))
+    printf("sym_again=%d@@", os.symlink("{d}/f", "{d}/s"))
+    printf("lnk=%d@@", os.link("{d}/f", "{d}/h"))
+    printf("lnk_none=%d@@", os.link("{d}/none", "{d}/h2"))
+    printf("fifo=%d@@", os.mkfifo("{d}/q", 420))
+    printf("ut=%d@@", os.utime("{d}/f", 1000000, 2000000))
+    printf("ut_none=%d@@", os.utime("{d}/none", 1, 2))
+    printf("um=%d@@", os.umask(18))
+    printf("um2=%d@@", os.umask(18))
+    return 0
+"""
+
+
+def group_fsmeta(tmpdir, verbose):
+    """`access`/`symlink`/`link`/`mkfifo`/`utime`/`umask` and the `*_OK` values.
+
+    The program performs each operation in a scratch directory and prints its
+    status; the TEST then checks the EFFECT with CPython (`islink`/`readlink`,
+    `st_nlink`, `S_ISFIFO`, `st_atime`/`st_mtime`), so a status that says 0 for
+    an operation that did nothing is caught. Both backends, each in its own
+    directory.
+    """
+    src_t = FSMETA_PROGRAM
+    bad = []
+    if (os.F_OK, os.R_OK, os.W_OK, os.X_OK) != (0, 4, 2, 1):
+        return False, "the *_OK constants this module hard-codes differ from CPython's"
+    for backend, prefix in (("arm64", []), ("x86_64", ["arch", "-x86_64"])):
+        d = os.path.join(tmpdir, f"fsmeta_{backend}")
+        os.makedirs(d)
+        with open(os.path.join(d, "f"), "w") as fh:
+            fh.write("x")
+        os.chmod(os.path.join(d, "f"), 0o644)
+        src = os.path.join(tmpdir, f"os_fsmeta_{backend}.mojo")
+        with open(src, "w") as fh:
+            fh.write(src_t.replace("{d}", d))
+        out = os.path.join(tmpdir, f"os_fsmeta_{backend}")
+        rc, text = build(src, out, backend=backend)
+        if rc != 0:
+            return False, f"[{backend}] build failed: {text.strip()[-400:]}"
+        p = subprocess.run(prefix + [out], capture_output=True, text=True,
+                           timeout=RUN_TIMEOUT, cwd=tmpdir)
+        if p.returncode != 0:
+            return False, f"[{backend}] exit {p.returncode}"
+        got = parse_kv(p.stdout)
+        f = os.path.join(d, "f")
+        # the statuses, as CPython's own calls would have left the world
+        want = {
+            "acc_r": "1", "acc_w": "1", "acc_x": "0", "acc_none": "0",
+            "sym": "0", "sym_again": "-1", "lnk": "0", "lnk_none": "-1",
+            "fifo": "0", "ut": "0", "ut_none": "-1",
+            # the process umask at the time: the module returns the PREVIOUS
+            # mask, and the second call returns the one the first installed.
+            "um2": "18",
+        }
+        for k, v in want.items():
+            if got.get(k) != v:
+                bad.append(f"[{backend}] {k}: image says {got.get(k)!r}, expected {v!r}")
+        # the effects, read back with CPython
+        s = os.path.join(d, "s")
+        if not (os.path.islink(s) and os.readlink(s) == f):
+            bad.append(f"[{backend}] symlink did not leave a link to {f}")
+        if os.stat(f).st_nlink != 2 or not os.path.samefile(f, os.path.join(d, "h")):
+            bad.append(f"[{backend}] link did not make a second name for the file")
+        if not stat.S_ISFIFO(os.stat(os.path.join(d, "q")).st_mode):
+            bad.append(f"[{backend}] mkfifo did not leave a FIFO")
+        st = os.stat(f)
+        if (int(st.st_atime), int(st.st_mtime)) != (1000000, 2000000):
+            bad.append(f"[{backend}] utime left atime/mtime "
+                       f"{int(st.st_atime)}/{int(st.st_mtime)}, wanted 1000000/2000000")
+    if bad:
+        return False, ("%d disagreements:\n      %s"
+                       % (len(bad), "\n      ".join(bad)))
+    if verbose:
+        print("      access/symlink/link/mkfifo/utime/umask effects agree with "
+              "CPython on both backends")
+    return True, ""
+
+
+STATTIMES_PROGRAM = """\
+import os
+
+def main():
+    printf("at=%d@@", os.path.stat_atime("{f}", 1))
+    printf("mt=%d@@", os.path.stat_mtime("{f}", 1))
+    printf("ct=%d@@", os.path.stat_ctime("{f}", 1))
+    printf("atns=%d@@", os.path.stat_atime_ns("{f}", 1))
+    printf("mtns=%d@@", os.path.stat_mtime_ns("{f}", 1))
+    printf("ctns=%d@@", os.path.stat_ctime_ns("{f}", 1))
+    printf("gm=%d@@", os.path.getmtime_ns("{f}"))
+    printf("lmt=%d@@", os.path.stat_mtime_ns("{l}", 0))
+    printf("none=%d@@", os.path.stat_mtime_ns("{f}.none", 1))
+    printf("sep=%s@@", os.path.sep())
+    return 0
+"""
+
+
+def group_stattimes(tmpdir, verbose):
+    """The `stat_*time` accessors, against `os.stat` at NANOSECOND precision.
+
+    The times are set by the TEST (`os.utime(ns=...)`) to values with all nine
+    digits significant, so a reader that dropped the nanoseconds, swapped the
+    access and modification fields, or added the halves in the wrong order is
+    caught. `st_ctime` cannot be set, so it is compared with what `os.stat`
+    says right after. `lstat` of a symlink is the link's own time.
+    """
+    bad = []
+    for backend, prefix in (("arm64", []), ("x86_64", ["arch", "-x86_64"])):
+        d = os.path.join(tmpdir, f"stattimes_{backend}")
+        os.makedirs(d)
+        f = os.path.join(d, "f")
+        link = os.path.join(d, "l")
+        with open(f, "w") as fh:
+            fh.write("x")
+        os.utime(f, ns=(1500000000123456789, 1600000000987654321))
+        os.symlink(f, link)
+        src = os.path.join(tmpdir, f"os_stattimes_{backend}.mojo")
+        with open(src, "w") as fh:
+            fh.write(STATTIMES_PROGRAM.replace("{f}", f).replace("{l}", link))
+        out = os.path.join(tmpdir, f"os_stattimes_{backend}")
+        rc, text = build(src, out, backend=backend)
+        if rc != 0:
+            return False, f"[{backend}] build failed: {text.strip()[-400:]}"
+        p = subprocess.run(prefix + [out], capture_output=True, text=True,
+                           timeout=RUN_TIMEOUT, cwd=tmpdir)
+        if p.returncode != 0:
+            return False, f"[{backend}] exit {p.returncode}"
+        got = parse_kv(p.stdout)
+        st = os.stat(f)
+        lst = os.lstat(link)
+        want = {
+            "at": str(int(st.st_atime_ns // 10**9)),
+            "mt": str(int(st.st_mtime_ns // 10**9)),
+            "ct": str(int(st.st_ctime_ns // 10**9)),
+            "atns": str(st.st_atime_ns),
+            "mtns": str(st.st_mtime_ns),
+            "ctns": str(st.st_ctime_ns),
+            "gm": str(st.st_mtime_ns),
+            "lmt": str(lst.st_mtime_ns),
+            "none": "-1",
+            "sep": os.path.sep,
+        }
+        for k, v in want.items():
+            if got.get(k) != v:
+                bad.append(f"[{backend}] {k}: image says {got.get(k)!r}, CPython {v!r}")
+        if want["atns"] != "1500000000123456789" or want["mtns"] != "1600000000987654321":
+            bad.append(f"[{backend}] the fixture's own times were not set exactly")
+    if bad:
+        return False, ("%d disagreements:\n      %s"
+                       % (len(bad), "\n      ".join(bad)))
+    if verbose:
+        print("      atime/mtime/ctime in seconds and nanoseconds, getmtime_ns, "
+              "lstat of a link and sep agree with os.stat on both backends")
+    return True, ""
+
+
+PROC2_STATUS = """\
+import os
+
+def main():
+    printf("self0=%d@@", os.kill(os.getpid(), 0))
+    printf("dead=%d@@", os.kill({dead}, 0))
+    printf("pg_none=%d@@", os.killpg({dead}, 0))
+    printf("sid=%d@@", os.setsid())
+    printf("pid=%d@@", os.getpid())
+    printf("defpath=%s@@", os.defpath())
+    return 0
+"""
+PROC2_KILL = """\
+import os
+
+def main():
+    os.kill(os.getpid(), 15)
+    printf("survived")
+    return 0
+"""
+PROC2_KILLPG = """\
+import os
+
+def main():
+    os.killpg(os.getpgid(0), 15)
+    printf("survived")
+    return 0
+"""
+PROC2_SETSID_LEADER = """\
+import os
+
+def main():
+    printf("sid=%d@@", os.setsid())
+    return 0
+"""
+
+
+def group_proc2(tmpdir, verbose):
+    """`kill`/`killpg`/`setsid`/`defpath`, by what the OPERATING SYSTEM then does.
+
+    Only processes this test spawned are ever signalled, and only by themselves:
+    one image kills itself (`kill(getpid(), SIGTERM)`) and the test requires the
+    wait status to be `-SIGTERM`; another is started as its own process-group
+    leader and kills its group; `setsid` succeeds for an ordinary child (the
+    new session id is its own pid) and fails for a group leader. A pid that
+    has been reaped is the "no such process" case.
+    """
+    import signal
+    bad = []
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    for backend, prefix in (("arm64", []), ("x86_64", ["arch", "-x86_64"])):
+        def run(name, text, **kw):
+            src = os.path.join(tmpdir, f"{name}_{backend}.mojo")
+            with open(src, "w") as fh:
+                fh.write(text)
+            out = os.path.join(tmpdir, f"{name}_{backend}")
+            rc, msg = build(src, out, backend=backend)
+            if rc != 0:
+                raise RuntimeError(f"[{backend}] {name} build failed: {msg.strip()[-300:]}")
+            return subprocess.run(prefix + [out], capture_output=True, text=True,
+                                  timeout=RUN_TIMEOUT, cwd=tmpdir, **kw)
+        try:
+            st = run("p2_status", PROC2_STATUS.replace("{dead}", str(dead.pid)))
+            got = parse_kv(st.stdout)
+            if st.returncode != 0:
+                bad.append(f"[{backend}] status program exit {st.returncode}")
+            if got.get("self0") != "0":
+                bad.append(f"[{backend}] kill(self, 0) = {got.get('self0')!r}, wanted 0")
+            if got.get("dead") != "-1" or got.get("pg_none") != "-1":
+                bad.append(f"[{backend}] kill/killpg of a reaped pid = "
+                           f"{got.get('dead')!r}/{got.get('pg_none')!r}, wanted -1/-1")
+            if got.get("sid") != got.get("pid") or not got.get("pid"):
+                bad.append(f"[{backend}] setsid() = {got.get('sid')!r} for pid "
+                           f"{got.get('pid')!r}; a non-leader child gets its own pid")
+            if got.get("defpath") != os.defpath:
+                bad.append(f"[{backend}] defpath {got.get('defpath')!r} != {os.defpath!r}")
+            k = run("p2_kill", PROC2_KILL)
+            if k.returncode != -signal.SIGTERM:
+                bad.append(f"[{backend}] kill(getpid(), SIGTERM) left exit status "
+                           f"{k.returncode}, wanted {-signal.SIGTERM}")
+            g = run("p2_killpg", PROC2_KILLPG, start_new_session=True)
+            if g.returncode != -signal.SIGTERM:
+                bad.append(f"[{backend}] killpg(own group, SIGTERM) left exit status "
+                           f"{g.returncode}, wanted {-signal.SIGTERM}")
+            s = run("p2_leader", PROC2_SETSID_LEADER, start_new_session=True)
+            if parse_kv(s.stdout).get("sid") != "-1":
+                bad.append(f"[{backend}] setsid() as a group leader = "
+                           f"{parse_kv(s.stdout).get('sid')!r}, wanted -1")
+        except RuntimeError as e:
+            return False, str(e)
+    if bad:
+        return False, ("%d disagreements:\n      %s"
+                       % (len(bad), "\n      ".join(bad)))
+    if verbose:
+        print("      kill/killpg/setsid/defpath behave as the OS reports on both backends")
+    return True, ""
+
+
+NOT_PROVIDED = [
+    ("fork", "os.fork()"), ("waitpid", "os.waitpid(1, 0)"),
+    ("system", "os.system(\"true\")"), ("urandom", "os.urandom(4)"),
+    ("uname", "os.uname()"), ("fdopen", "os.fdopen(1)"),
+    # file descriptors: no producer of a writable one exists (see the table)
+    ("open", "os.open(\"x\", 0)"), ("close", "os.close(3)"),
+    ("write", "os.write(1, \"x\")"), ("fsync", "os.fsync(3)"),
+    ("ftruncate", "os.ftruncate(3, 0)"), ("dup2", "os.dup2(1, 2)"),
+    ("pipe", "os.pipe()"),
+]
+
+
+def group_notprovided(tmpdir, verbose):
+    """Every name `os/__init__.mojo` documents as NOT PROVIDED is refused by NAME.
+
+    The failure this pins is the quiet one: a name that BUILDS (a stub, or
+    another module's same-named function) and answers something. Measured
+    2026-11-05 the refusal is `os.<name>(): \`os\` is a linked module but it
+    exports no \`<name>\``, shared by every backend because it is raised before
+    code generation; asserted on both architectures anyway.
+    """
+    bad = []
+    for name, call in NOT_PROVIDED:
+        src = os.path.join(tmpdir, f"np_{name}.mojo")
+        with open(src, "w") as fh:
+            fh.write(f"import os\n\ndef main():\n    var x = {call}\n    return 0\n")
+        for backend in ("arm64", "x86_64"):
+            rc, text = build(src, os.path.join(tmpdir, f"np_{name}_{backend}"),
+                             backend=backend)
+            needle = f"exports no `{name}`"
+            if rc == 0:
+                bad.append(f"[{backend}] os.{name} BUILT; it is documented as not provided")
+            elif needle not in text:
+                bad.append(f"[{backend}] os.{name} was refused, but not by name "
+                           f"({needle!r} missing): {text.strip()[-200:]}")
+    if bad:
+        return False, ("%d problems:\n      %s" % (len(bad), "\n      ".join(bad)))
+    if verbose:
+        print(f"      {len(NOT_PROVIDED)} not-provided names refused by name on both backends")
+    return True, ""
+
+
 GROUPS = {
     "inplace": group_inplace,
     "strings": group_strings,
     "posixpath": group_posixpath,
     "fs": group_fs,
     "env": group_env,
+    "proc": group_proc,
+    "fsmeta": group_fsmeta,
+    "stattimes": group_stattimes,
+    "proc2": group_proc2,
+    "notprovided": group_notprovided,
     "dirs": group_dirs,
     "blob": group_blob,
 }

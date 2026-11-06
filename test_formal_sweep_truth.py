@@ -2565,6 +2565,9 @@ class TestOleanCurrency(unittest.TestCase):
         # graph needs — a module at the far end of the tuple whose only edge is
         # to the root, so editing `X86` must leave it alone.
         "Specs": "import ProofLib\n",
+        # `lib/Scaffold.lean` — the only home of scaffold `sorry` in `lib/`.
+        # Imports ProofLib, X86, Peephole; imported by nothing.
+        "Scaffold": "import ProofLib\nimport X86\nimport Peephole\n",
     }
 
     def setUp(self):

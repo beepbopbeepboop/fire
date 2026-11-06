@@ -48,7 +48,8 @@ because it is not a matter of taste:
     C library returns: 0 or -1. A function documented as "0 on success, -1 on
     failure" is exactly that, and a caller that needs CPython's exception has
     to test the status itself. This is a real difference from CPython and it
-    is why `remove` below does not raise `FileNotFoundError`.
+    is why `remove` below does not raise `FileNotFoundError`. Status convention:
+    hoststatus.mojo.
 
   * **A DIRECTORY LISTING IS A BLOB, NOT A LIST.** `listdir` and `walk` are
     here and they are exact — same entries, same order, same `.`/`..` rule as
@@ -134,9 +135,46 @@ from ._syscalls import fs_mkdir, fs_free, str_build, str_dup
 from ._syscalls import fs_readdir, fs_rewinddir, fs_closedir
 from ._syscalls import fs_dirent_name, fs_name_is_dot, fs_opendir
 from ._syscalls import fs_environ_vec, str_find, str_cmp
+from ._syscalls import fs_getpid, fs_getppid, fs_getuid, fs_getpgid, fs_sysconf
+from ._syscalls import fs_access, fs_utimes, fs_symlink, fs_link, fs_mkfifo, fs_umask
+from ._syscalls import fs_kill, fs_killpg, fs_setsid
 from .path import exists, isfile, isdir, islink, lexists, getsize
 from .path import join
+from hoststatus import status_ok, status_err
 
+# ── NOT PROVIDED, and why ───────────────────────────────────────────────────
+#
+# A name CPython's `os` has and this module deliberately does not. Each is
+# REFUSED BY NAME at build time ("`os` is a linked module but it exports no
+# `<name>`"), never stubbed, because a stub that returns a plausible value for
+# an operation that was not performed is a wrong answer that looks like one.
+# `test_formal_os.py`'s `notprovided` group pins one name of each class.
+#
+#   fork, waitpid, wait4, _exit, execv, execvp, system, WEXITSTATUS
+#       Process control. A freestanding image has no process-control model: no
+#       unwinder for the child's exit, no wait-status object to return.
+#   urandom, fsencode, read
+#       Return `bytes`, which has no word representation on this path
+#       (`BYTE_BLOB_TYPE_CTORS`). `arc4random_buf` is reachable through
+#       `tempfile`'s own use of it, not as an `os` function.
+#   uname, getloadavg
+#       Return a tuple/named tuple of several fields; a struct is a frame blob
+#       and cannot be returned from a module function.
+#   fdopen
+#       Returns a file OBJECT.
+#   open, close, write, fsync, ftruncate, dup2, pipe, O_RDONLY/O_WRONLY/O_RDWR/
+#   O_CREAT/O_TRUNC, SEEK_SET   (file DESCRIPTORS)
+#       This path lowers `open` ITSELF from a mode string and refuses the C
+#       library's three-argument `open(path, flags, mode)` (see `fs_open_ro` in
+#       `_syscalls.mojo`), so there is no way to obtain a WRITABLE descriptor
+#       and `os.open` cannot be provided without ignoring its `flags`. With no
+#       descriptor producer, `write`/`fsync`/`ftruncate`/`dup2`/`close` and the
+#       `O_*` flags would be unreachable stubs, so they are absent rather than
+#       dead. The read-only descriptor `fs_open_ro` makes is module-internal.
+#       Reachable instead: `tempfile`'s own use of `fopen`/`fclose`.
+#   getmtime (os.path)
+#       A `float`; see `os.path.getmtime_ns`.
+#
 # ── The constants CPython spells as attributes ──────────────────────────────
 #
 # Functions, and the reason is at the top of this file. Each returns the
@@ -212,7 +250,7 @@ def getcwd() -> str:
 
 
 def chdir(path) -> int:
-    """Change the working directory. 0 on success, -1 on failure.
+    """Change the working directory. 0 on success, -1 on failure (hoststatus.mojo).
 
     CPython raises `OSError`; see the note at the top of this module.
     """
@@ -224,6 +262,40 @@ def chdir(path) -> int:
 # `getenv`/`putenv`/`unsetenv` are the three POSIX calls, and they are ONE KEY at
 # a time.  Everything under them is `os.environ`, CPython's dict-like view over
 # the process environment, and the whole of it is below.
+
+def getpid() -> int:
+    """`os.getpid()`: this process's pid. Never a constant and never cached: a
+    process that forked would otherwise report its parent's."""
+    return fs_getpid()
+
+
+def getppid() -> int:
+    """`os.getppid()`: the parent's pid (1 once the parent has exited)."""
+    return fs_getppid()
+
+
+def getuid() -> int:
+    """`os.getuid()`: the real user id."""
+    return fs_getuid()
+
+
+def getpgid(pid) -> int:
+    """`os.getpgid(pid)`: the process-group id of `pid`; 0 means this process.
+    A pid that names no process is -1 here (CPython raises `ProcessLookupError`;
+    a failure is a return value on this path, as everywhere in this module)."""
+    return fs_getpgid(pid)
+
+
+def cpu_count() -> int:
+    """`os.cpu_count()`: the number of CPUs online, always >= 1. CPython may
+    return `None` when it cannot tell; a `None` has no word representation on
+    this path, so the answer is 1 in that case rather than an absent value.
+    `_SC_NPROCESSORS_ONLN` is 58 on Darwin."""
+    n = fs_sysconf(58)
+    if n < 1:
+        return 1
+    return n
+
 
 def getenv(name) -> str:
     """The value of the environment variable `name`, or `""` when it is unset.
@@ -256,7 +328,7 @@ def getenv_or(name, default) -> str:
 
 
 def putenv(name, value) -> int:
-    """Set the environment variable `name`. 0 on success, -1 on failure.
+    """Set the environment variable `name`. 0 on success, -1 on failure (hoststatus.mojo).
 
     Always overwrites, which is `os.environ.__setitem__` rather than
     `os.putenv`'s `overwrite=False` default — there is no way to spell the other
@@ -276,7 +348,7 @@ def putenv(name, value) -> int:
 
 
 def unsetenv(name) -> int:
-    """Remove the environment variable `name`. 0 on success, -1 if it was
+    """Remove the environment variable `name`. 0 on success, -1 if it was (hoststatus.mojo).
     not set."""
     return fs_unsetenv(name)
 
@@ -942,7 +1014,7 @@ def environ_free(e: Pointer[Int64]) -> int:
 # ── Creating, removing and renaming ────────────────────────────────────────
 
 def remove(path) -> int:
-    """Remove the file at `path`. 0 on success, -1 on failure.
+    """Remove the file at `path`. 0 on success, -1 on failure (hoststatus.mojo).
 
     `os.remove` and `os.unlink` are the same call on a POSIX target and are
     both here; the C library's `unlink` is reached through `os/_syscalls.mojo`
@@ -961,7 +1033,7 @@ def unlink(path) -> int:
 
 
 def rmdir(path) -> int:
-    """Remove the DIRECTORY at `path`. 0 on success, -1 on failure."""
+    """Remove the DIRECTORY at `path`. 0 on success, -1 on failure (hoststatus.mojo)."""
     return fs_rmdir(path)
 
 
@@ -997,15 +1069,15 @@ def makedirs(path, mode=0o777) -> int:
     """
     n = str_len(path)
     if n == 0:
-        return 0 - 1
+        return status_err()
     i = 1 if str_starts(path, "/") == 1 else 0
     while i <= n:
         j = _prefix_end(path, i, n)
         if j > i:
             if _make_one(path, j, mode) < 0:
-                return 0 - 1
+                return status_err()
         i = j + 1
-    return 0
+    return status_ok()
 
 
 def _prefix_end(path, i, n) -> int:
@@ -1035,14 +1107,14 @@ def _make_one(path, j, mode) -> int:
     """
     seg = str_prefix(path, j)
     if isdir(seg) == 1:
-        return 0
+        return status_ok()
     return fs_mkdir(seg, mode)
 
 
 def rename(src, dst) -> int:
     """Rename `src` to `dst`, atomically, replacing `dst` if it is there.
 
-    0 on success, -1 on failure. CPython's `os.rename` raises; see the top of
+    0 on success, -1 on failure (hoststatus.mojo). CPython's `os.rename` raises; see the top of
     this module. Note that on a POSIX target this overwrites, so it is
     `replace` as much as `rename`.
     """
@@ -1054,8 +1126,98 @@ def replace(src, dst) -> int:
     return fs_rename(src, dst)
 
 
+def kill(pid, sig) -> int:
+    """`os.kill(pid, sig)`: send signal `sig` to process `pid`. 0 on success, -1 on
+    failure (hoststatus.mojo) -- ESRCH when there is no such process, EPERM when it
+    is not ours. Signal 0 is the existence probe. `SIGKILL`/`SIGSTOP` cannot be
+    caught, so sending one to oneself ends the image."""
+    return fs_kill(pid, sig)
+
+
+def killpg(pgid, sig) -> int:
+    """`os.killpg(pgid, sig)`: signal every process in a group. 0 on success, -1 on
+    failure (hoststatus.mojo)."""
+    return fs_killpg(pgid, sig)
+
+
+def setsid() -> int:
+    """`os.setsid()`: run as a new session leader. CPython returns None; here the
+    NEW SESSION ID (equal to this pid) on success and -1 on failure
+    (hoststatus.mojo), e.g. when already a process-group leader."""
+    return fs_setsid()
+
+
+def defpath() -> str:
+    """`os.defpath`: the default search path, `"/bin:/usr/bin"` on this platform."""
+    return "/bin:/usr/bin"
+
+
+def F_OK() -> int:
+    """`os.F_OK`: does the path resolve at all."""
+    return 0
+
+
+def R_OK() -> int:
+    """`os.R_OK`: may the path be read."""
+    return 4
+
+
+def W_OK() -> int:
+    """`os.W_OK`: may the path be written."""
+    return 2
+
+
+def X_OK() -> int:
+    """`os.X_OK`: may the path be executed (or searched, for a directory)."""
+    return 1
+
+
+def access(path, mode) -> int:
+    """`os.access(path, mode)`: 1 if the real user has `mode` on `path`, else 0.
+
+    A PREDICATE in CPython (it returns a bool and never raises), so it is 1/0
+    here and not a status: 0 means "no" for every reason, including a path that
+    does not exist. No `follow_symlinks=`, `dir_fd=` or `effective_ids=`.
+    """
+    if fs_access(path, mode) == 0:
+        return 1
+    return 0
+
+
+def utime(path, atime, mtime) -> int:
+    """`os.utime(path, (atime, mtime))` with INTEGER seconds. 0 on success, -1 on
+    failure (hoststatus.mojo). CPython's `times=None` (set to now), float times
+    and the `ns=` form are not provided: a float has no word representation here
+    and `None` would need an overload this module does not have."""
+    return fs_utimes(path, atime, 0, mtime, 0)
+
+
+def symlink(src, dst) -> int:
+    """`os.symlink(src, dst)`: make `dst` a symbolic link to `src`. 0 on success,
+    -1 on failure (hoststatus.mojo), e.g. when `dst` exists."""
+    return fs_symlink(src, dst)
+
+
+def link(src, dst) -> int:
+    """`os.link(src, dst)`: make `dst` a hard link to `src`. 0 on success, -1 on
+    failure (hoststatus.mojo)."""
+    return fs_link(src, dst)
+
+
+def mkfifo(path, mode) -> int:
+    """`os.mkfifo(path, mode)`: make a named pipe. 0 on success, -1 on failure
+    (hoststatus.mojo). Pass the mode: CPython's default is 0o666, and a default
+    argument is not available on this path."""
+    return fs_mkfifo(path, mode)
+
+
+def umask(mask) -> int:
+    """`os.umask(mask)`: install `mask` and return the previous mask."""
+    return fs_umask(mask)
+
+
 def chmod(path, mode) -> int:
-    """Set the permission bits of `path`. 0 on success, -1 on failure."""
+    """Set the permission bits of `path`. 0 on success, -1 on failure (hoststatus.mojo)."""
     return fs_chmod(path, mode)
 
 

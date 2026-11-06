@@ -6488,6 +6488,29 @@ class Parser:
                 or (self._peek().kind == "OP" and self._peek().value in ("*", "**"))
             ):
                 return self._parse_lambda()
+            # Bare `comptime <expr>` in expression position (e.g. RHS of
+            # assignment) must parse as a call to `comptime` so the gimple
+            # backend emits the "unavailable in compiled mode" diagnostic,
+            # matching the parenthesized `comptime (expr)` form.
+            if t.value == "comptime" and t.kind == "KW":
+                # Don't treat as prefix form if followed by ASSIGN (assignment to identifier)
+                if self._peek().kind == "ASSIGN":
+                    return IdentExpr(t.value, line=line, col=col)
+                # Don't treat as prefix form if followed by tokens that suggest
+                # it's being used as a plain identifier/value
+                nxt = self._peek()
+                if nxt.kind in ("RPAREN", "RBRACKET", "RBRACE", "COMMA", "NEWLINE", "DEDENT", "EOF", "SEMICOLON"):
+                    return IdentExpr(t.value, line=line, col=col)
+                # Don't treat as prefix form if followed by binary operators
+                if nxt.kind == "OP" and nxt.value in ("+", "-", "*", "/", "//", "%", "**", "==", "!=", "<", ">", "<=", ">=", "and", "or", "&", "|", "^", "<<", ">>"):
+                    return IdentExpr(t.value, line=line, col=col)
+                # Try to parse as comptime expression form
+                try:
+                    arg = self._parse_expr_or_yield()
+                    return CallExpr(func=IdentExpr('comptime', line=line, col=col), args=[arg], kwargs=[], line=line, col=col)
+                except Exception:
+                    # Fall back to treating as identifier
+                    return IdentExpr(t.value, line=line, col=col)
             return IdentExpr(t.value, line=line, col=col)
         if t.kind == "DOT" and self._peek(1).kind == "DOT" and self._peek(2).kind == "DOT":
             self._advance(); self._advance(); self._advance()

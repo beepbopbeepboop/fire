@@ -2230,6 +2230,12 @@ class ValueKinds:
             pk = self._pointer_pointee_kind(e)
             if pk is not None:
                 return pk
+            if callee == "chr":
+                try:
+                    if chr_fold(list(getattr(e, "args", []) or [])) is not None:
+                        return STR_KIND
+                except Exception:
+                    pass
             kind = _kind_of_call(callee, self._func_kind(callee))
             if kind is not None:
                 return kind

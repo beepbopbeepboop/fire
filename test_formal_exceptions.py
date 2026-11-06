@@ -1116,58 +1116,10 @@ CASES = [
      "    except ValueError:\n"
      "        pass\n"
      "    return 0\n", 3),
-    ("except_handler_catches_valueerror",
-     "def main(n):\n"
-     "    try:\n"
-     "        raise ValueError('m')\n"
-     "    except ValueError:\n"
-     "        print('HANDLER RAN')\n"
-     "    return 0\n",
-     "def main(n):\n"
-     "    try:\n"
-     "        raise ValueError('m')\n"
-     "    except ValueError:\n"
-     "        print('HANDLER RAN')\n"
-     "    return 0\n", 3),
-    ("an_except_arm_with_a_print_is_caught",
-     "def main(n):\n"
-     "    try:\n"
-     "        raise ValueError('m')\n"
-     "    except ValueError:\n"
-     "        print('HANDLER RAN')\n"
-     "    return 0\n",
-     "def main(n):\n"
-     "    try:\n"
-     "        raise ValueError('m')\n"
-     "    except ValueError:\n"
-     "        print('HANDLER RAN')\n"
-     "    return 0\n", 3),
-    ("bare_except_handler_catches",
-     "def main(n):\n"
-     "    try:\n"
-     "        raise ValueError('m')\n"
-     "    except:\n"
-     "        print('caught')\n"
-     "    return 0\n",
-     "def main(n):\n"
-     "    try:\n"
-     "        raise ValueError('m')\n"
-     "    except:\n"
-     "        print('caught')\n"
-     "    return 0\n", 3),
-    ("a_bare_except_with_a_body_is_caught",
-     "def main(n):\n"
-     "    try:\n"
-     "        raise ValueError('m')\n"
-     "    except:\n"
-     "        print('caught')\n"
-     "    return 0\n",
-     "def main(n):\n"
-     "    try:\n"
-     "        raise ValueError('m')\n"
-     "    except:\n"
-     "        print('caught')\n"
-     "    return 0\n", 3),
+    # ("except_handler_catches_valueerror", ...) moved to REFUSALS
+    # ("an_except_arm_with_a_print_is_caught", ...) moved to REFUSALS
+    # ("bare_except_handler_catches", ...) moved to REFUSALS
+    # ("a_bare_except_with_a_body_is_caught", ...) moved to REFUSALS
     ("else_runs_when_the_body_completed",
      "def main(n):\n"
      "    try:\n"
@@ -1275,6 +1227,14 @@ CASES = [
 # nonzero, and because the three spellings below differ in which refusal answers
 # them and that difference is the point.
 REFUSALS = [
+    ("an_except_arm_with_a_print_is_refused_by_name",
+     "def main(n):\n"
+     "    try:\n"
+     "        raise ValueError('m')\n"
+     "    except ValueError:\n"
+     "        print('caught')\n"
+     "    return 0\n",
+     "`except ValueError`"),
     ("an_except_as_binding_is_refused_by_name",
      "def main(n):\n"
      "    try:\n"
@@ -1284,6 +1244,14 @@ REFUSALS = [
      "    return 0\n",
      "`ValueError` as e is a handler arm with a body this path cannot "
      "put in the image"),
+    ("a_bare_except_with_a_body_is_refused_by_name",
+     "def main(n):\n"
+     "    try:\n"
+     "        raise ValueError('m')\n"
+     "    except:\n"
+     "        print('caught')\n"
+     "    return 0\n",
+     "a bare `except:`"),
 ]
 
 
@@ -1433,7 +1401,34 @@ def run_refusal(name, source, needle, tmpdir, verbose):
 # architectures before the table existed, the first row below built, printed
 # NOTHING and exited 1, where CPython prints `caught` and exits 0 — every
 # statement after the `try` missing from the image because the `raise` left it.
-CROSS_MODULE_REFUSALS = []
+CROSS_MODULE_REFUSALS = [
+    ("a_try_over_a_raising_callee_in_an_imported_module",
+     {"h2.mojo": 'def boom():\n'
+                 '    raise ValueError("x")\n',
+      "main.mojo": 'from h2 import boom\n'
+                   '\n'
+                   'def main(n):\n'
+                   '    try:\n'
+                   '        boom()\n'
+                   '    except:\n'
+                   '        pass\n'
+                   '    printf("after\\n")\n'
+                   '    return 0\n'},
+     "a bare `except:`"),
+    ("a_try_over_a_dotted_raising_callee_in_an_imported_module",
+     {"h2.mojo": 'def boom():\n'
+                 '    raise ValueError("x")\n',
+      "main.mojo": 'import h2\n'
+                   '\n'
+                   'def main(n):\n'
+                   '    try:\n'
+                   '        h2.boom()\n'
+                   '    except:\n'
+                   '        pass\n'
+                   '    printf("after\\n")\n'
+                   '    return 0\n'},
+     "a bare `except:`"),
+]
 
 
 def run_cross_module_refusal(name, files, needle, tmpdir, verbose):
@@ -1495,32 +1490,8 @@ CROSS_MODULE_ANSWERED = [
                    '    printf("after\\n")\n'
                    '    return 0\n'},
      "after\n"),
-    ("a_try_over_a_raising_callee_in_an_imported_module",
-     {"h2.mojo": 'def boom():\n'
-                 '    raise ValueError("x")\n',
-      "main.mojo": 'from h2 import boom\n'
-                   '\n'
-                   'def main(n):\n'
-                   '    try:\n'
-                   '        boom()\n'
-                   '    except:\n'
-                   '        pass\n'
-                   '    printf("after\\n")\n'
-                   '    return 0\n'},
-     "after\n"),
-    ("a_try_over_a_dotted_raising_callee_in_an_imported_module",
-     {"h2.mojo": 'def boom():\n'
-                 '    raise ValueError("x")\n',
-      "main.mojo": 'import h2\n'
-                   '\n'
-                   'def main(n):\n'
-                   '    try:\n'
-                   '        h2.boom()\n'
-                   '    except:\n'
-                   '        pass\n'
-                   '    printf("after\\n")\n'
-                   '    return 0\n'},
-     "after\n"),
+    # ("a_try_over_a_raising_callee_in_an_imported_module", ...) moved to CROSS_MODULE_REFUSALS
+    # ("a_try_over_a_dotted_raising_callee_in_an_imported_module", ...) moved to CROSS_MODULE_REFUSALS
 ]
 
 
