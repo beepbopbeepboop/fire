@@ -1,5 +1,7 @@
 # plan/step-02: the two memory lemmas the peephole store rules actually lack
-Class: mid      Size: S      Depends: 01a, 01b      Blocks: 03c, 03d, 04b, 04c
+**Status: DONE (verified by agent, work landed)**
+
+Class: mid      Size: S      Depends: 00a, 01a, 01b      Blocks: 03c, 03d, 04b, 04c
 Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §2 ("The recipe that works"), §3.
 
 ## Current state (measured; verified 2026-11-05)

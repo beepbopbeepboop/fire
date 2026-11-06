@@ -2143,21 +2143,15 @@ CASES = [
     # cannot be folded, and this path has no comptime evaluator that could
     # resolve it. Guessing a value would be a fabricated answer.
     #
-    # `refuse_either:`, and the reason is worth reading: the two backends
-    # refuse at DIFFERENT depths and name DIFFERENT limits for one construct.
-    # arm64 reaches the fold and says so; x86-64 has no `comptime` statement
-    # lowering at all and says "unsupported statement ComptimeVarStmt". Both
-    # are honest, and the shared-text rule that `refuse:` enforces cannot
-    # apply — but the DRIFT is real and is recorded in
-    # bugs/FORMAL_known_limits.md §3 as arch drift, not as agreement.
+    # x86-64 now shares `comptime_fold_refusal` (the same shared hook as
+    # arm64), so both backends agree on the message.
     ("limit_comptime_over_a_runtime_parameter",
      "def poly(coefficients):\n"
      "    comptime num_coefficients = len(coefficients)\n"
      "    return num_coefficients\n\n"
      "def main(n: Int) -> Int:\n"
      "    return poly([1, 2, 3])\n",
-     "refuse_either:does not fold to a compile-time constant"
-     "|unsupported statement ComptimeVarStmt", None),
+     "refuse:does not fold to a compile-time constant", None),
     # The ninth FLOATING conversion of a variadic call, which is the boundary
     # of `model.printf_argument_classes`'s placement and the reason the boundary
     # is a refusal rather than an approximation. SysV AMD64 has eight XMM
@@ -4828,6 +4822,24 @@ BYREF_HANDOFF_REFUSALS = [
      "    var e = Error(r)\n"
      "    return r.a\n",
      "refuse:is a real type this path has no representation", None),
+    ("byref_refuse_error_literal_argument",
+     "def main(n: Int) -> Int:\n"
+     "    var e = Error(\"boom\")\n"
+     "    return 0\n",
+     "refuse:is a real type this path has no representation", None),
+    ("byref_refuse_error_no_argument",
+     "def main(n: Int) -> Int:\n"
+     "    var e = Error()\n"
+     "    return 0\n",
+     "refuse:is a real type this path has no representation", None),
+    ("local_two_field_error_struct_keeps_refusal_arity",
+     "struct Error:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var e = Error()\n"
+     "    return 0\n",
+     0, None),
 ]
 
 # ── wave 4 (D4): a frame address handed to a method in an IMPORTED module ───
@@ -9317,6 +9329,41 @@ BOTH_ARCH_CASES = [
      "        return 1\n"
      "    printf(\"s=%s\", s)\n"
      "    return 0\n", 0, "s=hi"),
+    # Step 10: zero-arg String() used as a receiver is treated as a framed
+    # struct (not a char*) so field writes work.
+    ("string_frame_reading_reproducer",
+     "struct String:\n"
+     "    var _ptr_or_data: Pointer[UInt8]\n"
+     "    var _len_or_data: Int\n"
+     "    var _capacity_or_data: Int\n"
+     "    def size(self) -> Int:\n"
+     "        return self._len_or_data\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = String()\n"
+     "    a._len_or_data = 5\n"
+     "    return a.size()\n", 5, ""),
+    ("string_frame_reading_returned",
+     "struct String:\n"
+     "    var _ptr_or_data: Pointer[UInt8]\n"
+     "    var _len_or_data: Int\n"
+     "    var _capacity_or_data: Int\n"
+     "    def size(self) -> Int:\n"
+     "        return self._len_or_data\n"
+     "def make() -> String:\n"
+     "    var s = String()\n"
+     "    s._len_or_data = 5\n"
+     "    return s\n"
+     "def main(n: Int) -> Int:\n"
+     "    return make().size()\n", 5, ""),
+    ("string_text_reading_control",
+     "struct String:\n"
+     "    var _ptr_or_data: Pointer[UInt8]\n"
+     "    var _len_or_data: Int\n"
+     "    var _capacity_or_data: Int\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = String()\n"
+     "    printf(\"[%s]\\n\", s)\n"
+     "    return 0\n", 0, "[]\n"),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before
@@ -12062,6 +12109,21 @@ CONSTRUCTION_CASES = [
      "    if p.get(2) != 3:\n"
      "        return 30 + p.get(2)\n"
      "    return 4\n", 4, None),
+    ("constr_init_optional_none_field_is_refused",
+     "struct Slice:\n"
+     "    var start: Optional[Int]\n"
+     "    var end: Optional[Int]\n"
+     "    var step: Optional[Int]\n"
+     "\n"
+     "    def __init__(out self, start: Int, end: Int):\n"
+     "        self.start = start\n"
+     "        self.end = end\n"
+     "        self.step = None\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = Slice(1, 9)\n"
+     "    return 7\n",
+     "refuse:WRONG about `Some(0)`", None),
     # A ONE-FIELD struct, where the receiver IS the field and there is nothing
     # to store into.  The constructor's body is still what decides the value, so
     # the LAST store is the whole result — the same word, for the same reason
@@ -25820,12 +25882,17 @@ def check_interpolated_literal_bound_census(verbose=False):
     the corpus rather than a drifting proportion, and it is asserted exactly.
     """
     import os as _os
+    try:
+        import module_loader
+        _STDLIB_PATH = getattr(module_loader, "STDLIB_PATH", None)
+    except Exception:
+        _STDLIB_PATH = None
     import formal.types as _types
     build = __import__("formal.build", fromlist=["build"])
     M = _TYPE_VALUE_MODEL
     here = _os.path.dirname(_os.path.abspath(__file__))
     roots = [here]
-    stdlib = (os.path.join(STDLIB_PATH, "std") if STDLIB_PATH else _os.path.join(here, "..", "..", "modular", "mojo", "stdlib", "std"))
+    stdlib = (_os.path.join(_STDLIB_PATH, "std") if _STDLIB_PATH else _os.path.join(here, "..", "..", "modular", "mojo", "stdlib", "std"))
     if _os.path.isdir(stdlib):
         roots.append(stdlib)
 
@@ -26079,11 +26146,16 @@ def check_interpolated_literal_census(verbose=False):
     direction.
     """
     import os as _os
+    try:
+        import module_loader
+        _STDLIB_PATH = getattr(module_loader, "STDLIB_PATH", None)
+    except Exception:
+        _STDLIB_PATH = None
     build = __import__("formal.build", fromlist=["build"])
     passed, failures = 0, []
     here = _os.path.dirname(_os.path.abspath(__file__))
     roots = [here]
-    stdlib = (os.path.join(STDLIB_PATH, "std") if STDLIB_PATH else _os.path.join(here, "..", "..", "modular", "mojo", "stdlib", "std"))
+    stdlib = (_os.path.join(_STDLIB_PATH, "std") if _STDLIB_PATH else _os.path.join(here, "..", "..", "modular", "mojo", "stdlib", "std"))
     if _os.path.isdir(stdlib):
         roots.append(stdlib)
     scanned, rows, unquotable = 0, [], []

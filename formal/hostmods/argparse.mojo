@@ -1,5 +1,7 @@
 """`argparse` — command-line parsing, for the formal backend.
 
+Status convention: hoststatus.mojo.
+
 CPython's `argparse` is "a shape over the source language rather than a runtime
 facility" (`formal/imports.py`'s HOST_MODELLED comment, which names `argparse`
 among the reachable-in-principle modules). Nothing in it needs a second
@@ -188,6 +190,8 @@ Every message and every exit status below is checked against CPython's own
 `argparse` on the same command lines by `test_formal_argparse.py`, which builds
 the arm64 image, RUNS it, and diffs its output and status against a CPython
 program generated from the same declarations.
+
+Status convention: hoststatus.mojo.
 """
 
 from os._syscalls import str_alloc, str_len, str_put, str_copy, str_prefix

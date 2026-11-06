@@ -922,9 +922,9 @@ for the bare dialect name as well as the templates.
 
 | shape | files (arm64, stdlib scope) | verdict | evidence / what it should be |
 |---|---|---|---|
-| `constructing X has no representation: this image has no declaration of X` | 3 — `std/testing/prop/{__init__,random,runner}.mojo` (`Error`, at depth). The fourth was the repository-root stub `stdlib_core.mojo` (`StringRef`, direct), and it is **DELETED** (2026-10-03): nothing imported it, it declared no type this repository has, and its only remaining effect on the tree was this row | **refusal TRUE** | `Error` really is 2 fields and `StringRef` is a fat pointer, so neither fits one word, and neither is a struct in these images. The message now says the one thing it has checked — that there is no declaration here to ask — instead of asserting a shape it cannot see |
+| `constructing X has no representation: this image has no declaration of X` | 3 — `std/testing/prop/{__init__,random,runner}.mojo` (`Error`, at depth). The fourth was the repository-root stub `stdlib_core.mojo` (`StringRef`, direct), and it is **DELETED** (2026-10-03): nothing imported it, it declared no type this repository has, and its only remaining effect on the tree was this row; pinned by `byref_refuse_unrepresentable_type_constructor`, `byref_refuse_error_literal_argument`, `byref_refuse_error_no_argument`, `local_two_field_error_struct_keeps_refusal_arity` | **refusal TRUE** | `Error` really is 2 fields and `StringRef` is a fat pointer, so neither fits one word, and neither is a struct in these images. The message now says the one thing it has checked — that there is no declaration here to ask — instead of asserting a shape it cannot see |
 | `__mlir_attr[...]` assembles an MLIR attribute | 46 | **true limit for the dialect attributes** | §2.1; §2.0 for the target-query half, which is answered |
-| `comptime X = … does not fold to a compile-time constant` | 2 (`std/math/polynomial.mojo`, `std/utils/_serialize.mojo`) | **true limit** for `polynomial.mojo`; the second file was **NOT a limit** and is **CLOSED** (2026-10-02). The arch drift is **CLOSED** (2026-09-27) | `comptime n = len(coefficients)` over a *runtime* parameter, which is genuinely not knowable at compile time — that half of the row stands. The **drift** was that x86-64 refused **earlier and differently** (`unsupported call target on the formal x86-64 path (got SubscriptExpr)` for `polynomial.mojo`, `unsupported statement ComptimeForStmt` for `tile.mojo`), so one construct got two different limits from two architectures that are one language implementation. Closed by giving x86-64 the same `mojo/middle/comptime.py` resolver arm64 uses — that module documents x86-64 as an intended consumer of exactly this seam and it never was one — so both now refuse with `model.comptime_fold_refusal`, byte for byte. Side effect: x86-64 now *builds* a comptime binding that folds, which it used to refuse outright. **The 2026-10-02 correction:** the row's second file was `std/algorithm/backend/tile.mojo`, which has since moved to the bracketed-specialization cause (its own doc), and the file that took its place was `_serialize.mojo` — and THAT one was an over-refusal, not a limit. `comptime _kCompactMaxElemsToPrint = 7` + `comptime _kCompactElemPerSide = _kCompactMaxElemsToPrint // 2` (`_serialize.mojo:16-18`) was refused on both architectures for two reasons, neither of them a limit: `//` was in neither compile-time folder's operator table (both backends lower `//` at RUN time — `_emit_div_shift_pow`, `_emit_div_mod` — and the interpreter folds it, so one source had three answers), and a module-level initializer could not read an earlier module-level name although function scope always could and `comptime_fold_refusal`'s own text promises it. Both closed, plus the uncaught `ZeroDivisionError` a literal-zero divisor raised out of the folder. It does **not** become a swept pass: it moves past this refusal and onto `ptr.unsafe_value()` over an `OptionalPointer` receiver, the same "next terminal is a different construct" shape §2.0 records for `std/sys/info.mojo`. Pinned by `both_arch_comptime_floor_division_folds`, two zero-divisor `refuse:` rows, and three rows in `test_formal_globals.py` |
+| `comptime X = … does not fold to a compile-time constant` | 2 (`std/math/polynomial.mojo`, `std/utils/_serialize.mojo`) | **true limit** for `polynomial.mojo`; the second file was **NOT a limit** and is **CLOSED** (2026-10-02). The arch drift is **CLOSED** (2026-11-05) | `comptime n = len(coefficients)` over a *runtime* parameter, which is genuinely not knowable at compile time — that half of the row stands. The **drift** was that x86-64 refused **earlier and differently** (`unsupported call target on the formal x86-64 path (got SubscriptExpr)` for `polynomial.mojo`, `unsupported statement ComptimeForStmt` for `tile.mojo`), so one construct got two different limits from two architectures that are one language implementation. Closed by giving x86-64 the same `mojo/middle/comptime.py` resolver arm64 uses — that module documents x86-64 as an intended consumer of exactly this seam and it never was one — so both now refuse with `model.comptime_fold_refusal`, byte for byte. The pin in `test_formal_run.py` was tightened to `refuse:` (2026-11-05) now that both backends agree. Side effect: x86-64 now *builds* a comptime binding that folds, which it used to refuse outright. **The 2026-10-02 correction:** the row's second file was `std/algorithm/backend/tile.mojo`, which has since moved to the bracketed-specialization cause (its own doc), and the file that took its place was `_serialize.mojo` — and THAT one was an over-refusal, not a limit. `comptime _kCompactMaxElemsToPrint = 7` + `comptime _kCompactElemPerSide = _kCompactMaxElemsToPrint // 2` (`_serialize.mojo:16-18`) was refused on both architectures for two reasons, neither of them a limit: `//` was in neither compile-time folder's operator table (both backends lower `//` at RUN time — `_emit_div_shift_pow`, `_emit_div_mod` — and the interpreter folds it, so one source had three answers), and a module-level initializer could not read an earlier module-level name although function scope always could and `comptime_fold_refusal`'s own text promises it. Both closed, plus the uncaught `ZeroDivisionError` a literal-zero divisor raised out of the folder. It does **not** become a swept pass: it moves past this refusal and onto `ptr.unsafe_value()` over an `OptionalPointer` receiver, the same "next terminal is a different construct" shape §2.0 records for `std/sys/info.mojo`. Pinned by `both_arch_comptime_floor_division_folds`, two zero-divisor `refuse:` rows, and three rows in `test_formal_globals.py` |
 | `a \`...\` stands where this path needs instructions to emit` | 1 (`std/builtin/len.mojo`) | **true limit**, message **CLOSED** (2026-09-27) | `def len(value: StringSlice) -> Int: ...` has no instructions, and the old message (`unsupported expression EllipsisLiteral on the formal <arch> path`) named an AST node the author never wrote and said nothing about what to do. On x86-64 it was worse than weak: `_unsupported_expr_message` appended "container and string values are not", false of a `...`. Now one arch-free `model.ellipsis_refusal`, naming the language's own no-implementation marker and both repairs. **Measured, both arches, because the old note's scope claim was wrong in a way worth recording:** a `...` in a `trait` method builds, but a `...` in a plain function is refused whether or not anything ever CALLS it — so the distinction is the declaration KIND, not reach |
 | `a Optional receiver is stored in a container` | 1 (`std/iter/__init__.mojo`) | **true limit** | by-reference receiver work; **already pinned** by `byref_refuse_stored_in_a_list` (`test_formal_run.py`). Not duplicated here |
 
@@ -1435,29 +1435,21 @@ which is why it is written down here rather than attempted.
     **per-arch dylib build** item (agent [2]'s, and the thing [2] was asked to
     build), not a codegen gap, and it is a real load failure reported as one.
 
-## 6.5 Arch drift, still open, still two files
+## 6.5 Arch drift — CLOSED 2026-11-05
 
-Same sweep, both arches, `set`-diffed. **Zero class changes** — every file is
-in the same class on both architectures — and exactly **two files whose message
-differs**, which is the drift §3 records and which is *not* cosmetic:
-
-  * `std/builtin/swap.mojo` — **arm64 builds it, x86-64 refuses it**
-    (`unsupported unary operator '^' on the formal x86-64 path`). A construct
-    one architecture lowers and the other does not, which is a codegen gap in
-    x86-64, not a wording difference. Pre-existing, unchanged since `dbf3abb`.
-  * `std/math/polynomial.mojo` — arm64 says `comptime num_coefficients = …
-    does not fold to a compile-time constant`, x86-64 says `unsupported call
-    target on the formal x86-64 path (got SubscriptExpr)`. **The two
-    architectures name different limits for one construct**, and only one of
-    them is the operative one. Already pinned by
-    `limit_comptime_over_a_runtime_parameter` with `refuse_either:`.
-  * (`std/builtin/len.mojo` also differs, but only by the architecture's name
-    inside an otherwise identical sentence. Same verdict, same reason, and that
-    is the correct kind of difference.)
-
-Both are x86-64-side work of a sitting each, and both are in
-`formal/x86_64_codegen.py`. Not started: it is [3]'s file and [3] is working in
-it.
+Measured on both arches with `tools/formal_sweep.py` over the stdlib subtrees
+(`std/builtin/swap.mojo`, `std/math/polynomial.mojo`). **Both files are in
+the same class on both architectures with the same message.** The unary `^`
+ownership transfer on x86-64 is fixed in `formal/x86_64_codegen.py` (the
+`M.is_ownership_transfer(expr)` branch) and pinned by
+`test_formal_x86_64_parity.py::ownership_transfer_caret` (with its
+negative-value twin). The `comptime` binding over a runtime parameter now
+routes through the shared `M.comptime_fold_refusal` on x86-64 as well as
+arm64, giving the identical message `comptime ... does not fold to a
+compile-time constant` on both backends; the pin
+`limit_comptime_over_a_runtime_parameter` in `test_formal_run.py` is
+tightened to `refuse:` with that single needle. The earlier `refuse_either:`
+masked the arch drift; it is gone.
 
 ---
 

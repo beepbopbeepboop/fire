@@ -2,8 +2,8 @@
 
 > **PLANNED — this document's open work is decomposed into `bugs/plan/step-*.md`,
 > and the design plus ordering live in `doc/finish-formal.md`.** The steps that
-> own parts of this document: **step-02** (the memory lemmas), **step-03**
-> (arm64 rule theorems), **step-04** (x86-64 rule theorems), **step-05**
+> own parts of this document: **step-02** (the memory lemmas), **step-03a…d**
+> (arm64 rule theorems), **step-04a…d** (x86-64 rule theorems), **step-05a…b**
 > (licence/register/enable). Read the measurements here first; the step files are
 > the work orders.
 
@@ -269,10 +269,7 @@ pass for them; they are named here so the gap is visible.
 accepted (which `work_step_*` in `lib/ProofLib.lean` already does 40 times):
 write the arm's step lemma with the word as a `UInt32` parameter and one
 hypothesis per earlier class, `intro t; bv_decide` on each, then
-`unfold arm64_step; rw [hpc, hread]; rw [if_neg …, if_pos h]`. The memory
-lemmmas are the part with no precedent: `ProofLib` has
-`mem_read_after_write_u64` and `mem_read_two_writes`, but nothing that says
-`mem_read_u64 (mem_write_u64 m a v) a = v` in the shape a rule theorem needs.
+`unfold arm64_step; rw [hpc, hread]; rw [if_neg …, if_pos h]`. **2026-11-05 (step-02):** read-after-write already exists (ProofLib:297, X86:3694); what was missing is write idempotence (`mem_write_u64_idem`, `mem_write_bytes8_idem`) and register self-assignment identity (`arm64_set_reg_self`).
 
 **Measured 2026-10-05:** 0 occurrences of any of the three over the 52
 examples. 62 `STR (immediate-offset)`, 60 `LDR`, 306 `MOVZ` — and no two
@@ -350,19 +347,23 @@ drags its string-pool label down with it.
 
 ### The rules that are still unproved
 
-The rules that remain have no Lean theorem. They are deliberately NOT in
-`X86_RULES`, so `unlicensed_rules()` does not refuse the pass for them; they
-are named here so the gap is visible. Their matchers read `a.dec` (an x86
-`Entry` has no `a.form`/`.reg`/`.rm` — reading them off the entry was an
-`AttributeError` on the first match, now fixed for all of them), so the
-blocker is the theorem, not the matcher:
+The rules that remain have no Lean theorem. They are in `SCAFFOLDED_RULES`
+(matcher written, theorem scaffolded, never run) so `unlicensed_rules()` does
+not refuse the pass for them; they are named here so the gap is visible.
+Their matchers read `a.dec` (an x86 `Entry` has no `a.form`/`.reg`/`.rm` —
+reading them off the entry was an `AttributeError` on the first match, now
+fixed for all of them). Matchers were fixed for three soundness holes (SIB
+index, RIP-relative, load-pair `reg==base`), restricted to `mod==1` (disp8),
+and the `mov_rm64_imm32` pair branch was dropped (no theorem). The blocker
+is the theorem, not the matcher:
 
 | rule | the form | the arm in `x86_step` | the obstacle |
 |---|---|---|---|
-| `x86_64/imm_zero` | `add`/`sub r/m64, 0` | `op = 0x81`/`0x83`, digit 0/5 | deep in the `if` chain; also needs the flags-dead condition `_x_imm_zero` already asks |
+| `x86_64/imm_zero` | `add`/`sub r/m64, 0` | `op = 0x81`/`0x83`, digit 0/5 | deep in the `if` chain; also needs the flags-dead condition `_x_imm_zero` already asks (flags theorem missing) |
 | `x86_64/store_load` | `mov [m], r` ; `mov r, [m]` | `0x89`/`0x8b` with mod≠3 | needs `x86_mem` read-after-write lemmas of the shape §2 lacks on arm64 too |
-| `x86_64/mem_pair` | two identical `mov`s to one memory operand | same | same |
-| `x86_64/mov_self_rev` | `mov r, r` as `48 8b c0` | `0x8b`, mod=3 | not emitted today; the mirror of `peephole_x86_mov_self`, cheap once wanted |
+| `x86_64/mem_pair_store` | two identical `mov`s to one memory operand (store) | `0x89` with mod≠3 | needs `x86_mem` write lemmas |
+| `x86_64/mem_pair_load` | two identical `mov`s from one memory operand (load) | `0x8b` with mod≠3 | needs `x86_mem` read lemmas and `reg != base` |
+| `x86_64/mov_self_rev` | `mov r, r` as `48 8b c0` | `0x8b`, mod=3 | mirror of `peephole_x86_mov_self`, no theorem yet |
 
 ## 4. `add_imm_fuse` is proved and enabled and fires zero times
 

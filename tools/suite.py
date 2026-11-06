@@ -2852,6 +2852,16 @@ test('formal-call-proofgen', [PY, 'test_formal_call_proof_gen.py'],
      desc='proof generation on programs that CALL: a call must not raise, the '
           'model must be the model of the call, and no declaration may be '
           'vacuous')
+test('formal-try-model', [PY, 'test_formal_try_model.py'],
+     deps=['preflight'], mem='tiny',
+     extra=['test_formal_try_model.py', 'formal/arm64_proof_gen.py',
+            'formal/x86_64_proof_gen.py', 'fire_compiler.py'],
+     desc='try/except/finally flattening in the proof model')
+test('formal-eh-tables', [PY, 'test_formal_eh_tables.py'],
+     deps=['preflight'], mem='tiny',
+     extra=['test_formal_eh_tables.py', 'formal/model/eh.py',
+            'formal/model/__init__.py', 'formal/model/types.py'],
+     desc='landing-pad/personality tables in the value model')
 # `mem='tiny'` (4 GB) from a MEASURED peak, not from the shape of the workload.
 # `test_formal_dylib.py` peaked at 1.7 GB across the process tree on
 # 2026-10-03 (`python3 tools/memslot.py --gb 8 -- python3
@@ -2946,6 +2956,14 @@ test('formal-sweep-truth', [PY, 'test_formal_sweep_truth.py'],
 test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
      deps=['preflight'], mem='tiny',
      desc='every bound symbol is accounted for, on every container format')
+# Scaffold holes are ledgered in formal/proof_gaps.py and counted by
+# library_census; every sorry must live only in lib/Scaffold.lean.
+test('formal-proof-gaps', [PY, 'test_formal_proof_gaps.py'],
+     deps=['preflight', 'prooflib'], mem='module',
+     desc='proof-gap ledger matches library_census (Scaffold only)')
+test('lean-hne-chain', [PY, 'test_lean_hne_chain.py'],
+     deps=['preflight'], mem='tiny',
+     desc='arm64_step hne negation chain generator')
 # `formal/hostmods/re.mojo` against CPython's own `re`: 112 patterns, eight
 # sections each, every integer compared.  In `proofs` rather than `check` for
 # the reason it is slow and not the reason it is fast: it builds and EXECUTES
@@ -4100,7 +4118,7 @@ BUCKETS = {
               # test from the everyday loop.
               'rthdrscan', 'ptrreg', 'ptrreg-boxed-str', 'runtimedylib',
               'sqliteruntime', 'formal-sweep-truth', 'formal-link-accounting',
-              'formal-ast', 'silentnoop',
+              'formal-proof-gaps', 'lean-hne-chain', 'formal-ast', 'silentnoop',
               'refusal-taxonomy', 'returned-frame-layout',
               # The host-import WALL's readers. 17 cases, 0.36 s, no build and
               # no Lean, so the `formal-field-walk` rule puts it in the everyday

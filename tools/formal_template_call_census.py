@@ -1,6 +1,3 @@
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from module_loader import STDLIB_PATH
 #!/usr/bin/env python3
 """Which BARE calls to a declared template could have their type arguments
 inferred, and what each one would take — the measurement
@@ -110,6 +107,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
+from module_loader import STDLIB_PATH  # noqa: E402
 
 import checked_run                                           # noqa: E402
 import elaborate                                             # noqa: E402

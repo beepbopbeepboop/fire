@@ -97,6 +97,16 @@ CSEL_CASES = [
      6, ("csel",)),
 ]
 
+# CSINC family: ternary forms that fold to csinv/csinc/csneg
+CSEL_FAMILY_CASES = [
+    # Shape 1: T if c else ~T -> csinv (always allowed)
+    ("csinv_ternary_true", "def f(n):\n    c = 5\n    t = 7\n    return t if c else ~t\n",
+     7, ("csinv",)),
+    ("csinv_ternary_false", "def f(n):\n    c = 0\n    t = 7\n    r = t if c else ~t\n    return 0\n",  # just check emission
+     0, ("csinv",)),
+]
+
+
 # Cases that MUST NOT take the branchless path, because CSEL evaluates both
 # arms. Each one would print if the discarded arm ran.
 KEEP_BRANCHING = [
@@ -137,6 +147,29 @@ BCOND_CASES = [
     # B.cond off the flags -- there are no flags to read.
     ("bcond_call_still_cset", "def f(n):\n    if side(1):\n        return 5\n"
      "    return 0\ndef side(v):\n    return v\n", 5),
+]
+
+
+# CCMP: `if A and B:` where both are comparisons lowered to cmp + ccmp + b.cond
+CCMP_CASES = [
+    ("ccmp_and_simple", "def f(n):\n    a = 3\n    b = 9\n    c = 5\n"
+     "    if a < b and c == 0:\n        return 1\n    return 0\n", 0, ("ccmp",)),
+    ("ccmp_and_both_true", "def f(n):\n    a = 3\n    b = 9\n    if a < b and b > a:\n"
+     "        return 7\n    return 0\n", 7, ("ccmp",)),
+    ("ccmp_and_a_false", "def f(n):\n    a = 9\n    b = 3\n    if a < b and b > 0:\n"
+     "        return 1\n    return 0\n", 0, ("ccmp",)),
+    ("ccmp_and_b_false", "def f(n):\n    a = 3\n    b = 9\n    if a < b and b > 20:\n"
+     "        return 1\n    return 0\n", 0, ("ccmp",)),
+    ("ccmp_mixed_signed", "def f(n):\n    a = -1\n    b = 5\n    if a < b and b > 0:\n"
+     "        return 3\n    return 0\n", 3, ("ccmp",)),
+    ("ccmp_imm31_right", "def f(n):\n    a = 5\n    b = 31\n    if a < 10 and b == 31:\n"
+     "        return 11\n    return 0\n", 11, ("ccmp",)),
+    # literal 32 must fall back to a register (not use immediate form)
+    ("ccmp_imm32_right_fallback", "def f(n):\n    a = 5\n    b = 32\n    if a < 10 and b == 32:\n"
+     "        return 13\n    return 0\n", 13, ("ccmp",)),
+    # call in B must NOT use ccmp (B operands must be flag-neutral)
+    ("ccmp_call_in_b_not_used", "def f(n):\n    a = 5\n    if a < 10 and side(1):\n"
+     "        return 1\n    return 0\ndef side(v):\n    return v\n", 1, ()),
 ]
 
 
@@ -267,6 +300,47 @@ def test_csel_emitted_and_correct(tmpdir, verbose):
                   f"{name}: expected {want} to be emitted, got {sorted(set(ms))}"
                   f" — the encoder is correct but nothing calls it, which is "
                   f"the whole failure this file exists to catch")
+        if verbose:
+            print(f"  ok   {name} (exit {code}, {len(ms)} instructions)")
+
+
+def test_ccmp_emitted_and_correct(tmpdir, verbose):
+    for name, src, want_exit, want_mn in CCMP_CASES:
+        code, dis, out = build_and_run(src, tmpdir, name)
+        check(code == want_exit,
+              f"{name}: returned {code}, expected {want_exit}")
+        ms = mnemonics(dis)
+        for want in want_mn:
+            check(any(m == want or m.startswith(want) for m in ms),
+                  f"{name}: expected {want} to be emitted, got {sorted(set(ms))}"
+                  f" — the encoder is correct but nothing calls it, which is "
+                  f"the whole failure this file exists to catch")
+        if verbose:
+            print(f"  ok   {name} (exit {code}, {len(ms)} instructions)")
+
+
+def test_csel_family_emitted_and_correct(tmpdir, verbose):
+    for case in CSEL_FAMILY_CASES:
+        if len(case) == 4:
+            name, src, want_exit, want_mn = case
+        else:
+            continue
+        code, dis, out = build_and_run(src, tmpdir, name)
+        check(code == want_exit,
+              f"{name}: returned {code}, expected {want_exit}")
+        ms = mnemonics(dis)
+        if want_mn:
+            for want in want_mn:
+                # Accept aliases
+                aliases = {
+                    'csinv': ['csinv', 'cinv'],
+                    'csinc': ['csinc', 'cinc'],
+                    'csneg': ['csneg', 'cneg'],
+                    'csel': ['csel'],
+                }
+                ok_list = aliases.get(want, [want])
+                check(any(any(m == a or m.startswith(a) for a in ok_list) for m in ms),
+                      f"{name}: expected {want} to be emitted, got {sorted(set(ms))}")
         if verbose:
             print(f"  ok   {name} (exit {code}, {len(ms)} instructions)")
 
@@ -556,6 +630,8 @@ TESTS = [
      test_bcond_emitted_and_patched),
     ("CSEL is emitted and computes the right value",
      test_csel_emitted_and_correct),
+    ("CSEL family is emitted and computes the right value",
+     test_csel_family_emitted_and_correct),
     ("TBZ is emitted, tests the right bit, and its displacement is patched",
      test_tbz_emitted_and_correct),
     ("TST and CMN are emitted and answer CPython",

@@ -1,4 +1,6 @@
 # plan/step-28: `absval` frame-peel `K` — verify the same-day fix, pin it with a Lean-free test, then close or localise
+**Status: DONE (verified by agent, work landed)**
+
 Class: mid      Size: M      Depends: 00a      Blocks: none
 Source: fixed by commit `2e585ba4c` ("formal arm64 proof: scale an ADD/SUB immediate by its sh bit in every sp tracker"); the `absval` frame-peel symptom was a prologue using `sub sp, sp, #32, lsl #12` (128 KiB scratch).
 

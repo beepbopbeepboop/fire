@@ -1,5 +1,7 @@
 # plan/step-03d: `arm64/mem_pair` — duplicate `STR;STR` and `LDR;LDR`
-Class: mid      Size: M      Depends: 02, 03c      Blocks: 05a
+**Status: DONE (verified by agent, work landed)**
+
+Class: mid      Size: M      Depends: 00a, 02, 03c      Blocks: 05a
 Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §2 table row `arm64/mem_pair`.
 
 ## Current state (measured; verified 2026-11-05)

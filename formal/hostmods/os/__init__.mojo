@@ -48,7 +48,8 @@ because it is not a matter of taste:
     C library returns: 0 or -1. A function documented as "0 on success, -1 on
     failure" is exactly that, and a caller that needs CPython's exception has
     to test the status itself. This is a real difference from CPython and it
-    is why `remove` below does not raise `FileNotFoundError`.
+    is why `remove` below does not raise `FileNotFoundError`. Status convention:
+    hoststatus.mojo.
 
   * **A DIRECTORY LISTING IS A BLOB, NOT A LIST.** `listdir` and `walk` are
     here and they are exact — same entries, same order, same `.`/`..` rule as
@@ -136,6 +137,7 @@ from ._syscalls import fs_dirent_name, fs_name_is_dot, fs_opendir
 from ._syscalls import fs_environ_vec, str_find, str_cmp
 from .path import exists, isfile, isdir, islink, lexists, getsize
 from .path import join
+from hoststatus import status_ok, status_err
 
 # ── The constants CPython spells as attributes ──────────────────────────────
 #
@@ -212,7 +214,7 @@ def getcwd() -> str:
 
 
 def chdir(path) -> int:
-    """Change the working directory. 0 on success, -1 on failure.
+    """Change the working directory. 0 on success, -1 on failure (hoststatus.mojo).
 
     CPython raises `OSError`; see the note at the top of this module.
     """
@@ -256,7 +258,7 @@ def getenv_or(name, default) -> str:
 
 
 def putenv(name, value) -> int:
-    """Set the environment variable `name`. 0 on success, -1 on failure.
+    """Set the environment variable `name`. 0 on success, -1 on failure (hoststatus.mojo).
 
     Always overwrites, which is `os.environ.__setitem__` rather than
     `os.putenv`'s `overwrite=False` default — there is no way to spell the other
@@ -276,7 +278,7 @@ def putenv(name, value) -> int:
 
 
 def unsetenv(name) -> int:
-    """Remove the environment variable `name`. 0 on success, -1 if it was
+    """Remove the environment variable `name`. 0 on success, -1 if it was (hoststatus.mojo).
     not set."""
     return fs_unsetenv(name)
 
@@ -942,7 +944,7 @@ def environ_free(e: Pointer[Int64]) -> int:
 # ── Creating, removing and renaming ────────────────────────────────────────
 
 def remove(path) -> int:
-    """Remove the file at `path`. 0 on success, -1 on failure.
+    """Remove the file at `path`. 0 on success, -1 on failure (hoststatus.mojo).
 
     `os.remove` and `os.unlink` are the same call on a POSIX target and are
     both here; the C library's `unlink` is reached through `os/_syscalls.mojo`
@@ -961,7 +963,7 @@ def unlink(path) -> int:
 
 
 def rmdir(path) -> int:
-    """Remove the DIRECTORY at `path`. 0 on success, -1 on failure."""
+    """Remove the DIRECTORY at `path`. 0 on success, -1 on failure (hoststatus.mojo)."""
     return fs_rmdir(path)
 
 
@@ -997,15 +999,15 @@ def makedirs(path, mode=0o777) -> int:
     """
     n = str_len(path)
     if n == 0:
-        return 0 - 1
+        return status_err()
     i = 1 if str_starts(path, "/") == 1 else 0
     while i <= n:
         j = _prefix_end(path, i, n)
         if j > i:
             if _make_one(path, j, mode) < 0:
-                return 0 - 1
+                return status_err()
         i = j + 1
-    return 0
+    return status_ok()
 
 
 def _prefix_end(path, i, n) -> int:
@@ -1035,14 +1037,14 @@ def _make_one(path, j, mode) -> int:
     """
     seg = str_prefix(path, j)
     if isdir(seg) == 1:
-        return 0
+        return status_ok()
     return fs_mkdir(seg, mode)
 
 
 def rename(src, dst) -> int:
     """Rename `src` to `dst`, atomically, replacing `dst` if it is there.
 
-    0 on success, -1 on failure. CPython's `os.rename` raises; see the top of
+    0 on success, -1 on failure (hoststatus.mojo). CPython's `os.rename` raises; see the top of
     this module. Note that on a POSIX target this overwrites, so it is
     `replace` as much as `rename`.
     """
@@ -1055,7 +1057,7 @@ def replace(src, dst) -> int:
 
 
 def chmod(path, mode) -> int:
-    """Set the permission bits of `path`. 0 on success, -1 on failure."""
+    """Set the permission bits of `path`. 0 on success, -1 on failure (hoststatus.mojo)."""
     return fs_chmod(path, mode)
 
 

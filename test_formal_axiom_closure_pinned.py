@@ -13,7 +13,8 @@ def test_axiom_closure_is_pinned_not_stale():
     assert AXIOM_CLOSURE["X86"] == (156, 2, 153, 0, 1, 0)
     assert AXIOM_CLOSURE["work"] == (20, 0, 18, 0, 2, 0)
     assert AXIOM_CLOSURE["Specs"] == (66, 0, 66, 0, 0, 0)
-    assert AXIOM_CLOSURE["Peephole"] == (14, 1, 10, 0, 3, 0)
+    assert AXIOM_CLOSURE["Peephole"] == (17, 1, 13, 0, 3, 0)
+    assert AXIOM_CLOSURE["Scaffold"] == (1, 1, 0, 0, 0, 0)
     # Partition check: asked == reaches + clean + text_only + closure_only
     for mod, (asked, reaches, clean, text_only, closure_only, ofrb) in AXIOM_CLOSURE.items():
         assert asked == reaches + clean + text_only + closure_only, \

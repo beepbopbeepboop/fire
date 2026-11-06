@@ -1,4 +1,6 @@
 # plan/step-03a: a generator for the `hne_` negation chain of an `arm64_step` arm lemma
+**Status: DONE (verified by agent, work landed)**
+
 Class: mid      Size: S      Depends: none      Blocks: 03b, 03c, 03d
 Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §2 ("26 negations"); template `lib/Peephole.lean:166` `arm64_step_add_imm64`.
 
@@ -31,12 +33,15 @@ python3 tools/lean_hne_chain.py --list | tail -5
 ```
 
 ## Done when
-- [ ] tool + test exist; test passes
-- [ ] "Measured" section lists the arm count and the index of MOVZ, LDR, STR
-- [ ] registered in a `tools/suite.py` bucket (see 01b step 5 for how)
+- [x] tool + test exist; test passes
+- [x] "Measured" section lists the arm count and the index of MOVZ, LDR, STR
+- [x] registered in a `tools/suite.py` bucket (see 01b step 5 for how)
 
 ## If stuck
 If the chain has many compound arms, make the tool print them verbatim as UNPARSED and still emit the rest; the worker of 03b-d handles those by hand.
 
 ## Measured
-(fill in)
+- arm count: 81 (80 `else if` at chain level + 1 initial `if`)
+- MOVZ `0xd2800000` (line ~2476): index 27
+- LDR `0xF9400000` (line ~2392): index 21
+- STR `0xF9000000` (line ~2541): index 34

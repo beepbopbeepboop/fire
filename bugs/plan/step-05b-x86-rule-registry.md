@@ -1,4 +1,6 @@
 # plan/step-05b: register the x86-64 rules, and fix three latent soundness holes in their matchers
+**Status: DONE (verified by agent, work landed)**
+
 Class: mid      Size: M      Depends: 04a, 04b, 04c, 04d (each only for rules whose theorem is PROVED in Peephole.lean)      Blocks: none
 Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §3; `formal/peephole.py` (`_x_mem_pair` ~765, `_x_store_load` ~789, `_x_imm_zero` ~835, `X86_RULES` ~867); `formal/x86_64_decode.py` (`_modrm_fields` :108-154, dataclass :86).
 

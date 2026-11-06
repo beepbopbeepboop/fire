@@ -1,5 +1,7 @@
 # plan/step-01b: the proof-gap ledger and its census test
-Class: mid      Size: M      Depends: 01a      Blocks: every step that adds a hole (02+)
+**Status: DONE (verified by agent, work landed)**
+
+Class: mid      Size: M      Depends: 00a, 01a      Blocks: every step that adds a hole (02+)
 Source: `doc/finish-formal.md` Method #3, Shared mechanics S1/S2.
 
 ## Current state (measured; verified 2026-11-05)

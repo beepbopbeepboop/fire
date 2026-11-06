@@ -1,5 +1,7 @@
 # plan/step-03c: `arm64/store_load` — `STR Xt,[Xn,#o] ; LDR Xt,[Xn,#o]`
-Class: mid      Size: M      Depends: 02, 03a      Blocks: 05a
+**Status: DONE (verified by agent, work landed)**
+
+Class: mid      Size: M      Depends: 00a, 02, 03a      Blocks: 05a
 Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §2 table row `arm64/store_load`.
 
 ## Current state (measured; verified 2026-11-05)

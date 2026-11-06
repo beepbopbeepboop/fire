@@ -282,6 +282,8 @@ ExprStmt = F.ExprStmt
 Pass = F.PassStmt
 Break = F.BreakStmt
 Continue = F.ContinueStmt
+TryStmt = F.TryStmt
+RaiseStmt = F.RaiseStmt
 
 
 def _lean_op(op: str) -> str:
@@ -307,6 +309,44 @@ def _if_expand(st):
         else_body = [F.IfStmt(condition=cond, then_body=list(body),
                                elifs=[], else_body=else_body)]
     return st.condition, list(st.then_body), else_body
+
+
+def _try_flatten(st):
+    """Flatten a TryStmt into body ++ else_body ++ finally_body for the
+    proof model. Handlers are dropped; this is sound only for the buildable
+    subset (cited `_refuse_try_handlers`)."""
+    handlers = getattr(st, "handlers", None) or []
+    for h in handlers:
+        if getattr(h, "name", None) is not None:
+            raise NotImplementedError(
+                "model: try ... (step-27b): `as e` binding not supported in "
+                "the proof model")
+    body = list(getattr(st, "body", None) or [])
+    else_body = list(getattr(st, "else_body", None) or [])
+    finally_body = list(getattr(st, "finally_body", None) or [])
+
+    def _has_bad_stmt(stmts):
+        from formal import model as M
+        for node in M.iter_nodes(stmts):
+            if isinstance(node, (Return, Break, Continue, RaiseStmt)):
+                return True
+        return False
+
+    # Check body/else/finally for bad statements
+    if _has_bad_stmt(body) or _has_bad_stmt(else_body) or _has_bad_stmt(finally_body):
+        raise NotImplementedError(
+            "model: try ... (step-27b): return/break/continue/raise inside "
+            "try/else/finally not supported in the flat proof model")
+
+    # Also check for literal RaiseStmt in guarded region per the step
+    guarded = body + else_body
+    for node in __import__('formal.model', fromlist=['iter_nodes']).iter_nodes(guarded):
+        if isinstance(node, RaiseStmt):
+            raise NotImplementedError(
+                "model: try ... (step-27b): raise in guarded region not "
+                "supported in the flat proof model")
+
+    return body + else_body + finally_body
 
 
 def _target_name(assign_like) -> str:
@@ -2112,6 +2152,11 @@ def _stmts_go(stmts, param: str, env: dict, fname: str, loop_counter: list,
             raise NotImplementedError(_loop_leak_message(leaks))
         helpers.append(helper_def)
         return f"({helper} {env.get(iv, '(0 : UInt64)')})"
+    if isinstance(st, TryStmt):
+        # try/except/finally flattened for the buildable subset; handlers
+        # dropped (see _refuse_try_handlers). Sound translation per step-27b.
+        return _stmts_go(_try_flatten(st) + rest, param, env, fname,
+                         loop_counter, helpers, vtypes, call_types, scope)
     raise NotImplementedError(
         f"model: a {type(st).__name__} has no translation in the semantic "
         f"model (a `UInt64 → UInt64` function over the source's statements); "
@@ -2384,6 +2429,9 @@ def _stmts_go_t(stmts, param: str, env: dict, fname: str, vtypes: dict,
     if isinstance(st, WhileStmt):
         raise NotImplementedError(
             "typed model: while loops not yet supported")
+    if isinstance(st, TryStmt):
+        return _stmts_go_t(_try_flatten(st) + rest, param, env, fname, vtypes,
+                           call_types, loop_counter, helpers, scope)
     raise NotImplementedError(
         f"typed model: a {type(st).__name__} has no translation; refusing "
         f"rather than modelling it as 0, which would be a false statement "
@@ -4151,6 +4199,10 @@ def _stmts_ast(stmts, scope=None) -> list:
                          f'({_expr_ast(st.value, scope)})')
         elif isinstance(st, ExprStmt):
             parts.append(f"MojoStmt.exprstmt ({_expr_ast(st.value, scope)})")
+        elif isinstance(st, TryStmt):
+            # Flatten for AST model too (step-27b). Handlers dropped.
+            parts.extend(_stmts_ast(_try_flatten(st), scope))
+            continue
         elif isinstance(st, WhileStmt):
             if st.else_body:
                 raise NotImplementedError(

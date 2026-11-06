@@ -1,5 +1,7 @@
 # plan/step-04c: `x86_64/mem_pair` — duplicate store, duplicate load (no SIB)
-Class: mid      Size: M      Depends: 02, 04b      Blocks: 05b
+**Status: DONE (verified by agent, work landed)**
+
+Class: mid      Size: M      Depends: 00a, 02, 04b      Blocks: 05b
 Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §3 table row `x86_64/mem_pair`.
 
 ## Current state (measured; verified 2026-11-05)

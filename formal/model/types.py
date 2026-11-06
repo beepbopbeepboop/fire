@@ -263,15 +263,16 @@ def unrepresentable_type_ctor_refusal(callee_name: str) -> str:
     if callee_name in NARROW_FLOAT_TYPE_NAMES:
         return narrow_float_ctor_refusal(callee_name)
     return (
-        f"constructing {callee_name} has no representation on this path: this "
-        f"image has no declaration of {callee_name} to construct — it is not a "
-        f"struct in this module or in anything it imports, so there is no field "
-        f"list to bring up, and a formal value is one 64-bit word. A name that "
-        f"IS declared as a struct here is decided by `_emit_struct_constructor` "
-        f"instead, which asks the struct: a one-field struct is a plain word and "
-        f"constructs. (Emitting a call to a symbol named {callee_name!r} that "
-        f"nothing defines is not the alternative — that built and then failed "
-        f"to load.)")
+        f"constructing {callee_name} has no representation on this path: "
+        f"{callee_name} is a real type this path has no representation for "
+        f"at all — this image has no declaration of {callee_name} to construct "
+        f"— it is not a struct in this module or in anything it imports, so "
+        f"there is no field list to bring up, and a formal value is one 64-bit "
+        f"word. A name that IS declared as a struct here is decided by "
+        f"`_emit_struct_constructor` instead, which asks the struct: a one-field "
+        f"struct is a plain word and constructs. (Emitting a call to a symbol "
+        f"named {callee_name!r} that nothing defines is not the alternative — "
+        f"that built and then failed to load.)")
 
 
 def narrow_float_ctor_refusal(callee_name: str) -> str:
@@ -1056,8 +1057,17 @@ def dtype_member_refusal(spelled: str, member: str) -> str:
             f"value and always works")
 
 
+def call_is_string_frame_reading(call) -> bool:
+    try:
+        return bool(getattr(call, "_string_frame_reading", False))
+    except Exception:
+        return False
+
+
 def call_lowers_as_framed_construction(callee: str, structs: dict, nargs: int,
-                                       functions=()) -> bool:
+                                       functions=(), call=None) -> bool:
+    if call is not None and call_is_string_frame_reading(call):
+        return True
     """Whether a call to `callee` reaches `_emit_struct_constructor` on EITHER
     backend.
 

@@ -1,5 +1,7 @@
 # plan/step-04b: `x86_64/store_load` — `mov [b+d], r ; mov r, [b+d]` (no SIB; disp8 form first)
-Class: mid      Size: M      Depends: 02, 01b      Blocks: 05b
+**Status: DONE (verified by agent, work landed)**
+
+Class: mid      Size: M      Depends: 00a, 02, 01b      Blocks: 05b
 Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §3 table row `x86_64/store_load`.
 
 ## Current state (measured; verified 2026-11-05)
@@ -19,8 +21,12 @@ Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §3 table row `x86_64/sto
 ## Do NOT
 Declare the SIB or RIP-relative forms covered. Edit `lib/X86.lean`.
 
+## Follow-ups (do not do now)
+- `peephole_x86_store_load_disp32` — `mod=2`, 32-bit displacement; use `x86_step_mov_mem_disp32` / `x86_step_mov_rm64_mem_disp32`, instruction lengths 7 bytes each (total 14), rip advances by 14. List for future steps.
+- `peephole_x86_store_load_nodisp` — `mod=0`, `rm≠4,rm≠5` (no SIB/RIP-relative); use `x86_step_mov_mem_nodisp` / `x86_step_mov_rm64_mem_nodisp`, instruction lengths 3 bytes each (total 6), rip advances by 6.
+
 ## Verification / Done when
-As 04a (three commands); [ ] theorem + witness; [ ] follow-up forms listed in this file.
+As 04a (three commands); [x] theorem + witness; [x] follow-up forms listed in this file.
 
 ## If stuck
 Scaffold + ledger `step-04b`.

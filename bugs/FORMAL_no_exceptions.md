@@ -3,7 +3,7 @@
 > **PLANNED — this document's open work is decomposed into `bugs/plan/step-*.md`,
 > and the design plus ordering live in `doc/finish-formal.md`.** The steps that
 > own parts of this document: **step-26** (one discoverable host-module failure
-> convention, item 1) and **step-27** (the EH-runtime / `try`-handler-arm
+> convention, item 1) and **step-27a…c** (the EH-runtime / `try`-handler-arm
 > scaffold, item 2). Read the measurements here first; the step files are the
 > work orders. Item 3 (pin the behaviour) is already DONE.
 
@@ -272,7 +272,9 @@ tree today:
 |---|---|---|
 | `os` | `0` on success, `-1` on failure; `makedirs` is `exist_ok=True` only | `formal/hostmods/os/__init__.mojo`, at each `def` |
 | `json` | `valid` / `top_kind` / `member_kind` — names CPython's `json` does not have, carrying the answer as a word | `formal/hostmods/json.mojo`, at each `def` |
-| `hashlib` | each digest is one function returning a string; a disagreement is a status | `formal/hostmods/hashlib.mojo` |
+| `hashlib` | total function; no failure status | `formal/hostmods/hashlib.mojo` |
+
+The convention is `formal/hostmods/hoststatus.mojo`: `status_ok()`/`status_err()`.
 
 The reason a status is *not* invented where CPython has no failure to report is
 `os.makedirs`: a target with no exceptions cannot report `FileExistsError` to a
@@ -291,11 +293,7 @@ convention, and a reader has to learn it per module.
 
 Ordered by what unblocks the most:
 
-1. **Decide the convention once, in one place, and make it discoverable.** Not a
-   code change: a single exported pair of names every host module uses, so
-   `os`, `json` and `hashlib` stop each inventing one. The cost is three
-   modules' worth of churn and the benefit is that the next module does not
-   have to decide anything.
+1. **Decide the convention once, in one place, and make it discoverable.** DONE 2026-11-05: `formal/hostmods/hoststatus.mojo` provides `status_ok()`/`status_err()` and is cited across host modules.
 2. **An EH runtime, or do not.** A raise that unwinds to a handler needs a
    landing-pad table, a personality routine per catch type, and a place for the
    exception object to live — and `FORMAL.md`'s own arithmetic says

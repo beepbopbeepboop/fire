@@ -2,8 +2,8 @@
 
 > **PLANNED — this document's open work is decomposed into `bugs/plan/step-*.md`,
 > and the design plus ordering live in `doc/finish-formal.md`.** The steps that
-> own parts of this document: **step-06** (`ccmp`/`ccmn`), **step-07**
-> (`csinc`/`csinv`/`csneg`), **step-08** (`br`), **step-09** (the
+> own parts of this document: **step-06a…c** (`ccmp`/`ccmn`), **step-07a…b**
+> (`csinc`/`csinv`/`csneg`), **step-08a…c** (`br`), **step-09** (the
 > extended-register `ADD`/`SUB`/`CMP` SP class). Read the measurements here
 > first; the step files are the work orders. This file stays a survey.
 

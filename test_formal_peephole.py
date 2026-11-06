@@ -57,7 +57,8 @@ sys.path.insert(0, ROOT)
 import formal.peephole as P                                    # noqa: E402
 from formal.arm64 import (encode_add_xd_xn_imm, encode_b, encode_bl,        # noqa: E402
                            encode_b_cond, encode_cbz_xn, encode_cbnz_xn,
-                           encode_mul_xd_xn_xm, encode_ret)
+                           encode_ldr_xt_xn_imm, encode_movz_xd_imm,
+                           encode_mul_xd_xn_xm, encode_ret, encode_str_xt_xn_imm)
 from formal.arm64_codegen import ARM64Codegen                  # noqa: E402
 from formal.build import compile_formal                        # noqa: E402
 from exec_budget import RUN_TIMEOUT_S  # per-child budgets
@@ -150,6 +151,7 @@ class TestRulesAreLicensed(unittest.TestCase):
         missing = P.unlicensed_rules(P.ARM64_RULES + P.X86_RULES)
         self.assertEqual([], [r.name for r in missing],
                          "a rule with no theorem in lib/Peephole.lean")
+        self.assertEqual(set(), set(r.name for r in P.SCAFFOLDED_RULES) & set(r.name for r in (P.ARM64_RULES + P.X86_RULES)))
 
     def test_every_pending_rule_also_names_a_declared_theorem(self):
         # A pending rule is proved and not yet sound to FIRE; that is a
@@ -574,6 +576,53 @@ class TestRules(unittest.TestCase):
                           _i(encode_ret())], asm.words())
 
 
+class TestArm64ScaffoldedRules(unittest.TestCase):
+    def test_movz_pair_deletes_first(self):
+        words = _w(encode_movz_xd_imm(0, 1), encode_movz_xd_imm(0, 2))
+        ctx = _ctx(words)
+        rule = [r for r in P.SCAFFOLDED_RULES if r.name == "arm64/movz_pair"][0]
+        res = rule.apply(ctx.entries[:2], ctx)
+        self.assertIsNotNone(res)
+        self.assertEqual(res[1], 1)
+        self.assertEqual(struct.unpack("<I", res[0])[0], _i(encode_movz_xd_imm(0, 2)))
+
+    def test_movz_pair_declines_different_register(self):
+        words = _w(encode_movz_xd_imm(0, 1), encode_movz_xd_imm(1, 2))
+        ctx = _ctx(words)
+        rule = [r for r in P.SCAFFOLDED_RULES if r.name == "arm64/movz_pair"][0]
+        self.assertIsNone(rule.apply(ctx.entries[:2], ctx))
+
+    def test_mem_pair_str_deletes_second(self):
+        words = _w(encode_str_xt_xn_imm(1, 2, 0), encode_str_xt_xn_imm(1, 2, 0))
+        ctx = _ctx(words)
+        rule = [r for r in P.SCAFFOLDED_RULES if r.name == "arm64/mem_pair_str"][0]
+        res = rule.apply(ctx.entries[:2], ctx)
+        self.assertIsNotNone(res)
+        self.assertEqual(res[1], 1)
+
+    def test_mem_pair_ldr_deletes_second(self):
+        words = _w(encode_ldr_xt_xn_imm(1, 2, 0), encode_ldr_xt_xn_imm(1, 2, 0))
+        ctx = _ctx(words)
+        rule = [r for r in P.SCAFFOLDED_RULES if r.name == "arm64/mem_pair_ldr"][0]
+        res = rule.apply(ctx.entries[:2], ctx)
+        self.assertIsNotNone(res)
+        self.assertEqual(res[1], 1)
+
+    def test_mem_pair_ldr_declines_rt_eq_rn(self):
+        words = _w(encode_ldr_xt_xn_imm(1, 1, 0), encode_ldr_xt_xn_imm(1, 1, 0))
+        ctx = _ctx(words)
+        rule = [r for r in P.SCAFFOLDED_RULES if r.name == "arm64/mem_pair_ldr"][0]
+        self.assertIsNone(rule.apply(ctx.entries[:2], ctx))
+
+    def test_store_load_deletes_second(self):
+        words = _w(encode_str_xt_xn_imm(1, 2, 0), encode_ldr_xt_xn_imm(1, 2, 0))
+        ctx = _ctx(words)
+        rule = [r for r in P.SCAFFOLDED_RULES if r.name == "arm64/store_load"][0]
+        res = rule.apply(ctx.entries[:2], ctx)
+        self.assertIsNotNone(res)
+        self.assertEqual(res[1], 1)
+
+
 class TestBranchDecode(unittest.TestCase):
     """`arm64_branch_target`, against `formal/arm64.py`'s own encoders.
 
@@ -881,6 +930,26 @@ class TestX86Rules(unittest.TestCase):
         asm, removed = _xrun(b"\x48\x89\x38\x31\xc0\xc3")
         self.assertEqual(0, removed)
         self.assertEqual(b"\x48\x89\x38\x31\xc0\xc3", asm.text())
+
+    def test_x86_mem_pair_declines_sib_different_index(self):
+        # SIB with different index must be declined (index ignored)
+        # mov [rax+rcx*8], rax ; mov [rax+rdx*8], rax
+        data = b"\x48\x89\x04\xc8" + b"\x48\x89\x04\xd0" + b"\xc3"
+        asm, removed = _xrun(data)
+        self.assertEqual(0, removed)
+
+    def test_x86_mem_pair_declines_rip_relative(self):
+        # RIP-relative has mem_base None, must be declined
+        # mov rax, [rip+disp] ; mov rax, [rip+disp] (same disp)
+        data = b"\x48\x8b\x05\x00\x00\x00\x00" + b"\x48\x8b\x05\x00\x00\x00\x00" + b"\xc3"
+        asm, removed = _xrun(data)
+        self.assertEqual(0, removed)
+
+    def test_x86_load_pair_declines_when_reg_equals_base(self):
+        # mov rax, [rax+8] twice: first load clobbers base
+        data = b"\x48\x8b\x40\x08" + b"\x48\x8b\x40\x08" + b"\xc3"
+        asm, removed = _xrun(data)
+        self.assertEqual(0, removed)
 
 
 class TestX86Repatch(unittest.TestCase):

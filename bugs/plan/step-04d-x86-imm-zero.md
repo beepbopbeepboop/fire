@@ -1,5 +1,7 @@
 # plan/step-04d: `x86_64/imm_zero` — `add r, 0` / `sub r, 0` with dead flags
-Class: mid      Size: M      Depends: 01a, 01b      Blocks: 05b
+**Status: DONE (verified by agent, work landed)**
+
+Class: mid      Size: M      Depends: 00a, 01a, 01b      Blocks: 05b
 Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §3 table row `x86_64/imm_zero`.
 
 ## Current state (measured; verified 2026-11-05)

@@ -7,6 +7,9 @@
 > in the proof model), **step-13a…c** (Unicode `s[i]`/`%<w>s`). Read the
 > measurements here first; the step files are the work orders.
 
+**2026-11-05 (step-11a):** runtime string buffer via libc `strdup` (never freed), process lifetime for computed strings; `upper()`/`lower()` lowered on non-literal receivers when the image has no non-ASCII literals (ASCII-only; toupper/tolower). NUL obligation recorded in `STRING_BUFFER_NUL_OBLIGATION` (chr(0)/replace-to-NUL refuse).  
+**2026-11-05 (step-11b):** `strip()`/`rstrip()` lowered on the runtime buffer (both/backends), whitespace set `STRIP_CHARS`, ASCII-only image rule shared with case methods. Remaining: step-11c `chr()` fold and other case variants/replacements.
+
 **Status:** the representation question is DECIDED and the decision is landed.
 The string stays a bare `char *`; the length and the content equality are
 recovered as *computations* over that one word rather than as fields, and the
@@ -797,17 +800,8 @@ disagree, which is the `_emit_binop` / `_emit_branch_unless` lesson twice over.
   below gives. And the run-time BUFFER is still missing, so `s[i]` above and
   `upper`/`strip`/`join` below it are unchanged: none of them became easier
   because the model stopped lying about where a string is.
-- **The proving arm64 build cannot prove `len` or any string method.** Re-measured
-  2026-10-01, and re-measured again 2026-10-03: **the transcript quoted below
-  no longer reproduces, and for a better reason than a fix.** `len(s)` is now
-  refused at GENERATION time (`model: call to 'len' has no model in this image
-  (an extern, or a function this generator emits no '_go' for); refusing rather
-  than inventing its return value`) instead of emitting a theorem that is false,
-  so the build is red rather than green-and-wrong. The bullet's prescribed fix
-  (suppress the post-extern theorem on `_call_boundary`) was therefore not
-  needed for `len` — the `_call_go` refusal upstream of it already says what
-  this model cannot do — and the remaining text below is kept for the case that
-  is still live, an argument the model has no value for.
+- **The proving arm64 build cannot prove `len` or any string method.**  
+  **Status (2026-11-05, step 12a):** Re-measured on `def main(n: Int)->Int: var s="hello"; return len(s)`. The old claim "refused at GENERATION time" was FALSE on this tree; arm64 and x86-64 *generated* proofs containing `(strlen (UInt64.ofNat ...))` and `MojoExpr.call "strlen" [...]` with `lib/ProofLib.lean`'s constant-zero `strlen` (a fabricated value) and `post_extern_given_callee_returns` emitted for `strlen` — i.e. green-and-wrong. Step 12a fixes this: `len` of a string whose bytes/identity are known to the image (string literal, or a local assigned a string literal, or inverted via `str_addrs`) is folded to the numeral `(UInt64.ofNat N)` with `N = len(text)` in `_call_go`, `_expr_go`, and `_expr_ast`; `strlen` is suppressed from `post_extern_given_callee_returns` via `RESULT_BEARING_EXTERNS`; `len` of an unknown string raises `NotImplementedError("model: len(<name>) of a string whose bytes are not in this image...")` (no fabrication). The stub in `lib/ProofLib.lean` remains (step 12b). The earlier text below is historical; the remaining live case is an argument the model has no value for.
 
   What was there, and the `len_go` half of the original report is STALE — there
   is no `len_go` in `formal/arm64_proof_gen.py` any more and no `Unknown

@@ -133,6 +133,11 @@ is in, close the sorries and admits. A round that lands structural theorems
 whose leaves are named sorries, or discharges sorries an already-landed
 structure carries, is forward progress either way (see `FORMAL.md` §11.3).
 
+**Scaffold holes.** Scaffold holes live only in `lib/Scaffold.lean` and are
+ledgered in `formal/proof_gaps.py::SCAFFOLD_HOLES`, counted by
+`test_formal_proof_gaps.py` via `formal.lean::library_census`. No other library
+module may contain `sorry`.
+
 ## Running the checks — one runner, named buckets
 `tools/suite.py` runs everything: the buckets, each test's driver, the memory
 ceilings, the ordering, and one pass/fail count. The Makefile's targets are

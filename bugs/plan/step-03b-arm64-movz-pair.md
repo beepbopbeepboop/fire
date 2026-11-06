@@ -1,5 +1,7 @@
 # plan/step-03b: `arm64/movz_pair` — step lemma and rule theorem
-Class: mid      Size: M      Depends: 01a, 01b, 03a      Blocks: 05a
+**Status: DONE (verified by agent, work landed)**
+
+Class: mid      Size: M      Depends: 00a, 01a, 01b, 03a      Blocks: 05a
 Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §2 table row `arm64/movz_pair`.
 
 ## Current state (measured; verified 2026-11-05)

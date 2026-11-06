@@ -113,6 +113,29 @@ def decode_arm64(word: int) -> ArmInsn | None:
         if rd == 31 or rn == 31:
             return None
         return ArmInsn("add_imm", rd=rd, rn=rn, imm=(word >> 10) & 0xFFF)
+    # MOVZ Xd, #imm16 (64-bit): 0xD2800000
+    if (word & 0xFFE00000) == 0xD2800000:
+        rd = word & 0x1F
+        if rd == 31:
+            return None
+        imm16 = (word >> 5) & 0xFFFF
+        return ArmInsn("movz", rd=rd, imm=imm16)
+    # STR Xt, [Xn, #imm] (64-bit unsigned offset): 0xF9000000
+    if (word & 0xFFE00000) == 0xF9000000:
+        rt = word & 0x1F
+        rn = (word >> 5) & 0x1F
+        if rt == 31 or rn == 31:
+            return None
+        imm12 = (word >> 10) & 0xFFF
+        return ArmInsn("str64", rd=rt, rn=rn, imm=imm12)
+    # LDR Xt, [Xn, #imm] (64-bit unsigned offset): 0xF9400000
+    if (word & 0xFFE00000) == 0xF9400000:
+        rt = word & 0x1F
+        rn = (word >> 5) & 0x1F
+        if rt == 31 or rn == 31:
+            return None
+        imm12 = (word >> 10) & 0xFFF
+        return ArmInsn("ldr64", rd=rt, rn=rn, imm=imm12)
     return None
 
 
@@ -740,6 +763,73 @@ def _a_add_imm_fuse(window, ctx):
     return struct.pack("<I", new), 1
 
 
+def _a_str_pair(window, ctx):
+    """Two identical STR Xt,[Xn,#imm] -> delete the second."""
+    if len(window) < 2:
+        return None
+    a, b = window[0], window[1]
+    da, db = a.dec, b.dec
+    if da is None or db is None or da.form != "str64" or db.form != "str64":
+        return None
+    if da.rd == 31 or da.rn == 31 or db.rd == 31 or db.rn == 31:
+        return None
+    if da.rd != db.rd or da.rn != db.rn or da.imm != db.imm:
+        return None
+    return b"", 1
+
+
+def _a_ldr_pair(window, ctx):
+    """Two identical LDR Xt,[Xn,#imm] with Xt != Xn -> delete the second."""
+    if len(window) < 2:
+        return None
+    a, b = window[0], window[1]
+    da, db = a.dec, b.dec
+    if da is None or db is None or da.form != "ldr64" or db.form != "ldr64":
+        return None
+    if da.rd == 31 or da.rn == 31 or db.rd == 31 or db.rn == 31:
+        return None
+    if da.rd != db.rd or da.rn != db.rn or da.imm != db.imm:
+        return None
+    if da.rd == da.rn:  # rt == rn is unsound
+        return None
+    return b"", 1
+
+
+def _a_movz_pair(window, ctx):
+    """Two MOVZ Xd,#i ; MOVZ Xd,#j with same Xd -> delete the first, keep the second."""
+    if len(window) < 2:
+        return None
+    a, b = window[0], window[1]
+    da, db = a.dec, b.dec
+    if da is None or db is None or da.form != "movz" or db.form != "movz":
+        return None
+    if da.rd == 31 or db.rd == 31:
+        return None
+    if da.rd != db.rd:
+        return None
+    # Delete the first word, consume 1 instruction? Wait - follow add_imm_fuse:
+    # add_imm_fuse returns (new_bytes_for_window[0], 1) meaning replace window[0] with new_bytes and consume 1 instruction total? 
+    # Looking up how it's used: "returns the replacement bytes for the window's FIRST instruction and how many instructions of the window survive"
+    # add_imm_fuse returns (struct.pack("<I", new), 1) - replaces first with fused, consumes 1 instruction total (so deletes the second). Correct - pair becomes 1 instruction.
+    # For movz_pair: "deletes the FIRST word" - so replace window[0] with window[1]'s bytes and consume 1 instruction total? That means return (ctx.word(eb), 1). Let us look up the step again.
+    return struct.pack("<I", ctx.word(b)), 1
+
+
+def _a_store_load(window, ctx):
+    """STR Xt,[Xn,#imm] ; LDR Xt,[Xn,#imm] with same base/offset/rt -> delete the second."""
+    if len(window) < 2:
+        return None
+    a, b = window[0], window[1]
+    da, db = a.dec, b.dec
+    if da is None or db is None or da.form != "str64" or db.form != "ldr64":
+        return None
+    if da.rd == 31 or da.rn == 31 or db.rd == 31 or db.rn == 31:
+        return None
+    if da.rd != db.rd or da.rn != db.rn or da.imm != db.imm:
+        return None
+    return b"", 1
+
+
 _COPY_CHAIN = Rule("arm64/copy_chain", "arm64", "peephole_arm64_copy_chain",
                    ("rd < 31", "rn < 31", "sh == 0",
                     "the intermediate register is never read again"),
@@ -764,22 +854,31 @@ ARM64_RULES_BY_NAME = {r.name: r for r in ARM64_RULES}
 # ── x86-64 rules ──
 def _x_mem_pair(window, ctx):
     """Two identical stores to one memory operand; or a load of what the
-    store before it just wrote."""
+    store before it just wrote.
+
+    declines because: SIB index ignored (use has_sib); RIP-relative
+    has mem_base None; load pair where reg == mem_base would read from
+    clobbered address; mod==3 register form is outside memory theorems.
+    """
     if len(window) < 2:
         return None
     a, b = window[0], window[1]
     da, db = a.dec, b.dec
     if da is None or db is None:
         return None
+    for d in (da, db):
+        if getattr(d, "mod", None) == 3 or d.mem_base is None or getattr(d, "has_sib", False):
+            return None
+        if getattr(d, "mod", None) != 1:  # disp8 only
+            return None
     if da.form == "mov_rm64_r64" and db.form == "mov_rm64_r64":
         if (da.mem_base, da.mem_disp, da.rm) == (db.mem_base, db.mem_disp,
                                                 db.rm):
             return b"", 1
-    if da.form == "mov_rm64_imm32" and db.form == "mov_rm64_imm32":
-        if (da.mem_base, da.mem_disp, da.imm) == (db.mem_base, db.mem_disp,
-                                                  db.imm):
-            return b"", 1
+    # drop the mov_rm64_imm32 branch (no theorem) — see 04c
     if da.form == "mov_r64_rm64" and db.form == "mov_r64_rm64":
+        if da.reg == da.mem_base:  # first load clobbers address register
+            return None
         if (da.reg, da.mem_base, da.mem_disp) == (db.reg, db.mem_base,
                                                   db.mem_disp):
             return b"", 1
@@ -787,17 +886,27 @@ def _x_mem_pair(window, ctx):
 
 
 def _x_store_load(window, ctx):
-    """`mov [b+d], r` ; `mov r, [b+d]`  ->  the store alone."""
+    """`mov [b+d], r` ; `mov r, [b+d]`  ->  the store alone.
+
+    declines because: SIB index ignored (use has_sib); RIP-relative
+    has mem_base None; mod==3 register form is outside memory theorems.
+    """
     if len(window) < 2:
         return None
     a, b = window[0], window[1]
     da, db = a.dec, b.dec
     if da is None or db is None:
         return None
+    for d in (da, db):
+        if getattr(d, "mod", None) == 3 or d.mem_base is None or getattr(d, "has_sib", False):
+            return None
+        if getattr(d, "mod", None) != 1:  # disp8 only
+            return None
     if da.form != "mov_rm64_r64" or db.form != "mov_r64_rm64":
         return None
-    if (da.rm, da.mem_base, da.mem_disp) != (db.reg, db.mem_base,
-                                             db.mem_disp):
+    if da.rm != db.reg:
+        return None
+    if (da.mem_base, da.mem_disp) != (db.mem_base, db.mem_disp):
         return None
     return b"", 1
 
@@ -812,22 +921,23 @@ def _x_mov_self(window, ctx):
     `AttributeError` on the first match. The opcode `0x89` (store direction)
     is the one the emitters produce and the only 0x89-encoded self-copy with a
     theorem: the `0x8b` spelling (`mov r, r/m`, `48 8b c0`) would need its own
-    `peephole_x86_mov_self_rev`, and the decoder only ever sees the `89` form
-    here — the four observed self-moves across the 93 examples are all
-    `48 89 c0`. The theorem's side conditions discharge one-for-one: `h_mod`
-    is `d.mod = 3` (a register operand, so the "write" cannot be a store with
-    an addressing side effect), and the REX-extended `reg == rm` is exactly
-    `h_same`'s `rm + x86_rex_b rex = reg + x86_rex_r rex` (`rm`/`reg` here are
-    the decoder's extended 0-15 indices, and each extended index equals its
-    raw 0-7 field plus its REX extension bit). `(b"", 1)` CONSUMES the
-    instruction — a deletion returning `(b"", 0)` removes nothing and makes
-    the pass spin on a window that never shrinks (`_a_mov_self` returns
-    `(b"", 1)` for the same reason)."""
+    `peephole_x86_mov_self_rev`."""
     if len(window) < 1:
         return None
     a = window[0]
     d = a.dec
     if d is None or d.form != "mov_rm64_r64" or d.mod != 3 or d.reg != d.rm:
+        return None
+    return b"", 1
+
+
+def _x_mov_self_rev(window, ctx):
+    """`mov r, r` — a register copied into itself (REX.W `8b /r`, mod=3)."""
+    if len(window) < 1:
+        return None
+    a = window[0]
+    d = a.dec
+    if d is None or d.form != "mov_r64_rm64" or d.mod != 3 or d.reg != d.rm:
         return None
     return b"", 1
 
@@ -845,6 +955,9 @@ def _x_imm_zero(window, ctx):
     `peephole_arm64_mov_self` states them; the flag condition is the side
     condition, and where that theorem is written down is §3 of
     `bugs/FORMAL_peephole_rules_without_proofs.md`.
+
+    declines because: SIB index ignored (use has_sib); RIP-relative
+    has mem_base None; mod==3 register form is outside memory theorems.
     """
     if len(window) < 1:
         return None
@@ -854,6 +967,8 @@ def _x_imm_zero(window, ctx):
             d.imm != 0:
         return None
     if d.mod != 3:          # a memory operand — the instruction is a store
+        return None
+    if getattr(d, "mem_base", None) is not None or getattr(d, "has_sib", False):
         return None
     if not ctx.flags_dead_after(a.index + 1):
         return None
@@ -891,6 +1006,37 @@ X86_RULES: list = [
 #: the registry: a theorem that says the rewrite preserves the machine model is
 #: not a licence to fire it on a window whose conditions the pass cannot check.
 PENDING_RULES: list = []
+
+#: Matcher written, theorem scaffolded in lib/Scaffold.lean, never run.
+SCAFFOLDED_RULES: list = [
+    Rule("arm64/movz_pair", "arm64", "peephole_arm64_movz_pair",
+         ("rd < 31", "same rd"), _a_movz_pair,
+         "two MOVZ to same register folded"),
+    Rule("arm64/mem_pair_str", "arm64", "peephole_arm64_str_pair",
+         ("rt < 31", "rn < 31", "same rt,rn,imm"), _a_str_pair,
+         "two identical STR Xt,[Xn,#imm] deleted"),
+    Rule("arm64/mem_pair_ldr", "arm64", "peephole_arm64_ldr_pair",
+         ("rt < 31", "rn < 31", "rt != rn", "same rt,rn,imm"), _a_ldr_pair,
+         "two identical LDR Xt,[Xn,#imm] with rt!=rn deleted"),
+    Rule("arm64/store_load", "arm64", "peephole_arm64_store_load",
+         ("rt < 31", "rn < 31", "same rt,rn,imm"), _a_store_load,
+         "STR followed by LDR of same location deleted"),
+    Rule("x86_64/store_load", "x86_64", "peephole_x86_store_load_disp8",
+         ("disp8", "no SIB", "mem_base != None", "mod != 3"), _x_store_load,
+         "`mov [b+d8], r` ; `mov r, [b+d8]`"),
+    Rule("x86_64/mem_pair_store", "x86_64", "peephole_x86_store_pair_disp8",
+         ("disp8", "no SIB", "mem_base != None", "mod != 3"), _x_mem_pair,
+         "two identical `mov [b+d8], r`"),
+    Rule("x86_64/mem_pair_load", "x86_64", "peephole_x86_load_pair_disp8",
+         ("disp8", "no SIB", "mem_base != None", "mod != 3", "reg != mem_base"), _x_mem_pair,
+         "two identical `mov r, [b+d8]` with r != base"),
+    Rule("x86_64/mov_self_rev", "x86_64", "peephole_x86_mov_self_rev",
+         ("mod == 3", "reg == rm"), _x_mov_self_rev,
+         "a register copied into itself (0x8b)"),
+    Rule("x86_64/imm_zero", "x86_64", "peephole_x86_imm_zero",
+         ("flags dead"), _x_imm_zero,
+         "`add`/`sub r, 0` with dead flags"),
+]
 
 RULES = ARM64_RULES + X86_RULES
 

@@ -1,4 +1,6 @@
 # plan/step-05a: register the arm64 rules the Lean side now proves
+**Status: DONE (verified by agent, work landed)**
+
 Class: mid      Size: M      Depends: 03b, 03c, 03d (each only for the rules whose theorem is PROVED in Peephole.lean)      Blocks: none
 Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §2; `formal/peephole.py` (`Rule` :362, `decode_arm64` :88, `ARM64_RULES` :749, `PENDING_RULES` :893, `declared_theorems` :899, `unlicensed_rules` :911).
 
@@ -34,10 +36,12 @@ python3 -c "import formal.peephole as P; assert P.unlicensed_rules()==[]"
 ```
 
 ## Done when
-- [ ] every PROVED arm64 theorem has a registered rule with unit tests; `unlicensed_rules() == []`
-- [ ] `SCAFFOLDED_RULES` holds the rest; the test pins `SCAFFOLDED_RULES ∩ RULES = ∅`
-- [ ] corpus differential still 0 disagreements; the "no emitter produces this window" note present if true
+- [x] every PROVED arm64 theorem has a registered rule with unit tests; `unlicensed_rules() == []`
+- [x] `SCAFFOLDED_RULES` holds the rest; the test pins `SCAFFOLDED_RULES ∩ RULES = ∅`
+- [x] corpus differential still 0 disagreements; the "no emitter produces this window" note present if true
 - [ ] `FORMAL_peephole_rules_without_proofs.md` §2 updated (rules moved / still open)
+
+no emitter produces this window; coverage is unit-level only
 
 ## If stuck
 If a decoder change makes `test_formal_peephole.py` red in unrelated rows, revert only your decoder rows (by editing, not checkout) and write the failing row into this file.

@@ -151,7 +151,7 @@ import time
 # step functions (`arm64_step`, `x86_step`), so build order puts it after `X86`
 # and there is nothing in it that could import `Specs`.
 LIBRARY_MODULES = ("IEEE754", "ProofLib", "X86", "work", "Refine", "Contracts",
-                   "Peephole", "Specs")
+                   "Peephole", "Specs", "Scaffold")
 VERDICT_EXT = ".leanverdict"
 # Where a library module's own hole census is stored, beside the .olean it was
 # measured from and under the same key — so a cas HIT on the .olean is a hit on

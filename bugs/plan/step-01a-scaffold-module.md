@@ -1,5 +1,7 @@
 # plan/step-01a: `lib/Scaffold.lean` — the one home of scaffold `sorry`
-Class: mid      Size: M      Depends: none      Blocks: every step that adds a theorem with a hole
+**Status: DONE (verified by agent, work landed)**
+
+Class: mid      Size: M      Depends: 00a      Blocks: every step that adds a theorem with a hole
 Source: `doc/finish-formal.md` Shared mechanics S1, S2, S4.
 
 ## Current state (measured; verified 2026-11-05)

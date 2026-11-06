@@ -22,6 +22,41 @@ SCAFFOLD_HOLES: dict[str, Hole] = {
         "census positive control; delete when the first real scaffold lands",
         "control",
     ),
+    "peephole_x86_imm_zero_flags": Hole(
+        "step-04d",
+        "add r,0/sub r,0 flags: cf/of_ false, zf/sf from r (x86_flags_add/x86_flags_sub)",
+        "scaffold",
+    ),
+    "peephole_arm64_movz_pair": Hole(
+        "step-05a",
+        "MOVZ pair to same register folded (first deleted)",
+        "scaffold",
+    ),
+    "peephole_arm64_str_pair": Hole(
+        "step-05a",
+        "two identical STR Xt,[Xn,#imm] deleted",
+        "scaffold",
+    ),
+    "peephole_arm64_ldr_pair": Hole(
+        "step-05a",
+        "two identical LDR Xt,[Xn,#imm] with Xt!=Xn deleted",
+        "scaffold",
+    ),
+    "peephole_arm64_store_load": Hole(
+        "step-05a",
+        "STR followed by LDR of same location deleted",
+        "scaffold",
+    ),
+    "scaffold_cell_writeback_one_exit": Hole(
+        "step-18d",
+        "by-reference one-field mutator write-back (single exit): depth bound as hypothesis, obligation to prove",
+        "scaffold",
+    ),
+    "scaffold_cell_writeback_multi_exit": Hole(
+        "step-18d",
+        "by-reference one-field mutator write-back (multiple exits): per-exit obligation scaffolded",
+        "scaffold",
+    ),
 }
 
 

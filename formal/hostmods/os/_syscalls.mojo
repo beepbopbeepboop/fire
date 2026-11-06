@@ -1,4 +1,4 @@
-"""The C library this module needs, and nothing else.
+"""The C library this module needs, and nothing else. Status convention: hoststatus.mojo.
 
 Every call into libSystem that `os`, `os.path`, `platform` and `shutil` make is
 spelled here, once, and nowhere else. Three reasons, in the order they mattered while

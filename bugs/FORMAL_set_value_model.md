@@ -2,8 +2,11 @@
 
 > **PLANNED — this document's open work is decomposed into `bugs/plan/step-*.md`,
 > and the design plus ordering live in `doc/finish-formal.md`.** The step that
-> owns it is **step-14** (a set runtime on both backends). Read the measurements
+> owns it is **step-14a…e** (a set runtime on both backends). Read the measurements
 > here first; the step file is the work order.
+> 
+> **Status 2026-11-05 (step-14a):** the compile-time set-literal dedup for word-canonical elements was lost in the `formal/model/` package split (it lived in the old single `formal/model.py`) and is re-landed in `formal/model/layout.py` (`set_literal_word_key`, `set_literal_distinct_elements`) and wired in both codegens.  
+> **Status 2026-11-05 (step-14b):** runtime dedup added for set literals with non-canonical elements via linear scan on both backends (`_emit_set_literal`, `_emit_set_contains` on x86-64). Elements with unword-equalable kinds (floats, computed/non-literal strings, kind None) are refused with `set_runtime_element_refusal`. Mixed literals and names deduplicate at runtime with first-occurrence order preserved.
 
 ## Status 2026-10-12 (`work/formal314-docs`): ONE DISAGREEMENT THIS FILE CALLED "AGREED" WAS REAL, AND THE WORD-CANONICAL HALF IS FIXED
 
