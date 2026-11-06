@@ -30,7 +30,7 @@ from fire_compiler import (
     YieldExpr, YieldFromExpr, AwaitExpr,
     Parser, py_tokenize, _as_str, _sms_key, _as_floatlit_node, _ptr_slot_in_range,
     _signed_int64, _signed_int64_c_literal, _as_intlit_node,
-    _as_ident_node, _as_vardecl_node, _float_c_literal,
+    _as_ident_node, _as_vardecl_node,
 )
 import regex_compile
 import mlir
@@ -234,10 +234,11 @@ def _lower_FloatLiteral(gen, node) -> tuple[str, str]:
     # `_as_floatlit_node(...).value` for a DIRECT `double` field load —
     # `node.value` off the boxed `node` went through reflective dispatch and
     # truncated the double to the boxed int64_t, so `repr(4.2)` came out
-    # `'4.0'` (see _as_floatlit_node). `_float_c_literal` is the ONE spelling
-    # of the value as C, including the non-finite values a literal can reach
-    # by overflow (`999e9000` is `inf`, which `repr` spells 'inf').
-    return 'double', _float_c_literal(_as_floatlit_node(node).value)
+    # `'4.0'` (see _as_floatlit_node).
+    s = repr(_as_floatlit_node(node).value)
+    if '.' not in s and 'e' not in s.lower():
+        s += '.0'
+    return 'double', s
 
 
 def _lower_BoolLiteral(gen, node) -> tuple[str, str]:

@@ -1,5 +1,4 @@
 # plan/step-15b: restore the ALIASED import of a template (`from m import Pair as P` then `P[Int]()`)
-**Status: DONE 2026-11-06 (measured).** 'an aliased import of a template is instantiated' PASSES; `test_formal_monomorph.py` 60/0/0 on 2026-11-06; `local_defining_names` has a definition and its users in `formal/monomorph.py`.
 Class: mid      Size: M      Depends: 15a      Blocks: none
 Source: deleted `bugs/formal/FORMAL_generic_monomorph_scope.md` §2 (`git show 4fdf0a95d^:bugs/formal/FORMAL_generic_monomorph_scope.md`, search "ALIASED"); `bugs/FORMAL_known_limits.md` §1.2.
 

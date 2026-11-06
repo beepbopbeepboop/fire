@@ -1,5 +1,4 @@
 # plan/step-08b: `br` is emitted (the Mach-O stub) — fix the audit's scope and the stale "uncalled" claims
-**Status: DONE 2026-11-06 (measured).** The audit counts the linker stub, `EMITTED_ONLY_BY_STUB` is printed, `encode_br_xn` is no longer listed unwired; `test_arm64_encoders.py` 932/0.
 Class: easy      Size: S      Depends: none      Blocks: none
 Source: `bugs/FORMAL_arm64_instruction_coverage.md` ("`encode_br_xn` really is uncalled … a genuine 359-occurrence gap", §"Re-measured 2026-10-05").
 

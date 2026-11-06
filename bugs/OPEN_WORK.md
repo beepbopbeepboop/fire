@@ -43,37 +43,37 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_arm64_instruction_coverage.md` | `formal-plan-owner [claude (finish-formal plan owner)]` | the arm64 encoder survey, and what wiring the new instructions actually bought |
+| `FORMAL_arm64_instruction_coverage.md` | `fix-merge-fix-merge-fix-merge-fix-merge-fix-merge-fix-merge-` | the arm64 encoder survey, and what wiring the new instructions actually bought |
 
 ### `formal/arm64_codegen` — 1 document, 1 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_no_exceptions.md` | `formal-plan-owner [claude (finish-formal plan owner)]` | a `raise` is a TERMINATION on this path, not a value the caller can catch |
+| `FORMAL_no_exceptions.md` | `bug-formal-formal-no-exceptions` | a `raise` is a TERMINATION on this path, not a value the caller can catch |
 
 ### `formal/arm64_proof_gen` — 1 document, 1 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_string_value_model.md` | `formal-plan-owner [claude (finish-formal plan owner)]` | what a string IS on the formal path, and the two things that want to be one |
+| `FORMAL_string_value_model.md` | `fix-merge-fix-merge-fix-merge-fix-merge-bug-formal-formal-st` | what a string IS on the formal path, and the two things that want to be one |
 
 ### `formal/imports` — 1 document, 1 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_known_limits.md` | `formal-plan-owner [claude (finish-formal plan owner)]` | the sweep residue, audited — which refusals are true |
+| `FORMAL_known_limits.md` | `fix-merge-bug-formal-formal-known-limits-1382` | the sweep residue, audited — which refusals are true |
 
 ### `formal/model` — 1 document, 1 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_set_value_model.md` | `formal-plan-owner [claude (finish-formal plan owner)]` | A set is a LIST here: insertion order, no hashing, and `for x in s` disagrees with CPython |
+| `FORMAL_set_value_model.md` | `fix-merge-bug-formal-formal-set-value-model-9076` | A set is a LIST here: insertion order, no hashing, and `for x in s` disagrees with CPython |
 
 ### `formal/peephole` — 1 document, 1 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_peephole_rules_without_proofs.md` | `formal-plan-owner [claude (finish-formal plan owner)]` | Peephole rules that are not proved: arm64 `store_load`/`mem_pair`/`movz_pair`, x86-64 `imm_zero`/`store_load`/`mem_pair` |
+| `FORMAL_peephole_rules_without_proofs.md` | `bug-formal-formal-peephole-rules-without-7579` | Peephole rules that are not proved: arm64 `store_load`/`mem_pair`/`movz_pair`, x86-64 `imm_zero`/`store_load`/`mem_pair` |
 
 ---
 

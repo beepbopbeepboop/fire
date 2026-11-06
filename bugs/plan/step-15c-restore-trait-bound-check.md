@@ -1,5 +1,4 @@
 # plan/step-15c: restore the trait-bound conformance check on an instantiation
-**Status: DONE 2026-11-06 (measured).** 'a trait bound violation is refused by name' PASSES; `test_formal_monomorph.py` 60/0/0 on 2026-11-06.
 Class: mid      Size: M      Depends: 15a      Blocks: none
 Source: deleted `bugs/formal/FORMAL_generic_monomorph_scope.md` §8 ("A generic with a trait bound — FIXED 2026-10-13"); `bugs/FORMAL_known_limits.md` §1.2.
 
