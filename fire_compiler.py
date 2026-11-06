@@ -3530,8 +3530,13 @@ def desugar_genexps(stmts: list) -> list:
     global DESUGARED_GENEXP_NAMES
     d = _GenexpDesugarer(_module_level_names(stmts), _rebound_names(stmts))
     d.walk_list(stmts, None)
-    if d.hoisted:
-        stmts[0:0] = d.hoisted
+    # Inserted one at a time, in order, at the front: a slice assignment
+    # (`stmts[0:0] = d.hoisted`) is not lowered by the compiled backend, which
+    # left the synthesized generators out of the module entirely.
+    ins = 0
+    for hfn in d.hoisted:
+        stmts.insert(ins, hfn)
+        ins += 1
     # Cleared in place, not rebound: gimple_codegen imports this list by name,
     # so a rebound global would leave its copy pointing at the previous call's.
     del DESUGARED_GENEXP_NAMES[:]

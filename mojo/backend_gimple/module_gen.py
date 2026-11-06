@@ -12870,7 +12870,11 @@ def gen_module_impl(self, stmts: list):
         if isinstance(_od, FunctionDef):
             self._compile_nested_generator_closures(_od, _generator_fns)
 
-    for s in _gca._delegates_first(stmts, _generator_fns):
+    # Bound to an annotated local first: the compiled compiler types a
+    # cross-module call's result as a word, and a `for` over a word runs zero
+    # times, which silently dropped every nested-generator compilation.
+    _ordered_stmts: list = _gca._delegates_first(stmts, _generator_fns)
+    for s in _ordered_stmts:
         if not (isinstance(s, FunctionDef) and id(s) in _generator_fns
                 and id(s) not in _async_fns):
             continue

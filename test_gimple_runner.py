@@ -14484,7 +14484,8 @@ def main():
                   test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool,
                   test_slice_equals_after_a_multibyte_character,
                   test_caught_exception_prints_its_message,
-                  test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type):
+                  test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type,
+                  test_dataclass_default_factory_fields_start_empty_and_per_instance):
         try:
             _late()
         except AssertionError as e:
@@ -14898,6 +14899,33 @@ def main():
 
 main()
 """)
+
+
+def test_dataclass_default_factory_fields_start_empty_and_per_instance():
+    """`items: list = field(default_factory=list)` was never evaluated: the
+    member stayed NULL and the first `.append` crashed. It is now an empty
+    container built fresh for each instance."""
+    test_gimple_stdout("gimple_dataclass_default_factory", """\
+from dataclasses import dataclass, field
+
+@dataclass
+class P:
+    a: int = 3
+    items: list = field(default_factory=list)
+    seen: dict = field(default_factory=dict)
+    tag: str = "x"
+
+def main():
+    p = P()
+    p.items.append(5)
+    p.seen["k"] = 1
+    print(p.a, len(p.items), len(p.seen), p.tag)
+    q = P(7)
+    q.items.append(1)
+    q.items.append(2)
+    print(q.a, len(q.items), len(q.seen), q.tag)
+main()
+""", "3 1 1 x\n7 2 0 x\n")
 
 
 def test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type():
