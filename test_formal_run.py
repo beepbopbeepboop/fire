@@ -9354,7 +9354,8 @@ BOTH_ARCH_CASES = [
      "    s._len_or_data = 5\n"
      "    return s\n"
      "def main(n: Int) -> Int:\n"
-     "    return make().size()\n", 5, ""),
+     "    var t = make()\n"
+     "    return t.size()\n", 5, ""),
     ("string_text_reading_control",
      "struct String:\n"
      "    var _ptr_or_data: Pointer[UInt8]\n"
