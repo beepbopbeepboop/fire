@@ -29,7 +29,7 @@ from fire_compiler import (
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     Parser, py_tokenize,
-    _as_str, _signed_int64, _signed_int64_c_literal, _float_c_literal,
+    _as_str, _signed_int64, _signed_int64_c_literal,
     for_target_is_tuple,
 )
 import regex_compile
@@ -2312,7 +2312,10 @@ def _cpp_expr(gen, e) -> str:
         value = _signed_int64(e.value)
         return _signed_int64_c_literal(value)
     if isinstance(e, gimple_ctypes.FloatLiteral):
-        return _float_c_literal(e.value)
+        s = repr(e.value)
+        if '.' not in s and 'e' not in s.lower():
+            s += '.0'
+        return s
     if isinstance(e, gimple_ctypes.BoolLiteral):
         return 'true' if e.value else 'false'
     if isinstance(e, gimple_ctypes.DottedLiteral):

@@ -1,5 +1,4 @@
 # plan/step-13a: `%<w>s`, `%-<w>s`, `%.<p>s` on a non-ASCII text the build can SEE are folded to the CPython answer
-**Status: DONE 2026-11-06 (measured).** `printf("[%5s][%-5s][%.1s]", "日本", "日本", "日本")` prints `[   日本][日本   ][日]` on both backends, equal to CPython; `printf_fold_text_widths` is in `formal/model/strings.py`; `test_formal_unicode.py` 191/0.
 Class: mid      Size: M      Depends: 10      Blocks: 13c
 Source: `bugs/FORMAL_string_value_model.md` Wave 9 ("A `%<width>s` on non-ASCII text ... `%.3s` is refused for the same reason", line ~1085).
 

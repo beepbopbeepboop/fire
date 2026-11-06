@@ -143,33 +143,6 @@ def _signed_int64_c_literal(value: int) -> str:
         return '(-0x7FFFFFFFFFFFFFFFLL - 1)'
     return f'{value}LL'
 
-def _float_c_literal(value: float) -> str:
-    """The C spelling of `value`, denoting the same `double`.
-
-    `repr()` is an exact round-trip for finite values, but its spellings of
-    the non-finite ones are PYTHON names: `repr(float('inf'))` is `'inf'`,
-    and emitting that into generated C made gcc report "'inf' undeclared"
-    (a float literal that overflows, e.g. `999e9000`, parses to exactly
-    that value). Every generated C file includes `<math.h>`, which spells
-    them `INFINITY`/`-INFINITY`/`NAN`; the casts make the expression a
-    `double` rather than a `float` constant in every context it lands in.
-
-    This is the ONE spelling of a float literal for the C/GIMPLE backends —
-    `_lower_FloatLiteral`, the call-default padding and the C++ fallback all
-    go through it, so a non-finite value cannot be right in one and invalid
-    C in another.
-    """
-    s = repr(value)
-    if s == 'inf':
-        return '(double)INFINITY'
-    if s == '-inf':
-        return '(double)(-INFINITY)'
-    if s == 'nan':
-        return '(double)NAN'
-    if '.' not in s and 'e' not in s.lower():
-        s += '.0'
-    return s
-
 def _parse_int_literal(text: str) -> int:
     """Parse an INT token's source text (decimal / 0x / 0o / 0b, underscores
     allowed) into its signed 64-bit value, WITHOUT `int(text, 0)`.
@@ -4619,11 +4592,6 @@ class Parser:
             # body references" — 42 occurrences in the stdlib, so it is a form
             # with its own meaning and not a typo for a missing name).
             conv = None
-            moved_bare = False
-            # Allow leading `^` in capture lists
-            if self._peek().kind == "OP" and self._peek().value == "^":
-                self._advance()
-                moved_bare = True
             # A KW from the convention set at the START of an entry is always a
             # prefix, never the captured name — the same disambiguation the
             # parameter loop uses (KW followed by COLON/ASSIGN is a name), with
@@ -4636,14 +4604,6 @@ class Parser:
                    and self._peek().value in self._CONV_KWS
                    and self._peek(1).kind not in ("COLON", "ASSIGN")):
                 conv = _as_str(self._advance().value)
-                if self._peek().kind == "OP" and self._peek().value == "^":
-                    self._advance()
-                    moved_bare = True
-                    break
-            moved_bare = False
-            if self._peek().kind == "OP" and self._peek().value == "^":
-                self._advance()
-                moved_bare = True
             if self._peek().kind in ("COMMA", "RBRACE"):
                 # `{mut}` / `{var}` — a convention with NO name: "capture
                 # whatever this body references, under this convention" (42
@@ -4652,13 +4612,8 @@ class Parser:
                 # that happens to be called `mut`, and so the consumer can
                 # tell "infer the names, this is the convention" from an
                 # ordinary named capture.
-                _cc = _as_str(_canon_conv(conv)) if conv is not None else None
-                if _cc is None and moved_bare:
-                    _cc = 'owned'
-                elif moved_bare and _cc is not None:
-                    # moved bare convention: treat as owned/move
-                    _cc = 'owned'
-                out.append((None, _cc))
+                out.append((None, _as_str(_canon_conv(conv))
+                            if conv is not None else None))
                 self._skip_newlines()
                 if self._peek().kind == "COMMA":
                     self._advance(); self._skip_newlines()
@@ -6971,6 +6926,12 @@ class Parser:
         top-level trailing comma, as an earlier version of this function did,
         makes it indistinguishable from the parenthesised single name and puts
         the two parsers at odds with each other for the same source line."""
+        # Skip convention keywords (var, ref, mut, etc.)
+        if (self._peek().kind == "KW" and self._peek().value in self._CONV_KWS
+                and not (self._peek(1).kind == "KW" and self._peek(1).value == "in")
+                and self._peek(1).kind != "COLON"
+                and self._peek(1).kind != "COMMA"):
+            self._advance()
         t = self._peek()
         saw_comma = False
         if t.kind == "LPAREN":
@@ -7067,6 +7028,13 @@ class Parser:
             if self._peek().kind in ("RPAREN", "RBRACKET"):
                 break
             sub_t = self._peek()
+            # Skip convention keywords
+            if (sub_t.kind == "KW" and sub_t.value in self._CONV_KWS
+                    and self._peek(1).kind != "KW" and self._peek(1).value != "in"
+                    and self._peek(1).kind != "COLON"
+                    and self._peek(1).kind != "COMMA"):
+                self._advance()
+                sub_t = self._peek()
             if sub_t.kind == "LPAREN":
                 self._advance()
                 inner, inner_comma = self._parse_generator_target()
@@ -7927,6 +7895,12 @@ class Parser:
         convention). (Chained-assignment tuple targets use a separate
         Expr-based TupleExpr representation, not this string form — see
         _parse_stmt's ASSIGN handling.)"""
+        # Skip convention keywords (var, ref, mut, etc.) in tuple unpacking targets
+        if (self._peek().kind == "KW" and self._peek().value in self._CONV_KWS
+                and not (self._peek(1).kind == "KW" and self._peek(1).value == "in")
+                and self._peek(1).kind != "COLON"
+                and self._peek(1).kind != "COMMA"):
+            self._advance()
         if self._peek().kind == "LPAREN":
             self._advance()
             parts = []
