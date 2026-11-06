@@ -3050,6 +3050,8 @@ BARE_C_RETURN_KINDS = {
     "getppid": (32, True),        # pid_t is int
     "getuid": (32, False),        # uid_t is unsigned int: zero-extend, never sign-extend
     "link": (32, True),
+    "killpg": (32, True),
+    "setsid": (32, True),         # pid_t is int
     "mkfifo": (32, True),
     "symlink": (32, True),
     "umask": (16, False),         # mode_t is __uint16_t on Darwin

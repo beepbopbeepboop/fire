@@ -137,10 +137,34 @@ from ._syscalls import fs_dirent_name, fs_name_is_dot, fs_opendir
 from ._syscalls import fs_environ_vec, str_find, str_cmp
 from ._syscalls import fs_getpid, fs_getppid, fs_getuid, fs_getpgid, fs_sysconf
 from ._syscalls import fs_access, fs_utimes, fs_symlink, fs_link, fs_mkfifo, fs_umask
+from ._syscalls import fs_kill, fs_killpg, fs_setsid
 from .path import exists, isfile, isdir, islink, lexists, getsize
 from .path import join
 from hoststatus import status_ok, status_err
 
+# ── NOT PROVIDED, and why ───────────────────────────────────────────────────
+#
+# A name CPython's `os` has and this module deliberately does not. Each is
+# REFUSED BY NAME at build time ("`os` is a linked module but it exports no
+# `<name>`"), never stubbed, because a stub that returns a plausible value for
+# an operation that was not performed is a wrong answer that looks like one.
+# `test_formal_os.py`'s `notprovided` group pins one name of each class.
+#
+#   fork, waitpid, wait4, _exit, execv, execvp, system, WEXITSTATUS
+#       Process control. A freestanding image has no process-control model: no
+#       unwinder for the child's exit, no wait-status object to return.
+#   urandom, fsencode, read
+#       Return `bytes`, which has no word representation on this path
+#       (`BYTE_BLOB_TYPE_CTORS`). `arc4random_buf` is reachable through
+#       `tempfile`'s own use of it, not as an `os` function.
+#   uname, getloadavg
+#       Return a tuple/named tuple of several fields; a struct is a frame blob
+#       and cannot be returned from a module function.
+#   fdopen
+#       Returns a file OBJECT.
+#   getmtime (os.path)
+#       A `float`; see `os.path.getmtime_ns`.
+#
 # ── The constants CPython spells as attributes ──────────────────────────────
 #
 # Functions, and the reason is at the top of this file. Each returns the
@@ -1090,6 +1114,32 @@ def rename(src, dst) -> int:
 def replace(src, dst) -> int:
     """`rename(src, dst)`, under CPython's other name for the same call."""
     return fs_rename(src, dst)
+
+
+def kill(pid, sig) -> int:
+    """`os.kill(pid, sig)`: send signal `sig` to process `pid`. 0 on success, -1 on
+    failure (hoststatus.mojo) -- ESRCH when there is no such process, EPERM when it
+    is not ours. Signal 0 is the existence probe. `SIGKILL`/`SIGSTOP` cannot be
+    caught, so sending one to oneself ends the image."""
+    return fs_kill(pid, sig)
+
+
+def killpg(pgid, sig) -> int:
+    """`os.killpg(pgid, sig)`: signal every process in a group. 0 on success, -1 on
+    failure (hoststatus.mojo)."""
+    return fs_killpg(pgid, sig)
+
+
+def setsid() -> int:
+    """`os.setsid()`: run as a new session leader. CPython returns None; here the
+    NEW SESSION ID (equal to this pid) on success and -1 on failure
+    (hoststatus.mojo), e.g. when already a process-group leader."""
+    return fs_setsid()
+
+
+def defpath() -> str:
+    """`os.defpath`: the default search path, `"/bin:/usr/bin"` on this platform."""
+    return "/bin:/usr/bin"
 
 
 def F_OK() -> int:

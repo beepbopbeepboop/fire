@@ -1,4 +1,5 @@
 # plan/step-23e: os signals/process-group wrappers and the documented NOT-PROVIDED table
+**Status: DONE 2026-11-05 (verified).** `kill`, `killpg`, `setsid`, `defpath` added (`fs_killpg`/`fs_setsid` wrappers; `killpg`/`setsid` prototypes `(32,True)`). Group `proc2` checks BY WHAT THE OS DOES: an image kills itself and the test requires wait status -SIGTERM; another, started as its own group leader, `killpg`s its group; `setsid()` equals the pid for an ordinary child and is -1 for a group leader; `kill`/`killpg` of a reaped pid is -1. The NOT PROVIDED table is in `os/__init__.mojo` (comment block; refusal text measured: `os` is a linked module but it exports no `<name>`), pinned by group `notprovided` (fork, waitpid, system, urandom, uname, fdopen) on both backends. `test_formal_admitted.py` not run (library build).
 Class: mid      Size: S      Depends: 26, 23a      Blocks: none
 Source: `bugs/FORMAL_known_limits.md` §6.3-6.4 (host-import); round template and conventions are `bugs/plan/step-23-host-modules.md` (read it first; follow its "Work order" verbatim, items 3-7 are specialised below)
 

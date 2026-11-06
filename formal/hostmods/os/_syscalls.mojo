@@ -1022,6 +1022,18 @@ def fs_sysconf(name) -> int:
     return sysconf(name)
 
 
+def fs_killpg(pgid, sig) -> int:
+    """`killpg(pgid, sig)`: signal every process in the group. 0 on success, -1 on
+    failure (ESRCH if the group is empty, EPERM if one member is not ours)."""
+    return killpg(pgid, sig)
+
+
+def fs_setsid() -> int:
+    """`setsid()`: start a new session; the new session id (== this pid), or -1
+    (EPERM) if this process is already a process-group leader."""
+    return setsid()
+
+
 def fs_kill(pid, sig) -> int:
     """`kill(pid, sig)`: 0 on success, -1 with ESRCH if there is no such process.
 

@@ -1525,6 +1525,142 @@ def group_stattimes(tmpdir, verbose):
     return True, ""
 
 
+PROC2_STATUS = """\
+import os
+
+def main():
+    printf("self0=%d@@", os.kill(os.getpid(), 0))
+    printf("dead=%d@@", os.kill({dead}, 0))
+    printf("pg_none=%d@@", os.killpg({dead}, 0))
+    printf("sid=%d@@", os.setsid())
+    printf("pid=%d@@", os.getpid())
+    printf("defpath=%s@@", os.defpath())
+    return 0
+"""
+PROC2_KILL = """\
+import os
+
+def main():
+    os.kill(os.getpid(), 15)
+    printf("survived")
+    return 0
+"""
+PROC2_KILLPG = """\
+import os
+
+def main():
+    os.killpg(os.getpgid(0), 15)
+    printf("survived")
+    return 0
+"""
+PROC2_SETSID_LEADER = """\
+import os
+
+def main():
+    printf("sid=%d@@", os.setsid())
+    return 0
+"""
+
+
+def group_proc2(tmpdir, verbose):
+    """`kill`/`killpg`/`setsid`/`defpath`, by what the OPERATING SYSTEM then does.
+
+    Only processes this test spawned are ever signalled, and only by themselves:
+    one image kills itself (`kill(getpid(), SIGTERM)`) and the test requires the
+    wait status to be `-SIGTERM`; another is started as its own process-group
+    leader and kills its group; `setsid` succeeds for an ordinary child (the
+    new session id is its own pid) and fails for a group leader. A pid that
+    has been reaped is the "no such process" case.
+    """
+    import signal
+    bad = []
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    for backend, prefix in (("arm64", []), ("x86_64", ["arch", "-x86_64"])):
+        def run(name, text, **kw):
+            src = os.path.join(tmpdir, f"{name}_{backend}.mojo")
+            with open(src, "w") as fh:
+                fh.write(text)
+            out = os.path.join(tmpdir, f"{name}_{backend}")
+            rc, msg = build(src, out, backend=backend)
+            if rc != 0:
+                raise RuntimeError(f"[{backend}] {name} build failed: {msg.strip()[-300:]}")
+            return subprocess.run(prefix + [out], capture_output=True, text=True,
+                                  timeout=RUN_TIMEOUT, cwd=tmpdir, **kw)
+        try:
+            st = run("p2_status", PROC2_STATUS.replace("{dead}", str(dead.pid)))
+            got = parse_kv(st.stdout)
+            if st.returncode != 0:
+                bad.append(f"[{backend}] status program exit {st.returncode}")
+            if got.get("self0") != "0":
+                bad.append(f"[{backend}] kill(self, 0) = {got.get('self0')!r}, wanted 0")
+            if got.get("dead") != "-1" or got.get("pg_none") != "-1":
+                bad.append(f"[{backend}] kill/killpg of a reaped pid = "
+                           f"{got.get('dead')!r}/{got.get('pg_none')!r}, wanted -1/-1")
+            if got.get("sid") != got.get("pid") or not got.get("pid"):
+                bad.append(f"[{backend}] setsid() = {got.get('sid')!r} for pid "
+                           f"{got.get('pid')!r}; a non-leader child gets its own pid")
+            if got.get("defpath") != os.defpath:
+                bad.append(f"[{backend}] defpath {got.get('defpath')!r} != {os.defpath!r}")
+            k = run("p2_kill", PROC2_KILL)
+            if k.returncode != -signal.SIGTERM:
+                bad.append(f"[{backend}] kill(getpid(), SIGTERM) left exit status "
+                           f"{k.returncode}, wanted {-signal.SIGTERM}")
+            g = run("p2_killpg", PROC2_KILLPG, start_new_session=True)
+            if g.returncode != -signal.SIGTERM:
+                bad.append(f"[{backend}] killpg(own group, SIGTERM) left exit status "
+                           f"{g.returncode}, wanted {-signal.SIGTERM}")
+            s = run("p2_leader", PROC2_SETSID_LEADER, start_new_session=True)
+            if parse_kv(s.stdout).get("sid") != "-1":
+                bad.append(f"[{backend}] setsid() as a group leader = "
+                           f"{parse_kv(s.stdout).get('sid')!r}, wanted -1")
+        except RuntimeError as e:
+            return False, str(e)
+    if bad:
+        return False, ("%d disagreements:\n      %s"
+                       % (len(bad), "\n      ".join(bad)))
+    if verbose:
+        print("      kill/killpg/setsid/defpath behave as the OS reports on both backends")
+    return True, ""
+
+
+NOT_PROVIDED = [
+    ("fork", "os.fork()"), ("waitpid", "os.waitpid(1, 0)"),
+    ("system", "os.system(\"true\")"), ("urandom", "os.urandom(4)"),
+    ("uname", "os.uname()"), ("fdopen", "os.fdopen(1)"),
+]
+
+
+def group_notprovided(tmpdir, verbose):
+    """Every name `os/__init__.mojo` documents as NOT PROVIDED is refused by NAME.
+
+    The failure this pins is the quiet one: a name that BUILDS (a stub, or
+    another module's same-named function) and answers something. Measured
+    2026-11-05 the refusal is `os.<name>(): \`os\` is a linked module but it
+    exports no \`<name>\``, shared by every backend because it is raised before
+    code generation; asserted on both architectures anyway.
+    """
+    bad = []
+    for name, call in NOT_PROVIDED:
+        src = os.path.join(tmpdir, f"np_{name}.mojo")
+        with open(src, "w") as fh:
+            fh.write(f"import os\n\ndef main():\n    var x = {call}\n    return 0\n")
+        for backend in ("arm64", "x86_64"):
+            rc, text = build(src, os.path.join(tmpdir, f"np_{name}_{backend}"),
+                             backend=backend)
+            needle = f"exports no `{name}`"
+            if rc == 0:
+                bad.append(f"[{backend}] os.{name} BUILT; it is documented as not provided")
+            elif needle not in text:
+                bad.append(f"[{backend}] os.{name} was refused, but not by name "
+                           f"({needle!r} missing): {text.strip()[-200:]}")
+    if bad:
+        return False, ("%d problems:\n      %s" % (len(bad), "\n      ".join(bad)))
+    if verbose:
+        print(f"      {len(NOT_PROVIDED)} not-provided names refused by name on both backends")
+    return True, ""
+
+
 GROUPS = {
     "inplace": group_inplace,
     "strings": group_strings,
@@ -1534,6 +1670,8 @@ GROUPS = {
     "proc": group_proc,
     "fsmeta": group_fsmeta,
     "stattimes": group_stattimes,
+    "proc2": group_proc2,
+    "notprovided": group_notprovided,
     "dirs": group_dirs,
     "blob": group_blob,
 }
