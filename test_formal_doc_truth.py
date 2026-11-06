@@ -365,10 +365,14 @@ def group_closed():
         return out
 
     holes = {f: live_holes(s) for f, s in sorted(lib.items())}
-    total = sum(len(v) for v in holes.values())
+    # The scaffold design (CLAUDE.md "Scaffold holes"): `lib/Scaffold.lean` is
+    # the ONE home of a hole, ledgered in `formal/proof_gaps.py::SCAFFOLD_HOLES`
+    # and counted by test_formal_proof_gaps.py. Every OTHER module has none.
+    total = sum(len(v) for f, v in holes.items() if f != 'Scaffold.lean')
     check(total == 0,
-          f'lib/ has {total} live sorry/admit outside comments ({holes}), and '
-          f"FORMAL.md §5 and §7 both rest on it having none")
+          f'lib/ has {total} live sorry/admit outside comments and outside '
+          f"Scaffold.lean ({holes}), and FORMAL.md §5 and §7 both rest on it "
+          f"having none")
 
     # The three rows §7 struck, by name. A struck row that stops being struck is
     # a hole re-published as live; a name that leaves the document entirely is
