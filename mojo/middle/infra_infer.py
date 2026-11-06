@@ -3346,8 +3346,6 @@ def _int_dict_note(node, ok: set, other: set) -> None:
         _bound_names_in(node.target, other)
     elif isinstance(node, WalrusExpr):
         other.add(node.name)
-    elif isinstance(node, BinaryOp) and getattr(node, 'op', None) == ':=' and isinstance(node.left, IdentExpr):
-        other.add(node.left.name)
     elif isinstance(node, (GlobalStmt, NonlocalStmt)):
         _bound_names_in(node.names, other)
     elif isinstance(node, FunctionDef):

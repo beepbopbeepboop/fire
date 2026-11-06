@@ -199,31 +199,6 @@ def set_runtime_element_refusal(spelled_elem, kind):
         f"refuses it rather than answering wrongly.")
 
 
-def set_add_receiver_refusal(dotted, shape):
-    """`dotted(...)` named `add` on a receiver that is not known to be a set."""
-    return (f"{dotted}() is `set.add` on this path, which inserts a word into "
-            f"a SET blob; its receiver is {shape or 'a plain word'}, which "
-            f"this build cannot establish to be a set (a set and a list are "
-            f"the same blob, and only a name bound to a set literal or set "
-            f"comprehension is known to be one). Refused rather than storing "
-            f"into whatever blob the word addresses.")
-
-
-def set_element_is_container(el) -> bool:
-    """True when `el` builds a container (a list, tuple, set, dict or a
-    comprehension), which is never a word-comparable set element."""
-    return isinstance(el, (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr,
-                           F.Comprehension))
-
-
-def set_comprehension_element_refusal(spelled_elem):
-    """A set comprehension whose element is a container."""
-    return (f"{spelled_elem} is the element of a set comprehension and is a "
-            f"container: a set element must be hashable (a list, dict or set "
-            f"is not), and a tuple's equality is structural where this path "
-            f"compares words. Refused rather than deduplicating by address.")
-
-
 def set_runtime_element_refusal_in_comprehension(spelled_elem):
     return (f"{spelled_elem} is a set literal in a comprehension element "
             f"position that needs runtime dedup; this path refuses it rather "

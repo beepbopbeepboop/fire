@@ -230,13 +230,13 @@ numbered step; the numbers 01-28 are the first draft's names.
 
 | step | status | class | size | depends | title |
 |---|---|---|---|---|---|
-| [`00a`](../bugs/plan/step-00a-repair-prooflib-splice.md) | DONE | mid | M | 00c, 00d, 00e, 00f, 00g | `lib/ProofLib.lean` elaborates again (umbrella: gate for every Lean step) |
-| [`00b`](../bugs/plan/step-00b-step-conds-index-drift.md) | DONE | easy | S | none | `_STEP_CONDS` index drift — the STRB register-offset row sits in the middle of the table |
+| [`00a`](../bugs/plan/step-00a-repair-prooflib-splice.md) | OPEN | mid | M | 00c, 00d, 00e, 00f, 00g | `lib/ProofLib.lean` elaborates again (umbrella: gate for every Lean step) |
+| [`00b`](../bugs/plan/step-00b-step-conds-index-drift.md) | OPEN | easy | S | none | `_STEP_CONDS` index drift — the STRB register-offset row sits in the middle of the table |
 | [`00c`](../bugs/plan/step-00c-arm64state-fp-fields.md) | DONE | easy | S | none | struct literals that predate the FP register fields (`d0`-`d7`) |
 | [`00d`](../bugs/plan/step-00d-callfunc2-migration.md) | DONE | mid | M | none | finish the `callFunc2` migration (`runF`, `evalFuncF`, the `runF_*` lemmas, the generator templates) |
 | [`00e`](../bugs/plan/step-00e-contract-and-cmp-proofs.md) | DONE | mid | L | 00d | proofs broken by the shifted-register model — `arm64_step_cmp_reg_n31_reads_zero`, `while_lt_exit_contract_*` |
-| [`00f`](../bugs/plan/step-00f-nonfp-work-step-proofs.md) | DONE | mid | L | none | broken non-FP `work_step_*` proofs — `cmn`, `tst`, `ldur`, `stur`, `smulh`, `csel` |
-| [`00g`](../bugs/plan/step-00g-fp-work-steps.md) | DONE | mid | L | 00f | the FP `work_step_*` block — duplicates, timeouts, fragments |
+| [`00f`](../bugs/plan/step-00f-nonfp-work-step-proofs.md) | REGENERATED | mid | L | none | broken non-FP `work_step_*` proofs — `cmn`, `tst`, `ldur`, `stur`, `smulh`, `csel` |
+| [`00g`](../bugs/plan/step-00g-fp-work-steps.md) | REGENERATED | mid | L | 00f | the FP `work_step_*` block — duplicates, timeouts, fragments |
 | [`01a`](../bugs/plan/step-01a-scaffold-module.md) | CLAIMED | mid | M | 00a | `lib/Scaffold.lean` — the one home of scaffold `sorry` |
 | [`01b`](../bugs/plan/step-01b-proof-gap-ledger.md) | CLAIMED | mid | M | 00a, 01a | the proof-gap ledger and its census test |
 | [`02`](../bugs/plan/step-02-peephole-memory-lemmas.md) | CLAIMED | mid | S | 00a, 01a, 01b | the two memory lemmas the peephole store rules actually lack |
@@ -250,37 +250,37 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`04d`](../bugs/plan/step-04d-x86-imm-zero.md) | CLAIMED | mid | M | 00a, 01a, 01b | `x86_64/imm_zero` — `add r, 0` / `sub r, 0` with dead flags |
 | [`05a`](../bugs/plan/step-05a-arm64-rule-registry.md) | CLAIMED | mid | M | 03b, 03c, 03d | register the arm64 rules the Lean side now proves |
 | [`05b`](../bugs/plan/step-05b-x86-rule-registry.md) | CLAIMED | mid | M | 04a, 04b, 04c, 04d | register the x86-64 rules, and fix three latent soundness holes in their matchers |
-| [`06a`](../bugs/plan/step-06a-arm64-ccmp-encoders.md) | DONE | easy | S | none | arm64 `ccmp` encoders (register and immediate), byte-exact against `as` |
+| [`06a`](../bugs/plan/step-06a-arm64-ccmp-encoders.md) | OPEN | easy | S | none | arm64 `ccmp` encoders (register and immediate), byte-exact against `as` |
 | [`06b`](../bugs/plan/step-06b-arm64-ccmp-model.md) | OPEN | mid | M | 00a, 00b, 06a | `ccmp` in the machine model: `arm64_step` arms, `_STEP_CONDS` rows, `_step_rhs`, `_regs_written` |
 | [`06c`](../bugs/plan/step-06c-arm64-ccmp-lowering.md) | OPEN | hard | L | 06a, 06b | lower `if A and B:` (two integer comparisons) to `cmp` + `ccmp` + one `b.cond` |
 | [`07a`](../bugs/plan/step-07a-arm64-csinc-family-model.md) | OPEN | mid | M | 00a, 00b | `csinc` / `csinv` / `csneg` in the machine model, step table and fuzzer |
 | [`07b`](../bugs/plan/step-07b-arm64-csinc-family-lowering.md) | OPEN | hard | M | 07a | lower `a if c else ~a` to `csinv` (and `+1` / `-a` to `csinc`/`csneg` where no overflow trap is lost) |
-| [`08a`](../bugs/plan/step-08a-arm64-blr-named-unmodelled.md) | DONE | easy | S | none | name `BLR` in `_unmodelled_instruction` (the emitted indirect call has no step and no name) |
-| [`08b`](../bugs/plan/step-08b-arm64-br-audit-scope.md) | DONE | easy | S | none | `br` is emitted (the Mach-O stub) — fix the audit's scope and the stale "uncalled" claims |
+| [`08a`](../bugs/plan/step-08a-arm64-blr-named-unmodelled.md) | OPEN | easy | S | none | name `BLR` in `_unmodelled_instruction` (the emitted indirect call has no step and no name) |
+| [`08b`](../bugs/plan/step-08b-arm64-br-audit-scope.md) | OPEN | easy | S | none | `br` is emitted (the Mach-O stub) — fix the audit's scope and the stale "uncalled" claims |
 | [`08c`](../bugs/plan/step-08c-arm64-indirect-call-design.md) | OPEN | hard | M | 08a | DESIGN MEMO — how the proof model treats `BLR` (indirect call) and `BR` |
 | [`09`](../bugs/plan/step-09-arm64-extended-add-sub.md) | OPEN | mid | M | 00a, 00b | arm64 extended-register `ADD`/`SUB`/`SUBS(CMP)` with `UXTX` (the SP class), modelled, no lowering |
-| [`10`](../bugs/plan/step-10-string-struct-collision.md) | DONE | mid | M | 01a, 01b | the `String` frame-vs-`char *` collision (zero-argument `String()` used as a receiver) |
-| [`11a`](../bugs/plan/step-11a-string-buffer-upper-lower.md) | DONE | mid | M | 10 | the runtime string buffer (libc `strdup`, never freed) and `upper`/`lower` as its first clients |
-| [`11b`](../bugs/plan/step-11b-string-strip-rstrip.md) | DONE | mid | M | 11a | `strip()` / `rstrip()` on the runtime buffer |
-| [`11c`](../bugs/plan/step-11c-chr-fold-and-remaining-methods.md) | DONE | mid | S | 11a | `chr(<constant>)` folds; `replace`/`join`/the case-variants refuse naming the buffer correctly |
-| [`12a`](../bugs/plan/step-12a-len-of-known-string.md) | DONE | mid | M | 01a, 01b | `len(<string the image holds>)` is a numeral in the proof model; any other string `len` is refused; the post-extern theorem is not emitted for `strlen` |
+| [`10`](../bugs/plan/step-10-string-struct-collision.md) | OPEN | mid | M | 01a, 01b | the `String` frame-vs-`char *` collision (zero-argument `String()` used as a receiver) |
+| [`11a`](../bugs/plan/step-11a-string-buffer-upper-lower.md) | OPEN | mid | M | 10 | the runtime string buffer (libc `strdup`, never freed) and `upper`/`lower` as its first clients |
+| [`11b`](../bugs/plan/step-11b-string-strip-rstrip.md) | OPEN | mid | M | 11a | `strip()` / `rstrip()` on the runtime buffer |
+| [`11c`](../bugs/plan/step-11c-chr-fold-and-remaining-methods.md) | OPEN | mid | S | 11a | `chr(<constant>)` folds; `replace`/`join`/the case-variants refuse naming the buffer correctly |
+| [`12a`](../bugs/plan/step-12a-len-of-known-string.md) | OPEN | mid | M | 01a, 01b | `len(<string the image holds>)` is a numeral in the proof model; any other string `len` is refused; the post-extern theorem is not emitted for `strlen` |
 | [`12b`](../bugs/plan/step-12b-strlen-contract-memo.md) | OPEN | hard | M | 12a, 01a, 01b | DECISION MEMO — the Lean contract for an extern whose result is the program's answer (`strlen`) |
 | [`12c`](../bugs/plan/step-12c-strlen-contract.md) | OPEN | mid | M | 12a, 12b, 01a, 01b | Lean contract for `strlen` as the program's answer (extern contract) |
-| [`13a`](../bugs/plan/step-13a-printf-text-fold.md) | DONE | mid | M | 10 | `%<w>s`, `%-<w>s`, `%.<p>s` on a non-ASCII text the build can SEE are folded to the CPython answer |
-| [`13b`](../bugs/plan/step-13b-subscript-literal-fold.md) | DONE | mid | M | 10 | `<literal>[<int literal>]` on non-ASCII text folds to the one-character string |
+| [`13a`](../bugs/plan/step-13a-printf-text-fold.md) | OPEN | mid | M | 10 | `%<w>s`, `%-<w>s`, `%.<p>s` on a non-ASCII text the build can SEE are folded to the CPython answer |
+| [`13b`](../bugs/plan/step-13b-subscript-literal-fold.md) | OPEN | mid | M | 10 | `<literal>[<int literal>]` on non-ASCII text folds to the one-character string |
 | [`13c`](../bugs/plan/step-13c-runtime-unicode-memo.md) | OPEN | hard | M | 11a, 13a, 13b | DECISION MEMO — `%<w>s` / `%.<p>s` and `s[i]` on non-ASCII text the build CANNOT see |
-| [`14a`](../bugs/plan/step-14a-restore-set-literal-dedup.md) | DONE | easy | S | none | RESTORE the compile-time set-literal dedup that the `formal/model/` package split lost |
+| [`14a`](../bugs/plan/step-14a-restore-set-literal-dedup.md) | OPEN | easy | S | none | RESTORE the compile-time set-literal dedup that the `formal/model/` package split lost |
 | [`14b`](../bugs/plan/step-14b-set-runtime-dedup-literal.md) | OPEN | mid | L | 14a | run-time distinctness for a set literal with non-canonical elements (`{x, x, 2}`), both backends |
 | [`14c`](../bugs/plan/step-14c-set-add.md) | OPEN | mid | M | 14b | `set.add(x)` on both backends |
 | [`14d`](../bugs/plan/step-14d-set-comprehension-dedup.md) | OPEN | mid | M | 14b | a set COMPREHENSION is distinct (`{x % 2 for x in range(6)}` has len 2) |
 | [`14e`](../bugs/plan/step-14e-set-order-pin.md) | OPEN | easy | S | 14a, 14b, 14c, 14d | pin the set iteration order (insertion order) and re-word the `set_order` neutraliser; close the doc |
 | [`15a`](../bugs/plan/step-15a-monomorph-baseline.md) | DONE | mid | M | none | repair the monomorph baseline (import errors, debug litter, stale test expectations) |
-| [`15b`](../bugs/plan/step-15b-restore-aliased-import.md) | DONE | mid | M | 15a | restore the ALIASED import of a template (`from m import Pair as P` then `P[Int]()`) |
-| [`15c`](../bugs/plan/step-15c-restore-trait-bound-check.md) | DONE | mid | M | 15a | restore the trait-bound conformance check on an instantiation |
-| [`15d`](../bugs/plan/step-15d-consumer-declared-type-argument.md) | DONE | mid | S | 15a | refuse, by name, a type argument declared only in the consumer's file |
-| [`15e`](../bugs/plan/step-15e-pin-imported-parameter-annotation.md) | DONE | easy | S | 15a | re-pin the imported-instantiation parameter annotation (value vs frame) |
+| [`15b`](../bugs/plan/step-15b-restore-aliased-import.md) | OPEN | mid | M | 15a | restore the ALIASED import of a template (`from m import Pair as P` then `P[Int]()`) |
+| [`15c`](../bugs/plan/step-15c-restore-trait-bound-check.md) | OPEN | mid | M | 15a | restore the trait-bound conformance check on an instantiation |
+| [`15d`](../bugs/plan/step-15d-consumer-declared-type-argument.md) | OPEN | mid | S | 15a | refuse, by name, a type argument declared only in the consumer's file |
+| [`15e`](../bugs/plan/step-15e-pin-imported-parameter-annotation.md) | OPEN | easy | S | 15a | re-pin the imported-instantiation parameter annotation (value vs frame) |
 | [`16a`](../bugs/plan/step-16a-bare-call-design-memo.md) | OPEN | hard | M | 15a | DESIGN MEMO — what a bare template call's type arguments may be inferred from |
-| [`16b`](../bugs/plan/step-16b-consolidate-bare-inference.md) | DONE | mid | M | 15a | fold the two copies of bare-call inference into one function (behaviour-preserving) |
+| [`16b`](../bugs/plan/step-16b-consolidate-bare-inference.md) | OPEN | mid | M | 15a | fold the two copies of bare-call inference into one function (behaviour-preserving) |
 | [`16c`](../bugs/plan/step-16c-matcher-keywords-defaults.md) | OPEN | mid | S | 16a, 16b | bare-call inference — keyword arguments and type-spelled defaults |
 | [`16d`](../bugs/plan/step-16d-return-type-inference.md) | OPEN | mid | L | 16a, 16b | bare-call inference through declared types (the `dealloc(allocation^)` row) |
 | [`16e`](../bugs/plan/step-16e-bound-resolution.md) | OPEN | mid | M | 16a, 16b | bare-call inference against a trait bound (the `FormatStruct(writer, ...)` row) |
@@ -302,14 +302,14 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`23d`](../bugs/plan/step-23d-os-fd-io.md) | CLOSED AS 'NOT PROVIDED' | mid | M | 26 | os file-descriptor I/O: close, read, write, fsync, ftruncate, dup2, pipe, O_*/SEEK_SET constants |
 | [`23e`](../bugs/plan/step-23e-os-process-and-refusals.md) | DONE | mid | S | 26, 23a | os signals/process-group wrappers and the documented NOT-PROVIDED table |
 | [`24`](../bugs/plan/step-24-x86-arch-drift.md) | DONE | easy | S | none | x86-64 arch drift is mostly ALREADY CLOSED: pin it and correct the doc |
-| [`25`](../bugs/plan/step-25-unrepresentable-types.md) | DONE | mid | S | none | `Error` stays unrepresentable: make the refusal true, pin it on both backends |
+| [`25`](../bugs/plan/step-25-unrepresentable-types.md) | CLAIMED | mid | S | none | `Error` stays unrepresentable: make the refusal true, pin it on both backends |
 | [`26`](../bugs/plan/step-26-host-exception-convention.md) | DONE | mid | M | none | one discoverable host-module failure convention (`hoststatus`) |
 | [`27a`](../bugs/plan/step-27a-eh-design-memo.md) | CLAIMED | hard | M | 25 | EH runtime design memo (exception object storage, `as e`, superclass matching) |
 | [`27b`](../bugs/plan/step-27b-try-model-translation.md) | DONE | mid | M | 27a | `TryStmt` in the semantic model (`arm64_proof_gen.py`): the sound flat slice |
 | [`27c`](../bugs/plan/step-27c-landing-pad-tables.md) | DONE | mid | M | 27a | landing-pad / personality data structures (pure Python table + test, NO codegen change) |
 | [`28`](../bugs/plan/step-28-absval-frame-peel.md) | CLAIMED | mid | M | 00a | `absval` frame-peel `K` — verify the same-day fix, pin it with a Lean-free test, then close or localise |
 
-**78 step files:** 13 easy, 57 mid, 8 hard. Status: claimed 15, closed as 'not provided' 1, done 36, open 26. (Generated by `python3 tools/plan_index.py --write`; do not edit by hand.)
+**78 step files:** 13 easy, 57 mid, 8 hard. Status: claimed 16, closed as 'not provided' 1, done 15, open 44, regenerated 2. (Generated by `python3 tools/plan_index.py --write`; do not edit by hand.)
 
 <!-- END generated by tools/plan_index.py -->
 
@@ -405,26 +405,6 @@ agent" by the first execution wave WITHOUT a measurement, so treat as unproven;
   producer), the Lean arms for `ccmp`/`csinc`/`csinv`/`csneg`/extended-register
   (the `_STEP_CONDS` rows exist without Lean arms: `check_step_conds` warns),
   steps 06c, 07b, 08c, 10, 11a-c, 12b-c, 13a-c, 14b-e, 16a-f, 18a-d, 19a-c, 22.
-* **Found 2026-11-06 while running the regressions:** `strip`/`rstrip` on an
-  unfoldable receiver (11a/11b) are now correct on both backends
-  (`test_formal_str_trim_runtime.py`); the `str(<non-string>)` refusal path
-  crashed on a nonexistent `BOOL_KIND` import (fixed); x86-64 traps `<<`/`**`
-  overflow and arm64 still wraps (pinned as a divergence in
-  `test_formal_int_semantics.py`); x86-64 grows a loop-appended list on a heap
-  blob and arm64 stops loudly (`list_append_overflow_is_loud`) — a parity item.
-  `test_formal_run.py` still has stale "refused" rows for constructs that now
-  build (`upper`, f/t-strings) and changed refusal wording on the vararg and
-  set-comprehension rows.
-* **Known backend divergence (one red row):** x86-64 lowers `str(<int>)` through a
-  `%ld` format into a buffer and prints `[42]` (correct); arm64 refuses it
-  (`string_conversion_refusal`). `printf_s_of_a_conversion_of_a_number_is_refused`
-  pins the refusal and is red on x86-64 only (`test_formal_run.py` 1361/1). The fix
-  is to port the lowering to arm64 (then flip the row to an oracle row), or to
-  remove it from x86-64; the buffer's lifetime on x86-64 has not been audited.
-  Also still red and pre-existing: `test_formal_value_model.py`'s two x86-64
-  comprehension-element rows (65,536-byte element array) and
-  `a_string_conversion_of_an_integer_is_refused` (x86-64 does not classify an
-  unannotated parameter).
 * **Not run:** `test_formal_admitted.py` / `test_formal_axiom_closure_pinned.py`
   (need the library build; pins will move), the `make gate` bucket.
 

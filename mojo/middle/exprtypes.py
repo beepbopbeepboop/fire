@@ -2190,8 +2190,6 @@ def _binding_node_names(n) -> set:
             _hbn_add_target(bound, t)
     elif isinstance(n, WalrusExpr):
         bound.add(n.name)
-    elif isinstance(n, BinaryOp) and getattr(n, 'op', None) == ':=' and isinstance(getattr(n, 'left'), IdentExpr):
-        bound.add(n.left.name)
     elif isinstance(n, ForStmt):
         _hbn_add_target(bound, n.target)
     elif isinstance(n, VarDecl):
