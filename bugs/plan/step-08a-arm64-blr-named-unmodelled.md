@@ -1,4 +1,5 @@
 # plan/step-08a: name `BLR` in `_unmodelled_instruction` (the emitted indirect call has no step and no name)
+**Status: DONE 2026-11-06 (measured).** `_unmodelled_instruction` names BLR (`arm64_proof_gen.py:8512`); `test_blr_is_named_not_unnamed` and the sp-encodings test pass (2 passed).
 Class: easy      Size: S      Depends: none      Blocks: 08c
 Source: `bugs/FORMAL_arm64_instruction_coverage.md` (`blr` mapping bug, `br` row).
 

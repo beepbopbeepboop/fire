@@ -231,7 +231,7 @@ numbered step; the numbers 01-28 are the first draft's names.
 | step | status | class | size | depends | title |
 |---|---|---|---|---|---|
 | [`00a`](../bugs/plan/step-00a-repair-prooflib-splice.md) | OPEN | mid | M | 00c, 00d, 00e, 00f, 00g | `lib/ProofLib.lean` elaborates again (umbrella: gate for every Lean step) |
-| [`00b`](../bugs/plan/step-00b-step-conds-index-drift.md) | OPEN | easy | S | none | `_STEP_CONDS` index drift — the STRB register-offset row sits in the middle of the table |
+| [`00b`](../bugs/plan/step-00b-step-conds-index-drift.md) | DONE | easy | S | none | `_STEP_CONDS` index drift — the STRB register-offset row sits in the middle of the table |
 | [`00c`](../bugs/plan/step-00c-arm64state-fp-fields.md) | DONE | easy | S | none | struct literals that predate the FP register fields (`d0`-`d7`) |
 | [`00d`](../bugs/plan/step-00d-callfunc2-migration.md) | DONE | mid | M | none | finish the `callFunc2` migration (`runF`, `evalFuncF`, the `runF_*` lemmas, the generator templates) |
 | [`00e`](../bugs/plan/step-00e-contract-and-cmp-proofs.md) | DONE | mid | L | 00d | proofs broken by the shifted-register model — `arm64_step_cmp_reg_n31_reads_zero`, `while_lt_exit_contract_*` |
@@ -250,13 +250,13 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`04d`](../bugs/plan/step-04d-x86-imm-zero.md) | CLAIMED | mid | M | 00a, 01a, 01b | `x86_64/imm_zero` — `add r, 0` / `sub r, 0` with dead flags |
 | [`05a`](../bugs/plan/step-05a-arm64-rule-registry.md) | CLAIMED | mid | M | 03b, 03c, 03d | register the arm64 rules the Lean side now proves |
 | [`05b`](../bugs/plan/step-05b-x86-rule-registry.md) | CLAIMED | mid | M | 04a, 04b, 04c, 04d | register the x86-64 rules, and fix three latent soundness holes in their matchers |
-| [`06a`](../bugs/plan/step-06a-arm64-ccmp-encoders.md) | OPEN | easy | S | none | arm64 `ccmp` encoders (register and immediate), byte-exact against `as` |
+| [`06a`](../bugs/plan/step-06a-arm64-ccmp-encoders.md) | DONE | easy | S | none | arm64 `ccmp` encoders (register and immediate), byte-exact against `as` |
 | [`06b`](../bugs/plan/step-06b-arm64-ccmp-model.md) | OPEN | mid | M | 00a, 00b, 06a | `ccmp` in the machine model: `arm64_step` arms, `_STEP_CONDS` rows, `_step_rhs`, `_regs_written` |
 | [`06c`](../bugs/plan/step-06c-arm64-ccmp-lowering.md) | OPEN | hard | L | 06a, 06b | lower `if A and B:` (two integer comparisons) to `cmp` + `ccmp` + one `b.cond` |
 | [`07a`](../bugs/plan/step-07a-arm64-csinc-family-model.md) | OPEN | mid | M | 00a, 00b | `csinc` / `csinv` / `csneg` in the machine model, step table and fuzzer |
 | [`07b`](../bugs/plan/step-07b-arm64-csinc-family-lowering.md) | OPEN | hard | M | 07a | lower `a if c else ~a` to `csinv` (and `+1` / `-a` to `csinc`/`csneg` where no overflow trap is lost) |
-| [`08a`](../bugs/plan/step-08a-arm64-blr-named-unmodelled.md) | OPEN | easy | S | none | name `BLR` in `_unmodelled_instruction` (the emitted indirect call has no step and no name) |
-| [`08b`](../bugs/plan/step-08b-arm64-br-audit-scope.md) | OPEN | easy | S | none | `br` is emitted (the Mach-O stub) — fix the audit's scope and the stale "uncalled" claims |
+| [`08a`](../bugs/plan/step-08a-arm64-blr-named-unmodelled.md) | DONE | easy | S | none | name `BLR` in `_unmodelled_instruction` (the emitted indirect call has no step and no name) |
+| [`08b`](../bugs/plan/step-08b-arm64-br-audit-scope.md) | DONE | easy | S | none | `br` is emitted (the Mach-O stub) — fix the audit's scope and the stale "uncalled" claims |
 | [`08c`](../bugs/plan/step-08c-arm64-indirect-call-design.md) | OPEN | hard | M | 08a | DESIGN MEMO — how the proof model treats `BLR` (indirect call) and `BR` |
 | [`09`](../bugs/plan/step-09-arm64-extended-add-sub.md) | OPEN | mid | M | 00a, 00b | arm64 extended-register `ADD`/`SUB`/`SUBS(CMP)` with `UXTX` (the SP class), modelled, no lowering |
 | [`10`](../bugs/plan/step-10-string-struct-collision.md) | DONE | mid | M | 01a, 01b | the `String` frame-vs-`char *` collision (zero-argument `String()` used as a receiver) |
@@ -269,7 +269,7 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`13a`](../bugs/plan/step-13a-printf-text-fold.md) | OPEN | mid | M | 10 | `%<w>s`, `%-<w>s`, `%.<p>s` on a non-ASCII text the build can SEE are folded to the CPython answer |
 | [`13b`](../bugs/plan/step-13b-subscript-literal-fold.md) | OPEN | mid | M | 10 | `<literal>[<int literal>]` on non-ASCII text folds to the one-character string |
 | [`13c`](../bugs/plan/step-13c-runtime-unicode-memo.md) | OPEN | hard | M | 11a, 13a, 13b | DECISION MEMO — `%<w>s` / `%.<p>s` and `s[i]` on non-ASCII text the build CANNOT see |
-| [`14a`](../bugs/plan/step-14a-restore-set-literal-dedup.md) | OPEN | easy | S | none | RESTORE the compile-time set-literal dedup that the `formal/model/` package split lost |
+| [`14a`](../bugs/plan/step-14a-restore-set-literal-dedup.md) | DONE | easy | S | none | RESTORE the compile-time set-literal dedup that the `formal/model/` package split lost |
 | [`14b`](../bugs/plan/step-14b-set-runtime-dedup-literal.md) | OPEN | mid | L | 14a | run-time distinctness for a set literal with non-canonical elements (`{x, x, 2}`), both backends |
 | [`14c`](../bugs/plan/step-14c-set-add.md) | OPEN | mid | M | 14b | `set.add(x)` on both backends |
 | [`14d`](../bugs/plan/step-14d-set-comprehension-dedup.md) | OPEN | mid | M | 14b | a set COMPREHENSION is distinct (`{x % 2 for x in range(6)}` has len 2) |
@@ -309,7 +309,7 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`27c`](../bugs/plan/step-27c-landing-pad-tables.md) | DONE | mid | M | 27a | landing-pad / personality data structures (pure Python table + test, NO codegen change) |
 | [`28`](../bugs/plan/step-28-absval-frame-peel.md) | CLAIMED | mid | M | 00a | `absval` frame-peel `K` — verify the same-day fix, pin it with a Lean-free test, then close or localise |
 
-**78 step files:** 13 easy, 57 mid, 8 hard. Status: claimed 16, closed as 'not provided' 1, done 16, open 43, regenerated 2. (Generated by `python3 tools/plan_index.py --write`; do not edit by hand.)
+**78 step files:** 13 easy, 57 mid, 8 hard. Status: claimed 16, closed as 'not provided' 1, done 21, open 38, regenerated 2. (Generated by `python3 tools/plan_index.py --write`; do not edit by hand.)
 
 <!-- END generated by tools/plan_index.py -->
 

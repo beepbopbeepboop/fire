@@ -1,4 +1,5 @@
 # plan/step-00b: `_STEP_CONDS` index drift — the STRB register-offset row sits in the middle of the table
+**Status: DONE 2026-11-06 (measured).** `_STEP_CONDS` rows carry their own ordinal in the comment and `_step_branch_index` agrees for STRB-regoff (85), FCMP (70), FCVTZS (79), LDUR (64); the table is 89 rows now (the ccmp/csinc/csinv/csneg/UXTX rows of 06b/07a/09 were appended after it). `check_step_conds()` warns that 8 of those rows have no Lean arm yet (06b/07a/09's Lean half, blocked on 00a).
 Class: easy      Size: S      Depends: none      Blocks: 06b, 07a, 08a, 09a
 Source: found 2026-11-05 while verifying steps 06-09; no `FORMAL_*.md` owns it. Introduced by commit `6fa9db2d2` (2026-11-03, "wire STRB regoff").
 
