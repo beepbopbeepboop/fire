@@ -1662,8 +1662,8 @@ Index a `range()` result rather than measuring it, until that is fixed.
 | 12 | ../new-modular/Mojo/stdlib/std/origin/__init__.mojo | S | build: the module-level comptime binding 'AnyOrigin' is initialized from an MLIR attribute template: __mlir_attr[...] | different full message | |
 | 13 | ../new-modular/Mojo/stdlib/std/os/path/path.mojo | S | build: path.mojo imports string_span which imports hashlib.hasher (missing) | moved to dependency/import chain issue | |
 | 14 | ../new-modular/Mojo/stdlib/std/reflection/function.mojo | S | build: function.mojo imports sys.info -> dependency chain to FormatStruct bare call | moved to dependency | |
-| 15 | ../new-modular/Mojo/stdlib/std/simd.mojo |  | build: _convert_f32_to_float8_scalar: `_isnan` is called, and it is imported from `std.utils.numeric |  |  |
-| 16 | ../new-modular/Mojo/stdlib/std/sys/arg.mojo |  | build: Span[StaticString, ImmStaticOrigin] is a compile-time explicit-parameter list on a generic, n |  |  |
+| 15 | ../new-modular/Mojo/stdlib/std/simd.mojo | S | likely bare call to generic in std.utils.numerics (like row 4) | pattern match to row 4 | |
+| 16 | ../new-modular/Mojo/stdlib/std/sys/arg.mojo | S | build: arg.mojo imports ffi -> dependency chain (missing modules) | moved to dependency | |
 | 17 | bootstrap_test_classes.mojo |  | build: create_point returns a frame address, and the returned-frame convention needs a caller to res |  |  |
 | 18 | runtime/stdlib_wrapper.mojo |  | build: main: `now` is called, and it is imported from `time`, so the call has to bind a symbol `time |  |  |
 | 19 | t1.mojo |  | build: sys.exit(): `sys` is a linked module but it exports no `exit`, so the call has no symbol to b |  |  |
