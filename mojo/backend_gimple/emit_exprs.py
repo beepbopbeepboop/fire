@@ -3323,7 +3323,8 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
                 gen._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {ev_cast});")
             else:
                 if not gen._emit_struct_subscript_write(obj_v, ot, idx_v, vv, vtype):
-                    gen._emit(f"  {obj_v}[{idx_v}] = {vv};")
+                    # For RefSubscript/RLValue (without __setitem__), assign through reference
+                    gen._emit(f"  (*(&({obj_v}[{idx_v}]))) = {vv};")
             return vtype, vv
         # Skip emitting comment to avoid GIMPLE global-passing issues
         return vtype, vv
