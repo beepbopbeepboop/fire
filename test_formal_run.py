@@ -1782,26 +1782,34 @@ CASES = [
      "    return r\n", 7, None),
     # ── the refusals, which are the other half of the answer ─────────────
     #
-    # `strip` is one instruction from `lstrip` and is still refused, and the
-    # reason is a WRITE rather than a computation: a shorter string has to be
+    # `strip`/`rstrip` are ANSWERED now (step 11a/11b: the receiver here is a
+    # once-bound literal, so the build folds it; an unfoldable receiver takes
+    # `_emit_str_trim`, pinned by test_formal_str_trim_runtime.py). The comment
+    # below is the history of why they used to be refused: a WRITE rather than a computation: a shorter string has to be
     # terminated one byte earlier, and on a bare `char *` the only byte there is
     # the receiver's own. A string literal is interned into __TEXT,__text,
     # which is mapped read+execute, so writing it faults. Checked on both
     # backends because the failure it replaces was a plausible-looking WRONG
     # STRING: an earlier version returned the new end pointer without writing
     # anything, and "   hi   ".strip() printed as "   ".
-    ("str_strip_refused",
+    ("str_strip_folds_literal",
      "def main(n):\n"
      "    s = \"  hi  \"\n"
      "    t = s.strip()\n"
-     "    return 0\n",
-     "refuse:strip() is a real method of String", None),
-    ("str_rstrip_refused",
+     "    r = 0\n"
+     "    if t.find(\"hi\") == 0: r = r + 1\n"
+     "    if t.endswith(\"i\"): r = r + 2\n"
+     "    return r\n",
+     3, None),
+    ("str_rstrip_folds_literal",
      "def main(n):\n"
      "    s = \"  hi  \"\n"
      "    t = s.rstrip()\n"
-     "    return 0\n",
-     "refuse:see strip", None),
+     "    r = 0\n"
+     "    if t.find(\"hi\") == 2: r = r + 1\n"
+     "    if t.endswith(\"i\"): r = r + 2\n"
+     "    return r\n",
+     3, None),
     # The length-dependent half: each of these needs a buffer of a size
     # nothing knows at compile time. The needle is the reason, so the
     # diagnostic is checked for the part that tells a reader which half of the
