@@ -1671,6 +1671,6 @@ Index a `range()` result rather than measuring it, until that is fixed.
 | 21 | test_relaxed_imports.mojo | S | build: imports glob -> dependency chain issue | moved to dependency | |
 | 22 | tools/procrun.py | S | build: imports os -> dependency chain issue | moved to dependency | |
 | 23 | unescape_c.py | S | build: sys.stdin reads from imported module sys but sys publishes no stdin (different from module-not-value issue) | different detailed message | |
-| 24 | tools/wave2_extract_shared.py |  | build: an f-string literal on line 116 is refused on this path, and its text could not be taken apar |  |  |
+| 24 | tools/wave2_extract_shared.py | S | build: imports ast -> dependency chain issue | moved to dependency | |
 
 **Totals:** T=0 M=0 S=0 C=0 (of 24 rows)
