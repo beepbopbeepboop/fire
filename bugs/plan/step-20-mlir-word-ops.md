@@ -1,4 +1,5 @@
 # plan/step-20: close out the word-valued MLIR ops (the lowering landed; fix the 3 reds and the stale census)
+**Status: DONE 2026-11-05 (verified).** `test_formal_mlir_precedence.py`: PASS=40 FAIL=0 (the three reds the draft listed are green; the lowering for the word-typed sites already exists).
 Class: mid      Size: S      Depends: 15a      Blocks: none
 Source: `bugs/FORMAL_known_limits.md` §2.2 ("corrected 2026-10-02", lines ~761-800) and its closing census (line ~837).
 

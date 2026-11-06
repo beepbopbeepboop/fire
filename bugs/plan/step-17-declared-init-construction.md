@@ -1,4 +1,5 @@
 # plan/step-17: close out declared-`__init__` construction (it landed; pin it and fix the doc)
+**Status: DONE 2026-11-05 (verified).** The pin row `constr_init_optional_none_field_is_refused` exists in `test_formal_run.py` and passes (`formal run: PASS=117 FAIL=0`): the faithful `Slice` copy is refused for its `Optional[Int]` fields (`optional_none_word`, 'WRONG about `Some(0)`'), not for its declared `__init__`. No code change was needed.
 Class: easy      Size: S      Depends: 15a      Blocks: none
 Source: `bugs/FORMAL_known_limits.md` §6.1 (`builtin_slice.mojo` row), §6.3 lever #3 ("`Slice.__init__`, 20 files").
 
