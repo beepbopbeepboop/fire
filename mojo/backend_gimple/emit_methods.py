@@ -749,7 +749,7 @@ def _lower_struct_subscript_dunder(gen, ot: str, ov: str, method: str,
     # Also try alternate key forms
     if not cands:
         try:
-            for key_try in [f"{sn}:{method}", f"{sn}_{method}", f"{sn}.{method}", method]:
+            for key_try in [f"{sn}:{method}", f"{sn}_{method}", f"{sn}.{method}", f"{sn}__{method}"]:
                 cands = gen._struct_method_signatures.get(key_try)
                 if cands:
                     break
@@ -759,30 +759,17 @@ def _lower_struct_subscript_dunder(gen, ot: str, ov: str, method: str,
     if not cands and hasattr(gen, '_struct_method_signatures'):
         try:
             for k, v in gen._struct_method_signatures.items():
-                if isinstance(k, str) and (k.endswith(':' + method) or k.endswith('_' + method) or ('_' + sn + '_' in k and method in k)):
-                    cands = v
-                    break
+                if isinstance(k, str):
+                    if k == f'{sn}_{method}' or k.endswith(':' + method) and sn in k.split(':')[0]:
+                        cands = v
+                        break
+                    elif method == '__setitem__' and sn in k and '__setitem__' in k:
+                        cands = v
+                        break
         except Exception:
             pass
     # Be more lenient: if it's a user struct and has the method registered anywhere, try to dispatch
     if not cands:
-        # Last resort: try to construct a call if method might exist by name
-        try:
-            # Check if there's any function with this name
-            overload_id = ''
-            mangled = _gmm_as_str(_ggf._struct_method_csym(gen, sn, method, overload_id))
-            if mangled:
-                ret_type = gen.func_return_types.get(_gmm_as_str(mangled), gen.func_return_types.get(f"{sn}_{method}", 'void' if method == '__setitem__' else 'int64_t'))
-                all_pairs = [(ot, ov)] + list(arg_pairs)
-                if ret_type == 'void' or method == '__setitem__':
-                    gen._emit_call('void', '', mangled, all_pairs)
-                    if method == '__setitem__':
-                        return 'void', ''
-                else:
-                    t = gen._call_expr(ret_type, mangled, all_pairs)
-                    return ret_type, t
-        except Exception:
-            pass
         return None
     # Even if not in struct_field_types, some structs might still need dispatch
     chosen = None

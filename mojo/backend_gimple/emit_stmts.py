@@ -2309,12 +2309,16 @@ def _gen_stmt_AssignStmt(gen, node):
             gen, ot, obj_v, '__setitem__', [(it, idx_v), (vtype, v)])
         if _setitem_r is not None:
             return
-        # Extra aggressive: try direct call
+        # Extra aggressive: try direct call (more specific)
         try:
             _sn_try = gimple_exprtypes._struct_name_of(ot) if ot.endswith(' *') else None
             if _sn_try and hasattr(gen, '_struct_method_signatures'):
-                for k in gen._struct_method_signatures:
-                    if isinstance(k, str) and '__setitem__' in k and _sn_try in k:
+                # Only try if there's actually a method registered for THIS struct
+                import mojo.backend_gimple.emit_calls as gmp_calls
+                try:
+                    from mojo.backend_gimple.emit_methods import _gmm_sms_key
+                    k_exact = _gmm_sms_key(_sn_try, '__setitem__')
+                    if k_exact in gen._struct_method_signatures and gen._struct_method_signatures[k_exact]:
                         try:
                             import mojo.backend_gimple.emit_funcs as _ggf2
                             mangled = _ggf2._struct_method_csym(gen, _sn_try, '__setitem__', '')
@@ -2324,7 +2328,8 @@ def _gen_stmt_AssignStmt(gen, node):
                                 return
                         except Exception:
                             pass
-                        break
+                except Exception:
+                    pass
         except Exception:
             pass
         # Constant-index write into a synthesized `Tuple[...]` value
@@ -2492,7 +2497,7 @@ def _gen_stmt_AssignStmt(gen, node):
                 _backed = False
                 if _sn_cand and not gen._struct_defines_method(_sn_cand, '__setitem__'):
                     sft_c = gen.struct_field_types.get(_sn_cand, {})
-                    for _bf in ('_data', 'data', '_array', 'array', 'buffer', 'storage', 'values', '_values', 'items', '_items', 'container'):
+                    for _bf in ('_data', 'data', '_array', 'array', 'buffer', 'storage', 'values', '_values', 'items', '_items', 'container', 'inner', '_inner'):
                         if _bf in sft_c:
                             _bft = sft_c[_bf]
                             if isinstance(_bft, str) and _bft == 'MojoDict *':
@@ -2510,6 +2515,25 @@ def _gen_stmt_AssignStmt(gen, node):
                                 gen._emit(f"  mojo_list_set_{suf_b} ({_blist}, {idx64_b}, {ev_cast_b});")
                                 _backed = True
                                 break
+                    # Also try any field that's a container
+                    if not _backed:
+                        for _bf, _bft in sft_c.items():
+                            if isinstance(_bft, str):
+                                if _bft == 'MojoDict *':
+                                    _bdp = gen._new_val('MojoDict *', f"{obj_v}->{gimple_ctypes._safe_field(_bf)}")
+                                    _, _bkv = gen._char_to_cstr(it, idx_v, True, True)
+                                    gen._emit_dict_int_value_store(_bdp, 'char *', _bkv, vtype, v, node.value)
+                                    _backed = True
+                                    break
+                                elif _bft == 'MojoList *':
+                                    _blist = f"{obj_v}->{gimple_ctypes._safe_field(_bf)}"
+                                    elem_b = gen._elem_of(_blist) or gen._elem_types.get(_blist) or 'int64_t'
+                                    suf_b = gimple_ctypes.TypeLattice.list_suffix(elem_b)
+                                    idx64_b = gen._new_val('int64_t', f"(int64_t){idx_v}")
+                                    ev_cast_b = gen._cast_for_list(vtype, v, suf_b)
+                                    gen._emit(f"  mojo_list_set_{suf_b} ({_blist}, {idx64_b}, {ev_cast_b});")
+                                    _backed = True
+                                    break
                 if _backed:
                     pass  # handled
                 elif not gen._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
@@ -2958,8 +2982,10 @@ def _gen_stmt_AugAssignStmt(gen, node):
         try:
             _sn_try = gimple_exprtypes._struct_name_of(ot) if ot.endswith(' *') else None
             if _sn_try and hasattr(gen, '_struct_method_signatures'):
-                for k in gen._struct_method_signatures:
-                    if isinstance(k, str) and '__setitem__' in k and _sn_try in k:
+                try:
+                    from mojo.backend_gimple.emit_methods import _gmm_sms_key
+                    k_exact = _gmm_sms_key(_sn_try, '__setitem__')
+                    if k_exact in gen._struct_method_signatures and gen._struct_method_signatures[k_exact]:
                         try:
                             import mojo.backend_gimple.emit_funcs as _ggf2
                             mangled = _ggf2._struct_method_csym(gen, _sn_try, '__setitem__', '')
@@ -2969,7 +2995,8 @@ def _gen_stmt_AugAssignStmt(gen, node):
                                 return
                         except Exception:
                             pass
-                        break
+                except Exception:
+                    pass
         except Exception:
             pass
         if ot == 'MojoList *':
@@ -3092,7 +3119,17 @@ def _gen_stmt_AugAssignStmt(gen, node):
                                     mangled = _ggf2._struct_method_csym(gen, _w_sn, '__setitem__', '')
                                     if mangled:
                                         all_pairs = [(ot, obj_v), (it, idx_v), (vtype, v)]
-                                        gen._emit_call('void', '', mangled, all_pairs)
+                                        try:
+                                            gen._emit_call('void', '', mangled, all_pairs)
+                                        except Exception:
+                                            raise RuntimeError(
+                                                f"cannot compile module: `{_w_sn}[...] = ...` "
+                                                f"subscript store on user-defined struct {_w_sn!r} "
+                                                "(no `__setitem__` method and no backing container "
+                                                "field) — this codegen can't represent it as "
+                                                "compiled C without emitting silently wrong code; "
+                                                "falling back to interpreting this module from "
+                                                "source instead")
                                     else:
                                         raise RuntimeError(
                                             f"cannot compile module: `{_w_sn}[...] = ...` "
@@ -3119,14 +3156,33 @@ def _gen_stmt_AugAssignStmt(gen, node):
                             raise
                         except Exception:
                             if _w_sn in gen.struct_field_types:
-                                raise RuntimeError(
-                                    f"cannot compile module: `{_w_sn}[...] = ...` "
-                                    f"subscript store on user-defined struct {_w_sn!r} "
-                                    "(no `__setitem__` method and no backing container "
-                                    "field) — this codegen can't represent it as "
-                                    "compiled C without emitting silently wrong code; "
-                                    "falling back to interpreting this module from "
-                                    "source instead")
+                                # Last ditch: try to call __setitem__ directly
+                                try:
+                                    import mojo.backend_gimple.emit_funcs as _ggf2
+                                    mangled = _ggf2._struct_method_csym(gen, _w_sn, '__setitem__', '')
+                                    if mangled:
+                                        all_pairs = [(ot, obj_v), (it, idx_v), (vtype, v)]
+                                        gen._emit_call('void', '', mangled, all_pairs)
+                                    else:
+                                        raise RuntimeError(
+                                            f"cannot compile module: `{_w_sn}[...] = ...` "
+                                            f"subscript store on user-defined struct {_w_sn!r} "
+                                            "(no `__setitem__` method and no backing container "
+                                            "field) — this codegen can't represent it as "
+                                            "compiled C without emitting silently wrong code; "
+                                            "falling back to interpreting this module from "
+                                            "source instead")
+                                except RuntimeError:
+                                    raise
+                                except Exception:
+                                    raise RuntimeError(
+                                        f"cannot compile module: `{_w_sn}[...] = ...` "
+                                        f"subscript store on user-defined struct {_w_sn!r} "
+                                        "(no `__setitem__` method and no backing container "
+                                        "field) — this codegen can't represent it as "
+                                        "compiled C without emitting silently wrong code; "
+                                        "falling back to interpreting this module from "
+                                        "source instead")
                             else:
                                 gen._emit(f"  {obj_v}[{idx_v}] = {v};")
                     else:
