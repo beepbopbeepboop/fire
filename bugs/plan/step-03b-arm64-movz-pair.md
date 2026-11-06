@@ -30,8 +30,8 @@ Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §2 table row `arm64/movz
 ```
 export PATH=/opt/homebrew/bin:$PATH
 python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_peephole.py
-python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_proof_gaps.py
-python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_admitted.py
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_proof_gaps.py
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_admitted.py
 ```
 Update the `Peephole` pins in `test_formal_admitted.py`/`test_formal_axiom_closure_pinned.py` from the measurement.
 

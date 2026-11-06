@@ -31,7 +31,7 @@ Source: `bugs/FORMAL_no_exceptions.md` item 2 and the 27a section; `formal/arm64
 export PATH=/opt/homebrew/bin:$PATH
 python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_try_model.py
 python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_exceptions.py
-python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_call_proof_gen.py
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_call_proof_gen.py
 ```
 
 ## Done when

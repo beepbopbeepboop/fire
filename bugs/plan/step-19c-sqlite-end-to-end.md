@@ -22,7 +22,7 @@ Source: `bugs/FORMAL_known_limits.md` §3.1.
 ```
 export PATH=/opt/homebrew/bin:$PATH
 python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_runtime_link.py
-python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_dylib.py
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_dylib.py
 python3 tools/plan_index.py --check
 ```
 

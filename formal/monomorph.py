@@ -1816,6 +1816,7 @@ def rewrite_instantiation_uses(stmts, demap: dict) -> int:
     from formal import model as M                  # lazy — cycle
     from formal.build import _names_bound_in       # lazy — cycle
     uniq = _unique_instantiation(demap)
+    by_base = instantiations_by_base(demap)
     # The demand was recorded under the DEFINING name (see
     # `local_defining_names`), so a call site's own spelling has to be mapped
     # through the same table before it can name that demand's table entry.
@@ -1843,9 +1844,20 @@ def rewrite_instantiation_uses(stmts, demap: dict) -> int:
                     and isinstance(node.obj, F.IdentExpr):
                 if node.obj.name in shadowed:
                     continue
-                mangled = uniq.get(defining.get(node.obj.name,
-                                                node.obj.name))
+                base_name = defining.get(node.obj.name, node.obj.name)
+                mangled = uniq.get(base_name)
                 if mangled is None:
+                    # TWO OR MORE instantiations: the read names none of them in
+                    # particular, and both ways of proceeding are wrong (the
+                    # template's own unsubstituted alias is a number no
+                    # instantiation stands behind; the first one built is an
+                    # order the source does not state) — so refuse, by name.
+                    # ZERO instantiations is left alone: the class-attribute
+                    # refusal already in `formal/build.py` is true of it.
+                    made = by_base.get(base_name) or ()
+                    if len(made) > 1 and node.member:
+                        raise M.CodegenError(M.template_attribute_read_ambiguous(
+                            base_name, node.member, sorted(made)))
                     continue
                 node.obj = F.IdentExpr(name=mangled, line=node.obj.line,
                                        col=node.obj.col)

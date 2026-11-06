@@ -3811,6 +3811,44 @@ _CONTAINER_BUILDING_NODES = (
 )
 
 
+def template_attribute_read_ambiguous(template: str, attr: str,
+                                      instantiations) -> str:
+    """The diagnostic for `{template}.{attr}` where the consumer applies that
+    template at MORE THAN ONE instantiation.
+
+    A class-level value belongs to an INSTANTIATION and not to the template —
+    `comptime length = len(Self.values)` is `4` in the instantiation of
+    `[1, 2, 3, 4]` and `1` in the instantiation of `[9]`, and the two are two
+    separate declarations under two mangled names
+    (`formal/monomorph.py::instantiate_all`). So a read spelled through the
+    template's own name names a value only when the program says which
+    instantiation it means, and `formal/monomorph.py::rewrite_instantiation_uses`
+    answers it exactly when this unit applies the template once. At two or more
+    there is nothing to answer with, and the two ways of proceeding are both
+    wrong: the template's own unsubstituted alias is a number no instantiation
+    stands behind, and the first instantiation built is an order the source does
+    not state.
+
+    Named, not counted, because the repair is a spelling rather than a number:
+    the value is reachable through an INSTANCE (`d.{attr}`) or through the
+    mangled name of the instantiation meant, and the reader can see which
+    instantiations this file has. the general shape (recorded in `bugs/plan/step-15a-monomorph-baseline.md`)
+    a type argument in a NON-CALL position is not a
+    demand — and this is the one spelling of it where the consumer supplies the
+    argument somewhere else in the file and here supplies none."""
+    shown = ", ".join(instantiations[:3])
+    more = "" if len(instantiations) <= 3 else ", …"
+    return (f"{template}.{attr} reads a `comptime` class attribute of "
+            f"{template}, and a class attribute belongs to an INSTANTIATION, "
+            f"not to the generic template — this file "
+            f"applies {template} at {len(instantiations)} of them ({shown}"
+            f"{more}), each with its own value for `{attr}`, so the read names "
+            f"none of them in particular. Reading it through an instance "
+            f"(`d.{attr}`) names one; reading it through one instantiation's own "
+            f"name does too. Guessing the first one built would answer with a "
+            f"number the source never wrote")
+
+
 def _expr_builds_a_container(e) -> bool:
     """True when `e` is, or contains, an expression that builds a container."""
     if e is None or isinstance(e, str):

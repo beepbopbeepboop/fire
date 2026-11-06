@@ -12,7 +12,7 @@ Source: 18a's section "§6.3 Design: the by-reference one-field mutator contract
 ## Work order
 1. Edit `_frame_methods` per D1; keep the already-landed single-store case.
 2. Add tests to `test_formal_frame_method_finder.py` in the same style as `test_one_field_mutator_by_reference_gets_contract`: one per row of 18a's table that D1 now EXCLUDES (`assertIsNone(found)` or the method absent from `found`), and keep the set_v case.
-3. Run the existing proof generator unit file for frame contracts: `python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_call_proof_gen.py` (no Lean if the file's default doesn't need it; if it invokes lean, SKIP it and say so).
+3. Run the existing proof generator unit file for frame contracts: `python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_call_proof_gen.py` (no Lean if the file's default doesn't need it; if it invokes lean, SKIP it and say so).
 
 ## Do NOT
 - Do not add any new classification. Do not edit `lib/`.

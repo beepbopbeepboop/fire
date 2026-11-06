@@ -380,6 +380,18 @@ def reads_arm64(word: int) -> frozenset:
     return _ALL_REGS if got is None else got
 
 
+#: Return `(KEEP_FIRST, n)` from a rule to say: leave the window's first
+#: instruction EXACTLY as it is, keep the first `n` instructions, and delete the
+#: rest of the window. This is the "delete the second of a pair" shape
+#: (`store_load`, a duplicate store), and it needs its own spelling because the
+#: two neighbours both mean something else: `(b"", n)` DELETES the first `n`
+#: instructions (so `(b"", 1)` on a pair deletes the FIRST one — for a store
+#: followed by its load that removes the store and keeps the load, which is the
+#: wrong program), and `(bytes, n)` REPLACES the first instruction with `bytes`
+#: (arm64 only: the replacement is re-decoded as an A64 word).
+KEEP_FIRST = object()
+
+
 # ── rules ───────────────────────────────────────────────────────────────────
 @dataclass
 class Rule:
@@ -775,7 +787,7 @@ def _a_str_pair(window, ctx):
         return None
     if da.rd != db.rd or da.rn != db.rn or da.imm != db.imm:
         return None
-    return b"", 1
+    return KEEP_FIRST, 1
 
 
 def _a_ldr_pair(window, ctx):
@@ -792,7 +804,7 @@ def _a_ldr_pair(window, ctx):
         return None
     if da.rd == da.rn:  # rt == rn is unsound
         return None
-    return b"", 1
+    return KEEP_FIRST, 1
 
 
 def _a_movz_pair(window, ctx):
@@ -827,7 +839,7 @@ def _a_store_load(window, ctx):
         return None
     if da.rd != db.rd or da.rn != db.rn or da.imm != db.imm:
         return None
-    return b"", 1
+    return KEEP_FIRST, 1
 
 
 _COPY_CHAIN = Rule("arm64/copy_chain", "arm64", "peephole_arm64_copy_chain",
@@ -872,16 +884,19 @@ def _x_mem_pair(window, ctx):
         if getattr(d, "mod", None) != 1:  # disp8 only
             return None
     if da.form == "mov_rm64_r64" and db.form == "mov_rm64_r64":
-        if (da.mem_base, da.mem_disp, da.rm) == (db.mem_base, db.mem_disp,
-                                                db.rm):
-            return b"", 1
+        # Compare the SOURCE register (`reg`): for a memory operand the decoder
+        # overwrites `rm` with the base, so `rm` is just `mem_base` again and
+        # comparing it never distinguished `mov [m], rax` from `mov [m], rcx`.
+        if (da.reg, da.mem_base, da.mem_disp) == (db.reg, db.mem_base,
+                                                 db.mem_disp):
+            return KEEP_FIRST, 1
     # drop the mov_rm64_imm32 branch (no theorem) — see 04c
     if da.form == "mov_r64_rm64" and db.form == "mov_r64_rm64":
         if da.reg == da.mem_base:  # first load clobbers address register
             return None
         if (da.reg, da.mem_base, da.mem_disp) == (db.reg, db.mem_base,
                                                   db.mem_disp):
-            return b"", 1
+            return KEEP_FIRST, 1
     return None
 
 
@@ -904,11 +919,16 @@ def _x_store_load(window, ctx):
             return None
     if da.form != "mov_rm64_r64" or db.form != "mov_r64_rm64":
         return None
-    if da.rm != db.reg:
+    # The register STORED (`da.reg`) must be the register LOADED (`db.reg`).
+    # `da.rm` is the base for a memory operand, so comparing it with the
+    # load's destination (as this once did) deleted `mov [rbx-8], rax ;
+    # mov rbx, [rbx-8]` and declined the real `mov [rbp-8], rax ; mov rax,
+    # [rbp-8]`.
+    if da.reg != db.reg:
         return None
     if (da.mem_base, da.mem_disp) != (db.mem_base, db.mem_disp):
         return None
-    return b"", 1
+    return KEEP_FIRST, 1
 
 
 def _x_mov_self(window, ctx):
@@ -1033,8 +1053,8 @@ SCAFFOLDED_RULES: list = [
     Rule("x86_64/mov_self_rev", "x86_64", "peephole_x86_mov_self_rev",
          ("mod == 3", "reg == rm"), _x_mov_self_rev,
          "a register copied into itself (0x8b)"),
-    Rule("x86_64/imm_zero", "x86_64", "peephole_x86_imm_zero",
-         ("flags dead"), _x_imm_zero,
+    Rule("x86_64/imm_zero", "x86_64", "peephole_x86_imm_zero_flags",
+         ("flags dead",), _x_imm_zero,
          "`add`/`sub r, 0` with dead flags"),
 ]
 
@@ -1444,7 +1464,10 @@ def _run(asm, arch, rules, stats=None) -> int:
             # merged: deleting `entries[i+1:]` when the window is a single
             # instruction removes nothing, the loop makes no progress, and the
             # pass spins — which is exactly what it did before these two arms.
-            if new_bytes:
+            if new_bytes is KEEP_FIRST:
+                del entries[i + consumed:i + len(window)]
+                removed += len(window) - consumed
+            elif new_bytes:
                 entries[i].raw = new_bytes
                 entries[i].dec = _redecode(new_bytes, arch)
                 entries[i].reads = reads_arm64(struct.unpack_from(

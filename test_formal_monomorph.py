@@ -2597,9 +2597,17 @@ def test_a_class_attribute_read_of_two_instantiations_is_refused(tmpdir):
         text = run_pair_case(tmpdir, arch, "mm_classattr_two", CLASSCATTR_LIB,
                              CLASSCATTR_TWO_PROG, "", expect_ok=False,
                              libname="sizelib.mojo")
+        # The needles are the AMBIGUITY refusal's (`model.template_attribute_
+        # read_ambiguous`), which names the template, says the read is of a
+        # `comptime` class attribute, and lists the instantiations. This test
+        # used to pin the OLDER sentence (`...'values', a PARAMETER of
+        # TypeDict`) that the read fell through to when two instantiations were
+        # applied; two branches built the two refusals and the merge kept both
+        # tests. One message now carries the shared opening and the part that
+        # makes it actionable here (which instantiations exist).
         for needle in ("reads a `comptime` class attribute of TypeDict",
-                       "'values', a",
-                       "PARAMETER of TypeDict"):
+                       "applies TypeDict at 2 of them",
+                       "each with its own value for `length`"):
             check(needle in text,
                   f"[{arch}] the ambiguous class-attribute read did not say "
                   f"{needle!r}: {text.strip()[-400:]}")
@@ -4245,9 +4253,7 @@ TESTS = [
      test_a_module_called_through_its_import_alias_loweres_to_that_module),
 ]
 
-EXPECTED_FAILURES: dict = {
-    "a class attribute through two instantiations is refused": "regression: ambiguity refusal text lost; plan step-15a, see FORMAL_known_limits.md §1.2 Status",
-}
+EXPECTED_FAILURES: dict = {}
 
 
 def _check_case_arities() -> None:

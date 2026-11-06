@@ -1032,6 +1032,7 @@ class X86_64Codegen:
         # this path that produces one — see model.VALUE_METHOD_RECEIVERS for
         # what went wrong without this. Reset per function.
         self._fd_vars = set()
+        self._str_lit_vals: dict = {}   # per function: model.once_bound_string_literals
         # String-literal data, appended after all the code: (label, bytes).
         # `_str_intern` maps content to label so equal literals share one
         # address. Both persist across compile()'s two-pass re-emit so the
@@ -1641,6 +1642,7 @@ class X86_64Codegen:
         self._list_growable = set()
         self._list_growable_nodes = set()
         self._fd_vars = set()
+        self._str_lit_vals = M.once_bound_string_literals(f)
         # `comptime NAME = value` bindings in scope, and the list-valued ones
         # kept as their AST. Reset per function, exactly like the tables above:
         # a comptime binding is compile-time state local to the body that
@@ -2883,6 +2885,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         raise CodegenError(
             f"unsupported statement {type(stmt).__name__} on the formal "
             f"x86-64 path")
+
+    def _text_vals(self) -> dict:
+        """The text the build knows for a NAME: `comptime` constants, plus the
+        locals bound once to a string literal and never stored to again
+        (`model.once_bound_string_literals`). Separate from `_comptime_vals` on
+        purpose: that table is what `_check_comptime_target` refuses stores to."""
+        return {**self._str_lit_vals, **self._comptime_vals}
 
     def _check_comptime_target(self, name: str, what: str) -> None:
         """Refuse a store to a name that is currently a `comptime` binding.
@@ -5156,8 +5165,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             if isinstance(arg, F.IdentExpr):
                 name = arg.name
                 try:
-                    if getattr(self, "_comptime_vals", None) and name in self._comptime_vals:
-                        cv = self._comptime_vals[name]
+                    if name in self._text_vals():
+                        cv = self._text_vals()[name]
                         if isinstance(cv, str):
                             return cv
                         t2 = M.string_literal_text(cv)
@@ -7796,8 +7805,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 try:
                     if isinstance(a, F.IdentExpr):
                         nm = a.name
-                        if getattr(self, "_comptime_vals", None) and nm in self._comptime_vals:
-                            cv = self._comptime_vals[nm]
+                        if nm in self._text_vals():
+                            cv = self._text_vals()[nm]
                             if isinstance(cv, str): return cv
                             t2 = M.string_literal_text(cv)
                             if t2 is not None: return t2
@@ -7811,8 +7820,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 try:
                     name = e.obj.name
                     tcv = None
-                    if getattr(self, "_comptime_vals", None) and name in self._comptime_vals:
-                        cv = self._comptime_vals[name]
+                    if name in self._text_vals():
+                        cv = self._text_vals()[name]
                         tcv = M.string_literal_text(cv) or _text_of(cv)
                     if tcv is not None:
                         if isinstance(e.index, F.IntLiteral):
@@ -7849,8 +7858,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     try:
                         if isinstance(a, F.IdentExpr):
                             nm = a.name
-                            if getattr(self, "_comptime_vals", None) and nm in self._comptime_vals:
-                                cv = self._comptime_vals[nm]
+                            if nm in self._text_vals():
+                                cv = self._text_vals()[nm]
                                 t2 = M.string_literal_text(cv)
                                 if t2 is not None: return t2
                                 t2 = self._printf_arg_text(cv)
@@ -7863,8 +7872,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     try:
                         name = e.obj.name
                         tcv = None
-                        if getattr(self, "_comptime_vals", None) and name in self._comptime_vals:
-                            cv = self._comptime_vals[name]
+                        if name in self._text_vals():
+                            cv = self._text_vals()[name]
                             tcv = M.string_literal_text(cv) or _text_of(cv)
                         if tcv is not None:
                             if isinstance(e.index, F.IntLiteral):
@@ -8019,8 +8028,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 try:
                     if isinstance(a, F.IdentExpr):
                         nm = a.name
-                        if getattr(self, "_comptime_vals", None) and nm in self._comptime_vals:
-                            cv = self._comptime_vals[nm]
+                        if nm in self._text_vals():
+                            cv = self._text_vals()[nm]
                             t2 = M.string_literal_text(cv)
                             if t2 is not None: return t2
                             t2 = self._printf_arg_text(cv)
@@ -10970,7 +10979,12 @@ preference.
             self.asm.emit(encode_mov_r64_r64(Reg.R12, Reg.RCX))  # amount
             self.asm.emit(encode_shift_r64_cl(_SHIFT_IMM[op], Reg.RAX))  # RAX = orig << amt
             self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.RAX))  # save result
-            self.asm.emit(encode_shift_r64_cl(_SHIFT_CL[op] if signed else ">>signed", Reg.RAX))  # RAX = result >> amt
+            # Undo the shift with an ARITHMETIC right shift, always. (This line
+            # used `_SHIFT_CL[op] if signed else ">>signed"`; `_SHIFT_CL["<<"]`
+            # is `"<<"`, so for a signed operand the "undo" was a second LEFT
+            # shift, `(x << n) << n != x`, and every ordinary `x <<= n` /
+            # `x << n` with a non-literal count trapped as an overflow.)
+            self.asm.emit(encode_shift_r64_cl(">>signed", Reg.RAX))  # RAX = result >> amt
             self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R11))  # compare with orig
             self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.R12))
             ovf = f"{fn}_sh{sid}_ovf"
@@ -13093,17 +13107,9 @@ ctor_field_value=self._ctor_field_value_for(name),
             # re-deriving the test here is what keeps the two paths from
             # disagreeing about the same read.
             self._string_vars.add(name)
-            try:
-                if isinstance(value, F.StringLiteral) and getattr(self, "_comptime_vals", None) is not None:
-                    try:
-                        self._comptime_vals[name] = F.decoded_literal(value)
-                    except Exception:
-                        try:
-                            self._comptime_vals[name] = getattr(value, "value", None)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+            # NOT recorded in `_comptime_vals` (see the arm64 twin): a string
+            # VARIABLE is mutable, that table is for `comptime` constants, and
+            # `_check_comptime_target` refuses any later store to a name in it.
         elif isinstance(value, F.CallExpr) and M.string_method_yields_string(
                 value, M.string_operand_is_string(self._expr_str_kind(
                     value.func.obj if isinstance(value.func, F.MemberExpr)
@@ -13531,11 +13537,11 @@ ctor_field_value=self._ctor_field_value_for(name),
                         try:
                             if isinstance(a, F.IdentExpr):
                                 nm = a.name
-                                if getattr(self, "_comptime_vals", None) and nm in self._comptime_vals:
-                                    t2 = M.string_literal_text(self._comptime_vals[nm])
+                                if nm in self._text_vals():
+                                    t2 = M.string_literal_text(self._text_vals()[nm])
                                     if t2 is not None:
                                         return t2
-                                    t2 = self._printf_arg_text(self._comptime_vals[nm])
+                                    t2 = self._printf_arg_text(self._text_vals()[nm])
                                     if t2 is not None:
                                         return t2
                         except Exception:

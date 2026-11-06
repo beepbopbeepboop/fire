@@ -53,7 +53,7 @@ python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_hostmods_census
 python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_os.py
 python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_json.py
 python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_hashlib.py
-python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_admitted.py
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_admitted.py
 ```
 (`test_formal_os_backing.py` also runs `os` on both backends; run it if time allows.)
 

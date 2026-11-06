@@ -153,6 +153,23 @@ class TestRulesAreLicensed(unittest.TestCase):
                          "a rule with no theorem in lib/Peephole.lean")
         self.assertEqual(set(), set(r.name for r in P.SCAFFOLDED_RULES) & set(r.name for r in (P.ARM64_RULES + P.X86_RULES)))
 
+    def test_every_scaffolded_rule_names_a_ledgered_hole(self):
+        # A scaffolded rule's theorem is stated in lib/Scaffold.lean with a
+        # `sorry`, and that hole must be in the ledger. A name that is in
+        # NEITHER place (the state the x86 memory rules were in until the
+        # scaffolds were re-added) is a rule pointing at a theorem nobody
+        # wrote, and nothing else in the suite notices.
+        from formal.proof_gaps import SCAFFOLD_HOLES
+        bad = [r.name for r in P.SCAFFOLDED_RULES
+               if r.theorem not in SCAFFOLD_HOLES
+               and r.theorem not in P.declared_theorems()]
+        self.assertEqual([], bad)
+        # ...and the scaffold is not simultaneously a licence: no enabled
+        # rule may name a ledgered (sorry-backed) theorem.
+        leaked = [r.name for r in (P.ARM64_RULES + P.X86_RULES + P.PENDING_RULES)
+                  if r.theorem in SCAFFOLD_HOLES]
+        self.assertEqual([], leaked)
+
     def test_every_pending_rule_also_names_a_declared_theorem(self):
         # A pending rule is proved and not yet sound to FIRE; that is a
         # different fact from being unproved, and the test is what keeps it
@@ -623,6 +640,50 @@ class TestArm64ScaffoldedRules(unittest.TestCase):
         self.assertEqual(res[1], 1)
 
 
+class TestScaffoldedArm64PairsKeepTheRightInstruction(unittest.TestCase):
+    """Run each scaffolded arm64 memory rule through the real rewrite loop and
+    read back WHICH instruction is left.
+
+    The tests above only check the matcher's return count (`res[1] == 1`),
+    which is the same for "delete the second" and "delete the first" — and the
+    first draft of `_a_store_load` returned `(b"", 1)`, which deletes the STORE
+    and keeps the load. Only the surviving bytes tell the two apart.
+    """
+
+    @staticmethod
+    def _run(rule_name, *insns):
+        from unittest import mock
+        rule = [r for r in P.SCAFFOLDED_RULES if r.name == rule_name][0]
+        asm = _Asm(_w(*insns))
+        with mock.patch.object(P, "unlicensed_rules", lambda rules=None: []):
+            removed = P._run(asm, "arm64", [rule])
+        return asm, removed
+
+    def test_store_load_keeps_the_store(self):
+        st = encode_str_xt_xn_imm(1, 2, 8)
+        ld = encode_ldr_xt_xn_imm(1, 2, 8)
+        asm, removed = self._run("arm64/store_load", st, ld)
+        self.assertEqual(1, removed)
+        self.assertEqual(st, asm.text())
+
+    def test_store_load_declines_a_different_register(self):
+        st = encode_str_xt_xn_imm(1, 2, 8)
+        ld = encode_ldr_xt_xn_imm(3, 2, 8)
+        asm, removed = self._run("arm64/store_load", st, ld)
+        self.assertEqual(0, removed)
+
+    def test_store_pair_leaves_one_store(self):
+        st = encode_str_xt_xn_imm(1, 2, 8)
+        asm, removed = self._run("arm64/mem_pair_str", st, st)
+        self.assertEqual(1, removed)
+        self.assertEqual(st, asm.text())
+
+    def test_store_pair_declines_different_registers(self):
+        a, b = encode_str_xt_xn_imm(1, 2, 8), encode_str_xt_xn_imm(3, 2, 8)
+        asm, removed = self._run("arm64/mem_pair_str", a, b)
+        self.assertEqual(0, removed)
+
+
 class TestBranchDecode(unittest.TestCase):
     """`arm64_branch_target`, against `formal/arm64.py`'s own encoders.
 
@@ -950,6 +1011,103 @@ class TestX86Rules(unittest.TestCase):
         data = b"\x48\x8b\x40\x08" + b"\x48\x8b\x40\x08" + b"\xc3"
         asm, removed = _xrun(data)
         self.assertEqual(0, removed)
+
+
+class TestX86MemoryMatchers(unittest.TestCase):
+    """The x86-64 memory rules' MATCHERS, driven directly.
+
+    These rules are scaffolded, not enabled (their theorems are `sorry` in
+    `lib/Scaffold.lean`), so `_xrun` — which runs `X86_RULES` — never reaches
+    them, and the tests above that "decline" a window pass whatever the matcher
+    does. These run one scaffolded rule at a time over real encoder output, so
+    a matcher that is wrong fails here, in Python, long before a theorem could
+    be promoted over it.
+
+    The two bugs this class was written for: the decoder overwrites `rm` with
+    the BASE register for a memory operand, so (1) the store pair never
+    compared the register being stored, and (2) store-load compared the base
+    with the load's destination instead of the stored register with it.
+    """
+
+    @staticmethod
+    def _run(rule_name, *insns):
+        from formal import x86_64 as X
+        rule = [r for r in P.SCAFFOLDED_RULES if r.name == rule_name][0]
+        data = b"".join(insns) + b"\xc3"
+        asm = _XAsm(data)
+        # The licence check (`unlicensed_rules`) is exactly what keeps a
+        # scaffolded rule from running in the pass; this test is the one
+        # place that must run one, to test the MATCHER, so it lifts that check
+        # for this call only.
+        from unittest import mock
+        with mock.patch.object(P, "unlicensed_rules", lambda rules=None: []):
+            return asm, P._run(asm, "x86_64", [rule])
+
+    def setUp(self):
+        from formal import x86_64 as X
+        self.X, self.R = X, X.Reg
+        self.st = X.encode_mov_rm64_r64      # (base, disp, src)
+        self.ld = X.encode_mov_r64_rm64      # (dst, base, disp)
+
+    def test_store_load_of_the_same_register_deletes_the_load(self):
+        R = self.R
+        asm, n = self._run("x86_64/store_load",
+                           self.st(R.RBP, -8, R.RAX), self.ld(R.RAX, R.RBP, -8))
+        self.assertEqual(1, n)
+        self.assertEqual(self.st(R.RBP, -8, R.RAX) + b"\xc3", asm.text())
+
+    def test_store_load_declines_a_different_destination_register(self):
+        R = self.R
+        w = (self.st(R.RBP, -8, R.RAX), self.ld(R.RCX, R.RBP, -8))
+        asm, n = self._run("x86_64/store_load", *w)
+        self.assertEqual(0, n)
+
+    def test_store_load_declines_when_the_destination_is_the_base(self):
+        # `mov [rbx-8], rax ; mov rbx, [rbx-8]`: the load writes RBX with the
+        # stored RAX, which is not RBX's old value. A matcher comparing the
+        # base with the destination deletes the load.
+        R = self.R
+        asm, n = self._run("x86_64/store_load",
+                           self.st(R.RBX, -8, R.RAX), self.ld(R.RBX, R.RBX, -8))
+        self.assertEqual(0, n)
+
+    def test_store_pair_of_the_same_register_deletes_the_second(self):
+        R = self.R
+        s = self.st(R.RBP, -8, R.RAX)
+        asm, n = self._run("x86_64/mem_pair_store", s, s)
+        self.assertEqual(1, n)
+        self.assertEqual(s + b"\xc3", asm.text())
+
+    def test_store_pair_declines_different_source_registers(self):
+        # Two stores to one slot of DIFFERENT registers: the second wins, so
+        # deleting it keeps the wrong value. A matcher that never compares the
+        # source register deletes it.
+        R = self.R
+        asm, n = self._run("x86_64/mem_pair_store",
+                           self.st(R.RBP, -8, R.RAX), self.st(R.RBP, -8, R.RCX))
+        self.assertEqual(0, n)
+
+    def test_store_pair_declines_different_offsets_and_bases(self):
+        R = self.R
+        for a, b in ((self.st(R.RBP, -8, R.RAX), self.st(R.RBP, -16, R.RAX)),
+                     (self.st(R.RBP, -8, R.RAX), self.st(R.RBX, -8, R.RAX))):
+            asm, n = self._run("x86_64/mem_pair_store", a, b)
+            self.assertEqual(0, n)
+
+    def test_load_pair_deletes_the_second_only_when_the_base_survives(self):
+        R = self.R
+        l = self.ld(R.RAX, R.RBP, -8)
+        asm, n = self._run("x86_64/mem_pair_load", l, l)
+        self.assertEqual(1, n)
+        l2 = self.ld(R.RAX, R.RAX, 8)           # reg == base: first load clobbers it
+        asm, n = self._run("x86_64/mem_pair_load", l2, l2)
+        self.assertEqual(0, n)
+
+    def test_load_pair_declines_different_destinations(self):
+        R = self.R
+        asm, n = self._run("x86_64/mem_pair_load",
+                           self.ld(R.RAX, R.RBP, -8), self.ld(R.RCX, R.RBP, -8))
+        self.assertEqual(0, n)
 
 
 class TestX86Repatch(unittest.TestCase):

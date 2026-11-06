@@ -36,7 +36,7 @@ Source: `bugs/FORMAL_string_value_model.md` bullet "The proving arm64 build cann
 ## Verification
 ```
 export PATH=/opt/homebrew/bin:$PATH
-python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_call_proof_gen.py
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_call_proof_gen.py
 python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_value_model.py
 ```
 (If `test_formal_call_proof_gen.py` runs Lean for some classes it is slow; run it with a single class first: `... test_formal_call_proof_gen.py TestStringValueInTheModel`.)

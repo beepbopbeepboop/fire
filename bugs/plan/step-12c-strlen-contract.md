@@ -27,8 +27,8 @@ Source: `bugs/FORMAL_string_value_model.md` "Extern-result contract" (step-12b m
 ## Verification
 ```
 export PATH=/opt/homebrew/bin:$PATH
-python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_call_proof_gen.py
-python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_proof_gaps.py
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_call_proof_gen.py
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_proof_gaps.py
 python3 tools/memslot.py --gb 8 --label t -- python3 test_formal.py --backend arm64
 python3 tools/memslot.py --gb 8 --label t -- python3 test_formal.py --backend x86_64
 ```

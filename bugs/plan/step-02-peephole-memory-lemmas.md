@@ -33,8 +33,8 @@ What is genuinely MISSING (worker: confirm each with `grep -n 'idem\|write_same\
 ```
 export PATH=/opt/homebrew/bin:$PATH
 python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_peephole.py
-python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_proof_gaps.py
-python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_admitted.py
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_proof_gaps.py
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_admitted.py
 ```
 `test_formal_admitted.py` pins the `Peephole` row (`(0,0,9,9)`, AXIOM_CLOSURE `(14,1,10,0,3,0)`): new lemmas change "asked" and maybe the `bv_decide` tally. Update those two pins **from the measured output** in this commit (S4).
 

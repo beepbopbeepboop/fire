@@ -2961,6 +2961,9 @@ test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
 test('formal-proof-gaps', [PY, 'test_formal_proof_gaps.py'],
      deps=['preflight', 'prooflib'], mem='module',
      desc='proof-gap ledger matches library_census (Scaffold only)')
+test('formal-once-bound-strings', [PY, 'test_formal_once_bound_strings.py'],
+     deps=['preflight'], mem='tiny',
+     desc='only once-bound string literals may be folded through a name')
 test('lean-hne-chain', [PY, 'test_lean_hne_chain.py'],
      deps=['preflight'], mem='tiny',
      desc='arm64_step hne negation chain generator')

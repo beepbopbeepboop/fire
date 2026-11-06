@@ -170,7 +170,7 @@ same commit, by reading the new measurement** — never widening a ceiling to
 "whatever passes". Prefer putting new lemmas in `Scaffold.lean` (or a new small
 module) over editing the giant files when the lemma does not have to be in them.
 
-**S5. Worker rules (from `tools/formal_worker_rules.md`).** `export
+**S5. Worker rules (from `tools/formal_worker_rules.md`).** (Measured: any test that elaborates the library — `test_formal_proof_gaps`, `test_formal_admitted`, `test_formal_axioms`, `test_formal_sweep_truth` — peaks at ~8.2 GB, so it needs `--gb 24` (the `module` class), not 8; Lean-free tests such as `test_formal_peephole` run in 0.1 GB. A passing library test on a tree whose `.olean` is older than its source proves nothing: build with `formal.lean.ensure_library` first and read its output.) `export
 PATH=/opt/homebrew/bin:$PATH` (python3 must be 3.14); verify with the *narrow*
 `test_formal_*.py` files, each wrapped in `python3 tools/memslot.py --gb 8
 --label t -- …`; **no `make gate` for formal work**; never `git checkout <path>`
@@ -193,18 +193,17 @@ it. A step must also be small enough to land in one commit; if it is not, it is
 split (`step-NNa`, `step-NNb`, …). The step numbers 01–28 are stable names;
 suffix letters are the splits.
 
-**S0. The tree is not green at the start (measured 2026-11-05).** Two
-prerequisite steps exist because of it. **`00a`**: `lib/ProofLib.lean` does not
-elaborate at HEAD (commit `bd61c9036` spliced ~39 `work_step_*` theorems into
-the middle of `rw [...]` lines, `work_step_fmul` is missing, and `ProofLib.olean`
-is absent), so *every* Lean-touching step is blocked on it. **`00b`**:
-`formal/arm64_proof_gen.py::_STEP_CONDS` has a mis-ordered row (index drift),
-which turns `test_csel_is_modelled…` red. `15a` repairs the monomorph baseline
-(a missing `import threading` in `formal/model/layout.py`, debug litter,
-stale expectations). Other workers are editing this tree concurrently
-(`lib/Scaffold.lean`, `formal/proof_gaps.py`, `tools/lean_hne_chain.py` already
-exist from steps 01a/01b/03a): a step starts by `git status` and checking
-whether its deliverable is already there.
+**S0. The tree is not green at the start (measured 2026-11-05).**
+**`00a`** (umbrella; children `00c`-`00g`): `lib/ProofLib.lean` does not
+elaborate — 143 errors at ~100 sites, a half-finished `callFunc2` migration,
+the FP-register fields `d0`-`d7`, duplicated and fragment-corrupted FP step
+theorems — and has not since Oct 18 (`9a6616e83` is the last version that
+builds; a build is ~30 min, ~10 GB). `ProofLib.olean` on disk is from that old
+source, so **every Lean-backed "DONE" in steps 01-05/12/18/27 was checked
+against a stale binary and must be re-verified once `00a` is green.**
+**`00b`**: `_STEP_CONDS` index drift. **`15a`**: monomorph baseline
+(`import threading` etc.). Other workers edit this tree concurrently; a step
+starts with `git status` and checks whether its deliverable already exists.
 
 **S7. Honest numbering of what was stale in the first draft** (kept so a reader
 of an old copy can translate): line `lib/X86.lean:2830` is `:3016`; the "two
@@ -231,8 +230,13 @@ numbered step; the numbers 01-28 are the first draft's names.
 
 | step | class | size | depends | title |
 |---|---|---|---|---|
-| [`00a`](../bugs/plan/step-00a-repair-prooflib-splice.md) | mid | M | none | repair `lib/ProofLib.lean` so the library elaborates again (mangled `work_step_*` region + earlier errors) |
+| [`00a`](../bugs/plan/step-00a-repair-prooflib-splice.md) | mid | M | 00c, 00d, 00e, 00f, 00g | `lib/ProofLib.lean` elaborates again (umbrella: gate for every Lean step) |
 | [`00b`](../bugs/plan/step-00b-step-conds-index-drift.md) | easy | S | none | `_STEP_CONDS` index drift — the STRB register-offset row sits in the middle of the table |
+| [`00c`](../bugs/plan/step-00c-arm64state-fp-fields.md) | easy | S | none | struct literals that predate the FP register fields (`d0`-`d7`) |
+| [`00d`](../bugs/plan/step-00d-callfunc2-migration.md) | mid | M | none | finish the `callFunc2` migration (`runF`, `evalFuncF`, the `runF_*` lemmas, the generator templates) |
+| [`00e`](../bugs/plan/step-00e-contract-and-cmp-proofs.md) | mid | L | 00d | proofs broken by the shifted-register model — `arm64_step_cmp_reg_n31_reads_zero`, `while_lt_exit_contract_*` |
+| [`00f`](../bugs/plan/step-00f-nonfp-work-step-proofs.md) | mid | L | none | broken non-FP `work_step_*` proofs — `cmn`, `tst`, `ldur`, `stur`, `smulh`, `csel` |
+| [`00g`](../bugs/plan/step-00g-fp-work-steps.md) | mid | L | 00f | the FP `work_step_*` block — duplicates, timeouts, fragments |
 | [`01a`](../bugs/plan/step-01a-scaffold-module.md) | mid | M | 00a | `lib/Scaffold.lean` — the one home of scaffold `sorry` |
 | [`01b`](../bugs/plan/step-01b-proof-gap-ledger.md) | mid | M | 00a, 01a | the proof-gap ledger and its census test |
 | [`02`](../bugs/plan/step-02-peephole-memory-lemmas.md) | mid | S | 00a, 01a, 01b | the two memory lemmas the peephole store rules actually lack |
@@ -305,7 +309,7 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`27c`](../bugs/plan/step-27c-landing-pad-tables.md) | mid | M | 27a | landing-pad / personality data structures (pure Python table + test, NO codegen change) |
 | [`28`](../bugs/plan/step-28-absval-frame-peel.md) | mid | M | 00a | `absval` frame-peel `K` — verify the same-day fix, pin it with a Lean-free test, then close or localise |
 
-**73 step files:** 12 easy, 53 mid, 8 hard. (Generated by `python3 tools/plan_index.py --write`; do not edit by hand.)
+**78 step files:** 13 easy, 57 mid, 8 hard. (Generated by `python3 tools/plan_index.py --write`; do not edit by hand.)
 
 <!-- END generated by tools/plan_index.py -->
 
@@ -389,3 +393,32 @@ marked hard. **Hard (memo or deep Lean):** `06c`, `07b`, `08c`, `12b`, `13c`,
 `16a`, `18a`, `27a`. Each hard step's output is a committed decision that
 unblocks mid steps; none of them is on the critical path of the peephole
 work (`00a → 01 → 02 → 03/04 → 05`), which is entirely iceman-class.
+
+## Review log (2026-11-05, after the first execution wave)
+
+Independent re-check of what workers marked "DONE (verified by agent)". Not
+everything was; what was found and fixed, so the markers are read with it:
+
+- `x86_64` memory matchers (`_x_mem_pair`, `_x_store_load`) were unsound: the
+  decoder overwrites `rm` with the BASE register for a memory operand, so the
+  store pair never compared the stored register and store-load compared the base
+  with the load's destination. Fixed; `TestX86MemoryMatchers` drives the matchers
+  directly (the earlier "decline" tests ran `X86_RULES`, which excludes the
+  scaffolded rules, and passed vacuously).
+- `(b"", 1)` from a rule means "delete the window's FIRST instruction"; the arm64
+  and x86 `store_load` matchers used it to mean "delete the second", i.e. they
+  deleted the STORE and kept the load. New `KEEP_FIRST` return; arm64 end-to-end
+  tests read back which instruction survives.
+- Both codegens recorded every `var s = "lit"` in `_comptime_vals`, so any later
+  reassignment of a string variable was rejected as "assignment to comptime
+  binding". It broke 42 of 92 hostmods (`out = ...` in `os/_syscalls.mojo`);
+  removed, 90/92 build. `subprocess` (a 14-argument function returning a struct)
+  is a separate, older limit.
+- `lib/Peephole.lean` had its whole "x86-64 rules" section twice and an orphan
+  doc comment; x86 scaffold theorems named by registered rules did not exist
+  anywhere (steps 04a-04c "DONE"); both fixed, and a test now fails if a
+  scaffolded rule names a theorem that is neither ledgered nor declared.
+- Resource note: tests that elaborate the library peak at ~8.2 GB; use
+  `--gb 24`.
+- Still true after this pass: `test_formal_x86_64_parity` has one failure
+  (`aug_every_operator`, an overflow trap on `<<`) unrelated to this plan.

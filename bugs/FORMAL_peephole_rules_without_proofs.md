@@ -7,6 +7,22 @@
 > (licence/register/enable). Read the measurements here first; the step files are
 > the work orders.
 
+> **Review 2026-11-05 (read before trusting any "DONE" in `bugs/plan/step-0[2-5]*`).**
+> (1) The x86-64 memory matchers were UNSOUND, not merely unproved: the decoder
+> overwrites `rm` with the base register for a memory operand, so `_x_mem_pair`
+> never compared the stored register and `_x_store_load` compared the base with
+> the load's destination. Fixed in `formal/peephole.py`; `TestX86MemoryMatchers`
+> drives the matchers directly (the earlier "decline" tests ran only the ENABLED
+> rules and passed vacuously). (2) A rule returning `(b"", 1)` deletes the
+> window's FIRST instruction, so `store_load` deleted the store and kept the load
+> on both architectures; new `KEEP_FIRST` return, arm64 end-to-end tests read
+> back which instruction survives. (3) Read-after-write lemmas ALREADY exist
+> (`ProofLib.lean` `mem_read_after_write_u64`, `X86.lean`
+> `mem_read_bytes_write_same`); §2's claim that they were missing was stale.
+> (4) Every rule here is still SCAFFOLDED (theorem `sorry` in `lib/Scaffold.lean`,
+> matcher in `SCAFFOLDED_RULES`, never run by the pass); none is enabled.
+
+
 **Status 2026-10-05 (`work/formal268-docs`): §1 (`arm64/copy_chain`) and §3's
 `x86_64/mov_self` are FIXED and ENABLED; this doc is now the work list for the
 rules that remain unproved (§2, §3's remaining x86 rules, §4's note).**

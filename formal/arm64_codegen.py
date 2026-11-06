@@ -936,6 +936,7 @@ dylib_exports: list = None, globals_base: int = None,
         # container-tracking sets above: a `comptime` in one function does
         # not bind in the next.
         self._comptime_vals: dict = {}
+        self._str_lit_vals: dict = {}   # once-bound string literals (model.once_bound_string_literals)
         # {bare callee name -> exported symbol} for the formal libraries this
         # program links against. A call to one of these names is emitted
         # against the library's exported spelling, so the image can record the
@@ -1600,6 +1601,7 @@ dylib_exports: list = None, globals_base: int = None,
         self._fd_vars = set()
         self._comptime_vals = {}
         self._comptime_list_asts = {}
+        self._str_lit_vals = M.once_bound_string_literals(f)
         # What each local holds (see model.ValueKinds) and how much room each
         # list literal needs for `append`. Both are properties of the whole
         # function, so they are computed once here rather than guessed at each
@@ -5463,18 +5465,13 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._dict_vars.discard(name)
             self._blob_vars.discard(name)
             self._blob_var_est.pop(name, None)
-            try:
-                if getattr(self, "_comptime_vals", None) is not None:
-                    # store decoded string for comptime/read compatibility
-                    try:
-                        self._comptime_vals[name] = F.decoded_literal(value)
-                    except Exception:
-                        try:
-                            self._comptime_vals[name] = getattr(value, "value", None)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+            # NOT recorded in `_comptime_vals`: that table holds `comptime`
+            # constants, and `_check_comptime_target` refuses any later store to
+            # a name in it. A `var s = "lit"` is an ordinary mutable local, so
+            # recording it there made every reassignment of a string variable a
+            # build error (it broke 42 of 92 hostmods through `out = ...` in
+            # os/_syscalls.mojo). A printf fold of a string VARIABLE would need
+            # a once-assigned analysis; it does not exist yet.
         elif isinstance(value, F.IdentExpr):
             if value.name in self._dict_vars:
                 self._dict_vars.add(name)
@@ -5661,8 +5658,8 @@ ctor_field_value=self._ctor_field_value_for(name),
                     try:
                         if isinstance(a, F.IdentExpr):
                             nm = a.name
-                            if getattr(self, "_comptime_vals", None) and nm in self._comptime_vals:
-                                cv = self._comptime_vals[nm]
+                            if nm in self._text_vals():
+                                cv = self._text_vals()[nm]
                                 if isinstance(cv, str): return cv
                                 t2 = M.string_literal_text(cv)
                                 if t2 is not None: return t2
@@ -7030,8 +7027,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             if isinstance(arg, F.IdentExpr):
                 name = arg.name
                 try:
-                    if getattr(self, "_comptime_vals", None) and name in self._comptime_vals:
-                        cv = self._comptime_vals[name]
+                    if name in self._text_vals():
+                        cv = self._text_vals()[name]
                         if isinstance(cv, str):
                             return cv
                         t2 = M.string_literal_text(cv)
@@ -12159,8 +12156,8 @@ ctor_field_value=self._ctor_field_value_for(name),
                         try:
                             if isinstance(a, F.IdentExpr):
                                 nm = a.name
-                                if getattr(self, "_comptime_vals", None) and nm in self._comptime_vals:
-                                    cv = self._comptime_vals[nm]
+                                if nm in self._text_vals():
+                                    cv = self._text_vals()[nm]
                                     if isinstance(cv, str):
                                         return cv
                                     t2 = M.string_literal_text(cv)
@@ -14625,6 +14622,13 @@ ctor_field_value=self._ctor_field_value_for(name),
         else:
             self.asm.emit(encode_asr_xd_xn_imm(0, 0, 63))
 
+
+    def _text_vals(self) -> dict:
+        """The text the build knows for a NAME: `comptime` constants, plus the
+        locals bound once to a string literal and never stored to again
+        (`model.once_bound_string_literals`). Separate from `_comptime_vals` on
+        purpose: that table is what `_check_comptime_target` refuses stores to."""
+        return {**self._str_lit_vals, **self._comptime_vals}
 
     def _check_comptime_target(self, name: str, what: str) -> None:
         """Refuse a store to a name that is currently a `comptime` binding.

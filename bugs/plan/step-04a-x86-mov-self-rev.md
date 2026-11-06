@@ -23,8 +23,8 @@ Edit `lib/X86.lean`.
 ```
 export PATH=/opt/homebrew/bin:$PATH
 python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_peephole.py
-python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_proof_gaps.py
-python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_admitted.py
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_proof_gaps.py
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_admitted.py
 ```
 (update the `Peephole` pins from measurement)
 

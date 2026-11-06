@@ -39,7 +39,7 @@ Source: `bugs/FORMAL_known_limits.md` §6.3-6.4 (host-import); `bugs/sweeps/swee
 export PATH=/opt/homebrew/bin:$PATH
 python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_os.py          # os rounds
 python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_hostmods_census.py
-python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_admitted.py
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_admitted.py
 ```
 
 ## Done when  (per round)

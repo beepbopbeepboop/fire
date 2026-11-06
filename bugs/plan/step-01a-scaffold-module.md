@@ -32,10 +32,10 @@ Source: `doc/finish-formal.md` Shared mechanics S1, S2, S4.
 ## Verification
 ```
 export PATH=/opt/homebrew/bin:$PATH
-python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_axioms.py
-python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_admitted.py
-python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_axiom_closure_pinned.py
-python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_sweep_truth.py
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_axioms.py
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_admitted.py
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_axiom_closure_pinned.py
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_sweep_truth.py
 python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_peephole.py
 ```
 (Lean-heavy; if a file is too slow, run it alone and note the time.)

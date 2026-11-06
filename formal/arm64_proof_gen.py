@@ -4581,22 +4581,22 @@ _STEP_CONDS = [
     (0xfffffc00, 0x9e620000),  # 78 SCVTF Dd, Xn
     (0xfffffc00, 0x9e780000),  # 79 FCVTZS Xd, Dn
     # CCMP Xn, Xm, #nzcv, cond (register form)
-    (0xffe00c10, 0xfa400000),  # 82
+    (0xffe00c10, 0xfa400000),  # 80
     # CCMP Xn, #imm5, #nzcv, cond (immediate form)
-    (0xffe00c10, 0xfa400800),  # 83
+    (0xffe00c10, 0xfa400800),  # 81
     # CSINC Xd, Xn, Xm, cond
-    (0xffe00c00, 0x9a800400),  # 84
+    (0xffe00c00, 0x9a800400),  # 82
     # CSINV Xd, Xn, Xm, cond
-    (0xffe00c00, 0xda800000),  # 85
+    (0xffe00c00, 0xda800000),  # 83
     # CSNEG Xd, Xn, Xm, cond
-    (0xffe00c00, 0xda800400),  # 86
-    (0xffe0fc00, 0x38206800),  # 87 STRB Wt, [Xn, Xm] (register offset, LSL #0)
+    (0xffe00c00, 0xda800400),  # 84
+    (0xffe0fc00, 0x38206800),  # 85 STRB Wt, [Xn, Xm] (register offset, LSL #0)
     # ADD Xd, Xn, Xm, UXTX #imm3 (extended register, SP class) -- option=011 only
-    (0xffe0e000, 0x8b206000),  # 88 ADD extended (UXTX)
+    (0xffe0e000, 0x8b206000),  # 86 ADD extended (UXTX)
     # SUB Xd, Xn, Xm, UXTX #imm3 (extended register, SP class)
-    (0xffe0e000, 0xcb206000),  # 89 SUB extended (UXTX)
+    (0xffe0e000, 0xcb206000),  # 87 SUB extended (UXTX)
     # SUBS Xd, Xn, Xm, UXTX #imm3 / CMP (extended register, SP class)
-    (0xffe0e000, 0xeb206000),  # 90 SUBS/CMP extended (UXTX)
+    (0xffe0e000, 0xeb206000),  # 88 SUBS/CMP extended (UXTX)
 ]
 
 
@@ -12624,9 +12624,9 @@ theorem pred_iff (m : Nat) : @PRED@ \u2194 UInt64.ofNat m \u2260 0 := by
 
 /-- Loop condition holds iff counter value nonzero. -/
 theorem cond_val (m : Nat) :
-    (evalExpr handler (@COND@)
+    (evalExpr handler noCall2 (@COND@)
       (envOf m) \u2260 0) \u2194 (m % @S@ \u2260 0 \u2227 m % @S@ < 9223372036854775808) := by
-  have hv : evalExpr handler (@COND@)
+  have hv : evalExpr handler noCall2 (@COND@)
       (envOf m) = if @PRED@ then 1 else 0 := by
     simp [evalExpr, envOf]
   have ht : (UInt64.ofNat m).toNat = m % @S@ := by simp
@@ -12664,14 +12664,14 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 â†
     rcases Nat.eq_zero_or_pos (m % @S@) with hz | hp
     \u00b7 obtain \u27e8g, rfl\u27e9 : \u2203 g, fuel = g + 1 := \u27e8fuel - 1, by cases fuel <;> simp; omega\u27e9
       rw [hP]
-      have hvz : evalExpr handler (@COND@) (envOf m)
+      have hvz : evalExpr handler noCall2 (@COND@) (envOf m)
           = if @PRED@ then 1 else 0 := by simp [evalExpr, envOf]
       have ht2 : (UInt64.ofNat m).toNat = m % @S@ := by simp
       have hneg : \u00ac @PRED@ := by
         rw [pred_iff m]
         intro hne
         exact hne.2 (by apply eq_of_toNat_eq; rw [ht2]; simp [hz])
-      have hce : evalExpr handler (@COND@) (envOf m) = 0 := by
+      have hce : evalExpr handler noCall2 (@COND@) (envOf m) = 0 := by
         rw [hvz, if_neg hneg]
       have h1 := runF_while_false g handler (@COND@)
           ([@DEC@])
@@ -12680,8 +12680,8 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 â†
       obtain \u27e8gg, rfl\u27e9 : \u2203 gg, g = gg + 1 := \u27e8g - 1, by omega\u27e9
       have h2 := runF_return_eq gg handler (MojoExpr.var "@P@") (envOf m)
       rw [h2]
-      have hv0 : evalExpr handler (MojoExpr.var "@P@") (envOf m) = 0 := by
-        have hx : evalExpr handler (MojoExpr.var "@P@") (envOf m)
+      have hv0 : evalExpr handler noCall2 (MojoExpr.var "@P@") (envOf m) = 0 := by
+        have hx : evalExpr handler noCall2 (MojoExpr.var "@P@") (envOf m)
             = UInt64.ofNat m := by simp [evalExpr, envOf]
         rw [hx]
         apply eq_of_toNat_eq
@@ -12693,7 +12693,7 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 â†
         simp
       simp [@FN@_go_zero, hzlt]
     \u00b7 obtain \u27e8g, rfl\u27e9 : \u2203 g, fuel = g + 1 := \u27e8fuel - 1, by cases fuel <;> simp; omega\u27e9
-      have hcond : evalExpr handler (@COND@) (envOf m) â‰  0 :=
+      have hcond : evalExpr handler noCall2 (@COND@) (envOf m) â‰  0 :=
         (cond_val m).mpr (Nat.ne_of_gt hp)
       have hpred : UInt64.ofNat m - 1 =
           UInt64.ofNat (m % @S@ - 1) := by
@@ -12715,7 +12715,7 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 â†
         obtain \u27e8gg, rfl\u27e9 : \u2203 gg, g = gg + 1 := \u27e8g - 1, by cases g <;> simp; omega\u27e9
         rw [runF_assign]
         show runF gg handler [] _ = _
-        have hv1 : evalExpr handler (@DEXP@) (envOf m)
+        have hv1 : evalExpr handler noCall2 (@DEXP@) (envOf m)
             = UInt64.ofNat (m % @S@ - 1) := by
           simp [evalExpr, envOf, hpred]
         rw [hv1]

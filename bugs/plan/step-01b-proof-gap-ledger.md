@@ -41,7 +41,7 @@ Source: `doc/finish-formal.md` Method #3, Shared mechanics S1/S2.
 ## Verification
 ```
 export PATH=/opt/homebrew/bin:$PATH
-python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_proof_gaps.py -v
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_proof_gaps.py -v
 python3 tools/suite.py -j1 --list | grep proof_gaps
 python3 test_suite.py
 ```

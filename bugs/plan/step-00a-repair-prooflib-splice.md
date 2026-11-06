@@ -1,60 +1,41 @@
-# plan/step-00a: repair `lib/ProofLib.lean` so the library elaborates again (mangled `work_step_*` region + earlier errors)
-Class: mid      Size: M      Depends: none      Blocks: 06b, 07a, 08a, 09a, 03a-03d (anything that builds the library)
-Source: found 2026-11-05 while verifying steps 06-09; no `FORMAL_*.md` owns it. Introduced by commit `bd61c9036` ("arm64: add FP reg file and FCMP step model"), made worse by `e9ed86deb`.
+# plan/step-00a: `lib/ProofLib.lean` elaborates again (umbrella: gate for every Lean step)
+Class: mid      Size: M      Depends: 00c, 00d, 00e, 00f, 00g      Blocks: every step that edits or builds a Lean library
+Source: measured 2026-11-05 (this file); `doc/finish-formal.md` S0.
 
-## Current state (measured; verified 2026-11-05, NO lean run — textual evidence only)
-- `lib/ProofLib.lean` HEAD has **39 lines** where a `theorem work_step_*` header (or a `/-- ... -/` docstring tail) is glued onto the END of a previous line: `grep -c '[^ ]theorem work_step_' lib/ProofLib.lean` -> 39. Example, line 5452: `  rw [if_neg hne_ret, if_neg hne_70,theorem work_step_add_reg (s : Arm64State) ...`. A `rw [` list that never closes followed by `theorem` cannot parse. The text between (the rest of the `rw`, the tail of the proof, the blank line, the docstring) was eaten by a bad splice.
-- Pre-damage file: `git show bd61c9036^:lib/ProofLib.lean` has 0 such lines and the 13 `work_step_*` of that era intact (e.g. `work_step_mov` ends `rw [if_neg hne_ret, if_pos h]; try dsimp; try rfl; try simp`).
-- The commit also inserted `hne_70..hne_79` facts (negations of the new FP arms) before `rw [hpc, hread]` in lemmas for arms that come BEFORE the FP arms. They are unnecessary: the FP arms are the END of the `arm64_step` chain, and a lemma only negates arms before its own (`lib/ProofLib.lean` comment at the SMULH arm: "every other one negates the branches BEFORE its own and this arm is after all of them").
-- `lib/ProofLib.olean` is dated Nov 2 (older than the damage) and `.srcsha256` does not match the file (`shasum -a 256 lib/ProofLib.lean` vs `lib/ProofLib.olean.srcsha256`): nothing has built this file since.
-- `_WORK_STEP` (formal/arm64_proof_gen.py ~5004) names `work_step_fmul` (idx 73 after step-00b) but no `theorem work_step_fmul` exists in the file (`grep -c 'theorem work_step_fmul' lib/ProofLib.lean` -> 0): lost in the splice.
-- **A SECOND, independent break is already observed (a real library build, 2026-11-05, from `test_formal_call_proof_gen.py` output):** `lib/ProofLib.lean:1338:2: error: Tactic rfl failed`, `:1343:2: error: Tactic rfl failed`, `:1347:55: error(lean.synthInstanceFailed)` — the `evalExpr_var` / `evalExpr_int` / `evalExpr_bool` lemmas (~1334-1347). Likely cause: `evalExpr` gained a second call function (commit `3d32c0e66`, "support 2-arg admitted contracts via call2/callFunc2", Nov 3) and its per-node lemmas / `MojoExpr` constructors were not updated. Work order item 0 fixes these first; the splice damage (line 5452 onward) is only reached after Lean gets past them, so the full error list is unknown until item 0 is done.
-- The library may be broken elsewhere too. Do not assume these two are the only defects.
+## Current state (measured; build/probe_head, 2026-11-05)
+- `lib/ProofLib.lean` does NOT elaborate: a full pass with `-DmaxErrors=5000` reports **143 errors at ~100 sites** (list and grouping in 00c-00g). `lib/ProofLib.olean` is stale (built from the Oct-18 source `e9973f5a7`), so every library-touching test that is green today is green on an old binary: `formal.lean.ensure_library` accepts an `.olean` newer than its source when the stamp is missing, and `library_census` caches by source hash.
+- History (bisected by building each version alone; ProofLib takes **~30 minutes and ~10 GB** per build): `9a6616e83` (Oct 18) BUILDS. `6fa9db2d2`, `a34ee4100`, `39cd95d43` all FAIL (16-32 errors). So the break is older than the FP-register commits: it entered between `9a6616e83` and `39cd95d43` (the `callFunc2`/`strlen`/`u64_ofNat_sub` work), and `bd61c9036`/`e9ed86deb` (FP regs `d0`-`d7`, FP step arms) and the last commit's partial "repair" (-2382/+1132 lines) added the rest.
+- **Reverting is not an option**: `formal/arm64_proof_gen.py` generates proofs against the newer model (FP regs, CSEL, STRB-regoff, shifted-register ADD/SUB, `callFunc2`).
+- Already fixed in the working tree on 2026-11-05 (do not redo): `mem_read_write_below_split` and `mem_read_write_pair_below_split` (declared before `u64_ofNat_sub`; `have hK := a - b` shadowed a hypothesis). Unverified until a build.
+- Not an error but wrong: `def strlen : UInt64 → UInt64 := fun _ => 0` (ProofLib ~977) is a FABRICATED zero for every address. It stays here (step 12a/12c own it) but must not be "fixed" by reintroducing `axiom strlen` (FORMAL.md §7: no axioms; `axiom` + computable defs also gave `dependsOnNoncomputable` errors in the old bisect versions).
 
-## Decisions already made
-- Repair = RESTORE the `work_step_*` region (from `/-! Per-instruction step lemmas (routed from the generator)` to the end of `work_step_csel`) **verbatim from `git show bd61c9036^:lib/ProofLib.lean`**. Do NOT keep the `hne_70..79` additions in lemmas for pre-FP arms.
-- The FP-arm lemmas (`work_step_fcmp`, `fadd`, `fsub`, `fmul`, `fdiv`, `fneg`, `fmov_gpr_v`, `fmov_v_gpr`, `scvtf`, `fcvtzs`) are NEW in `bd61c9036`/`e9ed86deb`, so they cannot come from the pre-damage file: take them from HEAD where intact, rewrite where glued, and write `work_step_fmul` by copying `work_step_fsub` (arm text `lib/ProofLib.lean` "FMUL Dd, Dn, Dm", conclusion `arm64_set_reg_d rd s (fmulBits (arm64_reg_d rn s) (arm64_reg_d rm s))`). Each FP lemma negates every arm before its own (use `tools/lean_hne_chain.py` from step-03a if landed; else copy the chain from `work_step_csel` and append the FP arms before its own).
-- Everything outside the `work_step_*` region that `bd61c9036`/`e9ed86deb` changed (the `arm64_step` FP arms, `arm64_reg_d`, `fcmp_nzcv`, etc.) is kept as is — verify, do not rewrite.
+## Fast iteration (use this; a full build is 30 minutes)
+Errors cluster in four regions and depend only on a PREFIX of the file. To test a fix in region R, write `build/probe_x/lib/ProofLib.lean` = lines `1..E` of the real file, where `E` is the last line of the last theorem of R (cut on a blank line between declarations), copy `lib/IEEE754.lean` beside it, and elaborate with `formal.lean.run_lean(lean, ["-DmaxErrors=5000","-o",out,src], env={"LEAN_PATH": dir}, wall_s=3600, cpu_s=6000, mem_mb=24000)` under `python3 tools/memslot.py --gb 16 --label x --`. The source must live under the repo root (`build/` is untracked scratch). Prefix up to line ~3900 costs minutes, not 30. The reference script is `headprobe.py` pattern: copy IEEE754.lean + ProofLib.lean into `build/probe_head/lib`, elaborate IEEE754 then ProofLib, write stdout+stderr to `ProofLib.out`.
 
 ## Work order
-0. Get the first errors: `python3 tools/memslot.py --gb 16 --label t -- python3 test_formal_axioms.py 2>&1 | grep -E 'error' | head -20` (the library build prints them). For the `evalExpr_*` errors: `grep -n 'inductive MojoExpr\|def evalExpr' lib/ProofLib.lean`, read the current `evalExpr` signature (it takes `callFunc` and now probably `callFunc2`), and update each of the three lemmas' statements to the new signature (each is still `rfl`). If the cause is different, fix what the error says; do not weaken a statement.
-1. Confirm the damage: `grep -n '[^ ]theorem work_step_' lib/ProofLib.lean | cut -c1-60` (39 hits at time of writing). Also list every other glued construct: `grep -nE '[^ ] *(theorem|lemma|def) [a-z]' lib/ProofLib.lean | grep -vE '^[0-9]+:\s*(--|/-)' | cut -c1-80` and read each hit.
-2. `git diff bd61c9036^ HEAD -- lib/ProofLib.lean > $SCRATCH/pl.diff` (SCRATCH = your scratchpad). Read it hunk by hunk; classify each hunk: (a) FP arm / helper definition: keep; (b) `hne_7x` facts in a pre-FP lemma: drop; (c) glued text: restore.
-3. Rebuild the file: start from the pre-damage file, re-apply the (a) hunks only. Faster equivalent: take HEAD, replace the span of the 13 pre-FP lemmas + `work_step_csel` + the other pre-FP lemmas between them (`work_step_cmn`, `tst`, ldrb ... `strb_regoff`, `smulh`) with the pre-damage span, then repair the FP lemmas.
-4. Add `theorem work_step_fmul` (see Decisions).
-5. Textual check (no lean): `grep -c '[^ ]theorem work_step_' lib/ProofLib.lean` -> 0; and
-   `python3 - <<'E'` that, for each lemma name in `formal/arm64_proof_gen.py::_WORK_STEP`, asserts `theorem <name> ` occurs at line start in the file.
-6. Build through the library API (never `lean` directly): `python3 tools/memslot.py --gb 16 --label t -- python3 test_formal_axioms.py` (it calls `ensure_library`). Read any elaboration error and fix it in the lemma it names. Expect time: the file is 10.8k lines, ~minutes.
-7. Pins: `test_formal_admitted.py` and `test_formal_axiom_closure_pinned.py` may move because lemmas were removed/added; update only from the measured output (S4).
+1. Do 00c, 00d, 00e, 00f, 00g (independent regions; 00d before 00e).
+2. Full pass: `python3 tools/memslot.py --gb 24 --label t -- python3 -c "import formal.lean as L,os; L.ensure_library(L.find_lean(), os.path.abspath('lib'))"`. Expect 0 errors; if not, repeat with the leftover list (still `-DmaxErrors` high) and append the sites to this file.
+3. Delete the stale oleans' influence: `ensure_library` rebuilds `X86`, `work`, `Refine`, `Contracts`, `Peephole`, `Scaffold`, `Specs`; fix any error that surfaces there (they were never rebuilt against the new ProofLib).
+4. Re-measure and update pins DELIBERATELY: `test_formal_admitted.py` (`AXIOM_CLOSURE`, tally table), `test_formal_axiom_closure_pinned.py`, `test_formal_proof_gaps.py` (the Scaffold census has never run on a fresh build).
 
 ## Do NOT
-- Do not `git checkout`/`git restore`/`git stash` anything. Produce the repaired file with Edit/Write; `git show ... > scratch` is fine.
-- Do not keep `hne_70..79` in pre-FP lemmas "to be safe": an unused `bv_decide` fact per lemma is 40 wasted SAT calls and it is what was mis-spliced.
-- Do not touch the `arm64_step` chain order.
-- Do not run `lean` directly (`formal/lean.py::run_lean` carries the memory/wall bounds).
+- Do not use `git checkout`/`git restore`/`git stash` to restore an old ProofLib (CLAUDE.md; also it would drop the FP model the generator needs).
+- Do not add `sorry`/`axiom` to make a theorem pass. A theorem that cannot be repaired in this step is moved to `lib/Scaffold.lean` WITH a ledger row and the reason, and any generator use of it is noted here.
+- Do not widen `maxHeartbeats` globally; use `set_option maxHeartbeats 4000000 in` on the one theorem (the file already does this for `work_step_smulh`).
 
 ## Verification
 ```
 export PATH=/opt/homebrew/bin:$PATH
-grep -c '[^ ]theorem work_step_' lib/ProofLib.lean          # 0
-python3 tools/memslot.py --gb 16 --label t -- python3 test_formal_axioms.py
-python3 tools/memslot.py --gb 16 --label t -- python3 test_formal_admitted.py
-python3 tools/memslot.py --gb 16 --label t -- python3 test_formal_axiom_closure_pinned.py
-python3 tools/memslot.py --gb 8 --label t -- python3 test_formal.py --backend arm64 absval
+python3 tools/memslot.py --gb 24 --label t -- python3 -c "import formal.lean as L,os; L.ensure_library(L.find_lean(), os.path.abspath('lib')); print('LIBRARY BUILDS')"
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_proof_gaps.py
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_admitted.py
+python3 tools/memslot.py --gb 24 --label t -- python3 test_formal_axiom_closure_pinned.py
 ```
-(the last one is a smoke run of one real proof; step-28 owns its verdict — here it only has to get past library loading.)
 
 ## Done when
-- [ ] `grep -c '[^ ]theorem work_step_' lib/ProofLib.lean` prints 0 and every `_WORK_STEP` lemma name is a declared theorem
-- [ ] `lib/ProofLib.olean.srcsha256` matches `shasum -a 256 lib/ProofLib.lean` after the build
-- [ ] the three Lean-backed tests above pass; any pin changed has a one-line comment citing this step and the measured value
+- [ ] `LIBRARY BUILDS` printed from a tree whose `lib/*.olean` were deleted first (`rm lib/*.olean lib/*.olean.srcsha256`) so no stale artifact answers
+- [ ] the three tests pass; pins updated from measurement in the same commit
+- [ ] steps 01-05, 06b, 07a, 09, 12, 18d, 27 rows are re-verified on this build (their "DONE" markers predate it)
 
 ## If stuck
-If the library fails to elaborate for a reason outside the splice (a second, unrelated defect), write the first error verbatim into this file under "Blocked", and stop. Every Lean-touching step (06b, 07a, 08a, 09a) is blocked on this.
-
-## Blocked
-```
-/Users/mrs/net/chatgpt/claude/mojo-reference2/lib/ProofLib.lean:743:10: error(lean.unknownIdentifier): Unknown identifier `u64_ofNat_sub`
-/Users/mrs/net/chatgpt/claude/mojo-reference2/lib/ProofLib.lean:747:46: error: Application type mismatch: The argument
-```
-First errors are unrelated to the work_step_* splice (u64_ofNat_sub missing / type issues in mem_read_write_below_split). Splice damage fixed: no glued `theorem work_step_*` lines; all _WORK_STEP lemmas present (including work_step_fmul, work_step_strb_regoff); work_step region restored from pre-damage with FP arms preserved from HEAD.
+Append the leftover error sites (file:line:message first line) to this file and stop; do not guess.
