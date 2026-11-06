@@ -58,7 +58,38 @@ def build_and_run(source, tmpdir, name):
     r = subprocess.run([exe], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     dis = subprocess.run(["otool", "-tv", exe], capture_output=True,
                          text=True).stdout
-    return r.returncode, dis, r.stdout
+    return r.returncode, _code_only(dis), r.stdout
+
+
+_BRANCH = re.compile(r"^([0-9a-f]{8,})\t+(?:b|bl|b\.[a-z]+|cbz|cbnz|tbz|tbnz)\t.*?"
+                     r"(0x[0-9a-f]+)\s*$")
+
+
+def _code_only(dis):
+    """`otool -tv` output without the DATA it decodes as instructions.
+
+    The image keeps string literals and tables in the same section as the
+    code, so `otool` prints them too, as whatever instruction those bytes
+    happen to spell — including `tbz w1, #0xd, 0xffffb5ec`. A test that counts
+    `tbz` over the whole listing then counts noise, and the noise changes
+    whenever any string in the image changes (a new diagnostic message was
+    enough to turn three tests red). A genuine branch lands inside the image;
+    a decoded string almost never does, so a branch whose target is outside the
+    listed addresses is dropped.
+    """
+    lines = dis.splitlines()
+    addrs = [int(m.group(1), 16) for l in lines
+             if (m := re.match(r"^([0-9a-f]{8,})\t", l))]
+    if not addrs:
+        return dis
+    lo, hi = min(addrs), max(addrs)
+    keep = []
+    for l in lines:
+        m = _BRANCH.match(l)
+        if m and not (lo <= int(m.group(2), 16) <= hi + 4):
+            continue
+        keep.append(l)
+    return "\n".join(keep) + "\n"
 
 
 def mnemonics(dis):
