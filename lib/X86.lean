@@ -1867,7 +1867,7 @@ theorem x86_step_and_r8_r8 (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_plain, x86_step_alu_r8, x86_is_rex, x86_get_reg,
         x86_set_reg, x86_set_reg_narrow, x86_mask, x86_mem_addr, x86_rm_read,
         x86_rm_write, x86_flags_logic, x86_flags_logic8, x86_msb,
-        h_rip, h_b0, h_b1, h_mod]
+        h_rip, h_b0, h_b1, h_mod] <;> (repeat' apply And.intro) <;> congr
 
 /-- `or r/m8, r8` (08 /r, mod=3): the `!=` half of `x86_step_and_r8_r8`'s
     conjunction, and the same instruction with the other opcode.  Two theorems
@@ -2469,7 +2469,7 @@ theorem x86_step_neg_r64 (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_flags_sub,
         h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_ndigit2, h_rm,
-        h_dst, h_dst_lt]
+        h_dst, h_dst_lt] <;> (repeat' apply And.intro) <;> congr
 
 /-- `add r64, r64` (REX.W 01 /r, mod=3), general over both registers. -/
 theorem x86_step_add_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
@@ -2488,7 +2488,7 @@ theorem x86_step_add_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
         x86_flags_sub,
-        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm] <;> (repeat' apply And.intro) <;> congr
 
 /-- `sub r64, r64` (REX.W 29 /r, mod=3), general over both registers. -/
 theorem x86_step_sub_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
@@ -2507,7 +2507,7 @@ theorem x86_step_sub_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
         x86_flags_sub,
-        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm] <;> (repeat' apply And.intro) <;> congr
 
 /-! The three LOGIC ALU forms -- `and` (0x21), `or` (0x09), `xor` (0x31) -- as
     three theorems rather than one.
@@ -2552,7 +2552,7 @@ theorem x86_step_and_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
         x86_flags_sub,
-        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm] <;> (repeat' apply And.intro) <;> congr
 
 /-- `or r64, r64` (REX.W 09 /r, mod=3). -/
 theorem x86_step_or_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
@@ -2822,7 +2822,7 @@ theorem x86_step_add_ri32 (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
         x86_flags_sub,
-        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm]
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm] <;> (repeat' apply And.intro) <;> congr
 
 /-- `sub r64, imm32` (REX.W 81 /5 id, mod=3) — the exact sibling of
     `x86_step_add_ri32` with `x86_flags_sub` where that one has `x86_flags_add`.
@@ -2854,7 +2854,7 @@ theorem x86_step_sub_ri32 (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
         x86_flags_sub,
-        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm]
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm] <;> (repeat' apply And.intro) <;> congr
 
 /-- `and r64, imm32` (REX.W 81 /4 id, mod=3). -/
 theorem x86_step_and_ri32 (s : X86State) (code : Nat → UInt8) (m : Nat)
@@ -2873,7 +2873,7 @@ theorem x86_step_and_ri32 (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
         x86_flags_sub,
-        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm]
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm] <;> (repeat' apply And.intro) <;> congr
 
 /-- `cmp r64, imm8` (REX.W 83 /7 ib, mod=3): flags only, and the result is NOT
     written back — the one form in this family whose successor names no
@@ -2894,7 +2894,7 @@ theorem x86_step_cmp_ri8 (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write, x86_trunc32, x86_flags_logic, x86_flags_add,
         x86_flags_sub,
-        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm]
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_digit, h_rm] <;> (repeat' apply And.intro) <;> congr
 
 /-! `mov r64, r/m64` in its two shapes.  These two cover every instance the
     backend emits -- 170 across the examples, and `mov_r64_rm64` was the single

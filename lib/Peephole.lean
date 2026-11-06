@@ -198,6 +198,7 @@ theorem arm64_step_add_imm64 (s : Arm64State) (code : Nat → UInt8)
   rw [hpc, hread]
   rw [if_neg hne_ret, if_neg hne_orr, if_neg hne_add, if_neg hne_sub,
       if_neg hne_mul, if_neg hne_neg, if_neg hne_cmp, if_neg hne_and,
+      if_neg hne_eor, if_neg hne_add32, if_pos h, if_neg hrd]
 
 /-- One step of a 64-bit `LDR Xt, [Xn, #imm]` (unsigned offset, no writeback). -/
 theorem arm64_step_ldr64 (s : Arm64State) (code : Nat → UInt8)
@@ -208,8 +209,8 @@ theorem arm64_step_ldr64 (s : Arm64State) (code : Nat → UInt8)
     arm64_step s code
       = some (arm64_set_reg ((w &&& 0x1f).toNat) s
           (mem_read_u64 s.mem
-            ((arm64_reg_or_sp ((w >>> 5) &&& 0x1f).toNat s) +
-              UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8))) ) := by
+            (((arm64_reg_or_sp ((w >>> 5) &&& 0x1f).toNat s) +
+              UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat))) := by
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t
     rw [t] at h
@@ -237,7 +238,6 @@ theorem arm64_step_ldr64 (s : Arm64State) (code : Nat → UInt8)
   unfold arm64_step
   rw [hpc, hread]
   rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_pos h]
-  simp
 
 /-- One step of a 64-bit `STR Xt, [Xn, #imm]` (unsigned offset, no writeback). -/
 theorem arm64_step_str64 (s : Arm64State) (code : Nat → UInt8)
@@ -246,10 +246,10 @@ theorem arm64_step_str64 (s : Arm64State) (code : Nat → UInt8)
     (h : (w &&& 0xffe00000) = 0xF9000000)
     (hrt : (w &&& 0x1f).toNat < 31) :
     arm64_step s code
-      = some { s with mem := mem_write_u64 s.mem
-          ((arm64_reg_or_sp ((w >>> 5) &&& 0x1f).toNat s) +
-            UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8))
-          (arm64_reg ((w &&& 0x1f).toNat) s) } := by
+      = some { s with mem := (mem_write_u64 s.mem
+          (((arm64_reg_or_sp ((w >>> 5) &&& 0x1f).toNat s) +
+            UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 8)).toNat)
+          (arm64_reg ((w &&& 0x1f).toNat) s)) } := by
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
     intro t
     rw [t] at h
@@ -290,8 +290,6 @@ theorem arm64_step_str64 (s : Arm64State) (code : Nat → UInt8)
   unfold arm64_step
   rw [hpc, hread]
   rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_pos h]
-  simp
-      if_neg hne_eor, if_neg hne_add32, if_pos h, if_neg hrd]
 
 /-- The pc a SEQUENTIAL step leaves behind, and the advance `arm64_steps`
 performs for it.
@@ -774,7 +772,7 @@ theorem arm64_step_movz64 (s : Arm64State) (code : Nat → UInt8)
     intro t; bv_decide
   unfold arm64_step
   rw [hpc, hread]
-  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_pos h, if_neg hrd]
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_pos h]
 
 
 
@@ -804,18 +802,28 @@ theorem peephole_x86_imm_zero_regs_add (s : X86State) (code : Nat → UInt8) (m 
     ∧ (∀ i, i < 16 → i ≠ rm + x86_rex_b rex → x86_get_reg t i = x86_get_reg s i)
     ∧ t.mem = s.mem
     ∧ t.rip = m + 7 := by
+  -- Every register index below is `rm + x86_rex_b rex`, at most 7 + 8, so the
+  -- 16-way split on it is exhaustive; `simp` cannot reduce `x86_get_reg`'s
+  -- `match` on a variable, and `interval_cases` is Mathlib's, not core Lean's.
+  have hrm : rm ≤ 7 := by rw [← h_rm]; exact Nat.and_le_right
+  have hrb : x86_rex_b rex ≤ 8 := by unfold x86_rex_b; split <;> omega
+  have hidx : rm + x86_rex_b rex < 16 := by omega
   have hstep := x86_step_add_ri32 s code m rex modrm rm h_rip h_b0 h_b1 h_b2 h_rex h_w h_mod h_digit h_rm
   rw [hs] at hstep
   have ht := Option.some.inj hstep
   rw [h_imm] at ht
-  rw [ht]
-  constructor
-  · simp [x86_set_reg, x86_get_reg]
-  · constructor
-    · intro i hi hne
-      have hidx : rm + x86_rex_b rex < 16 := by omega
-      simp [x86_get_reg_set_reg_other i (rm + x86_rex_b rex) s (x86_get_reg s (rm + x86_rex_b rex) + 0) hi hidx hne]
-    · simp [x86_flags_add_mem]
+  subst ht
+  have h0 : UInt64.ofInt 0 = 0 := rfl
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · generalize rm + x86_rex_b rex = r at *
+    rcases (by omega : r = 0 ∨ r = 1 ∨ r = 2 ∨ r = 3 ∨ r = 4 ∨ r = 5 ∨ r = 6 ∨ r = 7 ∨ r = 8 ∨ r = 9 ∨ r = 10 ∨ r = 11 ∨ r = 12 ∨ r = 13 ∨ r = 14 ∨ r = 15) with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;> simp [x86_set_reg, x86_get_reg, h0]
+  · intro i hi hne
+    have key := x86_get_reg_set_reg_other i (rm + x86_rex_b rex) s (x86_get_reg s (rm + x86_rex_b rex) + UInt64.ofInt 0) hi hidx hne
+    simp only [x86_get_reg] at key ⊢
+    simpa using key
+  · generalize rm + x86_rex_b rex = r at *
+    rcases (by omega : r = 0 ∨ r = 1 ∨ r = 2 ∨ r = 3 ∨ r = 4 ∨ r = 5 ∨ r = 6 ∨ r = 7 ∨ r = 8 ∨ r = 9 ∨ r = 10 ∨ r = 11 ∨ r = 12 ∨ r = 13 ∨ r = 14 ∨ r = 15) with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;> simp [x86_set_reg]
+  · rfl
 
 /-- **Rule `x86_64/imm_zero`.** `sub r, 0` (REX.W 81 /5 id, mod==3): registers
 and memory unchanged except rip advances by 7. Flags not claimed here. -/
@@ -833,18 +841,28 @@ theorem peephole_x86_imm_zero_regs_sub (s : X86State) (code : Nat → UInt8) (m 
     ∧ (∀ i, i < 16 → i ≠ rm + x86_rex_b rex → x86_get_reg t i = x86_get_reg s i)
     ∧ t.mem = s.mem
     ∧ t.rip = m + 7 := by
+  -- Every register index below is `rm + x86_rex_b rex`, at most 7 + 8, so the
+  -- 16-way split on it is exhaustive; `simp` cannot reduce `x86_get_reg`'s
+  -- `match` on a variable, and `interval_cases` is Mathlib's, not core Lean's.
+  have hrm : rm ≤ 7 := by rw [← h_rm]; exact Nat.and_le_right
+  have hrb : x86_rex_b rex ≤ 8 := by unfold x86_rex_b; split <;> omega
+  have hidx : rm + x86_rex_b rex < 16 := by omega
   have hstep := x86_step_sub_ri32 s code m rex modrm rm h_rip h_b0 h_b1 h_b2 h_rex h_w h_mod h_digit h_rm
   rw [hs] at hstep
   have ht := Option.some.inj hstep
   rw [h_imm] at ht
-  rw [ht]
-  constructor
-  · simp [x86_set_reg, x86_get_reg]
-  · constructor
-    · intro i hi hne
-      have hidx : rm + x86_rex_b rex < 16 := by omega
-      simp [x86_get_reg_set_reg_other i (rm + x86_rex_b rex) s (x86_get_reg s (rm + x86_rex_b rex) - 0) hi hidx hne]
-    · simp [x86_flags_sub_mem]
+  subst ht
+  have h0 : UInt64.ofInt 0 = 0 := rfl
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · generalize rm + x86_rex_b rex = r at *
+    rcases (by omega : r = 0 ∨ r = 1 ∨ r = 2 ∨ r = 3 ∨ r = 4 ∨ r = 5 ∨ r = 6 ∨ r = 7 ∨ r = 8 ∨ r = 9 ∨ r = 10 ∨ r = 11 ∨ r = 12 ∨ r = 13 ∨ r = 14 ∨ r = 15) with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;> simp [x86_set_reg, x86_get_reg, h0]
+  · intro i hi hne
+    have key := x86_get_reg_set_reg_other i (rm + x86_rex_b rex) s (x86_get_reg s (rm + x86_rex_b rex) - UInt64.ofInt 0) hi hidx hne
+    simp only [x86_get_reg] at key ⊢
+    simpa using key
+  · generalize rm + x86_rex_b rex = r at *
+    rcases (by omega : r = 0 ∨ r = 1 ∨ r = 2 ∨ r = 3 ∨ r = 4 ∨ r = 5 ∨ r = 6 ∨ r = 7 ∨ r = 8 ∨ r = 9 ∨ r = 10 ∨ r = 11 ∨ r = 12 ∨ r = 13 ∨ r = 14 ∨ r = 15) with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;> simp [x86_set_reg]
+  · rfl
 
 /-- **Rule `x86_64/imm_zero`.** `add r, 0` or `sub r, 0` (REX.W 81 /0 id or /5 id, mod==3):
 registers and memory unchanged except rip advances by 7. Flags not claimed here. -/
@@ -865,7 +883,5 @@ theorem peephole_x86_imm_zero_regs (s : X86State) (code : Nat → UInt8) (m : Na
   cases h_digit with
   | inl hd =>
       apply peephole_x86_imm_zero_regs_add <;> try assumption
-      · exact hd
   | inr hd =>
       apply peephole_x86_imm_zero_regs_sub <;> try assumption
-      · exact hd

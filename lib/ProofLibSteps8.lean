@@ -16,6 +16,9 @@ into shards that import only `ProofLib` they build in parallel
 proof that wants the lemmas writes `import ProofLibSteps`.
 -/
 
+set_option maxHeartbeats 4000000 in
+/-- Per-instruction step: `work_step_ldr_uoff32`.
+
     One of the twelve narrower/unscaled access forms APPENDED to `arm64_step`;
     the comment above them there says why they sit at the END of the chain rather
     than in the architectural position.  This lemma is the half of that decision
@@ -93,6 +96,7 @@ theorem work_step_ldr_uoff32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) 
   have hne_59 : ¬ ((w &&& 0xffd00000) = 0x79800000) := by intro t; bv_decide
   have hne_60 : ¬ ((w &&& 0xffd00000) = 0xb9800000) := by intro t; bv_decide
   rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_pos h]; try dsimp; try rfl; try simp
+
 set_option maxHeartbeats 4000000 in
 /-- Per-instruction step: `work_step_ldr_regoff`.
 
@@ -174,6 +178,7 @@ theorem work_step_ldr_regoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) 
   have hne_60 : ¬ ((w &&& 0xffd00000) = 0xb9800000) := by intro t; bv_decide
   have hne_61 : ¬ ((w &&& 0xffd00000) = 0xb9400000) := by intro t; bv_decide
   rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_pos h]; try dsimp; try rfl; try simp
+
 set_option maxHeartbeats 4000000 in
 /-- Per-instruction step: `work_step_str_regoff`.
 
@@ -381,15 +386,3 @@ theorem work_step_cbnz (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
       if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15,
       if_neg hne_16, if_neg hne_17]
   simp [h, cbz_off64, cbnz_off64]
-
-/-- **Peel one STP pair below `sp`.**
- 
-    The emitter writes a frame slot pair as two `mem_write_u64`s at
-    `(sp - K)` and `(sp - K) + 8`.  Both are strictly below `sp` for `K ≥ 8`,
-    so neither can affect a read at `sp + j`, and the pair peels in one step.
- 
-    Peeling per-distance instead would have to canonicalise `(sp - K) + 8` into
-    `sp - UInt64.ofNat (K - 8)` first — the frame canonicalisation's
-    `u64_sub_add` produces that split form, and folding it back needs a rewrite
-    whose side conditions `simp` will not discharge on its own.  Matching the
-    pair's shape directly keeps the generator from reshaping addresses at all.
