@@ -3823,6 +3823,12 @@ BUILTIN_VALUE_METHODS = {
     # on this path, so the blob's capacity is a compile-time bound — the count
     # of append sites in the function — and the store is checked against it.
     "append": "list_append",
+    # `set.add(x)`: insert x unless a word scan finds it (the same scan the
+    # set literal and the set operators use), then the `append` store with its
+    # capacity guard. The receiver must be a SET (`_expr_is_set_like` in each
+    # backend; the value model cannot tell a set from a list), which is what
+    # keeps a struct's own `add` method and a list's missing one out of here.
+    "add": "set_add",
     # `list.clear()`: the count word is the blob's header, so emptying a list is
     # ONE store of zero at offset 0 of it. `std/collections/binary_heap.mojo`'s
     # `clear`, and it is the whole of that method:

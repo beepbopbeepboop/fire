@@ -1,9 +1,7 @@
 # A set is a LIST here: insertion order, no hashing, and `for x in s` disagrees with CPython
 
-> **PLANNED — this document's open work is decomposed into `bugs/plan/step-*.md`,
-> and the design plus ordering live in `doc/finish-formal.md`.** The step that
-> owns it is **step-14a…e** (a set runtime on both backends). Read the measurements
-> here first; the step file is the work order.
+> **Steps 14a-14e landed (2026-11-06).** The set runtime work is done; what remains below
+> (hash-order iteration, `print(set)`) is a documented model choice, not a gap.
 
 > **Status 2026-11-05:** the compile-time dedup this file's table calls "fixed"
 > had been LOST in the `formal/model/` package split (commit `1d40572ed` landed
@@ -14,6 +12,7 @@
 
 > 
 > **Status 2026-11-05 (step-14a):** the compile-time set-literal dedup for word-canonical elements was lost in the `formal/model/` package split (it lived in the old single `formal/model.py`) and is re-landed in `formal/model/layout.py` (`set_literal_word_key`, `set_literal_distinct_elements`) and wired in both codegens.  
+> **Status 2026-11-06 (steps 14c-14e):** `set.add(x)` (`_emit_list_append(distinct=True)`, scan before the capacity guard; `_scan_list_caps` counts `add` sites like `append`) and set COMPREHENSION dedup (`_compr_append_elem(distinct=True)`; container elements refused with `set_comprehension_element_refusal`) are on both backends; `len({x % 2 for x in range(6)})` is 2. A user struct's own `add` still runs (measured: exit 2); `add` on a list is refused. The compile-time literal dedup now carries the append capacity to its replacement list (`_emit_deduped_set`). **Order is pinned as first-occurrence insertion order** and `KNOWN_DIVERGENCES['set_order']` stays: CPython's order for strings is per-process random and for ints needs the full CPython table, a different representation. `--mix sets` now draws literals with a repeat (about 30%).
 > **Status 2026-11-05 (step-14b):** runtime dedup added for set literals with non-canonical elements via linear scan on both backends (`_emit_set_literal`, `_emit_set_contains` on x86-64). Elements with unword-equalable kinds (floats, computed/non-literal strings, kind None) are refused with `set_runtime_element_refusal`. Mixed literals and names deduplicate at runtime with first-occurrence order preserved.
 
 ## Status 2026-10-12 (`work/formal314-docs`): ONE DISAGREEMENT THIS FILE CALLED "AGREED" WAS REAL, AND THE WORD-CANONICAL HALF IS FIXED
@@ -72,11 +71,11 @@ no hash, no bucket array, no probe sequence, no load factor, and no resize. So:
 
 | operation | CPython | this path | why |
 |---|---|---|---|
-| `len(s)` | the element count | the element count | the count word — of the DISTINCT elements when every one is word-canonical, and of the REPEATS otherwise (see the Status at the top) |
+| `len(s)` | the element count | the element count | the count word — of the DISTINCT elements: at compile time for word-canonical literals, by a run-time word scan for names, `.add` and set comprehensions (steps 14a-14d) |
 | `x in s` | a hash probe | a linear scan | same answer, different cost |
-| `s.add(x)` | insert if absent | **REFUSED** | `add` is not in `model.BUILTIN_VALUE_METHODS`; a set is a list here and the count word is what an insert would have to re-check, so it is named rather than lowered as an append |
+| `s.add(x)` | insert if absent | the same (step 14c) | `BUILTIN_VALUE_METHODS["add"]`: a word scan (`_emit_set_contains`) then the `append` store and its capacity guard; the receiver must be a name/literal known to be a set, else `set_add_receiver_refusal` |
 | `for x in s` | HASH order | **INSERTION order** | the one disagreement |
-| `print(s)` | `{3, 1, 2}` | refused | `print` will not guess a set's spelling |
+| `print(s)` | `{3, 1, 2}` | refused | a set prints in CPython's hash order, which is not this path's insertion order |
 
 ## The measurement
 

@@ -4745,8 +4745,9 @@ class TestStringValueInTheModel(unittest.TestCase):
                          "the run tests are suppressed for a program whose "
                          "model the machine agrees with")
         for n in (0, 1, 2, 5, 10):
-            self.assertIn(f"main_runs_{n}", text)
-            self.assertIn(f"main_terminates_{n}", text)
+            with self.subTest(input=n):
+                self.assertIn(f"theorem main_runs_{n} :", text)
+                self.assertIn(f"theorem main_terminates_{n} :", text)
 
     def test_len_of_an_image_string_is_its_character_count(self):
         for arch in STRING_ARCHES:
@@ -4766,9 +4767,6 @@ class TestStringValueInTheModel(unittest.TestCase):
             with self.subTest(arch=arch, direct=True):
                 self.assertIn("(UInt64.ofNat 2)", text)
                 self.assertNotIn("(strlen (UInt64.ofNat", text)
-            with self.subTest(input=n):
-                self.assertIn(f"theorem main_runs_{n} :", text)
-                self.assertIn(f"theorem main_terminates_{n} :", text)
 
     def test_a_string_outside_the_intern_table_is_refused_not_zeroed(self):
         """The negative guard, and the reason the default is a refusal.

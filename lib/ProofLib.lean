@@ -1346,15 +1346,38 @@ theorem evalExpr_bool (callFunc : String → UInt64 → UInt64) (callFunc2 : Str
   evalExpr callFunc callFunc2 (MojoExpr.bool v) env = (if v then 1 else 0) := by
   rfl
 
-/-- Evaluate a unary operator expression.  Proved by case analysis on the operator. -/
+/-- Evaluate a unary operator expression.  Proved by case analysis on the operator.
+
+    All six NAMED operators are stated, because `evalExpr` has six arms before
+    its catch-all: an earlier statement listed three of them (`neg`, `not`,
+    `bnot`) and sent `lnot`, `inv` and `~` to the catch-all, which is FALSE for
+    them, and it was carried by a `sorry`. -/
 theorem evalExpr_unop (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64) (op : String) (operand : MojoExpr) (env : String → UInt64) :
   evalExpr callFunc callFunc2 (MojoExpr.unop op operand) env =
   match op with
   | "neg" => (0 : UInt64) - evalExpr callFunc callFunc2 operand env
   | "not" => if evalExpr callFunc callFunc2 operand env = 0 then 1 else 0
+  | "lnot" => if evalExpr callFunc callFunc2 operand env = 0 then 1 else 0
+  | "inv" => evalExpr callFunc callFunc2 operand env ^^^ (0xFFFFFFFFFFFFFFFF : UInt64)
+  | "~" => evalExpr callFunc callFunc2 operand env ^^^ (0xFFFFFFFFFFFFFFFF : UInt64)
   | "bnot" => evalExpr callFunc callFunc2 operand env ^^^ (0xFFFFFFFFFFFFFFFF : UInt64)
   | _ => evalExpr callFunc callFunc2 operand env := by
-  sorry
+  by_cases h1 : op = "neg"
+  · subst h1; rfl
+  by_cases h2 : op = "not"
+  · subst h2; rfl
+  by_cases h3 : op = "lnot"
+  · subst h3; rfl
+  by_cases h4 : op = "inv"
+  · subst h4; rfl
+  by_cases h5 : op = "~"
+  · subst h5; rfl
+  by_cases h6 : op = "bnot"
+  · subst h6; rfl
+  have e : evalExpr callFunc callFunc2 (MojoExpr.unop op operand) env = evalExpr callFunc callFunc2 operand env := by
+    simp [evalExpr, h1, h2, h3, h4, h5, h6]
+  rw [e]
+  simp [h1, h2, h3, h4, h5, h6]
 
 /-- Evaluate a binary operator expression.  Proved by case analysis on the operator. -/
 theorem evalExpr_binop (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64) (op : String) (l r : MojoExpr) (env : String → UInt64) :
@@ -1403,18 +1426,24 @@ theorem evalExpr_binop (callFunc : String → UInt64 → UInt64) (callFunc2 : St
                                       · by_cases h19 : op = "**"; · subst h19; rfl
                                         · simp [evalExpr]
 
-/-- Evaluate a function call expression. -/
-theorem evalExpr_call (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) (name : String) (args : List MojoExpr) (env : String → UInt64) :
+/-- Evaluate a function call expression.
+
+    The callee name must not be one of the three the evaluator answers with
+    `strlen` (`len`, `str_len`, `strlen`): for those the statement is FALSE, and
+    it used to be stated without the hypotheses and carried by a `sorry`. -/
+theorem evalExpr_call (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) (name : String) (args : List MojoExpr) (env : String → UInt64)
+  (h1 : name ≠ "len") (h2 : name ≠ "str_len") (h3 : name ≠ "strlen") :
   evalExpr callFunc callFunc2 (MojoExpr.call name args) env = callFunc name (evalArgs callFunc args env callFunc2) := by
-  sorry
+  simp [evalExpr, h1, h2, h3]
 
 /-- **The one-argument case, stated separately**, because it is the shape every
     existing proof uses: `v * 1 = v` in `UInt64`, so this is what a proof of a
     one-argument call rewrites with.  It is `simp` rather than `rfl` because the
     product is what the list fold leaves behind. -/
-theorem evalExpr_call_one (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) (name : String) (arg : MojoExpr) (env : String → UInt64) :
+theorem evalExpr_call_one (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) (name : String) (arg : MojoExpr) (env : String → UInt64)
+  (h1 : name ≠ "len") (h2 : name ≠ "str_len") (h3 : name ≠ "strlen") :
   evalExpr callFunc callFunc2 (MojoExpr.call name [arg]) env = callFunc name (evalExpr callFunc callFunc2 arg env) := by
-  sorry
+  simp [evalExpr, evalArgs, h1, h2, h3]
 
 /-- `evalArgs` over a singleton list is its element -- the property that makes
     the widening value-preserving, stated on its own so it is checked rather
