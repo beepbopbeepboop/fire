@@ -405,16 +405,6 @@ agent" by the first execution wave WITHOUT a measurement, so treat as unproven;
   producer), the Lean arms for `ccmp`/`csinc`/`csinv`/`csneg`/extended-register
   (the `_STEP_CONDS` rows exist without Lean arms: `check_step_conds` warns),
   steps 06c, 07b, 08c, 10, 11a-c, 12b-c, 13a-c, 14b-e, 16a-f, 18a-d, 19a-c, 22.
-* **Found 2026-11-06 while running the regressions:** `strip`/`rstrip` on an
-  unfoldable receiver (11a/11b) are now correct on both backends
-  (`test_formal_str_trim_runtime.py`); the `str(<non-string>)` refusal path
-  crashed on a nonexistent `BOOL_KIND` import (fixed); x86-64 traps `<<`/`**`
-  overflow and arm64 still wraps (pinned as a divergence in
-  `test_formal_int_semantics.py`); x86-64 grows a loop-appended list on a heap
-  blob and arm64 stops loudly (`list_append_overflow_is_loud`) — a parity item.
-  `test_formal_run.py` still has stale "refused" rows for constructs that now
-  build (`upper`, f/t-strings) and changed refusal wording on the vararg and
-  set-comprehension rows.
 * **Not run:** `test_formal_admitted.py` / `test_formal_axiom_closure_pinned.py`
   (need the library build; pins will move), the `make gate` bucket.
 
