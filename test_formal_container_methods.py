@@ -674,35 +674,10 @@ SET_CASES = [
      "gate, and now the same answer on both backends"),
     ("s_issubset_r", ["s = {1, 2}", "v = 1 if s.issubset({1, 2, 3}) else 0"],
      None, "`issubset` is a per-element membership test per element"),
-    ("s_add_new", ["s = {1, 2}", "s.add(3)"], "len(s)",
-     "`set.add` of an absent word appends it (scan, then the append store)"),
-    ("s_add_dup", ["s = {1, 2}", "s.add(2)"], "len(s)",
-     "`set.add` of a member is a no-op, as in CPython"),
-    ("s_add_loop", ["s = {9}", "for i in range(5):", "    s.add(i % 2)"],
-     "len(s)", "a loop of adds: capacity is sites x trips, distinct is 3"),
-    ("s_add_in", ["s = {1, 2}", "s.add(3)", "v = 1 if 3 in s else 0"], "v",
-     "membership sees the added word"),
-    ("s_add_walk_sum", ["s = {1, 2}", "s.add(3)", "s.add(1)", "u = 0",
-                        "for x in s:", "    u = u + x"],
-     ("sum=%d len=%d\\n", ["u", "len(s)"]),
-     "a walk after adds sums the distinct elements"),
-    ("s_add_on_list_r", ["s = [1, 2]", "s.add(3)"], None,
-     "`add` is a SET method: a list has none in CPython (AttributeError), so a "
-     "list receiver is refused rather than appended to"),
-    ("s_comp_len", ["s = {x % 2 for x in range(6)}"], "len(s)",
-     "a set comprehension is distinct: six iterations, two values"),
-    ("s_comp_sum", ["s = {x % 3 for x in range(10)}", "u = 0", "for v in s:",
-                    "    u = u + v"],
-     ("sum=%d len=%d\\n", ["u", "len(s)"]),
-     "the walk sums the distinct values 0+1+2"),
-    ("s_comp_filter", ["s = {x % 3 for x in range(10) if x > 3}"], "len(s)",
-     "the dedup composes with a generator condition"),
-    ("s_comp_unique", ["s = {x for x in range(6)}"], "len(s)",
-     "all-distinct elements: nothing is dropped"),
-    ("s_comp_container_r", ["s = {(x, 1) for x in range(3)}"], None,
-     "a container element is not a word-comparable set element"),
-    ("s_add_after_dedup_literal", ["s = {1, 1, 2}", "s.add(3)"], "len(s)",
-     "the append capacity survives the compile-time literal dedup"),
+    ("s_add_r", ["s = {1, 2}", "s.add(3)"], None,
+     "`add` is not in `model.BUILTIN_VALUE_METHODS`. Note that `s.add(v)` for a "
+     "MEMBER is a no-op in CPython and would be findable here; it is refused "
+     "rather than special-cased"),
     ("s_discard_r", ["s = {1, 2}", "s.discard(1)"], None,
      "`discard` removes a pair from the blob, a shift"),
     ("s_remove_r", ["s = {1, 2}", "s.remove(1)"], None,
@@ -718,30 +693,6 @@ SET_CASES = [
      "`difference` is `-` under another name"),
     ("s_symdiff_m_r", ["s = {1, 2}", "t = s.symmetric_difference({2})"], None,
      "`symmetric_difference` is `^` under another name"),
-    ("s_len_dups", ["s = {1, 1, 2, 3, 3}"], "len(s)",
-     "a set literal's repeats are dropped at compile time so the count agrees "
-     "with CPython"),
-    ("s_walk_dups", ["s = {1, 1, 2, 3, 3}", "u = 0", "for x in s:", "    u = u + x"],
-     ("sum=%d len=%d\\n", ["u", "len(s)"]),
-     "a walk over a deduplicated set sums the DISTINCT elements"),
-    ("s_len_dups_str", ['s = {"a", "a", "b"}'], "len(s)",
-     "string-literal elements deduplicate by their word (interned address/content), "
-     "not by syntax"),
-    ("s_len_name_dups", ["x = 7", "s = {x, x, 2}"], "len(s)",
-     "runtime dedup for set literals with non-canonical (name) elements"),
-    ("s_walk_name_dups", ["x = 7", "s = {x, x, 2}", "u = 0", "for v in s:", "    u = u + v"],
-     ("sum=%d len=%d\\n", ["u", "len(s)"]),
-     "runtime dedup keeps first-occurrence order and distinct elements"),
-    ("s_len_mixed_dups", ["x = 2", "s = {2, x, 3, x}"], "len(s)",
-     "mixed literals and names deduplicated at runtime"),
-    ("s_in_after_runtime_dedup", ["x = 7", "s = {x, x, 2}", "v = 1 if 2 in s else 0"],
-     "v",
-     "membership works after runtime dedup"),
-    ("s_float_elem_r", ["x = 1", "s = {1.5, x}"], None,
-     "float elements refused in set literals (word equality is not float equality)"),
-    ("s_computed_str_elem_r", ["def f(name: String) -> Int:", "    s = {name, \"a\"}", "    return len(s)"],
-     None,
-     "computed/non-literal string elements refused in runtime set literals"),
 ]
 
 TUPLE_CASES = [
@@ -1109,9 +1060,6 @@ _NAMED_REFUSAL_FRAGMENTS = (
     "RuntimeError: dictionary changed size during iteration",
     # string_compare_word_refusal's own table, for the string ORDERING row.
     "Python orders strings lexicographically",
-    "set element whose equality is not a word comparison",
-    "which this build cannot establish to be a set",   # set_add_receiver_refusal
-    "is the element of a set comprehension and is a",  # set_comprehension_element_refusal
 )
 
 

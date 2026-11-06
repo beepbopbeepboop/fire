@@ -158,11 +158,6 @@ _ARM64_OVERRIDES = {
     "encode_fmov_v_to_gpr": (0, 1),
     "encode_scvtf_dn_xn": (0, 1),
     "encode_fcvtzs_xn_dn": (0, 1),
-    "encode_ccmp_xn_xm": (3, 4, 4, "eq"),
-    "encode_ccmp_xn_imm5": (3, 5, 4, "eq"),
-    "encode_csinc_xd_xm_cond": (0, 3, 4, "eq"),
-    "encode_csinv_xd_xm_cond": (0, 3, 4, "eq"),
-    "encode_csneg_xd_xm_cond": (0, 3, 4, "eq"),
 }
 _ARM64_REG_ARGS = {
     "xd": 0, "wd": 0, "xt": 0, "wt": 0, "rd": 0, "dd": 0,

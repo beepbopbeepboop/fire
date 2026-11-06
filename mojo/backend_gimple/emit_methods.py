@@ -5699,16 +5699,7 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         # halves existed and only the pairing was missing, so
         # `d[b'a'] = 7; d.get(b'a')` read the str domain and answered 0.
         _sfx = '_bytes' if key_is_bytes else ''
-        if gen._is_none_literal(args[0]):
-            # `d.get(None)`: the None-key entry (keykind 3), which the integer 0
-            # the literal lowers to would miss (it reads the int-0 entry).
-            if val_type == 'char *':
-                raw = gen._call_expr('char *', 'mojo_dict_get_none_key_str', [('MojoDict *', ov)])
-            elif val_type == 'double':
-                raw = gen._call_expr('double', 'mojo_dict_get_none_key_double', [('MojoDict *', ov)])
-            else:
-                raw = gen._call_expr('int64_t', 'mojo_dict_get_none_key_int', [('MojoDict *', ov)])
-        elif val_type == 'char *':
+        if val_type == 'char *':
             raw = gen._call_expr('char *', f'mojo_dict_get{_sfx}_str', [('MojoDict *', ov), (key_type, key_val)])
         elif val_type == 'double':
             raw = gen._call_expr('double', f'mojo_dict_get{_sfx}_double', [('MojoDict *', ov), (key_type, key_val)])

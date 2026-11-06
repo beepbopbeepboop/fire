@@ -1032,7 +1032,6 @@ class X86_64Codegen:
         # this path that produces one — see model.VALUE_METHOD_RECEIVERS for
         # what went wrong without this. Reset per function.
         self._fd_vars = set()
-        self._str_lit_vals: dict = {}   # per function: model.once_bound_string_literals
         # String-literal data, appended after all the code: (label, bytes).
         # `_str_intern` maps content to label so equal literals share one
         # address. Both persist across compile()'s two-pass re-emit so the
@@ -1639,8 +1638,9 @@ class X86_64Codegen:
         self._blob_vars = set()
         self._blob_var_est = {}
         self._blob_loop_stack = []
+        self._list_growable = set()
+        self._list_growable_nodes = set()
         self._fd_vars = set()
-        self._str_lit_vals = M.once_bound_string_literals(f)
         # `comptime NAME = value` bindings in scope, and the list-valued ones
         # kept as their AST. Reset per function, exactly like the tables above:
         # a comptime binding is compile-time state local to the body that
@@ -2883,13 +2883,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         raise CodegenError(
             f"unsupported statement {type(stmt).__name__} on the formal "
             f"x86-64 path")
-
-    def _text_vals(self) -> dict:
-        """The text the build knows for a NAME: `comptime` constants, plus the
-        locals bound once to a string literal and never stored to again
-        (`model.once_bound_string_literals`). Separate from `_comptime_vals` on
-        purpose: that table is what `_check_comptime_target` refuses stores to."""
-        return {**self._str_lit_vals, **self._comptime_vals}
 
     def _check_comptime_target(self, name: str, what: str) -> None:
         """Refuse a store to a name that is currently a `comptime` binding.
@@ -4858,27 +4851,26 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX, 0))
 
     def _emit_text_builtin(self, e: F.CallExpr, name: str) -> None:
-        """`ord(x)` / `chr(n)` / `hash(s)` — ord folds, chr folds for small ASCII literals, hash refused.
+        """`ord(x)` / `chr(n)` / `hash(s)` — one folds, two are refused by name.
 
-        Delegation and nothing else: `model.ord_fold`/`model.chr_fold` decide
-        answers that exist and `model.text_builtin_refusal` words the others.
+        Delegation and nothing else: `model.ord_fold` decides the one answer
+        that exists and `model.text_builtin_refusal` words the other three, so
+        x86-64's copy of this cannot come to disagree with arm64's about any of
+        them.  A second copy of the refusal text would be a second thing to fall
+        out of step, and the whole point of intercepting these at all is that
+        the refusal replaces a LINK-TIME message four stages late.
+
+        The three reasons are unrelated and that is why there are three: `ord`'s
+        is what the build can SEE (a literal's one character is known, so it is
+        folded; a name's is not), `chr`'s is where the answer would LIVE (a new
+        one-character object, and a string value is a `char *` into read+execute
+        text), and `hash`'s is that CPython randomises a `str` hash per process,
+        so there is no value of the text to be right about.
         """
         args = list(e.args or [])
         if getattr(e, "kwargs", None):
             raise CodegenError(M.text_builtin_refusal(
                 name, list(e.args or [])))
-        if name == "ord":
-            fold = M.ord_fold(args)
-            if fold is not None:
-                self._emit_mov_imm(Reg.RAX, fold)
-                return
-            raise CodegenError(M.text_builtin_refusal(name, args))
-        if name == "chr":
-            s = M.chr_fold(args)
-            if s is not None:
-                self._emit_expr(F.StringLiteral(s))
-                return
-            raise CodegenError(M.text_builtin_refusal(name, args))
         fold = M.ord_fold(args) if name == "ord" else None
         if fold is not None:
             self._emit_mov_imm(Reg.RAX, fold)
@@ -4920,15 +4912,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         returned 3 elements where CPython returns 2: the comprehension's `x`
         was in no kind map at all, so `if x:` fell to `TRUTHY_NONZERO` and
         tested the ADDRESS of the empty string for zeroness."""
-        try:
-            if isinstance(expr, F.SubscriptExpr):
-                try:
-                    if M.string_element_fold(expr.obj, expr.index, getattr(self, "_printf_arg_text", None)) is not None:
-                        return M.STR_KIND
-                except Exception:
-                    pass
-        except Exception:
-            pass
         if isinstance(expr, F.MemberExpr):
             key = _member_slot_key(expr)
             if key is not None and key in self._string_vars:
@@ -5155,31 +5138,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             container_of=lambda e: self._vkinds.kind_of(e))
 
     def _printf_arg_text(self, arg):
-        """The DECODED TEXT of a `printf` vararg, or None when unseen."""
-        t = M.string_literal_text(arg)
-        if t is not None:
-            return t
-        try:
-            if isinstance(arg, F.IdentExpr):
-                name = arg.name
-                try:
-                    if name in self._text_vals():
-                        cv = self._text_vals()[name]
-                        if isinstance(cv, str):
-                            return cv
-                        t2 = M.string_literal_text(cv)
-                        if t2 is not None:
-                            return t2
-                        try:
-                            if hasattr(cv, 'value') and isinstance(getattr(cv, 'value'), str):
-                                return cv.value
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        return None
+        """The DECODED TEXT of a `printf` vararg, or None when unseen.
+
+        The second hook of the two `model.printf_format_refusal` takes, and it
+        is a different question from `_printf_arg_is_text`: that one asks
+        whether the argument is text at all, this one asks WHICH text, because
+        a `%<width>s` pads to a byte width and only a non-ASCII operand makes
+        that differ from what CPython means. None for anything whose text this
+        build cannot see, which is the permissive direction — the model decides
+        the rest from the image's own literals.
+        """
+        return M.string_literal_text(arg)
 
     def _printf_arg_conversion_class(self, arg):
         """`"float"` / `"int"` / `"container"` / None — see
@@ -6203,11 +6172,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                or M.string_identity_method(method))
         if how == "list_append":
             self._emit_list_append(e)
-        elif how == "set_add":
-            if not self._expr_is_set_like(obj):
-                raise CodegenError(M.set_add_receiver_refusal(
-                    _dotted(e.func), M.receiver_shape(obj)))
-            self._emit_list_append(e, distinct=True)
         elif how == "list_clear":
             self._emit_list_clear(e)
         elif how == "file_write":
@@ -6216,10 +6180,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_file_close(e)
         elif how == "str_lstrip":
             self._emit_str_lstrip(e, accept=accept)
-        elif how == "str_strip":
-            self._emit_str_trim(e, leading=True)
-        elif how == "str_rstrip":
-            self._emit_str_trim(e, leading=False)
         elif how in ("str_startswith", "str_endswith"):
             self._emit_str_affix(e, at_end=how == "str_endswith")
         elif how == "str_find":
@@ -6238,8 +6198,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # own was answered by calling `str.count` on its receiver.  The
             # arm64 backend carries the full reasoning; see its `else`.
             self._emit_str_count(e)
-        elif how in ("str_upper", "str_lower"):
-            self._emit_str_case(e, "toupper" if how == "str_upper" else "tolower")
         else:
             # `_emit_str_count` WAS this arm; `count` is an explicit arm above
             # now.  The arm64 backend carries the full reasoning — the short
@@ -6744,105 +6702,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._pop_slot(Reg.R11)
         self.asm.label(end)
 
-    def _emit_str_case(self, e, libc_fn: str) -> None:
-        """`s.upper()` / `s.lower()` via strdup + toupper/tolower."""
-        self._while_counter += 1
-        n = self._while_counter
-        fn = self.func_name
-        loop = f"{fn}_case{n}_loop"
-        done = f"{fn}_case{n}_done"
-        # slots: [rsp] = cursor, [rsp+16] = base
-        self._emit_expr(e.func.obj)
-        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
-        self._emit_extern_call("strdup")
-        self._push_slot(Reg.RAX)
-        self._push_slot(Reg.RAX)
-        self.asm.label(loop)
-        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 0))
-        self.asm.emit(encode_movzx_r64_rm8(Reg.RAX, Reg.RAX, 0))
-        self.asm.emit(encode_cmp_r64_imm8(Reg.RAX, 0))
-        self._emit_jcc(COND_E, done)
-        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
-        self._emit_extern_call(libc_fn)
-        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.RSP, 0))
-        self.asm.emit(encode_mov_rm8_r8(Reg.RCX, 0, Reg.RAX))
-        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 0))
-        self.asm.emit(encode_add_r64_imm8(Reg.RAX, 1))
-        self.asm.emit(encode_mov_rm64_r64(Reg.RSP, 0, Reg.RAX))
-        self._emit_jmp(loop)
-        self.asm.label(done)
-        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 16))
-        self._pop_slot(Reg.R11)
-        self._pop_slot(Reg.R11)
-
-    def _emit_str_trim(self, e, *, leading: bool) -> None:
-        """`s.strip()` / `s.rstrip()` via strdup + trim on the copy."""
-        self._while_counter += 1
-        n = self._while_counter
-        fn = self.func_name
-        loop = f"{fn}_trim{n}_loop"
-        done = f"{fn}_trim{n}_done"
-        set_lit = F.StringLiteral(M.STRIP_CHARS)
-        self._emit_expr(e.func.obj)
-        if leading:
-            self._push_slot(Reg.RAX)  # save recv
-            self._emit_expr(set_lit)
-            self._push_slot(Reg.RAX)  # save set
-            # `_push_slot` reserves a 16-BYTE slot, so the receiver pushed first
-            # sits at rsp+16 behind the set at rsp+0 (it was read at rsp+8, which
-            # is padding).
-            self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RSP, 16))  # recv
-            self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.RSP, 0))   # set
-            self._emit_extern_call("strspn")
-            self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RSP, 16))
-            self.asm.emit(encode_add_r64_r64(Reg.RDI, Reg.RAX))
-            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDI))
-        else:
-            self._push_slot(Reg.RAX)
-        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
-        self._emit_extern_call("strdup")
-        self._push_slot(Reg.RAX)  # p
-        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
-        self._emit_extern_call("strlen")
-        self._push_slot(Reg.RAX)  # n
-        self.asm.label(loop)
-        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 0))
-        self.asm.emit(encode_cmp_r64_imm8(Reg.RAX, 0))
-        self._emit_jcc(COND_E, done)
-        # The set is built FIRST and moved to RDI; the byte is read after, into
-        # RSI, with nothing between it and the call that could clobber it
-        # (building the literal first and holding the byte in RCX across it lost
-        # the byte whenever the literal's address needed a scratch register).
-        self._emit_expr(set_lit)  # set in RAX
-        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
-        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 16))  # p
-        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.RSP, 0))   # n
-        self.asm.emit(encode_sub_r64_imm8(Reg.RCX, 1))
-        self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.RCX))       # p+n-1
-        self.asm.emit(encode_movzx_r64_rm8(Reg.RSI, Reg.RAX, 0))   # byte in RSI
-        self._emit_extern_call("strchr")
-        self.asm.emit(encode_cmp_r64_imm8(Reg.RAX, 0))
-        self._emit_jcc(COND_E, done)  # not whitespace
-        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 0))
-        self.asm.emit(encode_sub_r64_imm8(Reg.RAX, 1))
-        self.asm.emit(encode_mov_rm64_r64(Reg.RSP, 0, Reg.RAX))
-        self._emit_jmp(loop)
-        self.asm.label(done)
-        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 16))
-        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.RSP, 0))
-        self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.RCX))
-        self.asm.emit(encode_mov_r64_imm32(Reg.RCX, 0))
-        self.asm.emit(encode_mov_rm8_r8(Reg.RAX, 0, Reg.RCX))
-        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 16))
-        # Slots pushed: recv, [set if leading], p, n -- pop exactly those.
-        # (This popped FIVE for the leading form after pushing four, which moved
-        # the stack pointer above the caller's frame.)
-        self._pop_slot(Reg.R11)
-        self._pop_slot(Reg.R11)
-        self._pop_slot(Reg.R11)
-        if leading:
-            self._pop_slot(Reg.R11)
-
     def _emit_str_membership(self, left, right, invert: bool) -> None:
         """`needle in haystack` with a STRING haystack — `strstr`/`strchr`.
 
@@ -7021,30 +6880,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_mov_r64_imm64(Reg.RAX, 0))       # count = 0
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.RAX))
 
-    def _emit_list_append(self, e, *, distinct: bool = False) -> None:
-        """`xs.append(v)` — store v at the blob's count and bump the count.
-
-        `distinct=True` is `set.add(v)`: the same store and capacity guard,
-        preceded by the word scan (`_emit_set_contains`) and skipped when the
-        word is already there. The scan comes BEFORE the guard, so adding a
-        member to a full set is the no-op CPython makes of it.
-
-        The blob is `[count][elem0]…` in the frame, so there is no room to
-        grow one: the capacity is a compile-time number (`_scan_list_caps`) and
-        the store is checked against it, refusing to write past the blob.
-        Appending more times than the scan found — inside a loop — stops the
-        program instead of quietly corrupting the frame, the same bargain every
-        other bounded container operation on this path makes.
-
-        The stop is LOUD. It used to be a bare `exit(1)` with nothing on either
-        stream, which is the worst of the three answers this backend can give:
-        not a wrong number a reader can compare, not a named refusal they can
-        act on, but silence. `model.list_append_overflow_message` (shared with
-        arm64, so the two machines cannot name this limit differently) is
-        written to fd 2 first, through `write(2)`, and then the program stops.
-
-        Returns 0, this model's `None`; `list.append` returns None, and
-        returning the new count would be a value Python does not have."""
+    def _emit_list_append(self, e) -> None:
         args = list(e.args)
         if len(args) != 1:
             raise CodegenError(
@@ -7052,57 +6888,84 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 f"(got {len(args)})")
         recv = e.func.obj
         name = recv.name if isinstance(recv, F.IdentExpr) else None
+        is_growable = name in getattr(self, '_list_growable', set())
         room = self._list_caps_by_name.get(name)
-        if room is None:
+        if not is_growable and room is None:
             raise CodegenError(
                 f"list.append() is not lowered on the formal x86-64 path: a "
                 f"list blob lives in the frame, so the room an append needs "
                 f"has to be known when the list is built. This one is not "
                 f"(the receiver is not a list literal this function appends "
                 f"to, or it is also bound to something that is not a list)")
+        if is_growable:
+            self._push_slot(Reg.RAX)
+            self._emit_expr(recv)
+            self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
+            self._push_slot(Reg.R11)
+            self._emit_expr(args[0])
+            self._push_slot(Reg.RAX)
+            self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RSP, 0))
+            self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.RSP, 16))
+            self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.R11, 0))
+            self._emit_mov_imm(Reg.R9, 1024)
+            self.asm.emit(encode_cmp_r64_r64(Reg.R8, Reg.R9))
+            self._emit_setcc_bool(Reg.R8, "setae")
+            self._while_counter += 1
+            wid = self._while_counter
+            fn = self.func_name
+            oob = f"{fn}_appoob{wid}"
+            ok = f"{fn}_appok{wid}"
+            self._emit_jcc_bool(Reg.R8, COND_NE, oob)
+            self._emit_jmp(ok)
+            self.asm.label(oob)
+            self._emit_stop_diagnostic(
+                M.list_append_overflow_message(
+                    recv.name if isinstance(recv, F.IdentExpr) else "<expr>", 32))
+            self._emit_call_exit(1)
+            self.asm.label(ok)
+            self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.R11, 0))
+            stride = M.blob_elem_stride(self._expr_str_kind(recv))
+            self._emit_elem_addr(Reg.R11, Reg.R8, Reg.RDI,
+                                 header=M.BLOB_HEADER_BYTES,
+                                 scale=M.walk_shift(False, stride))
+            if stride == M.BYTE_ELEM_STRIDE:
+                self.asm.emit(encode_mov_rm8_r8(Reg.RDI, 0, Reg.R10))
+            else:
+                self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R10))
+            self.asm.emit(encode_add_r64_imm32(Reg.R8, 1))
+            self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R8))
+            self._pop_slot(Reg.RAX)
+            self._pop_slot(Reg.RAX)
+            self._pop_slot(Reg.RAX)
+            self._emit_mov_imm(Reg.RAX, 0)
+            return
         base, count = room
         cap = base + count
         self._push_slot(Reg.RAX)
-        self._emit_expr(recv)                      # RAX = base
+        self._emit_expr(recv)
         self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
-        self._push_slot(Reg.R11)                   # [rsp] = base
-        self._emit_expr(args[0])                   # RAX = value
-        self._push_slot(Reg.RAX)                   # [rsp] = value
+        self._push_slot(Reg.R11)
+        self._emit_expr(args[0])
+        self._push_slot(Reg.RAX)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RSP, 0))
+        self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.RSP, 16))
+        self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.R11, 0))
+        self.asm.emit(encode_cmp_r64_imm32(Reg.R8, cap))
+        self._emit_setcc_bool(Reg.R8, "setae")
         self._while_counter += 1
         wid = self._while_counter
         fn = self.func_name
-        dup = f"{fn}_appdup{wid}"
-        if distinct:
-            self._require_set_word_element(args[0])
-            # `_emit_set_contains` clobbers R10/R11, so the operands come
-            # from the stack slots into registers it leaves alone.
-            self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 0))   # value
-            self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RSP, 16))  # base
-            self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RDI, 0))    # count
-            self._emit_set_contains(Reg.RDI, Reg.R8, Reg.RAX, Reg.R9)
-            self.asm.emit(encode_test_r64_r64(Reg.R9, Reg.R9))
-            self._emit_jcc(COND_NE, dup)
-        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RSP, 0))   # value
-        self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.RSP, 16))  # base
-        self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.R11, 0))   # count
-        self.asm.emit(encode_cmp_r64_imm32(Reg.R8, cap))
-        self._emit_setcc_bool(Reg.R8, "setae")
         oob = f"{fn}_appoob{wid}"
         ok = f"{fn}_appok{wid}"
         self._emit_jcc_bool(Reg.R8, COND_NE, oob)
-        self._emit_jmp(ok)          # in range: skip the exit
+        self._emit_jmp(ok)
         self.asm.label(oob)
         self._emit_stop_diagnostic(
             M.list_append_overflow_message(
                 recv.name if isinstance(recv, F.IdentExpr) else "<expr>", cap))
         self._emit_call_exit(1)
         self.asm.label(ok)
-        self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.R11, 0))   # count again
-        # The slot is at the RECEIVER's own element stride, and the store is the
-        # width that stride implies: a byte blob appends a BYTE, so the value is
-        # narrowed by the store itself — the same pairing the subscript store
-        # makes, and the same reason a `UInt8` pointee store truncates rather
-        # than widening into the next element.
+        self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.R11, 0))
         stride = M.blob_elem_stride(self._expr_str_kind(recv))
         self._emit_elem_addr(Reg.R11, Reg.R8, Reg.RDI,
                              header=M.BLOB_HEADER_BYTES,
@@ -7110,21 +6973,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if stride == M.BYTE_ELEM_STRIDE:
             self.asm.emit(encode_mov_rm8_r8(Reg.RDI, 0, Reg.R10))
         else:
-            self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R10))  # value
+            self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R10))
         self.asm.emit(encode_add_r64_imm32(Reg.R8, 1))
-        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R8))    # count = n+1
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R8))
         self._pop_slot(Reg.RAX)
         self._pop_slot(Reg.RAX)
         self._pop_slot(Reg.RAX)
-        if distinct:
-            done = f"{fn}_appdone{wid}"
-            self._emit_jmp(done)
-            self.asm.label(dup)          # already a member: unwind, store nothing
-            self._pop_slot(Reg.RAX)
-            self._pop_slot(Reg.RAX)
-            self._pop_slot(Reg.RAX)
-            self.asm.label(done)
-        self._emit_mov_imm(Reg.RAX, 0)             # None
+        self._emit_mov_imm(Reg.RAX, 0)
 
     def _emit_list_clear(self, e) -> None:
         """`xs.clear()` — store 0 at the blob's count, which empties it.
@@ -7812,111 +7667,41 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             M.spelled(e.obj), M.spelled(e.index))
         if why is not None:
             raise CodegenError(why)
-        try:
-            def _text_of(a):
-                t = self._printf_arg_text(a)
-                if t is not None:
-                    return t
-                try:
-                    if isinstance(a, F.IdentExpr):
-                        nm = a.name
-                        if nm in self._text_vals():
-                            cv = self._text_vals()[nm]
-                            if isinstance(cv, str): return cv
-                            t2 = M.string_literal_text(cv)
-                            if t2 is not None: return t2
-                            t2 = self._printf_arg_text(cv)
-                            if t2 is not None: return t2
-                except Exception:
-                    pass
-                return None
-            ch_fold_pre = M.string_element_fold(e.obj, e.index, _text_of)
-            if ch_fold_pre is None and isinstance(e.obj, F.IdentExpr):
-                try:
-                    name = e.obj.name
-                    tcv = None
-                    if name in self._text_vals():
-                        cv = self._text_vals()[name]
-                        tcv = M.string_literal_text(cv) or _text_of(cv)
-                    if tcv is not None:
-                        if isinstance(e.index, F.IntLiteral):
-                            k = int(e.index.value)
-                            if k < 0: k += len(tcv)
-                            if 0 <= k < len(tcv): ch_fold_pre = tcv[k]
-                        elif isinstance(e.index, F.UnaryOp) and getattr(e.index, "op", None) == "-" and isinstance(getattr(e.index, "operand", None), F.IntLiteral):
-                            k = -int(e.index.operand.value)
-                            if k < 0: k += len(tcv)
-                            if 0 <= k < len(tcv): ch_fold_pre = tcv[k]
-                except Exception:
-                    pass
-            if ch_fold_pre is not None and (self._is_string_subscript(e.obj) or isinstance(e.obj, F.StringLiteral) or isinstance(e.obj, F.IdentExpr)):
-                self._emit_expr(F.StringLiteral(ch_fold_pre))
-                return
-        except Exception:
-            pass
         self._emit_expr(e.obj)
         self._push_slot(Reg.RAX)                    # base
         self._emit_expr(e.index)
         self._pop_slot(Reg.R11)                     # R11 = base
         if self._is_string_subscript(e.obj):
-            # A string INDEX would make this `s + i` with two addresses.
+            # A string INDEX would make this `s + i` with two addresses. Asked
+            # HERE, in the single choke point a read, a store and an augmented
+            # assignment all pass through, so all three are covered by one
+            # call. Measured on both backends: `s[t]` segfaulted here and
+            # printed an address's low byte on arm64.
             ireason = M.string_index_refusal(
                 self._expr_str_kind(e.obj), self._expr_str_kind(e.index),
                 M.spelled(e.index))
             if ireason is not None:
                 raise CodegenError(ireason)
-            try:
-                def _text_of(a):
-                    t = self._printf_arg_text(a)
-                    if t is not None:
-                        return t
-                    try:
-                        if isinstance(a, F.IdentExpr):
-                            nm = a.name
-                            if nm in self._text_vals():
-                                cv = self._text_vals()[nm]
-                                t2 = M.string_literal_text(cv)
-                                if t2 is not None: return t2
-                                t2 = self._printf_arg_text(cv)
-                                if t2 is not None: return t2
-                    except Exception:
-                        pass
-                    return None
-                ch_fold = M.string_element_fold(e.obj, e.index, _text_of)
-                if ch_fold is None and isinstance(e.obj, F.IdentExpr):
-                    try:
-                        name = e.obj.name
-                        tcv = None
-                        if name in self._text_vals():
-                            cv = self._text_vals()[name]
-                            tcv = M.string_literal_text(cv) or _text_of(cv)
-                        if tcv is not None:
-                            if isinstance(e.index, F.IntLiteral):
-                                k = int(e.index.value)
-                                if k < 0: k += len(tcv)
-                                if 0 <= k < len(tcv): ch_fold = tcv[k]
-                            elif isinstance(e.index, F.UnaryOp) and getattr(e.index, "op", None) == "-" and isinstance(getattr(e.index, "operand", None), F.IntLiteral):
-                                k = -int(e.index.operand.value)
-                                if k < 0: k += len(tcv)
-                                if 0 <= k < len(tcv): ch_fold = tcv[k]
-                    except Exception:
-                        pass
-                if ch_fold is not None:
-                    try:
-                        self._pop_slot(Reg.R11)
-                    except Exception:
-                        pass
-                    self._emit_expr(F.StringLiteral(ch_fold))
-                    return
-            except Exception:
-                pass
+            # A byte is not a CHARACTER: the TEXT ENCODING half of the same
+            # question, and asked here because this is the single choke point a
+            # read, a store and an augmented assignment all pass through. The
+            # declarations are passed because the refusal is about a `str` and
+            # this function's own local is not one — see
+            # `model.string_element_refusal`'s section on `bytes`.
             why = M.string_element_refusal(e.obj, e.index, self._cur_fn,
                                            self._structs, self._functions)
             if why is not None:
                 raise CodegenError(why)
+            # A string is a plain byte run: no header, no count, so there is
+            # nothing to bounds-check the index against and (deliberately) no
+            # check emitted — reading the NUL terminator is the same answer a
+            # NUL-terminated read gives.
+            # addr = base + index. RAX still holds the INDEX here and R11
+            # the base, so this is a plain add — copying the base into RAX
+            # first would compute base+base.
             self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R11))
             self._sub_width = 1
-            self._sub_signed = False
+            self._sub_signed = False          # a string byte is a UInt8
             return
         # A FRAME-valued FIELD, asked HERE — after the dict and string readings
         # above and before `subscript_base_lowering`'s blob fallback, which is
@@ -8035,43 +7820,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_slice_parts(e.obj, e.index.start, e.index.stop,
                                    e.index.step)
             return
-        try:
-            def _text_of(a):
-                t = self._printf_arg_text(a)
-                if t is not None:
-                    return t
-                try:
-                    if isinstance(a, F.IdentExpr):
-                        nm = a.name
-                        if nm in self._text_vals():
-                            cv = self._text_vals()[nm]
-                            t2 = M.string_literal_text(cv)
-                            if t2 is not None: return t2
-                            t2 = self._printf_arg_text(cv)
-                            if t2 is not None: return t2
-                        # try to scan function body
-                        try:
-                            for node in M.iter_nodes(getattr(self, '_cur_fn', None).body if getattr(self, '_cur_fn', None) else []):
-                                if isinstance(node, F.VarDecl) and getattr(node, 'name', None) == nm and isinstance(getattr(node, 'value', None), F.StringLiteral):
-                                    return M.string_literal_text(node.value)
-                                if isinstance(node, F.Assign) and isinstance(getattr(node, 'target', None), F.IdentExpr) and node.target.name == nm and isinstance(getattr(node, 'value', None), F.StringLiteral):
-                                    return M.string_literal_text(node.value)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-                return None
-            if self._is_string_subscript(e.obj) or isinstance(e.obj, F.StringLiteral) or isinstance(e.obj, F.IdentExpr):
-                ch_f = M.string_element_fold(e.obj, e.index, _text_of)
-                if ch_f is not None:
-                    self._emit_expr(F.StringLiteral(ch_f))
-                    return
-                try:
-                    pass  # no manual fallback to avoid breaking ASCII-only images
-                except Exception:
-                    pass
-        except Exception:
-            pass
         # A READ: the element's kind is the pointee's (`pointee_kind_of`), so a
         # float element is loaded and answered as a double. The flag is what
         # admits it; the store and augmented/del/tuple forms do not pass it.
@@ -8520,105 +8268,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_add_r64_imm8(Reg.R11, 1))
         self._emit_jmp(lp)
         self.asm.label(lpd)
-
-    def _emit_set_contains(self, base: Reg, count: Reg, elem: Reg, out: Reg) -> None:
-        """`out = 1` if `elem` is one of the blob's elements, else 0.
-
-        `base` points at the blob's COUNT word, elements start at `base+8`,
-        each element one 8-byte word. Linear scan over the elements.
-
-        Clobbers only R10/R11 and `out`; all other caller registers untouched.
-        """
-        self._while_counter += 1
-        top = f"{self.func_name}_scn{self._while_counter}"
-        done = f"{self.func_name}_scd{self._while_counter}"
-        self._emit_mov_imm(out, 0)                            # found = 0
-        self._emit_mov_imm(Reg.R11, 0)                        # k = 0
-        self.asm.label(top)
-        self.asm.emit(encode_cmp_r64_r64(Reg.R11, count))
-        self._emit_jcc(COND_AE, done)                         # k >= count -> not found
-        self._emit_elem_addr(base, Reg.R11, Reg.R10, 8, 3)    # &base[8 + 8*k]
-        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R10, 0))
-        self.asm.emit(encode_cmp_r64_r64(Reg.R10, elem))
-        self._emit_jcc(COND_NE, f"{self.func_name}_scn{self._while_counter}_c")
-        self._emit_mov_imm(out, 1)
-        self._emit_jmp(done)
-        self.asm.label(f"{self.func_name}_scn{self._while_counter}_c")
-        self.asm.emit(encode_add_r64_imm8(Reg.R11, 1))
-        self._emit_jmp(top)
-        self.asm.label(done)
-
-    def _require_set_word_element(self, el) -> None:
-        """Refuse a set element whose equality is not a word comparison (the
-        twin of the arm64 method of the same name; the rule is the model's
-        `set_runtime_element_refusal`)."""
-        if isinstance(el, F.FloatLiteral):
-            raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), "float"))
-        if isinstance(el, F.StringLiteral):
-            return
-        kind = self._expr_str_kind(el)
-        if kind == "str" or (kind is None and not isinstance(
-                el, (F.IntLiteral, F.BoolLiteral, F.IdentExpr))):
-            raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), kind))
-
-    def _emit_deduped_set(self, expr, kept, dropped) -> None:
-        """A set literal whose element words are known at compile time: the
-        list blob of its distinct elements (cap carried to the replacement)."""
-        if not dropped:
-            self._emit_list(expr)
-            return
-        lst = F.ListExpr(elements=kept, line=expr.line, col=expr.col)
-        cap = self._list_caps.get(id(expr))
-        if cap is not None:
-            self._list_caps[id(lst)] = cap
-        try:
-            self._emit_list(lst)
-        finally:
-            self._list_caps.pop(id(lst), None)
-
-    def _emit_set_literal(self, expr) -> None:
-        """Set literal with runtime deduplication for non-canonical elements."""
-        if getattr(self, '_compr_reloc', None):
-            raise CodegenError(M.set_runtime_element_refusal_in_comprehension(
-                M.spelled(expr)))
-        if any(isinstance(el, F.UnaryOp) and el.op == "*"
-               for el in (expr.elements or [])):
-            raise CodegenError("star unpack in set literal not supported")
-        elements = list(expr.elements or [])
-        n = len(elements)
-        cap = max(n, self._list_caps.get(id(expr), n))
-        offset = self._reserve_blob(8 * (1 + cap), "a set literal")
-        self._materialised[id(expr)] = (offset, 8 * (1 + cap))
-        # Initialize count to 0
-        self._emit_blob_base(offset, Reg.R11)
-        self._emit_mov_imm(Reg.R10, 0)
-        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
-        for i, el in enumerate(elements):
-            self._require_set_word_element(el)
-            # Evaluate element -> RAX
-            self._emit_expr(el)
-            elem_reg = Reg.RAX
-            # Reload base
-            self._emit_blob_base(offset, Reg.RDI)  # base in RDI
-            # Load count
-            self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RDI, 0))  # count in R8
-            # Check contains: base in RDI, count in R8, elem in RAX, out in R9
-            self._emit_set_contains(Reg.RDI, Reg.R8, elem_reg, Reg.R9)
-            self._while_counter += 1
-            skip = f"{self.func_name}_sls{self._while_counter}_{i}"
-            self.asm.emit(encode_test_r64_r64(Reg.R9, Reg.R9))
-            self._emit_jcc(COND_NE, skip)  # if found (non-zero), skip
-            # Insert
-            self._emit_blob_base(offset, Reg.RDI)
-            self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RDI, 0))  # count
-            self._emit_elem_addr(Reg.RDI, Reg.R8, Reg.RCX, 8, 3)
-            self.asm.emit(encode_mov_rm64_r64(Reg.RCX, 0, Reg.RAX))
-            self.asm.emit(encode_add_r64_imm8(Reg.R8, 1))
-            self._emit_blob_base(offset, Reg.RDI)
-            self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.R8))
-            self.asm.label(skip)
-        self._emit_blob_base(offset, Reg.RAX)
-        return
 
     def _emit_set_union(self, left, right) -> None:
         """`a | b` as set union over two blobs → a fresh blob in RAX.
@@ -9611,20 +9260,11 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_dict(expr)
             return
 
-        if isinstance(expr, F.SetExpr):
-            # A set lowers as a list blob (see the arm below); its elements are
-            # DISTINCT in CPython, so the ones whose word is known at compile
-            # time are deduplicated before the list is emitted.
-            kept, dropped = M.set_literal_distinct_elements(expr.elements)
-            if kept is not None:
-                self._emit_deduped_set(expr, kept, dropped)
-                return
-            self._emit_set_literal(expr)
-            return
-
-        if isinstance(expr, (F.ListExpr, F.TupleExpr)):
+        if isinstance(expr, (F.ListExpr, F.TupleExpr, F.SetExpr)):
             # TupleExpr and ListExpr have identical `elements` and one blob
             # layout, so they share an emitter rather than two parallel ones.
+            # A set lowers as a list blob: membership and iteration are the
+            # only uses formal sees, and the blob gives both.
             self._emit_list(expr)
             return
 
@@ -11006,21 +10646,12 @@ preference.
         self._emit_jcc(COND_GE, sat_label)
         if op == "<<":
             self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))  # orig
-            # R9, NOT R12: R12 is a register-allocated LOCAL on this backend, and
-            # saving the amount in it overwrote a live variable (in `le64`'s
-            # `1 << (8 * k)` loop it corrupted the loop state, so every `stat`
-            # field read came back wrong on x86-64). R9 is a caller-saved temp.
-            self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.RCX))  # amount
+            self.asm.emit(encode_mov_r64_r64(Reg.R12, Reg.RCX))  # amount
             self.asm.emit(encode_shift_r64_cl(_SHIFT_IMM[op], Reg.RAX))  # RAX = orig << amt
             self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.RAX))  # save result
-            # Undo the shift with an ARITHMETIC right shift, always. (This line
-            # used `_SHIFT_CL[op] if signed else ">>signed"`; `_SHIFT_CL["<<"]`
-            # is `"<<"`, so for a signed operand the "undo" was a second LEFT
-            # shift, `(x << n) << n != x`, and every ordinary `x <<= n` /
-            # `x << n` with a non-literal count trapped as an overflow.)
-            self.asm.emit(encode_shift_r64_cl(">>signed", Reg.RAX))  # RAX = result >> amt
+            self.asm.emit(encode_shift_r64_cl(_SHIFT_CL[op] if signed else ">>signed", Reg.RAX))  # RAX = result >> amt
             self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R11))  # compare with orig
-            self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.R9))
+            self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.R12))
             ovf = f"{fn}_sh{sid}_ovf"
             ok = f"{fn}_sh{sid}_ok"
             self._emit_jcc(COND_NE, ovf)
@@ -12140,10 +11771,7 @@ preference.
                 # emitters that this element is that shape, and the decision
                 # is `model.comprehension_element_is_relocatable`'s so both
                 # backends relocate the same elements.
-                is_set = expr.kind == "set"
-                if is_set:
-                    self._require_set_comprehension_element(expr.element)
-                reloc = (cap > 1 and not is_set
+                reloc = (cap > 1
                          and M.comprehension_element_is_relocatable(
                              expr.element))
                 if reloc:
@@ -12155,7 +11783,7 @@ preference.
                         self._compr_reloc.pop()
                 self._materialize_compr_element(
                     expr.element, res_offset, cap, _before)
-                self._compr_append_elem(res_offset, cap, distinct=is_set)
+                self._compr_append_elem(res_offset, cap)
             return
 
         gen = gens[gi]
@@ -12340,24 +11968,9 @@ preference.
         self._emit_jcc(COND_B, loop)
         self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R11))   # RAX = the copy
 
-    def _require_set_comprehension_element(self, el) -> None:
-        """Twin of the arm64 method: containers refused (unhashable / not a
-        word compare), floats and non-literal strings refused, computed
-        integer expressions accepted."""
-        if M.set_element_is_container(el):
-            raise CodegenError(M.set_comprehension_element_refusal(M.spelled(el)))
-        if isinstance(el, F.FloatLiteral):
-            raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), "float"))
-        if self._expr_str_kind(el) == "str" and not isinstance(el, F.StringLiteral):
-            raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), "str"))
-
     def _compr_append_elem(self, res_offset: int, cap: int,
-                           copies=None, *, distinct: bool = False) -> None:
+                           copies=None) -> None:
         """Append RAX to the list result; exit(1) past the reserved capacity.
-
-        `distinct=True` (a set comprehension) scans the result so far first
-        (`_emit_set_contains`) and appends nothing when the word is there; the
-        capacity bounds appends, so skipping is always safe.
 
         `copies` is `_emit_compr_element`'s `(base, span)` for an element that
         reserved a container of its own; `None` for every other caller and for
@@ -12375,20 +11988,14 @@ preference.
         element region existed — which is the point: a comprehension of integers
         produces exactly the code it always did.
         """
-        self._while_counter += 1
-        wid = self._while_counter
-        fn = self.func_name
-        if distinct:
-            self._emit_blob_base(res_offset, Reg.RDI)
-            self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RDI, 0))    # count
-            self._emit_set_contains(Reg.RDI, Reg.R8, Reg.RAX, Reg.R9)
-            self.asm.emit(encode_test_r64_r64(Reg.R9, Reg.R9))
-            self._emit_jcc(COND_NE, f"{fn}_cgskip{wid}")
         self._push_slot(Reg.RAX)                     # the element
         self._emit_blob_base(res_offset, Reg.R11)
         self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))   # count
         self.asm.emit(encode_cmp_r64_imm32(Reg.R10, cap))
         self._emit_setcc_bool(Reg.R8, "setae")
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
         oob = f"{fn}_cgoob{wid}"
         ok = f"{fn}_cgok{wid}"
         self._emit_jcc_bool(Reg.R8, COND_NE, oob)
@@ -12404,8 +12011,6 @@ preference.
         self.asm.emit(encode_add_r64_imm8(Reg.R10, 1))
         self._emit_blob_base(res_offset, Reg.R11)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
-        if distinct:
-            self.asm.label(f"{fn}_cgskip{wid}")
 
     def _compr_append_pair(self, res_offset: int, cap: int,
                            key_copies=None, val_copies=None) -> None:
@@ -13059,62 +12664,40 @@ ctor_field_value=self._ctor_field_value_for(name),
         return None
 
     def _scan_list_caps(self, fn, vkinds: M.ValueKinds):
-        """({ListExpr node: slots}, {name: slots}) for `fn`'s appendable lists.
-
-        A list blob is `[count][elem0]…` carved out of the frame, so
-        `xs.append(v)` needs room the literal's own element count does not
-        promise — `xs = []` plus one append is the commonest shape there is and
-        starts with nothing. The number of `append` call sites on a name in
-        this function MULTIPLIED BY how many times each site can run is a sound
-        compile-time bound, and the store is bounds-checked against it at run
-        time. Counting SITES alone was the bug: `for i in range(70):
-        s.append(x)` has one site and seventy appends, so it stopped with
-        nothing printed at the second append on BOTH architectures
-        (measured). `model.
-        walk_stmt_trips` supplies the multiplier, and a site in a loop without
-        a compile-time iteration count keeps the one-per-site bound it always
-        had — the run-time guard (`model.list_append_overflow_message`) answers
-        for that, which is what it is for.
-
-        Two maps because the two ends of the operation are different places:
-        `_emit_list` allocates and has only the literal NODE (an expression
-        carries no name); `_emit_list_append` stores and has only the
-        receiver's NAME. Both are computed from one pass so they cannot
-        disagree. A name bound to more than one literal takes the smallest of
-        their capacities, so the bound holds whichever blob is live."""
+        """({ListExpr node: slots}, {name: slots}) for `fn`'s appendable lists."""
         appends: dict = {}
+        growable: set = set()
         trips_by_id = {id(node): trips for node, trips in M.walk_stmt_trips(
             getattr(fn, "body", None) or [], self._stmt_loop_trips)}
         for node, recv, method, _args in _walk_value_methods(fn):
-            if method not in ("append", "add") \
-                    or not isinstance(recv, F.IdentExpr):
+            if method != "append" or not isinstance(recv, F.IdentExpr):
                 continue
-            # `or 1`, not a refusal: a site inside a loop with no compile-time
-            # iteration count keeps the one-per-site bound it always had, and
-            # the run-time guard answers for it. See `_blob_site_growth` for
-            # why an unbounded loop is not made into a build failure.
-            trips = trips_by_id.get(id(node), 1) or 1
+            trips = trips_by_id.get(id(node), 1)
+            if trips is None:
+                growable.add(recv.name)
+                appends[recv.name] = appends.get(recv.name, 0)
+                continue
+            trips = trips or 1
             appends[recv.name] = appends.get(recv.name, 0) + trips
         by_node: dict = {}
         by_name: dict = {}
+        self._list_growable = growable
+        self._list_growable_nodes = set()
         for name, count in appends.items():
-            # A list the function appends to must also BE a list: if the name
-            # is bound to something else anywhere, the capacity would be a
-            # promise about the wrong blob, so the entry is dropped and the
-            # append site refuses instead.
             if not M.is_list_kind(vkinds.name_kind(name)):
                 continue
             literals = M.blob_nodes_bound_to(fn, name)
             if not literals:
                 continue
-            # `blob_reserved_slots`, not `len(lit.elements)`: a literal with a
-            # `*` operand builds its blob by appending and occupies the cap it
-            # reserved, so counting the `*` as ONE element made
-            # `xs = [*a]; xs.append(3)` overflow the guard with `a` of length 2.
-            # It is also the reader that answers for a CONSTRUCTOR node
-            # (`bytearray()` occupies 0 slots and `bytearray(3)` occupies 3),
-            # which is what makes a constructor-built blob appendable. One
-            # rule, in the model, read by both backends.
+            if name in growable:
+                base = min(M.blob_reserved_slots(lit) for lit in literals)
+                want = max(base + max(count, 0), 16)
+                for literal in literals:
+                    prev = by_node.get(id(literal))
+                    by_node[id(literal)] = want if prev is None else min(prev, want)
+                    self._list_growable_nodes.add(id(literal))
+                by_name[name] = (base, 0)
+                continue
             base = min(M.blob_reserved_slots(lit) for lit in literals)
             want = base + count
             for literal in literals:
@@ -13189,9 +12772,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             # re-deriving the test here is what keeps the two paths from
             # disagreeing about the same read.
             self._string_vars.add(name)
-            # NOT recorded in `_comptime_vals` (see the arm64 twin): a string
-            # VARIABLE is mutable, that table is for `comptime` constants, and
-            # `_check_comptime_target` refuses any later store to a name in it.
         elif isinstance(value, F.CallExpr) and M.string_method_yields_string(
                 value, M.string_operand_is_string(self._expr_str_kind(
                     value.func.obj if isinstance(value.func, F.MemberExpr)
@@ -13605,39 +13185,6 @@ ctor_field_value=self._ctor_field_value_for(name),
         # with arm64; it gates on the resolved CALLEE rather than on
         # `is_extern_call`, so `external_call["printf", Int32](fmt, n)` is asked
         # the same question.
-        try:
-            idx_f = M.printf_format_arg_index(name)
-            if idx_f is not None and idx_f < len(e.args):
-                fmt_node = e.args[idx_f]
-                if isinstance(fmt_node, F.StringLiteral):
-                    fmt_text_f = F.decoded_literal(fmt_node)
-                    vargs = list(e.args[idx_f + 1:])
-                    def _text_of_arg(a):
-                        t = self._printf_arg_text(a)
-                        if t is not None:
-                            return t
-                        try:
-                            if isinstance(a, F.IdentExpr):
-                                nm = a.name
-                                if nm in self._text_vals():
-                                    t2 = M.string_literal_text(self._text_vals()[nm])
-                                    if t2 is not None:
-                                        return t2
-                                    t2 = self._printf_arg_text(self._text_vals()[nm])
-                                    if t2 is not None:
-                                        return t2
-                        except Exception:
-                            pass
-                        return None
-                    folded = M.printf_fold_text_widths(name, fmt_text_f, vargs, _text_of_arg)
-                    if folded is not None:
-                        new_fmt, new_vargs = folded
-                        new_args = list(e.args)
-                        new_args[idx_f] = F.StringLiteral(new_fmt)
-                        new_args[idx_f + 1:idx_f + 1 + len(vargs)] = new_vargs
-                        e = F.CallExpr(func=e.func, args=new_args, kwargs=getattr(e, "kwargs", None), line=getattr(e, "line", None), col=getattr(e, "col", None))
-        except Exception:
-            pass
         self._refuse_unusable_printf_format(name, e)
         # …and the same call's VARARGS, each of which the format's conversions
         # turn into TEXT.  A return-less call here is the same value this path
@@ -13734,9 +13281,6 @@ ctor_field_value=self._ctor_field_value_for(name),
         # also declares as a struct, called with that struct's field count, is
         # a construction of that struct.  `model.type_constructor_prefers_local
         # _struct` is where the arity rule and the two exclusions live.
-        if M.call_is_string_frame_reading(e):
-            self._emit_struct_constructor(e, name, self._structs[name])
-            return
         if not is_extern_call and name not in self._functions:
             nargs = len(e.args) + len(e.kwargs or [])
             if not M.type_constructor_prefers_local_struct(

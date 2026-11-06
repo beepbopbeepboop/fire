@@ -1,4 +1,4 @@
-"""The C library this module needs, and nothing else. Status convention: hoststatus.mojo.
+"""The C library this module needs, and nothing else.
 
 Every call into libSystem that `os`, `os.path`, `platform` and `shutil` make is
 spelled here, once, and nowhere else. Three reasons, in the order they mattered while
@@ -999,41 +999,6 @@ def fs_getpid() -> int:
     return getpid()
 
 
-def fs_getppid() -> int:
-    """`getppid()`: the parent's pid (1 once the parent has gone), never negative."""
-    return getppid()
-
-
-def fs_getuid() -> int:
-    """`getuid()`: the real user id, which has no failure value."""
-    return getuid()
-
-
-def fs_getpgid(pid) -> int:
-    """`getpgid(pid)`: the process-group id of `pid` (0 means this process), or
-    -1 with ESRCH if there is no such process."""
-    return getpgid(pid)
-
-
-def fs_sysconf(name) -> int:
-    """`sysconf(name)`: the system value for a `_SC_*` constant, or -1 when the
-    name is not one this platform knows (a limit that is indeterminate is also
-    -1; the two are not distinguished here, as in the C API without `errno`)."""
-    return sysconf(name)
-
-
-def fs_killpg(pgid, sig) -> int:
-    """`killpg(pgid, sig)`: signal every process in the group. 0 on success, -1 on
-    failure (ESRCH if the group is empty, EPERM if one member is not ours)."""
-    return killpg(pgid, sig)
-
-
-def fs_setsid() -> int:
-    """`setsid()`: start a new session; the new session id (== this pid), or -1
-    (EPERM) if this process is already a process-group leader."""
-    return setsid()
-
-
 def fs_kill(pid, sig) -> int:
     """`kill(pid, sig)`: 0 on success, -1 with ESRCH if there is no such process.
 
@@ -1635,24 +1600,6 @@ def fs_stat_field64(p, follow, at) -> int:
     return le64(buf, at)
 
 
-def fs_stat_time_ns(p, follow, at) -> int:
-    """`stat`/`lstat`'s `struct timespec` at byte `at`, as NANOSECONDS, or -1.
-
-    `st_atimespec` is at 32, `st_mtimespec` at 48 and `st_ctimespec` at 64 in the
-    64-bit `struct stat` this module reads (`st_size` is at 96, which
-    `fs_stat_layout_ok` checks against `lseek` on every call). The seconds are
-    the first eight bytes and the nanoseconds the next eight. One `stat` call
-    produces BOTH halves, so the pair cannot straddle a change: two separate
-    reads (seconds, then nanoseconds) could. A 64-bit nanosecond count holds
-    dates up to the year 2262.
-    """
-    var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
-    if buf == 0:
-        return 0 - 1
-    ns = le64(buf, at) * 1000000000 + le64(buf, at + 8)
-    return ns
-
-
 def fs_stat_field16(p, follow, at) -> int:
     """The 16-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
 
@@ -1714,26 +1661,6 @@ def fs_realpath(p) -> str:
 def fs_rename(a, b) -> int:
     """`rename(a, b)`: atomic, and it replaces `b` if `b` is there."""
     return rename(a, b)
-
-
-def fs_symlink(target, linkpath) -> int:
-    """`symlink(target, linkpath)`: 0 on success, -1 on failure (e.g. EEXIST)."""
-    return symlink(target, linkpath)
-
-
-def fs_link(existing, newpath) -> int:
-    """`link(existing, newpath)`: a hard link; 0 on success, -1 on failure."""
-    return link(existing, newpath)
-
-
-def fs_mkfifo(p, mode) -> int:
-    """`mkfifo(p, mode)`: a named pipe; 0 on success, -1 on failure."""
-    return mkfifo(p, mode)
-
-
-def fs_umask(mask) -> int:
-    """`umask(mask)`: install `mask` and return the PREVIOUS one. It cannot fail."""
-    return umask(mask)
 
 
 def fs_rmdir(p) -> int:

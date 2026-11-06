@@ -55,8 +55,8 @@ have seen" would have been set at 93 s and would have fired on a legitimate
 proof.
 
 So `PROOF_WALL_S = 1500` / `PROOF_CPU_S = 1500` is **5x the slowest legitimate
-proof measured** (6.8x its CPU), and `LIBRARY_WALL_S = 10800` /
-`LIBRARY_CPU_S = 30000` is **~2x the full ProofLib build measured on 2026-11-06 (~85 min)** — both far below
+proof measured** (6.8x its CPU), and `LIBRARY_WALL_S = 3600` /
+`LIBRARY_CPU_S = 3600` is **16x the slowest module build** — both far below
 `tools/control.py guard`'s 45 min wall / 90 min CPU net, which exists to catch a
 launcher that was never taught these bounds, not to be the bound.
 
@@ -151,7 +151,7 @@ import time
 # step functions (`arm64_step`, `x86_step`), so build order puts it after `X86`
 # and there is nothing in it that could import `Specs`.
 LIBRARY_MODULES = ("IEEE754", "ProofLib", "X86", "work", "Refine", "Contracts",
-                   "Peephole", "Specs", "Scaffold")
+                   "Peephole", "Specs")
 VERDICT_EXT = ".leanverdict"
 # Where a library module's own hole census is stored, beside the .olean it was
 # measured from and under the same key — so a cas HIT on the .olean is a hit on
@@ -262,14 +262,8 @@ from tools import procrun  # noqa: E402 — the tree walk and the kill, shared
 # every launcher that never got here.
 PROOF_WALL_S = 1500.0
 PROOF_CPU_S = 1500.0
-# MEASURED 2026-11-06: the full `lib/ProofLib.lean` (580 KB after the work-step
-# regeneration) takes ~85 min wall to elaborate with other jobs on the box, and
-# the 3600 s these used to be killed it ("NOT a verdict on the proof"). The old
-# basis, "16x the slowest module build (112 s)", described a file a fraction of
-# the size. 10800 s is ~2x the measured wall; the CPU bound is looser because
-# Lean meters every thread.
-LIBRARY_WALL_S = 10800.0
-LIBRARY_CPU_S = 30000.0
+LIBRARY_WALL_S = 3600.0
+LIBRARY_CPU_S = 3600.0
 # Lean's own bounds.  `-M` is Lean's own memory ceiling and it is NOT the
 # project's 4 GB line: that line is a DEBT standard for what a job should cost
 # (`doc/POLICY_memory_over_4gb.md`), and enforcing it by capping Lean is

@@ -73,7 +73,7 @@ from .._syscalls import fs_opendir, fs_closedir, fs_realpath, fs_cwd, fs_getenv
 from .._syscalls import fs_getpwnam_dir
 from .._syscalls import fs_stat_mode
 from .._syscalls import fs_stat_field16, fs_stat_field32, fs_stat_field32s
-from .._syscalls import fs_stat_field64, fs_stat_time_ns
+from .._syscalls import fs_stat_field64
 
 # The two bytes this module asks about by value. They are NUMBERS because a
 # character argument to a C library call is an `int` there and a `char *` here:
@@ -608,61 +608,6 @@ def stat_size(p, follow) -> int:
     is not a file size at all.
     """
     return fs_stat_field64(p, follow, 96)
-
-
-def stat_atime(p, follow) -> int:
-    """`st_atime` — the last access time in WHOLE SECONDS since the epoch, or -1.
-
-    CPython's `os.stat(p).st_atime` is a float; a float has no value
-    representation on this path (`formal/hostmods/time.mojo` says why), so the
-    seconds and the exact nanoseconds are two integers: this and
-    `stat_atime_ns`. `follow` is 1 for `stat`, 0 for `lstat`.
-    """
-    return fs_stat_field64(p, follow, 32)
-
-
-def stat_mtime(p, follow) -> int:
-    """`st_mtime` in whole seconds since the epoch, or -1. See `stat_atime`."""
-    return fs_stat_field64(p, follow, 48)
-
-
-def stat_ctime(p, follow) -> int:
-    """`st_ctime` — the inode change time, in whole seconds, or -1."""
-    return fs_stat_field64(p, follow, 64)
-
-
-def stat_atime_ns(p, follow) -> int:
-    """`st_atime_ns` — the access time in nanoseconds since the epoch, or -1."""
-    return fs_stat_time_ns(p, follow, 32)
-
-
-def stat_mtime_ns(p, follow) -> int:
-    """`st_mtime_ns` — the modification time in nanoseconds since the epoch, or
-    -1. Exactly CPython's `os.stat(p).st_mtime_ns`."""
-    return fs_stat_time_ns(p, follow, 48)
-
-
-def stat_ctime_ns(p, follow) -> int:
-    """`st_ctime_ns` — the inode change time in nanoseconds, or -1."""
-    return fs_stat_time_ns(p, follow, 64)
-
-
-def getmtime_ns(p) -> int:
-    """The modification time of what `p` names, in nanoseconds, or -1.
-
-    This is `os.path.getmtime` WITHOUT the float: CPython's answer is a `float`
-    and no float value exists on this path (and returning the truncated seconds
-    under the name `getmtime` would disagree with it silently), so the name is
-    different on purpose. Divide by 1_000_000_000 for seconds. Not provided:
-    `commonpath` (a sequence argument, and CPython raises on mixed
-    absolute/relative paths, for which this path has no status to invent).
-    """
-    return fs_stat_time_ns(p, 1, 48)
-
-
-def sep() -> str:
-    """`os.path.sep`: `"/"`."""
-    return "/"
 
 
 def stat_ino(p, follow) -> int:

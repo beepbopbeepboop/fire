@@ -236,7 +236,3 @@ Repro re-verified 2026-11-05 (this session): `python3 -m pytest test_bootstrap_r
 ## Repro check (2026-11-05, next step: post-clear repro re-verified)
 
 `python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Repro re-verified after clearing remaining backend_gimple/middle accumulators.
-
-## Repro check (2026-11-05, next step: post-clear repro re-verified again)
-
-`python3 -m pytest test_codegen_module_ast_lifetime_regression.py test_bootstrap_resource_blowup_step3_regression.py` → 3 passed. Repro re-verified after clearing remaining backend_gimple/middle accumulators.

@@ -1,20 +1,5 @@
 from . import *
 
-
-def root_ident(node):
-    """`(name, depth)` for a chain of `.member` hops over a plain name, else None.
-
-    Moved here from `formal/build.py` so both the build pass and the model can
-    use it for the same definition (the "used as a receiver" test)."""
-    depth = 0
-    while isinstance(node, F.MemberExpr):
-        depth += 1
-        node = node.obj
-    if isinstance(node, F.IdentExpr):
-        return (node.name, depth)
-    return None
-
-
 # ── A frame that OUTLIVES the function that built it ─────────────────────
 #
 # `struct_constructor_sites` above is the whole of a frame's placement today,
@@ -199,53 +184,6 @@ def frame_binding_value(node):
     return None
 
 
-def string_frame_reading_calls(fn, framed, functions=()) -> list:
-    """The zero-argument `String()` calls that must be a FRAME, not a `char *`.
-
-    One rule, per call node (step 10). A call `C()` has the frame reading iff
-    all of: `C` is a string-type constructor name (`STRING_TYPE_CTORS`); this
-    module declares a FRAMED `struct C` (`framed` is `framed_struct_names`'s
-    mapping); `C` is not also a function in the image; the call is the value of
-    a single-name binding; and that name is the root of a `MemberExpr` somewhere
-    in the same body, i.e. it is used as a receiver. Everything else keeps the
-    TEXT reading, so `var s = String(); printf("%s", s)` is unchanged.
-
-    The verdict is put on the node by the build pass
-    (`_string_frame_reading`) so the five analysis sites and both emitters read
-    one fact and cannot disagree, which is the defect this fixes: the build
-    pass made `a` a three-slot frame while the emitter produced the address of
-    an interned `char *`, and the field store landed in read-only text (SIGBUS).
-    """
-    body = getattr(fn, "body", None)
-    if not body or not framed:
-        return []
-    image_functions = set(functions or ())
-    bindings = []
-    for node in iter_nodes(body):
-        target = frame_binding_target(node)
-        value = frame_binding_value(node)
-        if not target or not isinstance(value, F.CallExpr):
-            continue
-        if not isinstance(value.func, F.IdentExpr):
-            continue
-        callee = value.func.name
-        if (callee not in STRING_TYPE_CTORS or callee not in framed
-                or callee in image_functions):
-            continue
-        if value.args or value.kwargs:
-            continue
-        bindings.append((target, value))
-    if not bindings:
-        return []
-    receivers = set()
-    for node in iter_nodes(body):
-        if isinstance(node, F.MemberExpr):
-            root = root_ident(node)
-            if root is not None and root[1] >= 1:
-                receivers.add(root[0])
-    return [value for target, value in bindings if target in receivers]
-
-
 def struct_constructor_bindings(fn, framed, functions=()) -> dict:
     """`{name: [struct, …]}` for locals bound from a framed struct's constructor.
 
@@ -312,7 +250,7 @@ def struct_constructor_bindings(fn, framed, functions=()) -> dict:
             if not call_lowers_as_framed_construction(
                     value.func.name, framed,
                     len(value.args or []) + len(value.kwargs or []),
-                    functions, call=value):
+                    functions):
                 continue
             # De-duplicated, order kept: `x = A()` twice on two paths is ONE
             # candidate, and a refusal that printed "a A, A receiver" because it

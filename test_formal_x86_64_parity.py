@@ -92,39 +92,6 @@ CASES = [
     # quietly stops being lowered.  `-` is the one with a left operand that is
     # NOT the accumulator: for `p[0] -= 3` the old element is the LEFT operand
     # and 3 the right, and reversing them is a different answer.
-    # A VARIABLE shift count beside live register locals. `_emit_shift_reg`
-    # once saved the amount in R12, which this backend also allocates to a
-    # LOCAL: the shift came out right and a variable next to it was overwritten,
-    # which is how `le64`'s `1 << (8 * k)` loop read every `struct stat` field
-    # wrong on x86-64 (`os.path.getsize` -1, `isfile` 0) while arm64 was right.
-    # Before that was reachable the signed-operand shift check undid `<<` with a
-    # second `<<` and trapped, so the two bugs hid each other.
-    ("variable_shift_beside_register_locals",
-     "def main():\n"
-     "    var a = 1\n"
-     "    var b = 2\n"
-     "    var c = 3\n"
-     "    var d = 4\n"
-     "    var e = 5\n"
-     "    var v = 0\n"
-     "    var k = 0\n"
-     "    while k < 4:\n"
-     "        v = v + 3 * (1 << (8 * k))\n"
-     "        k = k + 1\n"
-     "    printf(\"%d %d %d %d\", v, k, a, b)\n"
-     "    printf(\" %d %d %d %d\", c, d, e, 1 << (2 * k))\n"
-     "    return 0\n",
-     "import sys\n"
-     "def main():\n"
-     "    a, b, c, d, e = 1, 2, 3, 4, 5\n"
-     "    v = 0\n"
-     "    k = 0\n"
-     "    while k < 4:\n"
-     "        v = v + 3 * (1 << (8 * k))\n"
-     "        k = k + 1\n"
-     "    sys.stdout.write(\"%d %d %d %d\" % (v, k, a, b))\n"
-     "    sys.stdout.write(\" %d %d %d %d\" % (c, d, e, 1 << (2 * k)))\n"
-     "    return 0\n"),
     ("aug_every_operator",
      "def main():\n"
      "    var p: Pointer[Int] = malloc(64)\n"

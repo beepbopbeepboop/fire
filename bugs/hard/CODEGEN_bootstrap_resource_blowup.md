@@ -1,57 +1,5 @@
 # CODEGEN: bootstrap resource blowup and four remaining stage1/stage2 divergences
 
-## Status (2026-11-05 — the census BUILDS and RUNS now; it cannot be taken on a real closure because the self-hosted binary does not work on this tree)
-
-Landed:
-- `runtime/fire_alloc_census.h`: the redirect macros no longer parenthesise their arguments
-  (`mojo_census_free((p))` -> `mojo_census_free(p)`). That was the `-fgimple` risk the entry below
-  could not test: inside a `__GIMPLE` body a parenthesised operand is `expected expression before
-  '('`, so a census build of the compiler's `fire.ci` died in 5 s with 776 errors. Pinned by a new
-  case in `test_runtime_alloc_census.py` (a `__GIMPLE` function calling `malloc`/`free` compiled with
-  `-DMOJO_ALLOC_CENSUS`; it fails on the old macros).
-- Measured, so the next round does not repeat it: with the fix, `fire.ci` (the `--dump-full fire.py`
-  output) links to a census-enabled compiler in **35 s, 3.4 GB peak** (the Makefile's `stage2/mojo`
-  recipe plus `-DMOJO_ALLOC_CENSUS`, `-O0`, memslot 16 GB). It prints one `alloc-census sites=N ...`
-  report plus one row per site, and the rows include emitted-TU sites (`ast_rewriter.py:823`,
-  `...:56`), which is what the 2026-11-01 entry set out to make visible.
-
-Why the census is still not taken on a real closure: **the self-hosted compiler of this tree writes
-an EMPTY `.ci` for any real input.** `./mojoc_census --dump-full monomorphize.py` (and
-`build_config.py`, `imports.py`, `regex_compile.py`) exits 0, prints `_crc32_str: unavailable in
-compiled mode` and `compile_to_gimple_parallel_frozen: unavailable in compiled mode`, and leaves a
-0-byte file; only a 3-line program produces output. Those are two of the **603 weak "unavailable in
-compiled mode" stubs** in the generated `fire.ci`. The count is the measurement to watch
-(`grep -c '__attribute__((weak)) [A-Za-z_ *0-9]* [A-Za-z_0-9]* (...)' fire.ci`):
-
-| tree | weak stubs |
-|---|---|
-| upstream `821c12dfd` (the first merge's parent) | 152 |
-| upstream `cbae22090` (105 commits later, midway) | 150 |
-| the `stdlib` branch right after merging that first batch | 25 |
-| upstream `origin/master` tip (+ the one-line `_module_stmts` initialiser it needs to run) | **603** |
-| `stdlib` after the second merge | **603** |
-
-So this is an upstream regression inside `821c12dfd..origin/master` (105 commits), not something
-from the `stdlib` branch. 429 of the new stubs are underscore-prefixed names reached through a module
-alias or a re-export (`gimple_ctypes._as_str(...)`, `gimple_ctypes._crc32_str(...)`,
-`gimple_codegen.compile_to_gimple_parallel_frozen(...)`): the call lowers to the BARE name instead of
-the module-qualified compiled symbol, and the weak stub is what links. A three-file reproduction
-(`import reexp as R; R._priv(3)` where `reexp` re-exports `_priv`) resolves correctly, so the
-failure needs the compiler's own closure.
-
-Ruled out: the end-of-compile clearing (`module_gen`'s `_module_stmts` / `_all_transitive_stmts_ordered`
-`.clear()` block): skipping the whole block leaves the count at 603.
-
-Next step (mechanical; one probe is a `--dump-full fire.py` plus a grep, 4-25 min depending on load):
-bisect `821c12dfd..origin/master` on the stub count (good < 300). Build each commit in a
-`git worktree`; commits after `2c211444d` need `self._module_stmts = {}` added to
-`GimpleGen.__init__` and `temp_gen._module_stmts = gen._module_stmts` in `_compile_imported_module`
-(upstream removed both, then `89df5bea3` restored only the assignment) or the dump raises
-`'GimpleGen' object has no attribute '_module_stmts'`. The suspects are the lane's own commits that
-drop per-module state: `a6ffc764f`, `2c211444d`, `8cddc0f09`, `38c3d53e2`, `1d260c151`, `d6a9cf567`,
-`09a64cb26`, and `89df5bea3`. Only after the stub count is back near 25 can the plan below (census
-on a 5-10 module closure, then the scale check) be run.
-
 ## Status (2026-11-01 — partial: the census now sees emitted translation units; the census RUN is still not taken)
 
 Landed (the planning round 2 design below, implemented as written; outcome 2):

@@ -1,12 +1,5 @@
 # FORMAL_arm64_instruction_coverage: the arm64 encoder survey, and what wiring the new instructions actually bought
 
-> **PLANNED — this document's open work is decomposed into `bugs/plan/step-*.md`,
-> and the design plus ordering live in `doc/finish-formal.md`.** The steps that
-> own parts of this document: **step-06a…c** (`ccmp`/`ccmn`), **step-07a…b**
-> (`csinc`/`csinv`/`csneg`), **step-08a…c** (`br`), **step-09** (the
-> extended-register `ADD`/`SUB`/`CMP` SP class). Read the measurements here
-> first; the step files are the work orders. This file stays a survey.
-
 **Status: the survey is current as of 2026-10-05 and `TST`/`CMN` are the second
 pair WIRED (encoder, machine model, proof tables, and now a lowering) — after
 `TBZ`/`TBNZ`, and by the same four-things rule. `ccmp` (13,842) is the top of

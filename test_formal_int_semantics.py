@@ -327,15 +327,8 @@ VARIABLE_ROWS = [
     # it is the doc's own measurement of "right on the edges".
     ("var_mul_fits", "a = 3000000000\nprint(a * a)",
      ("value", 9000000000000000000), "9000000000000000000"),
-    # `<<` and `**` are the two operators whose run-time trap landed on x86-64
-    # first (`_emit_shift_reg` and the `**` loop both end in the shared
-    # overflow diagnostic) and has NOT landed on arm64, which still answers the
-    # wrapped word. The expectation is per-backend so the divergence is pinned
-    # as a divergence: when arm64 gains the trap, this row fails until the
-    # `arm64` entry flips to ("trapped", TRAP), which is the reminder.
     ("var_shl_over", "a = 1\nb = 63\nprint(a << b)",
-     {"arm64": ("value", -9223372036854775808), "x86_64": ("trapped", TRAP)},
-     "9223372036854775808"),
+     ("value", -9223372036854775808), "9223372036854775808"),
     # The run-time half landed for this row (2026-11-03, the doc's step 3
     # shape): the build cannot fold the names, so the image carries the
     # overflow PRE-check — `divisor == -1 and dividend == INT64_MIN`, the one
@@ -363,8 +356,7 @@ VARIABLE_ROWS = [
     # the answer. Measured, both backends, exit 0.
     ("var_int_str_over", 's = "9223372036854775808"\nprint(int(s))',
      ("value", 9223372036854775807), "9223372036854775808"),
-    ("var_pow_neg", "a = 2\nb = 0 - 1\nprint(a ** b)",
-     {"arm64": ("value", 0), "x86_64": ("trapped", TRAP)}, "0.5"),
+    ("var_pow_neg", "a = 2\nb = 0 - 1\nprint(a ** b)", ("value", 0), "0.5"),
 ]
 
 STILL_UNTRAPPED_DOC = (

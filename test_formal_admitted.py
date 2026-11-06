@@ -1291,7 +1291,6 @@ LIBRARY_TRUST = {
     # check.  `AXIOM_CLOSURE`'s row below is what decided that, read out of a
     # real `#print axioms` run over all 55 declarations.
     "Specs": (0, 0, 0, 0),
-    "Scaffold": (0, 1, 0, 0),
 }
 
 #: What the CLOSURE census measured, per module: how many theorems were asked,
@@ -1507,10 +1506,7 @@ AXIOM_CLOSURE = {
     # licenses are proved about `Arm64State` with `omega`, so 10 of 14 are
     # checked by the kernel and the pass's soundness does not rest on a single
     # decision procedure call.
-    # Re-pinned for step-02: added mem_write_u64_idem, mem_write_bytes8_idem, arm64_set_reg_self (all kernel-checked).
-    "Peephole": (17, 1, 13, 0, 3, 0),
-    # step-01a: scaffold canary
-    "Scaffold": (1, 1, 0, 0, 0, 0),
+    "Peephole": (14, 1, 10, 0, 3, 0),
 }
 
 

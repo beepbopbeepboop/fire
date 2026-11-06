@@ -7732,24 +7732,6 @@ def main():
     print([x, 1.5])
 """, "5.0\n10.0\n1e+20\n0.30000000000000004\n[5.0, 1.5]\n")
 
-    # A float literal that OVERFLOWS to infinity still has to be emitted as
-    # C. `repr(float('inf'))` is the PYTHON name `inf`, which gcc reported as
-    # "'inf' undeclared" (bug:CODEGEN_inf_undeclared, from
-    # mojo/test/mojo-integration/floats.mojo). `-999e9000` covers the sign,
-    # and `inf - inf` the NaN reached from two such literals.
-    test_gimple_stdout("gimple_nonfinite_float_literals", """\
-def main():
-    print(999e9000)
-    print(-999e9000)
-    print(0.0 - 999e9000)
-    print(999e9000 - 999e9000)
-""", "inf\n-inf\n-inf\nnan\n")
-
-    test_gimple_stdout("gimple_nonfinite_float_in_list", """\
-def main():
-    print([999e9000, -999e9000])
-""", "[inf, -inf]\n")
-
     # 17. Dynamic-attribute Steps 1-4 (bugs/hard/CODEGEN_dynamic_attribute_
     # on_generic_object.md): a genuinely NEW attribute set on an opaque
     # object (real per-object storage, not a silent no-op) and a MISSING
@@ -14488,7 +14470,8 @@ def main():
                   test_none_held_in_local_with_if_join_is_none_needle,
                   test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool,
                   test_slice_equals_after_a_multibyte_character,
-                  test_caught_exception_prints_its_message):
+                  test_caught_exception_prints_its_message,
+                  test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type):
         try:
             _late()
         except AssertionError as e:
@@ -14902,6 +14885,38 @@ def main():
 
 main()
 """)
+
+
+def test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type():
+    """`body, idx = stack[-1]` over `stack = [(list, 0)]`: the tuple's slots
+    have different types, and the unpack read both with the joined element
+    type, so `idx` was a list (`idx + 1` printed `[]`, `idx >= n` raised
+    TypeError). The explicit-stack walk in module_gen's own
+    `_flatten_resolved_conditionals` is this shape."""
+    test_gimple_stdout("gimple_unpack_list_of_mixed_tuples", """\
+def flat(root: list) -> list:
+    out = []
+    stack = [(root, 0)]
+    while stack:
+        body, idx = stack[-1]
+        if idx >= len(body):
+            stack.pop()
+            continue
+        stmt = body[idx]
+        stack[-1] = (body, idx + 1)
+        if isinstance(stmt, list):
+            stack.append((stmt, 0))
+        else:
+            out.append(stmt)
+    return out
+
+def main():
+    stack = [([1, 2], 0)]
+    body, idx = stack[-1]
+    print(len(body), idx + 1)
+    print(len(flat([1, [2, 3], 4])))
+main()
+""", "2 1\n4\n")
 
 
 def test_caught_exception_prints_its_message():

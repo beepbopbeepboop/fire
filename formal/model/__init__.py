@@ -71,7 +71,6 @@ from .structs import *      # noqa: F401,F403
 from .builtins import *     # noqa: F401,F403
 from .calls import *        # noqa: F401,F403
 from .types import *        # noqa: F401,F403
-from .eh import *           # noqa: F401,F403
 from .init import *         # noqa: F401,F403
 from .frames import *       # noqa: F401,F403
 from .module import *       # noqa: F401,F403
@@ -95,7 +94,7 @@ from .layout import *       # noqa: F401,F403
 import sys as _sys
 
 _MODULES = ("cfg", "methods", "values", "strings", "structs", "builtins",
-            "calls", "types", "eh", "init", "frames", "module", "layout")
+            "calls", "types", "init", "frames", "module", "layout")
 
 _this = _sys.modules[__name__]
 _names = {_k: _v for _k, _v in vars(_this).items() if not _k.startswith("__")}

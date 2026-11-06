@@ -1,7 +1,5 @@
 """`subprocess` — the API SHAPE, with the host's answer admitted.
 
-Status convention: hoststatus.mojo.
-
 `formal/imports.py` used to refuse every file importing `subprocess`, and this
 module exists to make the second half of that answerable: a second process is a
 fact about the TARGET, but what a file SAYS is a question this tree can answer.
@@ -192,8 +190,6 @@ refusing any contract text containing a claim about host behaviour.  They are:
   the MODEL's answer to the question the caller asked, and for most of these
   operations CPython returns something that is not a word at all (`None`, a
   `CompletedProcess`, a `Popen`, a pair).
-
-Status convention: hoststatus.mojo.
 """
 
 # ── the constants ────────────────────────────────────────────────────────────

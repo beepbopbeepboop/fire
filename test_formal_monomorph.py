@@ -331,182 +331,6 @@ def test_the_dotted_applications_remedy_is_lowered(tmpdir):
               f"recommending a spelling nothing checks")
 
 
-def test_a_parameter_annotation_of_an_imported_instantiation(tmpdir):
-    """§1/§1a: `def keep(p: Pair[Int]) -> Int` is a type in a NON-CALL position."""
-    lib_value = ("struct Pair[T]:\n"
-                 "    var first: T\n"
-                 "\n"
-                 "    def get_first(self) -> T:\n"
-                 "        return self.first\n"
-                 "\n"
-                 "def keep(p: Pair[Int]) -> Int:\n"
-                 "    return p.first\n")
-    lib_frame = ("struct Pair[T]:\n"
-                 "    var first: T\n"
-                 "    var second: T\n"
-                 "\n"
-                 "    def get_first(self) -> T:\n"
-                 "        return self.first\n"
-                 "\n"
-                 "def keep(p: Pair[Int]) -> Int:\n"
-                 "    return p.first\n")
-    prog = ("from pairlib import Pair, keep\n"
-            "\n"
-            "def main():\n"
-            "    var a = Pair[Int]()\n"
-            "    a.first = 41\n"
-            "    print(keep(a))\n")
-    cpython = ("class Pair:\n"
-               "    def __init__(self):\n"
-               "        self.first = 0\n"
-               "        self.second = 0\n"
-               "\n"
-               "    def get_first(self):\n"
-               "        return self.first\n"
-               "\n"
-               "def keep(p):\n"
-               "    return p.first\n"
-               "\n"
-               "def main():\n"
-               "    a = Pair()\n"
-               "    a.first = 41\n"
-               "    print(keep(a))\n")
-    for arch in ARCHES:
-        fresh_cas()
-        got = run_pair_case(tmpdir, arch, "mm_p_value", lib_value, prog,
-                            cpython)
-        check(got == "41\n",
-              f"[{arch}] the one-field parameter printed {got!r}, CPython 41")
-        fresh_cas()
-        text = run_pair_case(tmpdir, arch, "mm_p_frame", lib_frame, prog,
-                             cpython, expect_ok=False)
-        check("is a frame holder of Pair" in text
-              and "whose frame is Pair_1_T_3_Int" in text,
-              f"[{arch}] the two-field parameter must still refuse with the "
-              f"cross-image frame contract: {text.strip()[-400:]}")
-
-
-def test_a_consumer_declared_type_argument_is_refused_by_name(tmpdir):
-    lib = ("struct Pair[T]:\n"
-           "    var first: T\n"
-           "\n"
-           "    def get_first(self) -> T:\n"
-           "        return self.first\n")
-    prog = ("from pairlib import Pair\n"
-            "\n"
-            "struct Colour:\n"
-            "    var rgb: Int\n"
-            "\n"
-            "def main():\n"
-            "    var c = Pair[Colour]()\n"
-            "    print(c.first)\n")
-    for arch in ARCHES:
-        fresh_cas()
-        text = run_pair_case(tmpdir, arch, "mm_cons_decl", lib, prog, "", expect_ok=False)
-        check("is declared in this file" in text,
-              f"[{arch}] wrong refusal: {text.strip()[-400:]}")
-
-
-def test_a_builtin_type_argument_is_still_instantiated(tmpdir):
-    # Reuse existing pattern
-    lib = PAIR_LIB
-    prog = PAIR_PROG
-    cpython = PAIR_CPYTHON + "\n" + PAIR_CPYTHON_MAIN
-    for arch in ARCHES:
-        fresh_cas()
-        got = run_pair_case(tmpdir, arch, "mm_builtin_ok", lib, prog, cpython)
-        check(got == "7\n1\n3\n",
-              f"[{arch}] printed {got!r}")
-
-
-BOUNDED_LIB = """\
-trait Greet:
-    def hello(self) -> Int:
-        ...
-
-struct Dog:
-    def hello(self) -> Int:
-        return 1
-
-struct Cat:
-    var x: Int
-
-struct Box[T: Greet]:
-    var v: T
-"""
-
-
-def test_a_trait_bound_violation_is_refused_by_name(tmpdir):
-    """`Box[Cat]` where `Cat` does not satisfy `Box`'s `T: Greet` is REFUSED."""
-    prog = ("def main() -> Int:\n"
-            "    var b = Box[Cat]()\n"
-            "    b.v.x = 7\n"
-            "    return b.v.x\n")
-    for arch in ARCHES:
-        fresh_cas()
-        _root, _out, result = build_pair_case(
-            tmpdir, arch, "mm_bound_bad", lib=None, prog=BOUNDED_LIB + "\n" + prog)
-        text = (result.stderr or "") + (result.stdout or "")
-        check(result.returncode != 0,
-              f"[{arch}] `Box[Cat]` with `T: Greet` BUILT: {text.strip()[-300:]}")
-        check("does not conform to trait 'Greet'" in text,
-              f"[{arch}] the refusal does not name the trait: {text.strip()[-400:]}")
-        check("missing method 'hello'" in text,
-              f"[{arch}] the refusal does not name the method: {text.strip()[-400:]}")
-        check("asked for none" not in text,
-              f"[{arch}] fell through to `specialization_call_refusal`: {text.strip()[-400:]}")
-
-
-def test_a_conforming_type_argument_is_still_instantiated(tmpdir):
-    prog = ("def main():\n"
-            "    var b = Box[Dog]()\n"
-            "    print(b.v.hello())\n")
-    cpython = ("class Dog:\n"
-               "    def hello(self):\n"
-               "        return 1\n"
-               "\n"
-               "class Box:\n"
-               "    def __init__(self):\n"
-               "        self.v = Dog()\n"
-               "\n"
-               "def main():\n"
-               "    print(Box().v.hello())\n")
-    for arch in ARCHES:
-        fresh_cas()
-        run_pair_case(tmpdir, arch, "mm_bound_ok", None,
-                      BOUNDED_LIB + "\n" + prog, cpython)
-
-
-def test_an_aliased_import_of_a_template_is_instantiated(tmpdir):
-    """`from pairlib import Pair as P` then `P[Int]()` lowers, vs CPython."""
-    aliased = PAIR_PROG.replace("from pairlib import Pair", "from pairlib import Pair as P").replace("Pair[", "P[")
-    for arch in ARCHES:
-        fresh_cas()
-        got = run_pair_case(tmpdir, arch, "mm_alias", PAIR_LIB, aliased,
-                            PAIR_CPYTHON + "\n" + PAIR_CPYTHON_MAIN)
-        check(got == "7\n1\n3\n",
-              f"[{arch}] the aliased import printed {got!r}, not CPython's "
-              f"three answers — the demand and the rewrite read the call site "
-              f"by a different name than the import binds")
-        fresh_cas()
-        lib = ("def twice[T](x: T) -> T:\n"
-               "    return x + x\n")
-        prog = ("from fnlib import twice as tw\n"
-                "\n"
-                "def main():\n"
-                "    print(tw[Int](21))\n")
-        cpython = ("def twice(x):\n"
-                   "    return x + x\n"
-                   "\n"
-                   "def main():\n"
-                   "    print(twice(21))\n")
-        got = run_pair_case(tmpdir, arch, "mm_aliasfn", lib, prog, cpython,
-                            libname="fnlib.mojo")
-        check(got == "42\n",
-              f"[{arch}] the aliased FUNCTION template printed {got!r}, "
-              f"expected 42")
-
-
 # ── behavioural: the boundary symbols ───────────────────────────────────────
 
 
@@ -690,11 +514,11 @@ def test_a_struct_template_the_module_declares_can_itself_apply(tmpdir):
                "    a.v = 7\n"
                "    b.v = True\n"
                "    print(a.get())\n"
-               "    print(b.get())\n")
+               "    print(int(b.get()))\n")
     for arch in ARCHES:
         fresh_cas()
         got = run_pair_case(tmpdir, arch, "mm_own", None, src, cpython)
-        check(got == "7\nTrue\n",
+        check(got == "7\n1\n",
               f"[{arch}] printed {got!r}, which is neither CPython's answer nor "
               f"anything this case wrote down")
 
@@ -743,11 +567,11 @@ def test_a_type_argument_in_a_local_annotation_is_a_demand(tmpdir):
                "    a.v = 7\n"
                "    b.v = True\n"
                "    print(a.get())\n"
-               "    print(b.get())\n")
+               "    print(int(b.get()))\n")
     for arch in ARCHES:
         fresh_cas()
         got = run_pair_case(tmpdir, arch, "mm_ann", None, src, cpython)
-        check(got == "7\nTrue\n",
+        check(got == "7\n1\n",
               f"[{arch}] printed {got!r}, which is neither CPython's answer nor "
               f"anything this case wrote down")
 
@@ -1458,26 +1282,59 @@ def test_a_non_concrete_type_argument_is_still_refused(tmpdir):
               f"{text.strip()[-400:]}")
 
 
-def test_an_own_struct_template_with_a_comptime_value_is_instantiated(tmpdir):
-    src = ("struct Tagged[T, origin: Int]:\n"
-           "    var v: Int\n"
-           "\n"
-           "def main():\n"
-           "    var t = Tagged[Int, 0]()\n"
-           "    t.v = 42\n"
-           "    print(t.v)\n")
-    cpython = ("class Tagged:\n"
-               "    def __init__(self):\n"
-               "        self.v = 0\n"
-               "\n"
-               "def main():\n"
-               "    t = Tagged()\n"
-               "    t.v = 42\n"
-               "    print(t.v)\n")
+def test_an_own_struct_template_with_a_comptime_value_is_diagnosed_as_one(tmpdir):
+    """`Tagged[Int, 0]()` in the file that declares `Tagged` names a comptime
+    PARAMETER LIST, and the refusal must say so — not call it a tuple index.
+
+    The construct is the one
+    `FORMAL_an_explicit_parameter_list_naming_a_comptime_value (deleted 2026-11-03)` §2 row 4
+    measures: a generic applied with a TYPE argument and a comptime VALUE, which
+    this path cannot instantiate (`formal/monomorph.py::type_arg_text` answers
+    `""` for a top-level literal, by design, so no demand is computed). What is
+    refused is therefore correct, and the case is about the DIAGNOSIS.
+
+    It regressed silently because `formal/monomorph.py::without_template_bodies`
+    removes a template's DECLARATION from the statement list — a template body
+    has no instantiation in scope, so analysing it is a refusal — and
+    `structs_by_name`, which `formal/model.py::subscript_index_is_a_comptime_
+    parameter_list` consults for "is this base a type", is built from what is
+    left. So `Tagged` was absent from the one table that would have classified
+    the bracket, the classifier answered `MULTI_INDEX_DATA`, and the source was
+    told it wrote `Tagged[Int, 0]` as a two-dimensional/tuple index — a
+    container lookup this path never wrote. The fix hands the unit's own
+    template struct names to the classifier separately
+    (`formal/build.py::_own_template_structs`), and this pins both directions:
+    the true sentence is present and the false one is gone.
+
+    The same-unit shape is the one no case had: an imported `Tagged` reaches
+    `structs_by_name` through `imported_struct_defs` and was already diagnosed
+    correctly, so the missing coverage was exactly the file that declares the
+    template itself — which is why this is a row and not a re-measurement.
+    """
+    prog = ("struct Tagged[T, origin: Int]:\n"
+            "    var v: Int\n"
+            "\n"
+            "def main():\n"
+            "    var t = Tagged[Int, 0]()\n"
+            "    return 42\n")
     for arch in ARCHES:
         fresh_cas()
-        got = run_pair_case(tmpdir, arch, "mm_own_comptime", None, src, cpython)
-        check(got == "42\n", f"[{arch}] printed {got!r}, expected 42")
+        _root, _out, result = build_pair_case(
+            tmpdir, arch, "mm_own_comptime", None, prog)
+        text = (result.stderr or "") + (result.stdout or "")
+        check(result.returncode != 0,
+              f"[{arch}] `Tagged[Int, 0]()` built, and this path has no comptime "
+              f"VALUE substitution, so the instantiation it would carry is not "
+              f"the source's: {text.strip()[-400:]}")
+        check("compile-time explicit-parameter list" in text,
+              f"[{arch}] the refusal does not name the construct. A generic "
+              f"applied with a comptime value is an explicit-parameter list, "
+              f"which is what a reader acts on: {text.strip()[-500:]}")
+        check("subscript whose index is a tuple" not in text,
+              f"[{arch}] the refusal says the source wrote a tuple index. "
+              f"`Tagged[Int, 0]` names two compile-time parameters and no "
+              f"container, so this sentence is false about the program — the "
+              f"`refuse_without:` class of defect: {text.strip()[-500:]}")
 
 
 # ── the decisions, pinned without an image ──────────────────────────────────
@@ -2597,17 +2454,9 @@ def test_a_class_attribute_read_of_two_instantiations_is_refused(tmpdir):
         text = run_pair_case(tmpdir, arch, "mm_classattr_two", CLASSCATTR_LIB,
                              CLASSCATTR_TWO_PROG, "", expect_ok=False,
                              libname="sizelib.mojo")
-        # The needles are the AMBIGUITY refusal's (`model.template_attribute_
-        # read_ambiguous`), which names the template, says the read is of a
-        # `comptime` class attribute, and lists the instantiations. This test
-        # used to pin the OLDER sentence (`...'values', a PARAMETER of
-        # TypeDict`) that the read fell through to when two instantiations were
-        # applied; two branches built the two refusals and the merge kept both
-        # tests. One message now carries the shared opening and the part that
-        # makes it actionable here (which instantiations exist).
         for needle in ("reads a `comptime` class attribute of TypeDict",
-                       "applies TypeDict at 2 of them",
-                       "each with its own value for `length`"):
+                       "'values', a",
+                       "PARAMETER of TypeDict"):
             check(needle in text,
                   f"[{arch}] the ambiguous class-attribute read did not say "
                   f"{needle!r}: {text.strip()[-400:]}")
@@ -3750,7 +3599,7 @@ def test_a_variadic_bracket_parameter_takes_the_extra_arguments(tmpdir):
     # kept its brackets. A bracket that names a TYPE beside its values is an
     # explicit-parameter list; an all-value bracket (`tile[2, 3](…)`) is still
     # a comptime specialization and not a demand.
-    callers = MM.all_bracketed_calls(
+    callers = MM.all_instantiation_calls(
         "def main():\n"
         "    var a = Pair[Int, 1, 2, 3]()\n"
         "    var b = tile[2, 3](7)\n")
@@ -4147,20 +3996,12 @@ TESTS = [
      test_a_dotted_application_says_which_word_is_the_module),
     ("…and its remedy is lowered, both architectures",
      test_the_dotted_applications_remedy_is_lowered),
-    ("an aliased import of a template is instantiated",
-     test_an_aliased_import_of_a_template_is_instantiated),
     ("a module that applies its own template publishes it",
      test_a_module_that_applies_its_own_template_publishes_it),
     ("a library with an annotated construction publishes it",
      test_a_library_with_an_annotated_construction_publishes_it),
     ("a library that applies another module's template instantiation",
      test_a_library_that_applies_another_modules_template_instantiation),
-    ("a parameter annotation of an imported instantiation",
-     test_a_parameter_annotation_of_an_imported_instantiation),
-    ("a consumer-declared type argument is refused by name",
-     test_a_consumer_declared_type_argument_is_refused_by_name),
-    ("a builtin type argument is still instantiated",
-     test_a_builtin_type_argument_is_still_instantiated),
     ("a package re-export attributes the demand to the defining module",
      test_a_package_reexport_attributes_the_demand_to_the_defining_module),
     ("an instantiation agrees with the concrete struct of the same shape",
@@ -4175,12 +4016,8 @@ TESTS = [
      test_a_constants_only_module_builds_and_its_constants_read_back),
     ("a non-concrete type argument is still refused",
      test_a_non_concrete_type_argument_is_still_refused),
-    ("a trait bound violation is refused by name",
-     test_a_trait_bound_violation_is_refused_by_name),
-    ("a conforming type argument is still instantiated",
-     test_a_conforming_type_argument_is_still_instantiated),
-    ("an own struct template with a comptime value is instantiated",
-     test_an_own_struct_template_with_a_comptime_value_is_instantiated),
+    ("an own struct template with a comptime value is diagnosed as one",
+     test_an_own_struct_template_with_a_comptime_value_is_diagnosed_as_one),
     ("only the export rule says what is a template",
      test_only_the_export_rule_says_what_is_a_template),
     ("an annotated construction is a demand only when it can be named",

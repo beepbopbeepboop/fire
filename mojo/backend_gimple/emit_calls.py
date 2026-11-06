@@ -10817,6 +10817,13 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             gen._actual_types[cast_t] = elem
             # Propagate nested element types for MojoList* (list-of-lists)
             if elem == 'MojoList *':
+                # A list of HETEROGENEOUS tuples (`[(body, 0)]`): the container
+                # carries each inner slot's own type, so the element read
+                # inherits them and `body, idx = stack[-1]` reads `idx` as an
+                # int, not as the joined list element type.
+                if ov in gen._tuple_slot_types:
+                    gen._tuple_slot_types[cast_t] = gen._tuple_slot_types[ov]
+                    gen._tuple_slot_types[t] = gen._tuple_slot_types[ov]
                 if ov in gen._nested_elem_types:
                     gen._elem_types[cast_t] = gen._nested_elem_types[ov]
                     gen._elem_types[t] = gen._nested_elem_types[ov]
@@ -10853,15 +10860,6 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
         t = gen._new_val('int64_t', f"mojo_memoryview_get ({ov}, {idx64})")
         return 'int64_t', t
-
-    if ot == 'MojoDict *' and gen._is_none_literal(node.index):
-        # `d[None]`: the None-key entry (keykind 3), not the integer-0 one.
-        val_ctype = gen._dict_val_of(ov)
-        if val_ctype == 'double':
-            return 'double', gen._call_expr('double', 'mojo_dict_get_none_key_double', [('MojoDict *', ov)])
-        if val_ctype == 'char *':
-            return 'char *', gen._call_expr('char *', 'mojo_dict_get_none_key_str', [('MojoDict *', ov)])
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_dict_get_none_key_int', [('MojoDict *', ov)])
 
     if ot == 'MojoDict *':
         # A bytes KEY reads from its own key domain (see _DictSlot.keykind);
@@ -11021,6 +11019,9 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             cast_t = gen._new_val(elem, f'({elem}){t}')
             gen._actual_types[cast_t] = elem
             if elem == 'MojoList *':
+                if ov in gen._tuple_slot_types:
+                    gen._tuple_slot_types[cast_t] = gen._tuple_slot_types[ov]
+                    gen._tuple_slot_types[t] = gen._tuple_slot_types[ov]
                 if ov in gen._nested_elem_types:
                     gen._elem_types[cast_t] = gen._nested_elem_types[ov]
                     gen._elem_types[t] = gen._nested_elem_types[ov]

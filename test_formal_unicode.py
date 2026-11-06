@@ -544,65 +544,6 @@ ORACLE_CASES = [
      'def main():\n'
      '    print("%d" % ord("\\x7f"), end="\\n")\n'),
 
-    # printf width/precision folding on known non-ASCII text (step 13a)
-    ("printf_width_on_non_ascii_text_folded",
-     'def main(n):\n'
-     '    printf("[%6s]\\n", "héllo")\n'
-     '    return 0\n',
-     'def main():\n'
-     '    print("[%6s]" % "héllo", end="\\n")\n'),
-
-    ("printf_left_width_on_non_ascii_text_folded",
-     'def main(n):\n'
-     '    printf("[%-6s]\\n", "héllo")\n'
-     '    return 0\n',
-     'def main():\n'
-     '    print("[%-6s]" % "héllo", end="\\n")\n'),
-
-    ("printf_precision_on_non_ascii_text_folded",
-     'def main(n):\n'
-     '    printf("[%.3s]\\n", "héllo")\n'
-     '    return 0\n',
-     'def main():\n'
-     '    print("[%.3s]" % "héllo", end="\\n")\n'),
-
-    ("printf_width_precision_cjk",
-     'def main(n):\n'
-     '    printf("[%10.3s]\\n", "日本語テキスト")\n'
-     '    return 0\n',
-     'def main():\n'
-     '    print("[%10.3s]" % "日本語テキスト", end="\\n")\n'),
-
-    ("printf_left_width_cjk",
-     'def main(n):\n'
-     '    printf("[%-5s|]\\n", "日本")\n'
-     '    return 0\n',
-     'def main():\n'
-     '    print("[%-5s|]" % "日本", end="\\n")\n'),
-
-    ("printf_width_fold_on_named_binding",
-     'def main(n):\n'
-     '    var s = "héllo"\n'
-     '    printf("[%7s]\\n", s)\n'
-     '    return 0\n',
-     'def main():\n'
-     '    s = "héllo"\n'
-     '    print("[%7s]" % s, end="\\n")\n'),
-
-    ("printf_percent_and_fold",
-     'def main(n):\n'
-     '    printf("%%[%6s]\\n", "héllo")\n'
-     '    return 0\n',
-     'def main():\n'
-     '    print("%%[%6s]" % "héllo", end="\\n")\n'),
-
-    ("printf_fold_plus_int",
-     'def main(n):\n'
-     '    printf("[%6s]=%d\\n", "héllo", 5)\n'
-     '    return 0\n',
-     'def main():\n'
-     '    print("[%6s]=%d" % ("héllo", 5), end="\\n")\n'),
-
     # ── GUARDS: the ASCII rows beside every refusal ──────────────────────
     #
     # `printf_width_on_ascii_text_is_a_byte_width_and_agrees`,
@@ -804,52 +745,6 @@ ORACLE_CASES = [
      '    table = ["héllo"]\n'
      '    print("q=[%.6d][%06d][%6.3d][%d] t=%d"\n'
      '          % (42, 7, 5, 42, len(table)), end="\\n")\n'),
-
-    ("chr_of_an_ascii_literal_folds",
-     'def main(n):\n'
-     '    var m = chr(65)\n'
-     '    printf("[%s]\\n", m)\n'
-     '    return 0\n',
-     'def main():\n'
-     '    print("[%s]" % chr(65), end="\\n")\n'),
-
-    # subscript folding on known non-ASCII text (step 13b)
-    ("subscript_non_ascii_literal_folded",
-     'def main(n):\n'
-     '    printf("c=[%s]\\n", "日本"[1])\n'
-     '    return 0\n',
-     'def main():\n'
-     '    print("c=[" + "日本"[1] + "]", end="\\n")\n'),
-
-    ("subscript_non_ascii_var_folded",
-     'def main(n):\n'
-     '    var s = "日本"\n'
-     '    printf("c=[%s]\\n", s[1])\n'
-     '    return 0\n',
-     'def main():\n'
-     '    s = "日本"\n'
-     '    print("c=[" + s[1] + "]", end="\\n")\n'),
-
-    ("subscript_non_ascii_index_zero",
-     'def main(n):\n'
-     '    printf("c=[%s]\\n", "héllo"[0])\n'
-     '    return 0\n',
-     'def main():\n'
-     '    print("c=[" + "héllo"[0] + "]", end="\\n")\n'),
-
-    ("subscript_non_ascii_index_neg_one",
-     'def main(n):\n'
-     '    printf("c=[%s]\\n", "héllo"[-1])\n'
-     '    return 0\n',
-     'def main():\n'
-     '    print("c=[" + "héllo"[-1] + "]", end="\\n")\n'),
-
-    ("subscript_non_ascii_index_one_accent",
-     'def main(n):\n'
-     '    printf("c=[%s]\\n", "héllo"[1])\n'
-     '    return 0\n',
-     'def main():\n'
-     '    print("c=[" + "héllo"[1] + "]", end="\\n")\n'),
 ]
 
 
@@ -909,13 +804,52 @@ REFUSAL_CASES = [
      '    return 0\n',
      ["is refused", "bytes from the start of the text"]),
 
-    # Out of range subscript on known non-ASCII text remains refused
-    ("refuse_subscript_out_of_range_non_ascii",
+    # An ELEMENT.  A byte is not a character, and this is a REFUSAL rather than
+    # a fold because the answer CPython wants is a new one-character object
+    # and a string value here is a `char *` into the image's read-only text.
+    ("refuse_subscript_into_a_non_ascii_string",
      'def main(n):\n'
      '    var s = "日本"\n'
-     '    printf("c=[%c]\\n", s[2])\n'
+     '    printf("c=[%c]\\n", s[1])\n'
      '    return 0\n',
-     ["is refused"]),
+     ["is refused on a string whose text is not ASCII",
+      "s[1]", "0x9c", "one CHARACTER"]),
+
+    # The same element read through a LITERAL receiver, which is the row that
+    # says knowing the text does not help: the obstacle is where the answer
+    # would live, not what it is.
+    ("refuse_subscript_into_a_non_ascii_literal",
+     'def main(n):\n'
+     '    printf("c=[%c]\\n", "日本"[1])\n'
+     '    return 0\n',
+     ["is refused on a string whose text is not ASCII",
+      "the literal", "nowhere to put one"]),
+
+    # A WIDTH.  `printf` is a C function and C has no characters, so `%6s`
+    # pads to six BYTES.  The needle quotes the specifier as the source spells
+    # it, including the flag, because `%-6s` and `%6s` pad on opposite sides
+    # and a message that said "the width" would not say which one.
+    ("refuse_printf_width_on_non_ascii_text",
+     'def main(n):\n'
+     '    printf("[%6s]\\n", "héllo")\n'
+     '    return 0\n',
+     ["`%6s`", "is refused", "BYTES where CPython answers in CHARACTERS"]),
+
+    ("refuse_printf_left_width_on_non_ascii_text",
+     'def main(n):\n'
+     '    printf("[%-6s]\\n", "héllo")\n'
+     '    return 0\n',
+     ["`%-6s`", "is refused"]),
+
+    # A PRECISION is the same defect as a width — `%.3s` of `"héllo"` emits
+    # three bytes, half a character — and the quantifier scanner is what
+    # catches it.  Without this row a scanner that read only the width would
+    # pass everything above.
+    ("refuse_printf_precision_on_non_ascii_text",
+     'def main(n):\n'
+     '    printf("[%.3s]\\n", "héllo")\n'
+     '    return 0\n',
+     ["`%.3s`", "is refused"]),
 
     # A width on an operand the build CANNOT see, in an image that holds a
     # non-ASCII literal elsewhere.  This is the whole-image condition doing
@@ -923,11 +857,10 @@ REFUSAL_CASES = [
     # because `%6s` of a value that might hold an `é` cannot be emitted with a
     # byte width and hope.
     ("refuse_printf_width_on_an_unseen_operand_in_a_non_ascii_image",
-     'def show(s: String):\n'
-     '    printf("[%6s]\\n", s)\n'
      'def main(n):\n'
      '    var table = ["héllo"]\n'
-     '    show("hello")\n'
+     '    var s = "hello"\n'
+     '    printf("[%6s]\\n", s)\n'
      '    return 0\n',
      ["`%6s`", "is refused", "'héllo'"]),
 
@@ -965,20 +898,12 @@ REFUSAL_CASES = [
      ["chr(233) is refused", "NEW one-character",
       "nowhere to put one", "LENGTH_DEPENDENT_METHODS"]),
 
-    ("chr_zero_is_refused",
+    ("refuse_chr_of_an_ascii_code_point_is_still_refused",
      'def main(n):\n'
-     '    var s = chr(0)\n'
+     '    var s = chr(65)\n'
      '    printf("[%s]\\n", s)\n'
      '    return 0\n',
-     ["NUL"]),
-
-    ("chr_of_a_name_is_refused",
-     'def main(n):\n'
-     '    var n = 65\n'
-     '    var s = chr(n)\n'
-     '    printf("[%s]\\n", s)\n'
-     '    return 0\n',
-     ["chr(n) is refused"]),
+     ["chr(65) is refused", "NEW one-character"]),
 
     ("refuse_hash_says_the_answer_is_not_a_function_of_the_text",
      'def main(n):\n'

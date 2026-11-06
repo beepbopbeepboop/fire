@@ -1,7 +1,5 @@
 """`shutil` — file copying, moving, tree removal and `PATH` search.
 
-Status convention: hoststatus.mojo.
-
 `formal/imports.py`'s FIRST resolution pass finds a `.mojo` source for a name
 in a search root and that wins outright, over the host-module list, so this
 file is what `import shutil` binds to. It lives in `formal/hostmods/`, the
@@ -108,8 +106,6 @@ WHAT IS NOT HERE, AND WHY — each measured or each a fact about the target
     link (see its docstring) AND takes the caller's depth. Both halves are
     needed: the link check is what makes the answer CPython's, and the depth is
     what makes the recursion bounded.
-
-Status convention: hoststatus.mojo.
 """
 
 from os import remove, rmdir, listdir, listdir_len, listdir_get, listdir_free

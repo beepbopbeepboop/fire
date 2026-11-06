@@ -117,15 +117,6 @@ STRING_PROGRAMS = {
         "a function whose RESULT is a string: the end-to-end theorem compares "
         "the machine's result register against `mojo`, and `mojo` is the "
         "interned address"),
-    "len_of_literal_local": (
-        "def main(n: Int) -> Int:\n"
-        "    var s = \"hello\"\n"
-        "    return len(s)\n",
-        "len of a string literal stored in a local is its character count"),
-    "len_of_literal_direct": (
-        "def main(n: Int) -> Int:\n"
-        "    return len(\"hi\")\n",
-        "len of a string literal direct is its character count"),
 }
 
 # Both backends, because the model generator is shared and the ADDRESS is not.
@@ -155,11 +146,6 @@ REFUSED = {
                      "SECOND return address to remember inside the callee, and "
                      "the recursion contract's frame bound and fuel descent would "
                      "have to be re-proved for it"),
-    "len_of_a_parameter": (
-        "def main(n: Int) -> Int:\n"
-        "    var s = getenv(\"HOME\")\n"
-        "    return len(s)\n",
-        "model: len(<name>) of a string whose bytes are not in this image"),
     "same_callee_twice": ("fn a(n):\n    return n + 1\n"
                           "fn main(n):\n    return a(n) + a(n)\n",
                           "two calls into the same image to the SAME callee: its "
@@ -1036,58 +1022,6 @@ class TestGeneratorSource(unittest.TestCase):
             "the word-relative form disagrees with the statement, so the "
             "two right-hand sides describe different steps")
 
-    def test_the_sp_trackers_scale_the_frame_stride(self):
-        """The absval frame-peel bug was fixed by scaling sp offsets by sh.
-
-        Commit 2e585ba4c made every sp tracker use _imm12_scaled so that
-        `sub sp, sp, #imm12, lsl #12` (the 128KiB scratch frame) produces
-        addresses at sp - 131072 - ..., not sp - 32 - ....
-        """
-        import formal.build as fb
-        import formal.arm64 as A
-
-        def word(fn, *args):
-            w = fn(*args)
-            return int.from_bytes(w, "little") if isinstance(w, (bytes, bytearray)) \
-                else w
-
-        for name in ("formal/examples/absval.mojo", "formal/examples/condassign2.mojo"):
-            with tempfile.TemporaryDirectory(prefix="sp-track-") as td:
-                out = os.path.join(td, os.path.basename(name)[:-5] + ".aout")
-                r = fb.compile_formal(name, output=out, arch="arm64", prove=True, check=False)
-                proof_path = r["proof_path"]
-                text = open(proof_path).read()
-                self.assertIn("UInt64.ofNat 131072", text,
-                              f"{name} must use the scaled frame stride 131072")
-                self.assertIsNone(re.search(r"sp - UInt64\.ofNat 32\b", text),
-                                  f"{name} must not build slot addresses from unscaled #32")
-                self.assertNotIn("(K := 32)", text,
-                                 f"{name} must not use K := 32 for the scaled frame")
-
-        # The prologue is sub sp, sp, #32, lsl #12
-        w = word(A.encode_sub_xd_xn_imm_sh, 31, 31, 32, 1)
-        self.assertEqual((w >> 22) & 1, 1,
-                         "absval/condassign2 prologue must use lsl #12")
-
-    def test_imm12_scaled(self):
-        import formal.arm64 as A
-        import formal.arm64_proof_gen as G
-
-        def word(fn, *args):
-            w = fn(*args)
-            return int.from_bytes(w, "little") if isinstance(w, (bytes, bytearray)) \
-                else w
-
-        # sub sp, sp, #32, lsl #12 -> 131072
-        w_sub = word(A.encode_sub_xd_xn_imm_sh, 31, 31, 32, 1)
-        self.assertEqual(G._imm12_scaled(w_sub), 131072)
-        # unshifted #32
-        w_sub_nosh = word(A.encode_sub_xd_xn_imm_sh, 31, 31, 32, 0)
-        self.assertEqual(G._imm12_scaled(w_sub_nosh), 32)
-        # add counterpart
-        w_add = word(A.encode_add_xd_xn_imm_sh, 31, 31, 32, 1)
-        self.assertEqual(G._imm12_scaled(w_add), 131072)
-
     def test_the_flag_setting_compares_write_rd_and_the_imm12_arms_shift(self):
         """The two `arm64_step` defects of 2026-10-07, pinned at the table level.
 
@@ -1432,50 +1366,6 @@ def _arm64_step_branch(src, key):
     return code[i:min(ends)] if ends else code[i:]
 
 
-class TestCCMPModelled(unittest.TestCase):
-    def test_ccmp_is_modelled(self):
-        import formal.arm64 as A
-        import formal.arm64_proof_gen as G
-
-        def word(fn, *args):
-            w = fn(*args)
-            return int.from_bytes(w, "little") if isinstance(w, (bytes, bytearray)) else w
-
-        conds = ("eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
-                 "hi", "ls", "ge", "lt", "gt", "le")
-        for cond in conds:
-            for xn in (0, 1, 30, 31):
-                for xm in (0, 2, 5, 31):
-                    w = word(A.encode_ccmp_xn_xm, xn, xm, 4, cond)
-                    self.assertEqual(G._step_branch_index(w), 80)
-                    self.assertEqual(G._regs_written(w, 80), set())
-                for imm5 in (0, 5, 16, 31):
-                    w = word(A.encode_ccmp_xn_imm5, xn, imm5, 0, cond)
-                    self.assertEqual(G._step_branch_index(w), 81)
-                    self.assertEqual(G._regs_written(w, 81), set())
-
-        self.assertEqual(G._STEP_CONDS[80][0], 0xffe00c10)
-        self.assertEqual(G._STEP_CONDS[80][1], 0xfa400000)
-        self.assertEqual(G._STEP_CONDS[81][0], 0xffe00c10)
-        self.assertEqual(G._STEP_CONDS[81][1], 0xfa400800)
-
-        for i4 in range(16):
-            rev = G._ccmp_model_nzcv(i4)
-            inv = ((rev >> 0) & 1) << 3 | ((rev >> 1) & 1) << 2 | ((rev >> 2) & 1) << 1 | ((rev >> 3) & 1)
-            self.assertEqual(inv, i4)
-        self.assertEqual(G._ccmp_model_nzcv(0x8), 0x1)
-        self.assertEqual(G._ccmp_model_nzcv(0x4), 0x2)
-        self.assertEqual(G._ccmp_model_nzcv(0x2), 0x4)
-        self.assertEqual(G._ccmp_model_nzcv(0x1), 0x8)
-
-        csel = word(A.encode_csel_xd_xm_cond, 0, 1, 2, "ne")
-        cset = word(A.encode_cset_xd_cond, 0, "ne")
-        self.assertNotEqual(G._step_branch_index(csel), 80)
-        self.assertNotEqual(G._step_branch_index(csel), 81)
-        self.assertNotEqual(G._step_branch_index(cset), 80)
-        self.assertNotEqual(G._step_branch_index(cset), 81)
-
-
 class TestRegister31(unittest.TestCase):
     """Which arm64 forms read register 31 as SP, and which as the zero register.
 
@@ -1792,57 +1682,45 @@ the text; it does not find out whether any word can arrive there.  So:
             "does so — which is how the B.cond arm failed")
 
     def test_the_sp_encodings_are_named_rather_than_left_unnamed(self):
-        """The words clang emits for `sp` in `Rn` in the UXTX extended class are modelled."""
+        """The words clang emits for `sp` in `Rn` are NAMED, not "an instruction".
+
+        A64's SP encoding for `Rn` is in the EXTENDED-register class, and
+        nothing this backend emits is in it — every `ADD Xd, SP, Xm` it wants is
+        spelled as the immediate form, and every register-form add/sub/cmp it
+        emits names an ordinary register.  So this is a COVERAGE gap, and the
+        only thing the generator owes a reader who hits one is its NAME: the
+        shifted-register rows are a different class, and the reason the class
+        exists is the same fact the NEG fix turned on (an `Rn` of 31 is the zero
+        register there and `sp` here).
+
+        The words are the ones clang assembles for the SP spellings, measured by
+        assembling them, and each is required to decode to no branch AND to be
+        named — a word that decodes to nothing and has no name is the failure
+        mode, and `_unmodelled_instruction`'s own contract is `(name, why)`.
+        """
         import formal.arm64_proof_gen as G
-        for form in (("add x0, sp, x1", 86),
-                     ("sub x0, sp, x1", 87),
-                     ("subs x0, sp, x1", 88),
-                     ("cmp sp, x16", 88)):
-            with self.subTest(form[0]):
-                word = _assembler_word(form[0])
-                self.assertIsNotNone(word, f"clang refuses `{form[0]}`")
-                idx = G._step_branch_index(word)
+        for form, want in (("add x0, sp, x1", "ADD extended"),
+                           ("sub x0, sp, x1", "SUB extended"),
+                           ("subs x0, sp, x1", "SUBS/CMP extended"),
+                           ("cmp sp, x16", "SUBS/CMP extended")):
+            with self.subTest(form):
+                word = _assembler_word(form)
+                self.assertIsNotNone(word, f"clang refuses `{form}`")
+                self.assertIsNone(
+                    G._step_branch_index(word),
+                    f"`{form}` assembles to 0x{word:08x}, which now DECODES — so "
+                    f"either the extended-register class has a model branch (and "
+                    f"this row is stale) or the emitter started producing one")
+                name, why = G._unmodelled_instruction(word)
                 self.assertEqual(
-                    idx, form[1],
-                    f"`{form[0]}` assembles to 0x{word:08x}, expected row {form[1]} but got {idx}")
-        # Other extend options remain unmodelled and named
-        word = _assembler_word("add x0, sp, w1, uxtw")
-        self.assertIsNotNone(word)
-        self.assertIsNone(G._step_branch_index(word))
-        name, why = G._unmodelled_instruction(word)
-        self.assertEqual(name, "ADD extended")
-        self.assertIn("UXTX", why)
-
-    def test_blr_is_named_not_unnamed(self):
-        import formal.arm64 as A
-        import formal.arm64_proof_gen as G
-        word = int.from_bytes(A.encode_blr_xn(16), "little")
-        self.assertIsNone(G._step_branch_index(word))
-        name, why = G._unmodelled_instruction(word)
-        self.assertEqual(name, "BLR")
-        self.assertIn("indirect", why)
-        self.assertIn("x16", why)
-
-    def test_extended_register_class_is_disjoint_from_shifted(self):
-        import formal.arm64_proof_gen as G
-        new_rows = {86, 87, 88}
-        for rd in (0, 30, 31):
-            for rn in (0, 30, 31):
-                for rm in (0, 30, 31):
-                    for imm3 in range(0, 5):
-                        # shifted-register forms (bit 21 clear)
-                        for base in (0x8b000000, 0xcb000000, 0xeb000000):
-                            w = base | (rm << 16) | (rn << 5) | rd
-                            # add shift if needed? shifted form has imm6/shift; keep simple
-                            idx = G._step_branch_index(w)
-                            if idx in new_rows:
-                                self.fail(f"shifted word 0x{w:08x} decoded to new row {idx}")
-                        # extended forms we model
-                        for base in (0x8b206000, 0xcb206000, 0xeb206000):
-                            w = base | (rm << 16) | (imm3 << 10) | (rn << 5) | rd
-                            idx = G._step_branch_index(w)
-                            if idx not in new_rows:
-                                self.fail(f"extended word 0x{w:08x} should decode to new row")
+                    name, want,
+                    f"0x{word:08x} (what clang assembles for `{form}`) is named "
+                    f"{name!r}; an unmodelled word with no name is reported as "
+                    f"'an instruction', which sends the reader to a "
+                    f"disassembler for a word the answer is about")
+                self.assertIn("sp", why,
+                              "the reason has to say what the class IS, since "
+                              "the name alone does not say why it is missing")
 
 
 # ── the floor correction, decoded ───────────────────────────────────────────
@@ -4748,25 +4626,6 @@ class TestStringValueInTheModel(unittest.TestCase):
             with self.subTest(input=n):
                 self.assertIn(f"theorem main_runs_{n} :", text)
                 self.assertIn(f"theorem main_terminates_{n} :", text)
-
-    def test_len_of_an_image_string_is_its_character_count(self):
-        for arch in STRING_ARCHES:
-            key = (arch, "len_of_literal_local")
-            text = self.proof_text.get(key)
-            self.assertIsNotNone(text, f"no proof generated for {key}")
-            with self.subTest(arch=arch):
-                self.assertIn("(UInt64.ofNat 5)", text)
-                self.assertNotIn("(strlen (UInt64.ofNat", text)
-                if arch == "arm64":
-                    self.assertNotIn("post_extern_given_callee_returns", text)
-        # direct literal
-        for arch in STRING_ARCHES:
-            key = (arch, "len_of_literal_direct")
-            text = self.proof_text.get(key)
-            self.assertIsNotNone(text, f"no proof generated for {key}")
-            with self.subTest(arch=arch, direct=True):
-                self.assertIn("(UInt64.ofNat 2)", text)
-                self.assertNotIn("(strlen (UInt64.ofNat", text)
 
     def test_a_string_outside_the_intern_table_is_refused_not_zeroed(self):
         """The negative guard, and the reason the default is a refusal.
@@ -9877,61 +9736,6 @@ class TestTheModelFuzzLedgerRowIsFromTheTally(unittest.TestCase):
         for k in ("AGREE", "WRONG", "NOSTEP", "FAULT", "ENC-MISMATCH",
                   "ENC-FAIL", "NO-REPORT", "NO-EVAL"):
             self.assertIn(k, row)
-
-    def test_csinc_csinv_csneg_are_modelled(self):
-        import formal.arm64 as A
-        import formal.arm64_proof_gen as G
-
-        def word(fn, *args):
-            w = fn(*args)
-            return int.from_bytes(w, "little") if isinstance(w, (bytes, bytearray)) \
-                else w
-
-        conds = ("eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
-                 "hi", "ls", "ge", "lt", "gt", "le")
-        # Find positions
-        i_cinc = G._step_branch_index(word(A.encode_csinc_xd_xm_cond, 0, 0, 0, "eq"))
-        i_cinv = G._step_branch_index(word(A.encode_csinv_xd_xm_cond, 0, 0, 0, "eq"))
-        i_cneg = G._step_branch_index(word(A.encode_csneg_xd_xm_cond, 0, 0, 0, "eq"))
-        self.assertIsNotNone(i_cinc)
-        self.assertIsNotNone(i_cinv)
-        self.assertIsNotNone(i_cneg)
-        inv_map = {"eq": "ne", "ne": "eq", "cs": "cc", "cc": "cs",
-                   "mi": "pl", "pl": "mi", "vs": "vc", "vc": "vs",
-                   "hi": "ls", "ls": "hi", "ge": "lt", "lt": "ge",
-                   "gt": "le", "le": "gt"}
-        for cond in conds:
-            for xn in (0, 31):
-                for xm in (0, 31):
-                    for xd in range(31):
-                        w_cinc = word(A.encode_csinc_xd_xm_cond, xd, xn, xm, cond)
-                        if xn == 31 and xm == 31:
-                            # Identity case with CSET takes precedence
-                            inv_c = inv_map[cond]
-                            w_cset2 = word(A.encode_cset_xd_cond, xd, inv_c)
-                            self.assertEqual(w_cinc, w_cset2)
-                            self.assertEqual(G._step_branch_index(w_cinc), 30)
-                        else:
-                            self.assertEqual(G._step_branch_index(w_cinc), i_cinc,
-                                             f"csinc x{xd},x{xn},x{xm},{cond} not on its row")
-                            self.assertEqual(G._regs_written(w_cinc, i_cinc), {xd})
-                        w_cinv = word(A.encode_csinv_xd_xm_cond, xd, xn, xm, cond)
-                        self.assertEqual(G._step_branch_index(w_cinv), i_cinv,
-                                         f"csinv x{xd},x{xn},x{xm},{cond} not on its row")
-                        self.assertEqual(G._regs_written(w_cinv, i_cinv), {xd})
-                        w_cneg = word(A.encode_csneg_xd_xm_cond, xd, xn, xm, cond)
-                        self.assertEqual(G._step_branch_index(w_cneg), i_cneg,
-                                         f"csneg x{xd},x{xn},x{xm},{cond} not on its row")
-                        self.assertEqual(G._regs_written(w_cneg, i_cneg), {xd})
-                        cselw = word(A.encode_csel_xd_xm_cond, xd, xn, xm, cond)
-                        self.assertEqual(G._step_branch_index(cselw), 69)
-                        csetw = word(A.encode_cset_xd_cond, xd, cond)
-                        self.assertEqual(G._step_branch_index(csetw), 30)
-                        inv = inv_map[cond]
-                        w_cset2 = word(A.encode_cset_xd_cond, xd, cond)
-                        w_cinc2 = word(A.encode_csinc_xd_xm_cond, xd, 31, 31, inv)
-                        self.assertEqual(w_cset2, w_cinc2,
-                                         f"CSET==CSINC identity failed for {cond}")
 
 
 if __name__ == "__main__":

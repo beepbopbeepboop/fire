@@ -11,7 +11,6 @@ generic → instantiate the template for those type args (CAS-cached), and repor
 the concrete symbol + object + signature so the codegen can lower the call and
 record the object on the link line.
 """
-import textwrap
 import re
 import subprocess
 
@@ -221,12 +220,7 @@ def extract_fn_source(module_src: str, fn_name: str, arg_count: int | None = Non
         return candidates[0]
     first_arity_match = None
     for src in candidates:
-        # A candidate may be a METHOD (the pattern allows leading whitespace),
-        # whose text starts indented; parsing that as a module is an
-        # `Unexpected INDENT` (a name defined both as a method and as a free
-        # function, e.g. `is_amd_gpu` in std/sys/info.mojo). Dedent to parse;
-        # the caller still gets the original text back.
-        for s in Parser(py_tokenize(textwrap.dedent(src))).parse_module():
+        for s in Parser(py_tokenize(src)).parse_module():
             if isinstance(s, FunctionDef) and s.name == fn_name:
                 n = len([1 for pn, _ in s.params if pn != 'self' and not pn.startswith('*')])
                 if n == arg_count:

@@ -1,7 +1,5 @@
 """`tempfile` — the DIRECTORY half, over `os`, with the file-object half absent.
 
-Status convention: hoststatus.mojo.
-
 `formal/imports.py`'s FIRST resolution pass finds a `.mojo` source for a name
 in a search root and that wins outright, over the host-module list, so this
 file is what `import tempfile` binds to. It lives in `formal/hostmods/`, the
@@ -188,8 +186,6 @@ WHAT IS NOT HERE, AND WHY — each measured, and none of them approximated
     `_infer_return_type`, `_get_default_tempdir` — private in CPython, and named
     here only because one of them (`_get_default_tempdir`) is the algorithm
     `gettempdir` above implements.
-
-Status convention: hoststatus.mojo.
 """
 
 from os import getenv_or, getcwd

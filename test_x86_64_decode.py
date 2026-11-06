@@ -503,19 +503,6 @@ for _msg in _formal_first_refusal("formal/x86_64_decode.py"):
         FAILURES.append("formal/x86_64_decode.py is refused on constructing "
                         "DecodeError again — it declares `args`, so the message "
                         "has a slot: " + _msg[-300:])
-
-# --- has_sib
-try:
-    # mov rax, [rax+rcx*8] in a form the decoder can see? Use 48 8B 04 C8 (mov rax,[rax+rcx*8] with disp0)
-    # ModRM 04 means r/m=100 (SIB), mod=00; SIB C8: scale 00 (<<0), index 001 (rcx), base 000 (rax)
-    ins = D.decode_one(bytes([0x48, 0x8B, 0x04, 0xC8]), 0)
-    if not getattr(ins, 'has_sib', False):
-        FAILURES.append('has_sib not set for SIB instruction')
-    if ins.mem_base is None:
-        FAILURES.append('has_sib case: mem_base should not be None for base+index')
-except Exception as e:
-    FAILURES.append('has_sib test failed: %s' % e)
-
 # And the declarations themselves, so a fix that deleted the message instead of
 # the cause would still be caught: `str()` reads `args` on both paths.
 try:

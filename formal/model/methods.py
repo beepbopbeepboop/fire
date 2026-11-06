@@ -60,14 +60,10 @@ STRING_PLAN_FOLD_TEXT = "fold_text"  # payload is the TEXT to intern
 # telling the reader something they can see.
 STRING_METHOD_ARGS = {
     "lstrip": ("chars",),
-    "strip": (),
-    "rstrip": (),
     "startswith": ("prefix",),
     "endswith": ("suffix",),
     "find": ("sub", "start", "end"),
     "count": ("sub", "start", "end"),
-    "upper": (),
-    "lower": (),
 }
 
 # How many of the above each lowering actually emits. `find`'s and `count`'s
@@ -76,8 +72,7 @@ STRING_METHOD_ARGS = {
 # parameter list and this path's are different facts, and a table that held one
 # column for both would have to invent the difference somewhere else.
 STRING_METHOD_MAX_ARGS = {
-    "lstrip": 1, "strip": 0, "rstrip": 0, "startswith": 1, "endswith": 1, "find": 1, "count": 1,
-    "upper": 0, "lower": 0,
+    "lstrip": 1, "startswith": 1, "endswith": 1, "find": 1, "count": 1,
 }
 
 # The parameters of the above that may be OMITTED. `lstrip()` with no argument
@@ -629,12 +624,7 @@ def string_method_call_plan(method: str, dotted: str, recv, args: list,
     verdict carries; the fold verdicts carry the folded value itself.
     """
     if method in STRING_FOLDED_METHODS:
-        plan, payload = string_method_fold(method, dotted, recv, args)
-        if plan != STRING_PLAN_EMIT or method not in string_buffer_methods():
-            return (plan, payload)
-        # fell through fold for a buffer method; check non-ASCII
-    if method in string_buffer_methods() and non_ascii_strings():
-        return (None, buffer_case_refusal(dotted))
+        return string_method_fold(method, dotted, recv, args)
     if method not in STRING_METHOD_ARGS:
         return (STRING_PLAN_EMIT, None)
     names = STRING_METHOD_ARGS[method]

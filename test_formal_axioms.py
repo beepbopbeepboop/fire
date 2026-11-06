@@ -83,7 +83,7 @@ from formal import lean as L                      # noqa: E402
 # imports `ProofLib` and `X86`, like `work`, because its rules are stated over
 # the two step functions.
 LIBRARY_MODULES = ("IEEE754", "ProofLib", "Refine", "X86", "work", "Contracts",
-                   "Peephole", "Specs", "Scaffold")
+                   "Peephole", "Specs")
 FOUNDATION = set(L.AXIOM_FOUNDATION)
 
 # The theorems whose axiom set this campaign CHANGED, plus the three that keep

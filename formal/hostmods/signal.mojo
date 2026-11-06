@@ -1,7 +1,5 @@
 """signal.mojo — the signal NUMBER VOCABULARY, for the formal backend.
 
-Status convention: hoststatus.mojo.
-
 `formal/imports.py` resolves an import in four passes and the FIRST is "a Mojo
 source `<name>.mojo` in a search root WINS OUTRIGHT, even over the host-module
 list". This file is that source for the name `signal`, so `import signal` is no
@@ -110,8 +108,6 @@ THE TWO THINGS THAT ARE NOT QUITE CPYTHON, STATED HERE
     `int` can express. `.name` is the one it cannot, and it is above.
   * `strsignal` and `raise_signal` return 0 where CPython returns `None`.
     `None` folds to the word 0 on this path (`formal/model/frames.py`, `NONE_WORD`).
-
-Status convention: hoststatus.mojo.
 """
 
 # ── the signal numbers ──────────────────────────────────────────────────────
