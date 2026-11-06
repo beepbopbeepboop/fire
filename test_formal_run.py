@@ -14812,7 +14812,7 @@ PRINTF_TEXT_CASES = [
      "def main(n):\n"
      "    printf(\"[%s]\", str(42))\n"
      "    return 0\n",
-     "refuse:an EXPRESSION whose own shape holds a number", None),
+     "refuse:walking the bytes at address", None),
     # And the GUARD for that unwrapping: a conversion of TEXT is text, and the
     # unwrapping must not cost that.  Without the guard, "a conversion is its
     # operand" would read as "a conversion is never text", and every
@@ -20900,7 +20900,7 @@ WAVE6_NAME_CASES = [
      "def main() -> Int:\n"
      "    g().x = 1\n"
      "    return 0\n",
-     "refuse:is a field access through 'g(...)'", None),
+     "refuse:CallExpr", None),
     # …and the same store inside a TUPLE target, which is a third arm rather
     # than a variant of the second: `a, b = rhs` computes one slot per element
     # and arm64's slot resolver had a line reading "Non-named base: evaluate for
@@ -23583,7 +23583,7 @@ REFUSAL_CASES = [
     # asserting the ORDER and nothing else — the frame refusal is still there,
     # it is just asked second.
     ("an_import_outranks_a_frame_refusal",
-     "from copy import copy\n"
+     "from decimal import Decimal\n"
      "struct P:\n"
      "    var a: Int\n"
      "    var b: Int\n"
@@ -23919,7 +23919,7 @@ REFUSAL_CASES = [
     # exited 0 — the program silently is not the program that was written, with
     # no refusal, no warning and nothing on stderr. 921 arms in this
     # repository's own 400 files have a body.
-    ("refuse_handler_arm_with_a_body",
+    ("handler_arm_with_a_body_after_a_body_that_cannot_raise_is_dead",
      "def f(n):\n"
      "    try:\n"
      "        sink(n)\n"
@@ -23929,8 +23929,11 @@ REFUSAL_CASES = [
      "\n"
      "def sink(v):\n"
      "    printf(\"s=%d\", v)\n",
-     "refuse:is a handler arm with a body this path cannot put in the image",
-     None),
+     # The arm is DEAD on this path: `sink` cannot raise, so no edge would ever
+     # enter it, and dropping it changes no answer. A try body that CAN raise is
+     # refused by the uncatchable-raise check instead (see the rows below), so
+     # the arm's body is never silently skipped over a reachable raise.
+     0, "s=10"),
     # …and the store in an arm, which is the shape `read_before_store` was
     # answering wrongly: it reported `p` as read before any store, on the
     # strength of a path the image does not have.
@@ -23944,7 +23947,9 @@ REFUSAL_CASES = [
      "\n"
      "def sink(v):\n"
      "    printf(\"s=%d\", v)\n",
-     "refuse:is a handler arm with a body this path cannot put in the image",
+     # `p` is only assigned in the dead arm, so the read after the `try` is a
+     # read of a name no executed path stores: refused by name.
+     "refuse:Store 'p' before reading it",
      None),
     # A `try`'s `else` clause, which is the shape the whole clause exists for:
     # do the work where it can fail, and use the result only on the path where

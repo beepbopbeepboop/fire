@@ -2919,16 +2919,13 @@ def _global_slot_value(fn, name: str):
     it a name that merely shares a module global's spelling is a local, and
     asking the table about it would answer for a name it does not bind.
     """
-    for node in iter_nodes(getattr(fn, "body", None) or []):
-        if not isinstance(node, F.GlobalStmt):
-            continue
-        if name not in (getattr(node, "names", None) or ()):
-            continue
-        slot = module_slot(name)
-        if slot is None:
-            return None
-        return getattr(slot.site, "value", None)
-    return None
+    from .module import declared_global_names
+    if name not in declared_global_names(fn):
+        return None
+    slot = module_slot(name)
+    if slot is None:
+        return None
+    return getattr(slot.site, "value", None)
 
 
 def _target_leaves(target) -> list:

@@ -42,4 +42,4 @@ constants are resolved (`mojo/middle/module_shared.py`'s
 same names to `myinterpreter.py`'s global scope/`FloatLiteral` stand-in so
 `fire.py run` agrees.  The pinning test is the four prints above; the wider
 target is `mojo/test/mojo-integration/floats.mojo`, which also needs the
-container-repr fix in `RUNTIME_repr_of_inf_in_a_container_aborts.md`.
+container-repr fix for bug `RUNTIME_repr_of_inf_in_a_container_aborts`.

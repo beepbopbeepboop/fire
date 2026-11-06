@@ -3519,12 +3519,37 @@ def functions_writing_globals(functions) -> dict:
     declaration of the name's scope, not a runtime statement."""
     out = {}
     for fn in (functions or []):
-        for node in iter_nodes(getattr(fn, "body", None) or []):
-            if not isinstance(node, F.GlobalStmt):
-                continue
-            for name in (node.names or []):
-                out.setdefault(name, []).append(fn)
+        for name in declared_global_names(fn):
+            out.setdefault(name, []).append(fn)
     return out
+
+
+def declared_global_names(fn) -> tuple:
+    """The names `fn`'s body declares `global`, in source order, de-duplicated.
+
+    ONE walk per function, remembered on the function: the emitters ask this
+    once PER CALL SITE (`callee_is_a_bound_value` -> `_global_slot_value`,
+    `global_names_bound_in`), and each ask used to re-walk the whole body, which
+    made a straight-line function of N calls cost N full walks (a 500-statement
+    `printf` body spent 22 of its 31 seconds in `iter_nodes`). The memo is keyed
+    on the identity of the body LIST and its length, so a pass that replaces or
+    grows the body gets a fresh answer; a `GlobalStmt` is a declaration the
+    parser produced and no later pass inserts one into an existing body."""
+    body = getattr(fn, "body", None) or []
+    memo = getattr(fn, "_declared_global_names_memo", None)
+    if memo is not None and memo[0] is body and memo[1] == len(body):
+        return memo[2]
+    seen = {}
+    for node in iter_nodes(body):
+        if isinstance(node, F.GlobalStmt):
+            for name in (node.names or []):
+                seen.setdefault(name, None)
+    names = tuple(seen)
+    try:
+        fn._declared_global_names_memo = (body, len(body), names)
+    except AttributeError:
+        pass
+    return names
 
 
 def module_body_store_names(functions) -> set:

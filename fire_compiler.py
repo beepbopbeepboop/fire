@@ -1305,7 +1305,7 @@ def for_target_tree(target: object):
 
 
 # ── Lexer ──────────────────────────────────────────────────────────
-_KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'super', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global', 'inout', 'borrowed', 'owned', 'enum', 'del', 'nonlocal', 'imm'}
+_KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'param', 'super', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global', 'inout', 'borrowed', 'owned', 'enum', 'del', 'nonlocal', 'imm'}
 
 _TOKEN_RE = re.compile(r'(?P<IMAG>(?:\d[\d_]*\.(?:\d|_\d)*(?:[eE][+-]?\d(?:\d|_\d)*)?|\.\d[\d_]*(?:[eE][+-]?\d(?:\d|_\d)*)?|\d[\d_]*(?:[eE][+-]?\d(?:\d|_\d)*)?)[jJ])|(?P<FLOAT>\d[\d_]*\.(?:\d|_\d)*(?:[eE][+-]?\d(?:\d|_\d)*)?|\.\d[\d_]*(?:[eE][+-]?\d(?:\d|_\d)*)?|\d[\d_]*[eE][+-]?\d(?:\d|_\d)*)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>|\?|\~)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>[fFrRbBuUtT]{0,2}(?:\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\')|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<SEMICOLON>;)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
@@ -6976,6 +6976,12 @@ class Parser:
         top-level trailing comma, as an earlier version of this function did,
         makes it indistinguishable from the parenthesised single name and puts
         the two parsers at odds with each other for the same source line."""
+        # Skip convention keywords (var, ref, mut, etc.)
+        if (self._peek().kind == "KW" and self._peek().value in self._CONV_KWS
+                and not (self._peek(1).kind == "KW" and self._peek(1).value == "in")
+                and self._peek(1).kind != "COLON"
+                and self._peek(1).kind != "COMMA"):
+            self._advance()
         t = self._peek()
         saw_comma = False
         if t.kind == "LPAREN":
@@ -7072,6 +7078,13 @@ class Parser:
             if self._peek().kind in ("RPAREN", "RBRACKET"):
                 break
             sub_t = self._peek()
+            # Skip convention keywords
+            if (sub_t.kind == "KW" and sub_t.value in self._CONV_KWS
+                    and self._peek(1).kind != "KW" and self._peek(1).value != "in"
+                    and self._peek(1).kind != "COLON"
+                    and self._peek(1).kind != "COMMA"):
+                self._advance()
+                sub_t = self._peek()
             if sub_t.kind == "LPAREN":
                 self._advance()
                 inner, inner_comma = self._parse_generator_target()
@@ -7932,6 +7945,12 @@ class Parser:
         convention). (Chained-assignment tuple targets use a separate
         Expr-based TupleExpr representation, not this string form — see
         _parse_stmt's ASSIGN handling.)"""
+        # Skip convention keywords (var, ref, mut, etc.) in tuple unpacking targets
+        if (self._peek().kind == "KW" and self._peek().value in self._CONV_KWS
+                and not (self._peek(1).kind == "KW" and self._peek(1).value == "in")
+                and self._peek(1).kind != "COLON"
+                and self._peek(1).kind != "COMMA"):
+            self._advance()
         if self._peek().kind == "LPAREN":
             self._advance()
             parts = []
@@ -8311,6 +8330,18 @@ class Parser:
     def _parse_stmt(self):
         t = self._peek()
         line, col = t.line, t.col
+        # `param for` is equivalent to `comptime for` (parametrized/compile-time for)
+        if ((t.kind == "KW" and t.value == "param") or (t.kind == "NAME" and t.value == "param")):
+            nxt = self._peek(1)
+            if nxt.kind == "KW" and nxt.value == "for":
+                self._advance()  # consume 'param'
+                return self._parse_comptime_for()
+            if nxt.kind == "KW" and nxt.value in ("if", "for", "assert", "var", "let"):
+                self._advance()  # consume 'param'
+                return self._parse_comptime()
+            if nxt.kind == "NAME" or (nxt.kind == "STRING" and nxt.value.startswith("`")):
+                self._advance()  # consume 'param'
+                return self._parse_comptime()
         # `match` is a soft keyword (like Python's own) — only a match
         # statement when followed by a real expression and a top-level `:`
         # before the line ends; otherwise it's an ordinary identifier
@@ -8481,21 +8512,24 @@ class Parser:
             if t.value == "trait": return self._parse_trait()
             if t.value == "try": return self._parse_try()
             if t.value == "with": return self._parse_with()
-            if t.value == "comptime":
-                # Only commit to the comptime-statement parse when the next
-                # token could actually start one: `comptime if/for/assert`,
-                # `comptime var NAME = ...`, `comptime NAME = ...`, or
-                # `comptime \`name\` = ...`.
-                # Anything else — `comptime.foo` (imported module named
-                # comptime), `comptime(...)`, `comptime = ...`, bare
-                # `comptime` — is an ordinary identifier use; fall through
-                # to expression/assignment parsing (same carve-out pattern
-                # as `enum` above; `_parse_primary` accepts KW as ident).
+            if t.value == "comptime" or t.value == "param":
+                # Only commit to the comptime/param-statement parse when the next
+                # token could actually start one: `comptime/param if/for/assert`,
+                # `comptime/param var NAME = ...`, `comptime/param NAME = ...`, or
+                # `comptime/param \`name\` = ...`.
+                # Anything else — `comptime.foo`/`param.foo`, `comptime(...)`/`param(...)`,
+                # `comptime = ...`/`param = ...`, bare `comptime`/`param` — is an ordinary
+                # identifier use; fall through to expression/assignment parsing.
                 nxt = self._peek(1)
                 if ((nxt.kind == "KW"
                      and nxt.value in ("if", "for", "assert", "var", "let"))
                         or nxt.kind == "NAME"
                         or (nxt.kind == "STRING" and nxt.value.startswith("`"))):
+                    # If we see 'param' followed by 'for', treat as comptime for
+                    if t.value == "param" and nxt.kind == "KW" and nxt.value == "for":
+                        # Consume 'param' and parse as comptime for
+                        self._advance()  # consume 'param'
+                        return self._parse_comptime_for()
                     return self._parse_comptime()
                 # else: fall through to expression statement
             if t.value == 'pass': return self._parse_pass()
@@ -8595,9 +8629,9 @@ class Parser:
             if kw.kind == "KW" and kw.value == "trait":
                 self._pending_decs = decs
                 return self._parse_trait()
-            if kw.kind == "KW" and kw.value == "comptime":
+            if kw.kind == "KW" and kw.value in ("comptime", "param"):
                 # Same carve-out as the statement-level dispatch: only a
-                # real comptime-statement shape commits; `comptime.foo` etc.
+                # real comptime/param-statement shape commits; `comptime.foo` etc.
                 # falls through (and the decorator path below will 404 with
                 # a clear expect-error rather than misparse).
                 nxt = self._peek(1)
@@ -8605,6 +8639,9 @@ class Parser:
                      and nxt.value in ("if", "for", "assert", "var", "let"))
                         or nxt.kind == "NAME"
                         or (nxt.kind == "STRING" and nxt.value.startswith("`"))):
+                    if kw.value == "param" and nxt.kind == "KW" and nxt.value == "for":
+                        self._advance()  # consume 'param'
+                        return self._parse_comptime_for()
                     return self._parse_comptime()
                 # else: fall through
             # Handle 'async def' — async is tokenized as NAME not KW. Milestone
@@ -8815,7 +8852,14 @@ class Parser:
         # If not just dots, parse the module name. Accept a keyword-named
         # module (e.g. `from struct import pack` — `struct` lexes as KW), but
         # never swallow the `import` keyword itself as the module name.
-        if self._peek().kind == "NAME" or (self._peek().kind == "KW" and not self._is_kw("import")):
+        # Also accept backtick-quoted identifiers (STRING starting with `).
+        tcur = self._peek()
+        if tcur.kind == "NAME" or (tcur.kind == "KW" and not self._is_kw("import")):
+            module += self._advance().value
+            while self._peek().kind == "DOT":
+                self._advance()
+                module += "." + self._ident()
+        elif tcur.kind == "STRING" and tcur.value.startswith("`"):
             module += self._advance().value
             while self._peek().kind == "DOT":
                 self._advance()
