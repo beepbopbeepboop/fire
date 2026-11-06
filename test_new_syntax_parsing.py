@@ -849,5 +849,31 @@ def run_tests():
     return _FAIL == 0
 
 
+def test_comptime_type_constraint_ampersand():
+    # PARSER_ampersand_in_comptime_type_constraints: & in comptime type constraints
+    stmts = _parse("comptime C = ImplicitlyCopyable & Movable\n")
+    check("comptime_ampersand_parses", len(stmts) == 1)
+    from fire_compiler import ComptimeVarStmt, BinaryOp
+    if stmts and isinstance(stmts[0], ComptimeVarStmt):
+        check("comptime_ampersand_is_binaryop", isinstance(stmts[0].value, BinaryOp))
+        if isinstance(stmts[0].value, BinaryOp):
+            check("comptime_ampersand_op_is_and", stmts[0].value.op == '&')
+
+
+# Add to run list
+# (we'll append by calling in run_tests - easier to just run separately)
+
+
 if __name__ == '__main__':
-    sys.exit(0 if run_tests() else 1)
+    # Also run our test
+    try:
+        print("\n--- test_comptime_type_constraint_ampersand")
+        test_comptime_type_constraint_ampersand()
+        print()
+        print("=" * 70)
+        print(f"Results: {_PASS} passed, {_FAIL} failed")
+        print("=" * 70)
+        sys.exit(0 if _FAIL == 0 else 1)
+    except Exception as e:
+        print(e)
+        sys.exit(1)

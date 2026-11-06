@@ -272,7 +272,7 @@ def group_constants():
     # document that publishes a stale bound is worse than one that publishes
     # none -- an operator sizing a decision against it reads the wrong number.
     for name, want in (('PROOF_WALL_S', 1500), ('PROOF_CPU_S', 1500),
-                       ('LIBRARY_WALL_S', 3600), ('LIBRARY_CPU_S', 3600)):
+                       ('LIBRARY_WALL_S', 10800), ('LIBRARY_CPU_S', 30000)):
         got = getattr(L, name)
         check(got == want,
               f'formal/lean.py::{name} is {got}, FORMAL.md §12 publishes {want}')
@@ -365,10 +365,14 @@ def group_closed():
         return out
 
     holes = {f: live_holes(s) for f, s in sorted(lib.items())}
-    total = sum(len(v) for v in holes.values())
+    # The scaffold design (CLAUDE.md "Scaffold holes"): `lib/Scaffold.lean` is
+    # the ONE home of a hole, ledgered in `formal/proof_gaps.py::SCAFFOLD_HOLES`
+    # and counted by test_formal_proof_gaps.py. Every OTHER module has none.
+    total = sum(len(v) for f, v in holes.items() if f != 'Scaffold.lean')
     check(total == 0,
-          f'lib/ has {total} live sorry/admit outside comments ({holes}), and '
-          f"FORMAL.md §5 and §7 both rest on it having none")
+          f'lib/ has {total} live sorry/admit outside comments and outside '
+          f"Scaffold.lean ({holes}), and FORMAL.md §5 and §7 both rest on it "
+          f"having none")
 
     # The three rows §7 struck, by name. A struck row that stops being struck is
     # a hole re-published as live; a name that leaves the document entirely is

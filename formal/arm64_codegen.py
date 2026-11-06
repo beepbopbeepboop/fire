@@ -4450,9 +4450,7 @@ dylib_exports: list = None, globals_base: int = None,
             # the walk agree with it; see `model.set_literal_distinct_elements`.
             kept, dropped = M.set_literal_distinct_elements(expr.elements)
             if kept is not None:
-                if dropped:
-                    expr = F.ListExpr(elements=kept, line=expr.line, col=expr.col)
-                self._emit_list(expr)
+                self._emit_deduped_set(expr, kept, dropped)
                 return
             self._emit_set_literal(expr)
             return
@@ -5343,7 +5341,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         trips_by_id = {id(node): trips for node, trips in M.walk_stmt_trips(
             getattr(fn, "body", None) or [], self._stmt_loop_trips)}
         for node, recv, method, _args in _walk_value_methods(fn):
-            if method != "append" or not isinstance(recv, F.IdentExpr):
+            if method not in ("append", "add") \
+                    or not isinstance(recv, F.IdentExpr):
                 continue
             # `or 1`, not a refusal: a site inside a loop with no compile-time
             # iteration count keeps the one-per-site bound it always had, and
@@ -8001,6 +8000,11 @@ ctor_field_value=self._ctor_field_value_for(name),
                or M.string_identity_method(method))
         if how == "list_append":
             self._emit_list_append(e)
+        elif how == "set_add":
+            if not self._expr_is_set_like(obj):
+                raise CodegenError(M.set_add_receiver_refusal(
+                    _dotted(e.func), M.receiver_shape(obj)))
+            self._emit_list_append(e, distinct=True)
         elif how == "list_clear":
             self._emit_list_clear(e)
         elif how == "file_write":
@@ -8681,8 +8685,13 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_movz_wd_imm(0, 0))         # count = 0
         self.asm.emit(encode_str_xt_xn_imm(0, 9, 0))
 
-    def _emit_list_append(self, e: F.CallExpr) -> None:
+    def _emit_list_append(self, e: F.CallExpr, *, distinct: bool = False) -> None:
         """`xs.append(v)` — store v at the blob's count and bump the count.
+
+        `distinct=True` is `set.add(v)`: the same store and the same capacity
+        guard, preceded by the word scan (`_emit_set_contains`) and skipped
+        when the word is already there. The scan comes BEFORE the guard, so
+        adding a member to a full set is the no-op CPython makes of it.
 
         The blob is `[count:i64][elem0]…` in the frame, so there is no room to
         grow one: the capacity is a compile-time number (`_scan_list_caps`)
@@ -8728,12 +8737,18 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldr_xt_xn_imm(4, 31, 0))       # X4 = base
         self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))       # X0 = value
         self.asm.emit(encode_ldr_xt_xn_imm(1, 4, 0))        # X1 = count
-        self._emit_mov_imm("X2", cap)
-        self.asm.emit(encode_cmp_xn_xm(1, 2))
-        self.asm.emit(encode_cset_xd_cond(3, "cs"))        # X3 = count >= cap
         self._while_counter += 1
         oob = f"{self.func_name}_appoob{self._while_counter}"
         ok = f"{self.func_name}_appok{self._while_counter}"
+        dup = f"{self.func_name}_appdup{self._while_counter}"
+        if distinct:
+            self._require_set_word_element(args[0])
+            self._emit_set_contains(4, 1, 0, 3)             # X3 = already there
+            self.asm.emit(encode_cbnz_xn(0, 3))
+            self.asm.emit_label_rel(dup, here_offset=-4)
+        self._emit_mov_imm("X2", cap)
+        self.asm.emit(encode_cmp_xn_xm(1, 2))
+        self.asm.emit(encode_cset_xd_cond(3, "cs"))        # X3 = count >= cap
         self.asm.emit(encode_cbnz_xn(0, 3))
         self.asm.emit_label_rel(oob, here_offset=-4)
         # value slot = base + header + count * stride, at the RECEIVER's own
@@ -8756,6 +8771,10 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_str_xt_xn_imm(1, 4, 0))       # count = n + 1
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self._emit_b_to(ok)
+        if distinct:
+            self.asm.label(dup)
+            self.asm.emit(encode_ldp_sp_post(0, 31))
+            self._emit_b_to(ok)
         self.asm.label(oob)
         self._emit_stop_diagnostic(
             M.list_append_overflow_message(
@@ -13206,7 +13225,10 @@ ctor_field_value=self._ctor_field_value_for(name),
                 # emitters that this element is that shape, and the decision
                 # is `model.comprehension_element_is_relocatable`'s so both
                 # backends relocate the same elements.
-                reloc = (cap > 1
+                is_set = expr.kind == "set"
+                if is_set:
+                    self._require_set_comprehension_element(expr.element)
+                reloc = (cap > 1 and not is_set
                          and M.comprehension_element_is_relocatable(
                              expr.element))
                 if reloc:
@@ -13218,7 +13240,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                         self._compr_reloc.pop()
                 self._materialize_compr_element(
                     expr.element, res_offset, cap, _before)
-                self._compr_append_elem(res_offset, cap)
+                self._compr_append_elem(res_offset, cap, distinct=is_set)
             return
 
         gen = gens[gi]
@@ -13344,17 +13366,40 @@ ctor_field_value=self._ctor_field_value_for(name),
 
 
 
-    def _compr_append_elem(self, res_offset: int, cap: int) -> None:
-        """Append X0 to list result at res_offset; exit(1) past cap."""
+    def _require_set_comprehension_element(self, el) -> None:
+        """A set comprehension's element must be a word whose `==` is a word
+        compare. Containers are refused (unhashable); the rest is the literal
+        rule, except that a COMPUTED integer expression (`x % 2`, which the
+        string-kind query cannot classify) is accepted: arithmetic yields an
+        integer word, and the string-kind check still refuses a string."""
+        if M.set_element_is_container(el):
+            raise CodegenError(M.set_comprehension_element_refusal(M.spelled(el)))
+        if isinstance(el, F.FloatLiteral):
+            raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), "float"))
+        if self._expr_str_kind(el) == "str" and not isinstance(el, F.StringLiteral):
+            raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), "str"))
+
+    def _compr_append_elem(self, res_offset: int, cap: int, *,
+                           distinct: bool = False) -> None:
+        """Append X0 to list result at res_offset; exit(1) past cap.
+
+        `distinct=True` (a set comprehension) first scans the result so far
+        (`_emit_set_contains`) and appends nothing when the word is there; the
+        capacity is an upper bound on appends, so skipping is always safe."""
         self.asm.emit(encode_stp_sp_pre(0, 2))
         self._emit_list_base(res_offset)
         self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))
-        self._emit_mov_imm("X2", cap)
-        self.asm.emit(encode_cmp_xn_xm(1, 2))
-        self.asm.emit(encode_cset_xd_cond(3, "cs"))
         self._while_counter += 1
         oob = f"{self.func_name}_cgoob{self._while_counter}"
         ok = f"{self.func_name}_cgok{self._while_counter}"
+        dup = f"{self.func_name}_cgdup{self._while_counter}"
+        if distinct:
+            self._emit_set_contains(9, 1, 0, 3)
+            self.asm.emit(encode_cbnz_xn(0, 3))
+            self.asm.emit_label_rel(dup, here_offset=-4)
+        self._emit_mov_imm("X2", cap)
+        self.asm.emit(encode_cmp_xn_xm(1, 2))
+        self.asm.emit(encode_cset_xd_cond(3, "cs"))
         self.asm.emit(encode_cbnz_xn(0, 3))
         self.asm.emit_label_rel(oob, here_offset=-4)
         self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
@@ -13365,6 +13410,10 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self._emit_b_to(ok)
+        if distinct:
+            self.asm.label(dup)          # already a member: unwind, store nothing
+            self.asm.emit(encode_ldp_sp_post(0, 31))
+            self._emit_b_to(ok)
         self.asm.label(oob)
         self._emit_exit(1)
         self.asm.label(ok)
@@ -16322,6 +16371,38 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_movz_wd_imm(reg, 0))
         self.asm.label(clamped)
 
+    def _require_set_word_element(self, el) -> None:
+        """Refuse a set element whose equality is not a word comparison.
+
+        Eligible: an integer/bool, a string LITERAL (interned by content), and
+        an unclassified word that is a plain name (the corpus's unannotated
+        integer parameter). Refused: a float, a string that is not a literal
+        (possibly computed, hence not interned), anything else unclassified."""
+        if isinstance(el, F.FloatLiteral):
+            raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), "float"))
+        if isinstance(el, F.StringLiteral):
+            return
+        kind = self._expr_str_kind(el)
+        if kind == "str" or (kind is None and not isinstance(
+                el, (F.IntLiteral, F.BoolLiteral, F.IdentExpr))):
+            raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), kind))
+
+    def _emit_deduped_set(self, expr, kept, dropped) -> None:
+        """A set literal whose element words are known at compile time: the
+        list blob of its distinct elements. The capacity the append scan found
+        is keyed by the SET node, so it is carried to the replacement list."""
+        if not dropped:
+            self._emit_list(expr)
+            return
+        lst = F.ListExpr(elements=kept, line=expr.line, col=expr.col)
+        cap = self._list_caps.get(id(expr))
+        if cap is not None:
+            self._list_caps[id(lst)] = cap
+        try:
+            self._emit_list(lst)
+        finally:
+            self._list_caps.pop(id(lst), None)
+
     def _emit_set_literal(self, expr: F.SetExpr) -> None:
         """Set literal with runtime deduplication for non-canonical elements."""
         if self._compr_reloc:
@@ -16349,28 +16430,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_mov_imm(f"X{count_reg}", 0)
         self.asm.emit(encode_str_xt_xn_imm(count_reg, base_reg, 0))
         for i, el in enumerate(expr.elements):
-            # Check element kind/refusal
-            if isinstance(el, F.FloatLiteral):
-                raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), "float"))
-            kind = self._expr_str_kind(el)
-            if isinstance(el, F.StringLiteral):
-                pass  # canonical string literal, ok
-            elif kind == "str" and not isinstance(el, F.StringLiteral):
-                raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), kind))
-            elif kind == "str":
-                raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), kind))
-            elif kind is None:
-                # For unclassified words (variables/params), allow if not obviously string
-                # and not a float; word comparison is fine for ints
-                if isinstance(el, F.StringLiteral):
-                    pass
-                elif isinstance(el, (F.IntLiteral, F.BoolLiteral)):
-                    pass
-                elif isinstance(el, F.IdentExpr):
-                    # Allow variables - word compare is fine for ints
-                    pass
-                else:
-                    raise CodegenError(M.set_runtime_element_refusal(M.spelled(el), kind))
+            self._require_set_word_element(el)
             # Evaluate element
             self._emit_expr(el)  # result in elem_reg (X0)
             # Reload base and count
