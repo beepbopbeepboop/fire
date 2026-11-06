@@ -10976,7 +10976,11 @@ preference.
         self._emit_jcc(COND_GE, sat_label)
         if op == "<<":
             self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))  # orig
-            self.asm.emit(encode_mov_r64_r64(Reg.R12, Reg.RCX))  # amount
+            # R9, NOT R12: R12 is a register-allocated LOCAL on this backend, and
+            # saving the amount in it overwrote a live variable (in `le64`'s
+            # `1 << (8 * k)` loop it corrupted the loop state, so every `stat`
+            # field read came back wrong on x86-64). R9 is a caller-saved temp.
+            self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.RCX))  # amount
             self.asm.emit(encode_shift_r64_cl(_SHIFT_IMM[op], Reg.RAX))  # RAX = orig << amt
             self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.RAX))  # save result
             # Undo the shift with an ARITHMETIC right shift, always. (This line
@@ -10986,7 +10990,7 @@ preference.
             # `x << n` with a non-literal count trapped as an overflow.)
             self.asm.emit(encode_shift_r64_cl(">>signed", Reg.RAX))  # RAX = result >> amt
             self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R11))  # compare with orig
-            self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.R12))
+            self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.R9))
             ovf = f"{fn}_sh{sid}_ovf"
             ok = f"{fn}_sh{sid}_ok"
             self._emit_jcc(COND_NE, ovf)
