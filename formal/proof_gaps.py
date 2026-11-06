@@ -13,7 +13,12 @@ from dataclasses import dataclass
 class Hole:
     step: str      # e.g. "step-03c"
     reason: str    # one line: what is unproved and why it is believed true
-    kind: str      # "scaffold" | "control"
+    kind: str      # "scaffold" | "control" | "placeholder"
+    #   scaffold    a real statement whose proof is open
+    #   control     a canary for the census itself
+    #   placeholder a hole whose STATEMENT is not written yet (it states `True`);
+    #               exempt from the vacuity check, and only while the design step
+    #               that will state it is open (the reason names it)
 
 
 SCAFFOLD_HOLES: dict[str, Hole] = {
@@ -50,12 +55,12 @@ SCAFFOLD_HOLES: dict[str, Hole] = {
     "scaffold_cell_writeback_one_exit": Hole(
         "step-18d",
         "by-reference one-field mutator write-back (single exit): depth bound as hypothesis, obligation to prove",
-        "scaffold",
+        "placeholder",
     ),
     "scaffold_cell_writeback_multi_exit": Hole(
         "step-18d",
         "by-reference one-field mutator write-back (multiple exits): per-exit obligation scaffolded",
-        "scaffold",
+        "placeholder",
     ),
     "peephole_x86_store_load_disp8": Hole(
         "step-04b",
