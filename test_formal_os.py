@@ -1628,6 +1628,11 @@ NOT_PROVIDED = [
     ("fork", "os.fork()"), ("waitpid", "os.waitpid(1, 0)"),
     ("system", "os.system(\"true\")"), ("urandom", "os.urandom(4)"),
     ("uname", "os.uname()"), ("fdopen", "os.fdopen(1)"),
+    # file descriptors: no producer of a writable one exists (see the table)
+    ("open", "os.open(\"x\", 0)"), ("close", "os.close(3)"),
+    ("write", "os.write(1, \"x\")"), ("fsync", "os.fsync(3)"),
+    ("ftruncate", "os.ftruncate(3, 0)"), ("dup2", "os.dup2(1, 2)"),
+    ("pipe", "os.pipe()"),
 ]
 
 

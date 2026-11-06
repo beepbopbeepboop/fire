@@ -1,4 +1,5 @@
 # plan/step-23d: os file-descriptor I/O: close, read, write, fsync, ftruncate, dup2, pipe, O_*/SEEK_SET constants
+**Status: CLOSED AS 'NOT PROVIDED' 2026-11-05 (verified).** Per the step's own rule: `fs_open_ro` documents that this path lowers `open` itself from a mode string and refuses the three-argument C `open`, so there is no way to obtain a WRITABLE descriptor and `os.open` cannot honour `flags`. With no descriptor producer, `close/write/fsync/ftruncate/dup2/pipe` and the `O_*`/`SEEK_SET` constants would be unreachable stubs, so none is added. They are listed in the NOT PROVIDED table in `os/__init__.mojo` and pinned (7 names) by group `notprovided` on both backends. Reopens if a descriptor producer lands (e.g. an `open` lowering that takes a flags word).
 Class: mid      Size: M      Depends: 26      Blocks: none
 Source: `bugs/FORMAL_known_limits.md` §6.3-6.4 (host-import); round template and conventions are `bugs/plan/step-23-host-modules.md` (read it first; follow its "Work order" verbatim, items 3-7 are specialised below)
 

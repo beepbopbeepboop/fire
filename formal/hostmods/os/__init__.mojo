@@ -162,6 +162,16 @@ from hoststatus import status_ok, status_err
 #       and cannot be returned from a module function.
 #   fdopen
 #       Returns a file OBJECT.
+#   open, close, write, fsync, ftruncate, dup2, pipe, O_RDONLY/O_WRONLY/O_RDWR/
+#   O_CREAT/O_TRUNC, SEEK_SET   (file DESCRIPTORS)
+#       This path lowers `open` ITSELF from a mode string and refuses the C
+#       library's three-argument `open(path, flags, mode)` (see `fs_open_ro` in
+#       `_syscalls.mojo`), so there is no way to obtain a WRITABLE descriptor
+#       and `os.open` cannot be provided without ignoring its `flags`. With no
+#       descriptor producer, `write`/`fsync`/`ftruncate`/`dup2`/`close` and the
+#       `O_*` flags would be unreachable stubs, so they are absent rather than
+#       dead. The read-only descriptor `fs_open_ro` makes is module-internal.
+#       Reachable instead: `tempfile`'s own use of `fopen`/`fclose`.
 #   getmtime (os.path)
 #       A `float`; see `os.path.getmtime_ns`.
 #
