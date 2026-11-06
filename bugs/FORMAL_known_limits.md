@@ -1670,7 +1670,7 @@ Index a `range()` result rather than measuring it, until that is fixed.
 | 20 | test_llm/dumb_gemm.mojo | S | build: [FloatLiteral] * m * k is a REPETITION, count not statically known | different detailed message | |
 | 21 | test_relaxed_imports.mojo | S | build: imports glob -> dependency chain issue | moved to dependency | |
 | 22 | tools/procrun.py | S | build: imports os -> dependency chain issue | moved to dependency | |
-| 23 | unescape_c.py |  | build: __module_body__: sys.stdin reads 'stdin' out of the imported module `sys`, and a module is no |  |  |
+| 23 | unescape_c.py | S | build: sys.stdin reads from imported module sys but sys publishes no stdin (different from module-not-value issue) | different detailed message | |
 | 24 | tools/wave2_extract_shared.py |  | build: an f-string literal on line 116 is refused on this path, and its text could not be taken apar |  |  |
 
 **Totals:** T=0 M=0 S=0 C=0 (of 24 rows)
