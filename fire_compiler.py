@@ -6971,6 +6971,12 @@ class Parser:
         top-level trailing comma, as an earlier version of this function did,
         makes it indistinguishable from the parenthesised single name and puts
         the two parsers at odds with each other for the same source line."""
+        # Skip convention keywords (var, ref, mut, etc.)
+        if (self._peek().kind == "KW" and self._peek().value in self._CONV_KWS
+                and not (self._peek(1).kind == "KW" and self._peek(1).value == "in")
+                and self._peek(1).kind != "COLON"
+                and self._peek(1).kind != "COMMA"):
+            self._advance()
         t = self._peek()
         saw_comma = False
         if t.kind == "LPAREN":
@@ -7067,6 +7073,13 @@ class Parser:
             if self._peek().kind in ("RPAREN", "RBRACKET"):
                 break
             sub_t = self._peek()
+            # Skip convention keywords
+            if (sub_t.kind == "KW" and sub_t.value in self._CONV_KWS
+                    and self._peek(1).kind != "KW" and self._peek(1).value != "in"
+                    and self._peek(1).kind != "COLON"
+                    and self._peek(1).kind != "COMMA"):
+                self._advance()
+                sub_t = self._peek()
             if sub_t.kind == "LPAREN":
                 self._advance()
                 inner, inner_comma = self._parse_generator_target()
@@ -7927,6 +7940,12 @@ class Parser:
         convention). (Chained-assignment tuple targets use a separate
         Expr-based TupleExpr representation, not this string form — see
         _parse_stmt's ASSIGN handling.)"""
+        # Skip convention keywords (var, ref, mut, etc.) in tuple unpacking targets
+        if (self._peek().kind == "KW" and self._peek().value in self._CONV_KWS
+                and not (self._peek(1).kind == "KW" and self._peek(1).value == "in")
+                and self._peek(1).kind != "COLON"
+                and self._peek(1).kind != "COMMA"):
+            self._advance()
         if self._peek().kind == "LPAREN":
             self._advance()
             parts = []
