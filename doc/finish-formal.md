@@ -415,6 +415,16 @@ agent" by the first execution wave WITHOUT a measurement, so treat as unproven;
   `test_formal_run.py` still has stale "refused" rows for constructs that now
   build (`upper`, f/t-strings) and changed refusal wording on the vararg and
   set-comprehension rows.
+* **Known backend divergence (one red row):** x86-64 lowers `str(<int>)` through a
+  `%ld` format into a buffer and prints `[42]` (correct); arm64 refuses it
+  (`string_conversion_refusal`). `printf_s_of_a_conversion_of_a_number_is_refused`
+  pins the refusal and is red on x86-64 only (`test_formal_run.py` 1361/1). The fix
+  is to port the lowering to arm64 (then flip the row to an oracle row), or to
+  remove it from x86-64; the buffer's lifetime on x86-64 has not been audited.
+  Also still red and pre-existing: `test_formal_value_model.py`'s two x86-64
+  comprehension-element rows (65,536-byte element array) and
+  `a_string_conversion_of_an_integer_is_refused` (x86-64 does not classify an
+  unannotated parameter).
 * **Not run:** `test_formal_admitted.py` / `test_formal_axiom_closure_pinned.py`
   (need the library build; pins will move), the `make gate` bucket.
 
