@@ -1,5 +1,4 @@
 # plan/step-13b: `<literal>[<int literal>]` on non-ASCII text folds to the one-character string
-**Status: DONE 2026-11-06 (measured).** `"héllo"[1]` prints `é` on both backends.
 Class: mid      Size: M      Depends: 10      Blocks: 13c
 Source: `bugs/FORMAL_string_value_model.md` Wave 9 ("`s[i]` on non-ASCII text", line ~1070) and "`ord`, `chr` and `hash`..." (line ~1118).
 

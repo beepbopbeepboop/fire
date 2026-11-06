@@ -1,5 +1,4 @@
 # plan/step-15e: re-pin the imported-instantiation parameter annotation (value vs frame)
-**Status: DONE 2026-11-06 (measured).** 'a parameter annotation of an imported instantiation' PASSES; `test_formal_monomorph.py` 60/0/0 on 2026-11-06.
 Class: easy      Size: S      Depends: 15a      Blocks: none
 Source: deleted `bugs/formal/FORMAL_generic_monomorph_scope.md` §1 / §1a (status 2026-10-13); `bugs/FORMAL_known_limits.md` §1.2.
 

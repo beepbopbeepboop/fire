@@ -1,5 +1,4 @@
 # plan/step-06a: arm64 `ccmp` encoders (register and immediate), byte-exact against `as`
-**Status: DONE 2026-11-06 (measured).** `encode_ccmp_xn_xm`/`encode_ccmp_xn_imm5` exist; `ccmp x1,x2,#4,eq` = 0xfa420024 and `ccmp x1,#5,#0,ne` = 0xfa451820; `test_arm64_encoders.py` 932/0 against `as`; census overrides at `tools/formal_isa_census.py:161`.
 Class: easy      Size: S      Depends: none      Blocks: 06b
 Source: `bugs/FORMAL_arm64_instruction_coverage.md` gap table row `ccmp` ("no encoder at all").
 
