@@ -51,23 +51,23 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_no_exceptions.md` | `bug-formal-formal-no-exceptions` | a `raise` is a TERMINATION on this path, not a value the caller can catch |
 
-### `formal/arm64_proof_gen` — 1 document, 1 claimed
+### `formal/arm64_proof_gen` — 2 documents, 2 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_absval_proof_does_not_check.md` | `bug-formal-formal-absval-proof-does-not-1557` | `formal/examples/absval.mojo`'s arm64 proof no longer checks — a frame-slot peel's address does not match the goal |
-
-### `formal/build` — 1 document, 1 claimed
-
-| doc | claim | what it is (its own title) |
-|---|---|---|
 | `FORMAL_string_value_model.md` | `fix-merge-fix-merge-fix-merge-fix-merge-bug-formal-formal-st` | what a string IS on the formal path, and the two things that want to be one |
 
-### `formal/model` — 2 documents, 2 claimed
+### `formal/imports` — 1 document, 1 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_known_limits.md` | `fix-merge-bug-formal-formal-known-limits-1382` | the sweep residue, audited — which refusals are true |
+
+### `formal/model` — 1 document, 1 claimed
+
+| doc | claim | what it is (its own title) |
+|---|---|---|
 | `FORMAL_set_value_model.md` | `fix-merge-bug-formal-formal-set-value-model-9076` | A set is a LIST here: insertion order, no hashing, and `for x in s` disagrees with CPython |
 
 ### `formal/peephole` — 1 document, 1 claimed
