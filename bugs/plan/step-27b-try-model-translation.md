@@ -1,5 +1,5 @@
 # plan/step-27b: `TryStmt` in the semantic model (`arm64_proof_gen.py`): the sound flat slice
-**Status: DONE (verified by agent, work landed)**
+**Status: DONE 2026-11-05 (verified).** `test_formal_try_model.py` passes (5 tests); the generator's `_stmts_go`/`_stmts_go_t`/`_stmts_ast` carry a `TryStmt` arm. No Lean change, as designed.
 
 Class: mid      Size: M      Depends: 27a      Blocks: none
 Source: `bugs/FORMAL_no_exceptions.md` item 2 and the 27a section; `formal/arm64_proof_gen.py` `_stmts_go` :1786, `_stmts_go_t` :2249, `_stmts_ast` :3921

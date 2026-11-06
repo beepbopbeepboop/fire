@@ -1,5 +1,5 @@
 # plan/step-26: one discoverable host-module failure convention (`hoststatus`)
-**Status: DONE (verified by agent, work landed)**
+**Status: DONE 2026-11-05 (verified).** `formal/hostmods/hoststatus.mojo` exists and `test_formal_hostmods_census.py` passes its `status docs cite hoststatus` row (hostmods 90/92 build; `subprocess` is the one pre-existing 14-argument struct-return limit).
 
 Class: mid      Size: M      Depends: none      Blocks: 23, 23a, 23b, 23c, 23d, 23e
 Source: `bugs/FORMAL_no_exceptions.md` ("The rule, stated once"; "The next step" item 1)

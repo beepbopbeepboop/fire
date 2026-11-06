@@ -1,5 +1,5 @@
 # plan/step-27c: landing-pad / personality data structures (pure Python table + test, NO codegen change)
-**Status: DONE (verified by agent, work landed)**
+**Status: DONE 2026-11-05 (verified).** `formal/model/eh.py` exists and `test_formal_eh_tables.py` passes (6 tests); no codegen change.
 
 Class: mid      Size: M      Depends: 27a      Blocks: none
 Source: 27a memo (`bugs/FORMAL_no_exceptions.md`, "EH design (step-27a)"); `formal/model/types.py` `handler_arm_matches` :2712, `exception_base_chain` :2608

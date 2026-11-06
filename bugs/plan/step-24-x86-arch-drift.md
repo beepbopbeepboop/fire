@@ -1,5 +1,5 @@
 # plan/step-24: x86-64 arch drift is mostly ALREADY CLOSED: pin it and correct the doc
-**Status: DONE (verified by agent, work landed)**
+**Status: DONE 2026-11-05 (verified).** x86-64 parity suite PASS=90 FAIL=0 (unary `^` case `ownership_transfer_caret` included); `refuse_either:does not fold` no longer appears in `test_formal_run.py`; `FORMAL_known_limits.md` §6.5 reads CLOSED.
 
 Class: easy      Size: S      Depends: none      Blocks: none
 Source: `bugs/FORMAL_known_limits.md` §6.5 (stale) and §3 table row "`comptime X = … does not fold`" (already says CLOSED 2026-09-27)

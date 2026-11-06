@@ -1,5 +1,5 @@
 # plan/step-03a: a generator for the `hne_` negation chain of an `arm64_step` arm lemma
-**Status: DONE (verified by agent, work landed)**
+**Status: DONE 2026-11-05 (verified).** `tools/lean_hne_chain.py` + `test_lean_hne_chain.py` (3 tests) pass; its output was used to regenerate the `work_step_*` theorems in step 00f/00g, where its chains elaborated (see those steps).
 
 Class: mid      Size: S      Depends: none      Blocks: 03b, 03c, 03d
 Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §2 ("26 negations"); template `lib/Peephole.lean:166` `arm64_step_add_imm64`.
