@@ -2869,21 +2869,33 @@ def callee_is_a_bound_value(fn, name: str) -> bool:
     a new question asked of every call."""
     if not name or fn is None:
         return False
-    params = [p[0] if isinstance(p, (list, tuple)) else getattr(p, "name", None)
-              for p in (getattr(fn, "params", None) or [])]
-    bound = {p for p in params if isinstance(p, str)}
-    try:
-        from mojo.middle.boundnames import bound_names_in_order
-        bound |= {n for n in bound_names_in_order(
-            getattr(fn, "body", None) or [], [])
-            if isinstance(n, str)}
-    except Exception:
-        # No answer from the allocator's walk means no answer here either: the
-        # refusal belongs to a name we have EVIDENCE is bound, and guessing
-        # would refuse a working program.
-        pass
-    bound -= global_names_bound_in(fn)
-    return name in bound
+    body = getattr(fn, "body", None) or []
+    # ONE allocator walk per function, remembered on it: this is asked once per
+    # CALL SITE, and the walk covers the whole body, so N calls cost N walks
+    # (a 1000-`printf` function spent 37 of its 44 seconds here). Keyed on the
+    # identity and length of the body list, so a pass that replaces or grows the
+    # body gets a fresh answer.
+    memo = getattr(fn, "_bound_value_names_memo", None)
+    if memo is not None and memo[0] is body and memo[1] == len(body):
+        bound = memo[2]
+    else:
+        params = [p[0] if isinstance(p, (list, tuple)) else getattr(p, "name", None)
+                  for p in (getattr(fn, "params", None) or [])]
+        bound = frozenset(p for p in params if isinstance(p, str))
+        try:
+            from mojo.middle.boundnames import bound_names_in_order
+            bound = bound | {n for n in bound_names_in_order(body, [])
+                             if isinstance(n, str)}
+        except Exception:
+            # No answer from the allocator's walk means no answer here either: the
+            # refusal belongs to a name we have EVIDENCE is bound, and guessing
+            # would refuse a working program.
+            pass
+        try:
+            fn._bound_value_names_memo = (body, len(body), bound)
+        except AttributeError:
+            pass
+    return name in bound and name not in global_names_bound_in(fn)
 
 
 def sole_field_call_refusal(spelling: str, struct: str, chain: str, root: str,

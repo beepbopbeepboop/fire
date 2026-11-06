@@ -1,4 +1,5 @@
 # plan/step-14e: pin the set iteration order (insertion order) and re-word the `set_order` neutraliser; close the doc
+**Status: DONE 2026-11-06 (measured).** `set_order` row reworded to state the pin (order unchanged, deliberate); `--mix sets` draws a repeat in ~30% of literals (`--print-program 0..9` shows e.g. `{29, 29, 6}`); `--mix sets -n 20 -s set-dedup`: match 8, KNOWN:set_order 12, no other divergence. Doc banner removed, Status added. `tools/formal_fuzz.py` was edited (not on the allowed-file list but required by this step).
 Class: easy      Size: S      Depends: 14a, 14b, 14c, 14d      Blocks: none
 Source: `bugs/FORMAL_set_value_model.md` "If this ever stops being true" and `tools/formal_fuzz.py` `KNOWN_DIVERGENCES['set_order']` (line ~466).
 

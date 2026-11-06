@@ -1,4 +1,5 @@
 # plan/step-14b: run-time distinctness for a set literal with non-canonical elements (`{x, x, 2}`), both backends
+**Status: DONE 2026-11-06 (measured).** `_emit_set_literal` + `_require_set_word_element` on both backends, x86-64 `_emit_set_contains`, `set_runtime_element_refusal`; rows `s_len_name_dups`, `s_walk_name_dups`, `s_len_mixed_dups`, `s_in_after_runtime_dedup`, `s_float_elem_r`, `s_computed_str_elem_r` pass on both; container-methods 6/0, parity 90/0. Kind-None fallback: a plain name is accepted, anything computed refused. `print(set)` reason reworded in the doc table (no code site spells it).
 Class: mid      Size: L      Depends: 14a      Blocks: 14c, 14d
 Source: `bugs/FORMAL_set_value_model.md` top Status ("What is NOT fixed, and it needs a set RUNTIME").
 
