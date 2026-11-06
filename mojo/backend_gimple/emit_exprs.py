@@ -30,7 +30,7 @@ from fire_compiler import (
     YieldExpr, YieldFromExpr, AwaitExpr,
     Parser, py_tokenize, _as_str, _sms_key, _as_floatlit_node, _ptr_slot_in_range,
     _signed_int64, _signed_int64_c_literal, _as_intlit_node,
-    _as_ident_node, _as_vardecl_node, _float_c_literal,
+    _as_ident_node, _as_vardecl_node,
 )
 import regex_compile
 import mlir
@@ -234,10 +234,11 @@ def _lower_FloatLiteral(gen, node) -> tuple[str, str]:
     # `_as_floatlit_node(...).value` for a DIRECT `double` field load —
     # `node.value` off the boxed `node` went through reflective dispatch and
     # truncated the double to the boxed int64_t, so `repr(4.2)` came out
-    # `'4.0'` (see _as_floatlit_node). `_float_c_literal` is the ONE spelling
-    # of the value as C, including the non-finite values a literal can reach
-    # by overflow (`999e9000` is `inf`, which `repr` spells 'inf').
-    return 'double', _float_c_literal(_as_floatlit_node(node).value)
+    # `'4.0'` (see _as_floatlit_node).
+    s = repr(_as_floatlit_node(node).value)
+    if '.' not in s and 'e' not in s.lower():
+        s += '.0'
+    return 'double', s
 
 
 def _lower_BoolLiteral(gen, node) -> tuple[str, str]:
@@ -2134,12 +2135,8 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # linesep's raw newline must go through _c_escape (the same
             # shared helper every other string-emission site uses) or it
             # splices a literal line break into the .ci string pool.
-            if _bm_ctype == 'char *':
-                _bm_text = gen._intern_string(gimple_ctypes._c_escape(_bm_val))
-            elif _bm_ctype == 'double':
-                _bm_text = _float_c_literal(_bm_val)
-            else:
-                _bm_text = str(_bm_val)
+            _bm_text = (gen._intern_string(gimple_ctypes._c_escape(_bm_val))
+                        if _bm_ctype == 'char *' else str(_bm_val))
             return _bm_ctype, gen._new_val(_bm_ctype, _bm_text)
 
         # Class attribute access: ClassName.ATTR
@@ -3327,8 +3324,7 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
                 gen._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {ev_cast});")
             else:
                 if not gen._emit_struct_subscript_write(obj_v, ot, idx_v, vv, vtype):
-                    # For RefSubscript/RLValue (without __setitem__), assign through reference
-                    gen._emit(f"  (*(&({obj_v}[{idx_v}]))) = {vv};")
+                    gen._emit(f"  {obj_v}[{idx_v}] = {vv};")
             return vtype, vv
         # Skip emitting comment to avoid GIMPLE global-passing issues
         return vtype, vv

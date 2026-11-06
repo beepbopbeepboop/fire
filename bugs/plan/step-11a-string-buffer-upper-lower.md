@@ -1,5 +1,4 @@
 # plan/step-11a: the runtime string buffer (libc `strdup`, never freed) and `upper`/`lower` as its first clients
-**Status: DONE 2026-11-06 (measured).** `upper()` on an unfoldable receiver answers `ABC D` on arm64 and x86-64; `STRING_BUFFER_NUL_OBLIGATION` is in `formal/model/strings.py:405`; `test_formal_str_methods.py` 2150/2150 (1105 rows x 2 backends), `test_formal_unicode.py` 191/0. `test_formal_value_model.py` has 3 failures that are NOT this step's: two x86-64 comprehension-element rows ('needs 65536 bytes', also red at d4ac7c8e4) and `a_string_conversion_of_an_integer_is_refused` (x86-64 does not classify an unannotated parameter as int; arm64 refuses).
 Class: mid      Size: M      Depends: 10      Blocks: 11b, 11c, 13c
 Source: `bugs/FORMAL_string_value_model.md` § "The cost, stated rather than hidden" (the NUL obligation, line ~114) and `LENGTH_DEPENDENT_METHODS` (`formal/model/cfg.py:4030`).
 

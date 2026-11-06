@@ -10817,13 +10817,6 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             gen._actual_types[cast_t] = elem
             # Propagate nested element types for MojoList* (list-of-lists)
             if elem == 'MojoList *':
-                # A list of HETEROGENEOUS tuples (`[(body, 0)]`): the container
-                # carries each inner slot's own type, so the element read
-                # inherits them and `body, idx = stack[-1]` reads `idx` as an
-                # int, not as the joined list element type.
-                if ov in gen._tuple_slot_types:
-                    gen._tuple_slot_types[cast_t] = gen._tuple_slot_types[ov]
-                    gen._tuple_slot_types[t] = gen._tuple_slot_types[ov]
                 if ov in gen._nested_elem_types:
                     gen._elem_types[cast_t] = gen._nested_elem_types[ov]
                     gen._elem_types[t] = gen._nested_elem_types[ov]
@@ -11028,9 +11021,6 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             cast_t = gen._new_val(elem, f'({elem}){t}')
             gen._actual_types[cast_t] = elem
             if elem == 'MojoList *':
-                if ov in gen._tuple_slot_types:
-                    gen._tuple_slot_types[cast_t] = gen._tuple_slot_types[ov]
-                    gen._tuple_slot_types[t] = gen._tuple_slot_types[ov]
                 if ov in gen._nested_elem_types:
                     gen._elem_types[cast_t] = gen._nested_elem_types[ov]
                     gen._elem_types[t] = gen._nested_elem_types[ov]

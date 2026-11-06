@@ -1,5 +1,4 @@
 # plan/step-10: the `String` frame-vs-`char *` collision (zero-argument `String()` used as a receiver)
-**Status: DONE 2026-11-06 (measured).** `frames.string_frame_reading_calls(fn, framed, functions)` + build-pass `_mark_string_frame_readings` set `_string_frame_reading` on the call node; both emitters read it (`call_is_string_frame_reading`). The earlier partial landing passed a LIST where the function called `.get`, inside blanket `try/except`, so nothing was ever marked; rewritten without the swallowing. `test_formal_run.py`: `string_frame_reading_reproducer` (5), `string_frame_reading_returned` (5; written `var t = make(); t.size()` — `make().size()`, a method on a call result, is a different feature and stays refused), `string_text_reading_control` all pass on both backends. Not measured: the 16 stdlib files.
 Class: mid      Size: M      Depends: 01a, 01b (convention only; no Lean change here)      Blocks: 11
 Source: `bugs/FORMAL_string_value_model.md` § "NOT the string value model: the 16 ..." (line ~190) and "Wave 8" §2 (line ~983, the SIGBUS-turned-refusal reproducer).
 

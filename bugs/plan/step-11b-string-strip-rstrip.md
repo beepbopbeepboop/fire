@@ -1,5 +1,4 @@
 # plan/step-11b: `strip()` / `rstrip()` on the runtime buffer
-**Status: DONE 2026-11-06 (measured).** `strip`/`rstrip` on an unfoldable receiver match CPython on both backends (`test_formal_str_trim_runtime.py`, registered as `formal-str-trim-runtime`). Fixed here: arm64 terminated the result with the low byte of X0 (`mov x2, x0` for a zero); x86-64 used the wrong slot offsets, byte ordering and pop count.
 Class: mid      Size: M      Depends: 11a      Blocks: 13c
 Source: `bugs/FORMAL_string_value_model.md` § "The cost" and `LENGTH_DEPENDENT_METHODS["strip"]` / `["rstrip"]` (`formal/model/cfg.py:4046-4060`, the measured `maxprot 0x5` read-only text and the wrong-answer story).
 
