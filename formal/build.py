@@ -1830,16 +1830,6 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
         closure = template_closure(
             [path for _, path in resolved], project_root=source_path)
         demands = {}
-        try:
-            try:
-                _dbg = os.path.join(os.path.dirname(__file__), '..', '.tmp', 'DEBUG_BUILD.txt')
-                os.makedirs(os.path.dirname(_dbg), exist_ok=True)
-                with open(_dbg, 'a') as _f:
-                    _f.write(f"BUILD: resolved={resolved}\n")
-            except Exception:
-                pass
-        except Exception:
-            pass
         for mod, path in resolved:
             for other, wanted in instantiation_demands(
                     path, module_source_text(source_path),
@@ -1848,11 +1838,6 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                 for tmpl, args in wanted.items():
                     merged[tmpl] = sorted(set(merged.get(tmpl, [])) | set(args))
                 demands[other] = merged
-        try:
-            with open(os.path.join(os.path.dirname(__file__), '..', '.tmp', 'DEBUG_BUILD.txt'), 'a') as _f:
-                _f.write(f"DEMANDS={demands}\n")
-        except Exception:
-            pass
         # The same PER-EDGE rule the recursion applies to its own imports
         # (`formal/imports.py::library_free_edges`), asked here for the program's
         # OWN imports rather than left to the first level of the closure below.
@@ -1863,18 +1848,8 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
         library_free = library_free_edges(source_path, stmts,
                                           project_root=source_path,
                                           demands=demands)
-        try:
-            with open(os.path.join(os.path.dirname(__file__), '..', '.tmp', 'DEBUG_BUILD.txt'), 'a') as _f:
-                _f.write(f"LIBFREE={library_free}\n")
-        except Exception:
-            pass
         check_library_free_calls(source_path, stmts, library_free)
         for mod, path in resolved:
-            try:
-                with open(os.path.join(os.path.dirname(__file__), '..', '.tmp', 'DEBUG_BUILD2.txt'), 'a') as _f:
-                    _f.write(f"TRY_BUILD {mod} {path} free={os.path.abspath(path) in library_free}\n")
-            except Exception:
-                pass
             if os.path.abspath(path) in library_free:
                 continue
             try:
@@ -1882,11 +1857,6 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                                            project_root=source_path,
                                            _parent=parent, demands=demands,
                                            closure=closure)
-                try:
-                    with open(os.path.join(os.path.dirname(__file__), '..', '.tmp', 'DEBUG_BUILD2.txt'), 'a') as _f:
-                        _f.write(f"BUILT {mod} {dylib}\n")
-                except Exception:
-                    pass
             except ImportBuildError as e:
                 # The dependency's own error names the file that failed, which
                 # is rarely the file the user asked about — and now that a
@@ -2063,6 +2033,11 @@ def compile_formal(source_path: str, output: str = None,
     # relative to the set of classes THIS image can name, so a second image
     # built in one process must not inherit the first one's.
     M.clear_exception_kinds()
+    try:
+        import formal.monomorph as _MM
+        _MM.clear_failed_demands()
+    except Exception:
+        pass
 
     # Structural acceptance: only FunctionDefs matter for codegen; imports /
     # module-level statements are fine (filtered here + in the codegen).
@@ -2277,14 +2252,12 @@ def compile_formal(source_path: str, output: str = None,
 
     # The gimple runtime's C library, on this image's link line, if and only if
     # the program names an entry point of it that the library really provides
-    # (see `_runtime_library_for` for why those are two questions). LAST in the
-    # list, so an imported module's own export still wins the name if the two
-    # ever collide: an import is a specific thing the program asked for and the
-    # runtime is the ambient one. `_codegen_and_link` merges the maps with
-    # `setdefault` in list order, so position here is the precedence.
-    runtime_lib, runtime_calls = _runtime_library_for(ordered, arch, fmt)
-    if runtime_lib is not None:
-        linked = linked + [runtime_lib]
+    runtime_libs_res, runtime_calls = _runtime_library_for(ordered, arch, fmt)
+    if runtime_libs_res is not None:
+        if isinstance(runtime_libs_res, list):
+            linked = linked + runtime_libs_res
+        else:
+            linked = linked + [runtime_libs_res]
 
 
     # `comptime f(...)` is resolved by RUNNING f through this same backend
@@ -3320,27 +3293,7 @@ def _struct_methods(stmts: list) -> list:
 
 
 def _root_ident(node):
-    """`(name, depth)` for a chain of `.member` hops over a plain name, else None.
-
-    `depth` is how many hops there are, which is what separates a frame slot
-    (`h.x`, depth 1) from a field OF a field (`h.sub.x`, depth 2) — the second
-    has no representation here, because slot `k` holds one 64-bit word and that
-    word is a field, not a struct.
-
-    None for anything the hops do not account for, and that is load-bearing
-    rather than tidy: `h[i].f` and `f(h).g` both bottom out at a name but are
-    NOT `h.f`, and a chain that reached the frame-slot table through a
-    subscript would silently read the wrong word. So the walk has to be
-    MemberExpr all the way down, and anything else is None — which sends it to
-    the ordinary local-slot lowering, i.e. to the pre-existing behaviour, not
-    to a frame access."""
-    depth = 0
-    while isinstance(node, F.MemberExpr):
-        depth += 1
-        node = node.obj
-    if isinstance(node, F.IdentExpr):
-        return (node.name, depth)
-    return None
+    return M.root_ident(node)
 
 
 def _frame_argument_slots(call, params):
@@ -3717,7 +3670,8 @@ def _frame_valued_calls(site_fn, structs_by_name, returns_frame, fns):
         built = constructors.get(id(node))
         if built is not None and M.call_lowers_as_framed_construction(
                 node.func.name, structs_by_name,
-                len(node.args or []) + len(node.kwargs or []), fns):
+                len(node.args or []) + len(node.kwargs or []), fns,
+                call=node):
             out[id(node)] = ([built[0].name],
                              f"a {built[0].name} frame built here")
             continue
@@ -4447,6 +4401,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     global _IMAGE_FUNCTIONS
     _IMAGE_FUNCTIONS = tuple(functions)
     framed = M.framed_struct_names(structs)
+    _mark_string_frame_readings(functions, framed)
     # …and the module's ONE-FIELD structs, the third predicate of the same
     # partition, on the same terms as `framed` and for the same reason: the
     # three arms below ask it PER FUNCTION (`struct_is_one_field` is
@@ -6128,7 +6083,7 @@ def _park_construction_mismatches(functions, framed) -> None:
                 continue
             if M.call_lowers_as_framed_construction(
                     callee, framed, len(value.args or [])
-                    + len(value.kwargs or []), fns):
+                    + len(value.kwargs or []), fns, call=value):
                 continue
             fn._construction_mismatch = (target, callee,
                                          M.struct_field_summary(framed[callee]))
@@ -6150,6 +6105,15 @@ def check_construction_mismatches(functions) -> None:
         target, callee, summary = finding
         raise CodegenError(M.construction_mismatch_refusal(
             target, callee, summary, fn.name))
+
+
+def _mark_string_frame_readings(functions, framed):
+    """Put `_string_frame_reading` on every call `string_frame_reading_calls`
+    names, BEFORE any binding analysis runs (step 10)."""
+    names = [fn.name for fn in functions]
+    for fn in functions:
+        for call in M.string_frame_reading_calls(fn, framed, names):
+            call._string_frame_reading = True
 
 
 def _value_may_be_a_frame(value, structs_by_name, holders, alias=None,
@@ -9195,7 +9159,8 @@ def _returned_frame_construction(fn, value, callee, structs_by_name, fns):
         return None
     if not M.call_lowers_as_framed_construction(
             callee, structs_by_name or {},
-            len(value.args or []) + len(value.kwargs or []), fns):
+            len(value.args or []) + len(value.kwargs or []), fns,
+            call=value):
         return None
     return built[0]
 
@@ -10002,7 +9967,7 @@ def _constructor_bindings(fn, framed, functions=(), own_scope: bool = False) -> 
         if isinstance(value.func, F.IdentExpr) and value.func.name in framed:
             if not M.call_lowers_as_framed_construction(
                     value.func.name, framed, len(value.args or [])
-                    + len(value.kwargs or []), functions):
+                    + len(value.kwargs or []), functions, call=value):
                 continue
             # De-duplicated, order kept: `x = A()` twice on two paths is ONE
             # candidate, and a refusal that printed "a A, A receiver" because it
@@ -16232,7 +16197,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             why = M.mlir_template_refusal(sub)
             if why is None and isinstance(sub, F.SubscriptExpr) \
                     and not type_application and not value_callee \
-                    and id(sub) not in type_positions:
+                    and id(sub) not in type_positions \
+                    and M.mlir_dialect_op_name(sub) is None:
                 why = M.multi_index_refusal_for(sub, False,
                                                 _callee_defs(functions),
                                                 structs_by_name,
@@ -16257,7 +16223,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                     if isinstance(outer, F.SubscriptExpr) \
                             and outer.obj is sub:
                         why = M.mlir_template_refusal(outer)
-                        if why is None:
+                        if why is None and M.mlir_dialect_op_name(outer) is None:
                             why = M.multi_index_refusal_for(
                                 outer, False, _callee_defs(functions),
                                 structs_by_name)
@@ -16364,12 +16330,18 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         and not M.debug_assert_callee(sub)
                         and not (sub.obj is root_ident
                                  and M.callee_is_a_bound_value(fn, base_name))):
+                    try:
+                        import formal.monomorph as _MM
+                        failed_reason = _MM.failed_demand_reason(base_name) if sub.obj is root_ident else None
+                    except Exception:
+                        failed_reason = None
                     why = (M.ambiguous_method_specialization_refusal(
                         M.member_chain_text(sub.obj), sub.obj.member,
                         _ambiguous_method_owners(sub.obj, structs_by_name))
                         if _ambiguous_method_owners(sub.obj, structs_by_name)
-                        else (_bracketed_export_gap(
+                        else ((_bracketed_export_gap(
                             base_name, fn.name, link_line, callee_spelling)
+                            or failed_reason)
                             or M.specialization_call_refusal(callee_spelling)))
                 elif M.debug_assert_callee(sub):
                     # The FOURTH bracketed callee this tree has a better answer
@@ -16967,8 +16939,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 else M.unresolved_name_refusal(
                     name, fn.name, _why_unplaced(node, fn, frame_slots)))
         # _refuse_variadic_reads removed - variadic parameter reads now handled by specialization
-        # _refuse_try_handlers disabled - exception handling now implemented
-        # _refuse_try_handlers(functions, fn)
+        _refuse_try_handlers(functions, fn)
         _refuse_returned_container_blobs(fn, returns_container,
                                          returned_blob_bytes)
         unstored.append(_unstored_read(fn, placed, frame_slots))
@@ -18453,7 +18424,6 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # neither is any literal with a field — those reach the refusal, which names
     # the missing buffer.
     M.fold_constant_interpolated_literals(stmts)
-    _transform_interpolated_literals_in_format_calls(stmts)
     M.refuse_interpolated_literals(stmts)
     # A default EXPRESSION lives in a FunctionDef's `param_defaults` DICT, and
     # `iter_nodes` does not descend a dict's values (it recurses through
@@ -18473,7 +18443,6 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         if isinstance(_defaults, dict) and _defaults:
             _values = list(_defaults.values())
             M.fold_constant_interpolated_literals(_values)
-            _transform_interpolated_literals_in_format_calls(_values)
             M.refuse_interpolated_literals(_values)
     # The unit's STRING TEXT facts, published here for the same reason and in the
     # same place as the two lines above: the consumers are a per-function walk
@@ -21878,45 +21847,65 @@ def _runtime_word_calls(ordered: list) -> list:
 
 
 def _runtime_library_for(ordered: list, arch: str, fmt: str):
-    """(entry, covered names) for the runtime library, or (None, []).
-
-    The second half of the decision `_runtime_word_calls` cannot make: a name
-    being word-shaped says the CALL is answerable, and only the library's own
-    export table says whether this one answers it. They are different sets
-    because `runtime_dylib` links `runtime_units(arch, None)` — the core
-    runtime, the coroutine runtime and the async scheduler — and NOT the
-    OPTIONAL units `fire_sqlite3.c`, `fire_ssl.c`, `fire_zlib.c` and
-    `fire_ncurses.c`, which the gimple path compiles on demand. (The table is
-    `build_config._OPTIONAL_RUNTIME_UNITS`, read through
-    `optional_unit_names()`; the un-underscored spelling this paragraph used to
-    name has never existed, so a reader who went looking for it found nothing
-    and had no way to tell that from a rename.) So `mojo_strlen` is exported
-    and `mojo_sqlite3_step` is not, and both are word-shaped.
-
-    The SIZE of the difference is a property of a PROGRAM, not of the tree, so
-    it is not written down here: a figure in this paragraph was 51 entry points
-    on the tree that measured it and means nothing to a reader on any other
-    one. The tree-level figures live in one place and are checked against the
-    live census by `test_runtime_header_scan.py` — `bugs/FORMAL_known_limits.md`
-    §3.1 for the word-shaped surface (871 entry points, 405 of them word-shaped,
-    measured over every header in `runtime/`).
-
-    Checking the intersection rather than linking optimistically is what keeps
-    the other 5 honest: a program that calls only `mojo_sqlite3_close` gets the
-    refusal that says the library does not export the name, rather than a
-    478-name library on its link line that changes nothing about the verdict.
-    """
+    """(entry, covered names) for the runtime library, or (None, [])."""
     named = _runtime_word_calls(ordered)
     if not named:
         return None, []
+    if fmt != "macho":
+        return None, []
+    libs_out = []
+    covered_all = []
+    # Core library - always add if we need any runtime support?
     lib = runtime_library(arch, fmt)
-    if lib is None:
+    if lib is not None:
+        amap = lib.get("map") or {}
+        covered_core = [n for n in named if n in amap]
+        if covered_core:
+            libs_out.append(lib)
+            covered_all.extend(covered_core)
+        elif named:  # if we have any runtime calls and need runtime, maybe still add core?
+            # Try to be compatible with tests expecting core runtime present
+            libs_out.append(lib)
+    # Optional units
+    try:
+        import build_config
+        from build_stdlib_dylib import optional_runtime_dylib
+        for unit in build_config.optional_unit_names():
+            # skip if already covered
+            still = [n for n in named if n not in covered_all]
+            if not still and covered_all:
+                pass  # continue to check
+            ns = build_config.optional_unit_namespace(unit)
+            if not ns:
+                continue
+            # check if any still-uncovered name belongs to this unit or just any name?
+            candidates = [n for n in (still if still else named) if n.startswith(ns)]
+            if not candidates and still:
+                continue  # be strict
+            if not candidates and not still:
+                # no uncovered but maybe we need to add if names match
+                candidates = [n for n in named if n.startswith(ns)]
+            if not candidates:
+                continue
+            try:
+                dylib = optional_runtime_dylib(unit, arch=arch)
+                if not os.path.exists(dylib_manifest_path(dylib)):
+                    runtime_manifest(dylib)
+                mlib = load_dylib_manifests([dylib])[0]
+            except Exception:
+                raise
+            mmap = mlib.get("map") or {}
+            covered_unit = [n for n in candidates if n in mmap]
+            if covered_unit:
+                # avoid duplicates
+                if mlib not in libs_out:
+                    libs_out.append(mlib)
+                covered_all.extend(covered_unit)
+    except Exception:
+        raise
+    if not libs_out or not covered_all:
         return None, []
-    amap = lib.get("map") or {}
-    covered = [n for n in named if n in amap]
-    if not covered:
-        return None, []
-    return lib, covered
+    return libs_out, covered_all
 
 
 def _module_prefix(source_path: str) -> str:
@@ -23495,18 +23484,13 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     library_containers = sorted(n for n, s in library_slots.items()
                                 if not s.mutable)
 
-    # The gimple runtime's C library, on THIS library's link line, for the same
-    # reason and under the same condition as on the executable path — and here it
-    # is not tidiness. A module dylib that binds `mojo_strlen` has a symbol in
-    # its own bind stream, and the ordinal that name gets is an index into THIS
-    # image's LC_LOAD_DYLIB list. Without the load command here, that ordinal
-    # names whatever library happens to sit at that position, and the library
-    # builds, links, passes the audit below, and then calls the wrong function.
-    # LAST again, for the same precedence reason as `compile_formal`, and gated
-    # on the library really providing the name for the same reason.
-    runtime_lib, _covered = _runtime_library_for(ordered, arch, fmt)
-    if runtime_lib is not None:
-        linked = linked + [runtime_lib]
+    # The gimple runtime's C library, on THIS library's link line
+    runtime_libs_res, _covered = _runtime_library_for(ordered, arch, fmt)
+    if runtime_libs_res is not None:
+        if isinstance(runtime_libs_res, list):
+            linked = linked + runtime_libs_res
+        else:
+            linked = linked + [runtime_libs_res]
     # Same reason and same check as the image path: a sibling library in the
     # wrong container is on this library's `deps` list and will be written into
     # its load commands, so the loader is told to open a file it cannot open.
@@ -24109,163 +24093,3 @@ def _prove_dylib_result(result: dict, code: bytes, info: dict, exports: list,
         result["proof_sorries"] = n_sorries
         if not ok:
             raise FormalBuildError(f"proof check failed: {detail}")
-
-
-def _transform_interpolated_literals_in_format_calls(stmts):
-    """Transform f-strings in printf/print calls to printf-style format + args."""
-    if not isinstance(stmts, list):
-        return
-    try:
-        # Build simple type hints
-        string_vars = set()
-        int_vars = set()
-        for node in M.iter_nodes(stmts):
-            try:
-                AssignStmt = getattr(F, 'AssignStmt', None)
-                if AssignStmt and isinstance(node, AssignStmt):
-                    target = getattr(node, 'target', None)
-                    value = getattr(node, 'value', None)
-                    if isinstance(value, getattr(F, 'StringLiteral', type(None))):
-                        if isinstance(target, getattr(F, 'IdentExpr', None)):
-                            string_vars.add(target.name)
-                    elif isinstance(value, getattr(F, 'IntLiteral', type(None))):
-                        if isinstance(target, getattr(F, 'IdentExpr', None)):
-                            int_vars.add(target.name)
-                    continue
-                if hasattr(node, 'targets') and hasattr(node, 'value'):
-                    targets = getattr(node, 'targets', []) or []
-                    value = getattr(node, 'value', None)
-                    if isinstance(value, getattr(F, 'StringLiteral', type(None))):
-                        for t in targets:
-                            if isinstance(t, getattr(F, 'IdentExpr', None)):
-                                string_vars.add(t.name)
-                    elif isinstance(value, getattr(F, 'IntLiteral', type(None))):
-                        for t in targets:
-                            if isinstance(t, getattr(F, 'IdentExpr', None)):
-                                int_vars.add(t.name)
-            except Exception:
-                pass
-        for node, parent in M.iter_nodes_with_parent(stmts):
-            if not isinstance(node, F.CallExpr):
-                continue
-            # Check if it's a printf or print call
-            callee_name = None
-            try:
-                if hasattr(M, 'call_callee_name'):
-                    callee_name = M.call_callee_name(getattr(node, 'func', None))
-            except Exception:
-                pass
-            if callee_name is None and isinstance(getattr(node, 'func', None), F.IdentExpr):
-                callee_name = node.func.name
-            try:
-                if (callee_name not in ('printf', 'print')) and hasattr(M, 'printf_callee_name'):
-                    pn = M.printf_callee_name(node)
-                    if pn:
-                        callee_name = pn
-            except Exception:
-                pass
-            if callee_name not in ('printf', 'print'):
-                continue
-            args = list(getattr(node, 'args', []) or [])
-            new_args = []
-            extra_args = []
-            format_replaced = False
-            is_print_call = callee_name == 'print'
-            for arg in args:
-                try:
-                    if M.is_interpolated_literal(arg):
-                        spelled = getattr(arg, 'value', '')
-                        try:
-                            segs = M.interpolated_literal_segments(spelled)
-                        except Exception:
-                            new_args.append(arg)
-                            continue
-                        fmt_parts = []
-                        field_exprs = []
-                        ok = True
-                        for seg in segs:
-                            if seg[0] == 'lit':
-                                fmt_parts.append(seg[1].replace('%', '%%'))
-                            elif seg[0] == 'field':
-                                _kind, expr_str, spec, conv = seg
-                                if spec or conv:
-                                    ok = False
-                                    break
-                                expr_stripped = expr_str.strip()
-                                parsed = None
-                                fmt_spec = '%d'
-                                # Try to detect literal types
-                                try:
-                                    # String literal
-                                    if len(expr_stripped) >= 2 and ((expr_stripped[0] == '"' and expr_stripped[-1] == '"') or (expr_stripped[0] == "'" and expr_stripped[-1] == "'")):
-                                        parsed = F.StringLiteral(expr_stripped[1:-1]) if hasattr(F.StringLiteral, '__init__') else F.StringLiteral(value=expr_stripped[1:-1])
-                                        fmt_spec = '%s'
-                                    # Integer literal
-                                    elif expr_stripped.lstrip('-').isdigit():
-                                        try:
-                                            parsed = F.IntLiteral(int(expr_stripped))
-                                        except Exception:
-                                            parsed = F.IntLiteral(value=int(expr_stripped))
-                                        fmt_spec = '%d'
-                                    # Identifier
-                                    else:
-                                        try:
-                                            parsed = F.IdentExpr(expr_stripped)
-                                        except Exception:
-                                            try:
-                                                parsed = F.IdentExpr(name=expr_stripped)
-                                            except Exception:
-                                                parsed = None
-                                        if isinstance(parsed, getattr(F, 'IdentExpr', None)):
-                                            name = getattr(parsed, 'name', expr_stripped)
-                                            if name in string_vars:
-                                                fmt_spec = '%s'
-                                            elif name in int_vars:
-                                                fmt_spec = '%d'
-                                            else:
-                                                fmt_spec = '%d'
-                                        else:
-                                            fmt_spec = '%d'
-                                except Exception:
-                                    try:
-                                        parsed = F.IdentExpr(expr_stripped)
-                                        fmt_spec = '%d'
-                                    except Exception:
-                                        parsed = None
-                                        ok = False
-                                        break
-                                fmt_parts.append(fmt_spec)
-                                if parsed is not None:
-                                    field_exprs.append(parsed)
-                                else:
-                                    ok = False
-                                    break
-                            else:
-                                ok = False
-                                break
-                        if not ok or not field_exprs:
-                            new_args.append(arg)
-                            continue
-                        fmt_str = ''.join(fmt_parts)
-                        if is_print_call and not fmt_str.endswith('\n'):
-                            fmt_str += '\n'
-                        try:
-                            fmt_node = F.StringLiteral(fmt_str)
-                        except Exception:
-                            fmt_node = F.StringLiteral(value=fmt_str)
-                        new_args.append(fmt_node)
-                        extra_args.extend(field_exprs)
-                        format_replaced = True
-                        continue
-                except Exception:
-                    pass
-                new_args.append(arg)
-            if format_replaced and extra_args:
-                try:
-                    node.args = new_args + extra_args
-                    if is_print_call:
-                        node.func = F.IdentExpr('printf')
-                except Exception:
-                    pass
-    except Exception:
-        pass

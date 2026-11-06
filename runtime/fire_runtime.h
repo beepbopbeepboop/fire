@@ -1567,6 +1567,9 @@ void        mojo_dict_set_none_key_double(MojoDict *d, double v);
 void        mojo_dict_set_none_key_bool(MojoDict *d, int v);
 void        mojo_dict_set_none_key_none(MojoDict *d);
 void        mojo_dict_set_none_key_struct(MojoDict *d, void *v);
+int64_t     mojo_dict_get_none_key_int(MojoDict *d);
+char       *mojo_dict_get_none_key_str(MojoDict *d);
+double      mojo_dict_get_none_key_double(MojoDict *d);
 void        mojo_dict_set_bytes_none_key(MojoDict *d, MojoBytes *key, int64_t v);
 
 /* A STRUCT stored as a dict VALUE: the boxed pointer, tagged `kind == 5` so

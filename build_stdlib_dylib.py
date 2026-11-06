@@ -26,6 +26,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 import cas
 import reflect
+import build_config
 from build_config import find_gcc, find_gxx
 from gimple_codegen import GimpleGen, FromImportStmt
 from fire_compiler import py_tokenize, Parser
@@ -1510,6 +1511,103 @@ def runtime_dylib(gcc: str = None, flags: tuple = (), arch: str = None) -> str:
                                install_name='@rpath/' + name, arch=arch), check=True)
         _arch_or_die(staged, arch, 'linked runtime dylib')
         os.replace(staged, out)
+        return out
+
+
+def optional_runtime_dylib(unit: str, arch: str = None) -> str:
+    """Build (or find in the CAS) an optional runtime unit as a loadable dylib."""
+    arch = normalize_arch(arch)
+    cc_default, cxx = toolchain_for(arch, find_gcc(), find_gxx())
+    unit_cc = build_config.optional_unit_cc(unit)
+    cc = unit_cc if unit_cc else cc_default
+    src = build_config.optional_unit_source(unit)
+    hdr = build_config.optional_unit_header(unit)
+    unit_flags = tuple(build_config.optional_unit_cc_flags(unit))
+    unit_libs = tuple(build_config.optional_unit_libs(unit))
+
+    digest = cas._hash(
+        'mojo-optrtdylib-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
+        cas.toolchain_fingerprint(cc, arch_flags(arch) + unit_flags + unit_libs),
+        arch, unit, os.path.basename(src), open(src).read(),
+        *unit_flags, *unit_libs)
+    name = f'libmojo{unit}.{arch}.{digest}.dylib'
+    out = cas.path_for(f'oprtdylib/libmojo{unit}.{arch}.{digest}', '.dylib')
+    if os.path.exists(out):
+        _arch_or_die(out, arch, 'cached optional runtime dylib')
+        return out
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with _StagingDir('mojo_optrt_') as wd:
+        objs = []
+        stem = os.path.splitext(os.path.basename(src))[0]
+        o = os.path.join(wd, stem + '.o')
+        if src.endswith(('.cpp', '.cc', '.cxx')):
+            compile_cmd = [cxx] + list(_UNIT_FLAGS.get('c++', ())) + [f'-I{RUNTIME}'] + list(arch_flags(arch)) + list(unit_flags) + ['-c', '-o', o, src]
+        elif src.endswith('.m'):
+            compile_cmd = [cc] + ['-fPIC', f'-I{RUNTIME}'] + list(arch_flags(arch)) + list(unit_flags) + ['-c', '-o', o, src]
+        else:
+            compile_cmd = [cc] + ['-fPIC', f'-I{RUNTIME}'] + list(arch_flags(arch)) + list(unit_flags) + ['-c', '-o', o, src]
+        subprocess.run(compile_cmd, check=True)
+        _arch_or_die(o, arch, f'object for {os.path.basename(src)}')
+        objs.append(o)
+
+        # Build reflect table from this unit's header
+        entries = []
+        seen = set()
+        try:
+            for e in reflect.collect_runtime_exports_h(hdr):
+                if e['name'] in seen:
+                    continue
+                seen.add(e['name'])
+                entries.append(e)
+        except Exception:
+            entries = []
+        defined = set()
+        for obj in objs:
+            defined |= _defined_symbols(cc, obj, include_weak=True)
+        kept = []
+        misresolved = []
+        undefined = []
+        for e in entries:
+            sym = reflect.export_csym(e)
+            if ('_' + sym) in defined:
+                kept.append(e)
+            elif ('_' + e['name']) in defined:
+                misresolved.append(f"{e['name']} -> {sym}")
+            else:
+                undefined.append(e['name'])
+        report = format_export_report(len(entries), misresolved, undefined)
+        for line in report:
+            print(f"  optional runtime {unit}: {line}", file=sys.stderr)
+        reflect_src = reflect.emit_table_c(kept)
+        rc = os.path.join(wd, '_mojo_reflect.c')
+        ro = os.path.join(wd, '_mojo_reflect.o')
+        with open(rc, 'w') as f:
+            f.write(reflect_src)
+        subprocess.run([cc, '-fno-builtin', '-fPIC', f'-I{HERE}', *arch_flags(arch),
+                        '-c', '-o', ro, rc], check=True)
+        objs.append(ro)
+
+        staged = os.path.join(wd, name)
+        # Try to link against core runtime to resolve symbols
+        try:
+            core = runtime_dylib(arch=arch)
+        except Exception:
+            core = None
+        link_cmd = _dylink(cc, staged, objs, undefined=False if core else True, link_driver=cc,
+                           install_name='@rpath/' + name, arch=arch)
+        # Add unit libs
+        link_cmd = link_cmd + list(unit_libs)
+        if core:
+            link_cmd = link_cmd + [core]
+        subprocess.run(link_cmd, check=True)
+        _arch_or_die(staged, arch, 'linked optional runtime dylib')
+        os.replace(staged, out)
+        try:
+            import formal.build as _FB
+            if not os.path.exists(_FB.dylib_manifest_path(out)):
+                _FB.runtime_manifest(out)
+        except Exception:
+            pass
         return out
 
 

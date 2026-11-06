@@ -129,24 +129,26 @@ EXCLUDED = {
 # Mnemonics the assembler emits by a route that is NOT an encoder call, mapped to
 # why. They are counted as covered, and they are PRINTED, because the rule this
 # tool has held itself to since 2026-10-03 is that an exclusion nobody can see
-# is not one — and an exclusion of 138,980 instructions reported as the single
-# largest gap in the survey would be the loudest possible way to be wrong in the
-# direction this tool exists to prevent.
+# is not one.
 #
-# This class exists because scoping the "is it called?" search to the files that
-# EMIT is not by itself sufficient. `encode_adrp` is byte-exact and nothing calls
-# it, and `encode_br_xn` is byte-exact and nothing calls it — but ADRP is emitted
-# on every relocation that materialises an address (three quarters of a percent
-# of real instructions, and `_emit_overflow_diagnostic` alone needs two per
-# bounded stop), because `Assembler.emit_adrp_add` builds the ADRP and its ADD
-# together as raw words: they share a page relocation and back-patching them
-# separately is the bug the single-instruction encoder cannot express. `BR` is
-# NOT in this table — `encode_br_xn` really is uncalled, and `br` is a genuine
-# 359-occurrence gap that this change is what makes visible.
+# `encode_adrp` is byte-exact and nothing calls it, but ADRP is emitted on every
+# relocation that materialises an address (three quarters of a percent of real
+# instructions, and `_emit_overflow_diagnostic` alone needs two per bounded
+# stop), because `Assembler.emit_adrp_add` builds the ADRP and its ADD together
+# as raw words: they share a page relocation and back-patching them separately
+# is the bug the single-instruction encoder cannot express. `encode_adrp` itself
+# is called only by the linker stub (`formal/macho_linker.py`).
 ASSEMBLER_EMITTED = {
-    "adrp": "Assembler.emit_adrp_add emits ADRP+ADD as raw words because the "
-            "two share one page relocation; encode_adrp is the byte-exact "
-            "single instruction and nothing calls it",
+    "adrp": "the code generator emits ADRP+ADD as raw words for relocations "
+            "(Assembler.emit_adrp_add); encode_adrp itself is called only by "
+            "the linker stub",
+}
+
+# Mnemonics emitted only by a specific stub (the Mach-O linker), printed
+# separately so they are visible but not read as general lowering support.
+EMITTED_ONLY_BY_STUB = {
+    "br": "emitted only by the Mach-O stub (formal/macho_linker.py); no "
+          "construct of the source language needs an indirect jump",
 }
 
 
@@ -234,11 +236,15 @@ def lowering_files(path=ARM64):
     `arm64.py` is in the set and not only for its encoder definitions: it is the
     assembler, and `Assembler.resolve` / `emit_extern_bl` are where a lowered
     word gets its relocation and its PLT stub. `arm64_codegen.py` is the
-    lowering proper. Nothing else in `formal/` writes instruction words into an
-    image, and a file added to this list is a claim that it does.
+    lowering proper. `macho_linker.py` emits the extern-symbol stub
+    (`adrp`/`ldr`/`br`) for every image that calls an extern, so the audit and
+    the census must agree that the linker counts as an emitter. Nothing else in
+    `formal/` writes instruction words into an image, and a file added to this
+    list is a claim that it does.
     """
     return [os.path.join(os.path.dirname(path), "arm64_codegen.py"),
-            os.path.join(os.path.dirname(path), "arm64.py")]
+            os.path.join(os.path.dirname(path), "arm64.py"),
+            os.path.join(os.path.dirname(path), "macho_linker.py")]
 
 
 def unwired_encoders(path=ARM64, roots=None, in_lowering=True):
@@ -416,6 +422,12 @@ def main():
               f"({len(ASSEMBLER_EMITTED)}) — counted as covered, and named "
               f"here for the reason every other exclusion is named:")
         for mn, why in sorted(ASSEMBLER_EMITTED.items()):
+            print(f"  {mn}  ({why})")
+    if EMITTED_ONLY_BY_STUB:
+        print(f"\nmnemonics emitted only by a specific stub "
+              f"({len(EMITTED_ONLY_BY_STUB)}) — counted as covered, and named "
+              f"here for the reason every other exclusion is named:")
+        for mn, why in sorted(EMITTED_ONLY_BY_STUB.items()):
             print(f"  {mn}  ({why})")
 
     def covers(mn):

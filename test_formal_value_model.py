@@ -2253,8 +2253,10 @@ REFUSALS = [
     # saw a call to a name in `framed_struct_names` and made the local a
     # three-slot frame HOLDER — and the field store landed in read-only `__TEXT`.
     # Measured before the fix on both architectures: SIGBUS, exit 138, from a
-    # green build, on the stdlib's own three-field `String` verbatim.
-        ("a_name_that_is_both_a_struct_and_a_conversion_is_refused",
+    # green build, on the stdlib's own three-field `String` verbatim.  With
+    # the frame-reading exception only applied to zero-argument String() used
+    # as a receiver, a one-argument conversion must remain a TEXT conversion.
+        ("a_one_argument_string_conversion_written_through_is_refused",
      "struct String:\n"
      "    var _ptr_or_data: Pointer[UInt8]\n"
      "    var _len_or_data: Int\n"
@@ -2262,7 +2264,7 @@ REFUSALS = [
      "    def size(self) -> Int:\n"
      "        return self._len_or_data\n"
      "def main(n: Int) -> Int:\n"
-     "    var a = String()\n"
+     "    var a = String(\"x\")\n"
      "    a._len_or_data = 5\n"
      "    return a.size()\n",
      "a = String(...) binds a to a value this path holds as TEXT"),

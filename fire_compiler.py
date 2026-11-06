@@ -143,6 +143,33 @@ def _signed_int64_c_literal(value: int) -> str:
         return '(-0x7FFFFFFFFFFFFFFFLL - 1)'
     return f'{value}LL'
 
+def _float_c_literal(value: float) -> str:
+    """The C spelling of `value`, denoting the same `double`.
+
+    `repr()` is an exact round-trip for finite values, but its spellings of
+    the non-finite ones are PYTHON names: `repr(float('inf'))` is `'inf'`,
+    and emitting that into generated C made gcc report "'inf' undeclared"
+    (a float literal that overflows, e.g. `999e9000`, parses to exactly
+    that value). Every generated C file includes `<math.h>`, which spells
+    them `INFINITY`/`-INFINITY`/`NAN`; the casts make the expression a
+    `double` rather than a `float` constant in every context it lands in.
+
+    This is the ONE spelling of a float literal for the C/GIMPLE backends —
+    `_lower_FloatLiteral`, the call-default padding and the C++ fallback all
+    go through it, so a non-finite value cannot be right in one and invalid
+    C in another.
+    """
+    s = repr(value)
+    if s == 'inf':
+        return '(double)INFINITY'
+    if s == '-inf':
+        return '(double)(-INFINITY)'
+    if s == 'nan':
+        return '(double)NAN'
+    if '.' not in s and 'e' not in s.lower():
+        s += '.0'
+    return s
+
 def _parse_int_literal(text: str) -> int:
     """Parse an INT token's source text (decimal / 0x / 0o / 0b, underscores
     allowed) into its signed 64-bit value, WITHOUT `int(text, 0)`.
@@ -4592,6 +4619,11 @@ class Parser:
             # body references" — 42 occurrences in the stdlib, so it is a form
             # with its own meaning and not a typo for a missing name).
             conv = None
+            moved_bare = False
+            # Allow leading `^` in capture lists
+            if self._peek().kind == "OP" and self._peek().value == "^":
+                self._advance()
+                moved_bare = True
             # A KW from the convention set at the START of an entry is always a
             # prefix, never the captured name — the same disambiguation the
             # parameter loop uses (KW followed by COLON/ASSIGN is a name), with
@@ -4604,6 +4636,14 @@ class Parser:
                    and self._peek().value in self._CONV_KWS
                    and self._peek(1).kind not in ("COLON", "ASSIGN")):
                 conv = _as_str(self._advance().value)
+                if self._peek().kind == "OP" and self._peek().value == "^":
+                    self._advance()
+                    moved_bare = True
+                    break
+            moved_bare = False
+            if self._peek().kind == "OP" and self._peek().value == "^":
+                self._advance()
+                moved_bare = True
             if self._peek().kind in ("COMMA", "RBRACE"):
                 # `{mut}` / `{var}` — a convention with NO name: "capture
                 # whatever this body references, under this convention" (42
@@ -4612,8 +4652,13 @@ class Parser:
                 # that happens to be called `mut`, and so the consumer can
                 # tell "infer the names, this is the convention" from an
                 # ordinary named capture.
-                out.append((None, _as_str(_canon_conv(conv))
-                            if conv is not None else None))
+                _cc = _as_str(_canon_conv(conv)) if conv is not None else None
+                if _cc is None and moved_bare:
+                    _cc = 'owned'
+                elif moved_bare and _cc is not None:
+                    # moved bare convention: treat as owned/move
+                    _cc = 'owned'
+                out.append((None, _cc))
                 self._skip_newlines()
                 if self._peek().kind == "COMMA":
                     self._advance(); self._skip_newlines()
@@ -6488,6 +6533,29 @@ class Parser:
                 or (self._peek().kind == "OP" and self._peek().value in ("*", "**"))
             ):
                 return self._parse_lambda()
+            # Bare `comptime <expr>` in expression position (e.g. RHS of
+            # assignment) must parse as a call to `comptime` so the gimple
+            # backend emits the "unavailable in compiled mode" diagnostic,
+            # matching the parenthesized `comptime (expr)` form.
+            if t.value == "comptime" and t.kind == "KW":
+                # Don't treat as prefix form if followed by ASSIGN (assignment to identifier)
+                if self._peek().kind == "ASSIGN":
+                    return IdentExpr(t.value, line=line, col=col)
+                # Don't treat as prefix form if followed by tokens that suggest
+                # it's being used as a plain identifier/value
+                nxt = self._peek()
+                if nxt.kind in ("RPAREN", "RBRACKET", "RBRACE", "COMMA", "NEWLINE", "DEDENT", "EOF", "SEMICOLON"):
+                    return IdentExpr(t.value, line=line, col=col)
+                # Don't treat as prefix form if followed by binary operators
+                if nxt.kind == "OP" and nxt.value in ("+", "-", "*", "/", "//", "%", "**", "==", "!=", "<", ">", "<=", ">=", "and", "or", "&", "|", "^", "<<", ">>"):
+                    return IdentExpr(t.value, line=line, col=col)
+                # Try to parse as comptime expression form
+                try:
+                    arg = self._parse_expr_or_yield()
+                    return CallExpr(func=IdentExpr('comptime', line=line, col=col), args=[arg], kwargs=[], line=line, col=col)
+                except Exception:
+                    # Fall back to treating as identifier
+                    return IdentExpr(t.value, line=line, col=col)
             return IdentExpr(t.value, line=line, col=col)
         if t.kind == "DOT" and self._peek(1).kind == "DOT" and self._peek(2).kind == "DOT":
             self._advance(); self._advance(); self._advance()

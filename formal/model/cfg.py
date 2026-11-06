@@ -2757,16 +2757,17 @@ def dotted_specialization_refusal(name: str) -> str:
     `bugs/FORMAL_generic_monomorph_scope.md` is where it is written down with
     the ABI decision it needs.
 
-    **The remedy is the one spelling measured to work, and nothing else is
-    claimed.** `from pairlib import Pair` — the module's OWN name — then
-    `Pair[Int]()`, which builds, runs and answers CPython on both architectures
-    (`test_formal_monomorph.py`'s two rows here). The ALIASED form is NOT
-    claimed: `from pairlib import Pair as P` then `P[Int]()` was measured on
-    this tree and is refused with `specialization_call_refusal`, because the
-    demand walk reads `P` where the template is `Pair` and a struct template's
-    instantiation is emitted under the mangled name. §2 of the doc says the
-    alias "maps back" for a FUNCTION template's demand; it is not true of this
-    one, so the message does not say it.
+    **Both spellings of the BARE template name work, and the message says so.**
+    `from pairlib import Pair` then `Pair[Int]()`, and the ALIASED form of the
+    same import (`from pairlib import Pair as P` then `P[Int]()`), both build,
+    run and answer CPython on both architectures
+    (`test_formal_monomorph.py`'s rows here). The call site's own spelling is
+    resolved to the DEFINING module's name through the same import table both
+    backends use (`formal/imports.py::imported_bindings`), so the demand the
+    library satisfies and the symbol the call site binds name one template.
+    What is NOT claimed — and what this message is about — is the module-alias
+    DOTTED spelling, which is a gap in the recogniser rather than in a name
+    resolution.
     """
     module, _, leaf = name.rpartition(".")
     return (
@@ -2784,9 +2785,11 @@ def dotted_specialization_refusal(name: str) -> str:
         f"`from <the module> import {leaf}`, spelled with the MODULE'S OWN name "
         f"rather than the `{module}` alias — and call `{leaf}[…](…)`. That is "
         f"the same program, and it builds, runs and answers CPython on both "
-        f"architectures; the ALIASED form (`import … as {module}` then "
-        f"`from {module} import {leaf}`, or `{module}` bound to `{leaf}`) was "
-        f"measured on this tree and is still refused, so do not stop there. "
+        f"architectures; the ALIASED form of that BARE spelling — "
+        f"`from <the module> import {leaf} as <X>` — lowers too (measured on "
+        f"this tree), because the call site is resolved through the import "
+        f"table; what is still refused is the module-alias DOTTED spelling "
+        f"this message is about. "
         f"The dotted application itself, and the ABI question a fix needs, are "
         f"§2 of bugs/FORMAL_generic_monomorph_scope.md. Refused rather than "
         f"emitted with the brackets dropped: that builds, runs, and returns a "
@@ -3934,12 +3937,15 @@ def list_clear_refusal(dotted: str, kind, shape: str) -> str:
 # than a diagnostic — `print(m)` prints a pointer as a number, and `m == "x"`
 # compares a pointer against an integer.
 POINTER_BOUNDED_METHODS = {
+    # name is historical: lowered methods; the str_upper/str_lower/str_strip/
+    # str_rstrip entries allocate via STRING_BUFFER_ALLOCATOR
     # An INTERIOR pointer: the bytes from the first non-whitespace character to
     # the existing NUL are exactly the answer, still in place, and nothing is
-    # written. That is what makes this one pointer-bounded and `strip` not —
-    # see the strip entry in LENGTH_DEPENDENT_METHODS, which is the measured
-    # reason rather than a guess.
+    # written. `strip`/`rstrip` trim on a copied buffer (strdup) so a write is
+    # possible; `lstrip` also avoids writing the original.
     "lstrip": ("str_lstrip", STR_KIND),
+    "strip": ("str_strip", STR_KIND),
+    "rstrip": ("str_rstrip", STR_KIND),
     # `strncmp(s, p, strlen(p)) == 0` — a bounded compare, since strncmp stops
     # at the first difference or at a NUL in either operand. An empty prefix
     # is a zero-length compare, which is 0, which is "yes" as Python has it.
@@ -3958,6 +3964,8 @@ POINTER_BOUNDED_METHODS = {
     # is the one case with no loop — it matches at every position, so the
     # answer is the receiver's length.
     "count": ("str_count", INT_KIND),
+    "upper": ("str_upper", STR_KIND),
+    "lower": ("str_lower", STR_KIND),
 }
 
 # The ASCII whitespace set, shared by the two backends so a trim cannot mean
@@ -4028,50 +4036,12 @@ CODEPOINT_CODEC_REFUSAL = (
     "`\"日本\"` is six bytes and two)")
 
 LENGTH_DEPENDENT_METHODS = {
-    # The one that is NOT about length, and the clearest statement of what is
-    # actually missing. `strip` is a one-character edit away from `lstrip`:
-    # both find the first non-whitespace byte. The difference is what happens
-    # at the FAR end, and it is not a computation but a WRITE — a shorter
-    # string has to be terminated one byte earlier, and on a bare `char *` the
-    # only byte there to write is the receiver's own.
-    #
-    # Measured, not assumed. String literals are interned by content and
-    # emitted after the code into `__TEXT,__text` (`_intern_string` in either
-    # backend), and that segment is mapped `maxprot 0x5` — read and execute,
-    # NO write — so writing the terminator over a literal's trailing space
-    # faults. And for a receiver that is not a literal, the bytes are shared
-    # with every other reference to the same interned string, so the write
-    # would be visible through all of them.
-    #
-    # An earlier version of this lowering computed the new end pointer and
-    # returned it without writing anything. It built, ran, and was WRONG:
-    # "   hi   ".strip() returned a pointer to a byte that still held a space,
-    # so the result printed as "   " — a plausible-looking string that is not
-    # the answer. That is the outcome this table exists to prevent.
-    "strip": "returns a SHORTER string, which on a bare char * means writing "
-             "a terminator over the first trailing whitespace byte — and the "
-             "receiver's bytes cannot be written: a string literal is interned "
-             "into __TEXT,__text, which is mapped read+execute and not "
-             "writable, and a non-literal receiver shares its bytes with every "
-             "other reference to the same interned string. lstrip() needs no "
-             "write and IS lowered",
-    "rstrip": "returns a SHORTER string and so needs the terminator write that "
-              "strip cannot do; see strip. lstrip() is the lowered half",
-    "upper": "returns a NEW string of the same length, and the only buffer "
-             "available for it is the receiver's own bytes — which live in "
-             "the image's text section and are interned by content, so "
-             "rewriting them in place would fault and would also change "
-             "every other reference to the same literal",
-    "lower": "returns a NEW string of the same length; see upper",
-    "swapcase": "returns a NEW string of the same length; see upper",
-    "capitalize": "returns a NEW string; see upper",
-    "title": "returns a NEW string; see upper",
-    "casefold": "returns a NEW string; see upper",
-    "replace": "has to find every occurrence of the old text and lay the new "
-               "text down between them, so the RESULT's length is not the "
-               "receiver's and no buffer of the right size exists",
-    "join": "has to allocate one buffer sized by walking the sequence and "
-            "measuring every element, and there is no heap to allocate it in",
+    "swapcase": "same buffer as upper(), different per-position rule; not lowered yet",
+    "capitalize": "same buffer as upper(), different per-position rule; not lowered yet",
+    "title": "same buffer as upper(), different per-position rule; not lowered yet",
+    "casefold": "same buffer as upper(), different per-position rule; not lowered yet",
+    "replace": "needs a two-pass walk (count occurrences, then build) over a buffer sized from the count; the runtime buffer exists (strdup) but the sizing loop is not lowered",
+    "join": "needs the elements of a sequence of strings walked at run time and this path cannot iterate a string blob (see string_iteration_refusal)",
     "split": "returns a SEQUENCE of strings, and a sequence on this path is a "
              "frame-allocated blob whose capacity has to be a compile-time "
              "bound (the count of append sites) — a split's element count is "
@@ -4084,21 +4054,19 @@ LENGTH_DEPENDENT_METHODS = {
              "find already answers — use find, which is lowered",
     "rfind": "walks the buffer backwards from its NUL, which needs the length "
              "first; find is the lowered direction",
-    "center": "pads to a width, so it allocates a new buffer; see upper",
-    "ljust": "pads to a width, so it allocates a new buffer; see upper",
-    "rjust": "pads to a width, so it allocates a new buffer; see upper",
-    "zfill": "pads to a width, so it allocates a new buffer; see upper",
+    "center": "pads to a width, so it allocates a new buffer sized at run time; the runtime buffer exists (strdup) but width-based padding is not lowered yet",
+    "ljust": "pads to a width, so it allocates a new buffer sized at run time; the runtime buffer exists (strdup) but width-based padding is not lowered yet",
+    "rjust": "pads to a width, so it allocates a new buffer sized at run time; the runtime buffer exists (strdup) but width-based padding is not lowered yet",
+    "zfill": "pads to a width, so it allocates a new buffer sized at run time; the runtime buffer exists (strdup) but width-based padding is not lowered yet",
     "format": "its result's length is a function of the format AND the "
-              "operands, so it is a fresh buffer of a size nothing knows at "
-              "compile time; see upper",
+              "operands, so it requires a buffer sized at run time; the runtime buffer exists (strdup) but formatting is not lowered yet",
     # `format_map` is `format` with the mapping already resolved, so the two
     # are missing the same half and are named together rather than leaving one
     # of them to fall through to the generic sentence — which is what happened,
     # and `test_formal_str_methods.py`'s refusal group is what found it.
     "format_map": "is format() with the mapping already resolved, so its "
                   "result's length is a function of the format AND the "
-                  "operands and there is no buffer of a size nothing knows at "
-                  "compile time; see format",
+                  "operands and requires a buffer sized at run time; the runtime buffer exists (strdup) but formatting is not lowered yet",
     "removeprefix": "returns a new string whenever the prefix is present, "
                     "which is a different pointer every time; a method that "
                     "sometimes aliases its receiver and sometimes does not is "
@@ -4106,8 +4074,7 @@ LENGTH_DEPENDENT_METHODS = {
     "removesuffix": "returns a new string whenever the suffix is present, "
                     "which is a different pointer every time; see "
                     "removeprefix",
-    "reverse": "returns a NEW string, and writing into the receiver's own "
-               "bytes would fault (see upper)",
+    "reverse": "returns a NEW string by reversing into a buffer; the runtime buffer exists (strdup) but reversal is not lowered yet",
     "__len__": "is len(), which IS lowered for a string — as strlen, not as a "
                "field read. Call len(s), which reads better and is the "
                "spelling both backends agree on",

@@ -32,7 +32,7 @@ from fire_compiler import (
     YieldExpr, YieldFromExpr, AwaitExpr,
     py_tokenize, Parser, _as_str, _as_dict, _as_list, _sms_key, _pair_key, _as_funcdef_node, _as_vardecl_node, _ptr_slot_in_range,
     _as_int, _as_intlit_node, _as_boollit_node, _as_structdef_node, _signed_int64, _signed_int64_c_literal,
-    method_receiver_kind,
+    _float_c_literal, method_receiver_kind,
 )
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
@@ -17049,7 +17049,7 @@ def gen_module_impl(self, stmts: list):
                         # folded constant), so its word is built from the literal
                         class_attr_words.append(
                             (s.name, aname, mangled, ctype,
-                             _as_str(repr(_as_floatlit_node(v).value))
+                             _as_str(_float_c_literal(_as_floatlit_node(v).value))
                              if isinstance(v, FloatLiteral) else None))
                         break
     if class_attr_decls:
@@ -18312,7 +18312,10 @@ def gen_module_impl(self, stmts: list):
                 for _wn, _wa, _wm, _wt, _wf in self._class_attr_words:
                     _wn = _as_str(_wn)
                     if _wf is not None:
-                        _wexpr = f'mojo_box_from_double({_wf if (chr(46) in _wf or chr(101) in _wf) else _wf + ".0"})'
+                        # `_wf` is `_float_c_literal`'s C spelling, already a
+                        # valid `double` expression (decimal point, exponent,
+                        # or INFINITY/NAN) — no suffixing needed here.
+                        _wexpr = f'mojo_box_from_double({_wf})'
                     elif _wt == 'int64_t':
                         _wexpr = _wm
                     elif _wt == 'double':

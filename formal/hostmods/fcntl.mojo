@@ -1,5 +1,7 @@
 """`fcntl` — file locks, descriptor flags and the `F_*` command numbers.
 
+Status convention: hoststatus.mojo.
+
 `formal/imports.py`'s FIRST resolution pass finds a `.mojo` source for a name
 in a search root and that wins outright, over the host-module list, so this
 file is what `import fcntl` binds to. It lives in `formal/hostmods/`, the
@@ -118,6 +120,8 @@ returns 0 on success and -1 on failure**, and the caller cannot tell the two
 failure reasons apart. `test_formal_fcntl.py`'s `absent` group pins the whole
 of that: a caller that wants CPython's `BlockingIOError` has to test for -1
 itself, and that is the module's documented answer rather than a gap.
+
+Status convention: hoststatus.mojo.
 """
 
 # `flock` and `fcntl` ARE CALLED THROUGH `_syscalls.mojo` AND NOT DIRECTLY, for

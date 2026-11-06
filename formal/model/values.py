@@ -1543,9 +1543,10 @@ def container_escape_sites(fn, returns_container=None, copied=None) -> list:
 
     CPython answers `11 22 33` in both. **A list LITERAL at the return site is
     the same shape and the same wrong answer** (`return [11, 22, 33]`, measured
-    identically): a returned container literal is NOT `malloc`'d here, and
-    "it reads correctly immediately after the call" is the only reason it looked
-    like it was.
+    identically), which corrects
+    `bugs/formal/FORMAL_listdir_no_run_time_sequence.md` item 3: a returned container
+    literal is NOT `malloc`'d here, and "it reads correctly immediately after the
+    call" is the only reason it looked like it was.
 
     **Why the check is HERE and not on the return**, and it is the whole design:
     a returned container that the caller reads immediately is sound, and this
@@ -2144,7 +2145,7 @@ def returned_container_refusal(fn, line: int, what: str) -> str:
         f"blob the callee appends to rather than a concatenation or a splat, "
         f"and when every element is provably a word — so the reader is being "
         f"told which of those four this program is. "
-        f"this was previously noted in a bug doc; "
+        f"`bugs/formal/FORMAL_listdir_no_run_time_sequence.md` item 3 records "
         f"the capability that closes the rest (a container with a run-time "
         f"length, `malloc`'d rather than frame-resident). What lowers today: "
         f"read the value before calling anything else, keep the container in "
@@ -4095,6 +4096,49 @@ def receiver_is_declared_bytes(fn, base, decls=None, functions=None) -> bool:
 BYTE_POINTER_ELEMENTS = frozenset({"UInt8", "Int8"})
 
 
+def string_element_fold(base, index, text_of=None):
+    """Fold `base[index]` to a one-character StringLiteral when possible."""
+    try:
+        from . import strings as _strings
+    except Exception:
+        _strings = None
+    if not non_ascii_strings():
+        return None
+    if text_of is None:
+        if _strings is not None:
+            text_of = _strings.string_literal_text
+        else:
+            text_of = string_literal_text
+    T = text_of(base) if callable(text_of) else None
+    if T is None or not isinstance(T, str):
+        # try direct
+        try:
+            if _strings is not None:
+                T = _strings.string_literal_text(base)
+        except Exception:
+            pass
+    if T is None or not isinstance(T, str):
+        return None
+    if _strings is not None and _strings.text_is_ascii(T):
+        return None
+    # index must be an int literal
+    import fire_compiler as F
+    if isinstance(index, F.UnaryOp) and getattr(index, "op", None) == "-" and isinstance(getattr(index, "operand", None), F.IntLiteral):
+        k = -int(index.operand.value)
+    elif isinstance(index, F.IntLiteral):
+        k = int(index.value)
+    else:
+        return None
+    if k < 0:
+        k += len(T)
+    if k < 0 or k >= len(T):
+        return None  # out of range - refuse, don't fold
+    try:
+        return T[k]
+    except Exception:
+        return None
+
+
 def string_element_refusal(base, index, fn=None, decls=None,
                            functions=None) -> str | None:
     """Why `base[index]` is not a CHARACTER of `base`, or None when it is.
@@ -4415,10 +4459,13 @@ def string_has_static_storage() -> bool:
     """True when a string value's BYTES outlive the function that made it.
 
     Always True, and it is a function rather than a constant so that the
-    question has a name at the place the answer is needed. The reasoning is in
+    question has a name at the place the answer is needed. Storage is program
+    lifetime (static for literals, process-lifetime heap for computed strings;
+    see `STRING_BUFFER_LIFETIME`), so computed strings returned from functions
+    remain valid for the lifetime of the process. The reasoning is in
     the section comment above: every string on this path is a literal interned
-    into `__TEXT,__text` or an interior pointer into one, so its storage
-    duration is static.
+    into `__TEXT,__text` or an interior pointer into one, or allocated via
+    `STRING_BUFFER_ALLOCATOR` (strdup) for computed results.
 
     WHY IT IS HERE, and who it is for: the frame-lifetime analysis in
     `formal/build.py` refuses a value that is the address of a frame when that

@@ -63,10 +63,14 @@ void  mojo_census_free(void *p);
 #ifndef __cplusplus
 /* Redirect every later call in the translation unit that includes this
    header. Include it only after the system headers, as fire_runtime.c does. */
-#define malloc(n)            mojo_census_malloc((n), __FILE__, __LINE__)
-#define calloc(c, s)         mojo_census_calloc((c), (s), __FILE__, __LINE__)
-#define realloc(p, n)        mojo_census_realloc((p), (n), __FILE__, __LINE__)
-#define free(p)              mojo_census_free((p))
+/* The arguments are NOT parenthesised: a parenthesised operand is `expected
+   expression before '('` inside a `__GIMPLE` body, and the emitted .ci calls
+   malloc/free there. A call argument needs no protective parentheses (only a
+   comma operator could differ, and none is passed to these). */
+#define malloc(n)            mojo_census_malloc(n, __FILE__, __LINE__)
+#define calloc(c, s)         mojo_census_calloc(c, s, __FILE__, __LINE__)
+#define realloc(p, n)        mojo_census_realloc(p, n, __FILE__, __LINE__)
+#define free(p)              mojo_census_free(p)
 #endif
 
 #ifdef __cplusplus

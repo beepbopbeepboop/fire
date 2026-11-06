@@ -2359,7 +2359,12 @@ def _gen_stmt_AssignStmt(gen, node):
             # dict[key] = val → mojo_dict_set_str_* (key coerced via
             # _char_to_cstr, the single dict-key-to-string conversion
             # used by both read and write sides — see its docstring).
-            if it == 'MojoBytes *':
+            if gen._is_none_literal(node.target.index):
+                # `d[None] = v`: the None-key domain, not the integer 0 that
+                # `None` lowers to (see `emit_dict_none_key_store`).
+                ginf.emit_dict_none_key_store(gen, obj_v, vtype, v, node.value)
+                key_tmp = None
+            elif it == 'MojoBytes *':
                 # A bytes KEY is its own key domain in the runtime (see
                 # _DictSlot.keykind), not a char* one: routing it through
                 # _char_to_cstr cast the MojoBytes POINTER to char*, so the

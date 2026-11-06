@@ -1,5 +1,21 @@
 # A set is a LIST here: insertion order, no hashing, and `for x in s` disagrees with CPython
 
+> **PLANNED — this document's open work is decomposed into `bugs/plan/step-*.md`,
+> and the design plus ordering live in `doc/finish-formal.md`.** The step that
+> owns it is **step-14a…e** (a set runtime on both backends). Read the measurements
+> here first; the step file is the work order.
+
+> **Status 2026-11-05:** the compile-time dedup this file's table calls "fixed"
+> had been LOST in the `formal/model/` package split (commit `1d40572ed` landed
+> against the old single `formal/model.py`); it is re-landed
+> (`model.set_literal_distinct_elements`, both emitters), measured:
+> `len({1, 1, 2, 3, 3})` is 3 on arm64 and x86-64. The run-time half (a name, a
+> call, a comprehension) is still open (steps 14b-14d).
+
+> 
+> **Status 2026-11-05 (step-14a):** the compile-time set-literal dedup for word-canonical elements was lost in the `formal/model/` package split (it lived in the old single `formal/model.py`) and is re-landed in `formal/model/layout.py` (`set_literal_word_key`, `set_literal_distinct_elements`) and wired in both codegens.  
+> **Status 2026-11-05 (step-14b):** runtime dedup added for set literals with non-canonical elements via linear scan on both backends (`_emit_set_literal`, `_emit_set_contains` on x86-64). Elements with unword-equalable kinds (floats, computed/non-literal strings, kind None) are refused with `set_runtime_element_refusal`. Mixed literals and names deduplicate at runtime with first-occurrence order preserved.
+
 ## Status 2026-10-12 (`work/formal314-docs`): ONE DISAGREEMENT THIS FILE CALLED "AGREED" WAS REAL, AND THE WORD-CANONICAL HALF IS FIXED
 
 **This file's table said `len(s)` was "the element count" on all three engines

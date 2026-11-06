@@ -30,7 +30,7 @@ from fire_compiler import (
     YieldExpr, YieldFromExpr, AwaitExpr,
     Parser, py_tokenize, _as_str, _sms_key, _as_floatlit_node, _ptr_slot_in_range,
     _signed_int64, _signed_int64_c_literal, _as_intlit_node,
-    _as_ident_node, _as_vardecl_node,
+    _as_ident_node, _as_vardecl_node, _float_c_literal,
 )
 import regex_compile
 import mlir
@@ -234,11 +234,10 @@ def _lower_FloatLiteral(gen, node) -> tuple[str, str]:
     # `_as_floatlit_node(...).value` for a DIRECT `double` field load —
     # `node.value` off the boxed `node` went through reflective dispatch and
     # truncated the double to the boxed int64_t, so `repr(4.2)` came out
-    # `'4.0'` (see _as_floatlit_node).
-    s = repr(_as_floatlit_node(node).value)
-    if '.' not in s and 'e' not in s.lower():
-        s += '.0'
-    return 'double', s
+    # `'4.0'` (see _as_floatlit_node). `_float_c_literal` is the ONE spelling
+    # of the value as C, including the non-finite values a literal can reach
+    # by overflow (`999e9000` is `inf`, which `repr` spells 'inf').
+    return 'double', _float_c_literal(_as_floatlit_node(node).value)
 
 
 def _lower_BoolLiteral(gen, node) -> tuple[str, str]:
@@ -7433,34 +7432,7 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
     Single source of truth for key coercion + per-type setter dispatch."""
     if _is_none_literal(key_expr):
         vt, vv = gen.lower_expr(val_expr)
-        gen._note_container_callable_ret(t, vv, vt, val_expr)
-        if vt == 'char *':
-            if isinstance(vv, str) and vv.startswith('_slit_'):
-                vv = gen._new_val('char *', f"{vv}")
-            gen._emit_call('void', '', 'mojo_dict_set_none_key_str',
-                           [('MojoDict *', t), ('char *', vv)])
-            return
-        if gen._is_none_literal(val_expr) or vt == 'int' and vv == '0' and _is_none_literal(val_expr):
-            gen._emit_call('void', '', 'mojo_dict_set_none_key_none',
-                           [('MojoDict *', t)])
-            return
-        if vt in gimple_ctypes._FLOAT_TYPES:
-            gen._emit_call('void', '', 'mojo_dict_set_none_key_double',
-                           [('MojoDict *', t), (vt, vv)])
-            return
-        _shim = gimple_exprtypes.struct_elem_repr_shim(gen, vt)
-        if _shim:
-            gen._emit_call('void', '', 'mojo_dict_set_none_key_struct',
-                           [('MojoDict *', t), (vt, vv)])
-            return
-        if gimple_exprtypes.is_python_bool_expr(gen, val_expr):
-            vv64 = gen._to_int64(vt, vv)
-            gen._emit_call('void', '', 'mojo_dict_set_none_key_bool',
-                           [('MojoDict *', t), ('int64_t', vv64)])
-            return
-        vv64 = gen._to_int64(vt, vv)
-        gen._emit_call('void', '', 'mojo_dict_set_none_key_int',
-                       [('MojoDict *', t), ('int64_t', vv64)])
+        ginf.emit_dict_none_key_store(gen, t, vt, vv, val_expr)
         return
     kt, kv = gen.lower_expr(key_expr)
     vt, vv = gen.lower_expr(val_expr)
