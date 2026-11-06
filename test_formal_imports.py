@@ -5259,6 +5259,24 @@ def test_the_wall_instrument_reads_the_sweep_column_with_its_own_peel(tmpdir, _s
           "a missing sweep log must be an empty column, not an error")
 
 
+
+def _default_stdlib_dir():
+    """`$MOJO_STDLIB`, else `module_loader.STDLIB_PATH/std`, else the sibling
+    `modular` checkout. One definition: two rows had each spelled this with an
+    unimported `STDLIB_PATH` (a NameError, so both rows ERRORed)."""
+    env = os.environ.get("MOJO_STDLIB")
+    if env:
+        return env
+    try:
+        from module_loader import STDLIB_PATH
+    except ImportError:
+        STDLIB_PATH = None
+    if STDLIB_PATH:
+        return os.path.join(STDLIB_PATH, "std")
+    return os.path.join(os.path.dirname(os.path.dirname(HERE)),
+                        "modular", "mojo", "stdlib", "std")
+
+
 def test_a_dead_import_is_not_a_wall_this_tree_has_to_climb(tmpdir, _shared):
     """A module in the file's closure that the file never READS is not a wall.
 
@@ -5279,7 +5297,7 @@ def test_a_dead_import_is_not_a_wall_this_tree_has_to_climb(tmpdir, _shared):
     straight back on the wall with nothing failing here.
     """
     root = HERE
-    stdlib = os.environ.get("MOJO_STDLIB") or (os.environ.get("MOJO_STDLIB") or os.path.join(STDLIB_PATH, "std") if STDLIB_PATH else os.path.join(os.path.dirname(os.path.dirname(HERE)), "modular", "mojo", "stdlib", "std"))
+    stdlib = _default_stdlib_dir()
 
     def closure_unresolved(path):
         seen, stack, out = set(), [path], set()
@@ -5383,7 +5401,7 @@ def test_a_memo_replaces_the_decorator_the_corpus_cannot_climb(tmpdir, _shared):
          regression in every caller.
     """
     root = HERE
-    stdlib = os.environ.get("MOJO_STDLIB") or (os.environ.get("MOJO_STDLIB") or os.path.join(STDLIB_PATH, "std") if STDLIB_PATH else os.path.join(os.path.dirname(os.path.dirname(HERE)), "modular", "mojo", "stdlib", "std"))
+    stdlib = _default_stdlib_dir()
 
     def closure_unresolved(path):
         seen, stack, out = set(), [path], set()
