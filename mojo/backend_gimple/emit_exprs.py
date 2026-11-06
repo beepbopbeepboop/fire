@@ -2134,8 +2134,12 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # linesep's raw newline must go through _c_escape (the same
             # shared helper every other string-emission site uses) or it
             # splices a literal line break into the .ci string pool.
-            _bm_text = (gen._intern_string(gimple_ctypes._c_escape(_bm_val))
-                        if _bm_ctype == 'char *' else str(_bm_val))
+            if _bm_ctype == 'char *':
+                _bm_text = gen._intern_string(gimple_ctypes._c_escape(_bm_val))
+            elif _bm_ctype == 'double':
+                _bm_text = _float_c_literal(_bm_val)
+            else:
+                _bm_text = str(_bm_val)
             return _bm_ctype, gen._new_val(_bm_ctype, _bm_text)
 
         # Class attribute access: ClassName.ATTR

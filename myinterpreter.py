@@ -3545,6 +3545,12 @@ class Interpreter:
         self.scope.define('max', _mojo_max)
         self.scope.define('min', _mojo_min)
         self.scope.define('SIMD', _MojoSIMDType())
+        class _MojoFloatLiteralType:
+            infinity = float('inf')
+            negative_infinity = float('-inf')
+            negative_zero = float('-0.0')
+            nan = float('nan')
+        self.scope.define('FloatLiteral', _MojoFloatLiteralType)
         self.scope.define('sum', sum)
         self.scope.define('sorted', sorted)
         self.scope.define('reversed', _mojo_reversed)

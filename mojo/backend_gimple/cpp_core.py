@@ -1506,6 +1506,8 @@ def _cpp_module_global_field(gen, marker, name):
             # VALUE (os.linesep and friends), not a source token, so there is
             # no prefix to take off and nothing to interpolate.
             return _bm_ctype, _cpp_string_literal_expr(gen, _bm_val, '')
+        if _bm_ctype == 'double':
+            return _bm_ctype, _float_c_literal(_bm_val)
         return _bm_ctype, f'({_bm_ctype}){_bm_val}'
     found = gen._module_global_field_type(bound, name)
     key = bound
