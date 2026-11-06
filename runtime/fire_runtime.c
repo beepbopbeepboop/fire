@@ -9978,9 +9978,9 @@ char *mojo_repr_float(double v) {
      * loop is guaranteed to terminate with a correct representation. */
     static char buffer[64];
     /* Special values first: Python's repr is "nan"/"inf"/"-inf". */
-    if (v != v) return strdup("nan");
-    if (v == (double)INFINITY) return strdup("inf");
-    if (v == (double)-INFINITY) return strdup("-inf");
+    if (v != v) return "nan";
+    if (v == (double)INFINITY) return "inf";
+    if (v == (double)-INFINITY) return "-inf";
     /* Shortest significant precision that strtod() parses back exactly.
      * 17 digits always round-trip for an IEEE-754 double. */
     int _prec = 17;
@@ -14094,11 +14094,14 @@ char *mojo_cstr_or_int_str(int64_t v) {
     /* A BOX (what mojo_list_get_boxed hands back for every non-int slot of a
        kind-mixed list) is pointer-shaped and not a string, so it fell through
        to the integer arm and printed as the box's own address. Spell it by its
-       kind. The result is always a fresh heap string and the release entry
-       points free it when `orig` is a box. */
+       kind. The result is always a fresh heap string (never `v`, never
+       mojo_repr_float's shared buffer), and the release entry points free it
+       when `orig` is a box. */
     if (_box_spelled_by_kind(v)) {
         MojoBox *bx = (MojoBox *)(intptr_t)v;
-        if (bx->kind == 'd') return mojo_repr_float(mojo_double_from_bits(bx->bits));
+        /* mojo_repr_float returns a shared buffer; every other arm of
+           mojo_repr_boxed returns a fresh heap string. */
+        if (bx->kind == 'd') return strdup(mojo_repr_float(mojo_double_from_bits(bx->bits)));
         return mojo_repr_boxed(v);
     }
     if (mojo_boxed_is_str(v)) return (char *)(intptr_t)v;

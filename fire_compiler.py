@@ -3530,13 +3530,8 @@ def desugar_genexps(stmts: list) -> list:
     global DESUGARED_GENEXP_NAMES
     d = _GenexpDesugarer(_module_level_names(stmts), _rebound_names(stmts))
     d.walk_list(stmts, None)
-    # Inserted one at a time, in order, at the front: a slice assignment
-    # (`stmts[0:0] = d.hoisted`) is not lowered by the compiled backend, which
-    # left the synthesized generators out of the module entirely.
-    ins = 0
-    for hfn in d.hoisted:
-        stmts.insert(ins, hfn)
-        ins += 1
+    if d.hoisted:
+        stmts[0:0] = d.hoisted
     # Cleared in place, not rebound: gimple_codegen imports this list by name,
     # so a rebound global would leave its copy pointing at the previous call's.
     del DESUGARED_GENEXP_NAMES[:]
@@ -5265,22 +5260,9 @@ class Parser:
                     except (SyntaxError, ValueError, TypeError, AttributeError,
                             IndexError, KeyError):
                         self._pos = _where_saved
-                        try:
-                            # Try parsing as type annotation for intersections
-                            self._parse_type_ann()
-                            self._pos = _where_saved
-                            try:
-                                self._parse_expr(0)
-                            except Exception:
-                                self._pos = _where_saved
-                                while self._peek().kind not in (
-                                        "ASSIGN", "NEWLINE", "DEDENT", "EOF"):
-                                    self._advance()
-                        except Exception:
-                            self._pos = _where_saved
-                            while self._peek().kind not in (
-                                    "ASSIGN", "NEWLINE", "DEDENT", "EOF"):
-                                self._advance()
+                        while self._peek().kind not in (
+                                "ASSIGN", "NEWLINE", "DEDENT", "EOF"):
+                            self._advance()
             # A multi-target comptime binding: `comptime a, b = expr(...)`, which
             # unpacks ONE compile-time value into two names. Collected BEFORE the
             # ASSIGN test below, because at this point the next token is the
@@ -5378,55 +5360,11 @@ class Parser:
 
         # Try to parse simple expressions (literals, identifiers, simple calls)
         saved_pos = self._pos
-        # Check for & or | (type intersections/unions) - try to be flexible
-        # Try parsing as expression first (handles & as binary op)
         try:
             expr = self._parse_expr(0)
             return expr
         except (SyntaxError, ValueError, TypeError, AttributeError,
                 IndexError, KeyError) as e:
-            # Try parsing as type annotation for type intersections like A & B
-            self._pos = saved_pos
-            try:
-                type_ann = self._parse_type_ann()
-                self._pos = saved_pos
-                try:
-                    expr = self._parse_expr(0)
-                    return expr
-                except Exception:
-                    self._pos = saved_pos
-                    try:
-                        expr = self._parse_expr(0)
-                        return expr
-                    except Exception:
-                        self._pos = saved_pos
-                        try:
-                            expr = self._parse_expr(0)
-                            return expr
-                        except Exception:
-                            pass
-            except Exception:
-                self._pos = saved_pos
-                try:
-                    expr = self._parse_expr(0)
-                    return expr
-                except Exception:
-                    pass
-            # Also try if there might be & in the tokens
-            self._pos = saved_pos
-            # Scan ahead for &
-            for i in range(50):  # look ahead a bit
-                if self._pos + i < len(self._tok):
-                    tok = self._tok[self._pos + i]
-                    if tok.kind == 'OP' and tok.value == '&':
-                        self._pos = saved_pos
-                        try:
-                            expr = self._parse_expr(0)
-                            return expr
-                        except Exception:
-                            break
-                    if tok.kind in ('NEWLINE', 'DEDENT', 'EOF'):
-                        break
             # This is a MISPARSE, not the function-type case above, and the
             # two used to be the same value. Skip to the newline so the rest
             # of the module still parses, record WHY, and re-raise: a

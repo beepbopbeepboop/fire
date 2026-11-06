@@ -7208,7 +7208,7 @@ _OWNED_REPR_FNS = frozenset({
     '_mojo_generic_elem_repr',
     # the scalar formatters that malloc unconditionally
     'mojo_str_from_int', 'mojo_repr_int', 'mojo_repr_str', 'mojo_repr_boxed',
-    'mojo_bytes_repr', 'mojo_memoryview_repr', 'mojo_sprintf_ptr', 'mojo_repr_float',
+    'mojo_bytes_repr', 'mojo_memoryview_repr', 'mojo_sprintf_ptr',
 })
 
 
@@ -7233,10 +7233,10 @@ _OWNED_REPR_FNS = frozenset({
 # one, read body by body once.
 #
 # Deliberately NOT added, and `_OWNED_REPR_FNS` is where the reason for each
-# lives: `_mojo_dispatch_repr`, `mojo_repr_bool`, `mojo_bool_to_str` and
-# `mojo_repr_boxed` each return a string LITERAL on at least one arm
-# (`return "None"`, `b ? "True" : "False"`, ...) where a `free` is heap
-# corruption rather than a leak.
+# lives: `_mojo_dispatch_repr`, `mojo_repr_bool`, `mojo_bool_to_str`,
+# `mojo_repr_float` and `mojo_repr_boxed` each return a string LITERAL on at
+# least one arm (`return "None"`, `b ? "True" : "False"`, `"nan"`/`"inf"`),
+# where a `free` is heap corruption rather than a leak.
 _FRESH_STRING_RETURNS = _FRESH_STRING_RETURNS | _OWNED_REPR_FNS
 
 

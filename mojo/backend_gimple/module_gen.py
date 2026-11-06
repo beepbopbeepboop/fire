@@ -130,7 +130,7 @@ from mojo.middle.module_shared import (
 # `_struct_method_qualifier` lives in, so the C-name qualifier and the
 # method-symbol qualifier are one function on one input.
 import mojo.middle.funcs_shared as _ggfs
-from mojo.middle.funcs_shared import _resolve_struct_cname, _sanitize_cname_qualifier, _selfhost_gen_self_param_ctype
+from mojo.middle.funcs_shared import _resolve_struct_cname, _sanitize_cname_qualifier
 
 
 # Builtins that look at a value without forwarding its static type anywhere.
@@ -12870,11 +12870,7 @@ def gen_module_impl(self, stmts: list):
         if isinstance(_od, FunctionDef):
             self._compile_nested_generator_closures(_od, _generator_fns)
 
-    # Bound to an annotated local first: the compiled compiler types a
-    # cross-module call's result as a word, and a `for` over a word runs zero
-    # times, which silently dropped every nested-generator compilation.
-    _ordered_stmts: list = _gca._delegates_first(stmts, _generator_fns)
-    for s in _ordered_stmts:
+    for s in _gca._delegates_first(stmts, _generator_fns):
         if not (isinstance(s, FunctionDef) and id(s) in _generator_fns
                 and id(s) not in _async_fns):
             continue
@@ -13614,7 +13610,7 @@ def gen_module_impl(self, stmts: list):
     # `mojo_fnptr_call_3`, which jumped to that data pointer and SIGBUS'd
     # (repro: std/atomic/atomic.mojo). The module-level function is a raw
     # code pointer, and discover_closures passes `ctx` explicitly.
-    self.selfhost_param_ctype = _selfhost_gen_self_param_ctype
+    self.selfhost_param_ctype = _ggf_dup._selfhost_gen_self_param_ctype
     try:
         # Prevent lifting of closure factories with nonlocal
         try:

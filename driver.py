@@ -85,7 +85,7 @@ def _build(c_code, stdlib, dylibs, objects, target, gcc, objflags, link_driver,
 
     client_o = cas.get_or_build(ckey, '.o', _client)[0]
 
-    link_dylibs = list(dict.fromkeys([stdlib] + list(dylibs)))
+    link_dylibs = list(dict.fromkeys(list(dylibs) + [stdlib]))
     rpaths = sorted({os.path.dirname(d) for d in link_dylibs})
 
     link = [link_driver, '-o', target, client_o] + list(objects) + link_dylibs
@@ -232,6 +232,29 @@ def compile_program(input_file, src, output=None, run=True,
 
             objects.append(cas.get_or_build(_key, '.o', _mk)[0])
 
+    # C++20 async runtime (Step A): the generated .c/.ci includes
+    # <fire_async_runtime.h> when gimple_codegen's async pre-pass compiled at
+    # least one `async def`.  build_executable links fire_async_runtime.cpp in
+    # that case; the link-mode driver must do the same or programs that use
+    # this async runtime fail at link with undefined __mojo_future__/__mojo_event__
+    # symbols (collect2: ld returned 1 exit status).
+    if 'fire_async_runtime.h' in c_code:
+        gxx = find_gxx()
+        _cpp_flags = ('-std=c++20', '-fPIC', f'-I{RUNTIME}') + flags
+        _p = os.path.join(RUNTIME, 'fire_async_runtime.cpp')
+        _key = cas.module_key(open(_p).read(), [], gxx, _cpp_flags + ('fire_async_runtime.cpp',))
+
+        def _mk_async(_p=_p, _cpp_flags=_cpp_flags, gxx=gxx):
+            import tempfile as _tf
+            _d = _tf.mkdtemp(prefix='mojo_async_')
+            _o = os.path.join(_d, 'x.o')
+            subprocess.run([gxx, *_cpp_flags, '-c', '-o', _o, _p], check=True,
+                           capture_output=True)
+            return open(_o, 'rb').read()
+
+        objects.append(cas.get_or_build(_key, '.o', _mk_async)[0])
+        needs_cxx = True
+
     # Optional runtime units (build_config's registry -- see
     # build_config.py's own header, where the bug is described). runtime/
     # holds six C
@@ -282,7 +305,7 @@ def compile_program(input_file, src, output=None, run=True,
     stdlib = bsd.build_stdlib()
 
     # Warm path: the whole program is content-addressed — a cache hit is a copy.
-    link_files = list(dict.fromkeys([stdlib] + list(dylibs))) + list(objects)
+    link_files = list(dict.fromkeys(list(dylibs) + [stdlib])) + list(objects)
     pkey = _prog_key(c_code, link_files, gcc, objflags, link_driver)
     hit = cas.lookup(pkey, '')
     if hit:
