@@ -1,4 +1,5 @@
 # plan/step-14d: a set COMPREHENSION is distinct (`{x % 2 for x in range(6)}` has len 2)
+**Status: DONE 2026-11-06 (measured).** `_compr_append_elem(distinct=True)` for `kind == "set"` on both backends (scan the result so far, skip the store); container elements refused (`set_comprehension_element_refusal`); computed integer elements accepted. Rows `s_comp_len/sum/filter/unique` and `s_comp_container_r` pass; list/dict rows unchanged.
 Class: mid      Size: M      Depends: 14b      Blocks: none
 Source: `bugs/FORMAL_set_value_model.md` top Status ("a set COMPREHENSION ... still lower[s] with [its] repeats").
 

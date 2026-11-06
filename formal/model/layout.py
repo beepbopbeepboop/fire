@@ -201,8 +201,8 @@ def set_runtime_element_refusal(spelled_elem, kind):
 
 def set_add_receiver_refusal(dotted, shape):
     """`dotted(...)` named `add` on a receiver that is not known to be a set."""
-    return (f"{dotted}() is `set.add` on this path, which inserts a word into "
-            f"a SET blob; its receiver is {shape or 'a plain word'}, which "
+    return (f"{dotted}() is a method call on a value, and `add` lowers only "
+            f"as `set.add`, which inserts a word into a SET blob; its receiver is {shape or 'a plain word'}, which "
             f"this build cannot establish to be a set (a set and a list are "
             f"the same blob, and only a name bound to a set literal or set "
             f"comprehension is known to be one). Refused rather than storing "
