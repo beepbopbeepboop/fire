@@ -4703,7 +4703,7 @@ theorem arm64_flag_le_s (a b : UInt64) :
 theorem arm64_slt_iff_lt (a b : UInt64)
     (hr : a < 0x8000000000000000) (hb : b < 0x8000000000000000) :
     (a ^^^ 0x8000000000000000) < (b ^^^ 0x8000000000000000) ↔ a < b := by
-  constructor <;> intro h <;> bv_decide
+  bv_decide
 
 theorem arm64_cset_eq (a b : UInt64) :
     (if arm64_matches_condition 0 (arm64_subs_flags a b) then (1 : UInt64) else 0)

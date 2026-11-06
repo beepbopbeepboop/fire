@@ -82,9 +82,16 @@ from formal import lean as L                      # noqa: E402
 # it is a module whose axioms nobody counts. `Peephole` sits ahead of it and
 # imports `ProofLib` and `X86`, like `work`, because its rules are stated over
 # the two step functions.
-LIBRARY_MODULES = ("IEEE754", "ProofLib", "Refine", "X86", "work", "Contracts",
-                   "Peephole", "Specs", "Scaffold")
+# The library's own list, minus the one module that declares nothing (the
+# `ProofLibSteps` facade only imports its eight shards); the shards ARE modules
+# here, because that is where the `work_step_*` declarations now live.
+LIBRARY_MODULES = tuple(m for m in L.LIBRARY_MODULES if m != "ProofLibSteps")
 FOUNDATION = set(L.AXIOM_FOUNDATION)
+
+
+def _scaffold_names():
+    from formal import proof_gaps as PG
+    return set(PG.SCAFFOLD_HOLES)
 
 # The theorems whose axiom set this campaign CHANGED, plus the three that keep
 # theirs, pinned by the NUMBER of generated axioms each reaches.  Eight rows
@@ -115,11 +122,11 @@ FOUNDATION = set(L.AXIOM_FOUNDATION)
 HEADLINE = {
     ("Contracts", "Contracts.spec_triple_ne_identity"): 0,
     ("X86", "lowMask_eight"): 0,
-    ("ProofLib", "work_step_mov"): 0,
+    ("ProofLibSteps1", "work_step_mov"): 0,
 ("ProofLib", "arm64_step_cmp_reg_n31_reads_zero"): 0,
     ("ProofLib", "arm64_step_neg_reads_zero_rn"): 0,
     ("ProofLib", "arm64_step_mul"): 0,
-    ("ProofLib", "work_step_movk"): 57,
+    ("ProofLibSteps1", "work_step_movk"): 57,
     ("ProofLib", "DylibExport.Semantics_refutable"): 1,
     ("ProofLib", "DylibExport.backward_branch_run_none"): 1,
     # The one site in `lib/` that reaches no axiom at all, and the reason the
@@ -337,6 +344,10 @@ def group_census(per_mod, dropped_names, got, verbose):
         so the arithmetic could not close at all.
     """
     qualified, bare = _census_site_names()
+    # …and the converse: a ledgered hole that does NOT reach `sorryAx` is a
+    # ledger row for a theorem that is now proved (or never was a hole).
+    _unreached = sorted(n for n in _scaffold_names()
+                        if "sorryAx" not in (got.get(("Scaffold", n)) or ()))
     per_decl = A.library_trust_by_declaration(A.lean_dir(HERE))
     sites = sum(n for per in per_decl.values() for n, _lines in per.values())
     missing = sorted(k for k, v in got.items() if v is None)
@@ -348,6 +359,11 @@ def group_census(per_mod, dropped_names, got, verbose):
             continue
         for ax in axioms:
             if ax in FOUNDATION:
+                continue
+            # A ledgered scaffold hole (`formal/proof_gaps.py::SCAFFOLD_HOLES`)
+            # reaches `sorryAx` BY DEFINITION; that is the one place it may.
+            if (ax == "sorryAx" and mod == "Scaffold"
+                    and name.split(".")[-1] in _scaffold_names()):
                 continue
             m = L.GENERATED_AXIOM_RE.match(ax)
             if not m:
@@ -370,6 +386,9 @@ def group_census(per_mod, dropped_names, got, verbose):
                    f"generated file did not elaborate, so every other number "
                    f"here would be vacuous:\n      {shown}")
     bad += unknown[:8] + unattributed[:8]
+    if _unreached:
+        bad.append("SCAFFOLD_HOLES names theorem(s) that reach no sorryAx: "
+                   + ", ".join(_unreached[:8]))
     for (mod, name), why in sorted(SITES_NEEDING_NO_AXIOM.items()):
         if (mod, name) not in got:
             bad.append(f"{mod}.{name}: named in SITES_NEEDING_NO_AXIOM as a "
