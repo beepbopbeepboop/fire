@@ -8,7 +8,7 @@ Runs up to -j tests in parallel (default 16). Each test gets its own --timeout
 (default 10 min). Writes per-test results to build/modular_suite_results.txt
 and a failure detail file.
 """
-import argparse, os, subprocess, sys, time, threading
+import argparse, os, subprocess, sys, time, threading, re, tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 FIRE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -19,16 +19,40 @@ DETAIL = os.path.join(FIRE, "build", "modular_suite_failures.txt")
 
 
 def run_one(f, timeout):
+    # Extract CHECK lines from the file (// CHECK: or # CHECK:)
+    checks = []
+    try:
+        with open(f) as fh:
+            for line in fh:
+                m = re.match(r"\s*(?://|#)\s*CHECK(?:-NEXT|-NOT|-SAME)?:\s*(.*)", line)
+                if m:
+                    checks.append(m.group(1).strip())
+    except Exception:
+        pass
+
     try:
         r = subprocess.run(
             ["python3", "fire.py", "build", f],
             cwd=FIRE, capture_output=True, text=True, timeout=timeout)
         ok = r.returncode == 0
-        err = (r.stderr or r.stdout or "").strip()
+        out = (r.stdout or "") + "\n" + (r.stderr or "")
+        err = out.strip()
     except subprocess.TimeoutExpired:
         ok = False
+        out = ""
         err = "TIMEOUT"
-    status = "OK" if ok else "FAIL"
+    # Verify CHECK lines as substrings (best-effort; modular's CHECKs are for
+    # the parser's MLIR output, so mismatches are expected for now).
+    check_fail = None
+    if ok and checks:
+        for c in checks:
+            if c and c not in out:
+                check_fail = f"CHECK not found: {c[:80]}"
+                break
+    if check_fail:
+        status = "CHECKFAIL"
+    else:
+        status = "OK" if ok else "FAIL"
     el = ""
     for l in err.splitlines():
         if l.strip():
