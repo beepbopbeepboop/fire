@@ -136,6 +136,7 @@ from ._syscalls import fs_readdir, fs_rewinddir, fs_closedir
 from ._syscalls import fs_dirent_name, fs_name_is_dot, fs_opendir
 from ._syscalls import fs_environ_vec, str_find, str_cmp
 from ._syscalls import fs_getpid, fs_getppid, fs_getuid, fs_getpgid, fs_sysconf
+from ._syscalls import fs_access, fs_utimes, fs_symlink, fs_link, fs_mkfifo, fs_umask
 from .path import exists, isfile, isdir, islink, lexists, getsize
 from .path import join
 from hoststatus import status_ok, status_err
@@ -1089,6 +1090,70 @@ def rename(src, dst) -> int:
 def replace(src, dst) -> int:
     """`rename(src, dst)`, under CPython's other name for the same call."""
     return fs_rename(src, dst)
+
+
+def F_OK() -> int:
+    """`os.F_OK`: does the path resolve at all."""
+    return 0
+
+
+def R_OK() -> int:
+    """`os.R_OK`: may the path be read."""
+    return 4
+
+
+def W_OK() -> int:
+    """`os.W_OK`: may the path be written."""
+    return 2
+
+
+def X_OK() -> int:
+    """`os.X_OK`: may the path be executed (or searched, for a directory)."""
+    return 1
+
+
+def access(path, mode) -> int:
+    """`os.access(path, mode)`: 1 if the real user has `mode` on `path`, else 0.
+
+    A PREDICATE in CPython (it returns a bool and never raises), so it is 1/0
+    here and not a status: 0 means "no" for every reason, including a path that
+    does not exist. No `follow_symlinks=`, `dir_fd=` or `effective_ids=`.
+    """
+    if fs_access(path, mode) == 0:
+        return 1
+    return 0
+
+
+def utime(path, atime, mtime) -> int:
+    """`os.utime(path, (atime, mtime))` with INTEGER seconds. 0 on success, -1 on
+    failure (hoststatus.mojo). CPython's `times=None` (set to now), float times
+    and the `ns=` form are not provided: a float has no word representation here
+    and `None` would need an overload this module does not have."""
+    return fs_utimes(path, atime, 0, mtime, 0)
+
+
+def symlink(src, dst) -> int:
+    """`os.symlink(src, dst)`: make `dst` a symbolic link to `src`. 0 on success,
+    -1 on failure (hoststatus.mojo), e.g. when `dst` exists."""
+    return fs_symlink(src, dst)
+
+
+def link(src, dst) -> int:
+    """`os.link(src, dst)`: make `dst` a hard link to `src`. 0 on success, -1 on
+    failure (hoststatus.mojo)."""
+    return fs_link(src, dst)
+
+
+def mkfifo(path, mode) -> int:
+    """`os.mkfifo(path, mode)`: make a named pipe. 0 on success, -1 on failure
+    (hoststatus.mojo). Pass the mode: CPython's default is 0o666, and a default
+    argument is not available on this path."""
+    return fs_mkfifo(path, mode)
+
+
+def umask(mask) -> int:
+    """`os.umask(mask)`: install `mask` and return the previous mask."""
+    return fs_umask(mask)
 
 
 def chmod(path, mode) -> int:

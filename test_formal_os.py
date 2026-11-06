@@ -1362,6 +1362,92 @@ def group_proc(tmpdir, verbose):
     return True, ""
 
 
+FSMETA_PROGRAM = """\
+import os
+
+def main():
+    printf("acc_r=%d@@", os.access("{d}/f", os.R_OK()))
+    printf("acc_w=%d@@", os.access("{d}/f", os.W_OK()))
+    printf("acc_x=%d@@", os.access("{d}/f", os.X_OK()))
+    printf("acc_none=%d@@", os.access("{d}/none", os.F_OK()))
+    printf("sym=%d@@", os.symlink("{d}/f", "{d}/s"))
+    printf("sym_again=%d@@", os.symlink("{d}/f", "{d}/s"))
+    printf("lnk=%d@@", os.link("{d}/f", "{d}/h"))
+    printf("lnk_none=%d@@", os.link("{d}/none", "{d}/h2"))
+    printf("fifo=%d@@", os.mkfifo("{d}/q", 420))
+    printf("ut=%d@@", os.utime("{d}/f", 1000000, 2000000))
+    printf("ut_none=%d@@", os.utime("{d}/none", 1, 2))
+    printf("um=%d@@", os.umask(18))
+    printf("um2=%d@@", os.umask(18))
+    return 0
+"""
+
+
+def group_fsmeta(tmpdir, verbose):
+    """`access`/`symlink`/`link`/`mkfifo`/`utime`/`umask` and the `*_OK` values.
+
+    The program performs each operation in a scratch directory and prints its
+    status; the TEST then checks the EFFECT with CPython (`islink`/`readlink`,
+    `st_nlink`, `S_ISFIFO`, `st_atime`/`st_mtime`), so a status that says 0 for
+    an operation that did nothing is caught. Both backends, each in its own
+    directory.
+    """
+    src_t = FSMETA_PROGRAM
+    bad = []
+    if (os.F_OK, os.R_OK, os.W_OK, os.X_OK) != (0, 4, 2, 1):
+        return False, "the *_OK constants this module hard-codes differ from CPython's"
+    for backend, prefix in (("arm64", []), ("x86_64", ["arch", "-x86_64"])):
+        d = os.path.join(tmpdir, f"fsmeta_{backend}")
+        os.makedirs(d)
+        with open(os.path.join(d, "f"), "w") as fh:
+            fh.write("x")
+        os.chmod(os.path.join(d, "f"), 0o644)
+        src = os.path.join(tmpdir, f"os_fsmeta_{backend}.mojo")
+        with open(src, "w") as fh:
+            fh.write(src_t.replace("{d}", d))
+        out = os.path.join(tmpdir, f"os_fsmeta_{backend}")
+        rc, text = build(src, out, backend=backend)
+        if rc != 0:
+            return False, f"[{backend}] build failed: {text.strip()[-400:]}"
+        p = subprocess.run(prefix + [out], capture_output=True, text=True,
+                           timeout=RUN_TIMEOUT, cwd=tmpdir)
+        if p.returncode != 0:
+            return False, f"[{backend}] exit {p.returncode}"
+        got = parse_kv(p.stdout)
+        f = os.path.join(d, "f")
+        # the statuses, as CPython's own calls would have left the world
+        want = {
+            "acc_r": "1", "acc_w": "1", "acc_x": "0", "acc_none": "0",
+            "sym": "0", "sym_again": "-1", "lnk": "0", "lnk_none": "-1",
+            "fifo": "0", "ut": "0", "ut_none": "-1",
+            # the process umask at the time: the module returns the PREVIOUS
+            # mask, and the second call returns the one the first installed.
+            "um2": "18",
+        }
+        for k, v in want.items():
+            if got.get(k) != v:
+                bad.append(f"[{backend}] {k}: image says {got.get(k)!r}, expected {v!r}")
+        # the effects, read back with CPython
+        s = os.path.join(d, "s")
+        if not (os.path.islink(s) and os.readlink(s) == f):
+            bad.append(f"[{backend}] symlink did not leave a link to {f}")
+        if os.stat(f).st_nlink != 2 or not os.path.samefile(f, os.path.join(d, "h")):
+            bad.append(f"[{backend}] link did not make a second name for the file")
+        if not stat.S_ISFIFO(os.stat(os.path.join(d, "q")).st_mode):
+            bad.append(f"[{backend}] mkfifo did not leave a FIFO")
+        st = os.stat(f)
+        if (int(st.st_atime), int(st.st_mtime)) != (1000000, 2000000):
+            bad.append(f"[{backend}] utime left atime/mtime "
+                       f"{int(st.st_atime)}/{int(st.st_mtime)}, wanted 1000000/2000000")
+    if bad:
+        return False, ("%d disagreements:\n      %s"
+                       % (len(bad), "\n      ".join(bad)))
+    if verbose:
+        print("      access/symlink/link/mkfifo/utime/umask effects agree with "
+              "CPython on both backends")
+    return True, ""
+
+
 GROUPS = {
     "inplace": group_inplace,
     "strings": group_strings,
@@ -1369,6 +1455,7 @@ GROUPS = {
     "fs": group_fs,
     "env": group_env,
     "proc": group_proc,
+    "fsmeta": group_fsmeta,
     "dirs": group_dirs,
     "blob": group_blob,
 }

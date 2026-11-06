@@ -1686,6 +1686,26 @@ def fs_rename(a, b) -> int:
     return rename(a, b)
 
 
+def fs_symlink(target, linkpath) -> int:
+    """`symlink(target, linkpath)`: 0 on success, -1 on failure (e.g. EEXIST)."""
+    return symlink(target, linkpath)
+
+
+def fs_link(existing, newpath) -> int:
+    """`link(existing, newpath)`: a hard link; 0 on success, -1 on failure."""
+    return link(existing, newpath)
+
+
+def fs_mkfifo(p, mode) -> int:
+    """`mkfifo(p, mode)`: a named pipe; 0 on success, -1 on failure."""
+    return mkfifo(p, mode)
+
+
+def fs_umask(mask) -> int:
+    """`umask(mask)`: install `mask` and return the PREVIOUS one. It cannot fail."""
+    return umask(mask)
+
+
 def fs_rmdir(p) -> int:
     """`rmdir(p)`: 0 on success, -1 on failure."""
     return rmdir(p)

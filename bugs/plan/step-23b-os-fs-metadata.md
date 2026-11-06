@@ -1,4 +1,5 @@
 # plan/step-23b: os filesystem metadata: access + R_OK/W_OK/X_OK/F_OK, utime, symlink, link, mkfifo, umask
+**Status: DONE 2026-11-05 (verified).** `F_OK/R_OK/W_OK/X_OK`, `access`, `utime`, `symlink`, `link`, `mkfifo`, `umask` added; prototypes `symlink/link/mkfifo` `(32,True)`, `umask` `(16,False)` (mode_t is uint16 on Darwin). New group `fsmeta` in `test_formal_os.py` checks statuses AND effects with CPython (`islink/readlink`, `st_nlink`, `S_ISFIFO`, atime/mtime) on both backends. `test_formal_admitted.py` not run (needs the library build).
 Class: mid      Size: M      Depends: 26      Blocks: none
 Source: `bugs/FORMAL_known_limits.md` §6.3-6.4 (host-import); round template and conventions are `bugs/plan/step-23-host-modules.md` (read it first; follow its "Work order" verbatim, items 3-7 are specialised below)
 
