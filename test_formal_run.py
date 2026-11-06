@@ -15983,7 +15983,7 @@ def build_formal(src, out, backend=None, tmpdir=None, env=None):
 #: truncated the same), and every needle the rows carried was early in the
 #: text, so the model's own sentence is what pins the ending.
 _APPEND_OVERFLOW_TEXT = __import__(
-    "formal.model", fromlist=["model"]).list_append_overflow_message("xs", 32)
+    "formal.model", fromlist=["model"]).list_append_overflow_message("xs", 1)
 
 STDERR_CASES = [
     # `xs.append` in a loop, past the capacity the append-site scan reserved.
