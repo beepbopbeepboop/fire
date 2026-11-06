@@ -1600,7 +1600,7 @@ def format_token(tok: Token) -> str:
 
 # ── Layout helpers ──────────────────────────────────────────────────
 def _strip_inline_comment(s: str) -> str:
-    """Remove trailing # or // comment, respecting quoted strings (including backtick strings and f/r/b prefixes)."""
+    """Remove trailing # comment, respecting quoted strings (including backtick strings and f/r/b prefixes)."""
     in_str = None
     i = 0
     while i < len(s):
@@ -1614,8 +1614,6 @@ def _strip_inline_comment(s: str) -> str:
             # f"..." prefix: already entered via the quote char above
             in_str = c
         elif c == _CMT_CHAR:
-            return s[:i]
-        elif c == '/' and i + 1 < len(s) and s[i + 1] == '/':
             return s[:i]
         i += 1
     return s
@@ -2321,7 +2319,7 @@ def py_tokenize(src: str) -> list[Token]:
     """Tokenize with layout rules derived from the .md spec:
         - Indentation (4 spaces) → INDENT/DEDENT
         - ';' → statement separator
-        - '#' or '//' → end-of-line comment
+        - '#' → end-of-line comment
         - Multi-line statements use indentation (no backslash continuation)
 
     The one-argument entry point, and the one every caller but two uses. It
@@ -2401,10 +2399,6 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                 # reaching here means we're in plain code. Comments can
                 # contain stray quote characters (e.g. `# say "hi"`) that
                 # must not be mistaken for string delimiters.
-                j = src.find('\n', i)
-                i = n if j == -1 else j
-                continue
-            if c == '/' and i + 1 < n and src[i + 1] == '/':
                 j = src.find('\n', i)
                 i = n if j == -1 else j
                 continue
@@ -2643,7 +2637,7 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
         physical_line = line_nums[line_idx]
         expanded = _indent_expanded(line)
         raw_content = expanded.lstrip()
-        if not raw_content or raw_content.startswith(_CMT_CHAR) or raw_content.startswith('//'): continue
+        if not raw_content or raw_content.startswith(_CMT_CHAR): continue
         content = _strip_inline_comment(raw_content).rstrip()
         if not content: continue
         indent = len(expanded) - len(raw_content)
