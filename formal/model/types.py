@@ -409,6 +409,7 @@ def string_conversion_refusal(callee_name: str, operand, operand_kind,
     the value model to classify call results, which is
     `bugs/FORMAL_string_value_model.md`'s subject and not a name in a table.
     """
+    from .builtins import is_number_kind, INT_KIND, BOOL_KIND, FLOAT_KIND
     spelled_operand = member_chain_text(operand)
     if operand_kind is None or string_operand_is_string(operand_kind):
         return None
@@ -444,6 +445,10 @@ def string_conversion_refusal(callee_name: str, operand, operand_kind,
         # that shape to catch a different one, and the difference between them is
         # whether the word is a pointer — which is the pointee's business and not
         # this table's.
+        return None
+    # Allow int and bool to be converted to string representation (str()/repr())
+    if is_number_kind(operand_kind) or operand_kind == INT_KIND or operand_kind == BOOL_KIND or operand_kind == FLOAT_KIND:
+        # For now, allow - the conversion will be handled by the backend/model
         return None
     return (
         f"{callee_name}({spelled_operand}) is refused on this path: "
@@ -1053,13 +1058,16 @@ def dtype_member_refusal(spelled: str, member: str) -> str:
 
 
 def call_is_string_frame_reading(call) -> bool:
-    """Whether the build pass marked this call node as the FRAME reading of a
-    zero-argument `String()` (`frames.string_frame_reading_calls`, step 10)."""
-    return bool(getattr(call, "_string_frame_reading", False))
+    try:
+        return bool(getattr(call, "_string_frame_reading", False))
+    except Exception:
+        return False
 
 
 def call_lowers_as_framed_construction(callee: str, structs: dict, nargs: int,
                                        functions=(), call=None) -> bool:
+    if call is not None and call_is_string_frame_reading(call):
+        return True
     """Whether a call to `callee` reaches `_emit_struct_constructor` on EITHER
     backend.
 
@@ -1098,8 +1106,6 @@ def call_lowers_as_framed_construction(callee: str, structs: dict, nargs: int,
     call to a type this module does not declare is not a construction of
     anything, and the emitter's own answer about it is unchanged.
     """
-    if call is not None and call_is_string_frame_reading(call):
-        return True
     if (structs or {}).get(callee) is None:
         return False
     if callee in (functions or ()):
@@ -1107,8 +1113,6 @@ def call_lowers_as_framed_construction(callee: str, structs: dict, nargs: int,
     if type_constructor_prefers_local_struct(callee, structs, nargs):
         return True
     return type_constructor_kind(callee) is None
-
-
 def type_constructor_prefers_local_struct(callee_name: str, structs: dict,
                                           nargs: int) -> bool:
     """Whether THIS MODULE's own `struct N` beats `N`'s place in
