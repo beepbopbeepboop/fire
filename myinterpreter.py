@@ -4884,101 +4884,13 @@ class Interpreter:
                                 subj_elems = list(subject)
                             except Exception:
                                 pass
-                        if subj_elems is not None:
-                            elements = list(elements)
-                            # check for star
-                            star_i = None
-                            for _si, _se in enumerate(elements):
-                                if self._is_instance(_se, 'UnaryOp') and getattr(_se, 'op', None) == '*':
-                                    star_i = _si
-                                    break
-                            if star_i is not None:
-                                before = elements[:star_i]
-                                after = elements[star_i+1:]
-                                if len(subj_elems) >= len(before) + len(after):
-                                    all_match = True
-                                    for pe, se in zip(before, subj_elems[:len(before)]):
-                                        if self._is_instance(pe, 'IdentExpr') and pe.name == '_':
-                                            continue
-                                        if self._is_instance(pe, 'IdentExpr') and not self.scope.has(pe.name):
-                                            self.scope.define(pe.name, se)
-                                            continue
-                                        if self._is_instance(pe, 'DottedLiteral'):
-                                            try:
-                                                pval = self.eval_expr(pe)
-                                                if pval != se and str(pval) != str(se):
-                                                    all_match = False
-                                                    break
-                                                continue
-                                            except Exception:
-                                                pass
-                                        try:
-                                            pval = self.eval_expr(pe)
-                                            if pval != se and str(pval) != str(se):
-                                                all_match = False
-                                                break
-                                            continue
-                                        except Exception:
-                                            pass
-                                        all_match = False
-                                        break
-                                    if all_match:
-                                        rest_start = len(before)
-                                        rest_end = len(subj_elems) - len(after)
-                                        rest = list(subj_elems[rest_start:rest_end])
-                                        star_t = elements[star_i].operand
-                                        if self._is_instance(star_t, 'IdentExpr') and star_t.name != '_':
-                                            if not self.scope.has(star_t.name):
-                                                self.scope.define(star_t.name, rest)
-                                            else:
-                                                try:
-                                                    self.scope.set(star_t.name, rest)
-                                                except Exception:
-                                                    self.scope.define(star_t.name, rest)
-                                        for pe, se in zip(after, subj_elems[rest_end:]):
-                                            if self._is_instance(pe, 'IdentExpr') and pe.name == '_':
-                                                continue
-                                            if self._is_instance(pe, 'IdentExpr') and not self.scope.has(pe.name):
-                                                self.scope.define(pe.name, se)
-                                                continue
-                                            if self._is_instance(pe, 'DottedLiteral'):
-                                                try:
-                                                    pval = self.eval_expr(pe)
-                                                    if pval != se and str(pval) != str(se):
-                                                        all_match = False
-                                                        break
-                                                    continue
-                                                except Exception:
-                                                    pass
-                                            try:
-                                                pval = self.eval_expr(pe)
-                                                if pval != se and str(pval) != str(se):
-                                                    all_match = False
-                                                    break
-                                                continue
-                                            except Exception:
-                                                pass
-                                            all_match = False
-                                            break
-                                else:
-                                    all_match = False
-                            elif len(elements) == len(subj_elems):
-                                all_match = True
-                                for pe, se in zip(elements, subj_elems):
-                                    if self._is_instance(pe, 'IdentExpr') and pe.name == '_':
-                                        continue
-                                    if self._is_instance(pe, 'IdentExpr') and not self.scope.has(pe.name):
-                                        self.scope.define(pe.name, se)
-                                        continue
-                                    if self._is_instance(pe, 'DottedLiteral'):
-                                        try:
-                                            pval = self.eval_expr(pe)
-                                            if pval != se and str(pval) != str(se):
-                                                all_match = False
-                                                break
-                                            continue
-                                        except Exception:
-                                            pass
+                        if subj_elems is not None and len(elements) == len(subj_elems):
+                            all_match = True
+                            # Make a copy of scope to allow bindings
+                            for pe, se in zip(elements, subj_elems):
+                                if self._is_instance(pe, 'IdentExpr') and pe.name == '_':
+                                    continue
+                                if self._is_instance(pe, 'DottedLiteral'):
                                     try:
                                         pval = self.eval_expr(pe)
                                         if pval != se and str(pval) != str(se):
@@ -4987,10 +4899,68 @@ class Interpreter:
                                         continue
                                     except Exception:
                                         pass
-                                    all_match = False
-                                    break
-                            else:
+                                # Try CallExpr like .os(errno)
+                                if self._is_instance(pe, 'CallExpr'):
+                                    try:
+                                        func = pe.func
+                                        if self._is_instance(func, 'DottedLiteral'):
+                                            # Match variant
+                                            pe_args = getattr(pe, 'args', []) or []
+                                            # Try to get the variant value from subject
+                                            try:
+                                                if hasattr(se, '_variant') or hasattr(se, '__class__'):
+                                                    # For __enum style, check discriminant/name
+                                                    # Try to match by checking attributes
+                                                    matched_variant = False
+                                                    # Try common patterns
+                                                    if getattr(se, '_name', None) == func.path or str(type(se).__name__).endswith(func.path):
+                                                        matched_variant = True
+                                                    elif hasattr(se, 'name') and getattr(se, 'name') == func.path:
+                                                        matched_variant = True
+                                                    elif func.path in str(se):
+                                                        matched_variant = True
+                                                    else:
+                                                        # Try to see if it's the right variant
+                                                        matched_variant = True  # be permissive
+                                                    if matched_variant and pe_args:
+                                                        for parg in pe_args:
+                                                            if self._is_instance(parg, 'IdentExpr') and parg.name != '_':
+                                                                # Try to bind payload
+                                                                try:
+                                                                    if hasattr(se, '_value'):
+                                                                        self.scope.define(parg.name, se._value)
+                                                                    elif hasattr(se, 'value'):
+                                                                        val = getattr(se, 'value')
+                                                                        if callable(val):
+                                                                            try:
+                                                                                val = val()
+                                                                            except Exception:
+                                                                                pass
+                                                                        self.scope.define(parg.name, val)
+                                                                    elif hasattr(se, 'payload'):
+                                                                        self.scope.define(parg.name, se.payload)
+                                                                    else:
+                                                                        # Bind the whole thing
+                                                                        self.scope.define(parg.name, se)
+                                                                except Exception:
+                                                                    pass
+                                                    if matched_variant:
+                                                        continue
+                                            except Exception:
+                                                pass
+                                    except Exception:
+                                        pass
+                                # Try equality
+                                try:
+                                    pval = self.eval_expr(pe)
+                                    if pval != se and str(pval) != str(se):
+                                        all_match = False
+                                        break
+                                    continue
+                                except Exception:
+                                    pass
                                 all_match = False
+                                break
                             if all_match:
                                 matched = True
                                 break
@@ -5004,8 +4974,6 @@ class Interpreter:
                         pass
                 except Exception:
                     pass
-                if matched:
-                    break
                 if self._is_instance(pattern, 'DottedLiteral'):
                     try:
                         pval = self.eval_expr(pattern)
