@@ -281,7 +281,7 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`15e`](../bugs/plan/step-15e-pin-imported-parameter-annotation.md) | DONE | easy | S | 15a | re-pin the imported-instantiation parameter annotation (value vs frame) |
 | [`16a`](../bugs/plan/step-16a-bare-call-design-memo.md) | DONE | hard | M | 15a | DESIGN MEMO — what a bare template call's type arguments may be inferred from |
 | [`16b`](../bugs/plan/step-16b-consolidate-bare-inference.md) | DONE | mid | M | 15a | fold the two copies of bare-call inference into one function (behaviour-preserving) |
-| [`16c`](../bugs/plan/step-16c-matcher-keywords-defaults.md) | OPEN | mid | S | 16a, 16b | bare-call inference — keyword arguments and type-spelled defaults |
+| [`16c`](../bugs/plan/step-16c-matcher-keywords-defaults.md) | DONE | mid | S | 16a, 16b | bare-call inference — keyword arguments and type-spelled defaults |
 | [`16d`](../bugs/plan/step-16d-return-type-inference.md) | OPEN | mid | L | 16a, 16b | bare-call inference through declared types (the `dealloc(allocation^)` row) |
 | [`16e`](../bugs/plan/step-16e-bound-resolution.md) | OPEN | mid | M | 16a, 16b | bare-call inference against a trait bound (the `FormatStruct(writer, ...)` row) |
 | [`16f`](../bugs/plan/step-16f-reconcile-export-pins.md) | OPEN | easy | S | 16c, 16d, 16e | reconcile the two export pins and the refusal wording with the inference |

@@ -4130,6 +4130,100 @@ def test_a_bare_call_to_an_imported_template_is_inferred_from_argument_annotatio
         check(got == "7\n", f"[{arch}] printed {got!r}, expected '7\\n'")
 
 
+
+# ── step 16c: keyword arguments and type-spelled defaults ──────────────
+
+
+def test_a_keyword_argument_decides_a_bare_calls_type_argument(tmpdir):
+    """`widen(v=x)` with `var x: Int = 7` infers `T=Int` (16c, kwargs)."""
+    src = ("def widen[T: Intable](v: T) -> T:\n"
+           "    return v\n"
+           "\n"
+           "def main():\n"
+           "    var x: Int = 7\n"
+           "    print(widen(v=x))\n")
+    cpython = ("def widen(v):\n"
+               "    return v\n"
+               "\n"
+               "def main():\n"
+               "    x = 7\n"
+               "    print(widen(v=x))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm16c_kw", None, src, cpython)
+        check(got == "7\n", f"[{arch}] printed {got!r}, expected '7\\n'")
+
+
+def test_a_type_spelled_default_settles_an_uninferred_parameter(tmpdir):
+    """`pick[T: AnyType = Int](v: Int)` bare call settles `T` from default (16c)."""
+    src = ("def pick[T: AnyType = Int](v: Int) -> Int:\n"
+           "    return v\n"
+           "\n"
+           "def main():\n"
+           "    var x: Int = 5\n"
+           "    print(pick(x))\n")
+    cpython = ("def pick(v):\n"
+               "    return v\n"
+               "\n"
+               "def main():\n"
+               "    x = 5\n"
+               "    print(pick(x))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm16c_def", None, src, cpython)
+        check(got == "5\n", f"[{arch}] printed {got!r}, expected '5\\n'")
+
+
+def test_a_comptime_value_default_leaves_the_bare_call_refused(tmpdir):
+    """`masked[T, flag: Bool = False]` bare call refused (16c, comptime default)."""
+    lib = ("def masked[T: Intable, flag: Bool = False](v: T) -> T:\n"
+           "    return v\n"
+           "\n"
+           "def helper(x: Int) -> Int:\n"
+           "    return x\n")
+    prog = ("from pairlib import masked\n"
+            "\n"
+            "def main():\n"
+            "    var x: Int = 7\n"
+            "    print(masked(x))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        text = run_pair_case(tmpdir, arch, "mm16c_cvdef", lib, prog, "",
+                             expect_ok=False)
+        check("does not export it" in text
+              and ("the SOURCE is right" in text or "does not infer" in text),
+              f"[{arch}] expected existing bare-call refusal text: "
+              f"{text.strip()[-500:]}")
+
+
+def test_a_callees_own_parameter_is_not_an_inference(tmpdir):
+    """Calling inside another template with `v: T` is not inferable (16c, #3)."""
+    lib = ("def widen[T: Intable](v: T) -> T:\n"
+           "    return v\n"
+           "\n"
+           "def helper(x: Int) -> Int:\n"
+           "    return x\n")
+    prog = ("from pairlib import widen\n"
+            "\n"
+            "def caller[T](v: T) -> T:\n"
+            "    return widen(v)\n"
+            "\n"
+            "def main():\n"
+            "    print(caller[Int](7))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        text = run_pair_case(tmpdir, arch, "mm16c_selft", lib, prog, "",
+                             expect_ok=False)
+        # Refusal: the bare widen(v) inside caller[T] cannot be inferred because
+        # v's type is the caller's own T (defect #3).
+        check(result_is_refusal := ("does not export it" in text
+                                    or "brackets cannot be bound" in text
+                                    or "calls a name this unit does not compile" in text
+                                    or "does not infer" in text
+                                    or "SOURCE is right" in text),
+              f"[{arch}] expected a refusal for callee's own parameter: "
+              f"{text.strip()[-600:]}")
+
 TESTS = [
     ("a generic struct template is instantiated at the importer's type",
      test_a_generic_struct_template_is_instantiated_at_the_importers_type),
@@ -4169,6 +4263,14 @@ TESTS = [
      test_a_bare_call_to_an_imported_generic_is_still_refused),
     ("a bare call to an imported template is inferred from argument annotation",
      test_a_bare_call_to_an_imported_template_is_inferred_from_argument_annotation),
+    ("a keyword argument decides a bare call's type argument",
+     test_a_keyword_argument_decides_a_bare_calls_type_argument),
+    ("a type-spelled default settles an uninferred parameter",
+     test_a_type_spelled_default_settles_an_uninferred_parameter),
+    ("a comptime-value default leaves the bare call refused",
+     test_a_comptime_value_default_leaves_the_bare_call_refused),
+    ("a callee's own parameter is not an inference",
+     test_a_callees_own_parameter_is_not_an_inference),
     ("an inferred-parameter function is called without the bracket",
      test_an_inferred_parameter_function_is_called_without_the_bracket),
     ("a constants-only module builds and its constants read back",
