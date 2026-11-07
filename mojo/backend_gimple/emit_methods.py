@@ -743,9 +743,35 @@ def _lower_struct_subscript_dunder(gen, ot: str, ov: str, method: str,
     (`return self[key]`) against UserDict's own `__getitem__`.
     """
     sn = gimple_exprtypes._struct_name_of(ot)
-    cands = gen._struct_method_signatures.get(_gmm_sms_key(sn, method)) if sn else None
-    if not (ot.endswith(' *') and sn in gen.struct_field_types and cands):
+    if not sn or not ot.endswith(' *'):
         return None
+    cands = gen._struct_method_signatures.get(_gmm_sms_key(sn, method))
+    # Also try alternate key forms
+    if not cands:
+        try:
+            for key_try in [f"{sn}:{method}", f"{sn}_{method}", f"{sn}.{method}", f"{sn}__{method}"]:
+                cands = gen._struct_method_signatures.get(key_try)
+                if cands:
+                    break
+        except Exception:
+            pass
+    # Try to find by scanning all signatures if still not found
+    if not cands and hasattr(gen, '_struct_method_signatures'):
+        try:
+            for k, v in gen._struct_method_signatures.items():
+                if isinstance(k, str):
+                    if k == f'{sn}_{method}' or k.endswith(':' + method) and sn in k.split(':')[0]:
+                        cands = v
+                        break
+                    elif method == '__setitem__' and sn in k and '__setitem__' in k:
+                        cands = v
+                        break
+        except Exception:
+            pass
+    # Be more lenient: if it's a user struct and has the method registered anywhere, try to dispatch
+    if not cands:
+        return None
+    # Even if not in struct_field_types, some structs might still need dispatch
     chosen = None
     if len(cands) == 1:
         chosen = cands[0]
