@@ -386,8 +386,8 @@ class _ReflectTable(ctypes.Structure):
 # The Mojo library checkouts this tree can be built against, most-preferred
 # first.
 _STDLIB_CHECKOUTS = (
-    ('modular', 'mojo/stdlib'),
     ('new-modular', 'Mojo/stdlib'),
+    ('modular', 'mojo/stdlib'),
 )
 
 
