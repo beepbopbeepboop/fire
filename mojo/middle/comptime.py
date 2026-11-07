@@ -409,10 +409,18 @@ def eval_const(node, bindings: dict, platform: str = None):
     # `byte == ord_dot` compared against 0 and `byte - ord_0` subtracted 0,
     # i.e. silently wrong digits, with a `-Wpointer-to-int-cast` warning as
     # the only symptom. The constructor wraps to its width, as the runtime
-    # constructor does.
+    # constructor does. `len(x)` folds when `x` is a comptime-known
+    # list/tuple/string so `comptime assert len(a) == ...` and
+    # `comptime for i in range(len(a))` bounds produce compile-time
+    # diagnostics (DIAGNOSTICS_missing_validation_modular).
     if (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
             and len(node.args) == 1 and not node.kwargs):
         _cfn = node.func.name
+        if _cfn == 'len':
+            _lv = eval_const(node.args[0], bindings, platform)
+            if isinstance(_lv, (list, tuple, str)):
+                return len(_lv)
+            return None
         if _cfn == 'ord':
             _ov = eval_const(node.args[0], bindings, platform)
             if isinstance(_ov, str) and len(_ov) == 1:
@@ -607,6 +615,14 @@ def eval_const_int(node, bindings: dict, call_hook=None):
             if not link: return 0
             left = right
         return 1
+    # `len(x)` of a comptime-known list/tuple/string (DIAGNOSTICS_missing_validation_modular).
+    if (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
+            and node.func.name == 'len' and len(node.args) == 1
+            and not node.kwargs):
+        _lv = eval_const(node.args[0], bindings)
+        if isinstance(_lv, (list, tuple, str)):
+            return len(_lv)
+        return None
     if call_hook is not None and isinstance(node, CallExpr) and isinstance(
             node.func, IdentExpr):
         argvals = [eval_const_int(a, bindings, call_hook) for a in node.args]
@@ -675,11 +691,11 @@ def _const_foldable(node, bindings: dict, call_hook=None) -> bool:
         # exposes no byteorder, the fold declines, and a shape-only "yes"
         # would then read as CONST_FALSE and drop the live branch.
         return eval_const(node, bindings) is not None
-    # String/ord/scalar constructors and other 1-arg ident calls eval_const folds.
+    # String/ord/len/scalar constructors and other 1-arg ident calls eval_const folds.
     if (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
             and len(node.args) == 1 and not node.kwargs
             and node.func.name in ('String', 'StringSlice', 'StaticString',
-                                   'StringSpan', 'ord')
+                                   'StringSpan', 'ord', 'len')
             or (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
                 and len(node.args) == 1 and not node.kwargs
                 and node.func.name in _SCALAR_CTOR_BITS)):

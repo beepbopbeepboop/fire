@@ -195,6 +195,51 @@ def test_constrained_in_comptime_for_range_comptime_bound_true():
         '        constrained[i < 3, "ok"]()\n')
 
 
+def test_constrained_len_comptime_list_fails():
+    # `len()` folds on comptime-known collections (DIAGNOSTICS_missing_validation_modular).
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime a = [1, 2, 3]\n'
+            '    constrained[len(a) == 2, "bad len"]()\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'constraint failed' in s, s
+        assert 'bad len' in s, s
+        return
+    raise AssertionError('constrained len(comptime list) == wrong compiled')
+
+
+def test_constrained_len_comptime_list_true():
+    _compile(
+        'fn f():\n'
+        '    comptime a = [1, 2, 3]\n'
+        '    constrained[len(a) == 3, "ok"]()\n')
+
+
+def test_constrained_in_comptime_for_range_len_fails():
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime a = [1, 2, 3]\n'
+            '    comptime for i in range(len(a)):\n'
+            '        constrained[i < 2, "nope"]()\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'constraint failed' in s, s
+        assert 'nope' in s, s
+        return
+    raise AssertionError('constrained in comptime for range(len(a)) compiled')
+
+
+def test_constrained_in_comptime_for_range_len_true():
+    _compile(
+        'fn f():\n'
+        '    comptime a = [1, 2, 3]\n'
+        '    comptime for i in range(len(a)):\n'
+        '        constrained[i < 3, "ok"]()\n')
+
+
 if __name__ == '__main__':
     test_constrained_bracket_false_fails()
     test_constrained_bracket_false_no_msg()
@@ -215,4 +260,8 @@ if __name__ == '__main__':
     test_constrained_in_comptime_for_comptime_alias_tuple_unpack()
     test_constrained_in_comptime_for_range_comptime_bound()
     test_constrained_in_comptime_for_range_comptime_bound_true()
+    test_constrained_len_comptime_list_fails()
+    test_constrained_len_comptime_list_true()
+    test_constrained_in_comptime_for_range_len_fails()
+    test_constrained_in_comptime_for_range_len_true()
     print('ok')

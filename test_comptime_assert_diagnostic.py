@@ -307,6 +307,53 @@ def test_comptime_assert_in_comptime_for_range_comptime_bound_true():
         '        comptime assert i < 3, "ok"\n')
 
 
+def test_comptime_assert_len_comptime_list_fails():
+    # `len()` folds on comptime-known collections (DIAGNOSTICS_missing_validation_modular).
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime a = [1, 2, 3]\n'
+            '    comptime assert len(a) == 2, "bad len"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad len' in s, s
+        return
+    raise AssertionError('comptime assert len(comptime list) == wrong compiled')
+
+
+def test_comptime_assert_len_comptime_list_true():
+    _compile(
+        'fn f():\n'
+        '    comptime a = [1, 2, 3]\n'
+        '    comptime assert len(a) == 3, "ok"\n')
+
+
+def test_comptime_assert_in_comptime_for_range_len_fails():
+    # `range(len(a))` bounds must fold when `a` is comptime-known so the
+    # comptime-for unroller can validate the body.
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime a = [1, 2, 3]\n'
+            '    comptime for i in range(len(a)):\n'
+            '        comptime assert i < 2, "nope"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'nope' in s, s
+        return
+    raise AssertionError('comptime assert in comptime for range(len(a)) compiled')
+
+
+def test_comptime_assert_in_comptime_for_range_len_true():
+    _compile(
+        'fn f():\n'
+        '    comptime a = [1, 2, 3]\n'
+        '    comptime for i in range(len(a)):\n'
+        '        comptime assert i < 3, "ok"\n')
+
+
 if __name__ == '__main__':
     test_comptime_assert_false_fails()
     test_comptime_assert_false_no_msg()
@@ -333,4 +380,8 @@ if __name__ == '__main__':
     test_comptime_assert_in_comptime_for_comptime_alias_tuple_unpack()
     test_comptime_assert_in_comptime_for_range_comptime_bound()
     test_comptime_assert_in_comptime_for_range_comptime_bound_true()
+    test_comptime_assert_len_comptime_list_fails()
+    test_comptime_assert_len_comptime_list_true()
+    test_comptime_assert_in_comptime_for_range_len_fails()
+    test_comptime_assert_in_comptime_for_range_len_true()
     print('ok')
