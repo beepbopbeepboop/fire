@@ -557,6 +557,11 @@ def eval_const_int(node, bindings: dict, call_hook=None):
     simply does not fold calls."""
     if isinstance(node, IntLiteral):  return node.value
     if isinstance(node, BoolLiteral): return int(node.value)
+    if isinstance(node, IdentExpr):
+        v = bindings.get(node.name)
+        if isinstance(v, (int, bool)) and not isinstance(v, str):
+            return int(v)
+        return None
     if isinstance(node, UnaryOp) and node.op in FOLD_UNARY_OPS:
         v = eval_const_int(node.operand, bindings, call_hook)
         return None if v is None else fold_unary_sign(node.op, v)

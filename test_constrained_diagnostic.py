@@ -170,6 +170,31 @@ def test_constrained_in_comptime_for_comptime_alias_tuple_unpack():
     raise AssertionError('constrained in comptime for over comptime alias unpack compiled')
 
 
+def test_constrained_in_comptime_for_range_comptime_bound():
+    # Range bounds from comptime-bound identifiers must unroll so comptime
+    # validation sees the loop variable (DIAGNOSTICS_missing_validation_modular).
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime n = 3\n'
+            '    comptime for i in range(n):\n'
+            '        constrained[i < 2, "nope"]()\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'constraint failed' in s, s
+        assert 'nope' in s, s
+        return
+    raise AssertionError('constrained in comptime for range(comptime var) compiled')
+
+
+def test_constrained_in_comptime_for_range_comptime_bound_true():
+    _compile(
+        'fn f():\n'
+        '    comptime n = 3\n'
+        '    comptime for i in range(n):\n'
+        '        constrained[i < 3, "ok"]()\n')
+
+
 if __name__ == '__main__':
     test_constrained_bracket_false_fails()
     test_constrained_bracket_false_no_msg()
@@ -188,4 +213,6 @@ if __name__ == '__main__':
     test_constrained_in_comptime_for_comptime_alias()
     test_constrained_in_comptime_for_comptime_alias_true()
     test_constrained_in_comptime_for_comptime_alias_tuple_unpack()
+    test_constrained_in_comptime_for_range_comptime_bound()
+    test_constrained_in_comptime_for_range_comptime_bound_true()
     print('ok')

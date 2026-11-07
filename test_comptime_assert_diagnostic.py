@@ -282,6 +282,31 @@ def test_comptime_assert_in_comptime_for_comptime_alias_tuple_unpack():
     raise AssertionError('comptime assert in comptime for over comptime alias unpack compiled')
 
 
+def test_comptime_assert_in_comptime_for_range_comptime_bound():
+    # Range bounds from comptime-bound identifiers must unroll so comptime
+    # validation sees the loop variable (DIAGNOSTICS_missing_validation_modular).
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime n = 3\n'
+            '    comptime for i in range(n):\n'
+            '        comptime assert i < 2, "nope"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'nope' in s, s
+        return
+    raise AssertionError('comptime assert in comptime for range(comptime var) compiled')
+
+
+def test_comptime_assert_in_comptime_for_range_comptime_bound_true():
+    _compile(
+        'fn f():\n'
+        '    comptime n = 3\n'
+        '    comptime for i in range(n):\n'
+        '        comptime assert i < 3, "ok"\n')
+
+
 if __name__ == '__main__':
     test_comptime_assert_false_fails()
     test_comptime_assert_false_no_msg()
@@ -306,4 +331,6 @@ if __name__ == '__main__':
     test_comptime_assert_in_comptime_for_comptime_alias()
     test_comptime_assert_in_comptime_for_comptime_alias_true()
     test_comptime_assert_in_comptime_for_comptime_alias_tuple_unpack()
+    test_comptime_assert_in_comptime_for_range_comptime_bound()
+    test_comptime_assert_in_comptime_for_range_comptime_bound_true()
     print('ok')
