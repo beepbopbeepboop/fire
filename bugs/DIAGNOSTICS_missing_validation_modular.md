@@ -152,6 +152,17 @@ Key categories:
   variables are diagnosed instead of the body being silently dropped.
   Regressions: `test_comptime_assert_diagnostic.py`,
   `test_constrained_diagnostic.py`.
+- **Landed (follow-up, this worker, branch
+  `work/bug-mid-diagnostics-missing-validation-m-1584`):** root-cause fix in
+  `mojo/backend_gimple/emit_funcs.py` comptime-for unrolling: `comptime for`
+  over a non-literal iterable that resolves via `gen._eval_const` to a constant
+  list/tuple (e.g. `comptime vals = [0, 1, 2]; comptime for i in vals`, or a
+  comptime alias holding tuple-unpack rows) is now unrolled with loop targets
+  bound in `gen._comptime_vals` per iteration (saved/restored), so
+  provably-false `comptime assert` / `constrained` conditions that depend on
+  those loop variables are diagnosed instead of the body being silently dropped.
+  Regressions: `test_comptime_assert_diagnostic.py`,
+  `test_constrained_diagnostic.py`.
 - **Still open (large):** the rest of this umbrella — comptime-assert/
   `constrained` cases where condition evaluation is incomplete (e.g.
   DType predicates on comptime params in generic struct instantiations that
@@ -161,9 +172,9 @@ Key categories:
   `constrained` cases whose conditions/messages cannot yet be folded (generics,
   trait reflection, `StaticString(_get_kgen_string[...])`), `comptime assert`/
   `constrained` in non-gimple/formal backends or in comptime-for shapes beyond
-  the gimple unroller's bound forms (e.g. iteration over non-literal comptime
-  values, DType/variadic iterables), type/trait conformance diagnostics, import
-  errors, and the other categories listed above.
+  the gimple unroller's bound forms (e.g. DType/variadic iterables, iteration
+  over computed/non-foldable iterables), type/trait conformance diagnostics,
+  import errors, and the other categories listed above.
   `build/checkfail_candidates.json` is not present in this worktree; re-run
   `tools/collect_checkfail.py` against the modular suite to refresh the
   candidate list and prioritize.

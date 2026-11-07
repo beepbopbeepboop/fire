@@ -134,6 +134,42 @@ def test_constrained_in_comptime_for_tuple_unpack_true():
     _compile('fn f():\n    comptime for i, j in [(0, 1), (1, 2)]:\n        constrained[i < j, "ok"]()\n')
 
 
+def test_constrained_in_comptime_for_comptime_alias():
+    # Iterating over a comptime (non-literal) iterable alias must unroll with
+    # the loop variable bound so comptime diagnostics fire
+    # (bugs/DIAGNOSTICS_missing_validation_modular.md).
+    src = 'fn f():\n    comptime vals = [0, 1, 2]\n    comptime for i in vals:\n        constrained[i < 2, "bad"]()\n'
+    try:
+        _compile(src)
+    except RuntimeError as e:
+        s = str(e)
+        assert 'constraint failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('constrained in comptime for over comptime alias compiled')
+
+
+def test_constrained_in_comptime_for_comptime_alias_true():
+    _compile('fn f():\n    comptime vals = [0, 1, 2]\n    comptime for i in vals:\n        constrained[i < 3, "ok"]()\n')
+
+
+def test_constrained_in_comptime_for_comptime_alias_tuple_unpack():
+    src = (
+        'fn f():\n'
+        '    comptime pairs = [(0, 1), (2, 0)]\n'
+        '    comptime for i, j in pairs:\n'
+        '        constrained[i + j < 2, "sum"]()\n'
+    )
+    try:
+        _compile(src)
+    except RuntimeError as e:
+        s = str(e)
+        assert 'constraint failed' in s, s
+        assert 'sum' in s, s
+        return
+    raise AssertionError('constrained in comptime for over comptime alias unpack compiled')
+
+
 if __name__ == '__main__':
     test_constrained_bracket_false_fails()
     test_constrained_bracket_false_no_msg()
@@ -149,4 +185,7 @@ if __name__ == '__main__':
     test_constrained_in_comptime_for_list_literal_true()
     test_constrained_in_comptime_for_tuple_unpack()
     test_constrained_in_comptime_for_tuple_unpack_true()
+    test_constrained_in_comptime_for_comptime_alias()
+    test_constrained_in_comptime_for_comptime_alias_true()
+    test_constrained_in_comptime_for_comptime_alias_tuple_unpack()
     print('ok')
