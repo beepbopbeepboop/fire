@@ -506,6 +506,24 @@ def test_comptime_assert_dict_len_true():
         '    comptime assert len(d) == 2, "ok"\n')
 
 
+def test_comptime_assert_local_alias_binding_fails():
+    # Local alias bindings must be visible to comptime folding
+    # (bugs/DIAGNOSTICS_missing_validation_modular.md: "local `alias`
+    # bindings not always visible to comptime folding").
+    try:
+        _compile('fn f():\n    alias x = 5\n    comptime assert x == 0, "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime assert with local alias binding compiled without error')
+
+
+def test_comptime_assert_local_alias_binding_true():
+    _compile('fn f():\n    alias x = 5\n    comptime assert x == 5, "ok"\n')
+
+
 if __name__ == '__main__':
     test_comptime_assert_false_fails()
     test_comptime_assert_false_no_msg()
@@ -548,4 +566,6 @@ if __name__ == '__main__':
     test_comptime_assert_dict_subscript_true()
     test_comptime_assert_dict_len_fails()
     test_comptime_assert_dict_len_true()
+    test_comptime_assert_local_alias_binding_fails()
+    test_comptime_assert_local_alias_binding_true()
     print('ok')

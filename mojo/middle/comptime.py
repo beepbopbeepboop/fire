@@ -507,6 +507,36 @@ def eval_const(node, bindings: dict, platform: str = None):
             _dv = _eval_dtype_predicate(_dn, _dm)
             if _dv is not None:
                 return _dv
+    # Dict/list method calls on comptime-known values
+    if isinstance(node, CallExpr) and isinstance(node.func, MemberExpr) and not node.kwargs:
+        _obj = node.func.obj
+        _method = node.func.member
+        _ov = eval_const(_obj, bindings, platform)
+        if isinstance(_ov, dict):
+            if _method == 'keys' and len(node.args) == 0:
+                try:
+                    return list(_ov.keys())
+                except Exception:
+                    return None
+            if _method == 'values' and len(node.args) == 0:
+                try:
+                    return list(_ov.values())
+                except Exception:
+                    return None
+            if _method == 'items' and len(node.args) == 0:
+                try:
+                    return list(_ov.items())
+                except Exception:
+                    return None
+        if isinstance(_ov, (list, tuple, str)):
+            if _method == 'copy' and len(node.args) == 0:
+                try:
+                    if isinstance(_ov, str):
+                        return _ov
+                    return type(_ov)(_ov)
+                except Exception:
+                    return None
+
     # Subscript/slice on a comptime-known value (list/tuple/str/dict element
     # access or slicing). Required so `comptime assert a[i] == ...` and similar
     # conditions over comptime collections produce compile-time diagnostics
@@ -544,6 +574,25 @@ def eval_const(node, bindings: dict, platform: str = None):
                 return l
             r = eval_const(node.right, bindings, platform)
             return r
+        if op == 'in':
+            r = eval_const(node.right, bindings, platform)
+            if l is None or r is None:
+                return None
+            try:
+                if isinstance(r, (list, tuple, set)):
+                    return l in r
+                if isinstance(r, dict):
+                    return l in r
+                if isinstance(r, str) and isinstance(l, str):
+                    return l in r
+            except Exception:
+                pass
+            return None
+        if op == 'not in':
+            res = eval_const(BinaryOp(op='in', left=node.left, right=node.right), bindings, platform)
+            if res is None:
+                return None
+            return not res
         r = eval_const(node.right, bindings, platform)
         if l is None or r is None: return None
         # `eval_const` yields an int or a str depending on the expression, and
@@ -789,6 +838,23 @@ def _const_foldable(node, bindings: dict, call_hook=None) -> bool:
                 and len(node.args) == 1 and not node.kwargs
                 and node.func.name in _SCALAR_CTOR_BITS)):
         return _const_foldable(node.args[0], bindings, call_hook)
+    # Dict/list method calls on comptime-known values
+    if isinstance(node, CallExpr) and isinstance(node.func, MemberExpr) and not node.kwargs:
+        _method = node.func.member
+        if _method in ('keys', 'values', 'items') and len(node.args) == 0:
+            try:
+                _ov = eval_const(node.func.obj, bindings)
+                if isinstance(_ov, dict):
+                    return True
+            except Exception:
+                pass
+        if _method == 'copy' and len(node.args) == 0:
+            try:
+                _ov = eval_const(node.func.obj, bindings)
+                if isinstance(_ov, (list, tuple, str, dict)):
+                    return True
+            except Exception:
+                pass
     # Subscript/slice on a comptime-known collection (DIAGNOSTICS_missing_validation_modular).
     if SubscriptExpr is not None and isinstance(node, SubscriptExpr):
         if getattr(node, 'attrs', None):

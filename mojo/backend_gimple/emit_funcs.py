@@ -1090,21 +1090,35 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                         else:
                             gen._comptime_vals.pop(_n, None)
                     return
-    elif isinstance(node.iterable, (ListExpr, TupleExpr, gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
+    elif isinstance(node.iterable, (ListExpr, TupleExpr, gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)) or isinstance(getattr(node.iterable, '__class__', None), type) and getattr(node.iterable.__class__, '__name__', '') == 'DictExpr' or (DictExpr is not None and isinstance(node.iterable, DictExpr)):
         # `comptime for x in [1, 2, 3]` / `(...,)`: unroll over compile-time
         # constant elements. The loop variable is bound in gen._comptime_vals
         # each iteration so comptime assert / constrained diagnostics that depend
         # on it evaluate correctly (bugs/DIAGNOSTICS_missing_validation_modular.md:
         # "comptime-for shapes beyond the gimple unroller's bound forms").
-        elems = getattr(node.iterable, 'elements', None) or []
-        cvals = []
-        all_ok = True
-        for _e in elems:
-            _v = gen._eval_const(_e)
-            if _v is None:
-                all_ok = False
-                break
-            cvals.append(_v)
+        if DictExpr is not None and isinstance(node.iterable, DictExpr):
+            pairs = getattr(node.iterable, 'pairs', None) or []
+            cvals = []
+            all_ok = True
+            for pair in pairs:
+                if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                    all_ok = False
+                    break
+                _v = gen._eval_const(pair[0])
+                if _v is None:
+                    all_ok = False
+                    break
+                cvals.append(_v)
+        else:
+            elems = getattr(node.iterable, 'elements', None) or []
+            cvals = []
+            all_ok = True
+            for _e in elems:
+                _v = gen._eval_const(_e)
+                if _v is None:
+                    all_ok = False
+                    break
+                cvals.append(_v)
         if all_ok and not for_target_is_tuple(node.target):
             dst = gen.var_types.get(node.target)
             if dst is None:
@@ -1199,8 +1213,8 @@ def _gen_stmt_ComptimeForStmt(gen, node):
         # (bugs/DIAGNOSTICS_missing_validation_modular.md: "iteration over
         # non-literal comptime values"; subscript/string collection ops).
         _resolved = gen._eval_const(node.iterable)
-        if isinstance(_resolved, (list, tuple, str)):
-            cvals = list(_resolved)
+        if isinstance(_resolved, (list, tuple, str)) or isinstance(_resolved, dict):
+            cvals = list(_resolved.keys()) if isinstance(_resolved, dict) else list(_resolved)
             elems = [None] * len(cvals)
             if not for_target_is_tuple(node.target):
                 dst = gen.var_types.get(node.target)

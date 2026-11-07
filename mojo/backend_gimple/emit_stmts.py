@@ -1199,6 +1199,28 @@ def _gen_stmt_AssignStmt(gen, node):
     # dispatch. Purely a set write: no emission, no early return.
     if (isinstance(node.target, gimple_ctypes.IdentExpr)
             and getattr(node, 'value', None) is not None):
+        # Try to record as comptime binding (alias/local alias bindings
+        # not always visible to comptime folding)
+        try:
+            _ct_target = _as_str(node.target.name) if hasattr(node.target, 'name') else _as_str(node.target)
+            _ctv = gen._eval_const(node.value)
+            if _ctv is not None:
+                if hasattr(gen, '_comptime_vals'):
+                    if isinstance(_ctv, str):
+                        if hasattr(gen, '_comptime_str_names'):
+                            gen._comptime_str_names.add(_ct_target)
+                    gen._comptime_vals[_ct_target] = _ctv
+            else:
+                # Follow alias chain
+                _rhs = node.value
+                if isinstance(_rhs, gimple_ctypes.IdentExpr):
+                    _rhs_name = _as_str(_rhs.name)
+                    if hasattr(gen, '_comptime_vals') and _rhs_name in gen._comptime_vals:
+                        _aliased = gen._comptime_vals[_rhs_name]
+                        if _aliased is not None:
+                            gen._comptime_vals[_ct_target] = _aliased
+        except Exception:
+            pass
         _bx, _dbl = _py_box_expr(gen, node.value)
         if _bx:
             gen._pybox_vars.add(node.target.name)
