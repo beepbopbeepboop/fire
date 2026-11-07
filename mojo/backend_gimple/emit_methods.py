@@ -1947,26 +1947,32 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if _leak is not None:
             return _leak
 
-    # `sys.getfilesystemencoding()`/`sys.getdefaultencoding()` — like
-    # the existing `sys.platform` comptime-constant special case just
-    # below (obj.name == 'sys'), these are genuinely string-returning
-    # calls with no real filesystem/locale model in this codegen, so a
-    # fixed `"utf-8"` (this compiler's own real behavior on every
-    # supported host) is a faithful stand-in. Without this, the call
-    # fell through to the fully generic "unknown method on scalar
-    # receiver" stub (`_stub_result(ot, ...)`, several hundred lines
-    # below), which passes the RECEIVER's type through unchanged — the
-    # `sys` module reference itself resolves to a placeholder
-    # `int64_t`, so the stubbed call result was typed `int64_t` too.
-    # Assigning that result directly to a real `char *`-typed target
-    # (e.g. `tarfile.py`'s module-level `ENCODING = sys.
-    # getfilesystemencoding()`) is invalid C ("assignment to 'char *'
-    # from 'int' makes pointer from integer without a cast") — a hard
-    # compile failure, not just an imprecise stub. Found via
+    # `sys.getfilesystemencoding()`/`sys.getdefaultencoding()`/
+    # `sys.getfilesystemencodeerrors()` — like the existing
+    # `sys.platform` comptime-constant special case just below
+    # (obj.name == 'sys'), these are genuinely string-returning calls
+    # with no real filesystem/locale model in this codegen, so fixed
+    # answers (PEP 686: UTF-8 is the default encoding) are a faithful
+    # stand-in. Without this, the call fell through to the fully
+    # generic "unknown method on scalar receiver" stub
+    # (`_stub_result(ot, ...)`, several hundred lines below), which
+    # passes the RECEIVER's type through unchanged — the `sys` module
+    # reference itself resolves to a placeholder `int64_t`, so the
+    # stubbed call result was typed `int64_t` too. Assigning that
+    # result directly to a real `char *`-typed target (e.g.
+    # `tarfile.py`'s module-level `ENCODING =
+    # sys.getfilesystemencoding()`) is invalid C ("assignment to
+    # 'char *' from 'int' makes pointer from integer without a cast")
+    # — a hard compile failure, not just an imprecise stub. Found via
     # “CODEGEN_generator_function: Lib/tarfile.py”.
     if (isinstance(func.obj, gimple_ctypes.IdentExpr) and func.obj.name == 'sys'
-            and func.member in ('getfilesystemencoding', 'getdefaultencoding')):
+            and func.member in ('getfilesystemencoding', 'getdefaultencoding',
+                                 'getfilesystemencodeerrors')):
         for a in node.args: gen.lower_expr(a)
+        if func.member == 'getfilesystemencodeerrors':
+            # POSIX default (surrogateescape) — matches CPython on the
+            # platforms this compiler targets.
+            return 'char *', gen._intern_string('surrogateescape')
         return 'char *', gen._intern_string('utf-8')
 
     # `hashlib.blake2b(...)`/`.md5(...)`/`.sha256(...)`: a mutable byte

@@ -101,6 +101,9 @@ NOT_LOWERED_BUILTINS = {
     "round": "a compare-and-select for an integer operand and a rounding rule "
              "for a real one; the C library's `round` is a double (see "
              "FOREIGN_ABI_BUILTINS)",
+    "sentinel": "a fresh, unique sentinel value per call, and a unique runtime "
+                "identity is not a value this one-word model can produce — the "
+                "same wall as `object()`",
     "sorted": "a sort — a comparison call per element, and a call through a "
               "value is not a thing this path can express",
     "sum": "a fold over a sequence, the same shape as `all`",
