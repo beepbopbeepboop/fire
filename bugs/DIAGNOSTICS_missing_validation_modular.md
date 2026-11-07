@@ -110,6 +110,17 @@ Key categories:
   driven messages (`StaticString(_get_kgen_string[...])`) remain open.
   Regressions: `test_comptime_assert_diagnostic.py`,
   `test_constrained_diagnostic.py`.
+- **Landed (follow-up, this worker, branch
+  `work/bug-mid-diagnostics-missing-validation-m-4840`):** root-cause fix in
+  `mojo/middle/comptime.py` for short-circuit boolean folding in compile-time
+  constant evaluation. `and`/`or` in `eval_const`, `eval_const_int`,
+  `eval_const_bool_state`/`_const_foldable` now apply short-circuit semantics,
+  so a provably-false left operand of `and` (e.g. `False and <unknown>`) is
+  diagnosed as provably false even when the right operand cannot be folded
+  (generic/comptime-param dependent). This fixes missed `comptime assert` /
+  `constrained` compile-time diagnostics for that shape. Regressions:
+  `test_comptime_assert_diagnostic.py`,
+  `test_constrained_diagnostic.py`.
 - **Still open (large):** the rest of this umbrella — comptime-assert/
   `constrained` cases where condition evaluation is incomplete (e.g.
   DType predicates on comptime params in generic struct instantiations that

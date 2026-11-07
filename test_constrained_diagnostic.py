@@ -66,6 +66,23 @@ def test_constrained_tstring_message():
     raise AssertionError('provably-false constrained with t-string compiled')
 
 
+def test_constrained_short_circuit_and_false():
+    # Short-circuit: provably-false `and` must diagnose even if rhs is unknown.
+    try:
+        _compile('fn f[x: Int]():\n    constrained[False and x > 0, "nope"]()\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'constraint failed' in s, s
+        assert 'nope' in s, s
+        return
+    raise AssertionError('provably-false short-circuit constrained compiled')
+
+
+def test_constrained_short_circuit_or_false_needs_rhs():
+    # `False or <unknown>` depends on rhs; must not produce a false diagnostic.
+    _compile('fn f[x: Int]():\n    constrained[False or x > 0, "ok"]()\n')
+
+
 if __name__ == '__main__':
     test_constrained_bracket_false_fails()
     test_constrained_bracket_false_no_msg()
@@ -73,4 +90,6 @@ if __name__ == '__main__':
     test_constrained_comparison_fails()
     test_constrained_unknown_passes()
     test_constrained_tstring_message()
+    test_constrained_short_circuit_and_false()
+    test_constrained_short_circuit_or_false_needs_rhs()
     print('ok')

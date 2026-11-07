@@ -99,6 +99,31 @@ def test_comptime_assert_message_fstring():
     raise AssertionError('provably-false comptime assert with f-string compiled')
 
 
+def test_comptime_assert_short_circuit_and_false():
+    # Short-circuit: `False and <unknown>` is provably false even when the
+    # right operand cannot be folded (generic/comptime-param dependent).
+    # bugs/DIAGNOSTICS_missing_validation_modular.md: missing diagnostic when
+    # comptime bool folding required both operands to be known.
+    try:
+        _compile('fn f[x: Int]():\n    comptime assert False and x > 0, "nope"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'nope' in s, s
+        return
+    raise AssertionError('provably-false short-circuit and compiled without error')
+
+
+def test_comptime_assert_short_circuit_or_unknown_not_false():
+    # `True or <unknown>` is provably true: must NOT fail compilation.
+    _compile('fn f[x: Int]():\n    comptime assert True or x < 0, "ok"\n')
+
+
+def test_comptime_assert_short_circuit_and_true_needs_rhs():
+    # `True and <unknown>` depends on rhs; must not produce a false diagnostic.
+    _compile('fn f[x: Int]():\n    comptime assert True and x > 0, "ok"\n')
+
+
 def _compile_full(src):
     import os
     import tempfile
@@ -145,5 +170,8 @@ if __name__ == '__main__':
     test_comptime_assert_message_tstring()
     test_comptime_assert_message_tstring_expr()
     test_comptime_assert_message_fstring()
+    test_comptime_assert_short_circuit_and_false()
+    test_comptime_assert_short_circuit_or_unknown_not_false()
+    test_comptime_assert_short_circuit_and_true_needs_rhs()
     test_comptime_assert_message_tstring_generic_param()
     print('ok')

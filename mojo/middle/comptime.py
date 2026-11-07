@@ -453,10 +453,29 @@ def eval_const(node, bindings: dict, platform: str = None):
         v = eval_const(node.operand, bindings, platform)
         return not v if isinstance(v, (bool, int)) else None
     if isinstance(node, BinaryOp):
+        op = node.op
         l = eval_const(node.left, bindings, platform)
+        # Short-circuit `and`/`or`: a provably-false left of `and` (or
+        # provably-true left of `or`) determines the result even when the
+        # right side cannot be folded. This is required for compile-time
+        # diagnostics (comptime assert / constrained): `False and <unknown>`
+        # is provably false and must be rejected, not treated as unknown.
+        if op == 'and':
+            if l is None:
+                return None
+            if not l:
+                return l
+            r = eval_const(node.right, bindings, platform)
+            return r
+        if op == 'or':
+            if l is None:
+                return None
+            if l:
+                return l
+            r = eval_const(node.right, bindings, platform)
+            return r
         r = eval_const(node.right, bindings, platform)
         if l is None or r is None: return None
-        op = node.op
         # `eval_const` yields an int or a str depending on the expression, and
         # a statically compiled backend types a local from its uses: one
         # variable that is sometimes a `char *` turns `l - r` into pointer
@@ -542,14 +561,33 @@ def eval_const_int(node, bindings: dict, call_hook=None):
         v = eval_const_int(node.operand, bindings, call_hook)
         return None if v is None else fold_unary_sign(node.op, v)
     if isinstance(node, BinaryOp):
+        op = node.op
         l = eval_const_int(node.left, bindings, call_hook)
+        # Short-circuit and/or: required for comptime diagnostics and to
+        # match eval_const's semantics (False and <unknown> is provably false).
+        if op == 'and':
+            if l is None: return None
+            if not l: return l
+            return eval_const_int(node.right, bindings, call_hook)
+        if op == 'or':
+            if l is None: return None
+            if l: return l
+            return eval_const_int(node.right, bindings, call_hook)
         r = eval_const_int(node.right, bindings, call_hook)
         if l is None or r is None: return None
-        ops = {'+': l+r, '-': l-r, '*': l*r, '//': l//r if r else None,
-               '%': l%r if r else None, '**': l**r,
-               '==': int(l == r), '!=': int(l != r), '<': int(l < r),
-               '<=': int(l <= r), '>': int(l > r), '>=': int(l >= r)}
-        return ops.get(node.op)
+        if op == '+': return l + r
+        if op == '-': return l - r
+        if op == '*': return l * r
+        if op == '//': return l // r if r else None
+        if op == '%': return l % r if r else None
+        if op == '**': return l ** r
+        if op == '==': return int(l == r)
+        if op == '!=': return int(l != r)
+        if op == '<': return int(l < r)
+        if op == '<=': return int(l <= r)
+        if op == '>': return int(l > r)
+        if op == '>=': return int(l >= r)
+        return None
     if isinstance(node, CompareChain):
         # Same short-circuit chained-comparison semantics as
         # myinterpreter.py's eval_CompareChain / _lower_compare_chain, just
@@ -644,6 +682,27 @@ def _const_foldable(node, bindings: dict, call_hook=None) -> bool:
     if isinstance(node, UnaryOp) and (node.op in FOLD_UNARY_OPS or node.op == 'not'):
         return _const_foldable(node.operand, bindings, call_hook)
     if isinstance(node, BinaryOp):
+        op = node.op
+        if op == 'and':
+            if not _const_foldable(node.left, bindings, call_hook):
+                return False
+            try:
+                lv = eval_const(node.left, bindings)
+            except Exception:
+                lv = None
+            if lv is not None and not lv:
+                return True
+            return _const_foldable(node.right, bindings, call_hook)
+        if op == 'or':
+            if not _const_foldable(node.left, bindings, call_hook):
+                return False
+            try:
+                lv = eval_const(node.left, bindings)
+            except Exception:
+                lv = None
+            if lv is not None and lv:
+                return True
+            return _const_foldable(node.right, bindings, call_hook)
         return (_const_foldable(node.left, bindings, call_hook)
                 and _const_foldable(node.right, bindings, call_hook))
     if isinstance(node, CompareChain):
