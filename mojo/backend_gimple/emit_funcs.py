@@ -815,10 +815,14 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
             bb_t = gen._new_bb(); bb_m = gen._new_bb()
             gen._emit(f"  if ({cv}) goto {bb_t}; else goto {bb_m};")
             gen._emit_label(bb_t)
-            _bscope = gen._open_block_scope()
-            for s in elif_body:
-                gen.gen_stmt(s)
-            gen._close_block_scope(_bscope)
+            gen._comptime_runtime_depth = getattr(gen, '_comptime_runtime_depth', 0) + 1
+            try:
+                _bscope = gen._open_block_scope()
+                for s in elif_body:
+                    gen.gen_stmt(s)
+                gen._close_block_scope(_bscope)
+            finally:
+                gen._comptime_runtime_depth -= 1
             gen._emit(f"  goto {bb_m};")
             gen._emit_label(bb_m)
             return
@@ -833,44 +837,48 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
     bb_merge = gen._new_bb()
     elifs = getattr(node, 'elifs', None) or []
     has_else = bool(node.else_body)
-    # First branch
-    if elifs or has_else:
-        bb_false = gen._new_bb()
-    else:
-        bb_false = bb_merge
-    bb_true = gen._new_bb()
-    gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
-    gen._emit_label(bb_true)
-    _bscope = gen._open_block_scope()
-    for s in node.then_body:
-        gen.gen_stmt(s)
-    gen._close_block_scope(_bscope)
-    gen._emit(f"  goto {bb_merge};")
-    # elif chains
-    for _elif_idx, (elif_cond, elif_body) in enumerate(elifs):
-        gen._emit_label(bb_false)
-        elif_tt, elif_cv = gen.lower_expr(elif_cond)
-        elif_cv = gen._ensure_bool_cond(elif_tt, elif_cv)
-        bb_elif_true = gen._new_bb()
-        if _elif_idx < len(elifs) - 1 or has_else:
+    gen._comptime_runtime_depth = getattr(gen, '_comptime_runtime_depth', 0) + 1
+    try:
+        # First branch
+        if elifs or has_else:
             bb_false = gen._new_bb()
         else:
             bb_false = bb_merge
-        gen._emit(f"  if ({elif_cv}) goto {bb_elif_true}; else goto {bb_false};")
-        gen._emit_label(bb_elif_true)
+        bb_true = gen._new_bb()
+        gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
+        gen._emit_label(bb_true)
         _bscope = gen._open_block_scope()
-        for _elif_stmt in elif_body:
-            gen.gen_stmt(_elif_stmt)
-        gen._close_block_scope(_bscope)
-        gen._emit(f"  goto {bb_merge};")
-    if has_else:
-        gen._emit_label(bb_false)
-        _bscope = gen._open_block_scope()
-        for s in node.else_body:
+        for s in node.then_body:
             gen.gen_stmt(s)
         gen._close_block_scope(_bscope)
         gen._emit(f"  goto {bb_merge};")
-    gen._emit_label(bb_merge)
+        # elif chains
+        for _elif_idx, (elif_cond, elif_body) in enumerate(elifs):
+            gen._emit_label(bb_false)
+            elif_tt, elif_cv = gen.lower_expr(elif_cond)
+            elif_cv = gen._ensure_bool_cond(elif_tt, elif_cv)
+            bb_elif_true = gen._new_bb()
+            if _elif_idx < len(elifs) - 1 or has_else:
+                bb_false = gen._new_bb()
+            else:
+                bb_false = bb_merge
+            gen._emit(f"  if ({elif_cv}) goto {bb_elif_true}; else goto {bb_false};")
+            gen._emit_label(bb_elif_true)
+            _bscope = gen._open_block_scope()
+            for _elif_stmt in elif_body:
+                gen.gen_stmt(_elif_stmt)
+            gen._close_block_scope(_bscope)
+            gen._emit(f"  goto {bb_merge};")
+        if has_else:
+            gen._emit_label(bb_false)
+            _bscope = gen._open_block_scope()
+            for s in node.else_body:
+                gen.gen_stmt(s)
+            gen._close_block_scope(_bscope)
+            gen._emit(f"  goto {bb_merge};")
+        gen._emit_label(bb_merge)
+    finally:
+        gen._comptime_runtime_depth -= 1
 
 
 def _gen_stmt_ComptimeVarStmt(gen, node):

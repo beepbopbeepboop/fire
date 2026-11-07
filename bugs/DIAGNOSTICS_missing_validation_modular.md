@@ -20,4 +20,22 @@ Key categories:
 - These are all cases where modular rejects invalid code. Our compiler lacks the corresponding validation.
 - Full list with expected error messages in build/checkfail_candidates.json.
 - This is a large body of work; prioritize based on user needs.
-EOF
+
+## Status (2026-11-06, branch work/bug-mid-diagnostics-missing-validation-m)
+- **Landed (partial):** `comptime assert` statements with provably-false
+  conditions now fail compilation with a diagnostic
+  (`comptime assertion failed: ...`) in the gimple backend, instead of being
+  silently accepted/emitted as a runtime trap. `eval_const_bool`/`_state`
+  determines provable falsehood; when a `comptime if` degrades to runtime
+  (conditions unknown) the assert is treated as non-fatal to avoid false
+  positives in generic fallback branches (e.g. DType-category `else` guards
+  whose conditions our comptime evaluator cannot yet resolve).
+  Regression: `test_comptime_assert_diagnostic.py`.
+- **Still open (large):** the rest of this umbrella — comptime-assert
+  enforcement in non-gimple/parametric-instantiation contexts where comptime
+  evaluation is incomplete (e.g. `DType.*.is_integral()` in instantiated
+  params), `constrained`/comptime constraint checks, type/trait conformance
+  diagnostics, import errors, and the other categories listed above.
+  `build/checkfail_candidates.json` is not present in this worktree; re-run
+  `tools/collect_checkfail.py` against the modular suite to refresh the
+  candidate list and prioritize.
