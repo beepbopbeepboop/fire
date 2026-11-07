@@ -1,5 +1,5 @@
 # plan/step-03d: `arm64/mem_pair` — duplicate `STR;STR` and `LDR;LDR`
-**Status: SCAFFOLDED 2026-11-06 (measured).** The rule theorem is a LEDGERED `sorry` in `lib/Scaffold.lean` (structure first, soundness later), the supporting step lemmas that exist compile, and the rule is registered as scaffolded in `formal/peephole.py`. NOT proved. `lib/` builds clean (`ensure_library`, 2026-11-06); `test_formal_proof_gaps.py` 5/5; `test_formal_peephole.py` OK.
+**Status: DONE 2026-11-07 (measured).** Proved `peephole_arm64_str_pair` and `peephole_arm64_ldr_pair` in `lib/Peephole.lean` (sorry-free); removed both from `lib/Scaffold.lean` and their rows from `formal/proof_gaps.py::SCAFFOLD_HOLES`. `str_pair`'s conclusion was strengthened vs the scaffold by adding `s2.mem = s1.mem` (true: `mem_write_u64_idem`); `ldr_pair` kept its scaffolded shape including the necessary `hne_rt_rn : Xt ≠ Xn` guard (counterexample `ldr x1,[x1,#0]; ldr x1,[x1,#0]` noted as a comment in `Peephole.lean`, not a theorem). `ensure_library` rebuilt Peephole/Scaffold OK (peak 1.7 GB); `python3 test_formal_proof_gaps.py` 5/5; `python3 test_formal_peephole.py` 82/82 OK. `formal/peephole.py` rule lists not edited (promotion is step 05a/05b).
 
 Class: mid      Size: M      Depends: 00a, 02, 03c      Blocks: 05a
 Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §2 table row `arm64/mem_pair`.

@@ -1304,7 +1304,7 @@ LIBRARY_TRUST = {
     # check.  `AXIOM_CLOSURE`'s row below is what decided that, read out of a
     # real `#print axioms` run over all 55 declarations.
     "Specs": (0, 0, 0, 0),
-    "Scaffold": (0, 12, 0, 0),
+    "Scaffold": (0, 3, 0, 0),
 }
 
 #: What the CLOSURE census measured, per module: how many theorems were asked,

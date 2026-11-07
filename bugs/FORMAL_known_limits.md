@@ -573,6 +573,67 @@ the limits above were wrong:
 
 **Status 2026-11-05 (step-15d):** refuse a type argument declared only in the consumer's file at the demand (probe showed it built before; now refused with message naming the library and that the type is declared in this file). Added cases `a consumer-declared type argument is refused by name` and `a builtin type argument is still instantiated`.
 
+### §1.2 Design: inferring a bare call's type arguments (2026-11-07, step 16a)
+
+**Measured again (`python3 tools/formal_template_call_census.py --rows 200`, 468 files, 120 bare
+calls to an imported declared template).** Buckets, with the 2026-10-04 figures in brackets:
+solvable from the annotations **4** [2]; the argument's type is written but does not unify **30** [28];
+the argument's type is not written down **72** [71]; a type argument is not in the arguments at all **6** [5];
+settled by a comptime default **8** [8]; no type parameter **0** [0]; unreadable **0** [1]. Trait-bounded
+parameter in **71** of the 120, written `Self.T` in **61**. Top callees: `dealloc` 26, `FormatStruct` 20,
+`ThinAllocation` 17, `Named` 14, `is_32bit` 5, `Pointer` 3.
+
+**The finding that decides all three questions: it is not the missing annotation, it is that the CALLER is
+itself generic.** Classifying the call sites of the top four callees by their enclosing declaration
+(a source-text pass over the census rows, `struct Name[` on the enclosing line and the enclosing `def`'s
+signature): **25 of 26 `dealloc` sites and 17 of 17 `ThinAllocation` sites are inside a generic struct**
+(`List[T]`, `LinkedList[T]`, `Deque[T]`, `ArcPointer[T]`, `OwnedPointer[T]`...), so the element type the call
+needs is that struct's own parameter `Self.T`; **all 20 `FormatStruct` callers and 14 of 14 `Named`
+callers take `mut writer: Some[Writer]`** (79 of the 80 `write_to` declarations in the stdlib are spelled
+that way), so the type the call needs is the caller's own anonymous implicit parameter. No reading of the
+ARGUMENT can name a concrete type for these; the type exists only after the CALLER is instantiated.
+
+**Q1 (arguments whose type is not written): R1, declared types only — chosen, and it is small.** Read an
+expression's type from declarations only: a parameter's annotation; `var x: T`; `var x = f(...)` where `f`
+has a declared `->` annotation that does not itself depend on an unresolved parameter; `x^` is the type of
+`x`. Never from a function body (R2 rejected: there is no machinery, and a type read from a body is a
+fabricated value). What R1 unlocks, measured: the **4** annotation-solvable sites plus the
+non-generic-caller sites of the unwritten bucket, which is **1 `dealloc`, 3 `Named`, 3 `Pointer`, ~4 others,
+about 12 of 72**. It does NOT unlock the stdlib's `alloc`/`dealloc` family: that is Q3.
+
+**Q2 (existential vs trait bound): B1, keep refusing — chosen.** B2 (instantiate `T :=` the argument's
+declared concrete type) refuses on all 20 `FormatStruct` sites and all 14 `Named` sites, because the
+declared type is `Some[Writer]`, not a concrete struct; B3 (`T := Writer`) invents a type the callee never
+sees. The 68-file `FormatStruct` row of the export gate therefore stays a TRUE limit until the caller is
+monomorphised or the project grows an existential story. This overturns the step file's default ONLY in
+that B2 is accepted for a concrete declared struct (it is cheap and correct) while `Some[...]`, a trait
+name and any unresolved parameter are refused by name.
+
+**Q3 (the answer is the caller's own parameter): refuse, with the parameter's name in the message —
+chosen.** `dealloc(self._data...)` inside `List[T]` needs `T := Self.T`; no instantiation can be mangled
+under an unbound parameter. The reason string is `call to <callee> needs <param> := <caller param>; the
+caller must be instantiated first`. Monomorphising the caller (a generic STRUCT's methods) is the real lever
+for ~60 of the 72 sites and is a separate, larger program; it is out of scope for 16c-16f.
+
+**What this means for the plan.** Steps 16c (keywords/defaults), 16d (return-type inference) and 16e
+(bound resolution) extend `infer_bare_call` to cover the **12 + 4 = about 16 of 120** sites that a
+declared-type reading can resolve. They are worth doing for correctness and for the `widen(5)` class, but
+they will not move the export gate's 123-file row: that moves only with caller monomorphisation. Step 22
+(singleton causes) and 16f (reconcile pins) must be written against this number, not against 120.
+
+**Interface the execution steps implement** (`formal/monomorph.py`; 16b already created the function with
+today's behaviour): `infer_bare_call(consumer_stmts, call_node, scope) -> tuple[str, ...] | Refusal` where
+`Refusal.reason` is one of `"argument type not declared"`, `"trait-bounded: Some[...]/trait name"`,
+`"needs <param> := <caller param>; the caller must be instantiated first"`, `"phantom parameter with no
+default"`, `"comptime-value default"`. 16c adds keyword and defaulted arguments to the unification; 16d adds
+the `var x = f(...)` declared-return read (R1) and `x^`; 16e adds B2 for a concrete declared struct and the
+by-name refusals above. Each refusal path is pinned by a test that names the reason.
+
+**Decisions each step can now take without re-investigating:** 16c — unify named arguments by parameter
+name and fill a defaulted parameter only from a type-spelling default; 16d — implement R1 exactly as above
+and nothing from bodies; 16e — B2 for concrete structs, B1 otherwise, Q3 refusal with the parameter name;
+16f — pin the refusal wording to the five reason strings above.
+
 ## 1.3 One of the 30 should not be in the family at all
 
 `std/gpu/host/nvidia/tma.mojo` is refused because it "imports `.`", and the

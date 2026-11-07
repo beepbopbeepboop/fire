@@ -1,5 +1,5 @@
 # plan/step-05a: register the arm64 rules the Lean side now proves
-**Status: DONE (verified by agent, work landed)**
+**Status: DONE 2026-11-07 (measured).** The four arm64 rules whose theorems are now PROVED in `lib/Peephole.lean` (`movz_pair`, `mem_pair_str`, `mem_pair_ldr`, `store_load`) are moved from `SCAFFOLDED_RULES` into `ARM64_RULES`; `unlicensed_rules() == []`; `test_formal_peephole.py` 83/83 (its corpus differential, which runs the whole pass over the examples, is green); `tools/formal_bench.py --opt` runs clean. No corpus program contains these windows (as the doc predicted), so coverage is the hand-assembled unit rows.
 
 Class: mid      Size: M      Depends: 03b, 03c, 03d (each only for the rules whose theorem is PROVED in Peephole.lean)      Blocks: none
 Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §2; `formal/peephole.py` (`Rule` :362, `decode_arm64` :88, `ARM64_RULES` :749, `PENDING_RULES` :893, `declared_theorems` :899, `unlicensed_rules` :911).

@@ -13409,7 +13409,7 @@ def generate_arm64_proof(prog, code, info) -> str:
             f"      have hn2 : n.toNat = (n.toNat - 1) + 1 := by omega\n"
             f"      have hx : (n.toNat - 1) + 1 = n.toNat := by omega\n"
             f"      rw [hn2, {func_name}_go, hx]\n"
-            f"    simp [hn]\n"
+            f"    simp [hn, evalArgs, evalExpr]\n"
             f"    rw [hsub]\n"
             f"    rw [hrhs]\n"
             f"    all_goals simp [UInt64.ofNat_toNat]"

@@ -242,14 +242,14 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`02`](../bugs/plan/step-02-peephole-memory-lemmas.md) | DONE | mid | S | 00a, 01a, 01b | the two memory lemmas the peephole store rules actually lack |
 | [`03a`](../bugs/plan/step-03a-hne-chain-generator.md) | DONE | mid | S | none | a generator for the `hne_` negation chain of an `arm64_step` arm lemma |
 | [`03b`](../bugs/plan/step-03b-arm64-movz-pair.md) | DONE | mid | M | 00a, 01a, 01b, 03a | `arm64/movz_pair` — step lemma and rule theorem |
-| [`03c`](../bugs/plan/step-03c-arm64-store-load.md) | SCAFFOLDED | mid | M | 00a, 02, 03a | `arm64/store_load` — `STR Xt,[Xn,#o] ; LDR Xt,[Xn,#o]` |
-| [`03d`](../bugs/plan/step-03d-arm64-mem-pair.md) | SCAFFOLDED | mid | M | 00a, 02, 03c | `arm64/mem_pair` — duplicate `STR;STR` and `LDR;LDR` |
-| [`04a`](../bugs/plan/step-04a-x86-mov-self-rev.md) | SCAFFOLDED | easy | S | 00a, 01a, 01b | `x86_64/mov_self_rev` — `mov r, r` spelled `48 8b c0` |
-| [`04b`](../bugs/plan/step-04b-x86-store-load.md) | SCAFFOLDED | mid | M | 00a, 02, 01b | `x86_64/store_load` — `mov [b+d], r ; mov r, [b+d]` (no SIB; disp8 form first) |
-| [`04c`](../bugs/plan/step-04c-x86-mem-pair.md) | SCAFFOLDED | mid | M | 00a, 02, 04b | `x86_64/mem_pair` — duplicate store, duplicate load (no SIB) |
-| [`04d`](../bugs/plan/step-04d-x86-imm-zero.md) | SCAFFOLDED | mid | M | 00a, 01a, 01b | `x86_64/imm_zero` — `add r, 0` / `sub r, 0` with dead flags |
-| [`05a`](../bugs/plan/step-05a-arm64-rule-registry.md) | CLAIMED | mid | M | 03b, 03c, 03d | register the arm64 rules the Lean side now proves |
-| [`05b`](../bugs/plan/step-05b-x86-rule-registry.md) | CLAIMED | mid | M | 04a, 04b, 04c, 04d | register the x86-64 rules, and fix three latent soundness holes in their matchers |
+| [`03c`](../bugs/plan/step-03c-arm64-store-load.md) | DONE | mid | M | 00a, 02, 03a | `arm64/store_load` — `STR Xt,[Xn,#o] ; LDR Xt,[Xn,#o]` |
+| [`03d`](../bugs/plan/step-03d-arm64-mem-pair.md) | DONE | mid | M | 00a, 02, 03c | `arm64/mem_pair` — duplicate `STR;STR` and `LDR;LDR` |
+| [`04a`](../bugs/plan/step-04a-x86-mov-self-rev.md) | DONE | easy | S | 00a, 01a, 01b | `x86_64/mov_self_rev` — `mov r, r` spelled `48 8b c0` |
+| [`04b`](../bugs/plan/step-04b-x86-store-load.md) | DONE | mid | M | 00a, 02, 01b | `x86_64/store_load` — `mov [b+d], r ; mov r, [b+d]` (no SIB; disp8 form first) |
+| [`04c`](../bugs/plan/step-04c-x86-mem-pair.md) | DONE | mid | M | 00a, 02, 04b | `x86_64/mem_pair` — duplicate store, duplicate load (no SIB) |
+| [`04d`](../bugs/plan/step-04d-x86-imm-zero.md) | DONE | mid | M | 00a, 01a, 01b | `x86_64/imm_zero` — `add r, 0` / `sub r, 0` with dead flags |
+| [`05a`](../bugs/plan/step-05a-arm64-rule-registry.md) | DONE | mid | M | 03b, 03c, 03d | register the arm64 rules the Lean side now proves |
+| [`05b`](../bugs/plan/step-05b-x86-rule-registry.md) | DONE | mid | M | 04a, 04b, 04c, 04d | register the x86-64 rules, and fix three latent soundness holes in their matchers |
 | [`06a`](../bugs/plan/step-06a-arm64-ccmp-encoders.md) | DONE | easy | S | none | arm64 `ccmp` encoders (register and immediate), byte-exact against `as` |
 | [`06b`](../bugs/plan/step-06b-arm64-ccmp-model.md) | DONE | mid | M | 00a, 00b, 06a | `ccmp` in the machine model: `arm64_step` arms, `_STEP_CONDS` rows, `_step_rhs`, `_regs_written` |
 | [`06c`](../bugs/plan/step-06c-arm64-ccmp-lowering.md) | OPEN | hard | L | 06a, 06b | lower `if A and B:` (two integer comparisons) to `cmp` + `ccmp` + one `b.cond` |
@@ -279,7 +279,7 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`15c`](../bugs/plan/step-15c-restore-trait-bound-check.md) | DONE | mid | M | 15a | restore the trait-bound conformance check on an instantiation |
 | [`15d`](../bugs/plan/step-15d-consumer-declared-type-argument.md) | DONE | mid | S | 15a | refuse, by name, a type argument declared only in the consumer's file |
 | [`15e`](../bugs/plan/step-15e-pin-imported-parameter-annotation.md) | DONE | easy | S | 15a | re-pin the imported-instantiation parameter annotation (value vs frame) |
-| [`16a`](../bugs/plan/step-16a-bare-call-design-memo.md) | OPEN | hard | M | 15a | DESIGN MEMO — what a bare template call's type arguments may be inferred from |
+| [`16a`](../bugs/plan/step-16a-bare-call-design-memo.md) | DONE | hard | M | 15a | DESIGN MEMO — what a bare template call's type arguments may be inferred from |
 | [`16b`](../bugs/plan/step-16b-consolidate-bare-inference.md) | DONE | mid | M | 15a | fold the two copies of bare-call inference into one function (behaviour-preserving) |
 | [`16c`](../bugs/plan/step-16c-matcher-keywords-defaults.md) | OPEN | mid | S | 16a, 16b | bare-call inference — keyword arguments and type-spelled defaults |
 | [`16d`](../bugs/plan/step-16d-return-type-inference.md) | OPEN | mid | L | 16a, 16b | bare-call inference through declared types (the `dealloc(allocation^)` row) |
@@ -309,7 +309,7 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`27c`](../bugs/plan/step-27c-landing-pad-tables.md) | DONE | mid | M | 27a | landing-pad / personality data structures (pure Python table + test, NO codegen change) |
 | [`28`](../bugs/plan/step-28-absval-frame-peel.md) | DONE | mid | M | 00a | `absval` frame-peel `K` — verify the same-day fix, pin it with a Lean-free test, then close or localise |
 
-**78 step files:** 13 easy, 57 mid, 8 hard. Status: claimed 4, closed as 'not provided' 1, done 48, open 19, scaffolded 6. (Generated by `python3 tools/plan_index.py --write`; do not edit by hand.)
+**78 step files:** 13 easy, 57 mid, 8 hard. Status: claimed 2, closed as 'not provided' 1, done 57, open 18. (Generated by `python3 tools/plan_index.py --write`; do not edit by hand.)
 
 <!-- END generated by tools/plan_index.py -->
 
@@ -389,6 +389,12 @@ done. At this writing: 45 DONE, 7 SCAFFOLDED, 6 CLAIMED, 19 OPEN, 1 closed as
   `work_step_*` lemmas, which depend only on the model and not on each other);
   the shards build in parallel (`formal/lean.py::ensure_library` builds by import
   LEVEL, `library_jobs()`). The wall bound was raised to the measured reality.
+* **Peephole rule proofs: 9 of 9 scaffold rules proved (2026-11-07).** `movz_pair` (by hand, which also
+  showed its first-draft statement was false and corrected it) plus `store_load`, `str_pair`, `ldr_pair`,
+  x86 `store_load`/store pair/load pair, `mov_self_rev` and `imm_zero_flags` (iceman workers following
+  `bugs/plan/WORKER_BRIEF_peephole_rule_proofs.md`; integrated by hand because all six branches inserted at
+  one anchor). `lib/Scaffold.lean` now holds only the canary and the two cell-write-back placeholders
+  (3 `sorry`). The rules are PROVED but NOT yet live: promotion into `ARM64_RULES`/`X86_RULES` is steps 05a/05b.
 * **The arm64 proof corpus: PASS 15 -> 50 of 94 (2026-11-06, measured, 61 min).**
   `python3 test_formal.py --backend arm64`: PASS=50 KNOWN-GAP=5 FAIL=33
   TOO-LARGE=6. Three generator fixes did it: block states inferred with `_`
