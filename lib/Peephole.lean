@@ -890,6 +890,533 @@ theorem peephole_arm64_movz_pair (s : Arm64State) (code : Nat → UInt8)
   · have hpc1 : s1.pc = s.pc := by rw [hs1', arm64_set_reg_pc_unchanged]
     rw [arm64_steps_two_seq s code s1 s2 hs1 hpc1 hpair, hpc]
 
+/-- `arm64_reg_or_sp` is invariant under memory-only and pc-only updates. -/
+theorem arm64_reg_or_sp_mem (i : Nat) (s : Arm64State) (m : Nat → UInt8) :
+    arm64_reg_or_sp i { s with mem := m } = arm64_reg_or_sp i s := by
+  simp [arm64_reg_or_sp, arm64_reg_mem]
+
+theorem arm64_reg_or_sp_pc (i : Nat) (s : Arm64State) (p : Nat) :
+    arm64_reg_or_sp i { s with pc := p } = arm64_reg_or_sp i s := by
+  simp [arm64_reg_or_sp, arm64_reg_pc]
+
+/-- **Rule `arm64/store_load`.** `STR Xt,[Xn,#o] ; LDR Xt,[Xn,#o]` with the same
+location and register: the LDR reloads the value just stored, so `arm64_set_reg rt`
+is applied to `arm64_reg rt` of the post-store state and is a no-op
+(`arm64_set_reg_self`). Deleting the LDR is sound. The address is computed from
+`arm64_reg_or_sp rn` of the pre-store state for STR and of the post-store (mem-only
+changed, pc-advanced for the step) state for LDR; STR does not change registers or
+`sp`, so the addresses are equal and `rt = rn` needs no special case. -/
+theorem peephole_arm64_store_load (s : Arm64State) (code : Nat → UInt8)
+    (pc : Nat) (w1 w2 : UInt32)
+    (hpc : s.pc = pc)
+    (hread1 : arm64_read_insn code pc = w1)
+    (hread2 : arm64_read_insn code (s.pc + 4) = w2)
+    (h1 : (w1 &&& 0xffe00000) = 0xF9000000)
+    (h2 : (w2 &&& 0xffe00000) = 0xF9400000)
+    (hrt1 : (w1 &&& 0x1f).toNat < 31)
+    (hrt2 : (w2 &&& 0x1f).toNat < 31)
+    (hrn_eq : ((w1 >>> 5) &&& 0x1f).toNat = ((w2 >>> 5) &&& 0x1f).toNat)
+    (hrt_eq : (w1 &&& 0x1f).toNat = (w2 &&& 0x1f).toNat)
+    (himm_eq : ((w1 >>> 10) &&& 0xfff).toNat = ((w2 >>> 10) &&& 0xfff).toNat)
+    (s1 s2 : Arm64State)
+    (hs1 : arm64_step s code = some s1)
+    (hpair : arm64_step { s1 with pc := s.pc + 4 } code
+      = some { s2 with pc := s.pc + 4 }) :
+    (∀ k, k < 31 → arm64_reg k s2 = arm64_reg k s1)
+    ∧ s2.nzcv = s1.nzcv
+    ∧ s2.mem = s1.mem
+    ∧ arm64_steps s code 2 = some { s2 with pc := pc + 8 }
+    ∧ arm64_steps s code 1 = some { s1 with pc := pc + 4 } := by
+  have e1 := arm64_step_str64 s code pc w1 hpc hread1 h1 hrt1
+  rw [hs1] at e1
+  have hs1' := Option.some.inj e1
+  have hpc1 : s1.pc = s.pc := by rw [hs1']
+  have hreg1 : ∀ k, arm64_reg k s1 = arm64_reg k s := by
+    intro k; rw [hs1']; simp [arm64_reg]
+  have hros1 : ∀ i, arm64_reg_or_sp i s1 = arm64_reg_or_sp i s := by
+    intro i; rw [hs1']; simp [arm64_reg_or_sp, arm64_reg]
+  have hmem1 : s1.mem = mem_write_u64 s.mem
+      ((arm64_reg_or_sp ((w1 >>> 5) &&& 0x1f).toNat s +
+        UInt64.ofNat ((((w1 >>> 10) &&& 0xfff).toNat) * 8)).toNat)
+      (arm64_reg ((w1 &&& 0x1f).toNat) s) := by rw [hs1']
+  have e2 := arm64_step_ldr64 { s1 with pc := s.pc + 4 } code (s.pc + 4) w2 rfl hread2 h2 hrt2
+  rw [hpair] at e2
+  have hs2' := Option.some.inj e2
+  have haddr :
+      (arm64_reg_or_sp ((w2 >>> 5) &&& 0x1f).toNat { s1 with pc := s.pc + 4 } +
+        UInt64.ofNat ((((w2 >>> 10) &&& 0xfff).toNat) * 8)).toNat
+      = (arm64_reg_or_sp ((w1 >>> 5) &&& 0x1f).toNat s +
+        UInt64.ofNat ((((w1 >>> 10) &&& 0xfff).toNat) * 8)).toNat := by
+    rw [hrn_eq, himm_eq, arm64_reg_or_sp_pc, hros1]
+  have hval : arm64_reg ((w1 &&& 0x1f).toNat) s
+      = arm64_reg ((w2 &&& 0x1f).toNat) { s1 with pc := s.pc + 4 } := by
+    rw [hrt_eq, ← hreg1 ((w2 &&& 0x1f).toNat)]
+    simp [arm64_reg]
+  have hload : mem_read_u64 ({ s1 with pc := s.pc + 4 } : Arm64State).mem
+      ((arm64_reg_or_sp ((w2 >>> 5) &&& 0x1f).toNat { s1 with pc := s.pc + 4 } +
+        UInt64.ofNat ((((w2 >>> 10) &&& 0xfff).toNat) * 8)).toNat)
+      = arm64_reg ((w2 &&& 0x1f).toNat) { s1 with pc := s.pc + 4 } := by
+    show mem_read_u64 s1.mem _ = _
+    rw [haddr, hmem1, mem_read_after_write_u64]
+    exact hval
+  have hs2state : { s2 with pc := s.pc + 4 } = { s1 with pc := s.pc + 4 } := by
+    rw [hs2']
+    rw [hload]
+    exact arm64_set_reg_self { s1 with pc := s.pc + 4 } ((w2 &&& 0x1f).toNat) hrt2
+  have hregs : ∀ k, k < 31 → arm64_reg k s2 = arm64_reg k s1 := by
+    intro k hk
+    have := congrArg (fun st : Arm64State => arm64_reg k st) hs2state
+    simp only [arm64_reg_pc] at this
+    exact this
+  have hnzcv : s2.nzcv = s1.nzcv := by
+    have := congrArg (fun st : Arm64State => st.nzcv) hs2state
+    simpa using this
+  have hmem : s2.mem = s1.mem := by
+    have := congrArg (fun st : Arm64State => st.mem) hs2state
+    simpa using this
+  refine ⟨hregs, hnzcv, hmem, ?_, ?_⟩
+  · rw [arm64_steps_two_seq s code s1 s2 hs1 hpc1 hpair, hpc]
+  · rw [arm64_steps_one_seq s code s1 hs1 hpc1, hpc]
+
+-- Witness: `str x1,[x2,#8] ; ldr x1,[x2,#8]` (rt != rn) satisfies the word hypotheses.
+example : ((0xF9000441 : UInt32) &&& 0xffe00000) = 0xF9000000 := by decide
+example : ((0xF9400441 : UInt32) &&& 0xffe00000) = 0xF9400000 := by decide
+example : ((0xF9000441 : UInt32) &&& 0x1f).toNat < 31 := by decide
+example : ((0xF9400441 : UInt32) &&& 0x1f).toNat < 31 := by decide
+example : ((0xF9000441 : UInt32) >>> 5 &&& 0x1f).toNat = ((0xF9400441 : UInt32) >>> 5 &&& 0x1f).toNat := by decide
+example : ((0xF9000441 : UInt32) &&& 0x1f).toNat = ((0xF9400441 : UInt32) &&& 0x1f).toNat := by decide
+example : ((0xF9000441 : UInt32) >>> 10 &&& 0xfff).toNat = ((0xF9400441 : UInt32) >>> 10 &&& 0xfff).toNat := by decide
+
+-- Witness: `rt = rn` case, `str x2,[x2,#8] ; ldr x2,[x2,#8]`, is allowed (no rt!=rn condition).
+example : ((0xF9000442 : UInt32) &&& 0xffe00000) = 0xF9000000 := by decide
+example : ((0xF9400442 : UInt32) &&& 0xffe00000) = 0xF9400000 := by decide
+example : ((0xF9000442 : UInt32) &&& 0x1f).toNat < 31 := by decide
+example : ((0xF9400442 : UInt32) &&& 0x1f).toNat < 31 := by decide
+example : ((0xF9000442 : UInt32) >>> 5 &&& 0x1f).toNat = ((0xF9400442 : UInt32) >>> 5 &&& 0x1f).toNat := by decide
+example : ((0xF9000442 : UInt32) &&& 0x1f).toNat = ((0xF9400442 : UInt32) &&& 0x1f).toNat := by decide
+example : ((0xF9000442 : UInt32) >>> 10 &&& 0xfff).toNat = ((0xF9400442 : UInt32) >>> 10 &&& 0xfff).toNat := by decide
+example : ((0xF9000442 : UInt32) &&& 0x1f).toNat = ((0xF9000442 : UInt32) >>> 5 &&& 0x1f).toNat := by decide
+
+/-- **Rule `x86_64/store_load` (step-04b).** `mov [b+d8], r ; mov r, [b+d8]`
+is the store alone. No condition relating `r` and `b`: the load's address is
+computed from the state after the store, which changed memory and `rip` only.
+Statement checked true (no correction needed). -/
+theorem peephole_x86_store_load_disp8 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm : Nat) (disp : Int)
+    (h_rip : s.rip = m)
+    (h_s0 : code m = rex) (h_s1 : code (m + 1) = 0x89)
+    (h_s2 : code (m + 2) = modrm) (h_sd : read_i8 (code (m + 3)) = disp)
+    (h_l0 : code (m + 4) = rex) (h_l1 : code (m + 5) = 0x8b)
+    (h_l2 : code (m + 6) = modrm) (h_ld : read_i8 (code (m + 7)) = disp)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = rm)
+    (h_rm_ne : rm ≠ 4)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_dst_lt : reg + x86_rex_r rex < 16)
+    (t1 t2 : X86State)
+    (hs1 : x86_step s code = some t1) (hs2 : x86_step t1 code = some t2) :
+    t2 = { t1 with rip := m + 8 } := by
+  have e1 := x86_step_mov_mem_disp8 s code m rex modrm reg rm disp
+    h_rip h_s0 h_s1 h_s2 h_sd h_rex h_w h_mod h_rm h_rm_ne h_reg
+  rw [hs1] at e1
+  have ht1 : t1 = { s with
+      mem := mem_write_bytes s.mem
+        (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat
+        (x86_get_reg s (reg + x86_rex_r rex)) 8,
+      rip := m + 4 } := Option.some.inj e1
+  have h_rip1 : t1.rip = m + 4 := by rw [ht1]
+  have e2 := x86_step_mov_rm64_mem_disp8 t1 code (m + 4) rex modrm reg rm
+    (reg + x86_rex_r rex) disp h_rip1 h_l0 h_l1 h_l2 h_ld h_rex h_w h_mod h_rm
+    h_rm_ne h_reg rfl h_dst_lt
+  rw [hs2] at e2
+  have ht2 := Option.some.inj e2
+  have h_base : x86_get_reg t1 (rm + x86_rex_b rex) = x86_get_reg s (rm + x86_rex_b rex) := by
+    rw [ht1]; rfl
+  have h_src : x86_get_reg t1 (reg + x86_rex_r rex) = x86_get_reg s (reg + x86_rex_r rex) := by
+    rw [ht1]; rfl
+  have h_mem : t1.mem = mem_write_bytes s.mem
+      (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat
+      (x86_get_reg s (reg + x86_rex_r rex)) 8 := by
+    rw [ht1]
+  have h_read : mem_read_bytes t1.mem
+      (Int.ofNat (x86_get_reg t1 (rm + x86_rex_b rex)).toNat + disp).toNat 8
+      = x86_get_reg s (reg + x86_rex_r rex) := by
+    rw [h_base, h_mem, mem_read_bytes_write_same]
+    simp [lowMask_eight]
+    bv_decide
+  rw [ht2]
+  simp only [h_read, ← h_src]
+  rw [x86_set_reg_self t1 (reg + x86_rex_r rex) h_dst_lt]
+
+/-- Witness (step-04b): `mov [rbp-8], rax ; mov rax, [rbp-8]` = `48 89 45 f8 ; 48 8b 45 f8`. -/
+example (s : X86State) (t1 t2 : X86State)
+    (hs1 : x86_step s (fun n => if n = 0 then 0x48 else if n = 1 then 0x89
+        else if n = 2 then 0x45 else if n = 3 then 0xF8
+        else if n = 4 then 0x48 else if n = 5 then 0x8B
+        else if n = 6 then 0x45 else if n = 7 then 0xF8 else 0) = some t1)
+    (hs2 : x86_step t1 (fun n => if n = 0 then 0x48 else if n = 1 then 0x89
+        else if n = 2 then 0x45 else if n = 3 then 0xF8
+        else if n = 4 then 0x48 else if n = 5 then 0x8B
+        else if n = 6 then 0x45 else if n = 7 then 0xF8 else 0) = some t2)
+    (h_rip : s.rip = 0) :
+    t2 = { t1 with rip := 8 } :=
+  peephole_x86_store_load_disp8 s _ 0 0x48 0x45 0 5 (-8) h_rip
+    rfl rfl rfl (by native_decide) rfl rfl rfl (by native_decide)
+    (by native_decide) (by native_decide) (by native_decide) (by native_decide)
+    (by native_decide) (by native_decide) (by native_decide)
+    t1 t2 hs1 hs2
+
+/-- **Rule `x86_64/imm_zero` (flags).** `add r, 0` / `sub r, 0` (REX.W 81 /0
+or /5 id, mod==3) leave CF/OF clear and set ZF/SF from `r`, by
+`x86_flags_add`/`x86_flags_sub` with imm=0. Statement checked true and proved
+as scaffolded (no correction). PF/AF are not modelled in `X86State`. The pass
+cannot use this soundly without a continuation predicate (see design note
+below); the rule is NOT enabled by this step. -/
+theorem peephole_x86_imm_zero_flags (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x81)
+    (h_b2 : code (m + 2) = modrm)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 3)
+    (h_digit : (modrm.toNat >>> 3) &&& 7 = 0 ∨ (modrm.toNat >>> 3) &&& 7 = 5)
+    (h_rm : modrm.toNat &&& 7 = rm)
+    (h_imm : read_i32_le code (m + 3) = 0)
+    (t : X86State) (hs : x86_step s code = some t) :
+    t.cf = false ∧ t.of_ = false ∧ t.zf = (x86_get_reg s (rm + x86_rex_b rex) = 0)
+    ∧ t.sf = x86_msb (x86_get_reg s (rm + x86_rex_b rex)) := by
+  rcases h_digit with hd | hd
+  · have hstep := x86_step_add_ri32 s code m rex modrm rm h_rip h_b0 h_b1 h_b2 h_rex h_w h_mod hd h_rm
+    rw [hs] at hstep
+    have ht := Option.some.inj hstep
+    rw [h_imm] at ht
+    subst ht
+    simp [x86_flags_add, UInt64.ofInt]
+  · have hstep := x86_step_sub_ri32 s code m rex modrm rm h_rip h_b0 h_b1 h_b2 h_rex h_w h_mod hd h_rm
+    rw [hs] at hstep
+    have ht := Option.some.inj hstep
+    rw [h_imm] at ht
+    subst ht
+    simp [x86_flags_sub, UInt64.ofInt]
+
+/-- **Rule `arm64/mem_pair_str`.** Two identical `STR Xt,[Xn,#o]`: deleting the
+    second is sound because the second store writes the same value to the same
+    address (`mem_write_u64_idem`), and STR changes only memory.
+
+    Statement strengthened vs the scaffold (which omitted `s2.mem = s1.mem`);
+    the full memory equality holds and is proved. -/
+theorem peephole_arm64_str_pair (s : Arm64State) (code : Nat → UInt8)
+    (pc : Nat) (w1 w2 : UInt32)
+    (hpc : s.pc = pc)
+    (hread1 : arm64_read_insn code pc = w1)
+    (hread2 : arm64_read_insn code (s.pc + 4) = w2)
+    (h1 : (w1 &&& 0xffe00000) = 0xF9000000)
+    (h2 : (w2 &&& 0xffe00000) = 0xF9000000)
+    (hrt1 : (w1 &&& 0x1f).toNat < 31)
+    (hrt2 : (w2 &&& 0x1f).toNat < 31)
+    (hrn_eq : ((w1 >>> 5) &&& 0x1f).toNat = ((w2 >>> 5) &&& 0x1f).toNat)
+    (hrt_eq : (w1 &&& 0x1f).toNat = (w2 &&& 0x1f).toNat)
+    (himm_eq : ((w1 >>> 10) &&& 0xfff).toNat = ((w2 >>> 10) &&& 0xfff).toNat)
+    (s1 s2 : Arm64State)
+    (hs1 : arm64_step s code = some s1)
+    (hpair : arm64_step { s1 with pc := s.pc + 4 } code
+      = some { s2 with pc := s.pc + 4 }) :
+    (∀ k, k < 31 → arm64_reg k s2 = arm64_reg k s1)
+    ∧ s2.nzcv = s1.nzcv
+    ∧ s2.mem = s1.mem
+    ∧ arm64_steps s code 2 = some { s2 with pc := pc + 8 }
+    ∧ arm64_steps s code 1 = some { s1 with pc := pc + 4 } := by
+  have e1 := arm64_step_str64 s code pc w1 hpc hread1 h1 hrt1
+  rw [hs1] at e1
+  have hs1' := Option.some.inj e1
+  have e2 := arm64_step_str64 { s1 with pc := s.pc + 4 } code (s.pc + 4) w2 rfl hread2 h2 hrt2
+  rw [hpair] at e2
+  have hs2' := Option.some.inj e2
+  have hpc1 : s1.pc = s.pc := by rw [hs1']
+  -- second store = same address and value as first (s1 differs from s only in mem)
+  have hbase : arm64_reg_or_sp ((w2 >>> 5) &&& 0x1f).toNat { s1 with pc := s.pc + 4 }
+      = arm64_reg_or_sp ((w1 >>> 5) &&& 0x1f).toNat s := by
+    rw [← hrn_eq]
+    unfold arm64_reg_or_sp
+    split <;> rename_i hsp
+    · simp [hs1']
+    · simp [arm64_reg, hs1']
+  have hval2 : arm64_reg ((w2 &&& 0x1f).toNat) { s1 with pc := s.pc + 4 }
+      = arm64_reg ((w1 &&& 0x1f).toNat) s := by
+    rw [← hrt_eq, arm64_reg_pc, hs1']; simp [arm64_reg]
+  have hmem : s2.mem = s1.mem := by
+    have : ({ s2 with pc := s.pc + 4 }).mem = ({ s1 with pc := s.pc + 4 }).mem := by
+      rw [hs2']
+      simp only
+      rw [hbase, hval2, ← himm_eq, hs1']
+      exact mem_write_u64_idem _ _ _
+    simpa using this
+  have hnzcv : s2.nzcv = s1.nzcv := by
+    have : ({ s2 with pc := s.pc + 4 }).nzcv = ({ s1 with pc := s.pc + 4 }).nzcv := by
+      rw [hs2']
+    simpa using this
+  refine ⟨?_, hnzcv, hmem, ?_, ?_⟩
+  · intro k hk
+    have hreg : arm64_reg k { s2 with pc := s.pc + 4 } = arm64_reg k { s1 with pc := s.pc + 4 } := by
+      rw [hs2']
+      rcases (by omega : k = 0 ∨ k = 1 ∨ k = 2 ∨ k = 3 ∨ k = 4 ∨ k = 5 ∨ k = 6 ∨ k = 7 ∨ k = 8 ∨ k = 9 ∨ k = 10 ∨ k = 11 ∨ k = 12 ∨ k = 13 ∨ k = 14 ∨ k = 15 ∨ k = 16 ∨ k = 17 ∨ k = 18 ∨ k = 19 ∨ k = 20 ∨ k = 21 ∨ k = 22 ∨ k = 23 ∨ k = 24 ∨ k = 25 ∨ k = 26 ∨ k = 27 ∨ k = 28 ∨ k = 29 ∨ k = 30) with
+        rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;> simp [arm64_reg]
+    simpa [arm64_reg_pc] using hreg
+  · rw [arm64_steps_two_seq s code s1 s2 hs1 hpc1 hpair, hpc]
+  · rw [arm64_steps_one_seq s code s1 hs1 hpc1, hpc]
+
+-- Counterexample showing `hne_rt_rn` is necessary for `peephole_arm64_ldr_pair`
+-- (comment only, not a theorem): `ldr x1,[x1,#0] ; ldr x1,[x1,#0]` differs from
+-- a single load because the first load overwrites the base register `x1`, so the
+-- second load reads from the address now in `x1` (the loaded value), not the
+-- original base. The rule and its theorem therefore require `Xt ≠ Xn`.
+
+/-- **Rule `arm64/mem_pair_ldr`.** Two identical `LDR Xt,[Xn,#o]` with `Xt ≠ Xn`:
+    the base is unchanged by the first load and memory is unchanged, so the
+    second load reads the same value into the same register and is redundant
+    (`arm64_set_reg_set_reg_same` / `arm64_set_reg_self`). The `Xt ≠ Xn`
+    (`hne_rt_rn`) hypothesis is necessary (see comment above). -/
+theorem peephole_arm64_ldr_pair (s : Arm64State) (code : Nat → UInt8)
+    (pc : Nat) (w1 w2 : UInt32)
+    (hpc : s.pc = pc)
+    (hread1 : arm64_read_insn code pc = w1)
+    (hread2 : arm64_read_insn code (s.pc + 4) = w2)
+    (h1 : (w1 &&& 0xffe00000) = 0xF9400000)
+    (h2 : (w2 &&& 0xffe00000) = 0xF9400000)
+    (hrt1 : (w1 &&& 0x1f).toNat < 31)
+    (hrt2 : (w2 &&& 0x1f).toNat < 31)
+    (hrn_eq : ((w1 >>> 5) &&& 0x1f).toNat = ((w2 >>> 5) &&& 0x1f).toNat)
+    (hrt_eq : (w1 &&& 0x1f).toNat = (w2 &&& 0x1f).toNat)
+    (himm_eq : ((w1 >>> 10) &&& 0xfff).toNat = ((w2 >>> 10) &&& 0xfff).toNat)
+    (hne_rt_rn : (w1 &&& 0x1f).toNat ≠ ((w1 >>> 5) &&& 0x1f).toNat)
+    (s1 s2 : Arm64State)
+    (hs1 : arm64_step s code = some s1)
+    (hpair : arm64_step { s1 with pc := s.pc + 4 } code
+      = some { s2 with pc := s.pc + 4 }) :
+    (∀ k, k < 31 → arm64_reg k s2 = arm64_reg k s1)
+    ∧ s2.nzcv = s1.nzcv
+    ∧ s2.mem = s1.mem
+    ∧ arm64_steps s code 2 = some { s2 with pc := pc + 8 }
+    ∧ arm64_steps s code 1 = some { s1 with pc := pc + 4 } := by
+  have e1 := arm64_step_ldr64 s code pc w1 hpc hread1 h1 hrt1
+  rw [hs1] at e1
+  have hs1' := Option.some.inj e1
+  have e2 := arm64_step_ldr64 { s1 with pc := s.pc + 4 } code (s.pc + 4) w2 rfl hread2 h2 hrt2
+  rw [hpair] at e2
+  have hs2' := Option.some.inj e2
+  have hpc1 : s1.pc = s.pc := by rw [hs1', arm64_set_reg_pc_unchanged]
+  -- base register unchanged: rt1 != rn1, and set_reg rt1 doesn't touch rn1 or sp
+  have hbase : arm64_reg_or_sp ((w2 >>> 5) &&& 0x1f).toNat { s1 with pc := s.pc + 4 }
+      = arm64_reg_or_sp ((w1 >>> 5) &&& 0x1f).toNat s := by
+    rw [← hrn_eq]
+    unfold arm64_reg_or_sp
+    split <;> rename_i hsp
+    · -- sp
+      simp [hs1']
+      try (unfold arm64_set_reg; split <;> rfl)
+    · -- register rn1 < 31, and rn1 != rt1
+      have hne_sp : ((w1 >>> 5) &&& 0x1f).toNat ≠ 31 := by
+        intro heq; simp [heq] at hsp
+      have hrn1 : ((w1 >>> 5) &&& 0x1f).toNat < 31 := by
+        have hle : ((w1 >>> 5) &&& 0x1f).toNat ≤ 31 := by
+          show (w1 >>> 5 &&& 0x1f).toNat ≤ (31 : UInt32).toNat
+          apply Nat.le_of_lt_succ
+          have : (w1 >>> 5 &&& 0x1f).toNat < (32 : UInt32).toNat := by
+            simp only [UInt32.toNat_and, UInt32.toNat_ofNat, UInt32.toNat_shiftRight,
+              Nat.reducePow, Nat.mod_eq_of_lt (by decide : 31 < 4294967296),
+              Nat.mod_eq_of_lt (by decide : 32 < 4294967296)]
+            exact Nat.lt_of_le_of_lt (Nat.and_le_right) (by decide)
+          simpa using this
+        omega
+      have hne : ((w1 >>> 5) &&& 0x1f).toNat ≠ (w1 &&& 0x1f).toNat := by omega
+      rw [arm64_reg_pc, hs1']
+      exact arm64_reg_set_reg_other _ _ _ _ hrn1 hne
+  -- second load reads same memory at same address => same value
+  have hval : mem_read_u64 ({ s1 with pc := s.pc + 4 }).mem
+      ((arm64_reg_or_sp ((w2 >>> 5) &&& 0x1f).toNat { s1 with pc := s.pc + 4 }
+        + UInt64.ofNat ((((w2 >>> 10) &&& 0xfff).toNat) * 8)).toNat)
+      = mem_read_u64 s.mem
+        ((arm64_reg_or_sp ((w1 >>> 5) &&& 0x1f).toNat s
+          + UInt64.ofNat ((((w1 >>> 10) &&& 0xfff).toNat) * 8)).toNat) := by
+    rw [hbase, ← himm_eq, hs1']
+    simp [arm64_set_reg_mem_unchanged]
+  -- {s2 with pc := s.pc+4} sets rt1 (= rt2) to that same value over s1 => equals s1 with pc
+  have hs2eq : { s2 with pc := s.pc + 4 } = { s1 with pc := s.pc + 4 } := by
+    rw [hs2', hval, ← hrt_eq, hs1']
+    rw [← arm64_set_reg_pc_congr]
+    rw [arm64_set_reg_set_reg_same]
+  have hnzcv : s2.nzcv = s1.nzcv := by
+    have := congrArg (fun t => t.nzcv) hs2eq; simpa using this
+  have hmem : s2.mem = s1.mem := by
+    have := congrArg (fun t => t.mem) hs2eq; simpa using this
+  refine ⟨?_, hnzcv, hmem, ?_, ?_⟩
+  · intro k hk
+    have hreg : arm64_reg k { s2 with pc := s.pc + 4 } = arm64_reg k { s1 with pc := s.pc + 4 } := by
+      have := congrArg (arm64_reg k) hs2eq; exact this
+    simpa [arm64_reg_pc] using hreg
+  · rw [arm64_steps_two_seq s code s1 s2 hs1 hpc1 hpair, hpc]
+  · rw [arm64_steps_one_seq s code s1 hs1 hpc1, hpc]
+
+/-- Reading register `i` immediately after writing it yields the written value. -/
+theorem x86_get_reg_set_reg_same (s : X86State) (i : Nat) (v : UInt64) (hi : i < 16) :
+    x86_get_reg (x86_set_reg s i v) i = v := by
+  rcases (show i = 0 ∨ i = 1 ∨ i = 2 ∨ i = 3 ∨ i = 4 ∨ i = 5 ∨ i = 6 ∨ i = 7
+      ∨ i = 8 ∨ i = 9 ∨ i = 10 ∨ i = 11 ∨ i = 12 ∨ i = 13 ∨ i = 14 ∨ i = 15 from by omega) with
+    rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+    | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+  all_goals simp [x86_get_reg, x86_set_reg]
+
+/-- **Rule `x86_64/mem_pair_store` (disp8, step 04c).** Two identical
+`mov [b+d8], r` (REX.W 89 /r, mod=1, no SIB): the second writes the same value
+to the same address and advances the pc, so deleting it leaves the state of the
+first with `rip := m + 8`. The store does not change registers, so the base and
+source registers are the same for both steps; memory idempotence is
+`mem_write_bytes8_idem`. The scaffold statement was checked and is true as
+stated (not corrected). -/
+theorem peephole_x86_store_pair_disp8 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm : Nat) (disp : Int)
+    (h_rip : s.rip = m)
+    (h_s0 : code m = rex) (h_s1 : code (m + 1) = 0x89)
+    (h_s2 : code (m + 2) = modrm) (h_sd : read_i8 (code (m + 3)) = disp)
+    (h_t0 : code (m + 4) = rex) (h_t1 : code (m + 5) = 0x89)
+    (h_t2 : code (m + 6) = modrm) (h_td : read_i8 (code (m + 7)) = disp)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = rm)
+    (h_rm_ne : rm ≠ 4)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (t1 t2 : X86State)
+    (hs1 : x86_step s code = some t1) (hs2 : x86_step t1 code = some t2) :
+    t2 = { t1 with rip := m + 8 } := by
+  have e1 := x86_step_mov_mem_disp8 s code m rex modrm reg rm disp
+    h_rip h_s0 h_s1 h_s2 h_sd h_rex h_w h_mod h_rm h_rm_ne h_reg
+  rw [hs1] at e1
+  have ht1 := Option.some.inj e1
+  have hrip1 : t1.rip = m + 4 := by rw [ht1]
+  have e2 := x86_step_mov_mem_disp8 t1 code (m + 4) rex modrm reg rm disp
+    hrip1 h_t0 h_t1 h_t2 h_td h_rex h_w h_mod h_rm h_rm_ne h_reg
+  rw [hs2] at e2
+  have ht2 := Option.some.inj e2
+  subst ht2 ht1
+  simp [x86_get_reg, mem_write_bytes8_idem]
+
+/-- **Rule `x86_64/mem_pair_load` (disp8, step 04c).** Two identical
+`mov r, [b+d8]` (REX.W 8b /r, mod=1, no SIB). UNSOUND without `r ≠ b`
+(`h_ne`): the first load overwrites the base register, so the second would read
+from a different address. Counterexample (not a theorem): `mov rax,[rax] ;
+mov rax,[rax]` — the first load changes `rax`, so the second dereferences the
+loaded value, not the original base. With `h_ne` the base and memory are
+unchanged by the first load, so the second reads the same value into the same
+destination; `x86_set_reg_self` collapses the redundant write. The scaffold
+statement was checked and is true as stated (not corrected). -/
+theorem peephole_x86_load_pair_disp8 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm : Nat) (disp : Int)
+    (h_rip : s.rip = m)
+    (h_s0 : code m = rex) (h_s1 : code (m + 1) = 0x8b)
+    (h_s2 : code (m + 2) = modrm) (h_sd : read_i8 (code (m + 3)) = disp)
+    (h_t0 : code (m + 4) = rex) (h_t1 : code (m + 5) = 0x8b)
+    (h_t2 : code (m + 6) = modrm) (h_td : read_i8 (code (m + 7)) = disp)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = rm)
+    (h_rm_ne : rm ≠ 4)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_dst_lt : reg + x86_rex_r rex < 16)
+    (h_ne : reg + x86_rex_r rex ≠ rm + x86_rex_b rex)
+    (t1 t2 : X86State)
+    (hs1 : x86_step s code = some t1) (hs2 : x86_step t1 code = some t2) :
+    t2 = { t1 with rip := m + 8 } := by
+  let dst := reg + x86_rex_r rex
+  have e1 := x86_step_mov_rm64_mem_disp8 s code m rex modrm reg rm dst disp
+    h_rip h_s0 h_s1 h_s2 h_sd h_rex h_w h_mod h_rm h_rm_ne h_reg rfl h_dst_lt
+  rw [hs1] at e1
+  have ht1 := Option.some.inj e1
+  have hrip1 : t1.rip = m + 4 := by rw [ht1]
+  have hmem1 : t1.mem = s.mem := by
+    rw [ht1]
+    rcases (show dst = 0 ∨ dst = 1 ∨ dst = 2 ∨ dst = 3 ∨ dst = 4 ∨ dst = 5 ∨ dst = 6 ∨ dst = 7
+        ∨ dst = 8 ∨ dst = 9 ∨ dst = 10 ∨ dst = 11 ∨ dst = 12 ∨ dst = 13 ∨ dst = 14 ∨ dst = 15
+        from by omega) with
+      h | h | h | h | h | h | h | h | h | h | h | h | h | h | h | h
+    all_goals (simp [x86_set_reg, h])
+  have hbase1 : x86_get_reg t1 (rm + x86_rex_b rex) = x86_get_reg s (rm + x86_rex_b rex) := by
+    rw [ht1]
+    have hrm7 : rm ≤ 7 := by rw [← h_rm]; exact Nat.and_le_right
+    have hrb : x86_rex_b rex ≤ 8 := by unfold x86_rex_b; split <;> omega
+    have hbase_lt : rm + x86_rex_b rex < 16 := by omega
+    exact x86_get_reg_set_reg_other (rm + x86_rex_b rex) dst s _ hbase_lt h_dst_lt (Ne.symm h_ne)
+  have hdst1 : x86_get_reg t1 dst = mem_read_bytes s.mem
+      (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat 8 := by
+    rw [ht1]
+    exact x86_get_reg_set_reg_same s dst _ h_dst_lt
+  have e2 := x86_step_mov_rm64_mem_disp8 t1 code (m + 4) rex modrm reg rm dst disp
+    hrip1 h_t0 h_t1 h_t2 h_td h_rex h_w h_mod h_rm h_rm_ne h_reg rfl h_dst_lt
+  rw [hs2] at e2
+  have ht2 := Option.some.inj e2
+  rw [ht2, hmem1, hbase1]
+  have hval : mem_read_bytes s.mem (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat 8
+      = x86_get_reg t1 dst := hdst1.symm
+  rw [hval, x86_set_reg_self t1 dst h_dst_lt]
+  simp [hmem1]
+
+/-- `mov r64, r64` register to register (REX.W 8b /r, mod=3), the LOAD
+    direction mirror of `x86_step_mov_rm64_r64_reg_st` (which is the 0x89 store
+    direction). In 0x8b the `reg` field (+REX.R) is the destination and the
+    `r/m` field (+REX.B) is the source — the opposite sense of 0x89. Proved in
+    Peephole.lean (not X86.lean) by the same `simp` step lemma used for 0x89. -/
+theorem x86_step_mov_r64_rm64_reg_st (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8b)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some
+      { x86_set_reg s (reg + x86_rex_r rex) (x86_get_reg s (rm + x86_rex_b rex)) with
+        rip := m + 3 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_mask,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+
+
+/-- **Rule `x86_64/mov_self_rev`.** `mov r, r` spelled `REX.W 8b /r, mod = 3`
+    (`48 8b c0` for `mov rax, rax`): the LOAD-direction mirror of
+    `peephole_x86_mov_self` (0x89 store direction). Same proof shape, using
+    `x86_step_mov_r64_rm64_reg_st`. The decoder can see the form as
+    `mov_r64_rm64` (mod==3), but the compiler/emitter does not produce it
+    (only `48 89 c0` / 0x89 observed), so the matcher only fires on the store
+    direction today; rule recorded for step-05b as scaffolded/not-run. -/
+theorem peephole_x86_mov_self_rev (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8b)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm)
+    (h_same : rm + x86_rex_b rex = reg + x86_rex_r rex)
+    (h_idx : reg + x86_rex_r rex < 16)
+    (t : X86State) (hs : x86_step s code = some t) :
+    t = { s with rip := m + 3 } := by
+  have hstep := x86_step_mov_r64_rm64_reg_st s code m rex modrm reg rm
+    h_rip h_b0 h_b1 h_b2 h_rex h_w h_mod h_reg h_rm
+  rw [h_same] at hstep
+  rw [x86_set_reg_self s (reg + x86_rex_r rex) h_idx] at hstep
+  rw [hs] at hstep
+  exact Option.some.inj hstep
+
+/-- Witness: `48 8b c0` (`mov rax, rax`, REX.W 8b /r, mod=3, reg=0, r/m=0)
+    is a no-op on the proved theorem. -/
+example (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0x8b)
+    (h_b2 : code (m + 2) = 0xc0)
+    (t : X86State) (hs : x86_step s code = some t) :
+    t = { s with rip := m + 3 } := by
+  have h_rex : x86_is_rex (0x48 : UInt8) = true := by native_decide
+  have h_w : x86_rex_w (0x48 : UInt8) = true := by native_decide
+  have h_mod : (0xc0 : UInt8).toNat >>> 6 = 3 := by native_decide
+  have h_reg : ((0xc0 : UInt8).toNat >>> 3) &&& 7 = 0 := by native_decide
+  have h_rm : (0xc0 : UInt8).toNat &&& 7 = 0 := by native_decide
+  have h_same : 0 + x86_rex_b (0x48 : UInt8) = 0 + x86_rex_r (0x48 : UInt8) := by native_decide
+  have h_idx : 0 + x86_rex_r (0x48 : UInt8) < 16 := by native_decide
+  exact peephole_x86_mov_self_rev s code m 0x48 0xc0 0 0 h_rip h_b0 h_b1 h_b2 h_rex h_w h_mod h_reg h_rm h_same h_idx t hs
+
 /-!
 ## Design note (x86_64/imm_zero) — for a later hard round
 The sound statement is "for every continuation whose first flag access is a

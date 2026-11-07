@@ -27,26 +27,6 @@ SCAFFOLD_HOLES: dict[str, Hole] = {
         "census positive control; delete when the first real scaffold lands",
         "control",
     ),
-    "peephole_x86_imm_zero_flags": Hole(
-        "step-04d",
-        "add r,0/sub r,0 flags: cf/of_ false, zf/sf from r (x86_flags_add/x86_flags_sub)",
-        "scaffold",
-    ),
-    "peephole_arm64_str_pair": Hole(
-        "step-03d",
-        "two identical STR Xt,[Xn,#imm] deleted",
-        "scaffold",
-    ),
-    "peephole_arm64_ldr_pair": Hole(
-        "step-03d",
-        "two identical LDR Xt,[Xn,#imm] with Xt!=Xn deleted",
-        "scaffold",
-    ),
-    "peephole_arm64_store_load": Hole(
-        "step-03c",
-        "STR followed by LDR of same location deleted",
-        "scaffold",
-    ),
     "scaffold_cell_writeback_one_exit": Hole(
         "step-18d",
         "by-reference one-field mutator write-back (single exit): depth bound as hypothesis, obligation to prove",
@@ -56,26 +36,6 @@ SCAFFOLD_HOLES: dict[str, Hole] = {
         "step-18d",
         "by-reference one-field mutator write-back (multiple exits): per-exit obligation scaffolded",
         "placeholder",
-    ),
-    "peephole_x86_store_load_disp8": Hole(
-        "step-04b",
-        "x86 `mov [b+d8],r ; mov r,[b+d8]` equals the store alone (no SIB, no RIP-relative)",
-        "scaffold",
-    ),
-    "peephole_x86_store_pair_disp8": Hole(
-        "step-04c",
-        "x86 two identical disp8 stores equal one (needs width-8 write idempotence)",
-        "scaffold",
-    ),
-    "peephole_x86_load_pair_disp8": Hole(
-        "step-04c",
-        "x86 two identical disp8 loads equal one, given dst != base",
-        "scaffold",
-    ),
-    "peephole_x86_mov_self_rev": Hole(
-        "step-04a",
-        "x86 `mov r,r` spelled 48 8b c0 is a no-op (mirror of the proved peephole_x86_mov_self)",
-        "scaffold",
     ),
 }
 
