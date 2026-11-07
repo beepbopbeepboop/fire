@@ -31,11 +31,21 @@ Key categories:
   positives in generic fallback branches (e.g. DType-category `else` guards
   whose conditions our comptime evaluator cannot yet resolve).
   Regression: `test_comptime_assert_diagnostic.py`.
-- **Still open (large):** the rest of this umbrella — comptime-assert
-  enforcement in non-gimple/parametric-instantiation contexts where comptime
-  evaluation is incomplete (e.g. `DType.*.is_integral()` in instantiated
-  params), `constrained`/comptime constraint checks, type/trait conformance
-  diagnostics, import errors, and the other categories listed above.
-  `build/checkfail_candidates.json` is not present in this worktree; re-run
-  `tools/collect_checkfail.py` against the modular suite to refresh the
-  candidate list and prioritize.
+- **Landed (follow-up, this worker):** comptime diagnostic messages are now
+  evaluated, not lowered to compiler temp names. `mojo/middle/comptime.py`
+  folds `String(int/bool)` and string `+` concatenation at compile time, so
+  messages like `"got " + String(x)` with bound param values (e.g. `x = -2`
+  in a monomorphized instantiation) produce the human-readable message.
+  Verified against modular `mojo-integration/comptime_assert.mojo`:
+  `use_positive_int[-2]()` is rejected with
+  `comptime assertion failed: expected positive number, got -2` (contains the
+  `# CHECK` text). Also fixed `test_implicit_string_concat.py` to run in the
+  current worktree (it hardcoded another worktree's cwd). Regression added to
+  `test_comptime_assert_diagnostic.py`.
+- **Still open (large):** the rest of this umbrella — comptime-assert cases
+  where condition evaluation is incomplete (e.g. `DType.*.is_integral()` in
+  instantiated params), `constrained`/comptime constraint checks, type/trait
+  conformance diagnostics, import errors, and the other categories listed
+  above. `build/checkfail_candidates.json` is not present in this worktree;
+  re-run `tools/collect_checkfail.py` against the modular suite to refresh
+  the candidate list and prioritize.

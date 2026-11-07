@@ -48,9 +48,24 @@ def test_comptime_assert_comparison_fails():
     raise AssertionError('provably-false comptime assert compiled without error')
 
 
+def test_comptime_assert_message_string_concat_and_string_int():
+    # Comptime diagnostic messages must be evaluated: String(int) and +
+    # concatenation fold so the message is human-readable, not a temp name.
+    try:
+        _compile('fn f():\n    comptime x = 42\n    comptime assert False, "got " + String(x)\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'got 42' in s, s
+        assert '_t' not in s.split('comptime assertion failed:')[-1], s
+        return
+    raise AssertionError('provably-false comptime assert compiled without error')
+
+
 if __name__ == '__main__':
     test_comptime_assert_false_fails()
     test_comptime_assert_false_no_msg()
     test_comptime_assert_true_passes()
     test_comptime_assert_comparison_fails()
+    test_comptime_assert_message_string_concat_and_string_int()
     print('ok')

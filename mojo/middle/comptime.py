@@ -259,11 +259,17 @@ def eval_const(node, bindings: dict, platform: str = None):
     # comptime `if` was UNRESOLVABLE (the documented first-branch-wins
     # fallback); folding it answers the measured value — strictly more
     # precise, the same direction as this file's own sys.platform fold.
+    # `String(int)` / `String(bool)` stringifies at compile time so comptime
+    # diagnostics (e.g. `comptime assert cond, "got " + String(x)`) produce
+    # the evaluated message, not a lowered temp name.
     if (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
             and len(node.args) == 1 and not node.kwargs
             and node.func.name in ('String', 'StringSlice', 'StaticString',
                                    'StringSpan')):
-        return eval_const(node.args[0], bindings, platform)
+        v = eval_const(node.args[0], bindings, platform)
+        if node.func.name == 'String' and isinstance(v, (int, bool)) and not isinstance(v, str):
+            return str(v)
+        return v
     # `ord("0")` of a one-character constant, and a fixed-width scalar
     # constructor over a foldable integer — `comptime ord_0 = Byte(ord("0"))`
     # is the idiom (std/collections/string/_parsing_numbers/parsing_floats).
@@ -319,6 +325,10 @@ def eval_const(node, bindings: dict, platform: str = None):
             folded = fold_arith(op, l, r)
             if folded is not None:
                 return folded
+        # String concatenation folds so comptime diagnostics can format
+        # messages like `"got " + String(x)` when both sides are known.
+        if op == '+' and isinstance(l, str) and isinstance(r, str):
+            return l + r
         # Comparisons fold for text as well as numbers, through the same helper
         # the CompareChain branch uses. Arithmetic on text deliberately does
         # NOT fold: `'a' + 'b'` is a pointer add in every statically compiled

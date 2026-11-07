@@ -22,7 +22,7 @@ def test_implicit_string_concat():
         result = subprocess.run(
             ['python3', 'fire.py', 'build', test_file],
             capture_output=True, text=True,
-            cwd='/Users/mrs/net/chatgpt/claude/work-4882',
+            cwd=os.path.dirname(__file__) or '.',
         )
 
         assert result.returncode == 0, (
