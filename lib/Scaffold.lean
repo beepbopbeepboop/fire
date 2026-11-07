@@ -154,26 +154,6 @@ Proof route for the promotion commit, using lemmas that already exist:
 `x86_get_reg_set_reg_other` (Peephole.lean). Stores additionally need write
 idempotence at width 8 (`mem_write_bytes` applied twice at one address). -/
 
-/-- **Scaffold (step-04b), rule `x86_64/store_load`.** `mov [b+d8], r ; mov r, [b+d8]`
-is the store alone. No condition relating `r` and `b`: the load's address is
-computed from the state after the store, which changed memory and `rip` only. -/
-theorem peephole_x86_store_load_disp8 (s : X86State) (code : Nat → UInt8)
-    (m : Nat) (rex modrm : UInt8) (reg rm : Nat) (disp : Int)
-    (h_rip : s.rip = m)
-    (h_s0 : code m = rex) (h_s1 : code (m + 1) = 0x89)
-    (h_s2 : code (m + 2) = modrm) (h_sd : read_i8 (code (m + 3)) = disp)
-    (h_l0 : code (m + 4) = rex) (h_l1 : code (m + 5) = 0x8b)
-    (h_l2 : code (m + 6) = modrm) (h_ld : read_i8 (code (m + 7)) = disp)
-    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
-    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = rm)
-    (h_rm_ne : rm ≠ 4)
-    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
-    (h_dst_lt : reg + x86_rex_r rex < 16)
-    (t1 t2 : X86State)
-    (hs1 : x86_step s code = some t1) (hs2 : x86_step t1 code = some t2) :
-    t2 = { t1 with rip := m + 8 } := by
-  sorry
-
 /-- **Scaffold (step-04c), rule `x86_64/mem_pair_store`.** Two identical
 `mov [b+d8], r`: the second writes the same value to the same address. -/
 theorem peephole_x86_store_pair_disp8 (s : X86State) (code : Nat → UInt8)

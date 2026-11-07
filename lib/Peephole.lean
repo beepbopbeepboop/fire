@@ -890,6 +890,75 @@ theorem peephole_arm64_movz_pair (s : Arm64State) (code : Nat → UInt8)
   · have hpc1 : s1.pc = s.pc := by rw [hs1', arm64_set_reg_pc_unchanged]
     rw [arm64_steps_two_seq s code s1 s2 hs1 hpc1 hpair, hpc]
 
+/-- **Rule `x86_64/store_load` (step-04b).** `mov [b+d8], r ; mov r, [b+d8]`
+is the store alone. No condition relating `r` and `b`: the load's address is
+computed from the state after the store, which changed memory and `rip` only.
+Statement checked true (no correction needed). -/
+theorem peephole_x86_store_load_disp8 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm : Nat) (disp : Int)
+    (h_rip : s.rip = m)
+    (h_s0 : code m = rex) (h_s1 : code (m + 1) = 0x89)
+    (h_s2 : code (m + 2) = modrm) (h_sd : read_i8 (code (m + 3)) = disp)
+    (h_l0 : code (m + 4) = rex) (h_l1 : code (m + 5) = 0x8b)
+    (h_l2 : code (m + 6) = modrm) (h_ld : read_i8 (code (m + 7)) = disp)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = rm)
+    (h_rm_ne : rm ≠ 4)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_dst_lt : reg + x86_rex_r rex < 16)
+    (t1 t2 : X86State)
+    (hs1 : x86_step s code = some t1) (hs2 : x86_step t1 code = some t2) :
+    t2 = { t1 with rip := m + 8 } := by
+  have e1 := x86_step_mov_mem_disp8 s code m rex modrm reg rm disp
+    h_rip h_s0 h_s1 h_s2 h_sd h_rex h_w h_mod h_rm h_rm_ne h_reg
+  rw [hs1] at e1
+  have ht1 : t1 = { s with
+      mem := mem_write_bytes s.mem
+        (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat
+        (x86_get_reg s (reg + x86_rex_r rex)) 8,
+      rip := m + 4 } := Option.some.inj e1
+  have h_rip1 : t1.rip = m + 4 := by rw [ht1]
+  have e2 := x86_step_mov_rm64_mem_disp8 t1 code (m + 4) rex modrm reg rm
+    (reg + x86_rex_r rex) disp h_rip1 h_l0 h_l1 h_l2 h_ld h_rex h_w h_mod h_rm
+    h_rm_ne h_reg rfl h_dst_lt
+  rw [hs2] at e2
+  have ht2 := Option.some.inj e2
+  have h_base : x86_get_reg t1 (rm + x86_rex_b rex) = x86_get_reg s (rm + x86_rex_b rex) := by
+    rw [ht1]; rfl
+  have h_src : x86_get_reg t1 (reg + x86_rex_r rex) = x86_get_reg s (reg + x86_rex_r rex) := by
+    rw [ht1]; rfl
+  have h_mem : t1.mem = mem_write_bytes s.mem
+      (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat
+      (x86_get_reg s (reg + x86_rex_r rex)) 8 := by
+    rw [ht1]
+  have h_read : mem_read_bytes t1.mem
+      (Int.ofNat (x86_get_reg t1 (rm + x86_rex_b rex)).toNat + disp).toNat 8
+      = x86_get_reg s (reg + x86_rex_r rex) := by
+    rw [h_base, h_mem, mem_read_bytes_write_same]
+    simp [lowMask_eight]
+    bv_decide
+  rw [ht2]
+  simp only [h_read, ← h_src]
+  rw [x86_set_reg_self t1 (reg + x86_rex_r rex) h_dst_lt]
+
+/-- Witness (step-04b): `mov [rbp-8], rax ; mov rax, [rbp-8]` = `48 89 45 f8 ; 48 8b 45 f8`. -/
+example (s : X86State) (t1 t2 : X86State)
+    (hs1 : x86_step s (fun n => if n = 0 then 0x48 else if n = 1 then 0x89
+        else if n = 2 then 0x45 else if n = 3 then 0xF8
+        else if n = 4 then 0x48 else if n = 5 then 0x8B
+        else if n = 6 then 0x45 else if n = 7 then 0xF8 else 0) = some t1)
+    (hs2 : x86_step t1 (fun n => if n = 0 then 0x48 else if n = 1 then 0x89
+        else if n = 2 then 0x45 else if n = 3 then 0xF8
+        else if n = 4 then 0x48 else if n = 5 then 0x8B
+        else if n = 6 then 0x45 else if n = 7 then 0xF8 else 0) = some t2)
+    (h_rip : s.rip = 0) :
+    t2 = { t1 with rip := 8 } :=
+  peephole_x86_store_load_disp8 s _ 0 0x48 0x45 0 5 (-8) h_rip
+    rfl rfl rfl (by native_decide) rfl rfl rfl (by native_decide)
+    (by native_decide) (by native_decide) (by native_decide) (by native_decide)
+    (by native_decide) (by native_decide) (by native_decide)
+    t1 t2 hs1 hs2
+
 /-!
 ## Design note (x86_64/imm_zero) — for a later hard round
 The sound statement is "for every continuation whose first flag access is a

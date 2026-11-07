@@ -57,11 +57,6 @@ SCAFFOLD_HOLES: dict[str, Hole] = {
         "by-reference one-field mutator write-back (multiple exits): per-exit obligation scaffolded",
         "placeholder",
     ),
-    "peephole_x86_store_load_disp8": Hole(
-        "step-04b",
-        "x86 `mov [b+d8],r ; mov r,[b+d8]` equals the store alone (no SIB, no RIP-relative)",
-        "scaffold",
-    ),
     "peephole_x86_store_pair_disp8": Hole(
         "step-04c",
         "x86 two identical disp8 stores equal one (needs width-8 write idempotence)",
