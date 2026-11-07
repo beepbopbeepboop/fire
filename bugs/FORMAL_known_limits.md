@@ -1439,31 +1439,41 @@ which is why it is written down here rather than attempted.
 **Measured 2026-11-05 (step 18a).** Two different things share "frame escape":
 (A) build-time `CODEGEN:` refusals mentioning "frame address"/"receiver" (a sweep count) — a Lean contract cannot move this count. (B) the Lean contract for a receiver passed by reference in a one-field by-reference mutator (`formal/arm64_proof_gen.py::_frame_methods` / `_generate_frame_proof`).
 
-**Classification table (D1 measurement):**
-| program | `_frame_methods` result | matches source? |
+**Re-measured 2026-11-07 (the table above this edit, written 2026-11-05, was wrong on `inc`).**
+Script: `.tmp/18a/measure.py` (spies `generate_arm64_proof`, calls `_frame_methods`, as `test_one_field_mutator_by_reference_gets_contract` does).
+
+| program (struct `Box`, one field `v`) | `_frame_methods` result today | matches source? |
 |---|---|---|
-| `Box.set_v(mut self, x: Int): self.v = x` (assignment of parameter) | `Box_set_v` kind=`set`, pairs=[(`v`,0)], stores=[True], body_len=1 | yes |
-| `Box.inc(mut self): self.v = self.v + 1` (read-modify-write, no param assigned) | `Box_inc` kind=`set`, pairs=[(`v`,0)], stores=[True], body_len=1 | **no** — classified as `set` by placeholder rule but body is not "assignment of a parameter"; has LOAD+STORE |
-| `Box.pop(mut self) -> Int:` with `if self.v==0: return 0` else read/store/return (multi-exit/branchy) | `None` | yes (not a simple leaf the finder accepts) |
+| `set_v(mut self, x): self.v = x` | `Box_set_v`, `kind="set"`, `pairs=[("v",0)]`, `stores=[True]` | yes |
+| `inc(mut self): self.v = self.v + 1` (load, add, store) | `None` | yes — no contract, which is sound |
+| `pop(mut self) -> Int` (read, two `if` exits each storing) | `None` | yes |
+| `set2(mut self, x): self.v = x; self.v = x + 1` | `None` | yes |
+| two-field `P.set_a(mut self, x): self.a = x` | `P_set_a`, `kind="set"`, `pairs=[("a",0)]` | yes (frame receiver, the older path) |
 
-**x86-64:** no `frame_methods`/`_self_accesses` machinery in `formal/x86_64_proof_gen.py` (grep returns nothing). Frame-contract machinery exists only for arm64; x86-64 has no by-reference one-field mutator contract path.
+**D1 is already implemented in the tree** (the "D1 (18b)" comments in `_frame_methods`: a by-reference one-field method gets a contract only for ONE assignment of a parameter to `self` (`set`) or `return self` (`get`); the `[(field, True)]` placeholder only survives inside that gate, and the second gate after `_frame_slot_accesses` repeats it). So **18b is a test-and-pin step, not a code step**: add the four negative rows above to `test_formal_frame_method_finder.py` (`inc`, `pop`, `set2` must give `None`) so the restriction cannot regress, then close 18b. The load-first rule that 18c is for is also partly in: `_frame_slot_accesses(..., is_cell_receiver=True)` exists and `test_cell_receiver_load_first_rule` / `..._two_rets` / `..._wrong_reg_is_none` pass (10/10 in that file). What 18c still owes: (i) the constant-propagation start `{0: 0}` is only checked on the unit test's hand-built words, not on a compiled `inc`-shaped method, which `_frame_methods` rejects before the scan (the source gate) — so the rule is unreachable from a real program until a `kind="rmw"` classification exists; (ii) the single-RET requirement (`len(rets) != 1 -> None`) is the 1-exit case of D3.
 
-**(A) sweep re-measure:** re-measure pending (full sweep in progress). Historical log `bugs/sweeps/sweep-arm-14.txt` shows 7 `CODEGEN:` lines mentioning `frame address\|receiver`; current tree state may differ. Count to be updated when sweep completes.
+**x86-64:** `grep -n "frame_methods\|_self_accesses" formal/x86_64_proof_gen.py` is empty (re-run 2026-11-07), and no `test_formal_x86_64_*` builds a by-reference one-field mutator with a proof (`call_tree`, `dylib`, `parity` only). There is no contract path; out of scope here.
 
-**Decisions:**
+**(A) sweep count:** the full re-sweep was not run (32 GB, ~hours). The only measured figure is the historical `bugs/sweeps/sweep-arm-14.txt`: 7 `CODEGEN:` lines match `frame address|receiver`, but only 2 of them are the by-reference frame escape (`bootstrap_test_classes.mojo` "returns a frame address"; `none.mojo` "receiver is the ADDRESS of a frame"); the others are unrelated method-call refusals that happen to contain "receiver". The 97/68 in §6.3 is the 2026-09-27 figure and is stale. Re-measure pending; a Lean contract cannot change this count.
 
-- **D1 (soundness of placeholder):** By-reference one-field methods are classified as `set` only when the body is **one assignment of a parameter to `self`** and the machine shows one store. `get` only for `return self`. Everything else → `continue` (no contract), matching pre-2026-11-03 behavior. Drop placeholder branches in `_frame_methods`. (Feeds 18b.)
-- **D2 (depth bound):** The contract must state the depth bound as a **theorem hypothesis**, not an axiom. The cell is in the caller's frame at address `p`; premise written as `h_cell : ...` (e.g. "cell in caller frame" / `Frame`-related bound). The generated theorem remains unsound-only-if-hypothesis-misapplied; discharge at call sites is scaffolded. (Feeds 18d.) **Theorem skeleton (to go in `lib/Scaffold.lean` by 18d):**
+**Decisions**
+
+- **D1 (soundness of the placeholder): taken, already in the code.** `set` = one parameter-assignment, `get` = `return self`, everything else is no contract. Feeds 18b (pin it).
+- **D2 (depth bound as a hypothesis, never an axiom).** The cell is the CALLER's word, so it sits ABOVE the callee's `sp`, the opposite side from the receiver *frames* of `_generate_frame_proof` (those sit at the callee's entry `sp` and grow upward, hence `Frame.FrameBelow`). `Frame.FrameBelow` is therefore the wrong premise for a cell. The correct premises are `Frame.FrameFits p 1` (the 8-byte cell does not wrap, `lib/ProofLib.lean:6207`) and a separation premise `h_above : s.sp.toNat + W ≤ p.toNat` where `W` is the stack window the method touches (`_frame_stack_depths`, the same number the frame contracts use for `hsep`). The skeleton 18d should put in `lib/Scaffold.lean` in place of the `h_cell : True` / `: Prop` placeholders (the shipped placeholders state `True`, which is vacuous; the ledger already lists them as such):
   ```lean
-  /-- Scaffold: write-back contract for a by-reference one-field mutator (single exit).
-      Depth bound is a hypothesis, not an axiom. -/
   theorem scaffold_cell_writeback_one_exit
-      {s s' : Arm64State} (p : UInt64)
-      (h_cell : True)  -- TODO(18d): replace by proper Frame hypothesis (e.g. cell_in_caller_frame p s.sp)
-      : Prop := by sorry
+      (s s' : Arm64State) (code : Nat → UInt8) (exit_pc fuel : Nat) (p v : UInt64) (W : Nat)
+      (hx0 : s.x0 = p) (hx1 : s.x1 = v)
+      (hfit : Frame.FrameFits p 1)                    -- cell does not wrap
+      (h_above : s.sp.toNat + W ≤ p.toNat)            -- cell is above the callee's stack window
+      (hrun : arm64_exec_go_exit s code exit_pc fuel = some s') :
+      Frame.frameRead s'.mem p 0 = v ∧                -- the write-back happened
+      ∀ a, (a < p.toNat ∨ p.toNat + 8 ≤ a) →          -- nothing else changed outside the callee's window
+        (a < s.sp.toNat - W ∨ s.sp.toNat ≤ a) → s'.mem a = s.mem a := by
+    sorry
   ```
-  (Exact `Frame.*` names to be confirmed against `lib/Refine.lean`/`lib/Contracts.lean`; 18d will narrow to what typechecks.)
-- **D3 (multiple exits):** Contract states write-back as a per-exit disjunction over RET addresses collected by the finder. 18c implements peel for 1 exit; >1 exits get scaffolded obligation in 18d. (Feeds 18c, 18d.)
+  The `sorry` is the proof, the statement is real; 18d must typecheck it (`Frame.frameRead` and `arm64_exec_go_exit` exist) before ledgering. Discharge at call sites (`h_above`) is the part that needs the caller's frame layout and stays a scaffold.
+- **D3 (multiple exits).** The write-back repeats on every RET, so the multi-exit statement is a conjunction over the RET addresses the finder collected (`rets`), one `frameRead` conjunct per exit reached; 18c proves the 1-exit case, 18d scaffolds `>1`. Nothing in the finder emits more than one RET today (`len(rets) != 1 -> None`), so the multi-exit scaffold is a statement with no producer yet.
 
 **Feeds:** 18b (restrict classifier per D1), 18c (load-first rule for cell receiver, constant propagation from `{0:0}`, 1-exit case), 18d (scaffold write-back contract with depth bound as hypothesis and per-exit obligation as `sorry` in `lib/Scaffold.lean`, ledgered).
 

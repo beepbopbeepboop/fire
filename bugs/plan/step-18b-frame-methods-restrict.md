@@ -1,4 +1,5 @@
 # plan/step-18b: make `_frame_methods` classify only the shapes whose contract is true
+**Scope note (2026-11-07, from 18a):** the restriction is already in `_frame_methods` ("D1 (18b)" comments). Remaining work is only to pin it: add tests that `inc`, `pop`, `set2` on a one-field `Box` give `_frame_methods(...) is None` (programs in `.tmp/18a/measure.py`, pattern `test_one_field_mutator_by_reference_gets_contract`), then mark DONE.
 Class: mid      Size: M      Depends: 18a      Blocks: 18c, 18d
 Source: 18a's section "§6.3 Design: the by-reference one-field mutator contract" in `bugs/FORMAL_known_limits.md`.
 
