@@ -495,20 +495,23 @@ ALL_INPUTS = {
         word="Specs.shiftMix64", nat="Specs.shiftMix", kind="closed",
         body="((n <<< (UInt64.ofNat 3)) + (asr64 n (UInt64.ofNat 2)))",
         hyp="hneg : w.toNat < Specs.signBit",
-        proof=("simp [mojo, {go}, {word}, {nat}, ProofLib.asr64]\n"
-               "apply UInt64.toNat_inj.mp\n"
-               "simp [UInt64.add_toNat, UInt64.toNat_ofNat', UInt64.shiftLeft_toNat]\n"
-               "have hs : (w >>> UInt64.ofNat 2).toNat = w.toNat / 2 ^ 2 := by\n"
-               "  rw [UInt64.toNat_shiftRight]\n"
-               "  simp\n"
-               "have hlt : w.toNat < 2 ^ 63 := hneg\n"
-               "have htop : (w >>> 63).toNat = 0 := by\n"
-               "  rw [UInt64.toNat_shiftRight]\n"
-               "  have := Nat.div_lt_div_of_lt_of_pos (by decide : 0 < 2^63) hlt\n"
+        proof=("have hlt : w.toNat < 2 ^ 63 := hneg\n"
+               "have htop : (w >>> 63) ≠ 1 := by\n"
+               "  intro h\n"
+               "  have := congrArg UInt64.toNat h\n"
+               "  rw [UInt64.toNat_shiftRight] at this\n"
                "  simp at this\n"
                "  omega\n"
-               "simp [htop, hs, Specs.shiftMix]\n"
-               "omega")),
+               "have hasr : asr64 w (UInt64.ofNat 2) = w >>> (UInt64.ofNat 2) := by\n"
+               "  unfold asr64\n"
+               "  simp [htop]\n"
+               "have key : ((w <<< (UInt64.ofNat 3)) + (asr64 w (UInt64.ofNat 2))) = {word} w := by\n"
+               "  rw [hasr]\n"
+               "  unfold {word} {nat}\n"
+               "  apply UInt64.toNat_inj.mp\n"
+               "  simp [UInt64.toNat_add, UInt64.toNat_shiftLeft, UInt64.toNat_shiftRight, "
+               "Nat.shiftLeft_eq, Nat.shiftRight_eq_div_pow]\n"
+               "simpa [mojo, {go}] using key")),
 }
 
 
