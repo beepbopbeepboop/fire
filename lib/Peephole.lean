@@ -1043,7 +1043,7 @@ theorem peephole_x86_store_load_disp8 (s : X86State) (code : Nat → UInt8)
       = x86_get_reg s (reg + x86_rex_r rex) := by
     rw [h_base, h_mem, mem_read_bytes_write_same]
     simp [lowMask_eight]
-    bv_decide
+    bv_normalize
   rw [ht2]
   simp only [h_read, ← h_src]
   rw [x86_set_reg_self t1 (reg + x86_rex_r rex) h_dst_lt]
@@ -1061,9 +1061,9 @@ example (s : X86State) (t1 t2 : X86State)
     (h_rip : s.rip = 0) :
     t2 = { t1 with rip := 8 } :=
   peephole_x86_store_load_disp8 s _ 0 0x48 0x45 0 5 (-8) h_rip
-    rfl rfl rfl (by native_decide) rfl rfl rfl (by native_decide)
-    (by native_decide) (by native_decide) (by native_decide) (by native_decide)
-    (by native_decide) (by native_decide) (by native_decide)
+    rfl rfl rfl (by decide) rfl rfl rfl (by decide)
+    (by decide) (by decide) (by decide) (by decide)
+    (by decide) (by decide) (by decide)
     t1 t2 hs1 hs2
 
 /-- **Rule `x86_64/imm_zero` (flags).** `add r, 0` / `sub r, 0` (REX.W 81 /0
@@ -1408,13 +1408,13 @@ example (s : X86State) (code : Nat → UInt8) (m : Nat)
     (h_b2 : code (m + 2) = 0xc0)
     (t : X86State) (hs : x86_step s code = some t) :
     t = { s with rip := m + 3 } := by
-  have h_rex : x86_is_rex (0x48 : UInt8) = true := by native_decide
-  have h_w : x86_rex_w (0x48 : UInt8) = true := by native_decide
-  have h_mod : (0xc0 : UInt8).toNat >>> 6 = 3 := by native_decide
-  have h_reg : ((0xc0 : UInt8).toNat >>> 3) &&& 7 = 0 := by native_decide
-  have h_rm : (0xc0 : UInt8).toNat &&& 7 = 0 := by native_decide
-  have h_same : 0 + x86_rex_b (0x48 : UInt8) = 0 + x86_rex_r (0x48 : UInt8) := by native_decide
-  have h_idx : 0 + x86_rex_r (0x48 : UInt8) < 16 := by native_decide
+  have h_rex : x86_is_rex (0x48 : UInt8) = true := by decide
+  have h_w : x86_rex_w (0x48 : UInt8) = true := by decide
+  have h_mod : (0xc0 : UInt8).toNat >>> 6 = 3 := by decide
+  have h_reg : ((0xc0 : UInt8).toNat >>> 3) &&& 7 = 0 := by decide
+  have h_rm : (0xc0 : UInt8).toNat &&& 7 = 0 := by decide
+  have h_same : 0 + x86_rex_b (0x48 : UInt8) = 0 + x86_rex_r (0x48 : UInt8) := by decide
+  have h_idx : 0 + x86_rex_r (0x48 : UInt8) < 16 := by decide
   exact peephole_x86_mov_self_rev s code m 0x48 0xc0 0 0 h_rip h_b0 h_b1 h_b2 h_rex h_w h_mod h_reg h_rm h_same h_idx t hs
 
 /-!
