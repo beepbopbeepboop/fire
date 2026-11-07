@@ -359,6 +359,90 @@ def test_multi_target_comptime():
           len(one) == 1 and one[0].target == 'a', repr(one))
 
 
+# ── 7b. Nested tuple patterns in a comptime assignment target ──────────
+def test_nested_target_comptime():
+    # PARSER_nested_tuple_unpack_comptime: `comptime a, (b, c) = 1, (2, 3)`
+    # used to die with "Unexpected COMMA" — the multi-target loop accepted
+    # only ONE more NAME directly followed by the `=`, so the `(` after the
+    # comma (and a third flat target, whose peek(2) saw the second comma)
+    # fell through to a bare `ExprStmt(IdentExpr('a'))` and the rest of the
+    # line to the statement parser.
+    #
+    # Each leaf name becomes one ComptimeVarStmt bound to the WHOLE
+    # right-hand side — the same name-to-expression model the flat
+    # `comptime a, b = g()` spelling above pins, and the one every
+    # ComptimeVarStmt consumer (the interpreter's scope.define, gimple's
+    # _comptime_vals table) already reads.
+    src = ('def f():\n'
+           '    comptime a, (b, c) = 1, (2, 3)\n')
+    body = _parse(src)[0].body
+    check("nested_target_comptime_yields_three_statements", len(body) == 3,
+          repr([type(s).__name__ for s in body]))
+    check("nested_target_comptime_targets",
+          all(isinstance(s, N.ComptimeVarStmt) for s in body)
+          and [s.target for s in body] == ['a', 'b', 'c'],
+          repr([getattr(s, 'target', None) for s in body]))
+    # The right-hand side is the BARE tuple `1, (2, 3)` — a TupleExpr whose
+    # second element is the inner 2-tuple — and every leaf name shares that
+    # one node.
+    if len(body) == 3:
+        val = body[0].value
+        check("nested_target_comptime_rhs_is_bare_tuple",
+              isinstance(val, N.TupleExpr) and len(val.elements) == 2,
+              repr(val))
+        check("nested_target_comptime_rhs_inner_tuple",
+              isinstance(val, N.TupleExpr)
+              and isinstance(val.elements[1], N.TupleExpr)
+              and len(val.elements[1].elements) == 2,
+              repr(val))
+        check("nested_target_comptime_all_names_share_rhs",
+              all(s.value is body[0].value for s in body),
+              repr([id(s.value) for s in body]))
+
+    # Deeper nesting flattens to one statement per leaf name, and a single
+    # (non-tuple) right-hand side is shared by all of them, unchanged.
+    deep = _parse('def f():\n    comptime a, (b, (c, d)) = g()\n')[0].body
+    check("deeply_nested_target_comptime_targets",
+          len(deep) == 4
+          and [s.target for s in deep] == ['a', 'b', 'c', 'd']
+          and all(isinstance(s, N.ComptimeVarStmt) for s in deep),
+          repr([getattr(s, 'target', None) for s in deep]))
+    check("deeply_nested_target_comptime_rhs_is_the_call",
+          len(deep) == 4
+          and all(s.value is deep[0].value for s in deep)
+          and isinstance(deep[0].value, N.CallExpr),
+          repr([type(s.value).__name__ for s in deep]))
+
+    # A THIRD flat target — the same limited loop broke on it: peek(2) saw
+    # the second comma, not the `=`, so it fell out of the loop too.
+    flat3 = _parse('def f():\n    comptime a, b, c = g()\n')[0].body
+    check("three_flat_target_comptime_targets",
+          len(flat3) == 3
+          and [s.target for s in flat3] == ['a', 'b', 'c']
+          and all(isinstance(s, N.ComptimeVarStmt) for s in flat3),
+          repr([getattr(s, 'target', None) for s in flat3]))
+
+    # The bare-tuple right-hand side is the same fix with a single target:
+    # `comptime A = 1, 2` used to die on the comma the same way.
+    single = _parse('def f():\n    comptime A = 1, 2\n')[0].body
+    check("single_target_bare_tuple_rhs",
+          len(single) == 1 and isinstance(single[0], N.ComptimeVarStmt)
+          and isinstance(single[0].value, N.TupleExpr)
+          and len(single[0].value.elements) == 2,
+          repr(single))
+
+    # NEGATIVE half: a target list that is not a comma-list of names/groups
+    # must not be swallowed as a binding — the whole attempt rolls back and
+    # the statement parser still rejects it, rather than silently binding a
+    # subset of the names.
+    check_raises("nested_target_comptime_eq_after_comma_still_rejected",
+                 'def f():\n    comptime a, = g()\n')
+    check_raises("nested_target_comptime_unclosed_group_still_rejected",
+                 'def f():\n    comptime a, (b = g()\n')
+    check_raises("nested_target_comptime_empty_group_still_rejected",
+                 'def f():\n    comptime a, () = g()\n')
+
+
 # ── 8. Function type in subscript (index) position ───────────────────────
 def test_fn_type_in_subscript():
     src = ('def f(self):\n'
@@ -829,7 +913,7 @@ def run_tests():
     print("=" * 70)
     for fn in (test_dotted_literal, test_match, test_lambda, test_capture_lists,
                test_imm_convention, test_struct_where,
-               test_multi_target_comptime, test_fn_type_in_subscript,
+               test_multi_target_comptime, test_nested_target_comptime, test_fn_type_in_subscript,
                test_decorated_import, test_multi_statement_result,
                # Both sides of this merge appended a case to the same list
                # and neither was a revert of the other: this branch brought
@@ -839,7 +923,8 @@ def run_tests():
                test_used_idents_covers_new_syntax,
                test_bracket_mixing_keyword_and_positional,
                test_bracket_param_default_is_captured,
-               test_comptime_rhs_misparse_is_refused):
+               test_comptime_rhs_misparse_is_refused,
+               test_comptime_type_constraint_ampersand):
         print(f"\n--- {fn.__name__}")
         fn()
     print()
@@ -860,15 +945,18 @@ def test_comptime_type_constraint_ampersand():
             check("comptime_ampersand_op_is_and", stmts[0].value.op == '&')
 
 
-# Add to run list
-# (we'll append by calling in run_tests - easier to just run separately)
+# The ampersand case joins the run list here rather than in __main__, which
+# used to call ONLY that one test: the file is registered in tools/suite.py
+# as `python3 test_new_syntax_parsing.py`, so run_tests()'s other fifteen
+# functions — including test_multi_target_comptime (this file's parser area)
+# and test_comptime_rhs_misparse_is_refused, which pins _skip_comptime_rhs —
+# had never run in the gate. Every test now runs through run_tests, the same
+# way test_parser_param_for.py does.
 
 
 if __name__ == '__main__':
-    # Also run our test
     try:
-        print("\n--- test_comptime_type_constraint_ampersand")
-        test_comptime_type_constraint_ampersand()
+        run_tests()
         print()
         print("=" * 70)
         print(f"Results: {_PASS} passed, {_FAIL} failed")
