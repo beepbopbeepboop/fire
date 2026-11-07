@@ -2660,6 +2660,9 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
     stack = [0]
     paren_depth = 0  # Track (), [], {} nesting to suppress INDENT/DEDENT inside
     continued_from_prev = False  # last physical line ended in an implicit-continuation token
+    prev_ended_string = False  # previous physical line ended with a string literal,
+                               # so this line continues an implicit string
+                               # concatenation (`"a"\n "b"`)
     for line_idx, line in enumerate(joined):
         physical_line = line_nums[line_idx]
         expanded = _indent_expanded(line)
@@ -2673,8 +2676,11 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
             stmt = stmt.strip()
             if not stmt: continue
             # Only emit INDENT/DEDENT when at paren depth 0, and not when this
-            # physical line is itself just the continuation of the previous one.
-            if stmt_idx == 0 and paren_depth == 0 and not continued_from_prev:
+            # physical line is itself just the continuation of the previous one
+            # (implicit-continuation token, or an implicit string concat whose
+            # previous line ended with a string literal).
+            if stmt_idx == 0 and paren_depth == 0 \
+                    and not continued_from_prev and not prev_ended_string:
                 if indent > stack[-1]:
                     stack.append(indent)
                     out.append(Token("INDENT", "", line=physical_line, col=0))
@@ -2744,6 +2750,16 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
             if paren_depth == 0 and not implicit_continuation:
                 out.append(Token("NEWLINE", "", line=physical_line, col=0))
             continued_from_prev = paren_depth == 0 and implicit_continuation
+        # A line that ends with a string literal may be the start of an implicit
+        # string concatenation that continues on a following, more-indented line
+        # (`"a"\n "b"`). Record it so the next physical line suppresses INDENT.
+        _last_tok = None
+        for _t in reversed(out):
+            if _t.kind in ("NEWLINE", "INDENT", "DEDENT"):
+                continue
+            _last_tok = _t
+            break
+        prev_ended_string = (_last_tok is not None and _last_tok.kind == "STRING")
     last_line = 0
     if line_nums:
         last_line = line_nums[-1]
