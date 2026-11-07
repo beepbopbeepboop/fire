@@ -461,6 +461,51 @@ def test_comptime_assert_in_comptime_for_str_literal_fails():
     raise AssertionError('comptime for over string literal compiled')
 
 
+def test_comptime_assert_dict_subscript_fails():
+    # Dict literal folding/subscript in comptime validation
+    # (DIAGNOSTICS_missing_validation_modular: comptime-known dict literal
+    # folding/subscript).
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime d = {"a": 1, "b": 2}\n'
+            '    comptime assert d["a"] == 9, "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime assert with dict subscript false compiled')
+
+
+def test_comptime_assert_dict_subscript_true():
+    _compile(
+        'fn f():\n'
+        '    comptime d = {"a": 1, "b": 2}\n'
+        '    comptime assert d["b"] == 2, "ok"\n')
+
+
+def test_comptime_assert_dict_len_fails():
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime d = {"a": 1, "b": 2}\n'
+            '    comptime assert len(d) == 3, "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime assert len(comptime dict) == wrong compiled')
+
+
+def test_comptime_assert_dict_len_true():
+    _compile(
+        'fn f():\n'
+        '    comptime d = {"a": 1, "b": 2}\n'
+        '    comptime assert len(d) == 2, "ok"\n')
+
+
 if __name__ == '__main__':
     test_comptime_assert_false_fails()
     test_comptime_assert_false_no_msg()
@@ -499,4 +544,8 @@ if __name__ == '__main__':
     test_comptime_assert_in_comptime_for_str_alias_fails()
     test_comptime_assert_in_comptime_for_str_alias_true()
     test_comptime_assert_in_comptime_for_str_literal_fails()
+    test_comptime_assert_dict_subscript_fails()
+    test_comptime_assert_dict_subscript_true()
+    test_comptime_assert_dict_len_fails()
+    test_comptime_assert_dict_len_true()
     print('ok')

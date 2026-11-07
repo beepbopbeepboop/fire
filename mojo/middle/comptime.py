@@ -56,6 +56,7 @@ CompareChain = _fc.CompareChain
 CallExpr = _fc.CallExpr
 TupleExpr = getattr(_fc, 'TupleExpr', None)
 ListExpr = getattr(_fc, 'ListExpr', None)
+DictExpr = getattr(_fc, 'DictExpr', None)
 DottedLiteral = getattr(_fc, 'DottedLiteral', None)
 SubscriptExpr = getattr(_fc, 'SubscriptExpr', None)
 SliceExpr = getattr(_fc, 'SliceExpr', None)
@@ -414,6 +415,20 @@ def eval_const(node, bindings: dict, platform: str = None):
                 return None
             res.append(v)
         return res
+    if DictExpr is not None and isinstance(node, DictExpr):
+        res = {}
+        for pair in getattr(node, 'pairs', []) or []:
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                return None
+            k = eval_const(pair[0], bindings, platform)
+            v = eval_const(pair[1], bindings, platform)
+            if k is None or v is None:
+                return None
+            try:
+                res[k] = v
+            except Exception:
+                return None
+        return res
     # PART 6 (2026-10-23, family S): the string-wrapping CONSTRUCTOR over a
     # single foldable argument — `StringSlice("x")`, `StaticString("x")`,
     # `String("x")`, `StringSpan("x")`. In every backend of this tree the
@@ -449,7 +464,7 @@ def eval_const(node, bindings: dict, platform: str = None):
     # i.e. silently wrong digits, with a `-Wpointer-to-int-cast` warning as
     # the only symptom. The constructor wraps to its width, as the runtime
     # constructor does. `len(x)` folds when `x` is a comptime-known
-    # list/tuple/string so `comptime assert len(a) == ...` and
+    # list/tuple/string/dict so `comptime assert len(a) == ...` and
     # `comptime for i in range(len(a))` bounds produce compile-time
     # diagnostics (DIAGNOSTICS_missing_validation_modular).
     if (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
@@ -457,7 +472,7 @@ def eval_const(node, bindings: dict, platform: str = None):
         _cfn = node.func.name
         if _cfn == 'len':
             _lv = eval_const(node.args[0], bindings, platform)
-            if isinstance(_lv, (list, tuple, str)):
+            if isinstance(_lv, (list, tuple, str, dict)):
                 return len(_lv)
             return None
         if _cfn == 'ord':
@@ -662,12 +677,13 @@ def eval_const_int(node, bindings: dict, call_hook=None):
             if not link: return 0
             left = right
         return 1
-    # `len(x)` of a comptime-known list/tuple/string (DIAGNOSTICS_missing_validation_modular).
+    # `len(x)` of a comptime-known list/tuple/string/dict
+    # (DIAGNOSTICS_missing_validation_modular).
     if (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
             and node.func.name == 'len' and len(node.args) == 1
             and not node.kwargs):
         _lv = eval_const(node.args[0], bindings)
-        if isinstance(_lv, (list, tuple, str)):
+        if isinstance(_lv, (list, tuple, str, dict)):
             return len(_lv)
         return None
     # Subscript/slice yielding an int (e.g. `range(a[0])` with comptime `a`).
@@ -719,6 +735,25 @@ def _const_foldable(node, bindings: dict, call_hook=None) -> bool:
     if isinstance(node, (BoolLiteral, IntLiteral, StringLiteral)):
         return True
     if DottedLiteral is not None and isinstance(node, DottedLiteral):
+        return True
+    if TupleExpr is not None and isinstance(node, TupleExpr):
+        for e in getattr(node, 'elements', []) or []:
+            if not _const_foldable(e, bindings, call_hook):
+                return False
+        return True
+    if ListExpr is not None and isinstance(node, ListExpr):
+        for e in getattr(node, 'elements', []) or []:
+            if not _const_foldable(e, bindings, call_hook):
+                return False
+        return True
+    if DictExpr is not None and isinstance(node, DictExpr):
+        for pair in getattr(node, 'pairs', []) or []:
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                return False
+            if not _const_foldable(pair[0], bindings, call_hook):
+                return False
+            if not _const_foldable(pair[1], bindings, call_hook):
+                return False
         return True
     if isinstance(node, IdentExpr):
         return node.name in bindings

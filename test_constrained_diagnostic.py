@@ -277,6 +277,50 @@ def test_constrained_subscript_str_fails():
     raise AssertionError('constrained with str subscript false compiled')
 
 
+def test_constrained_dict_subscript_fails():
+    # Dict literal folding/subscript in comptime validation
+    # (DIAGNOSTICS_missing_validation_modular).
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime d = {"a": 1, "b": 2}\n'
+            '    constrained[d["a"] == 9, "bad"]()\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'constraint failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('constrained with dict subscript false compiled')
+
+
+def test_constrained_dict_subscript_true():
+    _compile(
+        'fn f():\n'
+        '    comptime d = {"a": 1, "b": 2}\n'
+        '    constrained[d["b"] == 2, "ok"]()\n')
+
+
+def test_constrained_dict_len_fails():
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime d = {"a": 1, "b": 2}\n'
+            '    constrained[len(d) == 3, "bad"]()\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'constraint failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('constrained len(comptime dict) == wrong compiled')
+
+
+def test_constrained_dict_len_true():
+    _compile(
+        'fn f():\n'
+        '    comptime d = {"a": 1, "b": 2}\n'
+        '    constrained[len(d) == 2, "ok"]()\n')
+
+
 def test_constrained_in_comptime_for_str_alias_fails():
     try:
         _compile(
@@ -327,6 +371,10 @@ if __name__ == '__main__':
     test_constrained_subscript_list_fails()
     test_constrained_subscript_list_true()
     test_constrained_subscript_str_fails()
+    test_constrained_dict_subscript_fails()
+    test_constrained_dict_subscript_true()
+    test_constrained_dict_len_fails()
+    test_constrained_dict_len_true()
     test_constrained_in_comptime_for_str_alias_fails()
     test_constrained_in_comptime_for_str_alias_true()
     print('ok')

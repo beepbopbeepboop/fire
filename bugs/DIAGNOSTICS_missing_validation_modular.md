@@ -201,6 +201,16 @@ Key categories:
   loop-dependent diagnostics over string iteration fire. Regressions:
   `test_comptime_assert_diagnostic.py`,
   `test_constrained_diagnostic.py`.
+- **Landed (follow-up, this worker, branch
+  `work/bug-mid-diagnostics-missing-validation-m-7781`):** root-cause fix in
+  `mojo/middle/comptime.py` to fold comptime-known `DictExpr` literals and
+  support `len()`/subscript on comptime-known `dict` values in `eval_const`,
+  `eval_const_int`, and `_const_foldable`. Provably-false `comptime assert` /
+  `constrained` conditions using comptime dict literals, dict element access,
+  or `len()` on a comptime dict now produce compile-time diagnostics (e.g.
+  `comptime d = {"a": 1}; comptime assert d["a"] == 9`). Regressions:
+  `test_comptime_assert_diagnostic.py`,
+  `test_constrained_diagnostic.py`.
 - **Still open (large):** the rest of this umbrella — comptime-assert/
   `constrained` cases where condition evaluation is incomplete (e.g.
   DType predicates on comptime params in generic struct instantiations that
@@ -211,10 +221,10 @@ Key categories:
   trait reflection, `StaticString(_get_kgen_string[...])`), `comptime assert`/
   `constrained` in non-gimple/formal backends or in comptime-for shapes beyond
   the gimple unroller's bound forms (e.g. DType/variadic iterables, iteration
-  over computed/non-foldable iterables, bounds requiring comptime folding of
-  collection ops beyond `len()`/element access/slicing on comptime-known
-  `list`/`tuple`/`str`, comptime-known `dict` literal folding/subscript, and
-  local `alias` bindings not always visible to comptime folding), type/trait
+  over computed/non-foldable iterables or comptime-known `dict` values, bounds
+  requiring comptime folding of collection ops beyond `len()`/element
+  access/slicing on comptime-known `list`/`tuple`/`str`/`dict`, and local
+  `alias` bindings not always visible to comptime folding), type/trait
   conformance diagnostics,
   import errors, and the other categories listed above.
   `build/checkfail_candidates.json` is not present in this worktree; re-run
