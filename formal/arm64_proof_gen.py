@@ -81,9 +81,9 @@ def _over(s_cur: str, pc) -> str:
     return f"({{ {base} with pc := {pc} }})"
 
 
-def _slt(reg: int) -> str:
+def _slt(reg: int, st: str = "s") -> str:
     """The SIGN-FLIPPED read of register `reg`, as the flag lemmas spell it."""
-    return f"(arm64_reg {reg} s ^^^ {_SIGN_MASK})"
+    return f"(arm64_reg {reg} {st} ^^^ {_SIGN_MASK})"
 
 # ── The CFG leaves that admit ────────────────────────────────────────────────
 # A CFG leaf is a place where the walk has followed every edge it can and the
@@ -6996,7 +6996,7 @@ def _emit_range_back_edge_contract(A, ind: str, bi: int, ctx: dict, s_cur: str,
       f"mem_read_after_write_u64_ne, mem_read_two_writes_same]")
     A(f"{ind}  all_goals try simp [u64_add_zero_r, UInt64.toNat_ofNat]")
     A(f"{ind}  all_goals try grind")
-    A(_tag_leaf(f"all_goals {_HOLE}", "range-loop-back-edge-frame",
+    A(f"{ind}  " + _tag_leaf(f"all_goals {_HOLE}", "range-loop-back-edge-frame",
                 note="frame preservation at the back edge"))
     A(f"{ind}have hlt_{bi} : arm64_reg {_rr} {_state} < "
       f"arm64_reg {_rb} {_state} := by")
@@ -7107,7 +7107,7 @@ def _emit_range_back_edge_tail(A, ind: str, bi: int, ctx: dict, name: str) -> No
     A(f"{ind}all_goals try rw [hx19, hx21, hx20]")
     A(f"{ind}all_goals try simp [UInt64.toNat_ofNat]")
     A(f"{ind}all_goals try exact ({name}_loop_go_one_step n)")
-    A(_tag_leaf(f"all_goals {_HOLE}", "range-loop-terminal-invariant",
+    A(f"{ind}  " + _tag_leaf(f"all_goals {_HOLE}", "range-loop-terminal-invariant",
                 note="terminal loop invariant"))
 
 
@@ -7686,7 +7686,7 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
          f"(s : Arm64State) (hpc : s.pc = {cbz_start})" +
          (f"\n    (hr : arm64_reg {rr} s < {_SIGN_MASK})\n    (hb : arm64_reg {rb} s < {_SIGN_MASK})" if _is_signed else "") +
          f" :\n    {(_qsym)} {bmid} = true ↔ " +
-         (f"({_slt(rr)} {bmid} < {_slt(rb)} {bmid})" if _is_signed else
+         (f"((arm64_reg {rr} {bmid} ^^^ {_SIGN_MASK}) < (arm64_reg {rb} {bmid} ^^^ {_SIGN_MASK}))" if _is_signed else
           f"(arm64_reg {rr} {bmid} < arm64_reg {rb} {bmid})"),
          None),
         (f"{name}_loop_body_inc",
@@ -7701,7 +7701,7 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
          f"(s : Arm64State) (hpc : s.pc = {cbz_start})" +
          (f"\n    (hr : arm64_reg {rr} s < {_SIGN_MASK})\n    (hb : arm64_reg {rb} s < {_SIGN_MASK})" if _is_signed else "") +
          f"\n    (hlt : " +
-         (f"{_slt(rr)} s < {_slt(rb)} s" if _is_signed else f"arm64_reg {rr} s < arm64_reg {rb} s") +
+         (f"{_slt(rr)} < {_slt(rb)}" if _is_signed else f"arm64_reg {rr} s < arm64_reg {rb} s") +
          f") :\n    {name}_loop_model {bbody} = {name}_loop_model s",
          None),
         # The exit path is more than one block, so the frame fact the epilogue
@@ -7727,7 +7727,7 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
          f"(s : Arm64State) (hpc : s.pc = {exit_pc_val})" +
          (f"\n    (hr : arm64_reg {rr} s < {_SIGN_MASK})\n    (hb : arm64_reg {rb} s < {_SIGN_MASK})" if _is_signed else "") +
          f"\n    (hlt : ¬ (" +
-         (f"{_slt(rr)} s < {_slt(rb)} s" if _is_signed else f"arm64_reg {rr} s < arm64_reg {rb} s") +
+         (f"{_slt(rr)} < {_slt(rb)}" if _is_signed else f"arm64_reg {rr} s < arm64_reg {rb} s") +
          f")) :\n    {ex_expr}.x0 = {name}_loop_model s",
          None),
         # The composed exit run, and its avoidance.  One helper for each
@@ -7762,7 +7762,7 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
               f"{_slot} < 2^63)]")
             A(f"  all_goals try rw [h]")
             A(f"  all_goals try grind")
-            A(_tag_leaf(f"all_goals {_HOLE}", "range-loop-frame-preservation",
+            A("  " + _tag_leaf(f"all_goals {_HOLE}", "range-loop-frame-preservation",
                       note="frame preservation value flow"))
         elif hname == f"{name}_loop_frame_exit":
             # The frame slot is above `sp` and the restore segment only pushes
@@ -7778,7 +7778,7 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
               f"{_slot} < 2^63)]")
             A(f"  all_goals try rw [h]")
             A(f"  all_goals try grind")
-            A(_tag_leaf(f"all_goals {_HOLE}",
+            A("  " + _tag_leaf(f"all_goals {_HOLE}",
                       "range-loop-exit-frame-preservation",
                       note="exit frame preservation"))
         elif hname in (f"{name}_loop_exit_run", f"{name}_loop_exit_mid"):
@@ -7985,7 +7985,7 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
             A(f"  all_goals try grind")
             A(f"  all_goals try decide")
             A(f"  all_goals try rfl")
-            A(_tag_leaf(f"all_goals {_HOLE}", "range-loop-exit-x30",
+            A("  " + _tag_leaf(f"all_goals {_HOLE}", "range-loop-exit-x30",
                       note="exit x30 value flow"))
         elif hname == f"{name}_loop_exit_x0":
             # At the exit the counter is not below the bound, so the model's
@@ -8014,7 +8014,7 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     if _is_signed:
         A(f"    (hr : arm64_reg {rr} st < {_SIGN_MASK})")
         A(f"    (hb : arm64_reg {rb} st < {_SIGN_MASK})")
-        A(f"    (hlt : ({_slt(rr)} st < {_slt(rb)} st))")
+        A(f"    (hlt : ({_slt(rr, "st")} < {_slt(rb, "st")}))")
     else:
         A(f"    (hlt : arm64_reg {rr} st < arm64_reg {rb} st)")
     A(f"    (hframe : mem_read_u64 st.mem (st.sp + UInt64.ofNat {_slot}).toNat = "
