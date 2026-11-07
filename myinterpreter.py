@@ -4398,9 +4398,33 @@ class Interpreter:
             for name in names:
                 self.scope.define(name, getattr(mod, name))
             return None
+        _missing = object()
         for name, alias in node.names:
-            value = getattr(mod, name, None)
-            if value is None:
+            value = getattr(mod, name, _missing)
+            if value is _missing:
+                # `from package import submodule`: a submodule of a package is
+                # not necessarily set as an attribute of the package until it
+                # has been imported (e.g. Python 3.15's `profiling` exposes
+                # `tracing`/`sampling` as submodules). Resolve it the way
+                # Python does, by importing the fully-qualified submodule, so
+                # `from profiling import tracing` binds the real module rather
+                # than an auto-stub. Only attempted for host/Python module
+                # objects with a resolvable name; fall through to the stub on
+                # any import failure.
+                base = getattr(mod, '__name__', None) or (node.module if not node.module.startswith('.') else None)
+                if base:
+                    try:
+                        value = importlib.import_module(f"{base}.{name}")
+                    except Exception:
+                        value = _AutoStubValue(_AUTO_STUB_VALUE)
+                else:
+                    value = _AutoStubValue(_AUTO_STUB_VALUE)
+            elif value is None:
+                # Keep the historical fallback: `getattr(mod, name, None)`
+                # previously collapsed "missing" and "present but None" into a
+                # stub. Preserve that for present-but-None to avoid changing
+                # unrelated behavior; the missing case above now resolves
+                # package submodules before stubbing.
                 value = _AutoStubValue(_AUTO_STUB_VALUE)
             self.scope.define(alias or name, value)
         return None
