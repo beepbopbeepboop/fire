@@ -46,6 +46,35 @@ trigger, uniformly, and is already handled once, generically, wherever it
 appears (see the `UnaryOp` case below), so no call-site special-casing was
 needed for Phase 1's own scope.
 
+Triviality gate (2026-11-06, found against Modular's ACTUAL test suite, not
+a hypothetical): real Mojo's lifetime checker records liveness only for
+values whose type is NOT trivially register-passable —
+Mojo/lib/LowerLIT/CheckLifetimes.cpp's ValueSet::addValue says it outright
+("We don't track trivial values of register type", i.e. types conforming to
+the compiler-synthesized TrivialRegisterPassable trait: builtin scalars,
+Pointers, and structs with "no copy, move, or destructor members" over
+trivial fields). A use of a binding after `x^` is a "use of uninitialized
+value" error in real Mojo ONLY for such tracked values; for an untracked
+(trivial) value the move marks nothing and the later use is legal. The
+lattice here marks EVERY bare binding 'moved' after a `^`, so before this
+gate it rejected real, accepted code — Modular's own positive parser test
+mojo/test/mojo-parser/decls/structs.mojo::testCopyMoveSynth
+(`var aMove = a^` then `var aExCopy = a.copy()`, `a: IntPair`, a struct of
+two Ints) and the same shape in exprs/call_emission_errors.mojo for
+`MyStruct`. The flag is therefore suppressed exactly when the binding's
+DECLARED type is resolvable and decided-trivial (see
+`_type_ann_is_trivial`). A `*`/`**` parameter is the one declared type that
+is NOT the annotation: the annotation names the pack's element type, while
+the binding itself is the pack — a non-trivial object real Mojo does
+liveness-track — so those are treated as UNDECIDED (pack_errors.mojo pins
+the genuine `**kwargs^`-twice double-move that gating on the element type
+would have silenced). An undecided type (no annotation, a foreign or
+generic name) keeps the old flagged behaviour, because the pass's soundness
+rule is "never reject correct code" and suppressing on a guess is how that
+rule is lost. Phase 2 (single-call borrow exclusivity) is NOT gated on this:
+a real-Mojo `mutate_two(a, a)`-style aliasing of a `mut` borrow is an error
+regardless of triviality (call_emission_errors.mojo pins that on an Int).
+
 Known Phase-1 limitations (by design, not oversights — see
 doc/OWNERSHIP_MODEL.md):
   - Closures (`LambdaExpr` bodies, nested `def`) are analyzed as their own
@@ -130,6 +159,109 @@ _COMPTIME_TYPE_MEMBERS = {'type', 'origins'}
 _COMPTIME_TYPE_FUNCS = {'type_of', '__type_of'}
 
 
+# Builtin types that are ALWAYS trivially register-passable in real Mojo, so
+# a binding declared as one of them is never liveness-tracked there and a use
+# after `x^` is legal (see the "Triviality gate" section of the module
+# docstring for the source of the rule). All builtin scalars are raw register
+# values in LIT — CheckLifetimes.cpp's isRegisterPassableTrivial: "Other
+# values of raw MLIR type are always trivial". `Address` and `Pointer[...]`
+# are thin pointers with no destructor: std/memory/pointer.mojo declares the
+# TrivialRegisterPassable conformance on both structs directly.
+_TRIVIAL_BUILTIN_TYPES = frozenset((
+    'Int', 'Int8', 'Int16', 'Int32', 'Int64', 'Int128',
+    'UInt8', 'UInt16', 'UInt32', 'UInt64', 'UInt128',
+    'Float', 'Float16', 'Float32', 'Float64', 'Float128',
+    'Bool', 'Byte', 'Char', 'Address',
+))
+
+
+def _struct_def_is_trivial(st, struct_table, depth=0):
+    """Whether a same-module struct's type is trivially register-passable,
+    by real Mojo's own rule — a struct with "no copy, move, or destructor
+    members" (CheckLifetimes.cpp's isRegisterPassableTrivial comment) over
+    trivially register-passable fields. The three disqualifying members,
+    pinned in Modular's std/traits/test_trivial_generators.mojo:
+
+      - a user `__deinit__` (any body, even `pass` — the synthesized
+        `__del__is_trivial` witness flips to False);
+      - a user COPY constructor `def __init__(out self, *, copy: Self)`;
+      - a user MOVE constructor `def __init__(out self, *, deinit move: Self)`.
+
+    A plain user `__init__` does NOT count: the move/copy/deinit triviality
+    keys off those three members only. The non-movable case (`not Movable` /
+    `Movable where False` — "a non-movable type is never trivial") is the
+    one known hole: this parser drops the `where` clause and the `not` in
+    the base soup, so the clause is unobservable here; the error direction
+    is a missed flag, never a false one. Three-valued like
+    _type_ann_is_trivial: None (an unannotated field, an unresolvable field
+    type, a field cycle past the depth bound) means "undecided", which the
+    caller treats as flagged, exactly as today.
+    """
+    if depth > 32:
+        return None
+    for m in st.methods:
+        if m.name == '__deinit__':
+            return False
+        if m.name != '__init__':
+            continue
+        for pname, ptype in m.params:
+            if pname == 'copy' and ptype == 'Self':
+                return False
+            if (pname == 'move' and ptype == 'Self'
+                    and (m.param_convs or {}).get('move') == 'deinit'):
+                return False
+    for f in st.fields:
+        if not isinstance(f, N.VarDecl):
+            return None
+        verdict = _type_ann_is_trivial(f.type_ann, struct_table, depth + 1)
+        if verdict is not True:
+            return verdict
+    return True
+
+
+def _type_ann_is_trivial(type_ann, struct_table, depth=0):
+    """Whether a DECLARED type annotation is decided-trivial for the move
+    lattice. Three-valued, and the third value is the point:
+
+        True   -- trivially register-passable in real Mojo (a builtin scalar
+                  from _TRIVIAL_BUILTIN_TYPES, a Pointer, or a same-module
+                  struct _struct_def_is_trivial accepts), so real Mojo does
+                  not liveness-track it and a use after `x^` is legal;
+        False  -- decided non-trivial (a same-module struct _struct_def_is_
+                  trivial rejects); flagged exactly as before the gate;
+        None   -- UNDECIDED (no annotation, an annotation this pass cannot
+                  resolve: a foreign name, a generic application like
+                  List[Int] or MyPtr[Int] — a same-module struct applied to
+                  arguments may name its type parameters in its fields, and
+                  this pass does not instantiate them — a compound type).
+                  Callers keep the pre-existing behaviour (flag): the pass's
+                  soundness rule is "never reject correct code", and
+                  suppressing on a guess is how that rule is lost.
+
+    Deliberately NOT a type system: no inference from a binding's RHS, no
+    resolution of imported or qualified names. The 2026-11-06 false-positive
+    sweep that found the bug needed exactly this much (a parameter's or
+    field's declared same-module struct, or a declared scalar); every step
+    past it is a precision claim about the language this pass is not
+    equipped to make.
+    """
+    if not isinstance(type_ann, str):
+        return None
+    t = type_ann.strip()
+    if not t:
+        return None
+    if t in _TRIVIAL_BUILTIN_TYPES:
+        return True
+    if t == 'Pointer' or t.startswith('Pointer['):
+        return True
+    if '[' in t:
+        return None
+    st = struct_table.get(t)
+    if st is None:
+        return None
+    return _struct_def_is_trivial(st, struct_table, depth)
+
+
 def _is_node(x):
     if isinstance(x, type):
         return False
@@ -160,14 +292,23 @@ def _bind_target(target, state):
             _bind_target(e, state)
 
 
-def _check_use(node, state, diags):
+def _check_use(node, state, diags, types, struct_table):
     name = node.name
     st = state.get(name)
+    if st not in ('moved', 'maybe_moved'):
+        return
+    # Triviality gate — see the module docstring's "Triviality gate" section:
+    # real Mojo does not liveness-track a binding whose declared type is
+    # decided-trivial, so its 'moved' state has no effect on later uses (and
+    # on a second `^` of it). Undecided (None) and non-trivial (False) types
+    # fall through to the flag exactly as before.
+    if _type_ann_is_trivial(types.get(name), struct_table) is True:
+        return
     if st == 'moved':
         diags.append(Diagnostic(
             name=name, line=node.line, col=node.col,
             message=f"use of moved value '{name}'"))
-    elif st == 'maybe_moved':
+    else:
         diags.append(Diagnostic(
             name=name, line=node.line, col=node.col,
             message=f"use of possibly-moved value '{name}' "
@@ -234,24 +375,29 @@ def _check_call_aliasing(node, funcs, methods, diags):
                     f"— exclusivity violation)"))
 
 
-def _walk_expr(node, state, diags, funcs, methods):
+def _walk_expr(node, state, diags, funcs, methods, types, struct_table):
     """Recurse over an expression, checking/updating move state (Phase 1)
     and borrow conflicts (Phase 2) as it goes. Falls back to generic
     dataclass-field recursion for any node shape not specially handled, so
     adding a new expression AST node never silently stops being visited —
     see module docstring for the "absent from state -> never flagged"
-    safety property this relies on."""
+    safety property this relies on. `types` maps this function's binding
+    names to their DECLARED type annotations (str|None) for the triviality
+    gate in _check_use; `struct_table` is the module's StructDef table the
+    gate resolves same-module struct annotations against. Both are pure
+    inputs to a binding's declared type, so they never change as the walk
+    proceeds."""
     if node is None:
         return
     if isinstance(node, (list, tuple)):
         for item in node:
-            _walk_expr(item, state, diags, funcs, methods)
+            _walk_expr(item, state, diags, funcs, methods, types, struct_table)
         return
     if not _is_node(node):
         return
 
     if isinstance(node, N.IdentExpr):
-        _check_use(node, state, diags)
+        _check_use(node, state, diags, types, struct_table)
         return
 
     if isinstance(node, N.WalrusExpr):
@@ -266,24 +412,28 @@ def _walk_expr(node, state, diags, funcs, methods):
         # this case the checker treated it as still carrying whatever
         # state `dirname^` left behind at the end of the PREVIOUS
         # iteration, flagging a "possibly-moved" false positive.
-        _walk_expr(node.value, state, diags, funcs, methods)
+        _walk_expr(node.value, state, diags, funcs, methods, types, struct_table)
         state[node.name] = 'live'
         return
 
     if isinstance(node, N.UnaryOp) and node.op == '^':
         operand = node.operand
         if isinstance(operand, N.IdentExpr) and operand.name in state:
-            _check_use(operand, state, diags)   # error if ALREADY moved
+            # error if ALREADY moved — unless the binding's declared type is
+            # decided-trivial, in which case real Mojo never tracked it in
+            # the first place (see _check_use and the module docstring)
+            _check_use(operand, state, diags, types, struct_table)
             state[operand.name] = 'moved'        # this IS the move site
         else:
-            _walk_expr(operand, state, diags, funcs, methods)
+            _walk_expr(operand, state, diags, funcs, methods, types, struct_table)
         return
 
     if isinstance(node, N.FunctionDef):
         # Nested def / closure: checked as its own independent scope (own
         # diagnostics), but never reads or mutates the enclosing
         # function's state — see module docstring's "known limitations".
-        _check_function(node, diags, funcs, methods)
+        # It gets its OWN types table from its own parameters.
+        _check_function(node, diags, funcs, methods, struct_table)
         return
 
     if isinstance(node, N.LambdaExpr):
@@ -293,10 +443,10 @@ def _walk_expr(node, state, diags, funcs, methods):
             and node.func.name in _COMPTIME_TYPE_FUNCS):
         for a in node.args:
             if not isinstance(a, N.IdentExpr):
-                _walk_expr(a, state, diags, funcs, methods)
+                _walk_expr(a, state, diags, funcs, methods, types, struct_table)
         for _kw, v in (node.kwargs or []):
             if not isinstance(v, N.IdentExpr):
-                _walk_expr(v, state, diags, funcs, methods)
+                _walk_expr(v, state, diags, funcs, methods, types, struct_table)
         return
 
     if isinstance(node, N.MemberExpr) and node.member in _COMPTIME_TYPE_MEMBERS:
@@ -316,7 +466,7 @@ def _walk_expr(node, state, diags, funcs, methods):
         return
 
     if isinstance(node, N.MemberExpr):
-        _walk_expr(node.obj, state, diags, funcs, methods)
+        _walk_expr(node.obj, state, diags, funcs, methods, types, struct_table)
         return
 
     if isinstance(node, N.CallExpr):
@@ -333,7 +483,8 @@ def _walk_expr(node, state, diags, funcs, methods):
     for fname in getattr(type(node), "__dataclass_fields__", {}):
         if fname in ("line", "col"):
             continue
-        _walk_expr(getattr(node, fname), state, diags, funcs, methods)
+        _walk_expr(getattr(node, fname), state, diags, funcs, methods,
+                   types, struct_table)
 
 
 def _merge_states(states):
@@ -392,7 +543,8 @@ def _block_terminates(body):
     return bool(body) and _terminates(body[-1])
 
 
-def _branch_states(then_body, elifs, else_body, state, diags, funcs, methods):
+def _branch_states(then_body, elifs, else_body, state, diags, funcs, methods,
+                   types, struct_table):
     """Shared then/elifs/else branching logic for IfStmt and
     ComptimeIfStmt: check each arm against its own copy of `state`
     (elif/else conditions are evaluated against the ORIGINAL pre-if
@@ -404,79 +556,94 @@ def _branch_states(then_body, elifs, else_body, state, diags, funcs, methods):
     non-terminating arm for a missing `else`."""
     branches = []
     then_state = dict(state)
-    _check_block(then_body, then_state, diags, funcs, methods)
+    _check_block(then_body, then_state, diags, funcs, methods, types,
+                 struct_table)
     branches.append((then_state, _block_terminates(then_body)))
     for cond, body in (elifs or []):
-        _walk_expr(cond, state, diags, funcs, methods)
+        _walk_expr(cond, state, diags, funcs, methods, types, struct_table)
         es = dict(state)
-        _check_block(body, es, diags, funcs, methods)
+        _check_block(body, es, diags, funcs, methods, types, struct_table)
         branches.append((es, _block_terminates(body)))
     if else_body is not None:
         else_state = dict(state)
-        _check_block(else_body, else_state, diags, funcs, methods)
+        _check_block(else_body, else_state, diags, funcs, methods, types,
+                     struct_table)
         branches.append((else_state, _block_terminates(else_body)))
     else:
         branches.append((dict(state), False))
     return branches
 
 
-def _check_block(body, state, diags, funcs, methods):
+def _check_block(body, state, diags, funcs, methods, types, struct_table):
     for stmt in body:
-        _check_stmt(stmt, state, diags, funcs, methods)
+        _check_stmt(stmt, state, diags, funcs, methods, types, struct_table)
 
 
-def _check_stmt(stmt, state, diags, funcs, methods):
+def _check_stmt(stmt, state, diags, funcs, methods, types, struct_table):
     if isinstance(stmt, N.FunctionDef):
-        _check_function(stmt, diags, funcs, methods)
+        _check_function(stmt, diags, funcs, methods, struct_table)
         return
 
     if isinstance(stmt, N.ExprStmt):
-        _walk_expr(stmt.value, state, diags, funcs, methods)
+        _walk_expr(stmt.value, state, diags, funcs, methods, types,
+                   struct_table)
         return
 
     if isinstance(stmt, N.AssignStmt):
-        _walk_expr(stmt.value, state, diags, funcs, methods)
+        _walk_expr(stmt.value, state, diags, funcs, methods, types,
+                   struct_table)
         tgt = stmt.target
         if isinstance(tgt, (N.IdentExpr, N.TupleExpr)):
             _bind_target(tgt, state)
         else:
-            _walk_expr(tgt, state, diags, funcs, methods)
+            _walk_expr(tgt, state, diags, funcs, methods, types, struct_table)
         return
 
     if isinstance(stmt, N.AugAssignStmt):
-        _walk_expr(stmt.target, state, diags, funcs, methods)
-        _walk_expr(stmt.value, state, diags, funcs, methods)
+        _walk_expr(stmt.target, state, diags, funcs, methods, types,
+                   struct_table)
+        _walk_expr(stmt.value, state, diags, funcs, methods, types,
+                   struct_table)
         if isinstance(stmt.target, N.IdentExpr):
             state[stmt.target.name] = 'live'
         return
 
     if isinstance(stmt, N.VarDecl):
         if stmt.value is not None:
-            _walk_expr(stmt.value, state, diags, funcs, methods)
+            _walk_expr(stmt.value, state, diags, funcs, methods, types,
+                       struct_table)
+        # Remember the DECLARED annotation for the triviality gate in
+        # _check_use (None = no annotation -> undecided -> flagged as before).
+        types[stmt.name] = stmt.type_ann
         state[stmt.name] = 'live'
         return
 
     if isinstance(stmt, N.MultiAssignStmt):
-        _walk_expr(stmt.value, state, diags, funcs, methods)
+        _walk_expr(stmt.value, state, diags, funcs, methods, types,
+                   struct_table)
         for t in stmt.targets:
             _bind_target(t, state)
         return
 
     if isinstance(stmt, N.ReturnStmt):
         if stmt.value is not None:
-            _walk_expr(stmt.value, state, diags, funcs, methods)
+            _walk_expr(stmt.value, state, diags, funcs, methods, types,
+                       struct_table)
         return
 
     if isinstance(stmt, N.RaiseStmt):
         if stmt.value is not None:
-            _walk_expr(stmt.value, state, diags, funcs, methods)
+            _walk_expr(stmt.value, state, diags, funcs, methods, types,
+                       struct_table)
         return
 
     if isinstance(stmt, N.AssertStmt):
         if stmt.value is not None:
-            _walk_expr(stmt.value, state, diags, funcs, methods)
+            _walk_expr(stmt.value, state, diags, funcs, methods, types,
+                       struct_table)
         if stmt.msg is not None:
-            _walk_expr(stmt.msg, state, diags, funcs, methods)
+            _walk_expr(stmt.msg, state, diags, funcs, methods, types,
+                       struct_table)
         return
 
     if isinstance(stmt, N.DelStmt):
@@ -484,7 +651,8 @@ def _check_stmt(stmt, state, diags, funcs, methods):
             if isinstance(t, N.IdentExpr) and t.name in state:
                 state[t.name] = 'moved'
             else:
-                _walk_expr(t, state, diags, funcs, methods)
+                _walk_expr(t, state, diags, funcs, methods, types,
+                           struct_table)
         return
 
     if isinstance(stmt, (N.IfStmt, N.ComptimeIfStmt)):
@@ -502,9 +670,11 @@ def _check_stmt(stmt, state, diags, funcs, methods):
         # elif ...: return g(fspath^) else: return h(fspath^)`), which
         # flagged `fspath` as already-moved in the second/third arms
         # purely from this bug, not any real issue in that code.
-        _walk_expr(stmt.condition, state, diags, funcs, methods)
+        _walk_expr(stmt.condition, state, diags, funcs, methods, types,
+                   struct_table)
         branches = _branch_states(stmt.then_body, stmt.elifs, stmt.else_body,
-                                   state, diags, funcs, methods)
+                                   state, diags, funcs, methods, types,
+                                   struct_table)
         live = [s for s, term in branches if not term]
         if live:
             merged = _merge_states(live)
@@ -517,25 +687,31 @@ def _check_stmt(stmt, state, diags, funcs, methods):
 
     if isinstance(stmt, (N.WhileStmt, N.ForStmt, N.ComptimeForStmt)):
         if isinstance(stmt, N.WhileStmt):
-            _walk_expr(stmt.condition, state, diags, funcs, methods)
+            _walk_expr(stmt.condition, state, diags, funcs, methods, types,
+                       struct_table)
         elif isinstance(stmt, N.ForStmt):
-            _walk_expr(stmt.iterable, state, diags, funcs, methods)
+            _walk_expr(stmt.iterable, state, diags, funcs, methods, types,
+                       struct_table)
             _bind_target(stmt.target, state)
         else:  # ComptimeForStmt: target is a plain str, not an expr node
-            _walk_expr(stmt.iterable, state, diags, funcs, methods)
+            _walk_expr(stmt.iterable, state, diags, funcs, methods, types,
+                       struct_table)
             if stmt.target:
                 state[stmt.target] = 'live'
         # Pass 1: silent — just discover the body's own exit state.
         probe_state = dict(state)
-        _check_block(stmt.body, probe_state, [], funcs, methods)
+        _check_block(stmt.body, probe_state, [], funcs, methods, types,
+                     struct_table)
         entry = _merge_states([state, probe_state])
         # Pass 2: real diagnostics, entering with the merged (fixed-point)
         # state so a top-of-body use that's only invalid because of a
         # move near the bottom of the PREVIOUS iteration is still caught.
         body_state = dict(entry)
-        _check_block(stmt.body, body_state, diags, funcs, methods)
+        _check_block(stmt.body, body_state, diags, funcs, methods, types,
+                     struct_table)
         if getattr(stmt, 'else_body', None):
-            _check_block(stmt.else_body, body_state, diags, funcs, methods)
+            _check_block(stmt.else_body, body_state, diags, funcs, methods,
+                         types, struct_table)
         after = _merge_states([state, body_state])
         state.clear()
         state.update(after)
@@ -543,12 +719,14 @@ def _check_stmt(stmt, state, diags, funcs, methods):
 
     if isinstance(stmt, N.WithStmt):
         for item in stmt.items:
-            _walk_expr(item.expr, state, diags, funcs, methods)
+            _walk_expr(item.expr, state, diags, funcs, methods, types,
+                       struct_table)
             if isinstance(item.alias, N.IdentExpr):
                 _bind_target(item.alias, state)
             elif isinstance(item.alias, str):
                 state[item.alias] = 'live'
-        _check_block(stmt.body, state, diags, funcs, methods)
+        _check_block(stmt.body, state, diags, funcs, methods, types,
+                     struct_table)
         return
 
     if isinstance(stmt, N.TryStmt):
@@ -563,22 +741,27 @@ def _check_stmt(stmt, state, diags, funcs, methods):
         # something the (never-reached, on the exception path) `return
         # res^` had already consumed.
         pre_state = dict(state)
-        _check_block(stmt.body, state, diags, funcs, methods)
+        _check_block(stmt.body, state, diags, funcs, methods, types,
+                     struct_table)
         for h in (stmt.handlers or []):
-            _check_block(getattr(h, 'body', []), dict(pre_state), diags, funcs, methods)
+            _check_block(getattr(h, 'body', []), dict(pre_state), diags, funcs,
+                         methods, types, struct_table)
         if stmt.else_body:
-            _check_block(stmt.else_body, state, diags, funcs, methods)
+            _check_block(stmt.else_body, state, diags, funcs, methods, types,
+                         struct_table)
         if stmt.finally_body:
-            _check_block(stmt.finally_body, state, diags, funcs, methods)
+            _check_block(stmt.finally_body, state, diags, funcs, methods, types,
+                         struct_table)
         return
 
     if isinstance(stmt, N.MatchStmt):
-        _walk_expr(stmt.subject, state, diags, funcs, methods)
+        _walk_expr(stmt.subject, state, diags, funcs, methods, types,
+                   struct_table)
         branches = []
         for case in (stmt.cases or []):
             body = getattr(case, 'body', [])
             cs = dict(state)
-            _check_block(body, cs, diags, funcs, methods)
+            _check_block(body, cs, diags, funcs, methods, types, struct_table)
             branches.append((cs, _block_terminates(body)))
         # No wildcard `case _:` means match may fall through untouched —
         # always include the pre-match state as a possible (non-diverging)
@@ -605,18 +788,33 @@ def _check_stmt(stmt, state, diags, funcs, methods):
         if isinstance(val, list):
             for item in val:
                 if _is_node(item):
-                    _walk_expr(item, state, diags, funcs, methods)
+                    _walk_expr(item, state, diags, funcs, methods, types,
+                               struct_table)
         elif _is_node(val):
-            _walk_expr(val, state, diags, funcs, methods)
+            _walk_expr(val, state, diags, funcs, methods, types, struct_table)
 
 
-def _check_function(fn, diags, funcs, methods):
+def _check_function(fn, diags, funcs, methods, struct_table):
     state = {}
+    types = {}
     for pname, _ptype in fn.params:
+        # A `*`/`**` parameter's annotation names the PACK's element type,
+        # not the binding's own type — the binding is the pack itself, a
+        # non-trivial runtime object real Mojo liveness-tracks — so the
+        # triviality gate must see UNDECIDED, never the element type. Found
+        # for real against Modular's actual mojo-parser test
+        # decls/pack_errors.mojo (`test_two_kwargs_unpacks(**kwargs^,
+        # **kwargs^)` on `var **kwargs: Int`): gating on 'Int' would have
+        # suppressed the genuine double-move of the pack.
+        if pname.startswith('*'):
+            _ptype = None
         pname = pname.lstrip('*')
         if pname:
+            # Remember the DECLARED annotation for the triviality gate in
+            # _check_use (None = no annotation -> undecided -> flagged).
+            types[pname] = _ptype
             state[pname] = 'live'
-    _check_block(fn.body, state, diags, funcs, methods)
+    _check_block(fn.body, state, diags, funcs, methods, types, struct_table)
 
 
 def check_module(stmts: list):
@@ -633,15 +831,18 @@ def check_module(stmts: list):
             funcs[s.name] = s
         elif isinstance(s, N.StructDef):
             structs.append(s)
+    # The module's same-module struct table the triviality gate resolves
+    # declared-type annotations against (name -> StructDef).
+    struct_table = {s.name: s for s in structs}
 
     for s in stmts:
         if isinstance(s, N.FunctionDef):
-            _check_function(s, diags, funcs, {})
+            _check_function(s, diags, funcs, {}, struct_table)
 
     for st in structs:
         method_table = {m.name: m for m in st.methods}
         for m in st.methods:
-            _check_function(m, diags, funcs, method_table)
+            _check_function(m, diags, funcs, method_table, struct_table)
 
     return diags
 
