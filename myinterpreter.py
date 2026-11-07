@@ -1502,7 +1502,7 @@ class MojoClass:
 
     def __init__(self, name, fields, methods: dict, interpreter, bases=None,
                  comptime_aliases=None, static_methods=None, class_methods=None,
-                 def_scope=None):
+                 def_scope=None, keywords=None):
         self.name = name
         self.fields = fields  # list of VarDecl/AssignStmt (field declarations)
         self.methods = methods  # dict: name -> MojoFunction
@@ -1514,6 +1514,11 @@ class MojoClass:
         # struct (mirrors how `__init__` bodies already resolve such names).
         self.def_scope = def_scope
         self.bases = bases or []  # base MojoClass objects, e.g. `struct Child(Base):`
+        # Keyword arguments from the class definition, e.g.
+        # `extra_items=bool`, `closed=True` (PEP 692/728) or `metaclass=M`.
+        # Stored for introspection and passed through where the interpreter
+        # creates a real Python class (Python-type bases with keywords).
+        self.keywords = keywords or {}
         # `comptime EOF_TOKEN: Int = 69` inside the struct body — evaluated
         # once at struct-definition time and exposed as a class-level
         # attribute (`TokenType.EOF_TOKEN`), same as a Python class constant.
@@ -4157,11 +4162,19 @@ class Interpreter:
         methods = {}
         base_names = getattr(node, 'bases', None) or []
         base_classes = []
+        python_bases = []
         merged_fields = []
         comptime_aliases = {}
         static_methods = set()
         class_methods = set()
         from_base = set()
+        class_keywords = getattr(node, 'keywords', None) or []
+        kw_dict = {}
+        for _k, _v in class_keywords:
+            try:
+                kw_dict[_k] = self.eval_expr(_v)
+            except Exception:
+                kw_dict[_k] = _v
         for base_name in base_names:
             try:
                 base_cls = self.scope.get(base_name)
@@ -4175,6 +4188,13 @@ class Interpreter:
                 static_methods.update(base_cls.static_methods)
                 class_methods.update(base_cls.class_methods)
                 from_base.update(base_cls.methods.keys())
+            elif base_cls is not None:
+                # Real Python bases (types, typing special forms such as
+                # typing.TypedDict which is a function in 3.15+, or anything
+                # else).  Preserved so a class with Python keywords (PEP 692
+                # closed= / PEP 728 extra_items=) can be created through
+                # Python's class-creation protocol below.
+                python_bases.append(base_cls)
         for m in getattr(node, 'methods', None) or []:
             params = self._extract_param_names(m)
             comptime_params = getattr(m, 'comptime_params', None)
@@ -4251,9 +4271,49 @@ class Interpreter:
                         except Exception:
                             pass
         fields = merged_fields + actual_fields
+        # PEP 692/728 / general Python interop: a class defined with keyword
+        # arguments (e.g. `class M(TypedDict, extra_items=bool, closed=True)`)
+        # over real Python type bases must be created through Python's class-
+        # creation protocol so the metaclass sees those keywords — the parser
+        # used to discard them (root cause of PYTHON3.15_typeddict_extra_items)
+        # and a MojoClass cannot carry a Python metaclass protocol.  Narrowly
+        # activate only for the pure-Python-base case with keywords; fall back
+        # to MojoClass on any difficulty so existing Mojo behavior is unchanged.
+        if kw_dict and python_bases and not base_classes:
+            try:
+                ns = {'__module__': getattr(self, 'module_name', None) or '__main__',
+                      '__qualname__': node.name}
+                anns = {}
+                for f in actual_fields:
+                    if self._is_instance(f, 'VarDecl') and getattr(f, 'type_ann', None) is not None:
+                        try:
+                            anns[f.name] = self.eval_expr(f.type_ann)
+                        except Exception:
+                            anns[f.name] = getattr(f, 'type_ann', None)
+                    elif self._is_instance(f, 'AssignStmt') and f.value is not None:
+                        t = f.target
+                        if self._is_instance(t, 'IdentExpr'):
+                            try:
+                                ns[t.name] = self.eval_expr(f.value)
+                            except Exception:
+                                pass
+                if anns:
+                    ns['__annotations__'] = anns
+                for k, v in comptime_aliases.items():
+                    ns.setdefault(k, v)
+
+                def _exec_body(_ns):
+                    _ns.update(ns)
+
+                cls = types.new_class(node.name, tuple(python_bases), kw_dict, _exec_body)
+                self.scope.define(node.name, cls)
+                return cls
+            except Exception:
+                pass
         cls = MojoClass(node.name, fields, methods, self, bases=base_classes,
                          comptime_aliases=comptime_aliases, static_methods=static_methods,
-                         class_methods=class_methods, def_scope=self.scope)
+                         class_methods=class_methods, def_scope=self.scope,
+                         keywords=kw_dict)
         self.scope.define(node.name, cls)
         return cls
 
