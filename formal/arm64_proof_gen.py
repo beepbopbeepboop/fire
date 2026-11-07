@@ -10431,6 +10431,10 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                 A(f"{IND}  all_goals try simp (disch := decide) [mem_read_after_write_u64, "
                                   f"mem_read_after_write_u64_ne, mem_read_two_writes_same, UInt64.add_zero]")
                                 A(f"{IND}  all_goals try rfl")
+                                # A block that does not write the register
+                                # leaves `(s_prev).xR = v` — the earlier block's
+                                # own fact on this path, already in scope.
+                                A(f"{IND}  all_goals try assumption")
                                 # A narrow TYPED parameter's truncation, and the
                                 # last discharge in this list. `sgt8`'s residual
                                 # here is `⊢ t32s (t32u (t8s n)) = n`, which is
