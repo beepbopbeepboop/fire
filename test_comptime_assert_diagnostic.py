@@ -227,6 +227,24 @@ def test_comptime_assert_in_comptime_for_list_literal_true():
     _compile('fn f():\n    comptime for i in [0, 1, 2]:\n        comptime assert i < 3, "ok"\n')
 
 
+def test_comptime_assert_in_comptime_for_tuple_unpack():
+    # tuple-unpacking targets over constant collections must bind each target
+    # so comptime diagnostics see per-iteration values
+    # (bugs/DIAGNOSTICS_missing_validation_modular.md).
+    try:
+        _compile('fn f():\n    comptime for i, j in [(0, 1), (2, 0)]:\n        comptime assert i + j < 2, "sum"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'sum' in s, s
+        return
+    raise AssertionError('comptime assert in comptime for tuple unpack compiled')
+
+
+def test_comptime_assert_in_comptime_for_tuple_unpack_true():
+    _compile('fn f():\n    comptime for i, j in [(0, 1), (1, 2)]:\n        comptime assert i < j, "ok"\n')
+
+
 if __name__ == '__main__':
     test_comptime_assert_false_fails()
     test_comptime_assert_false_no_msg()
@@ -246,4 +264,6 @@ if __name__ == '__main__':
     test_comptime_assert_in_comptime_for_list_literal()
     test_comptime_assert_in_comptime_for_tuple_literal()
     test_comptime_assert_in_comptime_for_list_literal_true()
+    test_comptime_assert_in_comptime_for_tuple_unpack()
+    test_comptime_assert_in_comptime_for_tuple_unpack_true()
     print('ok')

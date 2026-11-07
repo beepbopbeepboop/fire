@@ -1135,6 +1135,61 @@ def _gen_stmt_ComptimeForStmt(gen, node):
             else:
                 gen._comptime_vals.pop(node.target, None)
             return
+        if all_ok and for_target_is_tuple(node.target):
+            _names = for_target_names(node.target)
+            _rows = []
+            _ok_unpack = True
+            for _i, _e in enumerate(elems):
+                _cv = cvals[_i]
+                if isinstance(_cv, (tuple, list)) and len(_cv) == len(_names):
+                    _rows.append(list(_cv))
+                    continue
+                _sub = getattr(_e, 'elements', None)
+                if _sub is None or len(_sub) != len(_names):
+                    _ok_unpack = False
+                    break
+                _row = []
+                for _se in _sub:
+                    _sv = gen._eval_const(_se)
+                    if _sv is None:
+                        _ok_unpack = False
+                        break
+                    _row.append(_sv)
+                if not _ok_unpack:
+                    break
+                _rows.append(_row)
+            if _ok_unpack and _rows:
+                for _t in _names:
+                    if _t not in gen.var_types:
+                        gen._declare_var(_t, 'int64_t')
+                _ct_saved = [(n, n in gen._comptime_vals,
+                              gen._comptime_vals.get(n)) for n in _names]
+                for _row in _rows:
+                    for _t, _v in zip(_names, _row):
+                        gen._comptime_vals[_t] = _v
+                        _dst = gen.var_types.get(_t) or 'int64_t'
+                        if isinstance(_v, bool):
+                            gen._safe_coerce_emit('int', _dst, '1' if _v else '0', _t)
+                        elif isinstance(_v, int) and not isinstance(_v, bool):
+                            gen._safe_coerce_emit('int', _dst, str(_v), _t)
+                        elif isinstance(_v, str):
+                            try:
+                                _sv = gen._emit_string_literal(_v)
+                                if gen.var_types.get(_t) != 'char *':
+                                    gen.var_types[_t] = 'char *'
+                                gen._safe_coerce_emit('char *', 'char *', _sv, _t)
+                            except Exception:
+                                pass
+                    _bscope = gen._open_block_scope()
+                    for s in node.body:
+                        gen.gen_stmt(s)
+                    gen._close_block_scope(_bscope)
+                for _n, _had, _old in _ct_saved:
+                    if _had:
+                        gen._comptime_vals[_n] = _old
+                    else:
+                        gen._comptime_vals.pop(_n, None)
+                return
     if not unrolled:
         pass
 

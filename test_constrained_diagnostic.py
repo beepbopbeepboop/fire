@@ -117,6 +117,23 @@ def test_constrained_in_comptime_for_list_literal_true():
     _compile('fn f():\n    comptime for i in [0, 1]:\n        constrained[i < 2, "ok"]()\n')
 
 
+def test_constrained_in_comptime_for_tuple_unpack():
+    # tuple-unpacking targets over constant collections must bind each target
+    # (bugs/DIAGNOSTICS_missing_validation_modular.md).
+    try:
+        _compile('fn f():\n    comptime for i, j in [(0, 1), (1, 1)]:\n        constrained[i != j, "eq"]()\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'constraint failed' in s, s
+        assert 'eq' in s, s
+        return
+    raise AssertionError('constrained in comptime for tuple unpack compiled')
+
+
+def test_constrained_in_comptime_for_tuple_unpack_true():
+    _compile('fn f():\n    comptime for i, j in [(0, 1), (1, 2)]:\n        constrained[i < j, "ok"]()\n')
+
+
 if __name__ == '__main__':
     test_constrained_bracket_false_fails()
     test_constrained_bracket_false_no_msg()
@@ -130,4 +147,6 @@ if __name__ == '__main__':
     test_constrained_in_comptime_for_range_true()
     test_constrained_in_comptime_for_list_literal()
     test_constrained_in_comptime_for_list_literal_true()
+    test_constrained_in_comptime_for_tuple_unpack()
+    test_constrained_in_comptime_for_tuple_unpack_true()
     print('ok')
