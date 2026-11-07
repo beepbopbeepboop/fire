@@ -1,5 +1,5 @@
 # plan/step-03b: `arm64/movz_pair` — step lemma and rule theorem
-**Status: SCAFFOLDED 2026-11-06 (measured).** The rule theorem is a LEDGERED `sorry` in `lib/Scaffold.lean` (structure first, soundness later), the supporting step lemmas that exist compile, and the rule is registered as scaffolded in `formal/peephole.py`. NOT proved. `lib/` builds clean (`ensure_library`, 2026-11-06); `test_formal_proof_gaps.py` 5/5; `test_formal_peephole.py` OK.
+**Status: DONE 2026-11-07 (measured).** `peephole_arm64_movz_pair` is PROVED in `lib/Peephole.lean` (with `arm64_set_reg_set_reg_same`); its Scaffold hole and ledger row are gone (Scaffold: 11 holes). The scaffold statement was FALSE as first drafted (it concluded `arm64_reg k s2 = arm64_reg k s1` for every `k`, but the second MOVZ overwrites `Xd`); the proved statement is "running only the second MOVZ from `s` reaches the state the two-run reaches" plus the `arm64_steps s code 2` clause. `ensure_library` OK; `test_formal_proof_gaps` 5/5; `test_formal_peephole` 82/82. Promotion of the rule into the live list is step 05a.
 
 Class: mid      Size: M      Depends: 00a, 01a, 01b, 03a      Blocks: 05a
 Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §2 table row `arm64/movz_pair`.

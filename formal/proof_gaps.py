@@ -32,11 +32,6 @@ SCAFFOLD_HOLES: dict[str, Hole] = {
         "add r,0/sub r,0 flags: cf/of_ false, zf/sf from r (x86_flags_add/x86_flags_sub)",
         "scaffold",
     ),
-    "peephole_arm64_movz_pair": Hole(
-        "step-03b",
-        "MOVZ pair to same register folded (first deleted)",
-        "scaffold",
-    ),
     "peephole_arm64_str_pair": Hole(
         "step-03d",
         "two identical STR Xt,[Xn,#imm] deleted",

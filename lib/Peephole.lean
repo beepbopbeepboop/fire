@@ -847,6 +847,49 @@ theorem arm64_step_movz64 (s : Arm64State) (code : Nat → UInt8)
 
 
 
+/-- Setting the same register twice keeps only the second value. -/
+theorem arm64_set_reg_set_reg_same (i : Nat) (u : Arm64State) (a b : UInt64) :
+    arm64_set_reg i (arm64_set_reg i u a) b = arm64_set_reg i u b := by
+  unfold arm64_set_reg
+  split <;> simp_all
+
+/-- **Rule `arm64/movz_pair`.** `MOVZ Xd,#i ; MOVZ Xd,#j` (same `Xd`): the first is
+dead.  Running only the second instruction from `s` (pc advanced past the first)
+reaches exactly the state the two-instruction run reaches, so deleting the first is
+sound with no liveness condition (MOVZ reads nothing and writes no flags). -/
+theorem peephole_arm64_movz_pair (s : Arm64State) (code : Nat → UInt8)
+    (pc : Nat) (w1 w2 : UInt32)
+    (hpc : s.pc = pc)
+    (hread1 : arm64_read_insn code pc = w1)
+    (hread2 : arm64_read_insn code (s.pc + 4) = w2)
+    (h1 : (w1 &&& 0xffe00000) = 0xD2800000)
+    (h2 : (w2 &&& 0xffe00000) = 0xD2800000)
+    (hrd1 : (w1 &&& 0x1f).toNat < 31)
+    (hrd2 : (w2 &&& 0x1f).toNat < 31)
+    (heq : (w1 &&& 0x1f).toNat = (w2 &&& 0x1f).toNat)
+    (s1 s2 : Arm64State)
+    (hs1 : arm64_step s code = some s1)
+    (hpair : arm64_step { s1 with pc := s.pc + 4 } code
+      = some { s2 with pc := s.pc + 4 }) :
+    arm64_step { s with pc := s.pc + 4 } code = some { s2 with pc := s.pc + 4 }
+    ∧ arm64_steps s code 2 = some { s2 with pc := pc + 8 } := by
+  have hd1 : (w1 &&& 0x1f).toNat ≠ 31 := by omega
+  have hd2 : (w2 &&& 0x1f).toNat ≠ 31 := by omega
+  have e1 := arm64_step_movz64 s code pc w1 hpc hread1 h1 hd1
+  rw [hs1] at e1
+  have e2 := arm64_step_movz64 { s1 with pc := s.pc + 4 } code (s.pc + 4) w2 rfl hread2 h2 hd2
+  rw [hpair] at e2
+  have e3 := arm64_step_movz64 { s with pc := s.pc + 4 } code (s.pc + 4) w2 rfl hread2 h2 hd2
+  have hs1' := Option.some.inj e1
+  have hs2' := Option.some.inj e2
+  refine ⟨?_, ?_⟩
+  · rw [e3]
+    apply congrArg some
+    refine Eq.trans ?_ hs2'.symm
+    rw [hs1', ← arm64_set_reg_pc_congr, ← heq, arm64_set_reg_set_reg_same]
+  · have hpc1 : s1.pc = s.pc := by rw [hs1', arm64_set_reg_pc_unchanged]
+    rw [arm64_steps_two_seq s code s1 s2 hs1 hpc1 hpair, hpc]
+
 /-!
 ## Design note (x86_64/imm_zero) — for a later hard round
 The sound statement is "for every continuation whose first flag access is a
