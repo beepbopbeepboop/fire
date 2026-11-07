@@ -1095,7 +1095,6 @@ def run_census_case(case, tmpdir, verbose):
     import fire_compiler as F
     import formal.build as FB
     import formal.model as M
-    import formal.model.types as MT
 
     name, source, want = case
     # THE CENSUS IS COUNTED WHERE IT IS MADE, which is `parse_module` and not
@@ -1134,19 +1133,16 @@ def run_census_case(case, tmpdir, verbose):
     # from a second `struct_field_names`.
     calls = []
     real = M.struct_receiver_stores
-    real_mt = MT.struct_receiver_stores
 
     def counted(struct_def, receivers_arg):
         calls.append(getattr(struct_def, "name", None))
-        return real_mt(struct_def, receivers_arg)
+        return real(struct_def, receivers_arg)
 
     M.struct_receiver_stores = counted
-    MT.struct_receiver_stores = counted
     try:
         stmts = FB.parse_module(source, name + ".mojo")
     finally:
         M.struct_receiver_stores = real
-        MT.struct_receiver_stores = real_mt
     structs = [s for s in stmts if isinstance(s, F.StructDef)]
     if len(structs) != 1:
         return False, f"the case declares {len(structs)} structs, expected 1"
@@ -1196,12 +1192,10 @@ def run_census_case(case, tmpdir, verbose):
     del calls[:]               # the parse's ask is counted above, not here
     n_methods = len(M.struct_methods(st))
     M.struct_receiver_stores = counted
-    MT.struct_receiver_stores = counted
     try:
         own = M._own_field_names(st)
     finally:
         M.struct_receiver_stores = real
-        MT.struct_receiver_stores = real_mt
     if len(calls) != 1:
         return False, (f"deriving {st.name}'s OWN field names asked "
                        f"struct_receiver_stores {len(calls)} times; it is a "

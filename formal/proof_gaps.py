@@ -29,13 +29,13 @@ SCAFFOLD_HOLES: dict[str, Hole] = {
     ),
     "scaffold_cell_writeback_one_exit": Hole(
         "step-18d",
-        "by-reference one-field mutator write-back (single exit): depth bound as hypothesis, obligation to prove; statement real, premises hmeth (opaque CellSetMethod) / hfit / h_above",
-        "scaffold",
+        "by-reference one-field mutator write-back (single exit): depth bound as hypothesis, obligation to prove",
+        "placeholder",
     ),
     "scaffold_cell_writeback_multi_exit": Hole(
         "step-18d",
-        "by-reference one-field mutator write-back (multiple exits): per-exit obligation scaffolded; same conclusion, one case per RET",
-        "scaffold",
+        "by-reference one-field mutator write-back (multiple exits): per-exit obligation scaffolded",
+        "placeholder",
     ),
 }
 

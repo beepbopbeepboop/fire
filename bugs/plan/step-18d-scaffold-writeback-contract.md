@@ -1,5 +1,4 @@
 # plan/step-18d: scaffold the write-back contract (depth bound as a hypothesis, per-exit obligation as `sorry`)
-**Status: DONE 2026-11-07 (measured).** `lib/Scaffold.lean` now holds REAL statements (they were `True` placeholders): `scaffold_cell_writeback_one_exit` / `_multi_exit` over `Arm64State`, `Frame.FrameFits p 1` (no wrap), `h_above : s.sp.toNat + W <= p.toNat` (the cell is above the callee's window; depth bound is a hypothesis, no axiom), `hrun : arm64_exec_go_exit ...`, concluding `Frame.frameRead s'.mem p 0 = v` plus non-interference outside the cell and `[sp-W, sp)`. They need `hmeth : CellSetMethod code s.pc exit_pc W`, an OPAQUE predicate declared in Scaffold (without it the statements quantify over arbitrary code and are false). Typecheck: `lean Scaffold.lean` -> 3 sorry warnings (canary + these two), no errors; `test_formal_proof_gaps.py` 5/5. Ledger rows moved from `placeholder` to `scaffold`. First proof obligation of a real discharge: define `CellSetMethod`.
 Class: mid      Size: M      Depends: 18a, 18c, 01b      Blocks: none
 Source: 18a's section (D2, D3 and the Lean skeleton); `doc/finish-formal.md` Shared mechanics S1, S2.
 

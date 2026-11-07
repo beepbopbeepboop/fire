@@ -1947,32 +1947,26 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if _leak is not None:
             return _leak
 
-    # `sys.getfilesystemencoding()`/`sys.getdefaultencoding()`/
-    # `sys.getfilesystemencodeerrors()` — like the existing
-    # `sys.platform` comptime-constant special case just below
-    # (obj.name == 'sys'), these are genuinely string-returning calls
-    # with no real filesystem/locale model in this codegen, so fixed
-    # answers (PEP 686: UTF-8 is the default encoding) are a faithful
-    # stand-in. Without this, the call fell through to the fully
-    # generic "unknown method on scalar receiver" stub
-    # (`_stub_result(ot, ...)`, several hundred lines below), which
-    # passes the RECEIVER's type through unchanged — the `sys` module
-    # reference itself resolves to a placeholder `int64_t`, so the
-    # stubbed call result was typed `int64_t` too. Assigning that
-    # result directly to a real `char *`-typed target (e.g.
-    # `tarfile.py`'s module-level `ENCODING =
-    # sys.getfilesystemencoding()`) is invalid C ("assignment to
-    # 'char *' from 'int' makes pointer from integer without a cast")
-    # — a hard compile failure, not just an imprecise stub. Found via
+    # `sys.getfilesystemencoding()`/`sys.getdefaultencoding()` — like
+    # the existing `sys.platform` comptime-constant special case just
+    # below (obj.name == 'sys'), these are genuinely string-returning
+    # calls with no real filesystem/locale model in this codegen, so a
+    # fixed `"utf-8"` (this compiler's own real behavior on every
+    # supported host) is a faithful stand-in. Without this, the call
+    # fell through to the fully generic "unknown method on scalar
+    # receiver" stub (`_stub_result(ot, ...)`, several hundred lines
+    # below), which passes the RECEIVER's type through unchanged — the
+    # `sys` module reference itself resolves to a placeholder
+    # `int64_t`, so the stubbed call result was typed `int64_t` too.
+    # Assigning that result directly to a real `char *`-typed target
+    # (e.g. `tarfile.py`'s module-level `ENCODING = sys.
+    # getfilesystemencoding()`) is invalid C ("assignment to 'char *'
+    # from 'int' makes pointer from integer without a cast") — a hard
+    # compile failure, not just an imprecise stub. Found via
     # “CODEGEN_generator_function: Lib/tarfile.py”.
     if (isinstance(func.obj, gimple_ctypes.IdentExpr) and func.obj.name == 'sys'
-            and func.member in ('getfilesystemencoding', 'getdefaultencoding',
-                                 'getfilesystemencodeerrors')):
+            and func.member in ('getfilesystemencoding', 'getdefaultencoding')):
         for a in node.args: gen.lower_expr(a)
-        if func.member == 'getfilesystemencodeerrors':
-            # POSIX default (surrogateescape) — matches CPython on the
-            # platforms this compiler targets.
-            return 'char *', gen._intern_string('surrogateescape')
         return 'char *', gen._intern_string('utf-8')
 
     # `hashlib.blake2b(...)`/`.md5(...)`/`.sha256(...)`: a mutable byte
@@ -3744,12 +3738,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                                     f"__mojo_global_get_"
                                     f"{gimple_ctypes._c_field_name(method_name)}")
                         gen._imported_global_accessors[method_name] = ('void *', _mg_csym)
-                    _bare_node = gimple_ctypes.CallExpr(
-                        func=gimple_ctypes.IdentExpr(
-                            name=method_name, line=getattr(node, 'line', 0)),
-                        args=list(node.args),
-                        kwargs=list(getattr(node, 'kwargs', None) or []))
-                    return gen._lower_call(_bare_node)
 
     # PART 6 (2026-10-23, family S): `Codepoint.ord(<string>)` — a STATIC-
     # style call whose receiver is the TYPE name. `Codepoint` is an
@@ -5704,33 +5692,6 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         # _dict_items_val_elems's docstring).
         gen._dict_items_val_elems[t] = gen._dict_val_of(ov)
         return 'MojoList *', t
-    if method == 'fromkeys' and args:
-        _keys_t, _keys_v = gen.lower_expr(args[0])
-        _keys_v = gen._materialize_as_list(_keys_t, _keys_v)
-        _vkind = '4'
-        _vval = '0'
-        _vstr = '0'
-        if len(args) > 1:
-            _vt, _vv = gen.lower_expr(args[1])
-            if _vt == 'double':
-                _vkind = '1'
-                _tmp = gen._new_val('int64_t', '0')
-                gen._emit(f'  memcpy (&{_tmp}, &{_vv}, 8);')
-                _vval = _tmp
-            elif _vt in ('char *', 'MojoStr *'):
-                _vkind = '2'
-                _vval = gen._new_val('int64_t', f'(int64_t)(intptr_t){_vv}')
-            elif isinstance(args[1], gimple_ctypes.NoneLiteral) or (
-                    isinstance(args[1], gimple_ctypes.IdentExpr)
-                    and args[1].name == 'None'):
-                _vkind = '4'; _vval = '0'
-            elif _vt == '_Bool':
-                _vkind = '3'; _vval = gen._new_val('int64_t', f'(int64_t){_vv}')
-            else:
-                _vkind = '0'; _vval = gen._new_val('int64_t', f'(int64_t){_vv}')
-        t = gen._new_val('MojoDict *',
-                         f'mojo_dict_fromkeys_on ({ov}, {_keys_v}, {_vval}, {_vkind}, (char *){_vstr})')
-        return 'MojoDict *', t
     if method == 'get' and args:
         key_type, key_val, key_is_bytes = _dict_key_probe(gen, *gen.lower_expr(args[0]))
         default_ty = None
@@ -5970,7 +5931,6 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
                 gen._dyn_word_vals.add(raw)
             return 'int64_t', raw
     if method == 'update' and args:
-        gen._emit(f'  mojo_frozendict_check_no_mut_method ({ov}, "update");')
         other_type, other_val = gen.lower_expr(args[0])
         # `d1.update(d2)` where d2 is itself a builtin-`dict` subclass
         # instance — the real dict lives in its hidden `_data` field, not
@@ -5984,7 +5944,6 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._emit(f"  mojo_dict_update ({ov_cast}, {other_val_cast});")
         return 'int', gen._new_val('int', '0')
     if method == 'pop' and args:
-        gen._emit(f'  mojo_frozendict_check_no_mut_method ({ov}, "pop");')
         # `d.pop(k)` / `d.pop(k, default)`. Two things were lost here and both
         # were silent wrong answers rather than refusals:
         #
@@ -6108,11 +6067,9 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._copy_dict_metadata(t, ov)
         return 'MojoDict *', t
     if method == 'clear':
-        gen._emit(f'  mojo_frozendict_check_no_mut_method ({ov}, "clear");')
         gen._emit(f"  mojo_dict_clear ({ov});")
         return 'int', gen._new_val('int', '0')
     if method == 'setdefault' and args:
-        gen._emit(f'  mojo_frozendict_check_no_mut_method ({ov}, "setdefault");')
         # `d.setdefault(key[, default])` — real Python: insert `default`
         # (None if omitted) under `key` when absent, then return the current
         # value. The previous lowering was just `mojo_dict_get_int`, which
@@ -6149,38 +6106,6 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             gen._elem_types[typed] = gen._elem_types.get(dv, gen._elem_types.get(_gmm_as_str(raw)))
             return dt, typed
         return 'int64_t', raw
-    if method == 'popitem':
-        gen._emit(f'  mojo_frozendict_check_no_mut_method ({ov}, "popitem");')
-        return 'int64_t', gen._new_val('int64_t', '0')
-    if method == '__setitem__':
-        gen._emit(
-            f"  if ({ov} && ((MojoDict*){ov})->frozen) "
-            f"mojo_raise_type_error((char*)\"'frozendict' object does not support item assignment\");")
-        return 'int64_t', gen._new_val('int64_t', '0')
-    if method == '__delitem__':
-        gen._emit(
-            f"  if ({ov} && ((MojoDict*){ov})->frozen) "
-            f"mojo_raise_type_error((char*)\"'frozendict' object does not support item deletion\");")
-        return 'int64_t', gen._new_val('int64_t', '0')
-    if method == '__or__' and args:
-        ot2, ov2 = gen.lower_expr(args[0])
-        if ot2 != 'MojoDict *':
-            ov2 = gen._coerce_to_type(ot2, 'MojoDict *', ov2)
-        t = gen._new_val('MojoDict *', f'mojo_dict_union ({ov}, {ov2})')
-        if ov in gen._dict_val_types:
-            gen._dict_val_types[t] = gen._dict_val_types[ov]
-        return 'MojoDict *', t
-    if method == '__ror__' and args:
-        ot2, ov2 = gen.lower_expr(args[0])
-        if ot2 != 'MojoDict *':
-            ov2 = gen._coerce_to_type(ot2, 'MojoDict *', ov2)
-        t = gen._new_val('MojoDict *', f'mojo_dict_union ({ov2}, {ov})')
-        if ov in gen._dict_val_types:
-            gen._dict_val_types[t] = gen._dict_val_types[ov]
-        return 'MojoDict *', t
-    if method == '__ior__':
-        gen._emit(f'  mojo_frozendict_check_no_mut_method ({ov}, "__ior__");')
-        return 'MojoDict *', ov
     return 'int64_t', gen._new_val('int64_t', '0')
 
 

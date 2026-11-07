@@ -704,6 +704,24 @@ def _calls_main(stmts, IfStmt, ExprStmt, CallExpr, IdentExpr):
     return False
 
 
+def _format_error_message(e):
+    """The top-level error text for an uncaught interpreter exception:
+    str(e), plus — for an AttributeError carrying CPython 3.15's `name`/`obj`
+    fields (set by myinterpreter._tag_attribute_error) — the 3.15-style
+    suggestion, computed at PRINT time from the real object. This is how an
+    uncaught `x.push(4)` reads `... no attribute 'push'. Did you mean
+    '.append'?` exactly as CPython 3.15 prints it; an AttributeError caught
+    in user code never goes through here and stays plain, the same
+    caught-plain/uncaught-suggested split CPython measures."""
+    msg = str(e)
+    if type(e).__name__ == 'AttributeError':
+        aname = getattr(e, 'name', None)
+        if isinstance(aname, str):
+            from myinterpreter import attribute_error_suggestion
+            msg = msg + attribute_error_suggestion(getattr(e, 'obj', None), aname)
+    return msg
+
+
 def interpret_and_execute(src_code, filename=None, argv=None):
     """Runs the interpretation in a worker thread with a large native stack.
 
@@ -767,9 +785,28 @@ def interpret_and_execute(src_code, filename=None, argv=None):
             text = str(e)
             exit_code.append(int(text) if text.lstrip('-').isdigit() else 0)
         except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
+            base_msg = str(e)
+            msg = _format_error_message(e)
+            tb_lines = None
+            if msg != base_msg:
+                # A 3.15 suggestion was appended — CPython prints it on the
+                # exception's own final line, so the traceback's last line
+                # must carry the same text (on a 3.15 host CPython's own
+                # traceback module may have already appended one; replacing
+                # the whole line keeps the `Error:` line and this one
+                # agreeing whatever host is running us).
+                import traceback
+                tb_lines = traceback.format_exception(e)
+                if tb_lines:
+                    tb_lines.pop()
+                    tb_lines.append(f"{type(e).__name__}: {msg}\n")
+            print(f"Error: {msg}", file=sys.stderr)
             import traceback
-            traceback.print_exc(file=sys.stderr)
+            if tb_lines is None:
+                traceback.print_exc(file=sys.stderr)
+            else:
+                for line in tb_lines:
+                    print(line, end='', file=sys.stderr)
             # An uncaught interpreter exception is a failed run, not a
             # successful one — without this, the worker thread finishes
             # "normally" after swallowing the exception, exit_code stays
@@ -892,7 +929,7 @@ def run_repl():
                     if result is not None and not isinstance(result, str):
                         print(result)
             except Exception as e:
-                print("Error:", e)
+                print("Error:", _format_error_message(e))
 
         except KeyboardInterrupt:
             print("\nInterrupt")

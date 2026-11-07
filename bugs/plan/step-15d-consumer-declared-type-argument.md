@@ -1,7 +1,7 @@
 # plan/step-15d: refuse, by name, a type argument declared only in the consumer's file
 **Status: DONE 2026-11-06 (measured).** 'a consumer-declared type argument is refused by name' PASSES; `test_formal_monomorph.py` 60/0/0 on 2026-11-06.
 Class: mid      Size: S      Depends: 15a      Blocks: none
-Source: the deleted generic-monomorph-scope FORMAL doc §4 and §5 (git history 4fdf0a95d^).
+Source: deleted `bugs/formal/FORMAL_generic_monomorph_scope.md` §4 and §5 (`git show 4fdf0a95d^:...`).
 
 ## Current state (documented 2026-10-12, UNVERIFIED on this tree: run the probe in Work order 1 first)
 - lib declares `struct Pair[T]: var first: T` + `def get_first(self) -> T`; program declares `struct Colour: var rgb: Int` and does `Pair[Colour]()`. The doc measured: it BUILDS (the library compiles `Pair_1_T_6_Colour` with `Colour` undeclared in its own module), and the first use that needs the layout (`var v: Int = c.rgb`) refuses with "this path has no way to say what `c` holds". Without the method the export gate refuses instead. No test pinned either half. This is a layout question deferred to first use: a wrong answer waiting if a use does not need the layout.

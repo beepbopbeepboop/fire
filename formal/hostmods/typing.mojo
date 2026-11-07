@@ -46,10 +46,10 @@ WHAT IS NOT HERE, AND WHY
   * `Optional`, `Union`, `Any`, `List`, `Dict`, `Set`, `Tuple`, `Callable`,
     `Iterable`, `Type`, `ClassVar`, `Final`, `Annotated`, `Literal`,
     `Protocol`, `Generic`, `TypeVar`, `TypedDict`, `NamedTuple`, `NoReturn`,
-    `Never`, `Self`, `LiteralString`, `TypeAlias`, `TypeForm` (PEP 747, 3.15),
-    `Concatenate`, `ParamSpec`, `Unpack`, `Required`, `NotRequired`,
-    `ReadOnly`, `runtime_checkable`, `assert_never`, `cast`, `overload`,
-    `final`, `get_args`, `get_origin`, `get_type_hints`, `reveal_type`,
+    `Never`, `Self`, `LiteralString`, `TypeAlias`, `Concatenate`,
+    `ParamSpec`, `Unpack`, `Required`, `NotRequired`, `ReadOnly`,
+    `runtime_checkable`, `assert_never`, `cast`, `overload`, `final`,
+    `get_args`, `get_origin`, `get_type_hints`, `reveal_type`,
     `TYPE_CHECKING` as a subscript — TYPES. A type is not a value on this path
     and cannot be returned from a module function, let alone stored in a
     module-level name (`(module state/model limits) (deleted) (deleted) (deleted)`).

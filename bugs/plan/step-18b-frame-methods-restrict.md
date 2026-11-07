@@ -1,5 +1,4 @@
 # plan/step-18b: make `_frame_methods` classify only the shapes whose contract is true
-**Status: DONE 2026-11-07 (measured).** pinned inc/pop/set2 -> None; restriction was already in _frame_methods
 Class: mid      Size: M      Depends: 18a      Blocks: 18c, 18d
 Source: 18a's section "§6.3 Design: the by-reference one-field mutator contract" in `bugs/FORMAL_known_limits.md`.
 

@@ -2790,8 +2790,8 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
 
 
 def _gen_for_str(gen, var: str, it_val: str, body: list, shadow_name: str | None = None):
-    gen._declare_var(var, 'char *', force=(var == shadow_name)
-                     or gen.var_types.get(var, 'char *') != 'char *')
+    gen._declare_var(var, 'char', force=(var == shadow_name)
+                     or gen.var_types.get(var, 'char') != 'char')
     len64 = gen._new_temp('int64_t')
     len_t = gen._new_temp('int64_t')
     idx_t = gen._new_temp('int64_t')

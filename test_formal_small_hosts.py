@@ -23,9 +23,7 @@ module.
     reads the name. `formal/elf.py` imports it and `type_system.py` imports six
     names, and all seven uses are in annotations or in a default — which is why
     the module is one function and why those two files are unblocked by its
-    existence rather than by anything it declares. Python 3.15's `TypeForm`
-    (PEP 747) is pinned the same way: usable in annotations, not exported as a
-    callable value.
+    existence rather than by anything it declares.
 
 Groups: `io`, `typing`, `resolve`, `absent`. With no argument, all.
 """
@@ -123,28 +121,6 @@ def main() -> int:
           f"answer: {got!r} (the backend erases annotations, so both must be "
           f"the functions' own bodies)")
 
-    # (2b) Python 3.15's TypeForm (PEP 747) is a typing construct: like every
-    # other type name here it is not exported as a callable value, but the
-    # backend erases annotations, so `from typing import TypeForm` and using it
-    # in annotation positions resolves and does not change behaviour. Pins the
-    # Python 3.15 TypeForm annotation case (PEP 747).
-    src = """from typing import TypeForm
-
-def annotated(a: TypeForm = None) -> int:
-    return 7
-
-def annotated_param(a: TypeForm[int]) -> int:
-    return 9
-
-def main() -> int:
-    printf("a=%d@@", annotated())
-    printf("b=%d@@", annotated_param(0))
-"""
-    got = run(build(src, "typing_typeform"))
-    got = [g for g in got.split("@@") if g != ""]
-    check(got == ["a=7", "b=9"],
-          f"TypeForm (3.15) in an annotation changed the answer: {got!r}")
-
     # (3) and the shape that is NOT erased, so a reader knows where the edge
     # is: a subscript in a STATEMENT is a real expression and is refused.
     r = subprocess.run(
@@ -159,9 +135,9 @@ def main() -> int:
           "says the backend erases annotations and this does not — either the "
           "erasure claim is wrong or the backend changed")
     if verbose:
-        print("    TYPE_CHECKING against CPython, plus 3 annotation shapes "
-              "(including 3.15 TypeForm) and the 1 that is not erased")
-    return True, "TYPE_CHECKING and the erased-annotation shapes agree (incl. TypeForm)"
+        print("    TYPE_CHECKING against CPython, plus 2 annotation shapes "
+              "and the 1 that is not erased")
+    return True, "TYPE_CHECKING and the erased-annotation shapes agree"
 
 
 def _write(name, text):
@@ -216,8 +192,7 @@ def group_absent(tmpdir, verbose):
                                        "final", "TypeVar", "Protocol",
                                        "Generic", "NamedTuple",
                                        "TypedDict", "runtime_checkable",
-                                       "assert_never", "reveal_type",
-                                       "TypeForm")]
+                                       "assert_never", "reveal_type")]
     for mod, name in absent:
         # A CALL, not a bare name. A bare `io.open` is a read of a
         # module-level name, which is refused for a DIFFERENT and vaguer

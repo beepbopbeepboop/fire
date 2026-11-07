@@ -540,7 +540,8 @@ def eval_const(node, bindings: dict, platform: str = None):
     # Subscript/slice on a comptime-known value (list/tuple/str/dict element
     # access or slicing). Required so `comptime assert a[i] == ...` and similar
     # conditions over comptime collections produce compile-time diagnostics
-    # (comptime collection ops beyond len()).
+    # (bugs/DIAGNOSTICS_missing_validation_modular.md: "collection ops beyond
+    # len()").
     _sv = _eval_subscript(node, bindings, platform)
     if _sv is not None:
         return _sv

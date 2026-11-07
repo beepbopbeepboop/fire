@@ -1,5 +1,4 @@
 # plan/step-13c: DECISION MEMO — `%<w>s` / `%.<p>s` and `s[i]` on non-ASCII text the build CANNOT see
-**Status: DONE 2026-11-07 (measured).** Memo in `bugs/FORMAL_string_value_model.md` ("Run-time code-point walk"): `%*.*s` is ACCEPTED on both arches but computes bytes (`printf("%*.*s|", 8, 3, "héllo")` prints `     hé|`, CPython `     hél|`), so the rewrite is star arguments computed at run time (A); copy-to-buffer (B) rejected. Follow-ups `13d` (printf) and `13e` (subscript) written.
 Class: hard      Size: M      Depends: 11a, 13a, 13b      Blocks: none
 Source: `bugs/FORMAL_string_value_model.md` Wave 9; `formal/model/strings.py:1949 printf_text_width_refusal`, `formal/model/values.py:4098 string_element_refusal`.
 

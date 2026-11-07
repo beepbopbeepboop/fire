@@ -4545,9 +4545,6 @@ class GimpleGen:
     def _lower_builtin_dict(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_dict(self, node)
 
-    def _lower_builtin_frozendict(self, node: CallExpr) -> tuple[str, str]:
-        return ggc._lower_builtin_frozendict(self, node)
-
     def _lower_builtin_list(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_list(self, node)
 
@@ -5815,9 +5812,6 @@ class GimpleGen:
     def _stub_result(self, ctype: str, value: str, note: str) -> tuple[str, str]:
         return grsl._stub_result(self, ctype, value, note)
     def _intern_string(self, escaped: str) -> str:
-        return grsl._intern_string(self, escaped)
-    def _emit_string_literal(self, val: str) -> str:
-        escaped = _c_escape(val)
         return grsl._intern_string(self, escaped)
     def _str_literal_to_slit(self, str_literal: str) -> str:
         return grsl._str_literal_to_slit(self, str_literal)

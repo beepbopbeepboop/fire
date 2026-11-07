@@ -50,8 +50,9 @@ WHAT IS NOT HERE, AND WHY
     caller would read an empty buffer as "the program printed nothing".
   * `contextmanager` — a DECORATOR over a generator function. Both halves are
     refused here: a decorator on a function OR a class is silently DROPPED by
-    both backends, so `@contextmanager` would build and turn the generator
-    function into an ordinary one that returns a generator nobody consumes.
+    both backends (`bugs/hard/COMPILE_FAIL_decorator_application_dropped.md`), so
+    `@contextmanager` would build and turn the generator function into an ordinary
+    one that returns a generator nobody consumes.
   * `closing` — LOOKED LIKE `nullcontext` AND IS NOT, which is why it is worth
     naming. `with closing(x) as y:` needs `y` to be `x.close()`'s result while
     the manager holds `x` itself, so it needs TWO words — and this path has one.

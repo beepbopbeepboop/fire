@@ -101,11 +101,6 @@ NOT_LOWERED_BUILTINS = {
     "round": "a compare-and-select for an integer operand and a rounding rule "
              "for a real one; the C library's `round` is a double (see "
              "FOREIGN_ABI_BUILTINS)",
-    "sentinel": "a fresh, unique sentinel value per call, and a unique runtime "
-                "identity is not a value this one-word model can produce — the "
-                "same wall as `object()`",
-    "frozendict": "an immutable dict variant; a fresh unique mapping value per "
-                  "call is not a thing this one-word model can produce",
     "sorted": "a sort — a comparison call per element, and a call through a "
               "value is not a thing this path can express",
     "sum": "a fold over a sequence, the same shape as `all`",
@@ -2036,7 +2031,7 @@ GIMPLE_RUNTIME_PREFIX = "mojo_"
 #
 # This is the generalisation of the `GIMPLE_LIST_PREFIX` special case that
 # stood here before, and that constant is gone: a hand-kept list of prefixes is
-# a list that rots, and the shape answers the same question for all 897 entry
+# a list that rots, and the shape answers the same question for all 871 entry
 # points the headers declare rather than for the 40-odd names one prefix
 # happened to cover.
 
@@ -2209,7 +2204,7 @@ def _parse_ctype(decl: str, is_param: bool = False) -> tuple:
     because it does in a parameter list and does not in a return type:
     `void *db` is a `void *` with a name, `void *` is not. Getting that backwards
     makes every parameter a type called `void db`, which nothing recognises as a
-    scalar — and a rule that refuses all 897 entry points for that reason looks
+    scalar — and a rule that refuses all 871 entry points for that reason looks
     exactly like a rule that has measured them all and found none reachable.
 
     The result is the RESOLVED type, which is what every reader of it wants:

@@ -1,5 +1,4 @@
 # plan/step-19a: build an OPTIONAL runtime unit (sqlite3 first) as a loadable dylib for the formal link line
-**Status: DONE 2026-11-07 (measured).** `build_stdlib_dylib.py`: factored shared `_compile_reflect_table()` and added/refined `optional_runtime_dylib(unit, arch)` (Mach-O, CAS-cached by unit/arch/source/effective flags/libs, unit+namespace-filtered `__mojo_reflect`, links unit libs and core runtime, `_arch_or_die`, clear errors for unknown unit/missing source/compile/link including dev-package hint). sqlite3 arm64+x86_64 build: manifest exports `mojo_sqlite3_close` and not `mojo_strlen` (22/22). `python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_runtime_link.py` => `20 passed in 23.60s` / `213 passed, 0 failed, 213 checks`. `python3 tools/memslot.py --gb 8 --label t -- python3 test_runtime_header_scan.py` => `43 passed, 28 failed, 71 checks` (pre-existing census/quote drift only; no files touched by this change). `python3 tools/plan_index.py --check` => PASS.
 Class: mid      Size: M      Depends: 15a      Blocks: 19b
 Source: `bugs/FORMAL_known_limits.md` §3.1 "What is still open, and it is [1]'s half".
 

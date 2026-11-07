@@ -57,9 +57,10 @@ WHAT IS NOT HERE, AND WHY
 measured reason — libSystem provides none of them, so each would be a
 from-scratch implementation of a specification nobody has checked here — and
 SHAKE additionally needs an extendable output, which is a run-time-length
-sequence this path cannot build. `test_formal_hashlib.py`'s `absent` group
-asserts each one is refused with a message naming itself, so an omission can
-never be mistaken for an implementation.
+sequence this path cannot build
+(`bugs/FORMAL_listdir_no_run_time_sequence.md`). `test_formal_hashlib.py`'s
+`absent` group asserts each one is refused with a message naming itself, so an
+omission can never be mistaken for an implementation.
 
 THE RULE THAT DECIDES IT, and it is a rule about this repository rather than
 about cryptography: **write what the tree asks for, check it against CPython,

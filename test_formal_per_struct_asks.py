@@ -112,22 +112,6 @@ def module_with(nfuncs: int, nmeths: int = 12) -> str:
     return '\n'.join(out)
 
 
-_MODEL_MODS = ('formal.model', 'formal.model.cfg', 'formal.model.methods',
-                'formal.model.values', 'formal.model.strings',
-                'formal.model.structs', 'formal.model.builtins',
-                'formal.model.calls', 'formal.model.types',
-                'formal.model.eh', 'formal.model.init',
-                'formal.model.frames', 'formal.model.module',
-                'formal.model.layout')
-
-
-def _set_everywhere(name, fn):
-    for modname in _MODEL_MODS:
-        mod = sys.modules.get(modname)
-        if mod is not None and hasattr(mod, name):
-            setattr(mod, name, fn)
-
-
 def ask_counts(source: str):
     """{predicate: calls} for one `_prepare_functions` run over `source`."""
     counts = collections.Counter()
@@ -139,7 +123,7 @@ def ask_counts(source: str):
             counts[_n] += 1
             return _fn(*a, **k)
         saved[name] = fn
-        _set_everywhere(name, timed)
+        setattr(M, name, timed)
     try:
         with tempfile.TemporaryDirectory() as td:
             path = os.path.join(td, 'asks.mojo')
@@ -149,7 +133,7 @@ def ask_counts(source: str):
             B._prepare_functions(stmts, synthetic=True, source_path=path)
     finally:
         for name, fn in saved.items():
-            _set_everywhere(name, fn)
+            setattr(M, name, fn)
     return counts
 
 
