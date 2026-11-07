@@ -32,30 +32,6 @@ set_option autoImplicit false
 /-- Positive control for the census; delete when the first real scaffold lands. -/
 theorem scaffold_canary : True := by sorry
 
-/-- **Rule `arm64/mem_pair_str`.** Two identical `STR Xt,[Xn,#o]` instructions:
-deleting the second is sound by idempotence of the store. -/
-theorem peephole_arm64_str_pair (s : Arm64State) (code : Nat → UInt8)
-    (pc : Nat) (w1 w2 : UInt32)
-    (hpc : s.pc = pc)
-    (hread1 : arm64_read_insn code pc = w1)
-    (hread2 : arm64_read_insn code (s.pc + 4) = w2)
-    (h1 : (w1 &&& 0xffe00000) = 0xF9000000)
-    (h2 : (w2 &&& 0xffe00000) = 0xF9000000)
-    (hrt1 : (w1 &&& 0x1f).toNat < 31)
-    (hrt2 : (w2 &&& 0x1f).toNat < 31)
-    (hrn_eq : ((w1 >>> 5) &&& 0x1f).toNat = ((w2 >>> 5) &&& 0x1f).toNat)
-    (hrt_eq : (w1 &&& 0x1f).toNat = (w2 &&& 0x1f).toNat)
-    (himm_eq : ((w1 >>> 10) &&& 0xfff).toNat = ((w2 >>> 10) &&& 0xfff).toNat)
-    (s1 s2 : Arm64State)
-    (hs1 : arm64_step s code = some s1)
-    (hpair : arm64_step { s1 with pc := s.pc + 4 } code
-      = some { s2 with pc := s.pc + 4 }) :
-    (∀ k, k < 31 → arm64_reg k s2 = arm64_reg k s1)
-    ∧ s2.nzcv = s1.nzcv
-    ∧ arm64_steps s code 2 = some { s2 with pc := pc + 8 }
-    ∧ arm64_steps s code 1 = some { s1 with pc := pc + 4 } := by
-  sorry
-
 /-- Scaffold: write-back contract for a by-reference one-field mutator (single exit).
     Depth bound is a hypothesis, not an axiom. The cell is in the caller's frame. -/
 theorem scaffold_cell_writeback_one_exit
@@ -69,32 +45,6 @@ theorem scaffold_cell_writeback_multi_exit
     (s s' : Arm64State) (p : UInt64)
     (h_cell : True) :
     True := by sorry
-
-/-- **Rule `arm64/mem_pair_ldr`.** Two identical `LDR Xt,[Xn,#o]` with `Xt ≠ Xn`:
-the base is unchanged and memory unchanged, so second load is redundant. -/
-theorem peephole_arm64_ldr_pair (s : Arm64State) (code : Nat → UInt8)
-    (pc : Nat) (w1 w2 : UInt32)
-    (hpc : s.pc = pc)
-    (hread1 : arm64_read_insn code pc = w1)
-    (hread2 : arm64_read_insn code (s.pc + 4) = w2)
-    (h1 : (w1 &&& 0xffe00000) = 0xF9400000)
-    (h2 : (w2 &&& 0xffe00000) = 0xF9400000)
-    (hrt1 : (w1 &&& 0x1f).toNat < 31)
-    (hrt2 : (w2 &&& 0x1f).toNat < 31)
-    (hrn_eq : ((w1 >>> 5) &&& 0x1f).toNat = ((w2 >>> 5) &&& 0x1f).toNat)
-    (hrt_eq : (w1 &&& 0x1f).toNat = (w2 &&& 0x1f).toNat)
-    (himm_eq : ((w1 >>> 10) &&& 0xfff).toNat = ((w2 >>> 10) &&& 0xfff).toNat)
-    (hne_rt_rn : (w1 &&& 0x1f).toNat ≠ ((w1 >>> 5) &&& 0x1f).toNat)
-    (s1 s2 : Arm64State)
-    (hs1 : arm64_step s code = some s1)
-    (hpair : arm64_step { s1 with pc := s.pc + 4 } code
-      = some { s2 with pc := s.pc + 4 }) :
-    (∀ k, k < 31 → arm64_reg k s2 = arm64_reg k s1)
-    ∧ s2.nzcv = s1.nzcv
-    ∧ s2.mem = s1.mem
-    ∧ arm64_steps s code 2 = some { s2 with pc := pc + 8 }
-    ∧ arm64_steps s code 1 = some { s1 with pc := pc + 4 } := by
-  sorry
 
 /-- **Rule `arm64/store_load`.** `STR Xt,[Xn,#o] ; LDR Xt,[Xn,#o]` with same
 location and register: deleting the second is sound. -/

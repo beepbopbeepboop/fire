@@ -32,16 +32,6 @@ SCAFFOLD_HOLES: dict[str, Hole] = {
         "add r,0/sub r,0 flags: cf/of_ false, zf/sf from r (x86_flags_add/x86_flags_sub)",
         "scaffold",
     ),
-    "peephole_arm64_str_pair": Hole(
-        "step-03d",
-        "two identical STR Xt,[Xn,#imm] deleted",
-        "scaffold",
-    ),
-    "peephole_arm64_ldr_pair": Hole(
-        "step-03d",
-        "two identical LDR Xt,[Xn,#imm] with Xt!=Xn deleted",
-        "scaffold",
-    ),
     "peephole_arm64_store_load": Hole(
         "step-03c",
         "STR followed by LDR of same location deleted",

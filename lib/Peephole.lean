@@ -890,6 +890,164 @@ theorem peephole_arm64_movz_pair (s : Arm64State) (code : Nat → UInt8)
   · have hpc1 : s1.pc = s.pc := by rw [hs1', arm64_set_reg_pc_unchanged]
     rw [arm64_steps_two_seq s code s1 s2 hs1 hpc1 hpair, hpc]
 
+/-- **Rule `arm64/mem_pair_str`.** Two identical `STR Xt,[Xn,#o]`: deleting the
+    second is sound because the second store writes the same value to the same
+    address (`mem_write_u64_idem`), and STR changes only memory.
+
+    Statement strengthened vs the scaffold (which omitted `s2.mem = s1.mem`);
+    the full memory equality holds and is proved. -/
+theorem peephole_arm64_str_pair (s : Arm64State) (code : Nat → UInt8)
+    (pc : Nat) (w1 w2 : UInt32)
+    (hpc : s.pc = pc)
+    (hread1 : arm64_read_insn code pc = w1)
+    (hread2 : arm64_read_insn code (s.pc + 4) = w2)
+    (h1 : (w1 &&& 0xffe00000) = 0xF9000000)
+    (h2 : (w2 &&& 0xffe00000) = 0xF9000000)
+    (hrt1 : (w1 &&& 0x1f).toNat < 31)
+    (hrt2 : (w2 &&& 0x1f).toNat < 31)
+    (hrn_eq : ((w1 >>> 5) &&& 0x1f).toNat = ((w2 >>> 5) &&& 0x1f).toNat)
+    (hrt_eq : (w1 &&& 0x1f).toNat = (w2 &&& 0x1f).toNat)
+    (himm_eq : ((w1 >>> 10) &&& 0xfff).toNat = ((w2 >>> 10) &&& 0xfff).toNat)
+    (s1 s2 : Arm64State)
+    (hs1 : arm64_step s code = some s1)
+    (hpair : arm64_step { s1 with pc := s.pc + 4 } code
+      = some { s2 with pc := s.pc + 4 }) :
+    (∀ k, k < 31 → arm64_reg k s2 = arm64_reg k s1)
+    ∧ s2.nzcv = s1.nzcv
+    ∧ s2.mem = s1.mem
+    ∧ arm64_steps s code 2 = some { s2 with pc := pc + 8 }
+    ∧ arm64_steps s code 1 = some { s1 with pc := pc + 4 } := by
+  have e1 := arm64_step_str64 s code pc w1 hpc hread1 h1 hrt1
+  rw [hs1] at e1
+  have hs1' := Option.some.inj e1
+  have e2 := arm64_step_str64 { s1 with pc := s.pc + 4 } code (s.pc + 4) w2 rfl hread2 h2 hrt2
+  rw [hpair] at e2
+  have hs2' := Option.some.inj e2
+  have hpc1 : s1.pc = s.pc := by rw [hs1']
+  -- second store = same address and value as first (s1 differs from s only in mem)
+  have hbase : arm64_reg_or_sp ((w2 >>> 5) &&& 0x1f).toNat { s1 with pc := s.pc + 4 }
+      = arm64_reg_or_sp ((w1 >>> 5) &&& 0x1f).toNat s := by
+    rw [← hrn_eq]
+    unfold arm64_reg_or_sp
+    split <;> rename_i hsp
+    · simp [hs1']
+    · simp [arm64_reg, hs1']
+  have hval2 : arm64_reg ((w2 &&& 0x1f).toNat) { s1 with pc := s.pc + 4 }
+      = arm64_reg ((w1 &&& 0x1f).toNat) s := by
+    rw [← hrt_eq, arm64_reg_pc, hs1']; simp [arm64_reg]
+  have hmem : s2.mem = s1.mem := by
+    have : ({ s2 with pc := s.pc + 4 }).mem = ({ s1 with pc := s.pc + 4 }).mem := by
+      rw [hs2']
+      simp only
+      rw [hbase, hval2, ← himm_eq, hs1']
+      exact mem_write_u64_idem _ _ _
+    simpa using this
+  have hnzcv : s2.nzcv = s1.nzcv := by
+    have : ({ s2 with pc := s.pc + 4 }).nzcv = ({ s1 with pc := s.pc + 4 }).nzcv := by
+      rw [hs2']
+    simpa using this
+  refine ⟨?_, hnzcv, hmem, ?_, ?_⟩
+  · intro k hk
+    have hreg : arm64_reg k { s2 with pc := s.pc + 4 } = arm64_reg k { s1 with pc := s.pc + 4 } := by
+      rw [hs2']
+      rcases (by omega : k = 0 ∨ k = 1 ∨ k = 2 ∨ k = 3 ∨ k = 4 ∨ k = 5 ∨ k = 6 ∨ k = 7 ∨ k = 8 ∨ k = 9 ∨ k = 10 ∨ k = 11 ∨ k = 12 ∨ k = 13 ∨ k = 14 ∨ k = 15 ∨ k = 16 ∨ k = 17 ∨ k = 18 ∨ k = 19 ∨ k = 20 ∨ k = 21 ∨ k = 22 ∨ k = 23 ∨ k = 24 ∨ k = 25 ∨ k = 26 ∨ k = 27 ∨ k = 28 ∨ k = 29 ∨ k = 30) with
+        rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;> simp [arm64_reg]
+    simpa [arm64_reg_pc] using hreg
+  · rw [arm64_steps_two_seq s code s1 s2 hs1 hpc1 hpair, hpc]
+  · rw [arm64_steps_one_seq s code s1 hs1 hpc1, hpc]
+
+-- Counterexample showing `hne_rt_rn` is necessary for `peephole_arm64_ldr_pair`
+-- (comment only, not a theorem): `ldr x1,[x1,#0] ; ldr x1,[x1,#0]` differs from
+-- a single load because the first load overwrites the base register `x1`, so the
+-- second load reads from the address now in `x1` (the loaded value), not the
+-- original base. The rule and its theorem therefore require `Xt ≠ Xn`.
+
+/-- **Rule `arm64/mem_pair_ldr`.** Two identical `LDR Xt,[Xn,#o]` with `Xt ≠ Xn`:
+    the base is unchanged by the first load and memory is unchanged, so the
+    second load reads the same value into the same register and is redundant
+    (`arm64_set_reg_set_reg_same` / `arm64_set_reg_self`). The `Xt ≠ Xn`
+    (`hne_rt_rn`) hypothesis is necessary (see comment above). -/
+theorem peephole_arm64_ldr_pair (s : Arm64State) (code : Nat → UInt8)
+    (pc : Nat) (w1 w2 : UInt32)
+    (hpc : s.pc = pc)
+    (hread1 : arm64_read_insn code pc = w1)
+    (hread2 : arm64_read_insn code (s.pc + 4) = w2)
+    (h1 : (w1 &&& 0xffe00000) = 0xF9400000)
+    (h2 : (w2 &&& 0xffe00000) = 0xF9400000)
+    (hrt1 : (w1 &&& 0x1f).toNat < 31)
+    (hrt2 : (w2 &&& 0x1f).toNat < 31)
+    (hrn_eq : ((w1 >>> 5) &&& 0x1f).toNat = ((w2 >>> 5) &&& 0x1f).toNat)
+    (hrt_eq : (w1 &&& 0x1f).toNat = (w2 &&& 0x1f).toNat)
+    (himm_eq : ((w1 >>> 10) &&& 0xfff).toNat = ((w2 >>> 10) &&& 0xfff).toNat)
+    (hne_rt_rn : (w1 &&& 0x1f).toNat ≠ ((w1 >>> 5) &&& 0x1f).toNat)
+    (s1 s2 : Arm64State)
+    (hs1 : arm64_step s code = some s1)
+    (hpair : arm64_step { s1 with pc := s.pc + 4 } code
+      = some { s2 with pc := s.pc + 4 }) :
+    (∀ k, k < 31 → arm64_reg k s2 = arm64_reg k s1)
+    ∧ s2.nzcv = s1.nzcv
+    ∧ s2.mem = s1.mem
+    ∧ arm64_steps s code 2 = some { s2 with pc := pc + 8 }
+    ∧ arm64_steps s code 1 = some { s1 with pc := pc + 4 } := by
+  have e1 := arm64_step_ldr64 s code pc w1 hpc hread1 h1 hrt1
+  rw [hs1] at e1
+  have hs1' := Option.some.inj e1
+  have e2 := arm64_step_ldr64 { s1 with pc := s.pc + 4 } code (s.pc + 4) w2 rfl hread2 h2 hrt2
+  rw [hpair] at e2
+  have hs2' := Option.some.inj e2
+  have hpc1 : s1.pc = s.pc := by rw [hs1', arm64_set_reg_pc_unchanged]
+  -- base register unchanged: rt1 != rn1, and set_reg rt1 doesn't touch rn1 or sp
+  have hbase : arm64_reg_or_sp ((w2 >>> 5) &&& 0x1f).toNat { s1 with pc := s.pc + 4 }
+      = arm64_reg_or_sp ((w1 >>> 5) &&& 0x1f).toNat s := by
+    rw [← hrn_eq]
+    unfold arm64_reg_or_sp
+    split <;> rename_i hsp
+    · -- sp
+      simp [hs1']
+      try (unfold arm64_set_reg; split <;> rfl)
+    · -- register rn1 < 31, and rn1 != rt1
+      have hne_sp : ((w1 >>> 5) &&& 0x1f).toNat ≠ 31 := by
+        intro heq; simp [heq] at hsp
+      have hrn1 : ((w1 >>> 5) &&& 0x1f).toNat < 31 := by
+        have hle : ((w1 >>> 5) &&& 0x1f).toNat ≤ 31 := by
+          show (w1 >>> 5 &&& 0x1f).toNat ≤ (31 : UInt32).toNat
+          apply Nat.le_of_lt_succ
+          have : (w1 >>> 5 &&& 0x1f).toNat < (32 : UInt32).toNat := by
+            simp only [UInt32.toNat_and, UInt32.toNat_ofNat, UInt32.toNat_shiftRight,
+              Nat.reducePow, Nat.mod_eq_of_lt (by decide : 31 < 4294967296),
+              Nat.mod_eq_of_lt (by decide : 32 < 4294967296)]
+            exact Nat.lt_of_le_of_lt (Nat.and_le_right) (by decide)
+          simpa using this
+        omega
+      have hne : ((w1 >>> 5) &&& 0x1f).toNat ≠ (w1 &&& 0x1f).toNat := by omega
+      rw [arm64_reg_pc, hs1']
+      exact arm64_reg_set_reg_other _ _ _ _ hrn1 hne
+  -- second load reads same memory at same address => same value
+  have hval : mem_read_u64 ({ s1 with pc := s.pc + 4 }).mem
+      ((arm64_reg_or_sp ((w2 >>> 5) &&& 0x1f).toNat { s1 with pc := s.pc + 4 }
+        + UInt64.ofNat ((((w2 >>> 10) &&& 0xfff).toNat) * 8)).toNat)
+      = mem_read_u64 s.mem
+        ((arm64_reg_or_sp ((w1 >>> 5) &&& 0x1f).toNat s
+          + UInt64.ofNat ((((w1 >>> 10) &&& 0xfff).toNat) * 8)).toNat) := by
+    rw [hbase, ← himm_eq, hs1']
+    simp [arm64_set_reg_mem_unchanged]
+  -- {s2 with pc := s.pc+4} sets rt1 (= rt2) to that same value over s1 => equals s1 with pc
+  have hs2eq : { s2 with pc := s.pc + 4 } = { s1 with pc := s.pc + 4 } := by
+    rw [hs2', hval, ← hrt_eq, hs1']
+    rw [← arm64_set_reg_pc_congr]
+    rw [arm64_set_reg_set_reg_same]
+  have hnzcv : s2.nzcv = s1.nzcv := by
+    have := congrArg (fun t => t.nzcv) hs2eq; simpa using this
+  have hmem : s2.mem = s1.mem := by
+    have := congrArg (fun t => t.mem) hs2eq; simpa using this
+  refine ⟨?_, hnzcv, hmem, ?_, ?_⟩
+  · intro k hk
+    have hreg : arm64_reg k { s2 with pc := s.pc + 4 } = arm64_reg k { s1 with pc := s.pc + 4 } := by
+      have := congrArg (arm64_reg k) hs2eq; exact this
+    simpa [arm64_reg_pc] using hreg
+  · rw [arm64_steps_two_seq s code s1 s2 hs1 hpc1 hpair, hpc]
+  · rw [arm64_steps_one_seq s code s1 hs1 hpc1, hpc]
+
 /-!
 ## Design note (x86_64/imm_zero) — for a later hard round
 The sound statement is "for every continuation whose first flag access is a
