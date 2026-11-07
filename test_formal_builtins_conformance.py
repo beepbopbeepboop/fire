@@ -805,6 +805,8 @@ group(
         # A fresh object, or a run-time-sized one.
         ("object", ["var v = object()", "printf(\"L%lld\\n\", 1)"],
          "refuse:`object(...)` is not lowered on this path"),
+        ("sentinel", ["var v = sentinel(\"MISSING\")", "printf(\"L%lld\\n\", 1)"],
+         "refuse:`sentinel(...)` is not lowered on this path"),
         ("memoryview", ["var v = memoryview(b\"ab\")", "printf(\"L%lld\\n\", len(v))"],
          "refuse:`memoryview(...)` is not lowered on this path"),
         ("frozenset", ["var v = frozenset([1, 2])", "printf(\"L%lld\\n\", len(v))"],
