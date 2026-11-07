@@ -9501,16 +9501,22 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                       f"≠ {run_last_pc} := by")
                     A(f"{IND}  rw [hx30_{bi}]")
                     A(f"{IND}  native_decide")
-                cert_args = f"{cert_name} ({state}) hpc_{bi} hjump_{bi}"
+                cert_args = f"{cert_name} _ hpc_{bi} hjump_{bi}"
             else:
-                cert_args = f"{cert_name} ({state}) hpc_{bi}"
+                cert_args = f"{cert_name} _ hpc_{bi}"
+            # The state argument is `_`, not the record literal: `hpc_{bi}`
+            # (`<state>.pc = pc`) fixes it by unification, and spelling it out
+            # makes the elaborator compare two separately-elaborated copies of
+            # a 40-field record update, which on any difference falls through to
+            # unfolding the block's four-step `qS`/`qT` chain and dies with
+            # "maximum recursion depth" -- measured on 60 of the 94 corpus
+            # examples (the `maxRecDepth` option does not help: raised to 10^6).
             # Bind the run-exit state as a PLAIN local (rcases), not a let:
             # a `let` bound to a deep run certificate makes any record update
             # over it recurse in the elaborator.
             A(f"{IND}have hrun_ex_{bi} : ∃ s : Arm64State, "
               f"arm64_runs {C} {m_run} ({state}) = some s := by")
             A(f"{IND}  refine ⟨({exit_state}), ?_⟩")
-            A(f"{IND}  change arm64_runs {C} {m_run} ({state}) = some {exit_state}")
             A(f"{IND}  exact {cert_args}")
             A(f"{IND}rcases hrun_ex_{bi} with ⟨s_{bi}, hrun_{bi}⟩")
             A(f"{IND}have hcert_{bi} : arm64_runs {C} {m_run} ({state}) = some ({exit_state}) "
@@ -10836,7 +10842,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{IND}  exact fun h => hx30ret {run_last_pc} (by decide) h.symm")
                 hj = f" hj_{n}"
             A(f"{IND}have hcert_{n} : arm64_runs {C} {m_run} ({cur}) = some ({rhs}) := "
-              f"{cert_name} ({cur}) {cur_pc}{hj}")
+              f"{cert_name} _ {cur_pc}{hj}")
             A(f"{IND}have hrun_ex_{n} : ∃ s : Arm64State, arm64_runs {C} {m_run} ({cur}) "
               f"= some s := ⟨({rhs}), hcert_{n}⟩")
             A(f"{IND}rcases hrun_ex_{n} with ⟨s_{n}, hrun_{n}⟩")
@@ -11888,9 +11894,20 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int,
             # -- produced a file that did not typecheck, and the error named a
             # mismatch in the step lemma rather than the ADRP.
             _pc_dependent = "s.pc" in (_step_rhs_generic(idx) or "")
-            _closer = (f"simpa [h] using ({lemma} s {name}_code {pc} "
-                       f"({w} : UInt32) h hinsn hw)" if _pc_dependent else
-                       f"exact {lemma} s {name}_code {pc} ({w} : UInt32) h hinsn hw")
+            # A lemma whose conclusion reads an operand through
+            # `arm64_shifted_reg w s rm` (ADDS/SUBS/CMN/TST register forms)
+            # is stated over the SHIFTED read, while `_step_rhs` writes the
+            # plain `arm64_reg rm s` the emitted shift-0 word means. `exact`
+            # needs `whnf` to evaluate the shift on the literal word and does
+            # not (measured: `work_step_cmn` vs `adds x0, x0, x1` was a "Type
+            # mismatch" in 60 of 94 corpus examples), so the fallback rewrites
+            # with the lemma and then `arm64_shifted_reg_zero`, which is the
+            # library fact that a zero shift field makes the two reads equal.
+            _exact = f"{lemma} s {name}_code {pc} ({w} : UInt32) h hinsn hw"
+            _closer = (f"simpa [h] using ({_exact})" if _pc_dependent else
+                       f"first | exact {_exact} | "
+                       f"(rw [{_exact}]; "
+                       f"simp only [arm64_shifted_reg_zero ({w} : UInt32) (by decide)]; rfl)")
             blocks.append(
                 f"theorem {name}_sr_{i} (s : Arm64State) (h : s.pc = {pc}) :\n"
                 f"  arm64_step s {name}_code = {rhs} := by\n"
