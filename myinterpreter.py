@@ -3227,6 +3227,48 @@ class _SysProxy:
         return getattr(sys, name)
 
 
+def _sentinel_builtin():
+    """The `sentinel` builtin (Python 3.14+/3.15, PEP 661).
+
+    Returns the host's `builtins.sentinel` when available; otherwise a
+    compatible implementation: `sentinel(name, /, *, repr=None)` returns a
+    unique instance whose repr is `name` (or the custom `repr`), and
+    `isinstance(instance, sentinel)` is true.
+    """
+    host = getattr(builtins, 'sentinel', None)
+    if host is not None:
+        return host
+
+    class sentinel:
+        __slots__ = ('_name', '_repr')
+
+        def __new__(cls, name, /, *, repr=None):
+            self = object.__new__(cls)
+            self._name = name
+            self._repr = name if repr is None else repr
+            return self
+
+        def __repr__(self):
+            return self._repr
+
+        def __reduce__(self):
+            args = (self._name,)
+            if self._repr == self._name:
+                return (sentinel, args)
+            return (sentinel, args, {'repr': self._repr})
+
+    sentinel.__name__ = 'sentinel'
+    sentinel.__qualname__ = 'sentinel'
+    sentinel.__module__ = 'builtins'
+    sentinel.__doc__ = (
+        "Create a unique sentinel object.\n\n"
+        "*name* should be the name of the variable to which the return value shall be assigned.\n\n"
+        "*repr*, if supplied, will be used for the repr of the sentinel object. "
+        "If not provided, \"<name>\" will be used."
+    )
+    return sentinel
+
+
 class Interpreter:
     """Executes Mojo AST nodes."""
 
@@ -3645,6 +3687,7 @@ class Interpreter:
         self.scope.define('object', object)
         self.scope.define('complex', complex)
         self.scope.define('slice', slice)
+        self.scope.define('sentinel', _sentinel_builtin())
         self.scope.define('callable', callable)
         self.scope.define('iter', _mojo_iter)
         self.scope.define('format', format)
