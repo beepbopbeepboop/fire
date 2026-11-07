@@ -62,17 +62,32 @@ Key categories:
   `is_half_float`) during compile-time constant evaluation. Provably-false
   `comptime assert` / `constrained` conditions that use DType predicates now
   produce compile-time diagnostics (direct cases). Unknown/unresolvable DType
-  bindings remain conservative (no false diagnostic). Regression:
-  `test_comptime_dtype_diagnostic.py`. Remaining gap: DType predicates on
-  instantiated generic params still require the backend to populate
-  `_comptime_vals` with the resolved DType binding for that instantiation.
+  Regression: `test_comptime_dtype_diagnostic.py`.
+- **Landed (follow-up, this worker, branch
+  `work/bug-mid-diagnostics-missing-validation-m-7836`):** root-cause fix in
+  `mojo/backend_gimple/emit_resolve.py`: compile-time diagnostics
+  (`constraint failed` / `comptime assertion failed` RuntimeErrors) raised
+  while compiling an elaborated generic struct instantiation were being
+  swallowed by `_ensure_generic_struct` and the inferred struct elaboration
+  path (they fell back as if elaboration "couldn't handle" the shape), so
+  provably-false `constrained`/`comptime assert` conditions inside
+  instantiated generic struct bodies (e.g. methods) were silently accepted.
+  These diagnostics are now re-raised so the invalid instantiation fails
+  compilation. For the `.o`/monomorphize elaboration route, type-param
+  substitution already makes DType predicates like `dtype.is_integral()`
+  evaluable in the instantiated body. Regression:
+  `test_comptime_dtype_diagnostic.py`
+  (`test_generic_struct_constrained_dtype_param_false`,
+  `test_generic_struct_comptime_assert_dtype_param_false`,
+  `test_generic_struct_constrained_dtype_param_true`).
 - **Still open (large):** the rest of this umbrella — comptime-assert/
   `constrained` cases where condition evaluation is incomplete (e.g.
-  DType predicates in instantiated params where bindings are not propagated,
-  `t"..."`/reflection-driven messages), `constrained` cases whose
-  conditions/messages cannot yet be folded (generics, trait reflection,
-  `StaticString(_get_kgen_string[...])`), type/trait conformance
-  diagnostics, import errors, and the other categories listed above.
-  `build/checkfail_candidates.json` is not present in this worktree;
-  re-run `tools/collect_checkfail.py` against the modular suite to refresh
-  the candidate list and prioritize.
+  DType predicates on comptime params in local generic struct instantiations
+  that bypass the elaboration path and are compiled with unbound params, so
+  conditions degrade to unknown/non-fatal; `t"..."`/reflection-driven
+  messages), `constrained` cases whose conditions/messages cannot yet be
+  folded (generics, trait reflection, `StaticString(_get_kgen_string[...])`),
+  type/trait conformance diagnostics, import errors, and the other categories
+  listed above. `build/checkfail_candidates.json` is not present in this
+  worktree; re-run `tools/collect_checkfail.py` against the modular suite to
+  refresh the candidate list and prioritize.
