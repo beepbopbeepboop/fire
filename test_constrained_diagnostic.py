@@ -52,10 +52,25 @@ def test_constrained_unknown_passes():
     _compile('fn f[x: Int]():\n    constrained[x > 0, "pos"]()\n')
 
 
+def test_constrained_tstring_message():
+    # t-string messages must be evaluated in constrained diagnostics
+    # (bugs/DIAGNOSTICS_missing_validation_modular.md).
+    try:
+        _compile('fn f():\n    comptime x = 7\n    constrained[False, t"val {x}"]()\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'constraint failed' in s, s
+        assert 'val 7' in s, s
+        assert '{x}' not in s, s
+        return
+    raise AssertionError('provably-false constrained with t-string compiled')
+
+
 if __name__ == '__main__':
     test_constrained_bracket_false_fails()
     test_constrained_bracket_false_no_msg()
     test_constrained_bracket_true_passes()
     test_constrained_comparison_fails()
     test_constrained_unknown_passes()
+    test_constrained_tstring_message()
     print('ok')

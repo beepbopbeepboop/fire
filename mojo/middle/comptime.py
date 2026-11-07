@@ -275,6 +275,48 @@ def _eval_dtype_predicate(dtype_name, method):
     return None
 
 
+def _eval_interpolated_string(node, bindings: dict, platform=None):
+    """Evaluate an interpolated (f/t) string literal into a plain string, or
+    None if any interpolation expression cannot be comptime-folded. Used for
+    compile-time diagnostic messages (comptime assert / constrained)."""
+    try:
+        from mojo.middle.resolve_shared import (
+            _decode_str_literal_text, _parse_fstring_parts)
+        from fire_compiler import Parser, py_tokenize
+        is_interp = '1' if getattr(node, 'is_interpolated', False) else ''
+        inner, is_fstring = _decode_str_literal_text(
+            None, getattr(node, 'value', '') or '', is_interp)
+        if not is_fstring:
+            return None
+        parts = _parse_fstring_parts(None, inner)
+        out = []
+        for part in parts:
+            kind = part[0] if isinstance(part, (list, tuple)) else getattr(part, 'kind', '')
+            text = part[1] if isinstance(part, (list, tuple)) and len(part) > 1 else getattr(part, 'text', '')
+            if kind == 'lit':
+                out.append(text if isinstance(text, str) else str(text))
+            elif kind == 'expr':
+                expr_src = text if isinstance(text, str) else str(text)
+                if not expr_src.strip():
+                    return None
+                try:
+                    expr_node = Parser(py_tokenize(expr_src))._parse_expr(0)
+                except Exception:
+                    return None
+                v = eval_const(expr_node, bindings, platform)
+                if v is None:
+                    return None
+                if isinstance(v, bool):
+                    out.append('True' if v else 'False')
+                else:
+                    out.append(str(v))
+            else:
+                out.append(str(text) if text is not None else '')
+        return ''.join(out)
+    except Exception:
+        return None
+
+
 def eval_const(node, bindings: dict, platform: str = None):
     """Evaluate `node` as any compile-time constant (int, bool, or str) — or
     None if it isn't foldable.
@@ -306,7 +348,11 @@ def eval_const(node, bindings: dict, platform: str = None):
             platform = None
     if isinstance(node, BoolLiteral): return node.value
     if isinstance(node, IntLiteral):  return node.value
-    if isinstance(node, StringLiteral): return node.value
+    if isinstance(node, StringLiteral):
+        if getattr(node, 'is_interpolated', False):
+            v = _eval_interpolated_string(node, bindings, platform)
+            return v if v is not None else node.value
+        return node.value
     if DottedLiteral is not None and isinstance(node, DottedLiteral):
         # .name - for enum/DType values, return a marker
         try:

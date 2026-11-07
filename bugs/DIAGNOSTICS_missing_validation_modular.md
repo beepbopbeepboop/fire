@@ -96,15 +96,29 @@ Key categories:
   `do_imports=True`). Regression:
   `test_comptime_dtype_diagnostic.py`
   (`test_generic_struct_comptime_assert_dtype_param_only_stmt`).
+- **Landed (follow-up, this worker, branch
+  `work/bug-mid-diagnostics-missing-validation-m-3407`):** comptime evaluation
+  of interpolated string literals (`t"..."` / `f"..."`) in compile-time
+  diagnostic messages (`mojo/middle/comptime.py`). `eval_const` now formats
+  interpolations by parsing f/t-string parts and folding each `{expr}` with the
+  comptime bindings, so provably-false `comptime assert` / `constrained`
+  diagnostics report evaluated messages (e.g.
+  `t"expected positive number, got {x}"` with `x = -3` ->
+  `expected positive number, got -3`), including instantiated generic params.
+  Verified against the modular integration shape
+  `comptime_assert_tstring.mojo` (`use_positive_int_tstring[-3]()`). Reflection-
+  driven messages (`StaticString(_get_kgen_string[...])`) remain open.
+  Regressions: `test_comptime_assert_diagnostic.py`,
+  `test_constrained_diagnostic.py`.
 - **Still open (large):** the rest of this umbrella — comptime-assert/
   `constrained` cases where condition evaluation is incomplete (e.g.
   DType predicates on comptime params in generic struct instantiations that
   genuinely bypass elaboration and are compiled with unbound params through the
   template fallback, so param-dependent conditions degrade to unknown/non-fatal;
-  `t"..."`/reflection-driven messages), `constrained` cases whose
-  conditions/messages cannot yet be folded (generics, trait reflection,
-  `StaticString(_get_kgen_string[...])`), type/trait conformance diagnostics,
-  import errors, and the other categories listed above.
-  `build/checkfail_candidates.json` is not present in this worktree; re-run
-  `tools/collect_checkfail.py` against the modular suite to refresh the
+  reflection-driven messages such as `StaticString(_get_kgen_string[...])`),
+  `constrained` cases whose conditions/messages cannot yet be folded (generics,
+  trait reflection, `StaticString(_get_kgen_string[...])`), type/trait
+  conformance diagnostics, import errors, and the other categories listed
+  above. `build/checkfail_candidates.json` is not present in this worktree;
+  re-run `tools/collect_checkfail.py` against the modular suite to refresh the
   candidate list and prioritize.
