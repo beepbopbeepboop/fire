@@ -5593,24 +5593,6 @@ def _gen_stmt_AssertStmt(gen, node):
     gen._emit("  __builtin_trap ();")
     gen._emit(f"  goto {bb_ok};")
     gen._emit_label(bb_ok)
-    _, v = gen.lower_expr(node.value)
-    bb_trap = gen._new_bb()
-    bb_ok   = gen._new_bb()
-    gen._emit(f"  if ({v}) goto {bb_ok}; else goto {bb_trap};")
-    gen._emit_label(bb_trap)
-    if node.msg is not None:
-        mt, mv = gen.lower_expr(node.msg)
-        if mt == 'char *':
-            gen._emit(f'  puts ({mv});')
-        elif mt in ('double', 'float', '__fp16'):
-            dv = mv if mt == 'double' else gen._new_val('double', f'(double){mv}')
-            rv = gen._call_expr('char *', 'mojo_repr_float', [('double', dv)])
-            gen._emit(f'  printf ("%s\\n", {rv});')
-        else:
-            gen._emit(f'  printf ("{gimple_ctypes.TypeLattice.printf_fmt(mt)}\\n", {mv});')
-    gen._emit("  __builtin_trap ();")
-    gen._emit(f"  goto {bb_ok};")
-    gen._emit_label(bb_ok)
 
 
 def _gen_stmt_RaiseStmt(gen, node):

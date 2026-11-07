@@ -1727,7 +1727,112 @@ def _dtype_cast_ctype(e):
     return None
 
 
+def _eval_constrained_msg(gen, msg_node, node):
+    msg = None
+    if msg_node is not None:
+        try:
+            import mojo.middle.comptime as _comptime_eval
+            m = _comptime_eval.eval_const(msg_node, getattr(gen, '_comptime_vals', {}) or {})
+            if isinstance(m, str):
+                msg = m
+            elif m is not None:
+                msg = str(m)
+        except Exception:
+            pass
+        if msg is None:
+            try:
+                mt, mv = gen.lower_expr(msg_node)
+                if isinstance(mv, str):
+                    s = mv
+                    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+                        s = s[1:-1]
+                    msg = s
+            except Exception:
+                pass
+    if msg is None:
+        msg = 'constraint failed'
+    return msg
+
+
+def _constrained_compile_error(gen, node, msg):
+    if getattr(gen, '_comptime_runtime_depth', 0) > 0:
+        gimple_ctypes._debug_note(
+            f'constrained false in runtime-degraded comptime-if branch: {msg}')
+        return False
+    loc = ''
+    fn = getattr(gen, '_current_filename', '') or ''
+    line = getattr(node, 'line', 0) or 0
+    col = getattr(node, 'col', 0) or 0
+    if fn and line:
+        loc = f'{fn}:{line}:{col}: '
+    elif line:
+        loc = f'{line}:{col}: '
+    raise RuntimeError(f'{loc}constraint failed: {msg}')
+
+
+def _try_lower_constrained(gen, node):
+    """Compile-time diagnostic for `constrained[cond, msg]()` / `constrained(cond, msg)`.
+
+    The Mojo builtin `constrained` is a compile-time check: a provably-false
+    condition must fail compilation with a diagnostic. Returns a lowered
+    no-op result when handled (condition false -> raises; unknown/true -> no-op),
+    or None to fall through to normal call lowering.
+    """
+    func = node.func
+    cond_node = None
+    msg_node = None
+    name = None
+    if isinstance(func, gimple_ctypes.SubscriptExpr):
+        base = func.obj
+        if isinstance(base, gimple_ctypes.IdentExpr):
+            name = _as_str(base.name)
+        elif isinstance(base, gimple_ctypes.MemberExpr):
+            name = _as_str(base.member)
+        if name == 'constrained':
+            idx = func.index
+            if isinstance(idx, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+                elems = list(getattr(idx, 'elements', []) or [])
+            else:
+                elems = [idx]
+            if elems:
+                cond_node = elems[0]
+            if len(elems) > 1:
+                msg_node = elems[1]
+    elif isinstance(func, gimple_ctypes.IdentExpr) and _as_str(func.name) == 'constrained':
+        # Paren form: constrained(cond, msg)
+        if node.args:
+            cond_node = node.args[0]
+        if len(node.args) > 1:
+            msg_node = node.args[1]
+    elif isinstance(func, gimple_ctypes.MemberExpr) and _as_str(func.member) == 'constrained':
+        if node.args:
+            cond_node = node.args[0]
+        if len(node.args) > 1:
+            msg_node = node.args[1]
+    if cond_node is None:
+        return None
+    # Only treat as the compile-time builtin when not shadowed by a local.
+    if name is None:
+        name = 'constrained'
+    if gen._locally_binds_name(name):
+        return None
+    try:
+        import mojo.middle.comptime as _comptime_eval
+        cvals = getattr(gen, '_comptime_vals', {}) or {}
+        state = _comptime_eval.eval_const_bool_state(cond_node, cvals)
+    except Exception:
+        state = None
+    if state == 0:  # CONST_FALSE / provably false
+        if _constrained_compile_error(gen, node, _eval_constrained_msg(gen, msg_node, node)) is False:
+            return 'int64_t', gen._new_val('int64_t', '0')
+    # Unknown or true: constrained has no runtime effect.
+    return 'int64_t', gen._new_val('int64_t', '0')
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    _c = _try_lower_constrained(gen, node)
+    if _c is not None:
+        return _c
     _dealloc = gen._lower_dealloc_thin_allocation(node)
     if _dealloc is not None:
         return _dealloc

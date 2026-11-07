@@ -31,7 +31,7 @@ Key categories:
   positives in generic fallback branches (e.g. DType-category `else` guards
   whose conditions our comptime evaluator cannot yet resolve).
   Regression: `test_comptime_assert_diagnostic.py`.
-- **Landed (follow-up, this worker):** comptime diagnostic messages are now
+- **Landed (follow-up, earlier worker):** comptime diagnostic messages are now
   evaluated, not lowered to compiler temp names. `mojo/middle/comptime.py`
   folds `String(int/bool)` and string `+` concatenation at compile time, so
   messages like `"got " + String(x)` with bound param values (e.g. `x = -2`
@@ -42,9 +42,23 @@ Key categories:
   `# CHECK` text). Also fixed `test_implicit_string_concat.py` to run in the
   current worktree (it hardcoded another worktree's cwd). Regression added to
   `test_comptime_assert_diagnostic.py`.
+- **Landed (follow-up, this worker, branch
+  `work/bug-mid-diagnostics-missing-validation-m-4715`):** compile-time
+  diagnostics for the `constrained[...]()` builtin form (and paren form) in
+  the gimple backend (`mojo/backend_gimple/emit_calls.py`). A provably-false
+  condition now fails compilation with `constraint failed: <message>`,
+  mirroring the comptime-assert diagnostic path and using the same comptime
+  evaluator/message folding. Unknown conditions are treated conservatively
+  (no false diagnostic). This addresses a root cause for many modular
+  validation cases that use `constrained` rather than `comptime assert`.
+  Also fixed a duplicate runtime-assert lowering in
+  `mojo/backend_gimple/emit_stmts.py` (regular `assert` emitted twice).
+  Regression: `test_constrained_diagnostic.py`.
 - **Still open (large):** the rest of this umbrella — comptime-assert cases
   where condition evaluation is incomplete (e.g. `DType.*.is_integral()` in
-  instantiated params), `constrained`/comptime constraint checks, type/trait
+  instantiated params, `t"..."`/reflection-driven messages), `constrained`
+  cases whose conditions/messages cannot yet be folded (generics, trait
+  reflection, `StaticString(_get_kgen_string[...])`), type/trait
   conformance diagnostics, import errors, and the other categories listed
   above. `build/checkfail_candidates.json` is not present in this worktree;
   re-run `tools/collect_checkfail.py` against the modular suite to refresh
