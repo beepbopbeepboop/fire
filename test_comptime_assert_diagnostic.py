@@ -197,6 +197,36 @@ def main():
     raise AssertionError('instantiated generic comptime assert t-string compiled')
 
 
+def test_comptime_assert_in_comptime_for_list_literal():
+    # comptime for over a constant list literal must unroll and bind the loop
+    # variable so comptime assertions see the per-iteration value
+    # (bugs/DIAGNOSTICS_missing_validation_modular.md: "comptime-for shapes
+    # beyond the gimple unroller's bound forms").
+    try:
+        _compile('fn f():\n    comptime for i in [0, 1, 2]:\n        comptime assert i < 2, "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime assert in comptime for over list literal compiled')
+
+
+def test_comptime_assert_in_comptime_for_tuple_literal():
+    try:
+        _compile('fn f():\n    comptime for i in (0, 1, 2):\n        comptime assert i != 2, "hit"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'hit' in s, s
+        return
+    raise AssertionError('comptime assert in comptime for over tuple literal compiled')
+
+
+def test_comptime_assert_in_comptime_for_list_literal_true():
+    _compile('fn f():\n    comptime for i in [0, 1, 2]:\n        comptime assert i < 3, "ok"\n')
+
+
 if __name__ == '__main__':
     test_comptime_assert_false_fails()
     test_comptime_assert_false_no_msg()
@@ -213,4 +243,7 @@ if __name__ == '__main__':
     test_comptime_assert_in_comptime_for_range_true()
     test_comptime_assert_in_comptime_for_product()
     test_comptime_assert_message_tstring_generic_param()
+    test_comptime_assert_in_comptime_for_list_literal()
+    test_comptime_assert_in_comptime_for_tuple_literal()
+    test_comptime_assert_in_comptime_for_list_literal_true()
     print('ok')

@@ -1090,6 +1090,51 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                         else:
                             gen._comptime_vals.pop(_n, None)
                     return
+    elif isinstance(node.iterable, (ListExpr, TupleExpr, gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
+        # `comptime for x in [1, 2, 3]` / `(...,)`: unroll over compile-time
+        # constant elements. The loop variable is bound in gen._comptime_vals
+        # each iteration so comptime assert / constrained diagnostics that depend
+        # on it evaluate correctly (bugs/DIAGNOSTICS_missing_validation_modular.md:
+        # "comptime-for shapes beyond the gimple unroller's bound forms").
+        elems = getattr(node.iterable, 'elements', None) or []
+        cvals = []
+        all_ok = True
+        for _e in elems:
+            _v = gen._eval_const(_e)
+            if _v is None:
+                all_ok = False
+                break
+            cvals.append(_v)
+        if all_ok and not for_target_is_tuple(node.target):
+            dst = gen.var_types.get(node.target)
+            if dst is None:
+                dst = 'int64_t'
+                gen._declare_var(node.target, dst)
+            _ct_saved = (node.target in gen._comptime_vals,
+                         gen._comptime_vals.get(node.target))
+            for _v in cvals:
+                gen._comptime_vals[node.target] = _v
+                if isinstance(_v, bool):
+                    gen._safe_coerce_emit('int', dst, '1' if _v else '0', node.target)
+                elif isinstance(_v, int) and not isinstance(_v, bool):
+                    gen._safe_coerce_emit('int', dst, str(_v), node.target)
+                elif isinstance(_v, str):
+                    try:
+                        _sv = gen._emit_string_literal(_v)
+                        if node.target not in gen.var_types or gen.var_types[node.target] != 'char *':
+                            gen.var_types[node.target] = 'char *'
+                        gen._safe_coerce_emit('char *', 'char *', _sv, node.target)
+                    except Exception:
+                        pass
+                _bscope = gen._open_block_scope()
+                for s in node.body:
+                    gen.gen_stmt(s)
+                gen._close_block_scope(_bscope)
+            if _ct_saved[0]:
+                gen._comptime_vals[node.target] = _ct_saved[1]
+            else:
+                gen._comptime_vals.pop(node.target, None)
+            return
     if not unrolled:
         pass
 

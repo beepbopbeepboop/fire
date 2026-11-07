@@ -100,6 +100,23 @@ def test_constrained_in_comptime_for_range_true():
     _compile('fn f():\n    comptime for i in range(3):\n        constrained[i < 3, "ok"]()\n')
 
 
+def test_constrained_in_comptime_for_list_literal():
+    # comptime for over constant list literals must unroll and bind the loop
+    # variable for comptime diagnostics (bugs/DIAGNOSTICS_missing_validation_modular.md).
+    try:
+        _compile('fn f():\n    comptime for i in [0, 1, 2]:\n        constrained[i < 2, "nope"]()\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'constraint failed' in s, s
+        assert 'nope' in s, s
+        return
+    raise AssertionError('constrained in comptime for over list literal compiled')
+
+
+def test_constrained_in_comptime_for_list_literal_true():
+    _compile('fn f():\n    comptime for i in [0, 1]:\n        constrained[i < 2, "ok"]()\n')
+
+
 if __name__ == '__main__':
     test_constrained_bracket_false_fails()
     test_constrained_bracket_false_no_msg()
@@ -111,4 +128,6 @@ if __name__ == '__main__':
     test_constrained_short_circuit_or_false_needs_rhs()
     test_constrained_in_comptime_for_range()
     test_constrained_in_comptime_for_range_true()
+    test_constrained_in_comptime_for_list_literal()
+    test_constrained_in_comptime_for_list_literal_true()
     print('ok')
