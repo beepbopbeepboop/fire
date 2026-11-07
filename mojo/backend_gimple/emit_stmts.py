@@ -1199,6 +1199,28 @@ def _gen_stmt_AssignStmt(gen, node):
     # dispatch. Purely a set write: no emission, no early return.
     if (isinstance(node.target, gimple_ctypes.IdentExpr)
             and getattr(node, 'value', None) is not None):
+        # Try to record as comptime binding (alias/local alias bindings
+        # not always visible to comptime folding)
+        try:
+            _ct_target = _as_str(node.target.name) if hasattr(node.target, 'name') else _as_str(node.target)
+            _ctv = gen._eval_const(node.value)
+            if _ctv is not None:
+                if hasattr(gen, '_comptime_vals'):
+                    if isinstance(_ctv, str):
+                        if hasattr(gen, '_comptime_str_names'):
+                            gen._comptime_str_names.add(_ct_target)
+                    gen._comptime_vals[_ct_target] = _ctv
+            else:
+                # Follow alias chain
+                _rhs = node.value
+                if isinstance(_rhs, gimple_ctypes.IdentExpr):
+                    _rhs_name = _as_str(_rhs.name)
+                    if hasattr(gen, '_comptime_vals') and _rhs_name in gen._comptime_vals:
+                        _aliased = gen._comptime_vals[_rhs_name]
+                        if _aliased is not None:
+                            gen._comptime_vals[_ct_target] = _aliased
+        except Exception:
+            pass
         _bx, _dbl = _py_box_expr(gen, node.value)
         if _bx:
             gen._pybox_vars.add(node.target.name)
@@ -5502,84 +5524,92 @@ def _gen_stmt_ExprStmt(gen, node):
         gen.lower_expr(node.value)
 
 
-def _gen_stmt_AssertStmt(gen, node):
-    # `comptime assert` is a COMPILE-TIME check in Mojo — it has no runtime
-    # semantics. Lowering it like a plain assert is measured-wrong: the
-    # drop iterator's `comptime assert conforms_to(Self.Element,
-    # Deinitable)` (std/itertools/itertools.mojo, spliced into every
-    # lifted `_DropIterator`) became a value-path branch on `conforms_to`
-    # (an undefined runtime symbol) plus a `__builtin_trap` in the hot
-    # `__next__` loop.
-    if getattr(node, 'is_comptime', False):
+def _comptime_assert_fail(gen, node, msg):
+    if getattr(gen, '_comptime_runtime_depth', 0) > 0:
+        gimple_ctypes._debug_note(
+            f'comptime assert false in runtime-degraded comptime-if branch: {msg}')
+        return False
+    # A literal `comptime assert False` in a struct method body is commonly
+    # a poison-pill / unsupported-path guard (e.g. sys.info._unsupported_target_error,
+    # CoordLike rejection methods, custom-self specialization overloads). These
+    # are only meaningful when that specific path is selected; failing module
+    # or template compilation on them breaks valid stdlib code. Computed-false
+    # asserts (condition evaluated false from comptime bindings) still fail.
+    _in_method = (getattr(gen, '_in_struct_method_body', 0) > 0
+                  or getattr(gen, '_in_custom_self_method', 0) > 0)
+    if _in_method:
+        _v = getattr(node, 'value', None)
+        if type(_v).__name__ == 'BoolLiteral' and getattr(_v, 'value', None) is False:
+            gimple_ctypes._debug_note(
+                f'comptime assert(False) suppressed in struct/custom-self method: {msg}')
+            return False
+    loc = ''
+    fn = getattr(gen, '_current_filename', '') or ''
+    line = getattr(node, 'line', 0) or 0
+    col = getattr(node, 'col', 0) or 0
+    if fn and line:
+        loc = f'{fn}:{line}:{col}: '
+    elif line:
+        loc = f'{line}:{col}: '
+    raise RuntimeError(f'{loc}comptime assertion failed: {msg}')
+
+
+def _eval_comptime_assert_msg(gen, node):
+    msg = None
+    msg_node = getattr(node, 'msg', None)
+    if msg_node is not None:
         try:
-            # Try to evaluate at compile time
             import mojo.middle.comptime as _comptime_eval
-            _res = _comptime_eval.eval_const_bool(getattr(node, 'value'), getattr(gen, '_comptime_vals', {}) or {})
-            if _res is False:
-                msg = None
-                if getattr(node, 'msg', None) is not None:
-                    try:
-                        m = _comptime_eval.eval_const(getattr(node, 'msg'), getattr(gen, '_comptime_vals', {}) or {})
-                        if isinstance(m, str):
-                            msg = m
-                        else:
-                            msg = str(m)
-                    except Exception:
-                        try:
-                            mt, mv = gen.lower_expr(node.msg)
-                            if isinstance(mv, str):
-                                msg = mv.strip('"')
-                        except Exception:
-                            pass
-                if msg is None:
-                    msg = 'assert failed'
-                if isinstance(msg, str) and 'scalbn_impl requires float32 or float64' in msg:
-                    pass
-                # Be lenient: don't fail compilation on comptime asserts that are false
-                # in code paths we might need to compile (e.g., in generic methods)
-                gimple_ctypes._debug_note(f'comptime assert failed at compile time: {msg} (treating as runtime trap)')
-                # Emit a runtime trap instead of failing compilation
-                try:
-                    gen._emit('  /* comptime assert failed */')
-                    gen._emit('  __builtin_trap();')
-                except Exception:
-                    pass
-                return
-            if _res is None:
-                # Try harder with int/bool state
-                try:
-                    _st = _comptime_eval.eval_const_bool_state(getattr(node, 'value'), getattr(gen, '_comptime_vals', {}) or {})
-                    if _st == 0:  # CONST_FALSE
-                        msg = None
-                        if getattr(node, 'msg', None) is not None:
-                            try:
-                                m = _comptime_eval.eval_const(getattr(node, 'msg'), getattr(gen, '_comptime_vals', {}) or {})
-                                if isinstance(m, str):
-                                    msg = m
-                            except Exception:
-                                pass
-                        if msg is None:
-                            msg = 'assert failed'
-                        if isinstance(msg, str) and 'scalbn_impl requires float32 or float64' in msg:
-                            pass
-                        gimple_ctypes._debug_note(f'comptime assert failed at compile time: {msg} (treating as runtime trap)')
-                        try:
-                            gen._emit('  /* comptime assert failed */')
-                            gen._emit('  __builtin_trap();')
-                        except Exception:
-                            pass
-                        return
-                except RuntimeError:
-                    raise
-                except Exception:
-                    pass
-        except RuntimeError:
-            raise
+            m = _comptime_eval.eval_const(msg_node, getattr(gen, '_comptime_vals', {}) or {})
+            if isinstance(m, str):
+                msg = m
+            elif m is not None:
+                msg = str(m)
         except Exception:
             pass
+        if msg is None:
+            try:
+                mt, mv = gen.lower_expr(msg_node)
+                if isinstance(mv, str):
+                    s = mv
+                    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+                        s = s[1:-1]
+                    msg = s
+            except Exception:
+                pass
+    if msg is None:
+        msg = 'comptime assertion failed'
+    return msg
+
+
+def _gen_stmt_AssertStmt(gen, node):
+    # `comptime assert` is a COMPILE-TIME check in Mojo — it has no runtime
+    # semantics. When the condition is provably false, fail compilation with
+    # a diagnostic (modular test cases and user code rely on this). When the
+    # condition cannot be evaluated at compile time, emit no runtime code:
+    # lowering an unknown comptime constraint to a value-path branch has
+    # caused real miscompiles (see the prior drop-iterator note below).
+    if getattr(node, 'is_comptime', False):
+        import mojo.middle.comptime as _comptime_eval
+        cvals = getattr(gen, '_comptime_vals', {}) or {}
+        try:
+            _res = _comptime_eval.eval_const_bool(getattr(node, 'value'), cvals)
+        except Exception:
+            _res = None
+        if _res is False:
+            if _comptime_assert_fail(gen, node, _eval_comptime_assert_msg(gen, node)) is False:
+                return
+        if _res is None:
+            try:
+                _st = _comptime_eval.eval_const_bool_state(getattr(node, 'value'), cvals)
+            except Exception:
+                _st = None
+            if _st == 0:  # CONST_FALSE
+                if _comptime_assert_fail(gen, node, _eval_comptime_assert_msg(gen, node)) is False:
+                    return
         gimple_ctypes._debug_note(
-            'comptime assert: no runtime lowering (compile-time '
-            'checking not implemented)')
+            'comptime assert: condition not provable at compile time; '
+            'no runtime lowering emitted')
         return
     _, v = gen.lower_expr(node.value)
     bb_trap = gen._new_bb()
