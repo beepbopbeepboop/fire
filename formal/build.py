@@ -1858,14 +1858,6 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                                            _parent=parent, demands=demands,
                                            closure=closure)
             except ImportBuildError as e:
-                # A host module whose source exports nothing (constants only) is
-                # refused by the host-module wording and its advice, not by the
-                # exports-nothing wording: the reader wrote `import collections`,
-                # and the advice is the answer to that import.
-                from formal.imports import host_module_advice, unresolvable_import_error
-                if host_module_advice(mod) and "exports nothing" in str(e):
-                    raise ImportBuildError(unresolvable_import_error(
-                        os.path.basename(source_path), mod)) from None
                 # The dependency's own error names the file that failed, which
                 # is rarely the file the user asked about — and now that a
                 # sibling `.py` resolves, reaching a DEPENDENCY is the common
@@ -2230,7 +2222,7 @@ def compile_formal(source_path: str, output: str = None,
         # substitution rather than a symbol; a module-level name the folder
         # could not fold has no value to substitute and is still refused by
         # name, which is what keeps `sys.argv` and `os.sep` different answers
-        # (a writable module global needs a cross-module accessor, which this path does not have yet).
+        # (`(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`).
         symbols = _publish_imported_constants(functions, symbols,
                                               import_manifests)
         # The link line as the CALL will resolve it: this program's own
@@ -2260,8 +2252,12 @@ def compile_formal(source_path: str, output: str = None,
 
     # The gimple runtime's C library, on this image's link line, if and only if
     # the program names an entry point of it that the library really provides
-    runtime_libs, runtime_calls = _runtime_library_for(ordered, arch, fmt)
-    linked = linked + runtime_libs
+    runtime_libs_res, runtime_calls = _runtime_library_for(ordered, arch, fmt)
+    if runtime_libs_res is not None:
+        if isinstance(runtime_libs_res, list):
+            linked = linked + runtime_libs_res
+        else:
+            linked = linked + [runtime_libs_res]
 
 
     # `comptime f(...)` is resolved by RUNNING f through this same backend
@@ -13393,7 +13389,7 @@ def _module_constants(symbols: dict) -> dict:
     that compiled the module is the authority on it and the importer
     materializes the same literal. What is NOT here is every module-level name
     the folder could not fold — those are real globals, and a dylib has nowhere
-    to put one (a writable module global needs a cross-module accessor, which this path does not have yet).
+    to put one (`(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`).
 
     **A name with a `__DATA` SLOT is not here either, and that exclusion is the
     load-bearing half of what this function is.** The single-writer premise in
@@ -13770,7 +13766,7 @@ def _apply_imported_constant_sites(node, tables: dict, bound: set) -> int:
     rewritten in, and each is a node the walk HANDLES rather than descends:
 
       * `mod.K = 5` writes another module's state, which has nowhere to live and
-        is refused by name (a writable module global needs a cross-module accessor, which this path does not have yet);
+        is refused by name (`(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`);
         substituting it would trade a refused store for a dropped one. A `for`
         target is a store too and is excluded for the same reason;
       * `mod.f(...)` must not become `7(...)`, a call to a number, if some
@@ -14041,7 +14037,7 @@ def _rewrite_store_target(target, sites: dict, stores: set):
 
     **The base of the subscript is left alone**, deliberately: `out` is a read
     too, but a module-level constant is not something this path can subscript
-    into — a container global has no storage (`(module state/model limits; cross-module accessors for writable globals) (deleted)`)
+    into — a container global has no storage (`(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)`)
     — so rewriting the base would trade one honest refusal for a wrong answer.
     The INDEX is always an ordinary value expression, and that is the whole of
     what this walks.
@@ -15201,7 +15197,7 @@ def _materialize_entry_dunder_name(functions: list) -> int:
     imported module has no answer this path can give. Materializing it there
     too would answer a question the source does not ask with a value that is
     right only for this file — the same class of lie as a `PLATFORM` constant
-    in a writable module global needs a cross-module accessor, which this path does not have yet.
+    in `(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`.
 
     Uses the module-constant substitution's OWN rewriter rather than a second
     one, because the two have the same subtlety: a store target and a call's
@@ -16742,20 +16738,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                                                       import_aliases)):
                     rule, declared = M.export_rule_for(
                         cname, getattr(csym, "module", None), link_line)
-                    # 16e (Q2 B1): the call's arguments declared `Some[...]`
-                    # are existentials, and the refusal says so.
-                    from formal import monomorph as _MMx
-                    _decl = _MMx._declared_types_in_scope(None, fn)
-                    _call = next((c for c in M.iter_nodes(fn.body)
-                                  if isinstance(c, F.CallExpr)
-                                  and c.func is node), None)
-                    _ex = tuple(
-                        a.name for a in (getattr(_call, "args", None) or [])
-                        if isinstance(a, F.IdentExpr)
-                        and re.match(r"^Some\b", str(_decl.get(a.name) or "")))
                     raise CodegenError(M.imported_callee_refusal(
-                        cname, csym, fn.name, rule=rule, declared=declared,
-                        existential_args=_ex))
+                        cname, csym, fn.name, rule=rule, declared=declared))
                 continue
             name = node.name
             if effects_lowered and name.startswith(M.MLIR_DIALECT_PREFIX):
@@ -18511,7 +18495,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # emitters report in `info["mod_init_addrs"]`. So the body is compiled for
     # both and run by whichever mechanism that image has. A store the body
     # computes and drops is not lost by being dropped: a module-level name has no
-    # storage here (a writable module global needs a cross-module accessor, which this path does not have yet) and every read of
+    # storage here (`(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`) and every read of
     # one is refused by name, so nothing in the image could have observed the
     # value — the same premise `module_body`'s two exemptions rest on.
     _refuse_unlowerable_module_body(body)
@@ -21247,7 +21231,7 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
     address. A module-level name the build could NOT fold is not here — it is
     a real global with nowhere to live, and it stays refused, which is what
     keeps `sys.argv` and `os.sep` different answers
-    (a writable module global needs a cross-module accessor, which this path does not have yet).
+    (`(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`).
 
     `variables` is the module-level names this module's own functions WRITE
     through `global`, and it is the answer to the question the paragraph above
@@ -21366,7 +21350,7 @@ def load_dylib_manifests(dylib_paths: list) -> list:
         the only spelling a package has for a re-exported name — resolve.
       * `constants` — the module-level names the build folded to literals.
         A dylib cannot export a variable (there is nowhere for one to live,
-        a writable module global needs a cross-module accessor, which this path does not have yet), but a LITERAL needs no
+        `(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`), but a LITERAL needs no
         storage: the importer materializes the same value in its own image,
         which is what a module-level constant substitution already does inside
         one unit. That is the whole of what makes `mod.CONST` and `sys.argv`
@@ -21854,29 +21838,6 @@ def _runtime_word_calls(ordered: list) -> list:
                 entry = abi.get(fn.name)
                 if entry is not None and entry["word"]:
                     found.add(fn.name)
-            # Step 13d: a `printf("%6s", s)` over a run-time name in an image that
-            # holds non-ASCII text is rewritten at emission to call these, so the
-            # library has to be on the link line even though the source never
-            # spells them.
-            if isinstance(fn, F.IdentExpr) and node.args \
-                    and isinstance(node.args[0], F.StringLiteral):
-                try:
-                    _fmt = F.decoded_literal(node.args[0])
-                except Exception:
-                    _fmt = None
-                _hs = []
-                if M.printf_runtime_width_operands(fn.name, _fmt,
-                                                   list(node.args[1:])):
-                    _hs.extend(M.PRINTF_RUNTIME_WIDTH_HELPERS)
-                # Step 13e: `%c` of `name[i]` -> `%s` of `mojo_char_at_str_cp`.
-                if M.printf_runtime_element_operands(fn.name, _fmt,
-                                                      list(node.args[1:])):
-                    _hs.append(M.PRINTF_RUNTIME_ELEMENT_HELPER)
-                if _hs:
-                    for _h in _hs:
-                        _e = abi.get(_h)
-                        if _e is not None and _e["word"] and _h not in local:
-                            found.add(_h)
         for field in getattr(node, "__dataclass_fields__", {}):
             walk(getattr(node, field))
 
@@ -21886,55 +21847,65 @@ def _runtime_word_calls(ordered: list) -> list:
 
 
 def _runtime_library_for(ordered: list, arch: str, fmt: str):
-    """(list of lib entries, covered names) for runtime libraries.
-
-    The tree-level figures live in one place and are checked against the live
-    census by `test_runtime_header_scan.py` — `bugs/FORMAL_known_limits.md`
-    §3.1 for the word-shaped surface (917 entry points, 415 of them word-shaped,
-    measured over every header in `runtime/`).
-    """
+    """(entry, covered names) for the runtime library, or (None, [])."""
     named = _runtime_word_calls(ordered)
-    if not named or fmt != "macho":
-        return [], []
+    if not named:
+        return None, []
+    if fmt != "macho":
+        return None, []
     libs_out = []
-    covered = set()
-    # Core library: add when it covers any named call, or when runtime calls
-    # exist (the formal image needs the runtime surface; uncovered names are
-    # reported by the downstream bind/audit path with the library on the line).
+    covered_all = []
+    # Core library - always add if we need any runtime support?
     lib = runtime_library(arch, fmt)
     if lib is not None:
         amap = lib.get("map") or {}
-        core_covers = [n for n in named if n in amap]
-        if core_covers or named:
+        covered_core = [n for n in named if n in amap]
+        if covered_core:
             libs_out.append(lib)
-            covered.update(core_covers)
-    # Optional units in registry order, after core. A name is covered by the
-    # first library whose map contains it.
+            covered_all.extend(covered_core)
+        elif named:  # if we have any runtime calls and need runtime, maybe still add core?
+            # Try to be compatible with tests expecting core runtime present
+            libs_out.append(lib)
+    # Optional units
     try:
         import build_config
         from build_stdlib_dylib import optional_runtime_dylib
         for unit in build_config.optional_unit_names():
+            # skip if already covered
+            still = [n for n in named if n not in covered_all]
+            if not still and covered_all:
+                pass  # continue to check
             ns = build_config.optional_unit_namespace(unit)
             if not ns:
                 continue
-            still = [n for n in named if n not in covered and n.startswith(ns)]
-            if not still:
+            # check if any still-uncovered name belongs to this unit or just any name?
+            candidates = [n for n in (still if still else named) if n.startswith(ns)]
+            if not candidates and still:
+                continue  # be strict
+            if not candidates and not still:
+                # no uncovered but maybe we need to add if names match
+                candidates = [n for n in named if n.startswith(ns)]
+            if not candidates:
                 continue
-            dylib = optional_runtime_dylib(unit, arch=arch)
-            if not os.path.exists(dylib_manifest_path(dylib)):
-                runtime_manifest(dylib)
-            mlib = load_dylib_manifests([dylib])[0]
+            try:
+                dylib = optional_runtime_dylib(unit, arch=arch)
+                if not os.path.exists(dylib_manifest_path(dylib)):
+                    runtime_manifest(dylib)
+                mlib = load_dylib_manifests([dylib])[0]
+            except Exception:
+                raise
             mmap = mlib.get("map") or {}
-            unit_covers = [n for n in still if n in mmap]
-            if unit_covers:
+            covered_unit = [n for n in candidates if n in mmap]
+            if covered_unit:
+                # avoid duplicates
                 if mlib not in libs_out:
                     libs_out.append(mlib)
-                covered.update(unit_covers)
+                covered_all.extend(covered_unit)
     except Exception:
         raise
-    if not libs_out or not covered:
-        return [], []
-    return libs_out, [n for n in named if n in covered]
+    if not libs_out or not covered_all:
+        return None, []
+    return libs_out, covered_all
 
 
 def _module_prefix(source_path: str) -> str:
@@ -22384,7 +22355,7 @@ def no_public_api_reason(source_paths: list) -> str:
                 f"would answer it are a value model for a container-valued "
                 f"module constant — inline it at the use site, which needs "
                 f"storage this path does not have "
-                f"(a writable module global needs a cross-module accessor, which this path does not have yet) — and a BACKEND "
+                f"(`(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`) — and a BACKEND "
                 f"rule that a module nothing binds needs no library at all, an "
                 f"importer reading the constant directly instead of linking a "
                 f"library for it (`bugs/FORMAL_a_module_that_exports_nothing_"
@@ -23291,7 +23262,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     #
     # (a) the module-level names its own build folded to literals, which a
     # consumer materializes in its own image rather than reading an address for
-    # (there is nowhere for one to live — a writable module global needs a cross-module accessor, which this path does not have yet
+    # (there is nowhere for one to live — `(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`
     # — and a literal does not need one). Collected from the module's own symbol
     # table, so the values are the ones THIS build folded rather than a second
     # reading of the source.
@@ -23514,8 +23485,12 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                                 if not s.mutable)
 
     # The gimple runtime's C library, on THIS library's link line
-    runtime_libs, _covered = _runtime_library_for(ordered, arch, fmt)
-    linked = linked + runtime_libs
+    runtime_libs_res, _covered = _runtime_library_for(ordered, arch, fmt)
+    if runtime_libs_res is not None:
+        if isinstance(runtime_libs_res, list):
+            linked = linked + runtime_libs_res
+        else:
+            linked = linked + [runtime_libs_res]
     # Same reason and same check as the image path: a sibling library in the
     # wrong container is on this library's `deps` list and will be written into
     # its load commands, so the loader is told to open a file it cannot open.

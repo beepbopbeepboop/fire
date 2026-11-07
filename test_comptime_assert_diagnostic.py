@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression test for comptime assert compile-time diagnostics.
 
-The compiler previously accepted (missing comptime validation diagnostics)
+`bugs/DIAGNOSTICS_missing_validation_modular.md`: the compiler accepted
 `comptime assert` statements whose conditions are provably false at compile
 time.  A `comptime assert` is a compile-time check; a provably-false
 condition must fail compilation with a diagnostic, not be silently accepted
@@ -64,7 +64,7 @@ def test_comptime_assert_message_string_concat_and_string_int():
 
 def test_comptime_assert_message_tstring():
     # t-string (template string) messages must be evaluated in comptime
-    # diagnostics (t"..." reflection-driven messages in comptime diagnostics;
+    # diagnostics (bugs/DIAGNOSTICS_missing_validation_modular.md: t"..."
     # reflection-driven messages).
     try:
         _compile('fn f():\n    comptime x = 5\n    comptime assert False, t"value is {x}"\n')
@@ -102,10 +102,10 @@ def test_comptime_assert_message_fstring():
 def test_comptime_assert_short_circuit_and_false():
     # Short-circuit: `False and <unknown>` is provably false even when the
     # right operand cannot be folded (generic/comptime-param dependent).
-    # missing diagnostic when
+    # bugs/DIAGNOSTICS_missing_validation_modular.md: missing diagnostic when
     # comptime bool folding required both operands to be known.
     try:
-        _compile('fn f[x: Int]():\n    comptime assert False and x > 0, "nope"\n\nfn main():\n    f[1]()\n')
+        _compile('fn f[x: Int]():\n    comptime assert False and x > 0, "nope"\n')
     except RuntimeError as e:
         s = str(e)
         assert 'comptime assertion failed' in s, s
@@ -145,7 +145,7 @@ def _compile_full(src):
 def test_comptime_assert_in_comptime_for_range():
     # comptime for unrolls at compile time; the induction variable must be
     # visible to comptime assertion evaluation so a provably-false condition in
-    # any iteration is diagnosed (comptime validation).
+    # any iteration is diagnosed (bugs/DIAGNOSTICS_missing_validation_modular.md).
     try:
         _compile('fn f():\n    comptime for i in range(3):\n        comptime assert i < 2, "bad"\n')
     except RuntimeError as e:
@@ -200,7 +200,7 @@ def main():
 def test_comptime_assert_in_comptime_for_list_literal():
     # comptime for over a constant list literal must unroll and bind the loop
     # variable so comptime assertions see the per-iteration value
-    # (comptime-for shapes
+    # (bugs/DIAGNOSTICS_missing_validation_modular.md: "comptime-for shapes
     # beyond the gimple unroller's bound forms").
     try:
         _compile('fn f():\n    comptime for i in [0, 1, 2]:\n        comptime assert i < 2, "bad"\n')
@@ -230,7 +230,7 @@ def test_comptime_assert_in_comptime_for_list_literal_true():
 def test_comptime_assert_in_comptime_for_tuple_unpack():
     # tuple-unpacking targets over constant collections must bind each target
     # so comptime diagnostics see per-iteration values
-    # (comptime validation diagnostics).
+    # (bugs/DIAGNOSTICS_missing_validation_modular.md).
     try:
         _compile('fn f():\n    comptime for i, j in [(0, 1), (2, 0)]:\n        comptime assert i + j < 2, "sum"\n')
     except RuntimeError as e:
@@ -248,7 +248,7 @@ def test_comptime_assert_in_comptime_for_tuple_unpack_true():
 def test_comptime_assert_in_comptime_for_comptime_alias():
     # Iterating over a comptime (non-literal) iterable alias must unroll with
     # the loop variable bound so comptime diagnostics fire
-    # ("iteration over
+    # (bugs/DIAGNOSTICS_missing_validation_modular.md: "iteration over
     # non-literal comptime values").
     src = 'fn f():\n    comptime vals = [0, 1, 2]\n    comptime for i in vals:\n        comptime assert i < 2, "bad"\n'
     try:
@@ -508,7 +508,7 @@ def test_comptime_assert_dict_len_true():
 
 def test_comptime_assert_local_alias_binding_fails():
     # Local alias bindings must be visible to comptime folding
-    # (DIAGNOSTICS missing comptime validation (deleted doc): "local `alias`
+    # (bugs/DIAGNOSTICS_missing_validation_modular.md: "local `alias`
     # bindings not always visible to comptime folding").
     try:
         _compile('fn f():\n    alias x = 5\n    comptime assert x == 0, "bad"\n')

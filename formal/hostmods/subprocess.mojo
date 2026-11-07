@@ -143,10 +143,11 @@ WHAT IS NOT HERE, AND WHY
     it would need (Windows quoting rules) is not this target's.
   * The `**kwargs` half of `run`/`call`/`check_call`/`check_output`.  `**` is a
     run-time-length mapping, and a mapping on this path is a bump-allocated blob
-    in the frame of the function that built it.  Each keyword CPython's callers
-    in this tree actually pass is a NAMED parameter instead, and `validate_args`'
-    `ARG_UNKNOWN_KEYWORD` is where a keyword that is neither named nor variadic
-    is reported.
+    in the frame of the function that built it
+    (`bugs/FORMAL_listdir_no_run_time_sequence.md`).  Each keyword CPython's
+    callers in this tree actually pass is a NAMED parameter instead, and
+    `validate_args`' `ARG_UNKNOWN_KEYWORD` is where a keyword that is neither
+    named nor variadic is reported.
   * `getoutput`/`getstatusoutput` are here as one call each because they differ
     only in what they return, and that difference is a word this model can carry.
 

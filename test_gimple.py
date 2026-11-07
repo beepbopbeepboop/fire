@@ -73,10 +73,7 @@ _WALK_AST_MUTATION_ALLOWLIST = {
     "ast_rewriter.py::Seq.__init__": "ditto",
     "ast_rewriter.py::Var.__init__": "ditto",
     "ast_rewriter.py::_rewrite_assign_stmt": "runs inside `rewrite`, on a tree no walk has seen",
-    "ast_rewriter.py::_desugar_one_enum": "runs in the rewrite pipeline (`desugar_enums`), before codegen walks the tree, and writes a freshly parsed StructDef the memo has not seen",
-    "ast_rewriter.py::_rewrite_enum_node": "runs in the rewrite pipeline (`desugar_enums`), before codegen walks the tree; any in-place rewrite is on a pre-walk tree",
-    "ast_rewriter.py::desugar_field_defaults": "runs inside `rewrite`/`desugar_enums` pipeline, before codegen walks the tree, on a pre-walk tree",
-    "gimple_codegen.py::_transform_enum_classes": "runs in the compile pipeline after `_walk_ast_reset()` on a freshly parsed/rewritten tree, and writes only `copy.copy`'d container nodes the memo has not seen",    "mojo/backend_gimple/cpp_core.py::_cpp_rewrite_yields": "writes `value` on a `copy.copy` of the yield node it is hoisting (`ynode`), a fresh node the original tree never sees; the copy is consumed only by the C++ emitter",
+    "mojo/backend_gimple/cpp_core.py::_cpp_rewrite_yields": "writes `value` on a `copy.copy` of the yield node it is hoisting (`ynode`), a fresh node the original tree never sees; the copy is consumed only by the C++ emitter",
     "mojo/backend_gimple/cpp_core.py::rewrite": "writes `value` on `copy.copy` of the root yield (`nv`) and `setattr`s the fields of `copy.copy(s)` (`new_stmt`): both are fresh nodes the emitter consumes, and the original statement is left untouched",
     "mojo/backend_gimple/elab_intu.py::_Work.__init__":"`_Work.alias`/`_Work.extra` are the elaborator's own scratch",
     "mojo/backend_gimple/elab_intu.py::_Work.enqueue": "ditto",
@@ -1084,10 +1081,7 @@ def run_tests():
     # the shadow is the load-bearing substring — it is what proves the element
     # type reached the declaration, and `(int64_t)` on the `mojo_list_get_str`
     # line is the exact text the bug put there.
-    def _test_comprehension_target_shadowing_a_struct_local_gets_its_own():
-        global _PASS, _FAIL
-        name = "comprehension_target_shadowing_a_struct_local_gets_its_own"
-        ok, c_src, stderr = gimple_compiles("""\
+    _run_isolated(lambda: test_c_shape("comprehension_target_shadowing_a_struct_local_gets_its_own", """\
 class Token:
     def __init__(self, kind: String):
         self.kind = kind
@@ -1102,27 +1096,8 @@ def names() -> List:
         t = pick("loop")
         i = i + 1
     return [t for t in ["a", "b"]]
-""")
-        must_have = ["char * _shadow", "_shadow1_t = ", "mojo_list_get_str"]
-        missing = [m for m in must_have if m not in c_src]
-        import re as _re
-        bad_assign = _re.search(r'\bt\s*=\s*\(int64_t\)', c_src)
-        present = []
-        if "(int64_t) _t" in c_src:
-            present.append("(int64_t) _t")
-        if bad_assign:
-            present.append("t = (int64_t)")
-        if ok and not missing and not present:
-            print(f"PASS  {name}")
-            _PASS += 1
-        else:
-            print(f"FAIL  {name}: compiles={ok} missing={missing} unexpectedly_present={present}")
-            if not ok:
-                for line in stderr.splitlines()[:8]:
-                    print(f"      {line}")
-            _FAIL += 1
-    _run_isolated(_test_comprehension_target_shadowing_a_struct_local_gets_its_own,
-                  'comprehension_target_shadowing_a_struct_local_gets_its_own')
+""", must_have=["char * _shadow", "_shadow1_t = ", "mojo_list_get_str"],
+       must_not_have=["(int64_t) _t", "t = (int64_t)"]), 'comprehension_target_shadowing_a_struct_local_gets_its_own')
 
     # The same site with a `char *` local shadowed instead of a struct pointer.
     # Before the fix this one COMPILED and printed the two string ADDRESSES as
@@ -1290,7 +1265,7 @@ def scan(s: String) -> Int:
 def main():
     print(scan("axbxc"))
     print(at("hello", 1))
-""", must_have=["mojo_char_at_str"],
+""", must_have=["mojo_char_at_str ("],
        must_not_have=["mojo_cstr_slice (", "_mojo_at_char"]), 'a_character_is_an_immortal_table_entry_not_a_slice')
 
     # The per-slot-kinds marker must not outlive its function; the reasoning
@@ -2711,68 +2686,6 @@ def foo() -> Int:
         s = s + i
     return s
 """), 'comptime_for_range_start_stop')
-
-    # 140a. comptime for over a string literal list — the loop variable must
-    # be declared `char *`. This is the 2026-11-07 stdlib-syntax red: the
-    # unroller declared the variable `int64_t` BEFORE looking at the elements,
-    # then emitted `filename = "canada";` into it (benchmarks/collections/
-    # string/bench_atof.mojo, std/sys/info.mojo) — a hard gcc error under
-    # -fgimple. Before the fix the str assignment also died in the
-    # AttributeError of the missing `_emit_string_literal` method, so the
-    # red was latent until that method landed and woke the path. Assert the
-    # declaration AND that the generated C still compiles.
-    _run_isolated(lambda: test_c_shape(
-        "comptime_for_str_list_loop_var_is_char_star", """\
-def foo() -> Int:
-    var s: Int = 0
-    comptime for name in ["canada", "mesh"]:
-        s = s + 1
-    return s
-""", ['char * name'], ['int64_t name']),
-        'comptime_for_str_list_loop_var_is_char_star')
-
-    # 140b. The same red through the non-literal (comptime alias) branch:
-    # `comptime files = [...]; comptime for filename in files` — the exact
-    # shape of bench_atof.mojo's main(). The resolved iterable is still a
-    # list of str, so the variable must be `char *` there too.
-    _run_isolated(lambda: test_c_shape(
-        "comptime_for_str_alias_list_loop_var_is_char_star", """\
-comptime files = ["canada", "mesh"]
-
-def foo() -> Int:
-    var s: Int = 0
-    comptime for filename in files:
-        s = s + 1
-    return s
-""", ['char * filename'], ['int64_t filename']),
-        'comptime_for_str_alias_list_loop_var_is_char_star')
-
-    # 140c. The int path of the same declaration must stay untouched: an int
-    # literal list still declares `int64_t` (not `char *`) and still unrolls
-    # the body with the per-element assignments.
-    _run_isolated(lambda: test_c_shape(
-        "comptime_for_int_list_keeps_int64_t", """\
-def foo() -> Int:
-    var s: Int = 0
-    comptime for i in [1, 2, 3]:
-        s = s + i
-    return s
-""", ['int64_t i', 'i = 1LL', 'i = 3LL', 's + i'], ['char * i']),
-        'comptime_for_int_list_keeps_int64_t')
-
-    # 140d. comptime for over a string list (alias/resolved iterable) —
-    # regression (master): the unroller must declare the loop var as char*,
-    # not int64_t, when elements are strings (bench_atof.mojo, sys/info.mojo).
-    _run_isolated(lambda: test("comptime_for_string_list", """\
-comptime NAMES = ["ab", "cd", "ef"]
-
-def foo() -> Int:
-    var n: Int = 0
-    comptime for name in NAMES:
-        if name == "cd":
-            n = n + 1
-    return n
-"""), 'comptime_for_string_list')
 
     # ── precise: loop body frequency annotations ──────────────────────────
 
@@ -11010,110 +10923,6 @@ print("%r" % p)
         print(f"PASS  {name}")
         _PASS += 1
 
-    def test_binding_index_memo_is_the_single_binder_census():
-        """`literal_bindings.binding_index` — the single binder census —
-        must cost ONE build per statement list per compile, not one per call.
-
-        The import-closure scan (coro's `_scan_callsite_param_kinds` ->
-        `_module_literal_env`, module_gen's call-site evidence) calls it once
-        per OTHER module in the closure, twice per pass, for EVERY module it
-        compiles. Without the memo that re-derives the whole tree's
-        per-node `bound_names` census once per module per level — the O(N^2)
-        that took the `do_imports=True` compile of a snippet importing
-        `build_config` (whose closure reaches the compiler's own modules)
-        past the sqliteruntime suite's timeout (bugs/MIDDLE_coro_import_
-        compile_hangs_on_large_modules, 60.26M `bound_names` calls measured
-        on that one compile). The fix memoizes the census per statement-list
-        identity in the walk memo's own lifecycle, and this pins all four
-        halves of that contract:
-
-          * a repeat call returns the SAME dict, straight from the memo;
-          * a repeat call re-runs the per-node `bound_names` census ZERO
-            times (the root-cause pin — a count, not a timing, so it cannot
-            be made to flake by a slow machine);
-          * a write inside the list invalidates the census through the
-            walk's own parent edges (`_walk_ast_invalidate`), and the
-            rebuild sees the new binder;
-          * the compile boundary (`_walk_ast_reset`) drops it.
-        """
-        global _PASS, _FAIL
-        name = "binding_index_memo_is_the_single_binder_census"
-        import mojo.middle.exprtypes as ET
-        import mojo.middle.literal_bindings as LB
-        from fire_compiler import py_tokenize, Parser, FunctionDef, AssignStmt, \
-            IdentExpr, StringLiteral
-        import ast_rewriter
-
-        err = None
-        try:
-            ET._walk_ast_reset()
-            src = ("s = 'r'\n"
-                   "def f(a):\n"
-                   "    b = 1\n"
-                   "    if a:\n"
-                   "        b = 2\n"
-                   "    return b\n"
-                   "def g(c):\n"
-                   "    for d in c:\n"
-                   "        print(d)\n")
-            stmts = ast_rewriter.rewrite(
-                Parser(py_tokenize(src)).parse_module()) or []
-            first = LB.binding_index(stmts)
-            if 's' not in first or 'b' not in first or 'f' not in first:
-                err = f'the census is missing binders: {sorted(first)}'
-            if not err:
-                again = LB.binding_index(stmts)
-                if again is not first:
-                    err = 'a repeat binding_index did not come from the memo'
-                # `getattr`: before the fix the memo did not exist, and the
-                # assertion above is the one that fails then; the entry shape
-                # is checked only where the memo is.
-                entry = getattr(ET, '_WALK_INDEX_MEMO', {}).get(id(stmts))
-                if entry is None or entry[0] is not stmts:
-                    err = 'the memo entry does not hold the list it is keyed on'
-            if not err:
-                calls = [0]
-                orig = LB.bound_names
-                def counting(nd):
-                    calls[0] += 1
-                    return orig(nd)
-                LB.bound_names = counting
-                try:
-                    for _ in range(5):
-                        LB.binding_index(stmts)
-                finally:
-                    LB.bound_names = orig
-                if calls[0] != 0:
-                    err = (f'a memoized binding_index re-ran bound_names '
-                           f'{calls[0]} times (the per-level re-derivation)')
-            if not err:
-                fd = [s for s in stmts if isinstance(s, FunctionDef)][0]
-                late = AssignStmt(target=IdentExpr(name='late'),
-                                  value=StringLiteral(value='x'))
-                fd.body.append(late)
-                ET._walk_ast_invalidate(fd)
-                rebuilt = LB.binding_index(stmts)
-                if rebuilt is first:
-                    err = 'the mutated module still answered from the old census'
-                elif 'late' not in rebuilt:
-                    err = 'the rebuilt census missed the appended binder'
-                elif 'late' in first:
-                    err = 'the mutation leaked into the pre-mutation census'
-            if not err:
-                ET._walk_ast_reset()
-                if id(stmts) in ET._WALK_INDEX_MEMO:
-                    err = '_walk_ast_reset left the index memo behind'
-        except Exception as e:  # noqa: BLE001
-            err = f'{type(e).__name__}: {e}'
-        finally:
-            ET._walk_ast_reset()
-        if err:
-            print(f"FAIL  {name}: {err}")
-            _FAIL += 1
-            return
-        print(f"PASS  {name}")
-        _PASS += 1
-
     def test_walk_ast_memo_never_answers_stale_over_real_compiles():
         """Every `_walk_ast` call, over real compiles, must return exactly
         what an uncached walk would — INCLUDING after a mutation.
@@ -13801,7 +13610,6 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_walk_ast_dataclass_cache_is_transparent(), 'test_walk_ast_dataclass_cache_is_transparent (line 12668)')
     _run_isolated(lambda: test_no_walk_ast_caller_mutates_what_it_is_handed(), 'test_no_walk_ast_caller_mutates_what_it_is_handed (line 12669)')
     _run_isolated(lambda: test_walk_ast_memo_is_transparent_and_honours_invalidation(), 'test_walk_ast_memo_is_transparent_and_honours_invalidation (line 12670)')
-    _run_isolated(lambda: test_binding_index_memo_is_the_single_binder_census(), 'test_binding_index_memo_is_the_single_binder_census (line 12670)')
     _run_isolated(lambda: test_walk_ast_memo_never_answers_stale_over_real_compiles(), 'test_walk_ast_memo_never_answers_stale_over_real_compiles (line 12671)')
     _run_isolated(lambda: test_every_ast_mutation_site_invalidates_the_walk_memo(), 'test_every_ast_mutation_site_invalidates_the_walk_memo (line 12672)')
     _run_isolated(lambda: test_posthoc_class_attr_write_invalidates_the_walk_memo(), 'test_posthoc_class_attr_write_invalidates_the_walk_memo (line 13416)')

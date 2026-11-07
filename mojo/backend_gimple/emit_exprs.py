@@ -186,7 +186,7 @@ def _mark_known_int(gen, operand_vals: list, res_type: str,
     `mojo_boxed_is_str` — a RANGE test that calls every positive int64 in
     [2^31, 2^47) a pointer, so `mojo_dict_set_int_kw(d, 3000000001, 1)`
     became a `strcmp` of address 3000000001 (at -O0, -O2 and under ASan
-    alike). See RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.
+    alike). See bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md.
 
     The two kinds of producer are here rather than spelled out at each site,
     and both reduce to the same statement — an integer operation on integers,
@@ -404,30 +404,6 @@ def _lower_StringLiteral(gen, node):
                     # repr() the ORIGINAL typed value, not the stringified
                     # one — _repr_value(et, ev) expects the raw value.
                     part_val = gen._repr_value(et, ev, expr_node)
-                elif _conv == 'a':
-                    # `!a` is CPython's ascii(): repr() with every non-ASCII
-                    # code point escaped. Rendering the raw value through the
-                    # repr machinery first (rather than stringifying it) is
-                    # what also gives a str its quotes and a container its
-                    # element reprs; the escape pass then handles the one
-                    # thing repr leaves raw (fire_runtime.c's
-                    # mojo_ascii_escape). Falling through to
-                    # _stringify_value here was the bug: `!a` rendered the
-                    # plain `str()` value and changed nothing.
-                    _repr_val = gen._repr_value(et, ev, expr_node)
-                    _repr_fresh = _repr_val in gen._fresh_vals
-                    part_val = gen._call_expr(
-                        'char *', 'mojo_ascii_escape', [('char *', _repr_val)])
-                    if _repr_fresh:
-                        # The repr temp is a fresh runtime allocation that
-                        # nothing else can name; the ascii pass copies it, so
-                        # release it now instead of leaking one string per
-                        # `!a` field. `!r` instead hands its repr straight to
-                        # the cat, which frees it there — that is why this
-                        # free exists only on the ascii path.
-                        gen._emit_call('void', '', 'free',
-                                       [('char *', _repr_val)])
-                        gen._fresh_vals.discard(_repr_val)
                 else:
                     part_val = gen._stringify_value(et, ev, expr_node)
                 if _spec:
@@ -701,7 +677,7 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     if name in gen._struct_bases and name not in gen.var_types and name not in gen._global_var_types:
         # A static class named as a VALUE is its type tag -- the word the run-time class table
         # files it under (`type('C', (A, B), ns)` / `bases = (A, B)` hand it to
-        # `mojo_type_add_base`; CODEGEN_enum_runtime_class_creation stage 3). Not the
+        # `mojo_type_add_base`; bugs/hard/CODEGEN_enum_runtime_class_creation.md stage 3). Not the
         # zero placeholder below, which every class would share.
         t = gen._new_temp('int64_t')
         gen._emit(f'  {t} = (int64_t){gimple_exprtypes._struct_type_id(name)}LL;  /* class {name} as value */')
@@ -1220,19 +1196,9 @@ def _lower_WalrusExpr(gen, node) -> tuple[str, str]:
     vtype, vv = gen.lower_expr(node.value)
     if node.name not in gen.var_types:
         gen._declare_var(node.name, vtype)
-    # A heap-boxed local (`_boxed_mut_locals`, e.g. a class capture that the
-    # enclosing function rebinds) stores the VALUE type even though its C
-    # declaration is `{type} *`. Without this branch the source-level type was
-    # read as the pointer, so `x := 5` coerced 5 to `int64_t *` AND overwrote
-    # the box pointer itself (`x = (int64_t *)5`) instead of `*x = 5`; the
-    # method then read uninitialised heap. The assignment path above has the
-    # same branch for the same reason.
-    if node.name in getattr(gen, '_boxed_mut_locals', {}):
-        dst = gen._boxed_mut_locals[node.name]
-    else:
-        dst = gen.var_types[node.name]
-    gen._safe_coerce_emit(vtype, dst, vv, gen._write_dest(node.name))
-    return dst, gen._write_dest(node.name)
+    dst = gen.var_types[node.name]
+    gen._safe_coerce_emit(vtype, dst, vv, gen._cname(node.name))
+    return dst, gen._cname(node.name)
 
 
 def _lower_class_dyn_getattr(gen, struct_name: str, member: str) -> tuple[str, str]:
@@ -1420,7 +1386,7 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
     # `-n` / `~n` on a value already known to be an integer is another
     # integer, which is what makes `d[-1]` and `d[~n]` dict writes instead of
     # a `strcmp` of an address in [2^31, 2^47) (see `_mark_known_int`, and
-    # RUNTIME_int64_key_above_2gb_dereferenced_as_pointer). The table
+    # bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md). The table
     # has both, and `-` is spelled by both the unary and the binary operator,
     # so one membership test covers them. Note the operand tested is
     # `actual_ov`, not `ov`: the pointer-coercion arm above REPLACES it with a
@@ -1562,10 +1528,10 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     if len(gen._frames_mods) > 0 and node.member == 'f_locals':
         # A frame's locals and trace hook have no representation yet (compiled C locals have no
         # runtime names or addresses): refuse by name rather than read the word as an object
-        # attribute and answer garbage (see CODEGEN_frame_f_locals_and_settrace, Plan).
+        # attribute and answer garbage (see bugs/mid/CODEGEN_frame_f_locals_and_settrace.md, Plan).
         raise RuntimeError(
             f"cannot compile module: frame attribute `{node.member}` is not modelled on the compiled "
-            "path (CODEGEN_frame_f_locals_and_settrace)")
+            "path (bugs/mid/CODEGEN_frame_f_locals_and_settrace.md)")
     if len(gen._frames_mods) > 0 and node.member in _FRAME_ATTRS:
         _fr_t, _fr_v = gen.lower_expr(node.obj)
         _fr_w = gen._to_int64(_fr_t, _fr_v)
@@ -1636,25 +1602,30 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             obj=gimple_ctypes.IdentExpr(name=_as_str(node.obj.member),
                                         line=getattr(node, 'line', 0)),
             member=_as_str(node.member)))
-    # `dict.fromkeys` / `frozendict.fromkeys` read as a VALUE
+    # `dict.fromkeys` read as a VALUE (real: zipfile/_path/__init__.py's
+    # `_dedupe = dict.fromkeys`, later called as `_dedupe(iterable)`) —
+    # `dict` itself already resolves to a real function-pointer VALUE
+    # (`_funcptr_mojo_make_dict`, via BUILTIN_VALUE_MAP/_lower_IdentExpr),
+    # but `.fromkeys` on that raw `void *` function pointer used to fall
+    # through to the generic dynamic-getattr dispatch
+    # (`_mojo_dispatch_getattr`), which correctly raises AttributeError
+    # for an attribute name no runtime object registration has — crashing
+    # the program during module-level top-level init, before `_dedupe`
+    # is ever even CALLED. `dict.fromkeys(iterable)` and `dict(iterable)`
+    # aren't semantically identical (fromkeys maps each element to a
+    # default value; plain dict() expects (k, v) pairs), but reusing the
+    # same `mojo_make_dict` function pointer at minimum stops the
+    # top-level crash — an honest, no-worse-than-before degrade for
+    # whatever this bound classmethod is later called with (this
+    # codegen already has no correctness guarantee for a call through a
+    # dynamically-stored builtin function-pointer VALUE regardless).
     if (isinstance(node.obj, gimple_ctypes.IdentExpr)
-            and node.obj.name in ('dict', 'OrderedDict', 'frozendict')
+            and node.obj.name in ('dict', 'OrderedDict')
             and node.obj.name not in gen.var_types
             and not gen._locally_binds_name(node.obj.name)
             and node.member == 'fromkeys'):
-        if node.obj.name == 'frozendict':
-            gen._funcptr_builtins_needed.add('mojo_frozendict_fromkeys')
-            if not hasattr(gen, '_frozendict_fromkeys_callables'):
-                gen._frozendict_fromkeys_callables = set()
-            t = gen._new_val('void *', '_funcptr_mojo_frozendict_fromkeys')
-            gen._frozendict_fromkeys_callables.add(t)
-            return 'void *', t
         gen._funcptr_builtins_needed.add('mojo_make_dict')
-        if not hasattr(gen, '_dict_fromkeys_callables'):
-            gen._dict_fromkeys_callables = set()
-        t = gen._new_val('void *', '_funcptr_mojo_make_dict')
-        gen._dict_fromkeys_callables.add(t)
-        return 'void *', t
+        return 'void *', gen._new_val('void *', '_funcptr_mojo_make_dict')
 
     # `m.lastgroup` where m is a regex-match for-loop variable — see
     # _gen_for_regex_iter / regex_compile.py / BACKLOG-CODEGEN.md §4f.
@@ -1914,7 +1885,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # `_mojo_dispatch_getattr` runtime dispatch on the module
         # marker's `(int64_t)0` placeholder — a NULL-pointer read, not
         # the real global value (see bugs/CODEGEN_generator_function_
-        # Lib_test_test_support's 2026-08-09 root-cause).
+        # Lib_test_test_support.md's 2026-08-09 root-cause).
         _bound_mod = gen.imported_symbols.get(module_name, {}).get('module') \
             if module_name in gen.imported_symbols else None
         # THIS module's own field triple is the authoritative answer for what
@@ -2439,7 +2410,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # 4, “setting/getting an arbitrary attribute on a generically-typed object”)
         # already routes unknown MojoBoundMethod fields through
         # runtime dispatch instead of a hard GCC error. See bugs/
-        # COMPILE_FAIL_zipfile__path___init__.
+        # COMPILE_FAIL_zipfile__path___init__.md.
         #
         # REGRESSION (found+fixed 2026-08-18, see bugs/hard/CODEGEN_
         # dynamic_attribute_on_generic_object.md's dated status
@@ -2727,7 +2698,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # this codegen's own fixed-layout runtime structs (Sub-case
             # C — MojoBoundMethod is the confirmed real case: a closure
             # value with a dynamically-set `__name__`, see bugs/hard/
-            # CODEGEN_dynamic_attribute_on_generic_object) — route
+            # CODEGEN_dynamic_attribute_on_generic_object.md) — route
             # through the same dynamic-attribute dispatch used for any
             # other not-a-real-field member, instead of the unconditional
             # "<type>" placeholder below (which would silently discard
@@ -4263,7 +4234,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # binary op (`x == y`, `x + y`, `x % y`, `x * n`) operates on that
     # payload. Normalize each such operand to its backing MojoBytes so the
     # existing MojoBytes cases below fire. See
-    # COMPILE_FAIL_zipfile___init__.
+    # bugs/COMPILE_FAIL_zipfile___init__.md.
     if gen._bytes_subclass_of(lt):
         lv = gen._new_val('MojoBytes *', f"{lv}->_data"); lt = 'MojoBytes *'
     if gen._bytes_subclass_of(rt):
@@ -4374,16 +4345,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             lv = _none_arith_guard(gen, op, lv, _numeric_type_name(rt), 1)
         if rv in _tagged and rv in _boxed and lt in ('int', 'int64_t', 'double', 'float'):
             rv = _none_arith_guard(gen, op, rv, _numeric_type_name(lt), 0)
-    # A BOXED operand beside a str under `+` is a string concatenation, for any
-    # boxed value and not only a tagged word: Python's `int + str` and
-    # `double + str` are TypeErrors, so no valid program adds a boxed number to
-    # a string. The box is kept and marked a dynamic word, and the concatenation
-    # below renders it by its run-time kind (`mojo_cstr_or_int_str`). Unboxing it
-    # to a double here made `_f + '@'` (a path from `_files: list`) a
-    # `double + char *` gcc error in the self-hosted fire.ci.
-    if lv in getattr(gen, '_boxed_vals', ()) and rt == 'char *' and op == '+':
-        gen._dyn_word_vals.add(lv)
-    elif lv in getattr(gen, '_boxed_vals', ()):
+    if lv in getattr(gen, '_boxed_vals', ()) and not (
+            lv in _tagged and rt == 'char *' and op == '+'):
         if op in _ident_ops and (op in ('is', 'is not')
                                  or rt not in ('double', 'float')):
             lv = gen._new_val('int64_t', f"mojo_box_word ({lv})")
@@ -4395,9 +4358,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         else:
             lv = gen._new_val('double', f"mojo_box_double ({lv})")
             lt = 'double'
-    if rv in getattr(gen, '_boxed_vals', ()) and lt == 'char *' and op == '+':
-        gen._dyn_word_vals.add(rv)
-    elif rv in getattr(gen, '_boxed_vals', ()):
+    if rv in getattr(gen, '_boxed_vals', ()) and not (
+            rv in _tagged and lt == 'char *' and op == '+'):
         if op in _ident_ops and (op in ('is', 'is not')
                                  or lt not in ('double', 'float')):
             rv = gen._new_val('int64_t', f"mojo_box_word ({rv})")
@@ -6063,7 +6025,7 @@ def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     # arithmetic tail — but this lowering is dispatched from `_lower_binary`
     # BEFORE that tail, so it needs its own producer or `d[6000000000 // 2]`
     # keeps crashing (SIGSEGV as a `strcmp` of address 1500000000, before this:
-    # RUNTIME_int64_key_above_2gb_dereferenced_as_pointer). The guard
+    # bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md). The guard
     # is on `lt`/`rt`, which the two pointer-coercion arms above deliberately
     # leave UNCHANGED (they rebind only `lv`/`rv`, to fresh `(int64_t)` casts):
     # a boxed pointer reaches here as a `char *`/`T *` operand whose address
@@ -6119,7 +6081,7 @@ def _lower_pow(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     # large key is usually COMPUTED rather than written: `3 ** 20` is
     # 3486784401, inside the runtime discriminator's pointer window, and
     # `d[3 ** 20] = 8` was a `strcmp` of address 3486784401 before this
-    # (RUNTIME_int64_key_above_2gb_dereferenced_as_pointer).
+    # (bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md).
     gen._int_word_vals.add(t4)
     return 'int', t4
 
@@ -6306,7 +6268,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
     ti = gen._new_temp('int')
 
     # `x in <bytes-subclass instance>`: substring/byte membership against
-    # the backing MojoBytes payload. See COMPILE_FAIL_zipfile___init__.
+    # the backing MojoBytes payload. See COMPILE_FAIL_zipfile___init__.md.
     if gen._bytes_subclass_of(rt) and not gen._struct_defines_method(
             gen._bytes_subclass_of(rt), '__contains__'):
         rv = gen._new_val('MojoBytes *', f"{rv}->_data")
@@ -6773,7 +6735,7 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # module-level global, where nothing else seeds the table) depends on it.
     # It is the RETURN-side publish that must not treat it as evidence, and
     # that is `_gen_ReturnStmt`'s own guard; see bugs/
-    # CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.
+    # CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md.
     if not (elem == 'int64_t' and gen._literal_elements_include_none(node.elements)):
         gen._elem_types[t] = elem
     # Every element is itself a tuple/list literal with a homogeneous,
@@ -7417,10 +7379,7 @@ def _lower_dict_literal(gen, node: gimple_ctypes.DictExpr) -> tuple[str, str]:
     # literal written at the call site, and two copies of this rule could
     # type the parameter one way while the literal stores another. Its skip of
     # a `**spread` pair (which carries no value sample) moved in with it.
-    # An EMPTY literal has no value kind to record: `int64_t` here would be false evidence of an int, and a later
-    # float store into the same dict would then join with it as 'mixed' (module-scope `d = {}; d[(1, 2)] = 9.5`).
-    if node.pairs:
-        gen._dict_val_types[t] = gimple_exprtypes.dict_literal_val_ctype(gen, node.pairs)
+    gen._dict_val_types[t] = gimple_exprtypes.dict_literal_val_ctype(gen, node.pairs)
     for key_expr, val_expr in node.pairs:
         # A `**expr` pair MERGES; it is not a store. Treated as a store it put
         # the spread's own dict into the KEY slot and the None sentinel into

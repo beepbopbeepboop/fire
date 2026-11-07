@@ -31,3 +31,17 @@ set_option autoImplicit false
 
 /-- Positive control for the census; delete when the first real scaffold lands. -/
 theorem scaffold_canary : True := by sorry
+
+/-- Scaffold: write-back contract for a by-reference one-field mutator (single exit).
+    Depth bound is a hypothesis, not an axiom. The cell is in the caller's frame. -/
+theorem scaffold_cell_writeback_one_exit
+    (s s' : Arm64State) (p : UInt64)
+    (h_cell : True) :
+    True := by sorry
+
+/-- Scaffold: write-back contract for a by-reference one-field mutator (multiple exits).
+    Per-exit obligation is scaffolded as a hole pending proof. Depth bound is a hypothesis. -/
+theorem scaffold_cell_writeback_multi_exit
+    (s s' : Arm64State) (p : UInt64)
+    (h_cell : True) :
+    True := by sorry

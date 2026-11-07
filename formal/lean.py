@@ -153,7 +153,7 @@ import time
 LIBRARY_STEP_SHARDS = tuple(f"ProofLibSteps{i}" for i in range(1, 9))
 LIBRARY_MODULES = ("IEEE754", "ProofLib") + LIBRARY_STEP_SHARDS + (
     "ProofLibSteps", "X86", "work", "Refine", "Contracts",
-    "Peephole", "Extern", "Specs", "Scaffold")
+    "Peephole", "Specs", "Scaffold")
 VERDICT_EXT = ".leanverdict"
 # Where a library module's own hole census is stored, beside the .olean it was
 # measured from and under the same key — so a cas HIT on the .olean is a hit on

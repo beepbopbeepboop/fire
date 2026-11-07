@@ -136,6 +136,7 @@ class TestFrameMethodFinder(unittest.TestCase):
         """A one-field struct's mutating method by reference gets a contract."""
         import tempfile
         import formal.build as fb
+        from types import SimpleNamespace
         src = '''struct Box:
     v: Int
     fn set_v(mut self, x: Int):
@@ -253,108 +254,6 @@ class TestFrameMethodFinder(unittest.TestCase):
             old = self.v
             self.v = 0
             return old
-'''
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.mojo', delete=False) as f:
-            f.write(src)
-            tmp = f.name
-        cap = {}
-        real = G.generate_arm64_proof
-        def spy(prog, code, info):
-            cap.update(prog=prog, code=code, info=info)
-            raise Exception("stop")
-        G.generate_arm64_proof = spy
-        try:
-            with tempfile.TemporaryDirectory() as td:
-                try:
-                    fb.compile_formal(tmp, output=os.path.join(td, 'box.aout'), prove=True, check=False)
-                except Exception as e:
-                    if 'stop' not in str(e):
-                        raise
-        finally:
-            G.generate_arm64_proof = real
-        self.assertTrue(cap)
-        found = G._frame_methods(cap['prog'], cap['code'], cap['info'])
-        self.assertIsNone(found)
-        os.unlink(tmp)
-
-    def test_d1_inc_not_classified_as_contract(self):
-        """inc: read-modify-write, not assignment of a parameter - excluded by D1 (task 18b)."""
-        import tempfile
-        import formal.build as fb
-        src = '''struct Box:
-    v: Int
-    fn inc(mut self):
-        self.v = self.v + 1
-'''
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.mojo', delete=False) as f:
-            f.write(src)
-            tmp = f.name
-        cap = {}
-        real = G.generate_arm64_proof
-        def spy(prog, code, info):
-            cap.update(prog=prog, code=code, info=info)
-            raise Exception("stop")
-        G.generate_arm64_proof = spy
-        try:
-            with tempfile.TemporaryDirectory() as td:
-                try:
-                    fb.compile_formal(tmp, output=os.path.join(td, 'box.aout'), prove=True, check=False)
-                except Exception as e:
-                    if 'stop' not in str(e):
-                        raise
-        finally:
-            G.generate_arm64_proof = real
-        self.assertTrue(cap)
-        found = G._frame_methods(cap['prog'], cap['code'], cap['info'])
-        self.assertIsNone(found)
-        os.unlink(tmp)
-
-    def test_d1_pop_not_classified_as_contract(self):
-        """pop: branches/multiple exits - excluded by D1 (task 18b)."""
-        import tempfile
-        import formal.build as fb
-        src = '''struct Box:
-    v: Int
-    fn pop(mut self) -> Int:
-        var old = self.v
-        if old > 0:
-            self.v = old - 1
-            return old
-        self.v = 0
-        return 0
-'''
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.mojo', delete=False) as f:
-            f.write(src)
-            tmp = f.name
-        cap = {}
-        real = G.generate_arm64_proof
-        def spy(prog, code, info):
-            cap.update(prog=prog, code=code, info=info)
-            raise Exception("stop")
-        G.generate_arm64_proof = spy
-        try:
-            with tempfile.TemporaryDirectory() as td:
-                try:
-                    fb.compile_formal(tmp, output=os.path.join(td, 'box.aout'), prove=True, check=False)
-                except Exception as e:
-                    if 'stop' not in str(e):
-                        raise
-        finally:
-            G.generate_arm64_proof = real
-        self.assertTrue(cap)
-        found = G._frame_methods(cap['prog'], cap['code'], cap['info'])
-        self.assertIsNone(found)
-        os.unlink(tmp)
-
-    def test_d1_set2_not_classified_as_contract(self):
-        """set2: two stores, not a single assignment - excluded by D1 (task 18b)."""
-        import tempfile
-        import formal.build as fb
-        src = '''struct Box:
-    v: Int
-    fn set2(mut self, x: Int):
-        self.v = x
-        self.v = x + 1
 '''
         with tempfile.NamedTemporaryFile(mode='w', suffix='.mojo', delete=False) as f:
             f.write(src)

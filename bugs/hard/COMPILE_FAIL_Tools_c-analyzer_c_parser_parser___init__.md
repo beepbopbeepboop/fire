@@ -1,5 +1,3 @@
-SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__-part1, COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__-part2, COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__-part3, COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__-part4
-
 # COMPILE_FAIL: Tools/c-analyzer/c_parser/parser/__init__.py
 
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_parser/parser/__init__.py`

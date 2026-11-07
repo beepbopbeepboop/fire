@@ -950,27 +950,6 @@ def _cpp_collect_os_path_aliases(fn) -> dict:
     return out
 
 
-def _cpp_fstring_list_piece(gen, expr_node, v):
-    """C++ expression emitted for the repr of a `MojoList *` interpolated into an f-string."""
-    if isinstance(expr_node, gimple_ctypes.IdentExpr):
-        elem_cty = (getattr(gen, '_cpp_list_local_elem_types', {}) or {}).get(expr_node.name)
-    else:
-        elem_cty = None
-    if elem_cty == 'double':
-        return f"mojo_repr_list_doubles({_cpp_as('MojoList *', v)})"
-    if elem_cty == 'int64_t':
-        return f"mojo_repr_list_ints({_cpp_as('MojoList *', v)})"
-    if elem_cty == '_Bool':
-        return f"mojo_repr_list_bools({_cpp_as('MojoList *', v)})"
-    if elem_cty == 'MojoBytes *':
-        return f"mojo_repr_list_bytes({_cpp_as('MojoList *', v)})"
-    if elem_cty == 'char *':
-        raise gimple_exprtypes._UnsupportedGeneratorShape(
-            "f-string interpolation of a list whose elements are str has "
-            "no scalar C++ string form in this compiled generator/coroutine body")
-    return f"mojo_repr_list_kinds({_cpp_as('MojoList *', v)}, NULL)"
-
-
 def _cpp_string_literal_expr(gen, val: str, is_interp: str) -> str:
     """`_cpp_expr`'s counterpart of the ordinary GIMPLE path's
     `_lower_StringLiteral` (gimple_gen_exprs.py) — decodes an f-string
@@ -1044,31 +1023,6 @@ def _cpp_string_literal_expr(gen, val: str, is_interp: str) -> str:
                     f"f-string interpolation '{{{part_text}}}' could not "
                     "be parsed in a compiled generator/coroutine body "
                     f"({type(ex).__name__}: {ex})")
-            # A collection LITERAL (`f"{[1, 2]}"`, `f"{(1, 2)}"`, a dict/set)
-            # has no scalar C++ value: `_cpp_expr` lowers it to a
-            # braced-init-list, which is only valid where this emitter puts
-            # it into a container-typed local / a real runtime constructor
-            # (see `_cpp_container_literal_init` and
-            # `_cpp_list_literal_arg_expr`). Every arm below assumes the
-            # interpolation lowered to ONE scalar value and stringifies it
-            # (`mojo_str((void *)({v}))` and friends), so wrapping the
-            # raw `{1, 2}` emitted invalid C++ that only g++ caught
-            # ("expected ';' before '}' token"). There is no container-repr
-            # walker in this expression-only emitter (the ordinary GIMPLE
-            # path's `_stringify_value`/`_repr_value` container arms need a
-            # statement side channel this emitter does not have), so refuse
-            # honestly at the same chokepoint the direct `yield [1, 2]`
-            # shape is refused rather than emit broken C++.
-            if isinstance(expr_node, (gimple_ctypes.ListExpr,
-                                      gimple_ctypes.TupleExpr,
-                                      gimple_ctypes.DictExpr,
-                                      gimple_ctypes.SetExpr)):
-                raise gimple_exprtypes._UnsupportedGeneratorShape(
-                    f"f-string interpolation '{{{part_text}}}' is a "
-                    "collection literal, which has no scalar C++ value in "
-                    "a compiled generator/coroutine body (this emitter has "
-                    "no container-repr walker; the value would lower to a "
-                    "C++ braced-init-list, not a string)")
             v = gen._cpp_expr(expr_node)
             try:
                 ectype = gimple_exprtypes._infer_simple_expr_ctype(
@@ -1076,66 +1030,19 @@ def _cpp_string_literal_expr(gen, val: str, is_interp: str) -> str:
                     fn_return_types=fn_ret) or 'int64_t'
             except Exception:
                 ectype = 'int64_t'
-            if conv == 'r' or conv == 'a':
+            if conv == 'r':
                 if ectype == 'char *':
                     piece = f"mojo_repr_str((char *)({v}))"
                 elif ectype == 'double':
                     piece = f"mojo_repr_float(({v}))"
-                elif ectype == '_Bool':
-                    # repr/ascii of a bool is its NAME, not its 0/1 value --
-                    # the same answer the non-conversion arm below already
-                    # gives `!s`/bare. Without this row the generic
-                    # `mojo_str` branch rendered `True` as `1`, so the cpp
-                    # path disagreed with CPython on `f"{flag!r}"` (and, via
-                    # the escape pass, `!a`).
-                    piece = f'(({v}) ? "True" : "False")'
-                elif ectype == 'MojoList *':
-                    piece = _cpp_fstring_list_piece(gen, expr_node, v)
-                elif ectype == 'MojoDict *':
-                    raise gimple_exprtypes._UnsupportedGeneratorShape(
-                        f"f-string interpolation '{{{part_text}}}' of a "
-                        "container-typed dict has no scalar C++ string form in "
-                        "this compiled generator/coroutine body "
-                        "(this emitter has no container-repr walker; refuse "
-                        "rather than print the dict's raw header bytes)")
-                elif ectype == 'MojoSet *':
-                    raise gimple_exprtypes._UnsupportedGeneratorShape(
-                        f"f-string interpolation '{{{part_text}}}' of a "
-                        "container-typed set has no scalar C++ string form in "
-                        "this compiled generator/coroutine body "
-                        "(this emitter has no container-repr walker; refuse "
-                        "rather than print the set's raw header bytes)")
                 else:
                     piece = f"mojo_str((void *)({v}))"
-                if conv == 'a':
-                    # `!a` = CPython ascii(): the repr rendering above, with
-                    # every non-ASCII code point escaped. Same runtime helper
-                    # and same reasoning as the ordinary GIMPLE path's
-                    # `_lower_StringLiteral`; without this arm `!a` fell to
-                    # the str() arm below and rendered the plain value.
-                    piece = f"mojo_ascii_escape((char *)({piece}))"
             elif ectype == 'char *':
                 piece = v
             elif ectype == 'double':
                 piece = f"mojo_repr_float(({v}))"
             elif ectype == '_Bool':
                 piece = f'(({v}) ? "True" : "False")'
-            elif ectype == 'MojoList *':
-                piece = _cpp_fstring_list_piece(gen, expr_node, v)
-            elif ectype == 'MojoDict *':
-                raise gimple_exprtypes._UnsupportedGeneratorShape(
-                    f"f-string interpolation '{{{part_text}}}' of a "
-                    "container-typed dict has no scalar C++ string form in "
-                    "this compiled generator/coroutine body "
-                    "(this emitter has no container-repr walker; refuse "
-                    "rather than print the dict's raw header bytes)")
-            elif ectype == 'MojoSet *':
-                raise gimple_exprtypes._UnsupportedGeneratorShape(
-                    f"f-string interpolation '{{{part_text}}}' of a "
-                    "container-typed set has no scalar C++ string form in "
-                    "this compiled generator/coroutine body "
-                    "(this emitter has no container-repr walker; refuse "
-                    "rather than print the set's raw header bytes)")
             else:
                 piece = f"mojo_str((void *)({v}))"
             if spec:
@@ -1401,7 +1308,7 @@ def _cpp_reset_unit_state(gen):
     # `next(it, default)` advance a genuine resumable position, and a later
     # `for x in it:` continues from that position (real Python iterator
     # semantics) rather than re-scanning from element 0. See
-    # CODEGEN_generator_function_Lib_ipaddress's `_find_address_range`.
+    # bugs/CODEGEN_generator_function_Lib_ipaddress.md's `_find_address_range`.
     gen._cpp_list_iter_cursor = {}
 
 
@@ -2596,7 +2503,7 @@ def _cpp_expr(gen, e) -> str:
         # which `cls` structurally cannot have; an unrecognized name)
         # must refuse rather than silently emit `cls->member` (invalid
         # C++ on a scalar int64_t) or `cls.member` (equally invalid).
-        # See CODEGEN_enum_runtime_class_creation's 2026-08-21
+        # See bugs/hard/CODEGEN_enum_runtime_class_creation.md's 2026-08-21
         # update for the motivating `cls._flag_mask_`/`cls.
         # _value2member_map_` shapes (Flag._iter_member_by_value_).
         if struct_name and isinstance(e.obj, gimple_ctypes.IdentExpr) and e.obj.name == 'cls':
@@ -3973,7 +3880,7 @@ def _cpp_expr(gen, e) -> str:
             # cast back to the real pointer type. Real: Lib/enum.py's
             # `Flag._iter_member_by_value_`: `cls._value2member_map_.
             # get(val)` returns a `Flag *`. See
-            # CODEGEN_enum_runtime_class_creation's 2026-08-20
+            # CODEGEN_enum_runtime_class_creation.md's 2026-08-20
             # update.
             if (_str_obj_ctype == 'MojoDict *' and e.func.member == 'get'
                     and len(e.args) in (1, 2)):
@@ -4321,7 +4228,7 @@ def _cpp_expr(gen, e) -> str:
                 # the recursive-yield-from iter_files repro took the base
                 # case for a list argument and yielded the raw MojoList*
                 # pointer as an int; see bugs/hard/
-                # CODEGEN_generator_recursive_yield_from_no_arg_forwarding).
+                # CODEGEN_generator_recursive_yield_from_no_arg_forwarding.md).
                 _tnames = None
                 if isinstance(e.args[1], gimple_ctypes.IdentExpr):
                     _tnames = [e.args[1].name]
@@ -4552,7 +4459,7 @@ def _cpp_expr(gen, e) -> str:
                 # callee 'list(...)'" honest refusal of the WHOLE
                 # generator -- confirmed the single most common blocker
                 # across the real-world corpus this codegen targets, see
-                # e.g. CODEGEN_generator_function_Lib_ipaddress's
+                # e.g. bugs/CODEGEN_generator_function_Lib_ipaddress.md's
                 # `_collapse_addresses_internal`). Mirrors the ordinary
                 # (non-coroutine) GIMPLE path's own `_lower_ctor_from_
                 # iterable` (gimple_gen_calls.py): synthesize the
@@ -5513,7 +5420,7 @@ def _cpp_expr(gen, e) -> str:
         # the SAME simplification the tuple/list-unpack branch's own
         # `mojo_list_get_int` call above already established as this
         # model's accepted convention for "unknown list element type".
-        # See CODEGEN_generator_non_plain_assignment_target_refused's
+        # See CODEGEN_generator_non_plain_assignment_target_refused.md's
         # 2026-08-19 update.
         if isinstance(e.obj, (gimple_ctypes.IdentExpr, gimple_ctypes.StringLiteral, gimple_ctypes.SubscriptExpr, gimple_ctypes.SliceExpr)):
             if gen._cpp_declared is not None and isinstance(e.obj, gimple_ctypes.IdentExpr) \
@@ -6811,7 +6718,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             # identifier assignment target is supported" refusal below,
             # even though the exact same decomposition this TupleExpr
             # branch already does applies unchanged. See
-            # CODEGEN_generator_non_plain_assignment_target_refused.
+            # CODEGEN_generator_non_plain_assignment_target_refused.md.
             # When `expr` is a call to a module function returning a
             # MojoList* (tokenize.py's `encoding, consumed =
             # detect_encoding(readline)` — detect_encoding returns a
@@ -8831,9 +8738,10 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 "[&]() { struct _W { int64_t w; "
                 "operator int64_t() const { return w; } "
                 "operator char *() const { return (char *)w; } "
-                + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
-                          for _k in ('MojoList', 'MojoDict', 'MojoSet'))
-                + "}; "
+                "operator MojoList *() const { return (MojoList *)w; } "
+                "operator MojoDict *() const { return (MojoDict *)w; } "
+                "operator MojoSet *() const { return (MojoSet *)w; } "
+                "}; "
                 "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
                 + ''.join(f"mojo_list_append_int(_a, (int64_t)(intptr_t)({_e})); " for _e in _pos_parts)
                 + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_callee_name}), _a, _k)}}; }}()")
@@ -8867,9 +8775,10 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     "[&]() { struct _W { int64_t w; "
                     "operator int64_t() const { return w; } "
                     "operator char *() const { return (char *)w; } "
-                    + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
-                              for _k in ('MojoList', 'MojoDict', 'MojoSet'))
-                    + "}; "
+                    "operator MojoList *() const { return (MojoList *)w; } "
+                    "operator MojoDict *() const { return (MojoDict *)w; } "
+                    "operator MojoSet *() const { return (MojoSet *)w; } "
+                    "}; "
                     "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
                     + ''.join(f"mojo_list_append_int(_a, (int64_t)(intptr_t)({_e})); " for _e in _pos_parts)
                     + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_callee_name}), _a, _k)}}; }}()")
@@ -9006,9 +8915,10 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     "[&]() { struct _W { int64_t w; "
                     "operator int64_t() const { return w; } "
                     "operator char *() const { return (char *)w; } "
-                    + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
-                              for _k in ('MojoList', 'MojoDict', 'MojoSet'))
-                    + "}; "
+                    "operator MojoList *() const { return (MojoList *)w; } "
+                    "operator MojoDict *() const { return (MojoDict *)w; } "
+                    "operator MojoSet *() const { return (MojoSet *)w; } "
+                    "}; "
                     "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
                     + ''.join(_parts)
                     + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_cpp_fc}), _a, _k)}}; }}()")
@@ -9104,9 +9014,10 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     "[&]() { struct _W { int64_t w; "
                     "operator int64_t() const { return w; } "
                     "operator char *() const { return (char *)w; } "
-                    + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
-                              for _k in ('MojoList', 'MojoDict', 'MojoSet'))
-                    + "}; "
+                    "operator MojoList *() const { return (MojoList *)w; } "
+                    "operator MojoDict *() const { return (MojoDict *)w; } "
+                    "operator MojoSet *() const { return (MojoSet *)w; } "
+                    "}; "
                     "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
                     + ''.join(f"mojo_list_append_int(_a, (int64_t)(intptr_t)({_e})); " for _e in _pos_parts)
                     + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_callee_name}), _a, _k)}}; }}()")
@@ -9130,7 +9041,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 _lines.append(f"{indent}for (int64_t {_ctr} = 0; "
                              f"{_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
                 _lines.append(f"{indent}    MojoList *{_tup} = "
-                             + f"{gen._cpp_container_cast_prefix('MojoList', False)}mojo_list_get_int({_wi}, {_ctr});")
+                             + f"(MojoList *)mojo_list_get_int({_wi}, {_ctr});")
                 for _si, _nm in enumerate(_names):
                     _lines.append(f"{indent}    {_nm} = mojo_list_get_int({_tup}, {_si});")
                 for inner in s.body:
@@ -10656,7 +10567,7 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
         # DYNAMICALLY resolved exception class (real, recurring idiom:
         # `raise self._imap.error(...)` in imaplib.py's Idler.burst,
         # plus test.support's run_with_locale/subst_drive — see
-        # CODEGEN_generator_raise_non_static_exception_class's three
+        # CODEGEN_generator_raise_non_static_exception_class.md's three
         # confirmed occurrences) has no statically-known class NAME to
         # look up in _exc_type_id, so it can't get a real per-class tag
         # the way `raise ExcName(...)` does. Rather than refuse the
@@ -11186,7 +11097,7 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
         # currently-working `yield from <expr>` shape. Real:
         # Lib/test/libregrtest/runtests.py's `RunTests.iter_tests`:
         # `yield from self.tests` (a MojoList* field). See
-        # CODEGEN_generator_function_Lib_test_libregrtest_runtests.
+        # CODEGEN_generator_function_Lib_test_libregrtest_runtests.md.
         #
         # Element accessor: the above cast handles the CONTAINER's own
         # pointer type, but the elements inside it aren't always
@@ -11477,7 +11388,7 @@ def _cls_refs_supported(gen, body, struct_name: str) -> bool:
 
     See gimple_codegen.py's classmethod-generator eligibility check
     (this method's only caller) and bugs/CODEGEN_generator_function_
-    Lib_enum's 2026-08-21 update for the motivating Lib/enum.py
+    Lib_enum.md's 2026-08-21 update for the motivating Lib/enum.py
     `Flag._iter_member_by_value_`/`_iter_member_by_def_` shapes.
     """
     class_attrs = gen._class_attrs.get(struct_name, {})

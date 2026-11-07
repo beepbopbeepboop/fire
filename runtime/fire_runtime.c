@@ -1419,46 +1419,30 @@ static _KindRow *_kinds_row(uint64_t addr)
 }
 
 /* The row for `addr`, creating it if needed. `*fresh` reports whether it is
- * new, so a caller that has nothing to record can undo the creation. The
- * probe runs BEFORE the grow check on purpose: a grow that happens while
- * looking up an EXISTING row must not be reported as a fresh row. It once
- * was — `*fresh` was set the moment the load factor tripped, before the probe
- * ran — and `mojo_list_set_elem_repr(l, NULL)` (called on EVERY list copy
- * whose source has kinds but no element repr, i.e. every `mojo_list_copy` of
- * a drained generator) then ran `if (fresh && !fn) _kinds_forget(addr)` and
- * deleted the row its caller had JUST written the kinds into: the copied
- * list reached `mojo_sorted` undescribed, so the recursive-pattern
- * `sorted(glob.glob(..., root_dir=..., recursive=True))` in
- * bugs/SUITE_globcompiled ordered by slot address instead of string, and the
- * wipe only landed on runs whose heap layout put the table at its growth
- * boundary — a flake, not a constant. */
+ * new, so a caller that has nothing to record can undo the creation. */
 static _KindRow *_kinds_row_for_write(uint64_t addr, int *fresh)
 {
     *fresh = 0;
-    if (!_reg_kinds.cap) _kinds_grow();
-    for (;;) {
-        uint64_t mask = _reg_kinds.cap - 1;
-        uint64_t i = _kinds_home(addr);
-        while (_reg_kinds.rows[i].addr) {
-            if (_reg_kinds.rows[i].addr == addr) return &_reg_kinds.rows[i];
-            i = (i + 1) & mask;
-        }
-        /* The slot is where a NEW row goes: only now does the load factor
-         * matter, and a grow restarts the probe at the doubled size. */
-        if ((_reg_kinds.used + 1) * 2 > _reg_kinds.cap) {
-            _kinds_grow();
-            continue;
-        }
-        /* A new row describes nothing yet, whatever a deleted row left here. */
-        _reg_kinds.rows[i].addr = addr;
-        _reg_kinds.rows[i].kinds = NULL;
-        _reg_kinds.rows[i].owned = 0;
-        _reg_kinds.rows[i].boxes = NULL;
-        _reg_kinds.rows[i].repr_fn = NULL;
-        _reg_kinds.used++;
+    if (!_reg_kinds.cap) { _kinds_grow(); *fresh = 1; }
+    if ((_reg_kinds.used + 1) * 2 > _reg_kinds.cap) {
+        _kinds_grow();
         *fresh = 1;
-        return &_reg_kinds.rows[i];
     }
+    uint64_t mask = _reg_kinds.cap - 1;
+    uint64_t i = _kinds_home(addr);
+    while (_reg_kinds.rows[i].addr) {
+        if (_reg_kinds.rows[i].addr == addr) return &_reg_kinds.rows[i];
+        i = (i + 1) & mask;
+    }
+    /* A new row describes nothing yet, whatever a deleted row left here. */
+    _reg_kinds.rows[i].addr = addr;
+    _reg_kinds.rows[i].kinds = NULL;
+    _reg_kinds.rows[i].owned = 0;
+    _reg_kinds.rows[i].boxes = NULL;
+    _reg_kinds.rows[i].repr_fn = NULL;
+    _reg_kinds.used++;
+    *fresh = 1;
+    return &_reg_kinds.rows[i];
 }
 
 const char *mojo_list_get_kinds(MojoList *l)
@@ -2734,21 +2718,11 @@ static MojoList *_gen_drain(void *h, MojoGenSig *sg)
         switch (sg->vkind) {
         case 1: mojo_list_append_int(out, ((bool (*)(void *))sg->value)(h) ? 1 : 0); break;
         case 2: mojo_list_append_double(out, ((double (*)(void *))sg->value)(h)); break;
-        case 3:
-        case 5: {   /* a str-typed (3) or a dynamic word (5): the element is a WORD,
-                     * and a word is a string OR a registered bytes object OR an int —
-                     * `glob._iglob` with a BYTES pattern yields `MojoBytes *` words
-                     * through this very path (its `os.path.join` argument was bytes),
-                     * which a `char *`-cast append stored under the str kind: the
-                     * slot's C-string read then walked the bytes struct's own header
-                     * and `sorted(glob.glob(b'*.py', ...))` printed an address.
-                     * Classify each element with the same discriminator the append
-                     * side uses, so the slot's kind says what it holds: 's' bytes,
-                     * 'p' str, 'i' anything else (a boxed tagged word keeps its box
-                     * kind — the old vkind-5 arm lost that, reading a box's is_str
-                     * false and storing the box pointer as an int). */
+        case 3: mojo_list_append_str(out, ((char *(*)(void *))sg->value)(h)); break;
+        case 5: {   /* a dynamic word: a string pointer or an integer, told apart now */
             int64_t w = ((int64_t (*)(void *))sg->value)(h);
-            mojo_list_append_word(out, w);
+            if (mojo_boxed_is_str(w)) mojo_list_append_str(out, (char *)(intptr_t)w);
+            else mojo_list_append_int(out, w);
             break; }
         default: mojo_list_append_int(out, ((int64_t (*)(void *))sg->value)(h)); break;
         }
@@ -2756,16 +2730,11 @@ static MojoList *_gen_drain(void *h, MojoGenSig *sg)
     int pending = mojo_exc_pending_get();
     ((void (*)(void *))sg->destroy)(h);
     if (pending) { mojo_exc_pending_set(0); mojo_raise(); }
-    if (sg->vkind == 5 || sg->vkind == 3) {
-        /* Uniform from the FIRST element's classification, the way the vkind-5
-         * arm did for str/int — extended to the bytes word that arm used to
-         * call an int. */
-        if (out->len > 0) {
-            if (mojo_is_registered_bytes(out->data[0])) mojo_list_set_kinds_uniform(out, MOJO_KIND_BYTES);
-            else if (mojo_boxed_is_str(out->data[0])) mojo_list_set_kinds_uniform(out, 'p');
-            else mojo_list_set_kinds_uniform(out, 'i');
-        }
+    if (sg->vkind == 5) {
+        if (out->len > 0 && mojo_boxed_is_str(out->data[0])) mojo_list_set_kinds_uniform(out, 'p');
+        else mojo_list_set_kinds_uniform(out, 'i');
     }
+    else if (sg->vkind == 3) mojo_list_set_kinds_uniform(out, 'p');
     else if (sg->vkind == 0) mojo_list_set_kinds_uniform(out, 'i');
     else if (sg->vkind == 2) mojo_list_set_kinds_uniform(out, 'd');
     else if (sg->vkind == 4) mojo_list_set_kinds_uniform(out, 'l');
@@ -2784,20 +2753,9 @@ int64_t mojo_gen_default_word(void *start, int64_t idx)
  * fire_coro_gen.c) drive it, found by name so this file does not depend on them. */
 #include <dlfcn.h>
 static void *_a3_sym(const char *n) { return dlsym(RTLD_DEFAULT, n); }
-/* A plain resume sends Python's None, which an int-valued generator's
- * `x = yield` receives as the shared None BOX -- `mojo_box_none()` -- not a
- * raw 0. Since fire_coro_gen.c's `__mojo_gen_resume` refuses a non-None send
- * on a just-started generator (a raw 0 is the integer 0, and real Python
- * refuses `g.send(0)` on a fresh generator with
- * "can't send non-None value to a just-started generator"), a drain that
- * primed with 0 died at its first resume the moment any A3 generator
- * escaped a function and came back through `mojo_iter_boxed_list` (the
- * `sorted(glob.iglob(..., root_dir=...))` shape, bugs/SUITE_globcompiled).
- * `mojo_box_none` is defined in THIS translation unit, so it is called
- * directly rather than looked up by name. */
 static bool _a3_resume(void *h) {
     int64_t (*f)(int64_t, int64_t) = (int64_t (*)(int64_t, int64_t))_a3_sym("__mojo_gen_resume");
-    return f && f((int64_t)(intptr_t)h, mojo_box_none()) != 0;
+    return f && f((int64_t)(intptr_t)h, 0) != 0;
 }
 static int64_t _a3_value(void *h) {
     int64_t (*f)(int64_t) = (int64_t (*)(int64_t))_a3_sym("__mojo_gen_value");
@@ -6446,16 +6404,6 @@ int mojo_truthy_cstr(char *s) {
        it as a string would dereference address 0x1 (etc.) and SIGSEGV.
        Guards against BUG-2026-045's "bool-as-char*" JIT crash. */
     if ((int64_t)(intptr_t)s < 65536) return s != NULL;
-    /* A BYTES WORD in a `char *` slot: an unannotated parameter defaults to
-       `char *` and an untyped caller hands a registered `MojoBytes *` through
-       that slot, so `if not dirname:` on `dirname=b'ROOT'` would read the
-       struct's first byte (the low byte of its `data` pointer — random)
-       instead of the length: `glob.glob(b'*.py', root_dir=b'...')` took its
-       branches on a coin flip (bugs/SUITE_globcompiled). Its truth is its
-       length, and a real C string is never a registered bytes object, so the
-       probe changes no str's answer. */
-    int64_t w = (int64_t)(intptr_t)s;
-    if (mojo_is_registered_bytes(w)) return mojo_bytes_truthy((MojoBytes *)(intptr_t)w);
     return s[0] != '\0';
 }
 
@@ -6554,13 +6502,8 @@ char *mojo_char_at_str_cp(char *s, int64_t i) {
     } else {
         char_len = 1;
     }
-    /* ASCII fast path: return an immortal 1-char string (no allocation),
-     * preserving the "character is an immortal table entry" invariant and
-     * avoiding per-character malloc in tight iteration. */
-    if (char_len == 1) {
-        return mojo_char_to_str((char)s[byte_off]);
-    }
-    /* Multi-byte UTF-8: build a heap string. */
+    /* Use a cached approach similar to mojo_char_to_str but we need to return a string
+     * that contains the full multi-byte char. For now, build it. */
     char *out = malloc((size_t)char_len + 1);
     memcpy(out, s + byte_off, (size_t)char_len);
     out[char_len] = '\0';
@@ -7106,7 +7049,6 @@ void mojo_dict_init(MojoDict *d)
     d->used     = 0;
     d->next_seq = 0;
     d->val_repr = NULL;
-    d->frozen   = 0;
     d->slots    = d->inl;       /* the first table lives inside the struct */
     memset(d->inl, 0, sizeof d->inl);
     _pr_add(&_reg_dict, (uint64_t)(uintptr_t)d);
@@ -7124,27 +7066,6 @@ MojoDict *mojo_dict_new(void)
     MojoDict *d = malloc(sizeof(MojoDict));
     mojo_dict_init(d);
     return d;
-}
-
-int mojo_is_frozen_dict(MojoDict *d) { return d ? d->frozen : 0; }
-
-MojoDict *mojo_frozendict_new(void)
-{
-    MojoDict *d = mojo_dict_new();
-    if (d) d->frozen = 1;
-    return d;
-}
-
-MojoDict *mojo_frozendict_from_dict(MojoDict *src)
-{
-    MojoDict *out = mojo_frozendict_new();
-    if (src) {
-        int was = out->frozen;
-        out->frozen = 0; /* allow mojo_dict_update to populate */
-        mojo_dict_update(out, src);
-        out->frozen = was;
-    }
-    return out;
 }
 
 void mojo_dict_free(MojoDict *d)
@@ -7278,10 +7199,6 @@ static void _dict_set_ik(MojoDict *d, int64_t k, int64_t val, int64_t kind);
 static void _dict_set_raw_seq_kind_k(MojoDict *d, char *key, int64_t val,
                                      int64_t seq, int64_t kind, int64_t keykind)
 {
-    if (d && d->frozen) {
-        mojo_raise_type_error((char *)"'frozendict' object does not support item assignment");
-        return;
-    }
     if (d->used * 2 >= d->cap) _dict_grow(d);
     if (keykind == 2) keykind = 0;   /* a re-insert of an integer slot: the string domain, re-normalised below */
     _DictSlot *sl = _dict_find_k(d, key, keykind);
@@ -7603,21 +7520,6 @@ char *mojo_dict_get_str(MojoDict *d, char *key)
     return sl ? (char *)(uintptr_t)sl->val : NULL;
 }
 
-static int64_t _dict_slot_boxed(_DictSlot *sl)
-{
-    if (!sl) return 0;
-    switch (sl->kind) {
-        case 1:
-            return mojo_box_from_double(mojo_double_from_bits(sl->val));
-        case 3:
-            return mojo_box_from_bool(sl->val);
-        case 4:
-            return mojo_box_none();
-        default:
-            return sl->val;
-    }
-}
-
 int64_t mojo_dict_slot_kind(MojoDict *d, char *key)
 {
     _DictSlot *sl = _dict_lookup(d, key);
@@ -7629,12 +7531,6 @@ char *mojo_dict_repr_slot(MojoDict *d, char *key)
     _DictSlot *sl = _dict_lookup(d, key);
     if (!sl) return mojo_str_from_int(0);
     return mojo_dict_slot_repr(sl->val, sl->kind);
-}
-
-int64_t mojo_dict_slot_boxed(MojoDict *d, char *key)
-{
-    _DictSlot *sl = _dict_lookup(d, key);
-    return _dict_slot_boxed(sl);
 }
 
 int mojo_dict_contains(MojoDict *d, char *key)
@@ -7665,23 +7561,6 @@ double mojo_dict_get_none_key_double(MojoDict *d)
     double v = 0.0;
     if (sl) memcpy(&v, &sl->val, sizeof(v));
     return v;
-}
-int64_t mojo_dict_slot_kind_none(MojoDict *d)
-{
-    _DictSlot *sl = _dict_lookup_k(d, "", 3);
-    return sl ? sl->kind : -1;
-}
-char *mojo_dict_repr_slot_none(MojoDict *d)
-{
-    _DictSlot *sl = _dict_lookup_k(d, "", 3);
-    if (!sl) return mojo_str_from_int(0);
-    return mojo_dict_slot_repr(sl->val, sl->kind);
-}
-
-int64_t mojo_dict_slot_boxed_none(MojoDict *d)
-{
-    _DictSlot *sl = _dict_lookup_k(d, "", 3);
-    return _dict_slot_boxed(sl);
 }
 
 /* ── bytes-keyed dict access ─────────────────────────────────────────────
@@ -7760,25 +7639,6 @@ double mojo_dict_get_bytes_double(MojoDict *d, MojoBytes *key)
     double v;
     memcpy(&v, &sl->val, sizeof(v));
     return v;
-}
-
-int64_t mojo_dict_slot_kind_bytes(MojoDict *d, MojoBytes *key)
-{
-    _DictSlot *sl = _dict_lookup_bytes(d, key);
-    return sl ? sl->kind : -1;
-}
-
-char *mojo_dict_repr_slot_bytes(MojoDict *d, MojoBytes *key)
-{
-    _DictSlot *sl = _dict_lookup_bytes(d, key);
-    if (!sl) return mojo_str_from_int(0);
-    return mojo_dict_slot_repr(sl->val, sl->kind);
-}
-
-int64_t mojo_dict_slot_boxed_bytes(MojoDict *d, MojoBytes *key)
-{
-    _DictSlot *sl = _dict_lookup_bytes(d, key);
-    return _dict_slot_boxed(sl);
 }
 
 int mojo_dict_contains_bytes(MojoDict *d, MojoBytes *key)
@@ -9791,14 +9651,8 @@ int mojo_isinstance_p(int64_t obj, int type_id) {
             && !mojo_is_tuple((MojoList *)(intptr_t)obj);
     if (type_id == 7)
         return mojo_is_registered_set(obj);
-    if (type_id == 6) {  /* dict: mutable mapping, NOT a frozendict (Python 3.15). */
-        if (!mojo_is_registered_dict(obj)) return 0;
-        return !mojo_is_frozen_dict((MojoDict *)(intptr_t)obj);
-    }
-    if (type_id == 10) { /* frozendict (Python 3.15): immutable mapping. */
-        if (!mojo_is_registered_dict(obj)) return 0;
-        return mojo_is_frozen_dict((MojoDict *)(intptr_t)obj);
-    }
+    if (type_id == 6)
+        return mojo_is_registered_dict(obj);
     if (type_id == 8) {  /* tuple: a registered MojoList carrying the tuple marker */
         if (!mojo_is_registered_list(obj)) return 0;
         return mojo_is_tuple((MojoList *)(intptr_t)obj);
@@ -10028,49 +9882,6 @@ char *mojo_repr_int(int64_t obj) {
 typedef struct MojoClassRec MojoClassRec;
 static MojoClassRec *_class_find(int64_t tag);
 
-/* CPython's `ascii()` applied to text that is already a `repr()` rendering:
- * every non-ASCII code point becomes `\xNN` / `\uNNNN` / `\UNNNNNNNN`, and
- * every ASCII byte (including the repr's own quotes and control escapes) is
- * copied through untouched. That is exactly the difference between
- * `repr(s)` and `ascii(s)` for a str, and it is also what CPython's ascii()
- * does to the repr of any other object -- a custom `__repr__` that returns
- * `Café()` ascii-renders as `Caf\xe9()`.
- *
- * Why a separate pass instead of escaping inside `mojo_repr_str`: repr's
- * non-ASCII escaping is a *display* choice that repr currently leaves out to
- * keep debug dumps readable (see that function's comment), while `!a` needs
- * it; passing the rendered text through here keeps the two spellings from
- * duplicating the UTF-8 decode + escape logic. The escape spelling and the
- * decoder are the codec machinery's own (`mojo_codepoint_escape` /
- * `mojo_utf8_next`), so `!a` and encode('ascii') cannot disagree about
- * whether U+03BB is `\u03bb` or `\xce\xbb`.
- *
- * Always returns a freshly allocated string: the ascii form is usually the
- * same length as its input but can be longer (`\U0001f600` for one
- * code point), so a caller may free it like any other runtime string. */
-char *mojo_ascii_escape(char *s) {
-    if (!s) s = "";
-    const unsigned char *p = (const unsigned char *)s;
-    int64_t n = (int64_t)strlen(s);
-    /* Worst case is one code point (at most 4 source bytes) rendered as
-     * `\UNNNNNNNN` (10 chars), so 4 bytes never produce more than 10 output
-     * chars and `n * 10 + 1` is a safe bound. */
-    char *out = malloc((size_t)n * 10 + 1);
-    size_t o = 0;
-    for (int64_t i = 0; i < n; ) {
-        unsigned c = p[i];
-        if (c < 0x80) { out[o++] = (char)c; i++; continue; }
-        uint32_t cp = mojo_utf8_next(p, n, &i);
-        char esc[16];
-        mojo_codepoint_escape(cp, esc, sizeof esc);
-        size_t el = strlen(esc);
-        memcpy(out + o, esc, el);
-        o += el;
-    }
-    out[o] = '\0';
-    return out;
-}
-
 char *mojo_repr_str(char *s) {
     /* Python repr() of a string is quoted: repr("hi") == "'hi'", with
      * control characters shown as escapes (repr("a\nb") == "'a\\nb'") rather
@@ -10091,16 +9902,10 @@ char *mojo_repr_str(char *s) {
      * own repr() once self-hosted-compiled and diffed against the
      * interpreted stage1 dump. */
     if (!s) s = "";
-    /* Check if this is actually an instance of a run-time class. Guard the
-     * 8-byte magic read with _mojo_tagged_addr_ok: a plain string (especially
-     * a short malloc'd one) is a valid char* but may be smaller than 8 bytes
-     * or otherwise unreadable as an int64_t, and reading past it is a real
-     * heap-buffer-overflow (caught by ASan in the container-key repr path). An
-     * instobj is a heap struct large enough to hold its header, so it always
-     * passes the check. */
+    /* Check if this is actually an instance of a run-time class. */
     {
         int64_t addr = (int64_t)(intptr_t)s;
-        if (_mojo_tagged_addr_ok(addr)) {
+        if (addr > 65536) {
             int64_t magic = *(int64_t *)(intptr_t)addr;
             if (magic == MOJO_INSTOBJ_MAGIC) {
                 int64_t tag = *(int64_t *)(intptr_t)(addr + 8);
@@ -10741,10 +10546,8 @@ char *mojo_repr_obj(int64_t addr) {
      * printing a decimal number indistinguishable from real data. */
     static char buffer[256];
     if (!addr) return "None";
-    if (_mojo_tagged_addr_ok(addr)) {
-        /* Check if it's an instance of a run-time class. Guard the read as in
-         * mojo_repr_str: a short/unreadable pointer-shaped word is not an
-         * instobj and must not be dereferenced as an 8-byte magic. */
+    if (addr > 65536) {
+        /* Check if it's an instance of a run-time class. */
         int64_t magic = *(int64_t *)(intptr_t)addr;
         if (magic == MOJO_INSTOBJ_MAGIC) {
             int64_t tag = *(int64_t *)(intptr_t)(addr + 8);
@@ -11378,92 +11181,10 @@ int64_t mojo_hash_str(char *s) {
     return (int64_t)_str_hash(s);
 }
 
-static int64_t _mojo_hash_combine_pair(int64_t h, int64_t kh, int64_t vh) {
-    uint64_t ph = (uint64_t)kh;
-    uint64_t x = (uint64_t)vh;
-    ph ^= x + 0x9e3779b97f4a7c15ULL + (ph << 6) + (ph >> 2);
-    return h + (int64_t)ph;
-}
-
-static int64_t _mojo_hash_slot_word(int64_t v, int64_t kind) {
-    switch (kind) {
-        case 1: { /* double bits -> hash as float-like */
-            double dv; memcpy(&dv, &v, sizeof(dv));
-            /* normalize -0.0 */
-            if (dv == 0.0) dv = 0.0;
-            /* if integral, hash like int where reasonable */
-            if (dv == (double)(int64_t)dv && dv >= -9007199254740991.0 && dv <= 9007199254740991.0)
-                return (int64_t)dv;
-            uint64_t bits; memcpy(&bits, &dv, sizeof(bits));
-            return (int64_t)bits;
-        }
-        case 2: return mojo_hash_str((char *)(intptr_t)v);
-        case 3: return v ? 1 : 0;
-        case 4: return 0xFCA86420LL; /* arbitrary stable None-ish hash */
-        case 0:
-            if (v == 0) return 0;
-            if (v > 65536) {
-                if (mojo_is_registered_dict(v)) {
-                    MojoDict *fd = (MojoDict *)(intptr_t)v;
-                    if (fd->frozen) return mojo_frozendict_hash(fd);
-                    mojo_raise_type_error((char *)"unhashable type: 'dict'");
-                    return 0;
-                }
-                if (mojo_is_registered_list(v) || mojo_is_registered_set(v)) {
-                    mojo_raise_type_error(mojo_is_registered_list(v)
-                        ? (char *)"unhashable type: 'list'"
-                        : (char *)"unhashable type: 'set'");
-                    return 0;
-                }
-                if (mojo_read_type_tag_safe(v) != 0) return v;
-                return mojo_hash_str((char *)(intptr_t)v);
-            }
-            return v;
-        default:
-            if (v > 65536) {
-                if (mojo_is_registered_dict(v)) {
-                    MojoDict *fd = (MojoDict *)(intptr_t)v;
-                    if (fd->frozen) return mojo_frozendict_hash(fd);
-                    mojo_raise_type_error((char *)"unhashable type: 'dict'");
-                    return 0;
-                }
-            }
-            return v;
-    }
-}
-
-int64_t mojo_frozendict_hash(MojoDict *d) {
-    if (!d) return 0;
-    int64_t h = 0x345678;
-    for (int64_t i = 0; i < d->cap; i++) {
-        _DictSlot *sl = &d->slots[i];
-        if (!sl->key) continue;
-        int64_t kh;
-        if (sl->keykind == 2) kh = sl->ikey;
-        else if (sl->keykind == 3) kh = 0xFCA86420LL;
-        else kh = mojo_hash_str(mojo_dict_slot_key(d, i));
-        int64_t vh = _mojo_hash_slot_word(sl->val, sl->kind);
-        h = _mojo_hash_combine_pair(h, kh, vh);
-    }
-    /* mix, avoid -1 sentinel used by some hash impls */
-    uint64_t x = (uint64_t)h;
-    x ^= x >> 33; x *= 0xff51afd7ed558ccdULL;
-    x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ULL;
-    x ^= x >> 33;
-    if (x == (uint64_t)-1) x = (uint64_t)-2;
-    return (int64_t)x;
-}
-
 int64_t mojo_hash(int64_t val) {
     if (val == 0) return 0;
     if (val > 65536) {
-        if (mojo_is_registered_dict(val)) {
-            MojoDict *d = (MojoDict *)(intptr_t)val;
-            if (d->frozen) return mojo_frozendict_hash(d);
-            mojo_raise_type_error((char *)"unhashable type: 'dict'");
-            return 0;
-        }
-        if (mojo_is_registered_list(val))
+        if (mojo_is_registered_list(val) || mojo_is_registered_dict(val))
             return val;
         if (mojo_read_type_tag_safe(val) != 0)
             return val;
@@ -12159,9 +11880,11 @@ char *mojo_dict_slot_repr(int64_t v, int64_t kind)
              * stores, and only this tag tells them apart. */
             return strdup("None");
         default:
-            /* kind 0: an integer value. Always render as the integer; callers
-             * use this to repr a slot by its recorded kind. */
-            return mojo_str_from_int(v);
+            /* kind 0. The word 0 is the INTEGER 0, which the generic reader
+             * cannot say (its `val == 0` arm answers "None", right for the
+             * NULL pointer it was written for) — so it is answered here and
+             * a non-zero kind-0 word is left to that reader. */
+            return v == 0 ? strdup("0") : NULL;
     }
 }
 
@@ -12171,23 +11894,7 @@ char *mojo_dict_slot_repr(int64_t v, int64_t kind)
  * and the dict-level `val_repr` (a struct shim) keeps precedence over all of
  * them. Indices are `_DictSlot.kind`; 5/6 have no thunk and are NULL, which
  * `mojo_list_repr_elem`'s contract already treats as "this says nothing". */
-static char *_dict_val_repr_int(int64_t v)
-{
-    /* Kind 0 is also how a CONTAINER is stored (`mojo_dict_set_int` stores the
-     * handle as a plain int64_t word), so a non-zero word under this thunk may
-     * be a POINTER and only the caller's dispatch can render it. Answering
-     * `mojo_str_from_int` for one printed the container's ADDRESS as the value:
-     * `print(d.items())` on `{'c': [1, 2]}` gave `[('c', 4374364288)]` where
-     * CPython gives `[('c', [1, 2])]`, and `print(d.values())` gave the same
-     * decimal. Decline exactly those words — the registered-container probe,
-     * NOT a range test, so a large INTEGER stored under kind 0 (2^40) still
-     * renders as itself rather than being read as a pointer. */
-    if (v > 65536 && (mojo_is_registered_list(v) || mojo_is_registered_dict(v)
-                      || mojo_is_registered_set(v)
-                      || mojo_is_registered_bytes(v)))
-        return NULL;
-    return mojo_dict_slot_repr(v, 0);
-}
+static char *_dict_val_repr_int(int64_t v)    { return mojo_dict_slot_repr(v, 0); }
 static char *_dict_val_repr_double(int64_t v) { return mojo_dict_slot_repr(v, 1); }
 static char *_dict_val_repr_str(int64_t v)    { return mojo_dict_slot_repr(v, 2); }
 static char *_dict_val_repr_bool(int64_t v)   { return mojo_dict_slot_repr(v, 3); }
@@ -12497,8 +12204,6 @@ static void _dict_remove_slot(MojoDict *d, _DictSlot *sl) {
  * absent-box convention every mojo_dict_get_* already uses. */
 static int64_t _dict_pop_k(MojoDict *d, char *key, int64_t keykind, int64_t dflt) {
     if (!d) return dflt;
-    if (d->frozen)
-        mojo_raise_type_error((char *)"'frozendict' object does not support item deletion");
     _DictSlot *sl = _dict_lookup_k(d, key, keykind);
     if (!sl) return dflt;
     int64_t val = sl->val;
@@ -12537,8 +12242,6 @@ char *mojo_dict_pop_str(MojoDict *d, char *key, char *dflt) {
 
 double mojo_dict_pop_double(MojoDict *d, char *key, double dflt) {
     if (!d) return dflt;
-    if (d->frozen)
-        mojo_raise_type_error((char *)"'frozendict' object does not support item deletion");
     _DictSlot *sl = _dict_lookup_k(d, key, 0 /* str key */);
     if (!sl) return dflt;
     double v;
@@ -12550,48 +12253,15 @@ double mojo_dict_pop_double(MojoDict *d, char *key, double dflt) {
 MojoDict *mojo_dict_copy(MojoDict *d) {
     MojoDict *out = mojo_dict_new();
     if (d) mojo_dict_update(out, d);
-    if (d && d->frozen) out->frozen = 1;
     return out;
-}
-
-/* frozendict.copy() returns a shallow copy as a frozendict in CPython. */
-MojoDict *mojo_frozendict_copy(MojoDict *d) {
-    return mojo_frozendict_from_dict(d);
-}
-
-MojoDict *mojo_frozendict_from_pairs(MojoList *pairs) {
-    MojoDict *out = mojo_frozendict_new();
-    if (pairs) {
-        out->frozen = 0;
-        MojoDict *tmp = mojo_dict_from_pairs(pairs);
-        if (tmp) { mojo_dict_update(out, tmp); mojo_dict_free(tmp); }
-        out->frozen = 1;
-    }
-    return out;
-}
-
-void mojo_dict_set_frozen(MojoDict *d, int frozen) {
-    if (d) d->frozen = frozen ? 1 : 0;
-}
-
-void mojo_frozendict_check_no_mut_method(MojoDict *d, const char *method) {
-    if (d && d->frozen) {
-        char msg[256];
-        snprintf(msg, sizeof msg, "'frozendict' object has no attribute '%s'",
-                 method ? method : "?");
-        mojo_raise_attribute_error(msg);
-    }
 }
 
 /* `a | b` dict union (Python/Mojo Dict.__or__): a new dict with a's
  * entries overridden by b's on key collision. `b`'s values win, matching
  * mojo_dict_update's "src overwrites dst" semantics. */
 MojoDict *mojo_dict_union(MojoDict *a, MojoDict *b) {
-    int frozen = (a && a->frozen) ? 1 : 0;
-    MojoDict *out = mojo_dict_new();
-    if (a) mojo_dict_update(out, a);
+    MojoDict *out = mojo_dict_copy(a);
     if (b) mojo_dict_update(out, b);
-    if (frozen) out->frozen = 1;
     return out;
 }
 
@@ -12606,98 +12276,6 @@ MojoDict *mojo_dict_from_pairs(MojoList *pairs) {
         mojo_dict_set_int(out, key, val);
     }
     return out;
-}
-
-static void _dict_fromkeys_set(MojoDict *out, MojoList *keys, int64_t val, int64_t vkind) {
-    if (!out || !keys) return;
-    const char *kinds = mojo_list_get_kinds(keys);
-    for (int64_t i = 0; i < keys->len; i++) {
-        char kk = (kinds && kinds[i]) ? kinds[i] : 0;
-        int64_t kraw = keys->data[i];
-        /* Honor per-slot kind metadata when present. Without metadata, keep
-         * the legacy string-key behavior (mojo_list_get_str) so existing
-         * dict/frozendict.fromkeys over string-key lists is unchanged. */
-        if (kk == MOJO_KIND_INT || kk == MOJO_KIND_BOOL) {
-            int64_t ival = kraw;
-            if (vkind == 1) { _dict_set_ik(out, ival, val, 1); }
-            else if (vkind == 2) { _dict_set_ik(out, ival, (int64_t)(intptr_t)val, 2); }
-            else if (vkind == 3) { _dict_set_ik(out, ival, val, 3); }
-            else if (vkind == 4) { _dict_set_ik(out, ival, 0, 4); }
-            else { _dict_set_ik(out, ival, val, 0); }
-            continue;
-        }
-        if (kk == MOJO_KIND_DOUBLE) {
-            double dvk; memcpy(&dvk, &kraw, sizeof(dvk));
-            if (dvk >= -9223372036854775808.0 && dvk < 9223372036854775808.0
-                    && (double)(int64_t)dvk == dvk) {
-                int64_t ival = (int64_t)dvk;
-                if (vkind == 1) { _dict_set_ik(out, ival, val, 1); }
-                else if (vkind == 2) { _dict_set_ik(out, ival, (int64_t)(intptr_t)val, 2); }
-                else if (vkind == 3) { _dict_set_ik(out, ival, val, 3); }
-                else if (vkind == 4) { _dict_set_ik(out, ival, 0, 4); }
-                else { _dict_set_ik(out, ival, val, 0); }
-                continue;
-            }
-            /* non-integral float key: rare in fromkeys; fall through to string */
-        }
-        if (kk == MOJO_KIND_BYTES) {
-            MojoBytes *bk = (MojoBytes *)(intptr_t)kraw;
-            if (vkind == 1) { double dv; memcpy(&dv, &val, sizeof(dv)); mojo_dict_set_bytes_double(out, bk, dv); }
-            else if (vkind == 2) { mojo_dict_set_bytes_str(out, bk, (char *)(intptr_t)val); }
-            else if (vkind == 3) { mojo_dict_set_bytes_bool(out, bk, (int)val); }
-            else if (vkind == 4) { mojo_dict_set_bytes_none(out, bk); }
-            else { mojo_dict_set_bytes_int(out, bk, val); }
-            continue;
-        }
-        if (kk == MOJO_KIND_NONE) {
-            if (vkind == 1) { double dv; memcpy(&dv, &val, sizeof(dv)); mojo_dict_set_none_key_double(out, dv); }
-            else if (vkind == 2) { mojo_dict_set_none_key_str(out, (char *)(intptr_t)val); }
-            else if (vkind == 3) { mojo_dict_set_none_key_bool(out, (int)val); }
-            else if (vkind == 4) { mojo_dict_set_none_key_none(out); }
-            else { mojo_dict_set_none_key_int(out, val); }
-            continue;
-        }
-        /* String keys (MOJO_KIND_STR='p', OBJ='o') or no kind metadata:
-         * preserve legacy behavior using mojo_list_get_str. */
-        char *key = mojo_list_get_str(keys, i);
-        if (!key) key = (char *)"";
-        if (vkind == 1) {
-            double dv; memcpy(&dv, &val, sizeof(dv));
-            mojo_dict_set_double(out, key, dv);
-        } else if (vkind == 2) {
-            mojo_dict_set_str(out, key, (char *)(intptr_t)val);
-        } else if (vkind == 3) {
-            mojo_dict_set_bool(out, key, (int)val);
-        } else if (vkind == 4) {
-            mojo_dict_set_none(out, key);
-        } else {
-            mojo_dict_set_int(out, key, val);
-        }
-    }
-}
-
-MojoDict *mojo_dict_fromkeys(MojoList *keys, int64_t val, int64_t vkind, char *val_str) {
-    (void)val_str;
-    MojoDict *out = mojo_dict_new();
-    _dict_fromkeys_set(out, keys, val, vkind);
-    return out;
-}
-
-MojoDict *mojo_frozendict_fromkeys(MojoList *keys, int64_t val, int64_t vkind, char *val_str) {
-    (void)val_str;
-    MojoDict *out = mojo_frozendict_new();
-    if (out) {
-        out->frozen = 0;
-        _dict_fromkeys_set(out, keys, val, vkind);
-        out->frozen = 1;
-    }
-    return out;
-}
-
-MojoDict *mojo_dict_fromkeys_on(MojoDict *self, MojoList *keys, int64_t val, int64_t vkind, char *val_str) {
-    if (self && self->frozen)
-        return mojo_frozendict_fromkeys(keys, val, vkind, val_str);
-    return mojo_dict_fromkeys(keys, val, vkind, val_str);
 }
 
 MojoList *mojo_list_copy(MojoList *l) {
@@ -14531,37 +14109,6 @@ char *mojo_cstr_or_int_str(int64_t v) {
     return _int_str_transient(v);
 }
 
-/* `mojo_cstr_or_int_str`'s VALUE sibling: the word is being handed to a
-   `char *` PARAMETER of a callee that dispatches on the word's kind (an
-   os.path.* helper, a truthiness test, `isinstance`, `glob`), not printed.
-   There a str is the same borrowed address and a registered BYTES object is
-   its own WORD — spelling it here would hand the callee a quoted repr string
-   where it wants the value: `glob.glob(b'*.py', root_dir=b'...')` passed its
-   pattern through the display spelling, so `iglob` received the 7-character
-   C string `b'*.py'`, `has_magic` searched the quoted text, and `fnmatch`
-   matched the literal `b'` prefix against the tree — [] instead of
-   [b'a.py'] (bugs/SUITE_globcompiled). A box of a str or bytes passes the
-   word it holds through the same way; any other box and a genuine integer
-   keep `mojo_cstr_or_int_str`'s answer (the integer's decimal is the one
-   spelling that is not a wild pointer). Ownership: the str/bytes arms return
-   the input address borrowed, the rest a fresh block — and the codegen's
-   value arm deliberately does NOT release the result, because the callee may
-   store it (see the call-site comment in emit_infra.py). */
-char *mojo_word_cstr_value(int64_t v) {
-    if (_box_spelled_by_kind(v)) {
-        MojoBox *bx = (MojoBox *)(intptr_t)v;
-        if (bx->kind == 'p' || bx->kind == 's')
-            return (char *)(intptr_t)bx->bits;
-        if (bx->kind == 'd') return mojo_repr_float(mojo_double_from_bits(bx->bits));
-        return mojo_repr_boxed(v);
-    }
-    if (mojo_boxed_is_str(v) || mojo_is_registered_bytes(v))
-        return (char *)(intptr_t)v;
-    if (mojo_is_re_match(v)) return mojo_re_match_repr(v);
-    if (mojo_is_registered_list(v)) return _container_key_str(v);
-    return _int_str_transient(v);
-}
-
 /* `mojo_cstr_or_int_str` for the caller that already KNOWS the word is an
    integer, so the question does not have to be asked at all.
 
@@ -14913,10 +14460,6 @@ static int _kw_is_container_key(int64_t kw)
 static void _dict_set_ik(MojoDict *d, int64_t k, int64_t val, int64_t kind)
 {
     if (!d) return;
-    if (d->frozen) {
-        mojo_raise_type_error((char *)"'frozendict' object does not support item assignment");
-        return;
-    }
     if (d->used * 2 >= d->cap) _dict_grow(d);
     _DictSlot *sl = _dict_find_ik(d, k);
     if (!sl->key) {
@@ -14980,26 +14523,6 @@ int64_t mojo_dict_get_int_kw(MojoDict *d, int64_t kw)
     }
     _DictSlot *sl = _dict_lookup_ik(d, kw);
     return sl ? sl->val : 0;
-}
-
-/* The BOXED read's `_kw` twin. `mojo_dict_slot_boxed` is the one dict read that
- * keeps a slot's own kind (a bool stays a boxed bool, a None stays None), so it
- * cannot be replaced by `mojo_dict_get_int_kw` — that hands back the raw word
- * and `print(d[True])` would say `1` where CPython says `True`. This is the same
- * three-arm `_kw_kind` dispatch as every other twin, with `_dict_slot_boxed`
- * (not `->val`) as the answer, so an INTEGER key reaches the same boxed value
- * the char* spelling produces and nothing is formatted to get there. */
-int64_t mojo_dict_slot_boxed_kw(MojoDict *d, int64_t kw)
-{
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { return mojo_dict_slot_boxed(d, (char *)(intptr_t)kw); }
-    if (k == _KW_CONT) {
-        int64_t v = mojo_dict_slot_boxed(d, ck);
-        mojo_dict_key_free(ck);
-        return v;
-    }
-    _DictSlot *sl = _dict_lookup_ik(d, kw);
-    return _dict_slot_boxed(sl);
 }
 
 double mojo_dict_get_double_kw(MojoDict *d, int64_t kw)
@@ -15244,7 +14767,6 @@ void *mojo_range(int64_t start, int64_t stop) {
     MojoList *l = mojo_list_new();
     for (int64_t i = start; i < stop; i++)
         mojo_list_append_int(l, i);
-    mojo_list_set_kinds_uniform(l, MOJO_KIND_INT);
     return l;
 }
 
@@ -15257,7 +14779,6 @@ void *mojo_range3(int64_t start, int64_t stop, int64_t step) {
         for (int64_t i = start; i > stop; i += step)
             mojo_list_append_int(l, i);
     }
-    mojo_list_set_kinds_uniform(l, MOJO_KIND_INT);
     return l;
 }
 
@@ -15333,33 +14854,14 @@ void *mojo_sorted(void *iterable) {
      * list whose elements are char* — see mojo_list_sorted_str below for why
      * the codegen dispatches around this one. */
     /* A list that records its OWN slot kinds says when every element is a string
-     * (a drained generator, `os.listdir`-style results): sort those as strings.
-     * The BYTES twin is the same fact for a bytes-typed generator: `sorted()`
-     * over a list whose slots are all 's' must order as bytes (memcmp then
-     * length — Python's bytes ordering), not by the struct pointer's value.
-     * `glob.glob(b'*.py', ...)` drained its generator to registered-bytes words
-     * (bugs/SUITE_globcompiled); with two or more matches the generic int64
-     * payload sort below would order them by ADDRESS, not lexically. */
+     * (a drained generator, `os.listdir`-style results): sort those as strings. */
     if (src && src->len > 0) {
-        int all_str = 1, all_bytes = 1;
-        for (int64_t i = 0; i < src->len && (all_str || all_bytes); i++) {
-            char k = mojo_list_slot_kind(src, i);
-            if (k != 'p') all_str = 0;
-            if (k != MOJO_KIND_BYTES) all_bytes = 0;
-        }
+        int all_str = 1;
+        for (int64_t i = 0; i < src->len && all_str; i++)
+            if (mojo_list_slot_kind(src, i) != 'p') all_str = 0;
         if (all_str) {
             MojoList *sd = mojo_list_sorted_str(src);
             mojo_list_set_kinds_uniform(sd, 'p');
-            return (void *)sd;
-        }
-        if (all_bytes) {
-            MojoList *sd = mojo_list_copy(src);
-            /* Sorting PERMUTES the slots, so the per-slot kinds copied along no
-             * longer describe them; drop them, exactly as mojo_list_sorted_str
-             * does, then re-record the uniform kind the elements all share. */
-            mojo_list_set_kinds(sd, NULL);
-            _mojo_permute_by(sd, NULL, MOJO_KIND_BYTES, 0);
-            mojo_list_set_kinds_uniform(sd, MOJO_KIND_BYTES);
             return (void *)sd;
         }
     }
@@ -16423,28 +15925,6 @@ int mojo_pyobject_is_container(int64_t box) {
  * calls agree within a run while differing from any small int hash —
  * test_hash asserts 42's hash != "hello"'s, never a specific value.
  * 0/None answers 0: the stub answer, no measured test hashes it. */
-/* Hasher state: FNV-1a over the 64-bit words folded in, so equal values hash
-   equal within a run and the order of the elements matters. */
-typedef struct { uint64_t state; } MojoHasher;
-
-int64_t mojo_hasher_new(void) {
-    MojoHasher *hs = (MojoHasher *)malloc(sizeof(MojoHasher));
-    hs->state = 1469598103934665603ULL;
-    return (int64_t)(intptr_t)hs;
-}
-
-void mojo_hasher_update_int(int64_t hasher, int64_t value) {
-    MojoHasher *hs = (MojoHasher *)(intptr_t)hasher;
-    if (!hs) return;
-    hs->state ^= (uint64_t)value;
-    hs->state *= 1099511628211ULL;
-}
-
-int64_t mojo_hasher_finish(int64_t hasher) {
-    MojoHasher *hs = (MojoHasher *)(intptr_t)hasher;
-    return hs ? (int64_t)(hs->state >> 1) : 0;
-}
-
 int64_t mojo_pyobject_hash(int64_t box) {
     if (box && mojo_pyobject_is_container(box)) {
         char *kind = mojo_is_registered_list(box) ? "list"
@@ -17079,7 +16559,7 @@ static int64_t _re_finditer(MojoRePat *r, int64_t subj)
     while (pos <= sb.n) {
         MojoReMatch *m = _re_search(r, sb, pos, -1, 1);
         if (!m) break;
-        mojo_list_append_word(out, (int64_t)(intptr_t)m);
+        mojo_list_append_int(out, (int64_t)(intptr_t)m);
         pos = m->caps[1] > m->caps[0] ? m->caps[1] : m->caps[1] + 1;
     }
     return (int64_t)(intptr_t)out;

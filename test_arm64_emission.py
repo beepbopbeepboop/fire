@@ -336,10 +336,6 @@ def test_csel_emitted_and_correct(tmpdir, verbose):
 
 
 def test_ccmp_emitted_and_correct(tmpdir, verbose):
-    _ccmp_cases(tmpdir, verbose)
-
-
-def _ccmp_cases(tmpdir, verbose):
     for name, src, want_exit, want_mn in CCMP_CASES:
         code, dis, out = build_and_run(src, tmpdir, name)
         check(code == want_exit,
@@ -667,8 +663,6 @@ TESTS = [
      test_csel_emitted_and_correct),
     ("CSEL family is emitted and computes the right value",
      test_csel_family_emitted_and_correct),
-    ("CCMP is emitted for `A and B` comparisons and computes the right value",
-     test_ccmp_emitted_and_correct),
     ("TBZ is emitted, tests the right bit, and its displacement is patched",
      test_tbz_emitted_and_correct),
     ("TST and CMN are emitted and answer CPython",

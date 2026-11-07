@@ -1,6 +1,6 @@
 # Plan: LinkedList reflection and struct elements
 
-Source bug: CODEGEN_linked_list_reflection_and_struct_elements
+Source bug: bugs/hard/CODEGEN_linked_list_reflection_and_struct_elements.md
 
 ## Decomposition
 

@@ -2624,15 +2624,8 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # wrong for its other slots. A list with no kinds of its own takes
         # the identical accessor it always did and yields the identical
         # word, so this costs only a set membership test at compile time.
-        # A list whose element type the codegen does not know (it came back from a call, so no `_elem_types` entry
-        # follows it) may hold doubles. The plain int read returns their raw IEEE bits (`for i in o.read(): print(i)`
-        # printed 4609434218613702656 for 1.5). The boxed read answers each slot by the kind the list recorded, and a
-        # list with no kinds row yields the same word as the plain read, so the boxed read is the safe one here.
-        _unknown_elem = (not is_tuple and _as_str(it_val) not in gen._elem_types
-                         and _as_str(list_ptr) not in gen._elem_types)
         _mkv = (it_val in getattr(gen, '_maybe_kinds_vals', ())
-                or list_ptr in getattr(gen, '_maybe_kinds_vals', ())
-                or _unknown_elem)
+                or list_ptr in getattr(gen, '_maybe_kinds_vals', ()))
         if _mkv:
             elem64 = gen._new_val('int64_t',
                                   f"mojo_list_get_boxed ({list_ptr}, {idx_t})")
@@ -2797,8 +2790,8 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
 
 
 def _gen_for_str(gen, var: str, it_val: str, body: list, shadow_name: str | None = None):
-    gen._declare_var(var, 'char *', force=(var == shadow_name)
-                     or gen.var_types.get(var, 'char *') != 'char *')
+    gen._declare_var(var, 'char', force=(var == shadow_name)
+                     or gen.var_types.get(var, 'char') != 'char')
     len64 = gen._new_temp('int64_t')
     len_t = gen._new_temp('int64_t')
     idx_t = gen._new_temp('int64_t')

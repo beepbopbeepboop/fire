@@ -1,5 +1,3 @@
-SPLIT: COMPILE_FAIL_Tools_cases_generator_analyzer-part1, COMPILE_FAIL_Tools_cases_generator_analyzer-part2, COMPILE_FAIL_Tools_cases_generator_analyzer-part3, COMPILE_FAIL_Tools_cases_generator_analyzer-part4
-
 ## Status (2026-10-29, worktree bug-compile-fail-tools-cases-generator-a — PARTIAL)
 
 Partial fix: `formal/model.py` `match_pattern_kind` now returns

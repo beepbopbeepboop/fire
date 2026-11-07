@@ -1182,13 +1182,6 @@ def all_bracketed_calls(consumer_src: str) -> dict:
 _ANNOTATION_TYPE_ARG_RE = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$")
 
 
-def _return_type_key(callee_name: str) -> str:
-    """Key under which a function's declared `->` annotation lives in the scope
-    table.  `name()` is not an identifier, so it can never collide with a
-    parameter or `var` of the same name (16d)."""
-    return callee_name + "()"
-
-
 def _declared_types_in_scope(stmts, enclosing_stmt=None) -> dict:
     """`{name: annotation string}` for the names a bare call's arguments can be
     read against: the enclosing function's parameters and `VarDecl`
@@ -1198,11 +1191,6 @@ def _declared_types_in_scope(stmts, enclosing_stmt=None) -> dict:
     annotation maps to `None`, and an earlier entry wins over a later
     `VarDecl` of the same name (`setdefault`), exactly as the two copies of
     this table that `derive` and `inferred_demands_for` used to build did.
-
-    Also includes function declarations' return types (16d), so a bare call to
-    a function with a declared `->` annotation resolves to that annotation.
-    And a `var a = <call>` with no explicit annotation resolves through the
-    callee's declared return type.
     """
     from formal import model as M
     declared: dict = {}
@@ -1215,58 +1203,26 @@ def _declared_types_in_scope(stmts, enclosing_stmt=None) -> dict:
         return declared
     else:
         scope = stmts
-
-    # Pass 1: collect function declarations' return types (16d).
     for n in M.iter_nodes(scope):
-        if isinstance(n, F.FunctionDef) and getattr(n, "return_type", None):
-            declared.setdefault(_return_type_key(n.name), n.return_type)
-
-    # Pass 2: collect VarDecl annotations; a call-initialised local with no
-    # explicit annotation resolves through the callee's declared return type.
-    for n in M.iter_nodes(scope):
-        if not isinstance(n, F.VarDecl) or not getattr(n, "name", None):
-            continue
-        ann = n.type_ann
-        if not isinstance(ann, str) or not ann.strip():
-            value = getattr(n, "value", None)
-            if isinstance(value, F.CallExpr):
-                callee = getattr(value, "func", None)
-                callee_name = (
-                    getattr(callee, "name", None) if isinstance(callee, F.IdentExpr) else None
-                )
-                if callee_name:
-                    ann = declared.get(_return_type_key(callee_name))
-        if isinstance(ann, str) and ann.strip():
-            declared.setdefault(n.name, ann)
+        if isinstance(n, F.VarDecl) and getattr(n, "name", None) and getattr(n, "type_ann", None):
+            declared.setdefault(n.name, n.type_ann)
     return declared
 
 
 
-def _bare_call_arg_annotations(call, declared, scope) -> tuple:
+def _bare_call_arg_annotations(call, declared) -> tuple:
     """([annotation or None per argument], has_literal) for a bare call (16c).
     Keyword arg values that are literals also block inference."""
     ctypes = []
     has_literal = False
     for arg in (getattr(call, "args", None) or []):
-        # First, try the direct declaration lookup for simple identifiers
         ann = declared.get(arg.name) if isinstance(arg, F.IdentExpr) else None
         if isinstance(ann, str) and ann.strip():
             ctypes.append(ann)
             continue
-            
-        # For non-identifier arguments, use _declared_type_of_expr to read from scope
-        if isinstance(arg, F.IdentExpr):
-            # This is a simple identifier, should have been caught above
-            ctypes.append(None)
-        else:
-            # For transfers (x^), member access (self.f), calls, etc.
-            ann = _declared_type_of_expr(arg, scope)
-            if isinstance(ann, str) and ann.strip():
-                ctypes.append(ann)
-            else:
-                ctypes.append(None)
         if not isinstance(arg, F.IdentExpr) and type(arg).__name__.endswith('Literal'):
             has_literal = True
+        ctypes.append(None)
     for kw in (getattr(call, "kwargs", None) or []):
         try:
             karg = kw[1]
@@ -1275,46 +1231,6 @@ def _bare_call_arg_annotations(call, declared, scope) -> tuple:
         if not isinstance(karg, F.IdentExpr) and type(karg).__name__.endswith('Literal'):
             has_literal = True
     return ctypes, has_literal
-
-
-# ── declared-type reading (step 16d: R1) ─────────────────────────────────
-
-def _declared_type_of_expr(expr, scope) -> str | None:
-    """The DECLARED type of an expression, read from declarations only — never
-    from a body (R1). Returns None when no declaration names it.
-
-    Order (from Q1's chosen reading):
-      1. identifier → its declared annotation (parameter, VarDecl, or module-level symbol)
-      2. `x^` transfer / `UnaryOp` wrapping an identifier → the identifier's declared type
-      3. `self.f` field read → declared field annotation of the enclosing struct
-      4. call to a function/ctor with a declared return annotation → that annotation
-         (with the callee's own template parameters substituted if the call itself
-         was inferred)
-      5. a local `var a = <call>` → the call's declared return type (same rule as 4)
-
-    Anything else → None.
-    """
-    if isinstance(expr, F.IdentExpr):
-        return scope.get(expr.name)
-    if isinstance(expr, F.UnaryOp) and getattr(expr, "op", None) == '^':
-        operand = getattr(expr, "operand", None)
-        if isinstance(operand, F.IdentExpr):
-            return scope.get(operand.name)
-        return None
-    if isinstance(expr, F.MemberExpr) \
-            and isinstance(getattr(expr, "obj", None), F.IdentExpr) \
-            and getattr(expr.obj, "name", None) == "self":
-        return scope.get(expr.member)
-    if isinstance(expr, F.CallExpr):
-        fn = getattr(expr, "func", None)
-        callee_name = getattr(fn, "name", None) if isinstance(fn, F.IdentExpr) else None
-        if callee_name is None:
-            return None
-        ret = scope.get(_return_type_key(callee_name))
-        if isinstance(ret, str) and ret.strip():
-            return ret.strip()
-    return None
-
 
 #: `SIMD[T]` / `SIMD[T, w]` as a parameter annotation: the element type binds
 #: to the argument's annotation and the width to `1` (a scalar's lane count).
@@ -1365,10 +1281,6 @@ def _inferred_binding_ok(binding, enclosing_tparams) -> bool:
         if vs in enclosing_tparams:
             return False
         if vs.startswith("Self."):
-            return False
-        # An existential (`Some[Writer]`) is not a concrete type: binding the
-        # template's parameter to it would invent an instantiation (16e, Q2 B1).
-        if re.match(r"^Some\b", vs):
             return False
     return True
 
@@ -1494,7 +1406,7 @@ def infer_bare_call(consumer_stmts, enclosing_stmt, call, template_src, kind, mo
     if _call_has_unknown_keyword(call, template_src, kind):
         return None
     declared = _declared_types_in_scope(consumer_stmts, enclosing_stmt)
-    arg_ctypes, has_literal = _bare_call_arg_annotations(call, declared, declared)
+    arg_ctypes, has_literal = _bare_call_arg_annotations(call, declared)
     enclosing_tparams = _enclosing_template_params(consumer_stmts, enclosing_stmt, consumer_src)
 
     if kind == KIND_FN:
@@ -1508,12 +1420,15 @@ def infer_bare_call(consumer_stmts, enclosing_stmt, call, template_src, kind, mo
         has_comptime_default = any(
             d and str(d).strip() and not _default_text_is_type_spelling(str(d))
             for d in defaults.values())
-        # There is deliberately NO call to `elaborate.infer_type_args` here (16e
-        # review): it unifies against C TYPES, and `c_to_mojo` maps every spelling
-        # it does not know (`Float64`, `Bool`, a struct name) to `Int`, so feeding
-        # it the argument's declared annotation bound `T := Int` for anything but
-        # `Int` -- `ident(x)` with `x: Float64` printed the bit pattern.  The
-        # annotation reader below binds the annotation itself.
+        # Skip fast path when arg annotations are caller's own template params
+        # (defect #3) or Self.T - elaborate.infer_type_args can mis-map them.
+        risky_ann = any(
+            isinstance(a, str) and (a.strip() in enclosing_tparams or a.strip().startswith('Self.'))
+            for a in arg_ctypes if a)
+        if not has_kwargs and not has_literal and not has_comptime_default and not risky_ann:
+            inferred = elaborate.infer_type_args(template_src, arg_ctypes)
+            if inferred and _inferred_binding_ok(dict(zip(params, inferred)), enclosing_tparams):
+                return tuple(inferred)
         binding = _bind_from_annotations(call, declared, template_src, params)
         if all(p in binding for p in params):
             if not _inferred_binding_ok(binding, enclosing_tparams):

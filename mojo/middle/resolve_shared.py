@@ -292,16 +292,13 @@ def _quick_type(gen, node) -> str:
         if isinstance(node.obj, gimple_ctypes.IdentExpr):
             _name = node.obj.name
             _dvt = (getattr(gen, '_dict_val_types', None) or {}).get(_name)
-            # 'mixed' is the store-side join of a dict whose values disagree:
-            # it names no C type, so it answers nothing and falls through to
-            # the boxed word (the chokepoint `_dict_val_of` maps it the same way).
-            if _dvt and _dvt != 'mixed':
+            if _dvt:
                 return _as_str(_dvt)
         else:
             # Nested: d["k"][i] — `node.obj.obj.name` is the dict name.
             _name = node.obj.obj.name
             _dvt = (getattr(gen, '_dict_val_types', None) or {}).get(_name)
-            if _dvt and _dvt != 'mixed':
+            if _dvt:
                 # If the dict value is a container, answer its element type.
                 # For char* (string subscript) the element is char*; for
                 # MojoList* it is the list's element type; for scalars
@@ -613,40 +610,17 @@ def _quick_type(gen, node) -> str:
         # correct body, which is the same value-identity failure this row
         # exists to prevent, one level below the parameter it fixed.
         #
-        # The receiver's type is asked of _quick_type so constructor calls
-        # (`C().get()`) and other expressions whose result type is known are
-        # answered, not only plain identifiers already in var_types.
-        _sot = ''
+        # Gated on `var_types` actually naming a registered struct, so every
+        # still-unknown receiver keeps exactly the old behaviour and only a
+        # provable one changes.
         if isinstance(node.func.obj, gimple_ctypes.IdentExpr):
             _sot = gen.var_types.get(node.func.obj.name, '')
-        if not (_sot and _sot.endswith(' *')):
-            _sot = gen._quick_type(node.func.obj)
-        if isinstance(_sot, str) and _sot.endswith(' *'):
-            _ssn = gimple_exprtypes._struct_name_of(_sot)
-            if _ssn in gen.struct_field_types:
-                _smeth = node.func.member
-                if (_ssn, _smeth) in gen._generator_method_api:
-                    return 'MojoGenerator *'
-                # Method return type, including overload-id manglings, the
-                # same way the auto-invoked @property path resolves below.
-                _srt = gen.func_return_types.get(f"{_ssn}_{_smeth}")
-                if _srt:
-                    return _srt
-                candidates = gen._struct_method_signatures.get(_sms_key(_ssn, _smeth))
-                if candidates:
-                    overload_id = ''
-                    if len(candidates) == 1:
-                        overload_id = candidates[0].get('overload_id', '') or ''
-                    mangled = gen._struct_method_csym(_ssn, _smeth, overload_id)
-                    _srt = gen.func_return_types.get(
-                        mangled, gen.func_return_types.get(f"{_ssn}_{_smeth}"))
-                    if _srt:
-                        return _srt
-                # @property: a field with the same name but no method symbol
-                # is a stored field; otherwise the property getter's return
-                # type is the answer (mirrors the auto-invoke resolution
-                # further down).
-                if _smeth not in gen.struct_field_types.get(_ssn, {}):
+            if _sot.endswith(' *'):
+                _ssn = gimple_exprtypes._struct_name_of(_sot)
+                if _ssn in gen.struct_field_types:
+                    _smeth = node.func.member
+                    if (_ssn, _smeth) in gen._generator_method_api:
+                        return 'MojoGenerator *'
                     _srt = gen.func_return_types.get(f"{_ssn}_{_smeth}")
                     if _srt:
                         return _srt
@@ -903,25 +877,6 @@ def _quick_type(gen, node) -> str:
         _fields = gen.struct_field_types.get(sn, {})
         if node.member in _fields:
             return _fields[node.member]
-        # A CLASS attribute (not an instance field): `_lower_MemberExpr`'s
-        # class-attribute branch redirects the read to the
-        # `_classattr_<Cls>__<attr>` global and returns that global's
-        # SEMANTIC type, which is what `_global_var_types` holds (the POINTEE
-        # type for a per-execution cell, `_cattr_instance_read` dereferences
-        # the cell). Without this arm the estimator fell to the int64_t
-        # default while the lowering produced a real pointer: a method whose
-        # SOLE `return` was a captured enclosing name (`return s`, an
-        # enclosing `s: str`, which the class-capture pass rewrites to
-        # `self._cap_s`) declared `int64_t C_tag (...)` against a body that
-        # returned a `char *`, so the string's ADDRESS was printed in decimal
-        # at exit 0. Both the bare `return s` and a rebound `s` hit it; the
-        # latter was a loud refusal before the capture became by-reference.
-        _cattrs = (getattr(gen, '_class_attrs', None) or {}).get(sn)
-        if _cattrs and node.member in _cattrs:
-            _cgt = (getattr(gen, '_global_var_types', None) or {}).get(
-                _cattrs[node.member])
-            if _cgt:
-                return _as_str(_cgt)
         # `node.member` isn't a real FIELD on this struct — it may be a
         # bound METHOD/`@property` read without call syntax (`self.
         # filename.parent`, `filename` a 0-arg method/property). Real

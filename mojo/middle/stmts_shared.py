@@ -343,16 +343,6 @@ def _assign_target(gen, tgt, et, ev):
         # that word now (see `_dyn_word_locals`).
         if ev in gen._dyn_word_vals and gen.var_types[tgt.name] == 'int64_t':
             gen._dyn_word_locals.add(tgt.name)
-        else:
-            gen._dyn_word_locals.discard(tgt.name)
-        # A `d[k]` read whose value kind lives on the slot: keep the mapping
-        # only when this assignment forwards that exact temp/word.
-        _dsr = getattr(gen, '_dict_slot_reads', None)
-        if _dsr is not None:
-            if ev in _dsr:
-                _dsr[tgt.name] = _dsr[ev]
-            else:
-                _dsr.pop(tgt.name, None)
         _note_rtobj_binding(gen, tgt.name, et, ev)
         # A `MojoBoundMethod *` value stored into a local whose declared C
         # type is NOT `MojoBoundMethod *` (a var-type-inference join with

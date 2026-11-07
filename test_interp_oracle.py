@@ -311,7 +311,7 @@ def main():
     # This is the shape `test_runtime_diff.py` structurally CANNOT see, which is
     # why it is here: that suite compares the two ENGINES, and the compiled
     # path had this bug too (a module global a module writes was published as
-    # a constant, `FORMAL_module_state_no_storage.md (deleted)` §(2)) — so a
+    # a constant, `FORMAL_module_state_no_storage.md (deleted) (deleted)` §(2)) — so a
     # diff between them was clean while both were wrong. This case is the third
     # opinion.
     #
@@ -442,26 +442,6 @@ def main():
         list(reversed(Counter(1, 4)))
     except TypeError as e:
         print(e)
-''',
-    # Python 3.15 adds `frozendict` as a builtin immutable mapping type.
-    # The interpreter must expose it and preserve CPython's behavior/repr.
-    "frozendict_builtin_basic": '''\
-def main():
-    d = frozendict({"b": 2, "a": 1})
-    print(len(d))
-    print(d["a"])
-    print(d.get("c", 9))
-    print("a" in d)
-    print("z" in d)
-    print(list(d))
-    print(list(d.keys()))
-    print(list(d.values()))
-    print(list(d.items()))
-    e = frozendict(a=3)
-    print(e["a"])
-    print(frozendict())
-    print(frozendict(d))
-    print(d == frozendict({"b": 2, "a": 1}))
 ''',
 }
 

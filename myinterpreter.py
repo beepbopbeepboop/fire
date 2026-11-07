@@ -37,787 +37,6 @@ _COMPARE_OPS = {'==', '!=', '<', '>', '<=', '>=', 'in', 'not in', 'is', 'is not'
 _GENEXP_ITER_NAME = '__mojo_genexp_iter__'
 
 
-# ---------------------------------------------------------------------------
-# CPython 3.15 "improved error messages" (What's New in 3.15): an UNCAUGHT
-# AttributeError is printed with a suggestion computed at PRINT time from two
-# fields the exception carries — `name` (the attribute that failed) and
-# `obj` (the object the lookup ran on) — exactly the fields CPython's
-# Lib/traceback.py reads (gh-146406, gh-136588). The machinery splits in two,
-# mirroring CPython's own split:
-#
-#   * `_tag_attribute_error` — the RAISE half. Every missing-attribute
-#     AttributeError in this file is built and tagged through it, so the
-#     exception carries the context no matter how it surfaces.
-#   * `attribute_error_suggestion` — the PRINT half. fire.py's top-level
-#     error printing calls it for an uncaught AttributeError and appends its
-#     result to the message. Because it runs at print time only, an
-#     AttributeError caught in user code stays plain — the same
-#     caught-plain/uncaught-suggested split CPython 3.15 measures.
-#
-# The fields are set with setattr() rather than member syntax because this
-# file self-hosts and the self-hosting compiler has no field table for
-# builtin exception attributes (the `e.code` note in fire.py).
-# ---------------------------------------------------------------------------
-
-def _tag_attribute_error(exc, obj, name, self_obj=None):
-    """Attach CPython 3.15's `name`/`obj` fields to a missing-attribute
-    AttributeError so the print-time suggestion pass can compute its hint
-    from the real object, not by re-parsing the message string. `self_obj`
-    is the `self` binding of the failing frame (None when there is none) —
-    CPython reads it off the traceback for its hide_underscored refinement;
-    this interpreter has no CPython frame for user code, so the raise site
-    captures it here (see `_frame_self`)."""
-    setattr(exc, 'name', name)
-    setattr(exc, 'obj', obj)
-    setattr(exc, 'self_obj', self_obj)
-    return exc
-
-
-def _frame_self(interp):
-    """The `self` binding of `interp`'s current (innermost) scope, or None.
-
-    This is the `frame.f_locals['self']` CPython 3.15's
-    `_compute_suggestion_error` reads off the failing traceback frame, which
-    this interpreter does not have: its user frames are Scope objects, and
-    the scope current at the failing member access IS that frame. Direct
-    `scope.vars` only, exactly like `_tag_name_error` — a `self` further up
-    the chain is a closure/global, which CPython does not put in the failing
-    frame's f_locals either."""
-    if interp is None:
-        return None
-    scope = interp.scope
-    if scope is not None and 'self' in scope.vars:
-        return scope.vars['self']
-    return None
-
-
-def _tag_name_error(exc, scope, name):
-    """Attach CPython 3.15's NameError-suggestion context to a `name` lookup
-    failure, at RAISE time: the print-time half computes the suggestion from
-    the failing frame's pool, but this interpreter's NameErrors carry no
-    CPython traceback frame (they are raised by this file's Scope, not by
-    CPython's name resolution), so the frame's contents are captured here,
-    while the exception still carries exactly the frame that failed:
-
-      * `name` — the lookup that failed (CPython's exc.name);
-      * `candidates` — CPython's `f_locals + f_globals + f_builtins` of the
-        failing frame. In this interpreter's scope model the current scope's
-        vars are the frame locals and the module (root) scope's vars are the
-        globals plus the builtins (setup_builtins binds them there); a
-        module-level failure duplicates the root scope once, exactly as
-        CPython duplicates the module dict (its f_locals IS its f_globals);
-      * `self_obj` — the frame's `self` (None when absent), for CPython's
-        `self.<name>` refinement (a bare name that is really an instance
-        attribute of the frame's `self`).
-
-    set with setattr() for the same self-host reason as
-    `_tag_attribute_error` (no field table for builtin exception attributes).
-    """
-    root = scope
-    while root.parent is not None:
-        root = root.parent
-    candidates = list(scope.vars)
-    candidates = candidates + list(root.vars)
-    self_obj = None
-    if 'self' in scope.vars:
-        self_obj = scope.vars['self']
-    setattr(exc, 'name', name)
-    setattr(exc, 'candidates', candidates)
-    setattr(exc, 'self_obj', self_obj)
-    return exc
-
-
-# Cross-language / wrong-type AttributeError hints, ported from CPython
-# 3.15.2's Lib/traceback.py `_CROSS_LANGUAGE_HINTS` (gh-146406). Each entry
-# maps the wrong name to a list of (type, hint, is_raw) triples checked in
-# order; the first isinstance() match wins. is_raw=False renders the hint as
-# "Did you mean '.<hint>'?", is_raw=True renders it verbatim.
-#
-# The `update` entry names `frozendict` (Python 3.15+), so the type is looked
-# up defensively — the tree's interpreter floor is 3.12 (CLAUDE.md) and a
-# bare name would be a NameError on older hosts.
-_FROZENDICT_TYPE = getattr(builtins, 'frozendict', None)
-_UPDATE_ENTRIES = ((frozenset, "Did you mean to use a 'set' object?", True),)
-if _FROZENDICT_TYPE is not None:
-    _UPDATE_ENTRIES = _UPDATE_ENTRIES + (
-        (_FROZENDICT_TYPE, "Did you mean to use a 'dict' object?", True),)
-_CROSS_LANGUAGE_ATTR_HINTS = {
-    # list -- JavaScript/Ruby equivalents
-    'push': ((list, 'append', False),),
-    'concat': ((list, 'extend', False),),
-    # list -- Java/C# equivalents
-    'addAll': ((list, 'extend', False),),
-    'contains': ((list, "Use 'x in list'.", True),),
-    # list -- wrong-type suggestion (user expected a set)
-    'add': ((list, "Did you mean to use a 'set' object?", True),
-            (frozenset, "Did you mean to use a 'set' object?", True)),
-    # str -- JavaScript equivalents
-    'toUpperCase': ((str, 'upper', False),),
-    'toLowerCase': ((str, 'lower', False),),
-    'trimStart': ((str, 'lstrip', False),),
-    'trimEnd': ((str, 'rstrip', False),),
-    # dict -- Java/JavaScript equivalents
-    'keySet': ((dict, 'keys', False),),
-    'entrySet': ((dict, 'items', False),),
-    'entries': ((dict, 'items', False),),
-    'putAll': ((dict, 'update', False),),
-    'put': ((dict, 'Use d[k] = v.', True),),
-    # tuple -- mutable method on immutable type (user expected a list)
-    'append': ((tuple, "Did you mean to use a 'list' object?", True),),
-    'extend': ((tuple, "Did you mean to use a 'list' object?", True),),
-    'insert': ((tuple, "Did you mean to use a 'list' object?", True),),
-    'remove': ((tuple, "Did you mean to use a 'list' object?", True),
-               (frozenset, "Did you mean to use a 'set' object?", True)),
-    # frozenset -- mutable method on immutable type (user expected a set)
-    'discard': ((frozenset, "Did you mean to use a 'set' object?", True),),
-    # frozenset/frozendict -- `update` on an immutable mapping/set
-    'update': _UPDATE_ENTRIES,
-    # float -- bitwise operators belong to int
-    '__or__': ((float, "Did you mean to use an 'int' object? "
-                       "Bitwise operators are not supported by 'float'.", True),),
-    '__and__': ((float, "Did you mean to use an 'int' object? "
-                        "Bitwise operators are not supported by 'float'.", True),),
-    '__xor__': ((float, "Did you mean to use an 'int' object? "
-                        "Bitwise operators are not supported by 'float'.", True),),
-    '__lshift__': ((float, "Did you mean to use an 'int' object? "
-                           "Bitwise operators are not supported by 'float'.", True),),
-    '__rshift__': ((float, "Did you mean to use an 'int' object? "
-                           "Bitwise operators are not supported by 'float'.", True),),
-}
-
-
-def _cross_language_attr_hint(obj, name):
-    """CPython 3.15's `_get_cross_language_hint`: the static-table half of
-    the suggestion, checked FIRST (it is more specific than distance).
-    Returns the hint text, or None."""
-    entries = _CROSS_LANGUAGE_ATTR_HINTS.get(name)
-    if entries is None:
-        return None
-    for check_type, hint, is_raw in entries:
-        if isinstance(obj, check_type):
-            if is_raw:
-                return hint
-            return f"Did you mean '.{hint}'?"
-    return None
-
-
-# CPython 3.15's Levenshtein costs (Lib/traceback.py / Python/suggestions.c):
-# a plain substitution or move costs 2, a case-only difference costs 1.
-_ATTR_MOVE_COST = 2
-_ATTR_CASE_COST = 1
-_ATTR_MAX_CANDIDATE_ITEMS = 750
-_ATTR_MAX_STRING_SIZE = 40
-
-# CPython 3.10+ exposes the set of stdlib module names (used by the
-# NameError "did you forget to import" refinement). Looked up defensively —
-# the self-hosted binary's `sys` is a stub (sys.argv/sys.path only, see
-# emit_exprs.py's module-attribute special cases), so a bare attribute read
-# would raise there; the empty default just withholds that one refinement
-# in the compiled path, like the other documented self-host gaps.
-_STDLIB_MODULE_NAMES = getattr(sys, 'stdlib_module_names', ())
-
-
-def _suggestion_normalize(name):
-    """CPython 3.15's `_compute_suggestion_error` NFKC preamble, shared by ALL
-    four branches (AttributeError, ModuleNotFoundError, ImportError,
-    NameError): a non-ASCII name that changes under NFKC normalization is
-    matched under its normalized form, and if that normalized form is present
-    in the candidate pool it is the answer outright (a "found" miss is never
-    suggested). Returns (normalized_name, was_changed)."""
-    if name.isascii():
-        return name, False
-    try:
-        import unicodedata
-        normalized = unicodedata.normalize('NFKC', name)
-    except ImportError:
-        normalized = name
-    if normalized == name:
-        return name, False
-    return normalized, True
-
-
-def _attr_substitution_cost(a, b):
-    """CPython 3.15.2's Python/suggestions.c substitution_cost, on bytes:
-    the low-five-bits test is its ASCII case-fold (no two ASCII letters
-    differ only in case can collide with a non-letter), then an explicit
-    A-Z check. CPython runs the whole match on the UTF-8 bytes of the
-    names, so a non-ASCII name gets exactly the C behavior."""
-    if (a & 31) != (b & 31):
-        # Not the same, not a case flip.
-        return _ATTR_MOVE_COST
-    if a == b:
-        return 0
-    if 65 <= a <= 90:
-        a += 32
-    if 65 <= b <= 90:
-        b += 32
-    if a == b:
-        return _ATTR_CASE_COST
-    return _ATTR_MOVE_COST
-
-
-def _attr_levenshtein_distance(a: str, b: str, max_cost: int) -> int:
-    """Port of CPython 3.15.2's Python/suggestions.c:levenshtein_distance —
-    the engine behind `_suggestions._generate_suggestions`, the fast path
-    Lib/traceback.py consults before its pure-Python fallback. (The
-    fallback differs in a way that matters: it seeds best_distance with
-    len(name) instead of infinity, silently dropping close matches on
-    short names — 'ge' -> 'get', 'po' -> 'pop'.) CPython operates on the
-    UTF-8 bytes of the names; we do the same. Single rolling row, common-
-    affix trimming, early bail-out when the running minimum exceeds
-    max_cost.
-
-    The trimming is tracked as OFFSETS into the byte sequences rather than
-    as slices: `a = a[pre:]` rebinds a local to a differently-typed value,
-    which the self-host lowering cannot express — it cast the `MojoBytes *`
-    to `char *` and ran the DP on a struct address, so this shape keeps
-    the encoded sequences in their own variables and indexes them with
-    `pre + i`."""
-    a_bytes = a.encode('utf-8')
-    b_bytes = b.encode('utf-8')
-    if a_bytes == b_bytes:
-        return 0
-
-    # Trim away common affixes.
-    pre = 0
-    alen = len(a_bytes)
-    blen = len(b_bytes)
-    while pre < alen and pre < blen and a_bytes[pre] == b_bytes[pre]:
-        pre += 1
-    post = 0
-    while post < alen - pre and post < blen - pre \
-            and a_bytes[alen - 1 - post] == b_bytes[blen - 1 - post]:
-        post += 1
-    alen -= pre + post
-    blen -= pre + post
-    if alen == 0 or blen == 0:
-        return _ATTR_MOVE_COST * (alen + blen)
-    if alen > _ATTR_MAX_STRING_SIZE or blen > _ATTR_MAX_STRING_SIZE:
-        return max_cost + 1
-
-    # Prefer shorter buffer — the trim offsets are common to both
-    # sequences, so each surviving range is [pre, pre + len).
-    if blen < alen:
-        a_bytes, b_bytes = b_bytes, a_bytes
-        alen, blen = blen, alen
-
-    # Quick fail when a match is impossible
-    if (blen - alen) * _ATTR_MOVE_COST > max_cost:
-        return max_cost + 1
-
-    # Instead of producing the whole traditional len(a)-by-len(b)
-    # matrix, we can update just one row in place.
-    row = list(range(_ATTR_MOVE_COST, _ATTR_MOVE_COST * (alen + 1), _ATTR_MOVE_COST))
-
-    result = 0
-    for bindex in range(blen):
-        bbyte = b_bytes[pre + bindex]
-        distance = result = bindex * _ATTR_MOVE_COST
-        minimum = sys.maxsize
-        for index in range(alen):
-            # 1) Previous distance in this row is cost(b[:bindex], a[:index])
-            substitute = distance + _attr_substitution_cost(bbyte, a_bytes[pre + index])
-            # 2) cost(b[:bindex], a[:index+1]) from previous row
-            distance = row[index]
-            # 3) existing result is cost(b[:bindex+1], a[:index])
-            insert_delete = min(result, distance) + _ATTR_MOVE_COST
-            result = min(insert_delete, substitute)
-
-            # cost(b[:bindex+1], a[:index+1])
-            row[index] = result
-            if result < minimum:
-                minimum = result
-        if minimum > max_cost:
-            # Everything in this row is too big, so bail early.
-            return max_cost + 1
-    return result
-
-
-def _attr_cp_levenshtein_distance(a: str, b: str, max_cost: int) -> int:
-    """Lib/traceback.py's pure-Python fallback (the pass CPython 3.15 runs
-    when the C module finds nothing): the same rolling-row algorithm, but on
-    CODE POINTS instead of UTF-8 bytes, and its substitution cost is
-    `str.lower()`-based, so a Unicode case flip ('É'->'é') costs 1 here
-    where the C byte pass (the low-five-bits trick) costs 2. On pure-ASCII
-    input the two passes agree on distance, and the fallback's best_distance
-    seed (len(name) rather than infinity) only ever TIGHTENS the window — so
-    the fallback can only ADD a match when non-ASCII is involved, which is
-    why `_attr_close_match` runs it only in that case."""
-    if a == b:
-        return 0
-
-    # Trim away common affixes.
-    pre = 0
-    while pre < len(a) and pre < len(b) and a[pre] == b[pre]:
-        pre += 1
-    a = a[pre:]
-    b = b[pre:]
-    post = 0
-    while post < len(a) and post < len(b) \
-            and a[len(a) - 1 - post] == b[len(b) - 1 - post]:
-        post += 1
-    if post:
-        a = a[:len(a) - post]
-        b = b[:len(b) - post]
-    if not a or not b:
-        return _ATTR_MOVE_COST * (len(a) + len(b))
-    if len(a) > _ATTR_MAX_STRING_SIZE or len(b) > _ATTR_MAX_STRING_SIZE:
-        return max_cost + 1
-
-    # Prefer shorter buffer
-    if len(b) < len(a):
-        a, b = b, a
-
-    # Quick fail when a match is impossible
-    if (len(b) - len(a)) * _ATTR_MOVE_COST > max_cost:
-        return max_cost + 1
-
-    # Instead of producing the whole traditional len(a)-by-len(b)
-    # matrix, we can update just one row in place.
-    row = list(range(_ATTR_MOVE_COST, _ATTR_MOVE_COST * (len(a) + 1), _ATTR_MOVE_COST))
-
-    result = 0
-    for bindex in range(len(b)):
-        bchar = b[bindex]
-        bchar_lower = bchar.lower()
-        distance = result = bindex * _ATTR_MOVE_COST
-        minimum = sys.maxsize
-        for index in range(len(a)):
-            # 1) Previous distance in this row is cost(b[:bindex], a[:index])
-            # CPython's fallback `_substitution_cost`: equal -> 0, a
-            # case-only flip -> _CASE_COST, else _MOVE_COST.
-            achar = a[index]
-            if bchar == achar:
-                cost = 0
-            elif bchar_lower == achar.lower():
-                cost = _ATTR_CASE_COST
-            else:
-                cost = _ATTR_MOVE_COST
-            substitute = distance + cost
-            # 2) cost(b[:bindex], a[:index+1]) from previous row
-            distance = row[index]
-            # 3) existing result is cost(b[:bindex+1], a[index])
-
-            insert_delete = min(result, distance) + _ATTR_MOVE_COST
-            result = min(insert_delete, substitute)
-
-            # cost(b[:bindex+1], a[:index+1])
-            row[index] = result
-            if result < minimum:
-                minimum = result
-        if minimum > max_cost:
-            # Everything in this row is too big, so bail early.
-            return max_cost + 1
-    return result
-
-
-def _suggestion_two_passes(d, name):
-    """CPython 3.15's distance-match tail, shared by ALL four
-    `_compute_suggestion_error` branches: the C module (`_suggestions`,
-    Python/suggestions.c) on UTF-8 BYTES with best_distance seeded at
-    infinity, then Lib/traceback.py's pure-Python fallback on CODE POINTS
-    with best_distance seeded at len(name) — and the two DISAGREE on
-    non-ASCII input (a Unicode case flip costs 2 in the byte pass, 1 in the
-    fallback; byte windows are wider but byte distances are bigger too), so
-    for example 'caf' -> 'café' is only found by the second pass. Returns the
-    closest candidate, or None.
-
-    `d` must already be branch-filtered (the underscore rule differs per
-    branch: the attr branch hides underscored candidates for a non-
-    underscored miss, the import branch only does so when `name_from` is
-    non-underscored, the NameError and ModuleNotFoundError branches filter
-    nothing) and `name` NFKC-normalized (the shared preamble). CPython's caps
-    apply verbatim: the C-module pass is skipped at 750+ candidates, the
-    fallback gives up at 751+ candidates and at a 40-code-point name. The
-    AttributeError branch must additionally skip its nested check after a
-    fallback cap — it decides that from the same caps, not from this
-    function's return value (a cap and a genuine no-match both return
-    None)."""
-    # Pass 1: the C module, on UTF-8 bytes, best_distance seeded at
-    # infinity, per-candidate max-distance window in BYTE lengths.
-    pass1_ran = len(d) < _ATTR_MAX_CANDIDATE_ITEMS
-    if pass1_ran:
-        wrong_name_bytes = len(name.encode('utf-8'))
-        best_distance = sys.maxsize
-        suggestion = None
-        for possible_name in d:
-            if possible_name == name:
-                # A missing attribute is "found". Don't suggest it (GH-88821).
-                continue
-            # No more than 1/3 of the involved characters should need changed.
-            item_bytes = len(possible_name.encode('utf-8'))
-            max_distance = (item_bytes + wrong_name_bytes + 3) * _ATTR_MOVE_COST // 6
-            # Don't take matches we've already beaten.
-            max_distance = min(max_distance, best_distance - 1)
-            current_distance = _attr_levenshtein_distance(name, possible_name, max_distance)
-            if current_distance > max_distance:
-                continue
-            if not suggestion or current_distance < best_distance:
-                suggestion = possible_name
-                best_distance = current_distance
-        if suggestion is not None:
-            return suggestion
-    # Pass 2: the pure-Python fallback, on code points, best_distance
-    # seeded at len(name). On pure-ASCII input it can only agree with or
-    # tighten pass 1, so when pass 1 RAN it is only worth running when
-    # non-ASCII is involved. That early return must NOT apply when pass 1
-    # was skipped by the 750 cap: at exactly 750 candidates CPython's C
-    # module gives up (its own cap) and the fallback is the only pass left,
-    # and it runs for ASCII too (test_name_error_caps_match_cpython pins
-    # the boundary).
-    if len(d) > _ATTR_MAX_CANDIDATE_ITEMS:
-        return None
-    if len(name) > _ATTR_MAX_STRING_SIZE:
-        return None
-    if pass1_ran:
-        _non_ascii = not name.isascii()
-        if not _non_ascii:
-            for n in d:
-                if not n.isascii():
-                    _non_ascii = True
-                    break
-        if not _non_ascii:
-            return None
-    wrong_name_len = len(name)
-    best_distance = wrong_name_len
-    suggestion = None
-    for possible_name in d:
-        if possible_name == name:
-            # A missing attribute is "found". Don't suggest it (GH-88821).
-            continue
-        # No more than 1/3 of the involved characters should need changed.
-        max_distance = (len(possible_name) + wrong_name_len + 3) * _ATTR_MOVE_COST // 6
-        # Don't take matches we've already beaten.
-        max_distance = min(max_distance, best_distance - 1)
-        current_distance = _attr_cp_levenshtein_distance(name, possible_name, max_distance)
-        if current_distance > max_distance:
-            continue
-        if not suggestion or current_distance < best_distance:
-            suggestion = possible_name
-            best_distance = current_distance
-    return suggestion
-
-
-def _suggestion_after_pool(d, name, not_normalized):
-    """The tail of CPython 3.15's `_compute_suggestion_error` every branch
-    shares AFTER its candidate pool is computed: the NFKC early return (a
-    name that normalization changed and which the pool contains is the
-    answer outright), then the distance match. Returns the suggestion or
-    None."""
-    if not_normalized and name in d:
-        return name
-    return _suggestion_two_passes(d, name)
-
-
-def _safe_dir(obj):
-    """CPython 3.15's `_get_safe___dir__` (its lazy-import filter has no
-    counterpart in this dialect): the names a successful `obj.<name>` lookup
-    could resolve to — the candidate pool CPython's traceback.py feeds its
-    matcher — obj.__dir__(), with CPython's `type(obj).__dir__(obj)` fallback
-    for the TypeError case (obj is a class), strings only, sorted. Shared by
-    the AttributeError branch (`_attr_candidates`) and the ImportError
-    branch (`import_error_suggestion`)."""
-    try:
-        names = obj.__dir__()
-    except TypeError:
-        names = type(obj).__dir__(obj)
-    return sorted(n for n in names if isinstance(n, str))
-
-
-def _attr_candidates(obj):
-    """The names a successful `obj.<name>` lookup could resolve to — the
-    candidate pool CPython's traceback.py feeds its matcher (its
-    `_get_safe___dir__`, i.e. the object's dir()). For a MojoInstance the
-    dir() machinery cannot see the Mojo method/alias tables (they live
-    outside the Python type), so those are added explicitly; for a
-    MojoClass, the methods/fields/aliases it presents. Host objects use
-    `_safe_dir`."""
-    if isinstance(obj, (MojoInstance, MojoClass)):
-        names = set()
-        if isinstance(obj, MojoInstance):
-            names.update(obj.__dict__)
-            names.update(obj._mojo_class.methods)
-            names.update(obj._mojo_class.comptime_aliases)
-        else:
-            names.update(obj.methods)
-            names.update(obj.comptime_aliases)
-            for f in obj.fields:
-                if hasattr(f, 'name'):
-                    names.add(f.name)
-        return sorted(n for n in names if isinstance(n, str))
-    return _safe_dir(obj)
-
-
-def _attr_close_match(obj, name, self_obj=None):
-    """CPython 3.15's Levenshtein half of `_compute_suggestion_error`:
-    the closest resolvable attribute name to a misspelled one, or None.
-
-    Candidate filtering follows CPython: no underscored names unless the
-    wrong name is underscored, OR the failing frame's `self` IS `obj`
-    (CPython's hide_underscored refinement: `self.value` inside a method may
-    suggest the private `self._value`, while the same misspell on the same
-    object from outside the method may not). The raising half captures that
-    frame `self` on the exception (`self_obj`); CPython reads it off the
-    traceback, which this interpreter does not carry. The distance match
-    itself is the engine every branch shares (`_suggestion_two_passes`); the
-    caps live there too, and a fallback cap aborts CPython's function
-    WITHOUT the nested check — so it is rechecked here (a cap and a genuine
-    no-match both return None from the engine, but only the former must skip
-    the nested check)."""
-    name, not_normalized = _suggestion_normalize(name)
-    d = _attr_candidates(obj)
-    hide_underscored = name[:1] != '_'
-    if hide_underscored and self_obj is not None and self_obj is obj:
-        hide_underscored = False
-    if hide_underscored:
-        d = [n for n in d if n[:1] != '_']
-    suggestion = _suggestion_after_pool(d, name, not_normalized)
-    if suggestion is None and len(d) <= _ATTR_MAX_CANDIDATE_ITEMS \
-            and len(name) <= _ATTR_MAX_STRING_SIZE:
-        # If no direct attribute match found, check for nested attributes
-        # (CPython's `_check_for_nested_attribute`: the What's New 3.15
-        # `container.area` -> `.inner.area` case).
-        suggestion = _attr_nested_match(obj, name, d)
-    return suggestion
-
-
-def _attr_nested_match(obj, name, candidates):
-    """CPython 3.15's `_check_for_nested_attribute`: when no attribute of
-    `obj` is a close match, look one level down — a member of obj that ITSELF
-    has `name`. Returns the dotted path (`inner.area`) or None. Mirrors
-    CPython's scan: ONLY non-underscored outer attributes — CPython re-
-    filters here, so even an underscored misspelling on `object()` gets no
-    nested suggestion (`__class__` does carry `__static_attributes__`, but
-    the underscored outer attribute is out of scope) — capped at 20 in
-    sorted order, errors while fetching a member are ignored (a failing
-    member cannot be the answer). CPython also skips descriptor outer
-    attributes and probes the member statically (`getattr_static`) so no
-    getter runs during error printing; the `hasattr` here agrees on plain
-    data and only diverges on a member whose `name` is a property that
-    raises — an under-suggestion on a cold path, not a false one."""
-    if isinstance(obj, MojoInstance):
-        # Instance fields only — the plain data members, no method-table
-        # values to fetch (CPython's equivalent skips descriptors for the
-        # same reason: fetching them runs code during error printing).
-        members = {n: obj.__dict__[n] for n in obj.__dict__
-                   if isinstance(n, str) and n[:1] != '_'}
-    else:
-        members = {}
-        checked = 0
-        for n in candidates:
-            if n[:1] == '_':
-                continue
-            if checked >= 20:
-                break
-            checked += 1
-            try:
-                members[n] = getattr(obj, n)
-            except Exception:
-                continue
-    for n in sorted(members)[:20]:
-        member = members[n]
-        try:
-            if hasattr(member, name):
-                return f"{n}.{name}"
-        except Exception:
-            continue
-    return None
-
-
-def attribute_error_suggestion(obj, name, self_obj=None):
-    """CPython 3.15's print-time AttributeError suggestion, as the suffix to
-    append to the message: '' when there is nothing to add. Priority is
-    CPython's: the static cross-language/wrong-type table first, then the
-    distance-based close match (with the nested-attribute fallback). The
-    renderings are CPython 3.15.2's verbatim (Lib/traceback.py).
-
-    `obj` is the object the failed lookup ran on — which may itself be None
-    (`None.append(1)`); CPython computes suggestions for that too (dunder
-    candidates for underscored names), so there is no None short-circuit.
-    The caller is responsible for only invoking this when the exception
-    actually carried an `obj` field (see fire.py's `name` guard).
-
-    `self_obj` is the failing frame's `self` captured at raise time (None
-    when the frame had none) — CPython's traceback-frame input to the
-    hide_underscored refinement, see `_attr_close_match`."""
-    if not isinstance(name, str):
-        return ''
-    hint = _cross_language_attr_hint(obj, name)
-    if hint:
-        return f". {hint}"
-    suggestion = _attr_close_match(obj, name, self_obj)
-    if suggestion is None:
-        return ''
-    if suggestion.isascii():
-        return f". Did you mean '.{suggestion}' instead of '.{name}'?"
-    return f". Did you mean '.{suggestion}' ({suggestion!a}) instead of '.{name}' ({name!a})?"
-
-
-def _module_not_found_candidates(name):
-    """CPython 3.15's ModuleNotFoundError candidate pool: every module spec
-    the import machinery can discover — for each finder in sys.meta_path
-    that carries a `discover` hook (in 3.15 only PathFinder does), the specs
-    it reports relative to the missing name's parent package. Mirrors
-    traceback.py's `_compute_suggestion_error` MNE branch verbatim: a dotted
-    miss probes `importlib.util.find_spec(parent)` (which yields None for a
-    missing parent — discover(None) then lists top-level names, CPython's
-    behavior), and ANY failure — e.g. a parent that is not a package
-    (frozen `os`: `import os.path2` raises ValueError inside discover) —
-    means no candidates at all, i.e. no suggestion."""
-    try:
-        import importlib.util
-        parent_name = name.rpartition('.')[0]
-        if parent_name:
-            parent = importlib.util.find_spec(parent_name)
-        else:
-            parent = None
-        d = []
-        for finder in sys.meta_path:
-            discover = getattr(finder, 'discover', None)
-            if discover is not None:
-                d += [spec.name for spec in discover(parent)]
-    except Exception:
-        return None
-    return d
-
-
-def module_not_found_suggestion(name):
-    """CPython 3.15's print-time ModuleNotFoundError suggestion, as the
-    suffix to append to the message: '' when there is nothing to add. The
-    real ModuleNotFoundError already carries `name` (the module that was not
-    found), so no raise-side tagging is needed. The rendering is 3.15.2's
-    verbatim (`. Did you mean: '<s>'?` — the MNE branch has no `!a`
-    rendering of its own; a module name is an identifier and CPython's MNE
-    branch prints it bare)."""
-    if not isinstance(name, str):
-        return ''
-    name, not_normalized = _suggestion_normalize(name)
-    d = _module_not_found_candidates(name)
-    if d is None:
-        return ''
-    suggestion = _suggestion_after_pool(d, name, not_normalized)
-    if suggestion is None:
-        return ''
-    return f". Did you mean: '{suggestion}'?"
-
-
-def import_error_suggestion(mod_name, name_from):
-    """CPython 3.15's print-time ImportError suggestion for a `from X import
-    Y` miss — an ImportError carrying `name` (module X) and `name_from`
-    (attribute Y) — as the suffix to append: '' when there is nothing to
-    add. Candidates are X's dir() (`_safe_dir`, CPython's `_get_safe___dir__`),
-    re-filtered to non-underscored names when Y is non-underscored
-    (CPython re-filters here, mirroring the attr branch), then the shared
-    distance match. The rendering is 3.15.2's verbatim (`. Did you mean:
-    '<s>'?`, with the `!a` parens for a non-ASCII suggestion).
-    `__import__` failing (module X gone by print time) means no candidates,
-    CPython's try/except-returns-None."""
-    if not isinstance(name_from, str) or not isinstance(mod_name, str):
-        return ''
-    name, not_normalized = _suggestion_normalize(name_from)
-    try:
-        mod = __import__(mod_name)
-        d = _safe_dir(mod)
-    except Exception:
-        return ''
-    if name[:1] != '_':
-        d = [x for x in d if x[:1] != '_']
-    suggestion = _suggestion_after_pool(d, name, not_normalized)
-    if suggestion is None:
-        return ''
-    if suggestion.isascii():
-        return f". Did you mean: '{suggestion}'?"
-    return f". Did you mean: '{suggestion}' ({suggestion!a})?"
-
-
-def name_error_suggestion(name, candidates, self_obj):
-    """CPython 3.15's print-time NameError suggestion, as the suffix to
-    append to the message: '' when there is nothing to add. CPython reads
-    the failing frame's pool (f_locals + f_globals + f_builtins) and `self`
-    off the traceback at print time; this interpreter's NameErrors carry
-    those captured at RAISE time instead (`_tag_name_error`), so `candidates`
-    and `self_obj` are the fields the exception carries — `candidates` None
-    for a NameError that never went through this interpreter's Scope (e.g.
-    one CPython raised itself), for which there is no frame to read and no
-    suggestion, exactly CPython's tb-is-None behavior.
-
-    CPython's order: the NFKC early return, then the `self.<name>`
-    refinement (a bare name that is really an instance attribute of the
-    frame's `self`), then the shared distance match. The renderings are
-    3.15.2's verbatim (`. Did you mean: '<s>'?` with `!a` parens for a
-    non-ASCII suggestion), plus CPython's forgot-to-import refinement: when
-    the misspelling IS a stdlib module name, append ` Or did you forget to
-    import '<name>'?` after a suggestion, or `. Did you forget to import
-    '<name>'?` when there is none."""
-    if not isinstance(name, str) or candidates is None:
-        return ''
-    d = [x for x in candidates if isinstance(x, str)]
-    name_n, not_normalized = _suggestion_normalize(name)
-    suggestion = None
-    if not_normalized and name_n in d:
-        suggestion = name_n
-    else:
-        if self_obj is not None:
-            try:
-                if hasattr(self_obj, name_n):
-                    suggestion = f"self.{name_n}"
-            except Exception:
-                pass
-        if suggestion is None:
-            suggestion = _suggestion_after_pool(d, name_n, not_normalized)
-    if suggestion is None:
-        if name in _STDLIB_MODULE_NAMES:
-            return f". Did you forget to import '{name}'?"
-        return ''
-    if suggestion.isascii():
-        suffix = f". Did you mean: '{suggestion}'?"
-    else:
-        suffix = f". Did you mean: '{suggestion}' ({suggestion!a})?"
-    if name in _STDLIB_MODULE_NAMES:
-        suffix += f" Or did you forget to import '{name}'?"
-    return suffix
-
-
-def error_suggestion_suffix(e):
-    """CPython 3.15's print-time suggestion suffix for ANY of the exception
-    types its improved error messages cover — AttributeError,
-    ModuleNotFoundError, ImportError (a `from X import Y` miss, the ones
-    carrying `name_from`), NameError — '' when CPython appends nothing.
-    fire.py appends it to an UNCAUGHT exception's message; an exception
-    caught in user code never goes through it, preserving CPython's
-    caught-plain/uncaught-suggested split.
-
-    The dispatch mirrors Lib/traceback.py's order: ModuleNotFoundError
-    before a bare ImportError (it is an ImportError subclass), and only
-    `from`-miss ImportErrors carry `name_from`, so the two are disjoint in
-    practice. Every guard is the one CPython applies (a str `name` field,
-    `name_from is not None`, ...)."""
-    if isinstance(e, AttributeError):
-        aname = getattr(e, 'name', None)
-        if isinstance(aname, str):
-            return attribute_error_suggestion(
-                getattr(e, 'obj', None), aname,
-                getattr(e, 'self_obj', None))
-        return ''
-    if isinstance(e, ModuleNotFoundError):
-        mname = getattr(e, 'name', None)
-        if isinstance(mname, str):
-            return module_not_found_suggestion(mname)
-        return ''
-    if isinstance(e, ImportError):
-        fname = getattr(e, 'name_from', None)
-        if isinstance(fname, str):
-            return import_error_suggestion(getattr(e, 'name', None), fname)
-        return ''
-    if isinstance(e, NameError):
-        nname = getattr(e, 'name', None)
-        if isinstance(nname, str):
-            return name_error_suggestion(
-                nname, getattr(e, 'candidates', None), getattr(e, 'self_obj', None))
-        return ''
-    return ''
-
-
 class ReturnValue(Exception):
     """Exception used to implement return statements."""
     def __init__(self, value=None):
@@ -862,158 +81,6 @@ class MojoRaisedException(Exception):
     pass
 
 
-class _LazyImportState:
-    """Process-wide state for PEP 810 lazy imports (Python 3.15).
-
-    `mode` mirrors `sys.set_lazy_imports`: 'normal' honours the `lazy`
-    keyword and `__lazy_modules__` only, 'all' makes every import that can be
-    lazy potentially lazy. (CPython 3.15.2 rejects 'none' — the pre-final
-    PEP text listed it, the implementation does not — so this does too.)
-    `filter` is the optional `sys.set_lazy_imports_filter` callable and
-    `lazy_modules` is the `sys.lazy_modules` set of fully-qualified names
-    currently held by an unresolved proxy.
-    """
-    def __init__(self):
-        self.mode = 'normal'
-        env_mode = os.environ.get('PYTHON_LAZY_IMPORTS')
-        if env_mode == 'all':
-            self.mode = 'all'
-        self.filter = None
-        self.lazy_modules = set()
-
-    def set_mode(self, mode):
-        if not isinstance(mode, str):
-            raise TypeError("mode must be a string: 'normal' or 'all'")
-        if mode not in ('normal', 'all'):
-            raise ValueError("mode must be 'normal' or 'all'")
-        self.mode = mode
-
-
-_LAZY_IMPORT_STATE = _LazyImportState()
-
-
-class _LazyImportTarget:
-    """Resolution state shared by every name bound by ONE lazy import.
-
-    A `lazy from m import a, b` statement loads `m` at most once, and only
-    when the first of `a`/`b` is used; the other name stays unresolved.
-    """
-    def __init__(self, interp, module, alias=None, is_from=False, scope=None):
-        self.interp = interp
-        self.module = module
-        self.alias = alias
-        self.is_from = is_from
-        # The lexical scope the import statement executed in. Lazy
-        # resolution can happen much later, while `interp.scope` is some
-        # other frame (a function call that first touched the name), so a
-        # dotted sibling import's namespace chain must be built in THIS
-        # scope, not whatever happens to be current at resolve time.
-        self.scope = scope
-        self.loaded = False
-        self.value = None
-
-    def load(self):
-        if not self.loaded:
-            if self.is_from:
-                value = self.interp._resolve_from_import_module(self.module)
-            else:
-                value = self.interp._resolve_import_module(
-                    self.module, self.alias, self.scope)
-            self.value = value
-            self.loaded = True
-            _LAZY_IMPORT_STATE.lazy_modules.discard(self.module)
-        return self.value
-
-    def resolve_name(self, name):
-        module = self.load()
-        if module is None:
-            raise ModuleNotFoundError(
-                f"No module named {self.module!r}")
-        _LAZY_IMPORT_STATE.lazy_modules.discard(self.module + '.' + name)
-        return self.interp._resolve_from_import_name(module, self.module, name)
-
-
-class LazyImportType:
-    """The proxy bound by `lazy import` / `lazy from ... import` (PEP 810).
-
-    The name is bound immediately so the module's import-time side effects —
-    and any ImportError — are deferred until the first use of the name.
-    `Scope.get` reifies the proxy and replaces the binding, so after first
-    use the name is indistinguishable from an eager import; the dunder
-    forwarding below covers the other ways a proxy can be reached (stored in
-    a container, passed as an argument, printed directly).
-
-    `resolve()` is the explicit reification entry point CPython exposes on
-    `types.LazyImportType`.
-    """
-    __slots__ = ('_target', '_label', '_from_name', '_resolved', '_value')
-
-    def __init__(self, target, label, from_name=None):
-        self._target = target
-        self._label = label
-        self._from_name = from_name
-        self._resolved = False
-        self._value = None
-
-    def resolve(self):
-        if not self._resolved:
-            if self._from_name is None:
-                value = self._target.load()
-            else:
-                value = self._target.resolve_name(self._from_name)
-            self._value = value
-            self._resolved = True
-        return self._value
-
-    def __repr__(self):
-        return f"<lazy_import {self._label!r}>"
-
-    def __getattr__(self, name):
-        return getattr(self.resolve(), name)
-
-    def __call__(self, *args, **kwargs):
-        return self.resolve()(*args, **kwargs)
-
-    def __getitem__(self, key):
-        return self.resolve()[key]
-
-    def __setitem__(self, key, value):
-        self.resolve()[key] = value
-
-    def __delitem__(self, key):
-        del self.resolve()[key]
-
-    def __iter__(self):
-        return iter(self.resolve())
-
-    def __len__(self):
-        return len(self.resolve())
-
-    def __contains__(self, item):
-        return item in self.resolve()
-
-    def __bool__(self):
-        return bool(self.resolve())
-
-    def __str__(self):
-        return str(self.resolve())
-
-    def __eq__(self, other):
-        return self.resolve() == other
-
-    def __ne__(self, other):
-        return self.resolve() != other
-
-    def __hash__(self):
-        return hash(self.resolve())
-
-    def __enter__(self):
-        return self.resolve().__enter__()
-
-    def __exit__(self, *args):
-        return self.resolve().__exit__(*args)
-
-
 class Scope:
     """Manages variable and function scopes."""
     def __init__(self, parent=None):
@@ -1039,27 +106,10 @@ class Scope:
 
     def get(self, name: str):
         if name in self.vars:
-            value = self.vars[name]
-            if isinstance(value, LazyImportType):
-                value = value.resolve()
-                self.vars[name] = value
-            return value
-        # Walk the chain iteratively (the old recursion raised in the ROOT
-        # scope): the lookup either finds the nearest binding in the same
-        # order, or fails with the exception tagged at THIS scope — the
-        # frame that failed — which is what CPython 3.15's print-time
-        # NameError suggestion needs (see _tag_name_error).
-        scope = self.parent
-        while scope is not None:
-            if name in scope.vars:
-                value = scope.vars[name]
-                if isinstance(value, LazyImportType):
-                    value = value.resolve()
-                    scope.vars[name] = value
-                return value
-            scope = scope.parent
-        raise _tag_name_error(
-            NameError(f"name '{name}' is not defined"), self, name)
+            return self.vars[name]
+        if self.parent:
+            return self.parent.get(name)
+        raise NameError(f"name '{name}' is not defined")
 
     def has(self, name: str) -> bool:
         if name in self.vars:
@@ -1079,20 +129,10 @@ class Scope:
     def delete(self, name: str):
         if name in self.vars:
             del self.vars[name]
-            return
-        # Walk the chain iteratively (the old recursion raised in the ROOT
-        # scope): the delete finds the nearest binding in the same order, or
-        # fails with the exception tagged at THIS scope — the frame that
-        # failed — for CPython 3.15's print-time NameError suggestion (see
-        # _tag_name_error).
-        scope = self.parent
-        while scope is not None:
-            if name in scope.vars:
-                del scope.vars[name]
-                return
-            scope = scope.parent
-        raise _tag_name_error(
-            NameError(f"name '{name}' is not defined"), self, name)
+        elif self.parent:
+            self.parent.delete(name)
+        else:
+            raise NameError(f"name '{name}' is not defined")
 
 
 def _split_invoker(owner_interp, args) -> tuple:
@@ -2273,9 +1313,7 @@ class MojoInstance:
             return BoundMethod(method, self, cls.interpreter)
         if name in cls.comptime_aliases:
             return cls.comptime_aliases[name]
-        raise _tag_attribute_error(
-            AttributeError(f"'{cls.name}' object has no attribute '{name}'"),
-            self, name, _frame_self(cls.interpreter))
+        raise AttributeError(f"'{cls.name}' object has no attribute '{name}'")
 
     def _write_via(self, method_name):
         """Call a user-defined `write_to`/`write_repr_to(self, mut writer)`
@@ -2454,55 +1492,6 @@ class BoundClassMethod:
         return self
 
 
-def _c3_linearize(cls):
-    """Return `cls.__mro__`: C3 linearization of the bases named in `cls`.
-
-    Matches CPython's `type.__mro__` exactly — including diamonds (e.g. a
-    `D(B, C)` over sibling `B(O)`/`C(O)` resolves to `D, B, C, O`) and its
-    error semantics: an entry that is neither a real Mojo class nor a real
-    Python type (typing specials like `TypedDict`, which are functions in 3.15+)
-    raises `TypeError`, and an inconsistent hierarchy raises a `TypeError`
-    naming every base, the same way `type()` does at class creation time. The
-    underlying Python-style hierarchy this interpreter synthesises only carries
-    `object` as an implicit root, so a plain class's MRO is just `(cls,)`; there
-    is no Mojo root type for it to inherit from."""
-    seqs = []
-    for b in cls.bases:
-        if isinstance(b, MojoClass):
-            seqs.append(_c3_linearize(b))
-        elif isinstance(b, type):
-            seqs.append(tuple(b.__mro__))
-        else:
-            raise TypeError(f"__mro__ entry is not a class: {b!r}")
-    seqs.append(tuple(cls.bases))
-    return (cls,) + tuple(_c3_merge(cls.bases, seqs))
-
-
-def _c3_merge(bases, seqs):
-    """Merge the sequence lists (`seqs`) one head at a time, removing every
-    head from every list's tail once taken — the standard C3 linearisation
-    step. A head that still appears in another list is rejected; if no head of
-    any list qualifies, the hierarchy is inconsistent, and the `TypeError`
-    names every base the way `type()` does at class creation."""
-    seqs = [list(s) for s in seqs if s]
-    out = []
-    while seqs:
-        for i, s in enumerate(seqs):
-            head = s[0]
-            # Only a tail appearance disqualifies a head; another list whose own
-            # head is this same element will consume it in this same step.
-            if any(head in other[1:] for j, other in enumerate(seqs) if j != i):
-                continue
-            out.append(head)
-            seqs = [o[1:] if o and o[0] is head else o for o in seqs]
-            seqs = [o for o in seqs if o]
-            break
-        else:
-            names = ', '.join(getattr(b, '__name__', type(b).__name__) or str(b) for b in bases)
-            raise TypeError(f"Cannot create a consistent method resolution order (MRO) for bases {names}")
-    return out
-
-
 class MojoClass:
     """Represents a class/struct defined in Mojo code."""
     _ARRAY_TYPE_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\[([A-Za-z_][A-Za-z0-9_]*|\d+)\]$')
@@ -2577,19 +1566,7 @@ class MojoClass:
             # ctypes/wintypes.py's `PFILETIME = POINTER(FILETIME)` raised
             # "'FILETIME' object has no attribute '__name__'".
             return self.name
-        if name == '__mro__':
-            # A real Python class built through the keywords path already owns a
-            # `__mro__`; only the plain interpreter-synthesised Mojo classes need
-            # this implemented here. Cached on the instance so repeated access is
-            # the one C3 work we do per class lifetime.
-            cached = self.__dict__.get('_mojo_mro')
-            if cached is None:
-                cached = _c3_linearize(self)
-                self.__dict__['_mojo_mro'] = cached
-            return cached
-        raise _tag_attribute_error(
-            AttributeError(f"'{self.name}' object has no attribute '{name}'"),
-            self, name, _frame_self(self.interpreter))
+        raise AttributeError(f"'{self.name}' object has no attribute '{name}'")
 
     def __call__(self, *args, **kwargs):
         instance = MojoInstance(self)
@@ -3623,8 +2600,6 @@ def _mojo_iterable(value):
 # `max(a, b)` compares values and must not turn a struct into a generator.
 _MOJO_ITER_FIRST_ARG = {id(list), id(tuple), id(set), id(frozenset), id(sum),
                         id(sorted), id(enumerate), id(any), id(all), id(dict)}
-if hasattr(builtins, 'frozendict'):
-    _MOJO_ITER_FIRST_ARG.add(id(builtins.frozendict))
 _MOJO_ITER_ALL_ARGS = id(zip)
 _MOJO_ITER_ONE_ARG = {id(_mojo_min), id(_mojo_max)}
 
@@ -4108,9 +3083,7 @@ class _MojoSuper:
             return object.__getattribute__(self, name)
         if name in base_cls.comptime_aliases:
             return base_cls.comptime_aliases[name]
-        raise _tag_attribute_error(
-            AttributeError(f"super object has no attribute '{name}'"),
-            self, name)
+        raise AttributeError(f"super object has no attribute '{name}'")
 
 
 _AUTO_STUB_VALUE = 0
@@ -4210,10 +3183,8 @@ class _MojoModuleObject(types.SimpleNamespace):
         try:
             return self.__modvars__[name]
         except KeyError:
-            raise _tag_attribute_error(
-                AttributeError(
-                    f"module '{self.__modname__}' has no attribute '{name}'"),
-                self, name)
+            raise AttributeError(
+                f"module '{self.__modname__}' has no attribute '{name}'")
 
     def __setattr__(self, name, value):
         self.__modvars__[name] = value
@@ -4222,10 +3193,8 @@ class _MojoModuleObject(types.SimpleNamespace):
         try:
             del self.__modvars__[name]
         except KeyError:
-            raise _tag_attribute_error(
-                AttributeError(
-                    f"module '{self.__modname__}' has no attribute '{name}'"),
-                self, name)
+            raise AttributeError(
+                f"module '{self.__modname__}' has no attribute '{name}'")
 
     def __dir__(self):
         return sorted(set(self.__modvars__) | set(object.__dir__(self))
@@ -4262,28 +3231,6 @@ class _SysProxy:
     """
     def __init__(self, argv):
         self.argv = argv
-        # `sys.lazy_modules` is the set of fully-qualified names currently
-        # bound to an unresolved PEP 810 lazy proxy. Deliberately OUR set,
-        # not the host interpreter's, since the interpreted program's lazy
-        # imports are resolved by this interpreter.
-        self.lazy_modules = _LAZY_IMPORT_STATE.lazy_modules
-
-    # PEP 810 lazy-import controls. These must be the interpreter's own
-    # state: the host `sys.set_lazy_imports` would govern the host's bytecode
-    # imports, not the imports this interpreter executes from source.
-    def set_lazy_imports(self, mode):
-        _LAZY_IMPORT_STATE.set_mode(mode)
-
-    def get_lazy_imports(self):
-        return _LAZY_IMPORT_STATE.mode
-
-    def set_lazy_imports_filter(self, func):
-        if func is not None and not callable(func):
-            raise ValueError("filter provided but is not callable")
-        _LAZY_IMPORT_STATE.filter = func
-
-    def get_lazy_imports_filter(self):
-        return _LAZY_IMPORT_STATE.filter
 
     def getdefaultencoding(self):
         return 'utf-8'
@@ -4299,23 +3246,6 @@ class _SysProxy:
 
     def __getattr__(self, name):
         return getattr(sys, name)
-
-
-class _TypesProxy:
-    """`import types` inside an interpreted program.
-
-    Forwards everything to the host `types` module except
-    `types.LazyImportType`, which is this interpreter's proxy class: lazy
-    imports of `.mojo` sibling modules resolve through this interpreter, so
-    the host's native lazy-import type would describe the wrong objects.
-    """
-    def __getattr__(self, name):
-        if name == 'LazyImportType':
-            return LazyImportType
-        return getattr(types, name)
-
-
-_TYPES_PROXY = _TypesProxy()
 
 
 def _sentinel_builtin():
@@ -4360,136 +3290,6 @@ def _sentinel_builtin():
     return sentinel
 
 
-def _frozendict_builtin():
-    """The `frozendict` builtin (Python 3.15+, PEP 814).
-
-    Returns the host's `builtins.frozendict` when available; otherwise a
-    compatible immutable mapping implementation.
-    """
-    host = getattr(builtins, 'frozendict', None)
-    if host is not None:
-        return host
-
-    class frozendict:
-        __slots__ = ('_data', '_hash')
-
-        def __new__(cls, *args, **kwargs):
-            self = object.__new__(cls)
-            self._data = dict(*args, **kwargs)
-            self._hash = None
-            return self
-
-        @classmethod
-        def fromkeys(cls, iterable, value=None):
-            return cls(dict.fromkeys(iterable, value))
-
-        def __repr__(self):
-            return f"frozendict({self._data!r})"
-
-        def __len__(self):
-            return len(self._data)
-
-        def __contains__(self, item):
-            return item in self._data
-
-        def __getitem__(self, key):
-            return self._data[key]
-
-        def __iter__(self):
-            return iter(self._data)
-
-        def __reversed__(self):
-            return reversed(self._data)
-
-        def __setitem__(self, key, value):
-            raise TypeError("'frozendict' object does not support item assignment")
-
-        def __delitem__(self, key):
-            raise TypeError("'frozendict' object does not support item deletion")
-
-        def keys(self):
-            return self._data.keys()
-
-        def values(self):
-            return self._data.values()
-
-        def items(self):
-            return self._data.items()
-
-        def get(self, key, default=None):
-            return self._data.get(key, default)
-
-        def copy(self):
-            return self
-
-        def __or__(self, other):
-            if isinstance(other, (dict, frozendict)):
-                data = dict(self._data)
-                if isinstance(other, frozendict):
-                    data.update(other._data)
-                else:
-                    data.update(other)
-                return frozendict(data)
-            return NotImplemented
-
-        def __ror__(self, other):
-            if isinstance(other, (dict, frozendict)):
-                if isinstance(other, frozendict):
-                    data = dict(other._data)
-                else:
-                    data = dict(other)
-                data.update(self._data)
-                return frozendict(data)
-            return NotImplemented
-
-        def __hash__(self):
-            if self._hash is None:
-                try:
-                    h = hash(frozenset(self._data.items()))
-                except TypeError:
-                    raise TypeError("unhashable type: 'frozendict'")
-                self._hash = h
-            return self._hash
-
-        def __eq__(self, other):
-            if isinstance(other, frozendict):
-                return self._data == other._data
-            if isinstance(other, dict):
-                return self._data == other
-            return NotImplemented
-
-    frozendict.__name__ = 'frozendict'
-    frozendict.__qualname__ = 'frozendict'
-    frozendict.__module__ = 'builtins'
-    return frozendict
-
-
-def _ascii_repr(value) -> str:
-    """CPython's `ascii(value)`: `repr(value)` with every non-ASCII code
-    point escaped as `\\xNN` / `\\uNNNN` / `\\UNNNNNNNN`.
-
-    Spelled out here rather than calling the `ascii()` builtin for the same
-    reason `_eval_fstring_field` gives for repr/str: `ascii()` has no
-    compiled-path runtime backing, and this module is self-host-compiled.
-    The escape table is CPython's own (`repr` of a str and `ascii` differ
-    only in these escapes), and `mojo_ascii_escape` in fire_runtime.c is the
-    compiled engine's spelling of exactly this rule -- the two must agree
-    character for character."""
-    text = repr(value)
-    out = ''
-    for ch in text:
-        o = ord(ch)
-        if o < 0x80:
-            out += ch
-        elif o < 0x100:
-            out += '\\x%02x' % o
-        elif o < 0x10000:
-            out += '\\u%04x' % o
-        else:
-            out += '\\U%08x' % o
-    return out
-
-
 class Interpreter:
     """Executes Mojo AST nodes."""
 
@@ -4506,18 +3306,6 @@ class Interpreter:
         self._mojo_module_cache = {}
         self._func_specs = {}
         self._raised_mojo_value = None
-        # The one `_SysProxy` this interpreter binds `sys` to (see
-        # _setup_builtins). Kept here because imports must resolve the
-        # canonical sys module even when `lazy import sys` has temporarily
-        # rebound the name `sys` to a lazy proxy — looking it up through the
-        # scope there would re-enter the proxy's own resolve() forever.
-        self._sys_proxy = None
-        # PEP 810: mode 'all' leaves imports inside try/except blocks eager.
-        # Explicit `lazy` there is a parse error, so only mode 'all' consults
-        # this. execute_TryStmt keeps it incremented for every part of the
-        # statement (body, handlers, else, finally), matching CPython's
-        # symtable `ste_in_try_block`.
-        self._try_depth = 0
         # Milestone 2 of INTERP_generator_yield_entirely_unimplemented:
         # per-OS-thread storage for "the yield_fn of the generator whose body
         # is currently running on THIS thread" — see MojoGeneratorObject
@@ -4751,33 +3539,24 @@ class Interpreter:
             mod_interp.execute(stmt)
         return namespace
 
-    def _bind_dotted_import(self, module_name, mod, scope=None):
+    def _bind_dotted_import(self, module_name, mod):
         """`import std.sys` (no `as` alias) must bind the top-level name
         `std` and make `std.sys` resolve via chained attribute access — same
         as Python's own dotted-import binding rule. A flat bind of `std`
         straight to the `std.sys` shim namespace (the previous behavior)
-        broke `std.sys.whatever`, since there was no intermediate `.sys`.
-        `scope` is supplied by a lazy import, whose statement's scope may
-        differ from the frame current at reification time."""
-        target_scope = scope if scope is not None else self.scope
+        broke `std.sys.whatever`, since there was no intermediate `.sys`."""
         parts = module_name.split('.')
         top = parts[0]
         if len(parts) == 1:
-            target_scope.define(top, mod)
+            self.scope.define(top, mod)
             return
         try:
-            root = self._bind_dotted_import_lazy_safe_root(top, target_scope)
+            root = self.scope.get(top)
         except NameError:
-            root = None
-        if isinstance(root, LazyImportType):
-            # This dotted import's own lazy proxy is being reified right now
-            # (its resolver called us). Do not look it up through Scope.get —
-            # that would re-enter resolve() forever. It is about to be
-            # replaced by the namespace chain below.
             root = None
         if not isinstance(root, types.SimpleNamespace):
             root = types.SimpleNamespace()
-            target_scope.define(top, root)
+            self.scope.define(top, root)
         obj = root
         for p in parts[1:-1]:
             nxt = getattr(obj, p, None)
@@ -4926,7 +3705,6 @@ class Interpreter:
         # (bytes/bytearray deliberately omitted — the self-hosting codegen
         # doesn't recognize them as callable; see the String ctor note below.)
         self.scope.define('frozenset', frozenset)
-        self.scope.define('frozendict', _frozendict_builtin())
         self.scope.define('object', object)
         self.scope.define('complex', complex)
         self.scope.define('slice', slice)
@@ -5103,8 +3881,7 @@ class Interpreter:
         import tempfile
         import traceback
         self.scope.define('os', os)
-        self._sys_proxy = _SysProxy(self.argv)
-        self.scope.define('sys', self._sys_proxy)
+        self.scope.define('sys', _SysProxy(self.argv))
         self.scope.define('subprocess', subprocess)
         self.scope.define('shutil', shutil)
         self.scope.define('sysconfig', sysconfig)
@@ -5545,6 +4322,7 @@ class Interpreter:
                     _ns.update(ns)
 
                 cls = types.new_class(node.name, tuple(python_bases), kw_dict, _exec_body)
+                cls = self._apply_function_decorators(node, cls)
                 self.scope.define(node.name, cls)
                 return cls
             except Exception:
@@ -5553,6 +4331,7 @@ class Interpreter:
                          comptime_aliases=comptime_aliases, static_methods=static_methods,
                          class_methods=class_methods, def_scope=self.scope,
                          keywords=kw_dict)
+        cls = self._apply_function_decorators(node, cls)
         self.scope.define(node.name, cls)
         return cls
 
@@ -5614,14 +4393,14 @@ class Interpreter:
                 return True
             return False
 
-    def _resolve_import_module(self, module, alias, scope=None):
-        """The value an eager `import module [as alias]` binds.
+    def _bind_one_import(self, module: str, alias):
+        """Resolve and bind a single `import module [as alias]` target.
 
-        Factored out of _bind_one_import so a lazy import can defer exactly
-        this resolution (including the sys/types proxies and the sibling
-        `.mojo` preference) to first use without a second implementation.
-        `scope` is the lexical scope a lazy statement ran in; it is only
-        needed to build a dotted sibling import's namespace chain there.
+        Shared by execute_ImportStmt for both the primary `module`/`alias`
+        and every extra `(module, alias)` pair from a comma-separated
+        `import a, b, c` so all targets get identical resolution logic
+        (sys special-case, sibling .mojo preference, real importlib
+        fallback) instead of only the first being handled.
         """
         # `import sys` is special: the program must see its own argv (see
         # _SysProxy), not the real process argv reinstated by a fresh
@@ -5630,12 +4409,8 @@ class Interpreter:
         # nested interpretation of fire.py would re-read the host's live
         # argv instead of the isolated one and take the same branch forever.
         if module == 'sys' or module.split('.')[0] == 'sys':
-            return self._sys_proxy
-        # `types.LazyImportType` must name OUR proxy class: lazy imports of
-        # `.mojo` sibling modules resolve through this interpreter, so the
-        # host's native lazy-import type would describe the wrong objects.
-        if module == 'types':
-            return _TYPES_PROXY
+            self.scope.define(alias or 'sys', self.scope.get('sys'))
+            return
         # Prefer a sibling .mojo file/package over a same-named *real*
         # Python module — otherwise a coincidentally-named .py file
         # anywhere on sys.path (including this very project's own helper
@@ -5647,13 +4422,11 @@ class Interpreter:
         # name collision with an installed/local Python module.
         mod = self._load_mojo_sibling_module(module)
         if mod is not None:
-            if alias or '.' not in module:
-                return mod
-            # `import a.b` binds the top-level name `a`; _bind_dotted_import
-            # builds the intermediate namespace chain (and replaces any lazy
-            # placeholder under that name rather than trying to reify it).
-            self._bind_dotted_import(module, mod, scope)
-            return (scope or self.scope).get(module.split('.')[0])
+            if alias:
+                self.scope.define(alias, mod)
+            else:
+                self._bind_dotted_import(module, mod)
+            return
         # No sibling .mojo module and no real Python module: let
         # ModuleNotFoundError propagate as a real exception (it's a real
         # Python BaseException subclass — see execute_TryStmt /
@@ -5672,96 +4445,13 @@ class Interpreter:
         # _load_mojo_sibling_module yet. That's now handled explicitly
         # above, so by the time we reach the real importlib call, a
         # ModuleNotFoundError here always means a genuinely missing module.
-        imported = importlib.import_module(module)
-        if alias or '.' not in module:
-            return imported
-        # `import a.b` binds the top-level package name `a`.
-        return importlib.import_module(module.split('.')[0])
-
-    def _bind_dotted_import_lazy_safe_root(self, top, scope=None):
-        """The current top-level binding for a dotted import, WITHOUT
-        reifying a lazy proxy that is resolving right now (that would
-        recurse forever: the proxy's resolver is the caller)."""
-        target_scope = scope if scope is not None else self.scope
-        if top in target_scope.vars:
-            return target_scope.vars[top]
-        return target_scope.get(top)
-
-    def _bind_one_import(self, module: str, alias):
-        """Resolve and bind a single `import module [as alias]` target.
-
-        Shared by execute_ImportStmt for both the primary `module`/`alias`
-        and every extra `(module, alias)` pair from a comma-separated
-        `import a, b, c` so all targets get identical resolution logic
-        (sys special-case, sibling .mojo preference, real importlib
-        fallback) instead of only the first being handled.
-        """
-        mod = self._resolve_import_module(module, alias)
-        self.scope.define(alias or module.split('.')[0], mod)
-
-    def _importing_module_name(self):
-        """`__name__` of the module whose source is executing — the first
-        argument CPython passes to a sys.set_lazy_imports_filter callable."""
-        try:
-            name = self.scope.get('__name__')
-        except NameError:
-            name = None
-        if isinstance(name, str) and name:
-            return name
-        return self.filename or '<input>'
-
-    def _declares_lazy_module(self, module):
-        """Whether this module's global `__lazy_modules__` names `module`.
-
-        PEP 810 checks it on imports at module scope only (measured against
-        CPython 3.15.2: a function-body import is eager even when the
-        module-level set names it), and consults `__contains__` on whatever
-        object is bound there.
-        """
-        if self.scope.parent is not None:
-            return False
-        if '__lazy_modules__' not in self.scope.vars:
-            return False
-        declared = self.scope.vars['__lazy_modules__']
-        try:
-            return module in declared
-        except TypeError:
-            return False
-
-    def _import_is_potentially_lazy(self, node, module, fromlist):
-        """Whether this import statement should bind lazy proxies.
-
-        `fromlist` is None for `import ...`, the tuple of imported names for
-        `from ... import ...`. A potentially lazy import (explicit `lazy`,
-        `__lazy_modules__`, or global mode 'all') still becomes eager under
-        the global filter callable, and mode 'all' leaves try-block imports
-        eager (CPython's symtable excludes them; explicit `lazy` there is a
-        SyntaxError, so the exclusion only ever applies to mode 'all').
-        """
-        mode = _LAZY_IMPORT_STATE.mode
-        potential = getattr(node, 'lazy', False)
-        if mode == 'all':
-            potential = True
-        if not potential and self._declares_lazy_module(module):
-            potential = True
-        if not potential:
-            return False
-        if mode == 'all' and self._try_depth > 0:
-            return False
-        if fromlist is not None and getattr(node, 'wildcard', False):
-            return False
-        flt = _LAZY_IMPORT_STATE.filter
-        if flt is not None:
-            if not flt(self._importing_module_name(), module, fromlist):
-                return False
-        return True
-
-    def _bind_lazy_import(self, module, alias):
-        target = _LazyImportTarget(self, module, alias, False, self.scope)
-        label = module
-        _LAZY_IMPORT_STATE.lazy_modules.add(module)
-        name = alias or module.split('.')[0]
-        self.scope.define(name, LazyImportType(target, label))
+        mod = importlib.import_module(module)
+        if alias:
+            self.scope.define(alias, mod)
+        else:
+            # `import a.b` binds the top-level package name `a`.
+            top = module.split('.')[0]
+            self.scope.define(top, importlib.import_module(top))
 
     def execute_ImportStmt(self, node):
         """Execute `import mod` / `import mod as alias` / `import a, b, c`.
@@ -5773,34 +4463,26 @@ class Interpreter:
 
         `node.extra` holds any additional comma-separated `(module, alias)`
         targets past the first (`import a, b, c`) — each gets the same
-        resolution as the primary target via _bind_one_import. A PEP 810 lazy
-        import binds a proxy for every target instead.
+        resolution as the primary target via _bind_one_import.
         """
-        targets = [(node.module, node.alias)]
-        targets.extend(node.extra or [])
-        for module, alias in targets:
-            if self._import_is_potentially_lazy(node, module, None):
-                self._bind_lazy_import(module, alias)
-            else:
-                self._bind_one_import(module, alias)
+        self._bind_one_import(node.module, node.alias)
+        for extra_module, extra_alias in (node.extra or []):
+            self._bind_one_import(extra_module, extra_alias)
         return None
 
-    def _resolve_from_import_module(self, module):
-        """The module object `from module import ...` fetches names from."""
+    def execute_FromImportStmt(self, node):
+        """Execute `from mod import a, b as c` / `from mod import *`."""
         # See execute_ImportStmt: keep the isolated-argv sys proxy, don't
         # pull attributes off the real sys module.
-        if module == 'sys':
-            return self._sys_proxy
-        if module == 'types':
-            return _TYPES_PROXY
-        if module.startswith('.'):
+        if node.module == 'sys':
+            mod = self.scope.get('sys')
+        elif node.module.startswith('.'):
             # Relative import (`from .compare_helpers import X`, inside a
             # package's __init__.mojo) — resolve relative to current module's directory.
-            mod = None
-            rel_module = module.lstrip('.')
+            rel_module = node.module.lstrip('.')
             if self.filename:
                 base_dir = os.path.dirname(os.path.abspath(self.filename))
-                level = len(module) - len(module.lstrip('.'))
+                level = len(node.module) - len(node.module.lstrip('.'))
                 base_dir = base_dir
                 for _ in range(level - 1):
                     base_dir = os.path.dirname(base_dir)
@@ -5813,84 +4495,60 @@ class Interpreter:
                         pkg_path = os.path.join(base_dir, rel_module.replace('.', os.sep), '__init__.mojo')
                         if os.path.isfile(pkg_path):
                             mod = self._load_mojo_module_from_path(pkg_path)
-            return mod
-        # Prefer a sibling .mojo file/package over a same-named *real*
-        # Python module — see execute_ImportStmt for why (a coincidental
-        # same-named .py file on sys.path, e.g. this project's own
-        # lexer.py, would otherwise silently shadow the .mojo file the
-        # source obviously meant).
-        mod = self._load_mojo_sibling_module(module)
-        if mod is None:
-            # See _bind_one_import: don't swallow ModuleNotFoundError —
-            # let it propagate as a real exception so an enclosing
-            # `except ImportError:` in the interpreted program (the
-            # extremely common `try: from _fast import * \n except
-            # ImportError: from _pure import *` idiom) actually fires,
-            # instead of the try silently continuing with nothing bound.
-            mod = importlib.import_module(module)
-        return mod
-
-    def _resolve_from_import_name(self, mod, module, name):
-        """Fetch one `from module import name` binding from `mod`."""
-        _missing = object()
-        value = getattr(mod, name, _missing)
-        if value is _missing:
-            # `from package import submodule`: a submodule of a package is
-            # not necessarily set as an attribute of the package until it
-            # has been imported (e.g. Python 3.15's `profiling` exposes
-            # `tracing`/`sampling` as submodules). Resolve it the way
-            # Python does, by importing the fully-qualified submodule, so
-            # `from profiling import tracing` binds the real module rather
-            # than an auto-stub. Only attempted for host/Python module
-            # objects with a resolvable name; fall through to the stub on
-            # any import failure.
-            base = getattr(mod, '__name__', None) or (module if not module.startswith('.') else None)
-            if base:
-                try:
-                    value = importlib.import_module(f"{base}.{name}")
-                except Exception:
-                    value = _AutoStubValue(_AUTO_STUB_VALUE)
-            else:
-                value = _AutoStubValue(_AUTO_STUB_VALUE)
-        elif value is None:
-            # Keep the historical fallback: `getattr(mod, name, None)`
-            # previously collapsed "missing" and "present but None" into a
-            # stub. Preserve that for present-but-None to avoid changing
-            # unrelated behavior; the missing case above now resolves
-            # package submodules before stubbing.
-            value = _AutoStubValue(_AUTO_STUB_VALUE)
-        return value
-
-    def execute_FromImportStmt(self, node):
-        """Execute `from mod import a, b as c` / `from mod import *`."""
-        if node.wildcard:
-            mod = self._resolve_from_import_module(node.module)
             if mod is None:
                 return None
+        else:
+            # Prefer a sibling .mojo file/package over a same-named *real*
+            # Python module — see execute_ImportStmt for why (a coincidental
+            # same-named .py file on sys.path, e.g. this project's own
+            # lexer.py, would otherwise silently shadow the .mojo file the
+            # source obviously meant).
+            mod = self._load_mojo_sibling_module(node.module)
+            if mod is None:
+                # See _bind_one_import: don't swallow ModuleNotFoundError —
+                # let it propagate as a real exception so an enclosing
+                # `except ImportError:` in the interpreted program (the
+                # extremely common `try: from _fast import * \n except
+                # ImportError: from _pure import *` idiom) actually fires,
+                # instead of the try silently continuing with nothing bound.
+                mod = importlib.import_module(node.module)
+        if node.wildcard:
             names = getattr(mod, '__all__', None)
             if names is None:
                 names = [n for n in dir(mod) if not n.startswith('_')]
             for name in names:
                 self.scope.define(name, getattr(mod, name))
             return None
-        fromlist = tuple(name for name, _alias in node.names)
-        if self._import_is_potentially_lazy(node, node.module, fromlist):
-            target = _LazyImportTarget(self, node.module, None, True, self.scope)
-            _LAZY_IMPORT_STATE.lazy_modules.add(node.module)
-            for name, alias in node.names:
-                _LAZY_IMPORT_STATE.lazy_modules.add(node.module + '.' + name)
-                label = node.module + '.' + name
-                self.scope.define(alias or name,
-                                  LazyImportType(target, label, from_name=name))
-            return None
-        mod = self._resolve_from_import_module(node.module)
-        if mod is None:
-            return None
+        _missing = object()
         for name, alias in node.names:
-            self.scope.define(alias or name,
-                              self._resolve_from_import_name(mod, node.module, name))
+            value = getattr(mod, name, _missing)
+            if value is _missing:
+                # `from package import submodule`: a submodule of a package is
+                # not necessarily set as an attribute of the package until it
+                # has been imported (e.g. Python 3.15's `profiling` exposes
+                # `tracing`/`sampling` as submodules). Resolve it the way
+                # Python does, by importing the fully-qualified submodule, so
+                # `from profiling import tracing` binds the real module rather
+                # than an auto-stub. Only attempted for host/Python module
+                # objects with a resolvable name; fall through to the stub on
+                # any import failure.
+                base = getattr(mod, '__name__', None) or (node.module if not node.module.startswith('.') else None)
+                if base:
+                    try:
+                        value = importlib.import_module(f"{base}.{name}")
+                    except Exception:
+                        value = _AutoStubValue(_AUTO_STUB_VALUE)
+                else:
+                    value = _AutoStubValue(_AUTO_STUB_VALUE)
+            elif value is None:
+                # Keep the historical fallback: `getattr(mod, name, None)`
+                # previously collapsed "missing" and "present but None" into a
+                # stub. Preserve that for present-but-None to avoid changing
+                # unrelated behavior; the missing case above now resolves
+                # package submodules before stubbing.
+                value = _AutoStubValue(_AUTO_STUB_VALUE)
+            self.scope.define(alias or name, value)
         return None
-
 
     def execute_AssignStmt(self, node):
         """Execute assignment statement."""
@@ -6990,20 +5648,7 @@ class Interpreter:
             return False
 
     def execute_TryStmt(self, node):
-        """Execute try statement.
-
-        The PEP 810 try-block context is held for the WHOLE statement (the
-        same region CPython's symtable marks `ste_in_try_block`), so a mode
-        'all' import in a handler/else/finally is eager too.
-        """
-        self._try_depth += 1
-        try:
-            return self._execute_try_stmt_inner(node)
-        finally:
-            self._try_depth -= 1
-
-    def _execute_try_stmt_inner(self, node):
-        """execute_TryStmt body — see that method's docstring."""
+        """Execute try statement."""
         try:
             for stmt in node.body:
                 self.execute(stmt)
@@ -7321,13 +5966,7 @@ class Interpreter:
         try:
             return self.scope.get(expr.name)
         except NameError:
-            # Re-raise with the source location, tagged like the original:
-            # scope.get raises through _tag_name_error (name/candidates/
-            # self_obj), and this new exception must carry the same fields
-            # for CPython 3.15's print-time NameError suggestion.
-            raise _tag_name_error(
-                NameError(f"{self._loc(expr)}name '{expr.name}' is not defined"),
-                self.scope, expr.name)
+            raise NameError(f"{self._loc(expr)}name '{expr.name}' is not defined")
 
     def _resolve_Self(self, expr):
         """Resolve Self to the current struct type (when inside a struct method)."""
@@ -7538,14 +6177,8 @@ class Interpreter:
         # and silently fail once compiled.
         expr_text, conv, spec = self._split_fstring_field(field)
         value = self._eval_fstring_expr(expr_text)
-        if conv == 'r':
+        if conv == 'r' or conv == 'a':
             text = repr(value)
-        elif conv == 'a':
-            # `!a` is ascii(), NOT repr(): repr leaves non-ASCII code points
-            # raw, so `f"{'héllo'!a}"` used to print the same unquoted text
-            # as `!s` here. The compiled engines have the same rule via
-            # mojo_ascii_escape (fire_runtime.c).
-            text = _ascii_repr(value)
         else:
             text = str(value)
         if spec:
@@ -7945,13 +6578,9 @@ class Interpreter:
                 return BoundMethod(method, obj, self)
             if expr.member in obj._mojo_class.comptime_aliases:
                 return obj._mojo_class.comptime_aliases[expr.member]
-            raise _tag_attribute_error(
-                AttributeError(f"{self._loc(expr)}'{obj._mojo_class.name}' object has no attribute '{expr.member}'"),
-                obj, expr.member, _frame_self(self))
+            raise AttributeError(f"{self._loc(expr)}'{obj._mojo_class.name}' object has no attribute '{expr.member}'")
         if not hasattr(obj, expr.member):
-            raise _tag_attribute_error(
-                AttributeError(f"{self._loc(expr)}'{type(obj).__name__}' object has no attribute '{expr.member}'"),
-                obj, expr.member, _frame_self(self))
+            raise AttributeError(f"{self._loc(expr)}'{type(obj).__name__}' object has no attribute '{expr.member}'")
         return getattr(obj, expr.member)
 
     def eval_SubscriptExpr(self, expr):

@@ -20,8 +20,7 @@ results = []
 for i, f in enumerate(files):
     rel = os.path.relpath(f, FIRE)
     try:
-        r = subprocess.run(["python3", "tools/cpu_cap.py", "wrap", "--name", rel, "--",
-                           "python3", "fire.py", "build", f], cwd=FIRE,
+        r = subprocess.run(["python3", "fire.py", "build", f], cwd=FIRE,
                            capture_output=True, text=True, timeout=300)
         ok = r.returncode == 0
         err = (r.stderr or r.stdout or "").strip()

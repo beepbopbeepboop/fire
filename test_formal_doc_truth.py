@@ -161,11 +161,8 @@ def group_census():
     if row is not None:
         note = row.group(0)
         counted = 0
-        from formal.model.builtins import _OPT_IN_RUNTIME_HEADERS
         for path in sorted(glob.glob(os.path.join(HERE, 'runtime', '*.h'))):
             base = os.path.basename(path)
-            if base in _OPT_IN_RUNTIME_HEADERS:
-                continue          # not part of the default ABI; runtime_abi() leaves it out too
             real = len(reflect.collect_runtime_exports_h(path))
             counted += real
             m = re.search(re.escape(f'`{base}`') + r'\s+(\d+)', note)
@@ -290,13 +287,13 @@ def group_constants():
           f'Lean runs with -j {L.LEAN_THREADS}, FORMAL.md §12 publishes -j 4')
 
     # §7 row 7: the CFG leaves that admit. Named in the document, and the
-    # document says seventeen; the generator stamps each name into the Lean, so a
+    # document says fifteen; the generator stamps each name into the Lean, so a
     # site added here is a site a reader is told about.
-    check(len(AP.CFG_LEAF_SITES) == 17,
+    check(len(AP.CFG_LEAF_SITES) == 15,
           f'CFG_LEAF_SITES has {len(AP.CFG_LEAF_SITES)} sites, FORMAL.md §7 row 7 '
-          f'publishes seventeen')
-    check('**seventeen named sites**' in text,
-          "FORMAL.md §7 row 7 states the CFG_LEAF_SITES count as 'seventeen'")
+          f'publishes fifteen')
+    check('**fifteen named sites**' in text,
+          "FORMAL.md §7 row 7 states the CFG_LEAF_SITES count as 'fifteen'")
 
     # §1: the runtime translation unit's size, which is the one figure in the
     # thesis paragraph and was 299 KB when written.
@@ -886,9 +883,9 @@ def group_opus():
     body = gen[gen.index('def _gen_universal_e2e_cfg'):]
     body = body[:body.index('\ndef ')]
     for clause, snippet, said in (
-            ('recursive', 'if (recursive or (not _acyclic and not _has_loop)',
+            ('recursive', 'if (recursive or not _acyclic',
              '**not recursive**'),
-            ('acyclic/loop', '_acyclic = all(', '**acyclic**'),
+            ('acyclic', '_acyclic = all(', '**acyclic**'),
             ('no `bl`', 'b["kind"] == "bl"', 'no `bl` block'),
             ('a `fuel` at or above the instruction count', 'fuel < _TOTAL',
              'a `fuel` at or above the instruction count')):

@@ -204,25 +204,18 @@ def test_probe_distinguishes_calls_from_mentions():
 def test_probe_ignores_mentions():
     """The self-host case specifically: the compiler's own generated C.
 
-    The do_imports=True import-snippet form, restored now that the transitive
-    compile stopped hanging (bugs/MIDDLE_coro_import_compile_hangs_on_
-    large_modules, fixed by memoizing the single binder census in the walk
-    memo's own lifecycle): the snippet's closure reaches the compiler's own
-    modules (`build_config` -> `module_loader` -> ... -> `gimple_codegen` /
-    `fire_compiler`), so the generated C carries every one of the 59
-    optional-unit signatures as string-literal data — the exact shape the
-    probe must not mistake for calls. This is the same compilation the suite
-    job timed out on before the fix; it must now complete and pull in no
-    unit. (The `do_imports=False` form this briefly measured `build_config.
-    py` alone while the wider form hung.)"""
+    Cheapest way to state the whole regression: compiling the compiler must not
+    pull in any optional unit, because nothing in it calls one. Asserted on a
+    real codegen run rather than on a synthetic string, since the string that
+    broke it was 59 real signatures."""
     gen = gimple_codegen.compile_to_gimple_cached(
         'from build_config import find_gcc\n'
-        'def main():\n    print(find_gcc())\n',
-        do_imports=True, filename='probe.mojo')
+        'def main():\n'
+        '    print(find_gcc())\n', do_imports=True, filename='probe.mojo')
     hits = build_config.referenced_optional_runtime_units(gen)
     check(hits == [],
-          'compiling an import snippet whose closure reaches the compiler '
-          'modules pulls in NO optional unit',
+          'compiling a module that imports build_config pulls in NO optional '
+          'unit (their symbols are in the generated C only as string data)',
           str(hits))
 
 

@@ -271,7 +271,7 @@ different jobs:
   gate would pass by construction and stop detecting the byte-identity
   divergence it exists to detect. Do not "fix" this by adding a cache; if
   bootstrap is too slow, fix the memory blowup
-  (`CODEGEN_bootstrap_resource_blowup`), which is the actual cause.
+  (`bugs/hard/CODEGEN_bootstrap_resource_blowup.md`), which is the actual cause.
   For scale: the 45-file per-stage sweeps measure **1.8 s** in total, so all
   of bootstrap's ~32 minutes is the three whole-closure dumps plus the
   `gcc -O0` compile between them. Per-file caching would buy nothing.
@@ -442,16 +442,13 @@ restated here.
 carry and, like `formal-struct` before it, lost its `expect=` on 2026-10-02:
 both failures each named were rewrites of an assertion that could no longer see
 the case it was watching, and the cases are now build-and-RUN comparisons
-against CPython. The remaining `expect=` jobs besides the two heavyweight steps,
-the formal host-module rows, and the `doc-refs` ratchet (marked 2026-11-09 with
-a whole-job condition while the citation campaign is open; the first `expect=`
-in `check`, deliberate — the alternative was an undeclared red there, and a
-marked job that starts passing reports loudly when the campaign lands) are the
-compiled-path async/await cluster, all cheap (0.0-0.2 GB, 1.2-11.6 s each) and
-all in `coroutine` and `x86`, each measured one at a time before being named,
-with the measurement at its registration. (A FANOUT can state a count too, checked against the per-item
+against CPython. The remaining `expect=` jobs besides the two heavyweight steps
+and the formal host-module rows are the compiled-path async/await cluster, all
+cheap (0.0-0.2 GB, 1.2-11.6 s each) and all in `coroutine` and `x86`, each
+measured one at a time before being named, with the measurement at its
+registration. (A FANOUT can state a count too, checked against the per-item
 verdicts rather than a summary line; see `observed_fanout_failures` in
-`tools/suite.py`.) `CODEGEN_ab_native_fails` §4 carries the full inventory
+`tools/suite.py`.) `bugs/hard/CODEGEN_ab_native_fails.md` §4 carries the full inventory
 and the reasoning for `expect=` rather than `disabled=` on each.
 
 | test | marker | subject | cost it charges every gate |
@@ -488,7 +485,7 @@ regex over a child's output and a child that writes a wrong artifact prints
 nothing. Residual divergence class, if one reappears:
 commit e8a7135b8; the whole-closure
 compile costs 12-15 GB and ~7.5 min per stage
-(`CODEGEN_bootstrap_resource_blowup`).
+(`bugs/hard/CODEGEN_bootstrap_resource_blowup.md`).
 
 **The gate is otherwise clean, and deliberately no file here says how many.**
 Every `expect=` and `disabled=` registration in the registry is accounted for
