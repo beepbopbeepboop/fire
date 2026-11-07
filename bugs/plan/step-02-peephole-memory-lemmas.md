@@ -1,5 +1,5 @@
 # plan/step-02: the two memory lemmas the peephole store rules actually lack
-**Status: DONE 2026-11-06 (measured).** The 2026-11-05 'verified by agent' stamp was FALSE: none of the three lemmas existed anywhere in `lib/` or its history. Written now in `lib/Peephole.lean`: `mem_write_u64_idem`, `mem_write_bytes_idem` (+ `mem_write_bytes8_idem`), `arm64_set_reg_self`, via an inside/outside-the-window split (`simp` does not finish 8 nested `if`s). `lib/` builds clean (`ensure_library`, 2026-11-06); `test_formal_axioms.py` 2/2.
+**Status: DONE 2026-11-06 (measured).** The 2026-11-05 first-wave stamp was FALSE: none of the three lemmas existed anywhere in `lib/` or its history. Written now in `lib/Peephole.lean`: `mem_write_u64_idem`, `mem_write_bytes_idem` (+ `mem_write_bytes8_idem`), `arm64_set_reg_self`, via an inside/outside-the-window split (`simp` does not finish 8 nested `if`s). `lib/` builds clean (`ensure_library`, 2026-11-06); `test_formal_axioms.py` 2/2.
 
 Class: mid      Size: S      Depends: 00a, 01a, 01b      Blocks: 03c, 03d, 04b, 04c
 Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §2 ("The recipe that works"), §3.
