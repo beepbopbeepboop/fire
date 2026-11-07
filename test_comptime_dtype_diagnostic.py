@@ -147,6 +147,34 @@ fn main():
     _compile_full(src)
 
 
+def test_generic_struct_comptime_assert_dtype_param_only_stmt():
+    # A comptime assert with a DType predicate on an instantiated struct
+    # param, as the method's ONLY statement. Regression for a tokenizer bug
+    # where a line ending in a string literal (`assert ..., "fp"`) left
+    # prev_ended_string set across a blank line, suppressing the DEDENTs
+    # before the following top-level `fn main` and swallowing the
+    # instantiation site — so elaboration never ran and the provably-false
+    # diagnostic was silently accepted
+    # (bugs/DIAGNOSTICS_missing_validation_modular.md).
+    src = '''
+struct DTypeDiagAS[dtype: DType]:
+    fn check(self):
+        comptime assert dtype.is_floating_point(), "fp"
+
+fn main():
+    var f = DTypeDiagAS[DType.uint32]()
+    f.check()
+'''
+    try:
+        _compile_full(src)
+    except RuntimeError as e:
+        assert 'comptime assertion failed' in str(e), e
+        assert 'fp' in str(e), e
+        return
+    raise AssertionError(
+        'instantiated generic struct comptime assert(dtype predicate, only stmt) compiled')
+
+
 if __name__ == '__main__':
     test_comptime_assert_dtype_is_integral_false()
     test_comptime_assert_dtype_is_integral_true()
@@ -158,4 +186,5 @@ if __name__ == '__main__':
     test_generic_struct_constrained_dtype_param_false()
     test_generic_struct_comptime_assert_dtype_param_false()
     test_generic_struct_constrained_dtype_param_true()
+    test_generic_struct_comptime_assert_dtype_param_only_stmt()
     print('ok')

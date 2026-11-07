@@ -80,14 +80,31 @@ Key categories:
   (`test_generic_struct_constrained_dtype_param_false`,
   `test_generic_struct_comptime_assert_dtype_param_false`,
   `test_generic_struct_constrained_dtype_param_true`).
+- **Landed (follow-up, this worker, branch
+  `work/bug-mid-diagnostics-missing-validation-m-794`):** root-cause fix in
+  `fire_compiler.py` tokenizer: a line ending with a string literal set
+  `prev_ended_string` (for implicit multi-line string concatenation) but never
+  cleared it across a blank/comment-only line and did not verify that the next
+  significant line actually begins a string continuation. When a `comptime
+  assert`/`assert` (or any statement) ended with a string message as the
+  last/only statement in an indented block and was followed by a blank line
+  and a dedented definition, the required DEDENT tokens were suppressed and the
+  parser swallowed the following top-level code (e.g. `fn main`). This
+  prevented elaboration-time diagnostics from firing for instantiated generic
+  structs in that shape (e.g. a sole `comptime assert dtype.is_floating_point(),
+  "..."` in a method of a locally-instantiated generic struct compiled with
+  `do_imports=True`). Regression:
+  `test_comptime_dtype_diagnostic.py`
+  (`test_generic_struct_comptime_assert_dtype_param_only_stmt`).
 - **Still open (large):** the rest of this umbrella — comptime-assert/
   `constrained` cases where condition evaluation is incomplete (e.g.
-  DType predicates on comptime params in local generic struct instantiations
-  that bypass the elaboration path and are compiled with unbound params, so
-  conditions degrade to unknown/non-fatal; `t"..."`/reflection-driven
-  messages), `constrained` cases whose conditions/messages cannot yet be
-  folded (generics, trait reflection, `StaticString(_get_kgen_string[...])`),
-  type/trait conformance diagnostics, import errors, and the other categories
-  listed above. `build/checkfail_candidates.json` is not present in this
-  worktree; re-run `tools/collect_checkfail.py` against the modular suite to
-  refresh the candidate list and prioritize.
+  DType predicates on comptime params in generic struct instantiations that
+  genuinely bypass elaboration and are compiled with unbound params through the
+  template fallback, so param-dependent conditions degrade to unknown/non-fatal;
+  `t"..."`/reflection-driven messages), `constrained` cases whose
+  conditions/messages cannot yet be folded (generics, trait reflection,
+  `StaticString(_get_kgen_string[...])`), type/trait conformance diagnostics,
+  import errors, and the other categories listed above.
+  `build/checkfail_candidates.json` is not present in this worktree; re-run
+  `tools/collect_checkfail.py` against the modular suite to refresh the
+  candidate list and prioritize.

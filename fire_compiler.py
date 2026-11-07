@@ -2667,9 +2667,17 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
         physical_line = line_nums[line_idx]
         expanded = _indent_expanded(line)
         raw_content = expanded.lstrip()
-        if not raw_content or raw_content.startswith(_CMT_CHAR): continue
+        if not raw_content or raw_content.startswith(_CMT_CHAR):
+            # A blank/comment-only line breaks implicit string concatenation
+            # (`"a"\n\n"b"` is not an implicit concat) and must not leave
+            # `prev_ended_string` set, or the next significant line's
+            # required INDENT/DEDENT emission is incorrectly suppressed.
+            prev_ended_string = False
+            continue
         content = _strip_inline_comment(raw_content).rstrip()
-        if not content: continue
+        if not content:
+            prev_ended_string = False
+            continue
         indent = len(expanded) - len(raw_content)
         sub_stmts = _split_on_separators(content)
         for stmt_idx, stmt in enumerate(sub_stmts):
@@ -2678,9 +2686,23 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
             # Only emit INDENT/DEDENT when at paren depth 0, and not when this
             # physical line is itself just the continuation of the previous one
             # (implicit-continuation token, or an implicit string concat whose
-            # previous line ended with a string literal).
+            # previous line ended with a string literal).  `prev_ended_string`
+            # is only a continuation when this line actually begins with a
+            # string literal (`"a"\n "b"`); a dedented `fn`/keyword/statement
+            # after a line that ended in a string (e.g. `assert x, "msg"`)
+            # must still get its DEDENTs.
+            _string_cont = False
+            if prev_ended_string and stmt_idx == 0 and paren_depth == 0:
+                s = stmt.lstrip()
+                _string_cont = (s.startswith('"') or s.startswith("'")
+                                or s.startswith('`')
+                                or (len(s) >= 2 and s[0] in 'fFrRbBuUtT'
+                                    and (s[1] in '"\''
+                                         or (len(s) >= 3 and s[1] in 'fFrRbBuUtT'
+                                             and s[2] in '"\''))))
             if stmt_idx == 0 and paren_depth == 0 \
-                    and not continued_from_prev and not prev_ended_string:
+                    and not continued_from_prev \
+                    and not (prev_ended_string and _string_cont):
                 if indent > stack[-1]:
                     stack.append(indent)
                     out.append(Token("INDENT", "", line=physical_line, col=0))
