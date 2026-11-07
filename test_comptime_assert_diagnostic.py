@@ -354,6 +354,113 @@ def test_comptime_assert_in_comptime_for_range_len_true():
         '        comptime assert i < 3, "ok"\n')
 
 
+def test_comptime_assert_subscript_list_fails():
+    # Subscript on a comptime-known list must fold so provably-false
+    # conditions are diagnosed (DIAGNOSTICS_missing_validation_modular:
+    # collection ops beyond len()).
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime a = [10, 20, 30]\n'
+            '    comptime assert a[1] == 99, "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime assert with list subscript false compiled')
+
+
+def test_comptime_assert_subscript_list_true():
+    _compile(
+        'fn f():\n'
+        '    comptime a = [10, 20, 30]\n'
+        '    comptime assert a[1] == 20, "ok"\n')
+
+
+def test_comptime_assert_subscript_tuple_fails():
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime a = (1, 2, 3)\n'
+            '    comptime assert a[0] == 5, "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime assert with tuple subscript false compiled')
+
+
+def test_comptime_assert_subscript_str_fails():
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime s = "abc"\n'
+            '    comptime assert s[1] == "z", "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime assert with str subscript false compiled')
+
+
+def test_comptime_assert_subscript_in_range_bound_fails():
+    # Subscript-folded range bound must let the comptime-for unroller diagnose.
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime a = [2, 5]\n'
+            '    comptime for i in range(a[1]):\n'
+            '        comptime assert i < 3, "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime for with subscript range bound compiled')
+
+
+def test_comptime_assert_in_comptime_for_str_alias_fails():
+    # Comptile-for over a comptime-known string must unroll with the loop
+    # variable bound (DIAGNOSTICS_missing_validation_modular).
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime s = "ab"\n'
+            '    comptime for c in s:\n'
+            '        comptime assert c == "a", "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime for over comptime str alias compiled')
+
+
+def test_comptime_assert_in_comptime_for_str_alias_true():
+    _compile(
+        'fn f():\n'
+        '    comptime s = "ab"\n'
+        '    comptime for c in s:\n'
+        '        comptime assert c == "a" or c == "b", "ok"\n')
+
+
+def test_comptime_assert_in_comptime_for_str_literal_fails():
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime for c in "ab":\n'
+            '        comptime assert c == "a", "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime for over string literal compiled')
+
+
 if __name__ == '__main__':
     test_comptime_assert_false_fails()
     test_comptime_assert_false_no_msg()
@@ -384,4 +491,12 @@ if __name__ == '__main__':
     test_comptime_assert_len_comptime_list_true()
     test_comptime_assert_in_comptime_for_range_len_fails()
     test_comptime_assert_in_comptime_for_range_len_true()
+    test_comptime_assert_subscript_list_fails()
+    test_comptime_assert_subscript_list_true()
+    test_comptime_assert_subscript_tuple_fails()
+    test_comptime_assert_subscript_str_fails()
+    test_comptime_assert_subscript_in_range_bound_fails()
+    test_comptime_assert_in_comptime_for_str_alias_fails()
+    test_comptime_assert_in_comptime_for_str_alias_true()
+    test_comptime_assert_in_comptime_for_str_literal_fails()
     print('ok')

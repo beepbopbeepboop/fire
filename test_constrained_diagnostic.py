@@ -240,6 +240,66 @@ def test_constrained_in_comptime_for_range_len_true():
         '        constrained[i < 3, "ok"]()\n')
 
 
+def test_constrained_subscript_list_fails():
+    # Subscript on comptime-known collections must fold for diagnostics
+    # (DIAGNOSTICS_missing_validation_modular: collection ops beyond len()).
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime a = [1, 2, 3]\n'
+            '    constrained[a[1] == 9, "bad"]()\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'constraint failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('constrained with subscript false compiled')
+
+
+def test_constrained_subscript_list_true():
+    _compile(
+        'fn f():\n'
+        '    comptime a = [1, 2, 3]\n'
+        '    constrained[a[1] == 2, "ok"]()\n')
+
+
+def test_constrained_subscript_str_fails():
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime s = "abc"\n'
+            '    constrained[s[0] == "z", "bad"]()\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'constraint failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('constrained with str subscript false compiled')
+
+
+def test_constrained_in_comptime_for_str_alias_fails():
+    try:
+        _compile(
+            'fn f():\n'
+            '    comptime s = "ab"\n'
+            '    comptime for c in s:\n'
+            '        constrained[c == "a", "bad"]()\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'constraint failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('constrained in comptime for over str alias compiled')
+
+
+def test_constrained_in_comptime_for_str_alias_true():
+    _compile(
+        'fn f():\n'
+        '    comptime s = "ab"\n'
+        '    comptime for c in s:\n'
+        '        constrained[c == "a" or c == "b", "ok"]()\n')
+
+
 if __name__ == '__main__':
     test_constrained_bracket_false_fails()
     test_constrained_bracket_false_no_msg()
@@ -264,4 +324,9 @@ if __name__ == '__main__':
     test_constrained_len_comptime_list_true()
     test_constrained_in_comptime_for_range_len_fails()
     test_constrained_in_comptime_for_range_len_true()
+    test_constrained_subscript_list_fails()
+    test_constrained_subscript_list_true()
+    test_constrained_subscript_str_fails()
+    test_constrained_in_comptime_for_str_alias_fails()
+    test_constrained_in_comptime_for_str_alias_true()
     print('ok')

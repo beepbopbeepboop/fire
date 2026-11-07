@@ -185,6 +185,22 @@ Key categories:
   comptime assert i < 2`). Regressions:
   `test_comptime_assert_diagnostic.py`,
   `test_constrained_diagnostic.py`.
+- **Landed (follow-up, this worker, branch
+  `work/bug-mid-diagnostics-missing-validation-m-6270`):** root-cause fixes
+  for comptime folding of collection element access and string iteration in
+  compile-time validation. `mojo/middle/comptime.py` now folds
+  `SubscriptExpr`/`SliceExpr` over comptime-known `list`/`tuple`/`str` values
+  in `eval_const`, `_const_foldable`, and `eval_const_int`, so provably-false
+  `comptime assert` / `constrained` conditions using element access/slicing
+  (e.g. `comptime a = [10,20]; comptime assert a[1] == 99`) produce
+  compile-time diagnostics, and subscript-folded values can drive
+  `range(...)` bounds for comptime-for unrolling.
+  `mojo/backend_gimple/emit_funcs.py`'s comptime-for unroller now treats a
+  comptime-known `str` iterable (literal or comptime alias) as unrollable with
+  loop variables bound in `gen._comptime_vals`, so provably-false
+  loop-dependent diagnostics over string iteration fire. Regressions:
+  `test_comptime_assert_diagnostic.py`,
+  `test_constrained_diagnostic.py`.
 - **Still open (large):** the rest of this umbrella — comptime-assert/
   `constrained` cases where condition evaluation is incomplete (e.g.
   DType predicates on comptime params in generic struct instantiations that
@@ -196,7 +212,8 @@ Key categories:
   `constrained` in non-gimple/formal backends or in comptime-for shapes beyond
   the gimple unroller's bound forms (e.g. DType/variadic iterables, iteration
   over computed/non-foldable iterables, bounds requiring comptime folding of
-  collection ops beyond `len()` on comptime-known `list`/`tuple`/`str`, and
+  collection ops beyond `len()`/element access/slicing on comptime-known
+  `list`/`tuple`/`str`, comptime-known `dict` literal folding/subscript, and
   local `alias` bindings not always visible to comptime folding), type/trait
   conformance diagnostics,
   import errors, and the other categories listed above.

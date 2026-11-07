@@ -1192,13 +1192,14 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                 return
     else:
         # Comptime for over a non-literal iterable that resolves to a constant
-        # list/tuple (e.g. a comptime alias: `comptime vals = [1,2]; for i in
-        # vals`). Bind loop targets in gen._comptime_vals so comptime assert /
-        # constrained diagnostics that depend on them evaluate correctly
+        # list/tuple/str (e.g. a comptime alias: `comptime vals = [1,2]; for i in
+        # vals`, or `comptime s = "ab"; for c in s`). Bind loop targets in
+        # gen._comptime_vals so comptime assert / constrained diagnostics that
+        # depend on them evaluate correctly
         # (bugs/DIAGNOSTICS_missing_validation_modular.md: "iteration over
-        # non-literal comptime values").
+        # non-literal comptime values"; subscript/string collection ops).
         _resolved = gen._eval_const(node.iterable)
-        if isinstance(_resolved, (list, tuple)):
+        if isinstance(_resolved, (list, tuple, str)):
             cvals = list(_resolved)
             elems = [None] * len(cvals)
             if not for_target_is_tuple(node.target):

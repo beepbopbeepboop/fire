@@ -57,6 +57,8 @@ CallExpr = _fc.CallExpr
 TupleExpr = getattr(_fc, 'TupleExpr', None)
 ListExpr = getattr(_fc, 'ListExpr', None)
 DottedLiteral = getattr(_fc, 'DottedLiteral', None)
+SubscriptExpr = getattr(_fc, 'SubscriptExpr', None)
+SliceExpr = getattr(_fc, 'SliceExpr', None)
 
 
 def compare_op(op: str, left, right):
@@ -247,6 +249,43 @@ def _resolve_dtype_name(node, bindings, platform=None):
     # Generic member access fallback (e.g. a value that eval_const can fold).
     v = eval_const(node, bindings, platform)
     return _dtype_name_from_value(v)
+
+
+def _eval_subscript(node, bindings: dict, platform=None):
+    """Fold subscript/slice on a comptime-known value, or None."""
+    if SubscriptExpr is not None and isinstance(node, SubscriptExpr):
+        base = eval_const(node.obj, bindings, platform)
+        if base is None:
+            return None
+        idx = eval_const(node.index, bindings, platform)
+        if idx is None:
+            return None
+        try:
+            return base[idx]
+        except Exception:
+            return None
+    if SliceExpr is not None and isinstance(node, SliceExpr):
+        base = eval_const(node.obj, bindings, platform)
+        if base is None:
+            return None
+        start = stop = step = None
+        if getattr(node, 'start', None) is not None:
+            start = eval_const(node.start, bindings, platform)
+            if start is None:
+                return None
+        if getattr(node, 'stop', None) is not None:
+            stop = eval_const(node.stop, bindings, platform)
+            if stop is None:
+                return None
+        if getattr(node, 'step', None) is not None:
+            step = eval_const(node.step, bindings, platform)
+            if step is None:
+                return None
+        try:
+            return base[slice(start, stop, step)]
+        except Exception:
+            return None
+    return None
 
 
 def _eval_dtype_predicate(dtype_name, method):
@@ -453,6 +492,14 @@ def eval_const(node, bindings: dict, platform: str = None):
             _dv = _eval_dtype_predicate(_dn, _dm)
             if _dv is not None:
                 return _dv
+    # Subscript/slice on a comptime-known value (list/tuple/str/dict element
+    # access or slicing). Required so `comptime assert a[i] == ...` and similar
+    # conditions over comptime collections produce compile-time diagnostics
+    # (bugs/DIAGNOSTICS_missing_validation_modular.md: "collection ops beyond
+    # len()").
+    _sv = _eval_subscript(node, bindings, platform)
+    if _sv is not None:
+        return _sv
     if isinstance(node, UnaryOp) and node.op in FOLD_UNARY_OPS:
         v = eval_const(node.operand, bindings, platform)
         return fold_unary_sign(node.op, v) if isinstance(v, (int, bool)) \
@@ -623,6 +670,13 @@ def eval_const_int(node, bindings: dict, call_hook=None):
         if isinstance(_lv, (list, tuple, str)):
             return len(_lv)
         return None
+    # Subscript/slice yielding an int (e.g. `range(a[0])` with comptime `a`).
+    if ((SubscriptExpr is not None and isinstance(node, SubscriptExpr))
+            or (SliceExpr is not None and isinstance(node, SliceExpr))):
+        _sv = eval_const(node, bindings)
+        if isinstance(_sv, (int, bool)) and not isinstance(_sv, str):
+            return int(_sv)
+        return None
     if call_hook is not None and isinstance(node, CallExpr) and isinstance(
             node.func, IdentExpr):
         argvals = [eval_const_int(a, bindings, call_hook) for a in node.args]
@@ -700,6 +754,21 @@ def _const_foldable(node, bindings: dict, call_hook=None) -> bool:
                 and len(node.args) == 1 and not node.kwargs
                 and node.func.name in _SCALAR_CTOR_BITS)):
         return _const_foldable(node.args[0], bindings, call_hook)
+    # Subscript/slice on a comptime-known collection (DIAGNOSTICS_missing_validation_modular).
+    if SubscriptExpr is not None and isinstance(node, SubscriptExpr):
+        if getattr(node, 'attrs', None):
+            return False
+        return (_const_foldable(node.obj, bindings, call_hook)
+                and _const_foldable(node.index, bindings, call_hook))
+    if SliceExpr is not None and isinstance(node, SliceExpr):
+        if not _const_foldable(node.obj, bindings, call_hook):
+            return False
+        for _part in (getattr(node, 'start', None),
+                      getattr(node, 'stop', None),
+                      getattr(node, 'step', None)):
+            if _part is not None and not _const_foldable(_part, bindings, call_hook):
+                return False
+        return True
     if isinstance(node, UnaryOp) and (node.op in FOLD_UNARY_OPS or node.op == 'not'):
         return _const_foldable(node.operand, bindings, call_hook)
     if isinstance(node, BinaryOp):
