@@ -1483,17 +1483,9 @@ def runtime_dylib(gcc: str = None, flags: tuple = (), arch: str = None) -> str:
         # mis-types, and this module is in mojoc's own compile closure. See that
         # function's `for line in report:` for the measurement.
         entries, report = runtime_export_entries(cc, objs)
-        reflect_src = reflect.emit_table_c(entries)
-        rc = os.path.join(wd, '_mojo_reflect.c')
-        ro = os.path.join(wd, '_mojo_reflect.o')
-        with open(rc, 'w') as f:
-            f.write(reflect_src)
-        # -fno-builtin for the same reason build()'s own table compile needs it:
-        # the table redeclares every advertised symbol unprototyped to take its
-        # address, and some of those names are C builtins.
-        subprocess.run([cc, '-fno-builtin', '-fPIC', f'-I{HERE}', *arch_flags(arch),
-                        '-c', '-o', ro, rc], check=True)
-        objs.append(ro)
+        # -fno-builtin: the table redeclares every advertised symbol unprototyped
+        # to take its address, and some of those names are C builtins.
+        objs.append(_compile_reflect_table(cc, arch, wd, entries))
         # Linked into the work directory and moved into place, because a dylib's
         # install name is derived from its output path: linking straight to `out`
         # and renaming would leave the artifact disagreeing with the load command
@@ -1514,9 +1506,34 @@ def runtime_dylib(gcc: str = None, flags: tuple = (), arch: str = None) -> str:
         return out
 
 
+def _compile_reflect_table(cc: str, arch: str, wd: str, entries: list) -> str:
+    """Emit and compile a `__mojo_reflect` table for `entries`; return the .o path."""
+    reflect_src = reflect.emit_table_c(entries)
+    rc = os.path.join(wd, '_mojo_reflect.c')
+    ro = os.path.join(wd, '_mojo_reflect.o')
+    with open(rc, 'w') as f:
+        f.write(reflect_src)
+    subprocess.run([cc, '-fno-builtin', '-fPIC', f'-I{HERE}', *arch_flags(arch),
+                    '-c', '-o', ro, rc], check=True)
+    return ro
+
+
 def optional_runtime_dylib(unit: str, arch: str = None) -> str:
-    """Build (or find in the CAS) an optional runtime unit as a loadable dylib."""
+    """Build (or find in the CAS) an optional runtime unit as a loadable Mach-O dylib.
+
+    The unit is compiled from `build_config.optional_unit_source(unit)` for `arch`
+    with `optional_unit_cc(unit)` / `optional_unit_cc_flags(unit)`, defaulting to
+    the same compiler/flags `runtime_units` uses for a plain C unit. It links with
+    `optional_unit_libs(unit)` (e.g. `-lsqlite3`) and carries a `__mojo_reflect`
+    table filtered to the unit's own namespace. CAS-cached by unit, arch, source,
+    flags and libs. A missing unit, missing dev library, or missing toolchain is a
+    clear error, never a silent skip.
+    """
     arch = normalize_arch(arch)
+    if unit not in build_config.optional_unit_names():
+        raise RuntimeError(
+            f"unknown optional runtime unit {unit!r}; known: "
+            f"{build_config.optional_unit_names()}")
     cc_default, cxx = toolchain_for(arch, find_gcc(), find_gxx())
     unit_cc = build_config.optional_unit_cc(unit)
     cc = unit_cc if unit_cc else cc_default
@@ -1524,12 +1541,33 @@ def optional_runtime_dylib(unit: str, arch: str = None) -> str:
     hdr = build_config.optional_unit_header(unit)
     unit_flags = tuple(build_config.optional_unit_cc_flags(unit))
     unit_libs = tuple(build_config.optional_unit_libs(unit))
+    namespace = build_config.optional_unit_namespace(unit)
+
+    if not os.path.isfile(src):
+        raise RuntimeError(
+            f"optional runtime unit {unit!r} source not found: {src}")
+    if not os.path.isfile(hdr):
+        raise RuntimeError(
+            f"optional runtime unit {unit!r} header not found: {hdr}")
+
+    # Effective compile flags: default like `runtime_units` uses for a C unit.
+    if src.endswith(('.cpp', '.cc', '.cxx')):
+        eff_cc = cxx
+        eff_lang_flags = list(_UNIT_FLAGS.get('c++', ()))
+    elif src.endswith('.m'):
+        eff_cc = cc
+        eff_lang_flags = list(_UNIT_FLAGS.get(_C_UNIT, ('-fPIC',)))
+    else:
+        eff_cc = cc
+        eff_lang_flags = list(_UNIT_FLAGS.get(_C_UNIT, ('-fPIC',)))
+    eff_opt = [_RUNTIME_DEFAULT_OPT] + list(unit_flags)
+    eff_compile_flags = tuple(eff_lang_flags + eff_opt)
 
     digest = cas._hash(
-        'mojo-optrtdylib-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
-        cas.toolchain_fingerprint(cc, arch_flags(arch) + unit_flags + unit_libs),
+        'mojo-optrtdylib-v2', cas.ABI_VERSION, cas.compiler_fingerprint(),
+        cas.toolchain_fingerprint(eff_cc, arch_flags(arch) + eff_compile_flags + unit_libs),
         arch, unit, os.path.basename(src), open(src).read(),
-        *unit_flags, *unit_libs)
+        *eff_compile_flags, *unit_libs)
     name = f'libmojo{unit}.{arch}.{digest}.dylib'
     out = cas.path_for(f'oprtdylib/libmojo{unit}.{arch}.{digest}', '.dylib')
     if os.path.exists(out):
@@ -1540,21 +1578,26 @@ def optional_runtime_dylib(unit: str, arch: str = None) -> str:
         objs = []
         stem = os.path.splitext(os.path.basename(src))[0]
         o = os.path.join(wd, stem + '.o')
-        if src.endswith(('.cpp', '.cc', '.cxx')):
-            compile_cmd = [cxx] + list(_UNIT_FLAGS.get('c++', ())) + [f'-I{RUNTIME}'] + list(arch_flags(arch)) + list(unit_flags) + ['-c', '-o', o, src]
-        elif src.endswith('.m'):
-            compile_cmd = [cc] + ['-fPIC', f'-I{RUNTIME}'] + list(arch_flags(arch)) + list(unit_flags) + ['-c', '-o', o, src]
-        else:
-            compile_cmd = [cc] + ['-fPIC', f'-I{RUNTIME}'] + list(arch_flags(arch)) + list(unit_flags) + ['-c', '-o', o, src]
-        subprocess.run(compile_cmd, check=True)
+        compile_cmd = ([eff_cc] + list(eff_lang_flags) + [f'-I{RUNTIME}'] +
+                       list(arch_flags(arch)) + list(eff_opt) +
+                       ['-c', '-o', o, src])
+        try:
+            subprocess.run(compile_cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            msg = (e.stderr or e.stdout or '').strip()
+            raise RuntimeError(
+                f"optional runtime unit {unit!r} compile failed ({src}): {msg}") from e
         _arch_or_die(o, arch, f'object for {os.path.basename(src)}')
         objs.append(o)
 
-        # Build reflect table from this unit's header
+        # Reflect table: this unit's header, filtered to its namespace and to
+        # symbols the objects actually define.
         entries = []
         seen = set()
         try:
             for e in reflect.collect_runtime_exports_h(hdr):
+                if namespace and not e['name'].startswith(namespace):
+                    continue
                 if e['name'] in seen:
                     continue
                 seen.add(e['name'])
@@ -1578,28 +1621,27 @@ def optional_runtime_dylib(unit: str, arch: str = None) -> str:
         report = format_export_report(len(entries), misresolved, undefined)
         for line in report:
             print(f"  optional runtime {unit}: {line}", file=sys.stderr)
-        reflect_src = reflect.emit_table_c(kept)
-        rc = os.path.join(wd, '_mojo_reflect.c')
-        ro = os.path.join(wd, '_mojo_reflect.o')
-        with open(rc, 'w') as f:
-            f.write(reflect_src)
-        subprocess.run([cc, '-fno-builtin', '-fPIC', f'-I{HERE}', *arch_flags(arch),
-                        '-c', '-o', ro, rc], check=True)
-        objs.append(ro)
+        objs.append(_compile_reflect_table(cc, arch, wd, kept))
 
         staged = os.path.join(wd, name)
-        # Try to link against core runtime to resolve symbols
+        # Link against core runtime to resolve symbols the unit may call.
         try:
             core = runtime_dylib(arch=arch)
         except Exception:
             core = None
-        link_cmd = _dylink(cc, staged, objs, undefined=False if core else True, link_driver=cc,
-                           install_name='@rpath/' + name, arch=arch)
-        # Add unit libs
+        link_cmd = _dylink(cc, staged, objs, undefined=False if core else True,
+                           link_driver=cc, install_name='@rpath/' + name, arch=arch)
         link_cmd = link_cmd + list(unit_libs)
         if core:
             link_cmd = link_cmd + [core]
-        subprocess.run(link_cmd, check=True)
+        try:
+            subprocess.run(link_cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            msg = (e.stderr or e.stdout or '').strip()
+            dev = build_config.optional_unit_dev_package(unit)
+            hint = f" (install {dev})" if dev else ""
+            raise RuntimeError(
+                f"optional runtime unit {unit!r} link failed{hint}: {msg}") from e
         _arch_or_die(staged, arch, 'linked optional runtime dylib')
         os.replace(staged, out)
         try:
