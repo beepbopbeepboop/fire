@@ -241,10 +241,10 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`01b`](../bugs/plan/step-01b-proof-gap-ledger.md) | DONE | mid | M | 00a, 01a | the proof-gap ledger and its census test |
 | [`02`](../bugs/plan/step-02-peephole-memory-lemmas.md) | DONE | mid | S | 00a, 01a, 01b | the two memory lemmas the peephole store rules actually lack |
 | [`03a`](../bugs/plan/step-03a-hne-chain-generator.md) | DONE | mid | S | none | a generator for the `hne_` negation chain of an `arm64_step` arm lemma |
-| [`03b`](../bugs/plan/step-03b-arm64-movz-pair.md) | DONE | mid | M | 00a, 01a, 01b, 03a | `arm64/movz_pair` — step lemma and rule theorem |
+| [`03b`](../bugs/plan/step-03b-arm64-movz-pair.md) | SCAFFOLDED | mid | M | 00a, 01a, 01b, 03a | `arm64/movz_pair` — step lemma and rule theorem |
 | [`03c`](../bugs/plan/step-03c-arm64-store-load.md) | SCAFFOLDED | mid | M | 00a, 02, 03a | `arm64/store_load` — `STR Xt,[Xn,#o] ; LDR Xt,[Xn,#o]` |
 | [`03d`](../bugs/plan/step-03d-arm64-mem-pair.md) | SCAFFOLDED | mid | M | 00a, 02, 03c | `arm64/mem_pair` — duplicate `STR;STR` and `LDR;LDR` |
-| [`04a`](../bugs/plan/step-04a-x86-mov-self-rev.md) | SCAFFOLDED | easy | S | 00a, 01a, 01b | `x86_64/mov_self_rev` — `mov r, r` spelled `48 8b c0` |
+| [`04a`](../bugs/plan/step-04a-x86-mov-self-rev.md) | DONE | easy | S | 00a, 01a, 01b | `x86_64/mov_self_rev` — `mov r, r` spelled `48 8b c0` |
 | [`04b`](../bugs/plan/step-04b-x86-store-load.md) | SCAFFOLDED | mid | M | 00a, 02, 01b | `x86_64/store_load` — `mov [b+d], r ; mov r, [b+d]` (no SIB; disp8 form first) |
 | [`04c`](../bugs/plan/step-04c-x86-mem-pair.md) | SCAFFOLDED | mid | M | 00a, 02, 04b | `x86_64/mem_pair` — duplicate store, duplicate load (no SIB) |
 | [`04d`](../bugs/plan/step-04d-x86-imm-zero.md) | SCAFFOLDED | mid | M | 00a, 01a, 01b | `x86_64/imm_zero` — `add r, 0` / `sub r, 0` with dead flags |

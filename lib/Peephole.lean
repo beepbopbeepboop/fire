@@ -743,6 +743,25 @@ theorem x86_get_reg_set_reg_other (i j : Nat) (s : X86State) (v : UInt64)
     simp [x86_get_reg, x86_set_reg]
     split <;> first | rfl | omega
 
+/-- `mov r64, r64` register to register (REX.W 8b /r, mod=3), the LOAD
+    direction mirror of `x86_step_mov_rm64_r64_reg_st` (which is the 0x89 store
+    direction). In 0x8b the `reg` field (+REX.R) is the destination and the
+    `r/m` field (+REX.B) is the source — the opposite sense of 0x89. Proved in
+    Peephole.lean (not X86.lean) by the same `simp` step lemma used for 0x89. -/
+theorem x86_step_mov_r64_rm64_reg_st (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8b)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm) :
+    x86_step s code = some
+      { x86_set_reg s (reg + x86_rex_r rex) (x86_get_reg s (rm + x86_rex_b rex)) with
+        rip := m + 3 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write, x86_mask,
+        h_rip, h_b0, h_b1, h_b2, h_rex, h_w, h_mod, h_reg, h_rm]
+
 /-- **Rule `x86_64/mov_self`.** `mov rax, rax` — a register copied into
     itself (REX.W `89 /r`, mod=3, the reg field equal to the r/m field) — is
     one instruction of nothing, and removing it leaves every register, the
@@ -774,6 +793,47 @@ theorem peephole_x86_mov_self (s : X86State) (code : Nat → UInt8)
   rw [x86_set_reg_self s (reg + x86_rex_r rex) h_idx] at hstep
   rw [hs] at hstep
   exact Option.some.inj hstep
+
+/-- **Rule `x86_64/mov_self_rev`.** `mov r, r` spelled `REX.W 8b /r, mod = 3`
+    (`48 8b c0` for `mov rax, rax`): the LOAD-direction mirror of
+    `peephole_x86_mov_self` (0x89 store direction). Same proof shape, using
+    `x86_step_mov_r64_rm64_reg_st`. The decoder can see the form as
+    `mov_r64_rm64` (mod==3), but the compiler/emitter does not produce it
+    (only `48 89 c0` / 0x89 observed), so the matcher only fires on the store
+    direction today; rule recorded for step-05b as scaffolded/not-run. -/
+theorem peephole_x86_mov_self_rev (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8b)
+    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rm : modrm.toNat &&& 7 = rm)
+    (h_same : rm + x86_rex_b rex = reg + x86_rex_r rex)
+    (h_idx : reg + x86_rex_r rex < 16)
+    (t : X86State) (hs : x86_step s code = some t) :
+    t = { s with rip := m + 3 } := by
+  have hstep := x86_step_mov_r64_rm64_reg_st s code m rex modrm reg rm
+    h_rip h_b0 h_b1 h_b2 h_rex h_w h_mod h_reg h_rm
+  rw [h_same] at hstep
+  rw [x86_set_reg_self s (reg + x86_rex_r rex) h_idx] at hstep
+  rw [hs] at hstep
+  exact Option.some.inj hstep
+
+/-- Witness: `48 8b c0` (`mov rax, rax`, REX.W 8b /r, mod=3, reg=0, r/m=0)
+    is a no-op on the proved theorem. -/
+example (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0x8b)
+    (h_b2 : code (m + 2) = 0xc0)
+    (t : X86State) (hs : x86_step s code = some t) :
+    t = { s with rip := m + 3 } := by
+  have h_rex : x86_is_rex (0x48 : UInt8) = true := by native_decide
+  have h_w : x86_rex_w (0x48 : UInt8) = true := by native_decide
+  have h_mod : (0xc0 : UInt8).toNat >>> 6 = 3 := by native_decide
+  have h_reg : ((0xc0 : UInt8).toNat >>> 3) &&& 7 = 0 := by native_decide
+  have h_rm : (0xc0 : UInt8).toNat &&& 7 = 0 := by native_decide
+  have h_same : 0 + x86_rex_b (0x48 : UInt8) = 0 + x86_rex_r (0x48 : UInt8) := by native_decide
+  have h_idx : 0 + x86_rex_r (0x48 : UInt8) < 16 := by native_decide
+  exact peephole_x86_mov_self_rev s code m 0x48 0xc0 0 0 h_rip h_b0 h_b1 h_b2 h_rex h_w h_mod h_reg h_rm h_same h_idx t hs
 
 /-- One step of a 64-bit `MOVZ Xd, #imm16`. -/
 theorem arm64_step_movz64 (s : Arm64State) (code : Nat → UInt8)
@@ -846,49 +906,6 @@ theorem arm64_step_movz64 (s : Arm64State) (code : Nat → UInt8)
 
 
 
-
-/-- Setting the same register twice keeps only the second value. -/
-theorem arm64_set_reg_set_reg_same (i : Nat) (u : Arm64State) (a b : UInt64) :
-    arm64_set_reg i (arm64_set_reg i u a) b = arm64_set_reg i u b := by
-  unfold arm64_set_reg
-  split <;> simp_all
-
-/-- **Rule `arm64/movz_pair`.** `MOVZ Xd,#i ; MOVZ Xd,#j` (same `Xd`): the first is
-dead.  Running only the second instruction from `s` (pc advanced past the first)
-reaches exactly the state the two-instruction run reaches, so deleting the first is
-sound with no liveness condition (MOVZ reads nothing and writes no flags). -/
-theorem peephole_arm64_movz_pair (s : Arm64State) (code : Nat → UInt8)
-    (pc : Nat) (w1 w2 : UInt32)
-    (hpc : s.pc = pc)
-    (hread1 : arm64_read_insn code pc = w1)
-    (hread2 : arm64_read_insn code (s.pc + 4) = w2)
-    (h1 : (w1 &&& 0xffe00000) = 0xD2800000)
-    (h2 : (w2 &&& 0xffe00000) = 0xD2800000)
-    (hrd1 : (w1 &&& 0x1f).toNat < 31)
-    (hrd2 : (w2 &&& 0x1f).toNat < 31)
-    (heq : (w1 &&& 0x1f).toNat = (w2 &&& 0x1f).toNat)
-    (s1 s2 : Arm64State)
-    (hs1 : arm64_step s code = some s1)
-    (hpair : arm64_step { s1 with pc := s.pc + 4 } code
-      = some { s2 with pc := s.pc + 4 }) :
-    arm64_step { s with pc := s.pc + 4 } code = some { s2 with pc := s.pc + 4 }
-    ∧ arm64_steps s code 2 = some { s2 with pc := pc + 8 } := by
-  have hd1 : (w1 &&& 0x1f).toNat ≠ 31 := by omega
-  have hd2 : (w2 &&& 0x1f).toNat ≠ 31 := by omega
-  have e1 := arm64_step_movz64 s code pc w1 hpc hread1 h1 hd1
-  rw [hs1] at e1
-  have e2 := arm64_step_movz64 { s1 with pc := s.pc + 4 } code (s.pc + 4) w2 rfl hread2 h2 hd2
-  rw [hpair] at e2
-  have e3 := arm64_step_movz64 { s with pc := s.pc + 4 } code (s.pc + 4) w2 rfl hread2 h2 hd2
-  have hs1' := Option.some.inj e1
-  have hs2' := Option.some.inj e2
-  refine ⟨?_, ?_⟩
-  · rw [e3]
-    apply congrArg some
-    refine Eq.trans ?_ hs2'.symm
-    rw [hs1', ← arm64_set_reg_pc_congr, ← heq, arm64_set_reg_set_reg_same]
-  · have hpc1 : s1.pc = s.pc := by rw [hs1', arm64_set_reg_pc_unchanged]
-    rw [arm64_steps_two_seq s code s1 s2 hs1 hpc1 hpair, hpc]
 
 /-!
 ## Design note (x86_64/imm_zero) — for a later hard round

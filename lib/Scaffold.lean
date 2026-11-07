@@ -32,6 +32,29 @@ set_option autoImplicit false
 /-- Positive control for the census; delete when the first real scaffold lands. -/
 theorem scaffold_canary : True := by sorry
 
+/-- **Rule `arm64/movz_pair`.** Two `MOVZ Xd,#i ; MOVZ Xd,#j` with same `Xd`:
+deleting the first and keeping the second is sound. -/
+theorem peephole_arm64_movz_pair (s : Arm64State) (code : Nat → UInt8)
+    (pc : Nat) (w1 w2 : UInt32)
+    (hpc : s.pc = pc)
+    (hread1 : arm64_read_insn code pc = w1)
+    (hread2 : arm64_read_insn code (s.pc + 4) = w2)
+    (h1 : (w1 &&& 0xffe00000) = 0xD2800000)
+    (h2 : (w2 &&& 0xffe00000) = 0xD2800000)
+    (hrd1 : (w1 &&& 0x1f).toNat < 31)
+    (hrd2 : (w2 &&& 0x1f).toNat < 31)
+    (heq : (w1 &&& 0x1f).toNat = (w2 &&& 0x1f).toNat)
+    (s1 s2 : Arm64State)
+    (hs1 : arm64_step s code = some s1)
+    (hpair : arm64_step { s1 with pc := s.pc + 4 } code
+      = some { s2 with pc := s.pc + 4 }) :
+    (∀ k, k < 31 → arm64_reg k s2 = arm64_reg k s1)
+    ∧ s2.nzcv = s1.nzcv
+    ∧ s2.mem = s1.mem
+    ∧ arm64_steps s code 2 = some { s2 with pc := pc + 8 }
+    ∧ arm64_steps s code 1 = some { s1 with pc := pc + 4 } := by
+  sorry
+
 /-- **Rule `arm64/mem_pair_str`.** Two identical `STR Xt,[Xn,#o]` instructions:
 deleting the second is sound by idempotence of the store. -/
 theorem peephole_arm64_str_pair (s : Arm64State) (code : Nat → UInt8)
@@ -211,19 +234,4 @@ theorem peephole_x86_load_pair_disp8 (s : X86State) (code : Nat → UInt8)
     (t1 t2 : X86State)
     (hs1 : x86_step s code = some t1) (hs2 : x86_step t1 code = some t2) :
     t2 = { t1 with rip := m + 8 } := by
-  sorry
-
-/-- **Scaffold (step-04a), rule `x86_64/mov_self_rev`.** `mov r, r` spelled
-`REX.W 8b /r, mod = 3` (`48 8b c0`): the mirror of `peephole_x86_mov_self`. -/
-theorem peephole_x86_mov_self_rev (s : X86State) (code : Nat → UInt8)
-    (m : Nat) (rex modrm : UInt8) (reg rm : Nat)
-    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8b)
-    (h_b2 : code (m + 2) = modrm) (h_rex : x86_is_rex rex = true)
-    (h_w : x86_rex_w rex = true) (h_mod : modrm.toNat >>> 6 = 3)
-    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
-    (h_rm : modrm.toNat &&& 7 = rm)
-    (h_same : rm + x86_rex_b rex = reg + x86_rex_r rex)
-    (h_idx : reg + x86_rex_r rex < 16)
-    (t : X86State) (hs : x86_step s code = some t) :
-    t = { s with rip := m + 3 } := by
   sorry
