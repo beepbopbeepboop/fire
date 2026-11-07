@@ -17,7 +17,7 @@ Modular test files expect compile-time errors/diagnostics that our compiler does
 - diagnostics_in_missing_locs.mojo, diagnostics_in_missing_locs_imports.mojo, diagnostic_format.mojo, kgen_lsp_check_parse_error.mojo, invalid_downcast_error.mojo (diagnostic part)
 - See bugs/mid/DIAGNOSTICS_formatting_modular.md
 
-### C. GPU/offload (we target GPU — see bugs/mid/GPU_offload_validation_modular.md)
+### C. GPU/offload (we target GPU — see bugs/hard/GPU_offload_validation_modular.md)
 - compile_offload_*, enqueue_function_device_passable_closure_arg_*, sanitize_address*.mojo, op_with_unsupported_type_error.mojo, end_to_end_thunk_with_direct_compile.mojo, simd_bad_size_lowering.mojo
 
 ### D. Modular-specific/CLI (not our bugs)
