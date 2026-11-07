@@ -3224,9 +3224,25 @@ class _SysProxy:
     argv instead of its own — harmless for most scripts, but fatal for
     self-referential ones: `fire run fire.py help` would otherwise have the
     nested interpretation of fire.py re-read the unchanged host argv, take
-    the same branch, and re-interpret itself forever."""
+    the same branch, and re-interpret itself forever.
+
+    Encoding functions are overridden to guarantee PEP 686 semantics (UTF-8
+    is the default encoding), independent of the host Python's configuration.
+    """
     def __init__(self, argv):
         self.argv = argv
+
+    def getdefaultencoding(self):
+        return 'utf-8'
+
+    def getfilesystemencoding(self):
+        return 'utf-8'
+
+    def getfilesystemencodeerrors(self):
+        # POSIX default; matches CPython on the platforms this compiler
+        # targets (PEP 686 keeps surrogateescape for filesystem paths on
+        # Unix even with UTF-8 as the default encoding).
+        return 'surrogateescape'
 
     def __getattr__(self, name):
         return getattr(sys, name)
