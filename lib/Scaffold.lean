@@ -121,24 +121,6 @@ theorem peephole_arm64_store_load (s : Arm64State) (code : Nat → UInt8)
     ∧ arm64_steps s code 1 = some { s1 with pc := pc + 4 } := by
   sorry
 
-/-- **Scaffold (step-04d):** `add r,0` / `sub r,0` leave `cf = false`, `of_ = false`,
-and `zf`/`sf` equal to the flags of `r` (from `x86_flags_add`/`x86_flags_sub`).
-Statement left here as a scaffold; the pass cannot yet use it soundly without a
-continuation predicate (design recorded in `Peephole.lean`). -/
-theorem peephole_x86_imm_zero_flags (s : X86State) (code : Nat → UInt8) (m : Nat)
-    (rex modrm : UInt8) (rm : Nat)
-    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x81)
-    (h_b2 : code (m + 2) = modrm)
-    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
-    (h_mod : modrm.toNat >>> 6 = 3)
-    (h_digit : (modrm.toNat >>> 3) &&& 7 = 0 ∨ (modrm.toNat >>> 3) &&& 7 = 5)
-    (h_rm : modrm.toNat &&& 7 = rm)
-    (h_imm : read_i32_le code (m + 3) = 0)
-    (t : X86State) (hs : x86_step s code = some t) :
-    t.cf = false ∧ t.of_ = false ∧ t.zf = (x86_get_reg s (rm + x86_rex_b rex) = 0)
-    ∧ t.sf = x86_msb (x86_get_reg s (rm + x86_rex_b rex)) := by
-  sorry
-
 
 /-! ## x86-64 memory rules (steps 04a-04c)
 

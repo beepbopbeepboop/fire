@@ -27,11 +27,6 @@ SCAFFOLD_HOLES: dict[str, Hole] = {
         "census positive control; delete when the first real scaffold lands",
         "control",
     ),
-    "peephole_x86_imm_zero_flags": Hole(
-        "step-04d",
-        "add r,0/sub r,0 flags: cf/of_ false, zf/sf from r (x86_flags_add/x86_flags_sub)",
-        "scaffold",
-    ),
     "peephole_arm64_str_pair": Hole(
         "step-03d",
         "two identical STR Xt,[Xn,#imm] deleted",

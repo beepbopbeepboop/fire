@@ -890,6 +890,38 @@ theorem peephole_arm64_movz_pair (s : Arm64State) (code : Nat → UInt8)
   · have hpc1 : s1.pc = s.pc := by rw [hs1', arm64_set_reg_pc_unchanged]
     rw [arm64_steps_two_seq s code s1 s2 hs1 hpc1 hpair, hpc]
 
+/-- **Rule `x86_64/imm_zero` (flags).** `add r, 0` / `sub r, 0` (REX.W 81 /0
+or /5 id, mod==3) leave CF/OF clear and set ZF/SF from `r`, by
+`x86_flags_add`/`x86_flags_sub` with imm=0. Statement checked true and proved
+as scaffolded (no correction). PF/AF are not modelled in `X86State`. The pass
+cannot use this soundly without a continuation predicate (see design note
+below); the rule is NOT enabled by this step. -/
+theorem peephole_x86_imm_zero_flags (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8) (rm : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x81)
+    (h_b2 : code (m + 2) = modrm)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 3)
+    (h_digit : (modrm.toNat >>> 3) &&& 7 = 0 ∨ (modrm.toNat >>> 3) &&& 7 = 5)
+    (h_rm : modrm.toNat &&& 7 = rm)
+    (h_imm : read_i32_le code (m + 3) = 0)
+    (t : X86State) (hs : x86_step s code = some t) :
+    t.cf = false ∧ t.of_ = false ∧ t.zf = (x86_get_reg s (rm + x86_rex_b rex) = 0)
+    ∧ t.sf = x86_msb (x86_get_reg s (rm + x86_rex_b rex)) := by
+  rcases h_digit with hd | hd
+  · have hstep := x86_step_add_ri32 s code m rex modrm rm h_rip h_b0 h_b1 h_b2 h_rex h_w h_mod hd h_rm
+    rw [hs] at hstep
+    have ht := Option.some.inj hstep
+    rw [h_imm] at ht
+    subst ht
+    simp [x86_flags_add, UInt64.ofInt]
+  · have hstep := x86_step_sub_ri32 s code m rex modrm rm h_rip h_b0 h_b1 h_b2 h_rex h_w h_mod hd h_rm
+    rw [hs] at hstep
+    have ht := Option.some.inj hstep
+    rw [h_imm] at ht
+    subst ht
+    simp [x86_flags_sub, UInt64.ofInt]
+
 /-!
 ## Design note (x86_64/imm_zero) — for a later hard round
 The sound statement is "for every continuation whose first flag access is a
