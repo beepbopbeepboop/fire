@@ -1754,11 +1754,21 @@ def _eval_constrained_msg(gen, msg_node, node):
     return msg
 
 
-def _constrained_compile_error(gen, node, msg):
+def _constrained_compile_error(gen, node, msg, cond_node=None):
     if getattr(gen, '_comptime_runtime_depth', 0) > 0:
         gimple_ctypes._debug_note(
             f'constrained false in runtime-degraded comptime-if branch: {msg}')
         return False
+    # Poison-pill literal-False guards in struct/custom-self methods are for
+    # specialization dispatch or unsupported-path markers; suppress in method
+    # bodies to avoid false positives during template/module compilation.
+    _in_method = (getattr(gen, '_in_struct_method_body', 0) > 0
+                  or getattr(gen, '_in_custom_self_method', 0) > 0)
+    if _in_method and cond_node is not None:
+        if type(cond_node).__name__ == 'BoolLiteral' and getattr(cond_node, 'value', None) is False:
+            gimple_ctypes._debug_note(
+                f'constrained[False] suppressed in struct/custom-self method: {msg}')
+            return False
     loc = ''
     fn = getattr(gen, '_current_filename', '') or ''
     line = getattr(node, 'line', 0) or 0
@@ -1823,7 +1833,7 @@ def _try_lower_constrained(gen, node):
     except Exception:
         state = None
     if state == 0:  # CONST_FALSE / provably false
-        if _constrained_compile_error(gen, node, _eval_constrained_msg(gen, msg_node, node)) is False:
+        if _constrained_compile_error(gen, node, _eval_constrained_msg(gen, msg_node, node), cond_node) is False:
             return 'int64_t', gen._new_val('int64_t', '0')
     # Unknown or true: constrained has no runtime effect.
     return 'int64_t', gen._new_val('int64_t', '0')

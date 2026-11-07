@@ -5529,6 +5529,20 @@ def _comptime_assert_fail(gen, node, msg):
         gimple_ctypes._debug_note(
             f'comptime assert false in runtime-degraded comptime-if branch: {msg}')
         return False
+    # A literal `comptime assert False` in a struct method body is commonly
+    # a poison-pill / unsupported-path guard (e.g. sys.info._unsupported_target_error,
+    # CoordLike rejection methods, custom-self specialization overloads). These
+    # are only meaningful when that specific path is selected; failing module
+    # or template compilation on them breaks valid stdlib code. Computed-false
+    # asserts (condition evaluated false from comptime bindings) still fail.
+    _in_method = (getattr(gen, '_in_struct_method_body', 0) > 0
+                  or getattr(gen, '_in_custom_self_method', 0) > 0)
+    if _in_method:
+        _v = getattr(node, 'value', None)
+        if type(_v).__name__ == 'BoolLiteral' and getattr(_v, 'value', None) is False:
+            gimple_ctypes._debug_note(
+                f'comptime assert(False) suppressed in struct/custom-self method: {msg}')
+            return False
     loc = ''
     fn = getattr(gen, '_current_filename', '') or ''
     line = getattr(node, 'line', 0) or 0

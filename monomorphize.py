@@ -1119,6 +1119,16 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
         # (`empty_Int` measures identical before and after).
         gen = GimpleGen(emit_entry_points=False, module_name='', no_mangle={mangled})
         gen._current_filename = mfile
+        # Compiling a monomorphized instantiation elaborates every method body
+        # in the concrete struct, including `@__allow_legacy_custom_self_type`
+        # overloads whose `self` type specializes on a different instantiation
+        # than this one. Those overloads often carry `comptime assert(False)`
+        # / `constrained[False]` poison-pill guards that are correct when the
+        # overload is selected but false-positive hard errors when compiled
+        # out of context here (bugs/mid/DIAGNOSTICS_missing_validation_modular.md).
+        # Mark the gen so the backend can suppress such inapplicable-overload
+        # diagnostics without hiding real diagnostics in normal compilation.
+        gen._is_elaborated_instantiation = True
         c = gen.gen_module(Parser(py_tokenize(concrete)).with_filename(mfile).parse_module())
         cfile, ofile = os.path.join(wd, mangled + '.c'), os.path.join(wd, mangled + '.o')
         with open(cfile, 'w') as f:

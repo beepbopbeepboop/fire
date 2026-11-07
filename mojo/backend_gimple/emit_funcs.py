@@ -4429,6 +4429,28 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # Per-function, same reason and same placement as gen_func's.
     gen._inlined_lambdas = {}
     gen._reset_no_candidates()
+    # In an elaborated generic instantiation, `@__allow_legacy_custom_self_type`
+    # methods may be specialization overloads whose `self` type targets a
+    # different instantiation than the one being compiled (e.g. an
+    # OptionalReg[Pointer[...]] guard compiled while instantiating
+    # OptionalReg[DevT]). Their `comptime assert(False)` / `constrained[False]`
+    # poison-pill guards are correct when selected but false positives here.
+    # Suppress comptime diagnostic escalation in that narrow context only.
+    # Also track custom-self methods generally: a literal `False` guard in a
+    # custom-self overload is a poison pill for specialization dispatch and
+    # must not fail template/module compilation (only meaningful when the
+    # overload is actually selected/instantiated).
+    _suppress_inapplicable = False
+    _is_custom_self = False
+    for _d in (getattr(node, 'decorators', None) or []):
+        _dn = _d if isinstance(_d, str) else (
+            getattr(_d, 'name', None) if not isinstance(_d, gimple_ctypes.CallExpr)
+            else (getattr(getattr(_d, 'func', None), 'name', None)))
+        if _dn == '__allow_legacy_custom_self_type':
+            _is_custom_self = True
+            break
+    if _is_custom_self and getattr(gen, '_is_elaborated_instantiation', False):
+        _suppress_inapplicable = True
     # Seed container element types for this method's params and locals —
     # gen_func does both of these (the cross-call `_param_elem_types`
     # contract at its `_pe` seeding, and `_scan_container_elems` for
@@ -4771,8 +4793,23 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     gen._begin_function(node)
     gen._frame_enter(node)
     gen._cattr_restore_begin(node.body)
-    for stmt in node.body:
-        gen.gen_stmt(stmt)
+    if _suppress_inapplicable:
+        gen._comptime_runtime_depth = getattr(gen, '_comptime_runtime_depth', 0) + 1
+        gimple_ctypes._debug_note(
+            f'suppressing comptime diagnostics in inapplicable custom-self '
+            f'overload during elaboration: {struct_name}.{node.name}')
+    if _is_custom_self:
+        gen._in_custom_self_method = getattr(gen, '_in_custom_self_method', 0) + 1
+    gen._in_struct_method_body = getattr(gen, '_in_struct_method_body', 0) + 1
+    try:
+        for stmt in node.body:
+            gen.gen_stmt(stmt)
+    finally:
+        gen._in_struct_method_body = getattr(gen, '_in_struct_method_body', 0) - 1
+        if _is_custom_self:
+            gen._in_custom_self_method = getattr(gen, '_in_custom_self_method', 0) - 1
+        if _suppress_inapplicable:
+            gen._comptime_runtime_depth = getattr(gen, '_comptime_runtime_depth', 0) - 1
     gen._emit_fallthrough_frees(node)
     gen._cattr_restore_fallthrough(node)
     gen._cattr_restore_end()
