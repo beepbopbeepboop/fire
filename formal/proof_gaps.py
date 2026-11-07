@@ -42,11 +42,6 @@ SCAFFOLD_HOLES: dict[str, Hole] = {
         "two identical LDR Xt,[Xn,#imm] with Xt!=Xn deleted",
         "scaffold",
     ),
-    "peephole_arm64_store_load": Hole(
-        "step-03c",
-        "STR followed by LDR of same location deleted",
-        "scaffold",
-    ),
     "scaffold_cell_writeback_one_exit": Hole(
         "step-18d",
         "by-reference one-field mutator write-back (single exit): depth bound as hypothesis, obligation to prove",

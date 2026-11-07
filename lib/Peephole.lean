@@ -890,6 +890,113 @@ theorem peephole_arm64_movz_pair (s : Arm64State) (code : Nat → UInt8)
   · have hpc1 : s1.pc = s.pc := by rw [hs1', arm64_set_reg_pc_unchanged]
     rw [arm64_steps_two_seq s code s1 s2 hs1 hpc1 hpair, hpc]
 
+/-- `arm64_reg_or_sp` is invariant under memory-only and pc-only updates. -/
+theorem arm64_reg_or_sp_mem (i : Nat) (s : Arm64State) (m : Nat → UInt8) :
+    arm64_reg_or_sp i { s with mem := m } = arm64_reg_or_sp i s := by
+  simp [arm64_reg_or_sp, arm64_reg_mem]
+
+theorem arm64_reg_or_sp_pc (i : Nat) (s : Arm64State) (p : Nat) :
+    arm64_reg_or_sp i { s with pc := p } = arm64_reg_or_sp i s := by
+  simp [arm64_reg_or_sp, arm64_reg_pc]
+
+/-- **Rule `arm64/store_load`.** `STR Xt,[Xn,#o] ; LDR Xt,[Xn,#o]` with the same
+location and register: the LDR reloads the value just stored, so `arm64_set_reg rt`
+is applied to `arm64_reg rt` of the post-store state and is a no-op
+(`arm64_set_reg_self`). Deleting the LDR is sound. The address is computed from
+`arm64_reg_or_sp rn` of the pre-store state for STR and of the post-store (mem-only
+changed, pc-advanced for the step) state for LDR; STR does not change registers or
+`sp`, so the addresses are equal and `rt = rn` needs no special case. -/
+theorem peephole_arm64_store_load (s : Arm64State) (code : Nat → UInt8)
+    (pc : Nat) (w1 w2 : UInt32)
+    (hpc : s.pc = pc)
+    (hread1 : arm64_read_insn code pc = w1)
+    (hread2 : arm64_read_insn code (s.pc + 4) = w2)
+    (h1 : (w1 &&& 0xffe00000) = 0xF9000000)
+    (h2 : (w2 &&& 0xffe00000) = 0xF9400000)
+    (hrt1 : (w1 &&& 0x1f).toNat < 31)
+    (hrt2 : (w2 &&& 0x1f).toNat < 31)
+    (hrn_eq : ((w1 >>> 5) &&& 0x1f).toNat = ((w2 >>> 5) &&& 0x1f).toNat)
+    (hrt_eq : (w1 &&& 0x1f).toNat = (w2 &&& 0x1f).toNat)
+    (himm_eq : ((w1 >>> 10) &&& 0xfff).toNat = ((w2 >>> 10) &&& 0xfff).toNat)
+    (s1 s2 : Arm64State)
+    (hs1 : arm64_step s code = some s1)
+    (hpair : arm64_step { s1 with pc := s.pc + 4 } code
+      = some { s2 with pc := s.pc + 4 }) :
+    (∀ k, k < 31 → arm64_reg k s2 = arm64_reg k s1)
+    ∧ s2.nzcv = s1.nzcv
+    ∧ s2.mem = s1.mem
+    ∧ arm64_steps s code 2 = some { s2 with pc := pc + 8 }
+    ∧ arm64_steps s code 1 = some { s1 with pc := pc + 4 } := by
+  have e1 := arm64_step_str64 s code pc w1 hpc hread1 h1 hrt1
+  rw [hs1] at e1
+  have hs1' := Option.some.inj e1
+  have hpc1 : s1.pc = s.pc := by rw [hs1']
+  have hreg1 : ∀ k, arm64_reg k s1 = arm64_reg k s := by
+    intro k; rw [hs1']; simp [arm64_reg]
+  have hros1 : ∀ i, arm64_reg_or_sp i s1 = arm64_reg_or_sp i s := by
+    intro i; rw [hs1']; simp [arm64_reg_or_sp, arm64_reg]
+  have hmem1 : s1.mem = mem_write_u64 s.mem
+      ((arm64_reg_or_sp ((w1 >>> 5) &&& 0x1f).toNat s +
+        UInt64.ofNat ((((w1 >>> 10) &&& 0xfff).toNat) * 8)).toNat)
+      (arm64_reg ((w1 &&& 0x1f).toNat) s) := by rw [hs1']
+  have e2 := arm64_step_ldr64 { s1 with pc := s.pc + 4 } code (s.pc + 4) w2 rfl hread2 h2 hrt2
+  rw [hpair] at e2
+  have hs2' := Option.some.inj e2
+  have haddr :
+      (arm64_reg_or_sp ((w2 >>> 5) &&& 0x1f).toNat { s1 with pc := s.pc + 4 } +
+        UInt64.ofNat ((((w2 >>> 10) &&& 0xfff).toNat) * 8)).toNat
+      = (arm64_reg_or_sp ((w1 >>> 5) &&& 0x1f).toNat s +
+        UInt64.ofNat ((((w1 >>> 10) &&& 0xfff).toNat) * 8)).toNat := by
+    rw [hrn_eq, himm_eq, arm64_reg_or_sp_pc, hros1]
+  have hval : arm64_reg ((w1 &&& 0x1f).toNat) s
+      = arm64_reg ((w2 &&& 0x1f).toNat) { s1 with pc := s.pc + 4 } := by
+    rw [hrt_eq, ← hreg1 ((w2 &&& 0x1f).toNat)]
+    simp [arm64_reg]
+  have hload : mem_read_u64 ({ s1 with pc := s.pc + 4 } : Arm64State).mem
+      ((arm64_reg_or_sp ((w2 >>> 5) &&& 0x1f).toNat { s1 with pc := s.pc + 4 } +
+        UInt64.ofNat ((((w2 >>> 10) &&& 0xfff).toNat) * 8)).toNat)
+      = arm64_reg ((w2 &&& 0x1f).toNat) { s1 with pc := s.pc + 4 } := by
+    show mem_read_u64 s1.mem _ = _
+    rw [haddr, hmem1, mem_read_after_write_u64]
+    exact hval
+  have hs2state : { s2 with pc := s.pc + 4 } = { s1 with pc := s.pc + 4 } := by
+    rw [hs2']
+    rw [hload]
+    exact arm64_set_reg_self { s1 with pc := s.pc + 4 } ((w2 &&& 0x1f).toNat) hrt2
+  have hregs : ∀ k, k < 31 → arm64_reg k s2 = arm64_reg k s1 := by
+    intro k hk
+    have := congrArg (fun st : Arm64State => arm64_reg k st) hs2state
+    simp only [arm64_reg_pc] at this
+    exact this
+  have hnzcv : s2.nzcv = s1.nzcv := by
+    have := congrArg (fun st : Arm64State => st.nzcv) hs2state
+    simpa using this
+  have hmem : s2.mem = s1.mem := by
+    have := congrArg (fun st : Arm64State => st.mem) hs2state
+    simpa using this
+  refine ⟨hregs, hnzcv, hmem, ?_, ?_⟩
+  · rw [arm64_steps_two_seq s code s1 s2 hs1 hpc1 hpair, hpc]
+  · rw [arm64_steps_one_seq s code s1 hs1 hpc1, hpc]
+
+-- Witness: `str x1,[x2,#8] ; ldr x1,[x2,#8]` (rt != rn) satisfies the word hypotheses.
+example : ((0xF9000441 : UInt32) &&& 0xffe00000) = 0xF9000000 := by decide
+example : ((0xF9400441 : UInt32) &&& 0xffe00000) = 0xF9400000 := by decide
+example : ((0xF9000441 : UInt32) &&& 0x1f).toNat < 31 := by decide
+example : ((0xF9400441 : UInt32) &&& 0x1f).toNat < 31 := by decide
+example : ((0xF9000441 : UInt32) >>> 5 &&& 0x1f).toNat = ((0xF9400441 : UInt32) >>> 5 &&& 0x1f).toNat := by decide
+example : ((0xF9000441 : UInt32) &&& 0x1f).toNat = ((0xF9400441 : UInt32) &&& 0x1f).toNat := by decide
+example : ((0xF9000441 : UInt32) >>> 10 &&& 0xfff).toNat = ((0xF9400441 : UInt32) >>> 10 &&& 0xfff).toNat := by decide
+
+-- Witness: `rt = rn` case, `str x2,[x2,#8] ; ldr x2,[x2,#8]`, is allowed (no rt!=rn condition).
+example : ((0xF9000442 : UInt32) &&& 0xffe00000) = 0xF9000000 := by decide
+example : ((0xF9400442 : UInt32) &&& 0xffe00000) = 0xF9400000 := by decide
+example : ((0xF9000442 : UInt32) &&& 0x1f).toNat < 31 := by decide
+example : ((0xF9400442 : UInt32) &&& 0x1f).toNat < 31 := by decide
+example : ((0xF9000442 : UInt32) >>> 5 &&& 0x1f).toNat = ((0xF9400442 : UInt32) >>> 5 &&& 0x1f).toNat := by decide
+example : ((0xF9000442 : UInt32) &&& 0x1f).toNat = ((0xF9400442 : UInt32) &&& 0x1f).toNat := by decide
+example : ((0xF9000442 : UInt32) >>> 10 &&& 0xfff).toNat = ((0xF9400442 : UInt32) >>> 10 &&& 0xfff).toNat := by decide
+example : ((0xF9000442 : UInt32) &&& 0x1f).toNat = ((0xF9000442 : UInt32) >>> 5 &&& 0x1f).toNat := by decide
+
 /-!
 ## Design note (x86_64/imm_zero) — for a later hard round
 The sound statement is "for every continuation whose first flag access is a
