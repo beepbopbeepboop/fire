@@ -65,6 +65,22 @@ _HOLE = "so" + "rry"
 _SIGN_MASK = "0x8000000000000000"
 
 
+_PC_OVERRIDE_RE = re.compile(r"\(\{ (.*) with pc := [^{}]+ \}\)", re.S)
+
+
+def _over(s_cur: str, pc) -> str:
+    """The state `s_cur` with its pc set to `pc`, written without stacking.
+
+    `{ ({ s with pc := a }) with pc := b }` is `{ s with pc := b }`, but the
+    elaborator builds the 48-field record once per layer and every later
+    unification re-walks all of them: the nested spelling was the difference
+    between a return block elaborating in seconds and exhausting the whole
+    heartbeat budget.  Collapse the overridden pc instead of nesting it."""
+    m = _PC_OVERRIDE_RE.fullmatch(s_cur)
+    base = m.group(1) if m else s_cur
+    return f"({{ {base} with pc := {pc} }})"
+
+
 def _slt(reg: int) -> str:
     """The SIGN-FLIPPED read of register `reg`, as the flag lemmas spell it."""
     return f"(arm64_reg {reg} s ^^^ {_SIGN_MASK})"
@@ -6964,7 +6980,7 @@ def _emit_range_back_edge_contract(A, ind: str, bi: int, ctx: dict, s_cur: str,
     _exit = lc["exit_pc"]
     _rr = lc["rr"]
     _rb = lc["rb"]
-    _state = f"({{ {s_cur} with pc := {tgt} }})"
+    _state = f"{_over(s_cur, tgt)}"
     # Subst chain: unfold every state on the executed path down to the concrete
     # initial state, so a value-flow fact about the path is a fact about the
     # concrete state the loop contract is stated at.
@@ -9652,11 +9668,11 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             else:
                 A(f"{IND}have hpcb_{bi} : ({s_cur}).pc = {b_pc} := {hpcb_proof}")
             A(f"{IND}have hs_{bi} : arm64_step {s_cur} {C} = some "
-              f"({{ {s_cur} with pc := {tgt} }}) := by")
+              f"{_over(s_cur, tgt)} := by")
             A(f"{IND}  have hsr := {sr_name}_sr_{i} {s_cur} hpcb_{bi}")
             A(f"{IND}  rw [hpcb_{bi}] at hsr")
             A(f"{IND}  exact hsr")
-            A(f"{IND}have hg_{bi} := go_exit_step {s_cur} ({{ {s_cur} with pc := {tgt} }}) "
+            A(f"{IND}have hg_{bi} := go_exit_step {s_cur} {_over(s_cur, tgt)} "
               f"{C} {EXIT} {fuel_1} {tgt} {b_pc} hs_{bi} (by rfl) hpcb_{bi} "
               f"(by omega) ({exit_cond})")
             A(f"{IND}rw [show {fuel_1} + 1 = {fuel_next} from by omega] at hg_{bi}")
@@ -9679,8 +9695,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         _path_bis = [int(h[len('hsid_'):])
                                      for h in reversed(ctx['flow_hsid'])]
                         A(f"{IND}have hframe_{bi} : mem_read_u64 "
-                          f"({{ {s_cur} with pc := {tgt} }}).mem "
-                          f"(({{ {s_cur} with pc := {tgt} }}).sp + "
+                          f"{_over(s_cur, tgt)}.mem "
+                          f"({_over(s_cur, tgt)}.sp + "
                           f"UInt64.ofNat {_slot}).toNat = "
                           f"UInt64.ofNat {_lc_exit} := by")
                         for _k in _path_bis:
@@ -9693,7 +9709,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                           f"UInt64.toNat_ofNat]")
                         A(f"{IND}  all_goals try grind")
                         A(f"{IND}have hlc_{bi} := {_lc_name}_lt_loop "
-                          f"({{ {s_cur} with pc := {tgt} }})")
+                          f"{_over(s_cur, tgt)}")
                         A(f"{IND}  hframe_{bi}")
                         _lc_is_signed = ctx.get("loop_contract") and ctx["loop_contract"].get("signed")
                         if _lc_is_signed:
@@ -9795,8 +9811,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                   f"all_goals (first | grind | omega | rfl | "
                                   f"simp <;> grind | sorry)",
                                   note="the counter's decrement")
-                        A(f"{IND}have hframe_arg : mem_read_u64 ({{ {s_cur} with pc := {tgt} }}).mem "
-                          f"(({{ {s_cur} with pc := {tgt} }}).sp + UInt64.ofNat "
+                        A(f"{IND}have hframe_arg : mem_read_u64 {_over(s_cur, tgt)}.mem "
+                          f"({_over(s_cur, tgt)}.sp + UInt64.ofNat "
                           f"{ctx['loop_contract'].get('slot', 0)}).toNat "
                           f"= UInt64.ofNat {_lc_exit} := by")
                         A(f"{IND}  rw [{', '.join(list(reversed(ctx['flow_hsid'])))}]")
@@ -9805,7 +9821,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         _cfg_leaf(A, IND + "  ", "dec-while-back-edge-frame-slot",
                                   "all_goals (first | done | sorry)",
                                   note="the frame slot")
-                        A(f"{IND}have hlc_{bi} := {_lc_name}_cd_loop (n - 1) ({{ {s_cur} with pc := {tgt} }})")
+                        A(f"{IND}have hlc_{bi} := {_lc_name}_cd_loop (n - 1) {_over(s_cur, tgt)}")
                         A(f"{IND}  (by rfl) hx19_arg hframe_arg")
                         A(f"{IND}  ({fuel_1}) (by")
                         A(f"{IND}    have hnz : n ≠ 0 := by intro h0; rw [h0] at {_bsrc}; simp at {_bsrc}")
@@ -9846,7 +9862,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                    "countdown contract, and the walk admits "
                                    "the rest of the run here")
             else:
-                emit_block(tgt_bi, f"({{ {s_cur} with pc := {tgt} }})",
+                emit_block(tgt_bi, f"{_over(s_cur, tgt)}",
                            fuel_1, depth, path, ctx)
         elif kind == "bl":
             # BL at s_cur (pc = bl_pc). targets = [fall (post-call), call-target].
@@ -10641,8 +10657,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{BIND}exact absurd hc_{bi} hne_{bi}")
             elif cbz_force != "fall":
                 if is_contract:
-                    A(f"{BIND}let s_t : Arm64State := ({{ {s_cur} with pc := {taken} }})")
-                    A(f"{BIND}have hst : ({{ {s_cur} with pc := {taken} }}) = s_t := rfl")
+                    A(f"{BIND}let s_t : Arm64State := {_over(s_cur, taken)}")
+                    A(f"{BIND}have hst : {_over(s_cur, taken)} = s_t := rfl")
                     A(f"{BIND}have hs_{bi} : arm64_step {s_cur} {C} = some s_t := by")
                     A(f"{BIND}  rw [← hst]")
                     A(f"{BIND}  rw [hcbz_{bi}, if_pos hc_{bi}]")
@@ -10655,9 +10671,9 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                       f"hne_sc hpc_sc")
                 else:
                     A(f"{BIND}have hs_{bi} : arm64_step {s_cur} {C} = some "
-                      f"({{ {s_cur} with pc := {taken} }}) := by")
+                      f"{_over(s_cur, taken)} := by")
                     A(f"{BIND}  rw [hcbz_{bi}, if_pos hc_{bi}]")
-                    A(f"{BIND}have hg_{bi} := go_exit_step {s_cur} ({{ {s_cur} with pc := {taken} }}) "
+                    A(f"{BIND}have hg_{bi} := go_exit_step {s_cur} {_over(s_cur, taken)} "
                       f"{C} {EXIT} {fuel_1} {taken} {cbz_pc} hs_{bi} (by rfl) hpcb_{bi} "
                       f"(by omega) ({exit_cond})")
                 A(f"{BIND}rw [show {fuel_1} + 1 = {fuel_next} from by omega] at hg_{bi}")
@@ -10696,7 +10712,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         elif _src is not None:
                             _ct["branch_src"] = f"hsrc_{bi}"
                             _ct["branch_srcs"] = list(ctx.get("branch_srcs", [])) + [f"hsrc_{bi}"]
-                        emit_block(tgt_bi, f"({{ {s_cur} with pc := {taken} }})",
+                        emit_block(tgt_bi, f"{_over(s_cur, taken)}",
                                    fuel_1, depth + 1, path, _ct)
             # fall branch
             if cbz_force is None:
@@ -10729,8 +10745,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{_fb}  · exact absurd (hc_{bi} (hcond_{bi}.mpr h)) (by simp)")
             if cbz_force != "taken":
                 if is_contract:
-                    A(f"{IND}let s_f : Arm64State := ({{ {s_cur} with pc := {fall} }})")
-                    A(f"{IND}have hsf : ({{ {s_cur} with pc := {fall} }}) = s_f := rfl")
+                    A(f"{IND}let s_f : Arm64State := {_over(s_cur, fall)}")
+                    A(f"{IND}have hsf : {_over(s_cur, fall)} = s_f := rfl")
                     A(f"{IND}have hs_{bi} : arm64_step {s_cur} {C} = some s_f := by")
                     A(f"{BIND}  rw [← hsf]")
                     A(f"{BIND}  rw [hcbz_{bi}, if_neg hc_{bi}]")
@@ -10743,9 +10759,9 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                       f"hne_sc hpc_sc")
                 else:
                     A(f"{IND}  have hs_{bi} : arm64_step {s_cur} {C} = some "
-                      f"({{ {s_cur} with pc := {fall} }}) := by")
+                      f"{_over(s_cur, fall)} := by")
                     A(f"{BIND}  rw [hcbz_{bi}, if_neg hc_{bi}]")
-                    A(f"{BIND}have hg_{bi} := go_exit_step {s_cur} ({{ {s_cur} with pc := {fall} }}) "
+                    A(f"{BIND}have hg_{bi} := go_exit_step {s_cur} {_over(s_cur, fall)} "
                       f"{C} {EXIT} {fuel_1} {fall} {cbz_pc} hs_{bi} (by rfl) hpcb_{bi} "
                       f"(by omega) ({exit_cond})")
                 A(f"{BIND}rw [show {fuel_1} + 1 = {fuel_next} from by omega] at hg_{bi}")
@@ -10772,7 +10788,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         elif _is_sc_merge or (_src is not None and not is_contract):
                             _cf["branch_src"] = f"hsrc_{bi}"
                             _cf["branch_srcs"] = list(ctx.get("branch_srcs", [])) + [f"hsrc_{bi}"]
-                        emit_block(tgt_bi, f"({{ {s_cur} with pc := {fall} }})",
+                        emit_block(tgt_bi, f"{_over(s_cur, fall)}",
                                    fuel_1, depth + 1, path, _cf)
 
     # --- runs-based contract walk -------------------------------------------
