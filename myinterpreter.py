@@ -7076,15 +7076,29 @@ class Interpreter:
             result = self._generator_expression(expr)
         else:
             results = []
+            # Dict comprehensions may use `**` spread in the element
+            # (`{**d for d in ds}`) rather than `key: value`; detect it
+            # once so the inner loop can merge mappings.
+            _dict_spread = (expr.kind == 'dict' and expr.value is None
+                            and isinstance(expr.element, N.UnaryOp)
+                            and expr.element.op == '**')
 
             def run(generators):
                 if not generators:
                     if expr.kind == 'dict':
-                        k = self.eval_expr(expr.element)
-                        v = self.eval_expr(expr.value)
-                        results.append((k, v))
+                        if _dict_spread:
+                            results.append(('__spread__', self.eval_expr(expr.element.operand)))
+                        else:
+                            k = self.eval_expr(expr.element)
+                            v = self.eval_expr(expr.value)
+                            results.append((k, v))
                     else:
-                        results.append(self.eval_expr(expr.element))
+                        spread = self._spread_operand(expr.element, "*")
+                        if spread is not None:
+                            for _sv in self.eval_expr(spread):
+                                results.append(_sv)
+                        else:
+                            results.append(self.eval_expr(expr.element))
                     return
                 gen = generators[0]
                 rest = generators[1:]
@@ -7102,7 +7116,12 @@ class Interpreter:
             if expr.kind == 'set':
                 result = set(results)
             elif expr.kind == 'dict':
-                result = dict(results)
+                if _dict_spread:
+                    result = {}
+                    for _pair in results:
+                        result.update(_pair[1])
+                else:
+                    result = dict(results)
             else:
                 result = results
         return result
