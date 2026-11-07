@@ -473,24 +473,25 @@ ALL_INPUTS = {
         word="Specs.stepConst64", nat="Specs.stepConst", kind="closed",
         body=("(if ((n ^^^ (0x8000000000000000 : UInt64)) ≤ ((UInt64.ofNat 0) ^^^ (0x8000000000000000 : UInt64))) then (UInt64.ofNat 0) else ((UInt64.ofNat 100000) + n))"),
         hyp="hneg : w.toNat < Specs.signBit",
-        proof=("simp [mojo, {go}, {word}, {nat}]\n"
-               "by_cases h : ((w ^^^ (0x8000000000000000 : UInt64)) ≤ ((UInt64.ofNat 0) ^^^ (0x8000000000000000 : UInt64)))\n"
-               "· have hw0 : w = 0 := by\n"
+        proof=("have hlt : w.toNat < 2 ^ 63 := hneg\n"
+               "have hlt' : w < (0x8000000000000000 : UInt64) := by\n"
+               "  rw [UInt64.lt_iff_toNat_lt]; simpa using hlt\n"
+               "have key : (if ((w ^^^ (0x8000000000000000 : UInt64)) ≤ ((UInt64.ofNat 0) ^^^ (0x8000000000000000 : UInt64))) then (UInt64.ofNat 0) else ((UInt64.ofNat 100000) + w)) = {word} w := by\n"
+               "  unfold {word} {nat}\n"
+               "  by_cases h : w.toNat = 0\n"
+               "  · have hw : w = 0 := UInt64.toNat_inj.mp (by simpa using h)\n"
+               "    subst hw\n"
+               "    decide\n"
+               "  · have hw0 : w ≠ 0 := fun e => h (by simp [e])\n"
+               "    have hc : ¬ ((w ^^^ (0x8000000000000000 : UInt64)) ≤ ((UInt64.ofNat 0) ^^^ (0x8000000000000000 : UInt64))) := by\n"
+               "      have h0 : UInt64.ofNat 0 = 0 := rfl\n"
+               "      rw [h0]\n"
+               "      revert hw0 hlt'\n"
+               "      bv_decide\n"
+               "    rw [if_neg hc, if_neg h]\n"
                "    apply UInt64.toNat_inj.mp\n"
-               "    have : w.toNat < 2 ^ 63 := hneg\n"
-               "    -- signed <= 0 with top bit clear means unsigned 0\n"
-               "    have h' := h\n"
-               "    simp at h'\n"
-               "    omega\n"
-               "  simp [hw0, Specs.stepConst]\n"
-               "  apply UInt64.toNat_inj.mp\n"
-               "  simp [UInt64.toNat_ofNat']\n"
-               "· simp [h]\n"
-               "  apply UInt64.toNat_inj.mp\n"
-               "  simp [UInt64.add_toNat, UInt64.toNat_ofNat', Specs.stepConst]\n"
-               "  have : w.toNat ≠ 0 := by omega\n"
-               "  simp [this]\n"
-               "  omega")),
+               "    simp [UInt64.toNat_add]\n"
+               "simpa [mojo, {go}] using key")),
     "Specs.shiftMix64": AllInputs(
         word="Specs.shiftMix64", nat="Specs.shiftMix", kind="closed",
         body="((n <<< (UInt64.ofNat 3)) + (asr64 n (UInt64.ofNat 2)))",
