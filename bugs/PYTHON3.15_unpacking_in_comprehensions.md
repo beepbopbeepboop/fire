@@ -9,6 +9,9 @@ Python 3.15 allows unpacking in set/dict comprehensions: `{*a, *b}`, `{**d1, **d
 {**d1, **d2}  # dict comprehension unpacking
 ```
 
+## Source (CPython 3.15.2)
+- Parser: Python/ast.c, Python/compile.c (comprehension unpacking)
+- Grammar: Grammar/python.gram
+
 ## Status
 Open.
-EOF

@@ -14,6 +14,13 @@ lazy from pathlib import Path
 - `sys.set_lazy_imports`, `sys.get_lazy_imports`, `sys.set_lazy_imports_filter`.
 - `types.LazyImportType`.
 
+## Source (CPython 3.15.2)
+- Lexer/parser: Python/symtable.c, Python/codegen.c, Python/import.c
+- Runtime: Python/sysmodule.c (sys.set_lazy_imports, sys.get_lazy_imports, sys.set_lazy_imports_filter)
+- Types: Objects/typeobject.c (types.LazyImportType)
+- Init config: Python/initconfig.c (-X lazy_imports, PYTHON_LAZY_IMPORTS)
+- Spec: PEP 810
+EOF
+
 ## Status
 Open. Need to add `lazy` keyword to lexer/parser and implement lazy import semantics.
-EOF
