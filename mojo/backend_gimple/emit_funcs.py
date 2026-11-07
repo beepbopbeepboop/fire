@@ -985,14 +985,21 @@ def _gen_stmt_ComptimeForStmt(gen, node):
             # See bug:CODEGEN_imported_generic_never_elaborated_calls_
             # nothing_defines.md.
             dst = gen.var_types.get(node.target) or 'int64_t'
+            _ct_saved = (node.target in gen._comptime_vals,
+                         gen._comptime_vals.get(node.target))
             i = start
             while (step > 0 and i < stop) or (step < 0 and i > stop):
                 gen._safe_coerce_emit('int', dst, str(i), node.target)
+                gen._comptime_vals[node.target] = i
                 _bscope = gen._open_block_scope()
                 for s in node.body:
                     gen.gen_stmt(s)
                 gen._close_block_scope(_bscope)
                 i += step
+            if _ct_saved[0]:
+                gen._comptime_vals[node.target] = _ct_saved[1]
+            else:
+                gen._comptime_vals.pop(node.target, None)
             return
     elif (isinstance(node.iterable, gimple_ctypes.CallExpr)
             and isinstance(node.iterable.func, gimple_ctypes.IdentExpr)
@@ -1065,15 +1072,23 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                     for _t in _names:
                         if _t not in gen.var_types:
                             gen._declare_var(_t, 'int64_t')
+                    _ct_saved = [(n, n in gen._comptime_vals,
+                                  gen._comptime_vals.get(n)) for n in _names]
                     for _combo in _combs:
                         for _t, _v in zip(_names, _combo):
                             _dst = gen.var_types.get(_t) or 'int64_t'
                             gen._safe_coerce_emit(
                                 'int', _dst, str(_v), _t)
+                            gen._comptime_vals[_t] = _v
                         _bscope = gen._open_block_scope()
                         for s in node.body:
                             gen.gen_stmt(s)
                         gen._close_block_scope(_bscope)
+                    for _n, _had, _old in _ct_saved:
+                        if _had:
+                            gen._comptime_vals[_n] = _old
+                        else:
+                            gen._comptime_vals.pop(_n, None)
                     return
     if not unrolled:
         pass

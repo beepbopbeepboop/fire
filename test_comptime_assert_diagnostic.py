@@ -142,6 +142,42 @@ def _compile_full(src):
             pass
 
 
+def test_comptime_assert_in_comptime_for_range():
+    # comptime for unrolls at compile time; the induction variable must be
+    # visible to comptime assertion evaluation so a provably-false condition in
+    # any iteration is diagnosed (bugs/DIAGNOSTICS_missing_validation_modular.md).
+    try:
+        _compile('fn f():\n    comptime for i in range(3):\n        comptime assert i < 2, "bad"\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'bad' in s, s
+        return
+    raise AssertionError('comptime assert in comptime for (false iteration) compiled')
+
+
+def test_comptime_assert_in_comptime_for_range_true():
+    _compile('fn f():\n    comptime for i in range(3):\n        comptime assert i < 3, "ok"\n')
+
+
+def test_comptime_assert_in_comptime_for_product():
+    # product() unrolling must also bind loop targets for comptime evaluation.
+    src = (
+        'from itertools import product\n'
+        'fn f():\n'
+        '    comptime for i, j in product(range(2), range(2)):\n'
+        '        comptime assert i + j < 2, "sum"\n'
+    )
+    try:
+        _compile(src)
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'sum' in s, s
+        return
+    raise AssertionError('comptime assert in comptime for product compiled')
+
+
 def test_comptime_assert_message_tstring_generic_param():
     # Modular shape: t-string message referencing an instantiated generic param.
     src = '''
@@ -173,5 +209,8 @@ if __name__ == '__main__':
     test_comptime_assert_short_circuit_and_false()
     test_comptime_assert_short_circuit_or_unknown_not_false()
     test_comptime_assert_short_circuit_and_true_needs_rhs()
+    test_comptime_assert_in_comptime_for_range()
+    test_comptime_assert_in_comptime_for_range_true()
+    test_comptime_assert_in_comptime_for_product()
     test_comptime_assert_message_tstring_generic_param()
     print('ok')

@@ -83,6 +83,23 @@ def test_constrained_short_circuit_or_false_needs_rhs():
     _compile('fn f[x: Int]():\n    constrained[False or x > 0, "ok"]()\n')
 
 
+def test_constrained_in_comptime_for_range():
+    # comptime for loop variables must be visible to constrained evaluation
+    # (bugs/DIAGNOSTICS_missing_validation_modular.md).
+    try:
+        _compile('fn f():\n    comptime for i in range(4):\n        constrained[i != 2, "hit"]()\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'constraint failed' in s, s
+        assert 'hit' in s, s
+        return
+    raise AssertionError('constrained in comptime for (false iteration) compiled')
+
+
+def test_constrained_in_comptime_for_range_true():
+    _compile('fn f():\n    comptime for i in range(3):\n        constrained[i < 3, "ok"]()\n')
+
+
 if __name__ == '__main__':
     test_constrained_bracket_false_fails()
     test_constrained_bracket_false_no_msg()
@@ -92,4 +109,6 @@ if __name__ == '__main__':
     test_constrained_tstring_message()
     test_constrained_short_circuit_and_false()
     test_constrained_short_circuit_or_false_needs_rhs()
+    test_constrained_in_comptime_for_range()
+    test_constrained_in_comptime_for_range_true()
     print('ok')

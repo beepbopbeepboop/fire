@@ -121,6 +121,17 @@ Key categories:
   `constrained` compile-time diagnostics for that shape. Regressions:
   `test_comptime_assert_diagnostic.py`,
   `test_constrained_diagnostic.py`.
+- **Landed (follow-up, this worker, branch
+  `work/bug-mid-diagnostics-missing-validation-m-6439`):** root-cause fix in
+  `mojo/backend_gimple/emit_funcs.py` comptime-for unrolling: induction/target
+  variables for unrolled `comptime for` over `range(...)` and
+  `product(range(...), ...)` are now bound in `gen._comptime_vals` (saved/
+  restored per iteration) while emitting the body. This makes the iteration
+  values visible to compile-time constant evaluation, so provably-false
+  `comptime assert` / `constrained` conditions that depend on the loop variable
+  are diagnosed instead of being treated as non-foldable and silently accepted.
+  Regressions: `test_comptime_assert_diagnostic.py`,
+  `test_constrained_diagnostic.py`.
 - **Still open (large):** the rest of this umbrella — comptime-assert/
   `constrained` cases where condition evaluation is incomplete (e.g.
   DType predicates on comptime params in generic struct instantiations that
@@ -128,8 +139,10 @@ Key categories:
   template fallback, so param-dependent conditions degrade to unknown/non-fatal;
   reflection-driven messages such as `StaticString(_get_kgen_string[...])`),
   `constrained` cases whose conditions/messages cannot yet be folded (generics,
-  trait reflection, `StaticString(_get_kgen_string[...])`), type/trait
-  conformance diagnostics, import errors, and the other categories listed
-  above. `build/checkfail_candidates.json` is not present in this worktree;
-  re-run `tools/collect_checkfail.py` against the modular suite to refresh the
+  trait reflection, `StaticString(_get_kgen_string[...])`), `comptime assert`/
+  `constrained` in non-gimple/formal backends or in comptime-for shapes beyond
+  the gimple unroller's bound forms, type/trait conformance diagnostics, import
+  errors, and the other categories listed above.
+  `build/checkfail_candidates.json` is not present in this worktree; re-run
+  `tools/collect_checkfail.py` against the modular suite to refresh the
   candidate list and prioritize.
