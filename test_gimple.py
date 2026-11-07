@@ -13904,6 +13904,35 @@ main()
        ["int info;", "int64_t _t = info;"]), 'len_of_a_local_declared_from_None_is_cast_into_its_int64_t_copy')
 
 
+    # Struct subscript store with __setitem__
+    _run_isolated(lambda: test_gimple_body("struct_subscript_store_with_setitem", """\
+struct S:
+    var x: Int
+    def __init__(out self):
+        self.x = 0
+    def __setitem__(mut self, i: Int, v: Int):
+        self.x = v
+
+def f() -> Int:
+    var s = S()
+    s[0] = 5
+    return s.x
+"""), 'struct_subscript_store_with_setitem')
+
+    # Struct subscript store with backing field
+    _run_isolated(lambda: test_gimple_body("struct_subscript_store_with_backing_field", """\
+struct S:
+    var data: List[Int]
+    def __init__(out self):
+        self.data = List[Int]()
+        self.data.append(0)
+
+def f() -> Int:
+    var s = S()
+    s[0] = 5
+    return s.data[0]
+"""), 'struct_subscript_store_with_backing_field')
+
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.
     if isinstance(_isolate(lambda: 1 / 0), ZeroDivisionError) and _isolate(lambda: None) is None:

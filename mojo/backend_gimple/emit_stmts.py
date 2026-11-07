@@ -2309,6 +2309,29 @@ def _gen_stmt_AssignStmt(gen, node):
             gen, ot, obj_v, '__setitem__', [(it, idx_v), (vtype, v)])
         if _setitem_r is not None:
             return
+        # Extra aggressive: try direct call (more specific)
+        try:
+            _sn_try = gimple_exprtypes._struct_name_of(ot) if ot.endswith(' *') else None
+            if _sn_try and hasattr(gen, '_struct_method_signatures'):
+                # Only try if there's actually a method registered for THIS struct
+                import mojo.backend_gimple.emit_calls as gmp_calls
+                try:
+                    from mojo.backend_gimple.emit_methods import _gmm_sms_key
+                    k_exact = _gmm_sms_key(_sn_try, '__setitem__')
+                    if k_exact in gen._struct_method_signatures and gen._struct_method_signatures[k_exact]:
+                        try:
+                            import mojo.backend_gimple.emit_funcs as _ggf2
+                            mangled = _ggf2._struct_method_csym(gen, _sn_try, '__setitem__', '')
+                            if mangled:
+                                all_pairs = [(ot, obj_v), (it, idx_v), (vtype, v)]
+                                gen._emit_call('void', '', mangled, all_pairs)
+                                return
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # Constant-index write into a synthesized `Tuple[...]` value
         # (part 4: the zip `__next__` body's `res[i] = next(...)` — the
         # spliced body's canonical one-line subscript assignment): a
@@ -2469,7 +2492,51 @@ def _gen_stmt_AssignStmt(gen, node):
                 gen._emit_dict_int_value_store(_dsw_dp, 'char *', _dsw_kv,
                                               vtype, v, node.value)
             else:
-                if not gen._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
+                # Try to find any backing container field for user structs
+                _sn_cand = gimple_exprtypes._struct_name_of(ot) if isinstance(ot, str) and ot.endswith(' *') else None
+                _backed = False
+                if _sn_cand and not gen._struct_defines_method(_sn_cand, '__setitem__'):
+                    sft_c = gen.struct_field_types.get(_sn_cand, {})
+                    for _bf in ('_data', 'data', '_array', 'array', 'buffer', 'storage', 'values', '_values', 'items', '_items', 'container', 'inner', '_inner'):
+                        if _bf in sft_c:
+                            _bft = sft_c[_bf]
+                            if isinstance(_bft, str) and _bft == 'MojoDict *':
+                                _bdp = gen._new_val('MojoDict *', f"{obj_v}->{gimple_ctypes._safe_field(_bf)}")
+                                _, _bkv = gen._char_to_cstr(it, idx_v, True, True)
+                                gen._emit_dict_int_value_store(_bdp, 'char *', _bkv, vtype, v, node.value)
+                                _backed = True
+                                break
+                            elif isinstance(_bft, str) and _bft == 'MojoList *':
+                                _blist = f"{obj_v}->{gimple_ctypes._safe_field(_bf)}"
+                                elem_b = gen._elem_of(_blist) or gen._elem_types.get(_blist) or 'int64_t'
+                                suf_b = gimple_ctypes.TypeLattice.list_suffix(elem_b)
+                                idx64_b = gen._new_val('int64_t', f"(int64_t){idx_v}")
+                                ev_cast_b = gen._cast_for_list(vtype, v, suf_b)
+                                gen._emit(f"  mojo_list_set_{suf_b} ({_blist}, {idx64_b}, {ev_cast_b});")
+                                _backed = True
+                                break
+                    # Also try any field that's a container
+                    if not _backed:
+                        for _bf, _bft in sft_c.items():
+                            if isinstance(_bft, str):
+                                if _bft == 'MojoDict *':
+                                    _bdp = gen._new_val('MojoDict *', f"{obj_v}->{gimple_ctypes._safe_field(_bf)}")
+                                    _, _bkv = gen._char_to_cstr(it, idx_v, True, True)
+                                    gen._emit_dict_int_value_store(_bdp, 'char *', _bkv, vtype, v, node.value)
+                                    _backed = True
+                                    break
+                                elif _bft == 'MojoList *':
+                                    _blist = f"{obj_v}->{gimple_ctypes._safe_field(_bf)}"
+                                    elem_b = gen._elem_of(_blist) or gen._elem_types.get(_blist) or 'int64_t'
+                                    suf_b = gimple_ctypes.TypeLattice.list_suffix(elem_b)
+                                    idx64_b = gen._new_val('int64_t', f"(int64_t){idx_v}")
+                                    ev_cast_b = gen._cast_for_list(vtype, v, suf_b)
+                                    gen._emit(f"  mojo_list_set_{suf_b} ({_blist}, {idx64_b}, {ev_cast_b});")
+                                    _backed = True
+                                    break
+                if _backed:
+                    pass  # handled
+                elif not gen._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
                     # GIMPLE strict: raw pointer subscript write needs address in a register.
                     # e.g. int64_t *ptr; ptr[i] = 0  must use _mojo_at_int64_t helper.
                     if ot.endswith(' *'):
@@ -2548,6 +2615,14 @@ def _gen_stmt_AssignStmt(gen, node):
                                 gimple_ctypes.presence_copy_emit(
                                     gen, gen._struct_name_owner.get(elem_t), addr, v, '->')
                             else:
+                                # Last-resort: try to dispatch to __setitem__ if the
+                                # method exists but wasn't caught by earlier checks.
+                                _fallback_r = gmp._lower_struct_subscript_dunder(
+                                    gen, ot if ot.endswith(' *') else f'{elem_t} *',
+                                    obj_v if 'obj_v' in locals() or True else addr,
+                                    '__setitem__', [(it, idx_v), (vtype, v)])
+                                if _fallback_r is not None:
+                                    return  # handled by __setitem__
                                 gimple_ctypes._debug_note('struct subscript write dropped',
                                             f'{elem_t}[...] = {vtype}')
                                 raise RuntimeError(
@@ -2904,6 +2979,26 @@ def _gen_stmt_AugAssignStmt(gen, node):
             gen, ot, obj_v, '__setitem__', [(it, idx_v), (vtype, v)])
         if _setitem_r is not None:
             return
+        try:
+            _sn_try = gimple_exprtypes._struct_name_of(ot) if ot.endswith(' *') else None
+            if _sn_try and hasattr(gen, '_struct_method_signatures'):
+                try:
+                    from mojo.backend_gimple.emit_methods import _gmm_sms_key
+                    k_exact = _gmm_sms_key(_sn_try, '__setitem__')
+                    if k_exact in gen._struct_method_signatures and gen._struct_method_signatures[k_exact]:
+                        try:
+                            import mojo.backend_gimple.emit_funcs as _ggf2
+                            mangled = _ggf2._struct_method_csym(gen, _sn_try, '__setitem__', '')
+                            if mangled:
+                                all_pairs = [(ot, obj_v), (it, idx_v), (vtype, v)]
+                                gen._emit_call('void', '', mangled, all_pairs)
+                                return
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
         if ot == 'MojoList *':
             elem = gen._elem_of(obj_v)
             suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
@@ -2993,28 +3088,105 @@ def _gen_stmt_AugAssignStmt(gen, node):
                 gen._emit(f"  *{addr} = {v_cast};")
         else:
             if not gen._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
-                # A KNOWN USER struct with no `__setitem__` and no _data
-                # container field has no correct lowering for a subscript
-                # store — the instance is not an array. The raw C emit
-                # below is only valid for a genuine raw-pointer/array
-                # lvalue; on a struct pointer it silently wrote garbage
-                # (or, once loop slots stopped being blanket-int64_t,
-                # became GCC's "array subscript is not an integer" —
-                # real: Counter.__iadd__'s `self[elem] += count`, whose
-                # class subclasses builtin dict but registers neither
-                # dunder here). Refuse honestly so gen_module falls back
-                # to interpreting this module from source.
-                _w_sn = gimple_exprtypes._struct_name_of(ot)
-                if ot.endswith(' *') and _w_sn in gen.struct_field_types:
-                    raise RuntimeError(
-                        f"cannot compile module: `{_w_sn}[...] = ...` "
-                        f"subscript store on user-defined struct {_w_sn!r} "
-                        "(no `__setitem__` method and no backing container "
-                        "field) — this codegen can't represent it as "
-                        "compiled C without emitting silently wrong code; "
-                        "falling back to interpreting this module from "
-                        "source instead")
-                gen._emit(f"  {obj_v}[{idx_v}] = {v};")
+                # Try __setitem__ as last resort
+                _fallback_r2 = gmp._lower_struct_subscript_dunder(
+                    gen, ot, obj_v, '__setitem__', [(it, idx_v), (vtype, v)])
+                if _fallback_r2 is not None:
+                    pass  # handled
+                else:
+                    # A KNOWN USER struct with no `__setitem__` and no _data
+                    # container field has no correct lowering for a subscript
+                    # store — the instance is not an array. The raw C emit
+                    # below is only valid for a genuine raw-pointer/array
+                    # lvalue; on a struct pointer it silently wrote garbage
+                    # (or, once loop slots stopped being blanket-int64_t,
+                    # became GCC's "array subscript is not an integer" —
+                    # real: Counter.__iadd__'s `self[elem] += count`, whose
+                    # class subclasses builtin dict but registers neither
+                    # dunder here). Refuse honestly so gen_module falls back
+                    # to interpreting this module from source.
+                    _w_sn = gimple_exprtypes._struct_name_of(ot)
+                    if ot.endswith(' *') and _w_sn:
+                        try:
+                            _fallback_r3 = gmp._lower_struct_subscript_dunder(
+                                gen, ot, obj_v, '__setitem__', [(it, idx_v), (vtype, v)])
+                            if _fallback_r3 is not None:
+                                pass
+                            elif _w_sn in gen.struct_field_types:
+                                # Try to directly call __setitem__ by constructing mangled name
+                                try:
+                                    import mojo.backend_gimple.emit_funcs as _ggf2
+                                    mangled = _ggf2._struct_method_csym(gen, _w_sn, '__setitem__', '')
+                                    if mangled:
+                                        all_pairs = [(ot, obj_v), (it, idx_v), (vtype, v)]
+                                        try:
+                                            gen._emit_call('void', '', mangled, all_pairs)
+                                        except Exception:
+                                            raise RuntimeError(
+                                                f"cannot compile module: `{_w_sn}[...] = ...` "
+                                                f"subscript store on user-defined struct {_w_sn!r} "
+                                                "(no `__setitem__` method and no backing container "
+                                                "field) — this codegen can't represent it as "
+                                                "compiled C without emitting silently wrong code; "
+                                                "falling back to interpreting this module from "
+                                                "source instead")
+                                    else:
+                                        raise RuntimeError(
+                                            f"cannot compile module: `{_w_sn}[...] = ...` "
+                                            f"subscript store on user-defined struct {_w_sn!r} "
+                                            "(no `__setitem__` method and no backing container "
+                                            "field) — this codegen can't represent it as "
+                                            "compiled C without emitting silently wrong code; "
+                                            "falling back to interpreting this module from "
+                                            "source instead")
+                                except RuntimeError:
+                                    raise
+                                except Exception:
+                                    raise RuntimeError(
+                                        f"cannot compile module: `{_w_sn}[...] = ...` "
+                                        f"subscript store on user-defined struct {_w_sn!r} "
+                                        "(no `__setitem__` method and no backing container "
+                                        "field) — this codegen can't represent it as "
+                                        "compiled C without emitting silently wrong code; "
+                                        "falling back to interpreting this module from "
+                                        "source instead")
+                            else:
+                                gen._emit(f"  {obj_v}[{idx_v}] = {v};")
+                        except RuntimeError:
+                            raise
+                        except Exception:
+                            if _w_sn in gen.struct_field_types:
+                                # Last ditch: try to call __setitem__ directly
+                                try:
+                                    import mojo.backend_gimple.emit_funcs as _ggf2
+                                    mangled = _ggf2._struct_method_csym(gen, _w_sn, '__setitem__', '')
+                                    if mangled:
+                                        all_pairs = [(ot, obj_v), (it, idx_v), (vtype, v)]
+                                        gen._emit_call('void', '', mangled, all_pairs)
+                                    else:
+                                        raise RuntimeError(
+                                            f"cannot compile module: `{_w_sn}[...] = ...` "
+                                            f"subscript store on user-defined struct {_w_sn!r} "
+                                            "(no `__setitem__` method and no backing container "
+                                            "field) — this codegen can't represent it as "
+                                            "compiled C without emitting silently wrong code; "
+                                            "falling back to interpreting this module from "
+                                            "source instead")
+                                except RuntimeError:
+                                    raise
+                                except Exception:
+                                    raise RuntimeError(
+                                        f"cannot compile module: `{_w_sn}[...] = ...` "
+                                        f"subscript store on user-defined struct {_w_sn!r} "
+                                        "(no `__setitem__` method and no backing container "
+                                        "field) — this codegen can't represent it as "
+                                        "compiled C without emitting silently wrong code; "
+                                        "falling back to interpreting this module from "
+                                        "source instead")
+                            else:
+                                gen._emit(f"  {obj_v}[{idx_v}] = {v};")
+                    else:
+                        gen._emit(f"  {obj_v}[{idx_v}] = {v};")
     else:
         pass  # complex aug-assign target: no-op
 

@@ -10449,7 +10449,7 @@ def _struct_data_field(gen, ctype: str):
     sft = gen.struct_field_types.get(sn, {})
     for fname in ('_data', 'data'):
         ft = sft.get(fname, '')
-        if ft.endswith(' *'):
+        if ft and isinstance(ft, str) and ft.endswith(' *'):
             return fname, ft
     return None, None
 
@@ -10511,10 +10511,19 @@ def _emit_struct_subscript_write(gen, obj_v: str, obj_t: str, idx_v: str, val: s
     fname, ftype = gen._struct_data_field(obj_t)
     if fname is None:
         return False
-    dp = gen._new_val(ftype, f"{obj_v}->{fname}")
-    # GIMPLE: can't chain casts in one expr; split into two steps
-    vp = gen._new_val('void *', f"(void *){dp}")
-    i64p = gen._new_val('int64_t *', f"(int64_t *){vp}")
+    if ftype and isinstance(ftype, str) and ftype.endswith(' *'):
+        dp = gen._new_val(ftype, f"{obj_v}->{fname}")
+        # GIMPLE: can't chain casts in one expr; split into two steps
+        vp = gen._new_val('void *', f"(void *){dp}")
+        i64p = gen._new_val('int64_t *', f"(int64_t *){vp}")
+    elif ftype and isinstance(ftype, str) and ftype in ('int64_t', 'int'):
+        dp = gen._new_val(ftype, f"{obj_v}->{fname}")
+        vp = gen._new_val('void *', f"(void *){dp}")
+        i64p = gen._new_val('int64_t *', f"(int64_t *){vp}")
+    else:
+        dp = gen._new_val(ftype, f"{obj_v}->{fname}")
+        vp = gen._new_val('void *', f"(void *){dp}")
+        i64p = gen._new_val('int64_t *', f"(int64_t *){vp}")
     idx64 = gen._new_val('int64_t', f"(int64_t) {idx_v}")
     gen._ptr_helpers_needed.add('int64_t')
     addr = gen._new_val('int64_t *', f"_mojo_at_int64_t ({i64p}, {idx64})")
