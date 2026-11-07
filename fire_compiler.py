@@ -5281,40 +5281,52 @@ class Parser:
                             while self._peek().kind not in (
                                     "ASSIGN", "NEWLINE", "DEDENT", "EOF"):
                                 self._advance()
-            # A multi-target comptime binding: `comptime a, b = expr(...)`, which
-            # unpacks ONE compile-time value into two names. Collected BEFORE the
-            # ASSIGN test below, because at this point the next token is the
-            # COMMA — testing for `=` first returned a bare `ExprStmt(IdentExpr
-            # ('a'))` and left `, b = expr` to be parsed as an ordinary statement
+            # A multi-target comptime binding: `comptime a, b = expr(...)`,
+            # which unpacks ONE compile-time value into two names, and each
+            # target may itself be a parenthesised (possibly nested) group —
+            # `comptime a, (b, c) = 1, (2, 3)`. Collected BEFORE the ASSIGN
+            # test below, because at this point the next token is the COMMA —
+            # testing for `=` first returned a bare `ExprStmt(IdentExpr('a'))`
+            # and left `, b = expr` to be parsed as an ordinary statement
             # tuple-assignment, which is how it silently misparsed.
+            #
+            # The old loop accepted exactly one more NAME directly followed by
+            # the `=`, so a nested group (the `(` after the comma) and a THIRD
+            # flat target (peek(2) saw the second comma, not the `=`) both fell
+            # through to `ExprStmt(IdentExpr('a'))` and died at statement level
+            # with "Unexpected COMMA" (PARSER_nested_tuple_unpack_comptime).
+            # The target list is now a real comma-separated pattern with a
+            # single `=` at its end, and the whole attempt is rolled back on
+            # any shape it does not accept — so `comptime a, b` without an
+            # `=` and `comptime a, = g()` still reach the single-name path and
+            # the statement parser exactly as before, error and all.
             targets = [name]
-            # The loop consumes its OWN `=`, so remember that it did: testing
-            # for an ASSIGN again afterwards looks for a SECOND one, finds the
-            # RHS expression instead, and falls through to
-            # `ExprStmt(IdentExpr(name))` — which silently drops the binding
-            # and leaves the RHS to be parsed as the next statement.
-            # `comptime char, num_bytes = Codepoint.unsafe_decode_...(...)`
-            # (std/collections/string/codepoint.mojo) compiled that way, with
-            # both names bound to nothing and the call statement orphaned; only
-            # a fixture that inspects the resulting node types saw it.
-            _saw_multi_eq = False
-            while (self._peek().kind == "COMMA"
-                   and self._peek(1).kind in ("NAME", "KW")
-                   and self._peek(2).kind == "ASSIGN"):
-                self._advance()
-                targets.append(self._advance().value)
-                self._advance()          # this entry's own '='
-                _saw_multi_eq = True
-            if _saw_multi_eq:
+            _saw_multi = False
+            if self._peek().kind == "COMMA":
+                _multi_saved = self._pos
+                _list_ok = True
+                while self._peek().kind == "COMMA":
+                    self._advance()
+                    if not self._parse_comptime_target_element(targets):
+                        _list_ok = False
+                        break
+                if _list_ok and self._peek().kind == "ASSIGN" \
+                        and len(targets) > 1:
+                    _saw_multi = True
+                else:
+                    self._pos = _multi_saved
+            if _saw_multi:
+                self._advance()          # the binding's single '='
                 rhs = self._skip_comptime_rhs()
-                # Each name is bound to the same RHS node: the parser cannot see
-                # that `expr` yields a 2-tuple (nothing in the syntax says so),
-                # and this backend models a comptime alias as name-to-expression,
+                # Each LEAF name is bound to the same WHOLE right-hand side:
+                # this backend models a comptime alias as name-to-expression,
                 # which is the shape every consumer of `comptime NAME = expr`
-                # already reads. Splitting one value per name is the backends'
+                # already reads, and the flat `comptime a, b = g()` spelling
+                # has done exactly this since it landed. Splitting one value
+                # per name (real tuple-unpacking semantics) is the backends'
                 # business, not the parser's.
                 #
-                # The loop variable is `_name`, NOT `t`: `t` is already a
+                # The comprehension variable is `_name`, NOT `t`: `t` is already a
                 # `Token *` local in this function (from the `t = self._peek()`
                 # above), and a comprehension target that shadows an enclosing
                 # local used to reuse that local's C variable, so the `char *`
@@ -5340,6 +5352,50 @@ class Parser:
                 return [ComptimeVarStmt(target=name, value=rhs)]
             return ExprStmt(IdentExpr(name))
         raise SyntaxError(f"{self._loc(t)}Unexpected token after comptime: {t.value!r}")
+
+    def _parse_comptime_target_element(self, out):
+        """Parse ONE element of a multi-target comptime binding's target
+        list — a plain name, or a parenthesised group of such elements,
+        nested to any depth (`comptime a, (b, (c, d)) = ...`) — and append
+        the leaf names to `out` in source order.
+
+        The caller has already consumed the COMMA that precedes this
+        element; this function stops at the element's end — the next COMMA,
+        the binding's single `=`, or whatever closes the group — leaving
+        that token pending. It returns False when the pending token cannot
+        start an element or a group is left unclosed; the caller rolls the
+        whole target list back, so a partial consumption does not matter.
+
+        Groups flatten to names rather than keeping the `"(a, b)"` string
+        the for/with/generator targets use (`_parse_unpack_target`): a
+        ComptimeVarStmt's target is a single name — one statement per leaf,
+        all bound to the same RHS — so the `"(a)"`-vs-`"(a,)"` 1-tuple
+        distinction that `_parse_unpack_target` must keep has no business
+        here.
+        """
+        t = self._peek()
+        if t.kind in ("NAME", "KW"):
+            self._advance()
+            out.append(t.value)
+            return True
+        if t.kind == "LPAREN":
+            self._advance()
+            try:
+                if self._peek().kind != "RPAREN":
+                    while True:
+                        if not self._parse_comptime_target_element(out):
+                            return False
+                        if self._peek().kind == "COMMA":
+                            self._advance()
+                            if self._peek().kind == "RPAREN":
+                                break
+                            continue
+                        break
+                self._expect("RPAREN")
+            except SyntaxError:
+                return False
+            return True
+        return False
 
     def _skip_comptime_rhs(self):
         """Parse RHS of comptime assignment, with fallback for complex types.
@@ -5382,6 +5438,23 @@ class Parser:
         # Try parsing as expression first (handles & as binary op)
         try:
             expr = self._parse_expr(0)
+            # A top-level comma makes the right-hand side a BARE
+            # (unparenthesised) tuple — `comptime a, (b, c) = 1, (2, 3)` —
+            # the same implicit tuple the statement level builds for an
+            # ordinary assignment (`_parse_stmt`'s first_group gathering)
+            # and for a for-loop's iterable (`_parse_for`'s `for x in a,
+            # b, c:`). Without this only the first element was returned and
+            # the comma was left for the statement parser, which died with
+            # "Unexpected COMMA" and the binding silently dropped. A
+            # trailing comma is a 1-tuple in CPython and stays one here.
+            if self._peek().kind == "COMMA":
+                elems = [expr]
+                while self._peek().kind == "COMMA":
+                    self._advance()
+                    if self._peek().kind in ("NEWLINE", "DEDENT", "EOF", "SEMICOLON"):
+                        break
+                    elems.append(self._parse_expr(0))
+                expr = TupleExpr(elements=elems)
             return expr
         except (SyntaxError, ValueError, TypeError, AttributeError,
                 IndexError, KeyError) as e:
