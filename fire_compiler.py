@@ -7060,7 +7060,17 @@ class Parser:
         # two `**`-UnaryOp "elements", which then crashes in eval_UnaryOp
         # instead of building a dict (see
         # INTERP_dict_double_star_unpack_runtime).
+        #
+        # `{**d for d in ds}` is a dict comprehension whose body is a
+        # mapping spread (PEP 448 generalizations / Python 3.15
+        # comprehension unpacking). Distinguish it from a spread literal
+        # by the `for` that follows the first spread element.
         if isinstance(first, UnaryOp) and first.op == "**":
+            if self._is_kw("for"):
+                gens = self._parse_generators()
+                self._expect("RBRACE")
+                return Comprehension(kind="dict", element=first, value=None,
+                                     generators=gens)
             pairs = [(first, None)]
             while self._peek().kind == "COMMA":
                 self._advance()
