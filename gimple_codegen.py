@@ -1834,6 +1834,14 @@ class GimpleGen:
         # here with a literal container gives _collect_self_assigns the real
         # C type AND guarantees the field is valid from construction.
         self._comptime_vals: dict = {}
+        # Nesting depth of runtime-degraded `comptime if` emission. When > 0,
+        # branch bodies are being generated for a comptime-if whose conditions
+        # could not be resolved statically (so all branches are emitted as a
+        # runtime chain). A `comptime assert` that is provably false in such a
+        # body must not fail compilation, because the branch may be unreachable
+        # at runtime and our comptime evaluator may have returned unknown for
+        # the guard due to incomplete support.
+        self._comptime_runtime_depth: int = 0
         # `comptime NAME = [T(...), T(...), ...]` — the raw ListExpr AST,
         # recorded regardless of whether _eval_const can fold it (it can't:
         # a Tuple(...) constructor call isn't a foldable scalar). Lets

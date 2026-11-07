@@ -815,10 +815,14 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
             bb_t = gen._new_bb(); bb_m = gen._new_bb()
             gen._emit(f"  if ({cv}) goto {bb_t}; else goto {bb_m};")
             gen._emit_label(bb_t)
-            _bscope = gen._open_block_scope()
-            for s in elif_body:
-                gen.gen_stmt(s)
-            gen._close_block_scope(_bscope)
+            gen._comptime_runtime_depth = getattr(gen, '_comptime_runtime_depth', 0) + 1
+            try:
+                _bscope = gen._open_block_scope()
+                for s in elif_body:
+                    gen.gen_stmt(s)
+                gen._close_block_scope(_bscope)
+            finally:
+                gen._comptime_runtime_depth -= 1
             gen._emit(f"  goto {bb_m};")
             gen._emit_label(bb_m)
             return
@@ -833,44 +837,48 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
     bb_merge = gen._new_bb()
     elifs = getattr(node, 'elifs', None) or []
     has_else = bool(node.else_body)
-    # First branch
-    if elifs or has_else:
-        bb_false = gen._new_bb()
-    else:
-        bb_false = bb_merge
-    bb_true = gen._new_bb()
-    gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
-    gen._emit_label(bb_true)
-    _bscope = gen._open_block_scope()
-    for s in node.then_body:
-        gen.gen_stmt(s)
-    gen._close_block_scope(_bscope)
-    gen._emit(f"  goto {bb_merge};")
-    # elif chains
-    for _elif_idx, (elif_cond, elif_body) in enumerate(elifs):
-        gen._emit_label(bb_false)
-        elif_tt, elif_cv = gen.lower_expr(elif_cond)
-        elif_cv = gen._ensure_bool_cond(elif_tt, elif_cv)
-        bb_elif_true = gen._new_bb()
-        if _elif_idx < len(elifs) - 1 or has_else:
+    gen._comptime_runtime_depth = getattr(gen, '_comptime_runtime_depth', 0) + 1
+    try:
+        # First branch
+        if elifs or has_else:
             bb_false = gen._new_bb()
         else:
             bb_false = bb_merge
-        gen._emit(f"  if ({elif_cv}) goto {bb_elif_true}; else goto {bb_false};")
-        gen._emit_label(bb_elif_true)
+        bb_true = gen._new_bb()
+        gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
+        gen._emit_label(bb_true)
         _bscope = gen._open_block_scope()
-        for _elif_stmt in elif_body:
-            gen.gen_stmt(_elif_stmt)
-        gen._close_block_scope(_bscope)
-        gen._emit(f"  goto {bb_merge};")
-    if has_else:
-        gen._emit_label(bb_false)
-        _bscope = gen._open_block_scope()
-        for s in node.else_body:
+        for s in node.then_body:
             gen.gen_stmt(s)
         gen._close_block_scope(_bscope)
         gen._emit(f"  goto {bb_merge};")
-    gen._emit_label(bb_merge)
+        # elif chains
+        for _elif_idx, (elif_cond, elif_body) in enumerate(elifs):
+            gen._emit_label(bb_false)
+            elif_tt, elif_cv = gen.lower_expr(elif_cond)
+            elif_cv = gen._ensure_bool_cond(elif_tt, elif_cv)
+            bb_elif_true = gen._new_bb()
+            if _elif_idx < len(elifs) - 1 or has_else:
+                bb_false = gen._new_bb()
+            else:
+                bb_false = bb_merge
+            gen._emit(f"  if ({elif_cv}) goto {bb_elif_true}; else goto {bb_false};")
+            gen._emit_label(bb_elif_true)
+            _bscope = gen._open_block_scope()
+            for _elif_stmt in elif_body:
+                gen.gen_stmt(_elif_stmt)
+            gen._close_block_scope(_bscope)
+            gen._emit(f"  goto {bb_merge};")
+        if has_else:
+            gen._emit_label(bb_false)
+            _bscope = gen._open_block_scope()
+            for s in node.else_body:
+                gen.gen_stmt(s)
+            gen._close_block_scope(_bscope)
+            gen._emit(f"  goto {bb_merge};")
+        gen._emit_label(bb_merge)
+    finally:
+        gen._comptime_runtime_depth -= 1
 
 
 def _gen_stmt_ComptimeVarStmt(gen, node):
@@ -977,14 +985,21 @@ def _gen_stmt_ComptimeForStmt(gen, node):
             # See bug:CODEGEN_imported_generic_never_elaborated_calls_
             # nothing_defines.md.
             dst = gen.var_types.get(node.target) or 'int64_t'
+            _ct_saved = (node.target in gen._comptime_vals,
+                         gen._comptime_vals.get(node.target))
             i = start
             while (step > 0 and i < stop) or (step < 0 and i > stop):
                 gen._safe_coerce_emit('int', dst, str(i), node.target)
+                gen._comptime_vals[node.target] = i
                 _bscope = gen._open_block_scope()
                 for s in node.body:
                     gen.gen_stmt(s)
                 gen._close_block_scope(_bscope)
                 i += step
+            if _ct_saved[0]:
+                gen._comptime_vals[node.target] = _ct_saved[1]
+            else:
+                gen._comptime_vals.pop(node.target, None)
             return
     elif (isinstance(node.iterable, gimple_ctypes.CallExpr)
             and isinstance(node.iterable.func, gimple_ctypes.IdentExpr)
@@ -1057,15 +1072,221 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                     for _t in _names:
                         if _t not in gen.var_types:
                             gen._declare_var(_t, 'int64_t')
+                    _ct_saved = [(n, n in gen._comptime_vals,
+                                  gen._comptime_vals.get(n)) for n in _names]
                     for _combo in _combs:
                         for _t, _v in zip(_names, _combo):
                             _dst = gen.var_types.get(_t) or 'int64_t'
                             gen._safe_coerce_emit(
                                 'int', _dst, str(_v), _t)
+                            gen._comptime_vals[_t] = _v
                         _bscope = gen._open_block_scope()
                         for s in node.body:
                             gen.gen_stmt(s)
                         gen._close_block_scope(_bscope)
+                    for _n, _had, _old in _ct_saved:
+                        if _had:
+                            gen._comptime_vals[_n] = _old
+                        else:
+                            gen._comptime_vals.pop(_n, None)
+                    return
+    elif isinstance(node.iterable, (ListExpr, TupleExpr, gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)) or isinstance(getattr(node.iterable, '__class__', None), type) and getattr(node.iterable.__class__, '__name__', '') == 'DictExpr' or (DictExpr is not None and isinstance(node.iterable, DictExpr)):
+        # `comptime for x in [1, 2, 3]` / `(...,)`: unroll over compile-time
+        # constant elements. The loop variable is bound in gen._comptime_vals
+        # each iteration so comptime assert / constrained diagnostics that depend
+        # on it evaluate correctly (bugs/DIAGNOSTICS_missing_validation_modular.md:
+        # "comptime-for shapes beyond the gimple unroller's bound forms").
+        if DictExpr is not None and isinstance(node.iterable, DictExpr):
+            pairs = getattr(node.iterable, 'pairs', None) or []
+            cvals = []
+            all_ok = True
+            for pair in pairs:
+                if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                    all_ok = False
+                    break
+                _v = gen._eval_const(pair[0])
+                if _v is None:
+                    all_ok = False
+                    break
+                cvals.append(_v)
+        else:
+            elems = getattr(node.iterable, 'elements', None) or []
+            cvals = []
+            all_ok = True
+            for _e in elems:
+                _v = gen._eval_const(_e)
+                if _v is None:
+                    all_ok = False
+                    break
+                cvals.append(_v)
+        if all_ok and not for_target_is_tuple(node.target):
+            dst = gen.var_types.get(node.target)
+            if dst is None:
+                dst = 'int64_t'
+                gen._declare_var(node.target, dst)
+            _ct_saved = (node.target in gen._comptime_vals,
+                         gen._comptime_vals.get(node.target))
+            for _v in cvals:
+                gen._comptime_vals[node.target] = _v
+                if isinstance(_v, bool):
+                    gen._safe_coerce_emit('int', dst, '1' if _v else '0', node.target)
+                elif isinstance(_v, int) and not isinstance(_v, bool):
+                    gen._safe_coerce_emit('int', dst, str(_v), node.target)
+                elif isinstance(_v, str):
+                    try:
+                        _sv = gen._emit_string_literal(_v)
+                        if node.target not in gen.var_types or gen.var_types[node.target] != 'char *':
+                            gen.var_types[node.target] = 'char *'
+                        gen._safe_coerce_emit('char *', 'char *', _sv, node.target)
+                    except Exception:
+                        pass
+                _bscope = gen._open_block_scope()
+                for s in node.body:
+                    gen.gen_stmt(s)
+                gen._close_block_scope(_bscope)
+            if _ct_saved[0]:
+                gen._comptime_vals[node.target] = _ct_saved[1]
+            else:
+                gen._comptime_vals.pop(node.target, None)
+            return
+        if all_ok and for_target_is_tuple(node.target):
+            _names = for_target_names(node.target)
+            _rows = []
+            _ok_unpack = True
+            for _i, _e in enumerate(elems):
+                _cv = cvals[_i]
+                if isinstance(_cv, (tuple, list)) and len(_cv) == len(_names):
+                    _rows.append(list(_cv))
+                    continue
+                _sub = getattr(_e, 'elements', None)
+                if _sub is None or len(_sub) != len(_names):
+                    _ok_unpack = False
+                    break
+                _row = []
+                for _se in _sub:
+                    _sv = gen._eval_const(_se)
+                    if _sv is None:
+                        _ok_unpack = False
+                        break
+                    _row.append(_sv)
+                if not _ok_unpack:
+                    break
+                _rows.append(_row)
+            if _ok_unpack and _rows:
+                for _t in _names:
+                    if _t not in gen.var_types:
+                        gen._declare_var(_t, 'int64_t')
+                _ct_saved = [(n, n in gen._comptime_vals,
+                              gen._comptime_vals.get(n)) for n in _names]
+                for _row in _rows:
+                    for _t, _v in zip(_names, _row):
+                        gen._comptime_vals[_t] = _v
+                        _dst = gen.var_types.get(_t) or 'int64_t'
+                        if isinstance(_v, bool):
+                            gen._safe_coerce_emit('int', _dst, '1' if _v else '0', _t)
+                        elif isinstance(_v, int) and not isinstance(_v, bool):
+                            gen._safe_coerce_emit('int', _dst, str(_v), _t)
+                        elif isinstance(_v, str):
+                            try:
+                                _sv = gen._emit_string_literal(_v)
+                                if gen.var_types.get(_t) != 'char *':
+                                    gen.var_types[_t] = 'char *'
+                                gen._safe_coerce_emit('char *', 'char *', _sv, _t)
+                            except Exception:
+                                pass
+                    _bscope = gen._open_block_scope()
+                    for s in node.body:
+                        gen.gen_stmt(s)
+                    gen._close_block_scope(_bscope)
+                for _n, _had, _old in _ct_saved:
+                    if _had:
+                        gen._comptime_vals[_n] = _old
+                    else:
+                        gen._comptime_vals.pop(_n, None)
+                return
+    else:
+        # Comptime for over a non-literal iterable that resolves to a constant
+        # list/tuple/str (e.g. a comptime alias: `comptime vals = [1,2]; for i in
+        # vals`, or `comptime s = "ab"; for c in s`). Bind loop targets in
+        # gen._comptime_vals so comptime assert / constrained diagnostics that
+        # depend on them evaluate correctly
+        # (bugs/DIAGNOSTICS_missing_validation_modular.md: "iteration over
+        # non-literal comptime values"; subscript/string collection ops).
+        _resolved = gen._eval_const(node.iterable)
+        if isinstance(_resolved, (list, tuple, str)) or isinstance(_resolved, dict):
+            cvals = list(_resolved.keys()) if isinstance(_resolved, dict) else list(_resolved)
+            elems = [None] * len(cvals)
+            if not for_target_is_tuple(node.target):
+                dst = gen.var_types.get(node.target)
+                if dst is None:
+                    dst = 'int64_t'
+                    gen._declare_var(node.target, dst)
+                _ct_saved = (node.target in gen._comptime_vals,
+                             gen._comptime_vals.get(node.target))
+                for _v in cvals:
+                    gen._comptime_vals[node.target] = _v
+                    if isinstance(_v, bool):
+                        gen._safe_coerce_emit('int', dst, '1' if _v else '0', node.target)
+                    elif isinstance(_v, int) and not isinstance(_v, bool):
+                        gen._safe_coerce_emit('int', dst, str(_v), node.target)
+                    elif isinstance(_v, str):
+                        try:
+                            _sv = gen._emit_string_literal(_v)
+                            if gen.var_types.get(node.target) != 'char *':
+                                gen.var_types[node.target] = 'char *'
+                            gen._safe_coerce_emit('char *', 'char *', _sv, node.target)
+                        except Exception:
+                            pass
+                    _bscope = gen._open_block_scope()
+                    for s in node.body:
+                        gen.gen_stmt(s)
+                    gen._close_block_scope(_bscope)
+                if _ct_saved[0]:
+                    gen._comptime_vals[node.target] = _ct_saved[1]
+                else:
+                    gen._comptime_vals.pop(node.target, None)
+                return
+            else:
+                _names = for_target_names(node.target)
+                _rows = []
+                _ok_unpack = True
+                for _cv in cvals:
+                    if isinstance(_cv, (tuple, list)) and len(_cv) == len(_names):
+                        _rows.append(list(_cv))
+                    else:
+                        _ok_unpack = False
+                        break
+                if _ok_unpack and _rows:
+                    for _t in _names:
+                        if _t not in gen.var_types:
+                            gen._declare_var(_t, 'int64_t')
+                    _ct_saved = [(n, n in gen._comptime_vals,
+                                  gen._comptime_vals.get(n)) for n in _names]
+                    for _row in _rows:
+                        for _t, _v in zip(_names, _row):
+                            gen._comptime_vals[_t] = _v
+                            _dst = gen.var_types.get(_t) or 'int64_t'
+                            if isinstance(_v, bool):
+                                gen._safe_coerce_emit('int', _dst, '1' if _v else '0', _t)
+                            elif isinstance(_v, int) and not isinstance(_v, bool):
+                                gen._safe_coerce_emit('int', _dst, str(_v), _t)
+                            elif isinstance(_v, str):
+                                try:
+                                    _sv = gen._emit_string_literal(_v)
+                                    if gen.var_types.get(_t) != 'char *':
+                                        gen.var_types[_t] = 'char *'
+                                    gen._safe_coerce_emit('char *', 'char *', _sv, _t)
+                                except Exception:
+                                    pass
+                        _bscope = gen._open_block_scope()
+                        for s in node.body:
+                            gen.gen_stmt(s)
+                        gen._close_block_scope(_bscope)
+                    for _n, _had, _old in _ct_saved:
+                        if _had:
+                            gen._comptime_vals[_n] = _old
+                        else:
+                            gen._comptime_vals.pop(_n, None)
                     return
     if not unrolled:
         pass
@@ -4208,6 +4429,28 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # Per-function, same reason and same placement as gen_func's.
     gen._inlined_lambdas = {}
     gen._reset_no_candidates()
+    # In an elaborated generic instantiation, `@__allow_legacy_custom_self_type`
+    # methods may be specialization overloads whose `self` type targets a
+    # different instantiation than the one being compiled (e.g. an
+    # OptionalReg[Pointer[...]] guard compiled while instantiating
+    # OptionalReg[DevT]). Their `comptime assert(False)` / `constrained[False]`
+    # poison-pill guards are correct when selected but false positives here.
+    # Suppress comptime diagnostic escalation in that narrow context only.
+    # Also track custom-self methods generally: a literal `False` guard in a
+    # custom-self overload is a poison pill for specialization dispatch and
+    # must not fail template/module compilation (only meaningful when the
+    # overload is actually selected/instantiated).
+    _suppress_inapplicable = False
+    _is_custom_self = False
+    for _d in (getattr(node, 'decorators', None) or []):
+        _dn = _d if isinstance(_d, str) else (
+            getattr(_d, 'name', None) if not isinstance(_d, gimple_ctypes.CallExpr)
+            else (getattr(getattr(_d, 'func', None), 'name', None)))
+        if _dn == '__allow_legacy_custom_self_type':
+            _is_custom_self = True
+            break
+    if _is_custom_self and getattr(gen, '_is_elaborated_instantiation', False):
+        _suppress_inapplicable = True
     # Seed container element types for this method's params and locals —
     # gen_func does both of these (the cross-call `_param_elem_types`
     # contract at its `_pe` seeding, and `_scan_container_elems` for
@@ -4550,8 +4793,23 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     gen._begin_function(node)
     gen._frame_enter(node)
     gen._cattr_restore_begin(node.body)
-    for stmt in node.body:
-        gen.gen_stmt(stmt)
+    if _suppress_inapplicable:
+        gen._comptime_runtime_depth = getattr(gen, '_comptime_runtime_depth', 0) + 1
+        gimple_ctypes._debug_note(
+            f'suppressing comptime diagnostics in inapplicable custom-self '
+            f'overload during elaboration: {struct_name}.{node.name}')
+    if _is_custom_self:
+        gen._in_custom_self_method = getattr(gen, '_in_custom_self_method', 0) + 1
+    gen._in_struct_method_body = getattr(gen, '_in_struct_method_body', 0) + 1
+    try:
+        for stmt in node.body:
+            gen.gen_stmt(stmt)
+    finally:
+        gen._in_struct_method_body = getattr(gen, '_in_struct_method_body', 0) - 1
+        if _is_custom_self:
+            gen._in_custom_self_method = getattr(gen, '_in_custom_self_method', 0) - 1
+        if _suppress_inapplicable:
+            gen._comptime_runtime_depth = getattr(gen, '_comptime_runtime_depth', 0) - 1
     gen._emit_fallthrough_frees(node)
     gen._cattr_restore_fallthrough(node)
     gen._cattr_restore_end()

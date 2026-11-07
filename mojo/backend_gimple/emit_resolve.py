@@ -3331,6 +3331,18 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
         # `monomorphize.instantiate` now carries into the exception. Without
         # that, the failure had to be inferred from a gcc error three stages
         # downstream.
+        #
+        # EXCEPTION: a compile-time diagnostic produced while compiling the
+        # instantiated body (provably-false `comptime assert` / `constrained`)
+        # is a real user diagnostic, not an elaboration-capability failure.
+        # Swallowing it accepts invalid instantiations silently
+        # (bugs/DIAGNOSTICS_missing_validation_modular.md). Re-raise those so
+        # the diagnostic surfaces at the instantiation site.
+        _emsg = str(e)
+        if isinstance(e, RuntimeError) and (
+                'constraint failed' in _emsg
+                or 'comptime assertion failed' in _emsg):
+            raise
         gen._generic_struct_elaboration_failures.append(
             f"{base_name}[{', '.join(type_args)}] from {source}: "
             f"{type(e).__name__}: {e}")
@@ -3364,7 +3376,16 @@ def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
                                 ([gen.lower_expr(a) for a in node.args]
                                  + [gen.lower_expr(k) for _, k in
                                     (getattr(node, 'kwargs', None) or [])])])
-        except Exception:
+        except Exception as e:
+            # A compile-time diagnostic (provably-false comptime assert /
+            # constrained) from compiling the instantiated body is a real user
+            # diagnostic — re-raise it instead of silently accepting an invalid
+            # instantiation (bugs/DIAGNOSTICS_missing_validation_modular.md).
+            _emsg = str(e)
+            if isinstance(e, RuntimeError) and (
+                    'constraint failed' in _emsg
+                    or 'comptime assertion failed' in _emsg):
+                raise
             gimple_ctypes._debug_note('inferred generic struct elaboration failed')
             info = None
         name = _register_generic_struct(gen, g, info) if info else None
