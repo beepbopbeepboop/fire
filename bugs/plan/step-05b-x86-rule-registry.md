@@ -1,5 +1,5 @@
 # plan/step-05b: register the x86-64 rules, and fix three latent soundness holes in their matchers
-**Status: DONE (verified by agent, work landed)**
+**Status: DONE 2026-11-07 (measured).** `x86_64/store_load`, `mem_pair_store`, `mem_pair_load` and `mov_self_rev` are moved into `X86_RULES` (their theorems are PROVED in `lib/Peephole.lean`). `x86_64/imm_zero` STAYS in `SCAFFOLDED_RULES` on purpose: both halves of its theorem are proved (registers, flags) but no theorem connects the pass's syntactic `flags_dead_after` scan to the semantics, so it is not enabled. `test_formal_peephole.py` 83/83. The old test that asserted `mov_self` DECLINES the `48 8b c0` spelling now asserts `mov_self_rev` removes it.
 
 Class: mid      Size: M      Depends: 04a, 04b, 04c, 04d (each only for rules whose theorem is PROVED in Peephole.lean)      Blocks: none
 Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §3; `formal/peephole.py` (`_x_mem_pair` ~765, `_x_store_load` ~789, `_x_imm_zero` ~835, `X86_RULES` ~867); `formal/x86_64_decode.py` (`_modrm_fields` :108-154, dataclass :86).

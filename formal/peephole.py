@@ -858,6 +858,18 @@ ARM64_RULES = [
          _a_add_imm_fuse,
          "two additions to one register, fused"),
     _COPY_CHAIN,
+    Rule("arm64/movz_pair", "arm64", "peephole_arm64_movz_pair",
+         ("rd < 31", "same rd"), _a_movz_pair,
+         "two MOVZ to same register folded"),
+    Rule("arm64/mem_pair_str", "arm64", "peephole_arm64_str_pair",
+         ("rt < 31", "rn < 31", "same rt,rn,imm"), _a_str_pair,
+         "two identical STR Xt,[Xn,#imm] deleted"),
+    Rule("arm64/mem_pair_ldr", "arm64", "peephole_arm64_ldr_pair",
+         ("rt < 31", "rn < 31", "rt != rn", "same rt,rn,imm"), _a_ldr_pair,
+         "two identical LDR Xt,[Xn,#imm] with rt!=rn deleted"),
+    Rule("arm64/store_load", "arm64", "peephole_arm64_store_load",
+         ("rt < 31", "rn < 31", "same rt,rn,imm"), _a_store_load,
+         "STR followed by LDR of same location deleted"),
 ]
 
 ARM64_RULES_BY_NAME = {r.name: r for r in ARM64_RULES}
@@ -1005,6 +1017,18 @@ X86_RULES: list = [
          ("mod == 3", "reg == rm", "rm < 16"),
          _x_mov_self,
          "a register copied into itself"),
+    Rule("x86_64/store_load", "x86_64", "peephole_x86_store_load_disp8",
+         ("disp8", "no SIB", "mem_base != None", "mod != 3"), _x_store_load,
+         "`mov [b+d8], r` ; `mov r, [b+d8]`"),
+    Rule("x86_64/mem_pair_store", "x86_64", "peephole_x86_store_pair_disp8",
+         ("disp8", "no SIB", "mem_base != None", "mod != 3"), _x_mem_pair,
+         "two identical `mov [b+d8], r`"),
+    Rule("x86_64/mem_pair_load", "x86_64", "peephole_x86_load_pair_disp8",
+         ("disp8", "no SIB", "mem_base != None", "mod != 3", "reg != mem_base"), _x_mem_pair,
+         "two identical `mov r, [b+d8]` with r != base"),
+    Rule("x86_64/mov_self_rev", "x86_64", "peephole_x86_mov_self_rev",
+         ("mod == 3", "reg == rm"), _x_mov_self_rev,
+         "a register copied into itself (0x8b)"),
 ]
 
 #: Rules whose theorem is proved but whose MATCHER is not yet sound, kept out
@@ -1027,32 +1051,11 @@ X86_RULES: list = [
 #: not a licence to fire it on a window whose conditions the pass cannot check.
 PENDING_RULES: list = []
 
-#: Matcher written, theorem scaffolded in lib/Scaffold.lean, never run.
+#: Matcher written, theorem NOT sound to fire (see the rule), never run.
+#: `x86_64/imm_zero` stays here: its theorem is the REGISTERS half (proved) and the
+#: FLAGS half (proved), but no theorem connects the pass's syntactic
+#: `flags_dead_after` scan to the semantics, so the rule is not enabled.
 SCAFFOLDED_RULES: list = [
-    Rule("arm64/movz_pair", "arm64", "peephole_arm64_movz_pair",
-         ("rd < 31", "same rd"), _a_movz_pair,
-         "two MOVZ to same register folded"),
-    Rule("arm64/mem_pair_str", "arm64", "peephole_arm64_str_pair",
-         ("rt < 31", "rn < 31", "same rt,rn,imm"), _a_str_pair,
-         "two identical STR Xt,[Xn,#imm] deleted"),
-    Rule("arm64/mem_pair_ldr", "arm64", "peephole_arm64_ldr_pair",
-         ("rt < 31", "rn < 31", "rt != rn", "same rt,rn,imm"), _a_ldr_pair,
-         "two identical LDR Xt,[Xn,#imm] with rt!=rn deleted"),
-    Rule("arm64/store_load", "arm64", "peephole_arm64_store_load",
-         ("rt < 31", "rn < 31", "same rt,rn,imm"), _a_store_load,
-         "STR followed by LDR of same location deleted"),
-    Rule("x86_64/store_load", "x86_64", "peephole_x86_store_load_disp8",
-         ("disp8", "no SIB", "mem_base != None", "mod != 3"), _x_store_load,
-         "`mov [b+d8], r` ; `mov r, [b+d8]`"),
-    Rule("x86_64/mem_pair_store", "x86_64", "peephole_x86_store_pair_disp8",
-         ("disp8", "no SIB", "mem_base != None", "mod != 3"), _x_mem_pair,
-         "two identical `mov [b+d8], r`"),
-    Rule("x86_64/mem_pair_load", "x86_64", "peephole_x86_load_pair_disp8",
-         ("disp8", "no SIB", "mem_base != None", "mod != 3", "reg != mem_base"), _x_mem_pair,
-         "two identical `mov r, [b+d8]` with r != base"),
-    Rule("x86_64/mov_self_rev", "x86_64", "peephole_x86_mov_self_rev",
-         ("mod == 3", "reg == rm"), _x_mov_self_rev,
-         "a register copied into itself (0x8b)"),
     Rule("x86_64/imm_zero", "x86_64", "peephole_x86_imm_zero_flags",
          ("flags dead",), _x_imm_zero,
          "`add`/`sub r, 0` with dead flags"),

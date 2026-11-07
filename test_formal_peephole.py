@@ -597,7 +597,7 @@ class TestArm64ScaffoldedRules(unittest.TestCase):
     def test_movz_pair_deletes_first(self):
         words = _w(encode_movz_xd_imm(0, 1), encode_movz_xd_imm(0, 2))
         ctx = _ctx(words)
-        rule = [r for r in P.SCAFFOLDED_RULES if r.name == "arm64/movz_pair"][0]
+        rule = [r for r in (P.ARM64_RULES + P.X86_RULES + P.SCAFFOLDED_RULES) if r.name == "arm64/movz_pair"][0]
         res = rule.apply(ctx.entries[:2], ctx)
         self.assertIsNotNone(res)
         self.assertEqual(res[1], 1)
@@ -606,13 +606,13 @@ class TestArm64ScaffoldedRules(unittest.TestCase):
     def test_movz_pair_declines_different_register(self):
         words = _w(encode_movz_xd_imm(0, 1), encode_movz_xd_imm(1, 2))
         ctx = _ctx(words)
-        rule = [r for r in P.SCAFFOLDED_RULES if r.name == "arm64/movz_pair"][0]
+        rule = [r for r in (P.ARM64_RULES + P.X86_RULES + P.SCAFFOLDED_RULES) if r.name == "arm64/movz_pair"][0]
         self.assertIsNone(rule.apply(ctx.entries[:2], ctx))
 
     def test_mem_pair_str_deletes_second(self):
         words = _w(encode_str_xt_xn_imm(1, 2, 0), encode_str_xt_xn_imm(1, 2, 0))
         ctx = _ctx(words)
-        rule = [r for r in P.SCAFFOLDED_RULES if r.name == "arm64/mem_pair_str"][0]
+        rule = [r for r in (P.ARM64_RULES + P.X86_RULES + P.SCAFFOLDED_RULES) if r.name == "arm64/mem_pair_str"][0]
         res = rule.apply(ctx.entries[:2], ctx)
         self.assertIsNotNone(res)
         self.assertEqual(res[1], 1)
@@ -620,7 +620,7 @@ class TestArm64ScaffoldedRules(unittest.TestCase):
     def test_mem_pair_ldr_deletes_second(self):
         words = _w(encode_ldr_xt_xn_imm(1, 2, 0), encode_ldr_xt_xn_imm(1, 2, 0))
         ctx = _ctx(words)
-        rule = [r for r in P.SCAFFOLDED_RULES if r.name == "arm64/mem_pair_ldr"][0]
+        rule = [r for r in (P.ARM64_RULES + P.X86_RULES + P.SCAFFOLDED_RULES) if r.name == "arm64/mem_pair_ldr"][0]
         res = rule.apply(ctx.entries[:2], ctx)
         self.assertIsNotNone(res)
         self.assertEqual(res[1], 1)
@@ -628,13 +628,13 @@ class TestArm64ScaffoldedRules(unittest.TestCase):
     def test_mem_pair_ldr_declines_rt_eq_rn(self):
         words = _w(encode_ldr_xt_xn_imm(1, 1, 0), encode_ldr_xt_xn_imm(1, 1, 0))
         ctx = _ctx(words)
-        rule = [r for r in P.SCAFFOLDED_RULES if r.name == "arm64/mem_pair_ldr"][0]
+        rule = [r for r in (P.ARM64_RULES + P.X86_RULES + P.SCAFFOLDED_RULES) if r.name == "arm64/mem_pair_ldr"][0]
         self.assertIsNone(rule.apply(ctx.entries[:2], ctx))
 
     def test_store_load_deletes_second(self):
         words = _w(encode_str_xt_xn_imm(1, 2, 0), encode_ldr_xt_xn_imm(1, 2, 0))
         ctx = _ctx(words)
-        rule = [r for r in P.SCAFFOLDED_RULES if r.name == "arm64/store_load"][0]
+        rule = [r for r in (P.ARM64_RULES + P.X86_RULES + P.SCAFFOLDED_RULES) if r.name == "arm64/store_load"][0]
         res = rule.apply(ctx.entries[:2], ctx)
         self.assertIsNotNone(res)
         self.assertEqual(res[1], 1)
@@ -653,7 +653,7 @@ class TestScaffoldedArm64PairsKeepTheRightInstruction(unittest.TestCase):
     @staticmethod
     def _run(rule_name, *insns):
         from unittest import mock
-        rule = [r for r in P.SCAFFOLDED_RULES if r.name == rule_name][0]
+        rule = [r for r in (P.ARM64_RULES + P.X86_RULES + P.SCAFFOLDED_RULES) if r.name == rule_name][0]
         asm = _Asm(_w(*insns))
         with mock.patch.object(P, "unlicensed_rules", lambda rules=None: []):
             removed = P._run(asm, "arm64", [rule])
@@ -965,14 +965,20 @@ class TestX86Rules(unittest.TestCase):
         self.assertEqual(2, removed)
         self.assertEqual(b"\x31\xc0\xc3", asm.text())
 
-    def test_mov_self_declines_the_reverse_spelling(self):
+    def test_the_reverse_spelling_is_removed_by_mov_self_rev(self):
         # `mov rax, rax` written as `48 8b c0` (the LOAD direction, form
-        # `mov_r64_rm64`). The theorem `peephole_x86_mov_self` is for the
-        # 0x89 store direction, which is the only one the emitters produce;
-        # a match on this would be a rewrite with no proof.
+        # `mov_r64_rm64`) is NOT `x86_64/mov_self`'s window (that theorem is the
+        # 0x89 store direction); it is `x86_64/mov_self_rev`'s, whose theorem
+        # `peephole_x86_mov_self_rev` is proved in lib/Peephole.lean.
         asm, removed = _xrun(b"\x48\x8b\xc0\x31\xc0\xc3")
+        self.assertEqual(1, removed)
+        self.assertEqual(b"\x31\xc0\xc3", asm.text())
+
+    def test_mov_self_rev_declines_a_copy_between_different_registers(self):
+        # `48 8b c8` is `mov rcx, rax`: reg != rm, so no rule applies.
+        asm, removed = _xrun(b"\x48\x8b\xc8\x31\xc0\xc3")
         self.assertEqual(0, removed)
-        self.assertEqual(b"\x48\x8b\xc0\x31\xc0\xc3", asm.text())
+        self.assertEqual(b"\x48\x8b\xc8\x31\xc0\xc3", asm.text())
 
     def test_mov_self_declines_a_copy_between_different_registers(self):
         # `48 89 c1` is `mov rcx, rax` (modrm 0xc1: reg=0/rax is the SOURCE,
@@ -1032,7 +1038,7 @@ class TestX86MemoryMatchers(unittest.TestCase):
     @staticmethod
     def _run(rule_name, *insns):
         from formal import x86_64 as X
-        rule = [r for r in P.SCAFFOLDED_RULES if r.name == rule_name][0]
+        rule = [r for r in (P.ARM64_RULES + P.X86_RULES + P.SCAFFOLDED_RULES) if r.name == rule_name][0]
         data = b"".join(insns) + b"\xc3"
         asm = _XAsm(data)
         # The licence check (`unlicensed_rules`) is exactly what keeps a
