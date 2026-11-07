@@ -389,6 +389,12 @@ done. At this writing: 45 DONE, 7 SCAFFOLDED, 6 CLAIMED, 19 OPEN, 1 closed as
   `work_step_*` lemmas, which depend only on the model and not on each other);
   the shards build in parallel (`formal/lean.py::ensure_library` builds by import
   LEVEL, `library_jobs()`). The wall bound was raised to the measured reality.
+* **Peephole rule proofs: 9 of 9 scaffold rules proved (2026-11-07).** `movz_pair` (by hand, which also
+  showed its first-draft statement was false and corrected it) plus `store_load`, `str_pair`, `ldr_pair`,
+  x86 `store_load`/store pair/load pair, `mov_self_rev` and `imm_zero_flags` (iceman workers following
+  `bugs/plan/WORKER_BRIEF_peephole_rule_proofs.md`; integrated by hand because all six branches inserted at
+  one anchor). `lib/Scaffold.lean` now holds only the canary and the two cell-write-back placeholders
+  (3 `sorry`). The rules are PROVED but NOT yet live: promotion into `ARM64_RULES`/`X86_RULES` is steps 05a/05b.
 * **The arm64 proof corpus: PASS 15 -> 50 of 94 (2026-11-06, measured, 61 min).**
   `python3 test_formal.py --backend arm64`: PASS=50 KNOWN-GAP=5 FAIL=33
   TOO-LARGE=6. Three generator fixes did it: block states inferred with `_`
