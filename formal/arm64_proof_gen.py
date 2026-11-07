@@ -9328,8 +9328,12 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         # of heartbeats.  The frame path's rewrites are hypotheses
         # (no side conditions), so it does not need `decide`.
         _sm = "only" if _fno.get("no_decide") else "+decide only"
+        # The conditional is PARENTHESISED: unparenthesised, `a + b if c else
+        # d + e` is `(a + b) if c else (d + e)`, so with no `simp_extra` the whole
+        # line collapsed to a lone "]" -- the `simp` call vanished and the stray
+        # bracket was a parse error in the generated proof.
         A(f"{IND}simp {_sm} [h8, {_mojo}{_goid}{simp_names}, {_VSP}"
-          + (", " + _fno["simp_extra"]) if _fno.get("simp_extra") else ""
+          + ((", " + _fno["simp_extra"]) if _fno.get("simp_extra") else "")
           + "]")
         A(f"{IND}all_goals try rfl")
         _bsrc = list(ctx.get("branch_srcs", []))
@@ -9340,9 +9344,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                             "mem_read_after_write_u64_high_nw",
                             "mem_read_write_below",
                             "mem_read_write_below_split",
-                            "mem_write_u64_high",
-                            "block_mem_read_above_sp",
-                            "mem_read_after_writes_below_sp"] + _bsrc)
+                            "mem_write_u64_high"] + _bsrc)
         A(f"{IND}all_goals try simp [{_msimp}]")
         if not _fno.get("strict"):
             # `bv_decide` and `grind` are both EVALUATORS, and a frame
@@ -9494,7 +9496,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                     unfold_terms = ctx["lets"] + flow_hsid + flow_defs + \
                         ['arm64_reg', 'arm64_set_reg', 'Arm64State.init']
                     A(f"{IND}  simp only [{', '.join(unfold_terms)}]")
-                    A(f"{IND}  simp (disch := decide) [{', '.join(_hl + ['mem_read_after_write_u64', 'mem_read_after_write_u64_ne', 'mem_read_two_writes_same', 'mem_read_after_write_u64_high', 'mem_read_after_write_u64_high_nw', 'mem_read_write_below', 'mem_read_write_below_split', 'block_mem_read_above_sp'])}]")
+                    A(f"{IND}  simp (disch := decide) [{', '.join(_hl + ['mem_read_after_write_u64', 'mem_read_after_write_u64_ne', 'mem_read_two_writes_same', 'mem_read_after_write_u64_high', 'mem_read_after_write_u64_high_nw', 'mem_read_write_below', 'mem_read_write_below_split'])}]")
                     A(f"{IND}have hjump_{bi} : ({name}_b{bi}_qS{m_run - 1} ({state})).x30.toNat "
                       f"≠ {run_last_pc} := by")
                     A(f"{IND}  rw [hx30_{bi}]")
@@ -10516,7 +10518,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                           f"arm64_matches_condition])")
                         # Handle CCMP: flags may be of form
                         # `if arm64_matches_condition c s.nzcv then arm64_subs_flags a b else k`
-                        A(f"{IND}  try (split_ifs <;> simp_all)")
+                        A(f"{IND}  try (split <;> simp_all)")
                         A(f"{IND}  by_cases h : ({_src}) <;> simp ["
                           + _simp_list("h", _fls, "Arm64State.init", _tw_defs)
                           + "] <;> bv_decide")
@@ -13387,7 +13389,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         _cf_unparenthesised = _cf[1:-1] if _cf.startswith("(") else _cf
         _cf2_use = _cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'
         eval_eq_mojo_proof = (
-            f"have hunf : evalFunc ast ({_cf_unparenthesised}) ({_cf2_use}) [n] =\n"
+            f"have hunf : evalFunc ast ({_cf_unparenthesised}) [n] ({_cf2_use}) =\n"
             f"      (if n ≤ (1 : UInt64) then n else mojo (n - 1) + mojo (n - 2)) := by\n"
             f"    simp only [ast, evalFunc, MojoEnv, evalBody, "
             f"evalBodyEnv, evalExpr]\n"
@@ -13427,7 +13429,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         # generator has had `sKey` in this set for the same reason.
         simp_lems = f"mojo, {func_name}_go, ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo, sKey"
         if len(conds) == 0:
-            eval_eq_mojo_proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n    simp +decide [{hs_join}{simp_lems}]"
+            eval_eq_mojo_proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  simp +decide [{hs_join}{simp_lems}]"
         else:
             # `_eval_eq_conds_tactic` decides the constant conditions with
             # `have`/`native_decide` and splits only the argument-dependent
@@ -13437,7 +13439,7 @@ def generate_arm64_proof(prog, code, info) -> str:
                     conds, hs, simp_lems,
                     extra=", u64_lt_iff_false_of_le, u64_le_iff_false_of_lt")
             if _t is not None:
-                eval_eq_mojo_proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n    {_t}"
+                eval_eq_mojo_proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {_t}"
             else:
                 if len(conds) > 4:
                     mid = len(conds) // 2
@@ -13445,9 +13447,9 @@ def generate_arm64_proof(prog, code, info) -> str:
                     by_cases2 = " ".join(f"by_cases h{i} : {conds[i]} <;>" for i in range(mid, len(conds)))
                     hs_mid = ", ".join(f"h{i}" for i in range(mid)) + (", " if mid > 0 else "")
                     hs_all = ", ".join(f"h{i}" for i in range(len(conds)))
-                    eval_eq_mojo_proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n    {by_cases1} simp_all +decide [{hs_mid}{simp_lems}, u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]\n    {by_cases2} simp_all +decide [{hs_all}, {simp_lems}, u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
+                    eval_eq_mojo_proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {by_cases1} simp_all +decide [{hs_mid}{simp_lems}, u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]\n  {by_cases2} simp_all +decide [{hs_all}, {simp_lems}, u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
                 else:
-                    eval_eq_mojo_proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n    {by_cases} simp_all +decide [{hs_join}{simp_lems}, " \
+                    eval_eq_mojo_proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  {by_cases} simp_all +decide [{hs_join}{simp_lems}, " \
                        f"u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
     else:
         eval_eq_mojo_proof = None
@@ -13482,7 +13484,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         eval_eq_mojo_section = (
             f"/-- eval_eq_mojo: AST evaluation agrees with the semantic model. -/\n"
             f"theorem eval_eq_mojo {_entry_binders(arity)} :\n"
-            f"  evalFunc ast {_cf_text} ({_cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'}) {_entry_arg_list(enames)} = "
+            f"  evalFunc ast {_cf_text} {_entry_arg_list(enames)} ({_cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'}) = "
             f"{_apply_args('mojo', enames)} := by\n"
             f"  {eval_eq_mojo_proof}"
         )
@@ -13584,8 +13586,8 @@ def generate_arm64_proof(prog, code, info) -> str:
                [f"(UInt64.ofNat {v})" for v in evalues[1:]])
         eval_tests.append(
             f"theorem eval_eq_mojo_test :\n"
-            f"  evalFunc ast {_cf_text} ({_cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'}) "
-            f"{_entry_arg_list(_tv)} = {_apply_args('mojo', _tv)} := by\n"
+            f"  evalFunc ast {_cf_text} {_entry_arg_list(_tv)} "
+            f"({_cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'}) = {_apply_args('mojo', _tv)} := by\n"
             f"{_tac_eval}"
         )
         eval_test_block = "\n\n".join(eval_tests)

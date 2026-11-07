@@ -759,7 +759,7 @@ def header_imports(needs_specs: bool) -> str:
     before this existed — an import nothing uses is an import every one of them
     pays to resolve.
     """
-    block = "import ProofLib\nimport work\nimport Refine\n"
+    block = "import ProofLib\nimport ProofLibSteps\nimport work\nimport Refine\n"
     if needs_specs:
         block += "import Specs\n"
     return block

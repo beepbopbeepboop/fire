@@ -297,7 +297,7 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     _cf2 = AP._call_func2_lean(func_name, _admitted_calls_map2, exports=_callees2)
     return (f"/-- eval_eq_mojo: AST evaluation agrees with the semantic model. -/\n"
             f"theorem eval_eq_mojo {AP._entry_binders(arity)} :\n"
-            f"  evalFunc ast {_cf} {_cf2} {AP._entry_arg_list(_en)} = "
+            f"  evalFunc ast {_cf} {AP._entry_arg_list(_en)} {_cf2} = "
             f"{AP._apply_args('mojo', _en)} := by\n"
             f"  {proof}\n")
 
