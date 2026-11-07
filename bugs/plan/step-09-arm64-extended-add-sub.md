@@ -1,4 +1,5 @@
 # plan/step-09: arm64 extended-register `ADD`/`SUB`/`SUBS(CMP)` with `UXTX` (the SP class), modelled, no lowering
+**Status: DONE 2026-11-06 (measured).** `arm64_step` has the UXTX extended-register ADD/SUB/SUBS arms (SP class; rd=31 is SP for ADD/SUB, XZR for SUBS). No lowering added: no emitter produces the class. `lib/` builds clean (`ensure_library`, 2026-11-06); `--mix alu`: AGREE 600/600 on two seeds. The fuzz uses REGISTER bases: SP-based forms cannot be compared (the model's SP is a fixed stand-in for the hardware's).
 Class: mid      Size: M      Depends: 00a, 00b      Blocks: none
 Source: `bugs/FORMAL_arm64_instruction_coverage.md` §"The one class the census cannot see: the EXTENDED-register `ADD`/`SUB`" (line ~436).
 

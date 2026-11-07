@@ -1,4 +1,5 @@
 # plan/step-07a: `csinc` / `csinv` / `csneg` in the machine model, step table and fuzzer
+**Status: DONE 2026-11-06 (measured).** `arm64_step` has CSINC/CSINV/CSNEG arms; `lib/` builds clean (`ensure_library`, 2026-11-06); `--mix select`: AGREE 200/200 and 600/600; CSET stays row 30 (it shadows the CSINC row, reported by `audit_step_table` as 'entry 30 shadows entry 82').
 Class: mid      Size: M      Depends: 00a, 00b      Blocks: 07b
 Source: `bugs/FORMAL_arm64_instruction_coverage.md` (the CSEL neighbours; `csinc` 3,014 in the 2026-10-05 reading).
 

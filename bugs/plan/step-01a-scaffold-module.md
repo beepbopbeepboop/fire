@@ -1,5 +1,5 @@
 # plan/step-01a: `lib/Scaffold.lean` — the one home of scaffold `sorry`
-**Status: DONE (verified by agent, work landed)**
+**Status: DONE 2026-11-06 (measured).** `lib/Scaffold.lean` holds the only 12 `sorry`s (`lib/` builds clean (`ensure_library`, 2026-11-06)); `test_formal_proof_gaps.py` 5/5 (ledger rows == `library_census`); `test_formal_doc_truth.py` allows holes only in Scaffold.
 
 Class: mid      Size: M      Depends: 00a      Blocks: every step that adds a theorem with a hole
 Source: `doc/finish-formal.md` Shared mechanics S1, S2, S4.

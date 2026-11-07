@@ -237,28 +237,28 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`00e`](../bugs/plan/step-00e-contract-and-cmp-proofs.md) | DONE | mid | L | 00d | proofs broken by the shifted-register model — `arm64_step_cmp_reg_n31_reads_zero`, `while_lt_exit_contract_*` |
 | [`00f`](../bugs/plan/step-00f-nonfp-work-step-proofs.md) | DONE | mid | L | none | broken non-FP `work_step_*` proofs — `cmn`, `tst`, `ldur`, `stur`, `smulh`, `csel` |
 | [`00g`](../bugs/plan/step-00g-fp-work-steps.md) | DONE | mid | L | 00f | the FP `work_step_*` block — duplicates, timeouts, fragments |
-| [`01a`](../bugs/plan/step-01a-scaffold-module.md) | CLAIMED | mid | M | 00a | `lib/Scaffold.lean` — the one home of scaffold `sorry` |
-| [`01b`](../bugs/plan/step-01b-proof-gap-ledger.md) | CLAIMED | mid | M | 00a, 01a | the proof-gap ledger and its census test |
+| [`01a`](../bugs/plan/step-01a-scaffold-module.md) | DONE | mid | M | 00a | `lib/Scaffold.lean` — the one home of scaffold `sorry` |
+| [`01b`](../bugs/plan/step-01b-proof-gap-ledger.md) | DONE | mid | M | 00a, 01a | the proof-gap ledger and its census test |
 | [`02`](../bugs/plan/step-02-peephole-memory-lemmas.md) | CLAIMED | mid | S | 00a, 01a, 01b | the two memory lemmas the peephole store rules actually lack |
 | [`03a`](../bugs/plan/step-03a-hne-chain-generator.md) | DONE | mid | S | none | a generator for the `hne_` negation chain of an `arm64_step` arm lemma |
-| [`03b`](../bugs/plan/step-03b-arm64-movz-pair.md) | CLAIMED | mid | M | 00a, 01a, 01b, 03a | `arm64/movz_pair` — step lemma and rule theorem |
-| [`03c`](../bugs/plan/step-03c-arm64-store-load.md) | CLAIMED | mid | M | 00a, 02, 03a | `arm64/store_load` — `STR Xt,[Xn,#o] ; LDR Xt,[Xn,#o]` |
-| [`03d`](../bugs/plan/step-03d-arm64-mem-pair.md) | CLAIMED | mid | M | 00a, 02, 03c | `arm64/mem_pair` — duplicate `STR;STR` and `LDR;LDR` |
-| [`04a`](../bugs/plan/step-04a-x86-mov-self-rev.md) | CLAIMED | easy | S | 00a, 01a, 01b | `x86_64/mov_self_rev` — `mov r, r` spelled `48 8b c0` |
-| [`04b`](../bugs/plan/step-04b-x86-store-load.md) | CLAIMED | mid | M | 00a, 02, 01b | `x86_64/store_load` — `mov [b+d], r ; mov r, [b+d]` (no SIB; disp8 form first) |
-| [`04c`](../bugs/plan/step-04c-x86-mem-pair.md) | CLAIMED | mid | M | 00a, 02, 04b | `x86_64/mem_pair` — duplicate store, duplicate load (no SIB) |
-| [`04d`](../bugs/plan/step-04d-x86-imm-zero.md) | CLAIMED | mid | M | 00a, 01a, 01b | `x86_64/imm_zero` — `add r, 0` / `sub r, 0` with dead flags |
+| [`03b`](../bugs/plan/step-03b-arm64-movz-pair.md) | SCAFFOLDED | mid | M | 00a, 01a, 01b, 03a | `arm64/movz_pair` — step lemma and rule theorem |
+| [`03c`](../bugs/plan/step-03c-arm64-store-load.md) | SCAFFOLDED | mid | M | 00a, 02, 03a | `arm64/store_load` — `STR Xt,[Xn,#o] ; LDR Xt,[Xn,#o]` |
+| [`03d`](../bugs/plan/step-03d-arm64-mem-pair.md) | SCAFFOLDED | mid | M | 00a, 02, 03c | `arm64/mem_pair` — duplicate `STR;STR` and `LDR;LDR` |
+| [`04a`](../bugs/plan/step-04a-x86-mov-self-rev.md) | SCAFFOLDED | easy | S | 00a, 01a, 01b | `x86_64/mov_self_rev` — `mov r, r` spelled `48 8b c0` |
+| [`04b`](../bugs/plan/step-04b-x86-store-load.md) | SCAFFOLDED | mid | M | 00a, 02, 01b | `x86_64/store_load` — `mov [b+d], r ; mov r, [b+d]` (no SIB; disp8 form first) |
+| [`04c`](../bugs/plan/step-04c-x86-mem-pair.md) | SCAFFOLDED | mid | M | 00a, 02, 04b | `x86_64/mem_pair` — duplicate store, duplicate load (no SIB) |
+| [`04d`](../bugs/plan/step-04d-x86-imm-zero.md) | SCAFFOLDED | mid | M | 00a, 01a, 01b | `x86_64/imm_zero` — `add r, 0` / `sub r, 0` with dead flags |
 | [`05a`](../bugs/plan/step-05a-arm64-rule-registry.md) | CLAIMED | mid | M | 03b, 03c, 03d | register the arm64 rules the Lean side now proves |
 | [`05b`](../bugs/plan/step-05b-x86-rule-registry.md) | CLAIMED | mid | M | 04a, 04b, 04c, 04d | register the x86-64 rules, and fix three latent soundness holes in their matchers |
 | [`06a`](../bugs/plan/step-06a-arm64-ccmp-encoders.md) | DONE | easy | S | none | arm64 `ccmp` encoders (register and immediate), byte-exact against `as` |
-| [`06b`](../bugs/plan/step-06b-arm64-ccmp-model.md) | OPEN | mid | M | 00a, 00b, 06a | `ccmp` in the machine model: `arm64_step` arms, `_STEP_CONDS` rows, `_step_rhs`, `_regs_written` |
+| [`06b`](../bugs/plan/step-06b-arm64-ccmp-model.md) | DONE | mid | M | 00a, 00b, 06a | `ccmp` in the machine model: `arm64_step` arms, `_STEP_CONDS` rows, `_step_rhs`, `_regs_written` |
 | [`06c`](../bugs/plan/step-06c-arm64-ccmp-lowering.md) | OPEN | hard | L | 06a, 06b | lower `if A and B:` (two integer comparisons) to `cmp` + `ccmp` + one `b.cond` |
-| [`07a`](../bugs/plan/step-07a-arm64-csinc-family-model.md) | OPEN | mid | M | 00a, 00b | `csinc` / `csinv` / `csneg` in the machine model, step table and fuzzer |
+| [`07a`](../bugs/plan/step-07a-arm64-csinc-family-model.md) | DONE | mid | M | 00a, 00b | `csinc` / `csinv` / `csneg` in the machine model, step table and fuzzer |
 | [`07b`](../bugs/plan/step-07b-arm64-csinc-family-lowering.md) | OPEN | hard | M | 07a | lower `a if c else ~a` to `csinv` (and `+1` / `-a` to `csinc`/`csneg` where no overflow trap is lost) |
 | [`08a`](../bugs/plan/step-08a-arm64-blr-named-unmodelled.md) | DONE | easy | S | none | name `BLR` in `_unmodelled_instruction` (the emitted indirect call has no step and no name) |
 | [`08b`](../bugs/plan/step-08b-arm64-br-audit-scope.md) | DONE | easy | S | none | `br` is emitted (the Mach-O stub) — fix the audit's scope and the stale "uncalled" claims |
 | [`08c`](../bugs/plan/step-08c-arm64-indirect-call-design.md) | OPEN | hard | M | 08a | DESIGN MEMO — how the proof model treats `BLR` (indirect call) and `BR` |
-| [`09`](../bugs/plan/step-09-arm64-extended-add-sub.md) | OPEN | mid | M | 00a, 00b | arm64 extended-register `ADD`/`SUB`/`SUBS(CMP)` with `UXTX` (the SP class), modelled, no lowering |
+| [`09`](../bugs/plan/step-09-arm64-extended-add-sub.md) | DONE | mid | M | 00a, 00b | arm64 extended-register `ADD`/`SUB`/`SUBS(CMP)` with `UXTX` (the SP class), modelled, no lowering |
 | [`10`](../bugs/plan/step-10-string-struct-collision.md) | DONE | mid | M | 01a, 01b | the `String` frame-vs-`char *` collision (zero-argument `String()` used as a receiver) |
 | [`11a`](../bugs/plan/step-11a-string-buffer-upper-lower.md) | DONE | mid | M | 10 | the runtime string buffer (libc `strdup`, never freed) and `upper`/`lower` as its first clients |
 | [`11b`](../bugs/plan/step-11b-string-strip-rstrip.md) | DONE | mid | M | 11a | `strip()` / `rstrip()` on the runtime buffer |
@@ -309,7 +309,7 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`27c`](../bugs/plan/step-27c-landing-pad-tables.md) | DONE | mid | M | 27a | landing-pad / personality data structures (pure Python table + test, NO codegen change) |
 | [`28`](../bugs/plan/step-28-absval-frame-peel.md) | CLAIMED | mid | M | 00a | `absval` frame-peel `K` — verify the same-day fix, pin it with a Lean-free test, then close or localise |
 
-**78 step files:** 13 easy, 57 mid, 8 hard. Status: claimed 15, closed as 'not provided' 1, done 40, open 22. (Generated by `python3 tools/plan_index.py --write`; do not edit by hand.)
+**78 step files:** 13 easy, 57 mid, 8 hard. Status: claimed 6, closed as 'not provided' 1, done 45, open 19, scaffolded 7. (Generated by `python3 tools/plan_index.py --write`; do not edit by hand.)
 
 <!-- END generated by tools/plan_index.py -->
 
@@ -374,59 +374,57 @@ is retired; the file is removed.
 
 ## Where the work stands (hand-written; the table above is generated)
 
-Updated 2026-11-05 as steps finish. **Read the Status column literally:**
-`DONE` = carries its own dated, measured Status; `CLAIMED` = stamped "verified by
-agent" by the first execution wave WITHOUT a measurement, so treat as unproven;
-`REGENERATED` = rebuilt but waiting on a full-library build; `OPEN` = not started.
+Updated 2026-11-06. **Read the Status column literally:** `DONE` = carries its own
+dated, measured Status; `SCAFFOLDED` = structure landed, the rule theorem is a
+ledgered `sorry` in `lib/Scaffold.lean`, NOT proved; `CLAIMED` = stamped "verified
+by agent" by the first wave without a measurement (treat as unproven); `OPEN` = not
+done. At this writing: 45 DONE, 7 SCAFFOLDED, 6 CLAIMED, 19 OPEN, 1 closed as
+'not provided'.
 
-* **Critical path: `lib/ProofLib.lean` must elaborate (step `00a`).** Repaired
-  across `00c`-`00g`; a prefix build of lines 1..5400 has 0 errors and a full
-  build of the regenerated tail had 24 errors, all explained and fixed; a final
-  full-file build is the verification and is still running when this was
-  written. Until it is green, every `CLAIMED` Lean-backed step (01a, 01b, 02,
-  03b-d, 04a-d, 05a-b, 12, 18, 27a) is unverified, and the `.olean`s on disk are
-  from the Oct-18 source.
-* **Python / hostmod work verified and committed:** 14a (set dedup), 15a (monomorph
-  suite 60/0), 17, 20, 23a-e (the `os` hostmod: process identity, fs metadata,
-  stat times, kill/setsid, and the by-name NOT PROVIDED table), 24, 26, 27b, 27c,
-  and the review fixes below.
-* **Bugs found by checking the "DONE" claims** (all fixed, each with a test that
-  fails on the old code): unsound x86-64 peephole memory matchers; `(b"", 1)`
-  deleting the FIRST instruction so `store_load` kept the load; `var s = "lit"`
-  recorded as a `comptime` constant (broke 42 of 92 hostmods); x86-64 signed `<<`
-  undone with a second `<<` (every `x <<= n` trapped); x86-64 `_emit_shift_reg`
-  saving its amount in R12, a register-allocated LOCAL (every `stat` field came
-  back wrong, `os.path.getsize` -1); the lost `Template.<attr>` ambiguity refusal;
-  a `#` inside a backtick literal read as a comment; a brittle `tbz` count over
-  data decoded as code.
-* **Still open and known:** `subprocess` (14-argument struct return, 90/92
-  hostmods), `getmtime -> Float64` (no int->double on this path; `getmtime_ns`
-  instead), `commonpath`, the file-descriptor functions (no writable-descriptor
-  producer), the Lean arms for `ccmp`/`csinc`/`csinv`/`csneg`/extended-register
-  (the `_STEP_CONDS` rows exist without Lean arms: `check_step_conds` warns),
-  steps 06c, 07b, 08c, 10, 11a-c, 12b-c, 13a-c, 14b-e, 16a-f, 18a-d, 19a-c, 22.
-* **Found 2026-11-06 while running the regressions:** `strip`/`rstrip` on an
-  unfoldable receiver (11a/11b) are now correct on both backends
-  (`test_formal_str_trim_runtime.py`); the `str(<non-string>)` refusal path
-  crashed on a nonexistent `BOOL_KIND` import (fixed); x86-64 traps `<<`/`**`
-  overflow and arm64 still wraps (pinned as a divergence in
-  `test_formal_int_semantics.py`); x86-64 grows a loop-appended list on a heap
-  blob and arm64 stops loudly (`list_append_overflow_is_loud`) — a parity item.
-  `test_formal_run.py` still has stale "refused" rows for constructs that now
-  build (`upper`, f/t-strings) and changed refusal wording on the vararg and
-  set-comprehension rows.
-* **Known backend divergence (one red row):** x86-64 lowers `str(<int>)` through a
-  `%ld` format into a buffer and prints `[42]` (correct); arm64 refuses it
-  (`string_conversion_refusal`). `printf_s_of_a_conversion_of_a_number_is_refused`
-  pins the refusal and is red on x86-64 only (`test_formal_run.py` 1361/1). The fix
-  is to port the lowering to arm64 (then flip the row to an oracle row), or to
-  remove it from x86-64; the buffer's lifetime on x86-64 has not been audited.
-  Also still red and pre-existing: `test_formal_value_model.py`'s two x86-64
-  comprehension-element rows (65,536-byte element array) and
-  `a_string_conversion_of_an_integer_is_refused` (x86-64 does not classify an
-  unannotated parameter).
-* **Not run:** `test_formal_admitted.py` / `test_formal_axiom_closure_pinned.py`
-  (need the library build; pins will move), the `make gate` bucket.
+* **The Lean library builds again, and builds in ~5 minutes.** A clean
+  `ensure_library` of `lib/` compiles IEEE754, ProofLib, the eight
+  `ProofLibSteps1..8` shards (+ the `ProofLibSteps` facade), X86, work, Refine,
+  Contracts, Peephole, Specs and Scaffold with 0 errors. The single-file ProofLib
+  took ~85 minutes (2,455 of its ~2,500 `bv_decide` calls were in the 59
+  `work_step_*` lemmas, which depend only on the model and not on each other);
+  the shards build in parallel (`formal/lean.py::ensure_library` builds by import
+  LEVEL, `library_jobs()`). The wall bound was raised to the measured reality.
+* **What the first wave's "repair" had destroyed, now restored.** The plan-wave
+  rewrite of `lib/ProofLib.lean` (`0bf96e814`) dropped ~1,700 lines that compiled
+  and that X86/Refine/Contracts/the proof generators name (`DylibExport`,
+  `Semantics`, `total_of_halts`, the `Frame` namespace, the `MF` method-frame
+  semantics, the congruence lemmas); restored from the last commit that built
+  (`9a6616e83`) and migrated to the `callFunc2` API. It also left three `sorry`d
+  theorems whose STATEMENTS were false (`evalExpr_unop/call/call_one`), nine X86
+  step lemmas that never closed (a `Decidable`-instance mismatch with this
+  toolchain; fixed with `congr`), and a `Peephole.lean` with two step lemmas
+  spliced into the middle of another's proof, statements missing `.toNat`, and
+  x86 `imm_zero` proofs that never closed. All fixed.
+* **Claims that were false** (found by checking, then fixed): step 02's three
+  lemmas never existed; step 05/03/04 "register the rules the Lean side proves" —
+  the Lean side is a `sorry` (hence SCAFFOLDED); the f-string-in-printf rewrite
+  printed `n=%d`; the x86 "growable list" overran its frame; `str(<non-string>)`
+  crashed on a nonexistent import; the step-10 marker pass was a silent no-op.
+* **Machine model:** `arm64_step` now has CCMP (reg/imm), CSINC, CSINV, CSNEG and
+  the UXTX extended-register ADD/SUB/SUBS arms, checked against the hardware
+  (`tools/formal_model_fuzz.py` `flags`/`select`/`alu` mixes: AGREE 600/600).
+  Lowering (06c, 07b) is not done.
+* **Strings / sets / templates (Python, both backends, verified):** 10, 11a-c,
+  12a, 13a-b, 14a-e, 15a-e, 16b (see their Status lines).
+* **Performance:** three separate per-call-site whole-body re-walks made large
+  straight-line functions quadratic (monomorph re-parse, `global` declarations,
+  the allocator's bound-name walk); each is memoized. A 1,000-`printf` function
+  builds in 2 s (was 44 s; the 2,000-statement test was over its 120 s limit).
+* **Known and open:** x86-64 lowers `str(<int>)` (`%ld` into a buffer) and arm64
+  refuses it (`printf_s_of_a_conversion_of_a_number_is_refused` is red on x86 only);
+  x86-64 traps `<<`/`**` overflow and arm64 wraps (pinned as a divergence);
+  `subprocess` (14-argument struct return, 3 `test_formal_admitted` failures);
+  `getmtime -> Float64`, `commonpath`, the fd functions; `test_formal_doc_truth`
+  has 12 stale-doc failures (header counts, `total_of_halts` prose); two x86-64
+  comprehension-element rows need a 65,536-byte array.
+* **Still to do** (OPEN): 06c, 07b (lowering), 08c, 13c, 16a/c-f, 18a-d, 19a-c,
+  12b/c (extern contract for `strlen`), 22 (the loop), plus proving the
+  SCAFFOLDED rules (03b-d, 04a-d) and 05a-b.
 
 ## Waves
 

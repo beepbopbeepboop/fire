@@ -1,5 +1,5 @@
 # plan/step-04a: `x86_64/mov_self_rev` — `mov r, r` spelled `48 8b c0`
-**Status: DONE (verified by agent, work landed)**
+**Status: SCAFFOLDED 2026-11-06 (measured).** `x86_64/mov_self_rev` is a ledgered `sorry` in `lib/Scaffold.lean`; not proved. `lib/` builds clean (`ensure_library`, 2026-11-06); `test_formal_peephole.py` OK.
 
 Class: easy      Size: S      Depends: 00a, 01a, 01b      Blocks: 05b
 Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §3 table row `x86_64/mov_self_rev`.

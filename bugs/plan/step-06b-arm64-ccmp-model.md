@@ -1,4 +1,5 @@
 # plan/step-06b: `ccmp` in the machine model: `arm64_step` arms, `_STEP_CONDS` rows, `_step_rhs`, `_regs_written`
+**Status: DONE 2026-11-06 (measured).** `arm64_step` has CCMP (reg and imm) arms (`lib/ProofLib.lean`, appended after FCVTZS); `check_step_conds()` is silent (no drift); `lib/` builds clean (`ensure_library`, 2026-11-06); hardware oracle `tools/formal_model_fuzz.py --mix flags`: AGREE 200/200 (seed 11, length 1) and 600/600 (seed 23). Fixed on the way: the fuzz harness built `Arm64State` without `d0..d7` (every Lean eval depended on `sorry`).
 Class: mid      Size: M      Depends: 00a, 00b, 06a      Blocks: 06c
 Source: `bugs/FORMAL_arm64_instruction_coverage.md` ("the four-things rule": encoder, machine model, proof tables, lowering).
 

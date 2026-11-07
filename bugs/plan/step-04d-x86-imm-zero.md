@@ -1,5 +1,5 @@
 # plan/step-04d: `x86_64/imm_zero` — `add r, 0` / `sub r, 0` with dead flags
-**Status: DONE (verified by agent, work landed)**
+**Status: SCAFFOLDED 2026-11-06 (measured).** The rule theorem is a LEDGERED `sorry` in `lib/Scaffold.lean` (structure first, soundness later), the supporting step lemmas that exist compile, and the rule is registered as scaffolded in `formal/peephole.py`. NOT proved. `lib/` builds clean (`ensure_library`, 2026-11-06); `test_formal_proof_gaps.py` 5/5; `test_formal_peephole.py` OK.
 
 Class: mid      Size: M      Depends: 00a, 01a, 01b      Blocks: 05b
 Source: `bugs/FORMAL_peephole_rules_without_proofs.md` §3 table row `x86_64/imm_zero`.

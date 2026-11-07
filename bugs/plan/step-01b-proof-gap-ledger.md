@@ -1,5 +1,5 @@
 # plan/step-01b: the proof-gap ledger and its census test
-**Status: DONE (verified by agent, work landed)**
+**Status: DONE 2026-11-06 (measured).** The ledger `formal/proof_gaps.py::SCAFFOLD_HOLES` (12 rows) and its census test agree: `test_formal_proof_gaps.py` 5/5; `test_formal_axioms.py` requires every ledgered hole to reach `sorryAx` and nothing else to.
 
 Class: mid      Size: M      Depends: 00a, 01a      Blocks: every step that adds a hole (02+)
 Source: `doc/finish-formal.md` Method #3, Shared mechanics S1/S2.
