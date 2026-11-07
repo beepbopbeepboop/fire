@@ -743,6 +743,15 @@ theorem x86_get_reg_set_reg_other (i j : Nat) (s : X86State) (v : UInt64)
     simp [x86_get_reg, x86_set_reg]
     split <;> first | rfl | omega
 
+/-- Reading register `i` immediately after writing it yields the written value. -/
+theorem x86_get_reg_set_reg_same (s : X86State) (i : Nat) (v : UInt64) (hi : i < 16) :
+    x86_get_reg (x86_set_reg s i v) i = v := by
+  rcases (show i = 0 ∨ i = 1 ∨ i = 2 ∨ i = 3 ∨ i = 4 ∨ i = 5 ∨ i = 6 ∨ i = 7
+      ∨ i = 8 ∨ i = 9 ∨ i = 10 ∨ i = 11 ∨ i = 12 ∨ i = 13 ∨ i = 14 ∨ i = 15 from by omega) with
+    rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+    | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+  all_goals simp [x86_get_reg, x86_set_reg]
+
 /-- **Rule `x86_64/mov_self`.** `mov rax, rax` — a register copied into
     itself (REX.W `89 /r`, mod=3, the reg field equal to the r/m field) — is
     one instruction of nothing, and removing it leaves every register, the
@@ -889,6 +898,97 @@ theorem peephole_arm64_movz_pair (s : Arm64State) (code : Nat → UInt8)
     rw [hs1', ← arm64_set_reg_pc_congr, ← heq, arm64_set_reg_set_reg_same]
   · have hpc1 : s1.pc = s.pc := by rw [hs1', arm64_set_reg_pc_unchanged]
     rw [arm64_steps_two_seq s code s1 s2 hs1 hpc1 hpair, hpc]
+
+/-- **Rule `x86_64/mem_pair_store` (disp8, step 04c).** Two identical
+`mov [b+d8], r` (REX.W 89 /r, mod=1, no SIB): the second writes the same value
+to the same address and advances the pc, so deleting it leaves the state of the
+first with `rip := m + 8`. The store does not change registers, so the base and
+source registers are the same for both steps; memory idempotence is
+`mem_write_bytes8_idem`. The scaffold statement was checked and is true as
+stated (not corrected). -/
+theorem peephole_x86_store_pair_disp8 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm : Nat) (disp : Int)
+    (h_rip : s.rip = m)
+    (h_s0 : code m = rex) (h_s1 : code (m + 1) = 0x89)
+    (h_s2 : code (m + 2) = modrm) (h_sd : read_i8 (code (m + 3)) = disp)
+    (h_t0 : code (m + 4) = rex) (h_t1 : code (m + 5) = 0x89)
+    (h_t2 : code (m + 6) = modrm) (h_td : read_i8 (code (m + 7)) = disp)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = rm)
+    (h_rm_ne : rm ≠ 4)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (t1 t2 : X86State)
+    (hs1 : x86_step s code = some t1) (hs2 : x86_step t1 code = some t2) :
+    t2 = { t1 with rip := m + 8 } := by
+  have e1 := x86_step_mov_mem_disp8 s code m rex modrm reg rm disp
+    h_rip h_s0 h_s1 h_s2 h_sd h_rex h_w h_mod h_rm h_rm_ne h_reg
+  rw [hs1] at e1
+  have ht1 := Option.some.inj e1
+  have hrip1 : t1.rip = m + 4 := by rw [ht1]
+  have e2 := x86_step_mov_mem_disp8 t1 code (m + 4) rex modrm reg rm disp
+    hrip1 h_t0 h_t1 h_t2 h_td h_rex h_w h_mod h_rm h_rm_ne h_reg
+  rw [hs2] at e2
+  have ht2 := Option.some.inj e2
+  subst ht2 ht1
+  simp [x86_get_reg, mem_write_bytes8_idem]
+
+/-- **Rule `x86_64/mem_pair_load` (disp8, step 04c).** Two identical
+`mov r, [b+d8]` (REX.W 8b /r, mod=1, no SIB). UNSOUND without `r ≠ b`
+(`h_ne`): the first load overwrites the base register, so the second would read
+from a different address. Counterexample (not a theorem): `mov rax,[rax] ;
+mov rax,[rax]` — the first load changes `rax`, so the second dereferences the
+loaded value, not the original base. With `h_ne` the base and memory are
+unchanged by the first load, so the second reads the same value into the same
+destination; `x86_set_reg_self` collapses the redundant write. The scaffold
+statement was checked and is true as stated (not corrected). -/
+theorem peephole_x86_load_pair_disp8 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm : Nat) (disp : Int)
+    (h_rip : s.rip = m)
+    (h_s0 : code m = rex) (h_s1 : code (m + 1) = 0x8b)
+    (h_s2 : code (m + 2) = modrm) (h_sd : read_i8 (code (m + 3)) = disp)
+    (h_t0 : code (m + 4) = rex) (h_t1 : code (m + 5) = 0x8b)
+    (h_t2 : code (m + 6) = modrm) (h_td : read_i8 (code (m + 7)) = disp)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = rm)
+    (h_rm_ne : rm ≠ 4)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_dst_lt : reg + x86_rex_r rex < 16)
+    (h_ne : reg + x86_rex_r rex ≠ rm + x86_rex_b rex)
+    (t1 t2 : X86State)
+    (hs1 : x86_step s code = some t1) (hs2 : x86_step t1 code = some t2) :
+    t2 = { t1 with rip := m + 8 } := by
+  let dst := reg + x86_rex_r rex
+  have e1 := x86_step_mov_rm64_mem_disp8 s code m rex modrm reg rm dst disp
+    h_rip h_s0 h_s1 h_s2 h_sd h_rex h_w h_mod h_rm h_rm_ne h_reg rfl h_dst_lt
+  rw [hs1] at e1
+  have ht1 := Option.some.inj e1
+  have hrip1 : t1.rip = m + 4 := by rw [ht1]
+  have hmem1 : t1.mem = s.mem := by
+    rw [ht1]
+    rcases (show dst = 0 ∨ dst = 1 ∨ dst = 2 ∨ dst = 3 ∨ dst = 4 ∨ dst = 5 ∨ dst = 6 ∨ dst = 7
+        ∨ dst = 8 ∨ dst = 9 ∨ dst = 10 ∨ dst = 11 ∨ dst = 12 ∨ dst = 13 ∨ dst = 14 ∨ dst = 15
+        from by omega) with
+      h | h | h | h | h | h | h | h | h | h | h | h | h | h | h | h
+    all_goals (simp [x86_set_reg, h])
+  have hbase1 : x86_get_reg t1 (rm + x86_rex_b rex) = x86_get_reg s (rm + x86_rex_b rex) := by
+    rw [ht1]
+    have hrm7 : rm ≤ 7 := by rw [← h_rm]; exact Nat.and_le_right
+    have hrb : x86_rex_b rex ≤ 8 := by unfold x86_rex_b; split <;> omega
+    have hbase_lt : rm + x86_rex_b rex < 16 := by omega
+    exact x86_get_reg_set_reg_other (rm + x86_rex_b rex) dst s _ hbase_lt h_dst_lt (Ne.symm h_ne)
+  have hdst1 : x86_get_reg t1 dst = mem_read_bytes s.mem
+      (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat 8 := by
+    rw [ht1]
+    exact x86_get_reg_set_reg_same s dst _ h_dst_lt
+  have e2 := x86_step_mov_rm64_mem_disp8 t1 code (m + 4) rex modrm reg rm dst disp
+    hrip1 h_t0 h_t1 h_t2 h_td h_rex h_w h_mod h_rm h_rm_ne h_reg rfl h_dst_lt
+  rw [hs2] at e2
+  have ht2 := Option.some.inj e2
+  rw [ht2, hmem1, hbase1]
+  have hval : mem_read_bytes s.mem (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat 8
+      = x86_get_reg t1 dst := hdst1.symm
+  rw [hval, x86_set_reg_self t1 dst h_dst_lt]
+  simp [hmem1]
 
 /-!
 ## Design note (x86_64/imm_zero) — for a later hard round

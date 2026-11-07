@@ -62,16 +62,7 @@ SCAFFOLD_HOLES: dict[str, Hole] = {
         "x86 `mov [b+d8],r ; mov r,[b+d8]` equals the store alone (no SIB, no RIP-relative)",
         "scaffold",
     ),
-    "peephole_x86_store_pair_disp8": Hole(
-        "step-04c",
-        "x86 two identical disp8 stores equal one (needs width-8 write idempotence)",
-        "scaffold",
-    ),
-    "peephole_x86_load_pair_disp8": Hole(
-        "step-04c",
-        "x86 two identical disp8 loads equal one, given dst != base",
-        "scaffold",
-    ),
+
     "peephole_x86_mov_self_rev": Hole(
         "step-04a",
         "x86 `mov r,r` spelled 48 8b c0 is a no-op (mirror of the proved peephole_x86_mov_self)",

@@ -174,45 +174,6 @@ theorem peephole_x86_store_load_disp8 (s : X86State) (code : Nat → UInt8)
     t2 = { t1 with rip := m + 8 } := by
   sorry
 
-/-- **Scaffold (step-04c), rule `x86_64/mem_pair_store`.** Two identical
-`mov [b+d8], r`: the second writes the same value to the same address. -/
-theorem peephole_x86_store_pair_disp8 (s : X86State) (code : Nat → UInt8)
-    (m : Nat) (rex modrm : UInt8) (reg rm : Nat) (disp : Int)
-    (h_rip : s.rip = m)
-    (h_s0 : code m = rex) (h_s1 : code (m + 1) = 0x89)
-    (h_s2 : code (m + 2) = modrm) (h_sd : read_i8 (code (m + 3)) = disp)
-    (h_t0 : code (m + 4) = rex) (h_t1 : code (m + 5) = 0x89)
-    (h_t2 : code (m + 6) = modrm) (h_td : read_i8 (code (m + 7)) = disp)
-    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
-    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = rm)
-    (h_rm_ne : rm ≠ 4)
-    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
-    (t1 t2 : X86State)
-    (hs1 : x86_step s code = some t1) (hs2 : x86_step t1 code = some t2) :
-    t2 = { t1 with rip := m + 8 } := by
-  sorry
-
-/-- **Scaffold (step-04c), rule `x86_64/mem_pair_load`.** Two identical
-`mov r, [b+d8]`. UNSOUND without `r ≠ b` (the first load overwrites the base),
-which is hypothesis `h_ne`; the pass-side matcher must check it too. -/
-theorem peephole_x86_load_pair_disp8 (s : X86State) (code : Nat → UInt8)
-    (m : Nat) (rex modrm : UInt8) (reg rm : Nat) (disp : Int)
-    (h_rip : s.rip = m)
-    (h_s0 : code m = rex) (h_s1 : code (m + 1) = 0x8b)
-    (h_s2 : code (m + 2) = modrm) (h_sd : read_i8 (code (m + 3)) = disp)
-    (h_t0 : code (m + 4) = rex) (h_t1 : code (m + 5) = 0x8b)
-    (h_t2 : code (m + 6) = modrm) (h_td : read_i8 (code (m + 7)) = disp)
-    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
-    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = rm)
-    (h_rm_ne : rm ≠ 4)
-    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
-    (h_dst_lt : reg + x86_rex_r rex < 16)
-    (h_ne : reg + x86_rex_r rex ≠ rm + x86_rex_b rex)
-    (t1 t2 : X86State)
-    (hs1 : x86_step s code = some t1) (hs2 : x86_step t1 code = some t2) :
-    t2 = { t1 with rip := m + 8 } := by
-  sorry
-
 /-- **Scaffold (step-04a), rule `x86_64/mov_self_rev`.** `mov r, r` spelled
 `REX.W 8b /r, mod = 3` (`48 8b c0`): the mirror of `peephole_x86_mov_self`. -/
 theorem peephole_x86_mov_self_rev (s : X86State) (code : Nat → UInt8)
