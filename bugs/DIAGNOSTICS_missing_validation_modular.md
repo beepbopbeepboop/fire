@@ -54,12 +54,25 @@ Key categories:
   Also fixed a duplicate runtime-assert lowering in
   `mojo/backend_gimple/emit_stmts.py` (regular `assert` emitted twice).
   Regression: `test_constrained_diagnostic.py`.
-- **Still open (large):** the rest of this umbrella — comptime-assert cases
-  where condition evaluation is incomplete (e.g. `DType.*.is_integral()` in
-  instantiated params, `t"..."`/reflection-driven messages), `constrained`
-  cases whose conditions/messages cannot yet be folded (generics, trait
-  reflection, `StaticString(_get_kgen_string[...])`), type/trait
-  conformance diagnostics, import errors, and the other categories listed
-  above. `build/checkfail_candidates.json` is not present in this worktree;
+- **Landed (follow-up, this worker, branch
+  `work/bug-mid-diagnostics-missing-validation-m-6289`):** root-cause fix in
+  `mojo/middle/comptime.py` to fold DType values (`DType.int32`) and DType
+  predicate methods (`is_integral`, `is_floating_point`, `is_signed`,
+  `is_unsigned`, `is_numeric`, `is_bool`, `is_index`, `is_float8`,
+  `is_half_float`) during compile-time constant evaluation. Provably-false
+  `comptime assert` / `constrained` conditions that use DType predicates now
+  produce compile-time diagnostics (direct cases). Unknown/unresolvable DType
+  bindings remain conservative (no false diagnostic). Regression:
+  `test_comptime_dtype_diagnostic.py`. Remaining gap: DType predicates on
+  instantiated generic params still require the backend to populate
+  `_comptime_vals` with the resolved DType binding for that instantiation.
+- **Still open (large):** the rest of this umbrella — comptime-assert/
+  `constrained` cases where condition evaluation is incomplete (e.g.
+  DType predicates in instantiated params where bindings are not propagated,
+  `t"..."`/reflection-driven messages), `constrained` cases whose
+  conditions/messages cannot yet be folded (generics, trait reflection,
+  `StaticString(_get_kgen_string[...])`), type/trait conformance
+  diagnostics, import errors, and the other categories listed above.
+  `build/checkfail_candidates.json` is not present in this worktree;
   re-run `tools/collect_checkfail.py` against the modular suite to refresh
   the candidate list and prioritize.

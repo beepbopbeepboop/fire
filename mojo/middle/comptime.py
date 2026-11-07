@@ -190,6 +190,91 @@ _SCALAR_CTOR_BITS = {
 }
 
 
+# ── DType compile-time predicates ─────────────────────────────────────────
+# `comptime assert` / `constrained` conditions frequently test DType
+# properties (e.g. `dtype.is_integral()`). Folding these in the
+# backend-neutral evaluator lets both the comptime-assert diagnostic path
+# and comptime-if resolution reject provably-false cases, including when
+# `dtype` is an instantiated generic parameter bound in `_comptime_vals`.
+
+_DTYPE_INTEGRAL = {
+    'int', 'int8', 'int16', 'int32', 'int64', 'int128', 'int256',
+    'uint', 'uint8', 'uint16', 'uint32', 'uint64', 'uint128', 'uint256',
+    'index',
+}
+_DTYPE_FLOATING = {
+    'float8_e3m4', 'float8_e4m3', 'float8_e4m3fn', 'float8_e4m3fnuz',
+    'float8_e5m2', 'float8_e5m2fnuz', 'float8_e8m0fnu',
+    'bfloat16', 'float16', 'float32', 'float64',
+}
+_DTYPE_SIGNED_INT = {
+    'int', 'int8', 'int16', 'int32', 'int64', 'int128', 'int256',
+    'index',
+}
+_DTYPE_UNSIGNED_INT = {
+    'uint', 'uint8', 'uint16', 'uint32', 'uint64', 'uint128', 'uint256',
+}
+_DTYPE_BOOL = {'bool', 'boolean'}
+
+
+def _dtype_name_from_value(v):
+    """Normalize a bound DType value to a lowercase dtype name, or None."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        s = v
+        if s.startswith('DType.'):
+            s = s[len('DType.'):]
+        if s.startswith('dtype.'):
+            s = s[len('dtype.'):]
+        return s.lower() if s else None
+    if isinstance(v, tuple) and len(v) == 2:
+        # ('.', name) from DottedLiteral, or ('DType', name) marker.
+        if v[0] in ('.', 'DType', 'dtype'):
+            return str(v[1]).lower()
+    return None
+
+
+def _resolve_dtype_name(node, bindings, platform=None):
+    """Resolve `node` to a DType name string, or None."""
+    # DType.int32 / dtype.int32
+    if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
+            and node.obj.name in ('DType', 'dtype')):
+        return node.member.lower()
+    # Bound name (instantiated generic param): `dtype` -> DType.int32
+    if isinstance(node, IdentExpr) and node.name in bindings:
+        return _dtype_name_from_value(bindings[node.name])
+    # Generic member access fallback (e.g. a value that eval_const can fold).
+    v = eval_const(node, bindings, platform)
+    return _dtype_name_from_value(v)
+
+
+def _eval_dtype_predicate(dtype_name, method):
+    """Evaluate a DType predicate method on a known dtype name, or None."""
+    if dtype_name is None:
+        return None
+    d = dtype_name.lower()
+    if method == 'is_integral':
+        return d in _DTYPE_INTEGRAL
+    if method == 'is_floating_point':
+        return d in _DTYPE_FLOATING
+    if method == 'is_signed':
+        return d in _DTYPE_SIGNED_INT or d in _DTYPE_FLOATING
+    if method == 'is_unsigned':
+        return d in _DTYPE_UNSIGNED_INT or d in _DTYPE_BOOL
+    if method == 'is_numeric':
+        return d in _DTYPE_INTEGRAL or d in _DTYPE_FLOATING
+    if method == 'is_bool':
+        return d in _DTYPE_BOOL
+    if method == 'is_index':
+        return d == 'index'
+    if method == 'is_float8':
+        return d.startswith('float8')
+    if method == 'is_half_float':
+        return d in ('float16', 'bfloat16')
+    return None
+
+
 def eval_const(node, bindings: dict, platform: str = None):
     """Evaluate `node` as any compile-time constant (int, bool, or str) — or
     None if it isn't foldable.
@@ -298,6 +383,22 @@ def eval_const(node, bindings: dict, platform: str = None):
             return None
     if isinstance(node, IdentExpr):
         return bindings.get(node.name)
+    # `DType.int32` / `dtype.int32` — a compile-time DType value.
+    if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
+            and node.obj.name in ('DType', 'dtype')):
+        return ('DType', node.member.lower())
+    # DType predicate methods: `dtype.is_integral()`, `DType.float32.is_integral()`.
+    # `constrained`/`comptime assert` conditions depend on these; folding them
+    # (including when `dtype` is an instantiated generic param in `bindings`)
+    # lets the compile-time diagnostic paths reject provably-false cases.
+    if (isinstance(node, CallExpr) and isinstance(node.func, MemberExpr)
+            and not node.args and not node.kwargs):
+        _dm = node.func.member
+        _dn = _resolve_dtype_name(node.func.obj, bindings, platform)
+        if _dn is not None:
+            _dv = _eval_dtype_predicate(_dn, _dm)
+            if _dv is not None:
+                return _dv
     if isinstance(node, UnaryOp) and node.op in FOLD_UNARY_OPS:
         v = eval_const(node.operand, bindings, platform)
         return fold_unary_sign(node.op, v) if isinstance(v, (int, bool)) \
@@ -458,8 +559,23 @@ def _const_foldable(node, bindings: dict, call_hook=None) -> bool:
     which is the one case that has to evaluate to find out."""
     if isinstance(node, (BoolLiteral, IntLiteral, StringLiteral)):
         return True
+    if DottedLiteral is not None and isinstance(node, DottedLiteral):
+        return True
     if isinstance(node, IdentExpr):
         return node.name in bindings
+    # `DType.int32` / `dtype.int32`
+    if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
+            and node.obj.name in ('DType', 'dtype')):
+        return True
+    # DType predicate method on a resolvable DType (literal or bound param).
+    # Only foldable when the dtype and predicate are both known, so an
+    # unresolved dtype stays CONST_UNKNOWN rather than becoming a false
+    # diagnostic.
+    if (isinstance(node, CallExpr) and isinstance(node.func, MemberExpr)
+            and not node.args and not node.kwargs):
+        _dn = _resolve_dtype_name(node.func.obj, bindings)
+        if _dn is not None and _eval_dtype_predicate(_dn, node.func.member) is not None:
+            return True
     if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
             and node.obj.name == 'sys' and node.member == 'platform'):
         return True
@@ -470,6 +586,15 @@ def _const_foldable(node, bindings: dict, call_hook=None) -> bool:
         # exposes no byteorder, the fold declines, and a shape-only "yes"
         # would then read as CONST_FALSE and drop the live branch.
         return eval_const(node, bindings) is not None
+    # String/ord/scalar constructors and other 1-arg ident calls eval_const folds.
+    if (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
+            and len(node.args) == 1 and not node.kwargs
+            and node.func.name in ('String', 'StringSlice', 'StaticString',
+                                   'StringSpan', 'ord')
+            or (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
+                and len(node.args) == 1 and not node.kwargs
+                and node.func.name in _SCALAR_CTOR_BITS)):
+        return _const_foldable(node.args[0], bindings, call_hook)
     if isinstance(node, UnaryOp) and (node.op in FOLD_UNARY_OPS or node.op == 'not'):
         return _const_foldable(node.operand, bindings, call_hook)
     if isinstance(node, BinaryOp):
