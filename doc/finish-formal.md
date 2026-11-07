@@ -389,6 +389,20 @@ done. At this writing: 45 DONE, 7 SCAFFOLDED, 6 CLAIMED, 19 OPEN, 1 closed as
   `work_step_*` lemmas, which depend only on the model and not on each other);
   the shards build in parallel (`formal/lean.py::ensure_library` builds by import
   LEVEL, `library_jobs()`). The wall bound was raised to the measured reality.
+* **The arm64 proof corpus: PASS 15 -> 50 of 94 (2026-11-06, measured, 61 min).**
+  `python3 test_formal.py --backend arm64`: PASS=50 KNOWN-GAP=5 FAIL=33
+  TOO-LARGE=6. Three generator fixes did it: block states inferred with `_`
+  (cured the shared "maximum recursion depth"), stacked `{ ({ s with pc := a })
+  with pc := b }` states collapsed to `{ s with pc := b }` (`unused_param` went
+  from 97 min and 3 errors to 2m42s PASS: each layer made Lean re-walk the
+  48-field record), and `hprior` facts close from the earlier block's own fact
+  (`try assumption`). Remaining FAILs: 9 timeouts (`fact`, `floordiv`, `pow2`,
+  `precedence`, `sqsum`, `sum`, `bittest`, `augassign_floordiv`, `wide_expr`),
+  loop-invariant refusals (`accum_max`, `digits`, `loop_break`, `nested_loop`,
+  `ret_in_loop`, `var_typed_loop`, `while_ne_zero`), model gaps (list/struct
+  rows, `main_calls_helper`/`multi_export` x30 returns), and a handful of
+  elaboration errors (`absval`, `bigconst`, `cmp_le_ge`, `not_and`, `shiftlr`,
+  `sum_range`, `wdiff`, `wide_recv`, `for_two_bounds`).
 * **What the first wave's "repair" had destroyed, now restored.** The plan-wave
   rewrite of `lib/ProofLib.lean` (`0bf96e814`) dropped ~1,700 lines that compiled
   and that X86/Refine/Contracts/the proof generators name (`DylibExport`,
