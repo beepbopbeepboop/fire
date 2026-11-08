@@ -3336,7 +3336,7 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
         # instantiated body (provably-false `comptime assert` / `constrained`)
         # is a real user diagnostic, not an elaboration-capability failure.
         # Swallowing it accepts invalid instantiations silently
-        # (bugs/DIAGNOSTICS_missing_validation_modular.md). Re-raise those so
+        # (comptime validation diagnostics). Re-raise those so
         # the diagnostic surfaces at the instantiation site.
         _emsg = str(e)
         if isinstance(e, RuntimeError) and (
@@ -3380,7 +3380,7 @@ def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
             # A compile-time diagnostic (provably-false comptime assert /
             # constrained) from compiling the instantiated body is a real user
             # diagnostic — re-raise it instead of silently accepting an invalid
-            # instantiation (bugs/DIAGNOSTICS_missing_validation_modular.md).
+            # instantiation (comptime validation diagnostics).
             _emsg = str(e)
             if isinstance(e, RuntimeError) and (
                     'constraint failed' in _emsg

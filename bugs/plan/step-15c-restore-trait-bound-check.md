@@ -1,7 +1,7 @@
 # plan/step-15c: restore the trait-bound conformance check on an instantiation
 **Status: DONE 2026-11-06 (measured).** 'a trait bound violation is refused by name' PASSES; `test_formal_monomorph.py` 60/0/0 on 2026-11-06.
 Class: mid      Size: M      Depends: 15a      Blocks: none
-Source: deleted `bugs/formal/FORMAL_generic_monomorph_scope.md` §8 ("A generic with a trait bound — FIXED 2026-10-13"); `bugs/FORMAL_known_limits.md` §1.2.
+Source: the deleted generic-monomorph-scope FORMAL doc §8 ("A generic with a trait bound — FIXED 2026-10-13"); `bugs/FORMAL_known_limits.md` §1.2.
 
 ## Current state (measured 2026-11-05)
 - Commit `0c3db7ff3` ("a bounded template's type argument must CONFORM, and the failure is named") IS an ancestor of HEAD, but its code is absent: `grep -n "check_bounds\|_FAILED_DEMANDS\|failed_demand_reason" formal/monomorph.py formal/build.py` finds nothing; `elaborate.check_bounds` (elaborate.py:636) and `elaborate.ConformanceError` (:25) exist. The two pins `a trait bound violation is refused by name` / `a conforming type argument is still instantiated` are not in `test_formal_monomorph.py`.

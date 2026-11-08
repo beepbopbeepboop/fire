@@ -1,7 +1,7 @@
 # plan/step-08d: pin the function-value / BLR refusal so it cannot become a wrong certificate
 **Status: DONE 2026-11-07 (measured).** `test_formal_call_proof_gen.TestFunctionValueCallIsRefusedNotCertified` passes: `prove=True` raises with "binds it to nothing", `prove=False` builds an image with exactly one BLR word.
 Class: easy      Size: S      Depends: 08c      Blocks: none
-Source: `bugs/plan/step-08c-blr-br-design-memo.md` "Decision (08c)", Reading A.
+Source: `bugs/plan/step-08c-arm64-indirect-call-design.md` "Decision (08c)", Reading A.
 
 ## Work order
 1. In `test_formal_call_proof_gen.py`, add one test: write `def dbl(x: Int) -> Int:\n    return x * 2\n\ndef main(n: Int) -> Int:\n    var g = dbl\n    return g(n)\n` to a temp `.mojo`; `fb.compile_formal(path, arch='arm64', prove=True, check=False)` must RAISE and its text must contain `binds it to nothing`.
