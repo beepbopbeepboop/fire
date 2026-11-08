@@ -6502,8 +6502,13 @@ char *mojo_char_at_str_cp(char *s, int64_t i) {
     } else {
         char_len = 1;
     }
-    /* Use a cached approach similar to mojo_char_to_str but we need to return a string
-     * that contains the full multi-byte char. For now, build it. */
+    /* ASCII fast path: return an immortal 1-char string (no allocation),
+     * preserving the "character is an immortal table entry" invariant and
+     * avoiding per-character malloc in tight iteration. */
+    if (char_len == 1) {
+        return mojo_char_to_str((char)s[byte_off]);
+    }
+    /* Multi-byte UTF-8: build a heap string. */
     char *out = malloc((size_t)char_len + 1);
     memcpy(out, s + byte_off, (size_t)char_len);
     out[char_len] = '\0';
