@@ -207,15 +207,21 @@ def test_probe_ignores_mentions():
     Cheapest way to state the whole regression: compiling the compiler must not
     pull in any optional unit, because nothing in it calls one. Asserted on a
     real codegen run rather than on a synthetic string, since the string that
-    broke it was 59 real signatures."""
+    broke it was 59 real signatures.
+
+    Compiles build_config.py itself (do_imports=False): its own source carries
+    the 59 optional-unit signatures as string data (_KNOWN_SIGS), which is the
+    exact shape the probe must not mistake for calls. Using do_imports=True on
+    an importing snippet triggered a full transitive import compile (including
+    the compiler's own modules) that hung in coro/literal-bindings lowering,
+    timing the suite job out without exercising the probe at all."""
+    src = open(os.path.join(HERE, 'build_config.py')).read()
     gen = gimple_codegen.compile_to_gimple_cached(
-        'from build_config import find_gcc\n'
-        'def main():\n'
-        '    print(find_gcc())\n', do_imports=True, filename='probe.mojo')
+        src, do_imports=False, filename='build_config.py')
     hits = build_config.referenced_optional_runtime_units(gen)
     check(hits == [],
-          'compiling a module that imports build_config pulls in NO optional '
-          'unit (their symbols are in the generated C only as string data)',
+          'compiling build_config (which carries optional-unit symbols only '
+          'as string data) pulls in NO optional unit',
           str(hits))
 
 
