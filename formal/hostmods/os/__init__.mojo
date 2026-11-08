@@ -64,8 +64,8 @@ because it is not a matter of taste:
     function — and a `readdir` name that is now readable, because a read of
     the `struct dirent` used to be a bounds check against the inode number at
     offset 0. A run-time-length blob is not a Python list and nothing here
-    pretends otherwise; see `listdir`'s own docstring for the layout and
-    bugs/FORMAL_listdir_no_run_time_sequence.md for what is still missing.
+    pretends otherwise; see `listdir`'s own docstring for the layout and the
+    run-time-length-sequence limit for what is still missing.
 
   * **EVERY FUNCTION HERE SAYS WHAT IT RETURNS.** `-> str` or `-> int` on all
     of them, which is not documentation: the annotation is what puts `char *` in
@@ -1227,9 +1227,8 @@ def chmod(path, mode) -> int:
 # already has — `[count][element]…` — so it is not a new representation. What
 # is new is that the blob is `malloc`'d rather than frame-resident, which is
 # what a length only known at RUN TIME needs: a frame blob dies with the
-# function that built it, so it cannot be returned, and
-# `bugs/FORMAL_listdir_no_run_time_sequence.md` records that as the reason
-# there was no `listdir` at all. The allocation is the whole difference, and
+# function that built it, so it cannot be returned, which is the reason there
+# was no `listdir` at all. The allocation is the whole difference, and
 # `malloc` was always there.
 #
 #     word 0      count, as an Int64
@@ -1277,10 +1276,9 @@ def listdir(path) -> List[String]:
     annotation is what lets a caller write `len(names)` and `for x in names`
     and `names[i]` instead of the three accessors below, and it is what
     `model.imported_callee_kind` reads across the dylib boundary a caller is
-    really behind (`bugs/FORMAL_listdir_no_run_time_sequence.md` item 1: the
-    representation was already right and the KIND was missing). It costs
-    nothing: the C signature is `int64_t` either way, because a list is one
-    word, so this is metadata and not an ABI change.
+    really behind (the representation was already right and the KIND was
+    missing). It costs nothing: the C signature is `int64_t` either way, because
+    a list is one word, so this is metadata and not an ABI change.
 
     The three accessors REMAIN, because they are the honest spelling for a
     caller that wants to free the blob, and `listdir_len`/`listdir_get` are
