@@ -1,0 +1,5 @@
+=== control: spawned plan-16d2 on opencode/deepseek-v4.1-flash-free at 2026-11-07 17:35:53 ===
+[0m
+> build · deepseek-v4.1-flash-free
+[91m[1mError: [0mFree usage limit reached. Connect a provider or subscribe to OpenCode Go to keep going, or switch models.
+cpu_cap: plan-16d2 used 0 s of a 600 s cap (exit 1)
