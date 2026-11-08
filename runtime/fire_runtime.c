@@ -16559,7 +16559,7 @@ static int64_t _re_finditer(MojoRePat *r, int64_t subj)
     while (pos <= sb.n) {
         MojoReMatch *m = _re_search(r, sb, pos, -1, 1);
         if (!m) break;
-        mojo_list_append_int(out, (int64_t)(intptr_t)m);
+        mojo_list_append_word(out, (int64_t)(intptr_t)m);
         pos = m->caps[1] > m->caps[0] ? m->caps[1] : m->caps[1] + 1;
     }
     return (int64_t)(intptr_t)out;

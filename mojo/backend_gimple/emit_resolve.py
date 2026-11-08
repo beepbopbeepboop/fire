@@ -3990,6 +3990,17 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
             gen._struct_slot_kinds[res] = ginf._RuntimeKinded(['int', 'str'])
             gen._maybe_kinds_vals.add(res)
             return
+        if et == 'int64_t' and (ev in getattr(gen, '_dyn_word_vals', ())
+                                or gen._is_dyn_word(None, ev)):
+            # A runtime-kinded word (e.g. re.Match.group() returns a str/bytes
+            # word whose kind is only known at run time, and the lowering marks
+            # it dyn_word). Appending it as an int and forcing int repr prints
+            # the raw pointer; append under the kind it carries instead.
+            gen._emit_call('void', '', 'mojo_list_append_word',
+                           [('MojoList *', res), ('int64_t', ev)])
+            gen._struct_slot_kinds[res] = ginf._RuntimeKinded(['int', 'str'])
+            gen._maybe_kinds_vals.add(res)
+            return
         suf = gimple_ctypes.TypeLattice.list_suffix(et)
         ev_cast = gen._cast_for_list(et, ev, suf)
         # GIMPLE: load global string literals into temp before function call
