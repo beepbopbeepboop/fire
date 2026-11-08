@@ -1,0 +1,66 @@
+=== control: spawned plan-22a on openrouter/openrouter/free at 2026-11-07 21:09:02 ===
+[0m
+> build · openrouter/free
+[0m→ [0mRead TASK.md 
+> build · openrouter/free
+[0m✗ [0mRead bugs/sweeps/step-22a.md failed
+[91m[1mError: [0mFile not found: /Users/mrs/net/chatgpt/claude/work-5087/bugs/sweeps/step-22a.md
+[0m→ [0mRead bugs/sweeps/singletons-2026-11-07.txt 
+> build · openrouter/free
+[0m✱ [0mGlob "**/step-22*.md" [90m1 match[0m
+> build · openrouter/free
+[0m→ [0mRead CLAUDE.md 
+[0m→ [0mRead bugs/plan/step-22-singleton-causes.md 
+> build · openrouter/free
+I now understand the task. Let me set up my environment and check the current state.
+[0m$ [0mcd /Users/mrs/net/chatgpt/claude/work-5087 && git status && git branch --show-current && git log --oneline -5
+On branch work/plan-22a
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	work.log
+
+nothing added to commit but untracked files present (use "git add" to track)
+work/plan-22a
+87bae79ec step 22: sweep log (arm64, 2026-11-07) and the 41-row singleton census
+f004b3eb1 step 12c: integration note
+ee067fe1c arm64 proof gen: repair the if/else that the 12c merge split (every non-strlen program was refused), restore a corrupted docstring escape
+b61369cc7 Merge branch 'work/plan-12c'
+423feaae5 plan/step-12c: emit arm64 post_extern_strlen from StrlenReturns (steps 3-5 partial)
+[0m$ [0mpython3 /Users/mrs/net/chatgpt/claude/mojo-reference2/tools/control.py claims 2>&1 || true
+bug-formal-formal-absval-proof-does-not-1557 bug:FORMAL_absval_proof_does_not_check
+bug-mid-diagnostics-missing-validation-m-3510 bug:DIAGNOSTICS_missing_validation_modular
+bug-middle-coro-import-compile-hangs-on bug:MIDDLE_coro_import_compile_hangs_on_large_modules
+bug-suite-gimplegenerators-2723 bug:SUITE_gimplegenerators
+bug-suite-gimplerunner-4191 bug:SUITE_gimplerunner
+bug-suite-globcompiled   bug:SUITE_globcompiled
+bug-suite-linkmode-1240  bug:SUITE_linkmode
+bug-suite-selfhost-1240  bug:SUITE_selfhost
+bug-suite-silentnoop-2723 bug:SUITE_silentnoop
+bug-suite-suite-self-test-3065 bug:SUITE_suite_self_test
+fix-gate-ab-native       gate:ab-native
+fix-gate-formal-doc-truth gate:formal-doc-truth
+fix-gate-formal-host-import-shapes gate:formal-host-import-shapes
+fix-gate-prooflib        gate:prooflib
+fix-gate-rthdrscan       gate:rthdrscan
+fix-merge-bug-formal-formal-model-package-split-le bug:FORMAL_model_package_split_left_duplicate_copies
+fix-merge-bug-python3-15-improved-error-messages-3988 bug:PYTHON3.15_improved_error_messages
+fix-red-bug-build-link-error-emit-string-literal-7843 bug:BUILD_link_error_emit_string_literal
+fix-red-bug-python3-15-lazy-imports-9032 bug:PYTHON3.15_lazy_imports
+fix-red-fix-merge-bug-codegen-dict-slot-read-loses-its-val-9 bug:CODEGEN_dict_slot_read_loses_its_value_kind
+fix-red-fix-red-fix-red-fix-red-fix-red-fix-merge-fix-leftov bug:perf-nested-module-compile-walk
+plan-13d                 plan:step-13d
+plan-22a                 plan:step-22a
+plan-22b                 plan:step-22b
+plan-22c                 plan:step-22c
+plan-22d                 plan:step-22d
+recover-apply-dangling   recover:apply-dangling
+recover-apply-haiku      recover:apply-dangling-haiku
+recover-review-dangling  recover:dangling-review
+formal-plan-owner        bug:FORMAL_arm64_instruction_coverage, bug:FORMAL_known_limits, bug:FORMAL_no_exceptions, bug:FORMAL_peephole_rules_without_proofs, bug:FORMAL_set_value_model, bug:FORMAL_string_value_model   [external: claude (finish-formal plan owner)]
+mq                       bug:GATE_red_recover-land_2026-11-02   [external: mojo-reference-77]
+[0m$ [0mexport PATH=/opt/homebrew/bin:$PATH && python3 -c "import formal.build" 2>&1; echo "EXIT: $?"
+EXIT: 0
+> build · openrouter/free
+[0m→ [0mRead bugs/sweeps/singletons-2026-11-07.txt [90m[offset=1, limit=12][0m
+> build · openrouter/free
+cpu_cap: plan-22a used 0 s of a 600 s cap (exit 0)
