@@ -115,8 +115,9 @@ Remaining (none block the interpreter/CLI path):
   The non-ASCII branch is also unreachable end-to-end in user programs while
   the parser rejects non-ASCII identifiers (pre-existing parser gap).
 - SELF-HOST binary: `frozenset` is stubbed in the cross-language table
-  (the frozenset builtin has no compiled-path backing; adjacent to
-  bugs/PYTHON3.15_frozendict.md), so the two frozenset hints degrade there.
+  (the frozenset builtin has no compiled-path backing; adjacent to the
+  frozendict-builtin work fixed in e79028f08), so the two frozenset hints
+  degrade there.
 - SELF-HOST binary: the environment-dependent refinements read the host's
   import/sys state at print time — `sys.meta_path`'s `discover` for
   ModuleNotFoundError, `sys.stdlib_module_names` for NameError's
