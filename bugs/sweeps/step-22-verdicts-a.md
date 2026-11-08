@@ -8,10 +8,10 @@
 | 4 | formal/x86_64_decode.py | T | build: decode_one returns a frame address on one path and falls off the end of its body on another, so a caller that reserved a block for the result would read a block nobody wrote: the bytes are whatever the scratch held. Every path that leaves the function must return a frame address, so that the caller's one reservation is the right one — give the last branch a `return the frame in 'decode_one_insn()'` as well, or copy a field out instead of returning the object | not Mojo source |  |
 | 5 | runtime/stdlib_wrapper.mojo | T | build: main: `now` is called, and it is imported from `time`, so the call has to bind a symbol `time` exports. **`time` declares no function or struct named `now` at all** | time is not declared in time module |  |
 | 6 | t1.mojo | T | build: sys.exit(): `sys` is a linked module but it exports no `exit`, so the call has no symbol to bind. What it does export: api_version, byteorder, flush_output, get_coroutine_origin_tracking_depth, get_int_max_str_digits, getdefaultencoding, getfilesystemencodeerrors, getfilesystemencoding, …. A name `doc/ABI.md`'s export rule excludes (a leading `_`, a generic template, an overload, or a C library symbol such as `exit` or `write`) is not advertised | time's `exit` not exported; need proper export rule for sys module |  |
-| 7 | test_arm64_encoders.py |  |  |  |  |
-| 8 | test_char_star_local_regress.py |  |  |  |  |
-| 9 | test_dict_literal_container_key_pin.py |  |  |  |  |
-| 10 | test_exception_object_attributes_regression.py |  |  |  |  |
-| 11 | test_formal_globals.py |  |  |  |  |
+| 7 | test_arm64_encoders.py | T | build: parse error: test_arm64_encoders.py:933:0: Expected RPAREN got EOF('') | not Mojo source |  |
+| 8 | test_char_star_local_regress.py | T | build: print() cannot tell whether SubscriptExpr is a string or a number on the formal arm64 path, and guessing would print an address as if it were text (or a number as if it were text) | print() cannot reliably determine string vs number on arm64 path |  |
+| 9 | test_dict_literal_container_key_pin.py | T | build: d['a'] is a subscript whose index is a tuple. A value here is one 64-bit word and a list is a flat blob of words, so a tuple index has no representation on this path | tuple index has no representation for dict key lookup |  |
+| 10 | test_exception_object_attributes_regression.py | T | build: f.read() is a method call on a value, and this backend lowers only add, append, clear, close, write (on a file descriptor) and the string methods count, endswith, find, lower, lstrip, rstrip, startswith, strip, upper — the receiver is a name on this path, and 'read' is not one of those methods of those receivers, so adding it to either table would be a guess about what it means on 'int' | f.read() not supported for file-like objects |  |
+| 11 | test_formal_globals.py | T | build: parse error: test_formal_globals.py:2332:0: Expected RPAREN got EOF('') | not Mojo source |  |
 
-TOTALS: T=5 M=0 S=0 C=0
+TOTALS: T=11 M=0 S=0 C=0
