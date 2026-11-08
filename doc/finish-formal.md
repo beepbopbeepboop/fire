@@ -252,23 +252,27 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`05b`](../bugs/plan/step-05b-x86-rule-registry.md) | DONE | mid | M | 04a, 04b, 04c, 04d | register the x86-64 rules, and fix three latent soundness holes in their matchers |
 | [`06a`](../bugs/plan/step-06a-arm64-ccmp-encoders.md) | DONE | easy | S | none | arm64 `ccmp` encoders (register and immediate), byte-exact against `as` |
 | [`06b`](../bugs/plan/step-06b-arm64-ccmp-model.md) | DONE | mid | M | 00a, 00b, 06a | `ccmp` in the machine model: `arm64_step` arms, `_STEP_CONDS` rows, `_step_rhs`, `_regs_written` |
-| [`06c`](../bugs/plan/step-06c-arm64-ccmp-lowering.md) | OPEN | hard | L | 06a, 06b | lower `if A and B:` (two integer comparisons) to `cmp` + `ccmp` + one `b.cond` |
+| [`06c`](../bugs/plan/step-06c-arm64-ccmp-lowering.md) | PARTIAL | hard | L | 06a, 06b | lower `if A and B:` (two integer comparisons) to `cmp` + `ccmp` + one `b.cond` |
+| [`06d`](../bugs/plan/step-06d-ccmp-flag-proofs.md) | OPEN | hard | L | 06c | the proof generator understands flags set by `ccmp`, then `CCMP_LOWERING` defaults on |
 | [`07a`](../bugs/plan/step-07a-arm64-csinc-family-model.md) | DONE | mid | M | 00a, 00b | `csinc` / `csinv` / `csneg` in the machine model, step table and fuzzer |
-| [`07b`](../bugs/plan/step-07b-arm64-csinc-family-lowering.md) | OPEN | hard | M | 07a | lower `a if c else ~a` to `csinv` (and `+1` / `-a` to `csinc`/`csneg` where no overflow trap is lost) |
+| [`07b`](../bugs/plan/step-07b-arm64-csinc-family-lowering.md) | DONE | hard | M | 07a | lower `a if c else ~a` to `csinv` (and `+1` / `-a` to `csinc`/`csneg` where no overflow trap is lost) |
 | [`08a`](../bugs/plan/step-08a-arm64-blr-named-unmodelled.md) | DONE | easy | S | none | name `BLR` in `_unmodelled_instruction` (the emitted indirect call has no step and no name) |
 | [`08b`](../bugs/plan/step-08b-arm64-br-audit-scope.md) | DONE | easy | S | none | `br` is emitted (the Mach-O stub) — fix the audit's scope and the stale "uncalled" claims |
-| [`08c`](../bugs/plan/step-08c-arm64-indirect-call-design.md) | OPEN | hard | M | 08a | DESIGN MEMO — how the proof model treats `BLR` (indirect call) and `BR` |
+| [`08c`](../bugs/plan/step-08c-arm64-indirect-call-design.md) | DONE | hard | M | 08a | DESIGN MEMO — how the proof model treats `BLR` (indirect call) and `BR` |
+| [`08d`](../bugs/plan/step-08d-pin-blr-refusal.md) | DONE | easy | S | 08c | pin the function-value / BLR refusal so it cannot become a wrong certificate |
 | [`09`](../bugs/plan/step-09-arm64-extended-add-sub.md) | DONE | mid | M | 00a, 00b | arm64 extended-register `ADD`/`SUB`/`SUBS(CMP)` with `UXTX` (the SP class), modelled, no lowering |
 | [`10`](../bugs/plan/step-10-string-struct-collision.md) | DONE | mid | M | 01a, 01b | the `String` frame-vs-`char *` collision (zero-argument `String()` used as a receiver) |
 | [`11a`](../bugs/plan/step-11a-string-buffer-upper-lower.md) | DONE | mid | M | 10 | the runtime string buffer (libc `strdup`, never freed) and `upper`/`lower` as its first clients |
 | [`11b`](../bugs/plan/step-11b-string-strip-rstrip.md) | DONE | mid | M | 11a | `strip()` / `rstrip()` on the runtime buffer |
 | [`11c`](../bugs/plan/step-11c-chr-fold-and-remaining-methods.md) | DONE | mid | S | 11a | `chr(<constant>)` folds; `replace`/`join`/the case-variants refuse naming the buffer correctly |
 | [`12a`](../bugs/plan/step-12a-len-of-known-string.md) | DONE | mid | M | 01a, 01b | `len(<string the image holds>)` is a numeral in the proof model; any other string `len` is refused; the post-extern theorem is not emitted for `strlen` |
-| [`12b`](../bugs/plan/step-12b-strlen-contract-memo.md) | OPEN | hard | M | 12a, 01a, 01b | DECISION MEMO — the Lean contract for an extern whose result is the program's answer (`strlen`) |
-| [`12c`](../bugs/plan/step-12c-strlen-contract.md) | OPEN | mid | M | 12a, 12b, 01a, 01b | Lean contract for `strlen` as the program's answer (extern contract) |
+| [`12b`](../bugs/plan/step-12b-strlen-contract-memo.md) | DONE | hard | M | 12a, 01a, 01b | DECISION MEMO — the Lean contract for an extern whose result is the program's answer (`strlen`) |
+| [`12c`](../bugs/plan/step-12c-strlen-contract.md) | PARTIAL | mid | M | 12a, 12b, 01a, 01b | Lean contract for `strlen` as the program's answer (extern contract) |
 | [`13a`](../bugs/plan/step-13a-printf-text-fold.md) | DONE | mid | M | 10 | `%<w>s`, `%-<w>s`, `%.<p>s` on a non-ASCII text the build can SEE are folded to the CPython answer |
 | [`13b`](../bugs/plan/step-13b-subscript-literal-fold.md) | DONE | mid | M | 10 | `<literal>[<int literal>]` on non-ASCII text folds to the one-character string |
-| [`13c`](../bugs/plan/step-13c-runtime-unicode-memo.md) | OPEN | hard | M | 11a, 13a, 13b | DECISION MEMO — `%<w>s` / `%.<p>s` and `s[i]` on non-ASCII text the build CANNOT see |
+| [`13c`](../bugs/plan/step-13c-runtime-unicode-memo.md) | DONE | hard | M | 11a, 13a, 13b | DECISION MEMO — `%<w>s` / `%.<p>s` and `s[i]` on non-ASCII text the build CANNOT see |
+| [`13d`](../bugs/plan/step-13d-printf-runtime-widths.md) | OPEN | mid | M | 13c | `%<w>.<p>s` on a non-ASCII image with a run-time operand, via star arguments |
+| [`13e`](../bugs/plan/step-13e-subscript-runtime.md) | OPEN | mid | M | 13d | `s[i]` on a non-ASCII image with a run-time receiver or index |
 | [`14a`](../bugs/plan/step-14a-restore-set-literal-dedup.md) | DONE | easy | S | none | RESTORE the compile-time set-literal dedup that the `formal/model/` package split lost |
 | [`14b`](../bugs/plan/step-14b-set-runtime-dedup-literal.md) | DONE | mid | L | 14a | run-time distinctness for a set literal with non-canonical elements (`{x, x, 2}`), both backends |
 | [`14c`](../bugs/plan/step-14c-set-add.md) | DONE | mid | M | 14b | `set.add(x)` on both backends |
@@ -282,9 +286,9 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`16a`](../bugs/plan/step-16a-bare-call-design-memo.md) | DONE | hard | M | 15a | DESIGN MEMO — what a bare template call's type arguments may be inferred from |
 | [`16b`](../bugs/plan/step-16b-consolidate-bare-inference.md) | DONE | mid | M | 15a | fold the two copies of bare-call inference into one function (behaviour-preserving) |
 | [`16c`](../bugs/plan/step-16c-matcher-keywords-defaults.md) | DONE | mid | S | 16a, 16b | bare-call inference — keyword arguments and type-spelled defaults |
-| [`16d`](../bugs/plan/step-16d-return-type-inference.md) | PARTIAL | mid | L | 16a, 16b | bare-call inference through declared types (the `dealloc(allocation^)` row) |
-| [`16e`](../bugs/plan/step-16e-bound-resolution.md) | OPEN | mid | M | 16a, 16b | bare-call inference against a trait bound (the `FormatStruct(writer, ...)` row) |
-| [`16f`](../bugs/plan/step-16f-reconcile-export-pins.md) | OPEN | easy | S | 16c, 16d, 16e | reconcile the two export pins and the refusal wording with the inference |
+| [`16d`](../bugs/plan/step-16d-return-type-inference.md) | DONE | mid | L | 16a, 16b | bare-call inference through declared types (the `dealloc(allocation^)` row) |
+| [`16e`](../bugs/plan/step-16e-bound-resolution.md) | DONE | mid | M | 16a, 16b | bare-call inference against a trait bound (the `FormatStruct(writer, ...)` row) |
+| [`16f`](../bugs/plan/step-16f-reconcile-export-pins.md) | DONE | easy | S | 16c, 16d, 16e | reconcile the two export pins and the refusal wording with the inference |
 | [`17`](../bugs/plan/step-17-declared-init-construction.md) | DONE | easy | S | 15a | close out declared-`__init__` construction (it landed; pin it and fix the doc) |
 | [`18a`](../bugs/plan/step-18a-frame-contract-memo.md) | DONE | hard | M | 15a, 01b | DESIGN MEMO — what the one-field by-reference mutator's Lean contract may say |
 | [`18b`](../bugs/plan/step-18b-frame-methods-restrict.md) | DONE | mid | M | 18a | make `_frame_methods` classify only the shapes whose contract is true |
@@ -292,7 +296,7 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`18d`](../bugs/plan/step-18d-scaffold-writeback-contract.md) | DONE | mid | M | 18a, 18c, 01b | scaffold the write-back contract (depth bound as a hypothesis, per-exit obligation as `sorry`) |
 | [`19a`](../bugs/plan/step-19a-optional-unit-dylib.md) | DONE | mid | M | 15a | build an OPTIONAL runtime unit (sqlite3 first) as a loadable dylib for the formal link line |
 | [`19b`](../bugs/plan/step-19b-link-line-opt-in.md) | DONE | mid | M | 19a | the formal link line opts into the optional unit a word-shaped call names |
-| [`19c`](../bugs/plan/step-19c-sqlite-end-to-end.md) | OPEN | easy | S | 19b | a real sqlite3 word-shaped call through a formal executable, and the census numbers |
+| [`19c`](../bugs/plan/step-19c-sqlite-end-to-end.md) | DONE | easy | S | 19b | a real sqlite3 word-shaped call through a formal executable, and the census numbers |
 | [`20`](../bugs/plan/step-20-mlir-word-ops.md) | DONE | mid | S | 15a | close out the word-valued MLIR ops (the lowering landed; fix the 3 reds and the stale census) |
 | [`22`](../bugs/plan/step-22-singleton-causes.md) | OPEN | mid | L | 15a, 16f, 17, 20 | the singleton direct causes — re-measure, then one verdict per row (LOOP STEP) |
 | [`23`](../bugs/plan/step-23-host-modules.md) | CLAIMED | mid | S | 26 | host-module growth: the per-module round template and the ranked queue |
@@ -309,7 +313,7 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`27c`](../bugs/plan/step-27c-landing-pad-tables.md) | DONE | mid | M | 27a | landing-pad / personality data structures (pure Python table + test, NO codegen change) |
 | [`28`](../bugs/plan/step-28-absval-frame-peel.md) | DONE | mid | M | 00a | `absval` frame-peel `K` — verify the same-day fix, pin it with a Lean-free test, then close or localise |
 
-**78 step files:** 13 easy, 57 mid, 8 hard. Status: claimed 2, closed as 'not provided' 1, done 64, open 10, partial 1. (Generated by `python3 tools/plan_index.py --write`; do not edit by hand.)
+**82 step files:** 14 easy, 59 mid, 9 hard. Status: claimed 2, closed as 'not provided' 1, done 73, open 4, partial 2. (Generated by `python3 tools/plan_index.py --write`; do not edit by hand.)
 
 <!-- END generated by tools/plan_index.py -->
 
@@ -395,6 +399,22 @@ done. At this writing: 45 DONE, 7 SCAFFOLDED, 6 CLAIMED, 19 OPEN, 1 closed as
   `bugs/plan/WORKER_BRIEF_peephole_rule_proofs.md`; integrated by hand because all six branches inserted at
   one anchor). `lib/Scaffold.lean` now holds only the canary and the two cell-write-back placeholders
   (3 `sorry`). The rules are PROVED but NOT yet live: promotion into `ARM64_RULES`/`X86_RULES` is steps 05a/05b.
+* **Bare-call inference, link line, frame contracts, memos (2026-11-07, measured).**
+  16c-16f landed: declared-type inference for `x^`/`self.f`/declared-`->`/call-initialised
+  locals, bounded parameters bind to a concrete struct and a non-conforming one is refused
+  by trait name, `Some[...]` is never bound. A wrong-code bug from 16b was found and fixed
+  (the fast path passed Mojo annotations to a function that takes C types, so `T` became
+  `Int` for every annotation but `Int`). 19b/19c: the formal link line opts into optional
+  runtime units; sqlite3 word-shaped call runs end to end; ABI census refreshed (897 entry
+  points, 411 word-shaped). 18a-d: the one-field mutator contract memo corrected, 18b pinned,
+  18c found landed, 18d's scaffold theorems state real propositions (opaque `CellSetMethod`
+  premise). 12b: extern contracts are HYPOTHESES (`lib/Extern.lean`, sorry-free, registered);
+  12c's generator wiring is open. 08c: Reading A (0 of 94 corpus examples emit a BLR; pinned by
+  08d). 13c: run-time code-point walk via computed `%*.*s` star arguments (13d/13e written).
+  07b verified (csinv, one CSINV word, proof 0 sorries). 06c: the ccmp lowering existed but was
+  off and its test never ran; it is now opt-in (`FIRE_CCMP_LOWERING=1`), because enabling it
+  makes `both` stop proving (06d: generator support). `wdiff`: total-correctness bridge
+  committed (unsigned `!=`, `n < 2^63` precondition); one loop back-edge `sorry` remains.
 * **The arm64 proof corpus: PASS 15 -> 50 of 94 (2026-11-06, measured, 61 min).**
   `python3 test_formal.py --backend arm64`: PASS=50 KNOWN-GAP=5 FAIL=33
   TOO-LARGE=6. Three generator fixes did it: block states inferred with `_`

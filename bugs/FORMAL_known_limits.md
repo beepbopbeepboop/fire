@@ -636,6 +636,10 @@ name and fill a defaulted parameter only from a type-spelling default; 16d — i
 and nothing from bodies; 16e — B2 for concrete structs, B1 otherwise, Q3 refusal with the parameter name;
 16f — pin the refusal wording to the five reason strings above.
 
+**Status (2026-11-07, step 16d):** declared-type inference landed for a bare call's non-identifier arguments (`_declared_type_of_expr`: `x^` transfer, `self.f` field read, call with a declared `->`, and a call-initialised `var`), reading declarations only (R1), never a body. A function's declared return type is kept under the key `name()` (`_return_type_key`) so it cannot collide with a variable of the same name. Pinned by five decision cases, a collision case and an end-to-end `make() -> Box[Int]` / `unwrap(b^)` case on both arches against CPython (`test_formal_monomorph.py` 66/66). The real row moved: `python3 fire.py build --formal --no-prove std/memory/alloc.mojo` no longer stops at `dealloc`; its terminal message is now the `FormatStruct` row verbatim: "`ThinAllocation_1_T_1_T.write_to`: `FormatStruct` is called, and it is imported from `std.format._utils`, so the call has to bind a symbol `std.format._utils` exports. That module does not export it ..." — a bare call against a trait bound, which is step 16e. The full census re-run was not done.
+
+**Status (2026-11-07, step 16e):** Q2 as chosen (B1; B2 only for a concrete declared struct) is implemented and pinned: conforming struct binds and runs, non-conforming is refused by trait name, `Some[...]` is never bound and the refusal names the existential argument. A wrong-code bug in the 16b fast path was found and removed (it passed Mojo annotations to `elaborate.infer_type_args`, which takes C types, so `T` became `Int` for every annotation but `Int`). The export gate's `FormatStruct` row (68 files) does not move: its argument is declared `Some[Writer]`, which stays a true limit until the caller is monomorphised.
+
 ## 1.3 One of the 30 should not be in the family at all
 
 `std/gpu/host/nvidia/tma.mojo` is refused because it "imports `.`", and the
@@ -1008,7 +1012,7 @@ a NUL-terminated `char *`, so the interned `""` is the answer and `len` of it is
 `model.gimple_runtime_callable(name, provided)` is the whole rule: every type
 crossing the call boundary is one 64-bit word, AND the symbol is on the link
 line. `GIMPLE_LIST_PREFIX` is **gone** — it was a hand-kept list of prefixes
-standing in for a shape, and the shape answers the same question for all 683
+standing in for a shape, and the shape answers the same question for all 897
 entry points instead of the 40-odd names one prefix covered.
 
 The two halves are independent and both are needed, which is what the prefix
@@ -1019,17 +1023,17 @@ because nothing provides it.
 
 | | measured over all 11 headers in `runtime/` |
 |---|---|
-| entry points declared | 683 |
-| every type crossing the boundary is one word | **272** |
-| a box in an argument or the return | 411 |
-| of the 272, refused only for want of a linked library | 272 |
+| entry points declared | 897 |
+| every type crossing the boundary is one word | **411** |
+| a box in an argument or the return | 486 |
+| of the 411, refused only for want of a linked library | 411 |
 
-**272 of 683 is what a link line converts into working code with no backend
+**411 of 897 is what a link line converts into working code with no backend
 change at all.** For `mojo_sqlite3_*` it is **16 of 22**.
 
-(Re-measured 2026-10-04 on this tree with `formal.model.runtime_abi()`, which
-is the authority and reads the headers rather than repeating this table: 683
-entry points, 272 word-shaped, 411 with a box. The figures above were right for
+(Re-measured 2026-11-07 on this tree with `formal.model.runtime_abi()`, which
+is the authority and reads the headers rather than repeating this table: 897
+entry points, 411 word-shaped, 486 with a box. The figures above were right for
 the tree this section was written on and had been drifting since, which is what
 `test_runtime_header_scan.py`'s census check now prevents — it reads each of
 these numbers out of the file and compares it with the live table, so a comment
@@ -1045,7 +1049,7 @@ heap box" and "for sqlite, **20 of 22** … the only two that are not are
 `mojo_sqlite3_query` and `_query_dict`". Measured, both are off, and the reason
 is worth recording because it is a rule, not a typo:
 
-1. **455 / 352 / 101.** I measure 683 / 510 / 173 by return type alone, and 272
+1. **455 / 352 / 101.** I measure 897 / 703 / 194 by return type alone, and 411
    once the ARGUMENTS are counted too. Neither matches 455/352/101. The
    scanner those numbers were taken with recorded `char *f` as returning `char`
    (see below), so every pointer-returning function was scored as a scalar —
@@ -1091,12 +1095,12 @@ Neither is closed by a test in the tree, so both are in
 
 A word-shaped call is emitted only when the symbol is on the link line, and the
 executable path (`build --formal`, which every suite drives) has no runtime
-library on its link line at all. So today the 272 are refused *for want of a
+library on its link line at all. So today the 411 are refused *for want of a
 library*, which the new message says plainly instead of claiming there is
 nothing to lower. INTERFACE REQUEST to [1] for the optional-runtime-unit
-registry; it is the only thing between the 272 and working code.
+registry; it is the only thing between the 411 and working code.
 
-**Status (2026-11-05):** optional unit registry wired for the formal path: sqlite3 16/22 word-shaped reachable; zlib 2, ssl 11, ncurses 16, metal 5 follow the same path (untested).
+**Status (2026-11-07):** optional unit registry wired for the formal path: sqlite3 16/22 word-shaped reachable; zlib 2, ssl 11, ncurses 16, metal 5 follow the same path (untested).
 
 ---
 

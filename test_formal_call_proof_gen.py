@@ -5484,6 +5484,39 @@ class TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath(unittest.TestCase):
                          "the example's ordinary run test is gone")
 
 
+class TestFunctionValueCallIsRefusedNotCertified(unittest.TestCase):
+    """08d (Reading A of the 08c memo): a call through a function VALUE emits a
+    BLR, the prover has no denotation for the value, and it must REFUSE -- never
+    certify a straight-line walk whose successor is `pc + 4`."""
+
+    SRC = ("def dbl(x: Int) -> Int:\n"
+           "    return x * 2\n"
+           "\n"
+           "def main(n: Int) -> Int:\n"
+           "    var g = dbl\n"
+           "    return g(n)\n")
+
+    def test_refused_with_proof_and_one_blr_without(self):
+        import formal.build as fb
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "fv.mojo")
+            with open(src, "w") as f:
+                f.write(self.SRC)
+            with self.assertRaises(Exception) as cm:
+                fb.compile_formal(src, output=os.path.join(td, "p.aout"),
+                                  arch="arm64", prove=True, check=False)
+            self.assertIn("binds it to nothing", str(cm.exception))
+            out = os.path.join(td, "n.aout")
+            fb.compile_formal(src, output=out, arch="arm64", prove=False,
+                              check=False)
+            with open(out, "rb") as f:
+                data = f.read()
+            blr = [i for i in range(0, len(data) - 3, 4)
+                   if (struct.unpack("<I", data[i:i + 4])[0] & 0xfffffc1f)
+                   == 0xd63f0000]
+            self.assertEqual(len(blr), 1, "expected exactly one BLR word")
+
+
 class TestLoopContractBlocks(unittest.TestCase):
     """Which block is a loop's TEST, asked once and asked right.
 

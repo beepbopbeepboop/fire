@@ -1,4 +1,5 @@
 # plan/step-12b: DECISION MEMO — the Lean contract for an extern whose result is the program's answer (`strlen`)
+**Status: DONE 2026-11-07 (measured).** The memo exists in `bugs/FORMAL_string_value_model.md` ("Extern-result contract" + "Correction and measurement (2026-11-07)"): measured state (model folded to `5`, machine still `extern_strlen_step`, only `main_reaches_call_at_0x1000004bc` proved), and the decision CHANGED from a `sorry`-ed Scaffold theorem to a HYPOTHESIS structure (`StrlenReturns`/`ExternReturn`/`cstring_at`, typechecked in scratch, no `sorry`) in a new `lib/Extern.lean`. Step 12c is rewritten accordingly.
 Class: hard      Size: M      Depends: 12a, 01a, 01b      Blocks: none
 Source: `bugs/FORMAL_string_value_model.md` bullet at line ~801 ("closes when the model gains a `strlen`"); `lib/ProofLib.lean:977`.
 

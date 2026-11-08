@@ -1,4 +1,5 @@
 # plan/step-19c: a real sqlite3 word-shaped call through a formal executable, and the census numbers
+**Status: DONE 2026-11-07 (measured).** `test_optional_unit_word_call_links_and_runs` (arm64 + x86_64: 2 linked dylibs, the second is sqlite3, exit 7 from `mojo_sqlite3_errmsg(0) == 0`) and `test_optional_unit_box_call_is_still_refused` added; `test_formal_runtime_link.py` 213 -> 225 passed, 0 failed. Census figures refreshed to the live ones (897 entry points, 411 word-shaped, 783 in `fire_runtime.h`); `test_runtime_header_scan.py` 43/28 -> 72/0 (the remaining failure was the census quote the plan wave deleted from `formal/build.py`, restored). `test_formal_dylib.py` NOT re-run. zlib/ssl/ncurses/metal untested.
 Class: easy      Size: S      Depends: 19b      Blocks: none
 Source: `bugs/FORMAL_known_limits.md` §3.1.
 

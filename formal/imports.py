@@ -24,6 +24,7 @@ that imports it.
 
 import contextlib
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -2722,6 +2723,14 @@ def instantiation_demands(module_path: str, consumer_src: str,
                 for a in args:
                     if a not in got[name]:
                         got[name].append(a)
+        except MM.MonomorphError as e:
+            # A bound violation of an INFERRED binding is the user's error and the
+            # same refusal the explicit bracket gives (`Box[Cat]`); swallowing it
+            # left a bare call to a bounded template with no instantiation and a
+            # generic "asked for none" message (16e).  Any other inference
+            # failure stays a non-demand.
+            if "does not conform to trait" in str(e):
+                raise
         except Exception:
             pass
         # Refuse type arguments declared only in the consumer's file
@@ -4121,9 +4130,19 @@ def check_library_free_calls(importer_path: str, stmts: list,
             rule, declared = M.export_rule_for(
                 callee.name, exempt[callee.name],
                 source=source_of.get(callee.name))
+            from formal import monomorph as _MM
+            enclosing = next((x for x in stmts
+                              if isinstance(x, F.FunctionDef) and x.body is body),
+                             None)
+            decl = _MM._declared_types_in_scope(body, enclosing)
+            existential = tuple(
+                a.name for a in (getattr(node, "args", None) or [])
+                if isinstance(a, F.IdentExpr)
+                and re.match(r"^Some\b", str(decl.get(a.name) or "")))
             raise ImportBuildError(
                 M.imported_callee_refusal(callee.name, sym, scope,
-                                          rule=rule, declared=declared))
+                                          rule=rule, declared=declared,
+                                          existential_args=existential))
 
 
 def _enclosing_scopes(stmts: list) -> list:

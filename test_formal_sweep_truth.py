@@ -2560,6 +2560,9 @@ class TestOleanCurrency(unittest.TestCase):
         # the currency check's graph a fiction in the one direction that hides a
         # stale `.olean`.
         "Peephole": "import ProofLib\nimport X86\n",
+        # `lib/Extern.lean` (step 12c): contracts for extern calls as hypotheses;
+        # it imports `ProofLib` and nothing else.
+        "Extern": "import ProofLib\n",
         # `lib/Specs.lean`, the independent specification layer: it imports
         # `ProofLib` and nothing else, which is the case the currency check's
         # graph needs — a module at the far end of the tuple whose only edge is
@@ -2691,7 +2694,7 @@ class TestOleanCurrency(unittest.TestCase):
         after = self._digests()
         self.assertEqual({s for s in self.SOURCES if mid[s] != after[s]},
                          {"ProofLib", "X86", "work", "Refine", "Contracts",
-                          "Peephole", "Specs"})
+                          "Peephole", "Extern", "Specs"})
 
     def test_a_touch_is_not_an_edit(self):
         """Content-based, with no `mtime` in the decision — at the DIGEST's

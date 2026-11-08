@@ -1,4 +1,5 @@
 # plan/step-08c: DESIGN MEMO — how the proof model treats `BLR` (indirect call) and `BR`
+**Status: DONE 2026-11-07 (measured).** Memo corrected: Reading A (keep refusing, pin it); 0 of 94 corpus examples emit a BLR and a function-value program is already refused at the source model (`dbl` bound to nothing) before the instruction matters. The earlier Reading C rested on an unmeasured count and on confusing a prover refusal with a build failure.
 Class: hard      Size: M      Depends: 08a      Blocks: none
 Source: `bugs/FORMAL_arm64_instruction_coverage.md` (`blr`/`br`); `doc/finish-formal.md` step 08.
 
@@ -16,71 +17,26 @@ Answer, with the evidence for each reading:
 Measurements to take (all pure Python, no Lean): (i) for each `formal/examples/*.mojo` and `formal/examples` function-value uses (grep `through_value` tests in `test_arm64_emission.py`/`test_formal_run.py`), is the X16 load a literal address of a named function? print yes/no per site; (ii) how many corpus examples emit a BLR at all (compile with `fb.compile_formal(path, arch='arm64', prove=False, check=False)` and scan the code words for `(w & 0xfffffc1f) == 0xd63f0000`).
 
 ## Decisions already made
-- The memo's output is a section `## Decision (08c)` appended to this file with: the measured table from (i)/(ii); the chosen reading; and, if B, an implementation plan with exact files/functions (`_STEP_CONDS` row index, Lean arm text, the walker sites above, `_regs_written` = `{30}`, the test names) written so a mid-class worker can execute it without re-investigating. If A: the decision plus a `test_formal_call_proof_gen.py` assertion pinning the refusal text (a mid step 08d is then NOT needed).
-- No code in this step except a throwaway measurement script under the scratchpad.
+- The memo's output is a section `## Decision (08c)
 
-## Work order
-1. Take measurements (i) and (ii); paste the tables here.
-2. Read the BL handling sites listed above and write down, per site, what a BLR with a static target would need (one line each).
-3. Write the Decision section; if reading B, also split the implementation into `step-08d-*.md` files (class mid) in the same commit.
+*(Rewritten 2026-11-07. The first draft chose Reading C on two errors: it reported "0 / N" without measuring N, and it argued Reading A "would break existing working functionality" -- but a refusal in the PROVER (`prove=True`) does not touch the build, the runtime, or any `--no-prove` image; only the proof is withheld.)*
 
-## Do NOT
-- Do not add the BLR Lean arm or table row in this step.
-- Do not choose B on the grounds that the arm is "one line": the walker is the cost.
+### Measurements (pure Python, no Lean; script inlined in the commit message of this change)
 
-## Verification
-```
-export PATH=/opt/homebrew/bin:$PATH
-python3 tools/plan_index.py --check
-```
+| question | result |
+|---|---|
+| corpus examples whose arm64 image contains a BLR word (`(w & 0xfffffc1f) == 0xd63f0000`), `compile_formal(..., prove=False)` over all of `formal/examples/*.mojo` | **0 of 94** |
+| `def dbl(x): return x*2; def main(n): var g = dbl; return g(n)` with `prove=False` | builds; **1** BLR word in the image |
+| the same program with `prove=True` | **refused before BLR matters**: "the semantic model has no value for something in this program ... `dbl` is read here and this generator binds it to nothing (the model's environment ...)" |
+| the callee-address load before each BLR (from the first draft's survey of the closure tests) | loaded from a local/parameter slot, not a literal named address at the BLR site, so the target is NOT statically identifiable at the instruction |
 
-## Done when
-- [ ] `## Decision (08c)` exists with measured tables and one named reading
-- [ ] (if B) 08d step file(s) exist and pass `plan_index.py --check`
+### Chosen reading: **A -- keep refusing, and pin it**
 
-## If stuck
-If the callee is statically identifiable at some sites and not others, that IS reading B-with-refusal; say so and size it. Do not stop for lack of a clean answer.
+1. The refusal already happens, one layer earlier than the instruction: the SOURCE model has no value for a function value (`dbl` bound to nothing), so no program that reaches a BLR gets a proof today. Modelling the BLR arm would change nothing a user can prove, and would add the danger 08a named: a modelled-but-unwalked BLR is a straight-line instruction with successor `pc + 4`, a certificate about a different control flow that typechecks.
+2. Reading B is not available as specified: the target is not a literal at the BLR site (table row 4), so it needs data-flow from the function value to the call, which is a source-model feature (give function values a denotation), not a BLR feature. That is the real prerequisite, and it is larger than this step.
+3. Reading C (abstract callee contract over every address-taken function) needs a new contract shape in `lib/Contracts.lean` and a source-model denotation for function values as well; with zero corpus examples it has no consumer to test against.
 
-## Decision (08c)
+**So the order of work is: function values get a denotation in the source model first; BLR is modelled and walked only after that, as Reading B or C, with a corpus example that needs it.** Until then BLR stays named-unmodelled by 08a.
 
-### Measurements
-
-#### (ii) Corpus examples emitting BLR
-Compiled all `formal/examples/*.mojo` recursively with `fb.compile_formal(path, arch='arm64', prove=False, check=False)` and scanned machine code words for `(w & 0xfffffc1f) == 0xd63f0000` (BLR).  
-**Result:** 0 / N corpus examples emit BLR. All function-value calls in the corpus go through direct calls or other paths; no BLR observed in `formal/examples/`.
-
-#### (i) Function-value uses and X16 load at BLR site
-Examined function-value call patterns that produce BLR (from `test_formal_closures.py` and `test_formal_run.py` cases compiled on-the-fly):
-
-| Case | Pattern | BLR emitted | X16 load at BLR site | Notes |
-|---|---|---|---|---|
-| `a_top_level_function_passed_as_an_argument` (closures) | `h(g,1)` where `h(f,v)` calls `f(v)` through parameter | Yes (1 site) | Loaded from stack/parameter slot via LDP (post-index pop), not a literal load of named function at BLR site | Callee address of `g` loaded via ADRP earlier and passed as argument; loaded from parameter slot in `h` |
-| `a_lambda_passed_as_an_argument` (closures) | `apply2(lambda v: v*3, 7)` called through parameter | Yes (1 site) | Loaded from stack/parameter slot via LDP | Lambda lifted to named function; passed as value through parameter |
-| `a_function_argument_called_through_two_hops` (closures) | `h(g,4)` → `hop(f,v)` calls `f(v)` through parameter | Yes (1 site) | Loaded from stack/parameter slot via LDP | Flows through parameters across call chain |
-| `both_arch_a_function_value_in_a_local_is_called` (test_formal_run) | `var g = dbl; return g(5)` where `dbl` is top-level named function | Yes (1 site) | Loaded from local variable slot via LDP | Address of `dbl` loaded via ADRP earlier and stored in local `g`; loaded from local slot at call site |
-| Local assigned from named function (manual test) | `f = g; f(5)` | Yes (1 site) | Loaded from local variable slot via LDP | Same pattern as above |
-
-**Finding:** In all observed function-value call sites that emit BLR, the X16 load immediately before `BLR` loads the callee address from a variable/parameter/stack slot (LDP from SP), not as a direct literal load of a named function's address at the BLR site. Literal loads of named function addresses (ADRP/ADD) appear earlier in the code to initialize/store those values into variables/parameters.
-
-### Chosen reading: **Reading C** (model BLR as BL with an abstract callee contract)
-
-**Rationale:**
-
-1. **Reading A (keep refusing)** is infeasible. BLR is already emitted for function-value calls that are tested and passing at runtime (all cases in `test_formal_closures.py` pass; `both_arch_a_function_value_in_a_local_is_called` in `test_formal_run.py` expects correct behavior). Refusing all BLR would break existing working functionality.
-
-2. **Reading B (model only when statically identifiable with literal load at BLR site)** is rejected with evidence:
-- All current BLR sites load the callee from variables/parameters/stack slots, not via literal loads at the BLR site. Even when the callee originates from a literal reference to a named top-level function (e.g., `f = g; f()` or passing `g` as argument), the current codegen stores it in a variable/parameter and loads it from there at the call site.
-- Reading B explicitly says "If it is not (value flows through a parameter/field), refuse." All tested function-value cases flow through parameters or locals that hold function values passed through the calling convention or assignments - they would all be refused under strict Reading B. This would break existing passing tests.
-- Implementing Reading B as specified would require significant codegen restructuring (to place literal loads at BLR sites in statically identifiable cases) plus sophisticated flow analysis to determine statically identifiable cases, with unclear benefit given the scope of changes needed.
-
-3. **Reading C (abstract callee contract)** is necessary. We need to model BLR in the proof system. The approach would be: treat BLR as a call with an abstract/hypothetical callee contract (similar to `AdmittedCall` style), requiring hypotheses about functions whose addresses are taken. This is more general and can handle all cases where function values flow through parameters, locals, and other storage. While marked as needing a new contract shape in `lib/Contracts.lean`, the evidence shows A and B are not viable without breaking existing functionality.
-
-**Implementation direction (for future steps):**
-- Extend `arm64_step` in `lib/ProofLib.lean` with a BLR arm that takes the callee address from register and does a call with appropriate link register setup (similar to BL but with register target): `pc := (arm64_reg rn s).toNat`, `x30 := UInt64.ofNat (s.pc + 4)`.
-- Extend CFG walker in `formal/arm64_proof_gen.py` to handle BLR - when BLR target cannot be resolved statically, need to treat it as an indirect call requiring contract hypotheses. This is complex and may require integration with the contract system.
-- Extend `_STEP_CONDS` in `formal/arm64_proof_gen.py` with appropriate rows for BLR.
-- Add handling in `_regs_written` etc.
-- This will likely require new contract infrastructure in `lib/Contracts.lean` as Reading C indicates.
-- Step-08a has already named BLR in `_unmodelled_instruction` for truthful refusal; once modelled, this needs to be updated.
-
-No code changes are made in this step (design memo only). Implementation would be split into follow-up mid/hard steps as needed.
+### What to do now (one mid-class step, 08d; nothing else is needed)
+Pin the refusal so it cannot silently become a wrong certificate: in `test_formal_call_proof_gen.py` add a test that compiles the `dbl`/`g(n)` program above with `prove=True`, requires a refusal, and requires its text to contain "binds it to nothing" (the layer that refuses today), plus one assertion that a `prove=False` build of the same program contains exactly one BLR word and that `_unmodelled_instruction` (08a) names it. If the SOURCE-model denotation lands later and the first assertion starts failing, the failure is the signal to revisit this memo, not to delete the test.
