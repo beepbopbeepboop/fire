@@ -6312,6 +6312,7 @@ def gen_module_impl(self, stmts: list):
         '_fieldwise_ctor_synthesized': '_Bool',
         'bracket_params': 'MojoList *',
         'type_param_names': 'MojoList *',
+        'keywords': 'MojoList *',
     }
     self.struct_field_types['TraitDef'] = {
         'name': 'char *', 'methods': 'MojoList *', 'decorators': 'MojoList *',
