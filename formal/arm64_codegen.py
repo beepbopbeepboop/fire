@@ -1257,7 +1257,7 @@ dylib_exports: list = None, globals_base: int = None,
             # in `info` for both proof generators to read, because the word an
             # unwinder writes on one side has to mean the same integer on the
             # other (`model.exception_kind_table`'s docstring). Nothing reads it
-            # yet — see the (deleted) doc on the unemitted ARM try-handler arm
+            # yet — see `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md`
             # §5, where this is step 2 of 6. `info` rather than a re-derivation
             # here is the point: x86-64's `info` carries the same table from the
             # same publisher, so a proof that reads one cannot drift from the
@@ -1447,7 +1447,7 @@ dylib_exports: list = None, globals_base: int = None,
         # `SP + k` is INSIDE it and a method that writes its receiver does not
         # satisfy `FrameOk` — which is why the callee contract for a method is
         # `Refine.FrameOk_except`, the predicate
-        # the wide-receiver-by-reference contract (formerly documented in a deleted FORMAL doc) lands for exactly this.
+        # `bugs/formal/FORMAL_wide_receiver_by_reference.md` lands for exactly this.
         # The layout itself is `formal/model.py`'s, so the x86-64 backend
         # reserves the same bytes in the same order.
         self._frame_sites = M.struct_constructor_sites(f, self._structs)
@@ -7223,7 +7223,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         **Two lines of delegation**, and `M.print_kwargs`'s docstring is where
         the decision and its reasons are: `flush=` is answered there (the
         largest `codegen-refused` family in this repository's own source, per
-        the 2026-10-03 proof-coverage census, §0.2), and the rule
+        `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` §0.2), and the rule
         that the keyword is dispatched BEFORE its value is inspected is what
         stops a bool from being refused with a sentence about `sep`."""
         return M.print_kwargs(e, "arm64")
@@ -9044,7 +9044,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         which is another C library call (`__error`) and therefore another
         unfollowable call in a block the proof framework has to cross — so the
         foldable case is refused here, precisely, and the rest is
-        the known limit that integer overflow at run time is still untrapped (deleted FORMAL doc).
+        `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
         """
         reason = M.int_parse_overflow_refusal(
             M.fold_literal_expr(text_expr), base)
@@ -9639,9 +9639,9 @@ ctor_field_value=self._ctor_field_value_for(name),
             # wrapped number or a status code — and the run-time half, the
             # same predicate over a value the build CANNOT know, which a
             # plain `ADD`/`SUB`/`MUL` used to answer with the hardware's
-            # modulo-2^64 wrap (exit 0, empty stderr, the deleted FORMAL
-            # integer-overflow-untrapped doc's `VARIABLE_ROWS` table is the
-            # measurement that pinned it). That
+            # modulo-2^64 wrap (exit 0, empty stderr, `bugs/formal/
+            # FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+            # `VARIABLE_ROWS` table is the measurement that pinned it). That
             # half is `_emit_int_alu_checked`: the flag-setting instruction
             # and the branch into the trap block, with the trap the one
             # answer this path has for a value the target cannot hold.
@@ -12097,8 +12097,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             # lives. `value_callee_can_hold_a_function` above reads the
             # DECLARATION; this reads the FLOW, and neither can see the other:
             # a local bound to `17` has no annotation to refuse on, and
-            # the deleted FORMAL doc on function-value calls not proved to be calls
-            # is what covers what is left when neither has an answer.
+            # `bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
+            # is the doc for what is left when neither has an answer.
             holds = M.callee_word_is_not_an_address(
                 self._cur_fn, name, self._vkinds)
             if holds is not None:
@@ -13687,7 +13687,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             #
             # Both are decidable when the AMOUNT is a literal and the BASE is
             # not, and precisely decidable when both are; the variable-base case
-            # is the known limit that integer overflow at run time is still untrapped (deleted FORMAL doc).
+            # is `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
             reason = M.shift_overflow_refusal(
                 op, M.fold_literal_expr(e.right), M.fold_literal_expr(e.left),
                 [e.left, e.right])

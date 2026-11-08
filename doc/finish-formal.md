@@ -208,10 +208,10 @@ starts with `git status` and checks whether its deliverable already exists.
 **S7. Honest numbering of what was stale in the first draft** (kept so a reader
 of an old copy can translate): line `lib/X86.lean:2830` is `:3016`; the "two
 `ProofLib` sorries at ~4510" do not exist; `test_formal_string_methods.py` is
-`test_formal_str_methods.py`; `FORMAL_generic_monomorph_scope` (deleted),
-`FORMAL_a_one_field_mutator_has_no_method_contract` (deleted),
-`FORMAL_a_try_handler_arm_is_still_never_emitted` (deleted),
-`FORMAL_trust_audit_2026-10-04` and the docs named above were deleted (their inventories must be
+`test_formal_str_methods.py`; `FORMAL_generic_monomorph_scope.md`,
+`FORMAL_a_one_field_mutator_has_no_method_contract.md`,
+`FORMAL_a_try_handler_arm_is_still_never_emitted.md`,
+`FORMAL_trust_audit_2026-10-04.md` do not exist (their inventories must be
 folded into the step that cites them, not "re-created"); and
 `bugs/OPEN_WORK.md`'s generated table lost the rows for FORMAL docs that are
 already gone (that edit is correct and uncommitted — commit it with the rest).

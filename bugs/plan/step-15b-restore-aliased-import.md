@@ -1,7 +1,7 @@
 # plan/step-15b: restore the ALIASED import of a template (`from m import Pair as P` then `P[Int]()`)
 **Status: DONE 2026-11-06 (measured).** 'an aliased import of a template is instantiated' PASSES; `test_formal_monomorph.py` 60/0/0 on 2026-11-06; `local_defining_names` has a definition and its users in `formal/monomorph.py`.
 Class: mid      Size: M      Depends: 15a      Blocks: none
-Source: the deleted generic-monomorph-scope FORMAL doc §2 (git history 4fdf0a95d^, search "ALIASED"); `bugs/FORMAL_known_limits.md` §1.2.
+Source: deleted `bugs/formal/FORMAL_generic_monomorph_scope.md` §2 (`git show 4fdf0a95d^:bugs/formal/FORMAL_generic_monomorph_scope.md`, search "ALIASED"); `bugs/FORMAL_known_limits.md` §1.2.
 
 ## Current state (measured 2026-11-05)
 - The fix existed twice (`7f8629084`, an ancestor of HEAD; `4440853a2` "restore the ALIASED import of a template", on `origin/work/bug-formal-formal-generic-monomorph-scop-5902`, NOT an ancestor). HEAD has neither: `grep -n "alias" formal/monomorph.py` shows only a comment at :1040; there is no `local_defining_names` and `test_formal_monomorph.py` has no case `an aliased import of a template is instantiated`.

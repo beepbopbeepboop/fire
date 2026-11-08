@@ -2600,8 +2600,6 @@ def _mojo_iterable(value):
 # `max(a, b)` compares values and must not turn a struct into a generator.
 _MOJO_ITER_FIRST_ARG = {id(list), id(tuple), id(set), id(frozenset), id(sum),
                         id(sorted), id(enumerate), id(any), id(all), id(dict)}
-if hasattr(builtins, 'frozendict'):
-    _MOJO_ITER_FIRST_ARG.add(id(builtins.frozendict))
 _MOJO_ITER_ALL_ARGS = id(zip)
 _MOJO_ITER_ONE_ARG = {id(_mojo_min), id(_mojo_max)}
 
@@ -3292,110 +3290,6 @@ def _sentinel_builtin():
     return sentinel
 
 
-def _frozendict_builtin():
-    """The `frozendict` builtin (Python 3.15+, PEP 814).
-
-    Returns the host's `builtins.frozendict` when available; otherwise a
-    compatible immutable mapping implementation.
-    """
-    host = getattr(builtins, 'frozendict', None)
-    if host is not None:
-        return host
-
-    class frozendict:
-        __slots__ = ('_data', '_hash')
-
-        def __new__(cls, *args, **kwargs):
-            self = object.__new__(cls)
-            self._data = dict(*args, **kwargs)
-            self._hash = None
-            return self
-
-        @classmethod
-        def fromkeys(cls, iterable, value=None):
-            return cls(dict.fromkeys(iterable, value))
-
-        def __repr__(self):
-            return f"frozendict({self._data!r})"
-
-        def __len__(self):
-            return len(self._data)
-
-        def __contains__(self, item):
-            return item in self._data
-
-        def __getitem__(self, key):
-            return self._data[key]
-
-        def __iter__(self):
-            return iter(self._data)
-
-        def __reversed__(self):
-            return reversed(self._data)
-
-        def __setitem__(self, key, value):
-            raise TypeError("'frozendict' object does not support item assignment")
-
-        def __delitem__(self, key):
-            raise TypeError("'frozendict' object does not support item deletion")
-
-        def keys(self):
-            return self._data.keys()
-
-        def values(self):
-            return self._data.values()
-
-        def items(self):
-            return self._data.items()
-
-        def get(self, key, default=None):
-            return self._data.get(key, default)
-
-        def copy(self):
-            return self
-
-        def __or__(self, other):
-            if isinstance(other, (dict, frozendict)):
-                data = dict(self._data)
-                if isinstance(other, frozendict):
-                    data.update(other._data)
-                else:
-                    data.update(other)
-                return frozendict(data)
-            return NotImplemented
-
-        def __ror__(self, other):
-            if isinstance(other, (dict, frozendict)):
-                if isinstance(other, frozendict):
-                    data = dict(other._data)
-                else:
-                    data = dict(other)
-                data.update(self._data)
-                return frozendict(data)
-            return NotImplemented
-
-        def __hash__(self):
-            if self._hash is None:
-                try:
-                    h = hash(frozenset(self._data.items()))
-                except TypeError:
-                    raise TypeError("unhashable type: 'frozendict'")
-                self._hash = h
-            return self._hash
-
-        def __eq__(self, other):
-            if isinstance(other, frozendict):
-                return self._data == other._data
-            if isinstance(other, dict):
-                return self._data == other
-            return NotImplemented
-
-    frozendict.__name__ = 'frozendict'
-    frozendict.__qualname__ = 'frozendict'
-    frozendict.__module__ = 'builtins'
-    return frozendict
-
-
 class Interpreter:
     """Executes Mojo AST nodes."""
 
@@ -3811,7 +3705,6 @@ class Interpreter:
         # (bytes/bytearray deliberately omitted — the self-hosting codegen
         # doesn't recognize them as callable; see the String ctor note below.)
         self.scope.define('frozenset', frozenset)
-        self.scope.define('frozendict', _frozendict_builtin())
         self.scope.define('object', object)
         self.scope.define('complex', complex)
         self.scope.define('slice', slice)
