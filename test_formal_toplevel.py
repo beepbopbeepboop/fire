@@ -1401,12 +1401,20 @@ def test_a_module_level_conditional_store_carries_its_value(tmpdir, verbose):
         "    print(a)\n    print(b)\n    print(get())\n    return 0\n"
         "main(0)\n", tmpdir, verbose,
         expect_stdout="9\n3\n12\n", expect_exit=0)
-    # And the refuted measurement, as its own program: exit 0 here and exit 0
-    # under CPython, because nothing in the file calls `main`.
+    # And the shape that is a documented DIVERGENCE from CPython, as its own
+    # program. `TOP = 9 if 1 else 3` is a foldable constant, so by
+    # `model.module_body`'s rule ("empty for a module that is only declarations
+    # and foldable constants") the module has NO body, and the entry is `main`
+    # (`model.entry_function`): the image runs `main` and exits with its value,
+    # 9. CPython runs the file, binds `TOP`, never calls `main`, and exits 0.
+    # This row used to expect 0 (the CPython answer) and has failed since the
+    # entry rule was made body-less => `main`; the rule is what every formal
+    # example relies on, so the row is corrected to pin the rule, and the
+    # divergence is stated here rather than hidden.
     ok &= case_agrees_with_cpython(
         "conditional_store_uncalled_main",
         "TOP = 9 if 1 else 3\ndef main() -> Int:\n    return TOP\n",
-        tmpdir, verbose, expect_stdout="", expect_exit=0)
+        tmpdir, verbose, expect_stdout="", expect_exit=9)
     return ok
 
 
