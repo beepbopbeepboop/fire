@@ -12721,7 +12721,7 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
         if ret_type_of.get(last["sym"], "int") not in ("none", "") and last["sym"] not in RESULT_BEARING_EXTERNS:
             last_bl = last["addr"]
             blocks.append(
-                f"/-- All steps after the extern call are verified, GIVEN that the\\n"
+                f"/-- All steps after the extern call are verified, GIVEN that the\n"
                 f"   callee returned to the instruction after the `BL` and left\n"
                 f"   every register and the stack frame otherwise as it found\n"
                 f"   them.  That is the calling convention, and it is an\n"
@@ -14350,8 +14350,8 @@ def generate_arm64_proof(prog, code, info) -> str:
                                             **_ukw)
     if universal_text is not None:
         universal_section = _opaque_note + universal_text
-    if _strlen_extra:
-        universal_section = universal_section + "\n\n" + _strlen_extra
+        if _strlen_extra:
+            universal_section = universal_section + "\n\n" + _strlen_extra
     else:
         raise NotImplementedError(_cfg_decomposition_refusal(
             func_name, code, base_addr, func_entry_addr))
