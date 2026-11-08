@@ -354,7 +354,7 @@ def test_word_shaped_but_not_exported_links_nothing():
     check(name in prepass(src),
           'but the pre-pass does name it — word-shaped is the first half only',
           str(prepass(src)))
-    check(B._runtime_library_for([], 'arm64', 'macho')[0] is None,
+    check(B._runtime_library_for([], 'arm64', 'macho')[0] == [],
           'a program naming no runtime call at all links nothing')
     msg = build_expecting_refusal(src, 'missingonly')
     check('is on the line and does not export this name' in msg,
