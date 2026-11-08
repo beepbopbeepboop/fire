@@ -92,3 +92,49 @@ theorem set_reg_x30_same (s : Arm64State) (v : UInt64) :
     (arm64_set_reg 30 s v).x30 = v := by
   unfold arm64_set_reg
   simp
+
+
+/-! ## The write-back contract of a by-reference one-field setter
+
+A method that takes a pointer to a cell in the CALLER's frame (`x0`) and a value
+(`x1`) and stores the value there.  The contract is a DEFINITION of what the
+method does, quantified over runs; whether a given image's method satisfies it
+is what a finder certificate has to establish (and is the open obligation of
+step 18's discharge).  Before 2026-11-08 this was an `opaque` predicate under two
+`sorry` theorems in `Scaffold.lean`; `opaque` is an axiom as far as the trust
+census is concerned, and the consequence below is a one-line proof, so the
+honest shape is the definition plus the theorem.  Memo: `bugs/FORMAL_known_limits.md`
+§6.3.
+-/
+
+/-- `code`, entered at `entry` with `x0` the cell pointer `p` and `x1` the value
+    `v`, runs to `exit_pc` having stored `v` in the cell and changed nothing
+    outside the cell and the callee's stack window `[sp - W, sp)`.  The cell is
+    the CALLER's word, so it lies above the window (`h_above`); `FrameFits` says
+    the 8-byte cell does not wrap. (`Frame.FrameBelow` is the wrong premise here:
+    it is for receiver frames at the callee's entry `sp`.) -/
+def CellSetMethod (code : Nat → UInt8) (entry exit_pc W : Nat) : Prop :=
+  ∀ (s s' : Arm64State) (p v : UInt64) (fuel : Nat),
+    s.pc = entry → s.x0 = p → s.x1 = v →
+    Frame.FrameFits p 1 → s.sp.toNat + W ≤ p.toNat →
+    arm64_exec_go_exit s code exit_pc fuel = some s' →
+    Frame.frameRead s'.mem p 0 = v ∧
+    ∀ a, (a < p.toNat ∨ p.toNat + 8 ≤ a) →
+      (a < s.sp.toNat - W ∨ s.sp.toNat ≤ a) → s'.mem a = s.mem a
+
+/-- A call to a method satisfying `CellSetMethod` writes the cell and disturbs
+    nothing else; the depth bound is the hypothesis `h_above`, never an axiom.
+    Every RET of a multi-exit method returns through the same `x30`, so this one
+    statement serves single- and multi-exit setters; what a multi-exit method owes
+    is a per-RET case split in the proof of `CellSetMethod` itself. -/
+theorem cell_writeback
+    (s s' : Arm64State) (code : Nat → UInt8) (exit_pc fuel : Nat) (p v : UInt64) (W : Nat)
+    (hmeth : CellSetMethod code s.pc exit_pc W)
+    (hx0 : s.x0 = p) (hx1 : s.x1 = v)
+    (hfit : Frame.FrameFits p 1)
+    (h_above : s.sp.toNat + W ≤ p.toNat)
+    (hrun : arm64_exec_go_exit s code exit_pc fuel = some s') :
+    Frame.frameRead s'.mem p 0 = v ∧
+    ∀ a, (a < p.toNat ∨ p.toNat + 8 ≤ a) →
+      (a < s.sp.toNat - W ∨ s.sp.toNat ≤ a) → s'.mem a = s.mem a :=
+  hmeth s s' p v fuel rfl hx0 hx1 hfit h_above hrun

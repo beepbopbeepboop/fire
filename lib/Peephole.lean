@@ -1417,6 +1417,19 @@ example (s : X86State) (code : Nat → UInt8) (m : Nat)
   have h_idx : 0 + x86_rex_r (0x48 : UInt8) < 16 := by decide
   exact peephole_x86_mov_self_rev s code m 0x48 0xc0 0 0 h_rip h_b0 h_b1 h_b2 h_rex h_w h_mod h_reg h_rm h_same h_idx t hs
 
+/-- `subs x, x, #1` does not set the overflow flag when `x` is below `2^63` and
+    nonzero: `x - 1` stays in the signed range, so `b.vs` (condition 6) is not
+    taken.  The fact a decrement loop's overflow-trap branch needs to fall
+    through (`while_dec_exit_contract_lt`, step 06d/wdiff). -/
+theorem subs_one_no_overflow (a : UInt64) (hlt : a.toNat < 9223372036854775808)
+    (hne : a ≠ 0) :
+    arm64_matches_condition 6 (arm64_subs_flags a 1) = false := by
+  have h : a < 9223372036854775808 := by
+    rw [UInt64.lt_iff_toNat_lt]; simpa using hlt
+  unfold arm64_matches_condition arm64_subs_flags
+  bv_normalize
+  bv_decide
+
 /-!
 ## Design note (x86_64/imm_zero) — for a later hard round
 The sound statement is "for every continuation whose first flag access is a

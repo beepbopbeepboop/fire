@@ -27,16 +27,6 @@ SCAFFOLD_HOLES: dict[str, Hole] = {
         "census positive control; delete when the first real scaffold lands",
         "control",
     ),
-    "scaffold_cell_writeback_one_exit": Hole(
-        "step-18d",
-        "by-reference one-field mutator write-back (single exit): depth bound as hypothesis, obligation to prove; statement real, premises hmeth (opaque CellSetMethod) / hfit / h_above",
-        "scaffold",
-    ),
-    "scaffold_cell_writeback_multi_exit": Hole(
-        "step-18d",
-        "by-reference one-field mutator write-back (multiple exits): per-exit obligation scaffolded; same conclusion, one case per RET",
-        "scaffold",
-    ),
 }
 
 

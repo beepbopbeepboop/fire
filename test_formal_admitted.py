@@ -1293,7 +1293,7 @@ LIBRARY_TRUST = {
     # pass performs is one whose soundness does not rest on a decision
     # procedure's fidelity. Nine `bv_decide` sites, no `sorry`.
     # 2026-11-06: 88 = the `hne_*` chains of arm64_step_{add_imm64,ldr64,str64,movz64} (bv_decide).
-    "Peephole": (0, 0, 88, 88),
+    "Peephole": (0, 0, 89, 89),
     # `lib/Specs.lean`, added 2026-10-05: the INDEPENDENT specification layer
     # (reference definitions for the classic example programs, written by hand
     # in `Nat`/`Int`/`List`).  Zero at 0 and zero at 1, and the zero at column 2
@@ -1305,7 +1305,7 @@ LIBRARY_TRUST = {
     # real `#print axioms` run over all 55 declarations.
     "Extern": (0, 0, 0, 0),
     "Specs": (0, 0, 0, 0),
-    "Scaffold": (0, 3, 0, 0),
+    "Scaffold": (0, 1, 0, 0),
 }
 
 #: What the CLOSURE census measured, per module: how many theorems were asked,
@@ -1367,9 +1367,9 @@ LIBRARY_TRUST = {
 AXIOM_CLOSURE = {
     #            asked  reaches  clean  text_only  closure_only  ofReduceBool
     "Contracts": (7, 0, 7, 0, 0, 0),
-    "Extern": (9, 0, 9, 0, 0, 0),
+    "Extern": (10, 0, 10, 0, 0, 0),
     "IEEE754": (26, 19, 7, 0, 0, 0),
-    "Peephole": (43, 4, 31, 0, 8, 0),
+    "Peephole": (44, 5, 31, 0, 8, 0),
     "ProofLib": (273, 17, 250, 0, 6, 0),
     "ProofLibSteps": (0, 0, 0, 0, 0, 0),
     "ProofLibSteps1": (22, 20, 2, 0, 0, 0),
@@ -1381,7 +1381,7 @@ AXIOM_CLOSURE = {
     "ProofLibSteps7": (6, 6, 0, 0, 0, 0),
     "ProofLibSteps8": (5, 5, 0, 0, 0, 0),
     "Refine": (29, 0, 29, 0, 0, 0),
-    "Scaffold": (3, 0, 3, 0, 0, 0),
+    "Scaffold": (1, 0, 1, 0, 0, 0),
     "Specs": (67, 0, 67, 0, 0, 0),
     "X86": (175, 2, 172, 0, 1, 0),
     "work": (20, 0, 18, 0, 2, 0),
