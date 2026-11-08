@@ -4058,6 +4058,7 @@ UNREGISTERED = {
     'test_runtime_class_creation.py': _STANDALONE_TEST_REASON,
     'test_runtime_cstr_region.py': _STANDALONE_TEST_REASON,
     'test_str_slice_tuple_return.py': _STANDALONE_TEST_REASON,
+    'test_suite_sweep_map_guard.py': _STANDALONE_TEST_REASON,
     'test_untyped_closure_str_return.py': _STANDALONE_TEST_REASON,
     'tools/test_control_pool.py': _STANDALONE_TEST_REASON,
     'tools/test_fleet_ledger.py': _STANDALONE_TEST_REASON,
@@ -5981,6 +5982,14 @@ def test_the_formal_doc_index_is_current():
           'nothing to undo')
 
 
+# The ONE consolidated map the pins below look for, named once: the missing-
+# file guard in `test_formal_sweep_work_map_index_tags_only_from_section3` and
+# the regression test in `test_suite_sweep_map_guard.py` (which renames it to
+# prove the guard reports a named check failure instead of raising) must agree
+# on the path, or each side can drift to a file the other does not see.
+SWEEP_WORK_MAP = os.path.join(HERE, 'bugs', 'FORMAL_sweep_work_map.md')
+
+
 def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
     """Twenty per-round work maps became one, and the two halves of that are
     what can rot again.
@@ -6014,9 +6023,10 @@ def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
        that check cannot see because the path it names DOES resolve.
     """
     import glob
-    maps = sorted(glob.glob(os.path.join(HERE, 'bugs',
-                                        'FORMAL_sweep_work_map*.md')))
-    canonical = 'FORMAL_sweep_work_map.md'
+    map_dir = os.path.dirname(SWEEP_WORK_MAP)
+    map_stem = os.path.splitext(os.path.basename(SWEEP_WORK_MAP))[0]
+    maps = sorted(glob.glob(os.path.join(map_dir, map_stem + '*.md')))
+    canonical = os.path.basename(SWEEP_WORK_MAP)
     check('sweep maps: there is exactly ONE per-round map, and it is the '
           'consolidated one',
           [os.path.basename(m) for m in maps] == [canonical],
@@ -6080,8 +6090,15 @@ def test_formal_sweep_work_map_index_tags_only_from_section3():
     conditions.
     """
     import re
-    index = open(os.path.join(HERE, 'bugs', 'FORMAL_sweep_work_map.md'),
-                 encoding='utf-8').read()
+    path = SWEEP_WORK_MAP
+    if not os.path.exists(path):
+        check('sweep map index: the consolidated work map exists',
+              False,
+              f'{os.path.relpath(path, HERE)} is missing; the index-tag checks '
+              f'need it, and the "one consolidated map" pin above is the '
+              f'primary report')
+        return
+    index = open(path, encoding='utf-8').read()
     m3 = re.search(r'^## 3\..*?(?=^## \d+\.|\Z)', index, re.M | re.S)
     check('sweep map index: §3, the round index, exists', m3 is not None,
           'a citation of a round resolves into the index, and a document '
