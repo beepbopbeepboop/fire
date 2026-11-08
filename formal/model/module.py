@@ -1995,13 +1995,18 @@ def _generic_inference_tail(name: str) -> str:
 
 def imported_callee_refusal(name: str, sym, fn_name: str,
                             rule: str = None, declared=None,
-                            existential_args=()) -> str:
+                            existential_args=(), alias_of=None) -> str:
     """See `_imported_callee_refusal`; `existential_args` names the call's
     arguments declared `Some[...]` (16e, Q2 B1), which adds the sentence that is
     true of them: an existential is not a concrete type, so no instantiation can
     be inferred from it."""
-    text = _imported_callee_refusal(name, sym, fn_name, rule=rule,
+    text = _imported_callee_refusal(alias_of or name, sym, fn_name, rule=rule,
                                     declared=declared)
+    if alias_of and alias_of != name:
+        mod = getattr(sym, "module", None) or "the module"
+        text = (f"`{name}` is this file's own alias for `{alias_of}` "
+                f"(`from {mod} import {alias_of} as {name}`); the call binds "
+                f"`{alias_of}`, so that is the name below. ") + text
     if existential_args:
         text += (" The argument" + ("s " if len(existential_args) > 1 else " ")
                  + ", ".join(f"`{a}`" for a in existential_args)
