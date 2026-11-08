@@ -949,6 +949,55 @@ def _gen_stmt_NonlocalStmt(gen, node):
         gen._func_declared_nonlocals.add(name)
 
 
+def _comptime_for_unroll_ctype(values):
+    """The ctype a comptime-for loop variable must be declared with so it can
+    hold every value in `values`: bool/int -> `int64_t` (the variable's
+    historical ctype — bool elements assign through the existing int-coercing
+    path, so a bool column stays exactly what it always emitted), str ->
+    `char *`. `None` when the values do not share one representable ctype
+    (an empty list, object values, or a mix such as Int and String).
+    `None` is NOT "do not unroll": the caller falls back to the historical
+    `int64_t` declaration and still unrolls the body — the per-element
+    assignment chain emits only bool/int/str, so such elements simply get no
+    assignment while their comptime values are inlined into the body (the
+    `DType.int8`-list shape in test/bit/test_bit.mojo unrolls 12 body
+    executions that reference no C variable at all; dropping the loop there
+    silently deleted the test body). The established emit-nothing fallback
+    belongs to the non-const case (an element `_eval_const` cannot resolve),
+    which is decided by the caller's `all_ok` gate before this helper runs.
+
+    The caller has to declare the variable in this ctype BEFORE the
+    per-element assignments: the 2026-11-07 stdlib-syntax red
+    (`benchmarks/collections/string/bench_atof.mojo`'s
+    `comptime for filename in files`, `std/sys/info.mojo`'s
+    `comptime for arch in <list>`) was the int64_t default declared first
+    and the string assignment `filename = "canada";` emitted second — a hard
+    gcc error. The wrong declaration shipped silently because the str
+    assignment used to die in the `AttributeError` of the missing
+    `_emit_string_literal` method (whose addition for the self-host link
+    error is what woke the path up); deriving one ctype from the elements
+    and declaring it once, before any assignment, is what rules that shape
+    out.
+
+    An isinstance chain, not a `type()`-keyed lookup: a type()-keyed dict is
+    unreliable in the self-hosted binary (see `_selfhost_literal_ctype`'s
+    own note); no set algebra, so the helper lowers the same self-hosted.
+    """
+    _single = None
+    for _v in values:
+        if isinstance(_v, bool) or isinstance(_v, int):
+            _ct = 'int64_t'
+        elif isinstance(_v, str):
+            _ct = 'char *'
+        else:
+            return None
+        if _single is None:
+            _single = _ct
+        elif _ct != _single:
+            return None
+    return _single
+
+
 def _gen_stmt_ComptimeForStmt(gen, node):
     unrolled = False
     if (isinstance(node.iterable, gimple_ctypes.CallExpr) and
@@ -1122,9 +1171,15 @@ def _gen_stmt_ComptimeForStmt(gen, node):
         if all_ok and not for_target_is_tuple(node.target):
             dst = gen.var_types.get(node.target)
             if dst is None:
-                if cvals and all(isinstance(_v, str) for _v in cvals):
-                    dst = 'char *'
-                else:
+                # The elements decide the loop variable's ctype (a string
+                # list is `char *`, not the old int64_t default — see
+                # `_comptime_for_unroll_ctype` for the red that shipped).
+                # None (object values, mixed or empty) keeps the historical
+                # int64_t default and unrolls the body exactly as before:
+                # such elements emit no assignment, only their comptime
+                # values are inlined (see the helper's note).
+                dst = _comptime_for_unroll_ctype(cvals)
+                if dst is None:
                     dst = 'int64_t'
                 gen._declare_var(node.target, dst)
             _ct_saved = (node.target in gen._comptime_vals,
@@ -1178,11 +1233,16 @@ def _gen_stmt_ComptimeForStmt(gen, node):
             if _ok_unpack and _rows:
                 for _ci, _t in enumerate(_names):
                     if _t not in gen.var_types:
-                        _col = [_row[_ci] for _row in _rows]
-                        if _col and all(isinstance(_v, str) for _v in _col):
-                            gen._declare_var(_t, 'char *')
-                        else:
-                            gen._declare_var(_t, 'int64_t')
+                        # Per-column ctype, declared before the assignments:
+                        # a string column under the int64_t default is the
+                        # same red as the single-variable case above.
+                        # None keeps the historical int64_t default (see the
+                        # helper's note on the object/mixed/empty case).
+                        _ct = _comptime_for_unroll_ctype(
+                            [_r[_ci] for _r in _rows])
+                        if _ct is None:
+                            _ct = 'int64_t'
+                        gen._declare_var(_t, _ct)
                 _ct_saved = [(n, n in gen._comptime_vals,
                               gen._comptime_vals.get(n)) for n in _names]
                 for _row in _rows:
@@ -1226,9 +1286,14 @@ def _gen_stmt_ComptimeForStmt(gen, node):
             if not for_target_is_tuple(node.target):
                 dst = gen.var_types.get(node.target)
                 if dst is None:
-                    if cvals and all(isinstance(_v, str) for _v in cvals):
-                        dst = 'char *'
-                    else:
+                    # The elements decide the loop variable's ctype (a string
+                    # list is `char *`, not the old int64_t default — see
+                    # `_comptime_for_unroll_ctype` for the red that shipped).
+                    # None (object values, mixed or empty) keeps the
+                    # historical int64_t default and unrolls the body exactly
+                    # as before (see the helper's note).
+                    dst = _comptime_for_unroll_ctype(cvals)
+                    if dst is None:
                         dst = 'int64_t'
                     gen._declare_var(node.target, dst)
                 _ct_saved = (node.target in gen._comptime_vals,
@@ -1269,11 +1334,15 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                 if _ok_unpack and _rows:
                     for _ci, _t in enumerate(_names):
                         if _t not in gen.var_types:
-                            _col = [_row[_ci] for _row in _rows]
-                            if _col and all(isinstance(_v, str) for _v in _col):
-                                gen._declare_var(_t, 'char *')
-                            else:
-                                gen._declare_var(_t, 'int64_t')
+                            # Per-column ctype, declared before the
+                            # assignments (see the literal-list sibling above).
+                            # None keeps the historical int64_t default (see
+                            # the helper's note on the object/mixed/empty case).
+                            _ct = _comptime_for_unroll_ctype(
+                                [_r[_ci] for _r in _rows])
+                            if _ct is None:
+                                _ct = 'int64_t'
+                            gen._declare_var(_t, _ct)
                     _ct_saved = [(n, n in gen._comptime_vals,
                                   gen._comptime_vals.get(n)) for n in _names]
                     for _row in _rows:

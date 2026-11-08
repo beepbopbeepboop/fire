@@ -37,6 +37,752 @@ _COMPARE_OPS = {'==', '!=', '<', '>', '<=', '>=', 'in', 'not in', 'is', 'is not'
 _GENEXP_ITER_NAME = '__mojo_genexp_iter__'
 
 
+# ---------------------------------------------------------------------------
+# CPython 3.15 "improved error messages" (What's New in 3.15): an UNCAUGHT
+# AttributeError is printed with a suggestion computed at PRINT time from two
+# fields the exception carries — `name` (the attribute that failed) and
+# `obj` (the object the lookup ran on) — exactly the fields CPython's
+# Lib/traceback.py reads (gh-146406, gh-136588). The machinery splits in two,
+# mirroring CPython's own split:
+#
+#   * `_tag_attribute_error` — the RAISE half. Every missing-attribute
+#     AttributeError in this file is built and tagged through it, so the
+#     exception carries the context no matter how it surfaces.
+#   * `attribute_error_suggestion` — the PRINT half. fire.py's top-level
+#     error printing calls it for an uncaught AttributeError and appends its
+#     result to the message. Because it runs at print time only, an
+#     AttributeError caught in user code stays plain — the same
+#     caught-plain/uncaught-suggested split CPython 3.15 measures.
+#
+# The fields are set with setattr() rather than member syntax because this
+# file self-hosts and the self-hosting compiler has no field table for
+# builtin exception attributes (the `e.code` note in fire.py).
+# ---------------------------------------------------------------------------
+
+def _tag_attribute_error(exc, obj, name):
+    """Attach CPython 3.15's `name`/`obj` fields to a missing-attribute
+    AttributeError so the print-time suggestion pass can compute its hint
+    from the real object, not by re-parsing the message string."""
+    setattr(exc, 'name', name)
+    setattr(exc, 'obj', obj)
+    return exc
+
+
+def _tag_name_error(exc, scope, name):
+    """Attach CPython 3.15's NameError-suggestion context to a `name` lookup
+    failure, at RAISE time: the print-time half computes the suggestion from
+    the failing frame's pool, but this interpreter's NameErrors carry no
+    CPython traceback frame (they are raised by this file's Scope, not by
+    CPython's name resolution), so the frame's contents are captured here,
+    while the exception still carries exactly the frame that failed:
+
+      * `name` — the lookup that failed (CPython's exc.name);
+      * `candidates` — CPython's `f_locals + f_globals + f_builtins` of the
+        failing frame. In this interpreter's scope model the current scope's
+        vars are the frame locals and the module (root) scope's vars are the
+        globals plus the builtins (setup_builtins binds them there); a
+        module-level failure duplicates the root scope once, exactly as
+        CPython duplicates the module dict (its f_locals IS its f_globals);
+      * `self_obj` — the frame's `self` (None when absent), for CPython's
+        `self.<name>` refinement (a bare name that is really an instance
+        attribute of the frame's `self`).
+
+    set with setattr() for the same self-host reason as
+    `_tag_attribute_error` (no field table for builtin exception attributes).
+    """
+    root = scope
+    while root.parent is not None:
+        root = root.parent
+    candidates = list(scope.vars)
+    candidates = candidates + list(root.vars)
+    self_obj = None
+    if 'self' in scope.vars:
+        self_obj = scope.vars['self']
+    setattr(exc, 'name', name)
+    setattr(exc, 'candidates', candidates)
+    setattr(exc, 'self_obj', self_obj)
+    return exc
+
+
+# Cross-language / wrong-type AttributeError hints, ported from CPython
+# 3.15.2's Lib/traceback.py `_CROSS_LANGUAGE_HINTS` (gh-146406). Each entry
+# maps the wrong name to a list of (type, hint, is_raw) triples checked in
+# order; the first isinstance() match wins. is_raw=False renders the hint as
+# "Did you mean '.<hint>'?", is_raw=True renders it verbatim.
+#
+# The `update` entry names `frozendict` (Python 3.15+), so the type is looked
+# up defensively — the tree's interpreter floor is 3.12 (CLAUDE.md) and a
+# bare name would be a NameError on older hosts.
+_FROZENDICT_TYPE = getattr(builtins, 'frozendict', None)
+_UPDATE_ENTRIES = ((frozenset, "Did you mean to use a 'set' object?", True),)
+if _FROZENDICT_TYPE is not None:
+    _UPDATE_ENTRIES = _UPDATE_ENTRIES + (
+        (_FROZENDICT_TYPE, "Did you mean to use a 'dict' object?", True),)
+_CROSS_LANGUAGE_ATTR_HINTS = {
+    # list -- JavaScript/Ruby equivalents
+    'push': ((list, 'append', False),),
+    'concat': ((list, 'extend', False),),
+    # list -- Java/C# equivalents
+    'addAll': ((list, 'extend', False),),
+    'contains': ((list, "Use 'x in list'.", True),),
+    # list -- wrong-type suggestion (user expected a set)
+    'add': ((list, "Did you mean to use a 'set' object?", True),
+            (frozenset, "Did you mean to use a 'set' object?", True)),
+    # str -- JavaScript equivalents
+    'toUpperCase': ((str, 'upper', False),),
+    'toLowerCase': ((str, 'lower', False),),
+    'trimStart': ((str, 'lstrip', False),),
+    'trimEnd': ((str, 'rstrip', False),),
+    # dict -- Java/JavaScript equivalents
+    'keySet': ((dict, 'keys', False),),
+    'entrySet': ((dict, 'items', False),),
+    'entries': ((dict, 'items', False),),
+    'putAll': ((dict, 'update', False),),
+    'put': ((dict, 'Use d[k] = v.', True),),
+    # tuple -- mutable method on immutable type (user expected a list)
+    'append': ((tuple, "Did you mean to use a 'list' object?", True),),
+    'extend': ((tuple, "Did you mean to use a 'list' object?", True),),
+    'insert': ((tuple, "Did you mean to use a 'list' object?", True),),
+    'remove': ((tuple, "Did you mean to use a 'list' object?", True),
+               (frozenset, "Did you mean to use a 'set' object?", True)),
+    # frozenset -- mutable method on immutable type (user expected a set)
+    'discard': ((frozenset, "Did you mean to use a 'set' object?", True),),
+    # frozenset/frozendict -- `update` on an immutable mapping/set
+    'update': _UPDATE_ENTRIES,
+    # float -- bitwise operators belong to int
+    '__or__': ((float, "Did you mean to use an 'int' object? "
+                       "Bitwise operators are not supported by 'float'.", True),),
+    '__and__': ((float, "Did you mean to use an 'int' object? "
+                        "Bitwise operators are not supported by 'float'.", True),),
+    '__xor__': ((float, "Did you mean to use an 'int' object? "
+                        "Bitwise operators are not supported by 'float'.", True),),
+    '__lshift__': ((float, "Did you mean to use an 'int' object? "
+                           "Bitwise operators are not supported by 'float'.", True),),
+    '__rshift__': ((float, "Did you mean to use an 'int' object? "
+                           "Bitwise operators are not supported by 'float'.", True),),
+}
+
+
+def _cross_language_attr_hint(obj, name):
+    """CPython 3.15's `_get_cross_language_hint`: the static-table half of
+    the suggestion, checked FIRST (it is more specific than distance).
+    Returns the hint text, or None."""
+    entries = _CROSS_LANGUAGE_ATTR_HINTS.get(name)
+    if entries is None:
+        return None
+    for check_type, hint, is_raw in entries:
+        if isinstance(obj, check_type):
+            if is_raw:
+                return hint
+            return f"Did you mean '.{hint}'?"
+    return None
+
+
+# CPython 3.15's Levenshtein costs (Lib/traceback.py / Python/suggestions.c):
+# a plain substitution or move costs 2, a case-only difference costs 1.
+_ATTR_MOVE_COST = 2
+_ATTR_CASE_COST = 1
+_ATTR_MAX_CANDIDATE_ITEMS = 750
+_ATTR_MAX_STRING_SIZE = 40
+
+# CPython 3.10+ exposes the set of stdlib module names (used by the
+# NameError "did you forget to import" refinement). Looked up defensively —
+# the self-hosted binary's `sys` is a stub (sys.argv/sys.path only, see
+# emit_exprs.py's module-attribute special cases), so a bare attribute read
+# would raise there; the empty default just withholds that one refinement
+# in the compiled path, like the other documented self-host gaps.
+_STDLIB_MODULE_NAMES = getattr(sys, 'stdlib_module_names', ())
+
+
+def _suggestion_normalize(name):
+    """CPython 3.15's `_compute_suggestion_error` NFKC preamble, shared by ALL
+    four branches (AttributeError, ModuleNotFoundError, ImportError,
+    NameError): a non-ASCII name that changes under NFKC normalization is
+    matched under its normalized form, and if that normalized form is present
+    in the candidate pool it is the answer outright (a "found" miss is never
+    suggested). Returns (normalized_name, was_changed)."""
+    if name.isascii():
+        return name, False
+    try:
+        import unicodedata
+        normalized = unicodedata.normalize('NFKC', name)
+    except ImportError:
+        normalized = name
+    if normalized == name:
+        return name, False
+    return normalized, True
+
+
+def _attr_substitution_cost(a, b):
+    """CPython 3.15.2's Python/suggestions.c substitution_cost, on bytes:
+    the low-five-bits test is its ASCII case-fold (no two ASCII letters
+    differ only in case can collide with a non-letter), then an explicit
+    A-Z check. CPython runs the whole match on the UTF-8 bytes of the
+    names, so a non-ASCII name gets exactly the C behavior."""
+    if (a & 31) != (b & 31):
+        # Not the same, not a case flip.
+        return _ATTR_MOVE_COST
+    if a == b:
+        return 0
+    if 65 <= a <= 90:
+        a += 32
+    if 65 <= b <= 90:
+        b += 32
+    if a == b:
+        return _ATTR_CASE_COST
+    return _ATTR_MOVE_COST
+
+
+def _attr_levenshtein_distance(a: str, b: str, max_cost: int) -> int:
+    """Port of CPython 3.15.2's Python/suggestions.c:levenshtein_distance —
+    the engine behind `_suggestions._generate_suggestions`, the fast path
+    Lib/traceback.py consults before its pure-Python fallback. (The
+    fallback differs in a way that matters: it seeds best_distance with
+    len(name) instead of infinity, silently dropping close matches on
+    short names — 'ge' -> 'get', 'po' -> 'pop'.) CPython operates on the
+    UTF-8 bytes of the names; we do the same. Single rolling row, common-
+    affix trimming, early bail-out when the running minimum exceeds
+    max_cost.
+
+    The trimming is tracked as OFFSETS into the byte sequences rather than
+    as slices: `a = a[pre:]` rebinds a local to a differently-typed value,
+    which the self-host lowering cannot express — it cast the `MojoBytes *`
+    to `char *` and ran the DP on a struct address, so this shape keeps
+    the encoded sequences in their own variables and indexes them with
+    `pre + i`."""
+    a_bytes = a.encode('utf-8')
+    b_bytes = b.encode('utf-8')
+    if a_bytes == b_bytes:
+        return 0
+
+    # Trim away common affixes.
+    pre = 0
+    alen = len(a_bytes)
+    blen = len(b_bytes)
+    while pre < alen and pre < blen and a_bytes[pre] == b_bytes[pre]:
+        pre += 1
+    post = 0
+    while post < alen - pre and post < blen - pre \
+            and a_bytes[alen - 1 - post] == b_bytes[blen - 1 - post]:
+        post += 1
+    alen -= pre + post
+    blen -= pre + post
+    if alen == 0 or blen == 0:
+        return _ATTR_MOVE_COST * (alen + blen)
+    if alen > _ATTR_MAX_STRING_SIZE or blen > _ATTR_MAX_STRING_SIZE:
+        return max_cost + 1
+
+    # Prefer shorter buffer — the trim offsets are common to both
+    # sequences, so each surviving range is [pre, pre + len).
+    if blen < alen:
+        a_bytes, b_bytes = b_bytes, a_bytes
+        alen, blen = blen, alen
+
+    # Quick fail when a match is impossible
+    if (blen - alen) * _ATTR_MOVE_COST > max_cost:
+        return max_cost + 1
+
+    # Instead of producing the whole traditional len(a)-by-len(b)
+    # matrix, we can update just one row in place.
+    row = list(range(_ATTR_MOVE_COST, _ATTR_MOVE_COST * (alen + 1), _ATTR_MOVE_COST))
+
+    result = 0
+    for bindex in range(blen):
+        bbyte = b_bytes[pre + bindex]
+        distance = result = bindex * _ATTR_MOVE_COST
+        minimum = sys.maxsize
+        for index in range(alen):
+            # 1) Previous distance in this row is cost(b[:bindex], a[:index])
+            substitute = distance + _attr_substitution_cost(bbyte, a_bytes[pre + index])
+            # 2) cost(b[:bindex], a[:index+1]) from previous row
+            distance = row[index]
+            # 3) existing result is cost(b[:bindex+1], a[:index])
+            insert_delete = min(result, distance) + _ATTR_MOVE_COST
+            result = min(insert_delete, substitute)
+
+            # cost(b[:bindex+1], a[:index+1])
+            row[index] = result
+            if result < minimum:
+                minimum = result
+        if minimum > max_cost:
+            # Everything in this row is too big, so bail early.
+            return max_cost + 1
+    return result
+
+
+def _attr_cp_levenshtein_distance(a: str, b: str, max_cost: int) -> int:
+    """Lib/traceback.py's pure-Python fallback (the pass CPython 3.15 runs
+    when the C module finds nothing): the same rolling-row algorithm, but on
+    CODE POINTS instead of UTF-8 bytes, and its substitution cost is
+    `str.lower()`-based, so a Unicode case flip ('É'->'é') costs 1 here
+    where the C byte pass (the low-five-bits trick) costs 2. On pure-ASCII
+    input the two passes agree on distance, and the fallback's best_distance
+    seed (len(name) rather than infinity) only ever TIGHTENS the window — so
+    the fallback can only ADD a match when non-ASCII is involved, which is
+    why `_attr_close_match` runs it only in that case."""
+    if a == b:
+        return 0
+
+    # Trim away common affixes.
+    pre = 0
+    while pre < len(a) and pre < len(b) and a[pre] == b[pre]:
+        pre += 1
+    a = a[pre:]
+    b = b[pre:]
+    post = 0
+    while post < len(a) and post < len(b) \
+            and a[len(a) - 1 - post] == b[len(b) - 1 - post]:
+        post += 1
+    if post:
+        a = a[:len(a) - post]
+        b = b[:len(b) - post]
+    if not a or not b:
+        return _ATTR_MOVE_COST * (len(a) + len(b))
+    if len(a) > _ATTR_MAX_STRING_SIZE or len(b) > _ATTR_MAX_STRING_SIZE:
+        return max_cost + 1
+
+    # Prefer shorter buffer
+    if len(b) < len(a):
+        a, b = b, a
+
+    # Quick fail when a match is impossible
+    if (len(b) - len(a)) * _ATTR_MOVE_COST > max_cost:
+        return max_cost + 1
+
+    # Instead of producing the whole traditional len(a)-by-len(b)
+    # matrix, we can update just one row in place.
+    row = list(range(_ATTR_MOVE_COST, _ATTR_MOVE_COST * (len(a) + 1), _ATTR_MOVE_COST))
+
+    result = 0
+    for bindex in range(len(b)):
+        bchar = b[bindex]
+        bchar_lower = bchar.lower()
+        distance = result = bindex * _ATTR_MOVE_COST
+        minimum = sys.maxsize
+        for index in range(len(a)):
+            # 1) Previous distance in this row is cost(b[:bindex], a[:index])
+            # CPython's fallback `_substitution_cost`: equal -> 0, a
+            # case-only flip -> _CASE_COST, else _MOVE_COST.
+            achar = a[index]
+            if bchar == achar:
+                cost = 0
+            elif bchar_lower == achar.lower():
+                cost = _ATTR_CASE_COST
+            else:
+                cost = _ATTR_MOVE_COST
+            substitute = distance + cost
+            # 2) cost(b[:bindex], a[:index+1]) from previous row
+            distance = row[index]
+            # 3) existing result is cost(b[:bindex+1], a[index])
+
+            insert_delete = min(result, distance) + _ATTR_MOVE_COST
+            result = min(insert_delete, substitute)
+
+            # cost(b[:bindex+1], a[:index+1])
+            row[index] = result
+            if result < minimum:
+                minimum = result
+        if minimum > max_cost:
+            # Everything in this row is too big, so bail early.
+            return max_cost + 1
+    return result
+
+
+def _suggestion_two_passes(d, name):
+    """CPython 3.15's distance-match tail, shared by ALL four
+    `_compute_suggestion_error` branches: the C module (`_suggestions`,
+    Python/suggestions.c) on UTF-8 BYTES with best_distance seeded at
+    infinity, then Lib/traceback.py's pure-Python fallback on CODE POINTS
+    with best_distance seeded at len(name) — and the two DISAGREE on
+    non-ASCII input (a Unicode case flip costs 2 in the byte pass, 1 in the
+    fallback; byte windows are wider but byte distances are bigger too), so
+    for example 'caf' -> 'café' is only found by the second pass. Returns the
+    closest candidate, or None.
+
+    `d` must already be branch-filtered (the underscore rule differs per
+    branch: the attr branch hides underscored candidates for a non-
+    underscored miss, the import branch only does so when `name_from` is
+    non-underscored, the NameError and ModuleNotFoundError branches filter
+    nothing) and `name` NFKC-normalized (the shared preamble). CPython's caps
+    apply verbatim: the C-module pass is skipped at 750+ candidates, the
+    fallback gives up at 751+ candidates and at a 40-code-point name. The
+    AttributeError branch must additionally skip its nested check after a
+    fallback cap — it decides that from the same caps, not from this
+    function's return value (a cap and a genuine no-match both return
+    None)."""
+    # Pass 1: the C module, on UTF-8 bytes, best_distance seeded at
+    # infinity, per-candidate max-distance window in BYTE lengths.
+    pass1_ran = len(d) < _ATTR_MAX_CANDIDATE_ITEMS
+    if pass1_ran:
+        wrong_name_bytes = len(name.encode('utf-8'))
+        best_distance = sys.maxsize
+        suggestion = None
+        for possible_name in d:
+            if possible_name == name:
+                # A missing attribute is "found". Don't suggest it (GH-88821).
+                continue
+            # No more than 1/3 of the involved characters should need changed.
+            item_bytes = len(possible_name.encode('utf-8'))
+            max_distance = (item_bytes + wrong_name_bytes + 3) * _ATTR_MOVE_COST // 6
+            # Don't take matches we've already beaten.
+            max_distance = min(max_distance, best_distance - 1)
+            current_distance = _attr_levenshtein_distance(name, possible_name, max_distance)
+            if current_distance > max_distance:
+                continue
+            if not suggestion or current_distance < best_distance:
+                suggestion = possible_name
+                best_distance = current_distance
+        if suggestion is not None:
+            return suggestion
+    # Pass 2: the pure-Python fallback, on code points, best_distance
+    # seeded at len(name). On pure-ASCII input it can only agree with or
+    # tighten pass 1, so when pass 1 RAN it is only worth running when
+    # non-ASCII is involved. That early return must NOT apply when pass 1
+    # was skipped by the 750 cap: at exactly 750 candidates CPython's C
+    # module gives up (its own cap) and the fallback is the only pass left,
+    # and it runs for ASCII too (test_name_error_caps_match_cpython pins
+    # the boundary).
+    if len(d) > _ATTR_MAX_CANDIDATE_ITEMS:
+        return None
+    if len(name) > _ATTR_MAX_STRING_SIZE:
+        return None
+    if pass1_ran:
+        _non_ascii = not name.isascii()
+        if not _non_ascii:
+            for n in d:
+                if not n.isascii():
+                    _non_ascii = True
+                    break
+        if not _non_ascii:
+            return None
+    wrong_name_len = len(name)
+    best_distance = wrong_name_len
+    suggestion = None
+    for possible_name in d:
+        if possible_name == name:
+            # A missing attribute is "found". Don't suggest it (GH-88821).
+            continue
+        # No more than 1/3 of the involved characters should need changed.
+        max_distance = (len(possible_name) + wrong_name_len + 3) * _ATTR_MOVE_COST // 6
+        # Don't take matches we've already beaten.
+        max_distance = min(max_distance, best_distance - 1)
+        current_distance = _attr_cp_levenshtein_distance(name, possible_name, max_distance)
+        if current_distance > max_distance:
+            continue
+        if not suggestion or current_distance < best_distance:
+            suggestion = possible_name
+            best_distance = current_distance
+    return suggestion
+
+
+def _suggestion_after_pool(d, name, not_normalized):
+    """The tail of CPython 3.15's `_compute_suggestion_error` every branch
+    shares AFTER its candidate pool is computed: the NFKC early return (a
+    name that normalization changed and which the pool contains is the
+    answer outright), then the distance match. Returns the suggestion or
+    None."""
+    if not_normalized and name in d:
+        return name
+    return _suggestion_two_passes(d, name)
+
+
+def _safe_dir(obj):
+    """CPython 3.15's `_get_safe___dir__` (its lazy-import filter has no
+    counterpart in this dialect): the names a successful `obj.<name>` lookup
+    could resolve to — the candidate pool CPython's traceback.py feeds its
+    matcher — obj.__dir__(), with CPython's `type(obj).__dir__(obj)` fallback
+    for the TypeError case (obj is a class), strings only, sorted. Shared by
+    the AttributeError branch (`_attr_candidates`) and the ImportError
+    branch (`import_error_suggestion`)."""
+    try:
+        names = obj.__dir__()
+    except TypeError:
+        names = type(obj).__dir__(obj)
+    return sorted(n for n in names if isinstance(n, str))
+
+
+def _attr_candidates(obj):
+    """The names a successful `obj.<name>` lookup could resolve to — the
+    candidate pool CPython's traceback.py feeds its matcher (its
+    `_get_safe___dir__`, i.e. the object's dir()). For a MojoInstance the
+    dir() machinery cannot see the Mojo method/alias tables (they live
+    outside the Python type), so those are added explicitly; for a
+    MojoClass, the methods/fields/aliases it presents. Host objects use
+    `_safe_dir`."""
+    if isinstance(obj, (MojoInstance, MojoClass)):
+        names = set()
+        if isinstance(obj, MojoInstance):
+            names.update(obj.__dict__)
+            names.update(obj._mojo_class.methods)
+            names.update(obj._mojo_class.comptime_aliases)
+        else:
+            names.update(obj.methods)
+            names.update(obj.comptime_aliases)
+            for f in obj.fields:
+                if hasattr(f, 'name'):
+                    names.add(f.name)
+        return sorted(n for n in names if isinstance(n, str))
+    return _safe_dir(obj)
+
+
+def _attr_close_match(obj, name):
+    """CPython 3.15's Levenshtein half of `_compute_suggestion_error`:
+    the closest resolvable attribute name to a misspelled one, or None.
+
+    Candidate filtering follows CPython: no underscored names unless the
+    wrong name is underscored (CPython's refinement — also allowing
+    underscored candidates when the failing access was `self.x` — needs the
+    traceback frame, which the print-time half here does not carry). The
+    distance match itself is the engine every branch shares
+    (`_suggestion_two_passes`); the caps live there too, and a fallback cap
+    aborts CPython's function WITHOUT the nested check — so it is rechecked
+    here (a cap and a genuine no-match both return None from the engine,
+    but only the former must skip the nested check)."""
+    name, not_normalized = _suggestion_normalize(name)
+    d = _attr_candidates(obj)
+    if name[:1] != '_':
+        d = [n for n in d if n[:1] != '_']
+    suggestion = _suggestion_after_pool(d, name, not_normalized)
+    if suggestion is None and len(d) <= _ATTR_MAX_CANDIDATE_ITEMS \
+            and len(name) <= _ATTR_MAX_STRING_SIZE:
+        # If no direct attribute match found, check for nested attributes
+        # (CPython's `_check_for_nested_attribute`: the What's New 3.15
+        # `container.area` -> `.inner.area` case).
+        suggestion = _attr_nested_match(obj, name, d)
+    return suggestion
+
+
+def _attr_nested_match(obj, name, candidates):
+    """CPython 3.15's `_check_for_nested_attribute`: when no attribute of
+    `obj` is a close match, look one level down — a member of obj that ITSELF
+    has `name`. Returns the dotted path (`inner.area`) or None. Mirrors
+    CPython's scan: ONLY non-underscored outer attributes — CPython re-
+    filters here, so even an underscored misspelling on `object()` gets no
+    nested suggestion (`__class__` does carry `__static_attributes__`, but
+    the underscored outer attribute is out of scope) — capped at 20 in
+    sorted order, errors while fetching a member are ignored (a failing
+    member cannot be the answer). CPython also skips descriptor outer
+    attributes and probes the member statically (`getattr_static`) so no
+    getter runs during error printing; the `hasattr` here agrees on plain
+    data and only diverges on a member whose `name` is a property that
+    raises — an under-suggestion on a cold path, not a false one."""
+    if isinstance(obj, MojoInstance):
+        # Instance fields only — the plain data members, no method-table
+        # values to fetch (CPython's equivalent skips descriptors for the
+        # same reason: fetching them runs code during error printing).
+        members = {n: obj.__dict__[n] for n in obj.__dict__
+                   if isinstance(n, str) and n[:1] != '_'}
+    else:
+        members = {}
+        checked = 0
+        for n in candidates:
+            if n[:1] == '_':
+                continue
+            if checked >= 20:
+                break
+            checked += 1
+            try:
+                members[n] = getattr(obj, n)
+            except Exception:
+                continue
+    for n in sorted(members)[:20]:
+        member = members[n]
+        try:
+            if hasattr(member, name):
+                return f"{n}.{name}"
+        except Exception:
+            continue
+    return None
+
+
+def attribute_error_suggestion(obj, name):
+    """CPython 3.15's print-time AttributeError suggestion, as the suffix to
+    append to the message: '' when there is nothing to add. Priority is
+    CPython's: the static cross-language/wrong-type table first, then the
+    distance-based close match (with the nested-attribute fallback). The
+    renderings are CPython 3.15.2's verbatim (Lib/traceback.py).
+
+    `obj` is the object the failed lookup ran on — which may itself be None
+    (`None.append(1)`); CPython computes suggestions for that too (dunder
+    candidates for underscored names), so there is no None short-circuit.
+    The caller is responsible for only invoking this when the exception
+    actually carried an `obj` field (see fire.py's `name` guard)."""
+    if not isinstance(name, str):
+        return ''
+    hint = _cross_language_attr_hint(obj, name)
+    if hint:
+        return f". {hint}"
+    suggestion = _attr_close_match(obj, name)
+    if suggestion is None:
+        return ''
+    if suggestion.isascii():
+        return f". Did you mean '.{suggestion}' instead of '.{name}'?"
+    return f". Did you mean '.{suggestion}' ({suggestion!a}) instead of '.{name}' ({name!a})?"
+
+
+def _module_not_found_candidates(name):
+    """CPython 3.15's ModuleNotFoundError candidate pool: every module spec
+    the import machinery can discover — for each finder in sys.meta_path
+    that carries a `discover` hook (in 3.15 only PathFinder does), the specs
+    it reports relative to the missing name's parent package. Mirrors
+    traceback.py's `_compute_suggestion_error` MNE branch verbatim: a dotted
+    miss probes `importlib.util.find_spec(parent)` (which yields None for a
+    missing parent — discover(None) then lists top-level names, CPython's
+    behavior), and ANY failure — e.g. a parent that is not a package
+    (frozen `os`: `import os.path2` raises ValueError inside discover) —
+    means no candidates at all, i.e. no suggestion."""
+    try:
+        import importlib.util
+        parent_name = name.rpartition('.')[0]
+        if parent_name:
+            parent = importlib.util.find_spec(parent_name)
+        else:
+            parent = None
+        d = []
+        for finder in sys.meta_path:
+            discover = getattr(finder, 'discover', None)
+            if discover is not None:
+                d += [spec.name for spec in discover(parent)]
+    except Exception:
+        return None
+    return d
+
+
+def module_not_found_suggestion(name):
+    """CPython 3.15's print-time ModuleNotFoundError suggestion, as the
+    suffix to append to the message: '' when there is nothing to add. The
+    real ModuleNotFoundError already carries `name` (the module that was not
+    found), so no raise-side tagging is needed. The rendering is 3.15.2's
+    verbatim (`. Did you mean: '<s>'?` — the MNE branch has no `!a`
+    rendering of its own; a module name is an identifier and CPython's MNE
+    branch prints it bare)."""
+    if not isinstance(name, str):
+        return ''
+    name, not_normalized = _suggestion_normalize(name)
+    d = _module_not_found_candidates(name)
+    if d is None:
+        return ''
+    suggestion = _suggestion_after_pool(d, name, not_normalized)
+    if suggestion is None:
+        return ''
+    return f". Did you mean: '{suggestion}'?"
+
+
+def import_error_suggestion(mod_name, name_from):
+    """CPython 3.15's print-time ImportError suggestion for a `from X import
+    Y` miss — an ImportError carrying `name` (module X) and `name_from`
+    (attribute Y) — as the suffix to append: '' when there is nothing to
+    add. Candidates are X's dir() (`_safe_dir`, CPython's `_get_safe___dir__`),
+    re-filtered to non-underscored names when Y is non-underscored
+    (CPython re-filters here, mirroring the attr branch), then the shared
+    distance match. The rendering is 3.15.2's verbatim (`. Did you mean:
+    '<s>'?`, with the `!a` parens for a non-ASCII suggestion).
+    `__import__` failing (module X gone by print time) means no candidates,
+    CPython's try/except-returns-None."""
+    if not isinstance(name_from, str) or not isinstance(mod_name, str):
+        return ''
+    name, not_normalized = _suggestion_normalize(name_from)
+    try:
+        mod = __import__(mod_name)
+        d = _safe_dir(mod)
+    except Exception:
+        return ''
+    if name[:1] != '_':
+        d = [x for x in d if x[:1] != '_']
+    suggestion = _suggestion_after_pool(d, name, not_normalized)
+    if suggestion is None:
+        return ''
+    if suggestion.isascii():
+        return f". Did you mean: '{suggestion}'?"
+    return f". Did you mean: '{suggestion}' ({suggestion!a})?"
+
+
+def name_error_suggestion(name, candidates, self_obj):
+    """CPython 3.15's print-time NameError suggestion, as the suffix to
+    append to the message: '' when there is nothing to add. CPython reads
+    the failing frame's pool (f_locals + f_globals + f_builtins) and `self`
+    off the traceback at print time; this interpreter's NameErrors carry
+    those captured at RAISE time instead (`_tag_name_error`), so `candidates`
+    and `self_obj` are the fields the exception carries — `candidates` None
+    for a NameError that never went through this interpreter's Scope (e.g.
+    one CPython raised itself), for which there is no frame to read and no
+    suggestion, exactly CPython's tb-is-None behavior.
+
+    CPython's order: the NFKC early return, then the `self.<name>`
+    refinement (a bare name that is really an instance attribute of the
+    frame's `self`), then the shared distance match. The renderings are
+    3.15.2's verbatim (`. Did you mean: '<s>'?` with `!a` parens for a
+    non-ASCII suggestion), plus CPython's forgot-to-import refinement: when
+    the misspelling IS a stdlib module name, append ` Or did you forget to
+    import '<name>'?` after a suggestion, or `. Did you forget to import
+    '<name>'?` when there is none."""
+    if not isinstance(name, str) or candidates is None:
+        return ''
+    d = [x for x in candidates if isinstance(x, str)]
+    name_n, not_normalized = _suggestion_normalize(name)
+    suggestion = None
+    if not_normalized and name_n in d:
+        suggestion = name_n
+    else:
+        if self_obj is not None:
+            try:
+                if hasattr(self_obj, name_n):
+                    suggestion = f"self.{name_n}"
+            except Exception:
+                pass
+        if suggestion is None:
+            suggestion = _suggestion_after_pool(d, name_n, not_normalized)
+    if suggestion is None:
+        if name in _STDLIB_MODULE_NAMES:
+            return f". Did you forget to import '{name}'?"
+        return ''
+    if suggestion.isascii():
+        suffix = f". Did you mean: '{suggestion}'?"
+    else:
+        suffix = f". Did you mean: '{suggestion}' ({suggestion!a})?"
+    if name in _STDLIB_MODULE_NAMES:
+        suffix += f" Or did you forget to import '{name}'?"
+    return suffix
+
+
+def error_suggestion_suffix(e):
+    """CPython 3.15's print-time suggestion suffix for ANY of the exception
+    types its improved error messages cover — AttributeError,
+    ModuleNotFoundError, ImportError (a `from X import Y` miss, the ones
+    carrying `name_from`), NameError — '' when CPython appends nothing.
+    fire.py appends it to an UNCAUGHT exception's message; an exception
+    caught in user code never goes through it, preserving CPython's
+    caught-plain/uncaught-suggested split.
+
+    The dispatch mirrors Lib/traceback.py's order: ModuleNotFoundError
+    before a bare ImportError (it is an ImportError subclass), and only
+    `from`-miss ImportErrors carry `name_from`, so the two are disjoint in
+    practice. Every guard is the one CPython applies (a str `name` field,
+    `name_from is not None`, ...)."""
+    if isinstance(e, AttributeError):
+        aname = getattr(e, 'name', None)
+        if isinstance(aname, str):
+            return attribute_error_suggestion(getattr(e, 'obj', None), aname)
+        return ''
+    if isinstance(e, ModuleNotFoundError):
+        mname = getattr(e, 'name', None)
+        if isinstance(mname, str):
+            return module_not_found_suggestion(mname)
+        return ''
+    if isinstance(e, ImportError):
+        fname = getattr(e, 'name_from', None)
+        if isinstance(fname, str):
+            return import_error_suggestion(getattr(e, 'name', None), fname)
+        return ''
+    if isinstance(e, NameError):
+        nname = getattr(e, 'name', None)
+        if isinstance(nname, str):
+            return name_error_suggestion(
+                nname, getattr(e, 'candidates', None), getattr(e, 'self_obj', None))
+        return ''
+    return ''
+
+
 class ReturnValue(Exception):
     """Exception used to implement return statements."""
     def __init__(self, value=None):
@@ -107,9 +853,18 @@ class Scope:
     def get(self, name: str):
         if name in self.vars:
             return self.vars[name]
-        if self.parent:
-            return self.parent.get(name)
-        raise NameError(f"name '{name}' is not defined")
+        # Walk the chain iteratively (the old recursion raised in the ROOT
+        # scope): the lookup either finds the nearest binding in the same
+        # order, or fails with the exception tagged at THIS scope — the
+        # frame that failed — which is what CPython 3.15's print-time
+        # NameError suggestion needs (see _tag_name_error).
+        scope = self.parent
+        while scope is not None:
+            if name in scope.vars:
+                return scope.vars[name]
+            scope = scope.parent
+        raise _tag_name_error(
+            NameError(f"name '{name}' is not defined"), self, name)
 
     def has(self, name: str) -> bool:
         if name in self.vars:
@@ -129,10 +884,20 @@ class Scope:
     def delete(self, name: str):
         if name in self.vars:
             del self.vars[name]
-        elif self.parent:
-            self.parent.delete(name)
-        else:
-            raise NameError(f"name '{name}' is not defined")
+            return
+        # Walk the chain iteratively (the old recursion raised in the ROOT
+        # scope): the delete finds the nearest binding in the same order, or
+        # fails with the exception tagged at THIS scope — the frame that
+        # failed — for CPython 3.15's print-time NameError suggestion (see
+        # _tag_name_error).
+        scope = self.parent
+        while scope is not None:
+            if name in scope.vars:
+                del scope.vars[name]
+                return
+            scope = scope.parent
+        raise _tag_name_error(
+            NameError(f"name '{name}' is not defined"), self, name)
 
 
 def _split_invoker(owner_interp, args) -> tuple:
@@ -1313,7 +2078,9 @@ class MojoInstance:
             return BoundMethod(method, self, cls.interpreter)
         if name in cls.comptime_aliases:
             return cls.comptime_aliases[name]
-        raise AttributeError(f"'{cls.name}' object has no attribute '{name}'")
+        raise _tag_attribute_error(
+            AttributeError(f"'{cls.name}' object has no attribute '{name}'"),
+            self, name)
 
     def _write_via(self, method_name):
         """Call a user-defined `write_to`/`write_repr_to(self, mut writer)`
@@ -1566,7 +2333,9 @@ class MojoClass:
             # ctypes/wintypes.py's `PFILETIME = POINTER(FILETIME)` raised
             # "'FILETIME' object has no attribute '__name__'".
             return self.name
-        raise AttributeError(f"'{self.name}' object has no attribute '{name}'")
+        raise _tag_attribute_error(
+            AttributeError(f"'{self.name}' object has no attribute '{name}'"),
+            self, name)
 
     def __call__(self, *args, **kwargs):
         instance = MojoInstance(self)
@@ -3085,7 +3854,9 @@ class _MojoSuper:
             return object.__getattribute__(self, name)
         if name in base_cls.comptime_aliases:
             return base_cls.comptime_aliases[name]
-        raise AttributeError(f"super object has no attribute '{name}'")
+        raise _tag_attribute_error(
+            AttributeError(f"super object has no attribute '{name}'"),
+            self, name)
 
 
 _AUTO_STUB_VALUE = 0
@@ -3185,8 +3956,10 @@ class _MojoModuleObject(types.SimpleNamespace):
         try:
             return self.__modvars__[name]
         except KeyError:
-            raise AttributeError(
-                f"module '{self.__modname__}' has no attribute '{name}'")
+            raise _tag_attribute_error(
+                AttributeError(
+                    f"module '{self.__modname__}' has no attribute '{name}'"),
+                self, name)
 
     def __setattr__(self, name, value):
         self.__modvars__[name] = value
@@ -3195,8 +3968,10 @@ class _MojoModuleObject(types.SimpleNamespace):
         try:
             del self.__modvars__[name]
         except KeyError:
-            raise AttributeError(
-                f"module '{self.__modname__}' has no attribute '{name}'")
+            raise _tag_attribute_error(
+                AttributeError(
+                    f"module '{self.__modname__}' has no attribute '{name}'"),
+                self, name)
 
     def __dir__(self):
         return sorted(set(self.__modvars__) | set(object.__dir__(self))
@@ -6071,7 +6846,13 @@ class Interpreter:
         try:
             return self.scope.get(expr.name)
         except NameError:
-            raise NameError(f"{self._loc(expr)}name '{expr.name}' is not defined")
+            # Re-raise with the source location, tagged like the original:
+            # scope.get raises through _tag_name_error (name/candidates/
+            # self_obj), and this new exception must carry the same fields
+            # for CPython 3.15's print-time NameError suggestion.
+            raise _tag_name_error(
+                NameError(f"{self._loc(expr)}name '{expr.name}' is not defined"),
+                self.scope, expr.name)
 
     def _resolve_Self(self, expr):
         """Resolve Self to the current struct type (when inside a struct method)."""
@@ -6683,9 +7464,13 @@ class Interpreter:
                 return BoundMethod(method, obj, self)
             if expr.member in obj._mojo_class.comptime_aliases:
                 return obj._mojo_class.comptime_aliases[expr.member]
-            raise AttributeError(f"{self._loc(expr)}'{obj._mojo_class.name}' object has no attribute '{expr.member}'")
+            raise _tag_attribute_error(
+                AttributeError(f"{self._loc(expr)}'{obj._mojo_class.name}' object has no attribute '{expr.member}'"),
+                obj, expr.member)
         if not hasattr(obj, expr.member):
-            raise AttributeError(f"{self._loc(expr)}'{type(obj).__name__}' object has no attribute '{expr.member}'")
+            raise _tag_attribute_error(
+                AttributeError(f"{self._loc(expr)}'{type(obj).__name__}' object has no attribute '{expr.member}'"),
+                obj, expr.member)
         return getattr(obj, expr.member)
 
     def eval_SubscriptExpr(self, expr):

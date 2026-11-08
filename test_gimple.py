@@ -2712,9 +2712,57 @@ def foo() -> Int:
     return s
 """), 'comptime_for_range_start_stop')
 
-    # 140a. comptime for over a string list (alias/resolved iterable) —
-    # regression: the unroller must declare the loop var as char*, not
-    # int64_t, when elements are strings (bench_atof.mojo, sys/info.mojo).
+    # 140a. comptime for over a string literal list — the loop variable must
+    # be declared `char *`. This is the 2026-11-07 stdlib-syntax red: the
+    # unroller declared the variable `int64_t` BEFORE looking at the elements,
+    # then emitted `filename = "canada";` into it (benchmarks/collections/
+    # string/bench_atof.mojo, std/sys/info.mojo) — a hard gcc error under
+    # -fgimple. Before the fix the str assignment also died in the
+    # AttributeError of the missing `_emit_string_literal` method, so the
+    # red was latent until that method landed and woke the path. Assert the
+    # declaration AND that the generated C still compiles.
+    _run_isolated(lambda: test_c_shape(
+        "comptime_for_str_list_loop_var_is_char_star", """\
+def foo() -> Int:
+    var s: Int = 0
+    comptime for name in ["canada", "mesh"]:
+        s = s + 1
+    return s
+""", ['char * name'], ['int64_t name']),
+        'comptime_for_str_list_loop_var_is_char_star')
+
+    # 140b. The same red through the non-literal (comptime alias) branch:
+    # `comptime files = [...]; comptime for filename in files` — the exact
+    # shape of bench_atof.mojo's main(). The resolved iterable is still a
+    # list of str, so the variable must be `char *` there too.
+    _run_isolated(lambda: test_c_shape(
+        "comptime_for_str_alias_list_loop_var_is_char_star", """\
+comptime files = ["canada", "mesh"]
+
+def foo() -> Int:
+    var s: Int = 0
+    comptime for filename in files:
+        s = s + 1
+    return s
+""", ['char * filename'], ['int64_t filename']),
+        'comptime_for_str_alias_list_loop_var_is_char_star')
+
+    # 140c. The int path of the same declaration must stay untouched: an int
+    # literal list still declares `int64_t` (not `char *`) and still unrolls
+    # the body with the per-element assignments.
+    _run_isolated(lambda: test_c_shape(
+        "comptime_for_int_list_keeps_int64_t", """\
+def foo() -> Int:
+    var s: Int = 0
+    comptime for i in [1, 2, 3]:
+        s = s + i
+    return s
+""", ['int64_t i', 'i = 1LL', 'i = 3LL', 's + i'], ['char * i']),
+        'comptime_for_int_list_keeps_int64_t')
+
+    # 140d. comptime for over a string list (alias/resolved iterable) —
+    # regression (master): the unroller must declare the loop var as char*,
+    # not int64_t, when elements are strings (bench_atof.mojo, sys/info.mojo).
     _run_isolated(lambda: test("comptime_for_string_list", """\
 comptime NAMES = ["ab", "cd", "ef"]
 
