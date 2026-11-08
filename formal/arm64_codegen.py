@@ -12127,6 +12127,17 @@ ctor_field_value=self._ctor_field_value_for(name),
         if not is_extern_call and name == "range":
             self._emit_range_list(list(e.args))
             return
+        # `str(<integer literal>)` / `repr(<integer literal>)` is a build-time
+        # constant: the literal's decimal text, interned like any string
+        # literal. No buffer, no pointer arithmetic, same on both architectures.
+        # (`str(n)` of a RUN-TIME integer stays refused: formatting needs a
+        # buffer that outlives the call, which this path does not have.)
+        if not is_extern_call and name in ("str", "repr") \
+                and len(e.args) == 1 and not e.kwargs:
+            _lit = M.integer_literal_text(e.args[0])
+            if _lit is not None:
+                self._emit_expr(F.StringLiteral(_lit))
+                return
         if not is_extern_call and M.emitter_lowers(name):
             if name == "len":
                 self._emit_len(e)

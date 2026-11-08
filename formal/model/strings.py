@@ -2287,6 +2287,20 @@ def printf_runtime_text_widths(callee: str, fmt_text, args: list,
 PRINTF_RUNTIME_ELEMENT_HELPER = "mojo_char_at_str_cp"
 
 
+def integer_literal_text(node):
+    """The decimal text of an integer LITERAL (`42`, `-7`), or None.
+
+    `str(42)` and `repr(42)` are build-time constants on both architectures
+    (`str`/`repr` of a run-time integer needs a buffer this path does not have)."""
+    import fire_compiler as F
+    if isinstance(node, F.IntLiteral) and not isinstance(node.value, bool):
+        return str(int(node.value))
+    if isinstance(node, F.UnaryOp) and getattr(node, "op", None) == "-" \
+            and isinstance(getattr(node, "operand", None), F.IntLiteral):
+        return str(-int(node.operand.value))
+    return None
+
+
 def printf_runtime_element_operands(callee: str, fmt_text, args: list,
                                      is_string_subscript=None) -> list:
     """`[(operand index, spec)]` for each plain `%c` whose operand is `name[i]`
