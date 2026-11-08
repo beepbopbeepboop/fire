@@ -1303,6 +1303,7 @@ LIBRARY_TRUST = {
     # would be resting on the same unverified evaluation the layer exists to
     # check.  `AXIOM_CLOSURE`'s row below is what decided that, read out of a
     # real `#print axioms` run over all 55 declarations.
+    "Extern": (0, 0, 0, 0),
     "Specs": (0, 0, 0, 0),
     "Scaffold": (0, 3, 0, 0),
 }
