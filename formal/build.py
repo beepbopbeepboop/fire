@@ -21843,7 +21843,13 @@ def _runtime_word_calls(ordered: list) -> list:
 
 
 def _runtime_library_for(ordered: list, arch: str, fmt: str):
-    """(list of lib entries, covered names) for runtime libraries."""
+    """(list of lib entries, covered names) for runtime libraries.
+
+    The tree-level figures live in one place and are checked against the live
+    census by `test_runtime_header_scan.py` — `bugs/FORMAL_known_limits.md`
+    §3.1 for the word-shaped surface (897 entry points, 411 of them word-shaped,
+    measured over every header in `runtime/`).
+    """
     named = _runtime_word_calls(ordered)
     if not named or fmt != "macho":
         return [], []

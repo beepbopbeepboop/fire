@@ -200,6 +200,44 @@ def test_word_shaped_call_links_and_runs():
               f"{arch}: mojo_print's output reaches stdout", repr(out))
 
 
+SQLITE_CALL = (
+    "def main():\n"
+    "    mojo_sqlite3_close(0)\n"
+    "    if mojo_sqlite3_errmsg(0) == 0:\n"
+    "        return 7\n"
+    "    return 1\n"
+)
+
+
+def test_optional_unit_word_call_links_and_runs():
+    """19c: a word-shaped call into an OPTIONAL runtime unit (sqlite3) links the
+    unit beside the core library and runs.  `mojo_sqlite3_close(0)` is a no-op and
+    `mojo_sqlite3_errmsg(0)` is NULL, so the exit code is a deterministic host
+    value (no live handle is obtainable from a formal program)."""
+    for arch in ('arm64', 'x86_64'):
+        r = build(SQLITE_CALL, 'sqlitecall', arch=arch)
+        libs = [os.path.basename(p) for p in r["linked_dylibs"]]
+        check(len(libs) == 2, f"{arch}: core + the sqlite3 unit are linked", str(libs))
+        check(any('sqlite3' in b for b in libs),
+              f"{arch}: the second library is the sqlite3 unit", str(libs))
+        rc, out = run(r)
+        check(rc == 7, f"{arch}: mojo_sqlite3_errmsg(0) is NULL (exit 7)",
+              f'exit {rc!r}, stdout {out!r}')
+
+
+def test_optional_unit_box_call_is_still_refused():
+    """19c: the safe word-shaped sqlite3 call does not make a box-shaped one
+    buildable: `mojo_sqlite3_open` in the same program keeps the box refusal."""
+    msg = build_expecting_refusal(
+        "def main():\n"
+        "    mojo_sqlite3_close(0)\n"
+        "    var db = mojo_sqlite3_open(\":memory:\")\n"
+        "    return 0\n", 'sqlitebox')
+    check(msg != '', 'a program with a sqlite3 box-shaped call is refused')
+    check('mojo_sqlite3_open' in msg, 'and the refusal names the entry point',
+          msg[:200])
+
+
 def test_image_carries_the_load_command():
     # `otool -L` is not this repository. If the build's own report of its link
     # line and an unrelated tool disagree, the tool is right.
@@ -1139,6 +1177,8 @@ def test_a_void_return_is_a_legal_call_and_an_illegal_value():
 
 def main():
     test_word_shaped_call_links_and_runs()
+    test_optional_unit_word_call_links_and_runs()
+    test_optional_unit_box_call_is_still_refused()
     test_image_carries_the_load_command()
     test_box_surface_still_refused()
     test_float_surface_refused()
