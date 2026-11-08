@@ -2687,6 +2687,20 @@ def foo() -> Int:
     return s
 """), 'comptime_for_range_start_stop')
 
+    # 140a. comptime for over a string list (alias/resolved iterable) —
+    # regression: the unroller must declare the loop var as char*, not
+    # int64_t, when elements are strings (bench_atof.mojo, sys/info.mojo).
+    _run_isolated(lambda: test("comptime_for_string_list", """\
+comptime NAMES = ["ab", "cd", "ef"]
+
+def foo() -> Int:
+    var n: Int = 0
+    comptime for name in NAMES:
+        if name == "cd":
+            n = n + 1
+    return n
+"""), 'comptime_for_string_list')
+
     # ── precise: loop body frequency annotations ──────────────────────────
 
     # 141. while loop body gets guessed_local(10) annotation

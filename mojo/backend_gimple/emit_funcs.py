@@ -1122,7 +1122,10 @@ def _gen_stmt_ComptimeForStmt(gen, node):
         if all_ok and not for_target_is_tuple(node.target):
             dst = gen.var_types.get(node.target)
             if dst is None:
-                dst = 'int64_t'
+                if cvals and all(isinstance(_v, str) for _v in cvals):
+                    dst = 'char *'
+                else:
+                    dst = 'int64_t'
                 gen._declare_var(node.target, dst)
             _ct_saved = (node.target in gen._comptime_vals,
                          gen._comptime_vals.get(node.target))
@@ -1135,7 +1138,7 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                 elif isinstance(_v, str):
                     try:
                         _sv = gen._emit_string_literal(_v)
-                        if node.target not in gen.var_types or gen.var_types[node.target] != 'char *':
+                        if gen.var_types.get(node.target) != 'char *':
                             gen.var_types[node.target] = 'char *'
                         gen._safe_coerce_emit('char *', 'char *', _sv, node.target)
                     except Exception:
@@ -1173,9 +1176,13 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                     break
                 _rows.append(_row)
             if _ok_unpack and _rows:
-                for _t in _names:
+                for _ci, _t in enumerate(_names):
                     if _t not in gen.var_types:
-                        gen._declare_var(_t, 'int64_t')
+                        _col = [_row[_ci] for _row in _rows]
+                        if _col and all(isinstance(_v, str) for _v in _col):
+                            gen._declare_var(_t, 'char *')
+                        else:
+                            gen._declare_var(_t, 'int64_t')
                 _ct_saved = [(n, n in gen._comptime_vals,
                               gen._comptime_vals.get(n)) for n in _names]
                 for _row in _rows:
@@ -1219,7 +1226,10 @@ def _gen_stmt_ComptimeForStmt(gen, node):
             if not for_target_is_tuple(node.target):
                 dst = gen.var_types.get(node.target)
                 if dst is None:
-                    dst = 'int64_t'
+                    if cvals and all(isinstance(_v, str) for _v in cvals):
+                        dst = 'char *'
+                    else:
+                        dst = 'int64_t'
                     gen._declare_var(node.target, dst)
                 _ct_saved = (node.target in gen._comptime_vals,
                              gen._comptime_vals.get(node.target))
@@ -1257,9 +1267,13 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                         _ok_unpack = False
                         break
                 if _ok_unpack and _rows:
-                    for _t in _names:
+                    for _ci, _t in enumerate(_names):
                         if _t not in gen.var_types:
-                            gen._declare_var(_t, 'int64_t')
+                            _col = [_row[_ci] for _row in _rows]
+                            if _col and all(isinstance(_v, str) for _v in _col):
+                                gen._declare_var(_t, 'char *')
+                            else:
+                                gen._declare_var(_t, 'int64_t')
                     _ct_saved = [(n, n in gen._comptime_vals,
                                   gen._comptime_vals.get(n)) for n in _names]
                     for _row in _rows:
