@@ -314,3 +314,49 @@ Ordered by what unblocks the most:
    carries the same shape for the file that is in no bucket. The suite itself,
    `test_formal_exceptions.py`, is also not in a `tools/suite.py` bucket;
    registering it is a separate decision this document does not make.
+
+
+## EH design (step-27a)
+
+*Written 2026-11-07. Steps 27b and 27c landed first and cite this memo; the step file claimed DONE with no memo behind it. This records what was measured, what 27b/27c already implement, and the decisions that are still open, each ending in a RECOMMENDATION.*
+
+### Measured state (2026-11-07)
+
+`python3 -c "import formal.model"` works (the `threading` import the step feared was already fixed). Programs from `.tmp/27a/` built with `compile_formal(prove=False)` on BOTH arm64 and x86-64, identical on the two:
+
+| program | result |
+|---|---|
+| `try: printf("a") / except ValueError: printf("b")` | builds, prints `a`, exit 0 (the handler is dead because the body cannot raise) |
+| `try: raise ValueError("x") / except ValueError:` | REFUSED by `try_handler_refusal` ("this image has no unwinder: a `raise` here is an EXIT") |
+| `try: boom() / except ValueError:` with `boom` raising | REFUSED (the body calls a function that can end the process and the arm cannot catch it) |
+| `except ValueError as e:` | REFUSED by `unemitted_handler_arm` ("a handler arm with a body this path cannot put in the image") |
+| `try: raise ValueError("x") / finally: printf("f")` | builds, prints `f`, exit 1 (the `finally` runs, then the process exits: correct for an uncaught raise) |
+
+So the SUSPECT in the step ("handler arms silently dropped for a raising body") does NOT hold: there is no truth bug. `test_formal_exceptions.py` 331/331, `test_formal_try_model.py` OK, `test_formal_eh_tables.py` OK.
+
+### Q1 — where the exception object lives
+- **R1** a `malloc`'d record `[class_id: i64][msg: char*][cause: i64]`, its address the in-flight value. A value outlives its frame on this path only through `malloc` (the blob pattern); an exception outlives the frame that raised it by definition.
+- **R2** a per-process global slot. Rejected: there is no module-state storage (every value is one word in a function's stack scratch).
+- **R3** a caller-allocated frame record passed as a hidden argument to every raiser. Avoids `malloc` but changes the signature of every raiser and every function pointer to one.
+
+**RECOMMENDATION: R1**, with `class_id` the index into the sorted union of `CPYTHON_EXCEPTION_BASE` (`formal/model/types.py:2496`) and the module's own declared exception classes, so a landing pad's `class_ids` are numbers fixed at BUILD time.
+
+### Q2 — what `except A as e` binds
+**RECOMMENDATION:** `e` is the R1 record's address as an OPAQUE word with no operation on it in the first slice, and `as e` stays REFUSED by name (`unemitted_handler_arm`, row `an_except_as_binding_is_refused_by_name`) until a later step gives `e` a message accessor. Nothing in the tree gives `e` a value today, so refusing is the only sound reading.
+
+### Q3 — superclass matching
+Already answered, not open: `handler_arm_matches(arm_name, flying_name, kinds, structs)` (`formal/model/types.py:2718`) returns True/False/None over the CPython hierarchy and is oracle-tested 71 x 71 by `test_formal_exceptions.py::run_matching_oracle`. A landing-pad row per (try region, arm) lists the `class_id`s for which it returned True, computed at build time. **This is exactly `formal/model/eh.py`** (`PersonalityArm`, `LandingPad`, `LandingPadTable.arm_for(region_id, class_id)`, `build_landing_pads`), landed by 27c with no codegen change. **RECOMMENDATION:** a `None` (undecidable) answer refuses the image; never a guess.
+
+### Propagation
+Which functions can raise is already computed: `_raises_somewhere` (`formal/build.py:17228`) and, across modules, `CrossModuleRaises` (`formal/imports.py:2179`). **RECOMMENDATION (a proposal for `doc/ABI.md`, not an edit of it):** only functions in the raiser set get the new convention; every other function's ABI is unchanged. A raiser returns its normal value in the first return register and an in-flight status in the SECOND return register (`x1` / `rdx`): 0 for a normal return, otherwise the R1 record's address. After every call to a raiser the caller tests the status register and branches to the enclosing landing pad (or, with none, returns the status upward unchanged). This keeps the cost on raisers and their callers.
+
+### Proof-side plan
+`MojoStmt` (`lib/ProofLib.lean:966`) has no `raise` or `try` constructor; 27b translates a flat `try` in the GENERATOR (`_stmts_go`, `_stmts_go_t`, `_stmts_ast`: body ++ else ++ finally) with no Lean change, which is sound only while the region cannot raise (the refusals above guarantee that today). **RECOMMENDATION:** add the minimal constructors `raise (cls : Nat)` and `tryStmt (body) (arms : List (List Nat × List MojoStmt)) (final)` only when 27e emits real dispatch, and state, as `sorry` holes ledgered in `formal/proof_gaps.py::SCAFFOLD_HOLES` (S1/S2), `try_flat_sound` (a `try` whose region cannot raise is body; else; finally) and `raise_terminates`. Not before: constructors nothing emits would be a model with no consumer.
+
+### Slice order (each independently testable by `test_formal_exceptions.py`, oracle rows against CPython)
+1. **27d** same-module raiser marking plus the status-register convention, arm64 first, behind the existing refusals (no handler runs yet): measure that programs without a handler arm are byte-identical, and raisers return status 0.
+2. **27e** a `raise` caught by an arm in the SAME function (no calls): build the R1 record, dispatch through `LandingPadTable`, run the arm body; `as e` still refused.
+3. **27f** calls through a raiser: test the status register after each call, route to the pad or propagate; the "calls boom()" row above becomes a built-and-run row.
+4. **27g** `finally` with an exception in flight, and cross-module raisers via `CrossModuleRaises`; then x86-64.
+
+Sizing note carried from the deleted design doc: hand-dispatching a same-function arm without the call convention moves 0 corpus files (every arm wraps a CALL), which is why 27e alone is not the milestone; 27f is.
