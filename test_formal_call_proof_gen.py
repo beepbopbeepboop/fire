@@ -10016,8 +10016,11 @@ class TestDecWhileSignedModelRegression(unittest.TestCase):
         lines passed every substring assertion above.  So run Lean on the
         block alone -- it is self-contained, so this is seconds, not the
         proof's own CPU budget."""
-        import shutil as _sh, subprocess
-        if _sh.which("lean") is None:
+        import shutil as _sh
+
+        from formal.lean import run_lean
+        lean = _sh.which("lean")
+        if lean is None:
             self.skipTest("lean not on PATH")
         text = open(self.proof).read()
         m = re.search(r"def countdown_go : .*?simp \[countdown_go, h'\]",
@@ -10026,8 +10029,12 @@ class TestDecWhileSignedModelRegression(unittest.TestCase):
         path = os.path.join(self.tmp, "go_block.lean")
         with open(path, "w") as f:
             f.write(m.group(0) + "\n")
-        r = subprocess.run(["lean", path], capture_output=True, text=True,
-                           timeout=COMPILE_TIMEOUT_S, cwd=self.tmp)
+        r = run_lean(lean, [path], cwd=self.tmp,
+                     wall_s=COMPILE_TIMEOUT_S, cpu_s=COMPILE_TIMEOUT_S)
+        self.assertIsNone(
+            r.exceeded,
+            "emitted _go block did not finish under the bound: "
+            + (r.exceeded or ""))
         self.assertEqual(r.returncode, 0,
                          "emitted _go block does not typecheck:\n"
                          + r.stdout + r.stderr)
