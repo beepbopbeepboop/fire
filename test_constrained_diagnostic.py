@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression test for compile-time `constrained` diagnostics.
 
-`bugs/DIAGNOSTICS_missing_validation_modular.md`: the compiler accepted
+The compiler previously accepted (missing comptime/constrained validation diagnostics)
 `constrained[False, "msg"]()` (and related forms) whose conditions are
 provably false at compile time.  `constrained` is a compile-time check; a
 provably-false condition must fail compilation with a diagnostic.
@@ -54,7 +54,7 @@ def test_constrained_unknown_passes():
 
 def test_constrained_tstring_message():
     # t-string messages must be evaluated in constrained diagnostics
-    # (bugs/DIAGNOSTICS_missing_validation_modular.md).
+    # (comptime validation diagnostics).
     try:
         _compile('fn f():\n    comptime x = 7\n    constrained[False, t"val {x}"]()\n')
     except RuntimeError as e:
@@ -85,7 +85,7 @@ def test_constrained_short_circuit_or_false_needs_rhs():
 
 def test_constrained_in_comptime_for_range():
     # comptime for loop variables must be visible to constrained evaluation
-    # (bugs/DIAGNOSTICS_missing_validation_modular.md).
+    # (comptime validation diagnostics).
     try:
         _compile('fn f():\n    comptime for i in range(4):\n        constrained[i != 2, "hit"]()\n')
     except RuntimeError as e:
@@ -102,7 +102,7 @@ def test_constrained_in_comptime_for_range_true():
 
 def test_constrained_in_comptime_for_list_literal():
     # comptime for over constant list literals must unroll and bind the loop
-    # variable for comptime diagnostics (bugs/DIAGNOSTICS_missing_validation_modular.md).
+    # variable for comptime diagnostics.
     try:
         _compile('fn f():\n    comptime for i in [0, 1, 2]:\n        constrained[i < 2, "nope"]()\n')
     except RuntimeError as e:
@@ -119,7 +119,7 @@ def test_constrained_in_comptime_for_list_literal_true():
 
 def test_constrained_in_comptime_for_tuple_unpack():
     # tuple-unpacking targets over constant collections must bind each target
-    # (bugs/DIAGNOSTICS_missing_validation_modular.md).
+    # (comptime validation diagnostics).
     try:
         _compile('fn f():\n    comptime for i, j in [(0, 1), (1, 1)]:\n        constrained[i != j, "eq"]()\n')
     except RuntimeError as e:
@@ -137,7 +137,7 @@ def test_constrained_in_comptime_for_tuple_unpack_true():
 def test_constrained_in_comptime_for_comptime_alias():
     # Iterating over a comptime (non-literal) iterable alias must unroll with
     # the loop variable bound so comptime diagnostics fire
-    # (bugs/DIAGNOSTICS_missing_validation_modular.md).
+    # (comptime validation diagnostics).
     src = 'fn f():\n    comptime vals = [0, 1, 2]\n    comptime for i in vals:\n        constrained[i < 2, "bad"]()\n'
     try:
         _compile(src)
@@ -172,7 +172,7 @@ def test_constrained_in_comptime_for_comptime_alias_tuple_unpack():
 
 def test_constrained_in_comptime_for_range_comptime_bound():
     # Range bounds from comptime-bound identifiers must unroll so comptime
-    # validation sees the loop variable (DIAGNOSTICS_missing_validation_modular).
+    # validation sees the loop variable (comptime validation diagnostics).
     try:
         _compile(
             'fn f():\n'
@@ -196,7 +196,7 @@ def test_constrained_in_comptime_for_range_comptime_bound_true():
 
 
 def test_constrained_len_comptime_list_fails():
-    # `len()` folds on comptime-known collections (DIAGNOSTICS_missing_validation_modular).
+    # `len()` folds on comptime-known collections.
     try:
         _compile(
             'fn f():\n'
@@ -242,7 +242,7 @@ def test_constrained_in_comptime_for_range_len_true():
 
 def test_constrained_subscript_list_fails():
     # Subscript on comptime-known collections must fold for diagnostics
-    # (DIAGNOSTICS_missing_validation_modular: collection ops beyond len()).
+    # (comptime collection ops beyond len()).
     try:
         _compile(
             'fn f():\n'
@@ -279,7 +279,7 @@ def test_constrained_subscript_str_fails():
 
 def test_constrained_dict_subscript_fails():
     # Dict literal folding/subscript in comptime validation
-    # (DIAGNOSTICS_missing_validation_modular).
+    # (comptime validation diagnostics).
     try:
         _compile(
             'fn f():\n'

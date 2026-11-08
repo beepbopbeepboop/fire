@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression test: DType predicate evaluation in comptime diagnostics.
 
-`bugs/DIAGNOSTICS_missing_validation_modular.md`: comptime validation must
+Comptime validation must (previously missing for DType predicates)
 catch provably-false conditions involving DType predicates such as
 `dtype.is_integral()`. The comptime evaluator now folds DType member access
 (`DType.int32`) and DType predicate methods, so `comptime assert` and
@@ -90,7 +90,7 @@ def _compile_full(src):
 def test_generic_struct_constrained_dtype_param_false():
     # DType predicate on an instantiated struct comptime param: the elaborated
     # struct body must diagnose, not silently accept
-    # (bugs/DIAGNOSTICS_missing_validation_modular.md). Regression for the case
+    # Regression for the case
     # where elaboration swallows compile-time diagnostics from instantiated
     # generic struct bodies.
     src = '''
@@ -155,7 +155,7 @@ def test_generic_struct_comptime_assert_dtype_param_only_stmt():
     # before the following top-level `fn main` and swallowing the
     # instantiation site — so elaboration never ran and the provably-false
     # diagnostic was silently accepted
-    # (bugs/DIAGNOSTICS_missing_validation_modular.md).
+    # (comptime validation diagnostics for DType predicates).
     src = '''
 struct DTypeDiagAS[dtype: DType]:
     fn check(self):
