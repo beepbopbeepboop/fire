@@ -1166,10 +1166,10 @@ def fs_rewinddir(d) -> int:
 # read, which is the only safe thing to do with a byte whose meaning this
 # source does not state.
 #
-# This is the half of `bugs/FORMAL_listdir_no_run_time_sequence.md` the byte
-# read made answerable. It was not answerable before because a read of the
-# struct was a COUNT-WALK — a bounds check against whatever word sat at offset
-# 0 — and now each byte is a load of the width it declares.
+# This is the half of the run-time-length-sequence limit the byte read made
+# answerable. It was not answerable before because a read of the struct was a
+# COUNT-WALK — a bounds check against whatever word sat at offset 0 — and now
+# each byte is a load of the width it declares.
 
 def fs_dirent_name(e: Pointer[UInt8]) -> str:
     """The `d_name` of the entry `e`, in a fresh buffer the caller owns.
