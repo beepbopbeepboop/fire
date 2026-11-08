@@ -1293,7 +1293,7 @@ LIBRARY_TRUST = {
     # pass performs is one whose soundness does not rest on a decision
     # procedure's fidelity. Nine `bv_decide` sites, no `sorry`.
     # 2026-11-06: 88 = the `hne_*` chains of arm64_step_{add_imm64,ldr64,str64,movz64} (bv_decide).
-    "Peephole": (0, 0, 89, 89),
+    "Peephole": (0, 0, 88, 88),
     # `lib/Specs.lean`, added 2026-10-05: the INDEPENDENT specification layer
     # (reference definitions for the classic example programs, written by hand
     # in `Nat`/`Int`/`List`).  Zero at 0 and zero at 1, and the zero at column 2
@@ -1303,7 +1303,7 @@ LIBRARY_TRUST = {
     # would be resting on the same unverified evaluation the layer exists to
     # check.  `AXIOM_CLOSURE`'s row below is what decided that, read out of a
     # real `#print axioms` run over all 55 declarations.
-    "Extern": (0, 0, 0, 0),
+    "Extern": (0, 0, 1, 1),
     "Specs": (0, 0, 0, 0),
     "Scaffold": (0, 1, 0, 0),
 }
@@ -1367,9 +1367,9 @@ LIBRARY_TRUST = {
 AXIOM_CLOSURE = {
     #            asked  reaches  clean  text_only  closure_only  ofReduceBool
     "Contracts": (7, 0, 7, 0, 0, 0),
-    "Extern": (10, 0, 10, 0, 0, 0),
+    "Extern": (16, 1, 15, 0, 0, 0),
     "IEEE754": (26, 19, 7, 0, 0, 0),
-    "Peephole": (44, 5, 31, 0, 8, 0),
+    "Peephole": (43, 4, 31, 0, 8, 0),
     "ProofLib": (273, 17, 250, 0, 6, 0),
     "ProofLibSteps": (0, 0, 0, 0, 0, 0),
     "ProofLibSteps1": (22, 20, 2, 0, 0, 0),

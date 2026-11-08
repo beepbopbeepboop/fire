@@ -138,3 +138,94 @@ theorem cell_writeback
     ∀ a, (a < p.toNat ∨ p.toNat + 8 ≤ a) →
       (a < s.sp.toNat - W ∨ s.sp.toNat ≤ a) → s'.mem a = s.mem a :=
   hmeth s s' p v fuel rfl hx0 hx1 hfit h_above hrun
+
+
+/-! ## Walking a loop body that crosses blocks
+
+A counting loop whose body contains the signed-overflow trap check (`subs …;
+b.vs trap; b …`) is not one straight-line run: the `b.vs` is a conditional branch
+that FALLS THROUGH while the counter is in range.  These are the generic pieces
+a generated loop contract composes (`while_dec_exit_contract_lt`): run
+composition, the intermediate-pc bookkeeping, and the one arithmetic fact that
+makes the `b.vs` fall through.
+-/
+
+/-- `subs x, x, #1` does not set the overflow flag when `x` is below `2^63` and
+    nonzero: `x - 1` stays in the signed range, so `b.vs` (condition 6) is not
+    taken. -/
+theorem subs_one_no_overflow (a : UInt64) (hlt : a.toNat < 9223372036854775808)
+    (hne : a ≠ 0) :
+    arm64_matches_condition 6 (arm64_subs_flags a 1) = false := by
+  have h : a < 9223372036854775808 := by
+    rw [UInt64.lt_iff_toNat_lt]; simpa using hlt
+  unfold arm64_matches_condition arm64_subs_flags
+  bv_normalize
+  bv_decide
+
+theorem runs_seq (code : Nat → UInt8) (a b : Nat) (s s1 s2 : Arm64State)
+    (h1 : arm64_runs code a s = some s1) (h2 : arm64_runs code b s1 = some s2) :
+    arm64_runs code (a + b) s = some s2 := by
+  induction a generalizing s with
+  | zero =>
+    simp [arm64_runs] at h1
+    subst h1
+    simpa using h2
+  | succ a ih =>
+    rw [show a + 1 + b = (a + b) + 1 from by omega]
+    unfold arm64_runs at h1 ⊢
+    cases hstep : arm64_step s code with
+    | none => rw [hstep] at h1; simp at h1
+    | some s' =>
+      rw [hstep] at h1
+      simp only at h1 ⊢
+      exact ih _ h1
+
+/-- One step that CHANGES `pc` is a one-step run. -/
+theorem runs_one_jump (code : Nat → UInt8) (s s' : Arm64State)
+    (h : arm64_step s code = some s') (hne : s'.pc ≠ s.pc) :
+    arm64_runs code 1 s = some s' := by
+  unfold arm64_runs
+  rw [h]
+  simp [hne, arm64_runs]
+
+theorem runs_after (code : Nat → UInt8) (a k : Nat) (s s1 : Arm64State)
+    (h1 : arm64_runs code a s = some s1) :
+    arm64_runs code (a + k) s = arm64_runs code k s1 := by
+  induction a generalizing s with
+  | zero =>
+    simp [arm64_runs] at h1
+    subst h1
+    simp
+  | succ a ih =>
+    rw [show a + 1 + k = (a + k) + 1 from by omega]
+    rw [arm64_runs.eq_2] at h1
+    rw [arm64_runs.eq_2]
+    cases hstep : arm64_step s code with
+    | none => rw [hstep] at h1; simp at h1
+    | some s' =>
+      rw [hstep] at h1
+      simp only at h1 ⊢
+      exact ih _ h1
+
+/-- No intermediate state of a composed run is at `exit`, from the two parts. -/
+theorem mid_seq (code : Nat → UInt8) (exit a b : Nat) (s s1 : Arm64State)
+    (h1 : arm64_runs code a s = some s1)
+    (m1 : ∀ u < a, ∀ su, arm64_runs code u s = some su → su.pc ≠ exit)
+    (m2 : ∀ u < b, ∀ su, arm64_runs code u s1 = some su → su.pc ≠ exit) :
+    ∀ u < a + b, ∀ su, arm64_runs code u s = some su → su.pc ≠ exit := by
+  intro u hu su hsu
+  by_cases hua : u < a
+  · exact m1 u hua su hsu
+  · have hu' : u = a + (u - a) := by omega
+    rw [hu', runs_after code a (u - a) s s1 h1] at hsu
+    exact m2 (u - a) (by omega) su hsu
+
+/-- A one-step segment: its only proper prefix is the empty run, i.e. `s` itself. -/
+theorem mid_one (code : Nat → UInt8) (exit : Nat) (s : Arm64State) (h : s.pc ≠ exit) :
+    ∀ u < 1, ∀ su, arm64_runs code u s = some su → su.pc ≠ exit := by
+  intro u hu su hsu
+  have : u = 0 := by omega
+  subst this
+  simp [arm64_runs] at hsu
+  subst hsu
+  exact h
