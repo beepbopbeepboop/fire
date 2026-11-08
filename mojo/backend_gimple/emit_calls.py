@@ -1622,17 +1622,21 @@ def _lower_type_new(gen, node, args=None, meta=None):
             if nst == 'MojoDict *':
                 ns_dict = nsv
             else:
-                # Be very permissive for custom dict subclasses (e.g. EnumDict)
+                # Be very permissive for custom dict subclasses (e.g. EnumDict):
+                # route through the R2 chokepoint rather than an ad-hoc cast
+                # (no-new-casts guard), so a true container-kind mismatch is
+                # caught instead of reinterpreted.
                 try:
-                    ns_dict = gen._new_val('MojoDict *', f'(MojoDict *){nsv}')
+                    ns_dict = gen._coerce_to_type(nst, 'MojoDict *', nsv)
                 except Exception:
-                    ns_dict = gen._new_val('MojoDict *', f'(MojoDict *){gen._to_int64(nst, nsv) if hasattr(gen, "_to_int64") else nsv}')
+                    ns_dict = gen._coerce_to_type(
+                        'int64_t', 'MojoDict *', gen._to_int64(nst, nsv))
         except Exception:
             # Last resort: try to pass it through as-is
             try:
                 if isinstance(ns_n, (gimple_ctypes.IdentExpr, gimple_ctypes.MemberExpr)):
                     nt, nv = gen.lower_expr(ns_n)
-                    ns_dict = gen._new_val('MojoDict *', f'(MojoDict *){nv}')
+                    ns_dict = gen._coerce_to_type(nt, 'MojoDict *', nv)
                 else:
                     return None
             except Exception:
