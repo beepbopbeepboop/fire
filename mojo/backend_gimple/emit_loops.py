@@ -2624,15 +2624,8 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # wrong for its other slots. A list with no kinds of its own takes
         # the identical accessor it always did and yields the identical
         # word, so this costs only a set membership test at compile time.
-        # A list whose element type the codegen does not know (it came back from a call, so no `_elem_types` entry
-        # follows it) may hold doubles. The plain int read returns their raw IEEE bits (`for i in o.read(): print(i)`
-        # printed 4609434218613702656 for 1.5). The boxed read answers each slot by the kind the list recorded, and a
-        # list with no kinds row yields the same word as the plain read, so the boxed read is the safe one here.
-        _unknown_elem = (not is_tuple and _as_str(it_val) not in gen._elem_types
-                         and _as_str(list_ptr) not in gen._elem_types)
         _mkv = (it_val in getattr(gen, '_maybe_kinds_vals', ())
-                or list_ptr in getattr(gen, '_maybe_kinds_vals', ())
-                or _unknown_elem)
+                or list_ptr in getattr(gen, '_maybe_kinds_vals', ()))
         if _mkv:
             elem64 = gen._new_val('int64_t',
                                   f"mojo_list_get_boxed ({list_ptr}, {idx_t})")
@@ -2797,8 +2790,8 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
 
 
 def _gen_for_str(gen, var: str, it_val: str, body: list, shadow_name: str | None = None):
-    gen._declare_var(var, 'char *', force=(var == shadow_name)
-                     or gen.var_types.get(var, 'char *') != 'char *')
+    gen._declare_var(var, 'char', force=(var == shadow_name)
+                     or gen.var_types.get(var, 'char') != 'char')
     len64 = gen._new_temp('int64_t')
     len_t = gen._new_temp('int64_t')
     idx_t = gen._new_temp('int64_t')
@@ -3874,11 +3867,6 @@ def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_pt
             # instead of printing as 0 / a pointer's decimal.
             raw = gen._new_val('int64_t', f"mojo_list_get_boxed ({list_ptr}, {i})")
             gen._boxed_vals.add(cvn)
-            # The slot's kind is only known at run time, so the name is a TAGGED
-            # word: arithmetic selects by the box's kind (`b + 1` stays an int),
-            # and a None box compares `== None`. A bare int is not a box and the
-            # select answers its integer, so an int slot is unchanged.
-            gen._tagged_word_vals.add(cvn)
             gen._emit(f"  {cvn} = {raw};")
         else:
             raw = gen._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {i})")
@@ -3996,16 +3984,10 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
         # A generator that iterates a kind-mixed list parameter yields BOXES in
         # its int64_t slots (see cpp_core's `_cpp_mixed_list_params` read), so
         # the unpacked names must resolve them at each use.
-        # Each int64_t name is a TAGGED word, as the single-target arm below
-        # marks it: a None yield must print None and compare `== None`, and an
-        # arithmetic operand must read by kind (`b + 1` must stay an int). Marking
-        # only `_boxed_vals` left the box to the untagged double arm, which read
-        # `11` back as `11.0`.
         if api.get('mixed_slots'):
             for _mvn in var_names:
                 if gen.var_types.get(_mvn) == 'int64_t':
                     gen._boxed_vals.add(gen._cname(_mvn))
-                    gen._tagged_word_vals.add(gen._cname(_mvn))
     else:
         gen._emit(f"  {gen._cname(var)} = {val};")
         if api.get('mixed_slots') and gen.var_types.get(var) == 'int64_t':

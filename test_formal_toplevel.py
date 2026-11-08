@@ -603,7 +603,7 @@ def test_name_in_a_function_is_still_refused(tmpdir, verbose):
     and a function lifted out of an imported module has no answer this path
     can give — answering it would be a value that is right for this file and
     wrong for every other, which is the class of lie
-    `FORMAL_module_state_no_storage.md (deleted)` is about. Pinned so a later
+    `FORMAL_module_state_no_storage.md (deleted) (deleted)` is about. Pinned so a later
     change cannot widen the substitution into the function bodies."""
     # `refuse_without:`, and the needle is the REWORDED sentence rather than
     # the one this row used to pin.  A more specific check now answers this
@@ -1401,20 +1401,12 @@ def test_a_module_level_conditional_store_carries_its_value(tmpdir, verbose):
         "    print(a)\n    print(b)\n    print(get())\n    return 0\n"
         "main(0)\n", tmpdir, verbose,
         expect_stdout="9\n3\n12\n", expect_exit=0)
-    # And the shape that is a documented DIVERGENCE from CPython, as its own
-    # program. `TOP = 9 if 1 else 3` is a foldable constant, so by
-    # `model.module_body`'s rule ("empty for a module that is only declarations
-    # and foldable constants") the module has NO body, and the entry is `main`
-    # (`model.entry_function`): the image runs `main` and exits with its value,
-    # 9. CPython runs the file, binds `TOP`, never calls `main`, and exits 0.
-    # This row used to expect 0 (the CPython answer) and has failed since the
-    # entry rule was made body-less => `main`; the rule is what every formal
-    # example relies on, so the row is corrected to pin the rule, and the
-    # divergence is stated here rather than hidden.
+    # And the refuted measurement, as its own program: exit 0 here and exit 0
+    # under CPython, because nothing in the file calls `main`.
     ok &= case_agrees_with_cpython(
         "conditional_store_uncalled_main",
         "TOP = 9 if 1 else 3\ndef main() -> Int:\n    return TOP\n",
-        tmpdir, verbose, expect_stdout="", expect_exit=9)
+        tmpdir, verbose, expect_stdout="", expect_exit=0)
     return ok
 
 

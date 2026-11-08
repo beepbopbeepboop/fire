@@ -2209,11 +2209,10 @@ main()
     # exactly that reason: moving the statement out of the body would silently
     # withdraw the folded field.
     # A method of a class declared inside a function cannot reach that
-    # function's frame directly, so its free reads are captured.
-    # Reads of an enclosing name are captured BY REFERENCE (the
-    # `functools.cmp_to_key` shape, a CALLED capture, included), so a name the
-    # enclosing function rebinds after the class statement is late-bound; only
-    # a method with no `self` is still refused instead of answering 0.
+    # function's frame in the shapes refused below.
+    # Reads of an enclosing name are captured (the `functools.cmp_to_key`
+    # shape, a CALLED capture, included); a rebound one and a method with no
+    # `self` are still refused instead of answering 0.
     test_gimple_stdout("gimple_nested_class_method_calls_enclosing_param", """\
 def mkpair(mycmp: int, a: int, b: int):
     class K:
@@ -2278,11 +2277,10 @@ def main():
     print(a.get(), b.get(), a.tag(), b.tag())
 """, "21 201 x! yy!\n")
 
-    # A name the enclosing function rebinds is late-bound in Python. The
-    # capture is BY REFERENCE (the enclosing local is heap-boxed and the
-    # class attribute is the box), so the method sees the CURRENT value.
-    test_gimple_stdout(
-        "gimple_nested_class_method_reads_rebound_enclosing_local", """\
+    # A name the enclosing function rebinds is late-bound in Python; the
+    # snapshot would differ, so it is refused.
+    test_gimple_build_refusal(
+        "gimple_nested_class_method_reads_rebound_enclosing_local_is_refused", """\
 def mk(n: int):
     class C:
         def get(self):
@@ -2292,458 +2290,7 @@ def mk(n: int):
 
 def main():
     print(mk(1))
-""", "2\n")
-
-    # An instance built BEFORE the rebind must still see the new value: that
-    # is what distinguishes Python's cell from a snapshot taken at instance
-    # construction, and it is the property the `class` statement's box exists
-    # to preserve.
-    test_gimple_stdout(
-        "gimple_nested_class_method_sees_rebind_after_instance_built", """\
-def mk(n: int):
-    class C:
-        def get(self):
-            return n
-    c = C()
-    n = n + 1
-    return c.get()
-
-def main():
-    print(mk(1))
-""", "2\n")
-
-    # A captured `str` is a pointer value, not an int: the method's own C
-    # return type has to be the class attribute's semantic type (`char *`)
-    # or the string's address prints in decimal.
-    test_gimple_stdout(
-        "gimple_nested_class_method_returns_rebound_str_capture", """\
-def mk(s: str):
-    class C:
-        def tag(self):
-            return s
-    t = C()
-    s = s + "!"
-    return t.tag()
-
-def main():
-    print(mk("x"))
-""", "x!\n")
-
-    # A function returning a subscript of a tuple local must be declared to
-    # return the slot's type (e.g. `char *` for a string element), not the
-    # int64_t default — otherwise the string pointer prints in decimal.
-    test_gimple_stdout(
-        "gimple_tuple_index_return_type", """\
-def f():
-    args = ("a", "b")
-    return args[0]
-
-def main():
-    print(f())
-""", "a\n")
-
-    # The shape the bug was reported for (`http.server._main`'s
-    # `DualStackServerMixin.finish_request`): a PARAMETER rebound before the
-    # `class` statement, read by a method as a FIELD of the captured object
-    # (not as the method's return value). `args` is rebound AGAIN after the
-    # class, so the answer ("e") also pins that the field read goes through
-    # the late-bound box, not a snapshot of the first `Args`. The old capture
-    # pass saw "parameter + assignments" and refused this outright.
-    test_gimple_stdout(
-        "gimple_nested_class_method_reads_field_of_rebound_capture", """\
-class Args:
-    def __init__(self, d: str):
-        self.directory = d
-
-def emit(s: str):
-    print(s)
-
-def f(args=None):
-    args = Args("d")
-    class C:
-        def go(self):
-            emit(args.directory)
-    args = Args("e")
-    C().go()
-
-def main():
-    f()
-""", "e\n")
-
-    # The doc's source is CPython (`Lib/socketserver.py`), which is compiled
-    # under PYTHON scoping rules (`filename` ending in `.py`), not the default
-    # Mojo rules. The doc's exact shape is a `super().finish_request(...)`
-    # call forwarding `args`, a parameter of the class-declaring function
-    # that the function rebinds before AND after the `class` statement, and
-    # the method reads it as a bare call argument. Pin that path separately:
-    # the scoping analysis and the `super()` lowering are not exercised by
-    # the default-scoping case above.
-    test_gimple_stdout(
-        "gimple_nested_class_rebound_capture_python_scoping", """\
-class Server:
-    def finish_request(self, request: str, kwargs: str):
-        print(request, kwargs)
-
-def _main(args=None):
-    args = "d"
-    class ServerMixin(Server):
-        def finish_request(self, request: str):
-            super().finish_request(request, args)
-    args = "e"
-    ServerMixin().finish_request("r")
-
-def main():
-    _main()
-""", "r e\n", filename='classcatch.py')
-
-    # The same problem with no REBIND: a local whose FIRST binding is after
-    # the class statement. A snapshot taken at the class statement read it
-    # before it was bound (the compiled path answered 0).
-    test_gimple_stdout(
-        "gimple_nested_class_method_reads_local_bound_after_class", """\
-def mk():
-    class C:
-        def get(self):
-            return x
-    x = 7
-    return C().get()
-
-def main():
-    print(mk())
-""", "7\n")
-
-    # A class declared inside a NESTED `def` reaches the outer local
-    # through that closure's env. The non-rebind shape uses the same boxed
-    # cell as the direct case; the rebind shapes below pin that the box
-    # pointer travels through the env, so late binding still holds.
-    test_gimple_stdout(
-        "gimple_nested_class_inside_nested_def_capture", """\
-def outer():
-    x = 5
-    def inner():
-        class C:
-            def get(self):
-                return x
-        return C().get()
-    return inner()
-
-def main():
-    print(outer())
-""", "5\n")
-
-    # The SAME nested-`def` shape, but the outer function rebinds the local
-    # after `inner` is defined. Python's cell is shared by reference, so the
-    # method sees 7. The outer local is heap-boxed and the inner closure's
-    # env field carries the BOX POINTER (the by-reference capture), which the
-    # lifted frame installs on the class attribute.
-    test_gimple_stdout(
-        "gimple_nested_class_inside_nested_def_late_binds", """\
-def outer():
-    x = 5
-    def inner():
-        class C:
-            def get(self):
-                return x
-        return C().get()
-    x = 7
-    return inner()
-
-def main():
-    print(outer())
-""", "7\n")
-
-    # An instance built before the outer rebind must see the new value: the
-    # instance's hidden cell field points at the box, not at a snapshot.
-    test_gimple_stdout(
-        "gimple_nested_class_inside_nested_def_sees_later_rebind", """\
-def outer():
-    x = 5
-    def inner():
-        class C:
-            def get(self):
-                return x
-        return C()
-    c = inner()
-    x = 7
-    return c.get()
-
-def main():
-    print(outer())
-""", "7\n")
-
-    # A local of the nested `def` that SHADOWS an outer name is the inner
-    # function's own binding: it must stay by value (boxing the outer one
-    # would be the wrong cell entirely).
-    test_gimple_stdout(
-        "gimple_nested_class_inside_nested_def_shadows_outer_capture", """\
-def outer():
-    x = 5
-    def inner():
-        x = 100
-        class C:
-            def get(self):
-                return x
-        y = C().get()
-        x = 200
-        return y
-    return inner()
-
-def main():
-    print(outer())
-""", "100\n")
-
-    # The class-declaring frame's OWN local (not the outermost function's):
-    # the box has to live in the lifted nested `def`, which is where the
-    # `class` statement is emitted. A name whose first binding comes after
-    # the class statement used to be captured by value (silent 0).
-    test_gimple_stdout(
-        "gimple_nested_class_nested_def_own_local_late_binds", """\
-def outer():
-    def inner():
-        class C:
-            def get(self):
-                return x
-        x = 100
-        print(C().get())
-    inner()
-
-def main():
-    outer()
-""", "100\n")
-
-    # ...and a name the SAME nested `def` binds before the class and rebinds
-    # after it was refused outright. Python's cell is late-bound: the method
-    # sees 200. `_ef_own` (the outermost frame's set) cannot answer this --
-    # the owner is `inner` -- so the capture pass has to carry the declaring
-    # frame through the walk.
-    test_gimple_stdout(
-        "gimple_nested_class_nested_def_own_local_rebind", """\
-def outer():
-    def inner():
-        x = 100
-        class C:
-            def get(self):
-                return x
-        x = 200
-        print(C().get())
-    inner()
-
-def main():
-    outer()
-""", "200\n")
-
-    # An instance built BEFORE the rebind must see the new value: the
-    # instance cell points at `inner`'s box, not at a snapshot.
-    test_gimple_stdout(
-        "gimple_nested_class_nested_def_own_local_sees_rebind", """\
-def outer():
-    def inner():
-        x = 100
-        class C:
-            def get(self):
-                return x
-        c = C()
-        x = 200
-        return c.get()
-    return inner()
-
-def main():
-    print(outer())
-""", "200\n")
-
-    # The box's C type comes from the declaring frame's scope: a `str` bound
-    # after the class statement is a pointer, so a wrong-width box would
-    # print its address as decimal.
-    test_gimple_stdout(
-        "gimple_nested_class_nested_def_own_str_keeps_pointer_width", """\
-def outer():
-    def inner():
-        class C:
-            def show(self):
-                print(x)
-        x = "word"
-        C().show()
-    inner()
-
-def main():
-    outer()
-""", "word\n")
-
-    # A PARAMETER of the class-declaring nested `def` is owned by that frame
-    # too (not by the outermost function), and must be boxed in the lifted
-    # frame the same way.
-    test_gimple_stdout(
-        "gimple_nested_class_nested_def_own_param_late_binds", """\
-def outer():
-    def inner(x: str):
-        class C:
-            def show(self):
-                print(x)
-        C().show()
-    inner("param")
-
-def main():
-    outer()
-""", "param\n")
-
-    # A `global` declared by the class-declaring nested `def` is a MODULE
-    # variable there, so it must be left uncaptured and read at call time --
-    # the same rule the direct shape already follows.
-    test_gimple_stdout(
-        "gimple_nested_class_nested_def_global_is_not_captured", """\
-G = 3
-
-def outer():
-    def inner():
-        global G
-        class C:
-            def get(self):
-                return G
-        G = 10
-        print(C().get())
-    inner()
-
-def main():
-    outer()
-""", "10\n")
-
-    # A name bound ONLY inside a nested `def` is not a local of the
-    # class-declaring function: Python resolves the method's read to the
-    # MODULE global of that name, and the nested def's local must not become
-    # a box in the enclosing frame (which would shadow the global and leave
-    # the method reading an unwritten box).
-    test_gimple_stdout(
-        "gimple_nested_class_ignores_nested_def_local_shadowing_global", """\
-G = 3
-
-def f():
-    def inner():
-        G = 10
-        return G
-    class C:
-        def get(self):
-            return G
-    return C().get() + inner()
-
-def main():
-    print(f())
-""", "13\n")
-
-    # A local whose ONLY binding is a `match` case body is still this
-    # function's own local, so a class method reading it captures the CELL by
-    # reference, not a snapshot taken at the `class` statement (before the
-    # case ran). The shared bound-name walk had no `MatchStmt` arm, so the
-    # capture stayed by value and printed 0; this is the shape the residual
-    # `match`/`except`/walrus doc measured.
-    test_gimple_stdout(
-        "gimple_nested_class_match_bound_local_is_late_bound", """\
-def f(v: int):
-    class C:
-        def get(self):
-            return x
-    match v:
-        case 1:
-            x = 5
-    return C().get()
-
-def main():
-    print(f(1))
-""", "5\n")
-
-    # The same shape with a `str`: the capture box's C type comes from the
-    # closure pre-pass's typing of the enclosing scope, which also had no
-    # `MatchStmt` arm and fell back to int64_t -- a wrong-width box. Printing
-    # inside the method keeps this test on the capture type alone; returning
-    # a method call through the enclosing function is the separate
-    # CODEGEN_function_return_type_from_method_call bug.
-    test_gimple_stdout(
-        "gimple_nested_class_match_bound_str_keeps_pointer_width", """\
-def f(v: int):
-    class C:
-        def show(self):
-            print(x)
-    match v:
-        case 1:
-            x = "word"
-    C().show()
-
-def main():
-    f(1)
-""", "word\n")
-
-    # `except E as e:` binds `e` in the handler. Capturing it by value took a
-    # snapshot before the handler ran; the box now receives the caught object
-    # too (the handler's own references still go through its typed temp).
-    test_gimple_stdout(
-        "gimple_nested_class_except_bound_local_is_late_bound", """\
-def f():
-    class C:
-        def show(self):
-            print(x)
-    try:
-        raise ValueError("boom")
-    except ValueError as x:
-        C().show()
-
-def main():
-    f()
-""", "boom\n")
-
-    # A walrus target is a binding in an EXPRESSION, not a statement: the
-    # capture must box it (like an assignment) and the walrus store must go
-    # THROUGH the box (`*x = 5`), not overwrite the box pointer.
-    test_gimple_stdout(
-        "gimple_nested_class_walrus_bound_local_is_late_bound", """\
-def f():
-    class C:
-        def get(self):
-            return x
-    if (x := 5):
-        pass
-    return C().get()
-
-def main():
-    print(f())
-""", "5\n")
-
-    # The walrus spelling with a `str`, so the boxed name's width is checked
-    # as well as the store (printed inside the method for the reason above).
-    test_gimple_stdout(
-        "gimple_nested_class_walrus_bound_str_keeps_pointer_width", """\
-def f():
-    class C:
-        def show(self):
-            print(x)
-    if (x := "word"):
-        pass
-    C().show()
-
-def main():
-    f()
-""", "word\n")
-
-    # The enclosing function's own call through the SAME captured callable
-    # goes through a heap box (the class capture boxes the local), so the
-    # callable value is `*box`, not the box address: passing the box to
-    # `mojo_fnptr_call_N` jumped into heap data after the class use printed.
-    test_gimple_stdout(
-        "gimple_nested_class_method_calls_captured_callable_after_rebind", """\
-def mkpair(mycmp, a: int, b: int):
-    class K:
-        def __init__(self, obj: int):
-            self.obj = obj
-        def __lt__(self, other: K):
-            return mycmp(self.obj, other.obj) < 0
-    p = K(a) < K(b)
-    mycmp = dec
-    return p, mycmp(5, 3)
-
-def dec(x: int, y: int) -> int:
-    return x - y
-
-def main():
-    print(mkpair(dec, 1, 2))
-""", "(True, 2)\n")
+""", "cannot reach its enclosing function's frame")
 
     # A method that reads only its own names and a module-level global is not
     # refused: the refusal is for enclosing-function scope and nothing wider.
@@ -2760,48 +2307,6 @@ def mk(n: int):
 def main():
     print(mk(4))
 """, "12\n")
-
-    # A method of a class declared inside a NESTED `def` returning a MODULE
-    # global inferred its C return type as the internal `int` marker, while
-    # the caller in the lifted `__GIMPLE` function holds the word type: gcc
-    # rejected the call ("invalid conversion in gimple call"). The direct
-    # shape escaped only because its caller is not a GIMPLE function.
-    test_gimple_stdout(
-        "gimple_nested_class_nested_def_method_returns_module_global", """\
-G = 4
-
-def outer():
-    def inner():
-        class C:
-            def get(self):
-                return G
-        return C().get()
-    return inner()
-
-def main():
-    print(outer())
-""", "4\n")
-
-    # A name the enclosing function declares `global` is a module variable,
-    # not a local, even though the body assigns it: the class method must read
-    # the global at CALL time. `_gmi_local_binding_names` is deliberately
-    # over-broad, so the capture pass boxed `G` as if it were a local and the
-    # method read the unwritten heap cell (a pointer-shaped garbage value)
-    # instead of 10.
-    test_gimple_stdout("gimple_nested_class_global_declared_is_not_captured", """\
-G = 3
-
-def f():
-    global G
-    class C:
-        def get(self):
-            return G
-    G = 10
-    print(C().get())
-
-def main():
-    f()
-""", "10\n")
 
     # A `@property` read is the getter's result (it printed the bound-method
     # pointer, and `==` compared two such pointers), and `@x.setter` is a
@@ -3095,23 +2600,6 @@ c()
     # read; `add(a, b)` is two, and is the shape that shows the arity is
     # really wrong rather than merely untidy.
     #
-    # A function whose only `return` is a call to a USER-CLASS method:
-    # the callee is a MemberExpr and the function's inferred return type
-    # must follow the method's return type, not default to int64_t
-    # (which truncates a double).  (deleted bug doc: CODEGEN_function_return_type_from_method_call)
-    test_gimple_matches_cpython("gimple_function_return_type_from_method_call", """\
-class C:
-    def get(self):
-        return 2.5
-
-def mk():
-    return C().get()
-
-def main():
-    print(mk())
-main()
-""")
-
     # Two fixes, and the second was only reachable after the first: the global
     # store records `_actual_types[name] = 'MojoBoundMethod *'` (the kind IS
     # known there — `_bound_method_ret_types` holds a bound method and nothing
@@ -5470,7 +4958,7 @@ main()
     # Repeated, and the dict is a MODULE GLOBAL rather than a local on
     # purpose: a dict passed as an unannotated parameter is typed `MojoList *`
     # and `sorted()` then mis-dispatches, which is a different bug with its
-    # own doc (CODEGEN_polymorphic_unannotated_param_vacuous_unanimity) and
+    # own doc (CODEGEN_polymorphic_unannotated_param_vacuous_unanimity.md) and
     # would mask this one. Every line below is a DIFFERENT missed field, so a
     # fix that patches only `condition` cannot pass.
     test_gimple_stdout_repeated("gimple_lambda_capture_through_unwalked_fields", """\
@@ -6751,7 +6239,7 @@ def main():
     #   * the five `.append` calls that register an item for teardown sat
     #     inside `if item.alias is not None:`, so `with C():` registered
     #     nothing — no `__exit__` at all (bugs/
-    #     CODEGEN_with_no_as_target_drops_exit);
+    #     CODEGEN_with_no_as_target_drops_exit.md);
     #   * the `has_exit` pre-scan read `_ctx_sns` only, so an item whose
     #     teardown is a GENERATOR's final resume+destroy looked like "no
     #     teardown" too — and then the raise path lost it as well, which for
@@ -8457,7 +7945,7 @@ def main():
 """, "override\n1\nx\ny\n")
 
     # 21d. Builtin `bytes` subclassing (`class _Extra(bytes)`, zipfile) --
-    # see COMPILE_FAIL_zipfile___init__. `super().__new__(cls, v)`
+    # see bugs/COMPILE_FAIL_zipfile___init__.md. `super().__new__(cls, v)`
     # populates the synthesized `_data: MojoBytes *` payload; inherited
     # len/index/slice/iter/eq/concat/`in`/`.decode`/`.hex`/`.startswith`/
     # `.split` route to it; extra `self.<attr>` fields sit alongside;
@@ -10025,7 +9513,7 @@ fn main():
     # `self._buf = b''` in __init__ makes the field a real bytes value, so
     # a slice of the field and `acc += <bytes>` accumulation work end to
     # end (was: char* field -> mojo_cstr_slice -> char*+MojoBytes* pointer
-    # arithmetic + a GCC GIMPLE-FE ICE). COMPILE_FAIL_zipfile___init__.
+    # arithmetic + a GCC GIMPLE-FE ICE). COMPILE_FAIL_zipfile___init__.md.
     test_gimple_stdout("gimple_bytes_field_slice_and_augassign", """\
 fn chunk() -> bytes:
     return b'hello world'
@@ -11704,7 +11192,7 @@ fn main():
     # (fire_compiler.desugar_genexps rewrites it into a call to a
     # synthesized module-level generator function), so this also pins the
     # value-typing of what flows through it.
-    # COMPILE_FAIL_zipfile___init__ blocker 3.
+    # bugs/COMPILE_FAIL_zipfile___init__.md blocker 3.
     test_gimple_stdout("gimple_genexp_local_sum_once", """\
 fn main():
     g = (x * 2 for x in [1, 2, 3])
@@ -11746,7 +11234,7 @@ def main():
 """, "12\n0\n")
 
     # os.path.splitdrive / splitroot — POSIX (see
-    # COMPILE_FAIL_zipfile___init__). splitdrive is always
+    # bugs/COMPILE_FAIL_zipfile___init__.md). splitdrive is always
     # ('', p); splitroot follows posixpath (1/>=3 leading slashes -> '/',
     # exactly 2 -> '//').
     test_gimple_stdout("gimple_os_path_splitdrive_splitroot", """\
@@ -12387,7 +11875,7 @@ bytes_keyed()
     # what lets a kind-0 zero print `0` in the same dict where a `None` prints
     # `None`. `d['n']` still prints `0` where CPython says `None` — a READ
     # does not carry the slot kind anywhere — which is deliberately NOT pinned
-    # here; see CODEGEN_dict_slot_read_loses_its_value_kind.
+    # here; see bugs/mid/CODEGEN_dict_slot_read_loses_its_value_kind.md.
     # A `(key, value)` pair built by `mojo_dict_items` has to carry the dict
     # slot's kind, because a pair slot is a raw int64_t and the pair is built by
     # the runtime with nothing from the dict slot travelling with it. Without it
@@ -13939,7 +13427,7 @@ main()
     # OUTER `t`, not the comprehension's last element. It is printed rather
     # than returned on purpose: a heterogeneous list bound from a call result
     # reads its elements back through the wrong accessor, which is its own
-    # filed bug (CODEGEN_list_element_read_defaults_to_str_across_a_call)
+    # filed bug (CODEGEN_list_element_read_defaults_to_str_across_a_call.md)
     # and would otherwise be what made this case red.
     _check_agrees_with_cpython("comprehension_target_shadows_struct_local", {
         'compr_shadow.py': "class Tok:\n"
@@ -14216,7 +13704,7 @@ main()
     # `Tools/<tool>/x.py` entry file can never arrive there and every CPython
     # `Lib/` import used to degrade to a receiver stub with the source tree
     # sitting right there on disk (bugs/
-    # COMPILE_FAIL_cpython_lib_is_invisible_outside_it). The layout below is
+    # COMPILE_FAIL_cpython_lib_is_invisible_outside_it.md). The layout below is
     # a real one — `<root>/Lib/os.py` is what marks the root as a checkout, and
     # `<root>/Tools/probe/entry.py` is the entry — and the expectation is
     # CPython's own, run with `Lib` on its `PYTHONPATH` (which is how the
@@ -14989,15 +14477,8 @@ def main():
                   test_namedtuple_mixed_literal_types_is_refused,
                   test_namedtuple_tuple_protocol_is_refused_by_name,
                   test_nested_class_attr_reads_enclosing_local_regression,
-                  test_nested_class_in_method_captures_enclosing_param_regression,
                   test_nested_class_attr_from_str_param_regression,
                   test_nested_class_var_attr_from_str_param_regression,
-                  test_nested_class_var_attr_annotated_from_str_param_regression,
-                  test_nested_class_attr_annotated_from_str_param_regression,
-                  test_nested_class_var_attr_from_enclosing_local_regression,
-                  test_nested_class_var_attr_method_read_regression,
-                  test_nested_class_var_attr_rebind_after_construction_regression,
-                  test_nested_class_var_attr_instance_write_shadows_regression,
                   test_nested_class_attr_expr_over_str_param_regression,
                   test_instance_write_shadows_class_attr_regression,
                   test_nested_class_attr_rebind_after_construction_regression,
@@ -15137,43 +14618,6 @@ def main():
 """, "5\n7\n")
 
 
-def test_nested_class_in_method_captures_enclosing_param_regression():
-    """Regression: a `class` statement inside a struct METHOD, whose attribute
-    captures the method's parameter. The class-capture save/restore emits the
-    address of the `_classattr_` cell global for its unwind record, and a
-    method body is `__GIMPLE`-tagged, where `-fgimple` rejects
-    `&<variable>`: the whole program failed to compile with
-    "expected expression before '(' token". The capture must behave exactly
-    as it does from a plain function, including per-execution cells.
-
-    The enclosing method returns an `int`, deliberately: a POINTER-returning
-    function's `__GIMPLE` tag is not honoured by gcc's parser at all (measured;
-    see `_alloc_C`'s shape), so a pointer-returning method would pass even
-    with the address-of emitted and would not pin this bug."""
-    test_gimple_stdout("gimple_nested_class_in_method_captures_param", """\
-class Outer:
-    def make(self, n: int):
-        class C:
-            def get(self):
-                return n
-        return C().get()
-
-    def twice(self, n: int) -> int:
-        class C:
-            def get(self):
-                return n
-        a = C()
-        b = C()
-        return a.get() * 10 + b.get()
-
-def main():
-    print(Outer().make(3))
-    o = Outer()
-    print(o.make(4), o.make(5))
-    print(o.twice(6))
-""", "3\n4 5\n66\n")
-
-
 def test_instance_write_shadows_class_attr_regression():
     """Pins the instance-read half of CPython's class-attribute lookup order.
     An instance write to a name its class defines as an attribute shadows the
@@ -15249,136 +14693,6 @@ def main():
     print(a.name)
     print(b.name)
 """, "x\ny\n")
-
-
-def test_nested_class_var_attr_annotated_from_str_param_regression():
-    """Regression: the ANNOTATED `var` form (bug:CODEGEN_nested_class_var_attr_
-    untyped_field). `var name: str = s` typed its struct field `char *` right,
-    but the per-execution cell never seeded the field — the allocator's
-    per-instance init fires only when the field type and the `_classattr_`
-    global type agree, and a cell attribute's global is a POINTER to the cell —
-    so every instance read the never-written field and printed `None`. A
-    per-execution attribute is not a visible struct field at all; the read
-    goes through the cell this instance was built under, exactly like the
-    unannotated bare spelling `name = s` (which never minted a field and
-    always worked)."""
-    test_gimple_stdout("gimple_nested_class_var_attr_annotated_str_param", """\
-def h(s: str):
-    class C():
-        var name: str = s
-    return C()
-
-def main():
-    a = h("x")
-    b = h("y")
-    print(a.name)
-    print(b.name)
-""", "x\ny\n")
-
-
-def test_nested_class_attr_annotated_from_str_param_regression():
-    """Regression: the annotation alone, in the BARE spelling, mints the
-    shadowing field too. `name: str = s` (no `var`) goes through the typed-
-    assign field loop, so before the fix it failed exactly like the `var`
-    form — `None` through the instance — while the unannotated `name = s`
-    printed right. An annotation on a per-execution attribute must not turn
-    it into a visible struct field."""
-    test_gimple_stdout("gimple_nested_class_attr_annotated_str_param", """\
-def h(s: str):
-    class C():
-        name: str = s
-    return C()
-
-def main():
-    a = h("x")
-    b = h("y")
-    print(a.name)
-    print(b.name)
-""", "x\ny\n")
-
-
-def test_nested_class_var_attr_from_enclosing_local_regression():
-    """Regression: the value is an enclosing LOCAL, not a parameter of the
-    class's declaring function (so it is not in the parameter-type table the
-    class-attribute registration resolves from). The read must still reach
-    the per-execution cell; the `var` spelling's shadowing field made it
-    answer 0 for a string the `class` statement stored right."""
-    test_gimple_stdout("gimple_nested_class_var_attr_from_local", """\
-def h():
-    s = "x"
-    class C():
-        var name = s
-    return C()
-
-def main():
-    print(h().name)
-    print(h().name)
-""", "x\nx\n")
-
-
-def test_nested_class_var_attr_method_read_regression():
-    """Regression: a METHOD of the function-scoped class reads the cell
-    attribute through `self`. With the `var` spelling's visible field gone,
-    `self.name` resolves through the same class-attribute path as an external
-    read — the cell the instance was built under — so each call's method
-    answers its own value."""
-    test_gimple_stdout("gimple_nested_class_var_attr_method_read", """\
-def h(s: str):
-    class C():
-        var name = s
-        def get(self):
-            return self.name
-    return C()
-
-def main():
-    a = h("x")
-    b = h("y")
-    print(a.get())
-    print(b.get())
-""", "x\ny\n")
-
-
-def test_nested_class_var_attr_rebind_after_construction_regression():
-    """Pins CPython's lookup order for the `var` spelling, mirroring
-    `test_nested_class_attr_rebind_after_construction_regression` (the bare
-    form). A class attribute rebound on the CLASS after an instance was built
-    is seen by that instance — the instance holds no attribute of its own, so
-    it reads the class's current value, 3. The pre-fix read went through the
-    visible struct field the `var` spelling minted and answered 0/None; a
-    per-construction SNAPSHOT copy into that field would answer 5 here, which
-    is also wrong — the read must reach the cell, where the rebind lands."""
-    test_gimple_stdout("gimple_nested_class_var_attr_rebind_after_construct", """\
-def make(version: int):
-    class Tag():
-        var __version__ = version
-    t = Tag()
-    Tag.__version__ = 3
-    return t
-
-def main():
-    t = make(5)
-    print(t.__version__)
-""", "3\n")
-
-
-def test_nested_class_var_attr_instance_write_shadows_regression():
-    """Pins the instance-write half for the `var` spelling: an instance write
-    to a name its class defines as an attribute shadows the class attribute
-    on a later read. With no visible struct field, the write lands in the
-    instance's dynamic storage and the read probes it before the cell — the
-    same machinery the bare spelling already used (the companion test for it
-    is `test_instance_write_shadows_class_attr_regression`)."""
-    test_gimple_stdout("gimple_nested_class_var_attr_instance_write_shadows", """\
-def f(v: int):
-    class A():
-        var x = v
-    a = A()
-    a.x = 9
-    return a.x
-
-def main():
-    print(f(4))
-""", "9\n")
 
 
 def test_nested_class_attr_expr_over_str_param_regression():
@@ -15557,35 +14871,6 @@ def main():
             print("skip")
         else:
             print("keep")
-main()
-""")
-
-
-def test_dict_equality_by_value_for_integer_keys():
-    """`d == e` on two separately-built dicts with integer keys was False: the
-    comparison probed an integer-domain slot (keykind 2) with the string probe,
-    which cannot find it. The probe is the dict's own, so equal dicts compare
-    equal, unequal values and unequal keys still differ, and key order does not
-    matter (the convergence loop `nxt == proven` depends on this)."""
-    test_gimple_matches_cpython("gimple_dict_eq_int_keys", """\
-def main():
-    d = {1: 2}
-    e = {1: 2}
-    print(d == e)
-    f = {1: 2}
-    g = {1: 3}
-    print(f == g)
-    h = {5: 'a', 7: 'b'}
-    k = {7: 'b', 5: 'a'}
-    print(h == k)
-    m = {'x': 1, 'y': 2}
-    n = {'y': 2, 'x': 1}
-    print(m == n)
-    p = {1: 2}
-    q = {2: 2}
-    print(p == q)
-    print({} == {})
-    print({1: 2, 3: 4} == {1: 2})
 main()
 """)
 

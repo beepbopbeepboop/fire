@@ -639,11 +639,11 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             # shape, so nothing can reach _cpp_expr's MemberExpr
             # "non-self member access" fallback (invalid C++ on a
             # scalar) or silently read the placeholder as a real value.
-            # See CODEGEN_enum_runtime_class_creation's
+            # See bugs/hard/CODEGEN_enum_runtime_class_creation.md's
             # 2026-08-21 update for the motivating Lib/enum.py
             # `Flag._iter_member_by_value_` shape (previously refused
             # unconditionally here — see the
-            # CODEGEN_generator_classmethod_first_param_must_be_self
+            # CODEGEN_generator_classmethod_first_param_must_be_self.md
             # hard-bug doc for that original, narrower carve-out).
             if not gen._cls_refs_supported(fn.body, struct_name):
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
@@ -781,7 +781,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # "conflicting types" GCC error across the whole-program
         # compile the moment both were transitively reachable (real:
         # `python3 fire.py build .../Lib/os.py`) — see
-        # CODEGEN_generator_function_symbol_not_module_qualified.
+        # CODEGEN_generator_function_symbol_not_module_qualified.md.
         # `_func_qualifier` is called here EXACTLY as `_func_csym` calls
         # it for an ordinary function's definition: `fn.name` is always
         # one of THIS gen_module() call's own top-level FunctionDefs at
@@ -906,7 +906,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # (WRONG on two counts at once: the kwarg-forwarding skip that
     # fallback shares with nothing, and defaulting the WHOLE function's
     # yield-value type to char* — see
-    # CODEGEN_generator_recursive_yield_from_no_arg_forwarding).
+    # CODEGEN_generator_recursive_yield_from_no_arg_forwarding.md).
     # Set here (this function's own `base`/`param_ctypes` are already
     # fully computed above) and cleared in `finally`, mirroring
     # `_cpp_gen_self_struct`'s exact same scoped-context convention.
@@ -1019,11 +1019,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # bound by a for loop or `x = next(g)`); see cpp_core._cpp_is_tagged_word_expr.
     gen._cpp_tagged_word_names = set()
     gen._cpp_param_names = set(gimple_ctypes._as_str(_p[0]) for _p in (fn.params or []))
-    # Include captured/extra parameters too (e.g. lifted async closures that
-    # capture free function values from enclosing scopes), so that `_cpp_dyn_call_expr`
-    # can correctly recognise calls to captured function-valued parameters
-    # (like `func()` where `func` was a bracket‑parameter of the enclosing function).
-    gen._cpp_param_names |= set(gimple_ctypes._as_str(_c[0]) for _c in (extra_captures or []))
     gen._cpp_mixed_list_params = set(
         getattr(gen, '_param_elem_mixed', {}).get(fn.name, ()))
     gen._cpp_mixed_list_params |= set(getattr(gen, '_cpp_inherited_mixed', ()))
@@ -1771,6 +1766,13 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
                         and _binding_site_count(_before, _cn) == 0))
                for _cn, _ in caps):
             continue
+        # `self` in a method cannot be supplied to a nested generator whose
+        # result escapes the enclosing frame (the receiver would outlive the
+        # method's frame), so do not thread it as a capture in that case and
+        # let the generator unit refuse it honestly.
+        _caps_for_compile = list(caps)
+        if any(_cn == 'self' for _cn, _ in caps) and coro_mod._generator_result_escapes(outer_fn, inner.name):
+            _caps_for_compile = [(_cn, _ct) for _cn, _ct in caps if _cn != 'self']
         # Captured names the enclosing function's contract marks kind-mixed
         # stay kind-mixed inside the generator frame.
         gen._cpp_inherited_mixed = set(
@@ -1778,7 +1780,7 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
             if _cn in getattr(gen, '_param_elem_mixed', {}).get(outer_fn.name, ()))
         try:
             cpp_text, value_ctype, base, param_ctypes = gen._gen_cpp_generator_unit(
-                inner, extra_captures=caps)
+                inner, extra_captures=_caps_for_compile)
         except gimple_exprtypes._UnsupportedGeneratorShape as e:
             gen._cpp_refusal_reasons.setdefault(inner.name, str(e))
             continue
@@ -2603,20 +2605,6 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
     for _pn, _ in param_ctypes:
         if _pn in gimple_ctypes._C_KEYWORDS or _pn in gimple_ctypes._CPP_KEYWORD_FIELDS or _pn in gimple_ctypes._C_PARAM_EXTRA_KEYWORDS:
             gen._cpp_kw_param_renames[_pn] = f"_kw_{_pn}"
-    # Per-unit set of this unit's parameter names — the async unit's
-    # twin of the generator unit's identical seed (see
-    # _gen_cpp_generator_unit), with mutable captures included for the
-    # same reason the generator unit's `extra_captures` union exists: a
-    # function-valued bracket parameter threaded through as an ordinary
-    # trailing `int64_t` capture (e.g. a nested `async def wrapper()
-    # capturing: func()` calling the enclosing method's `func`) must be
-    # recognised by `_cpp_dyn_call_expr` (which gates on
-    # `_cpp_param_names`) for the call to lower through
-    # `mojo_dyn_call` instead of falling through to the "unresolved
-    # callee" refusal. `param_ctypes` already includes the widened
-    # pointer entries for mut-captures, so the plain name set covers
-    # them too.
-    gen._cpp_param_names = set(gimple_ctypes._as_str(_p[0]) for _p in (param_ctypes or []))
     declared: dict[str, str] = {}
     for _pn, _pct in param_ctypes:
         if _pn in mut_capture_names and _pct.endswith(' *'):

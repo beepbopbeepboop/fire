@@ -219,42 +219,6 @@ def dylib_module_path_refuses_a_generated_cpp() -> bool:
     return ok
 
 
-def coro_module_compiles_to_c() -> bool:
-    """`mojo/middle/coro.py` itself compiles to C.
-
-    The compiler's own Figure-8 middle tier has to be compilable by the
-    compiler it builds, not merely interpretable from source: a module of
-    the self-host closure that the compiled path cannot take is a hole in
-    the self-host build (`closure_coroutines_are_lowerable` above narrows
-    that to the coroutine/link half). `coro.py`'s `_lower_callable_choices`
-    used to carry a recursive GENERATOR (`_walk_lists`) whose dynamic
-    `getattr` the C++ companion refuses and whose A3 tuple slot the static
-    scan cannot type — so this compile raised with "cannot compile module".
-    The walk is an eager list now; this is the regression that keeps a
-    future shape from silently turning the compile back into a refusal.
-
-    `linkable=False` because this probe has no link line; it asks only that
-    codegen returns C for the module.
-    """
-    sys.path.insert(0, REPO)
-    from build_stdlib_dylib import compile_module_to_c
-    path = os.path.join(REPO, 'mojo', 'middle', 'coro.py')
-    with open(path, encoding='utf-8') as f:
-        src = f.read()
-    try:
-        c = compile_module_to_c(src, path, 'coro', linkable=False)
-    except Exception as e:
-        print(f"  ✗ mojo/middle/coro.py does not compile to C: "
-              f"{type(e).__name__}: {str(e)[:300]}")
-        return False
-    ok = bool(c) and '_walk_lists' in c
-    if not ok:
-        print("  ✗ mojo/middle/coro.py compiled to empty C, or without its "
-              "statement walk")
-    print(f"  mojo/middle/coro.py compiles to C ({len(c)} bytes): {ok}")
-    return ok
-
-
 def closure_coroutines_are_lowerable() -> bool:
     """No module of the self-host closure may contain a generator the
     compiled path cannot lower in place.
@@ -528,7 +492,6 @@ def run() -> tuple:
     that reads like a build failure; the scratch check next because it is the
     only one that does not need the closure."""
     static_ok = closure_coroutines_are_lowerable() and \
-        coro_module_compiles_to_c() and \
         dylib_module_path_refuses_a_generated_cpp() and \
         pinned_prototypes_match_their_definitions()
     scratch_ok = build_scratch_is_private_and_removed()

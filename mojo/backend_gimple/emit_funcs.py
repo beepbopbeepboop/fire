@@ -949,55 +949,6 @@ def _gen_stmt_NonlocalStmt(gen, node):
         gen._func_declared_nonlocals.add(name)
 
 
-def _comptime_for_unroll_ctype(values):
-    """The ctype a comptime-for loop variable must be declared with so it can
-    hold every value in `values`: bool/int -> `int64_t` (the variable's
-    historical ctype — bool elements assign through the existing int-coercing
-    path, so a bool column stays exactly what it always emitted), str ->
-    `char *`. `None` when the values do not share one representable ctype
-    (an empty list, object values, or a mix such as Int and String).
-    `None` is NOT "do not unroll": the caller falls back to the historical
-    `int64_t` declaration and still unrolls the body — the per-element
-    assignment chain emits only bool/int/str, so such elements simply get no
-    assignment while their comptime values are inlined into the body (the
-    `DType.int8`-list shape in test/bit/test_bit.mojo unrolls 12 body
-    executions that reference no C variable at all; dropping the loop there
-    silently deleted the test body). The established emit-nothing fallback
-    belongs to the non-const case (an element `_eval_const` cannot resolve),
-    which is decided by the caller's `all_ok` gate before this helper runs.
-
-    The caller has to declare the variable in this ctype BEFORE the
-    per-element assignments: the 2026-11-07 stdlib-syntax red
-    (`benchmarks/collections/string/bench_atof.mojo`'s
-    `comptime for filename in files`, `std/sys/info.mojo`'s
-    `comptime for arch in <list>`) was the int64_t default declared first
-    and the string assignment `filename = "canada";` emitted second — a hard
-    gcc error. The wrong declaration shipped silently because the str
-    assignment used to die in the `AttributeError` of the missing
-    `_emit_string_literal` method (whose addition for the self-host link
-    error is what woke the path up); deriving one ctype from the elements
-    and declaring it once, before any assignment, is what rules that shape
-    out.
-
-    An isinstance chain, not a `type()`-keyed lookup: a type()-keyed dict is
-    unreliable in the self-hosted binary (see `_selfhost_literal_ctype`'s
-    own note); no set algebra, so the helper lowers the same self-hosted.
-    """
-    _single = None
-    for _v in values:
-        if isinstance(_v, bool) or isinstance(_v, int):
-            _ct = 'int64_t'
-        elif isinstance(_v, str):
-            _ct = 'char *'
-        else:
-            return None
-        if _single is None:
-            _single = _ct
-        elif _ct != _single:
-            return None
-    return _single
-
-
 def _gen_stmt_ComptimeForStmt(gen, node):
     unrolled = False
     if (isinstance(node.iterable, gimple_ctypes.CallExpr) and
@@ -1143,8 +1094,8 @@ def _gen_stmt_ComptimeForStmt(gen, node):
         # `comptime for x in [1, 2, 3]` / `(...,)`: unroll over compile-time
         # constant elements. The loop variable is bound in gen._comptime_vals
         # each iteration so comptime assert / constrained diagnostics that depend
-        # on it evaluate correctly (comptime-for shapes beyond the gimple
-        # unroller's bound forms).
+        # on it evaluate correctly (bugs/DIAGNOSTICS_missing_validation_modular.md:
+        # "comptime-for shapes beyond the gimple unroller's bound forms").
         if DictExpr is not None and isinstance(node.iterable, DictExpr):
             pairs = getattr(node.iterable, 'pairs', None) or []
             cvals = []
@@ -1171,15 +1122,9 @@ def _gen_stmt_ComptimeForStmt(gen, node):
         if all_ok and not for_target_is_tuple(node.target):
             dst = gen.var_types.get(node.target)
             if dst is None:
-                # The elements decide the loop variable's ctype (a string
-                # list is `char *`, not the old int64_t default — see
-                # `_comptime_for_unroll_ctype` for the red that shipped).
-                # None (object values, mixed or empty) keeps the historical
-                # int64_t default and unrolls the body exactly as before:
-                # such elements emit no assignment, only their comptime
-                # values are inlined (see the helper's note).
-                dst = _comptime_for_unroll_ctype(cvals)
-                if dst is None:
+                if cvals and all(isinstance(_v, str) for _v in cvals):
+                    dst = 'char *'
+                else:
                     dst = 'int64_t'
                 gen._declare_var(node.target, dst)
             _ct_saved = (node.target in gen._comptime_vals,
@@ -1233,16 +1178,11 @@ def _gen_stmt_ComptimeForStmt(gen, node):
             if _ok_unpack and _rows:
                 for _ci, _t in enumerate(_names):
                     if _t not in gen.var_types:
-                        # Per-column ctype, declared before the assignments:
-                        # a string column under the int64_t default is the
-                        # same red as the single-variable case above.
-                        # None keeps the historical int64_t default (see the
-                        # helper's note on the object/mixed/empty case).
-                        _ct = _comptime_for_unroll_ctype(
-                            [_r[_ci] for _r in _rows])
-                        if _ct is None:
-                            _ct = 'int64_t'
-                        gen._declare_var(_t, _ct)
+                        _col = [_row[_ci] for _row in _rows]
+                        if _col and all(isinstance(_v, str) for _v in _col):
+                            gen._declare_var(_t, 'char *')
+                        else:
+                            gen._declare_var(_t, 'int64_t')
                 _ct_saved = [(n, n in gen._comptime_vals,
                               gen._comptime_vals.get(n)) for n in _names]
                 for _row in _rows:
@@ -1277,8 +1217,8 @@ def _gen_stmt_ComptimeForStmt(gen, node):
         # vals`, or `comptime s = "ab"; for c in s`). Bind loop targets in
         # gen._comptime_vals so comptime assert / constrained diagnostics that
         # depend on them evaluate correctly
-        # (iteration over non-literal comptime values; subscript/string
-        # collection ops).
+        # (bugs/DIAGNOSTICS_missing_validation_modular.md: "iteration over
+        # non-literal comptime values"; subscript/string collection ops).
         _resolved = gen._eval_const(node.iterable)
         if isinstance(_resolved, (list, tuple, str)) or isinstance(_resolved, dict):
             cvals = list(_resolved.keys()) if isinstance(_resolved, dict) else list(_resolved)
@@ -1286,14 +1226,9 @@ def _gen_stmt_ComptimeForStmt(gen, node):
             if not for_target_is_tuple(node.target):
                 dst = gen.var_types.get(node.target)
                 if dst is None:
-                    # The elements decide the loop variable's ctype (a string
-                    # list is `char *`, not the old int64_t default — see
-                    # `_comptime_for_unroll_ctype` for the red that shipped).
-                    # None (object values, mixed or empty) keeps the
-                    # historical int64_t default and unrolls the body exactly
-                    # as before (see the helper's note).
-                    dst = _comptime_for_unroll_ctype(cvals)
-                    if dst is None:
+                    if cvals and all(isinstance(_v, str) for _v in cvals):
+                        dst = 'char *'
+                    else:
                         dst = 'int64_t'
                     gen._declare_var(node.target, dst)
                 _ct_saved = (node.target in gen._comptime_vals,
@@ -1334,15 +1269,11 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                 if _ok_unpack and _rows:
                     for _ci, _t in enumerate(_names):
                         if _t not in gen.var_types:
-                            # Per-column ctype, declared before the
-                            # assignments (see the literal-list sibling above).
-                            # None keeps the historical int64_t default (see
-                            # the helper's note on the object/mixed/empty case).
-                            _ct = _comptime_for_unroll_ctype(
-                                [_r[_ci] for _r in _rows])
-                            if _ct is None:
-                                _ct = 'int64_t'
-                            gen._declare_var(_t, _ct)
+                            _col = [_row[_ci] for _row in _rows]
+                            if _col and all(isinstance(_v, str) for _v in _col):
+                                gen._declare_var(_t, 'char *')
+                            else:
+                                gen._declare_var(_t, 'int64_t')
                     _ct_saved = [(n, n in gen._comptime_vals,
                                   gen._comptime_vals.get(n)) for n in _names]
                     for _row in _rows:
@@ -2648,31 +2579,6 @@ def _note_own_func_home(gen, bare_name: str, module_name: str,
         home[bare_name] = gimple_codegen._AMBIGUOUS_FUNC_HOME
 
 
-def _find_decl_location(gen, module: str, name: str):
-    """Best-effort `(path, line, col)` of `name`'s top-level declaration in
-    `module`'s source, for an ambiguity note. None when the module or the
-    declaration cannot be located."""
-    import os as _os
-    try:
-        _p = gen._submodule_source_path(module)
-    except Exception:
-        _p = None
-    if not _p:
-        return None
-    try:
-        with open(_p, 'r') as _f:
-            _lines = _f.readlines()
-    except Exception:
-        return None
-    import re as _re
-    _pat = _re.compile(r'^\s*(?:def|fn|struct|trait|enum|alias|comptime|var|let)\s+'
-                       + _re.escape(name) + r'\b')
-    for _i, _ln in enumerate(_lines, 1):
-        if _pat.match(_ln):
-            return (_p, _i, 1)
-    return None
-
-
 def _push_import_scope(gen) -> dict:
     """Push a fresh lexical-scope import-binding map onto
     _import_scope_stack (see its docstring) and return it — used at the
@@ -2727,42 +2633,7 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict) -> None:
                     q = _cb_mod.lstrip('.').replace('.', '_').replace('-', '_')
                 if not q:
                     continue
-                _local_nm = alias if alias else nm
-                _prev_q = scope.get(_local_nm)
-                if _prev_q is not None and _prev_q != q:
-                    # The same name imported from two different modules into
-                    # one function scope is ambiguous (modular's
-                    # import_fn_scope_ambiguous.mojo). A re-import from the
-                    # SAME module is a harmless shadow. Checked here, in the
-                    # pre-scan, so the diagnostic points at the SECOND import
-                    # (the body pass runs after this map is already filled and
-                    # would otherwise flag the first one).
-                    _iln = getattr(stmt, 'line', 0) or 0
-                    _ilc = getattr(stmt, 'col', 0) or 0
-                    _ifn = getattr(gen, '_current_filename', '') or ''
-                    _iat = f'{_ifn}:{_iln}:{_ilc}: ' if _ifn else f'{_iln}:{_ilc}: '
-                    # Notes naming where each module declares the name, as
-                    # modular does (`note: 'X' declared here` / `also declared
-                    # here`). Best-effort: resolve each module to a source
-                    # file and find the declaration line.
-                    _prev_mod = scope.get('__mod__' + _local_nm)
-                    _decls = []
-                    for _mod in (_prev_mod, stmt.module):
-                        if not _mod:
-                            continue
-                        _d = _find_decl_location(gen, _mod, _local_nm)
-                        if _d:
-                            _decls.append(_d)
-                    _note_txt = ''
-                    if len(_decls) == 2:
-                        _note_txt = (f"\n{_decls[0][0]}:{_decls[0][1]}:{_decls[0][2]}: "
-                                     f"note: '{_local_nm}' declared here")
-                        _note_txt += (f"\n{_decls[1][0]}:{_decls[1][1]}:{_decls[1][2]}: "
-                                      f"note: '{_local_nm}' also declared here")
-                    raise RuntimeError(
-                        f"{_iat}error: import of '{_local_nm}' is ambiguous{_note_txt}")
-                scope[_local_nm] = q
-                scope['__mod__' + _local_nm] = stmt.module
+                scope[alias if alias else nm] = q
         elif isinstance(stmt, gimple_ctypes.IfStmt):
             gen._collect_body_import_bindings(stmt.then_body, scope)
             for _, eb in stmt.elifs:
@@ -2922,19 +2793,30 @@ def _func_qualifier(gen, bare_name: str) -> str:
     own_home = getattr(gen, '_own_imported_func_home', None)
     if own_home and bare_name in own_home:
         qualifier = own_home[bare_name]
-        # If bare_name is marked _AMBIGUOUS_FUNC_HOME (two same-named imports
-        # from different sibling modules, each lexically nested in a different
-        # scope), don't refuse outright: the lexical scope resolver above
-        # (Tier 2) already had first crack at this reference and found no
-        # enclosing import that binds bare_name, so the only remaining option
-        # short of erroring is to let the caller fall through to the shared
-        # whole-program registry (Tier 4). That mirrors _imported_def_pts's
-        # `definer_only` contract (an _AMBIGUOUS entry means "no answer", not
-        # a wrong answer) and keeps every tier in this file symmetric: no
-        # stale RuntimeError that contradicts the other three call sites
-        # which already treat the sentinel as a fall-through.
-        if qualifier != gimple_codegen._AMBIGUOUS_FUNC_HOME:
-            return _sanitize_qualifier(qualifier)
+        if qualifier == gimple_codegen._AMBIGUOUS_FUNC_HOME:
+            # Never silently miscompile (doc/STDLIB-BUGS.md SB-1's
+            # per-scope-import residual): this compile unit transitively
+            # imports TWO different sibling modules that both define a
+            # function named `bare_name`, each from a different lexical
+            # scope, and no enclosing lexical scope binds the name for
+            # THIS particular reference (the scope-chain walk above found
+            # nothing). Picking either one silently would risk calling
+            # the wrong module's implementation with no error at all.
+            # Honest refusal instead (see _note_own_func_home's docstring
+            # for the exact repro shape and why this can't be resolved by
+            # the module-qualifier mechanism alone).
+            raise RuntimeError(
+                f"cannot compile module: {bare_name!r} is ambiguous — this "
+                "program transitively imports two different sibling "
+                "modules that both define a free function named "
+                f"{bare_name!r}, each from a different lexical scope "
+                "(e.g. two different nested `from X import ...` "
+                "statements), and no enclosing `from X import ...` "
+                "statement in the current lexical scope binds the name "
+                "for this specific reference. Rename one of the two "
+                "functions, or import qualified (`import X` + "
+                "`X.func(...)`), to work around this.")
+        return _sanitize_qualifier(qualifier)
     home = getattr(gen, '_imported_func_home', None)
     if home and bare_name in home:
         return _sanitize_qualifier(home[bare_name])

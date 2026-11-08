@@ -1,13 +1,3 @@
-SPLIT: bugs/mid/COMPILE_FAIL_Tools_cases_generator_analyzer-part1.md, bugs/mid/COMPILE_FAIL_Tools_cases_generator_analyzer-part2.md, bugs/mid/COMPILE_FAIL_Tools_cases_generator_analyzer-part3.md
-
-## Status (2026-11-12, replan) — SPLIT into three parts
-
-The str()/repr() None-guard sub-bug (the `", ".join` line's gcc `-fgimple`
-error) is fixed in b00e6669e; its part was deleted with that fix, so the
-split is now parts 1-3 (formerly 1, 2, 4; renumbered). Part 3 is the
-end-to-end analyzer build and CPython comparison. Each part has an on-disk
-Done-when test that fails on the current tree.
-
 ## Status (2026-10-29, worktree bug-compile-fail-tools-cases-generator-a — PARTIAL)
 
 Partial fix: `formal/model.py` `match_pattern_kind` now returns

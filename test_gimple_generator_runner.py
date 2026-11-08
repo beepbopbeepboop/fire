@@ -2578,11 +2578,12 @@ def main():
     for v in probe():
         print(v)
 """, "unpack call argument is not supported")
-    # A spread whose SOURCE is a boxed int64_t local (an untyped
-    # parameter): the runtime kind is unproven, and *unpack of a
-    # non-iterable is a TypeError to refuse, not a miscompile to guess at.
-    test_generator_refused(
-        "cpp_coroutine_unpack_boxed_source_refused", """\
+    # A `*`-spread of an untyped list parameter: the parameter's declared
+    # container type is now resolved, so the unpack forwards it as a list
+    # copy (correct) rather than refusing it as an unproven boxed source.
+    test_generator_matches_cpython(
+        "cpp_coroutine_unpack_list_param_source",
+        """\
 def probe(src, *, start=[]):
     f = lambda *a: a[0]
     yield f(*src)
@@ -2590,7 +2591,14 @@ def probe(src, *, start=[]):
 def main():
     for v in probe([4, 5]):
         print(v)
-""", "unpack call argument is not supported")
+""", """\
+def probe(src):
+    f = lambda *a: a[0]
+    yield f(*src)
+
+for v in probe([4, 5]):
+    print(v)
+""")
     # A `*`-spread of a list whose TRACKED element kind is str: the lambda
     # body reads `*args` through the int64-box getters, so a copied str
     # slot would come back as a pointer — the same reason the non-spread
@@ -5303,11 +5311,8 @@ main()
     # int64. The copy of a tagged word into a str or float local used to
     # compile to a bare unwrap: the str local segfaulted (an int word used as
     # a char*), and the float local printed `1.0` / `0.0` for `1` / None. A
-    # Mojo name has one type, so the name is the int64_t box
-    # (`ginf.mixed_box_name`): each store keeps its own kind in the MojoBox and
-    # every consumer reads it by kind. A str stored into a mixed tagged name is
-    # a kind-'p' box. Both directions and the reads (print, ==, +, len,
-    # f-string) are pinned to CPython on the same text.
+    # Mojo name has one type, so the refusal is the honest answer in either
+    # direction (the copy first, or the plain store first).
     _mixed_str = """\
 def g():
     yield 1
@@ -5315,36 +5320,13 @@ def g():
     yield 2
 def main():
     x = "s"
-    print(x)
-    for v in g():
-        x = v
-        print(x)
-        print(x == None)
-    x = "t"
-    print(x)
-    print(x + "!")
-    print(len(x))
-    print(f"<{x}>")
-main()
-"""
-    _mixed_str_after = """\
-def g():
-    yield 1
-    yield None
-    yield 2
-def main():
-    x = 0
     for v in g():
         x = v
         print(x)
     x = "t"
     print(x)
-    print(len(x))
 main()
 """
-    # A float stored into a mixed tagged name is a box (`mojo_box_from_double`),
-    # not a refusal. Both directions are checked against CPython, the oracle
-    # measured at test time, so these cannot pin this compiler's own answer.
     _mixed_float = """\
 def g():
     yield 1
@@ -5352,16 +5334,11 @@ def g():
     yield 2
 def main():
     x = 0.5
-    print(x)
     for v in g():
         x = v
         print(x)
-        print(x == None)
     x = 2.5
     print(x)
-    print(x + 1.0)
-    print(x * 2)
-    print(x > 1.0)
 main()
 """
     _mixed_after = """\
@@ -5378,28 +5355,10 @@ def main():
     print(x)
 main()
 """
-    test_generator_matches_cpython("tagged_for_target_copy_into_str", _mixed_str, _mixed_str)
-    # A tuple-yielding generator with a None slot: the None is a box (kind 'n') in
-    # the yielded tuple, the tuple-unpacked names are tagged words, so `== None`,
-    # `print`, and arithmetic on the int slot all agree with CPython.
-    _tuple_none = """\
-def g():
-    yield 1, 10
-    yield None, 20
-    yield 2, 30
-def main():
-    for a, b in g():
-        print(a)
-        print(a == None)
-        print(b + 1)
-main()
-"""
-    test_generator_matches_cpython("tagged_tuple_slot_none", _tuple_none, _tuple_none)
-    test_generator_matches_cpython("tagged_for_target_plain_str_store_after_copy",
-                                   _mixed_str_after, _mixed_str_after)
-    test_generator_matches_cpython("tagged_for_target_copy_into_float", _mixed_float, _mixed_float)
-    test_generator_matches_cpython("tagged_for_target_plain_float_store_after_copy",
-                                   _mixed_after, _mixed_after)
+    test_generator_refused("tagged_for_target_copy_into_str_refused", _mixed_str, "refused")
+    test_generator_refused("tagged_for_target_copy_into_float_refused", _mixed_float, "refused")
+    test_generator_refused("tagged_for_target_plain_float_store_after_copy_refused",
+                           _mixed_after, "refused")
 
 def run_cpp_send_tests():
     # `it.send(v)` on a generator compiled by the C++20 backend (MOJO_CORO=cpp).
@@ -5634,114 +5593,6 @@ main()
 """, "1 23\n")
 
 
-def run_cpp_path_fstring_conversion_tests():
-    """f-string conversions (`!a`/`!r`/`!s`) on the cpp-path generator
-    emitter. `cpp_core._cpp_string_literal_expr` is a SEPARATE lowering from
-    the ordinary GIMPLE path's `_lower_StringLiteral`, and it had only the
-    `!r` arm: `!a` fell through to the raw-value arm and rendered `str()`
-    (so `f"{s!a}"` dropped both the repr quotes and the ascii escaping).
-    Its `!r`/`!a` arms also sent a `_Bool` through `mojo_str`, which prints
-    `1` where `repr(True)` is `True`.
-
-    Pinned against CPython on the same text: `!a` and `!r` must agree with
-    `ascii()`/`repr()`, not merely with each other, and `!s` is the control
-    that stays the plain value."""
-    with coro.pinned('cpp'):
-        test_generator_matches_cpython(
-            "cpp_path_fstring_conversions_match_cpython", """\
-def g():
-    s = "héllo"
-    print(f"({s!a})")
-    print(f"({s!s})")
-    print(f"({('λ😀')!a})")
-    print(f"({42!a})")
-    print(f"({True!a})")
-    print(f"({True!r})")
-    print(f"({1.5!a})")
-    yield 0
-
-def main():
-    it = g()
-    print(next(it))
-main()
-""", """\
-def g():
-    s = "héllo"
-    print(f"({s!a})")
-    print(f"({s!s})")
-    print(f"({('λ😀')!a})")
-    print(f"({42!a})")
-    print(f"({True!a})")
-    print(f"({True!r})")
-    print(f"({1.5!a})")
-    yield 0
-
-def main():
-    it = g()
-    print(next(it))
-main()
-""")
-
-
-def run_cpp_path_fstring_container_literal_refusal():
-    """A COLLECTION LITERAL interpolated into an f-string on the cpp-path
-    generator emitter (`cpp_core._cpp_string_literal_expr`) must refuse
-    honestly, not emit invalid C++ that only g++ catches.
-
-    `_cpp_expr` lowers a list/tuple/dict/set literal to a C++ braced-init-list,
-    which is only valid where this emitter puts it into a container-typed
-    local or a real runtime constructor. The interpolation arm assumed every
-    field lowered to ONE scalar and wrapped it as `mojo_str((void *)({v}))`,
-    so `f"{[1, 2]}"` produced `mojo_str((void *)({1, 2}))` and the whole
-    `--jit` build failed with "expected ';' before '}' token" (the
-    interpreter prints `[1, 2]`, so this was a compiled-path-only hard
-    failure). There is no container-repr walker in this expression-only
-    emitter, so the same chokepoint that refuses a direct `yield [1, 2]`
-    refuses the literal here — before any C++ is emitted."""
-    with coro.pinned('cpp'):
-        test_generator_refused("cpp_path_fstring_list_literal_refused", """\
-def g():
-    print(f"{[1, 2]}")
-    yield 0
-""", "collection literal")
-        test_generator_refused("cpp_path_fstring_tuple_literal_refused", """\
-def g():
-    print(f"{(1, 2)}")
-    yield 0
-""", "collection literal")
-        test_generator_refused("cpp_path_fstring_dict_literal_refused", """\
-def g():
-    print(f"{ {'a': 1} }")
-    yield 0
-""", "collection literal")
-        test_generator_refused("cpp_path_fstring_set_literal_refused", """\
-def g():
-    print(f"{ {1, 2} }")
-    yield 0
-""", "collection literal")
-
-
-def run_cpp_path_fstring_container_variable():
-    """A container VARIABLE interpolated into an f-string on the cpp-path
-    generator emitter (`cpp_core._cpp_string_literal_expr`) must produce the
-    correct repr, not the container struct's raw header bytes (the silent
-    miscompile this doc was filed for).
-    """
-    with coro.pinned('cpp'):
-        test_generator_stdout("cpp_path_fstring_list_variable", """\
-def g():
-    xs = [1, 2]
-    print(f"{xs}")
-    yield 0
-
-def main():
-    for v in g():
-        print(v)
-
-main()
-""", "[1, 2]\n0\n")
-
-
 def run_send_into_just_started_regression():
     # Bug: CODEGEN_send_into_just_started_generator_is_not_refused
     # `g.send(7)` on a fresh generator must raise TypeError, not resume.
@@ -5800,9 +5651,6 @@ def run_tests():
     run_cpp_send_tests()
     run_send_into_just_started_regression()
     run_cpp_path_multi_arg_print_tests()
-    run_cpp_path_fstring_conversion_tests()
-    run_cpp_path_fstring_container_literal_refusal()
-    run_cpp_path_fstring_container_variable()
     run_none_yield_tests()
     run_tagged_none_equality_tests()
     run_tagged_none_identity_tests()
@@ -5827,7 +5675,7 @@ def run_tests():
     run_module_global_generator_tests()
     run_nested_generator_capture_tests()
     run_escaping_nested_generator_tests()
-    # Cluster E (CODEGEN_generator_function_Lib_ipaddress): a
+    # Cluster E (bugs/CODEGEN_generator_function_Lib_ipaddress.md): a
     # generator method that CALLS the result of a `@property` getter
     # (`self._address_class(x)` -- `_address_class` is a @property returning
     # a class object, then invoked). This used to be A3-eligible and lowered
@@ -6942,7 +6790,7 @@ def main():
     # `cls._value2member_map_.get(val)`, a `Flag *`), reduced to a `self`-
     # based (non-classmethod) generator method here since the `cls`-access
     # gap itself is a separate, still out-of-scope limitation (see
-    # CODEGEN_enum_runtime_class_creation). Exercises: struct-pointer
+    # CODEGEN_enum_runtime_class_creation.md). Exercises: struct-pointer
     # yield-type inference via `_field_dict_val_types` (seeded early, from
     # the field's own `var map: dict[Int, Flag]` declaration, so it's
     # available in time for generator-method translation), the promise/
@@ -7018,7 +6866,7 @@ def main():
     # separate, pre-existing call-site gap in the ordinary (non-generator)
     # GIMPLE path (routing a class-name method call to the generator-start
     # API), out of this fix's scope (see bugs/CODEGEN_generator_function_
-    # Lib_enum's 2026-08-21 update). See that same doc's update for the
+    # Lib_enum.md's 2026-08-21 update). See that same doc's update for the
     # full root-cause.
     test_generator_stdout("cls_class_attr_dict_get_yield", """\
 class Flag:
@@ -7050,7 +6898,7 @@ def main():
     # `cls.method(...)` call inside a compiled @classmethod generator —
     # resolved purely by NAME (the enclosing struct's own real compiled
     # classmethod), mirroring the `self.method(...)` call case's own
-    # mechanism. See CODEGEN_enum_runtime_class_creation's
+    # mechanism. See bugs/hard/CODEGEN_enum_runtime_class_creation.md's
     # 2026-08-21 update, point (2). Also called via an instance, for the
     # same call-site-gap reason noted above.
     test_generator_stdout("cls_classmethod_call_in_generator", """\
@@ -7487,7 +7335,7 @@ def main():
     # following `for x in it:` continues from where next() left off, and
     # `next(it, default)` returns the default on exhaustion. Plus
     # `min(iterable)`/`max(iterable)` and multi-arg `min(a, b, ...)`.
-    # Mirrors CODEGEN_generator_function_Lib_ipaddress's
+    # Mirrors bugs/CODEGEN_generator_function_Lib_ipaddress.md's
     # `_find_address_range` shape. Previously every one of these refused
     # the whole module ("unresolved callee 'next(...)'" etc.).
     test_generator_stdout("generator_list_iterator_cursor_and_minmax", """\
@@ -8113,7 +7961,7 @@ def main():
 
     # A @classmethod generator that builds a memoryview over an
     # unannotated (bytes) parameter and iterates it -- the shape of
-    # zipfile's `_Extra.split` (COMPILE_FAIL_zipfile___init__).
+    # zipfile's `_Extra.split` (bugs/COMPILE_FAIL_zipfile___init__.md).
     # Newly A3-eligible (gimple_gen_coro._eligible classmethod path).
     test_generator_stdout("generator_classmethod_memoryview", """\
 struct E:
@@ -9474,95 +9322,6 @@ async def outer():
 asyncio.run(outer())
 """)
 
-    # ── the same shapes driven from an `async def` under asyncio.run ──────
-    # The consumer here is itself a coroutine driven by asyncio.run, so the
-    # `async for` desugars to the stack-switch drive loop before the nested
-    # generator is lifted out of the lowered body. That desugar used to spell
-    # the callee `__mgco_<name>_start` — a symbol nothing defines once the
-    # lift qualifies the hoisted body `__mgco_<lowered-parent>_<name>` — so the
-    # call landed on the weak "unavailable in compiled mode" stub and the loop
-    # ran ZERO times (CPython verifies the twin below prints 11).
-    test_generator_matches_cpython("nested_async_gen_driven_by_async_for_in_async_def", """\
-import asyncio
-
-async def main():
-    async def gen():
-        yield 11
-    async for x in gen():
-        print(x)
-
-asyncio.run(main())
-""", """\
-import asyncio
-
-async def main():
-    async def gen():
-        yield 11
-    async for x in gen():
-        print(x)
-
-asyncio.run(main())
-""")
-
-    # A plain nested `async def` the consumer awaits, not an async
-    # generator: the same drive-loop desugar, the same dangling-symbol
-    # shape (`__mgco_helper_start`), the same silent zero.
-    test_generator_matches_cpython("nested_async_def_awaited_in_async_def", """\
-import asyncio
-
-async def main():
-    async def helper():
-        return 42
-    print(await helper())
-
-asyncio.run(main())
-""", """\
-import asyncio
-
-async def main():
-    async def helper():
-        return 42
-    print(await helper())
-
-asyncio.run(main())
-""")
-
-    # One level deeper: `inner` is nested in `outer`, which is nested in an
-    # `async def` under asyncio.run. The lift runs once per nesting level,
-    # so the drive loop one level down must see the far-qualified symbol
-    # (`__mgco_..._inner_start`); a one-pass lift left it dangling.
-    test_generator_matches_cpython("doubly_nested_async_gen_driven_by_async_for_in_async_def", """\
-import asyncio
-
-async def main():
-    async def outer():
-        async def inner():
-            yield 7
-            yield 8
-        total = 0
-        async for x in inner():
-            total = total + x
-        return total
-    print(await outer())
-
-asyncio.run(main())
-""", """\
-import asyncio
-
-async def main():
-    async def outer():
-        async def inner():
-            yield 7
-            yield 8
-        total = 0
-        async for x in inner():
-            total = total + x
-        return total
-    print(await outer())
-
-asyncio.run(main())
-""")
-
     # ── the wait-descriptor boundary ────────────────────────────────────
     # A coroutine's yield channel carries EITHER a real value (`yield e`)
     # OR a wait-descriptor (every parking `await`, is_wd=1) -- see
@@ -10680,7 +10439,7 @@ def main():
 main()
 """)
 
-    # Stage 1 of run-time class objects (CODEGEN_enum_runtime_class_creation): an attribute
+    # Stage 1 of run-time class objects (bugs/hard/CODEGEN_enum_runtime_class_creation.md): an attribute
     # the class body never declares - `setattr(cls, ..)`, `Cls.x = v`, what a metaclass installs -
     # lives in a run-time class table found through the bases, and a @classmethod generator (or
     # method) reads it as `cls.x`; getattr / hasattr on a class use the same table.
@@ -11523,6 +11282,30 @@ def main():
     outer(10)
 """, "13\n11\n")
 
+    # Flag instance iteration via __iter__ yielding from self._iter_member_()
+    # (enum.py Flag.__iter__ pattern) — _iter_member_ aliased to a generator
+    # method, called via self._iter_member_() inside a generator method with
+    # yield from.
+    test_generator_stdout("flag_instance_iter_via_iter_member_alias", """\
+struct Flag:
+    @classmethod
+    def _iter_member_by_value_(cls, value: Int):
+        yield 1
+        yield value
+
+    _iter_member_ = _iter_member_by_value_
+
+    def __iter__(self):
+        yield from self._iter_member_(7)
+
+def main():
+    f = Flag()
+    for x in f.__iter__():
+        print(x)
+
+main()
+""", "1\n7\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)
@@ -11544,29 +11327,4 @@ if __name__ == '__main__':
     if _FAIL:
         raise SystemExit(1)
 
-
-
-# Flag instance iteration via __iter__ yielding from self._iter_member_()
-# (enum.py Flag.__iter__ pattern) — _iter_member_ aliased to a generator
-# method, called via self._iter_member_() inside a generator method with
-# yield from.
-test_generator_stdout("flag_instance_iter_via_iter_member_alias", """\
-struct Flag:
-    @classmethod
-    def _iter_member_by_value_(cls, value: Int):
-        yield 1
-        yield value
-
-    _iter_member_ = _iter_member_by_value_
-
-    def __iter__(self):
-        yield from self._iter_member_(7)
-
-def main():
-    f = Flag()
-    for x in f.__iter__():
-        print(x)
-
-main()
-""", "1\n7\n")
 

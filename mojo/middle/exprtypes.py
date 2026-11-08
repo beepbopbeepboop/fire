@@ -66,21 +66,6 @@ _WALK_AST_MAX_DEPTH = 900
 # at each module boundary as well (baseline: 19,480,348).
 _WALK_AST_MEMO: dict = {}
 _WALK_AST_PARENTS: dict = {}
-# A sibling of the walk memo for WHOLE-TREE DERIVED indices: a census or
-# table built from walking a statement list, keyed the same way (id of the
-# list, the list itself held so the address cannot be reused, e.g.
-# `literal_bindings.binding_index`'s binder census). It shares the walk
-# memo's two lifecycle points rather than inventing its own: a node mutated
-# after the index was built invalidates EVERY entry that contains it through
-# the same parent-edge walk (`_walk_ast_invalidate` drops both memos' entries
-# in one loop), and the compile boundary drops both. That is exactly the
-# safety contract the binder census needs: the import-closure scan re-asks
-# "who binds what in module C" once per module per pass per module compiled,
-# and without the memo the per-level re-derivation of the cumulative tree is
-# what took the `do_imports` compile of a snippet importing `build_config`
-# past the sqliteruntime suite's timeout (bugs/MIDDLE_coro_import_compile_
-# hangs_on_large_modules).
-_WALK_INDEX_MEMO: dict = {}
 
 
 def _walk_ast_invalidate(node) -> None:
@@ -113,8 +98,6 @@ def _walk_ast_invalidate(node) -> None:
         seen.add(k)
         if k in _WALK_AST_MEMO:
             del _WALK_AST_MEMO[k]
-        if k in _WALK_INDEX_MEMO:
-            del _WALK_INDEX_MEMO[k]
         par = _WALK_AST_PARENTS.get(k)
         if par is not None:
             for p in par:
@@ -134,7 +117,6 @@ def _walk_ast_reset() -> None:
     (`compile_stdlib.py`, the test runners) would retain every AST it ever
     walked."""
     _WALK_AST_MEMO.clear()
-    _WALK_INDEX_MEMO.clear()
     _WALK_AST_PARENTS.clear()
     # The field-names / dataclass caches are also keyed on node types and
     # retain (type -> tuple/bool) entries for every node type ever walked;
@@ -273,46 +255,6 @@ def _walk_ast(node):
         _WALK_AST_MEMO[key] = (node, out)
     return out
 
-def _walk_derived_index(stmts: list, build) -> object:
-    """A whole-tree DERIVED index over the statement list `stmts`, memoized
-    with the walk memo's own lifecycle.
-
-    `build(stmts)` is called exactly once per (list, mutation): the first
-    call builds and pins the answer under `id(stmts)`, and every later call
-    for the SAME list object returns that pinned answer without touching the
-    tree. The one consumer is the binder census in
-    `literal_bindings.binding_index`, and that census is the per-level
-    re-ask the memo exists to kill: the import-closure scan calls it once
-    per OTHER module in the closure, twice per pass, for EVERY module it
-    compiles (`coro._scan_callsite_param_kinds` -> `_module_literal_env`,
-    `module_gen`'s call-site evidence passes) — O(N^2) re-derivation of the
-    cumulative tree before, one build per module after.
-
-    Safety is inherited, not re-argued. The answer is stale exactly when the
-    tree it was built from is mutated, and a mutation is never silent in this
-    compiler: every write site calls `_walk_ast_invalidate(<the node it
-    wrote>)`, whose parent-edge walk drops every entry that CONTAINS the node
-    — including this one, because the walk that `build` ran (a `_walk_ast`)
-    recorded the edge from the list down to each node it reached. So a
-    mutation inside `stmts` drops the entry at `id(stmts)` and the next call
-    rebuilds; `_walk_ast_reset` drops it whole at the compile boundary. The
-    entry holds `stmts` itself (a strong reference), so its address cannot be
-    handed to a different list while the entry lives — hazard 2, closed the
-    same way the walk memo closes it.
-
-    `build` must run a `_walk_ast` over `stmts` before returning, so the
-    parent edges that make invalidation findable are recorded in the same
-    call that produces the answer — the memo entry is written AFTER `build`
-    returns, and a write-site invalidation can only find it through edges the
-    walk already recorded."""
-    key = id(stmts)
-    hit = _WALK_INDEX_MEMO.get(key)
-    if hit is not None:
-        return hit[1]
-    out = build(stmts)
-    _WALK_INDEX_MEMO[key] = (stmts, out)
-    return out
-
 class _UnsupportedGeneratorShape(Exception):
     """Raised by GimpleGen._gen_cpp_generator_unit (and nothing else) when a
     generator FunctionDef gen_module already flagged as "worth trying" turns
@@ -435,8 +377,6 @@ def _async_quick_eligible(fn: FunctionDef, known_async_names=frozenset()) -> boo
                 continue
             if isinstance(v, IdentExpr):
                 continue
-            if isinstance(v, CallExpr) and isinstance(v.func, MemberExpr) and (v.func.member in known_async_names) and (not getattr(v, 'kwargs', None)):
-                continue
             if isinstance(v, CallExpr) and isinstance(v.func, MemberExpr) and (v.func.member == 'wait') and (not v.args) and (not getattr(v, 'kwargs', None)):
                 continue
             return False
@@ -506,7 +446,7 @@ def _async_gen_quick_eligible(fn: FunctionDef, known_async_names=frozenset()) ->
     both true).
 
     Parameters ARE supported (see bugs/hard/
-    CODEGEN_async_gen_params_silent_regression for the full history).
+    CODEGEN_async_gen_params_silent_regression.md for the full history).
     Phase 7 (commit 1b736d7) first taught `_gen_cpp_async_generator_unit`
     to emit a real parametrized C++ signature, but the ONLY real
     consumption path -- `_cpp_async_for_stmt` (`async for x in f(<args>):`)
@@ -901,7 +841,7 @@ def _is_python_bool_method(gen, node) -> bool:
     Note that `b.get() == True` was ALREADY right, because the comparison
     produces a `_Bool`; a test that only checked the equality would pass
     while every printing spelling was wrong, which is the same trap
-    `CODEGEN_repr_of_a_bool_prints_1` documents for print vs repr.
+    `CODEGEN_repr_of_a_bool_prints_1.md` documents for print vs repr.
 
     `struct_bool_methods` records only methods whose EVERY `return` hands
     back a bool field (see module_gen.py's second per-method loop), so a
@@ -1003,7 +943,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
     like every other compiled struct-method call site already resolves it)
     is one. Reuses this codegen's ALREADY-established per-struct dict-value-
     type/method-return-type registries rather than inventing new tracking —
-    see CODEGEN_enum_runtime_class_creation's 2026-08-20 update.
+    see CODEGEN_enum_runtime_class_creation.md's 2026-08-20 update.
 
     `module_global_types` (optional, default None — every existing caller
     that doesn't pass it keeps this function's original behaviour) is a
@@ -1623,7 +1563,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
     function body (a generator can't `await`, an async function can't
     `yield` — see gen_module's combined-refusal category). `known_structs`/
     `dict_val_types`/`method_return_types` (struct-pointer-yield support —
-    see CODEGEN_enum_runtime_class_creation's 2026-08-20 update) are
+    see CODEGEN_enum_runtime_class_creation.md's 2026-08-20 update) are
     threaded straight through to every `_infer_simple_expr_ctype` call
     below unchanged — see that function's own docstring for what each
     widens. `field_elem_types`/`local_elem_types` (struct_name-scoped
@@ -1794,48 +1734,7 @@ def _dict_literal_spread_operand(key_expr):
     return None
 
 
-def dict_value_kind(gen, node):
-    """The kind a dict VALUE node stores under, or None when the node does not say.
-
-    Only KNOWN kinds answer: a literal, a float- or str-typed expression, or a registered struct pointer. Anything
-    else is None, which joins nothing (see `dict_kind_join`), so an unknown value never turns a dict into `mixed`.
-    `'none'` is the None literal; it is a kind of its own, so `{'n': None, 'z': 0}` is mixed.
-    """
-    if node is None:
-        return None
-    if gen._is_none_literal(node):
-        return 'none'
-    if isinstance(node, BoolLiteral):
-        return '_Bool'
-    if isinstance(node, IntLiteral):
-        return 'int64_t'
-    if isinstance(node, FloatLiteral):
-        return 'double'
-    if isinstance(node, StringLiteral):
-        return 'char *'
-    _vt = gen._quick_type(node)
-    if _vt in _FLOAT_TYPES:
-        return 'double'
-    if _vt == 'char *':
-        return 'char *'
-    if _vt and _vt.endswith(' *') and gen.struct_field_types.get(_vt[:-2].strip()):
-        return _vt
-    return None
-
-
-def dict_kind_join(a, b):
-    """The join of two dict value kinds: an unknown (None) side joins to the other; equal kinds stay; two different
-    kinds are 'mixed', because no single accessor reads both. Used by every writer of a dict's value type, so a
-    literal and a later store cannot disagree about the same dict."""
-    if a is None:
-        return b
-    if b is None or a == b:
-        return a
-    return 'mixed'
-
-
-def _dict_literal_first_sample_ctype(gen, pairs) -> str:
-    """The first-sample rule a literal used before the join (kept for literals with no known value kind)."""
+def dict_literal_val_ctype(gen, pairs) -> str:
     """The dict VALUE ctype a `{k: v, ...}` LITERAL stores under, by the
     first-pair sample rule the dict-literal lowering has always used.
 
@@ -1894,25 +1793,6 @@ def _dict_literal_first_sample_ctype(gen, pairs) -> str:
             return _vt
         return 'int64_t'
     return 'int64_t'
-
-
-def dict_literal_val_ctype(gen, pairs) -> str:
-    """The dict VALUE ctype a `{k: v, ...}` literal stores under: the join of every value's known kind (see
-    `dict_value_kind`). 'mixed' when the values disagree, so reads take the boxed path. A literal whose values
-    are all unknown keeps the first-sample rule. Callers: `_lower_dict_literal` and `module_gen`'s cross-call
-    contract, which both use this one definition."""
-    kind = None
-    for _pair in (pairs or ()):
-        if _dict_literal_spread_operand(_pair[0]) is not None:
-            continue
-        kind = dict_kind_join(kind, dict_value_kind(gen, _pair[1]))
-    if kind == 'mixed':
-        return 'mixed'
-    if kind == '_Bool':
-        return 'int64_t'
-    if kind not in (None, 'none'):
-        return kind
-    return _dict_literal_first_sample_ctype(gen, pairs)
 
 
 def _struct_name_of(ctype: str) -> str:
@@ -2200,9 +2080,9 @@ _NESTED_CLASS_BODY_SLOTS = (
 
 
 def _gmi_nested_struct_defs(body, enclosing, out: list, top: bool = False,
-                            params=None, frame=None) -> None:
+                            params=None) -> None:
     """Every `StructDef` written INSIDE `body`, in source order, as
-    `[node, enclosing_key, params, frame]` QUADS rather than 2-tuples.
+    `[node, enclosing_key, params]` TRIPLES rather than 2-tuples.
 
     The pairs are index-addressed by the one caller for the reason the rest of
     this file writes index loops instead of `zip()`: the self-hosted backend
@@ -2225,20 +2105,11 @@ def _gmi_nested_struct_defs(body, enclosing, out: list, top: bool = False,
     carried so a class-level attribute whose value is a bare parameter name
     can take its C type from that parameter's annotation
     (a `str` parameter used to read back as a pointer-sized int).
-
-    `frame` is the innermost enclosing `FunctionDef`/method NODE (the frame
-    whose body declares the class), or None when the caller does not need it.
-    The class-capture pass reads it to decide whether a captured name is
-    LOCAL TO THE CLASS-DECLARING FRAME (`_gmi_capture_nested_class_enclosing_
-    reads`): a name owned by the same nested `def` that writes the `class`
-    statement is boxed in THAT lifted frame, not in the outermost one. Slot 3
-    is append-only for the same reason slot 2 was -- every other consumer
-    indexes `[0]`/`[1]`/`[2]`.
     """
     for _nc in (body or []):
         if isinstance(_nc, StructDef):
             if not top:
-                out.append([_nc, enclosing, params, frame])
+                out.append([_nc, enclosing, params])
             # A struct METHOD's enclosing key is `current_func_name`, which the
             # method emitter sets to `<struct>_<method>` — the class's own name
             # with no enclosing-function prefix (`closures.discover_closures`
@@ -2248,7 +2119,7 @@ def _gmi_nested_struct_defs(body, enclosing, out: list, top: bool = False,
                 if isinstance(_ncm, FunctionDef):
                     _gmi_nested_struct_defs(
                         _ncm.body, _cname + '_' + _as_str(_ncm.name), out,
-                        False, _ncm.params, _ncm)
+                        False, _ncm.params)
             continue
         if isinstance(_nc, FunctionDef):
             # A nested `def` is LIFTED as `<outer>_<name>`, and `current_func_name`
@@ -2259,25 +2130,25 @@ def _gmi_nested_struct_defs(body, enclosing, out: list, top: bool = False,
             _gmi_nested_struct_defs(
                 _nc.body,
                 enclosing + '_' + _as_str(_nc.name) if enclosing else _as_str(_nc.name),
-                out, False, _nc.params, _nc)
+                out, False, _nc.params)
             continue
         if isinstance(_nc, IfStmt):
-            _gmi_nested_struct_defs(_nc.then_body, enclosing, out, False, params, frame)
+            _gmi_nested_struct_defs(_nc.then_body, enclosing, out, False, params)
             # `elifs` is a list of (condition, body) PAIRS, so the body is an
             # indexed slot read and not another statement list — the same
             # shape `_gmi_collect_self_assigns` walks.
             for _nce in range(len(_nc.elifs or [])):
-                _gmi_nested_struct_defs(_nc.elifs[_nce][1], enclosing, out, False, params, frame)
-            _gmi_nested_struct_defs(_nc.else_body, enclosing, out, False, params, frame)
+                _gmi_nested_struct_defs(_nc.elifs[_nce][1], enclosing, out, False, params)
+            _gmi_nested_struct_defs(_nc.else_body, enclosing, out, False, params)
             continue
         if isinstance(_nc, MatchStmt):
             for _ncmc in (_nc.cases or []):
                 _gmi_nested_struct_defs(
-                    getattr(_ncmc, 'body', None), enclosing, out, False, params, frame)
+                    getattr(_ncmc, 'body', None), enclosing, out, False, params)
             continue
         for _slot in _NESTED_CLASS_BODY_SLOTS:
             _gmi_nested_struct_defs(
-                getattr(_nc, _slot, None), enclosing, out, False, params, frame)
+                getattr(_nc, _slot, None), enclosing, out, False, params)
 
 
 def _hbn_add_target(bound: set, t) -> None:

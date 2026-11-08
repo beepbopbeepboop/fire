@@ -53,7 +53,7 @@ What is asserted here, and why each one is a separate test:
   2. the shapes that must STAY refused stay refused, each for its own reason
      and with a message that names it: a STORE to another module's constant, a
      module-level LIST (a real global with nowhere to live,
-     `FORMAL_module_state_no_storage.md (deleted)`), and a name the module does not
+     `(module state/model limits) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)`), and a name the module does not
      publish.
   3. the manifest is the contract, and it says what the consumer needs: which
      module the library IS, the constants it publishes, and the symbol each
@@ -576,7 +576,7 @@ def test_a_store_to_a_module_constant_is_refused(tmpdir, _shared, verbose):
     there, which is the outcome this backend exists to refuse rather than
     produce. A module-level name in another module is a real global, and a real
     global has nowhere to live on this path
-    (`FORMAL_module_state_no_storage.md (deleted)`)."""
+    (`(module state/model limits) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)`)."""
     prog = ("import mylib\n\n"
             "def main():\n"
             "  mylib.CONST = 9\n"
@@ -623,7 +623,7 @@ def test_a_module_level_list_is_still_refused(tmpdir, _shared, verbose):
     write_tree(root, {"mylib.mojo": lib, "prog.mojo": prog})
     for arch in ARCHES:
         text = build_expecting_refusal(root, "prog", arch)
-        check("FORMAL_module_state_no_storage.md (deleted)" in text
+        check("(module state/model limits) (deleted) (deleted) (deleted) (deleted) (deleted)" in text
               or "storage" in text,
               f"{arch}: a list has no storage to cross a dylib boundary and "
               f"the refusal must say so: {text.strip()[-300:]}")
@@ -776,7 +776,7 @@ def test_a_spine_link_that_resolves_to_nothing_is_an_attribute_read(
     link rather than about whatever the rest of the expression happens to do
     with the result. The message must print what `pkg` DOES publish, because
     that is what separates "a capability `pkg` lacks" (`os.environ` is a
-    `char **` walk, `FORMAL_module_state_no_storage.md (deleted)`) from "a name it
+    `char **` walk, `(module state/model limits) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)`) from "a name it
     does not have".
     """
     prog = ("import pkg\n\n"
@@ -1086,7 +1086,7 @@ def test_a_module_attribute_read_is_refused_as_an_attribute(
               f"{arch}: the refusal must print what the module DOES publish, "
               f"so a reader can see `ITEMS` is not one of them: "
               f"{text.strip()[-400:]}")
-        check("FORMAL_module_state_no_storage.md (deleted)" in text,
+        check("(module state/model limits) (deleted) (deleted) (deleted) (deleted) (deleted)" in text,
               f"{arch}: the design note this shape belongs to must be cited: "
               f"{text.strip()[-400:]}")
 
@@ -1113,7 +1113,7 @@ def test_a_name_the_module_does_not_publish_says_so(tmpdir, _shared, verbose):
     reason that name is missing is a SOURCE — `_NSGetExecutablePath` is refused
     by name on this path and the `__file__` route would put one build's `-o`
     into a content-addressed dylib's cache key
-    (`FORMAL_module_state_no_storage.md (deleted)`'s `sys.executable` row) — not a
+    (`(module state/model limits) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)`'s `sys.executable` row) — not a
     representation.
 
     So the assertion is threefold and the middle one is the load-bearing: the

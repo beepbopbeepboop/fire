@@ -596,21 +596,21 @@ def _resolve_import_module_qualifier(gen, mod: str) -> str:
         fn = getattr(gen, '_current_filename', '') or ''
         if not fn:
             return ''
-        d = os.path.dirname(os.path.abspath(fn))
+        d = gimple_ctypes.os.path.dirname(gimple_ctypes.os.path.abspath(fn))
         dots = len(mod) - len(mod.lstrip('.'))
         rest = mod.lstrip('.')
         for _ in range(dots - 1):
-            p = os.path.dirname(d)
+            p = gimple_ctypes.os.path.dirname(d)
             if p == d:
                 break
             d = p
         if rest:
-            cand = os.path.join(d, *rest.split('.'), '__init__.mojo')
-            if not os.path.exists(cand):
-                cand = os.path.join(d, *rest.split('.')) + '.mojo'
+            cand = gimple_ctypes.os.path.join(d, *rest.split('.'), '__init__.mojo')
+            if not gimple_ctypes.os.path.exists(cand):
+                cand = gimple_ctypes.os.path.join(d, *rest.split('.')) + '.mojo'
         else:
-            cand = os.path.join(d, '__init__.mojo')
-        if os.path.exists(cand):
+            cand = gimple_ctypes.os.path.join(d, '__init__.mojo')
+        if gimple_ctypes.os.path.exists(cand):
             path = cand
         if path is None:
             return ''
@@ -623,7 +623,7 @@ def _resolve_import_module_qualifier(gen, mod: str) -> str:
                 path = _mlmod._module_loader.resolve_module_path(mod)
             except Exception:
                 path = None
-        if not path or not os.path.exists(path):
+        if not path or not gimple_ctypes.os.path.exists(path):
             # Not a stdlib/test module (e.g. a sibling project module,
             # `alpha_module` in a fire.py build test dir) — fall back to
             # the module string itself, matching the do_imports
@@ -1137,15 +1137,15 @@ def _resolve_test_relative_module(gen, module: str) -> str | None:
     if not gen._current_filename:
         return None
     rel_parts = module.split('.')
-    d = os.path.dirname(os.path.abspath(gen._current_filename))
+    d = gimple_ctypes.os.path.dirname(gimple_ctypes.os.path.abspath(gen._current_filename))
     for _ in range(6):
-        cand_pkg = os.path.join(d, *rel_parts, '__init__.mojo')
-        if os.path.isfile(cand_pkg):
+        cand_pkg = gimple_ctypes.os.path.join(d, *rel_parts, '__init__.mojo')
+        if gimple_ctypes.os.path.isfile(cand_pkg):
             return cand_pkg
-        cand_mod = os.path.join(d, *rel_parts[:-1], rel_parts[-1] + '.mojo')
-        if os.path.isfile(cand_mod):
+        cand_mod = gimple_ctypes.os.path.join(d, *rel_parts[:-1], rel_parts[-1] + '.mojo')
+        if gimple_ctypes.os.path.isfile(cand_mod):
             return cand_mod
-        parent = os.path.dirname(d)
+        parent = gimple_ctypes.os.path.dirname(d)
         if parent == d:
             break
         d = parent
@@ -1825,11 +1825,11 @@ def _parser_node_class_names() -> dict:
     import gimple_codegen
     _sd = gimple_codegen._SELFHOST_DIR
     _fc_classes: dict = {}
-    for _st in _selfhost_parsed_source(os.path.join(_sd, 'fire_compiler.py')):
+    for _st in _selfhost_parsed_source(gimple_ctypes.os.path.join(_sd, 'fire_compiler.py')):
         if isinstance(_st, StructDef):
             _fc_classes[_as_str(_st.name)] = True
     _names: dict = {}
-    _types_src = os.path.join(_sd, 'mojo', 'middle', 'types.py')
+    _types_src = gimple_ctypes.os.path.join(_sd, 'mojo', 'middle', 'types.py')
     for _st in _selfhost_parsed_source(_types_src):
         if isinstance(_st, StructDef):
             _names[_as_str(_st.name)] = True
@@ -1979,7 +1979,7 @@ def _selfhost_parsed_source(_f: str) -> list:
     parsed and rewritten exactly once per (path, mtime). `[]` when the file
     is unreadable or does not parse: every caller treats a failed file as
     contributing nothing, and an empty statement list contributes nothing."""
-    _mtime = os.path.getmtime(_f)
+    _mtime = gimple_ctypes.os.path.getmtime(_f)
     _ck = _f + '@' + str(_mtime)
     if _ck in _SELFHOST_PARSE_CACHE:
         _entry = _SELFHOST_PARSE_CACHE[_ck]
@@ -2003,7 +2003,7 @@ def _selfhost_files_key(_files: list) -> str:
     its mtime, as ONE string (see the tuple-key note above)."""
     _parts: list = []
     for _f in _files:
-        _parts.append(_f + '@' + str(os.path.getmtime(_f)))
+        _parts.append(_f + '@' + str(gimple_ctypes.os.path.getmtime(_f)))
     return '\n'.join(_parts)
 
 

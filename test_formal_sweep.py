@@ -3079,7 +3079,7 @@ class TestRoundOverRound(unittest.TestCase):
         "every value a formal program can name lives in a function's own stack "
         "scratch, which is reclaimed when the function returns. What `sys` "
         "publishes: api_version, byteorder, flush_output, … "
-        "`FORMAL_module_state_no_storage.md (deleted)` records the design and what "
+        "`FORMAL_module_state_no_storage.md (deleted) (deleted)` records the design and what "
         "would have to be true to close it, and §(2) is this shape")
     def _exports_message(self):
         """`no_public_api_reason`'s own sentence for a constants-only module,

@@ -48,7 +48,6 @@ import argparse
 import glob
 import json
 import os
-import re
 import platform
 import shutil
 import struct
@@ -1572,6 +1571,8 @@ def test_no_standard_library_module_is_left_in_neither_tier(tmpdir, _shared):
     import formal.imports as I
     placed = {
         # name: (tier, why that tier, in one line)
+        "builtins": ("unreachable",
+                     "`set(dir(builtins))`: the interpreter's own namespace"),
         "sysconfig": ("unreachable",
                       "where an embedded CPython would be installed"),
         "datetime": ("modelled", "a clock this tree reads, plus arithmetic"),
@@ -1583,9 +1584,6 @@ def test_no_standard_library_module_is_left_in_neither_tier(tmpdir, _shared):
     # the tree \u2014 `formal/imports.py`'s rule fires by itself and this row is
     # what checks that it did.
     written = {
-        "builtins": ("the interpreter's own namespace, which the hostmod now answers "
-                     "for the three files that spell `set(dir(builtins))`",
-                     "formal/hostmods/builtins.mojo"),
         "html": ("five character replacements over a string",
                  "formal/hostmods/html.mojo"),
         "posixpath": ("`os/path/__init__.mojo` IS CPython's posixpath",
@@ -2284,7 +2282,8 @@ def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
         ("subprocess", "admitted",
          "a source AND `@admitted` contracts for the operations whose answer is "
          "a host fact"),
-        ("copy", "written", "formal/hostmods/copy.mojo answers it"),
+        ("copy", "modelled", "in HOST_MODELLED and unwritten: a gap with an "
+                             "owner"),
         ("asyncio", "unreachable",
          "in HOST_UNREACHABLE: an event loop and a thread are objects this "
          "image does not have"),
@@ -2534,9 +2533,8 @@ def test_a_host_module_refusal_carries_its_measured_next_step(tmpdir, _shared):
     # the append safe for `formal_sweep.py`'s message families.
     base = I.unresolvable_import_error("prog.mojo", "collections")
     check(base.startswith("prog.mojo imports 'collections', which is a host "
-                          "module (CPython standard library), whose Mojo source "
-                          "in this tree declares only module-level constants, so "
-                          "it has no function or type an importer could bind"),
+                          "module (CPython standard library), which has no Mojo "
+                          "source for this backend to compile"),
           f"the generated wording changed shape, so anything matching on it "
           f"moves: {base!r}")
 
@@ -2554,26 +2552,13 @@ def test_host_module_advice_is_honest(tmpdir, _shared):
     not name the thing the module is wanted FOR is a generic sentence, and a
     generic sentence in a generated message is noise."""
     import formal.imports as I
-    # A written module keeps its advice only when its source exports NOTHING
-    # (constants only): the refusal still happens, so the advice is still the
-    # next step. Today that is `collections`, whose source has module-level
-    # constants and no function or type, which `formal/build.py`'s
-    # exports-nothing refusal names. Checked against the file, not trusted.
-    CONSTANT_ONLY_SOURCES = {"collections"}
     for name, advice in I.HOST_MODULE_ADVICE.items():
         src = I.resolve_module_path(name, relative_to=os.path.join(HERE, "x"),
                                     project_root=HERE)
-        if src is not None:
-            check(name in CONSTANT_ONLY_SOURCES,
-                  f"HOST_MODULE_ADVICE has an entry for {name!r} but it now "
-                  f"resolves to {src!r} — a module source exists, so the advice "
-                  f"is telling a reader to write what is already in the tree")
-            with open(src) as _f:
-                _decls = [l for l in _f if re.match(r"\s*(def|fn|struct|trait)\b", l)]
-            check(not _decls,
-                  f"{name!r} is exempt from the advice check as a constants-only "
-                  f"source, but {src!r} declares "
-                  f"{_decls[0].strip() if _decls else ''!r}")
+        check(src is None,
+              f"HOST_MODULE_ADVICE has an entry for {name!r} but it now "
+              f"resolves to {src!r} — a module source exists, so the advice is "
+              f"telling a reader to write what is already in the tree")
         check(len(advice) > 40,
               f"the advice for {name!r} is too short to be a next step: "
               f"{advice!r}")
@@ -4381,13 +4366,15 @@ def test_a_constants_only_module_is_not_told_nothing_could_be_added(
     The constants are already inlined at their use sites by the
     module-constant substitution; what is absent is a RULE that a module with
     nothing to export needs no dylib at all, so an importer reading the
-    constant directly needs no library. That is one feature and the refusal
-    must name it, rather than telling a reader that nothing would help.
+    constant directly needs no library. That is one feature, and
+    `bugs/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` is where
+    it is written down — so the message now says which feature it is and where
+    it lives, rather than telling a reader that nothing would help.
 
-    **The assertion is on the false clause and on the missing rule being
-    named**, and both directions matter: a message that merely stopped saying
-    the false thing would leave the 6 files with no next step, which is the
-    same dead end in a quieter form.
+    **The assertion is on the false clause and on the owner being named**, and
+    both directions matter: a message that merely stopped saying the false thing
+    would leave the 6 files with no next step, which is the same dead end in a
+    quieter form.
     """
     sys.path.insert(0, HERE)
     from formal.build import no_public_api_reason
@@ -4402,15 +4389,14 @@ def test_a_constants_only_module_is_not_told_nothing_could_be_added(
           f"which is false — the constants are already inlined at their use "
           f"sites and the missing thing is a rule, not an implementation: "
           f"{reason}")
-    check("a BACKEND rule that a module nothing binds" in reason
-          and "needs no library at all" in reason,
-          "the refusal does not name the feature that would remove it (a "
-          f"backend rule that a module nothing binds needs no library at all, "
-          f"and a value model for container-valued module constants), so the "
-          f"files behind this row still have no next step: {reason}")
-    check("value model for a container-valued module constant" in reason,
-          "the refusal does not say why a container-valued module constant "
-          f"cannot be inlined today: {reason}")
+    check("FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib" in reason,
+          "the refusal does not name the feature that would remove it, so the "
+          f"6 files behind this row still have no next step: {reason}")
+    check("a BACKEND rule that a module nothing binds needs no library "
+          "at all" in reason,
+          "the refusal does not say the missing thing is a backend RULE "
+          f"rather than work on the module, which is the part a reader acts "
+          f"on: {reason}")
     # …and the branch's own judgement is untouched: there really is nothing an
     # importer could bind, and the refusal is still correct.
     check("nothing an importer could bind" in reason,

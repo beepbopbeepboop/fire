@@ -346,62 +346,6 @@ def _submodule_source_path(gen, module_name: str) -> str | None:
     return None
 
 
-def _module_missing(gen, module_name: str) -> bool:
-    """True when `module_name` is neither importable as a real Python module
-    nor resolvable to a source file on the compiler's search path. A missing
-    module is a compile-time error (modular: `error: unable to locate module
-    'X'`), not something to silently skipped."""
-    _mn = (module_name or '').lstrip('.')
-    if not _mn:
-        return False
-    import importlib.util as _ilu
-    try:
-        if _ilu.find_spec(_mn) is not None:
-            return False
-    except Exception:
-        pass
-    # A sibling/source module on the compiler's search path (the same
-    # resolution `_compile_imported_module` uses).
-    try:
-        if gen._submodule_source_path(_mn):
-            return False
-    except Exception:
-        pass
-    # A dotted name may be a symbol inside its parent package, not a module;
-    # only the leaf is missing when the parent resolves.
-    try:
-        import imports as _imp
-        if _imp.resolve(_mn).source:
-            return False
-    except Exception:
-        pass
-    return True
-
-
-def _raise_missing_module(gen, module_name: str, loc=None):
-    """Raise the missing-module diagnostic for `module_name` at `loc`
-    ("line:col"), unless it is a real Python module (runtime-provided).
-
-    The diagnostic names the FIRST missing component of the dotted path:
-    `import a.b.c` where `a` resolves but `c` does not reports `c`; a
-    wrong-case root (`from TEST_BINARY_PACKAGE.inner1 import x`) reports
-    `TEST_BINARY_PACKAGE`.
-    """
-    _mn = (module_name or '').lstrip('.')
-    if not _module_missing(gen, _mn):
-        return
-    _leaf = _mn
-    _parts = _mn.split('.')
-    for _i in range(1, len(_parts) + 1):
-        if _module_missing(gen, '.'.join(_parts[:_i])):
-            _leaf = _parts[_i - 1]
-            break
-    _fn = getattr(gen, '_current_filename', '') or ''
-    _ln = (loc or '0').split(':')[0]
-    _at = f'{_fn}:{_ln}: ' if _fn else (f'{_ln}: ' if _ln != '0' else '')
-    raise RuntimeError(f"{_at}error: unable to locate module '{_leaf}'")
-
-
 def _register_closure_struct_inits(gen, stmts: list) -> None:
     """Populate `gen._struct_has_init` / `_struct_init_params` /
     `_struct_init_defaults` / `_struct_method_names` for every top-level
@@ -508,17 +452,11 @@ def publish_a3_generators(gen, meta) -> None:
             gen._generator_home_api[_key] = _api
 
 
-def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
+def _compile_imported_module(gen, module_name: str) -> tuple:
     """Find and compile an imported .mojo/.py module, extracting type
     information.
 
     Returns (code: str, stmts: list) where stmts are parsed statements from the module.
-
-    `loc` is the "line:col" of the import statement that pulled this module
-    in, used to point a missing-module diagnostic at the import site. It is
-    None for a module the compiler itself synthesized (a `from X import Y`
-    joined candidate, a link-inline module): those are not import sites and
-    must not raise a missing-module error.
     """
     # If this module already failed in this root compile, skip re-compile
     # (rollback-recompile path is the root cause of the quadratic walk).
@@ -1390,17 +1328,6 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
                 continue
 
     # Module not found (e.g. stdlib module like sys, os)
-    #
-    # A module that is a real Python module is provided by the runtime
-    # (myinterpreter's importlib path) and is NOT an error. A module that is
-    # neither on the search path nor importable as Python is a genuine
-    # missing module: modular rejects it at compile time
-    # (`error: unable to locate module 'X'`), and so do we (2026-11-09,
-    # bugs/hard/DIAGNOSTICS_missing_validation_modular.md). `loc` is None for
-    # a compiler-synthesized name (a `from X import Y` joined candidate, a
-    # link-inline module), which is not an import site and must not raise.
-    if isinstance(loc, str) and ':' in loc:
-        _raise_missing_module(gen, module_name, loc)
     return (None, [])
 
 
@@ -1711,12 +1638,6 @@ def _register_link_imports(gen, stmts: list) -> list:
     def scan(stmt_list: list):
         for stmt in stmt_list:
             if isinstance(stmt, gimple_ctypes.ImportStmt):
-                # A missing module is a compile-time error, in link mode too
-                # (modular: `error: unable to locate module 'X'`). Checked
-                # here, before the dylib/source resolution below silently
-                # skips an unresolvable name.
-                _raise_missing_module(gen, stmt.module,
-                                      f"{getattr(stmt, 'line', 0)}:{getattr(stmt, 'col', 0)}")
                 # `import M` needs TWO things registered here, and they are
                 # the only two arms of this ladder that ever matched a bare
                 # import — see the unreachable `elif isinstance(stmt,
@@ -1760,8 +1681,6 @@ def _register_link_imports(gen, stmts: list) -> list:
                     if _src2 and gen._submodule_source_path(_im_m):
                         gen._link_inline_modules.add(_im_m)
             elif isinstance(stmt, gimple_ctypes.FromImportStmt):
-                _raise_missing_module(gen, stmt.module,
-                                      f"{getattr(stmt, 'line', 0)}:{getattr(stmt, 'col', 0)}")
                 exports, from_reflection, source = _exports(stmt.module)
                 for _fip11 in (getattr(stmt, 'name_alias_strs', None) or []):
                     name = gimple_ctypes._fi_name(_fip11)
@@ -2185,46 +2104,6 @@ def _new_val(gen, ctype: str, rhs: str) -> str:
     else:
         gen._emit(f'  {t} = {rhs};')
     return t
-
-
-def _select_val(gen, ctype: str, cond_ctype: str, cond_val: str, then_val, else_val) -> str:
-    """Branch-based `cond ? then : else`, producing a fresh temp of `ctype`.
-
-    A `?:` expression is not a legal GIMPLE r-value when either arm is a
-    call, and a parenthesized conditional is not a legal operand at all —
-    gcc `-fgimple` rejects `t = (c ? call (x) : lit)` with "expected
-    expression before '(' token" and `t = c ? call (x) : lit` with
-    "invalid operands in ternary operation" (both measured with
-    gcc-mp-15). So a select whose arms are not already plain variable
-    operands must be emitted as the same three-block shape
-    `_lower_TernaryExpr` uses: `if (cond) goto bb_then; else goto
-    bb_else;`, one arm per block, result merged after.
-
-    `then_val`/`else_val` are either GIMPLE values of `ctype` (strings) or
-    zero-argument callables called INSIDE their branch to produce one. The
-    callable form is what keeps a side effect (a user `__str__`/`__repr__`
-    call, say) lazy: `gen._call_expr` emits immediately, so a value passed
-    in ahead of time would already have run unconditionally — the branch
-    would guard nothing. A value that is already computed is selected
-    either way; a call is only emitted in its own block.
-    """
-    ctype = _as_str(ctype)
-    result = gen._new_temp(ctype)
-    cond = gen._ensure_bool_cond(cond_ctype, cond_val)
-    bb_then = gen._new_bb()
-    bb_else = gen._new_bb()
-    bb_merge = gen._new_bb()
-    gen._emit(f"  if ({cond}) goto {bb_then}; else goto {bb_else};")
-    gen._emit_label(bb_then)
-    tv = then_val() if callable(then_val) else then_val
-    gen._safe_coerce_emit(ctype, ctype, tv, result)
-    gen._emit(f"  goto {bb_merge};")
-    gen._emit_label(bb_else)
-    ev = else_val() if callable(else_val) else else_val
-    gen._safe_coerce_emit(ctype, ctype, ev, result)
-    gen._emit(f"  goto {bb_merge};")
-    gen._emit_label(bb_merge)
-    return result
 
 
 def _inc_val(gen, base: str) -> str:
@@ -2749,26 +2628,6 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         if _real in ('MojoList *', 'MojoSet *', 'MojoDict *'):
             rat = _real
             rav = gen._new_val(_real, f'({_real}){rav}')
-    # A `d[k]` read whose value type was unknown at compile time: the slot's
-    # runtime kind (None/True/1.5/...) is recoverable from (dict,key).
-    _dsr = getattr(gen, '_dict_slot_reads', {})
-    _dsr_hit = _dsr.get(rav)
-    if _dsr_hit is None and enode is not None and isinstance(enode, gimple_ctypes.IdentExpr):
-        _dsr_hit = _dsr.get(_as_str(enode.name))
-    if rat in ('int', 'int64_t') and _dsr_hit is not None:
-        _dv, _kv, _kk = _dsr_hit
-        if _kk == 'str':
-            return gen._call_expr('char *', 'mojo_dict_repr_slot',
-                                  [('MojoDict *', _dv), ('char *', _kv)])
-        if _kk == 'bytes':
-            return gen._call_expr('char *', 'mojo_dict_repr_slot_bytes',
-                                  [('MojoDict *', _dv), ('MojoBytes *', _kv)])
-        if _kk == 'none':
-            return gen._call_expr('char *', 'mojo_dict_repr_slot_none',
-                                  [('MojoDict *', _dv)])
-    # A call result may be a boxed dict-slot value carrying its runtime kind.
-    if rat in ('int', 'int64_t') and isinstance(enode, gimple_ctypes.CallExpr):
-        return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav)])
     if rat == 'char *':
         return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
     if rat == 'MojoList *':
@@ -2828,11 +2687,6 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         rav_d = rav if rat == 'double' else gen._new_val('double', f'(double){rav}')
         return gen._call_expr('char *', 'mojo_repr_float', [('double', rav_d)])
     rav64 = rav if rat == 'int64_t' else gen._new_val('int64_t', f'(int64_t){rav}')
-    # A word of unknown kind (boxed dict-slot value, tagged word, string
-    # pointer held in int64_t, or plain integer): render via the runtime's
-    # generic repr discriminator. For a plain integer it is the same decimal.
-    if rat in ('int', 'int64_t'):
-        return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav64)])
     return gen._call_expr('char *', 'mojo_repr_int', [('int64_t', rav64)])
 
 
@@ -3033,27 +2887,6 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     types — slice 2). Returns (ctype, val) if elaborated, else None."""
     explicit = isinstance(node.func, gimple_ctypes.SubscriptExpr)
     g = node.func.obj.name if explicit else node.func.name
-    # A SELF-RECURSIVE generic call (`self_recursion[i + 1]()` inside
-    # `self_recursion`) cannot be monomorphized: the arg is not a concrete
-    # literal, so no instantiation exists, and the call would reach the
-    # generated C as a declared-never-defined extern (a dangling symbol).
-    # Refuse with a clear diagnostic instead. The bracketed form is decided on
-    # its arguments (`self_recursive_uninstantiable`), not on the name alone.
-    if explicit:
-        _rec = ggc.self_recursive_uninstantiable(gen, node.func)
-        if _rec is not None:
-            raise RuntimeError(
-                f'cannot compile module: self recursive call to {_rec!r} will '
-                f'cause an infinite loop')
-    else:
-        # A bare call has no bracket to inspect, so the name test stands: the
-        # enclosing function is either the bare base or its mangled instance
-        # (`self_recursion_1_i_1_3`).
-        _cfn = getattr(gen, 'current_func_name', None)
-        if _cfn and (g == _cfn or _cfn.startswith(g + '_')):
-            raise RuntimeError(
-                f'cannot compile module: self recursive call to {g!r} will '
-                f'cause an infinite loop')
     source = gen._imported_generics.get(g)
     if not source:
         return None
@@ -3278,20 +3111,7 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
         # elaboration failures elsewhere, e.g. a generic this
         # elaborator just can't handle yet).
         raise
-    except Exception as _elab_e:
-        # A `ConformanceError` from `check_bounds` is a real diagnostic
-        # (`where` clause / trait bound violated by the call's type args),
-        # not a transient elaboration failure — it must surface, not fall
-        # through to the silent stub path (modular:
-        # `error: invalid call to '<fn>': violated constraint`).
-        if 'Conformance' in type(_elab_e).__name__:
-            _cfn = getattr(gen, '_current_filename', '') or ''
-            _cln = getattr(node, 'line', 0) or 0
-            _clc = getattr(node, 'col', 0) or 0
-            _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
-            raise RuntimeError(
-                f"{_cat}error: invalid call to '{g}': violated constraint\n"
-                f"note: {type(_elab_e).__name__}: {_elab_e}")
+    except Exception:
         gimple_ctypes._debug_note('generic call elaboration failed')
         info = None
     if not info:
@@ -3516,23 +3336,13 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
         # instantiated body (provably-false `comptime assert` / `constrained`)
         # is a real user diagnostic, not an elaboration-capability failure.
         # Swallowing it accepts invalid instantiations silently
-        # (comptime validation diagnostics). Re-raise those so
+        # (bugs/DIAGNOSTICS_missing_validation_modular.md). Re-raise those so
         # the diagnostic surfaces at the instantiation site.
         _emsg = str(e)
         if isinstance(e, RuntimeError) and (
                 'constraint failed' in _emsg
                 or 'comptime assertion failed' in _emsg):
             raise
-        # A `where` clause of the struct that is provably false for these type
-        # args is a real diagnostic (modular: `error: violated constraint`),
-        # not an elaboration-capability failure. Only this subclass surfaces:
-        # the bound check's other ConformanceErrors are the false positives the
-        # fall-through above exists for.
-        import elaborate as _elab_mod
-        if isinstance(e, _elab_mod.WhereConformanceError):
-            raise RuntimeError(
-                f"error: invalid instantiation of '{base_name}': violated constraint\n"
-                f"note: {type(e).__name__}: {e}")
         gen._generic_struct_elaboration_failures.append(
             f"{base_name}[{', '.join(type_args)}] from {source}: "
             f"{type(e).__name__}: {e}")
@@ -3570,7 +3380,7 @@ def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
             # A compile-time diagnostic (provably-false comptime assert /
             # constrained) from compiling the instantiated body is a real user
             # diagnostic — re-raise it instead of silently accepting an invalid
-            # instantiation (comptime validation diagnostics).
+            # instantiation (bugs/DIAGNOSTICS_missing_validation_modular.md).
             _emsg = str(e)
             if isinstance(e, RuntimeError) and (
                     'constraint failed' in _emsg
@@ -4175,17 +3985,6 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
             # kind it carries (a float box as a double, a bool as a bool, a
             # string as a string) instead of truncating it through mojo_box_int,
             # and let the list render itself from its own kinds row.
-            gen._emit_call('void', '', 'mojo_list_append_word',
-                           [('MojoList *', res), ('int64_t', ev)])
-            gen._struct_slot_kinds[res] = ginf._RuntimeKinded(['int', 'str'])
-            gen._maybe_kinds_vals.add(res)
-            return
-        if et == 'int64_t' and (ev in getattr(gen, '_dyn_word_vals', ())
-                                or gen._is_dyn_word(None, ev)):
-            # A runtime-kinded word (e.g. re.Match.group() returns a str/bytes
-            # word whose kind is only known at run time, and the lowering marks
-            # it dyn_word). Appending it as an int and forcing int repr prints
-            # the raw pointer; append under the kind it carries instead.
             gen._emit_call('void', '', 'mojo_list_append_word',
                            [('MojoList *', res), ('int64_t', ev)])
             gen._struct_slot_kinds[res] = ginf._RuntimeKinded(['int', 'str'])

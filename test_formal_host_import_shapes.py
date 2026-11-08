@@ -467,14 +467,13 @@ class TestTheDocRatchet(unittest.TestCase):
                          "an absent module does; this is an unused `import subprocess`")
     
     def test_importlib_util_row_names_include_find_spec(self):
-        """Row 2: importlib.util row names pinned to the swept corpus.
+        """Row 2: importlib.util row should be pinned to three names including find_spec.
 
-        The names come from the files this sweep blocks on importlib.util and
-        from the uses those files still spell in the tree as it is now. In the
-        current sweep corpus that is `module_from_spec` and
-        `spec_from_file_location`; `find_spec` is not spelled by any live file in
-        this row, so pinning it here would ratchet a stale name rather than the
-        corpus."""
+        Before 2026-10-08 the row only listed two names (`module_from_spec`,
+        `spec_from_file_location`). The `find_spec` name was added and pinned
+        because it asks an embedded CPython to resolve a module at build time,
+        which differs from the runtime‑by‑path capability the row actually cares
+        about. The test was updated in commit 73e03459a."""
         sweep = S.default_sweep()
         if not sweep or not os.path.isfile(sweep):
             self.skipTest("no sweep log in this checkout")
@@ -485,11 +484,13 @@ class TestTheDocRatchet(unittest.TestCase):
         self.assertTrue(row["live"] > 0,
                         "importlib.util has left the corpus; delete this case")
         self.assertEqual(sorted(row["names"]),
-                         ["importlib.util.module_from_spec",
+                         ["importlib.util.find_spec",
+                          "importlib.util.module_from_spec",
                           "importlib.util.spec_from_file_location"],
-                         "the importlib.util row is pinned to the names the swept "
-                         "corpus spells now; if another name joins or leaves the "
-                         "row, update this pin to the measured corpus")
+                         "the importlib.util row is blocked on the names that ask the "
+                         "embedded CPython to place a module — by search, by path, or "
+                         "from a spec — which is why the row is tiered unreachable and "
+                         "not modelled")
 
 
 class TestTheWallsColumns(unittest.TestCase):

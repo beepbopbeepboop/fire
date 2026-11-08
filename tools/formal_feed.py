@@ -30,11 +30,6 @@ CONTEXT = ("Context: formal backend (arm64 + x86-64 Mach-O, Lean proofs). `expor
            "Every fix gets a test and a commit; file what you cannot fix as bugs/FORMAL_*.md (no duplicates). "
            "The latest sweep map (`ls -t bugs/FORMAL_sweep_work_map*.md | head -1`) says where the corpus stands.\n\n")
 
-# A task whose branch has unmerged commits holds its claims forever. After this many passes of `release_finished`
-# seeing the branch still unlanded, the task is superseded so its claim releases and queued tasks on the same claim
-# can start.
-MAX_LANDING_ATTEMPTS = 3
-
 
 def state_path():
     return os.path.join(C.ctl_dir(), "feed.json")
@@ -106,26 +101,19 @@ def _record_tips():
 def release_finished():
     _record_tips()
     n = 0
-    with C.registry() as reg:
-        for name, t in reg.items():
-            st = C.state_of(t)
-            if C.dead_on_arrival(t):
-                continue   # died of a limit/outage before doing anything: `refill` bounces it to the queue
-            if st in ("exited-ok", "exited-err") and _unlanded(t):
-                # Still unlanded: count another failed landing attempt. After MAX_LANDING_ATTEMPTS, supersede it
-                # so its claim releases and queued tasks on the same claim can start.
-                attempts = t.get("landing_attempts", 0) + 1
-                t["landing_attempts"] = attempts
-                if attempts >= MAX_LANDING_ATTEMPTS:
-                    t["state"] = "superseded"
-                    n += 1
-                continue
-            if st in ("exited-ok", "exited-err") and not _unlanded(t):
-                # Done, and nothing left to land: "integrated" is true. A superseded task is NOT integrated: it was handed
-                # to a fixer because its branch failed to merge or broke the gate, so its state stays superseded (2026-11-02:
-                # this loop relabelled five such tasks integrated while their commits were still off master).
-                t["state"] = "integrated"
-                n += 1
+    for name, t in C.load().items():
+        st = C.state_of(t)
+        if C.dead_on_arrival(t):
+            continue   # died of a limit/outage before doing anything: `refill` bounces it to the queue, it is not "integrated"
+        if st in ("exited-ok", "exited-err") and _unlanded(t):
+            continue   # its fix is on a branch master does not have yet: the doc is NOT free, or the next worker re-fixes it
+        if st in ("exited-ok", "exited-err") and not _unlanded(t):
+            # Done, and nothing left to land: "integrated" is true. A superseded task is NOT integrated: it was handed to
+            # a fixer because its branch failed to merge or broke the gate, so its state stays superseded (2026-11-02:
+            # this loop relabelled five such tasks integrated while their commits were still off master).
+            r = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "mark", name, "integrated"],
+                               capture_output=True, text=True)
+            n += r.returncode == 0
     return n
 
 
@@ -136,11 +124,6 @@ def free_docs(held, q):
     out = []
     for p in sorted(glob.glob(os.path.join(C.MAIN, "bugs", "FORMAL_*.md"))):
         b = os.path.basename(p)[:-3]
-        # DONE ratchet: skip docs already deleted on any branch
-        r = subprocess.run(["git", "log", "--all", "--diff-filter=D", "--oneline", "--", "bugs/%s.md" % b, "bugs/formal/%s.md" % b],
-                           capture_output=True, text=True, cwd=C.MAIN)
-        if r.stdout.strip():
-            continue
         if "sweep_work_map" in b or b == "FORMAL_known_limits":
             continue
         if "bug:" + b not in taken:

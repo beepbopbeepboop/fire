@@ -46,7 +46,7 @@
     {
       "name": "haiku",
       "model": "claude-haiku-5-5",
-      "count": 2,
+      "count": 0,
       "kind": "claude",
       "recover_hours": 4.23,
       "class": "easy"
@@ -71,7 +71,7 @@
     {
       "name": "iceman",
       "model": "opencode-go/iceman-contributor-free",
-      "count": 1,
+      "count": 20,
       "kind": "opencode",
       "recover_hours": 2.5,
       "class": "mid",
@@ -103,9 +103,6 @@
     "mid": "bugs/mid/*.md (Sonnet 5.5)",
     "hard": "bugs/hard/*.md (Opus 5.5)",
     "escalate_after": 2,
-    "unserved_policy": {
-      "hard": "replan"
-    },
-    "note": "Every doc starts easy. A no-commit attempt (a limit kill excluded) boosts it one class; the top class keeps its docs. Work stays in its class. A class with no slot but an accepted unserved_policy is handled by that policy instead of warned about."
+    "note": "Every doc starts easy. A no-commit attempt (a limit kill excluded) boosts it one class; the top class keeps its docs. Work stays in its class."
   }
 }

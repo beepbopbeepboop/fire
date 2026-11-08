@@ -1,6 +1,6 @@
 # Plan: Enum run-time class creation (CODEGEN_enum_runtime_class_creation)
 
-Source bug: CODEGEN_enum_runtime_class_creation
+Source bug: bugs/hard/CODEGEN_enum_runtime_class_creation.md
 
 ## Decomposition
 

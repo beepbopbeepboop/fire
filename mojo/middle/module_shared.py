@@ -158,7 +158,7 @@ def _selfhost_parsed_modules(sd: str) -> list:
     tokenized and parsed three times AND all three AST copies stayed live
     for the life of the process. That is both the repeated work and a
     contributor to the never-frees accumulation measured in
-    `CODEGEN_bootstrap_resource_blowup`: one shared parse is ~1/3
+    `bugs/hard/CODEGEN_bootstrap_resource_blowup.md`: one shared parse is ~1/3
     the instructions and ~1/3 the retained AST nodes.
 
     The cache is keyed PER FILE on `(path, mtime)`, not on the whole file
@@ -501,10 +501,7 @@ def _collect_import_modules_rec(modules_to_compile: dict, node_list: list, _dept
         return
     for stmt in node_list:
         if isinstance(stmt, FromImportStmt):
-            _loc = f"{getattr(stmt, 'line', 0)}:{getattr(stmt, 'col', 0)}"
-            _prev = modules_to_compile.get(_as_str(stmt.module))
-            if not _prev:
-                modules_to_compile[_as_str(stmt.module)] = _loc
+            modules_to_compile[_as_str(stmt.module)] = True
             # `stmt.name_alias_strs` + `_fi_name`, NOT
             # `gimple_ctypes._fromimport_names(stmt)` + `_fip14[0]` — the
             # latter subscripts a freshly-built 2-tuple (each entry
@@ -523,13 +520,7 @@ def _collect_import_modules_rec(modules_to_compile: dict, node_list: list, _dept
                 # the separator dot would double-count the depth. The joined
                 # string must be EXACTLY what _module_candidate_paths resolves
                 # and what the temp_gen's module_name/qualifier derive from.
-                _jm = _as_str(gimple_ctypes._join_import_member(stmt.module, _fn))
-                if not modules_to_compile.get(_jm):
-                    # No location: `X.Y` may be a SYMBOL defined in X, not a
-                    # submodule, so an unresolved `X.Y` is not a missing-module
-                    # error. Only the primary module (`stmt.module`) carries
-                    # the import's location and can raise one.
-                    modules_to_compile[_jm] = None
+                modules_to_compile[_as_str(gimple_ctypes._join_import_member(stmt.module, _fn))] = True
         elif isinstance(stmt, ImportStmt):
             # Read `stmt.module` DIRECTLY (a char* field, exactly like the
             # FromImportStmt branch above), not via `_import_targets(stmt)`
@@ -538,14 +529,11 @@ def _collect_import_modules_rec(modules_to_compile: dict, node_list: list, _dept
             # POINTER was stored via mojo_set_add_int and every later
             # `name in modules_to_compile` missed — the compiled --dump-full
             # then emitted a truncated transitive closure.
-            _loc = f"{getattr(stmt, 'line', 0)}:{getattr(stmt, 'col', 0)}"
-            if not modules_to_compile.get(_as_str(stmt.module)):
-                modules_to_compile[_as_str(stmt.module)] = _loc
+            modules_to_compile[_as_str(stmt.module)] = True
             _mtc_extra = stmt.extra
             if _mtc_extra and len(_mtc_extra) > 0:
                 for _ex in _mtc_extra:
-                    if not modules_to_compile.get(_as_str(_ex[0])):
-                        modules_to_compile[_as_str(_ex[0])] = _loc
+                    modules_to_compile[_as_str(_ex[0])] = True
         elif isinstance(stmt, FunctionDef):
             _collect_import_modules_rec(modules_to_compile, stmt.body, _depth + 1)
         elif isinstance(stmt, IfStmt):
@@ -1010,16 +998,8 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict,
             # variable and is not the module global, so it records nothing.
             _p17_dname = _as_str(_n.target.obj.name)
             if _p17_dname not in self.var_types:
-                # The value's dict KIND (exprtypes.dict_value_kind), so the join below is the one every other dict
-                # writer uses. The lattice join promoted an int and a float to double, and read a mixed dict as double.
-                _k = gimple_exprtypes.dict_value_kind(self, _n.value)
-                if _k is None:
-                    # A container or other type the kind table does not name: its quick type, except the int64_t
-                    # default, which is no evidence of an int and would join with every other kind.
-                    _qt = self._quick_type(_n.value)
-                    if _qt and _qt != 'int64_t':
-                        _k = _qt
-                _store_hits.setdefault(_p17_dname, []).append(_k)
+                _store_hits.setdefault(_p17_dname, []).append(
+                    self._quick_type(_n.value))
         if (isinstance(_n, ExprStmt)
                 and isinstance(_n.value, CallExpr)
                 and isinstance(_n.value.func, MemberExpr)

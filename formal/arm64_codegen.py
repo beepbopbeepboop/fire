@@ -673,12 +673,15 @@ def _emit_sub_imm(asm, xd: int, xn: int, imm: int) -> None:
                           encode_add_xd_xn_imm_sh)
 
 
-#: `if A and B:` over two integer comparisons as `cmp ; ccmp ; b.cond` (step 06c/06d).
-#: ON by default: the machine code answers CPython's (`test_arm64_emission.py`),
-#: and the proof generator proves it (`both.mojo` 0 sorries; the full arm64 corpus
-#: went 50 -> 55 PASS with it on, no example regressed because of it).
-#: `FIRE_CCMP_LOWERING=0` turns it off for A/B comparison.
-CCMP_LOWERING = os.environ.get("FIRE_CCMP_LOWERING", "1") != "0"
+#: `if A and B:` over two integer comparisons as `cmp ; ccmp ; b.cond` (step 06c).
+#: OPT-IN (`FIRE_CCMP_LOWERING=1`), OFF by default: the machine code is correct
+#: (`test_arm64_emission.py` runs it with the variable set, answers equal CPython's)
+#: but `formal/arm64_proof_gen.py` derives a branch's condition from the flags of
+#: the LAST `cmp` and has no model for flags that a `ccmp` set from two
+#: comparisons, so turning it on makes `formal/examples/both.mojo` stop proving
+#: ("unsupported: branch condition value flow (frame/flag unavailable)", measured
+#: 2026-11-07).  Default it on only together with that generator support.
+CCMP_LOWERING = os.environ.get("FIRE_CCMP_LOWERING") == "1"
 
 
 class ARM64Codegen:
@@ -714,11 +717,6 @@ dylib_exports: list = None, globals_base: int = None,
         # names whose calls produce no value, transitively over `return <call>`
         # chains (`model.returnless_function_names`). None means "not computed".
         self._returnless = None
-        # Lazily filled by `_callee_returns_none` from `self._functions`: the
-        # name -> "every path answers None" resolver
-        # (`model.function_returns_none_resolver`). None means "not computed";
-        # the same one-table-per-compile shape as `_returnless`.
-        self._returns_none = None
         # Lazily filled by `_refuse_foreign_bytes_into_text_parameter`: the
         # parameters each function measures as TEXT, transitively through calls
         # that forward a bare parameter (`model.text_measured_parameters`).
@@ -1259,7 +1257,7 @@ dylib_exports: list = None, globals_base: int = None,
             # in `info` for both proof generators to read, because the word an
             # unwinder writes on one side has to mean the same integer on the
             # other (`model.exception_kind_table`'s docstring). Nothing reads it
-            # yet — see the (deleted) doc on the unemitted ARM try-handler arm
+            # yet — see `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md`
             # §5, where this is step 2 of 6. `info` rather than a re-derivation
             # here is the point: x86-64's `info` carries the same table from the
             # same publisher, so a proof that reads one cannot drift from the
@@ -1449,7 +1447,7 @@ dylib_exports: list = None, globals_base: int = None,
         # `SP + k` is INSIDE it and a method that writes its receiver does not
         # satisfy `FrameOk` — which is why the callee contract for a method is
         # `Refine.FrameOk_except`, the predicate
-        # the wide-receiver-by-reference contract (formerly documented in a deleted FORMAL doc) lands for exactly this.
+        # `bugs/formal/FORMAL_wide_receiver_by_reference.md` lands for exactly this.
         # The layout itself is `formal/model.py`'s, so the x86-64 backend
         # reserves the same bytes in the same order.
         self._frame_sites = M.struct_constructor_sites(f, self._structs)
@@ -4745,7 +4743,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             callee_is_bool=lambda callee: self._callee_is_bool(
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
-            callee_returns_none=self._callee_returns_none,
             callee_returned_parameter=self._callee_returned_parameter,
             dict_names=DICT_TYPE_NAMES,
             deref_kind=lambda e: M.pointer_deref_kind(
@@ -5212,31 +5209,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._returnless = M.returnless_function_names(
                 self._functions.values())
         return name not in self._returnless
-
-    def _callee_returns_none(self, name):
-        """Whether EVERY path out of the local function `name` answers `None`.
-
-        **Direction (b)'s question**, and the one `ValueKinds.is_none_value`
-        asks a call before `print` (or a `printf`'s `%s`) renders it: a
-        function that falls off its end, or whose every `return` is `None` or a
-        call to one that answers `None`, is statically `None`, and the four
-        characters are the only honest rendering this path has for it (a value
-        here is one 64-bit word, and `None` is the absence of one).
-
-        **The answer is the TRANSITIVE one, and the recursion lives in
-        `model.function_returns_none_resolver`** — the same shape as
-        `_callee_returns_value` above and for the same reason: `def h(a): return
-        g(a)` with a return-less `g` is `None` one hop out, so a reader that
-        stopped at the first function would print the word `g` never wrote.
-        The resolver is built once over `self._functions` (the emitter's table)
-        and its cycle/not-of-this-unit answers are the shared reader's, so
-        arm64 and x86-64 cannot disagree about what a call to one function
-        produces.
-        """
-        if self._returns_none is None:
-            self._returns_none = M.function_returns_none_resolver(
-                self._functions)
-        return self._returns_none(name)
 
     def _callee_returned_parameter(self, name):
         """The positional index of a parameter `name` hands straight back.
@@ -7251,7 +7223,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         **Two lines of delegation**, and `M.print_kwargs`'s docstring is where
         the decision and its reasons are: `flush=` is answered there (the
         largest `codegen-refused` family in this repository's own source, per
-        the 2026-10-03 proof-coverage census, §0.2), and the rule
+        `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` §0.2), and the rule
         that the keyword is dispatched BEFORE its value is inspected is what
         stops a bool from being refused with a sentence about `sep`."""
         return M.print_kwargs(e, "arm64")
@@ -9072,7 +9044,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         which is another C library call (`__error`) and therefore another
         unfollowable call in a block the proof framework has to cross — so the
         foldable case is refused here, precisely, and the rest is
-        the known limit that integer overflow at run time is still untrapped (deleted FORMAL doc).
+        `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
         """
         reason = M.int_parse_overflow_refusal(
             M.fold_literal_expr(text_expr), base)
@@ -9667,9 +9639,9 @@ ctor_field_value=self._ctor_field_value_for(name),
             # wrapped number or a status code — and the run-time half, the
             # same predicate over a value the build CANNOT know, which a
             # plain `ADD`/`SUB`/`MUL` used to answer with the hardware's
-            # modulo-2^64 wrap (exit 0, empty stderr, the deleted FORMAL
-            # integer-overflow-untrapped doc's `VARIABLE_ROWS` table is the
-            # measurement that pinned it). That
+            # modulo-2^64 wrap (exit 0, empty stderr, `bugs/formal/
+            # FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+            # `VARIABLE_ROWS` table is the measurement that pinned it). That
             # half is `_emit_int_alu_checked`: the flag-setting instruction
             # and the branch into the trap block, with the trap the one
             # answer this path has for a value the target cannot hold.
@@ -9776,18 +9748,10 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_int_overflow_trap(op, "vs")
             return
         if op == "*":
-            # The product fits in 64 bits exactly when the HIGH word (smulh) is
-            # the sign extension of the LOW word (mul), i.e. hi == lo asr 63 in
-            # every bit. The earlier sequence tested only bit 63 of hi XOR lo
-            # (`lsr #63`), which misses an overflow whose high word is nonzero
-            # but whose low word's top bit equals it: `triple(2**63 - 1)` wrapped
-            # to 9223372036854775805 and exited 0. The fix is the full test:
-            # sign(lo) into a scratch, XOR into hi, a zero result means it fits.
-            # x1 is the second operand, dead once `mul` has read it.
             self.asm.emit(encode_smulh_xd_xn_xm(2, 0, 1))
             self.asm.emit(encode_mul_xd_xn_xm(0, 0, 1))
-            self.asm.emit(encode_asr_xd_xn_imm(1, 0, 63))
-            self.asm.emit(encode_eor_xd_xn_xm(2, 2, 1))
+            self.asm.emit(encode_eor_xd_xn_xm(2, 2, 0))
+            self.asm.emit(encode_lsr_xd_xn_imm(2, 2, 63))
             self._emit_int_overflow_trap(op, None, reg=2)
             return
         raise CodegenError(
@@ -12133,8 +12097,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             # lives. `value_callee_can_hold_a_function` above reads the
             # DECLARATION; this reads the FLOW, and neither can see the other:
             # a local bound to `17` has no annotation to refuse on, and
-            # the deleted FORMAL doc on function-value calls not proved to be calls
-            # is what covers what is left when neither has an answer.
+            # `bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
+            # is the doc for what is left when neither has an answer.
             holds = M.callee_word_is_not_an_address(
                 self._cur_fn, name, self._vkinds)
             if holds is not None:
@@ -12166,17 +12130,6 @@ ctor_field_value=self._ctor_field_value_for(name),
         if not is_extern_call and name == "range":
             self._emit_range_list(list(e.args))
             return
-        # `str(<integer literal>)` / `repr(<integer literal>)` is a build-time
-        # constant: the literal's decimal text, interned like any string
-        # literal. No buffer, no pointer arithmetic, same on both architectures.
-        # (`str(n)` of a RUN-TIME integer stays refused: formatting needs a
-        # buffer that outlives the call, which this path does not have.)
-        if not is_extern_call and name in ("str", "repr") \
-                and len(e.args) == 1 and not e.kwargs:
-            _lit = M.integer_literal_text(e.args[0])
-            if _lit is not None:
-                self._emit_expr(F.StringLiteral(_lit))
-                return
         if not is_extern_call and M.emitter_lowers(name):
             if name == "len":
                 self._emit_len(e)
@@ -12253,12 +12206,6 @@ ctor_field_value=self._ctor_field_value_for(name),
                             pass
                         return None
                     folded = M.printf_fold_text_widths(name, fmt_text_f, vargs, _text_of_arg)
-                    if folded is None:
-                        # Step 13d: text the build cannot see, in an image that holds non-ASCII
-                        # text, becomes the star form with widths computed in characters.
-                        folded = M.printf_runtime_rewrites(
-                            name, fmt_text_f, vargs, _text_of_arg,
-                            lambda a: self._is_string_subscript(a.obj))
                     if folded is not None:
                         new_fmt, new_vargs = folded
                         new_args = list(e.args)
@@ -12268,25 +12215,16 @@ ctor_field_value=self._ctor_field_value_for(name),
         except Exception:
             pass
         self._refuse_unusable_printf_format(name, e)
-        # …and the same call's VARARGS, a value this build knows is `None`
-        # among them.  Direction (b) makes a call to a function that always
-        # answers `None` a value whose TEXT is decided at build time, so `%s`
-        # gets the four characters (`printf_none_argument_rewrite`) rather than
-        # the word the callee never wrote.  A NUMBER conversion of the same
-        # operand is refused, because CPython raises TypeError for
-        # `"%d" % None` and this path has no exception to raise.  The rewrite
-        # is the model's, asked at the same line in both emitters, so the two
-        # architectures cannot render one call differently.
-        rewritten = M.printf_none_argument_rewrite(
-            name, list(e.args or []), self._vkinds.is_none_value)
-        if rewritten is not None:
-            new_args, reason = rewritten
-            if reason is not None:
-                raise CodegenError(reason)
-            e = F.CallExpr(func=e.func, args=new_args,
-                           kwargs=getattr(e, "kwargs", None),
-                           line=getattr(e, "line", None),
-                           col=getattr(e, "col", None))
+        # …and the same call's VARARGS, each of which the format's conversions
+        # turn into TEXT.  A return-less call here is the same value this path
+        # cannot carry that `_print_call` refuses for `print`, at the other
+        # spelling of "render this word" — see
+        # `model.returnless_printf_argument_refusal` for why it is one reader and
+        # not a second copy of `_print_call`'s loop.
+        reason = M.returnless_printf_argument_refusal(
+            name, list(e.args or []), self._vkinds.no_value_callee_of)
+        if reason is not None:
+            raise CodegenError(reason)
         # …and the same call's ARGUMENTS against the callee's own parameter
         # types. Beside the line above and for the same reason — this is the last
         # point where the resolved callee and its arguments are both in hand —
@@ -13749,7 +13687,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             #
             # Both are decidable when the AMOUNT is a literal and the BASE is
             # not, and precisely decidable when both are; the variable-base case
-            # is the known limit that integer overflow at run time is still untrapped (deleted FORMAL doc).
+            # is `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
             reason = M.shift_overflow_refusal(
                 op, M.fold_literal_expr(e.right), M.fold_literal_expr(e.left),
                 [e.left, e.right])

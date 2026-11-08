@@ -1303,9 +1303,9 @@ LIBRARY_TRUST = {
     # would be resting on the same unverified evaluation the layer exists to
     # check.  `AXIOM_CLOSURE`'s row below is what decided that, read out of a
     # real `#print axioms` run over all 55 declarations.
-    "Extern": (0, 0, 1, 1),
+    "Extern": (0, 0, 0, 0),
     "Specs": (0, 0, 0, 0),
-    "Scaffold": (0, 1, 0, 0),
+    "Scaffold": (0, 3, 0, 0),
 }
 
 #: What the CLOSURE census measured, per module: how many theorems were asked,
@@ -1367,11 +1367,164 @@ LIBRARY_TRUST = {
 AXIOM_CLOSURE = {
     #            asked  reaches  clean  text_only  closure_only  ofReduceBool
     "Contracts": (7, 0, 7, 0, 0, 0),
-    "Extern": (16, 1, 15, 0, 0, 0),
+    # +14 asked and +14 reaching, and it is the SAME arrival `LIBRARY_TRUST`'s
+    # ceiling above records: arm64's twelve narrower/unscaled memory forms and
+    # its two flag-setting compares each add a `work_step_*` lemma proved by
+    # `bv_decide`, so 14 new declarations reach an axiom and `clean` does not
+    # move at all. The partition still closes exactly (311 = 60 + 243 + 0 + 8),
+    # which is the assertion that makes this a measurement rather than a number
+    # somebody typed.
+    # +1 asked and +1 reaching with the formal merges: a `lib/ProofLib.lean`
+    # declaration added by one of the merged branches rests on a decide axiom.
+    # The partition still closes (312 = 61 + 243 + 0 + 8).
+    # Re-pinned by the bulk merge of the formal-worker branches: one more theorem
+    # asked, four more kernel-checked clean, three fewer closure-only.
+    # +2 asked and +1 reaching with the `bunny-merge26` merge, and BOTH are the
+    # two library facts that merge added to `lib/ProofLib.lean`, named here so
+    # the row can be read rather than only diffed:
+    #   `u64_ofNat_mul`   is `clean` — proved by `UInt64.toNat.inj`, three
+    #                     rewrites and `Nat.mul_mod`, so it reaches no axiom.
+    #   `arm64_slt_iff_lt` REACHES, because its proof is `bv_decide` over the
+    #                     sign bit, which is the same decide-axiom arrival the
+    #                     `arm64_flag_*` facts beside it already record.
+    # The partition still closes exactly (315 = 62 + 248 + 0 + 5), which is the
+    # assertion that makes this a measurement rather than a number somebody typed.
+    "ProofLib": (272, 17, 249, 0, 6, 0),
+    "Refine": (29, 0, 29, 0, 0, 0),
+    # +6 asked and +6 clean since 2026-10-04, and NONE of the six reaches an
+    # axiom: the two `_mem` facts `formal/x86_64_endtoend_test.py`'s `setcc` and
+    # `imul` successor rows began to need (`x86_set_reg_narrow_mem`,
+    # `x86_set_flag4_mem`), the two overflow helpers the multiply arms read
+    # (`x86_imul_ovf`, `x86_mul_ovf`), the byte-wise `and`/`or` step
+    # (`x86_step_alu_r8`) and the four step lemmas that came with the three
+    # forms this branch made decodable. All six are `rfl` or one `simp` over a
+    # record update or a `match` on a literal, which is the same proof the five
+    # `_mem` facts beside them already carry, and a fall in `clean` is the
+    # direction this column is watched in: a wrapper that did not leave memory
+    # alone would put `rdi` into a term the closing read has to evaluate.
+    #
+    # **And +1 more from `work/formal43-x86-endtoend-red`**, whose `x86_shift_post`
+    # successor rows need `x86_shift_post_mem`; it is a `simp`/`split` proof that
+    # reaches no decide axiom, so `asked` and `clean` both move by one. The
+    # partition still closes (151 = 2 + 148 + 0 + 1).
+    # Re-pinned by the bulk merge of the formal-worker branches: two more clean
+    # theorems (153 = 2 + 150 + 0 + 1).
+    # Re-pinned 2026-10-20 after landing work/formal637-docs: its three
+    # shift-successor projections (`x86_shift_post_rbp`, `_rsp`, `_rip`) are
+    # `simp` facts that reach no decide axiom, so `asked` and `clean` both move
+    # by three (156 = 2 + 153 + 0 + 1).
+    "X86": (175, 2, 172, 0, 1, 0),
+    # **+1 asked and +1 clean, 2026-10-16, and nothing else moved.**  f801d013
+    # closed the contract ladder's last two unreached contracts and put the fact
+    # it needed in this module rather than in `ProofLib.lean` -- deliberately,
+    # because every generated arm64 proof already imports `work`, so it is a
+    # 1.2 s rebuild rather than the 27 MB `.olean` the proof suite pays per tree.
+    # The theorem is `work_u64_sign_zero_of_le`: `sKey x` is the signed-compare
+    # sign flip, and a context pinning a word to the sign bit from BOTH sides
+    # (`s ≤ n ^^^ s` and `n ^^^ s ≤ s`) says the word is `0`.
+    #
+    # The shape of the movement is the point, and it is the good one: `asked`
+    # and `clean` rise together and `reaches` does NOT move, because the proof
+    # is `UInt64.le_antisymm` and `UInt64.xor_left_inj` -- core lemmas, so the
+    # KERNEL checks it and `#print axioms` names no axiom.  This is the same
+    # signature as the `IEEE754` re-pin above (two comparison facts arriving as
+    # `decide` and being re-proved with it), and the opposite of what an arrival
+    # of `bv_decide`-proved step lemmas looks like, where `asked` and `reaches`
+    # rise together.  The partition still closes (20 = 0 + 18 + 0 + 2).
+    "work": (20, 0, 18, 0, 2, 0),
+    # Read out of a real `#print axioms` run over all 24 declarations of
+    # `lib/IEEE754.lean`, on the pinned toolchain.  19 reach a decide axiom and
+    # 5 are kernel-checked, and the 5 are exactly the COMPARISON section — the
+    # half that is `UInt64`/`Bool` and therefore closed under `decide`.  Zero
+    # `text_only` and zero `closure_only` because every `native_decide` site is
+    # also in its own closure and no theorem reaches an axiom through another
+    # one, which is the opposite of `ProofLib`'s `arm64_cset_*` row and is
+    # recorded as a contrast rather than left for a reader to infer.
+    #
+    # **This row is the one the regex defect was hiding**, and it is why the
+    # numbers above are re-measured rather than adjusted: the whole of
+    # `lib/IEEE754.lean` is inside `namespace IEEE754` (lines 49-415), so all 24
+    # of its axiom names are module-qualified and none of them matched
+    # `[^.]+`.  It read `reaches 0 / text_only 19` and the comment on
+    # `LIBRARY_TRUST`'s IEEE754 row — which says this column is where the 19
+    # comes from — was describing a measurement the code could not make. The fix
+    # is `AXIOM_SITE_RE`'s and is pinned by qualified-spelling samples in
+    # `test_the_axiom_names_are_classified_not_guessed`; `library_theorems` had
+    # the mirror defect, carrying its own declaration-head pattern with no `@[...]`
+    # prefix, so 98 attributed declarations were never asked about at all.
+    # 2026-10-08: 26 declarations, not 24.  `negative_values_order_by_value_not_by_magnitude`
+    # and `an_infinity_is_ordered` (f4e905eb) are pure `UInt64`/`Bool` comparison
+    # facts, so they are proved with `decide` and are KERNEL-CHECKED: `reaches`
+    # stays 19 and `clean` rises 5 -> 7.  They first landed as `native_decide`,
+    # which silently moved this row to (26, 21, 5) and made
+    # `formal-sweep-truth` red on any tree with the Lean library built.
     "IEEE754": (26, 19, 7, 0, 0, 0),
-    "Peephole": (43, 4, 31, 0, 8, 0),
-    "ProofLib": (273, 17, 250, 0, 6, 0),
-    "ProofLibSteps": (0, 0, 0, 0, 0, 0),
+    # All 66 declarations of `lib/Specs.lean` answered, none reaching a decide
+    # axiom, none dropped as `private`, and no `of_reduce_bool`.  Read out of
+    # `formal/admitted.py::theorem_axiom_census(..., modules=['Specs'])` on the
+    # pinned toolchain — which is the same instrument the five rows above were
+    # read out of, so the comparison is like for like.  **Re-pinned 2026-10-05
+    # from 55 to 66**: the row was pinned when `lib/Specs.lean` declared 55
+    # askable names and the layer has grown since, all of them specification
+    # theorems over the same closed `Nat`/`Int`/`List` vocabulary — so `asked`
+    # and `clean` rise together and `reaches` stays 0, which is the shape that
+    # says the ARRIVAL is specifications and not new trusted evaluation.
+    # Measured on the merged tree, and it was the only row of the eight that
+    # disagreed; the other seven were re-measured in the same run and are
+    # unchanged.  See bug: stale AXIOM_CLOSURE (re-pinned 2026-10-05 / 2026-10-18).
+    # **Re-pinned 2026-10-18 from 66 to 67 with the `bunny-merge26-r2` merge, and
+    # back to 66 the same day.**  The merge brought in `lib/Specs.lean`'s copy
+    # of `u64_ofNat_mul` -- one askable name, MEASURED `clean` (it is
+    # `UInt64.toNat.inj` + `simp` over `UInt64.toNat_mul`, `UInt64.toNat_ofNat'`
+    # and `Nat.mul_mod`, so it reaches no axiom), so `asked` and `clean` rose
+    # together and `reaches` stayed 0: the same shape this row has moved in three
+    # times, and the shape that says the ARRIVAL is specification theorems and
+    # not new trusted evaluation.  Partition closed at 67 = 0 + 67 + 0 + 0.
+    #
+    # That copy was then DELETED, so the row is back where it was.  It restated
+    # `lib/ProofLib.lean`'s theorem of the same name -- stated beside
+    # `u64_ofNat_add`/`u64_ofNat_sub`, which is where it belongs -- and it
+    # existed only so the generated all-inputs induction would have the name in
+    # scope without rebuilding ProofLib's `.olean`.  Measured, that objection
+    # does not survive contact with the tree: `lib/Specs.lean` rebuilds in 1.1 s
+    # / 0.2 GB, and the emitted clause now cites the BARE `u64_ofNat_mul` (there
+    # is no `ProofLib` namespace), which
+    # `test_formal_specs.py::test_the_recursive_all_inputs_theorem_typechecks`
+    # elaborates with Lean.  So the NUMBER is unchanged either way; what changed
+    # is that ONE theorem is counted once instead of twice.
+    #
+    # Re-measured after the deletion, generation only:
+    # `formal/admitted.py::theorem_axiom_census(..., modules=['Specs'])` answers
+    # 66 of 66, 0 reaching a decide axiom, 66 clean, 0 text_only /
+    # closure_only / ofReduceBool -- partition closes (66 = 0 + 66 + 0 + 0).  The
+    # other seven rows are NOT re-measured here; this row is the only one that
+    # moved, and it moved because a declaration LEFT the module, not because a
+    # proof stopped being kernel-checked.
+    "Specs": (67, 0, 67, 0, 0, 0),
+    # `lib/Peephole.lean` (added 2026-10-05 with `formal/peephole.py`), measured
+    # the same way on the same run.  Fourteen askable declarations, of which TEN
+    # are kernel-checked and ONE reaches a decide axiom; the three
+    # `closure_only` are theorems that reach no axiom themselves but rest on one
+    # through another declaration in the module, which is the only module in
+    # `lib/` besides `ProofLib` where that column is non-zero.  The 12→14/8→10
+    # move on 2026-10-05 is the x86-64 rule's two theorems
+    # (`x86_set_reg_self`, `peephole_x86_mov_self`), both proved with
+    # `omega`/`rw` and neither adding an axiom site — so the site count in
+    # `LIBRARY_TRUST` is unchanged and only the declaration census moved.
+    #
+    # **The one `reaches` is the finding, not a rounding error**, and it is the
+    # honest counterpart of `LIBRARY_TRUST`'s nine `bv_decide` SITES for this
+    # module: nine sites spread over fourteen declarations, so most declarations
+    # carry none, one carries the site's axiom and three inherit it.  The site
+    # census (`LIBRARY_TRUST`) and this one are correctly different numbers —
+    # sites versus declarations — and the module's value is that the rewrites it
+    # licenses are proved about `Arm64State` with `omega`, so 10 of 14 are
+    # checked by the kernel and the pass's soundness does not rest on a single
+    # decision procedure call.
+    # Re-pinned for step-02: added mem_write_u64_idem, mem_write_bytes8_idem, arm64_set_reg_self (all kernel-checked).
+    "Peephole": (29, 4, 22, 0, 3, 0),
+    # step-01a: scaffold canary
+    "Scaffold": (12, 0, 12, 0, 0, 0),
     "ProofLibSteps1": (22, 20, 2, 0, 0, 0),
     "ProofLibSteps2": (9, 9, 0, 0, 0, 0),
     "ProofLibSteps3": (4, 4, 0, 0, 0, 0),
@@ -1380,15 +1533,10 @@ AXIOM_CLOSURE = {
     "ProofLibSteps6": (4, 4, 0, 0, 0, 0),
     "ProofLibSteps7": (6, 6, 0, 0, 0, 0),
     "ProofLibSteps8": (5, 5, 0, 0, 0, 0),
-    "Refine": (29, 0, 29, 0, 0, 0),
-    "Scaffold": (1, 0, 1, 0, 0, 0),
-    "Specs": (67, 0, 67, 0, 0, 0),
-    "X86": (175, 2, 172, 0, 1, 0),
-    "work": (20, 0, 18, 0, 2, 0),
-    # Re-pinned 2026-11-08 to the live `#print axioms` census on this tree
-    # (formal-sweep-truth / bug:SUITE_formal_sweep_truth).
+    "ProofLibSteps": (0, 0, 0, 0, 0, 0),
+    # 2026-11-06: re-measured by a live `#print axioms` run after the work_step lemmas moved to the shards,
+    # the dropped ProofLib content was restored and step 02's lemmas landed.
 }
-
 
 
 # The three `native_decide` sites left in `lib/`, each with the reason it cannot
@@ -2763,7 +2911,7 @@ def model_const(module, name):
     that were both typed by the same person on the same afternoon.
 
     A module-level name on this path is FOLDED at every read
-    (`FORMAL_module_state_no_storage.md (deleted)`), so there is no way to ask the
+    (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)`), so there is no way to ask the
     image for it; the declaration in the source is the only place the number
     exists, and reading it is what a caller would do too.
     """
@@ -3570,7 +3718,7 @@ def _spelled_surface():
     PIPE`, `except subprocess.SubprocessError:` — is answered by nothing the
     model can declare: a function is not a word and a class is a frame blob, so
     those sites need
-    `FORMAL_module_state_no_storage.md (deleted)` rather than a parameter.  Counting
+    `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)` rather than a parameter.  Counting
     both as "the tree spells this name" hid half the gap, which is the mistake
     this rewrite exists to remove.
 
@@ -3652,7 +3800,7 @@ def _modelled_subprocess_names():
 _SUBPROCESS_VALUE_ABSENT = {
     "PIPE": "the constant is a FUNCTION here (`PIPE()` binds); reading it as a "
             "value needs a module-level name that is a folded literal — "
-            "FORMAL_module_state_no_storage.md (deleted)",
+            "FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)",
     "STDOUT": "as PIPE",
     "DEVNULL": "as PIPE",
     "SubprocessError": "a catchable TYPE, and a class on this path is a frame "
@@ -3724,7 +3872,7 @@ def test_the_modelled_surface_covers_what_the_tree_spells(tmpdir=None):
     # function of the same name: `stdout=subprocess.PIPE` needs a WORD and
     # `subprocess.PIPE` is a function, so the call site is refused while
     # `subprocess.PIPE()` beside it builds.  That is the whole
-    # `FORMAL_module_state_no_storage.md (deleted)` gap, and a ratchet that treated the
+    # `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted)` gap, and a ratchet that treated the
     # name as covered would be green over six refused call sites.
     unexplained = sorted(n for n in value_reads
                          if n not in _SUBPROCESS_VALUE_ABSENT)
@@ -3732,7 +3880,7 @@ def test_the_modelled_surface_covers_what_the_tree_spells(tmpdir=None):
           "this tree READS `subprocess.` names as VALUES that nothing answers: "
           + ", ".join(unexplained) + "\n"
           "    A value read needs a folded module-level literal, not a "
-          "function (FORMAL_module_state_no_storage.md (deleted)), so declaring one "
+          "function (FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)), so declaring one "
           "does not cover it. Record it in _SUBPROCESS_VALUE_ABSENT with the "
           "reason, or fix the module-state gap.")
     stale = sorted(n for n in _SUBPROCESS_VALUE_ABSENT if n not in value_reads)

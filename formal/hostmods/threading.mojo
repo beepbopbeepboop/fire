@@ -6,7 +6,8 @@ and nothing else gets no `pthread_create` to call.  So `Thread` cannot be built
 here, and neither can `Lock`, `RLock`, `Condition`, `Event`, `Semaphore`,
 `Barrier` or `Queue` -- each is a lock word plus a waiter list plus a predicate,
 and a waiter list is a run-time-length sequence, which is the same limit that
-took `os.listdir` out of reach.
+took `os.listdir` out of reach
+(`bugs/FORMAL_listdir_no_run_time_sequence.md`).
 
 WHAT IS DECIDED HERE
 --------------------

@@ -2929,7 +2929,7 @@ def builtin_module_constants(source_path: str) -> dict:
     **What this is not:** it is not `sys.argv`.  `argv` is the process's command
     line, which arrives in registers the entry stub overwrites before the first
     statement runs, so there is nothing for the build to hold —
-    `FORMAL_module_state_no_storage.md (deleted)` §(4) is right about that one and
+    `FORMAL_module_state_no_storage.md (deleted) (deleted)` §(4) is right about that one and
     this doc's author grouped `__file__` with it by shape rather than by cause.
     A source the BUILD was handed is not a source that is gone.
     """

@@ -1125,7 +1125,7 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
         # than this one. Those overloads often carry `comptime assert(False)`
         # / `constrained[False]` poison-pill guards that are correct when the
         # overload is selected but false-positive hard errors when compiled
-        # out of context here (bugs/hard/DIAGNOSTICS_missing_validation_modular.md).
+        # out of context here (bugs/mid/DIAGNOSTICS_missing_validation_modular.md).
         # Mark the gen so the backend can suppress such inapplicable-overload
         # diagnostics without hiding real diagnostics in normal compilation.
         gen._is_elaborated_instantiation = True

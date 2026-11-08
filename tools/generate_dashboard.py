@@ -5,7 +5,7 @@ Sources: doc/ORCHESTRATION.html
 """
 
 import os
-import time
+from datetime import datetime
 
 # ---------------------------------------------------------------------------
 # DATA EXTRACTED FROM doc/ORCHESTRATION.html
@@ -779,7 +779,7 @@ def main():
   <header>
     <h1>mojo-reference Fleet Dashboard</h1>
     <p class="subtitle">Orchestration system overview — claims, workers, architecture, and system state</p>
-    <div class="meta">Generated from <code>doc/ORCHESTRATION.html</code> · Orchestration guide for the mojo-reference fleet · {esc(time.strftime('%Y-%m-%d %H:%M'))}</div>
+    <div class="meta">Generated from <code>doc/ORCHESTRATION.html</code> · Orchestration guide for the mojo-reference fleet · {esc(datetime.now().strftime('%Y-%m-%d %H:%M'))}</div>
   </header>
 
   <div class="grid">
