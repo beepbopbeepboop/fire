@@ -398,7 +398,23 @@ def strip_prose(src: str) -> str:
 # cpp_core.py and module_gen.py share it. Generated C++ is byte-identical.
 # The one-parameter prototype `_mojo_repr_set (MojoSet *);` stopped counting (see
 # CAST_RE), which is the rest of the drop.
-BASELINE_COUNT = 24
+#
+# 24 -> 22 (2026-11-08, work/bug-suite-no-new-casts): ROOT CAUSE of the
+# `no-new-casts` suite job failure (+14, 38 total) was a merge/regression that
+# re-inlined 13 C++ container casts in `cpp_core.py`'s coroutine `_W` word
+# structs and one tuple-unpack element read, bypassing the exempted
+# `emit_resolve.cpp_word_container_operator` / `cpp_container_cast_prefix`
+# helpers (the 2026-10-31 consolidation), plus 3 new ad-hoc `(MojoDict *)`
+# coercions in `emit_calls.py:_lower_type_new` (aac9e2d3e9, the permissive
+# EnumType/dict-subclass namespace fallback) that should route through the R2
+# GIMPLE chokepoint. Fixed by reusing the emit_resolve helpers for the C++
+# text casts and `gen._coerce_to_type(..., 'MojoDict *', ...)` for the
+# namespace coercions (an int64_t/boxed-handle source is not an R2
+# container-kind refusal). Net -2 below the prior baseline locks in the
+# improvement; the remaining 22 are the previously-justified sites (generated-C
+# template casts under measured registry dispatch, deliberate measured unboxes,
+# and typed NULLs) documented in the ledger above.
+BASELINE_COUNT = 22
 
 
 def count_casts() -> int:

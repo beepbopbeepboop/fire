@@ -2269,7 +2269,7 @@ class MojoClass:
 
     def __init__(self, name, fields, methods: dict, interpreter, bases=None,
                  comptime_aliases=None, static_methods=None, class_methods=None,
-                 def_scope=None):
+                 def_scope=None, keywords=None):
         self.name = name
         self.fields = fields  # list of VarDecl/AssignStmt (field declarations)
         self.methods = methods  # dict: name -> MojoFunction
@@ -2281,6 +2281,11 @@ class MojoClass:
         # struct (mirrors how `__init__` bodies already resolve such names).
         self.def_scope = def_scope
         self.bases = bases or []  # base MojoClass objects, e.g. `struct Child(Base):`
+        # Keyword arguments from the class definition, e.g.
+        # `extra_items=bool`, `closed=True` (PEP 692/728) or `metaclass=M`.
+        # Stored for introspection and passed through where the interpreter
+        # creates a real Python class (Python-type bases with keywords).
+        self.keywords = keywords or {}
         # `comptime EOF_TOKEN: Int = 69` inside the struct body — evaluated
         # once at struct-definition time and exposed as a class-level
         # attribute (`TokenType.EOF_TOKEN`), same as a Python class constant.
@@ -3364,6 +3369,8 @@ def _mojo_iterable(value):
 # `max(a, b)` compares values and must not turn a struct into a generator.
 _MOJO_ITER_FIRST_ARG = {id(list), id(tuple), id(set), id(frozenset), id(sum),
                         id(sorted), id(enumerate), id(any), id(all), id(dict)}
+if hasattr(builtins, 'frozendict'):
+    _MOJO_ITER_FIRST_ARG.add(id(builtins.frozendict))
 _MOJO_ITER_ALL_ARGS = id(zip)
 _MOJO_ITER_ONE_ARG = {id(_mojo_min), id(_mojo_max)}
 
@@ -3994,12 +4001,174 @@ class _SysProxy:
     argv instead of its own — harmless for most scripts, but fatal for
     self-referential ones: `fire run fire.py help` would otherwise have the
     nested interpretation of fire.py re-read the unchanged host argv, take
-    the same branch, and re-interpret itself forever."""
+    the same branch, and re-interpret itself forever.
+
+    Encoding functions are overridden to guarantee PEP 686 semantics (UTF-8
+    is the default encoding), independent of the host Python's configuration.
+    """
     def __init__(self, argv):
         self.argv = argv
 
+    def getdefaultencoding(self):
+        return 'utf-8'
+
+    def getfilesystemencoding(self):
+        return 'utf-8'
+
+    def getfilesystemencodeerrors(self):
+        # POSIX default; matches CPython on the platforms this compiler
+        # targets (PEP 686 keeps surrogateescape for filesystem paths on
+        # Unix even with UTF-8 as the default encoding).
+        return 'surrogateescape'
+
     def __getattr__(self, name):
         return getattr(sys, name)
+
+
+def _sentinel_builtin():
+    """The `sentinel` builtin (Python 3.14+/3.15, PEP 661).
+
+    Returns the host's `builtins.sentinel` when available; otherwise a
+    compatible implementation: `sentinel(name, /, *, repr=None)` returns a
+    unique instance whose repr is `name` (or the custom `repr`), and
+    `isinstance(instance, sentinel)` is true.
+    """
+    host = getattr(builtins, 'sentinel', None)
+    if host is not None:
+        return host
+
+    class sentinel:
+        __slots__ = ('_name', '_repr')
+
+        def __new__(cls, name, /, *, repr=None):
+            self = object.__new__(cls)
+            self._name = name
+            self._repr = name if repr is None else repr
+            return self
+
+        def __repr__(self):
+            return self._repr
+
+        def __reduce__(self):
+            args = (self._name,)
+            if self._repr == self._name:
+                return (sentinel, args)
+            return (sentinel, args, {'repr': self._repr})
+
+    sentinel.__name__ = 'sentinel'
+    sentinel.__qualname__ = 'sentinel'
+    sentinel.__module__ = 'builtins'
+    sentinel.__doc__ = (
+        "Create a unique sentinel object.\n\n"
+        "*name* should be the name of the variable to which the return value shall be assigned.\n\n"
+        "*repr*, if supplied, will be used for the repr of the sentinel object. "
+        "If not provided, \"<name>\" will be used."
+    )
+    return sentinel
+
+
+def _frozendict_builtin():
+    """The `frozendict` builtin (Python 3.15+, PEP 814).
+
+    Returns the host's `builtins.frozendict` when available; otherwise a
+    compatible immutable mapping implementation.
+    """
+    host = getattr(builtins, 'frozendict', None)
+    if host is not None:
+        return host
+
+    class frozendict:
+        __slots__ = ('_data', '_hash')
+
+        def __new__(cls, *args, **kwargs):
+            self = object.__new__(cls)
+            self._data = dict(*args, **kwargs)
+            self._hash = None
+            return self
+
+        @classmethod
+        def fromkeys(cls, iterable, value=None):
+            return cls(dict.fromkeys(iterable, value))
+
+        def __repr__(self):
+            return f"frozendict({self._data!r})"
+
+        def __len__(self):
+            return len(self._data)
+
+        def __contains__(self, item):
+            return item in self._data
+
+        def __getitem__(self, key):
+            return self._data[key]
+
+        def __iter__(self):
+            return iter(self._data)
+
+        def __reversed__(self):
+            return reversed(self._data)
+
+        def __setitem__(self, key, value):
+            raise TypeError("'frozendict' object does not support item assignment")
+
+        def __delitem__(self, key):
+            raise TypeError("'frozendict' object does not support item deletion")
+
+        def keys(self):
+            return self._data.keys()
+
+        def values(self):
+            return self._data.values()
+
+        def items(self):
+            return self._data.items()
+
+        def get(self, key, default=None):
+            return self._data.get(key, default)
+
+        def copy(self):
+            return self
+
+        def __or__(self, other):
+            if isinstance(other, (dict, frozendict)):
+                data = dict(self._data)
+                if isinstance(other, frozendict):
+                    data.update(other._data)
+                else:
+                    data.update(other)
+                return frozendict(data)
+            return NotImplemented
+
+        def __ror__(self, other):
+            if isinstance(other, (dict, frozendict)):
+                if isinstance(other, frozendict):
+                    data = dict(other._data)
+                else:
+                    data = dict(other)
+                data.update(self._data)
+                return frozendict(data)
+            return NotImplemented
+
+        def __hash__(self):
+            if self._hash is None:
+                try:
+                    h = hash(frozenset(self._data.items()))
+                except TypeError:
+                    raise TypeError("unhashable type: 'frozendict'")
+                self._hash = h
+            return self._hash
+
+        def __eq__(self, other):
+            if isinstance(other, frozendict):
+                return self._data == other._data
+            if isinstance(other, dict):
+                return self._data == other
+            return NotImplemented
+
+    frozendict.__name__ = 'frozendict'
+    frozendict.__qualname__ = 'frozendict'
+    frozendict.__module__ = 'builtins'
+    return frozendict
 
 
 class Interpreter:
@@ -4417,9 +4586,11 @@ class Interpreter:
         # (bytes/bytearray deliberately omitted — the self-hosting codegen
         # doesn't recognize them as callable; see the String ctor note below.)
         self.scope.define('frozenset', frozenset)
+        self.scope.define('frozendict', _frozendict_builtin())
         self.scope.define('object', object)
         self.scope.define('complex', complex)
         self.scope.define('slice', slice)
+        self.scope.define('sentinel', _sentinel_builtin())
         self.scope.define('callable', callable)
         self.scope.define('iter', _mojo_iter)
         self.scope.define('format', format)
@@ -4889,11 +5060,19 @@ class Interpreter:
         methods = {}
         base_names = getattr(node, 'bases', None) or []
         base_classes = []
+        python_bases = []
         merged_fields = []
         comptime_aliases = {}
         static_methods = set()
         class_methods = set()
         from_base = set()
+        class_keywords = getattr(node, 'keywords', None) or []
+        kw_dict = {}
+        for _k, _v in class_keywords:
+            try:
+                kw_dict[_k] = self.eval_expr(_v)
+            except Exception:
+                kw_dict[_k] = _v
         for base_name in base_names:
             try:
                 base_cls = self.scope.get(base_name)
@@ -4907,6 +5086,13 @@ class Interpreter:
                 static_methods.update(base_cls.static_methods)
                 class_methods.update(base_cls.class_methods)
                 from_base.update(base_cls.methods.keys())
+            elif base_cls is not None:
+                # Real Python bases (types, typing special forms such as
+                # typing.TypedDict which is a function in 3.15+, or anything
+                # else).  Preserved so a class with Python keywords (PEP 692
+                # closed= / PEP 728 extra_items=) can be created through
+                # Python's class-creation protocol below.
+                python_bases.append(base_cls)
         for m in getattr(node, 'methods', None) or []:
             params = self._extract_param_names(m)
             comptime_params = getattr(m, 'comptime_params', None)
@@ -4983,9 +5169,49 @@ class Interpreter:
                         except Exception:
                             pass
         fields = merged_fields + actual_fields
+        # PEP 692/728 / general Python interop: a class defined with keyword
+        # arguments (e.g. `class M(TypedDict, extra_items=bool, closed=True)`)
+        # over real Python type bases must be created through Python's class-
+        # creation protocol so the metaclass sees those keywords — the parser
+        # used to discard them (root cause of PYTHON3.15_typeddict_extra_items)
+        # and a MojoClass cannot carry a Python metaclass protocol.  Narrowly
+        # activate only for the pure-Python-base case with keywords; fall back
+        # to MojoClass on any difficulty so existing Mojo behavior is unchanged.
+        if kw_dict and python_bases and not base_classes:
+            try:
+                ns = {'__module__': getattr(self, 'module_name', None) or '__main__',
+                      '__qualname__': node.name}
+                anns = {}
+                for f in actual_fields:
+                    if self._is_instance(f, 'VarDecl') and getattr(f, 'type_ann', None) is not None:
+                        try:
+                            anns[f.name] = self.eval_expr(f.type_ann)
+                        except Exception:
+                            anns[f.name] = getattr(f, 'type_ann', None)
+                    elif self._is_instance(f, 'AssignStmt') and f.value is not None:
+                        t = f.target
+                        if self._is_instance(t, 'IdentExpr'):
+                            try:
+                                ns[t.name] = self.eval_expr(f.value)
+                            except Exception:
+                                pass
+                if anns:
+                    ns['__annotations__'] = anns
+                for k, v in comptime_aliases.items():
+                    ns.setdefault(k, v)
+
+                def _exec_body(_ns):
+                    _ns.update(ns)
+
+                cls = types.new_class(node.name, tuple(python_bases), kw_dict, _exec_body)
+                self.scope.define(node.name, cls)
+                return cls
+            except Exception:
+                pass
         cls = MojoClass(node.name, fields, methods, self, bases=base_classes,
                          comptime_aliases=comptime_aliases, static_methods=static_methods,
-                         class_methods=class_methods, def_scope=self.scope)
+                         class_methods=class_methods, def_scope=self.scope,
+                         keywords=kw_dict)
         self.scope.define(node.name, cls)
         return cls
 
@@ -5173,9 +5399,33 @@ class Interpreter:
             for name in names:
                 self.scope.define(name, getattr(mod, name))
             return None
+        _missing = object()
         for name, alias in node.names:
-            value = getattr(mod, name, None)
-            if value is None:
+            value = getattr(mod, name, _missing)
+            if value is _missing:
+                # `from package import submodule`: a submodule of a package is
+                # not necessarily set as an attribute of the package until it
+                # has been imported (e.g. Python 3.15's `profiling` exposes
+                # `tracing`/`sampling` as submodules). Resolve it the way
+                # Python does, by importing the fully-qualified submodule, so
+                # `from profiling import tracing` binds the real module rather
+                # than an auto-stub. Only attempted for host/Python module
+                # objects with a resolvable name; fall through to the stub on
+                # any import failure.
+                base = getattr(mod, '__name__', None) or (node.module if not node.module.startswith('.') else None)
+                if base:
+                    try:
+                        value = importlib.import_module(f"{base}.{name}")
+                    except Exception:
+                        value = _AutoStubValue(_AUTO_STUB_VALUE)
+                else:
+                    value = _AutoStubValue(_AUTO_STUB_VALUE)
+            elif value is None:
+                # Keep the historical fallback: `getattr(mod, name, None)`
+                # previously collapsed "missing" and "present but None" into a
+                # stub. Preserve that for present-but-None to avoid changing
+                # unrelated behavior; the missing case above now resolves
+                # package submodules before stubbing.
                 value = _AutoStubValue(_AUTO_STUB_VALUE)
             self.scope.define(alias or name, value)
         return None
@@ -7734,15 +7984,29 @@ class Interpreter:
             result = self._generator_expression(expr)
         else:
             results = []
+            # Dict comprehensions may use `**` spread in the element
+            # (`{**d for d in ds}`) rather than `key: value`; detect it
+            # once so the inner loop can merge mappings.
+            _dict_spread = (expr.kind == 'dict' and expr.value is None
+                            and isinstance(expr.element, N.UnaryOp)
+                            and expr.element.op == '**')
 
             def run(generators):
                 if not generators:
                     if expr.kind == 'dict':
-                        k = self.eval_expr(expr.element)
-                        v = self.eval_expr(expr.value)
-                        results.append((k, v))
+                        if _dict_spread:
+                            results.append(('__spread__', self.eval_expr(expr.element.operand)))
+                        else:
+                            k = self.eval_expr(expr.element)
+                            v = self.eval_expr(expr.value)
+                            results.append((k, v))
                     else:
-                        results.append(self.eval_expr(expr.element))
+                        spread = self._spread_operand(expr.element, "*")
+                        if spread is not None:
+                            for _sv in self.eval_expr(spread):
+                                results.append(_sv)
+                        else:
+                            results.append(self.eval_expr(expr.element))
                     return
                 gen = generators[0]
                 rest = generators[1:]
@@ -7760,7 +8024,12 @@ class Interpreter:
             if expr.kind == 'set':
                 result = set(results)
             elif expr.kind == 'dict':
-                result = dict(results)
+                if _dict_spread:
+                    result = {}
+                    for _pair in results:
+                        result.update(_pair[1])
+                else:
+                    result = dict(results)
             else:
                 result = results
         return result

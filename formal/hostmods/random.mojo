@@ -333,9 +333,8 @@ def _word_count(n: int) -> int:
     CPython's `keyused = bits == 0 ? 1 : (bits - 1) / 32 + 1`, which is this
     count: a zero seed is ONE key word, and that word is 0. The key is never
     MATERIALISED as a list — `_seed_by_array` reads word `j` out of `n` with a
-    shift — because a run-time-length list is not a value this path has
-    (`bugs/FORMAL_listdir_no_run_time_sequence.md`) and the words are the same
-    two lines either way.
+    shift — because a run-time-length list is not a value this path has and the
+    words are the same two lines either way.
     """
     var w = 1
     var v = n

@@ -895,6 +895,42 @@ Instantiate for `strlen` with `f` = length of the NUL-terminated byte run at the
   python3 tools/memslot.py --gb 8 --label t -- python3 test_formal.py --backend x86_64
   ```
 
+
+### Correction and measurement (2026-11-07, step 12b closed)
+
+**What is measured** (`compile_formal('t.mojo', prove=True, check=False)` on `def main(n: Int) -> Int: var s = "hello"; return len(s)`, arm64):
+1. The model and the AST are folded: `def main_go (n : UInt64) : UInt64 := (UInt64.ofNat 5)` and the AST is `return (MojoExpr.int (UInt64.ofNat 5))`. No `strlen` call remains on the MODEL side. The MACHINE still calls out: `theorem extern_strlen_step : arm64_step main_pre_0 main_code = some ({ main_pre_0 with x30 := UInt64.ofNat 4294968512, pc := 4294969388 } ...)`.
+2. What the proof file proves is `main_reaches_call_at_0x1000004bc` — a `match` whose `some s` arm is `True` and `none` arm is `False`: "the run reaches the call, for every input". No `x0` appears in it. `main_compiles_correctly_universal` is NOT emitted; `main_post_extern_given_callee_returns` is NOT emitted (`RESULT_BEARING_EXTERNS`). So nothing in the file says `main` returns 5.
+3. Why: `Arm64State.init` has `mem := fun _ => 0`, so the string's bytes (at 4294969368) are not in the model's memory at all, and `arm64_step` has no arm for an address outside the image. The numeral 5 on the model side is therefore not connected to the machine side by any theorem.
+
+**Correction to part 2 above: the contract should be a HYPOTHESIS STRUCTURE with proved consequences, not a `sorry`.** A `by sorry` theorem in Scaffold would state the callee's behaviour as a hole; but the callee's behaviour is exactly what is assumed (it is outside the image), and an assumption belongs in the theorem's premises where the reader sees it (invariant 3: never an axiom). Typechecked in scratch against `import ProofLib` (no errors, no `sorry`):
+
+```lean
+def cstring_at (mem : Nat → UInt8) (addr n : Nat) : Prop :=
+  (∀ i, i < n → mem (addr + i) ≠ 0) ∧ mem (addr + n) = 0
+
+structure ExternReturn (s s' : Arm64State) : Prop where   -- AAPCS64: what a call leaves alone
+  pc_ret : s'.pc = s.x30.toNat
+  sp_same : s'.sp = s.sp
+  x19_same : s'.x19 = s.x19
+  x20_same : s'.x20 = s.x20
+  x29_same : s'.x29 = s.x29
+  mem_same : s'.mem = s.mem
+
+structure StrlenReturns (s s' : Arm64State) (addr n : Nat) : Prop where
+  ret : ExternReturn s s'
+  arg : s.x0.toNat = addr
+  str : cstring_at s.mem addr n     -- the image bytes: a premise the CALLER establishes
+  res : s'.x0 = UInt64.ofNat n
+
+theorem cstring_at_unique ...        -- proved: two runs of NUL-terminated bytes at one address have one length
+theorem strlen_result_unique ...     -- proved: two callee behaviours that both satisfy StrlenReturns agree
+```
+
+So the restated post-extern theorem is `main_post_extern_strlen (s_ret) (hcall : StrlenReturns s_call s_ret addr 5) (hmem : cstring_at s_call.mem addr 5) : run_result_exit {s_ret with pc := ...} ... = mojo n`, proved by the existing step machinery from `hcall.ret` and `hcall.res`. The only assumptions are the ones a reader can see: the callee obeys `StrlenReturns`, and the image holds the 5 bytes + NUL. Home for the definitions: a NEW module `lib/Extern.lean` (not Scaffold — it has no `sorry`; not ProofLib — S4), appended to `formal.lean::LIBRARY_MODULES` after `Peephole` and imported by the generated file's header only when the program calls `strlen`. This changes 12c's deliverable: `Scaffold` keeps its 3 holes (the `test_formal_admitted.py` Scaffold pin `(0, 3, 0, 0)` does not move) and the new module is a (0, 0, 0, 0) row in that table.
+
+**Statement truth.** For the two cases in `formal/model/strings.py` TEXT ENCODING: ASCII_BYTES — the folded `n` is `len(text)` and the machine's `strlen` of the interned bytes is the same number, so `StrlenReturns .. 5` with `cstring_at` of the literal is consistent. CODEPOINTS (non-ASCII literal) — the build folds `len` to the code-point count and emits NO `strlen` call at all (the block says "no machine operation at all"), so there is no `StrlenReturns` to state; claiming `x0 = n` there would be false (UTF-8 bytes != code points: `len("日本")` is 2, `strlen` is 6). REFUSE — a run-time string with non-ASCII bytes in the image is refused, and the contract is not claimed for it: `cstring_at` of a run-time address cannot be established by the caller.
+
 ## Two regressions that arrived from OUTSIDE this work, during this wave
 
 Neither is a string problem and neither is wave 6's; both are recorded because
@@ -1323,3 +1359,31 @@ suites and rediscovering that 174 checks were one fact.
 **And the project half is unchanged and still is one:** the `d[i]` refusal
 itself, which is this document's subject. What changed is only that the
 repository's own modules are no longer standing in the way of measuring it.
+
+## Run-time code-point walk for `%<w>.<p>s` and `s[i]` (step 13c memo, 2026-11-07)
+
+**The four refusals that remain** (after 11a/13a/13b), all on a non-ASCII image and an operand whose text the build cannot see: (1) `printf("%6s", p)` and (2) `printf("%.3s", p)` for a parameter-typed `p` (`printf_text_width_refusal`, `formal/model/strings.py:2005`); (3) `s[i]` with an unknown receiver and (4) with a non-constant index (`string_element_refusal`, `formal/model/values.py:4142`). Pinned by the rows in `test_formal_unicode.py` (the `printf_text_width_refusal`/`string_element_refusal` blocks around lines 1700-1750 and the oracle rows near 468-480).
+
+**Measured today (arm64 and x86-64, `prove=False`, `.tmp/13c`):**
+
+| program | result |
+|---|---|
+| `printf("%*.*s|\n", 8, 3, "hello")` | BUILDS, prints `     hel|` on both arches: the variadic area accepts star arguments |
+| `printf("%*.*s|\n", 8, 3, "héllo")` | BUILDS, prints `     hé|`; CPython's `"%*.*s" % (8, 3, "héllo")` is `     hél|` — **wrong by the byte/character difference** (precision 3 took 3 BYTES = `hé`) |
+| `printf("%6s|\n", s)` with `s: String` holding `héllo` | REFUSED by name ("would answer in BYTES where CPython answers in CHARACTERS") |
+| `s[i]` with `s: String` parameter, non-ASCII image | REFUSED by name |
+
+So the star form is not a new capability to add (item 5 is settled: accepted, both arches); what it needs is **correct star ARGUMENTS computed at run time**, because the C library counts bytes and CPython counts code points.
+
+**Decision: (A), star forms with run-time arguments, chosen; (B) rejected.**
+
+- *Precision* `%.Ps` over operand `p`: emit `%.*s` with the byte length of the first `P` code points of `p`: `bytes_for_chars(p, P)` = walk `p` counting non-continuation bytes (`(b & 0xC0) != 0x80`), stop at the `(P+1)`-th code-point start or at NUL; the byte offset reached is the argument.
+- *Width* `%W.Ps` (or `%Ws`): CPython pads to `W` CHARACTERS, C pads to `W` BYTES, so pass `W' = W + (bytes_of_printed_part - chars_of_printed_part)`, where the printed part is the first `min(P, charcount(p))` code points; `charcount` is the same loop. Left-justify (`%-W`) uses the same `W'`.
+- *Subscript* `s[i]`: `start` = byte offset of code point `i` (same walk; `i` negative = from the end, via `charcount`), `len` = 1 + the continuation bytes that follow `start`; the result is the 11a buffer (`strndup`-style, NUL-free by construction); out-of-range `i` takes the existing out-of-range path unchanged.
+- (B) copy into a `strdup`'d buffer and pad there: rejected — it needs a sized buffer per call and a second allocation, for the same loop.
+
+**Exact files/functions.** Two shared loop emitters, one per backend, next to `_emit_str_count` (`formal/arm64_codegen.py:8484`, `formal/x86_64_codegen.py:6652`): `_emit_utf8_charcount(ptr_reg) -> count_reg` and `_emit_utf8_char_start(ptr_reg, index_reg) -> byte_offset_reg`. The model side: a `printf_runtime_text_widths` next to `printf_fold_text_widths` (`formal/model/strings.py:2096`) that REPLACES the refusal with the star rewrite when the operand is a string-kind and the image is non-ASCII; `string_element_refusal` stays for an operand that is not a string-kind. The proof side is unaffected until the proof model gains the code-point walk: both programs must stay `prove`-refused with a named reason (the model has no value for the loop), which is the existing behaviour for run-time string operations.
+
+**Tests.** Oracle rows (build + run on both backends, compared with CPython, in `test_formal_unicode.py` beside the existing rows): `%6s`, `%-6s`, `%.3s`, `%8.3s` and `s[1]`, `s[i]`, `s[-1]` with a PARAMETER-typed operand holding `héllo`, `日本` and `a😀b`; an ASCII operand must produce byte-identical code to today (compare the generated assembly or the emitted text for one ASCII row — the rewrite must not fire there).
+
+**Follow-ups written from this memo:** `step-13d-printf-runtime-widths.md` and `step-13e-subscript-runtime.md`.

@@ -3336,7 +3336,7 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
         # instantiated body (provably-false `comptime assert` / `constrained`)
         # is a real user diagnostic, not an elaboration-capability failure.
         # Swallowing it accepts invalid instantiations silently
-        # (bugs/DIAGNOSTICS_missing_validation_modular.md). Re-raise those so
+        # (comptime validation diagnostics). Re-raise those so
         # the diagnostic surfaces at the instantiation site.
         _emsg = str(e)
         if isinstance(e, RuntimeError) and (
@@ -3380,7 +3380,7 @@ def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
             # A compile-time diagnostic (provably-false comptime assert /
             # constrained) from compiling the instantiated body is a real user
             # diagnostic — re-raise it instead of silently accepting an invalid
-            # instantiation (bugs/DIAGNOSTICS_missing_validation_modular.md).
+            # instantiation (comptime validation diagnostics).
             _emsg = str(e)
             if isinstance(e, RuntimeError) and (
                     'constraint failed' in _emsg
@@ -3985,6 +3985,17 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
             # kind it carries (a float box as a double, a bool as a bool, a
             # string as a string) instead of truncating it through mojo_box_int,
             # and let the list render itself from its own kinds row.
+            gen._emit_call('void', '', 'mojo_list_append_word',
+                           [('MojoList *', res), ('int64_t', ev)])
+            gen._struct_slot_kinds[res] = ginf._RuntimeKinded(['int', 'str'])
+            gen._maybe_kinds_vals.add(res)
+            return
+        if et == 'int64_t' and (ev in getattr(gen, '_dyn_word_vals', ())
+                                or gen._is_dyn_word(None, ev)):
+            # A runtime-kinded word (e.g. re.Match.group() returns a str/bytes
+            # word whose kind is only known at run time, and the lowering marks
+            # it dyn_word). Appending it as an int and forcing int repr prints
+            # the raw pointer; append under the kind it carries instead.
             gen._emit_call('void', '', 'mojo_list_append_word',
                            [('MojoList *', res), ('int64_t', ev)])
             gen._struct_slot_kinds[res] = ginf._RuntimeKinded(['int', 'str'])

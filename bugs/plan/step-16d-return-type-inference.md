@@ -1,4 +1,5 @@
 # plan/step-16d: bare-call inference through declared types (the `dealloc(allocation^)` row)
+**Status: DONE 2026-11-07 (measured).** `_declared_type_of_expr` (transfer, field read, declared-return call, call-initialised local) + head/arity unification wired into the inference; function return types now live under `name()` (`_return_type_key`) so a variable of the same name cannot collide. Cases: five decision cases, a collision case, and an end-to-end `make() -> Box[Int]` / `unwrap(b^)` on both arches vs CPython; `test_formal_monomorph.py` 66/66; `test_formal_imports.py` 89 PASS / 6 FAIL (the same 6 environment-dependent rows as before). `alloc.mojo` now stops at the `FormatStruct` trait-bound row (16e), recorded verbatim in `bugs/FORMAL_known_limits.md` §1.2 Status. Census re-run NOT done.
 Class: mid      Size: L      Depends: 16a, 16b      Blocks: 16f
 Source: 16a's committed design section (Q1) in `bugs/FORMAL_known_limits.md` §1.2; `bugs/FORMAL_known_limits.md` §1.2 2026-10-04 (dealloc 29 files, `std/memory/alloc.mojo:99`, `dealloc` declared `:904`).
 

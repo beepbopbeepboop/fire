@@ -1143,8 +1143,8 @@ def _gen_stmt_ComptimeForStmt(gen, node):
         # `comptime for x in [1, 2, 3]` / `(...,)`: unroll over compile-time
         # constant elements. The loop variable is bound in gen._comptime_vals
         # each iteration so comptime assert / constrained diagnostics that depend
-        # on it evaluate correctly (bugs/DIAGNOSTICS_missing_validation_modular.md:
-        # "comptime-for shapes beyond the gimple unroller's bound forms").
+        # on it evaluate correctly (comptime-for shapes beyond the gimple
+        # unroller's bound forms).
         if DictExpr is not None and isinstance(node.iterable, DictExpr):
             pairs = getattr(node.iterable, 'pairs', None) or []
             cvals = []
@@ -1193,7 +1193,7 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                 elif isinstance(_v, str):
                     try:
                         _sv = gen._emit_string_literal(_v)
-                        if node.target not in gen.var_types or gen.var_types[node.target] != 'char *':
+                        if gen.var_types.get(node.target) != 'char *':
                             gen.var_types[node.target] = 'char *'
                         gen._safe_coerce_emit('char *', 'char *', _sv, node.target)
                     except Exception:
@@ -1277,8 +1277,8 @@ def _gen_stmt_ComptimeForStmt(gen, node):
         # vals`, or `comptime s = "ab"; for c in s`). Bind loop targets in
         # gen._comptime_vals so comptime assert / constrained diagnostics that
         # depend on them evaluate correctly
-        # (bugs/DIAGNOSTICS_missing_validation_modular.md: "iteration over
-        # non-literal comptime values"; subscript/string collection ops).
+        # (iteration over non-literal comptime values; subscript/string
+        # collection ops).
         _resolved = gen._eval_const(node.iterable)
         if isinstance(_resolved, (list, tuple, str)) or isinstance(_resolved, dict):
             cvals = list(_resolved.keys()) if isinstance(_resolved, dict) else list(_resolved)

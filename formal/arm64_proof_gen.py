@@ -12603,6 +12603,112 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
     return "\n\n".join(blocks), "\n\n".join(step_blocks)
 
 
+_NE_DEC_WHILE_TAIL = r'''
+theorem cond_val (m : Nat) :
+    (evalExpr handler noCall2 (MojoExpr.binop "!=" (MojoExpr.var "@P@") (MojoExpr.int 0))
+      (envOf m) ≠ 0) ↔ UInt64.ofNat m ≠ 0 := by
+  have hv : evalExpr handler noCall2 (MojoExpr.binop "!=" (MojoExpr.var "@P@") (MojoExpr.int 0))
+      (envOf m) = if UInt64.ofNat m ≠ 0 then 1 else 0 := by
+    simp only [evalExpr, envOf]
+    by_cases h : UInt64.ofNat m = 0 <;> simp [h]
+  rw [hv]
+  by_cases h : UInt64.ofNat m = 0 <;> simp [h]
+
+theorem prog_correct : ∀ (m : Nat), m < 9223372036854775808 → ∀ (fuel : Nat), fuel ≥ m + 2 →
+    runF fuel handler prog (envOf m) = some (RunRes.ret 0) := by
+  intro m
+  induction m using Nat.strongRecOn with
+  | ind m ih =>
+    intro hm fuel hf
+    have hP : prog =
+        MojoStmt.while (MojoExpr.binop "!=" (MojoExpr.var "@P@") (MojoExpr.int 0))
+          ([MojoStmt.assign "@P@" (MojoExpr.binop "-" (MojoExpr.var "@P@") (MojoExpr.int 1))])
+          :: [MojoStmt.return (MojoExpr.var "@P@")] := rfl
+    have hOf : (UInt64.ofNat m).toNat = m := ofNat_toNat_mod m (by omega)
+    obtain ⟨g, rfl⟩ : ∃ g, fuel = g + 1 := ⟨fuel - 1, by omega⟩
+    rw [hP]
+    by_cases hz : m = 0
+    · subst hz
+      have hce : evalExpr handler noCall2 (MojoExpr.binop "!=" (MojoExpr.var "@P@") (MojoExpr.int 0)) (envOf 0) = 0 := by
+        by_cases h : evalExpr handler noCall2 (MojoExpr.binop "!=" (MojoExpr.var "@P@") (MojoExpr.int 0)) (envOf 0) = 0
+        · exact h
+        · exact absurd (by simp) ((cond_val 0).mp h)
+      have h1 := runF_while_false g handler (MojoExpr.binop "!=" (MojoExpr.var "@P@") (MojoExpr.int 0))
+          ([MojoStmt.assign "@P@" (MojoExpr.binop "-" (MojoExpr.var "@P@") (MojoExpr.int 1))])
+          [MojoStmt.return (MojoExpr.var "@P@")] (envOf 0) hce
+      rw [h1]
+      obtain ⟨gg, rfl⟩ : ∃ gg, g = gg + 1 := ⟨g - 1, by omega⟩
+      rw [runF_return_eq gg handler (MojoExpr.var "@P@") (envOf 0)]
+      simp [evalExpr, envOf]
+    · have hne : UInt64.ofNat m ≠ 0 := by
+        intro h
+        have : (UInt64.ofNat m).toNat = 0 := by rw [h]; simp
+        omega
+      have hcond := (cond_val m).mpr hne
+      have hpred : UInt64.ofNat m - 1 = UInt64.ofNat (m - 1) := by
+        apply eq_of_toNat_eq
+        have hL : (UInt64.ofNat m - 1).toNat = m - 1 := by
+          rw [UInt64.toNat_sub]
+          have hO : ((1 : UInt64)).toNat = 1 := by simp
+          have h64 : (2 ^ 64 : Nat) = 18446744073709551616 := by decide
+          rw [hOf, hO, h64]
+          omega
+        rw [hL, ofNat_toNat_mod _ (by omega)]
+      have hbody : runF g handler ([MojoStmt.assign "@P@" (MojoExpr.binop "-" (MojoExpr.var "@P@") (MojoExpr.int 1))]) (envOf m)
+          = some (RunRes.done (fun name => if name == "@P@"
+                              then UInt64.ofNat (m - 1)
+                              else envOf m name)) := by
+        obtain ⟨gg, rfl⟩ : ∃ gg, g = gg + 1 := ⟨g - 1, by omega⟩
+        rw [runF_assign]
+        show runF gg handler [] _ = _
+        have hv1 : evalExpr handler noCall2 (MojoExpr.binop "-" (MojoExpr.var "@P@") (MojoExpr.int 1)) (envOf m)
+            = UInt64.ofNat (m - 1) := by
+          simp [evalExpr, envOf, hpred]
+        rw [hv1]
+        exact runF_nil_pos gg (by omega) handler _
+          |>.trans rfl
+      have hstep := runF_while_done g handler (MojoExpr.binop "!=" (MojoExpr.var "@P@") (MojoExpr.int 0))
+          ([MojoStmt.assign "@P@" (MojoExpr.binop "-" (MojoExpr.var "@P@") (MojoExpr.int 1))])
+          [MojoStmt.return (MojoExpr.var "@P@")] (envOf m)
+          (fun name => if name == "@P@" then UInt64.ofNat (m - 1) else envOf m name)
+          hcond hbody
+      have henv : (fun name => if name == "@P@" then UInt64.ofNat (m - 1) else envOf m name)
+                = envOf (m - 1) := by
+        funext name
+        by_cases hx : name == "@P@"
+        · simp only [hx, envOf]
+          rfl
+        · simp only [hx, envOf]
+          rfl
+      have hrec := ih (m - 1) (by omega) (by omega) g (by omega)
+      rw [hP] at hrec
+      rw [hstep, henv, hrec]
+
+/-- TRUST BOUNDARY eliminated (total correctness): for a non-negative counter the
+fuel-bounded full interpreter applied to the formal AST returns 0. -/
+theorem eval_eq_mojo (n : UInt64) (hn : n.toNat < 9223372036854775808) :
+    evalFuncF (n.toNat + 2) ast handler [n] = mojo n := by
+  have hA : ast = MojoFunc.mk "@FN@" ["@P@"] prog := rfl
+  rw [hA]
+  simp only [evalFuncF, MojoEnv]
+  have henv0 : (fun name => if name == "@P@" then n else (0 : UInt64))
+      = envOf n.toNat := by
+    funext x
+    by_cases hx : x == "@P@"
+    · have hxe : x = "@P@" := of_decide_eq_true (by simpa using hx)
+      subst hxe
+      show n = UInt64.ofNat n.toNat
+      rw [UInt64.ofNat_toNat]
+    · simp [hx, envOf]
+  rw [henv0]
+  have hrec := prog_correct n.toNat hn (n.toNat + 2) (by omega)
+  rw [show noCall2 = (fun (_ : String) (_ : UInt64) (_ : UInt64) => (0 : UInt64)) from rfl] at hrec
+  rw [hrec]
+  unfold mojo
+  exact (@FN@_go_zero _ hn).symm
+'''
+
+
 def _gen_dec_while_block(fname: str, param: str, cond_op: str = "GT") -> str:
     """Emit handler/prog/envOf/cond_val/prog_correct + eval_eq_mojo for the
     decrement-while shape, using ProofLib's runF interpreter.  Mirrors the
@@ -12782,7 +12888,8 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 �
       rw [hstep, henv, hrec]
       apply congrArg
       have hltm : m % @S@ < 9223372036854775808 := (cond_val m).mp hcond |>.right
-      simp [@FN@_go_zero, hltm]
+      have hltk : (m % @S@ - 1) % @S@ < 9223372036854775808 := by omega
+      rw [@FN@_go_zero _ hltk, @FN@_go_zero _ hltm]
 
 /-- TRUST BOUNDARY eliminated: the fuel-bounded full interpreter applied to
 the formal AST equals the structural model, by strong induction. -/
@@ -12807,6 +12914,8 @@ theorem eval_eq_mojo (n : UInt64) :
     \u00b7 simp [hx, envOf]
   rw [henv0]
   have hrec := prog_correct n.toNat (n.toNat % @S@ + 2) (by omega)
+  -- bridge: `evalFuncF`'s default `cf2` is the literal lambda, `runF`'s is `noCall2`
+  rw [show noCall2 = (fun (_ : String) (_ : UInt64) (_ : UInt64) => (0 : UInt64)) from rfl] at hrec
   rw [hrec]
   unfold mojo
   congr 1
@@ -12827,6 +12936,15 @@ theorem eval_eq_mojo (n : UInt64) :
               .replace("@FN@", fname)
               .replace("@P@", param)
               .replace("@S@", S))
+    if cond_op == "NE":
+        # `!=` is the UNSIGNED `≠` in the interpreter, so a negative counter
+        # wraps and the loop runs 2^64-|n| times, where Python diverges.  The
+        # honest statement is TOTAL correctness for a non-negative counter:
+        # `cond_val` is plain `ofNat m ≠ 0`, `prog_correct` and `eval_eq_mojo`
+        # carry `m < 2^63`, and the result is 0 (`_go_zero`).
+        cut = body.index("/-- The source predicate")
+        body = body[:cut] + (_NE_DEC_WHILE_TAIL.replace("@FN@", fname)
+                             .replace("@P@", param))
     return prelude + body
 
 

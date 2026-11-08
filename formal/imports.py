@@ -24,6 +24,7 @@ that imports it.
 
 import contextlib
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -154,18 +155,14 @@ HOST_UNREACHABLE = frozenset((
     "socket", "urllib", "http", "wsgiref",
     # A dynamic loader for foreign code, or an embedded CPython.  `ctypes` moved
     # to HOST_ADMITTED with the rest; what is left here is the embedded CPython.
-    "importlib", "importlib.util", "importlib.machinery",
+    # `importlib` left on 2026-11-08 for `formal/hostmods/importlib.mojo`; its
+    # dotted submodules below still have no source.
+    "importlib.util", "importlib.machinery",
     # The interpreter's own frames, allocation set, or shutdown path. There is
     # no interpreter here to ask, and on this path a value is one 64-bit word,
     # so there is nothing for `gc` to track and no bytecode for `dis` to
     # disassemble (the formal backends emit machine code, not bytecode).
-    # `builtins` is here for the same reason and it is measured rather than
-    # read off: the three files in this repository that want it
-    # (`tools/codeindex.py`, `tools/wave2c_explicit_imports.py`,
-    # `tools/wave2b_fix_deps.py`, ranked by `tools/formal_sweep_causes.py
-    # --host`) all spell `set(dir(builtins))` — they ask the INTERPRETER to
-    # enumerate its own namespace, which is the one question on this page with
-    # no answer at all here.
+    # `builtins` left on 2026-11-08 for `formal/hostmods/builtins.mojo`.
     # `traceback` and `signal` WERE here, in the same line, and left on
     # 2026-10-04 by being WRITTEN — the way `shutil` and `tempfile` left. The
     # entry above them says what this heading means: an interpreter's own
@@ -177,7 +174,7 @@ HOST_UNREACHABLE = frozenset((
     # `signal` answers the platform's `<signal.h>` vocabulary plus two libc
     # calls, so neither leaves a host fact over to trust — which is why both sit
     # in NO tier rather than in `HOST_ADMITTED` (the `fcntl` precedent, verbatim).
-    "gc", "atexit", "warnings", "dis", "builtins",
+    "gc", "atexit", "warnings", "dis",
     # Process-wide reporting machinery, which is a host object by construction.
     "logging", "unittest", "unittest.mock",
 # A terminal. `tempfile` WAS here too — under this heading, for the
@@ -660,7 +657,8 @@ HOST_MODELLED = frozenset((
     #     matter. `itemgetter` and its siblings want a first-class callable, and
     #     the in-place family wants a name to write through — both refused on this
     #     path, both named in the module.
-    "numbers", "array", "functools", "itertools",
+    # `functools` left on 2026-11-08 for `formal/hostmods/functools.mojo`.
+    "numbers", "array", "itertools",
     #   `collections`  — NO `formal/hostmods/` module, and the entry says why in
     #     the form a reader acts on: `HOST_MODULE_ADVICE` below is what the
     #     REFUSAL prints, which is where a person moving one of the five files
@@ -689,7 +687,7 @@ HOST_MODELLED = frozenset((
     #     which needs a type this image can see. Shipping the blob under the
     #     name `Counter` is the approximation
     #     `FORMAL_hashlib_sha3_and_blake2s_absent` declined to ship.
-    "collections",
+    # `collections` left on 2026-11-08 for `formal/hostmods/collections.mojo`.
     "heapq", "bisect", "csv", "difflib", "base64",
     #   `textwrap`  — LEFT on 2026-10-03 for `formal/hostmods/textwrap.mojo`,
     #     `dedent` and `indent` only.  It is pure string computation over the
@@ -727,7 +725,8 @@ HOST_MODELLED = frozenset((
     #     help string at ONE width, so re-exporting it under this name would be
     #     a second copy of it rather than this module's `fill`.
     #     Five files import it; what of it is absent is at the top of the module.
-    "codecs", "copy", "abc", "types", "queue",
+    # `copy` left on 2026-11-08 for `formal/hostmods/copy.mojo`.
+    "codecs", "abc", "types", "queue",
     "weakref", "pprint", "reprlib", "pickle",
     #   `shlex`  — LEFT 2026-10-04 for `formal/hostmods/shlex.mojo`, and it is
     #     the CHEAPEST row `tools/formal_sweep_causes.py --host` has left: one
@@ -2722,6 +2721,14 @@ def instantiation_demands(module_path: str, consumer_src: str,
                 for a in args:
                     if a not in got[name]:
                         got[name].append(a)
+        except MM.MonomorphError as e:
+            # A bound violation of an INFERRED binding is the user's error and the
+            # same refusal the explicit bracket gives (`Box[Cat]`); swallowing it
+            # left a bare call to a bounded template with no instantiation and a
+            # generic "asked for none" message (16e).  Any other inference
+            # failure stays a non-demand.
+            if "does not conform to trait" in str(e):
+                raise
         except Exception:
             pass
         # Refuse type arguments declared only in the consumer's file
@@ -4121,9 +4128,19 @@ def check_library_free_calls(importer_path: str, stmts: list,
             rule, declared = M.export_rule_for(
                 callee.name, exempt[callee.name],
                 source=source_of.get(callee.name))
+            from formal import monomorph as _MM
+            enclosing = next((x for x in stmts
+                              if isinstance(x, F.FunctionDef) and x.body is body),
+                             None)
+            decl = _MM._declared_types_in_scope(body, enclosing)
+            existential = tuple(
+                a.name for a in (getattr(node, "args", None) or [])
+                if isinstance(a, F.IdentExpr)
+                and re.match(r"^Some\b", str(decl.get(a.name) or "")))
             raise ImportBuildError(
                 M.imported_callee_refusal(callee.name, sym, scope,
-                                          rule=rule, declared=declared))
+                                          rule=rule, declared=declared,
+                                          existential_args=existential))
 
 
 def _enclosing_scopes(stmts: list) -> list:

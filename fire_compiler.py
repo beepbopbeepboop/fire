@@ -868,6 +868,13 @@ class StructDef:
     decorators: list = field(default_factory=list)
     comptime_aliases: dict = field(default_factory=dict)  # name -> value expr
     bases: list = field(default_factory=list)  # base class/struct names, e.g. `struct Child(Base):`
+    # Keyword arguments in the class/struct base list, e.g.
+    # `class M(TypedDict, extra_items=bool, closed=True):` (PEP 728/692).
+    # Each entry is (name, value_expr).  The parser used to consume and
+    # discard these (keeping only positional base names in `bases`), which
+    # dropped PEP 728's `extra_items`/`closed` before any consumer could see
+    # them — the root cause of PYTHON3.15_typeddict_extra_items.
+    keywords: list = field(default_factory=list)
     line: int = 0
     col: int = 0
     # A "mark visited" flag set via plain attribute assignment (not passed to
@@ -3005,10 +3012,10 @@ def _detect_generator(body: list):
 # cannot call).
 _BUILTIN_NAMES = frozenset({
     'None', 'True', 'False', 'len', 'print', 'range', 'str', 'int', 'float',
-    'bool', 'list', 'dict', 'set', 'tuple', 'enumerate', 'zip', 'sum', 'min',
-    'max', 'any', 'all', 'sorted', 'reversed', 'abs', 'map', 'filter',
-    'isinstance', 'hasattr', 'getattr', 'setattr', 'type', 'open', 'input',
-    'self', 'super',
+    'bool', 'list', 'dict', 'frozendict', 'set', 'tuple', 'enumerate', 'zip',
+    'sum', 'min', 'max', 'any', 'all', 'sorted', 'reversed', 'abs', 'map',
+    'filter', 'isinstance', 'hasattr', 'getattr', 'setattr', 'type', 'open',
+    'input', 'self', 'super',
 })
 
 
@@ -4758,12 +4765,15 @@ class Parser:
         else:
             type_param_names = []
         # `struct Child(Base1, Base2):` / `class Child(Base):` — Python-style
-        # base-class list. Capture the top-level names (skipping keyword
-        # args like `metaclass=X` and trait-bound expressions we can't
-        # resolve as a real base) instead of discarding the whole
-        # parenthesized list; MojoClass merges the named bases' fields and
-        # methods at struct-definition time (see execute_StructDef).
+        # base-class list. Capture the top-level names (skipping trait-bound
+        # expressions we can't resolve as a real base) and KEYWORD arguments
+        # like `metaclass=X`, `closed=True`, `extra_items=int` (PEP 692/728)
+        # instead of discarding either; MojoClass merges the named bases'
+        # fields and methods at struct-definition time (see
+        # execute_StructDef), and keywords are preserved on the StructDef so
+        # consumers that need them (e.g. TypedDict/PEP 728) can read them.
         bases = []
+        class_keywords = []
         if self._peek().kind == "LPAREN":
             self._advance()
             depth = 1
@@ -4783,7 +4793,15 @@ class Parser:
                     is_kwarg = nxt.kind in ("ASSIGN", "EQUAL") or (
                         nxt.kind == "OP" and nxt.value == "=")
                     if is_kwarg:
-                        self._advance()
+                        kw_name = t.value
+                        self._advance()  # consume kwarg name
+                        # consume '=' (ASSIGN / EQUAL / OP '=')
+                        if self._peek().kind in ("ASSIGN", "EQUAL") or (
+                                self._peek().kind == "OP"
+                                and self._peek().value == "="):
+                            self._advance()
+                        kw_value = self._parse_expr_or_yield()
+                        class_keywords.append((kw_name, kw_value))
                         expect_name = False
                         continue
                     # A dotted base (`class Foo(module.Bar):`) — walk the
@@ -5004,7 +5022,7 @@ class Parser:
         decs    = getattr(self, "_pending_decs", [])
         self._pending_decs = []
         return StructDef(name=name, fields=fields, methods=methods, decorators=decs,
-                         comptime_aliases=aliases, bases=bases,
+                         comptime_aliases=aliases, bases=bases, keywords=class_keywords,
                          bracket_params=bracket_params,
                          type_param_names=type_param_names)
 
@@ -7060,7 +7078,17 @@ class Parser:
         # two `**`-UnaryOp "elements", which then crashes in eval_UnaryOp
         # instead of building a dict (see
         # INTERP_dict_double_star_unpack_runtime).
+        #
+        # `{**d for d in ds}` is a dict comprehension whose body is a
+        # mapping spread (PEP 448 generalizations / Python 3.15
+        # comprehension unpacking). Distinguish it from a spread literal
+        # by the `for` that follows the first spread element.
         if isinstance(first, UnaryOp) and first.op == "**":
+            if self._is_kw("for"):
+                gens = self._parse_generators()
+                self._expect("RBRACE")
+                return Comprehension(kind="dict", element=first, value=None,
+                                     generators=gens)
             pairs = [(first, None)]
             while self._peek().kind == "COMMA":
                 self._advance()

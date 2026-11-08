@@ -27,8 +27,8 @@ WHAT IS NOT HERE, AND WHY
 -------------------------
   * `wrap` — a SEQUENCE. It answers a list of strings, and a list on this path
     lives in the frame of the function that made it and cannot cross a dylib
-    boundary (`bugs/FORMAL_listdir_no_run_time_sequence.md`). This is the same
-    reason `fnmatch.filter` is absent from `fnmatch.mojo`.
+    boundary. This is the same reason `fnmatch.filter` is absent from
+    `fnmatch.mojo`.
   * `fill` — the same shape one step later: `fill` is `wrap`'s answer joined
     by newlines, so it is answerable, and it is absent because NOTHING on this
     path calls it. `formal/hostmods/argparse.mojo` has its own transcription of
@@ -44,11 +44,11 @@ WHAT IS NOT HERE, AND WHY
     It is `fill` plus a word count, so it inherits `fill`'s absence; and
     `TextWrapper` is an object with nine pieces of mutable configuration, which
     is at least nine words where a value on this path is one
-    (`formal/model/builtins.py`; `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`
-    is the measurement, and it is `collections`' and `copy`'s
-    blocker too). Note the consequence honestly: `wrap`/`fill` being ABSENT
-    means the absent `TextWrapper` costs nothing extra, because nothing that
-    wanted the object was going to get the function either.
+    (`formal/model/builtins.py`; a type cannot be constructed or cloned at run
+    time on this path, which is the same measurement that blocks `collections`
+    and `copy`). Note the consequence honestly: `wrap`/`fill` being ABSENT means
+    the absent `TextWrapper` costs nothing extra, because nothing that wanted
+    the object was going to get the function either.
   * `TextWrapper`, `HTMLWrapper`, `BackslashWrapper` — CLASSES, per above.
   * `dedent`'s cousin `inspect.cleandoc` is NOT re-exported here and must not
     be: it is a different function (it expands tabs and strips leading and

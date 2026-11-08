@@ -573,6 +573,8 @@ the limits above were wrong:
 
 **Status 2026-11-05 (step-15d):** refuse a type argument declared only in the consumer's file at the demand (probe showed it built before; now refused with message naming the library and that the type is declared in this file). Added cases `a consumer-declared type argument is refused by name` and `a builtin type argument is still instantiated`.
 
+**Status 2026-11-07 (step-16c):** `formal/monomorph.py::infer_bare_call` / `_bind_from_annotations` extended for keyword arguments (matched to function parameters by name; unknown keyword -> not inferable) and type-spelled defaults (a default whose text is a type spelling accepted by `type_arg_text` may settle an uninferred template parameter; comptime-value defaults like `False` / `CompilationTarget.current()` leave inference refused). Enforces defect #3: an inferred result that is the enclosing template's own parameter or `Self.T` is refused. Rewrites preserved (bare-call sites rewritten to the mangled instantiation; kwargs preserved). `test_formal_monomorph.py` PASS=64 EXPECTED=0 SKIP=0 FAIL=0 (+4 cases: keyword decides type arg, type-spelled default settles uninferred param, comptime-value default refused, callee's own parameter not an inference). `test_formal_imports.py` PASS=89/FAIL=6 (host-module advice/wall verdict/instrument + bounded-time sweep classification; pre-existing class, unrelated to monomorph). Census (`tools/formal_template_call_census.py`, 468 files, 120 bare calls to imported declared templates): solvable 4, type-written-but-not-unify 30, type-not-written 72, not-in-args 6, comptime-default 8, no-type-param 0, unreadable 0 — "solvable from the annotations at the call site" delta vs 16a baseline (4) is **0** (census classification unchanged; 16c's kwargs/type-spelled-default inference is implemented but no additional corpus sites moved into the census's solvable bucket).
+
 ### §1.2 Design: inferring a bare call's type arguments (2026-11-07, step 16a)
 
 **Measured again (`python3 tools/formal_template_call_census.py --rows 200`, 468 files, 120 bare
@@ -633,6 +635,10 @@ by-name refusals above. Each refusal path is pinned by a test that names the rea
 name and fill a defaulted parameter only from a type-spelling default; 16d — implement R1 exactly as above
 and nothing from bodies; 16e — B2 for concrete structs, B1 otherwise, Q3 refusal with the parameter name;
 16f — pin the refusal wording to the five reason strings above.
+
+**Status (2026-11-07, step 16d):** declared-type inference landed for a bare call's non-identifier arguments (`_declared_type_of_expr`: `x^` transfer, `self.f` field read, call with a declared `->`, and a call-initialised `var`), reading declarations only (R1), never a body. A function's declared return type is kept under the key `name()` (`_return_type_key`) so it cannot collide with a variable of the same name. Pinned by five decision cases, a collision case and an end-to-end `make() -> Box[Int]` / `unwrap(b^)` case on both arches against CPython (`test_formal_monomorph.py` 66/66). The real row moved: `python3 fire.py build --formal --no-prove std/memory/alloc.mojo` no longer stops at `dealloc`; its terminal message is now the `FormatStruct` row verbatim: "`ThinAllocation_1_T_1_T.write_to`: `FormatStruct` is called, and it is imported from `std.format._utils`, so the call has to bind a symbol `std.format._utils` exports. That module does not export it ..." — a bare call against a trait bound, which is step 16e. The full census re-run was not done.
+
+**Status (2026-11-07, step 16e):** Q2 as chosen (B1; B2 only for a concrete declared struct) is implemented and pinned: conforming struct binds and runs, non-conforming is refused by trait name, `Some[...]` is never bound and the refusal names the existential argument. A wrong-code bug in the 16b fast path was found and removed (it passed Mojo annotations to `elaborate.infer_type_args`, which takes C types, so `T` became `Int` for every annotation but `Int`). The export gate's `FormatStruct` row (68 files) does not move: its argument is declared `Some[Writer]`, which stays a true limit until the caller is monomorphised.
 
 ## 1.3 One of the 30 should not be in the family at all
 
@@ -1006,7 +1012,7 @@ a NUL-terminated `char *`, so the interned `""` is the answer and `len` of it is
 `model.gimple_runtime_callable(name, provided)` is the whole rule: every type
 crossing the call boundary is one 64-bit word, AND the symbol is on the link
 line. `GIMPLE_LIST_PREFIX` is **gone** — it was a hand-kept list of prefixes
-standing in for a shape, and the shape answers the same question for all 683
+standing in for a shape, and the shape answers the same question for all 897
 entry points instead of the 40-odd names one prefix covered.
 
 The two halves are independent and both are needed, which is what the prefix
@@ -1017,17 +1023,17 @@ because nothing provides it.
 
 | | measured over all 11 headers in `runtime/` |
 |---|---|
-| entry points declared | 683 |
-| every type crossing the boundary is one word | **272** |
-| a box in an argument or the return | 411 |
-| of the 272, refused only for want of a linked library | 272 |
+| entry points declared | 897 |
+| every type crossing the boundary is one word | **411** |
+| a box in an argument or the return | 486 |
+| of the 411, refused only for want of a linked library | 411 |
 
-**272 of 683 is what a link line converts into working code with no backend
+**411 of 897 is what a link line converts into working code with no backend
 change at all.** For `mojo_sqlite3_*` it is **16 of 22**.
 
-(Re-measured 2026-10-04 on this tree with `formal.model.runtime_abi()`, which
-is the authority and reads the headers rather than repeating this table: 683
-entry points, 272 word-shaped, 411 with a box. The figures above were right for
+(Re-measured 2026-11-07 on this tree with `formal.model.runtime_abi()`, which
+is the authority and reads the headers rather than repeating this table: 897
+entry points, 411 word-shaped, 486 with a box. The figures above were right for
 the tree this section was written on and had been drifting since, which is what
 `test_runtime_header_scan.py`'s census check now prevents — it reads each of
 these numbers out of the file and compares it with the live table, so a comment
@@ -1043,7 +1049,7 @@ heap box" and "for sqlite, **20 of 22** … the only two that are not are
 `mojo_sqlite3_query` and `_query_dict`". Measured, both are off, and the reason
 is worth recording because it is a rule, not a typo:
 
-1. **455 / 352 / 101.** I measure 683 / 510 / 173 by return type alone, and 272
+1. **455 / 352 / 101.** I measure 897 / 703 / 194 by return type alone, and 411
    once the ARGUMENTS are counted too. Neither matches 455/352/101. The
    scanner those numbers were taken with recorded `char *f` as returning `char`
    (see below), so every pointer-returning function was scored as a scalar —
@@ -1089,12 +1095,12 @@ Neither is closed by a test in the tree, so both are in
 
 A word-shaped call is emitted only when the symbol is on the link line, and the
 executable path (`build --formal`, which every suite drives) has no runtime
-library on its link line at all. So today the 272 are refused *for want of a
+library on its link line at all. So today the 411 are refused *for want of a
 library*, which the new message says plainly instead of claiming there is
 nothing to lower. INTERFACE REQUEST to [1] for the optional-runtime-unit
-registry; it is the only thing between the 272 and working code.
+registry; it is the only thing between the 411 and working code.
 
-**Status (2026-11-05):** optional unit registry wired for the formal path: sqlite3 16/22 word-shaped reachable; zlib 2, ssl 11, ncurses 16, metal 5 follow the same path (untested).
+**Status (2026-11-07):** optional unit registry wired for the formal path: sqlite3 16/22 word-shaped reachable; zlib 2, ssl 11, ncurses 16, metal 5 follow the same path (untested).
 
 ---
 
@@ -1437,34 +1443,46 @@ which is why it is written down here rather than attempted.
 **Measured 2026-11-05 (step 18a).** Two different things share "frame escape":
 (A) build-time `CODEGEN:` refusals mentioning "frame address"/"receiver" (a sweep count) — a Lean contract cannot move this count. (B) the Lean contract for a receiver passed by reference in a one-field by-reference mutator (`formal/arm64_proof_gen.py::_frame_methods` / `_generate_frame_proof`).
 
-**Classification table (D1 measurement):**
-| program | `_frame_methods` result | matches source? |
+**Re-measured 2026-11-07 (the table above this edit, written 2026-11-05, was wrong on `inc`).**
+Script: `.tmp/18a/measure.py` (spies `generate_arm64_proof`, calls `_frame_methods`, as `test_one_field_mutator_by_reference_gets_contract` does).
+
+| program (struct `Box`, one field `v`) | `_frame_methods` result today | matches source? |
 |---|---|---|
-| `Box.set_v(mut self, x: Int): self.v = x` (assignment of parameter) | `Box_set_v` kind=`set`, pairs=[(`v`,0)], stores=[True], body_len=1 | yes |
-| `Box.inc(mut self): self.v = self.v + 1` (read-modify-write, no param assigned) | `Box_inc` kind=`set`, pairs=[(`v`,0)], stores=[True], body_len=1 | **no** — classified as `set` by placeholder rule but body is not "assignment of a parameter"; has LOAD+STORE |
-| `Box.pop(mut self) -> Int:` with `if self.v==0: return 0` else read/store/return (multi-exit/branchy) | `None` | yes (not a simple leaf the finder accepts) |
+| `set_v(mut self, x): self.v = x` | `Box_set_v`, `kind="set"`, `pairs=[("v",0)]`, `stores=[True]` | yes |
+| `inc(mut self): self.v = self.v + 1` (load, add, store) | `None` | yes — no contract, which is sound |
+| `pop(mut self) -> Int` (read, two `if` exits each storing) | `None` | yes |
+| `set2(mut self, x): self.v = x; self.v = x + 1` | `None` | yes |
+| two-field `P.set_a(mut self, x): self.a = x` | `P_set_a`, `kind="set"`, `pairs=[("a",0)]` | yes (frame receiver, the older path) |
 
-**x86-64:** no `frame_methods`/`_self_accesses` machinery in `formal/x86_64_proof_gen.py` (grep returns nothing). Frame-contract machinery exists only for arm64; x86-64 has no by-reference one-field mutator contract path.
+**D1 is already implemented in the tree** (the "D1 (18b)" comments in `_frame_methods`: a by-reference one-field method gets a contract only for ONE assignment of a parameter to `self` (`set`) or `return self` (`get`); the `[(field, True)]` placeholder only survives inside that gate, and the second gate after `_frame_slot_accesses` repeats it). So **18b is a test-and-pin step, not a code step**: add the four negative rows above to `test_formal_frame_method_finder.py` (`inc`, `pop`, `set2` must give `None`) so the restriction cannot regress, then close 18b. The load-first rule that 18c is for is also partly in: `_frame_slot_accesses(..., is_cell_receiver=True)` exists and `test_cell_receiver_load_first_rule` / `..._two_rets` / `..._wrong_reg_is_none` pass (10/10 in that file). What 18c still owes: (i) the constant-propagation start `{0: 0}` is only checked on the unit test's hand-built words, not on a compiled `inc`-shaped method, which `_frame_methods` rejects before the scan (the source gate) — so the rule is unreachable from a real program until a `kind="rmw"` classification exists; (ii) the single-RET requirement (`len(rets) != 1 -> None`) is the 1-exit case of D3.
 
-**(A) sweep re-measure:** re-measure pending (full sweep in progress). Historical log `bugs/sweeps/sweep-arm-14.txt` shows 7 `CODEGEN:` lines mentioning `frame address\|receiver`; current tree state may differ. Count to be updated when sweep completes.
+**x86-64:** `grep -n "frame_methods\|_self_accesses" formal/x86_64_proof_gen.py` is empty (re-run 2026-11-07), and no `test_formal_x86_64_*` builds a by-reference one-field mutator with a proof (`call_tree`, `dylib`, `parity` only). There is no contract path; out of scope here.
 
-**Decisions:**
+**(A) sweep count:** the full re-sweep was not run (32 GB, ~hours). The only measured figure is the historical `bugs/sweeps/sweep-arm-14.txt`: 7 `CODEGEN:` lines match `frame address|receiver`, but only 2 of them are the by-reference frame escape (`bootstrap_test_classes.mojo` "returns a frame address"; `none.mojo` "receiver is the ADDRESS of a frame"); the others are unrelated method-call refusals that happen to contain "receiver". The 97/68 in §6.3 is the 2026-09-27 figure and is stale. Re-measure pending; a Lean contract cannot change this count.
 
-- **D1 (soundness of placeholder):** By-reference one-field methods are classified as `set` only when the body is **one assignment of a parameter to `self`** and the machine shows one store. `get` only for `return self`. Everything else → `continue` (no contract), matching pre-2026-11-03 behavior. Drop placeholder branches in `_frame_methods`. (Feeds 18b.)
-- **D2 (depth bound):** The contract must state the depth bound as a **theorem hypothesis**, not an axiom. The cell is in the caller's frame at address `p`; premise written as `h_cell : ...` (e.g. "cell in caller frame" / `Frame`-related bound). The generated theorem remains unsound-only-if-hypothesis-misapplied; discharge at call sites is scaffolded. (Feeds 18d.) **Theorem skeleton (to go in `lib/Scaffold.lean` by 18d):**
+**Decisions**
+
+- **D1 (soundness of the placeholder): taken, already in the code.** `set` = one parameter-assignment, `get` = `return self`, everything else is no contract. Feeds 18b (pin it).
+- **D2 (depth bound as a hypothesis, never an axiom).** The cell is the CALLER's word, so it sits ABOVE the callee's `sp`, the opposite side from the receiver *frames* of `_generate_frame_proof` (those sit at the callee's entry `sp` and grow upward, hence `Frame.FrameBelow`). `Frame.FrameBelow` is therefore the wrong premise for a cell. The correct premises are `Frame.FrameFits p 1` (the 8-byte cell does not wrap, `lib/ProofLib.lean:6207`) and a separation premise `h_above : s.sp.toNat + W ≤ p.toNat` where `W` is the stack window the method touches (`_frame_stack_depths`, the same number the frame contracts use for `hsep`). The skeleton 18d should put in `lib/Scaffold.lean` in place of the `h_cell : True` / `: Prop` placeholders (the shipped placeholders state `True`, which is vacuous; the ledger already lists them as such):
   ```lean
-  /-- Scaffold: write-back contract for a by-reference one-field mutator (single exit).
-      Depth bound is a hypothesis, not an axiom. -/
   theorem scaffold_cell_writeback_one_exit
-      {s s' : Arm64State} (p : UInt64)
-      (h_cell : True)  -- TODO(18d): replace by proper Frame hypothesis (e.g. cell_in_caller_frame p s.sp)
-      : Prop := by sorry
+      (s s' : Arm64State) (code : Nat → UInt8) (exit_pc fuel : Nat) (p v : UInt64) (W : Nat)
+      (hx0 : s.x0 = p) (hx1 : s.x1 = v)
+      (hfit : Frame.FrameFits p 1)                    -- cell does not wrap
+      (h_above : s.sp.toNat + W ≤ p.toNat)            -- cell is above the callee's stack window
+      (hrun : arm64_exec_go_exit s code exit_pc fuel = some s') :
+      Frame.frameRead s'.mem p 0 = v ∧                -- the write-back happened
+      ∀ a, (a < p.toNat ∨ p.toNat + 8 ≤ a) →          -- nothing else changed outside the callee's window
+        (a < s.sp.toNat - W ∨ s.sp.toNat ≤ a) → s'.mem a = s.mem a := by
+    sorry
   ```
-  (Exact `Frame.*` names to be confirmed against `lib/Refine.lean`/`lib/Contracts.lean`; 18d will narrow to what typechecks.)
-- **D3 (multiple exits):** Contract states write-back as a per-exit disjunction over RET addresses collected by the finder. 18c implements peel for 1 exit; >1 exits get scaffolded obligation in 18d. (Feeds 18c, 18d.)
+  The `sorry` is the proof, the statement is real; 18d must typecheck it (`Frame.frameRead` and `arm64_exec_go_exit` exist) before ledgering. Discharge at call sites (`h_above`) is the part that needs the caller's frame layout and stays a scaffold.
+- **D3 (multiple exits).** The write-back repeats on every RET, so the multi-exit statement is a conjunction over the RET addresses the finder collected (`rets`), one `frameRead` conjunct per exit reached; 18c proves the 1-exit case, 18d scaffolds `>1`. Nothing in the finder emits more than one RET today (`len(rets) != 1 -> None`), so the multi-exit scaffold is a statement with no producer yet.
 
 **Feeds:** 18b (restrict classifier per D1), 18c (load-first rule for cell receiver, constant propagation from `{0:0}`, 1-exit case), 18d (scaffold write-back contract with depth bound as hypothesis and per-exit obligation as `sorry` in `lib/Scaffold.lean`, ledgered).
 
+
+**Status (2026-11-07, step 18d): the two scaffold theorems now state real propositions (see step 18d Status; opaque `CellSetMethod` premise).** Earlier note:
 
 **Status (2026-11-05, step 18d):** Scaffold theorems `scaffold_cell_writeback_one_exit` and `scaffold_cell_writeback_multi_exit` added to `lib/Scaffold.lean` (imports `ProofLib`/`X86`/`Peephole` as per scaffold policy; `set_option autoImplicit false`). Depth bound stated as a **theorem hypothesis** (`h_cell : True` as a placeholder to be narrowed to the actual `Frame.*` premise), never an axiom. Theorems end in `by sorry` and are ledgered in `formal/proof_gaps.py::SCAFFOLD_HOLES` under step `18d` (kind `scaffold`). Lean typecheck **handed off** (needs `python3 tools/memslot.py --gb 16 --label lean -- python3 test_formal_proof_gaps.py` run by user/gate worker). 18a–18c complete (classifier restricted per D1, load-first rule added with `is_cell_receiver`), 18d scaffolds the write-back contract obligations.
 

@@ -1981,8 +1981,8 @@ def _generic_inference_tail(name: str) -> str:
         f"SOURCE is right and this path is short**: Mojo infers a template "
         f"call's type arguments, so `{name}(…)` with no bracket is correct "
         f"code — the stdlib's own `FormatStruct(writer, \"Allocation\")` is "
-        f"spelled that way — and this path does not infer them yet. Its demand "
-        f"pipeline reads type arguments off an explicit bracket, so a bare call "
+        f"spelled that way — and this path infers them only from DECLARED argument types (a written annotation, `x^` of one, a `self.f` field, or a call with a declared `->`), never from a literal or an unwritten type. Its demand "
+        f"pipeline otherwise reads type arguments off an explicit bracket, so this bare call "
         f"arrives here with no instantiation to bind; the inference, the 123 "
         f"measured files it is worth, and the shape of the missing piece are "
         f"in bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_"
@@ -1994,7 +1994,29 @@ def _generic_inference_tail(name: str) -> str:
 
 
 def imported_callee_refusal(name: str, sym, fn_name: str,
-                            rule: str = None, declared=None) -> str:
+                            rule: str = None, declared=None,
+                            existential_args=()) -> str:
+    """See `_imported_callee_refusal`; `existential_args` names the call's
+    arguments declared `Some[...]` (16e, Q2 B1), which adds the sentence that is
+    true of them: an existential is not a concrete type, so no instantiation can
+    be inferred from it."""
+    text = _imported_callee_refusal(name, sym, fn_name, rule=rule,
+                                    declared=declared)
+    if existential_args:
+        text += (" The argument" + ("s " if len(existential_args) > 1 else " ")
+                 + ", ".join(f"`{a}`" for a in existential_args)
+                 + " "
+                 + ("are" if len(existential_args) > 1 else "is")
+                 + " declared `Some[...]`: an EXISTENTIAL, not a concrete struct, "
+                 "so the template's type parameter cannot be bound to it "
+                 "(binding it to `Some[...]` or to the trait name would invent "
+                 "an instantiation the callee never sees). Declare the "
+                 "argument with a concrete type, or monomorphise the caller.")
+    return text
+
+
+def _imported_callee_refusal(name: str, sym, fn_name: str,
+                             rule: str = None, declared=None) -> str:
     """The diagnostic for a CALL to a name the defining module does not export.
 
     `rule` is the ONE rule `doc/ABI.md`'s export rule applied to this name,
@@ -2091,9 +2113,9 @@ def imported_callee_refusal(name: str, sym, fn_name: str,
                     f"infers a template call's type arguments, so `{name}(…)` "
                     f"with no bracket is correct code — the stdlib's own "
                     f"`FormatStruct(writer, \"Allocation\")` is spelled that way "
-                    f"— and this path does not infer them yet. Its demand "
-                    f"pipeline reads type arguments off an explicit bracket, so "
-                    f"a bare call arrives here with no instantiation to bind; "
+                    f"— and this path infers them only from DECLARED argument types (a written annotation, `x^` of one, a `self.f` field, or a call with a declared `->`), never from a literal or an unwritten type. Its demand "
+                    f"pipeline otherwise reads type arguments off an explicit bracket, so "
+                    f"this bare call arrives here with no instantiation to bind; "
                     f"the inference, the 123 measured files it is worth, and the "
                     f"shape of the missing piece are in "
                     f"bugs/FORMAL_a_bare_call_to_a_template_whose_type_"

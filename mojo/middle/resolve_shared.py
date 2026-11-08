@@ -725,16 +725,19 @@ def _quick_type(gen, node) -> str:
             if mod == 'os' and meth in ('getcwd', 'path'): return 'char *'
             if mod == 'os' and meth == 'listdir': return 'MojoList *'
             if mod == 'sysconfig' and meth == 'get_config_var': return 'char *'
-            # `sys.getfilesystemencoding()` / `sys.getdefaultencoding()` lower to
-            # an interned `char *` literal (emit_methods.py's `sys` row, which
-            # this must agree with). Answering the generic `sys.*` `int` here
-            # typed the local `int` for every pre-pass that asks this function
-            # -- above all `discover_closures`, whose capture list becomes the
-            # env struct: a nested `def` capturing `encoding` got an
-            # `int encoding` field and the pointer stored into it was truncated
-            # to 32 bits (or, beside a branch that assigns the real `char *`,
-            # a hard "assignment to 'int' from 'char *'" gcc error).
-            if mod == 'sys' and meth in ('getfilesystemencoding', 'getdefaultencoding'):
+            # `sys.getfilesystemencoding()` / `sys.getdefaultencoding()` /
+            # `sys.getfilesystemencodeerrors()` lower to an interned `char *`
+            # literal (emit_methods.py's `sys` row, which this must agree
+            # with). PEP 686 makes UTF-8 the default encoding. Answering the
+            # generic `sys.*` `int` here typed the local `int` for every
+            # pre-pass that asks this function -- above all
+            # `discover_closures`, whose capture list becomes the env struct:
+            # a nested `def` capturing `encoding` got an `int encoding` field
+            # and the pointer stored into it was truncated to 32 bits (or,
+            # beside a branch that assigns the real `char *`, a hard
+            # "assignment to 'int' from 'char *'" gcc error).
+            if mod == 'sys' and meth in ('getfilesystemencoding', 'getdefaultencoding',
+                                          'getfilesystemencodeerrors'):
                 return 'char *'
             if mod == 'sys': return 'int'
             # `struct.Struct(...)` / `struct.pack(...)` / `struct.unpack(...)`:

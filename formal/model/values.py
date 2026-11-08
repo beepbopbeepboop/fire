@@ -1544,7 +1544,7 @@ def container_escape_sites(fn, returns_container=None, copied=None) -> list:
     CPython answers `11 22 33` in both. **A list LITERAL at the return site is
     the same shape and the same wrong answer** (`return [11, 22, 33]`, measured
     identically), which corrects
-    `bugs/formal/FORMAL_listdir_no_run_time_sequence.md` item 3: a returned container
+    the deleted FORMAL listdir-no-run-time-sequence doc item 3: a returned container
     literal is NOT `malloc`'d here, and "it reads correctly immediately after the
     call" is the only reason it looked like it was.
 
@@ -2145,7 +2145,7 @@ def returned_container_refusal(fn, line: int, what: str) -> str:
         f"blob the callee appends to rather than a concatenation or a splat, "
         f"and when every element is provably a word — so the reader is being "
         f"told which of those four this program is. "
-        f"`bugs/formal/FORMAL_listdir_no_run_time_sequence.md` item 3 records "
+        f"the deleted FORMAL listdir-no-run-time-sequence doc item 3 records "
         f"the capability that closes the rest (a container with a run-time "
         f"length, `malloc`'d rather than frame-resident). What lowers today: "
         f"read the value before calling anything else, keep the container in "
