@@ -106,7 +106,8 @@ ROWS = [
      ("refuse", "16000000000000000000")),
     # A multiply by 0 and by 1 are the two that must NOT trap at the edge, and
     # they are here because the run-time check (`_emit_int_alu_checked`, landed
-    # with the deleted FORMAL integer-overflow-untrapped doc's step 3) is a
+    # with `bugs/formal/
+    # FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s step 3) is a
     # high-half compare, and `high == low` is not the test that gets it right.
     ("mul_by_one", "print(9223372036854775807 * 1)",
      ("value", 9223372036854775807)),
@@ -366,7 +367,8 @@ VARIABLE_ROWS = [
      {"arm64": ("value", 0), "x86_64": ("trapped", TRAP)}, "0.5"),
 ]
 
-STILL_UNTRAPPED_DOC = "(deleted FORMAL doc: integer overflow at run time still untrapped)"
+STILL_UNTRAPPED_DOC = (
+    "bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md")
 
 # ── `FORMAT_ROWS`: the OUTPUT spelling, with CPython as the oracle ──────────
 #

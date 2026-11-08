@@ -1602,25 +1602,30 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             obj=gimple_ctypes.IdentExpr(name=_as_str(node.obj.member),
                                         line=getattr(node, 'line', 0)),
             member=_as_str(node.member)))
-    # `dict.fromkeys` / `frozendict.fromkeys` read as a VALUE
+    # `dict.fromkeys` read as a VALUE (real: zipfile/_path/__init__.py's
+    # `_dedupe = dict.fromkeys`, later called as `_dedupe(iterable)`) —
+    # `dict` itself already resolves to a real function-pointer VALUE
+    # (`_funcptr_mojo_make_dict`, via BUILTIN_VALUE_MAP/_lower_IdentExpr),
+    # but `.fromkeys` on that raw `void *` function pointer used to fall
+    # through to the generic dynamic-getattr dispatch
+    # (`_mojo_dispatch_getattr`), which correctly raises AttributeError
+    # for an attribute name no runtime object registration has — crashing
+    # the program during module-level top-level init, before `_dedupe`
+    # is ever even CALLED. `dict.fromkeys(iterable)` and `dict(iterable)`
+    # aren't semantically identical (fromkeys maps each element to a
+    # default value; plain dict() expects (k, v) pairs), but reusing the
+    # same `mojo_make_dict` function pointer at minimum stops the
+    # top-level crash — an honest, no-worse-than-before degrade for
+    # whatever this bound classmethod is later called with (this
+    # codegen already has no correctness guarantee for a call through a
+    # dynamically-stored builtin function-pointer VALUE regardless).
     if (isinstance(node.obj, gimple_ctypes.IdentExpr)
-            and node.obj.name in ('dict', 'OrderedDict', 'frozendict')
+            and node.obj.name in ('dict', 'OrderedDict')
             and node.obj.name not in gen.var_types
             and not gen._locally_binds_name(node.obj.name)
             and node.member == 'fromkeys'):
-        if node.obj.name == 'frozendict':
-            gen._funcptr_builtins_needed.add('mojo_frozendict_fromkeys')
-            if not hasattr(gen, '_frozendict_fromkeys_callables'):
-                gen._frozendict_fromkeys_callables = set()
-            t = gen._new_val('void *', '_funcptr_mojo_frozendict_fromkeys')
-            gen._frozendict_fromkeys_callables.add(t)
-            return 'void *', t
         gen._funcptr_builtins_needed.add('mojo_make_dict')
-        if not hasattr(gen, '_dict_fromkeys_callables'):
-            gen._dict_fromkeys_callables = set()
-        t = gen._new_val('void *', '_funcptr_mojo_make_dict')
-        gen._dict_fromkeys_callables.add(t)
-        return 'void *', t
+        return 'void *', gen._new_val('void *', '_funcptr_mojo_make_dict')
 
     # `m.lastgroup` where m is a regex-match for-loop variable — see
     # _gen_for_regex_iter / regex_compile.py / BACKLOG-CODEGEN.md §4f.

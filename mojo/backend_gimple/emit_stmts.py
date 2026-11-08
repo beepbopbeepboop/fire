@@ -1236,23 +1236,6 @@ def _gen_stmt_AssignStmt(gen, node):
     if isinstance(node.target, gimple_ctypes.IdentExpr) \
             and getattr(node, 'value', None) is not None:
         _record_bool_valued(gen, node.target.name, node.value)
-        # Track frozendict.fromkeys assignment
-        try:
-            _rhs = node.value
-            if isinstance(_rhs, gimple_ctypes.MemberExpr) and isinstance(_rhs.obj, gimple_ctypes.IdentExpr):
-                if _rhs.obj.name == 'frozendict' and _rhs.member == 'fromkeys' and not gen._locally_binds_name(_rhs.obj.name):
-                    if not hasattr(gen, '_frozendict_fromkeys_callables'): gen._frozendict_fromkeys_callables = set()
-                    gen._frozendict_fromkeys_callables.add(node.target.name)
-                    try: gen._frozendict_fromkeys_callables.add(gen._cname(node.target.name))
-                    except Exception: pass
-            elif isinstance(_rhs, gimple_ctypes.MemberExpr) and isinstance(_rhs.obj, gimple_ctypes.IdentExpr):
-                if _rhs.obj.name in ('dict', 'OrderedDict') and _rhs.member == 'fromkeys' and not gen._locally_binds_name(_rhs.obj.name):
-                    if not hasattr(gen, '_dict_fromkeys_callables'): gen._dict_fromkeys_callables = set()
-                    gen._dict_fromkeys_callables.add(node.target.name)
-                    try: gen._dict_fromkeys_callables.add(gen._cname(node.target.name))
-                    except Exception: pass
-        except Exception:
-            pass
     if (isinstance(node.target, gimple_ctypes.IdentExpr)
             and getattr(node, 'value', None) is not None and len(gen._frames_mods) > 0):
         if gmp._is_frame_expr(gen, node.value):
@@ -1434,22 +1417,6 @@ def _gen_stmt_AssignStmt(gen, node):
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name
-        # Track frozendict/dict fromkeys callable values
-        try:
-            if hasattr(gen, '_frozendict_fromkeys_callables') and v in gen._frozendict_fromkeys_callables:
-                gen._frozendict_fromkeys_callables.add(tname)
-                try:
-                    gen._frozendict_fromkeys_callables.add(gen._cname(tname))
-                except Exception:
-                    pass
-            if hasattr(gen, '_dict_fromkeys_callables') and v in gen._dict_fromkeys_callables:
-                gen._dict_fromkeys_callables.add(tname)
-                try:
-                    gen._dict_fromkeys_callables.add(gen._cname(tname))
-                except Exception:
-                    pass
-        except Exception:
-            pass
         # Flow-sensitive None tracking
         try:
             _fs = getattr(gen, '_flow_none_state', None)
@@ -2854,10 +2821,6 @@ def _gen_stmt_AugAssignStmt(gen, node):
             except Exception:
                 pass
     if base_op in ('//', '**', '+', '-', '*', '/', '%', '|', '&', '^', '<<', '>>', '@'):
-        if (base_op == '|'
-                and isinstance(node.target, gimple_ctypes.IdentExpr)
-                and gen._type_of(node.target.name) == 'MojoDict *'):
-            gen._emit(f'  mojo_frozendict_check_no_mut_method ({gen._cname(node.target.name)}, "__ior__");')
         fake  = gimple_ctypes.BinaryOp(op=base_op, left=node.target, right=node.value)
         vtype, v = gen.lower_expr(fake)
     else:

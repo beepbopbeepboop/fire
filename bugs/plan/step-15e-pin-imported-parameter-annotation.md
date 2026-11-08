@@ -1,7 +1,7 @@
 # plan/step-15e: re-pin the imported-instantiation parameter annotation (value vs frame)
 **Status: DONE 2026-11-06 (measured).** 'a parameter annotation of an imported instantiation' PASSES; `test_formal_monomorph.py` 60/0/0 on 2026-11-06.
 Class: easy      Size: S      Depends: 15a      Blocks: none
-Source: the deleted generic-monomorph-scope FORMAL doc §1 / §1a (status 2026-10-13); `bugs/FORMAL_known_limits.md` §1.2.
+Source: deleted `bugs/formal/FORMAL_generic_monomorph_scope.md` §1 / §1a (status 2026-10-13); `bugs/FORMAL_known_limits.md` §1.2.
 
 ## Current state (measured 2026-11-05)
 - Commit `75086acf2` ("pin §1a — the value half is answered and the frame half is the remainder", ancestor of HEAD) added the case `a parameter annotation of an imported instantiation`; HEAD's `test_formal_monomorph.py` lacks it (`grep -n "imported instantiation" test_formal_monomorph.py` finds nothing).

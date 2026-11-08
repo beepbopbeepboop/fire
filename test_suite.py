@@ -6080,8 +6080,15 @@ def test_formal_sweep_work_map_index_tags_only_from_section3():
     conditions.
     """
     import re
-    index = open(os.path.join(HERE, 'bugs', 'FORMAL_sweep_work_map.md'),
-                 encoding='utf-8').read()
+    path = os.path.join(HERE, 'bugs', 'FORMAL_sweep_work_map.md')
+    if not os.path.exists(path):
+        check('sweep map index: the consolidated work map exists',
+              False,
+              f'{os.path.relpath(path, HERE)} is missing; the index-tag checks '
+              f'need it, and the "one consolidated map" pin above is the '
+              f'primary report')
+        return
+    index = open(path, encoding='utf-8').read()
     m3 = re.search(r'^## 3\..*?(?=^## \d+\.|\Z)', index, re.M | re.S)
     check('sweep map index: §3, the round index, exists', m3 is not None,
           'a citation of a round resolves into the index, and a document '
