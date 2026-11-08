@@ -4282,6 +4282,64 @@ def test_a_call_initialised_local_infers_through_declared_return(tmpdir):
         check(got == "42\n", f"[{arch}] printed {got!r}, expected '42\\n'")
 
 
+def test_a_local_named_like_a_function_is_not_its_return_type(tmpdir):
+    """The scope table keeps a function's declared `->` apart from variables:
+    `var size: Int` next to `def size() -> Float64` reads `Int` (16d review item;
+    both used to share one dict key and `setdefault` let the function win)."""
+    from fire_compiler import py_tokenize, Parser
+    import formal.monomorph as MM
+    src = ("def size() -> Float64:\n"
+           "    return 1.0\n"
+           "\n"
+           "var size: Int = 4\n")
+    stmts = Parser(py_tokenize(src)).parse_module()
+    declared = MM._declared_types_in_scope(stmts, None)
+    check(declared.get("size") == "Int",
+          f"the variable `size` read as {declared.get('size')!r}, expected 'Int'")
+    check(declared.get("size()") == "Float64",
+          f"the function's return type read as {declared.get('size()')!r}")
+
+
+def test_a_declared_return_and_a_transfer_build_end_to_end(tmpdir):
+    """`var b = make(); unwrap(b^)`: the type argument comes from `make`'s
+    declared `-> Box[Int]` through the local, with the transfer wrapper (16d)."""
+    lib = ("struct Box[T]:\n"
+           "    var v: T\n"
+           "\n"
+           "def make() -> Box[Int]:\n"
+           "    var b = Box[Int]()\n"
+           "    b.v = 9\n"
+           "    return b\n"
+           "\n"
+           "def unwrap(t: Box[T]) -> T:\n"
+           "    return t.v\n")
+    prog = ("from boxlib import Box, make, unwrap\n"
+            "\n"
+            "def main():\n"
+            "    var b = make()\n"
+            "    print(unwrap(b^))\n")
+    cpython = ("class Box:\n"
+               "    def __init__(self):\n"
+               "        self.v = 0\n"
+               "\n"
+               "def make():\n"
+               "    b = Box()\n"
+               "    b.v = 9\n"
+               "    return b\n"
+               "\n"
+               "def unwrap(t):\n"
+               "    return t.v\n"
+               "\n"
+               "def main():\n"
+               "    b = make()\n"
+               "    print(unwrap(b))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm16d_e2e", lib, prog, cpython,
+                            libname="boxlib.mojo")
+        check(got == "9\n", f"[{arch}] printed {got!r}, expected '9\\n'")
+
+
 def test_an_untyped_local_with_no_declaration_blocks_inference(tmpdir):
     """`var x = something_untyped()` where the callee has no declared return
     type: `consume(x)` is a decision-or-refusal (16d, untyped local)."""
@@ -4411,6 +4469,10 @@ TESTS = [
      test_a_comptime_value_default_leaves_the_bare_call_refused),
     ("a callee's own parameter is not an inference",
      test_a_callees_own_parameter_is_not_an_inference),
+    ("a local named like a function is not its return type",
+     test_a_local_named_like_a_function_is_not_its_return_type),
+    ("a declared return and a transfer build end to end",
+     test_a_declared_return_and_a_transfer_build_end_to_end),
     ("an inferred-parameter function is called without the bracket",
      test_an_inferred_parameter_function_is_called_without_the_bracket),
     ("a constants-only module builds and its constants read back",

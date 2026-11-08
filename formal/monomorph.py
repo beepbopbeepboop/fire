@@ -1182,6 +1182,13 @@ def all_bracketed_calls(consumer_src: str) -> dict:
 _ANNOTATION_TYPE_ARG_RE = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$")
 
 
+def _return_type_key(callee_name: str) -> str:
+    """Key under which a function's declared `->` annotation lives in the scope
+    table.  `name()` is not an identifier, so it can never collide with a
+    parameter or `var` of the same name (16d)."""
+    return callee_name + "()"
+
+
 def _declared_types_in_scope(stmts, enclosing_stmt=None) -> dict:
     """`{name: annotation string}` for the names a bare call's arguments can be
     read against: the enclosing function's parameters and `VarDecl`
@@ -1212,7 +1219,7 @@ def _declared_types_in_scope(stmts, enclosing_stmt=None) -> dict:
     # Pass 1: collect function declarations' return types (16d).
     for n in M.iter_nodes(scope):
         if isinstance(n, F.FunctionDef) and getattr(n, "return_type", None):
-            declared.setdefault(n.name, n.return_type)
+            declared.setdefault(_return_type_key(n.name), n.return_type)
 
     # Pass 2: collect VarDecl annotations; a call-initialised local with no
     # explicit annotation resolves through the callee's declared return type.
@@ -1228,7 +1235,7 @@ def _declared_types_in_scope(stmts, enclosing_stmt=None) -> dict:
                     getattr(callee, "name", None) if isinstance(callee, F.IdentExpr) else None
                 )
                 if callee_name:
-                    ann = declared.get(callee_name)
+                    ann = declared.get(_return_type_key(callee_name))
         if isinstance(ann, str) and ann.strip():
             declared.setdefault(n.name, ann)
     return declared
@@ -1303,7 +1310,7 @@ def _declared_type_of_expr(expr, scope) -> str | None:
         callee_name = getattr(fn, "name", None) if isinstance(fn, F.IdentExpr) else None
         if callee_name is None:
             return None
-        ret = scope.get(callee_name)
+        ret = scope.get(_return_type_key(callee_name))
         if isinstance(ret, str) and ret.strip():
             return ret.strip()
     return None

@@ -636,6 +636,8 @@ name and fill a defaulted parameter only from a type-spelling default; 16d — i
 and nothing from bodies; 16e — B2 for concrete structs, B1 otherwise, Q3 refusal with the parameter name;
 16f — pin the refusal wording to the five reason strings above.
 
+**Status (2026-11-07, step 16d):** declared-type inference landed for a bare call's non-identifier arguments (`_declared_type_of_expr`: `x^` transfer, `self.f` field read, call with a declared `->`, and a call-initialised `var`), reading declarations only (R1), never a body. A function's declared return type is kept under the key `name()` (`_return_type_key`) so it cannot collide with a variable of the same name. Pinned by five decision cases, a collision case and an end-to-end `make() -> Box[Int]` / `unwrap(b^)` case on both arches against CPython (`test_formal_monomorph.py` 66/66). The real row moved: `python3 fire.py build --formal --no-prove std/memory/alloc.mojo` no longer stops at `dealloc`; its terminal message is now the `FormatStruct` row verbatim: "`ThinAllocation_1_T_1_T.write_to`: `FormatStruct` is called, and it is imported from `std.format._utils`, so the call has to bind a symbol `std.format._utils` exports. That module does not export it ..." — a bare call against a trait bound, which is step 16e. The full census re-run was not done.
+
 ## 1.3 One of the 30 should not be in the family at all
 
 `std/gpu/host/nvidia/tma.mojo` is refused because it "imports `.`", and the
