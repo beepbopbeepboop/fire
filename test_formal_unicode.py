@@ -603,6 +603,130 @@ ORACLE_CASES = [
      'def main():\n'
      '    print("[%6s]=%d" % ("héllo", 5), end="\\n")\n'),
 
+    # Step 13d: a width/precision on a run-time `String` PARAMETER in an image
+    # that holds non-ASCII text. C counts bytes, CPython characters; the lowering
+    # computes the star arguments in characters (`model.printf_runtime_text_widths`).
+    ("printf_runtime_width_string_param",
+     'def show(s: String):\n'
+     '    printf("[%6s]\\n", s)\n'
+     'def main(n):\n'
+     '    var table = ["héllo"]\n'
+     '    show("héllo")\n'
+     '    return 0\n',
+     'def show(s):\n'
+     '    print("[%6s]" % s, end="\\n")\n'
+     'def main():\n'
+     '    show("héllo")\n'),
+
+    ("printf_runtime_width_string_param_ascii",
+     'def show(s: String):\n'
+     '    printf("[%6s]\\n", s)\n'
+     'def main(n):\n'
+     '    var table = ["héllo"]\n'
+     '    show("hello")\n'
+     '    return 0\n',
+     'def show(s):\n'
+     '    print("[%6s]" % s, end="\\n")\n'
+     'def main():\n'
+     '    show("hello")\n'),
+
+    ("printf_runtime_left_width_string_param",
+     'def show(s: String):\n'
+     '    printf("[%-6s]\\n", s)\n'
+     'def main(n):\n'
+     '    var table = ["héllo"]\n'
+     '    show("héllo")\n'
+     '    return 0\n',
+     'def show(s):\n'
+     '    print("[%-6s]" % s, end="\\n")\n'
+     'def main():\n'
+     '    show("héllo")\n'),
+
+    ("printf_runtime_left_width_string_param_ascii",
+     'def show(s: String):\n'
+     '    printf("[%-6s]\\n", s)\n'
+     'def main(n):\n'
+     '    var table = ["héllo"]\n'
+     '    show("hello")\n'
+     '    return 0\n',
+     'def show(s):\n'
+     '    print("[%-6s]" % s, end="\\n")\n'
+     'def main():\n'
+     '    show("hello")\n'),
+
+    ("printf_runtime_precision_string_param",
+     'def show(s: String):\n'
+     '    printf("[%.3s]\\n", s)\n'
+     'def main(n):\n'
+     '    var table = ["héllo"]\n'
+     '    show("héllo")\n'
+     '    return 0\n',
+     'def show(s):\n'
+     '    print("[%.3s]" % s, end="\\n")\n'
+     'def main():\n'
+     '    show("héllo")\n'),
+
+    ("printf_runtime_precision_string_param_ascii",
+     'def show(s: String):\n'
+     '    printf("[%.3s]\\n", s)\n'
+     'def main(n):\n'
+     '    var table = ["héllo"]\n'
+     '    show("hello")\n'
+     '    return 0\n',
+     'def show(s):\n'
+     '    print("[%.3s]" % s, end="\\n")\n'
+     'def main():\n'
+     '    show("hello")\n'),
+
+    ("printf_runtime_width_precision_string_param",
+     'def show(s: String):\n'
+     '    printf("[%8.3s]\\n", s)\n'
+     'def main(n):\n'
+     '    var table = ["héllo"]\n'
+     '    show("héllo")\n'
+     '    return 0\n',
+     'def show(s):\n'
+     '    print("[%8.3s]" % s, end="\\n")\n'
+     'def main():\n'
+     '    show("héllo")\n'),
+
+    ("printf_runtime_width_precision_string_param_ascii",
+     'def show(s: String):\n'
+     '    printf("[%8.3s]\\n", s)\n'
+     'def main(n):\n'
+     '    var table = ["héllo"]\n'
+     '    show("hello")\n'
+     '    return 0\n',
+     'def show(s):\n'
+     '    print("[%8.3s]" % s, end="\\n")\n'
+     'def main():\n'
+     '    show("hello")\n'),
+
+    ("printf_runtime_left_width_precision_string_param",
+     'def show(s: String):\n'
+     '    printf("[%-8.3s]\\n", s)\n'
+     'def main(n):\n'
+     '    var table = ["héllo"]\n'
+     '    show("héllo")\n'
+     '    return 0\n',
+     'def show(s):\n'
+     '    print("[%-8.3s]" % s, end="\\n")\n'
+     'def main():\n'
+     '    show("héllo")\n'),
+
+    ("printf_runtime_left_width_precision_string_param_ascii",
+     'def show(s: String):\n'
+     '    printf("[%-8.3s]\\n", s)\n'
+     'def main(n):\n'
+     '    var table = ["héllo"]\n'
+     '    show("hello")\n'
+     '    return 0\n',
+     'def show(s):\n'
+     '    print("[%-8.3s]" % s, end="\\n")\n'
+     'def main():\n'
+     '    show("hello")\n'),
+
+
     # ── GUARDS: the ASCII rows beside every refusal ──────────────────────
     #
     # `printf_width_on_ascii_text_is_a_byte_width_and_agrees`,
@@ -917,19 +1041,10 @@ REFUSAL_CASES = [
      '    return 0\n',
      ["is refused"]),
 
-    # A width on an operand the build CANNOT see, in an image that holds a
-    # non-ASCII literal elsewhere.  This is the whole-image condition doing
-    # its work: the operand here is an ASCII name, and it is still refused,
-    # because `%6s` of a value that might hold an `é` cannot be emitted with a
-    # byte width and hope.
-    ("refuse_printf_width_on_an_unseen_operand_in_a_non_ascii_image",
-     'def show(s: String):\n'
-     '    printf("[%6s]\\n", s)\n'
-     'def main(n):\n'
-     '    var table = ["héllo"]\n'
-     '    show("hello")\n'
-     '    return 0\n',
-     ["`%6s`", "is refused", "'héllo'"]),
+    # (The row that stood here asserted that a width on a run-time `String`
+    # parameter is refused in a non-ASCII image. Step 13d lowers it instead, via
+    # the star form with widths computed in characters; the oracle rows
+    # `printf_runtime_*` next to `printf_fold_plus_int` replace it.)
 
     # A `String`-ANNOTATED receiver, which is the row that says the exemption
     # beside the two `bytes` rows is keyed on the POINTEE and not on "this is a
@@ -1720,6 +1835,40 @@ def model_checks():
         ok("width refusal: the %.6f is still not, in the same image",
            M.printf_text_width_refusal("printf", "%6d %.6f", [None, None],
                                        unseen), None)
+        # Step 13d: the run-time rewrite, on the same image.
+        import fire_compiler as _F
+        _s = _F.IdentExpr("s")
+        _lit = _F.StringLiteral("héllo")
+        ok("runtime rewrite: a width on a name becomes a star width",
+           M.printf_runtime_text_widths("printf", "[%6s]", [_s], unseen)[0],
+           "[%*s]")
+        ok("runtime rewrite: a left width keeps its flag",
+           M.printf_runtime_text_widths("printf", "[%-6s]", [_s], unseen)[0],
+           "[%-*s]")
+        ok("runtime rewrite: width and precision become two stars",
+           M.printf_runtime_text_widths("printf", "[%8.3s]", [_s], unseen)[0],
+           "[%*.*s]")
+        ok("runtime rewrite: a precision alone becomes one",
+           M.printf_runtime_text_widths("printf", "[%.3s]", [_s], unseen)[0],
+           "[%.*s]")
+        ok("runtime rewrite: width then precision then the value",
+           len(M.printf_runtime_text_widths("printf", "[%8.3s]", [_s],
+                                            unseen)[1]), 3)
+        ok("runtime rewrite: a plain %s is untouched",
+           M.printf_runtime_text_widths("printf", "[%s]", [_s], unseen), None)
+        ok("runtime rewrite: an operand that is not a name is not rewritten",
+           M.printf_runtime_text_widths("printf", "[%6s]", [_lit], unseen), None)
+        ok("runtime rewrite: text the build can see is left to the fold",
+           M.printf_runtime_text_widths("printf", "[%6s]", [_s],
+                                        lambda a: "héllo"), None)
+    finally:
+        M.clear_non_ascii_strings()
+        M.publish_non_ascii_strings(saved_width)
+    M.clear_non_ascii_strings()
+    try:
+        ok("runtime rewrite: an ASCII image is not rewritten",
+           M.printf_runtime_text_widths("printf", "[%6s]",
+                                        [_F.IdentExpr("s")], unseen), None)
     finally:
         M.clear_non_ascii_strings()
         M.publish_non_ascii_strings(saved_width)

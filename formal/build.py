@@ -21846,6 +21846,22 @@ def _runtime_word_calls(ordered: list) -> list:
                 entry = abi.get(fn.name)
                 if entry is not None and entry["word"]:
                     found.add(fn.name)
+            # Step 13d: a `printf("%6s", s)` over a run-time name in an image that
+            # holds non-ASCII text is rewritten at emission to call these, so the
+            # library has to be on the link line even though the source never
+            # spells them.
+            if isinstance(fn, F.IdentExpr) and node.args \
+                    and isinstance(node.args[0], F.StringLiteral):
+                try:
+                    _fmt = F.decoded_literal(node.args[0])
+                except Exception:
+                    _fmt = None
+                if M.printf_runtime_width_operands(fn.name, _fmt,
+                                                   list(node.args[1:])):
+                    for _h in M.PRINTF_RUNTIME_WIDTH_HELPERS:
+                        _e = abi.get(_h)
+                        if _e is not None and _e["word"] and _h not in local:
+                            found.add(_h)
         for field in getattr(node, "__dataclass_fields__", {}):
             walk(getattr(node, field))
 

@@ -13630,6 +13630,10 @@ ctor_field_value=self._ctor_field_value_for(name),
                             pass
                         return None
                     folded = M.printf_fold_text_widths(name, fmt_text_f, vargs, _text_of_arg)
+                    if folded is None:
+                        # Step 13d: text the build cannot see, in an image that holds non-ASCII
+                        # text, becomes the star form with widths computed in characters.
+                        folded = M.printf_runtime_text_widths(name, fmt_text_f, vargs, _text_of_arg)
                     if folded is not None:
                         new_fmt, new_vargs = folded
                         new_args = list(e.args)
