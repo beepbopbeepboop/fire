@@ -3744,6 +3744,12 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                                     f"__mojo_global_get_"
                                     f"{gimple_ctypes._c_field_name(method_name)}")
                         gen._imported_global_accessors[method_name] = ('void *', _mg_csym)
+                    _bare_node = gimple_ctypes.CallExpr(
+                        func=gimple_ctypes.IdentExpr(
+                            name=method_name, line=getattr(node, 'line', 0)),
+                        args=list(node.args),
+                        kwargs=list(getattr(node, 'kwargs', None) or []))
+                    return gen._lower_call(_bare_node)
 
     # PART 6 (2026-10-23, family S): `Codepoint.ord(<string>)` — a STATIC-
     # style call whose receiver is the TYPE name. `Codepoint` is an
