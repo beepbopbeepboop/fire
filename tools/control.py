@@ -1297,6 +1297,73 @@ def cmd_reap(a):
 
 
 
+def cmd_sync(a):
+    '''Reconcile the queue and registry with the filesystem and live processes.
+
+    - Queue entries whose bug doc no longer exists on disk are stale: drop them.
+    - Queue entries whose class drifted from the doc's current class: rewrite.
+    - Registry tasks marked 'running' whose process is dead: report (not auto-fixed).
+    --dry-run: report only, change nothing.'''
+    import os as _os
+    dry = getattr(a, "dry_run", False)
+    restart_dead = getattr(a, "restart_dead", False)
+    tasks = load()
+    removed = []
+    rewritten = []
+    for f in sorted(_os.listdir(qdir())):
+        if not f.endswith(".json"):
+            continue
+        path = _os.path.join(qdir(), f)
+        with open(path) as fh:
+            it = json.load(fh)
+        doc_exists = False
+        if it.get("files"):
+            doc_exists = any(_os.path.exists(c) for c in it["files"])
+        else:
+            for c in it.get("claims", []):
+                tail = c.split(":")[-1].lower().replace("_", "-")
+                for root, _, files in _os.walk("bugs"):
+                    for fn in files:
+                        if fn.endswith(".md") and tail in fn.lower().replace("_", "-"):
+                            doc_exists = True
+                            break
+                    if doc_exists:
+                        break
+                if doc_exists:
+                    break
+        if not doc_exists:
+            removed.append(it["name"])
+            if not dry:
+                _os.remove(path)
+            continue
+        new_cls = doc_class_now(it)
+        if new_cls != it.get("cls"):
+            rewritten.append((it["name"], it.get("cls"), new_cls))
+            if not dry:
+                it2 = dict(it, cls=new_cls)
+                _rewrite_queued(it2)
+    print("sync: queued stale removed=%d%s" % (len(removed), " (dry-run)" if dry else ""))
+    for n in removed:
+        print("  removed %s" % n)
+    print("sync: queued class-rewritten=%d" % len(rewritten))
+    for n, old, new in rewritten:
+        print("  %s: %s -> %s" % (n, old, new))
+    live = live_names(tasks)
+    dead_running = [name for name, t in tasks.items()
+                    if t.get("state") == "running" and (live is None or name not in live)]
+    print("sync: running-but-dead-in-registry=%d" % len(dead_running))
+    for n in dead_running:
+        print("  %s" % n)
+    if dead_running and restart_dead and not dry:
+        for n in dead_running:
+            try:
+                new = restart(n, "process dead (sync --restart-dead)", None)
+                print("  restarted %s -> %s" % (n, new))
+            except Exception as e:
+                print("  FAILED to restart %s: %s" % (n, e))
+    elif dead_running and not dry:
+        print("  (not auto-fixed; use control.py mark NAME abandoned/exited-err by hand, or --restart-dead)")
+
 def cmd_report(a):
     rows = []
     for name, t in sorted(load().items(), key=lambda kv: kv[1]["slot"]):
@@ -1366,6 +1433,7 @@ def main():
     s = sub.add_parser("hold"); s.add_argument("name"); s.add_argument("--release", action="store_true"); s.set_defaults(f=cmd_hold)
     sub.add_parser("ps").set_defaults(f=cmd_ps)
     s = sub.add_parser("reap"); s.add_argument("--dry-run", action="store_true"); s.set_defaults(f=cmd_reap)
+    s = sub.add_parser("sync"); s.add_argument("--dry-run", action="store_true"); s.add_argument("--restart-dead", action="store_true"); s.set_defaults(f=cmd_sync)
     sub.add_parser("report").set_defaults(f=cmd_report)
     a = ap.parse_args()
     a.f(a)
