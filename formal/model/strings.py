@@ -2284,6 +2284,104 @@ def printf_runtime_text_widths(callee: str, fmt_text, args: list,
     return ("".join(new_fmt), new_args)
 
 
+PRINTF_RUNTIME_ELEMENT_HELPER = "mojo_char_at_str_cp"
+
+
+def printf_runtime_element_operands(callee: str, fmt_text, args: list,
+                                     is_string_subscript=None) -> list:
+    """`[(operand index, spec)]` for each plain `%c` whose operand is `name[i]`
+    on a string (step 13e), in an image that holds non-ASCII text.
+
+    `name` and `i` have to be plain names or integer literals, because the
+    rewrite evaluates them once in the helper call and the original is dropped
+    (nothing is evaluated twice, but only these shapes are known pure)."""
+    import fire_compiler as F
+    if callee not in PRINTF_TEXT_CONVERSIONS_CALLEES or not isinstance(fmt_text, str):
+        return []
+    if not non_ascii_strings():
+        return []
+    specs = _printf_specs(fmt_text)
+    if specs is None:
+        return []
+
+    def pure(e):
+        if isinstance(e, (F.IdentExpr, F.IntLiteral)):
+            return True
+        return (isinstance(e, F.UnaryOp) and getattr(e, "op", None) == "-"
+                and isinstance(getattr(e, "operand", None), F.IntLiteral))
+
+    out, arg = [], 0
+    for sp in specs:
+        operand = arg + sp["stars"]
+        arg = operand + 1
+        if sp["conv"] != "c" or sp["stars"] or sp["quant"] is not None:
+            continue
+        if operand >= len(args):
+            continue
+        a = args[operand]
+        if not (isinstance(a, F.SubscriptExpr) and isinstance(a.obj, F.IdentExpr)
+                and pure(a.index)):
+            continue
+        if is_string_subscript is not None and not is_string_subscript(a):
+            continue
+        out.append((operand, sp))
+    return out
+
+
+def printf_runtime_text_elements(callee: str, fmt_text, args: list,
+                                 is_string_subscript=None, text_of_arg=None):
+    """Rewrite `%c` of `name[i]` to `%s` of `mojo_char_at_str_cp(name, i)`
+    (step 13e): the element of a string is a CHARACTER, and the byte load that
+    the ASCII lowering uses reads one byte of a multi-byte character."""
+    import fire_compiler as F
+    cands = dict(printf_runtime_element_operands(callee, fmt_text, args,
+                                                  is_string_subscript))
+    if text_of_arg is not None:
+        # Text the build can SEE is the fold's (and, out of range, the
+        # refusal's): `s = "日本"; s[2]` must keep saying so.
+        cands = {o: sp for o, sp in cands.items()
+                 if text_of_arg(args[o].obj) is None}
+    if not cands:
+        return None
+    specs = _printf_specs(fmt_text)
+    new_fmt, new_args, pos, arg = [], [], 0, 0
+    for sp in specs:
+        operand = arg + sp["stars"]
+        new_fmt.append(fmt_text[pos:sp["start"]])
+        pos = sp["end"]
+        new_args.extend(args[arg:operand])
+        if operand in cands:
+            a = args[operand]
+            new_fmt.append("%s")
+            new_args.append(F.CallExpr(
+                func=F.IdentExpr(PRINTF_RUNTIME_ELEMENT_HELPER),
+                args=[a.obj, a.index]))
+        else:
+            new_fmt.append(sp["text"])
+            if operand < len(args):
+                new_args.append(args[operand])
+        arg = operand + 1
+    new_fmt.append(fmt_text[pos:])
+    new_args.extend(args[arg:])
+    return ("".join(new_fmt), new_args)
+
+
+def printf_runtime_rewrites(callee: str, fmt_text, args: list, text_of_arg=None,
+                            is_string_subscript=None):
+    """The run-time rewrites of a `printf` in a non-ASCII image, chained:
+    widths/precisions on a name (13d), then `%c` of a string element (13e).
+    `(new_format, new_args)` or None."""
+    cur_fmt, cur_args, changed = fmt_text, list(args), False
+    w = printf_runtime_text_widths(callee, cur_fmt, cur_args, text_of_arg)
+    if w is not None:
+        cur_fmt, cur_args, changed = w[0], w[1], True
+    el = printf_runtime_text_elements(callee, cur_fmt, cur_args,
+                                      is_string_subscript, text_of_arg)
+    if el is not None:
+        cur_fmt, cur_args, changed = el[0], el[1], True
+    return (cur_fmt, cur_args) if changed else None
+
+
 def printf_text_conversion_refusal(callee: str, fmt_text, args: list,
                                    text_of, text_of_arg=None) -> str | None:
     """Why a `%s` conversion of an argument that is not text is refused.

@@ -21856,9 +21856,16 @@ def _runtime_word_calls(ordered: list) -> list:
                     _fmt = F.decoded_literal(node.args[0])
                 except Exception:
                     _fmt = None
+                _hs = []
                 if M.printf_runtime_width_operands(fn.name, _fmt,
                                                    list(node.args[1:])):
-                    for _h in M.PRINTF_RUNTIME_WIDTH_HELPERS:
+                    _hs.extend(M.PRINTF_RUNTIME_WIDTH_HELPERS)
+                # Step 13e: `%c` of `name[i]` -> `%s` of `mojo_char_at_str_cp`.
+                if M.printf_runtime_element_operands(fn.name, _fmt,
+                                                      list(node.args[1:])):
+                    _hs.append(M.PRINTF_RUNTIME_ELEMENT_HELPER)
+                if _hs:
+                    for _h in _hs:
                         _e = abi.get(_h)
                         if _e is not None and _e["word"] and _h not in local:
                             found.add(_h)

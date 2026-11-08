@@ -727,6 +727,120 @@ ORACLE_CASES = [
      '    show("hello")\n'),
 
 
+    # Step 13e: `%c` of an element of a run-time `String` PARAMETER in a non-ASCII
+    # image. The element is a CHARACTER; the lowering calls the runtime helper that
+    # walks code points (`model.printf_runtime_text_elements`).
+    ("printf_runtime_element_literal_index",
+     'def show(s: String):\n'
+     '    printf("[%c]\\n", s[1])\n'
+     'def main(n):\n'
+     '    show("héllo")\n'
+     '    return 0\n',
+     'def show(s):\n'
+     '    print("[%c]" % s[1], end="\\n")\n'
+     'def main():\n'
+     '    show("héllo")\n'),
+
+    ("printf_runtime_element_literal_index_cjk",
+     'def show(s: String):\n'
+     '    printf("[%c]\\n", s[1])\n'
+     'def main(n):\n'
+     '    show("日本語")\n'
+     '    return 0\n',
+     'def show(s):\n'
+     '    print("[%c]" % s[1], end="\\n")\n'
+     'def main():\n'
+     '    show("日本語")\n'),
+
+    ("printf_runtime_element_literal_index_emoji",
+     'def show(s: String):\n'
+     '    printf("[%c]\\n", s[1])\n'
+     'def main(n):\n'
+     '    show("a😀b")\n'
+     '    return 0\n',
+     'def show(s):\n'
+     '    print("[%c]" % s[1], end="\\n")\n'
+     'def main():\n'
+     '    show("a😀b")\n'),
+
+    ("printf_runtime_element_first",
+     'def show(s: String):\n'
+     '    printf("[%c]\\n", s[0])\n'
+     'def main(n):\n'
+     '    show("héllo")\n'
+     '    return 0\n',
+     'def show(s):\n'
+     '    print("[%c]" % s[0], end="\\n")\n'
+     'def main():\n'
+     '    show("héllo")\n'),
+
+    ("printf_runtime_element_first_cjk",
+     'def show(s: String):\n'
+     '    printf("[%c]\\n", s[0])\n'
+     'def main(n):\n'
+     '    show("日本語")\n'
+     '    return 0\n',
+     'def show(s):\n'
+     '    print("[%c]" % s[0], end="\\n")\n'
+     'def main():\n'
+     '    show("日本語")\n'),
+
+    ("printf_runtime_element_first_emoji",
+     'def show(s: String):\n'
+     '    printf("[%c]\\n", s[0])\n'
+     'def main(n):\n'
+     '    show("a😀b")\n'
+     '    return 0\n',
+     'def show(s):\n'
+     '    print("[%c]" % s[0], end="\\n")\n'
+     'def main():\n'
+     '    show("a😀b")\n'),
+
+    ("printf_runtime_element_negative",
+     'def show(s: String):\n'
+     '    printf("[%c]\\n", s[-1])\n'
+     'def main(n):\n'
+     '    show("héllo")\n'
+     '    return 0\n',
+     'def show(s):\n'
+     '    print("[%c]" % s[-1], end="\\n")\n'
+     'def main():\n'
+     '    show("héllo")\n'),
+
+    ("printf_runtime_element_negative_cjk",
+     'def show(s: String):\n'
+     '    printf("[%c]\\n", s[-1])\n'
+     'def main(n):\n'
+     '    show("日本語")\n'
+     '    return 0\n',
+     'def show(s):\n'
+     '    print("[%c]" % s[-1], end="\\n")\n'
+     'def main():\n'
+     '    show("日本語")\n'),
+
+    ("printf_runtime_element_negative_emoji",
+     'def show(s: String):\n'
+     '    printf("[%c]\\n", s[-1])\n'
+     'def main(n):\n'
+     '    show("a😀b")\n'
+     '    return 0\n',
+     'def show(s):\n'
+     '    print("[%c]" % s[-1], end="\\n")\n'
+     'def main():\n'
+     '    show("a😀b")\n'),
+
+    ("printf_runtime_element_variable_index",
+     'def show(s: String, i: Int):\n'
+     '    printf("[%c]\\n", s[i])\n'
+     'def main(n):\n'
+     '    show("héllo", 1)\n'
+     '    return 0\n',
+     'def show(s, i):\n'
+     '    print("[%c]" % s[i], end="\\n")\n'
+     'def main():\n'
+     '    show("héllo", 1)\n'),
+
+
     # ── GUARDS: the ASCII rows beside every refusal ──────────────────────
     #
     # `printf_width_on_ascii_text_is_a_byte_width_and_agrees`,
@@ -1861,6 +1975,25 @@ def model_checks():
         ok("runtime rewrite: text the build can see is left to the fold",
            M.printf_runtime_text_widths("printf", "[%6s]", [_s],
                                         lambda a: "héllo"), None)
+        # Step 13e: `%c` of a string element.
+        _el = _F.SubscriptExpr(obj=_F.IdentExpr("s"), index=_F.IntLiteral(1))
+        ok("element rewrite: %c of s[1] becomes %s of the helper call",
+           M.printf_runtime_text_elements("printf", "[%c]", [_el],
+                                          lambda a: True)[0], "[%s]")
+        ok("element rewrite: the argument is the helper call",
+           M.printf_runtime_text_elements("printf", "[%c]", [_el],
+                                          lambda a: True)[1][0].func.name,
+           "mojo_char_at_str_cp")
+        ok("element rewrite: not a string subscript is left alone",
+           M.printf_runtime_text_elements("printf", "[%c]", [_el],
+                                          lambda a: False), None)
+        ok("element rewrite: a receiver whose text is known is left to the fold",
+           M.printf_runtime_text_elements("printf", "[%c]", [_el],
+                                          lambda a: True, lambda o: "日本"),
+           None)
+        ok("element rewrite: %d of s[1] is not a character conversion",
+           M.printf_runtime_text_elements("printf", "[%d]", [_el],
+                                          lambda a: True), None)
     finally:
         M.clear_non_ascii_strings()
         M.publish_non_ascii_strings(saved_width)
