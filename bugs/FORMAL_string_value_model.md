@@ -895,6 +895,42 @@ Instantiate for `strlen` with `f` = length of the NUL-terminated byte run at the
   python3 tools/memslot.py --gb 8 --label t -- python3 test_formal.py --backend x86_64
   ```
 
+
+### Correction and measurement (2026-11-07, step 12b closed)
+
+**What is measured** (`compile_formal('t.mojo', prove=True, check=False)` on `def main(n: Int) -> Int: var s = "hello"; return len(s)`, arm64):
+1. The model and the AST are folded: `def main_go (n : UInt64) : UInt64 := (UInt64.ofNat 5)` and the AST is `return (MojoExpr.int (UInt64.ofNat 5))`. No `strlen` call remains on the MODEL side. The MACHINE still calls out: `theorem extern_strlen_step : arm64_step main_pre_0 main_code = some ({ main_pre_0 with x30 := UInt64.ofNat 4294968512, pc := 4294969388 } ...)`.
+2. What the proof file proves is `main_reaches_call_at_0x1000004bc` — a `match` whose `some s` arm is `True` and `none` arm is `False`: "the run reaches the call, for every input". No `x0` appears in it. `main_compiles_correctly_universal` is NOT emitted; `main_post_extern_given_callee_returns` is NOT emitted (`RESULT_BEARING_EXTERNS`). So nothing in the file says `main` returns 5.
+3. Why: `Arm64State.init` has `mem := fun _ => 0`, so the string's bytes (at 4294969368) are not in the model's memory at all, and `arm64_step` has no arm for an address outside the image. The numeral 5 on the model side is therefore not connected to the machine side by any theorem.
+
+**Correction to part 2 above: the contract should be a HYPOTHESIS STRUCTURE with proved consequences, not a `sorry`.** A `by sorry` theorem in Scaffold would state the callee's behaviour as a hole; but the callee's behaviour is exactly what is assumed (it is outside the image), and an assumption belongs in the theorem's premises where the reader sees it (invariant 3: never an axiom). Typechecked in scratch against `import ProofLib` (no errors, no `sorry`):
+
+```lean
+def cstring_at (mem : Nat → UInt8) (addr n : Nat) : Prop :=
+  (∀ i, i < n → mem (addr + i) ≠ 0) ∧ mem (addr + n) = 0
+
+structure ExternReturn (s s' : Arm64State) : Prop where   -- AAPCS64: what a call leaves alone
+  pc_ret : s'.pc = s.x30.toNat
+  sp_same : s'.sp = s.sp
+  x19_same : s'.x19 = s.x19
+  x20_same : s'.x20 = s.x20
+  x29_same : s'.x29 = s.x29
+  mem_same : s'.mem = s.mem
+
+structure StrlenReturns (s s' : Arm64State) (addr n : Nat) : Prop where
+  ret : ExternReturn s s'
+  arg : s.x0.toNat = addr
+  str : cstring_at s.mem addr n     -- the image bytes: a premise the CALLER establishes
+  res : s'.x0 = UInt64.ofNat n
+
+theorem cstring_at_unique ...        -- proved: two runs of NUL-terminated bytes at one address have one length
+theorem strlen_result_unique ...     -- proved: two callee behaviours that both satisfy StrlenReturns agree
+```
+
+So the restated post-extern theorem is `main_post_extern_strlen (s_ret) (hcall : StrlenReturns s_call s_ret addr 5) (hmem : cstring_at s_call.mem addr 5) : run_result_exit {s_ret with pc := ...} ... = mojo n`, proved by the existing step machinery from `hcall.ret` and `hcall.res`. The only assumptions are the ones a reader can see: the callee obeys `StrlenReturns`, and the image holds the 5 bytes + NUL. Home for the definitions: a NEW module `lib/Extern.lean` (not Scaffold — it has no `sorry`; not ProofLib — S4), appended to `formal.lean::LIBRARY_MODULES` after `Peephole` and imported by the generated file's header only when the program calls `strlen`. This changes 12c's deliverable: `Scaffold` keeps its 3 holes (the `test_formal_admitted.py` Scaffold pin `(0, 3, 0, 0)` does not move) and the new module is a (0, 0, 0, 0) row in that table.
+
+**Statement truth.** For the two cases in `formal/model/strings.py` TEXT ENCODING: ASCII_BYTES — the folded `n` is `len(text)` and the machine's `strlen` of the interned bytes is the same number, so `StrlenReturns .. 5` with `cstring_at` of the literal is consistent. CODEPOINTS (non-ASCII literal) — the build folds `len` to the code-point count and emits NO `strlen` call at all (the block says "no machine operation at all"), so there is no `StrlenReturns` to state; claiming `x0 = n` there would be false (UTF-8 bytes != code points: `len("日本")` is 2, `strlen` is 6). REFUSE — a run-time string with non-ASCII bytes in the image is refused, and the contract is not claimed for it: `cstring_at` of a run-time address cannot be established by the caller.
+
 ## Two regressions that arrived from OUTSIDE this work, during this wave
 
 Neither is a string problem and neither is wave 6's; both are recorded because
