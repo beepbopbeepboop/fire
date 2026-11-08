@@ -1478,6 +1478,8 @@ Script: `.tmp/18a/measure.py` (spies `generate_arm64_proof`, calls `_frame_metho
 **Feeds:** 18b (restrict classifier per D1), 18c (load-first rule for cell receiver, constant propagation from `{0:0}`, 1-exit case), 18d (scaffold write-back contract with depth bound as hypothesis and per-exit obligation as `sorry` in `lib/Scaffold.lean`, ledgered).
 
 
+**Status (2026-11-07, step 18d): the two scaffold theorems now state real propositions (see step 18d Status; opaque `CellSetMethod` premise).** Earlier note:
+
 **Status (2026-11-05, step 18d):** Scaffold theorems `scaffold_cell_writeback_one_exit` and `scaffold_cell_writeback_multi_exit` added to `lib/Scaffold.lean` (imports `ProofLib`/`X86`/`Peephole` as per scaffold policy; `set_option autoImplicit false`). Depth bound stated as a **theorem hypothesis** (`h_cell : True` as a placeholder to be narrowed to the actual `Frame.*` premise), never an axiom. Theorems end in `by sorry` and are ledgered in `formal/proof_gaps.py::SCAFFOLD_HOLES` under step `18d` (kind `scaffold`). Lean typecheck **handed off** (needs `python3 tools/memslot.py --gb 16 --label lean -- python3 test_formal_proof_gaps.py` run by user/gate worker). 18a–18c complete (classifier restricted per D1, load-first rule added with `is_cell_receiver`), 18d scaffolds the write-back contract obligations.
 
 ## 6.4 Three things that are not findings, and were being counted as work
