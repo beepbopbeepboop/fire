@@ -399,6 +399,22 @@ done. At this writing: 45 DONE, 7 SCAFFOLDED, 6 CLAIMED, 19 OPEN, 1 closed as
   `bugs/plan/WORKER_BRIEF_peephole_rule_proofs.md`; integrated by hand because all six branches inserted at
   one anchor). `lib/Scaffold.lean` now holds only the canary and the two cell-write-back placeholders
   (3 `sorry`). The rules are PROVED but NOT yet live: promotion into `ARM64_RULES`/`X86_RULES` is steps 05a/05b.
+* **Bare-call inference, link line, frame contracts, memos (2026-11-07, measured).**
+  16c-16f landed: declared-type inference for `x^`/`self.f`/declared-`->`/call-initialised
+  locals, bounded parameters bind to a concrete struct and a non-conforming one is refused
+  by trait name, `Some[...]` is never bound. A wrong-code bug from 16b was found and fixed
+  (the fast path passed Mojo annotations to a function that takes C types, so `T` became
+  `Int` for every annotation but `Int`). 19b/19c: the formal link line opts into optional
+  runtime units; sqlite3 word-shaped call runs end to end; ABI census refreshed (897 entry
+  points, 411 word-shaped). 18a-d: the one-field mutator contract memo corrected, 18b pinned,
+  18c found landed, 18d's scaffold theorems state real propositions (opaque `CellSetMethod`
+  premise). 12b: extern contracts are HYPOTHESES (`lib/Extern.lean`, sorry-free, registered);
+  12c's generator wiring is open. 08c: Reading A (0 of 94 corpus examples emit a BLR; pinned by
+  08d). 13c: run-time code-point walk via computed `%*.*s` star arguments (13d/13e written).
+  07b verified (csinv, one CSINV word, proof 0 sorries). 06c: the ccmp lowering existed but was
+  off and its test never ran; it is now opt-in (`FIRE_CCMP_LOWERING=1`), because enabling it
+  makes `both` stop proving (06d: generator support). `wdiff`: total-correctness bridge
+  committed (unsigned `!=`, `n < 2^63` precondition); one loop back-edge `sorry` remains.
 * **The arm64 proof corpus: PASS 15 -> 50 of 94 (2026-11-06, measured, 61 min).**
   `python3 test_formal.py --backend arm64`: PASS=50 KNOWN-GAP=5 FAIL=33
   TOO-LARGE=6. Three generator fixes did it: block states inferred with `_`
