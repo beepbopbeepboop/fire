@@ -410,7 +410,7 @@ done. At this writing: 45 DONE, 7 SCAFFOLDED, 6 CLAIMED, 19 OPEN, 1 closed as
   18c found landed, 18d's scaffold theorems state real propositions (opaque `CellSetMethod`
   premise). 12b: extern contracts are HYPOTHESES (`lib/Extern.lean`, sorry-free, registered);
   12c's generator wiring is open. 08c: Reading A (0 of 94 corpus examples emit a BLR; pinned by
-  08d). 13c: run-time code-point walk via computed `%*.*s` star arguments (13d/13e written).
+  08d). 13c/13d/13e: `%<w>.<p>s` on a run-time String name and `%c` of `s[i]` in a non-ASCII image now lower to the star form / `mojo_char_at_str_cp` with widths in characters (both arches, CPython oracle rows, `test_formal_unicode.py` 191 -> 224); other element reads stay refused.
   07b verified (csinv, one CSINV word, proof 0 sorries). 06c: the ccmp lowering existed but was
   off and its test never ran; enabling it
   makes `both` stop proving; 06d fixed the generator (a guard block mis-registered as a short-circuit branch) and the lowering is now ON by default: arm64 corpus PASS 50 -> 55 of 94. `wdiff`: total-correctness bridge
