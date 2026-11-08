@@ -104,6 +104,8 @@ NOT_LOWERED_BUILTINS = {
     "sentinel": "a fresh, unique sentinel value per call, and a unique runtime "
                 "identity is not a value this one-word model can produce — the "
                 "same wall as `object()`",
+    "frozendict": "an immutable dict variant; a fresh unique mapping value per "
+                  "call is not a thing this one-word model can produce",
     "sorted": "a sort — a comparison call per element, and a call through a "
               "value is not a thing this path can express",
     "sum": "a fold over a sequence, the same shape as `all`",

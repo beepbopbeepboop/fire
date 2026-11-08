@@ -3012,10 +3012,10 @@ def _detect_generator(body: list):
 # cannot call).
 _BUILTIN_NAMES = frozenset({
     'None', 'True', 'False', 'len', 'print', 'range', 'str', 'int', 'float',
-    'bool', 'list', 'dict', 'set', 'tuple', 'enumerate', 'zip', 'sum', 'min',
-    'max', 'any', 'all', 'sorted', 'reversed', 'abs', 'map', 'filter',
-    'isinstance', 'hasattr', 'getattr', 'setattr', 'type', 'open', 'input',
-    'self', 'super',
+    'bool', 'list', 'dict', 'frozendict', 'set', 'tuple', 'enumerate', 'zip',
+    'sum', 'min', 'max', 'any', 'all', 'sorted', 'reversed', 'abs', 'map',
+    'filter', 'isinstance', 'hasattr', 'getattr', 'setattr', 'type', 'open',
+    'input', 'self', 'super',
 })
 
 
