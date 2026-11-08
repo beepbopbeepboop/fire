@@ -8951,7 +8951,12 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             if _i >= len(_cond_pairs):
                 continue
             _merge_pc, _whole = _cond_pairs[_i]
+            # `not _trap_branch(b)`: the stack-floor guard's own branch can have
+            # the merge block as its taken target when `cmp ; ccmp ; b.cond`
+            # (06c) leaves no chain branch of its own, and it was then registered
+            # as the chain's left operand (the proof read `if a and b` as `if a`).
             _sblk = next((b for b in blocks if b["kind"] == "cbz"
+                          and not _trap_branch(b)
                           and b["targets"][1] == _merge_pc), None)
             if _sblk is None:
                 continue
