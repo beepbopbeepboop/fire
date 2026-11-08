@@ -64,9 +64,9 @@ WHAT IS NOT HERE, AND WHY
 -------------------------
   * `filter`, `filterfalse` — a SEQUENCE. Both take a list of names and answer a
     list of names, and a list is a blob carved out of the frame that built it, so
-    it cannot cross a dylib boundary (a run-time-length sequence cannot cross the
-    boundary on this path). The matcher they would filter with is `match_core`
-    and is here.
+    it cannot cross a dylib boundary
+    (`bugs/FORMAL_listdir_no_run_time_sequence.md`). The matcher they would
+    filter with is `match_core` and is here.
   * `iglob` — a GENERATOR, for the same reason `os.listdir` is a blob and a
     generator is worse: it has to survive between two calls.
   * `translate` — CPython's pattern-to-REGEX function. It is pure and its

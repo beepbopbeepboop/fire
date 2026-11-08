@@ -73,10 +73,7 @@ _WALK_AST_MUTATION_ALLOWLIST = {
     "ast_rewriter.py::Seq.__init__": "ditto",
     "ast_rewriter.py::Var.__init__": "ditto",
     "ast_rewriter.py::_rewrite_assign_stmt": "runs inside `rewrite`, on a tree no walk has seen",
-    "ast_rewriter.py::_desugar_one_enum": "runs in the rewrite pipeline (`desugar_enums`), before codegen walks the tree, and writes a freshly parsed StructDef the memo has not seen",
-    "ast_rewriter.py::_rewrite_enum_node": "runs in the rewrite pipeline (`desugar_enums`), before codegen walks the tree; any in-place rewrite is on a pre-walk tree",
-    "ast_rewriter.py::desugar_field_defaults": "runs inside `rewrite`/`desugar_enums` pipeline, before codegen walks the tree, on a pre-walk tree",
-    "gimple_codegen.py::_transform_enum_classes": "runs in the compile pipeline after `_walk_ast_reset()` on a freshly parsed/rewritten tree, and writes only `copy.copy`'d container nodes the memo has not seen",    "mojo/backend_gimple/cpp_core.py::_cpp_rewrite_yields": "writes `value` on a `copy.copy` of the yield node it is hoisting (`ynode`), a fresh node the original tree never sees; the copy is consumed only by the C++ emitter",
+    "mojo/backend_gimple/cpp_core.py::_cpp_rewrite_yields": "writes `value` on a `copy.copy` of the yield node it is hoisting (`ynode`), a fresh node the original tree never sees; the copy is consumed only by the C++ emitter",
     "mojo/backend_gimple/cpp_core.py::rewrite": "writes `value` on `copy.copy` of the root yield (`nv`) and `setattr`s the fields of `copy.copy(s)` (`new_stmt`): both are fresh nodes the emitter consumes, and the original statement is left untouched",
     "mojo/backend_gimple/elab_intu.py::_Work.__init__":"`_Work.alias`/`_Work.extra` are the elaborator's own scratch",
     "mojo/backend_gimple/elab_intu.py::_Work.enqueue": "ditto",
@@ -1084,10 +1081,7 @@ def run_tests():
     # the shadow is the load-bearing substring — it is what proves the element
     # type reached the declaration, and `(int64_t)` on the `mojo_list_get_str`
     # line is the exact text the bug put there.
-    def _test_comprehension_target_shadowing_a_struct_local_gets_its_own():
-        global _PASS, _FAIL
-        name = "comprehension_target_shadowing_a_struct_local_gets_its_own"
-        ok, c_src, stderr = gimple_compiles("""\
+    _run_isolated(lambda: test_c_shape("comprehension_target_shadowing_a_struct_local_gets_its_own", """\
 class Token:
     def __init__(self, kind: String):
         self.kind = kind
@@ -1102,27 +1096,8 @@ def names() -> List:
         t = pick("loop")
         i = i + 1
     return [t for t in ["a", "b"]]
-""")
-        must_have = ["char * _shadow", "_shadow1_t = ", "mojo_list_get_str"]
-        missing = [m for m in must_have if m not in c_src]
-        import re as _re
-        bad_assign = _re.search(r'\bt\s*=\s*\(int64_t\)', c_src)
-        present = []
-        if "(int64_t) _t" in c_src:
-            present.append("(int64_t) _t")
-        if bad_assign:
-            present.append("t = (int64_t)")
-        if ok and not missing and not present:
-            print(f"PASS  {name}")
-            _PASS += 1
-        else:
-            print(f"FAIL  {name}: compiles={ok} missing={missing} unexpectedly_present={present}")
-            if not ok:
-                for line in stderr.splitlines()[:8]:
-                    print(f"      {line}")
-            _FAIL += 1
-    _run_isolated(_test_comprehension_target_shadowing_a_struct_local_gets_its_own,
-                  'comprehension_target_shadowing_a_struct_local_gets_its_own')
+""", must_have=["char * _shadow", "_shadow1_t = ", "mojo_list_get_str"],
+       must_not_have=["(int64_t) _t", "t = (int64_t)"]), 'comprehension_target_shadowing_a_struct_local_gets_its_own')
 
     # The same site with a `char *` local shadowed instead of a struct pointer.
     # Before the fix this one COMPILED and printed the two string ADDRESSES as
@@ -1290,7 +1265,7 @@ def scan(s: String) -> Int:
 def main():
     print(scan("axbxc"))
     print(at("hello", 1))
-""", must_have=["mojo_char_at_str"],
+""", must_have=["mojo_char_at_str ("],
        must_not_have=["mojo_cstr_slice (", "_mojo_at_char"]), 'a_character_is_an_immortal_table_entry_not_a_slice')
 
     # The per-slot-kinds marker must not outlive its function; the reasoning

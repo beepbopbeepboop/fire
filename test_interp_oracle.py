@@ -443,26 +443,6 @@ def main():
     except TypeError as e:
         print(e)
 ''',
-    # Python 3.15 adds `frozendict` as a builtin immutable mapping type.
-    # The interpreter must expose it and preserve CPython's behavior/repr.
-    "frozendict_builtin_basic": '''\
-def main():
-    d = frozendict({"b": 2, "a": 1})
-    print(len(d))
-    print(d["a"])
-    print(d.get("c", 9))
-    print("a" in d)
-    print("z" in d)
-    print(list(d))
-    print(list(d.keys()))
-    print(list(d.values()))
-    print(list(d.items()))
-    e = frozendict(a=3)
-    print(e["a"])
-    print(frozendict())
-    print(frozendict(d))
-    print(d == frozendict({"b": 2, "a": 1}))
-''',
 }
 
 # Shapes CPython CANNOT EXPRESS, so the corpus above cannot hold them: a

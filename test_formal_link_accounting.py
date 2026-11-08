@@ -413,12 +413,6 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
     # — so its test pins both halves: the three names that build, against
     # CPython's own `random`, and the absent ones refused naming themselves.
     "random": "test_formal_random.py",
-    # These left the pre-split claim tiers by being WRITTEN. `test_formal_admitted`
-    # ratchets each module's @admitted declaration count (zero for these).
-    "collections": "test_formal_admitted.py",
-    "copy": "test_formal_admitted.py",
-    "functools": "test_formal_admitted.py",
-    "importlib": "test_formal_admitted.py",
 }
 
 # A module this tree now provides that was NEVER in the host set, so it cannot
@@ -506,14 +500,6 @@ PROVIDED_NEVER_A_HOST_MODULE = {
     # file's docstring gives: a handful of names whose answers are CPython's to
     # give.
     "operator": "test_formal_core_hostmods.py",
-    # Never in the pre-split host set; written with source in this tree and
-    # ratcheted by test_formal_admitted (zero @admitted declarations), except
-    # builtins which has its own conformance test.
-    "builtins": "test_formal_builtins_conformance.py",
-    "contextvars": "test_formal_admitted.py",
-    "hoststatus": "test_formal_admitted.py",
-    "keyword": "test_formal_admitted.py",
-    "multiprocessing": "test_formal_admitted.py",
 }
 
 # The two `os` SUBMODULES, which are provided and are named by the file they are
@@ -610,6 +596,10 @@ ADMITTED_HOST_MODULE_TESTS = {
 # and in a tier, so writing `formal/hostmods/glob.mojo` took it out of both and
 # `IMPLEMENTED_HOST_MODULE_TESTS` is where its test belongs.
 HOST_SET_ADDED_TIERS = {
+    # `set(dir(builtins))` asks the interpreter to enumerate ITSELF.  A formal
+    # image is a Mach-O binary with an embedded CPython to compile it and none to
+    # run in, so the object is missing and permanently so.
+    "builtins": "unreachable",
     # Where an EMBEDDED CPython would be installed -- the same missing object,
     # named from the other side.  `fire.py` imports `sysconfig` and never uses
     # it, so nothing this tree can write would move a file.

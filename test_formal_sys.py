@@ -75,8 +75,6 @@ sys.path.insert(0, HERE)
 from test_formal_dylib import (TestFailure, check, parse_macho,  # noqa: E402
                                run_fire)
 
-from exec_budget import RUN_TIMEOUT_S  # noqa: E402, per-child budgets
-
 # A CAS of this file's own. A module dylib is cached by content, so a stale
 # one from an earlier run could mask a regression, and this file must not
 # delete libraries out from under a parallel job in a shared bucket.
@@ -90,6 +88,7 @@ ARCHES = ("arm64", "x86_64")
 # expected stdout is a constant and not something recomputed by the test.
 USE_SYS = """\
 import sys
+from exec_budget import RUN_TIMEOUT_S  # per-child budgets
 
 def main():
   print(sys.version())

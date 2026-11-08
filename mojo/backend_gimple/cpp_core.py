@@ -8738,9 +8738,10 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 "[&]() { struct _W { int64_t w; "
                 "operator int64_t() const { return w; } "
                 "operator char *() const { return (char *)w; } "
-                + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
-                          for _k in ('MojoList', 'MojoDict', 'MojoSet'))
-                + "}; "
+                "operator MojoList *() const { return (MojoList *)w; } "
+                "operator MojoDict *() const { return (MojoDict *)w; } "
+                "operator MojoSet *() const { return (MojoSet *)w; } "
+                "}; "
                 "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
                 + ''.join(f"mojo_list_append_int(_a, (int64_t)(intptr_t)({_e})); " for _e in _pos_parts)
                 + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_callee_name}), _a, _k)}}; }}()")
@@ -8774,9 +8775,10 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     "[&]() { struct _W { int64_t w; "
                     "operator int64_t() const { return w; } "
                     "operator char *() const { return (char *)w; } "
-                    + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
-                              for _k in ('MojoList', 'MojoDict', 'MojoSet'))
-                    + "}; "
+                    "operator MojoList *() const { return (MojoList *)w; } "
+                    "operator MojoDict *() const { return (MojoDict *)w; } "
+                    "operator MojoSet *() const { return (MojoSet *)w; } "
+                    "}; "
                     "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
                     + ''.join(f"mojo_list_append_int(_a, (int64_t)(intptr_t)({_e})); " for _e in _pos_parts)
                     + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_callee_name}), _a, _k)}}; }}()")
@@ -8913,9 +8915,10 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     "[&]() { struct _W { int64_t w; "
                     "operator int64_t() const { return w; } "
                     "operator char *() const { return (char *)w; } "
-                    + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
-                              for _k in ('MojoList', 'MojoDict', 'MojoSet'))
-                    + "}; "
+                    "operator MojoList *() const { return (MojoList *)w; } "
+                    "operator MojoDict *() const { return (MojoDict *)w; } "
+                    "operator MojoSet *() const { return (MojoSet *)w; } "
+                    "}; "
                     "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
                     + ''.join(_parts)
                     + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_cpp_fc}), _a, _k)}}; }}()")
@@ -9011,9 +9014,10 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     "[&]() { struct _W { int64_t w; "
                     "operator int64_t() const { return w; } "
                     "operator char *() const { return (char *)w; } "
-                    + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
-                              for _k in ('MojoList', 'MojoDict', 'MojoSet'))
-                    + "}; "
+                    "operator MojoList *() const { return (MojoList *)w; } "
+                    "operator MojoDict *() const { return (MojoDict *)w; } "
+                    "operator MojoSet *() const { return (MojoSet *)w; } "
+                    "}; "
                     "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
                     + ''.join(f"mojo_list_append_int(_a, (int64_t)(intptr_t)({_e})); " for _e in _pos_parts)
                     + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_callee_name}), _a, _k)}}; }}()")
@@ -9037,7 +9041,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 _lines.append(f"{indent}for (int64_t {_ctr} = 0; "
                              f"{_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
                 _lines.append(f"{indent}    MojoList *{_tup} = "
-                             + f"{gen._cpp_container_cast_prefix('MojoList', False)}mojo_list_get_int({_wi}, {_ctr});")
+                             + f"(MojoList *)mojo_list_get_int({_wi}, {_ctr});")
                 for _si, _nm in enumerate(_names):
                     _lines.append(f"{indent}    {_nm} = mojo_list_get_int({_tup}, {_si});")
                 for inner in s.body:

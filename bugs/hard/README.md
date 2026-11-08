@@ -17,8 +17,5 @@ deleted in the same commit, as for any bug.
 | `COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_cases_generator_analyzer.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_gdb_libpython.md` | see doc | workers |
-| `DIAGNOSTICS_formatting_modular.md` | see doc | workers |
-| `GPU_offload_validation_modular.md` | see doc | workers |
-| `PYTHON3.15_disjoint_bases.md` | see doc | workers |
-| `PYTHON3.15_lazy_modules_attribute.md` | see doc | workers |
+| `COMPILE_FAIL_Tools_scripts_summarize_stats.md` | see doc | workers |
 | `SUITE_gimple_runner_buckets_red_on_master.md` | see doc | workers |
