@@ -22,11 +22,12 @@ could be said for what it replaced.
 **The emitter's own condition has four clauses, not two**, and the gap matters
 because two of them are silent. `_gen_universal_e2e_cfg` returns `None` — so
 the caller emits the named `sorry` — unless the walk is **not recursive**, is
-**acyclic** (every branch target after the branch), has **no `bl` block**, and
-is given a `fuel` at or above the instruction count. So "acyclic and has no
-calls" is two of four: a self-recursive export that is otherwise acyclic in its
-CFG, and an export offered less fuel than it has instructions, both fall back
-to the `sorry` without either condition being visible from this sentence.
+**acyclic** (every branch target after the branch) or a recognized loop shape,
+has **no `bl` block**, and is given a `fuel` at or above the instruction count.
+So "acyclic and has no calls" is two of four: a self-recursive export that is
+otherwise acyclic in its CFG, and an export offered less fuel than it has
+instructions, both fall back to the `sorry` without either condition being
+visible from this sentence.
 
 How: the generator's existing CFG walk (`_gen_universal_e2e_cfg`, halt-only
 mode) now proves `{ident}_halts`:
