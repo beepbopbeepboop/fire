@@ -11010,110 +11010,6 @@ print("%r" % p)
         print(f"PASS  {name}")
         _PASS += 1
 
-    def test_binding_index_memo_is_the_single_binder_census():
-        """`literal_bindings.binding_index` — the single binder census —
-        must cost ONE build per statement list per compile, not one per call.
-
-        The import-closure scan (coro's `_scan_callsite_param_kinds` ->
-        `_module_literal_env`, module_gen's call-site evidence) calls it once
-        per OTHER module in the closure, twice per pass, for EVERY module it
-        compiles. Without the memo that re-derives the whole tree's
-        per-node `bound_names` census once per module per level — the O(N^2)
-        that took the `do_imports=True` compile of a snippet importing
-        `build_config` (whose closure reaches the compiler's own modules)
-        past the sqliteruntime suite's timeout (bugs/MIDDLE_coro_import_
-        compile_hangs_on_large_modules, 60.26M `bound_names` calls measured
-        on that one compile). The fix memoizes the census per statement-list
-        identity in the walk memo's own lifecycle, and this pins all four
-        halves of that contract:
-
-          * a repeat call returns the SAME dict, straight from the memo;
-          * a repeat call re-runs the per-node `bound_names` census ZERO
-            times (the root-cause pin — a count, not a timing, so it cannot
-            be made to flake by a slow machine);
-          * a write inside the list invalidates the census through the
-            walk's own parent edges (`_walk_ast_invalidate`), and the
-            rebuild sees the new binder;
-          * the compile boundary (`_walk_ast_reset`) drops it.
-        """
-        global _PASS, _FAIL
-        name = "binding_index_memo_is_the_single_binder_census"
-        import mojo.middle.exprtypes as ET
-        import mojo.middle.literal_bindings as LB
-        from fire_compiler import py_tokenize, Parser, FunctionDef, AssignStmt, \
-            IdentExpr, StringLiteral
-        import ast_rewriter
-
-        err = None
-        try:
-            ET._walk_ast_reset()
-            src = ("s = 'r'\n"
-                   "def f(a):\n"
-                   "    b = 1\n"
-                   "    if a:\n"
-                   "        b = 2\n"
-                   "    return b\n"
-                   "def g(c):\n"
-                   "    for d in c:\n"
-                   "        print(d)\n")
-            stmts = ast_rewriter.rewrite(
-                Parser(py_tokenize(src)).parse_module()) or []
-            first = LB.binding_index(stmts)
-            if 's' not in first or 'b' not in first or 'f' not in first:
-                err = f'the census is missing binders: {sorted(first)}'
-            if not err:
-                again = LB.binding_index(stmts)
-                if again is not first:
-                    err = 'a repeat binding_index did not come from the memo'
-                # `getattr`: before the fix the memo did not exist, and the
-                # assertion above is the one that fails then; the entry shape
-                # is checked only where the memo is.
-                entry = getattr(ET, '_WALK_INDEX_MEMO', {}).get(id(stmts))
-                if entry is None or entry[0] is not stmts:
-                    err = 'the memo entry does not hold the list it is keyed on'
-            if not err:
-                calls = [0]
-                orig = LB.bound_names
-                def counting(nd):
-                    calls[0] += 1
-                    return orig(nd)
-                LB.bound_names = counting
-                try:
-                    for _ in range(5):
-                        LB.binding_index(stmts)
-                finally:
-                    LB.bound_names = orig
-                if calls[0] != 0:
-                    err = (f'a memoized binding_index re-ran bound_names '
-                           f'{calls[0]} times (the per-level re-derivation)')
-            if not err:
-                fd = [s for s in stmts if isinstance(s, FunctionDef)][0]
-                late = AssignStmt(target=IdentExpr(name='late'),
-                                  value=StringLiteral(value='x'))
-                fd.body.append(late)
-                ET._walk_ast_invalidate(fd)
-                rebuilt = LB.binding_index(stmts)
-                if rebuilt is first:
-                    err = 'the mutated module still answered from the old census'
-                elif 'late' not in rebuilt:
-                    err = 'the rebuilt census missed the appended binder'
-                elif 'late' in first:
-                    err = 'the mutation leaked into the pre-mutation census'
-            if not err:
-                ET._walk_ast_reset()
-                if id(stmts) in ET._WALK_INDEX_MEMO:
-                    err = '_walk_ast_reset left the index memo behind'
-        except Exception as e:  # noqa: BLE001
-            err = f'{type(e).__name__}: {e}'
-        finally:
-            ET._walk_ast_reset()
-        if err:
-            print(f"FAIL  {name}: {err}")
-            _FAIL += 1
-            return
-        print(f"PASS  {name}")
-        _PASS += 1
-
     def test_walk_ast_memo_never_answers_stale_over_real_compiles():
         """Every `_walk_ast` call, over real compiles, must return exactly
         what an uncached walk would — INCLUDING after a mutation.
@@ -13801,7 +13697,6 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_walk_ast_dataclass_cache_is_transparent(), 'test_walk_ast_dataclass_cache_is_transparent (line 12668)')
     _run_isolated(lambda: test_no_walk_ast_caller_mutates_what_it_is_handed(), 'test_no_walk_ast_caller_mutates_what_it_is_handed (line 12669)')
     _run_isolated(lambda: test_walk_ast_memo_is_transparent_and_honours_invalidation(), 'test_walk_ast_memo_is_transparent_and_honours_invalidation (line 12670)')
-    _run_isolated(lambda: test_binding_index_memo_is_the_single_binder_census(), 'test_binding_index_memo_is_the_single_binder_census (line 12670)')
     _run_isolated(lambda: test_walk_ast_memo_never_answers_stale_over_real_compiles(), 'test_walk_ast_memo_never_answers_stale_over_real_compiles (line 12671)')
     _run_isolated(lambda: test_every_ast_mutation_site_invalidates_the_walk_memo(), 'test_every_ast_mutation_site_invalidates_the_walk_memo (line 12672)')
     _run_isolated(lambda: test_posthoc_class_attr_write_invalidates_the_walk_memo(), 'test_posthoc_class_attr_write_invalidates_the_walk_memo (line 13416)')

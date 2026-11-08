@@ -2036,7 +2036,7 @@ GIMPLE_RUNTIME_PREFIX = "mojo_"
 #
 # This is the generalisation of the `GIMPLE_LIST_PREFIX` special case that
 # stood here before, and that constant is gone: a hand-kept list of prefixes is
-# a list that rots, and the shape answers the same question for all 908 entry
+# a list that rots, and the shape answers the same question for all 897 entry
 # points the headers declare rather than for the 40-odd names one prefix
 # happened to cover.
 
@@ -2209,7 +2209,7 @@ def _parse_ctype(decl: str, is_param: bool = False) -> tuple:
     because it does in a parameter list and does not in a return type:
     `void *db` is a `void *` with a name, `void *` is not. Getting that backwards
     makes every parameter a type called `void db`, which nothing recognises as a
-    scalar — and a rule that refuses all 908 entry points for that reason looks
+    scalar — and a rule that refuses all 897 entry points for that reason looks
     exactly like a rule that has measured them all and found none reachable.
 
     The result is the RESOLVED type, which is what every reader of it wants:
@@ -4935,11 +4935,6 @@ def _kind_of_call(callee: str, kind_int_call) -> str | None:
         return INT_KIND      # a blob's count field; len of a string is refused
     if callee == "ord":
         return INT_KIND
-    if callee == "repr":
-        # `repr(<integer literal>)` folds to its decimal text (see
-        # `model.integer_literal_text`); any other `repr` is refused before a
-        # value exists, so naming the kind here never describes a built value.
-        return STR_KIND
     tkind = type_constructor_kind(callee)
     if tkind is not None:
         what = tkind[0]

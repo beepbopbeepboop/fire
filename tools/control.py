@@ -907,32 +907,18 @@ def cmd_ps(a):
     """Our workers' live opencode processes, told apart from the user's own opencode sessions by their
     arguments: ours are launched with `run --model M --auto ... <PARENT>/work-N/TASK.md` (opencode v1: `--model M run --auto
     --dir <PARENT>/work-N`), theirs have neither."""
-    tasks = load()
-    print("%-40s %-6s %-5s %-6s %-28s %s" % ("name", "pid", "alive", "cls", "model", "claims"))
-    for name, t in sorted(tasks.items()):
-        if t.get("state") != "running":
-            continue
-        pid = t.get("pid")
-        alive = False
-        if pid:
-            try:
-                os.kill(pid, 0); alive = True
-            except (OSError, ProcessLookupError):
-                alive = False
-        claims = ",".join(t.get("claims") or [])[:40]
-        model = (t.get("model") or t.get("pool") or "?")[:28]
-        cls = (t.get("cls") or "?")[:6]
-        print("%-40s %-6s %-5s %-6s %-28s %s" % (name[:40], pid, "yes" if alive else "no", cls, model, claims))
-    # live process scan
+    tasks = {os.path.realpath(t["worktree"]): n for n, t in load().items()}
     out = subprocess.run(["ps", "-axww", "-o", "pid=,etime=,rss=,args="], capture_output=True, text=True).stdout
     mine = other = 0
     for line in out.splitlines():
         m = re.search(r"opencode .*(?:--dir |instructions are in )(\S+?)(?:/TASK\.md)?(?:\s|$)", line)
         if m and " run " in line and "sh -c" not in line[:40]:
+            pid, et, rss, _ = line.split(None, 3)
+            print("%-24s pid %-6s up %-10s %5.0f MB" % (tasks.get(os.path.realpath(m.group(1)), "?"), pid, et, int(rss) / 1024))
             mine += 1
         elif re.search(r"/opencode\s*$", line.strip()):
             other += 1
-    print("%d live opencode process(es) of ours; %d belong to someone else" % (mine, other))
+    print("%d of our workers alive; %d other opencode process(es) belong to someone else" % (mine, other))
 
 
 def cmd_guard(a):
@@ -1166,8 +1152,6 @@ def _task_text(t):
 def restart(name, why, model=None):
     """Snapshot a worker's uncommitted work, stop it, and continue it as NAME-rN from its own branch."""
     t = load()[name]
-    # strip any existing -rN suffix so restarts increment instead of nesting: foo-r2 -> foo-r3, not foo-r2-r2
-    base = re.sub(r"-r\d+$", "", name)
     wt = t["worktree"]
     git("add", "-A", cwd=wt, check=False)
     git("commit", "-q", "-m", "WIP snapshot by controller: %s's uncommitted edits when it was restarted (%s)" % (name, why),
@@ -1177,9 +1161,9 @@ def restart(name, why, model=None):
     except OSError:
         pass
     n = 2
-    while "%s-r%d" % (base, n) in load():
+    while "%s-r%d" % (name, n) in load():
         n += 1
-    new = "%s-r%d" % (base, n)
+    new = "%s-r%d" % (name, n)
     with registry() as reg:
         reg[name]["state"] = "superseded"
     task = ("You CONTINUE task '%s': the previous instance stopped (%s). Everything it had done is on your branch (its last "
@@ -1313,86 +1297,6 @@ def cmd_reap(a):
 
 
 
-def cmd_sync(a):
-    '''Reconcile the queue and registry with the filesystem and live processes.
-
-    - Queue entries whose bug doc no longer exists on disk are stale: drop them.
-    - Queue entries whose class drifted from the doc's current class: rewrite.
-    - Registry tasks marked 'running' whose process is dead: report (not auto-fixed).
-    --dry-run: report only, change nothing.'''
-    import os as _os
-    dry = getattr(a, "dry_run", False)
-    restart_dead = getattr(a, "restart_dead", False)
-    tasks = load()
-    removed = []
-    rewritten = []
-    for f in sorted(_os.listdir(qdir())):
-        if not f.endswith(".json"):
-            continue
-        path = _os.path.join(qdir(), f)
-        with open(path) as fh:
-            it = json.load(fh)
-        doc_exists = False
-        if it.get("files"):
-            doc_exists = any(_os.path.exists(c) for c in it["files"])
-        else:
-            for c in it.get("claims", []):
-                tail = c.split(":")[-1].lower().replace("_", "-")
-                for root, _, files in _os.walk("bugs"):
-                    for fn in files:
-                        if fn.endswith(".md") and tail in fn.lower().replace("_", "-"):
-                            doc_exists = True
-                            break
-                    if doc_exists:
-                        break
-                if doc_exists:
-                    break
-        if not doc_exists:
-            removed.append(it["name"])
-            if not dry:
-                _os.remove(path)
-            continue
-        new_cls = doc_class_now(it)
-        if new_cls != it.get("cls"):
-            rewritten.append((it["name"], it.get("cls"), new_cls))
-            if not dry:
-                it2 = dict(it, cls=new_cls)
-                _rewrite_queued(it2)
-    print("sync: queued stale removed=%d%s" % (len(removed), " (dry-run)" if dry else ""))
-    for n in removed:
-        print("  removed %s" % n)
-    print("sync: queued class-rewritten=%d" % len(rewritten))
-    for n, old, new in rewritten:
-        print("  %s: %s -> %s" % (n, old, new))
-    live = live_names(tasks)
-    def _pid_alive(t):
-        pid = t.get("pid")
-        if not pid:
-            return False
-        try:
-            os.kill(pid, 0)
-            return True
-        except (OSError, ProcessLookupError):
-            return False
-    if live is None:
-        dead_running = [name for name, t in tasks.items()
-                        if t.get("state") == "running" and not _pid_alive(t)]
-    else:
-        dead_running = [name for name, t in tasks.items()
-                        if t.get("state") == "running" and name not in live and not _pid_alive(t)]
-    print("sync: running-but-dead-in-registry=%d" % len(dead_running))
-    for n in dead_running:
-        print("  %s" % n)
-    if dead_running and restart_dead and not dry:
-        for n in dead_running:
-            try:
-                new = restart(n, "process dead (sync --restart-dead)", None)
-                print("  restarted %s -> %s" % (n, new))
-            except Exception as e:
-                print("  FAILED to restart %s: %s" % (n, e))
-    elif dead_running and not dry:
-        print("  (not auto-fixed; use control.py mark NAME abandoned/exited-err by hand, or --restart-dead)")
-
 def cmd_report(a):
     rows = []
     for name, t in sorted(load().items(), key=lambda kv: kv[1]["slot"]):
@@ -1462,7 +1366,6 @@ def main():
     s = sub.add_parser("hold"); s.add_argument("name"); s.add_argument("--release", action="store_true"); s.set_defaults(f=cmd_hold)
     sub.add_parser("ps").set_defaults(f=cmd_ps)
     s = sub.add_parser("reap"); s.add_argument("--dry-run", action="store_true"); s.set_defaults(f=cmd_reap)
-    s = sub.add_parser("sync"); s.add_argument("--dry-run", action="store_true"); s.add_argument("--restart-dead", action="store_true"); s.set_defaults(f=cmd_sync)
     sub.add_parser("report").set_defaults(f=cmd_report)
     a = ap.parse_args()
     a.f(a)

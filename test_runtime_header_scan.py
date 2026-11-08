@@ -497,7 +497,7 @@ def test_every_declaration_is_seen():
     # header by one more name since the 740 rung without bumping it (the
     # scanner read 741 on master), so the figure is read off the MERGED header
     # and not added up from the two sides.
-    for header, want in (('fire_runtime.h', 794),   # --fix writes the live figure
+    for header, want in (('fire_runtime.h', 783),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already
@@ -773,7 +773,7 @@ CENSUS_QUOTES = (
     # library, and `live_census()` reads headers only. `test_formal_runtime_link.py`
     # is the check for those two, and the `word` row is in both.
     ('FORMAL.md',
-     r'\| entry points across \*\*\d+\*\* headers \| \*\*(\d+)\*\* \|',
+     r'\| entry points across \*\*11\*\* headers \| \*\*(\d+)\*\* \|',
      ('total',)),
     ('FORMAL.md',
      r'\| `fire_runtime\.h` (\d+), `fire_sqlite3\.h`',

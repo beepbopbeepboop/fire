@@ -28,14 +28,6 @@ Scope rule, which is the whole soundness argument:
     enclosing function's scope when that scope binds the name at all (a local
     shadows a global), otherwise from the module-wide census.
 
-The module-wide census is MEMOIZED per statement-list identity for the life
-of one compile (`exprtypes._walk_derived_index`, the walk memo's own
-lifecycle and invalidation). That is what keeps the import-closure scan --
-which re-asks "who binds what in module C" once per module per pass per
-module compiled -- at one build per module instead of one per level; see
-`binding_index`'s docstring and bugs/MIDDLE_coro_import_compile_hangs_on_
-large_modules for the measurement it removed.
-
 Any second binder, a non-literal binder, a parameter, a `global`/`nonlocal`,
 a comprehension or lambda target, or a wildcard import makes the answer None.
 """
@@ -51,7 +43,7 @@ from fire_compiler import (
     CallExpr,
 )
 import mojo.middle.types as _types
-from mojo.middle.exprtypes import _walk_ast, _walk_derived_index
+from mojo.middle.exprtypes import _walk_ast
 
 
 def _target_names(target, out) -> None:
@@ -144,33 +136,13 @@ def _add_binders(idx: dict, nd, names) -> None:
             idx[nm] = [nd]
 
 
-def _binding_index_build(stmts: list) -> dict:
-    """The census body: every binder of `stmts`, one walk. Module-level
-    because the memo helper (`_walk_derived_index`) calls it by reference.
-    Runs the `_walk_ast` over `stmts` BEFORE the memo entry is written, so
-    the parent edges that make a later `_walk_ast_invalidate` find that
-    entry are recorded by this same walk."""
+def binding_index(stmts: list) -> dict:
+    """MODULE-WIDE census: name -> list of the nodes anywhere in `stmts`
+    (nested functions included) that bind it. One walk."""
     idx: dict = {}
     for nd in _walk_ast(stmts):
         _add_binders(idx, nd, bound_names(nd))
     return idx
-
-
-def binding_index(stmts: list) -> dict:
-    """MODULE-WIDE census: name -> list of the nodes anywhere in `stmts`
-    (nested functions included) that bind it. One build, then memoized per
-    statement-list identity for the life of the compile (see
-    `exprtypes._walk_derived_index` for the lifecycle and invalidation).
-
-    The memo is the whole point, not an optimisation: the import-closure
-    scan calls this once per OTHER module in the closure, twice per pass,
-    for EVERY module it compiles (`coro._scan_callsite_param_kinds` ->
-    `_module_literal_env`, `module_gen`'s call-site evidence), so without it
-    the per-node `bound_names` census re-derives the cumulative tree once per
-    module per level — the O(N^2) that took the `do_imports` compile of a
-    snippet importing `build_config` past the sqliteruntime suite's timeout
-    (bugs/MIDDLE_coro_import_compile_hangs_on_large_modules)."""
-    return _walk_derived_index(stmts, _binding_index_build)
 
 
 def _scope_nodes(body) -> list:

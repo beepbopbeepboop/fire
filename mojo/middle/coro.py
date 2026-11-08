@@ -95,10 +95,8 @@ SETRET_SHIM  = '__mojo_gen_set_return'
 # plain int64_t box; 'd' and 'p' bit-cast through it, so the awaiter gets the
 # value the callee returned rather than its truncated integer.
 _ASYNC_SETRET_SHIM = {'i': SETRET_SHIM, 'b': SETRET_SHIM,
-                      'd': '__mojo_gen_set_return_d', 'p': '__mojo_gen_set_return_p',
-                      'tuple': '__mojo_gen_set_return_p'}
-_ASYNC_BITS_SHIM = {'b': '__mojo_bits_b', 'd': '__mojo_bits_d', 'p': '__mojo_bits_p',
-                    'tuple': '__mojo_bits_p'}
+                      'd': '__mojo_gen_set_return_d', 'p': '__mojo_gen_set_return_p'}
+_ASYNC_BITS_SHIM = {'b': '__mojo_bits_b', 'd': '__mojo_bits_d', 'p': '__mojo_bits_p'}
 # The value-slot lattice. 'b' is NOT redundant with 'i': the slot's C type IS
 # the type the consumer's loop target / tuple slot / `next()` result is
 # declared with, and `print` dispatches on it (`emit_infra`'s `_Bool` branch
@@ -2461,7 +2459,7 @@ def _async_result_kind(fn: N.FunctionDef) -> str:
         return 'b'
     folded: set = set()
     for k in kinds:
-        folded.add('i' if k == 'b' else ('p' if k == 'tuple' else k))
+        folded.add('i' if k == 'b' else k)
     if len(folded) == 1:
         for k in folded:
             return k
@@ -2484,7 +2482,7 @@ def _async_return_refusal(fn: N.FunctionDef) -> str | None:
     kinds = _async_return_kinds(fn)
     folded: set = set()
     for k in kinds:
-        folded.add('i' if k == 'b' else ('p' if k == 'tuple' else k))
+        folded.add('i' if k == 'b' else k)
     if len(folded) > 1:
         names = sorted(folded)
         return (f'{fn.name}: its `return` values disagree on one kind '

@@ -53,9 +53,8 @@ def live_guard():
     try:
         dirs = C.live_session_dirs()
     except (RuntimeError, OSError, ValueError) as e:
-        log("guard: %s; falling back to pid-based liveness (session listing unreadable)" % e)
-        BUSY["names"], BUSY["claims"] = set(), set()
-        return True
+        log("guard: %s; this pass feeds, continues, retires and lands nothing" % e)
+        return False
     tasks = C.load()
     names = C.busy_task_names(dirs, tasks)
     claims = set()
@@ -633,16 +632,6 @@ def main():
             if guard_ok:
                 apply_moves(load_state())        # a class change is a file move, so it lands before the feed reads the tree
             subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "reap"], capture_output=True, cwd=C.MAIN)  # jobs of finished workers
-            # keep the control plane honest: reconcile queue/registry with the filesystem and recover dead workers
-            sr = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "sync", "--restart-dead"], capture_output=True, text=True, cwd=C.MAIN)
-            for line in (sr.stdout or "").splitlines():
-                if line.strip():
-                    log("sync: " + line.strip())
-            # safe, conservative cleanup every pass: only removes merged/clean/idle trees with no outside claim
-            cr = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "cleanup"], capture_output=True, text=True, cwd=C.MAIN)
-            for line in (cr.stdout or "").splitlines():
-                if line.strip() and ("removed" in line.lower() or "deleted" in line.lower() or "worktree" in line.lower()):
-                    log("cleanup: " + line.strip())
             fed = cont = retired = 0
             if guard_ok:
                 fed = feed()

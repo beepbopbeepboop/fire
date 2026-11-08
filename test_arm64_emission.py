@@ -336,7 +336,12 @@ def test_csel_emitted_and_correct(tmpdir, verbose):
 
 
 def test_ccmp_emitted_and_correct(tmpdir, verbose):
-    _ccmp_cases(tmpdir, verbose)
+    # The lowering is opt-in (see `CCMP_LOWERING` in formal/arm64_codegen.py).
+    os.environ["FIRE_CCMP_LOWERING"] = "1"
+    try:
+        _ccmp_cases(tmpdir, verbose)
+    finally:
+        os.environ.pop("FIRE_CCMP_LOWERING", None)
 
 
 def _ccmp_cases(tmpdir, verbose):

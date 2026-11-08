@@ -2806,7 +2806,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 # `_int_word_vals`-only gate, which is what let `Dialog(2.5)`
                 # print `2` and `Dialog(True)` print `1`.)
                 #
-                # The ambiguous case goes to `mojo_cstr_or_int_str`, the
+                # The ambiguous case goes to `mojo_word_cstr_value`, the
                 # model's OWN answer to this question — it is what
                 # `_char_to_cstr` already routes every other
                 # int64_t-used-where-a-string-is-needed through — and it is
@@ -2816,7 +2816,15 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 # as its decimal, which is what CPython prints. So it is also
                 # the right answer for the unprovable integer, which is why
                 # the gate is about SOUNDNESS of the two arms rather than
-                # about picking a winner.
+                # about picking a winner. It is NOT `mojo_cstr_or_int_str`
+                # (the display spelling): that one hands a BYTES word back as
+                # its quoted repr, which corrupts a VALUE the callee then
+                # dispatches on — `glob.glob(b'*.py', root_dir=b'...')`
+                # reached `iglob` with the 7-character string `b'*.py'` and
+                # fnmatch'd the literal `b'` prefix, printing [] instead of
+                # [b'a.py'] (bugs/SUITE_globcompiled). `mojo_word_cstr_value`
+                # passes a str or a registered bytes object through as the
+                # word itself and spells only a genuine integer.
                 #
                 # Deliberately NOT registered with `_cstr_key_src`, so the
                 # `mojo_cstr_or_int_release` protocol does not reclaim it:
@@ -2852,7 +2860,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                         # is the word inside it (a box's own address is not one)
                         _iv = gen._call_expr('int64_t', 'mojo_box_word', [('int64_t', _iv)])
                     coerced_args.append(gen._call_expr(
-                        'char *', 'mojo_cstr_or_int_str', [('int64_t', _iv)]))
+                        'char *', 'mojo_word_cstr_value', [('int64_t', _iv)]))
 
         elif ptype.endswith(' *') and (actual_atype in ('int', 'int64_t') or atype == 'int64_t'):
             # Parameter expects a pointer; the lowered argument is a plain

@@ -66,21 +66,6 @@ _WALK_AST_MAX_DEPTH = 900
 # at each module boundary as well (baseline: 19,480,348).
 _WALK_AST_MEMO: dict = {}
 _WALK_AST_PARENTS: dict = {}
-# A sibling of the walk memo for WHOLE-TREE DERIVED indices: a census or
-# table built from walking a statement list, keyed the same way (id of the
-# list, the list itself held so the address cannot be reused, e.g.
-# `literal_bindings.binding_index`'s binder census). It shares the walk
-# memo's two lifecycle points rather than inventing its own: a node mutated
-# after the index was built invalidates EVERY entry that contains it through
-# the same parent-edge walk (`_walk_ast_invalidate` drops both memos' entries
-# in one loop), and the compile boundary drops both. That is exactly the
-# safety contract the binder census needs: the import-closure scan re-asks
-# "who binds what in module C" once per module per pass per module compiled,
-# and without the memo the per-level re-derivation of the cumulative tree is
-# what took the `do_imports` compile of a snippet importing `build_config`
-# past the sqliteruntime suite's timeout (bugs/MIDDLE_coro_import_compile_
-# hangs_on_large_modules).
-_WALK_INDEX_MEMO: dict = {}
 
 
 def _walk_ast_invalidate(node) -> None:
@@ -113,8 +98,6 @@ def _walk_ast_invalidate(node) -> None:
         seen.add(k)
         if k in _WALK_AST_MEMO:
             del _WALK_AST_MEMO[k]
-        if k in _WALK_INDEX_MEMO:
-            del _WALK_INDEX_MEMO[k]
         par = _WALK_AST_PARENTS.get(k)
         if par is not None:
             for p in par:
@@ -134,7 +117,6 @@ def _walk_ast_reset() -> None:
     (`compile_stdlib.py`, the test runners) would retain every AST it ever
     walked."""
     _WALK_AST_MEMO.clear()
-    _WALK_INDEX_MEMO.clear()
     _WALK_AST_PARENTS.clear()
     # The field-names / dataclass caches are also keyed on node types and
     # retain (type -> tuple/bool) entries for every node type ever walked;
@@ -271,46 +253,6 @@ def _walk_ast(node):
     _walk_ast_into(node, out)
     if len(out) > 1:
         _WALK_AST_MEMO[key] = (node, out)
-    return out
-
-def _walk_derived_index(stmts: list, build) -> object:
-    """A whole-tree DERIVED index over the statement list `stmts`, memoized
-    with the walk memo's own lifecycle.
-
-    `build(stmts)` is called exactly once per (list, mutation): the first
-    call builds and pins the answer under `id(stmts)`, and every later call
-    for the SAME list object returns that pinned answer without touching the
-    tree. The one consumer is the binder census in
-    `literal_bindings.binding_index`, and that census is the per-level
-    re-ask the memo exists to kill: the import-closure scan calls it once
-    per OTHER module in the closure, twice per pass, for EVERY module it
-    compiles (`coro._scan_callsite_param_kinds` -> `_module_literal_env`,
-    `module_gen`'s call-site evidence passes) — O(N^2) re-derivation of the
-    cumulative tree before, one build per module after.
-
-    Safety is inherited, not re-argued. The answer is stale exactly when the
-    tree it was built from is mutated, and a mutation is never silent in this
-    compiler: every write site calls `_walk_ast_invalidate(<the node it
-    wrote>)`, whose parent-edge walk drops every entry that CONTAINS the node
-    — including this one, because the walk that `build` ran (a `_walk_ast`)
-    recorded the edge from the list down to each node it reached. So a
-    mutation inside `stmts` drops the entry at `id(stmts)` and the next call
-    rebuilds; `_walk_ast_reset` drops it whole at the compile boundary. The
-    entry holds `stmts` itself (a strong reference), so its address cannot be
-    handed to a different list while the entry lives — hazard 2, closed the
-    same way the walk memo closes it.
-
-    `build` must run a `_walk_ast` over `stmts` before returning, so the
-    parent edges that make invalidation findable are recorded in the same
-    call that produces the answer — the memo entry is written AFTER `build`
-    returns, and a write-site invalidation can only find it through edges the
-    walk already recorded."""
-    key = id(stmts)
-    hit = _WALK_INDEX_MEMO.get(key)
-    if hit is not None:
-        return hit[1]
-    out = build(stmts)
-    _WALK_INDEX_MEMO[key] = (stmts, out)
     return out
 
 class _UnsupportedGeneratorShape(Exception):
