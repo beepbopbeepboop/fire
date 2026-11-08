@@ -25,6 +25,7 @@ from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           BOOL_TYPE_NAMES)
 
 import collections
+import os
 
 import fire_compiler as F
 import mojo.middle.comptime as comptime_eval
@@ -672,7 +673,15 @@ def _emit_sub_imm(asm, xd: int, xn: int, imm: int) -> None:
                           encode_add_xd_xn_imm_sh)
 
 
-CCMP_LOWERING = False
+#: `if A and B:` over two integer comparisons as `cmp ; ccmp ; b.cond` (step 06c).
+#: OPT-IN (`FIRE_CCMP_LOWERING=1`), OFF by default: the machine code is correct
+#: (`test_arm64_emission.py` runs it with the variable set, answers equal CPython's)
+#: but `formal/arm64_proof_gen.py` derives a branch's condition from the flags of
+#: the LAST `cmp` and has no model for flags that a `ccmp` set from two
+#: comparisons, so turning it on makes `formal/examples/both.mojo` stop proving
+#: ("unsupported: branch condition value flow (frame/flag unavailable)", measured
+#: 2026-11-07).  Default it on only together with that generator support.
+CCMP_LOWERING = os.environ.get("FIRE_CCMP_LOWERING") == "1"
 
 
 class ARM64Codegen:
