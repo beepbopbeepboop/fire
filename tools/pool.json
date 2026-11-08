@@ -71,7 +71,7 @@
     {
       "name": "iceman",
       "model": "opencode-go/iceman-contributor-free",
-      "count": 20,
+      "count": 1,
       "kind": "opencode",
       "recover_hours": 2.5,
       "class": "mid",
