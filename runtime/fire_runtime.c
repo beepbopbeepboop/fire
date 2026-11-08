@@ -9902,10 +9902,16 @@ char *mojo_repr_str(char *s) {
      * own repr() once self-hosted-compiled and diffed against the
      * interpreted stage1 dump. */
     if (!s) s = "";
-    /* Check if this is actually an instance of a run-time class. */
+    /* Check if this is actually an instance of a run-time class. Guard the
+     * 8-byte magic read with _mojo_tagged_addr_ok: a plain string (especially
+     * a short malloc'd one) is a valid char* but may be smaller than 8 bytes
+     * or otherwise unreadable as an int64_t, and reading past it is a real
+     * heap-buffer-overflow (caught by ASan in the container-key repr path). An
+     * instobj is a heap struct large enough to hold its header, so it always
+     * passes the check. */
     {
         int64_t addr = (int64_t)(intptr_t)s;
-        if (addr > 65536) {
+        if (_mojo_tagged_addr_ok(addr)) {
             int64_t magic = *(int64_t *)(intptr_t)addr;
             if (magic == MOJO_INSTOBJ_MAGIC) {
                 int64_t tag = *(int64_t *)(intptr_t)(addr + 8);
@@ -10546,8 +10552,10 @@ char *mojo_repr_obj(int64_t addr) {
      * printing a decimal number indistinguishable from real data. */
     static char buffer[256];
     if (!addr) return "None";
-    if (addr > 65536) {
-        /* Check if it's an instance of a run-time class. */
+    if (_mojo_tagged_addr_ok(addr)) {
+        /* Check if it's an instance of a run-time class. Guard the read as in
+         * mojo_repr_str: a short/unreadable pointer-shaped word is not an
+         * instobj and must not be dereferenced as an 8-byte magic. */
         int64_t magic = *(int64_t *)(intptr_t)addr;
         if (magic == MOJO_INSTOBJ_MAGIC) {
             int64_t tag = *(int64_t *)(intptr_t)(addr + 8);
