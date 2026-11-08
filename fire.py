@@ -706,19 +706,21 @@ def _calls_main(stmts, IfStmt, ExprStmt, CallExpr, IdentExpr):
 
 def _format_error_message(e):
     """The top-level error text for an uncaught interpreter exception:
-    str(e), plus — for an AttributeError carrying CPython 3.15's `name`/`obj`
-    fields (set by myinterpreter._tag_attribute_error) — the 3.15-style
-    suggestion, computed at PRINT time from the real object. This is how an
+    str(e), plus — for the exception types CPython 3.15's improved error
+    messages extend (AttributeError, ModuleNotFoundError, a `from X import
+    Y` ImportError, NameError) — the 3.15-style suggestion, computed at
+    PRINT time from the fields the exception carries (myinterpreter's
+    error_suggestion_suffix, mirroring CPython's Lib/traceback.py
+    `_compute_suggestion_error` for all four branches). This is how an
     uncaught `x.push(4)` reads `... no attribute 'push'. Did you mean
-    '.append'?` exactly as CPython 3.15 prints it; an AttributeError caught
-    in user code never goes through here and stays plain, the same
+    '.append'?` exactly as CPython 3.15 prints it; an exception caught in
+    user code never goes through here and stays plain, the same
     caught-plain/uncaught-suggested split CPython measures."""
     msg = str(e)
-    if type(e).__name__ == 'AttributeError':
-        aname = getattr(e, 'name', None)
-        if isinstance(aname, str):
-            from myinterpreter import attribute_error_suggestion
-            msg = msg + attribute_error_suggestion(getattr(e, 'obj', None), aname)
+    from myinterpreter import error_suggestion_suffix
+    suffix = error_suggestion_suffix(e)
+    if suffix:
+        msg = msg + suffix
     return msg
 
 

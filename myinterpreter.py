@@ -68,6 +68,42 @@ def _tag_attribute_error(exc, obj, name):
     return exc
 
 
+def _tag_name_error(exc, scope, name):
+    """Attach CPython 3.15's NameError-suggestion context to a `name` lookup
+    failure, at RAISE time: the print-time half computes the suggestion from
+    the failing frame's pool, but this interpreter's NameErrors carry no
+    CPython traceback frame (they are raised by this file's Scope, not by
+    CPython's name resolution), so the frame's contents are captured here,
+    while the exception still carries exactly the frame that failed:
+
+      * `name` — the lookup that failed (CPython's exc.name);
+      * `candidates` — CPython's `f_locals + f_globals + f_builtins` of the
+        failing frame. In this interpreter's scope model the current scope's
+        vars are the frame locals and the module (root) scope's vars are the
+        globals plus the builtins (setup_builtins binds them there); a
+        module-level failure duplicates the root scope once, exactly as
+        CPython duplicates the module dict (its f_locals IS its f_globals);
+      * `self_obj` — the frame's `self` (None when absent), for CPython's
+        `self.<name>` refinement (a bare name that is really an instance
+        attribute of the frame's `self`).
+
+    set with setattr() for the same self-host reason as
+    `_tag_attribute_error` (no field table for builtin exception attributes).
+    """
+    root = scope
+    while root.parent is not None:
+        root = root.parent
+    candidates = list(scope.vars)
+    candidates = candidates + list(root.vars)
+    self_obj = None
+    if 'self' in scope.vars:
+        self_obj = scope.vars['self']
+    setattr(exc, 'name', name)
+    setattr(exc, 'candidates', candidates)
+    setattr(exc, 'self_obj', self_obj)
+    return exc
+
+
 # Cross-language / wrong-type AttributeError hints, ported from CPython
 # 3.15.2's Lib/traceback.py `_CROSS_LANGUAGE_HINTS` (gh-146406). Each entry
 # maps the wrong name to a list of (type, hint, is_raw) triples checked in
@@ -148,6 +184,33 @@ _ATTR_MOVE_COST = 2
 _ATTR_CASE_COST = 1
 _ATTR_MAX_CANDIDATE_ITEMS = 750
 _ATTR_MAX_STRING_SIZE = 40
+
+# CPython 3.10+ exposes the set of stdlib module names (used by the
+# NameError "did you forget to import" refinement). Looked up defensively —
+# the self-hosted binary's `sys` is a stub (sys.argv/sys.path only, see
+# emit_exprs.py's module-attribute special cases), so a bare attribute read
+# would raise there; the empty default just withholds that one refinement
+# in the compiled path, like the other documented self-host gaps.
+_STDLIB_MODULE_NAMES = getattr(sys, 'stdlib_module_names', ())
+
+
+def _suggestion_normalize(name):
+    """CPython 3.15's `_compute_suggestion_error` NFKC preamble, shared by ALL
+    four branches (AttributeError, ModuleNotFoundError, ImportError,
+    NameError): a non-ASCII name that changes under NFKC normalization is
+    matched under its normalized form, and if that normalized form is present
+    in the candidate pool it is the answer outright (a "found" miss is never
+    suggested). Returns (normalized_name, was_changed)."""
+    if name.isascii():
+        return name, False
+    try:
+        import unicodedata
+        normalized = unicodedata.normalize('NFKC', name)
+    except ImportError:
+        normalized = name
+    if normalized == name:
+        return name, False
+    return normalized, True
 
 
 def _attr_substitution_cost(a, b):
@@ -325,75 +388,32 @@ def _attr_cp_levenshtein_distance(a: str, b: str, max_cost: int) -> int:
     return result
 
 
-def _attr_candidates(obj):
-    """The names a successful `obj.<name>` lookup could resolve to — the
-    candidate pool CPython's traceback.py feeds its matcher (its
-    `_get_safe___dir__`, i.e. the object's dir()). For a MojoInstance the
-    dir() machinery cannot see the Mojo method/alias tables (they live
-    outside the Python type), so those are added explicitly; for a
-    MojoClass, the methods/fields/aliases it presents. Host objects use
-    their own __dir__(), with CPython's `type(obj).__dir__(obj)` fallback
-    for the TypeError case (obj is a class)."""
-    if isinstance(obj, (MojoInstance, MojoClass)):
-        names = set()
-        if isinstance(obj, MojoInstance):
-            names.update(obj.__dict__)
-            names.update(obj._mojo_class.methods)
-            names.update(obj._mojo_class.comptime_aliases)
-        else:
-            names.update(obj.methods)
-            names.update(obj.comptime_aliases)
-            for f in obj.fields:
-                if hasattr(f, 'name'):
-                    names.add(f.name)
-    else:
-        try:
-            names = obj.__dir__()
-        except TypeError:
-            names = type(obj).__dir__(obj)
-    return sorted(n for n in names if isinstance(n, str))
+def _suggestion_two_passes(d, name):
+    """CPython 3.15's distance-match tail, shared by ALL four
+    `_compute_suggestion_error` branches: the C module (`_suggestions`,
+    Python/suggestions.c) on UTF-8 BYTES with best_distance seeded at
+    infinity, then Lib/traceback.py's pure-Python fallback on CODE POINTS
+    with best_distance seeded at len(name) — and the two DISAGREE on
+    non-ASCII input (a Unicode case flip costs 2 in the byte pass, 1 in the
+    fallback; byte windows are wider but byte distances are bigger too), so
+    for example 'caf' -> 'café' is only found by the second pass. Returns the
+    closest candidate, or None.
 
-
-def _attr_close_match(obj, name):
-    """CPython 3.15's Levenshtein half of `_compute_suggestion_error`:
-    the closest resolvable attribute name to a misspelled one, or None.
-
-    CPython runs TWO distance passes and takes the first that finds
-    something: the C module (`_suggestions`, Python/suggestions.c) on UTF-8
-    BYTES with best_distance seeded at infinity, then Lib/traceback.py's
-    pure-Python fallback on CODE POINTS with best_distance seeded at
-    len(name) — and the two DISAGREE on non-ASCII input (a Unicode case
-    flip costs 2 in the byte pass, 1 in the fallback; byte windows are
-    wider but byte distances are bigger too), so for example 'caf' ->
-    'café' is only found by the second pass. Candidate filtering follows
-    CPython: no underscored names unless the wrong name is underscored
-    (CPython's refinement — also allowing underscored candidates when the
-    failing access was `self.x` — needs the traceback frame, which the
-    print-time half here does not carry), and its caps: the C module gives
-    up at 750+ candidates, the fallback at 751+ and at a 40-code-point
-    name, and a fallback cap is a bare `return None` from the whole
-    function — the nested check never runs after one."""
-    not_normalized = False
-    if not name.isascii():
-        try:
-            import unicodedata
-            normalized = unicodedata.normalize('NFKC', name)
-        except ImportError:
-            normalized = name
-        if normalized != name:
-            not_normalized = True
-            name = normalized
-    d = _attr_candidates(obj)
-    if name[:1] != '_':
-        d = [n for n in d if n[:1] != '_']
-    # A name that NFKC-normalization changed and which is in the candidate
-    # set is the answer outright (CPython checks this before the distance
-    # passes; a missing attribute that is "found" is never suggested).
-    if not_normalized and name in d:
-        return name
+    `d` must already be branch-filtered (the underscore rule differs per
+    branch: the attr branch hides underscored candidates for a non-
+    underscored miss, the import branch only does so when `name_from` is
+    non-underscored, the NameError and ModuleNotFoundError branches filter
+    nothing) and `name` NFKC-normalized (the shared preamble). CPython's caps
+    apply verbatim: the C-module pass is skipped at 750+ candidates, the
+    fallback gives up at 751+ candidates and at a 40-code-point name. The
+    AttributeError branch must additionally skip its nested check after a
+    fallback cap — it decides that from the same caps, not from this
+    function's return value (a cap and a genuine no-match both return
+    None)."""
     # Pass 1: the C module, on UTF-8 bytes, best_distance seeded at
     # infinity, per-candidate max-distance window in BYTE lengths.
-    if len(d) < _ATTR_MAX_CANDIDATE_ITEMS:
+    pass1_ran = len(d) < _ATTR_MAX_CANDIDATE_ITEMS
+    if pass1_ran:
         wrong_name_bytes = len(name.encode('utf-8'))
         best_distance = sys.maxsize
         suggestion = None
@@ -416,39 +436,115 @@ def _attr_close_match(obj, name):
             return suggestion
     # Pass 2: the pure-Python fallback, on code points, best_distance
     # seeded at len(name). On pure-ASCII input it can only agree with or
-    # tighten pass 1, so it is only worth running when non-ASCII is
-    # involved. Its own caps abort the whole function (no nested check).
+    # tighten pass 1, so when pass 1 RAN it is only worth running when
+    # non-ASCII is involved. That early return must NOT apply when pass 1
+    # was skipped by the 750 cap: at exactly 750 candidates CPython's C
+    # module gives up (its own cap) and the fallback is the only pass left,
+    # and it runs for ASCII too (test_name_error_caps_match_cpython pins
+    # the boundary).
     if len(d) > _ATTR_MAX_CANDIDATE_ITEMS:
         return None
     if len(name) > _ATTR_MAX_STRING_SIZE:
         return None
-    _non_ascii = not name.isascii()
-    if not _non_ascii:
-        for n in d:
-            if not n.isascii():
-                _non_ascii = True
-                break
-    if not _non_ascii:
-        suggestion = None
-    else:
-        wrong_name_len = len(name)
-        best_distance = wrong_name_len
-        suggestion = None
-        for possible_name in d:
-            if possible_name == name:
-                # A missing attribute is "found". Don't suggest it (GH-88821).
-                continue
-            # No more than 1/3 of the involved characters should need changed.
-            max_distance = (len(possible_name) + wrong_name_len + 3) * _ATTR_MOVE_COST // 6
-            # Don't take matches we've already beaten.
-            max_distance = min(max_distance, best_distance - 1)
-            current_distance = _attr_cp_levenshtein_distance(name, possible_name, max_distance)
-            if current_distance > max_distance:
-                continue
-            if not suggestion or current_distance < best_distance:
-                suggestion = possible_name
-                best_distance = current_distance
-    if suggestion is None:
+    if pass1_ran:
+        _non_ascii = not name.isascii()
+        if not _non_ascii:
+            for n in d:
+                if not n.isascii():
+                    _non_ascii = True
+                    break
+        if not _non_ascii:
+            return None
+    wrong_name_len = len(name)
+    best_distance = wrong_name_len
+    suggestion = None
+    for possible_name in d:
+        if possible_name == name:
+            # A missing attribute is "found". Don't suggest it (GH-88821).
+            continue
+        # No more than 1/3 of the involved characters should need changed.
+        max_distance = (len(possible_name) + wrong_name_len + 3) * _ATTR_MOVE_COST // 6
+        # Don't take matches we've already beaten.
+        max_distance = min(max_distance, best_distance - 1)
+        current_distance = _attr_cp_levenshtein_distance(name, possible_name, max_distance)
+        if current_distance > max_distance:
+            continue
+        if not suggestion or current_distance < best_distance:
+            suggestion = possible_name
+            best_distance = current_distance
+    return suggestion
+
+
+def _suggestion_after_pool(d, name, not_normalized):
+    """The tail of CPython 3.15's `_compute_suggestion_error` every branch
+    shares AFTER its candidate pool is computed: the NFKC early return (a
+    name that normalization changed and which the pool contains is the
+    answer outright), then the distance match. Returns the suggestion or
+    None."""
+    if not_normalized and name in d:
+        return name
+    return _suggestion_two_passes(d, name)
+
+
+def _safe_dir(obj):
+    """CPython 3.15's `_get_safe___dir__` (its lazy-import filter has no
+    counterpart in this dialect): the names a successful `obj.<name>` lookup
+    could resolve to — the candidate pool CPython's traceback.py feeds its
+    matcher — obj.__dir__(), with CPython's `type(obj).__dir__(obj)` fallback
+    for the TypeError case (obj is a class), strings only, sorted. Shared by
+    the AttributeError branch (`_attr_candidates`) and the ImportError
+    branch (`import_error_suggestion`)."""
+    try:
+        names = obj.__dir__()
+    except TypeError:
+        names = type(obj).__dir__(obj)
+    return sorted(n for n in names if isinstance(n, str))
+
+
+def _attr_candidates(obj):
+    """The names a successful `obj.<name>` lookup could resolve to — the
+    candidate pool CPython's traceback.py feeds its matcher (its
+    `_get_safe___dir__`, i.e. the object's dir()). For a MojoInstance the
+    dir() machinery cannot see the Mojo method/alias tables (they live
+    outside the Python type), so those are added explicitly; for a
+    MojoClass, the methods/fields/aliases it presents. Host objects use
+    `_safe_dir`."""
+    if isinstance(obj, (MojoInstance, MojoClass)):
+        names = set()
+        if isinstance(obj, MojoInstance):
+            names.update(obj.__dict__)
+            names.update(obj._mojo_class.methods)
+            names.update(obj._mojo_class.comptime_aliases)
+        else:
+            names.update(obj.methods)
+            names.update(obj.comptime_aliases)
+            for f in obj.fields:
+                if hasattr(f, 'name'):
+                    names.add(f.name)
+        return sorted(n for n in names if isinstance(n, str))
+    return _safe_dir(obj)
+
+
+def _attr_close_match(obj, name):
+    """CPython 3.15's Levenshtein half of `_compute_suggestion_error`:
+    the closest resolvable attribute name to a misspelled one, or None.
+
+    Candidate filtering follows CPython: no underscored names unless the
+    wrong name is underscored (CPython's refinement — also allowing
+    underscored candidates when the failing access was `self.x` — needs the
+    traceback frame, which the print-time half here does not carry). The
+    distance match itself is the engine every branch shares
+    (`_suggestion_two_passes`); the caps live there too, and a fallback cap
+    aborts CPython's function WITHOUT the nested check — so it is rechecked
+    here (a cap and a genuine no-match both return None from the engine,
+    but only the former must skip the nested check)."""
+    name, not_normalized = _suggestion_normalize(name)
+    d = _attr_candidates(obj)
+    if name[:1] != '_':
+        d = [n for n in d if n[:1] != '_']
+    suggestion = _suggestion_after_pool(d, name, not_normalized)
+    if suggestion is None and len(d) <= _ATTR_MAX_CANDIDATE_ITEMS \
+            and len(name) <= _ATTR_MAX_STRING_SIZE:
         # If no direct attribute match found, check for nested attributes
         # (CPython's `_check_for_nested_attribute`: the What's New 3.15
         # `container.area` -> `.inner.area` case).
@@ -524,6 +620,169 @@ def attribute_error_suggestion(obj, name):
     return f". Did you mean '.{suggestion}' ({suggestion!a}) instead of '.{name}' ({name!a})?"
 
 
+def _module_not_found_candidates(name):
+    """CPython 3.15's ModuleNotFoundError candidate pool: every module spec
+    the import machinery can discover — for each finder in sys.meta_path
+    that carries a `discover` hook (in 3.15 only PathFinder does), the specs
+    it reports relative to the missing name's parent package. Mirrors
+    traceback.py's `_compute_suggestion_error` MNE branch verbatim: a dotted
+    miss probes `importlib.util.find_spec(parent)` (which yields None for a
+    missing parent — discover(None) then lists top-level names, CPython's
+    behavior), and ANY failure — e.g. a parent that is not a package
+    (frozen `os`: `import os.path2` raises ValueError inside discover) —
+    means no candidates at all, i.e. no suggestion."""
+    try:
+        import importlib.util
+        parent_name = name.rpartition('.')[0]
+        if parent_name:
+            parent = importlib.util.find_spec(parent_name)
+        else:
+            parent = None
+        d = []
+        for finder in sys.meta_path:
+            discover = getattr(finder, 'discover', None)
+            if discover is not None:
+                d += [spec.name for spec in discover(parent)]
+    except Exception:
+        return None
+    return d
+
+
+def module_not_found_suggestion(name):
+    """CPython 3.15's print-time ModuleNotFoundError suggestion, as the
+    suffix to append to the message: '' when there is nothing to add. The
+    real ModuleNotFoundError already carries `name` (the module that was not
+    found), so no raise-side tagging is needed. The rendering is 3.15.2's
+    verbatim (`. Did you mean: '<s>'?` — the MNE branch has no `!a`
+    rendering of its own; a module name is an identifier and CPython's MNE
+    branch prints it bare)."""
+    if not isinstance(name, str):
+        return ''
+    name, not_normalized = _suggestion_normalize(name)
+    d = _module_not_found_candidates(name)
+    if d is None:
+        return ''
+    suggestion = _suggestion_after_pool(d, name, not_normalized)
+    if suggestion is None:
+        return ''
+    return f". Did you mean: '{suggestion}'?"
+
+
+def import_error_suggestion(mod_name, name_from):
+    """CPython 3.15's print-time ImportError suggestion for a `from X import
+    Y` miss — an ImportError carrying `name` (module X) and `name_from`
+    (attribute Y) — as the suffix to append: '' when there is nothing to
+    add. Candidates are X's dir() (`_safe_dir`, CPython's `_get_safe___dir__`),
+    re-filtered to non-underscored names when Y is non-underscored
+    (CPython re-filters here, mirroring the attr branch), then the shared
+    distance match. The rendering is 3.15.2's verbatim (`. Did you mean:
+    '<s>'?`, with the `!a` parens for a non-ASCII suggestion).
+    `__import__` failing (module X gone by print time) means no candidates,
+    CPython's try/except-returns-None."""
+    if not isinstance(name_from, str) or not isinstance(mod_name, str):
+        return ''
+    name, not_normalized = _suggestion_normalize(name_from)
+    try:
+        mod = __import__(mod_name)
+        d = _safe_dir(mod)
+    except Exception:
+        return ''
+    if name[:1] != '_':
+        d = [x for x in d if x[:1] != '_']
+    suggestion = _suggestion_after_pool(d, name, not_normalized)
+    if suggestion is None:
+        return ''
+    if suggestion.isascii():
+        return f". Did you mean: '{suggestion}'?"
+    return f". Did you mean: '{suggestion}' ({suggestion!a})?"
+
+
+def name_error_suggestion(name, candidates, self_obj):
+    """CPython 3.15's print-time NameError suggestion, as the suffix to
+    append to the message: '' when there is nothing to add. CPython reads
+    the failing frame's pool (f_locals + f_globals + f_builtins) and `self`
+    off the traceback at print time; this interpreter's NameErrors carry
+    those captured at RAISE time instead (`_tag_name_error`), so `candidates`
+    and `self_obj` are the fields the exception carries — `candidates` None
+    for a NameError that never went through this interpreter's Scope (e.g.
+    one CPython raised itself), for which there is no frame to read and no
+    suggestion, exactly CPython's tb-is-None behavior.
+
+    CPython's order: the NFKC early return, then the `self.<name>`
+    refinement (a bare name that is really an instance attribute of the
+    frame's `self`), then the shared distance match. The renderings are
+    3.15.2's verbatim (`. Did you mean: '<s>'?` with `!a` parens for a
+    non-ASCII suggestion), plus CPython's forgot-to-import refinement: when
+    the misspelling IS a stdlib module name, append ` Or did you forget to
+    import '<name>'?` after a suggestion, or `. Did you forget to import
+    '<name>'?` when there is none."""
+    if not isinstance(name, str) or candidates is None:
+        return ''
+    d = [x for x in candidates if isinstance(x, str)]
+    name_n, not_normalized = _suggestion_normalize(name)
+    suggestion = None
+    if not_normalized and name_n in d:
+        suggestion = name_n
+    else:
+        if self_obj is not None:
+            try:
+                if hasattr(self_obj, name_n):
+                    suggestion = f"self.{name_n}"
+            except Exception:
+                pass
+        if suggestion is None:
+            suggestion = _suggestion_after_pool(d, name_n, not_normalized)
+    if suggestion is None:
+        if name in _STDLIB_MODULE_NAMES:
+            return f". Did you forget to import '{name}'?"
+        return ''
+    if suggestion.isascii():
+        suffix = f". Did you mean: '{suggestion}'?"
+    else:
+        suffix = f". Did you mean: '{suggestion}' ({suggestion!a})?"
+    if name in _STDLIB_MODULE_NAMES:
+        suffix += f" Or did you forget to import '{name}'?"
+    return suffix
+
+
+def error_suggestion_suffix(e):
+    """CPython 3.15's print-time suggestion suffix for ANY of the exception
+    types its improved error messages cover — AttributeError,
+    ModuleNotFoundError, ImportError (a `from X import Y` miss, the ones
+    carrying `name_from`), NameError — '' when CPython appends nothing.
+    fire.py appends it to an UNCAUGHT exception's message; an exception
+    caught in user code never goes through it, preserving CPython's
+    caught-plain/uncaught-suggested split.
+
+    The dispatch mirrors Lib/traceback.py's order: ModuleNotFoundError
+    before a bare ImportError (it is an ImportError subclass), and only
+    `from`-miss ImportErrors carry `name_from`, so the two are disjoint in
+    practice. Every guard is the one CPython applies (a str `name` field,
+    `name_from is not None`, ...)."""
+    if isinstance(e, AttributeError):
+        aname = getattr(e, 'name', None)
+        if isinstance(aname, str):
+            return attribute_error_suggestion(getattr(e, 'obj', None), aname)
+        return ''
+    if isinstance(e, ModuleNotFoundError):
+        mname = getattr(e, 'name', None)
+        if isinstance(mname, str):
+            return module_not_found_suggestion(mname)
+        return ''
+    if isinstance(e, ImportError):
+        fname = getattr(e, 'name_from', None)
+        if isinstance(fname, str):
+            return import_error_suggestion(getattr(e, 'name', None), fname)
+        return ''
+    if isinstance(e, NameError):
+        nname = getattr(e, 'name', None)
+        if isinstance(nname, str):
+            return name_error_suggestion(
+                nname, getattr(e, 'candidates', None), getattr(e, 'self_obj', None))
+        return ''
+    return ''
+
+
 class ReturnValue(Exception):
     """Exception used to implement return statements."""
     def __init__(self, value=None):
@@ -594,9 +853,18 @@ class Scope:
     def get(self, name: str):
         if name in self.vars:
             return self.vars[name]
-        if self.parent:
-            return self.parent.get(name)
-        raise NameError(f"name '{name}' is not defined")
+        # Walk the chain iteratively (the old recursion raised in the ROOT
+        # scope): the lookup either finds the nearest binding in the same
+        # order, or fails with the exception tagged at THIS scope — the
+        # frame that failed — which is what CPython 3.15's print-time
+        # NameError suggestion needs (see _tag_name_error).
+        scope = self.parent
+        while scope is not None:
+            if name in scope.vars:
+                return scope.vars[name]
+            scope = scope.parent
+        raise _tag_name_error(
+            NameError(f"name '{name}' is not defined"), self, name)
 
     def has(self, name: str) -> bool:
         if name in self.vars:
@@ -616,10 +884,20 @@ class Scope:
     def delete(self, name: str):
         if name in self.vars:
             del self.vars[name]
-        elif self.parent:
-            self.parent.delete(name)
-        else:
-            raise NameError(f"name '{name}' is not defined")
+            return
+        # Walk the chain iteratively (the old recursion raised in the ROOT
+        # scope): the delete finds the nearest binding in the same order, or
+        # fails with the exception tagged at THIS scope — the frame that
+        # failed — for CPython 3.15's print-time NameError suggestion (see
+        # _tag_name_error).
+        scope = self.parent
+        while scope is not None:
+            if name in scope.vars:
+                del scope.vars[name]
+                return
+            scope = scope.parent
+        raise _tag_name_error(
+            NameError(f"name '{name}' is not defined"), self, name)
 
 
 def _split_invoker(owner_interp, args) -> tuple:
@@ -6318,7 +6596,13 @@ class Interpreter:
         try:
             return self.scope.get(expr.name)
         except NameError:
-            raise NameError(f"{self._loc(expr)}name '{expr.name}' is not defined")
+            # Re-raise with the source location, tagged like the original:
+            # scope.get raises through _tag_name_error (name/candidates/
+            # self_obj), and this new exception must carry the same fields
+            # for CPython 3.15's print-time NameError suggestion.
+            raise _tag_name_error(
+                NameError(f"{self._loc(expr)}name '{expr.name}' is not defined"),
+                self.scope, expr.name)
 
     def _resolve_Self(self, expr):
         """Resolve Self to the current struct type (when inside a struct method)."""
