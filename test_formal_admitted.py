@@ -1367,10 +1367,10 @@ LIBRARY_TRUST = {
 AXIOM_CLOSURE = {
     #            asked  reaches  clean  text_only  closure_only  ofReduceBool
     "Contracts": (7, 0, 7, 0, 0, 0),
-    "Extern": (3, 0, 3, 0, 0, 0),
+    "Extern": (9, 0, 9, 0, 0, 0),
     "IEEE754": (26, 19, 7, 0, 0, 0),
     "Peephole": (43, 4, 31, 0, 8, 0),
-    "ProofLib": (272, 17, 249, 0, 6, 0),
+    "ProofLib": (273, 17, 250, 0, 6, 0),
     "ProofLibSteps": (0, 0, 0, 0, 0, 0),
     "ProofLibSteps1": (22, 20, 2, 0, 0, 0),
     "ProofLibSteps2": (9, 9, 0, 0, 0, 0),
