@@ -2252,12 +2252,8 @@ def compile_formal(source_path: str, output: str = None,
 
     # The gimple runtime's C library, on this image's link line, if and only if
     # the program names an entry point of it that the library really provides
-    runtime_libs_res, runtime_calls = _runtime_library_for(ordered, arch, fmt)
-    if runtime_libs_res is not None:
-        if isinstance(runtime_libs_res, list):
-            linked = linked + runtime_libs_res
-        else:
-            linked = linked + [runtime_libs_res]
+    runtime_libs, runtime_calls = _runtime_library_for(ordered, arch, fmt)
+    linked = linked + runtime_libs
 
 
     # `comptime f(...)` is resolved by RUNNING f through this same backend
@@ -21847,65 +21843,49 @@ def _runtime_word_calls(ordered: list) -> list:
 
 
 def _runtime_library_for(ordered: list, arch: str, fmt: str):
-    """(entry, covered names) for the runtime library, or (None, [])."""
+    """(list of lib entries, covered names) for runtime libraries."""
     named = _runtime_word_calls(ordered)
-    if not named:
-        return None, []
-    if fmt != "macho":
-        return None, []
+    if not named or fmt != "macho":
+        return [], []
     libs_out = []
-    covered_all = []
-    # Core library - always add if we need any runtime support?
+    covered = set()
+    # Core library: add when it covers any named call, or when runtime calls
+    # exist (the formal image needs the runtime surface; uncovered names are
+    # reported by the downstream bind/audit path with the library on the line).
     lib = runtime_library(arch, fmt)
     if lib is not None:
         amap = lib.get("map") or {}
-        covered_core = [n for n in named if n in amap]
-        if covered_core:
+        core_covers = [n for n in named if n in amap]
+        if core_covers or named:
             libs_out.append(lib)
-            covered_all.extend(covered_core)
-        elif named:  # if we have any runtime calls and need runtime, maybe still add core?
-            # Try to be compatible with tests expecting core runtime present
-            libs_out.append(lib)
-    # Optional units
+            covered.update(core_covers)
+    # Optional units in registry order, after core. A name is covered by the
+    # first library whose map contains it.
     try:
         import build_config
         from build_stdlib_dylib import optional_runtime_dylib
         for unit in build_config.optional_unit_names():
-            # skip if already covered
-            still = [n for n in named if n not in covered_all]
-            if not still and covered_all:
-                pass  # continue to check
             ns = build_config.optional_unit_namespace(unit)
             if not ns:
                 continue
-            # check if any still-uncovered name belongs to this unit or just any name?
-            candidates = [n for n in (still if still else named) if n.startswith(ns)]
-            if not candidates and still:
-                continue  # be strict
-            if not candidates and not still:
-                # no uncovered but maybe we need to add if names match
-                candidates = [n for n in named if n.startswith(ns)]
-            if not candidates:
+            still = [n for n in named if n not in covered and n.startswith(ns)]
+            if not still:
                 continue
-            try:
-                dylib = optional_runtime_dylib(unit, arch=arch)
-                if not os.path.exists(dylib_manifest_path(dylib)):
-                    runtime_manifest(dylib)
-                mlib = load_dylib_manifests([dylib])[0]
-            except Exception:
-                raise
+            dylib = optional_runtime_dylib(unit, arch=arch)
+            if not os.path.exists(dylib_manifest_path(dylib)):
+                runtime_manifest(dylib)
+            mlib = load_dylib_manifests([dylib])[0]
             mmap = mlib.get("map") or {}
-            covered_unit = [n for n in candidates if n in mmap]
-            if covered_unit:
-                # avoid duplicates
+            unit_covers = [n for n in still if n in mmap]
+            if unit_covers:
                 if mlib not in libs_out:
                     libs_out.append(mlib)
-                covered_all.extend(covered_unit)
+                covered.update(unit_covers)
     except Exception:
         raise
-    if not libs_out or not covered_all:
-        return None, []
-    return libs_out, covered_all
+    if not libs_out or not covered:
+        return [], []
+    return libs_out, [n for n in named if n in covered]
 
 
 def _module_prefix(source_path: str) -> str:
@@ -23485,12 +23465,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                                 if not s.mutable)
 
     # The gimple runtime's C library, on THIS library's link line
-    runtime_libs_res, _covered = _runtime_library_for(ordered, arch, fmt)
-    if runtime_libs_res is not None:
-        if isinstance(runtime_libs_res, list):
-            linked = linked + runtime_libs_res
-        else:
-            linked = linked + [runtime_libs_res]
+    runtime_libs, _covered = _runtime_library_for(ordered, arch, fmt)
+    linked = linked + runtime_libs
     # Same reason and same check as the image path: a sibling library in the
     # wrong container is on this library's `deps` list and will be written into
     # its load commands, so the loader is told to open a file it cannot open.
