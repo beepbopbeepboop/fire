@@ -92,11 +92,11 @@ not just `fire_runtime.h`:
 
 | | count | note |
 |---|---|---|
-| entry points across **12** headers | **897** | `fire_runtime.h` 783, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 16, `fire_ssl.h` 13, `fire_coro.h` 11, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_alloc_census.h` 4, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
+| entry points across **12** headers | **908** | `fire_runtime.h` 794, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 16, `fire_ssl.h` 13, `fire_coro.h` 11, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_alloc_census.h` 4, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
 | **word in, word out** | **411** | every parameter and the return value is one 64-bit word |
-| not word-shaped | **486** | a box crosses the boundary — in an argument, in the return, or both |
+| not word-shaped | **497** | a box crosses the boundary — in an argument, in the return, or both |
 
-So **411 of 897 (45.8%)** is the reachable-surface ceiling. The previous
+So **411 of 908 (45.8%)** is the reachable-surface ceiling. The previous
 revision of this section published 402 of 863 (46.6%), and before that 389 of
 455 (77%) — the word *share* has been stable across recent censuses. Two headers have been added
 since (`fire_coro.h`, `fire_metal.h`), `fire_runtime.h` alone grew by 115

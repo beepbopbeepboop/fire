@@ -1,5 +1,5 @@
 # plan/step-27a: EH runtime design memo (exception object storage, `as e`, superclass matching)
-**Status: DONE (verified by agent, work landed)**
+**Status: DONE 2026-11-07 (measured).** The earlier first-wave stamp had no memo behind it (27b/27c cite a section that did not exist). The section "EH design (step-27a)" is now in `bugs/FORMAL_no_exceptions.md`: the five-program build/run table on both arches (no truth bug; the step's SUSPECT does not hold), Q1 (R1 malloc'd record), Q2 (`e` opaque, `as e` refused), Q3 (answered; `formal/model/eh.py` is exactly the landing-pad table), propagation (second return register as status, raisers only), the proof-side plan, and slices 27d-27g. No source file changed; `test_formal_exceptions.py` 331/331.
 
 Class: hard      Size: M      Depends: 25      Blocks: 27b, 27c
 Source: `bugs/FORMAL_no_exceptions.md` "The next step" item 2; `formal/model/types.py` (`handler_arm_matches` :2712, `CPYTHON_EXCEPTION_BASE` :2490, `exception_base_chain` :2608); `formal/model/module.py` (`try_handler_refusal` :6687, `unemitted_handler_arm` :344, `uncatchable_raise` :830)

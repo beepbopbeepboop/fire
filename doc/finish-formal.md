@@ -252,8 +252,8 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`05b`](../bugs/plan/step-05b-x86-rule-registry.md) | DONE | mid | M | 04a, 04b, 04c, 04d | register the x86-64 rules, and fix three latent soundness holes in their matchers |
 | [`06a`](../bugs/plan/step-06a-arm64-ccmp-encoders.md) | DONE | easy | S | none | arm64 `ccmp` encoders (register and immediate), byte-exact against `as` |
 | [`06b`](../bugs/plan/step-06b-arm64-ccmp-model.md) | DONE | mid | M | 00a, 00b, 06a | `ccmp` in the machine model: `arm64_step` arms, `_STEP_CONDS` rows, `_step_rhs`, `_regs_written` |
-| [`06c`](../bugs/plan/step-06c-arm64-ccmp-lowering.md) | PARTIAL | hard | L | 06a, 06b | lower `if A and B:` (two integer comparisons) to `cmp` + `ccmp` + one `b.cond` |
-| [`06d`](../bugs/plan/step-06d-ccmp-flag-proofs.md) | PARTIAL | hard | L | 06c | the proof generator understands flags set by `ccmp`, then `CCMP_LOWERING` defaults on |
+| [`06c`](../bugs/plan/step-06c-arm64-ccmp-lowering.md) | DONE | hard | L | 06a, 06b | lower `if A and B:` (two integer comparisons) to `cmp` + `ccmp` + one `b.cond` |
+| [`06d`](../bugs/plan/step-06d-ccmp-flag-proofs.md) | DONE | hard | L | 06c | the proof generator understands flags set by `ccmp`, then `CCMP_LOWERING` defaults on |
 | [`07a`](../bugs/plan/step-07a-arm64-csinc-family-model.md) | DONE | mid | M | 00a, 00b | `csinc` / `csinv` / `csneg` in the machine model, step table and fuzzer |
 | [`07b`](../bugs/plan/step-07b-arm64-csinc-family-lowering.md) | DONE | hard | M | 07a | lower `a if c else ~a` to `csinv` (and `+1` / `-a` to `csinc`/`csneg` where no overflow trap is lost) |
 | [`08a`](../bugs/plan/step-08a-arm64-blr-named-unmodelled.md) | DONE | easy | S | none | name `BLR` in `_unmodelled_instruction` (the emitted indirect call has no step and no name) |
@@ -267,12 +267,12 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`11c`](../bugs/plan/step-11c-chr-fold-and-remaining-methods.md) | DONE | mid | S | 11a | `chr(<constant>)` folds; `replace`/`join`/the case-variants refuse naming the buffer correctly |
 | [`12a`](../bugs/plan/step-12a-len-of-known-string.md) | DONE | mid | M | 01a, 01b | `len(<string the image holds>)` is a numeral in the proof model; any other string `len` is refused; the post-extern theorem is not emitted for `strlen` |
 | [`12b`](../bugs/plan/step-12b-strlen-contract-memo.md) | DONE | hard | M | 12a, 01a, 01b | DECISION MEMO — the Lean contract for an extern whose result is the program's answer (`strlen`) |
-| [`12c`](../bugs/plan/step-12c-strlen-contract.md) | PARTIAL | mid | M | 12a, 12b, 01a, 01b | Lean contract for `strlen` as the program's answer (extern contract) |
+| [`12c`](../bugs/plan/step-12c-strlen-contract.md) | DONE | mid | M | 12a, 12b, 01a, 01b | Lean contract for `strlen` as the program's answer (extern contract) |
 | [`13a`](../bugs/plan/step-13a-printf-text-fold.md) | DONE | mid | M | 10 | `%<w>s`, `%-<w>s`, `%.<p>s` on a non-ASCII text the build can SEE are folded to the CPython answer |
 | [`13b`](../bugs/plan/step-13b-subscript-literal-fold.md) | DONE | mid | M | 10 | `<literal>[<int literal>]` on non-ASCII text folds to the one-character string |
 | [`13c`](../bugs/plan/step-13c-runtime-unicode-memo.md) | DONE | hard | M | 11a, 13a, 13b | DECISION MEMO — `%<w>s` / `%.<p>s` and `s[i]` on non-ASCII text the build CANNOT see |
-| [`13d`](../bugs/plan/step-13d-printf-runtime-widths.md) | OPEN | mid | M | 13c | `%<w>.<p>s` on a non-ASCII image with a run-time operand, via star arguments |
-| [`13e`](../bugs/plan/step-13e-subscript-runtime.md) | OPEN | mid | M | 13d | `s[i]` on a non-ASCII image with a run-time receiver or index |
+| [`13d`](../bugs/plan/step-13d-printf-runtime-widths.md) | DONE | mid | M | 13c | `%<w>.<p>s` on a non-ASCII image with a run-time operand, via star arguments |
+| [`13e`](../bugs/plan/step-13e-subscript-runtime.md) | DONE | mid | M | 13d | `s[i]` on a non-ASCII image with a run-time receiver or index |
 | [`14a`](../bugs/plan/step-14a-restore-set-literal-dedup.md) | DONE | easy | S | none | RESTORE the compile-time set-literal dedup that the `formal/model/` package split lost |
 | [`14b`](../bugs/plan/step-14b-set-runtime-dedup-literal.md) | DONE | mid | L | 14a | run-time distinctness for a set literal with non-canonical elements (`{x, x, 2}`), both backends |
 | [`14c`](../bugs/plan/step-14c-set-add.md) | DONE | mid | M | 14b | `set.add(x)` on both backends |
@@ -298,8 +298,8 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`19b`](../bugs/plan/step-19b-link-line-opt-in.md) | DONE | mid | M | 19a | the formal link line opts into the optional unit a word-shaped call names |
 | [`19c`](../bugs/plan/step-19c-sqlite-end-to-end.md) | DONE | easy | S | 19b | a real sqlite3 word-shaped call through a formal executable, and the census numbers |
 | [`20`](../bugs/plan/step-20-mlir-word-ops.md) | DONE | mid | S | 15a | close out the word-valued MLIR ops (the lowering landed; fix the 3 reds and the stale census) |
-| [`22`](../bugs/plan/step-22-singleton-causes.md) | OPEN | mid | L | 15a, 16f, 17, 20 | the singleton direct causes — re-measure, then one verdict per row (LOOP STEP) |
-| [`23`](../bugs/plan/step-23-host-modules.md) | CLAIMED | mid | S | 26 | host-module growth: the per-module round template and the ranked queue |
+| [`22`](../bugs/plan/step-22-singleton-causes.md) | DONE | mid | L | 15a, 16f, 17, 20 | the singleton direct causes — re-measure, then one verdict per row (LOOP STEP) |
+| [`23`](../bugs/plan/step-23-host-modules.md) | DONE | mid | S | 26 | host-module growth: the per-module round template and the ranked queue |
 | [`23a`](../bugs/plan/step-23a-os-process-identity.md) | DONE | mid | S | 26 | os process identity: getpid, getppid, getuid, getpgid, cpu_count |
 | [`23b`](../bugs/plan/step-23b-os-fs-metadata.md) | DONE | mid | M | 26 | os filesystem metadata: access + R_OK/W_OK/X_OK/F_OK, utime, symlink, link, mkfifo, umask |
 | [`23c`](../bugs/plan/step-23c-os-stat-times.md) | DONE | mid | M | 26 | os.path.getmtime/commonpath/sep and os.stat/lstat as per-field functions |
@@ -308,12 +308,12 @@ numbered step; the numbers 01-28 are the first draft's names.
 | [`24`](../bugs/plan/step-24-x86-arch-drift.md) | DONE | easy | S | none | x86-64 arch drift is mostly ALREADY CLOSED: pin it and correct the doc |
 | [`25`](../bugs/plan/step-25-unrepresentable-types.md) | DONE | mid | S | none | `Error` stays unrepresentable: make the refusal true, pin it on both backends |
 | [`26`](../bugs/plan/step-26-host-exception-convention.md) | DONE | mid | M | none | one discoverable host-module failure convention (`hoststatus`) |
-| [`27a`](../bugs/plan/step-27a-eh-design-memo.md) | CLAIMED | hard | M | 25 | EH runtime design memo (exception object storage, `as e`, superclass matching) |
+| [`27a`](../bugs/plan/step-27a-eh-design-memo.md) | DONE | hard | M | 25 | EH runtime design memo (exception object storage, `as e`, superclass matching) |
 | [`27b`](../bugs/plan/step-27b-try-model-translation.md) | DONE | mid | M | 27a | `TryStmt` in the semantic model (`arm64_proof_gen.py`): the sound flat slice |
 | [`27c`](../bugs/plan/step-27c-landing-pad-tables.md) | DONE | mid | M | 27a | landing-pad / personality data structures (pure Python table + test, NO codegen change) |
 | [`28`](../bugs/plan/step-28-absval-frame-peel.md) | DONE | mid | M | 00a | `absval` frame-peel `K` — verify the same-day fix, pin it with a Lean-free test, then close or localise |
 
-**82 step files:** 14 easy, 59 mid, 9 hard. Status: claimed 2, closed as 'not provided' 1, done 73, open 3, partial 3. (Generated by `python3 tools/plan_index.py --write`; do not edit by hand.)
+**82 step files:** 14 easy, 59 mid, 9 hard. Status: closed as 'not provided' 1, done 81. (Generated by `python3 tools/plan_index.py --write`; do not edit by hand.)
 
 <!-- END generated by tools/plan_index.py -->
 
@@ -399,6 +399,7 @@ done. At this writing: 45 DONE, 7 SCAFFOLDED, 6 CLAIMED, 19 OPEN, 1 closed as
   `bugs/plan/WORKER_BRIEF_peephole_rule_proofs.md`; integrated by hand because all six branches inserted at
   one anchor). `lib/Scaffold.lean` now holds only the canary and the two cell-write-back placeholders
   (3 `sorry`). The rules are PROVED but NOT yet live: promotion into `ARM64_RULES`/`X86_RULES` is steps 05a/05b.
+* **All 82 plan steps are done or closed (2026-11-08, measured).** `python3 tools/plan_index.py --check`: done 81, closed as 'not provided' 1 (23d). The last open ones this stretch: 12c now proves the PROGRAM's answer, not only the contract's consequence (arm64): for any post-call state the `strlen` contract allows, the epilogue returns exactly `n` (`<name>_post_extern_strlen_returns`, generic lemmas in `lib/Extern.lean`, both example programs typecheck under Lean with no `sorry`); 27a's EH design memo now exists (the earlier DONE stamp had none behind it); 13d/13e lower `%<w>.<p>s` and `%c` of `s[i]` on run-time strings in a non-ASCII image via the runtime's code-point helpers; step 22 re-measured (41 singleton causes, 7 are real capability gaps); x86-64 `str(n)` no longer builds code that dies of SIGSEGV. WHAT IS NOT DONE, with the measured blocker for each: (a) `wdiff`'s loop back-edge `sorry` -- the only loop contract (`while_dec_exit_contract`, `lib/ProofLib.lean:4787`) takes the body as ONE straight-line `arm64_runs` run (`hbodyRun`), and since the overflow flip the body of `n = n - 1` is split across blocks by the `subs`/`b.vs` trap check, so it needs a multi-block variant of that theorem (a ProofLib edit, which rebuilds the whole library), generator support for the split body, and an `n < 2^63` precondition carried into the universal theorem (a negative counter traps on the machine); (b) DONE: `test_formal_toplevel`'s `conditional_store_uncalled_main` (148/148 now) used to expect exit 0, but `model.module_body` documents that a module of only declarations and foldable constants has NO body and so `main` is the entry; the row, not the rule, is stale (changing the rule would change every formal example) and it cannot use the CPython-agreement helper because the two intentionally disagree; (c) EH slices 27d-27g change the calling convention of raisers on both backends (second return register as status), see the memo in `bugs/FORMAL_no_exceptions.md`; (d) 12c on x86-64 (it emits no post-extern theorem at all) and for externs other than `strlen`; (e) the remaining step-22 capability rows (comptime-parameter iteration, origin inference, caller value types for a generic bare call, by-reference frame receiver, builtin origin aliases, caller-own-generic-parameter calls such as `getsize`->`stat`). In short: the `wdiff` loop back-edge `sorry` (the corpus counts it PASS), the seven C rows of step 22, 12c on x86-64 and for externs other than `strlen`, the EH slices 27d-27g, and three stale expectations in `test_formal_format_conformance.py`.
 * **Bare-call inference, link line, frame contracts, memos (2026-11-07, measured).**
   16c-16f landed: declared-type inference for `x^`/`self.f`/declared-`->`/call-initialised
   locals, bounded parameters bind to a concrete struct and a non-conforming one is refused
@@ -407,13 +408,12 @@ done. At this writing: 45 DONE, 7 SCAFFOLDED, 6 CLAIMED, 19 OPEN, 1 closed as
   `Int` for every annotation but `Int`). 19b/19c: the formal link line opts into optional
   runtime units; sqlite3 word-shaped call runs end to end; ABI census refreshed (897 entry
   points, 411 word-shaped). 18a-d: the one-field mutator contract memo corrected, 18b pinned,
-  18c found landed, 18d's scaffold theorems state real propositions (opaque `CellSetMethod`
-  premise). 12b: extern contracts are HYPOTHESES (`lib/Extern.lean`, sorry-free, registered);
+  18c found landed, 18d: `CellSetMethod` is a definition and `cell_writeback` a proved theorem in `lib/Extern.lean` (the first version's `opaque` failed the library-trust census and was replaced). 12b: extern contracts are HYPOTHESES (`lib/Extern.lean`, sorry-free, registered);
   12c's generator wiring is open. 08c: Reading A (0 of 94 corpus examples emit a BLR; pinned by
-  08d). 13c: run-time code-point walk via computed `%*.*s` star arguments (13d/13e written).
+  08d). 13c/13d/13e: `%<w>.<p>s` on a run-time String name and `%c` of `s[i]` in a non-ASCII image now lower to the star form / `mojo_char_at_str_cp` with widths in characters (both arches, CPython oracle rows, `test_formal_unicode.py` 191 -> 224); other element reads stay refused.
   07b verified (csinv, one CSINV word, proof 0 sorries). 06c: the ccmp lowering existed but was
-  off and its test never ran; it is now opt-in (`FIRE_CCMP_LOWERING=1`), because enabling it
-  makes `both` stop proving (06d: generator support). `wdiff`: total-correctness bridge
+  off and its test never ran; enabling it
+  makes `both` stop proving; 06d fixed the generator (a guard block mis-registered as a short-circuit branch) and the lowering is now ON by default: arm64 corpus PASS 50 -> 55 of 94. `wdiff`: total-correctness bridge
   committed (unsigned `!=`, `n < 2^63` precondition); one loop back-edge `sorry` remains.
 * **The arm64 proof corpus: PASS 15 -> 50 of 94 (2026-11-06, measured, 61 min).**
   `python3 test_formal.py --backend arm64`: PASS=50 KNOWN-GAP=5 FAIL=33

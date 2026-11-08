@@ -1012,7 +1012,7 @@ a NUL-terminated `char *`, so the interned `""` is the answer and `len` of it is
 `model.gimple_runtime_callable(name, provided)` is the whole rule: every type
 crossing the call boundary is one 64-bit word, AND the symbol is on the link
 line. `GIMPLE_LIST_PREFIX` is **gone** — it was a hand-kept list of prefixes
-standing in for a shape, and the shape answers the same question for all 897
+standing in for a shape, and the shape answers the same question for all 908
 entry points instead of the 40-odd names one prefix covered.
 
 The two halves are independent and both are needed, which is what the prefix
@@ -1023,17 +1023,17 @@ because nothing provides it.
 
 | | measured over all 11 headers in `runtime/` |
 |---|---|
-| entry points declared | 897 |
+| entry points declared | 908 |
 | every type crossing the boundary is one word | **411** |
-| a box in an argument or the return | 486 |
+| a box in an argument or the return | 497 |
 | of the 411, refused only for want of a linked library | 411 |
 
-**411 of 897 is what a link line converts into working code with no backend
+**411 of 908 is what a link line converts into working code with no backend
 change at all.** For `mojo_sqlite3_*` it is **16 of 22**.
 
 (Re-measured 2026-11-07 on this tree with `formal.model.runtime_abi()`, which
-is the authority and reads the headers rather than repeating this table: 897
-entry points, 411 word-shaped, 486 with a box. The figures above were right for
+is the authority and reads the headers rather than repeating this table: 908
+entry points, 411 word-shaped, 497 with a box. The figures above were right for
 the tree this section was written on and had been drifting since, which is what
 `test_runtime_header_scan.py`'s census check now prevents — it reads each of
 these numbers out of the file and compares it with the live table, so a comment
@@ -1049,7 +1049,7 @@ heap box" and "for sqlite, **20 of 22** … the only two that are not are
 `mojo_sqlite3_query` and `_query_dict`". Measured, both are off, and the reason
 is worth recording because it is a rule, not a typo:
 
-1. **455 / 352 / 101.** I measure 897 / 703 / 194 by return type alone, and 411
+1. **455 / 352 / 101.** I measure 908 / 707 / 201 by return type alone, and 411
    once the ARGUMENTS are counted too. Neither matches 455/352/101. The
    scanner those numbers were taken with recorded `char *f` as returning `char`
    (see below), so every pointer-returning function was scored as a scalar —
@@ -1482,7 +1482,7 @@ Script: `.tmp/18a/measure.py` (spies `generate_arm64_proof`, calls `_frame_metho
 **Feeds:** 18b (restrict classifier per D1), 18c (load-first rule for cell receiver, constant propagation from `{0:0}`, 1-exit case), 18d (scaffold write-back contract with depth bound as hypothesis and per-exit obligation as `sorry` in `lib/Scaffold.lean`, ledgered).
 
 
-**Status (2026-11-07, step 18d): the two scaffold theorems now state real propositions (see step 18d Status; opaque `CellSetMethod` premise).** Earlier note:
+**Status (2026-11-08, step 18d): reshaped.** `CellSetMethod` is a definition and `cell_writeback` a proved theorem in `lib/Extern.lean`; the two `sorry` scaffold theorems and the `opaque` (which the library-trust census rejects) are gone from `lib/Scaffold.lean`. See the step 18d Status. Earlier note:
 
 **Status (2026-11-05, step 18d):** Scaffold theorems `scaffold_cell_writeback_one_exit` and `scaffold_cell_writeback_multi_exit` added to `lib/Scaffold.lean` (imports `ProofLib`/`X86`/`Peephole` as per scaffold policy; `set_option autoImplicit false`). Depth bound stated as a **theorem hypothesis** (`h_cell : True` as a placeholder to be narrowed to the actual `Frame.*` premise), never an axiom. Theorems end in `by sorry` and are ledgered in `formal/proof_gaps.py::SCAFFOLD_HOLES` under step `18d` (kind `scaffold`). Lean typecheck **handed off** (needs `python3 tools/memslot.py --gb 16 --label lean -- python3 test_formal_proof_gaps.py` run by user/gate worker). 18a–18c complete (classifier restricted per D1, load-first rule added with `is_cell_receiver`), 18d scaffolds the write-back contract obligations.
 
@@ -1713,35 +1713,52 @@ classified as `'int'`". The `range()` result is not classified as a list for
 `len`, which is a gap in the result's classification and not a size question.
 Index a `range()` result rather than measuring it, until that is fixed.
 
-## 3.2 The singleton direct causes (re-measured 2026-11-05, step-22)
+## 3.2 The singleton direct causes (re-measured 2026-11-07, step-22)
 
-**Source:** `bugs/sweeps/sweep-arm-14.txt` (2026-10-05) — used as fallback because re-measurement not performed in this session; each row below must be re-reproduced by `python3 fire.py build --formal --no-prove -o .tmp/row.aout <file>` per step-22 §4a and staleness detected per row.
+**Source:** a fresh arm64 sweep, `bugs/sweeps/sweep-arm-15-step22.txt` (88 direct `CODEGEN:` rows, 46 distinct normalised causes, 41 singletons; the census is `bugs/sweeps/singletons-2026-11-07.txt`, codegen coverage 239/883 = 27.1%). Each row was reproduced with `python3 fire.py build --formal --no-prove <file>`; the per-chunk working files are `bugs/sweeps/step-22-verdicts-{a,b,c,d}.md`. This REPLACES the 2026-11-05 table, which came from the older log, marked all 24 rows S and gave reasons such as "likely" and "pattern match" that no command backed.
 
 | # | file | verdict | message (first 100 chars) | reason / fix | commit |
 |---|------|---------|--------------------------|--------------|--------|
-| 1 | ../new-modular/Mojo/stdlib/std/algorithm/backend/tile.mojo | S | build: tile: 'tile_size_list' has no home: this module declares no module-level name by  | new message differs (name-not-found/home) vs variadic ABI | |
-| 2 | ../new-modular/Mojo/stdlib/std/benchmark/compiler.mojo | S | build: compiler.mojo imports 'std.sys._assembly', which cannot be built either: Slice.write | moved to dependency on std.sys._assembly (FormatStruct bare call) | |
-| 3 | ../new-modular/Mojo/stdlib/std/bit/bit.mojo | S | MonomorphError: count_leading_zeros[...] comptime specialization of a FUNCTION template  | different failure (monomorph) vs missing export is_negative | |
-| 4 | ../new-modular/Mojo/stdlib/std/builtin/_format_float.mojo | S | build: _write_float: `isnan` is called from `std.utils.numerics` (bare call to generic template, | longer message about bare call inference (step-16 family) | |
-| 5 | ../new-modular/Mojo/stdlib/std/builtin/float_literal.mojo | S | builds successfully (exit 0) | file now builds | |
-| 6 | ../new-modular/Mojo/stdlib/std/builtin/len.mojo | S | build: a `...` stands where this path needs instructions to emit, and there are none: a forma | different full message (explains trait vs function) | |
-| 7 | ../new-modular/Mojo/stdlib/std/builtin/none.mojo | S | build: writer.write_string() is a method on a Writer — multi-field struct, receiver is frame addr | detailed message about fd vs frame address | |
-| 8 | ../new-modular/Mojo/stdlib/std/builtin/type_aliases.mojo | S | build: the module-level comptime binding 'Never' is initialized from an MLIR type template: __mlir_type.`!kgen.never` names an MLIR TYPE | different full message | |
-| 9 | ../new-modular/Mojo/stdlib/std/collections/binary_heap.mojo | S | builds successfully (exit 0) | file now builds | |
-| 10 | ../new-modular/Mojo/stdlib/std/collections/type_dict.mojo | S | builds successfully (exit 0) | file now builds | |
-| 11 | ../new-modular/Mojo/stdlib/std/format/repr.mojo | S | build: value.write_repr_to() is a method call on a value, and this backend lowers only append, clear, close, write and string methods | detailed message lists allowed methods | |
-| 12 | ../new-modular/Mojo/stdlib/std/origin/__init__.mojo | S | build: the module-level comptime binding 'AnyOrigin' is initialized from an MLIR attribute template: __mlir_attr[...] | different full message | |
-| 13 | ../new-modular/Mojo/stdlib/std/os/path/path.mojo | S | build: path.mojo imports string_span which imports hashlib.hasher (missing) | moved to dependency/import chain issue | |
-| 14 | ../new-modular/Mojo/stdlib/std/reflection/function.mojo | S | build: function.mojo imports sys.info -> dependency chain to FormatStruct bare call | moved to dependency | |
-| 15 | ../new-modular/Mojo/stdlib/std/simd.mojo | S | likely bare call to generic in std.utils.numerics (like row 4) | pattern match to row 4 | |
-| 16 | ../new-modular/Mojo/stdlib/std/sys/arg.mojo | S | build: arg.mojo imports ffi -> dependency chain (missing modules) | moved to dependency | |
-| 17 | bootstrap_test_classes.mojo | S | build: create_point returns a frame address, and the returned-frame convention needs a caller to reserve a block and pass its address — entry point issue | different full message | |
-| 18 | runtime/stdlib_wrapper.mojo | S | build: main: `now` is called from `time` but `time` declares no function or struct named `now` at all | different reason (name not found) | |
-| 19 | t1.mojo | S | build: sys.exit(): `sys` is a linked module but it exports no `exit` (exit may be excluded by export rule or not defined) | different detailed message | |
-| 20 | test_llm/dumb_gemm.mojo | S | build: [FloatLiteral] * m * k is a REPETITION, count not statically known | different detailed message | |
-| 21 | test_relaxed_imports.mojo | S | build: imports glob -> dependency chain issue | moved to dependency | |
-| 22 | tools/procrun.py | S | build: imports os -> dependency chain issue | moved to dependency | |
-| 23 | unescape_c.py | S | build: sys.stdin reads from imported module sys but sys publishes no stdin (different from module-not-value issue) | different detailed message | |
-| 24 | tools/wave2_extract_shared.py | S | build: imports ast -> dependency chain issue | moved to dependency | |
+| 1 | bootstrap_test_classes.mojo | T | create_point returns a frame address, and the returned-frame convention needs a caller to reserve a block and pass its address — and create_point is this | create_point returns a frame address but is the ENTRY, causing convention mismatch |  |
+| 2 | formal/build.py | T | build: parse error: /Users/mrs/net/chatgpt/claude/mojo-reference2/formal/build.py:19162:19: Unexpected COLON(':') | not Mojo source |  |
+| 3 | formal/hostmods/subprocess.mojo | T | build: run returns a frame address, so it needs one hidden word for the caller's block — and it already takes 14 arguments, which is this path's whole argument | build: run returns a frame address but takes 14 args, exceeding ABI budget |  |
+| 4 | formal/x86_64_decode.py | T | build: decode_one returns a frame address on one path and falls off the end of its body on another, so a caller that reserved a block for the result would read a block nobody wrote: the bytes are whatever the scratch held. Every path that leaves the function must return a frame address, so that the caller's one reservation is the right one — give the last branch a `return the frame in 'decode_one_insn()'` as well, or copy a field out instead of returning the object | not Mojo source |  |
+| 5 | runtime/stdlib_wrapper.mojo | T | build: main: `now` is called, and it is imported from `time`, so the call has to bind a symbol `time` exports. **`time` declares no function or struct named `now` at all** | time is not declared in time module |  |
+| 6 | t1.mojo | T | build: sys.exit(): `sys` is a linked module but it exports no `exit`, so the call has no symbol to bind. What it does export: api_version, byteorder, flush_output, get_coroutine_origin_tracking_depth, get_int_max_str_digits, getdefaultencoding, getfilesystemencodeerrors, getfilesystemencoding, …. A name `doc/ABI.md`'s export rule excludes (a leading `_`, a generic template, an overload, or a C library symbol such as `exit` or `write`) is not advertised | time's `exit` not exported; need proper export rule for sys module |  |
+| 7 | test_arm64_encoders.py | T | build: parse error: test_arm64_encoders.py:933:0: Expected RPAREN got EOF('') | not Mojo source |  |
+| 8 | test_char_star_local_regress.py | T | build: print() cannot tell whether SubscriptExpr is a string or a number on the formal arm64 path, and guessing would print an address as if it were text (or a number as if it were text) | print() cannot reliably determine string vs number on arm64 path |  |
+| 9 | test_dict_literal_container_key_pin.py | T | build: d['a'] is a subscript whose index is a tuple. A value here is one 64-bit word and a list is a flat blob of words, so a tuple index has no representation on this path | tuple index has no representation for dict key lookup |  |
+| 10 | test_exception_object_attributes_regression.py | T | build: f.read() is a method call on a value, and this backend lowers only add, append, clear, close, write (on a file descriptor) and the string methods count, endswith, find, lower, lstrip, rstrip, startswith, strip, upper — the receiver is a name on this path, and 'read' is not one of those methods of those receivers, so adding it to either table would be a guess about what it means on 'int' | f.read() not supported for file-like objects |  |
+| 11 | test_formal_globals.py | T | build: parse error: test_formal_globals.py:2332:0: Expected RPAREN got EOF('') | not Mojo source |  |
+| 12 | test_formal_hostmods_conformance.py | T | build: parse error: Expected ASSIGN got COLON(':') at 1256:28 | Not Mojo source (Python test file swept as Mojo). | 503663bd7 |
+| 13 | test_formal_interop.py | T | build: parse error: Expected ASSIGN got COLON(':') at 577:46 | Not Mojo source (Python test file swept as Mojo). | 503663bd7 |
+| 14 | test_formal_os_backing.py | T | build: parse error: Expected ASSIGN got COLON(':') at 2071:15 | Not Mojo source (Python test file swept as Mojo). | 503663bd7 |
+| 15 | test_formal_shlex.py | T | build: parse error: Expected ASSIGN got COLON(':') at 580:13 | Not Mojo source (Python test file swept as Mojo). | 3484a6f6e |
+| 16 | test_formal_str_methods.py | T | build: parse error: Expected ASSIGN got COLON(':') at 674:27 | Not Mojo source (Python test file swept as Mojo). | 3484a6f6e |
+| 17 | test_llm/dumb_gemm.mojo | T | [FloatLiteral] * m * k is a REPETITION, and this path can only lower one whose count it can read | Runtime repetition count `[0.0]*(m*k)` (lines 49-51) is not a build-time literal; formal frame-only path cannot reserve dynamic slots. | 3484a6f6e |
+| 18 | test_pin_FORMAL_declared_parameter.py | T | build: test_pin_declared_param_fix_present: 'os' has no home: module-level symbol table empty for  | Not Mojo source (Python test file swept as Mojo; build error reflects Python test body). | 5851f1e29 |
+| 19 | test_regress_callable_ctype_param.py | T | build: test_callable_ctype_parameterized: 'types' imported from `mojo.middle`, module-level name o | Not Mojo source (Python test file swept as Mojo). | 5851f1e29 |
+| 20 | test_regress_gencodec_pinned.py | T | build: test_gencodec_compile_exits_0: sys.path reads 'path' out of imported module `sys`, module n | Not Mojo source (Python test file swept as Mojo). | 5851f1e29 |
+| 21 | test_regress_split_coro.py | T | build: __module_body__: sys.path reads 'path' out of imported module `sys`, module not a value thi | Not Mojo source (Python test file swept as Mojo). | 2c0f32aaf |
+| 22 | test_regress_stale_budget_literal_fix.py | T | build: test_gimple_uses_shared_constants_at_named_sites: 'os' has no home: module-level symbol tab | Not Mojo source (Python test file swept as Mojo). | 2c0f32aaf |
+| 23 | test_relaxed_imports.mojo | T | '+' on two strings is refused on this path. A string here is a bare `char *`, so `+` is integer arit | string `+` has no buffer on this path; the file concatenates strings (cmd: fire.py build --formal --no-prove, same message as the sweep) |  |
+| 24 | tmpe7tqx39y.mojo | T | main: os.O_RDWR reads 'O_RDWR' out of the imported module `os`, and a module is not a value this pat | `os.O_RDWR`/`O_CREAT` are deliberately absent from `formal/hostmods/os/__init__.mojo` (documented NOT PROVIDED, step 23d): no writable-descriptor producer exists, so the flags would be unreachable stubs |  |
+| 25 | tools/test_swarm_class_refresh.py | T | parse error: /Users/mrs/net/chatgpt/claude/mojo-reference2/tools/test_swarm_class_refresh.py:106:61: | not Mojo source (a Python file swept as Mojo; the parse error is at a Python annotation) |  |
+| 26 | unescape_c.py | M | __module_body__: sys.stdin reads 'stdin' out of the imported module `sys`, and a module is not a val | message fixed: it cited a deleted doc followed by twelve repeated `(deleted)` tags (a doc rewriter's leftover); collapsed to one tag in the producers (`formal/model/calls.py`, `module.py`, `frames.py`, `build.py`, `macho_linker.py`) and in the tests that quote it; `sys.stdin` itself is a true limit (`sys` deliberately does not declare `stdin`, its hostmod docstring says why) | 0efcafd25 |
+| 27 | ../new-modular/Mojo/stdlib/std/algorithm/backend/tile.mojo | C | tile: 'tile_size_list' has no home: this module declares no module-level name by that spelling, and  | `comptime for tile_size in tile_size_list` (line 79) iterates a comptime `List[Int]` struct parameter; the path binds no comptime parameter values. Needs comptime-parameter iteration. Size L |  |
+| 28 | ../new-modular/Mojo/stdlib/std/benchmark/compiler.mojo | T | inlined_assembly['', NoneType, 'r,~{memory}', True] is a subscript whose index is a tuple. A value h | `inlined_assembly[...]` is MLIR inline assembly spelled as a tuple-index subscript; there is no MLIR on this path |  |
+| 29 | ../new-modular/Mojo/stdlib/std/benchmark/quick_bench.mojo | C | QuickBench.run: `keep` is called, and it is imported from `.compiler`, so the call has to bind a sym | bare call `keep(x)` where `keep[T: AnyType, origin: Origin, //](ref[origin] value: T)` (compiler.mojo:29) needs `T` AND an origin parameter inferred from a `ref` argument; 16d infers only declared types, not origins. Needs origin inference. Size M |  |
+| 30 | ../new-modular/Mojo/stdlib/std/builtin/builtin_slice.mojo | T | Slice.write_to: `FormatStruct` is called, and it is imported from `std.format._utils`, so the call h | `FormatStruct(writer, ...)` with `writer: Some[Writer]`: an existential, never bound (16e Q2, B1); true until the caller is monomorphised |  |
+| 31 | ../new-modular/Mojo/stdlib/std/builtin/_format_float.mojo | C | _write_float: `isnan` is called, and it is imported from `std.utils.numerics`, so the call has to bi | bare call `isnan(x)` to a generic in `std.utils.numerics` (numerics.mojo:531) from a context whose argument type is not written; needs the caller's value type (16d reads declared types only). Size M |  |
+| 32 | ../new-modular/Mojo/stdlib/std/builtin/len.mojo | T | a `...` stands where this path needs instructions to emit, and there are none: a formal image is a c | `len.mojo` declares functions whose body is `...` (the language's no-implementation marker); a formal image needs bodies, and the message says it is refused whether or not it is called |  |
+| 33 | ../new-modular/Mojo/stdlib/std/builtin/none.mojo | C | writer.write_string() is a method on a Writer — a multi-field struct, so on this path the receiver i | `writer.write_string()` where `writer` is a multi-field `Writer` struct passed by reference: the by-reference frame receiver work (steps 18a-d). Size L |  |
+| 34 | ../new-modular/Mojo/stdlib/std/builtin/type_aliases.mojo | T | the module-level comptime binding 'Never' is initialized from an MLIR type template: __mlir_type.`!k | module-level `comptime Never = __mlir_type.`!kgen.never``: an MLIR type, not a value |  |
+| 35 | ../new-modular/Mojo/stdlib/std/format/repr.mojo | T | value.write_repr_to() is a method call on a value, and this backend lowers only add, append, clear,  | `value.write_repr_to(...)` is a method call on a generic value; the backend lowers a fixed set of methods and a trait-bound generic receiver has none |  |
+| 36 | ../new-modular/Mojo/stdlib/std/memory/alloc.mojo | T | ThinAllocation_1_T_1_T.write_to: `FormatStruct` is called, and it is imported from `std.format._util | `FormatStruct(writer, ...)` with `writer: Some[Writer]`: existential, never bound (16e Q2, B1); the alloc row moved from `dealloc` to here after 16d |  |
+| 37 | ../new-modular/Mojo/stdlib/std/origin/__init__.mojo | T | the module-level comptime binding 'AnyOrigin' is initialized from an MLIR attribute template: __mlir | module-level `comptime AnyOrigin = __mlir_attr[...]`: an MLIR attribute template, no MLIR on this path |  |
+| 38 | ../new-modular/Mojo/stdlib/std/os/path/path.mojo | C | getsize: `stat` is called, and it is imported from `..fstat`, so the call has to bind a symbol `..fs | `stat` is `def stat[PathLike: stdPathLike](path: PathLike) raises -> stat_result` (`std/os/fstat.mojo:179`), a GENERIC template: the message is right (a bare call to a template asks for no instantiation). The caller `getsize` passes an argument typed by the CALLER'S OWN generic parameter, which 16c refuses by design ("the caller must be instantiated first"), so inference cannot bind `PathLike` here. Corrected 2026-11-08 from an earlier guess about relative-parent imports, which was wrong. Needs caller monomorphisation. Size L |  |
+| 39 | ../new-modular/Mojo/stdlib/std/random/_rng.mojo | M | build: _PhiloxWrapper.__init__: `PhiloxRandom` is called, and it is imported from `.philox`, so the call has to bind a symbol `.philox` exports. | FIXED (commit below): `_rng.mojo:32` is `from .philox import Random as PhiloxRandom`; the export rule was asked by the importer's ALIAS, so the refusal claimed `.philox` declares no such name, which was false of the file. It is now asked by the defining name `Random` and says so ("`PhiloxRandom` is this file's own alias for `Random` ..."); the real reason is that `Random` is a generic template (the bare-call inference gap, as rows 29/31). Pin: `test_formal_monomorph.py` `a refusal for an aliased import names the alias and the real name`. | c40d4bd0b |
+| 40 | ../new-modular/Mojo/stdlib/std/sys/arg.mojo | C | Span[StaticString, ImmStaticOrigin] is a compile-time explicit-parameter list on a generic, not a su | `Span[StaticString, ImmStaticOrigin]`: `ImmStaticOrigin` is a bare comptime name from the builtin origin module that this image cannot resolve. Needs builtin origin aliases. Size M |  |
+| 41 | ../new-modular/Mojo/stdlib/std/utils/_serialize.mojo | T | _serialize_elements[serialize_fn, True] is a compile-time explicit-parameter list on a generic, not  | `_serialize_elements[serialize_fn, True]`: `serialize_fn` is a comptime FUNCTION-valued parameter; no runtime word |  |
 
-**Totals:** T=0 M=0 S=24 C=0
+**Totals:** T=33 M=2 S=0 C=6 (41 rows). (Row 39 moved from C to M on 2026-11-08.) Most T rows are Python files the sweep's repo population feeds to the Mojo front end ("not Mojo source"); the C rows are the real work list: comptime-parameter iteration (tile.mojo), origin inference (`keep`), caller value types for a generic bare call (`isnan`), the by-reference frame receiver (none.mojo), aliased and relative-parent imports (`_rng.mojo`, `path.mojo`), and builtin origin aliases (`arg.mojo`).

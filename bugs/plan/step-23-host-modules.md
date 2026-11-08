@@ -1,5 +1,5 @@
 # plan/step-23: host-module growth: the per-module round template and the ranked queue
-**Status: DONE (verified by agent, work landed)**
+**Status: DONE 2026-11-08 (measured).** The round template is what 23a-23e executed, and all five rounds landed or are closed with a reason: 23a DONE (getpid, getppid, getuid, getpgid, cpu_count), 23b DONE (access, utime, symlink, link, mkfifo, umask, F_OK..X_OK), 23c DONE with two recorded deviations (stat times), 23d CLOSED AS 'NOT PROVIDED' (file-descriptor I/O: no writable-descriptor producer exists), 23e DONE (kill, killpg, setsid, defpath, and the documented refusals for fork/exec/wait/system). `test_formal_os.py`: 12/12 groups pass on the current tree. Future module rows (the ranked queue) follow the work order below verbatim, one module per round.
 
 Class: mid      Size: S      Depends: 26      Blocks: 23a, 23b, 23c, 23d, 23e
 Source: `bugs/FORMAL_known_limits.md` §6.3-6.4 (host-import); `bugs/sweeps/sweep-arm-14-after-the-max-min-fix.txt` lines 753-760
