@@ -11037,6 +11037,58 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                         'char *', f"mojo_list_get_str ({ov}, {idx64})")
                 return 'int64_t', gen._new_val(
                     'int64_t', f"mojo_list_get_int ({ov}, {idx64})")
+        # A tuple (or any list with per-slot C types recorded) subscripted at
+        # a compile-time constant index: the slot's own C type is the answer.
+        # This must run BEFORE the generic `_maybe_kinds_vals` boxed read,
+        # because `mojo_list_get_boxed` returns a raw container pointer for a
+        # nested-list slot (MOJO_KIND_LIST is "its own answer") while the
+        # lowering would still type it as a boxed int64_t — so `print(t[0])`
+        # on `t = ([1, 2], 3)` printed the list's address as a decimal instead
+        # of `[1, 2]` (`test_runtime_diff.py::tuple_with_a_nested_container_
+        # slot`). `_tuple_slot_types` carries the static C type; use it and
+        # propagate the slot value's nested tracking the same way the uniform
+        # pointer-element path does below.
+        _ts = getattr(gen, '_tuple_slot_types', {}).get(ov)
+        if _ts and isinstance(node.index, gimple_ctypes.IntLiteral):
+            _si = node.index.value
+            if 0 <= _si < len(_ts):
+                _sct = _as_str(_ts[_si])
+                idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
+                if _sct == 'double':
+                    return 'double', gen._new_val(
+                        'double', f"mojo_list_get_double ({ov}, {idx64})")
+                if _sct == 'char *':
+                    return 'char *', gen._new_val(
+                        'char *', f"mojo_list_get_str ({ov}, {idx64})")
+                if _sct == 'MojoBytes *':
+                    _bt = gen._new_val('int64_t',
+                                       f"mojo_list_get_int ({ov}, {idx64})")
+                    return 'MojoBytes *', gen._new_val(
+                        'MojoBytes *', f"(MojoBytes *)(uintptr_t){_bt}")
+                if _sct == '_Bool':
+                    return '_Bool', gen._new_val(
+                        '_Bool', f"(_Bool) mojo_list_get_int ({ov}, {idx64})")
+                t = gen._new_val('int64_t', f"mojo_list_get_int ({ov}, {idx64})")
+                if _sct and _sct.endswith(' *'):
+                    gen._actual_types[t] = _sct
+                    cast_t = gen._new_val(_sct, f'({_sct}){t}')
+                    gen._actual_types[cast_t] = _sct
+                    if _sct == 'MojoList *':
+                        if ov in gen._tuple_slot_types:
+                            gen._tuple_slot_types[cast_t] = gen._tuple_slot_types[ov]
+                            gen._tuple_slot_types[t] = gen._tuple_slot_types[ov]
+                        if ov in gen._nested_elem_types:
+                            gen._elem_types[cast_t] = gen._nested_elem_types[ov]
+                            gen._elem_types[t] = gen._nested_elem_types[ov]
+                        else:
+                            gen._elem_types[t] = gen._elem_types.get(ov, 'int64_t')
+                            if gen._elem_types[t] in ('int64_t',) and ov in gen._elem_types:
+                                gen._elem_types[cast_t] = gen._elem_types[ov]
+                    if _sct == 'MojoDict *' and ov in gen._dict_val_types:
+                        gen._dict_val_types[cast_t] = gen._dict_val_types[ov]
+                    return _sct, cast_t
+                _mark_unknown_list_elem(gen, ov, t)
+                return 'int64_t', t
         suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
         idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
         # A list that records its OWN per-slot kinds, read at an index that is
