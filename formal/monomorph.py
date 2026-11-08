@@ -1366,6 +1366,10 @@ def _inferred_binding_ok(binding, enclosing_tparams) -> bool:
             return False
         if vs.startswith("Self."):
             return False
+        # An existential (`Some[Writer]`) is not a concrete type: binding the
+        # template's parameter to it would invent an instantiation (16e, Q2 B1).
+        if re.match(r"^Some\b", vs):
+            return False
     return True
 
 
@@ -1504,15 +1508,12 @@ def infer_bare_call(consumer_stmts, enclosing_stmt, call, template_src, kind, mo
         has_comptime_default = any(
             d and str(d).strip() and not _default_text_is_type_spelling(str(d))
             for d in defaults.values())
-        # Skip fast path when arg annotations are caller's own template params
-        # (defect #3) or Self.T - elaborate.infer_type_args can mis-map them.
-        risky_ann = any(
-            isinstance(a, str) and (a.strip() in enclosing_tparams or a.strip().startswith('Self.'))
-            for a in arg_ctypes if a)
-        if not has_kwargs and not has_literal and not has_comptime_default and not risky_ann:
-            inferred = elaborate.infer_type_args(template_src, arg_ctypes)
-            if inferred and _inferred_binding_ok(dict(zip(params, inferred)), enclosing_tparams):
-                return tuple(inferred)
+        # There is deliberately NO call to `elaborate.infer_type_args` here (16e
+        # review): it unifies against C TYPES, and `c_to_mojo` maps every spelling
+        # it does not know (`Float64`, `Bool`, a struct name) to `Int`, so feeding
+        # it the argument's declared annotation bound `T := Int` for anything but
+        # `Int` -- `ident(x)` with `x: Float64` printed the bit pattern.  The
+        # annotation reader below binds the annotation itself.
         binding = _bind_from_annotations(call, declared, template_src, params)
         if all(p in binding for p in params):
             if not _inferred_binding_ok(binding, enclosing_tparams):

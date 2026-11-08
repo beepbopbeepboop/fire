@@ -16734,8 +16734,20 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                                                       import_aliases)):
                     rule, declared = M.export_rule_for(
                         cname, getattr(csym, "module", None), link_line)
+                    # 16e (Q2 B1): the call's arguments declared `Some[...]`
+                    # are existentials, and the refusal says so.
+                    from formal import monomorph as _MMx
+                    _decl = _MMx._declared_types_in_scope(None, fn)
+                    _call = next((c for c in M.iter_nodes(fn.body)
+                                  if isinstance(c, F.CallExpr)
+                                  and c.func is node), None)
+                    _ex = tuple(
+                        a.name for a in (getattr(_call, "args", None) or [])
+                        if isinstance(a, F.IdentExpr)
+                        and re.match(r"^Some\b", str(_decl.get(a.name) or "")))
                     raise CodegenError(M.imported_callee_refusal(
-                        cname, csym, fn.name, rule=rule, declared=declared))
+                        cname, csym, fn.name, rule=rule, declared=declared,
+                        existential_args=_ex))
                 continue
             name = node.name
             if effects_lowered and name.startswith(M.MLIR_DIALECT_PREFIX):

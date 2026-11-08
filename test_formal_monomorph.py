@@ -457,6 +457,94 @@ def test_a_trait_bound_violation_is_refused_by_name(tmpdir):
               f"[{arch}] fell through to `specialization_call_refusal`: {text.strip()[-400:]}")
 
 
+BOUNDED_CALL_LIB = BOUNDED_LIB + """
+
+def greet_it[T: Greet](g: T) -> Int:
+    return g.hello()
+"""
+
+
+def test_a_bare_call_binds_the_declared_annotation_not_int(tmpdir):
+    """16e review finding: the bare-call fast path fed Mojo annotations to
+    `elaborate.infer_type_args`, which takes C types, and `c_to_mojo` maps every
+    unknown spelling (`Float64`, `Bool`, a struct) to `Int` -- so `T` silently
+    became `Int` for anything but `Int`.  Decision-level, because printing a
+    Float64 from a generic return is a separate pre-existing gap (it prints the
+    bit pattern even for the explicit `ident[Float64](x)`)."""
+    import formal.monomorph as MM
+    import fire_compiler as F
+    from fire_compiler import py_tokenize, Parser
+    from formal import model as M
+    lib = "def ident[T: AnyType](v: T) -> T:\n    return v\n"
+    for ann, want in (("Float64", ("Float64",)), ("Bool", ("Bool",)),
+                      ("String", ("String",)), ("Int", ("Int",))):
+        prog = f"def main():\n    var x: {ann} = 0\n    var y = ident(x)\n"
+        stmts = Parser(py_tokenize(prog)).parse_module()
+        main = stmts[0]
+        call = [n for n in M.iter_nodes(main.body) if isinstance(n, F.CallExpr)][0]
+        got = MM.infer_bare_call(stmts, main, call, lib, MM.KIND_FN)
+        check(got == want, f"`x: {ann}` bound T to {got!r}, expected {want!r}")
+
+
+def test_a_bare_call_binds_a_bounded_parameter_to_a_conforming_struct(tmpdir):
+    """16e (Q2, B2 for a concrete declared struct): `greet_it(d)` with
+    `d: Dog` binds `T := Dog` and `Dog` conforms to `T: Greet`."""
+    prog = ("from boundlib import Dog, greet_it\n"
+            "\n"
+            "def main():\n"
+            "    var d: Dog = Dog()\n"
+            "    print(greet_it(d))\n")
+    cpython = ("class Dog:\n"
+               "    def hello(self):\n"
+               "        return 1\n"
+               "\n"
+               "def greet_it(g):\n"
+               "    return g.hello()\n"
+               "\n"
+               "def main():\n"
+               "    d = Dog()\n"
+               "    print(greet_it(d))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm16e_ok", BOUNDED_CALL_LIB, prog,
+                            cpython, libname="boundlib.mojo")
+        check(got == "1\n", f"[{arch}] printed {got!r}, expected '1\\n'")
+
+
+def test_a_bare_call_with_a_non_conforming_struct_is_refused(tmpdir):
+    """16e: `greet_it(c)` with `c: Cat` (no `hello`) is refused by name."""
+    prog = ("from boundlib import Cat, greet_it\n"
+            "\n"
+            "def main():\n"
+            "    var c: Cat = Cat(1)\n"
+            "    print(greet_it(c))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        text = run_pair_case(tmpdir, arch, "mm16e_bad", BOUNDED_CALL_LIB, prog,
+                             "", expect_ok=False, libname="boundlib.mojo")
+        check("does not conform to trait 'Greet'" in text,
+              f"[{arch}] the refusal does not name the trait: {text.strip()[-500:]}")
+
+
+def test_a_bare_call_with_an_existential_argument_is_refused_by_name(tmpdir):
+    """16e (Q2, B1): an argument declared `Some[Greet]` is an existential, not a
+    concrete struct: `T` is never bound to `Some[...]` or to the trait name."""
+    prog = ("from boundlib import Greet, greet_it\n"
+            "\n"
+            "def run(g: Some[Greet]) -> Int:\n"
+            "    return greet_it(g)\n"
+            "\n"
+            "def main():\n"
+            "    pass\n")
+    for arch in ARCHES:
+        fresh_cas()
+        text = run_pair_case(tmpdir, arch, "mm16e_some", BOUNDED_CALL_LIB, prog,
+                             "", expect_ok=False, libname="boundlib.mojo")
+        check("EXISTENTIAL" in text and "`g`" in text,
+              f"[{arch}] the refusal does not name the existential argument: "
+              f"{text.strip()[-600:]}")
+
+
 def test_a_conforming_type_argument_is_still_instantiated(tmpdir):
     prog = ("def main():\n"
             "    var b = Box[Dog]()\n"
@@ -4469,6 +4557,14 @@ TESTS = [
      test_a_comptime_value_default_leaves_the_bare_call_refused),
     ("a callee's own parameter is not an inference",
      test_a_callees_own_parameter_is_not_an_inference),
+    ("a bare call binds the declared annotation, not Int",
+     test_a_bare_call_binds_the_declared_annotation_not_int),
+    ("a bare call binds a bounded parameter to a conforming struct",
+     test_a_bare_call_binds_a_bounded_parameter_to_a_conforming_struct),
+    ("a bare call with a non-conforming struct is refused",
+     test_a_bare_call_with_a_non_conforming_struct_is_refused),
+    ("a bare call with an existential argument is refused by name",
+     test_a_bare_call_with_an_existential_argument_is_refused_by_name),
     ("a local named like a function is not its return type",
      test_a_local_named_like_a_function_is_not_its_return_type),
     ("a declared return and a transfer build end to end",

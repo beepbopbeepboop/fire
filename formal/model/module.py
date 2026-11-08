@@ -1994,7 +1994,29 @@ def _generic_inference_tail(name: str) -> str:
 
 
 def imported_callee_refusal(name: str, sym, fn_name: str,
-                            rule: str = None, declared=None) -> str:
+                            rule: str = None, declared=None,
+                            existential_args=()) -> str:
+    """See `_imported_callee_refusal`; `existential_args` names the call's
+    arguments declared `Some[...]` (16e, Q2 B1), which adds the sentence that is
+    true of them: an existential is not a concrete type, so no instantiation can
+    be inferred from it."""
+    text = _imported_callee_refusal(name, sym, fn_name, rule=rule,
+                                    declared=declared)
+    if existential_args:
+        text += (" The argument" + ("s " if len(existential_args) > 1 else " ")
+                 + ", ".join(f"`{a}`" for a in existential_args)
+                 + " "
+                 + ("are" if len(existential_args) > 1 else "is")
+                 + " declared `Some[...]`: an EXISTENTIAL, not a concrete struct, "
+                 "so the template's type parameter cannot be bound to it "
+                 "(binding it to `Some[...]` or to the trait name would invent "
+                 "an instantiation the callee never sees). Declare the "
+                 "argument with a concrete type, or monomorphise the caller.")
+    return text
+
+
+def _imported_callee_refusal(name: str, sym, fn_name: str,
+                             rule: str = None, declared=None) -> str:
     """The diagnostic for a CALL to a name the defining module does not export.
 
     `rule` is the ONE rule `doc/ABI.md`'s export rule applied to this name,
