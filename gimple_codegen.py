@@ -4545,6 +4545,9 @@ class GimpleGen:
     def _lower_builtin_dict(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_dict(self, node)
 
+    def _lower_builtin_frozendict(self, node: CallExpr) -> tuple[str, str]:
+        return ggc._lower_builtin_frozendict(self, node)
+
     def _lower_builtin_list(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_list(self, node)
 

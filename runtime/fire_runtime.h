@@ -1463,9 +1463,26 @@ typedef struct {
      * a wild read, not merely a wrong string. Recorded from the compile-time
      * type, on the value, it has neither failure mode. */
     char      *(*val_repr)(int64_t);
+    /* Nonzero when this is a Python 3.15 `frozendict` (immutable). Shares the
+     * same MojoDict representation and registry as a mutable dict so read
+     * operations and type dispatch stay simple; mutating operations must check
+     * this flag and raise TypeError/AttributeError as CPython does. Appended
+     * so existing field offsets are unchanged. */
+    int         frozen;
 } MojoDict;
 
 MojoDict   *mojo_dict_new(void);
+MojoDict   *mojo_frozendict_new(void);
+MojoDict   *mojo_frozendict_from_dict(MojoDict *src);
+MojoDict   *mojo_frozendict_copy(MojoDict *d);
+MojoDict   *mojo_frozendict_from_pairs(MojoList *pairs);
+MojoDict   *mojo_dict_fromkeys(MojoList *keys, int64_t value, int64_t val_kind, char *val_str);
+MojoDict   *mojo_frozendict_fromkeys(MojoList *keys, int64_t value, int64_t val_kind, char *val_str);
+MojoDict   *mojo_dict_fromkeys_on(MojoDict *self, MojoList *keys, int64_t value, int64_t val_kind, char *val_str);
+int         mojo_is_frozen_dict(MojoDict *d);
+int64_t     mojo_frozendict_hash(MojoDict *d);
+void        mojo_dict_set_frozen(MojoDict *d, int frozen);
+void        mojo_frozendict_check_no_mut_method(MojoDict *d, const char *method);
 /* `os.environ` as a VALUE (the mapping). The per-key idioms
  * (`os.environ.get(k)`, `os.environ[k]`, `k in os.environ`,
  * `os.environ[k] = v`) are lowered to mojo_c_getenv by ast_rewriter.py

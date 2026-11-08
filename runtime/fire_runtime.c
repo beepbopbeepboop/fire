@@ -7049,6 +7049,7 @@ void mojo_dict_init(MojoDict *d)
     d->used     = 0;
     d->next_seq = 0;
     d->val_repr = NULL;
+    d->frozen   = 0;
     d->slots    = d->inl;       /* the first table lives inside the struct */
     memset(d->inl, 0, sizeof d->inl);
     _pr_add(&_reg_dict, (uint64_t)(uintptr_t)d);
@@ -7066,6 +7067,27 @@ MojoDict *mojo_dict_new(void)
     MojoDict *d = malloc(sizeof(MojoDict));
     mojo_dict_init(d);
     return d;
+}
+
+int mojo_is_frozen_dict(MojoDict *d) { return d ? d->frozen : 0; }
+
+MojoDict *mojo_frozendict_new(void)
+{
+    MojoDict *d = mojo_dict_new();
+    if (d) d->frozen = 1;
+    return d;
+}
+
+MojoDict *mojo_frozendict_from_dict(MojoDict *src)
+{
+    MojoDict *out = mojo_frozendict_new();
+    if (src) {
+        int was = out->frozen;
+        out->frozen = 0; /* allow mojo_dict_update to populate */
+        mojo_dict_update(out, src);
+        out->frozen = was;
+    }
+    return out;
 }
 
 void mojo_dict_free(MojoDict *d)
@@ -7199,6 +7221,10 @@ static void _dict_set_ik(MojoDict *d, int64_t k, int64_t val, int64_t kind);
 static void _dict_set_raw_seq_kind_k(MojoDict *d, char *key, int64_t val,
                                      int64_t seq, int64_t kind, int64_t keykind)
 {
+    if (d && d->frozen) {
+        mojo_raise_type_error((char *)"'frozendict' object does not support item assignment");
+        return;
+    }
     if (d->used * 2 >= d->cap) _dict_grow(d);
     if (keykind == 2) keykind = 0;   /* a re-insert of an integer slot: the string domain, re-normalised below */
     _DictSlot *sl = _dict_find_k(d, key, keykind);
@@ -9651,8 +9677,14 @@ int mojo_isinstance_p(int64_t obj, int type_id) {
             && !mojo_is_tuple((MojoList *)(intptr_t)obj);
     if (type_id == 7)
         return mojo_is_registered_set(obj);
-    if (type_id == 6)
-        return mojo_is_registered_dict(obj);
+    if (type_id == 6) {  /* dict: mutable mapping, NOT a frozendict (Python 3.15). */
+        if (!mojo_is_registered_dict(obj)) return 0;
+        return !mojo_is_frozen_dict((MojoDict *)(intptr_t)obj);
+    }
+    if (type_id == 10) { /* frozendict (Python 3.15): immutable mapping. */
+        if (!mojo_is_registered_dict(obj)) return 0;
+        return mojo_is_frozen_dict((MojoDict *)(intptr_t)obj);
+    }
     if (type_id == 8) {  /* tuple: a registered MojoList carrying the tuple marker */
         if (!mojo_is_registered_list(obj)) return 0;
         return mojo_is_tuple((MojoList *)(intptr_t)obj);
@@ -11181,10 +11213,92 @@ int64_t mojo_hash_str(char *s) {
     return (int64_t)_str_hash(s);
 }
 
+static int64_t _mojo_hash_combine_pair(int64_t h, int64_t kh, int64_t vh) {
+    uint64_t ph = (uint64_t)kh;
+    uint64_t x = (uint64_t)vh;
+    ph ^= x + 0x9e3779b97f4a7c15ULL + (ph << 6) + (ph >> 2);
+    return h + (int64_t)ph;
+}
+
+static int64_t _mojo_hash_slot_word(int64_t v, int64_t kind) {
+    switch (kind) {
+        case 1: { /* double bits -> hash as float-like */
+            double dv; memcpy(&dv, &v, sizeof(dv));
+            /* normalize -0.0 */
+            if (dv == 0.0) dv = 0.0;
+            /* if integral, hash like int where reasonable */
+            if (dv == (double)(int64_t)dv && dv >= -9007199254740991.0 && dv <= 9007199254740991.0)
+                return (int64_t)dv;
+            uint64_t bits; memcpy(&bits, &dv, sizeof(bits));
+            return (int64_t)bits;
+        }
+        case 2: return mojo_hash_str((char *)(intptr_t)v);
+        case 3: return v ? 1 : 0;
+        case 4: return 0xFCA86420LL; /* arbitrary stable None-ish hash */
+        case 0:
+            if (v == 0) return 0;
+            if (v > 65536) {
+                if (mojo_is_registered_dict(v)) {
+                    MojoDict *fd = (MojoDict *)(intptr_t)v;
+                    if (fd->frozen) return mojo_frozendict_hash(fd);
+                    mojo_raise_type_error((char *)"unhashable type: 'dict'");
+                    return 0;
+                }
+                if (mojo_is_registered_list(v) || mojo_is_registered_set(v)) {
+                    mojo_raise_type_error(mojo_is_registered_list(v)
+                        ? (char *)"unhashable type: 'list'"
+                        : (char *)"unhashable type: 'set'");
+                    return 0;
+                }
+                if (mojo_read_type_tag_safe(v) != 0) return v;
+                return mojo_hash_str((char *)(intptr_t)v);
+            }
+            return v;
+        default:
+            if (v > 65536) {
+                if (mojo_is_registered_dict(v)) {
+                    MojoDict *fd = (MojoDict *)(intptr_t)v;
+                    if (fd->frozen) return mojo_frozendict_hash(fd);
+                    mojo_raise_type_error((char *)"unhashable type: 'dict'");
+                    return 0;
+                }
+            }
+            return v;
+    }
+}
+
+int64_t mojo_frozendict_hash(MojoDict *d) {
+    if (!d) return 0;
+    int64_t h = 0x345678;
+    for (int64_t i = 0; i < d->cap; i++) {
+        _DictSlot *sl = &d->slots[i];
+        if (!sl->key) continue;
+        int64_t kh;
+        if (sl->keykind == 2) kh = sl->ikey;
+        else if (sl->keykind == 3) kh = 0xFCA86420LL;
+        else kh = mojo_hash_str(mojo_dict_slot_key(d, i));
+        int64_t vh = _mojo_hash_slot_word(sl->val, sl->kind);
+        h = _mojo_hash_combine_pair(h, kh, vh);
+    }
+    /* mix, avoid -1 sentinel used by some hash impls */
+    uint64_t x = (uint64_t)h;
+    x ^= x >> 33; x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    if (x == (uint64_t)-1) x = (uint64_t)-2;
+    return (int64_t)x;
+}
+
 int64_t mojo_hash(int64_t val) {
     if (val == 0) return 0;
     if (val > 65536) {
-        if (mojo_is_registered_list(val) || mojo_is_registered_dict(val))
+        if (mojo_is_registered_dict(val)) {
+            MojoDict *d = (MojoDict *)(intptr_t)val;
+            if (d->frozen) return mojo_frozendict_hash(d);
+            mojo_raise_type_error((char *)"unhashable type: 'dict'");
+            return 0;
+        }
+        if (mojo_is_registered_list(val))
             return val;
         if (mojo_read_type_tag_safe(val) != 0)
             return val;
@@ -12204,6 +12318,8 @@ static void _dict_remove_slot(MojoDict *d, _DictSlot *sl) {
  * absent-box convention every mojo_dict_get_* already uses. */
 static int64_t _dict_pop_k(MojoDict *d, char *key, int64_t keykind, int64_t dflt) {
     if (!d) return dflt;
+    if (d->frozen)
+        mojo_raise_type_error((char *)"'frozendict' object does not support item deletion");
     _DictSlot *sl = _dict_lookup_k(d, key, keykind);
     if (!sl) return dflt;
     int64_t val = sl->val;
@@ -12242,6 +12358,8 @@ char *mojo_dict_pop_str(MojoDict *d, char *key, char *dflt) {
 
 double mojo_dict_pop_double(MojoDict *d, char *key, double dflt) {
     if (!d) return dflt;
+    if (d->frozen)
+        mojo_raise_type_error((char *)"'frozendict' object does not support item deletion");
     _DictSlot *sl = _dict_lookup_k(d, key, 0 /* str key */);
     if (!sl) return dflt;
     double v;
@@ -12253,15 +12371,48 @@ double mojo_dict_pop_double(MojoDict *d, char *key, double dflt) {
 MojoDict *mojo_dict_copy(MojoDict *d) {
     MojoDict *out = mojo_dict_new();
     if (d) mojo_dict_update(out, d);
+    if (d && d->frozen) out->frozen = 1;
     return out;
+}
+
+/* frozendict.copy() returns a shallow copy as a frozendict in CPython. */
+MojoDict *mojo_frozendict_copy(MojoDict *d) {
+    return mojo_frozendict_from_dict(d);
+}
+
+MojoDict *mojo_frozendict_from_pairs(MojoList *pairs) {
+    MojoDict *out = mojo_frozendict_new();
+    if (pairs) {
+        out->frozen = 0;
+        MojoDict *tmp = mojo_dict_from_pairs(pairs);
+        if (tmp) { mojo_dict_update(out, tmp); mojo_dict_free(tmp); }
+        out->frozen = 1;
+    }
+    return out;
+}
+
+void mojo_dict_set_frozen(MojoDict *d, int frozen) {
+    if (d) d->frozen = frozen ? 1 : 0;
+}
+
+void mojo_frozendict_check_no_mut_method(MojoDict *d, const char *method) {
+    if (d && d->frozen) {
+        char msg[256];
+        snprintf(msg, sizeof msg, "'frozendict' object has no attribute '%s'",
+                 method ? method : "?");
+        mojo_raise_attribute_error(msg);
+    }
 }
 
 /* `a | b` dict union (Python/Mojo Dict.__or__): a new dict with a's
  * entries overridden by b's on key collision. `b`'s values win, matching
  * mojo_dict_update's "src overwrites dst" semantics. */
 MojoDict *mojo_dict_union(MojoDict *a, MojoDict *b) {
-    MojoDict *out = mojo_dict_copy(a);
+    int frozen = (a && a->frozen) ? 1 : 0;
+    MojoDict *out = mojo_dict_new();
+    if (a) mojo_dict_update(out, a);
     if (b) mojo_dict_update(out, b);
+    if (frozen) out->frozen = 1;
     return out;
 }
 
@@ -12276,6 +12427,98 @@ MojoDict *mojo_dict_from_pairs(MojoList *pairs) {
         mojo_dict_set_int(out, key, val);
     }
     return out;
+}
+
+static void _dict_fromkeys_set(MojoDict *out, MojoList *keys, int64_t val, int64_t vkind) {
+    if (!out || !keys) return;
+    const char *kinds = mojo_list_get_kinds(keys);
+    for (int64_t i = 0; i < keys->len; i++) {
+        char kk = (kinds && kinds[i]) ? kinds[i] : 0;
+        int64_t kraw = keys->data[i];
+        /* Honor per-slot kind metadata when present. Without metadata, keep
+         * the legacy string-key behavior (mojo_list_get_str) so existing
+         * dict/frozendict.fromkeys over string-key lists is unchanged. */
+        if (kk == MOJO_KIND_INT || kk == MOJO_KIND_BOOL) {
+            int64_t ival = kraw;
+            if (vkind == 1) { _dict_set_ik(out, ival, val, 1); }
+            else if (vkind == 2) { _dict_set_ik(out, ival, (int64_t)(intptr_t)val, 2); }
+            else if (vkind == 3) { _dict_set_ik(out, ival, val, 3); }
+            else if (vkind == 4) { _dict_set_ik(out, ival, 0, 4); }
+            else { _dict_set_ik(out, ival, val, 0); }
+            continue;
+        }
+        if (kk == MOJO_KIND_DOUBLE) {
+            double dvk; memcpy(&dvk, &kraw, sizeof(dvk));
+            if (dvk >= -9223372036854775808.0 && dvk < 9223372036854775808.0
+                    && (double)(int64_t)dvk == dvk) {
+                int64_t ival = (int64_t)dvk;
+                if (vkind == 1) { _dict_set_ik(out, ival, val, 1); }
+                else if (vkind == 2) { _dict_set_ik(out, ival, (int64_t)(intptr_t)val, 2); }
+                else if (vkind == 3) { _dict_set_ik(out, ival, val, 3); }
+                else if (vkind == 4) { _dict_set_ik(out, ival, 0, 4); }
+                else { _dict_set_ik(out, ival, val, 0); }
+                continue;
+            }
+            /* non-integral float key: rare in fromkeys; fall through to string */
+        }
+        if (kk == MOJO_KIND_BYTES) {
+            MojoBytes *bk = (MojoBytes *)(intptr_t)kraw;
+            if (vkind == 1) { double dv; memcpy(&dv, &val, sizeof(dv)); mojo_dict_set_bytes_double(out, bk, dv); }
+            else if (vkind == 2) { mojo_dict_set_bytes_str(out, bk, (char *)(intptr_t)val); }
+            else if (vkind == 3) { mojo_dict_set_bytes_bool(out, bk, (int)val); }
+            else if (vkind == 4) { mojo_dict_set_bytes_none(out, bk); }
+            else { mojo_dict_set_bytes_int(out, bk, val); }
+            continue;
+        }
+        if (kk == MOJO_KIND_NONE) {
+            if (vkind == 1) { double dv; memcpy(&dv, &val, sizeof(dv)); mojo_dict_set_none_key_double(out, dv); }
+            else if (vkind == 2) { mojo_dict_set_none_key_str(out, (char *)(intptr_t)val); }
+            else if (vkind == 3) { mojo_dict_set_none_key_bool(out, (int)val); }
+            else if (vkind == 4) { mojo_dict_set_none_key_none(out); }
+            else { mojo_dict_set_none_key_int(out, val); }
+            continue;
+        }
+        /* String keys (MOJO_KIND_STR='p', OBJ='o') or no kind metadata:
+         * preserve legacy behavior using mojo_list_get_str. */
+        char *key = mojo_list_get_str(keys, i);
+        if (!key) key = (char *)"";
+        if (vkind == 1) {
+            double dv; memcpy(&dv, &val, sizeof(dv));
+            mojo_dict_set_double(out, key, dv);
+        } else if (vkind == 2) {
+            mojo_dict_set_str(out, key, (char *)(intptr_t)val);
+        } else if (vkind == 3) {
+            mojo_dict_set_bool(out, key, (int)val);
+        } else if (vkind == 4) {
+            mojo_dict_set_none(out, key);
+        } else {
+            mojo_dict_set_int(out, key, val);
+        }
+    }
+}
+
+MojoDict *mojo_dict_fromkeys(MojoList *keys, int64_t val, int64_t vkind, char *val_str) {
+    (void)val_str;
+    MojoDict *out = mojo_dict_new();
+    _dict_fromkeys_set(out, keys, val, vkind);
+    return out;
+}
+
+MojoDict *mojo_frozendict_fromkeys(MojoList *keys, int64_t val, int64_t vkind, char *val_str) {
+    (void)val_str;
+    MojoDict *out = mojo_frozendict_new();
+    if (out) {
+        out->frozen = 0;
+        _dict_fromkeys_set(out, keys, val, vkind);
+        out->frozen = 1;
+    }
+    return out;
+}
+
+MojoDict *mojo_dict_fromkeys_on(MojoDict *self, MojoList *keys, int64_t val, int64_t vkind, char *val_str) {
+    if (self && self->frozen)
+        return mojo_frozendict_fromkeys(keys, val, vkind, val_str);
+    return mojo_dict_fromkeys(keys, val, vkind, val_str);
 }
 
 MojoList *mojo_list_copy(MojoList *l) {
@@ -14460,6 +14703,10 @@ static int _kw_is_container_key(int64_t kw)
 static void _dict_set_ik(MojoDict *d, int64_t k, int64_t val, int64_t kind)
 {
     if (!d) return;
+    if (d->frozen) {
+        mojo_raise_type_error((char *)"'frozendict' object does not support item assignment");
+        return;
+    }
     if (d->used * 2 >= d->cap) _dict_grow(d);
     _DictSlot *sl = _dict_find_ik(d, k);
     if (!sl->key) {
@@ -14767,6 +15014,7 @@ void *mojo_range(int64_t start, int64_t stop) {
     MojoList *l = mojo_list_new();
     for (int64_t i = start; i < stop; i++)
         mojo_list_append_int(l, i);
+    mojo_list_set_kinds_uniform(l, MOJO_KIND_INT);
     return l;
 }
 
@@ -14779,6 +15027,7 @@ void *mojo_range3(int64_t start, int64_t stop, int64_t step) {
         for (int64_t i = start; i > stop; i += step)
             mojo_list_append_int(l, i);
     }
+    mojo_list_set_kinds_uniform(l, MOJO_KIND_INT);
     return l;
 }
 
