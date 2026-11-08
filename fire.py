@@ -116,7 +116,7 @@ Formal backend notes:
 
 Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache key):
   -O0 -O1 -O2 -O3 -Os -Oz -Og      Optimization level (JIT default -Og, build default -O0, dylib default -O2)
-  -g -g0 -g1 -g2 -g3               Debug info level (build default -g3)
+  -g -g0 -g1 -g2 -g3               Debug info level (build default -g2; -g3 unsupported by the toolchain's debug linker)
 
 Backend selector (may appear anywhere; selects the codegen path):
   --backend=gimple|arm64           gimple = default C/GIMPLE path; arm64 = formal arm64 + Mach-O (no gimple, no driver)
@@ -1038,7 +1038,7 @@ def build_executable(input_file: str, src: str, output: str = None,
     # `def main(): print(42)` under MOJO_NO_SHIM=1. Zero-init makes the read
     # well-defined (NULL), which the codegen's own `_ptr_slot_in_range`
     # guard already treats as "no known type" and falls back on safely.
-    cg_flags = [opt_flag or "-O0", debug_flag or "-g3", "-ftrivial-auto-var-init=zero"]
+    cg_flags = [opt_flag or "-O0", debug_flag or "-g2", "-ftrivial-auto-var-init=zero"]
     try:
         import gimple_codegen
 
