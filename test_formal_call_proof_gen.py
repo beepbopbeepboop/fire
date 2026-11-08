@@ -4759,6 +4759,8 @@ class TestStringValueInTheModel(unittest.TestCase):
                 self.assertNotIn("(strlen (UInt64.ofNat", text)
                 if arch == "arm64":
                     self.assertNotIn("post_extern_given_callee_returns", text)
+                    self.assertIn("post_extern_strlen", text)
+                    self.assertIn("import Extern", text)
         # direct literal
         for arch in STRING_ARCHES:
             key = (arch, "len_of_literal_direct")
@@ -4767,6 +4769,9 @@ class TestStringValueInTheModel(unittest.TestCase):
             with self.subTest(arch=arch, direct=True):
                 self.assertIn("(UInt64.ofNat 2)", text)
                 self.assertNotIn("(strlen (UInt64.ofNat", text)
+                if arch == "arm64":
+                    self.assertIn("post_extern_strlen", text)
+                    self.assertIn("import Extern", text)
 
     def test_a_string_outside_the_intern_table_is_refused_not_zeroed(self):
         """The negative guard, and the reason the default is a refusal.
