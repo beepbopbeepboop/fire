@@ -1358,7 +1358,7 @@ def test_a_bare_call_to_an_imported_generic_is_still_refused(tmpdir):
         # WORKAROUND. The property is pinned here rather than in the message's
         # own test because it is a property of the REFUSAL a program gets.
         check("the SOURCE is right" in bare
-              and "does not infer them yet" in bare,
+              and "infers them only from DECLARED argument types" in bare,
               f"[{arch}] the refusal does not say the bare spelling is correct "
               f"source and that the inference is what is missing: "
               f"{bare.strip()[-600:]}")
