@@ -1359,3 +1359,31 @@ suites and rediscovering that 174 checks were one fact.
 **And the project half is unchanged and still is one:** the `d[i]` refusal
 itself, which is this document's subject. What changed is only that the
 repository's own modules are no longer standing in the way of measuring it.
+
+## Run-time code-point walk for `%<w>.<p>s` and `s[i]` (step 13c memo, 2026-11-07)
+
+**The four refusals that remain** (after 11a/13a/13b), all on a non-ASCII image and an operand whose text the build cannot see: (1) `printf("%6s", p)` and (2) `printf("%.3s", p)` for a parameter-typed `p` (`printf_text_width_refusal`, `formal/model/strings.py:2005`); (3) `s[i]` with an unknown receiver and (4) with a non-constant index (`string_element_refusal`, `formal/model/values.py:4142`). Pinned by the rows in `test_formal_unicode.py` (the `printf_text_width_refusal`/`string_element_refusal` blocks around lines 1700-1750 and the oracle rows near 468-480).
+
+**Measured today (arm64 and x86-64, `prove=False`, `.tmp/13c`):**
+
+| program | result |
+|---|---|
+| `printf("%*.*s|\n", 8, 3, "hello")` | BUILDS, prints `     hel|` on both arches: the variadic area accepts star arguments |
+| `printf("%*.*s|\n", 8, 3, "héllo")` | BUILDS, prints `     hé|`; CPython's `"%*.*s" % (8, 3, "héllo")` is `     hél|` — **wrong by the byte/character difference** (precision 3 took 3 BYTES = `hé`) |
+| `printf("%6s|\n", s)` with `s: String` holding `héllo` | REFUSED by name ("would answer in BYTES where CPython answers in CHARACTERS") |
+| `s[i]` with `s: String` parameter, non-ASCII image | REFUSED by name |
+
+So the star form is not a new capability to add (item 5 is settled: accepted, both arches); what it needs is **correct star ARGUMENTS computed at run time**, because the C library counts bytes and CPython counts code points.
+
+**Decision: (A), star forms with run-time arguments, chosen; (B) rejected.**
+
+- *Precision* `%.Ps` over operand `p`: emit `%.*s` with the byte length of the first `P` code points of `p`: `bytes_for_chars(p, P)` = walk `p` counting non-continuation bytes (`(b & 0xC0) != 0x80`), stop at the `(P+1)`-th code-point start or at NUL; the byte offset reached is the argument.
+- *Width* `%W.Ps` (or `%Ws`): CPython pads to `W` CHARACTERS, C pads to `W` BYTES, so pass `W' = W + (bytes_of_printed_part - chars_of_printed_part)`, where the printed part is the first `min(P, charcount(p))` code points; `charcount` is the same loop. Left-justify (`%-W`) uses the same `W'`.
+- *Subscript* `s[i]`: `start` = byte offset of code point `i` (same walk; `i` negative = from the end, via `charcount`), `len` = 1 + the continuation bytes that follow `start`; the result is the 11a buffer (`strndup`-style, NUL-free by construction); out-of-range `i` takes the existing out-of-range path unchanged.
+- (B) copy into a `strdup`'d buffer and pad there: rejected — it needs a sized buffer per call and a second allocation, for the same loop.
+
+**Exact files/functions.** Two shared loop emitters, one per backend, next to `_emit_str_count` (`formal/arm64_codegen.py:8484`, `formal/x86_64_codegen.py:6652`): `_emit_utf8_charcount(ptr_reg) -> count_reg` and `_emit_utf8_char_start(ptr_reg, index_reg) -> byte_offset_reg`. The model side: a `printf_runtime_text_widths` next to `printf_fold_text_widths` (`formal/model/strings.py:2096`) that REPLACES the refusal with the star rewrite when the operand is a string-kind and the image is non-ASCII; `string_element_refusal` stays for an operand that is not a string-kind. The proof side is unaffected until the proof model gains the code-point walk: both programs must stay `prove`-refused with a named reason (the model has no value for the loop), which is the existing behaviour for run-time string operations.
+
+**Tests.** Oracle rows (build + run on both backends, compared with CPython, in `test_formal_unicode.py` beside the existing rows): `%6s`, `%-6s`, `%.3s`, `%8.3s` and `s[1]`, `s[i]`, `s[-1]` with a PARAMETER-typed operand holding `héllo`, `日本` and `a😀b`; an ASCII operand must produce byte-identical code to today (compare the generated assembly or the emitted text for one ASCII row — the rewrite must not fire there).
+
+**Follow-ups written from this memo:** `step-13d-printf-runtime-widths.md` and `step-13e-subscript-runtime.md`.
