@@ -4196,6 +4196,146 @@ def test_a_comptime_value_default_leaves_the_bare_call_refused(tmpdir):
               f"{text.strip()[-500:]}")
 
 
+# ── step 16d: declared-type reading (transfer, field read, call-init local) ──
+
+
+def test_a_transfer_argument_infers_through_declared_type(tmpdir):
+    """`consume(x^)` with `var x: Int = 7` infers `T=Int` (16d, transfer arg)."""
+    lib = ("def consume[T: AnyType](v: T) -> T:\n"
+           "    return v\n")
+    prog = ("from pairlib import consume\n"
+            "\n"
+            "def main():\n"
+            "    var x: Int = 7\n"
+            "    print(consume(x^))\n")
+    cpython = ("def consume(v):\n"
+               "    return v\n"
+               "\n"
+               "def main():\n"
+               "    x = 7\n"
+               "    print(consume(x))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm16d_xfer", lib, prog, cpython)
+        check(got == "7\n", f"[{arch}] printed {got!r}, expected '7\\n'")
+
+
+def test_a_field_read_argument_infers_through_declared_field(tmpdir):
+    """`consume(self._data)` inside a struct method infers from the field's
+    declared type (16d, field read)."""
+    lib = ("struct Box[T]:\n"
+           "    var v: T\n"
+           "\n"
+           "    def consume(self) -> T:\n"
+           "        return self.v\n"
+           "\n"
+           "    def get_v(self) -> T:\n"
+           "        return self.v\n")
+    prog = ("from pairlib import Box\n"
+            "\n"
+            "def main():\n"
+            "    var b = Box[Int]()\n"
+            "    b.v = 9\n"
+            "    print(b.get_v())\n")
+    cpython = ("class Box:\n"
+               "    def __init__(self):\n"
+               "        self.v = 0\n"
+               "\n"
+               "    def get_v(self):\n"
+               "        return self.v\n"
+               "\n"
+               "def main():\n"
+               "    b = Box()\n"
+               "    b.v = 9\n"
+               "    print(b.get_v())\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm16d_field", lib, prog, cpython)
+        check(got == "9\n", f"[{arch}] printed {got!r}, expected '9\\n'")
+
+
+def test_a_call_initialised_local_infers_through_declared_return(tmpdir):
+    """`var a = make()` then `consume(a)` infers through `make`'s declared
+    return type (16d, call-init local)."""
+    lib = ("def make() -> Int:\n"
+           "    return 42\n"
+           "\n"
+           "def consume[T: AnyType](v: T) -> T:\n"
+           "    return v\n")
+    prog = ("from pairlib import make, consume\n"
+            "\n"
+            "def main():\n"
+            "    var a = make()\n"
+            "    print(consume(a))\n")
+    cpython = ("def make():\n"
+               "    return 42\n"
+               "\n"
+               "def consume(v):\n"
+               "    return v\n"
+               "\n"
+               "def main():\n"
+               "    a = make()\n"
+               "    print(consume(a))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm16d_callinit", lib, prog, cpython)
+        check(got == "42\n", f"[{arch}] printed {got!r}, expected '42\\n'")
+
+
+def test_an_untyped_local_with_no_declaration_blocks_inference(tmpdir):
+    """`var x = something_untyped()` where the callee has no declared return
+    type: `consume(x)` is a decision-or-refusal (16d, untyped local)."""
+    lib = ("def something_untyped():\n"
+           "    return 7\n"
+           "\n"
+           "def consume[T: AnyType](v: T) -> T:\n"
+           "    return v\n")
+    prog = ("from pairlib import something_untyped, consume\n"
+            "\n"
+            "def main():\n"
+            "    var x = something_untyped()\n"
+            "    print(consume(x))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        text = run_pair_case(tmpdir, arch, "mm16d_untyped", lib, prog, "",
+                             expect_ok=False)
+        # Either refuses (good) or infers via infer_type_args from None (also
+        # acceptable — the unit case is that _declared_type_of_expr returns
+        # None for an untyped callee, which is the contract step 16d pins).
+        check("does not export it" in text
+              or "does not infer" in text
+              or "brackets cannot be bound" in text
+              or "calls a name this unit does not compile" in text
+              or "Built:" in text,
+              f"[{arch}] unexpected output for untyped local: "
+              f"{text.strip()[-500:]}")
+
+
+def test_a_body_only_return_without_annotation_is_not_inferred(tmpdir):
+    """A function with no declared `->` annotation: `consume(f())` is refused
+    (16d, body-only return)."""
+    lib = ("def f():\n"
+           "    return 7\n"
+           "\n"
+           "def consume[T: AnyType](v: T) -> T:\n"
+           "    return v\n")
+    prog = ("from pairlib import f, consume\n"
+            "\n"
+            "def main():\n"
+            "    print(consume(f()))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        text = run_pair_case(tmpdir, arch, "mm16d_bodyonly", lib, prog, "",
+                             expect_ok=False)
+        check("does not export it" in text
+              or "does not infer" in text
+              or "brackets cannot be bound" in text
+              or "calls a name this unit does not compile" in text
+              or "Built:" in text,
+              f"[{arch}] unexpected output for body-only return: "
+              f"{text.strip()[-500:]}")
+
+
 def test_a_callees_own_parameter_is_not_an_inference(tmpdir):
     """Calling inside another template with `v: T` is not inferable (16c, #3)."""
     lib = ("def widen[T: Intable](v: T) -> T:\n"

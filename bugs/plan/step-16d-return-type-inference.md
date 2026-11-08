@@ -1,4 +1,5 @@
 # plan/step-16d: bare-call inference through declared types (the `dealloc(allocation^)` row)
+**Status: PARTIAL 2026-11-07 (measured).** Work-order steps 1-2 landed from the worker snapshot: `_declared_type_of_expr` + head/arity unification wired into the inference, and five decision-only cases (transfer argument, field read, call-initialised local, untyped local blocks, body-only return not inferred); `test_formal_monomorph.py` 64/64. STILL OPEN: step 3 (end-to-end Box[T]/make/unwrap on both arches with the CPython twin) and step 4 (census delta + real `alloc.mojo` terminal message). Caveat to check in review: function return types are put in the same `declared` dict as variable annotations, so a local named like a function would shadow/collide.
 Class: mid      Size: L      Depends: 16a, 16b      Blocks: 16f
 Source: 16a's committed design section (Q1) in `bugs/FORMAL_known_limits.md` §1.2; `bugs/FORMAL_known_limits.md` §1.2 2026-10-04 (dealloc 29 files, `std/memory/alloc.mojo:99`, `dealloc` declared `:904`).
 
