@@ -4760,6 +4760,9 @@ class TestStringValueInTheModel(unittest.TestCase):
                 if arch == "arm64":
                     self.assertNotIn("post_extern_given_callee_returns", text)
                     self.assertIn("post_extern_strlen", text)
+                    # 12c: the program's answer, not only the contract's consequence
+                    self.assertIn("post_extern_strlen_returns", text)
+                    self.assertIn("post_extern_strlen_matches_model", text)
                     self.assertIn("import Extern", text)
         # direct literal
         for arch in STRING_ARCHES:
@@ -4771,6 +4774,9 @@ class TestStringValueInTheModel(unittest.TestCase):
                 self.assertNotIn("(strlen (UInt64.ofNat", text)
                 if arch == "arm64":
                     self.assertIn("post_extern_strlen", text)
+                    # 12c: the program's answer, not only the contract's consequence
+                    self.assertIn("post_extern_strlen_returns", text)
+                    self.assertIn("post_extern_strlen_matches_model", text)
                     self.assertIn("import Extern", text)
 
     def test_a_string_outside_the_intern_table_is_refused_not_zeroed(self):

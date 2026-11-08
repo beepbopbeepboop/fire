@@ -12341,24 +12341,152 @@ def _program_extern_calls(info: dict) -> list:
 
 
 
-def _gen_strlen_post_extern(name, code, base, li, bl, tgt, s_call, n, addr, cont, scope):
-    """Emit the step-12c post-extern strlen theorem for arm64.
-    Proved from hcall.ret/hcall.res; no sorry.  The full symbolic continuation
-    (run_result_exit through the epilogue from a general s_ret) is left for a
-    follow-up: the epilogue reads only sp/mem (preserved) and preserves x0, so
-    the key consequence x0 = UInt64.ofNat n and the return-pc fact are proved
-    here from the contract."""
+def _strlen_epilogue_plan(cont):
+    """The standard epilogue after a result-bearing extern call, or None.
+
+    `cont` is `[(pc, word)]` from the instruction after the `BL` up to and
+    including the first `RET`. The vocabulary is exactly what the backend's
+    epilogue uses and nothing else, because the generated proof walks it with
+    the per-instruction step lemmas and must know each one's effect:
+
+      * `add sp, sp, #imm{, lsl #12}`            -> sp += imm
+      * `ldp xA, xB, [sp], #imm` (64-bit, post)  -> reads [sp], [sp+8]; sp += imm
+      * `ret`
+
+    No instruction may write `x0` (or `xzr`/`sp` as a loaded register), and the
+    return address must be loaded by exactly one `ldp` that is followed by the
+    `ret`. Returns `(steps, sp_terms, x30_extra)`: `steps` is `[(pc, kind)]`,
+    `sp_terms` the stack-pointer increments applied before the `ldp` that loads
+    `x30`, and `x30_extra` the byte offset (0 or 8) of `x30` inside that pair."""
+    steps, sp_terms, x30_extra, x30_loaded = [], [], None, False
+    for pc, w in cont:
+        if (w & 0xff800000) == 0x91000000 and (w & 0x1f) == 31 and ((w >> 5) & 0x1f) == 31:
+            if x30_loaded:
+                return None
+            delta = ((w >> 10) & 0xfff) << (12 if (w >> 22) & 1 else 0)
+            if delta <= 0:
+                return None
+            sp_terms.append(delta)
+            steps.append((pc, "add"))
+        elif (w & 0xffc00000) == 0xa8c00000 and ((w >> 5) & 0x1f) == 31:
+            rt, rt2 = w & 0x1f, (w >> 10) & 0x1f
+            imm7 = (w >> 15) & 0x7f
+            imm = (imm7 - 128 if imm7 >= 64 else imm7) * 8
+            if imm <= 0 or any(r in (0, 31) for r in (rt, rt2)):
+                return None
+            if x30_loaded:
+                return None
+            if 30 in (rt, rt2):
+                x30_extra = 8 if rt2 == 30 else 0
+                x30_loaded = True
+                steps.append((pc, "ldp30"))
+            else:
+                sp_terms.append(imm)
+                steps.append((pc, "ldp"))
+                continue
+            # the pair that loads x30 is the last thing before ret: its own sp
+            # increment is applied AFTER its reads, so it is not a read-time term
+        elif w == 0xd65f03c0:
+            if not x30_loaded:
+                return None
+            steps.append((pc, "ret"))
+            return steps, sp_terms, x30_extra
+        else:
+            return None
+    return None
+
+
+def _gen_strlen_post_extern(name, code, base, li, bl, tgt, s_call, n, addr, cont, scope,
+                            exit_addr=None, mojo_app=None):
+    """Emit the step-12c post-extern strlen theorems for arm64.
+
+    `<name>_post_extern_strlen` (always): the contract's consequence, proved from
+    `hcall.res`/`hcall.ret.pc_ret`, no `sorry`.
+
+    `<name>_post_extern_strlen_returns` (when `_strlen_epilogue_plan` recognises the
+    code after the call): from ANY post-call state `s_ret` the contract allows,
+    running the epilogue returns `UInt64.ofNat n`. The callee-saved registers, `sp`
+    and memory are as the caller left them (`hcall.ret`), so the epilogue's loads
+    read what the prologue stored, `ret` goes to the exit address, and `x0` is
+    never written. Proved by stepping the epilogue with the per-instruction step
+    lemmas over the abstract `s_ret`; `<name>_post_extern_strlen_matches_model`
+    states the same value as the model's `mojo`."""
     retpc = bl + 4
     L = []
     L.append(f"/-- Step 12c: post-extern contract consequence for `strlen`, proved")
     L.append(f"    from `hcall.ret` and `hcall.res` (no `sorry`).  The callee")
-    L.append(f"    returns `x0 = UInt64.ofNat n` to `pc = retpc`.  The full")
-    L.append(f"    symbolic continuation through the epilogue is follow-up work")
-    L.append(f"    (the continuation needs block-walk from a symbolic state). -/")
+    L.append(f"    returns `x0 = UInt64.ofNat n` to `pc = retpc`. -/")
     L.append(f"theorem {name}_post_extern_strlen (s_ret : Arm64State)")
     L.append(f"    (hcall : StrlenReturns ({s_call} : Arm64State) s_ret {addr} {n}) :")
     L.append(f"    s_ret.x0 = UInt64.ofNat {n} ∧ s_ret.pc = {retpc} := by")
     L.append(f"  exact ⟨hcall.res, hcall.ret.pc_ret⟩")
+    plan = _strlen_epilogue_plan(cont) if exit_addr is not None else None
+    if plan is None:
+        return "\n".join(L)
+    steps, sp_terms, x30_extra = plan
+    pre0 = s_call.split("{ ", 1)[1].split(" with", 1)[0].strip()  # `<name>_pre_<i>`
+    sp_expr = "s_ret.sp" + "".join(f" + UInt64.ofNat {d}" for d in sp_terms)
+    sp_expr0 = pre0 + ".sp" + "".join(f" + UInt64.ofNat {d}" for d in sp_terms)
+    if x30_extra:
+        sp_expr += f" + {x30_extra}"
+        sp_expr0 += f" + {x30_extra}"
+    nsteps = len(steps)               # includes the ret
+    idx = lambda pc: (pc - base) // 4
+    L.append("")
+    L.append(f"/-- Step 12c: the PROGRAM's answer.  From any state `s_ret` the `strlen`")
+    L.append(f"    contract allows, the epilogue after the call returns `UInt64.ofNat {n}`:")
+    L.append(f"    the callee-saved registers, `sp` and memory are as the caller left them,")
+    L.append(f"    so the epilogue reloads the saved return address, `ret` goes to the exit")
+    L.append(f"    address, and no instruction writes `x0`.  Conditional on the contract and")
+    L.append(f"    on the image holding the string's {n} bytes + NUL (`hcall`), and on")
+    L.append(f"    nothing else. -/")
+    L.append(f"theorem {name}_post_extern_strlen_returns (s_ret : Arm64State)")
+    L.append(f"    (hcall : StrlenReturns ({s_call} : Arm64State) s_ret {addr} {n}) :")
+    L.append(f"    run_result_exit {{ s_ret with pc := {retpc} }} {name}_code {exit_addr} 200000")
+    L.append(f"      = UInt64.ofNat {n} := by")
+    L.append(f"  have hmem : s_ret.mem = {pre0}.mem := hcall.ret.mem_same")
+    L.append(f"  have hsp : s_ret.sp = {pre0}.sp := hcall.ret.sp_same")
+    L.append(f"  have hx0 : s_ret.x0 = UInt64.ofNat {n} := hcall.res")
+    L.append(f"  have hx30 : mem_read_u64 {pre0}.mem ({sp_expr0}).toNat")
+    L.append(f"      = UInt64.ofNat {exit_addr} := by native_decide")
+    L.append(f"  have hx30' : mem_read_u64 s_ret.mem ({sp_expr}).toNat")
+    L.append(f"      = UInt64.ofNat {exit_addr} := by rw [hmem, hsp]; exact hx30")
+    L.append(f"  unfold run_result_exit arm64_exec_go_exit")
+    pad = " + 1" * (nsteps + 1)
+    L.append(f"  rw [show (200000 : Nat) = {200000 - nsteps - 1}{pad} from rfl]")
+    for pc, kind in steps:
+        if kind == "ret":
+            L.append(f"  rw [go_exit_step _ _ {name}_code {exit_addr} _ {exit_addr} {pc} "
+                     f"({name}_sr_{idx(pc)} _ rfl) ?hpc' ?hpcb (by decide) (by decide)]")
+        else:
+            L.append(f"  rw [go_exit_step_adv _ _ {name}_code _ _ (by simp) "
+                     f"({name}_sr_{idx(pc)} _ rfl) (by simp [set_reg_pc_keeps])]")
+    L.append(f"  case hpcb => rfl")
+    L.append(f"  case hpc' =>")
+    L.append(f"    dsimp only")
+    L.append(f"    simp only [set_reg_x30_same, set_reg_sp_keeps, set_reg_mem_keeps]")
+    L.append(f"    rw [hx30']")
+    L.append(f"    native_decide")
+    L.append(f"  rw [arm64_go_exit_hit _ {name}_code _ _ (by omega) ?hit]")
+    L.append(f"  case hit =>")
+    L.append(f"    dsimp only")
+    L.append(f"    simp only [set_reg_x30_same, set_reg_sp_keeps, set_reg_mem_keeps]")
+    L.append(f"    rw [hx30']")
+    L.append(f"    native_decide")
+    L.append(f"  dsimp only")
+    L.append(f"  simp only [set_reg_x0_keeps 19 (by decide), set_reg_x0_keeps 20 (by decide), "
+             f"set_reg_x0_keeps 29 (by decide), set_reg_x0_keeps 30 (by decide)]")
+    L.append(f"  exact hx0")
+    if mojo_app:
+        L.append("")
+        L.append(f"/-- Step 12c: that answer IS the model's.  `mojo` is the semantic model of the")
+        L.append(f"    source; for this program it is the numeral the build folded `len(...)` to. -/")
+        L.append(f"theorem {name}_post_extern_strlen_matches_model (s_ret : Arm64State)")
+        L.append(f"    (hcall : StrlenReturns ({s_call} : Arm64State) s_ret {addr} {n}) :")
+        L.append(f"    run_result_exit {{ s_ret with pc := {retpc} }} {name}_code {exit_addr} 200000")
+        L.append(f"      = {mojo_app} := by")
+        L.append(f"  rw [{name}_post_extern_strlen_returns s_ret hcall]")
+        L.append(f"  rfl")
     return "\n".join(L)
 
 
@@ -12849,7 +12977,9 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
             # For the full run_result_exit to a fixed exit, it's hard symbolically.
             # I'll state it more directly:
             _strlen_extra = _gen_strlen_post_extern(
-                name, code, base, li, last_bl, _tgt, _s_call, _n, _addr, _cont, scope)
+                name, code, base, li, last_bl, _tgt, _s_call, _n, _addr, _cont, scope,
+                exit_addr=exit_addr,
+                mojo_app=(_apply_args('mojo', vals) if _info is not None else None))
         else:
             _strlen_extra = ""
     else:

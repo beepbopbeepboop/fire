@@ -48,3 +48,47 @@ theorem strlen_returns_len (s s' : Arm64State) (addr n : Nat)
 theorem strlen_result_unique (s s' s'' : Arm64State) (addr n m : Nat)
     (h : StrlenReturns s s' addr n) (h2 : StrlenReturns s s'' addr m) :
     n = m := cstring_at_unique s.mem addr n m h.str h2.str
+
+/-! ## The epilogue after an extern call, over an ABSTRACT post-call state
+
+The theorems a generated proof states about what follows a `BL` to an extern
+(`<name>_post_extern_strlen_returns`) walk a short epilogue (`add sp`, `ldp`,
+`ret`) from a state `s_ret` that is only known through its contract.  These are
+the generic pieces: one `arm64_go_exit` iteration over a step that leaves `pc`
+where it was, and the projections of a register write that the walk needs.
+-/
+
+/-- One `arm64_go_exit` iteration over a step that leaves `pc` where it was (the
+    model's `arm64_step` does not advance it; the loop adds 4). -/
+theorem go_exit_step_adv (st st' : Arm64State) (code : Nat → UInt8) (exit fuel : Nat)
+    (hne : st.pc ≠ exit) (h : arm64_step st code = some st') (hpc : st'.pc = st.pc) :
+    arm64_go_exit st code exit (fuel + 1) =
+      arm64_go_exit { st' with pc := st.pc + 4 } code exit fuel := by
+  have hf : ¬ (fuel + 1 = 0) := by omega
+  rw [arm64_go_exit, if_neg hf, if_neg hne, h]
+  simp only [hpc, if_true, Nat.add_sub_cancel]
+
+theorem set_reg_pc_keeps (i : Nat) (s : Arm64State) (v : UInt64) :
+    (arm64_set_reg i s v).pc = s.pc := by
+  unfold arm64_set_reg
+  split <;> simp_all
+
+theorem set_reg_mem_keeps (i : Nat) (s : Arm64State) (v : UInt64) :
+    (arm64_set_reg i s v).mem = s.mem := by
+  unfold arm64_set_reg
+  split <;> simp_all
+
+theorem set_reg_sp_keeps (i : Nat) (s : Arm64State) (v : UInt64) :
+    (arm64_set_reg i s v).sp = s.sp := by
+  unfold arm64_set_reg
+  split <;> simp_all
+
+theorem set_reg_x0_keeps (i : Nat) (hi : i ≠ 0) (s : Arm64State) (v : UInt64) :
+    (arm64_set_reg i s v).x0 = s.x0 := by
+  unfold arm64_set_reg
+  split <;> simp_all
+
+theorem set_reg_x30_same (s : Arm64State) (v : UInt64) :
+    (arm64_set_reg 30 s v).x30 = v := by
+  unfold arm64_set_reg
+  simp
