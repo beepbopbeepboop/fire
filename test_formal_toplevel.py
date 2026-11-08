@@ -603,7 +603,7 @@ def test_name_in_a_function_is_still_refused(tmpdir, verbose):
     and a function lifted out of an imported module has no answer this path
     can give — answering it would be a value that is right for this file and
     wrong for every other, which is the class of lie
-    `FORMAL_module_state_no_storage.md (deleted) (deleted)` is about. Pinned so a later
+    `FORMAL_module_state_no_storage.md (deleted)` is about. Pinned so a later
     change cannot widen the substitution into the function bodies."""
     # `refuse_without:`, and the needle is the REWORDED sentence rather than
     # the one this row used to pin.  A more specific check now answers this
