@@ -908,7 +908,7 @@ def cmd_ps(a):
     arguments: ours are launched with `run --model M --auto ... <PARENT>/work-N/TASK.md` (opencode v1: `--model M run --auto
     --dir <PARENT>/work-N`), theirs have neither."""
     tasks = load()
-    print("%-40s %-6s %-5s %-28s %s" % ("name", "pid", "alive", "model", "claims"))
+    print("%-40s %-6s %-5s %-6s %-28s %s" % ("name", "pid", "alive", "cls", "model", "claims"))
     for name, t in sorted(tasks.items()):
         if t.get("state") != "running":
             continue
@@ -921,7 +921,8 @@ def cmd_ps(a):
                 alive = False
         claims = ",".join(t.get("claims") or [])[:40]
         model = (t.get("model") or t.get("pool") or "?")[:28]
-        print("%-40s %-6s %-5s %-28s %s" % (name[:40], pid, "yes" if alive else "no", model, claims))
+        cls = (t.get("cls") or "?")[:6]
+        print("%-40s %-6s %-5s %-6s %-28s %s" % (name[:40], pid, "yes" if alive else "no", cls, model, claims))
     # live process scan
     out = subprocess.run(["ps", "-axww", "-o", "pid=,etime=,rss=,args="], capture_output=True, text=True).stdout
     mine = other = 0
