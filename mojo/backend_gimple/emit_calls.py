@@ -409,7 +409,7 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
     Two resume entries carry the sent word, one per backend:
     - the default stack-switch path: `__mojo_gen_resume(gen, send)`, the
       runtime entry the `<base>_resume(g)` trampoline also funnels into (it
-      hardcodes a 0 send, which is why this calls the runtime directly);
+      sends the shared None box, which is why this calls the runtime directly);
     - the C++20 path (`_mojogen_` base): `{base}_send(g, send)`, the unit's
       own entry, which stores the word where the suspended `x = yield` reads
       it (cpp_async.py's generator promise). `{base}_resume` is the same
@@ -5148,6 +5148,26 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
                 zero = gen._new_val('int64_t', '(int64_t)0')
                 return gen._new_val('_Bool', f'{iv} != {zero}')
             return gen._new_val('_Bool', '(_Bool)1')
+        # A `char *` slot that may hold a BYTES WORD. The static verdict
+        # "`char *` is a str, so it is not bytes" is unsound for bytes:
+        # an unannotated parameter defaults to `char *` (str) and an
+        # untyped caller passes a registered `MojoBytes *` word through
+        # that slot bit-pattern-wise — `glob.has_magic(s)` with
+        # `s=b'*.py'` (CPython's `isinstance(s, bytes)` dispatch) folded
+        # to `0 != 0`, took the str branch, and matched a str-compiled
+        # pattern against the bytes object's own struct header: no match,
+        # so `_iglob` walked the no-magic branch, lstat'd the pattern
+        # itself, and `sorted(glob.glob(b'*.py', root_dir=...))` printed
+        # `[]` instead of `[b'a.py']` (bugs/SUITE_globcompiled). The
+        # registry answers soundly — a real C string is never a
+        # registered bytes object, so the probe changes no str's answer —
+        # exactly the way the `int64_t`-word arm below already goes to
+        # `mojo_isinstance_p`.
+        if type_name in ('bytes', 'bytearray') and obj_type in ('char *', 'void *'):
+            res = gen._new_temp('int')
+            iv = gen._new_val('int64_t', f'(int64_t){obj_val}')
+            gen._emit(f'  {res} = mojo_isinstance_p ({iv}, {type_id});')
+            return gen._new_val('_Bool', f'(_Bool){res}')
         if obj_type not in ('int64_t', 'void *', ''):
             return gen._new_val('_Bool', '(_Bool)0')
     res = gen._new_temp('int')

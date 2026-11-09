@@ -1419,30 +1419,46 @@ static _KindRow *_kinds_row(uint64_t addr)
 }
 
 /* The row for `addr`, creating it if needed. `*fresh` reports whether it is
- * new, so a caller that has nothing to record can undo the creation. */
+ * new, so a caller that has nothing to record can undo the creation. The
+ * probe runs BEFORE the grow check on purpose: a grow that happens while
+ * looking up an EXISTING row must not be reported as a fresh row. It once
+ * was — `*fresh` was set the moment the load factor tripped, before the probe
+ * ran — and `mojo_list_set_elem_repr(l, NULL)` (called on EVERY list copy
+ * whose source has kinds but no element repr, i.e. every `mojo_list_copy` of
+ * a drained generator) then ran `if (fresh && !fn) _kinds_forget(addr)` and
+ * deleted the row its caller had JUST written the kinds into: the copied
+ * list reached `mojo_sorted` undescribed, so the recursive-pattern
+ * `sorted(glob.glob(..., root_dir=..., recursive=True))` in
+ * bugs/SUITE_globcompiled ordered by slot address instead of string, and the
+ * wipe only landed on runs whose heap layout put the table at its growth
+ * boundary — a flake, not a constant. */
 static _KindRow *_kinds_row_for_write(uint64_t addr, int *fresh)
 {
     *fresh = 0;
-    if (!_reg_kinds.cap) { _kinds_grow(); *fresh = 1; }
-    if ((_reg_kinds.used + 1) * 2 > _reg_kinds.cap) {
-        _kinds_grow();
+    if (!_reg_kinds.cap) _kinds_grow();
+    for (;;) {
+        uint64_t mask = _reg_kinds.cap - 1;
+        uint64_t i = _kinds_home(addr);
+        while (_reg_kinds.rows[i].addr) {
+            if (_reg_kinds.rows[i].addr == addr) return &_reg_kinds.rows[i];
+            i = (i + 1) & mask;
+        }
+        /* The slot is where a NEW row goes: only now does the load factor
+         * matter, and a grow restarts the probe at the doubled size. */
+        if ((_reg_kinds.used + 1) * 2 > _reg_kinds.cap) {
+            _kinds_grow();
+            continue;
+        }
+        /* A new row describes nothing yet, whatever a deleted row left here. */
+        _reg_kinds.rows[i].addr = addr;
+        _reg_kinds.rows[i].kinds = NULL;
+        _reg_kinds.rows[i].owned = 0;
+        _reg_kinds.rows[i].boxes = NULL;
+        _reg_kinds.rows[i].repr_fn = NULL;
+        _reg_kinds.used++;
         *fresh = 1;
+        return &_reg_kinds.rows[i];
     }
-    uint64_t mask = _reg_kinds.cap - 1;
-    uint64_t i = _kinds_home(addr);
-    while (_reg_kinds.rows[i].addr) {
-        if (_reg_kinds.rows[i].addr == addr) return &_reg_kinds.rows[i];
-        i = (i + 1) & mask;
-    }
-    /* A new row describes nothing yet, whatever a deleted row left here. */
-    _reg_kinds.rows[i].addr = addr;
-    _reg_kinds.rows[i].kinds = NULL;
-    _reg_kinds.rows[i].owned = 0;
-    _reg_kinds.rows[i].boxes = NULL;
-    _reg_kinds.rows[i].repr_fn = NULL;
-    _reg_kinds.used++;
-    *fresh = 1;
-    return &_reg_kinds.rows[i];
 }
 
 const char *mojo_list_get_kinds(MojoList *l)
@@ -2718,11 +2734,21 @@ static MojoList *_gen_drain(void *h, MojoGenSig *sg)
         switch (sg->vkind) {
         case 1: mojo_list_append_int(out, ((bool (*)(void *))sg->value)(h) ? 1 : 0); break;
         case 2: mojo_list_append_double(out, ((double (*)(void *))sg->value)(h)); break;
-        case 3: mojo_list_append_str(out, ((char *(*)(void *))sg->value)(h)); break;
-        case 5: {   /* a dynamic word: a string pointer or an integer, told apart now */
+        case 3:
+        case 5: {   /* a str-typed (3) or a dynamic word (5): the element is a WORD,
+                     * and a word is a string OR a registered bytes object OR an int —
+                     * `glob._iglob` with a BYTES pattern yields `MojoBytes *` words
+                     * through this very path (its `os.path.join` argument was bytes),
+                     * which a `char *`-cast append stored under the str kind: the
+                     * slot's C-string read then walked the bytes struct's own header
+                     * and `sorted(glob.glob(b'*.py', ...))` printed an address.
+                     * Classify each element with the same discriminator the append
+                     * side uses, so the slot's kind says what it holds: 's' bytes,
+                     * 'p' str, 'i' anything else (a boxed tagged word keeps its box
+                     * kind — the old vkind-5 arm lost that, reading a box's is_str
+                     * false and storing the box pointer as an int). */
             int64_t w = ((int64_t (*)(void *))sg->value)(h);
-            if (mojo_boxed_is_str(w)) mojo_list_append_str(out, (char *)(intptr_t)w);
-            else mojo_list_append_int(out, w);
+            mojo_list_append_word(out, w);
             break; }
         default: mojo_list_append_int(out, ((int64_t (*)(void *))sg->value)(h)); break;
         }
@@ -2730,11 +2756,16 @@ static MojoList *_gen_drain(void *h, MojoGenSig *sg)
     int pending = mojo_exc_pending_get();
     ((void (*)(void *))sg->destroy)(h);
     if (pending) { mojo_exc_pending_set(0); mojo_raise(); }
-    if (sg->vkind == 5) {
-        if (out->len > 0 && mojo_boxed_is_str(out->data[0])) mojo_list_set_kinds_uniform(out, 'p');
-        else mojo_list_set_kinds_uniform(out, 'i');
+    if (sg->vkind == 5 || sg->vkind == 3) {
+        /* Uniform from the FIRST element's classification, the way the vkind-5
+         * arm did for str/int — extended to the bytes word that arm used to
+         * call an int. */
+        if (out->len > 0) {
+            if (mojo_is_registered_bytes(out->data[0])) mojo_list_set_kinds_uniform(out, MOJO_KIND_BYTES);
+            else if (mojo_boxed_is_str(out->data[0])) mojo_list_set_kinds_uniform(out, 'p');
+            else mojo_list_set_kinds_uniform(out, 'i');
+        }
     }
-    else if (sg->vkind == 3) mojo_list_set_kinds_uniform(out, 'p');
     else if (sg->vkind == 0) mojo_list_set_kinds_uniform(out, 'i');
     else if (sg->vkind == 2) mojo_list_set_kinds_uniform(out, 'd');
     else if (sg->vkind == 4) mojo_list_set_kinds_uniform(out, 'l');
@@ -2753,9 +2784,20 @@ int64_t mojo_gen_default_word(void *start, int64_t idx)
  * fire_coro_gen.c) drive it, found by name so this file does not depend on them. */
 #include <dlfcn.h>
 static void *_a3_sym(const char *n) { return dlsym(RTLD_DEFAULT, n); }
+/* A plain resume sends Python's None, which an int-valued generator's
+ * `x = yield` receives as the shared None BOX -- `mojo_box_none()` -- not a
+ * raw 0. Since fire_coro_gen.c's `__mojo_gen_resume` refuses a non-None send
+ * on a just-started generator (a raw 0 is the integer 0, and real Python
+ * refuses `g.send(0)` on a fresh generator with
+ * "can't send non-None value to a just-started generator"), a drain that
+ * primed with 0 died at its first resume the moment any A3 generator
+ * escaped a function and came back through `mojo_iter_boxed_list` (the
+ * `sorted(glob.iglob(..., root_dir=...))` shape, bugs/SUITE_globcompiled).
+ * `mojo_box_none` is defined in THIS translation unit, so it is called
+ * directly rather than looked up by name. */
 static bool _a3_resume(void *h) {
     int64_t (*f)(int64_t, int64_t) = (int64_t (*)(int64_t, int64_t))_a3_sym("__mojo_gen_resume");
-    return f && f((int64_t)(intptr_t)h, 0) != 0;
+    return f && f((int64_t)(intptr_t)h, mojo_box_none()) != 0;
 }
 static int64_t _a3_value(void *h) {
     int64_t (*f)(int64_t) = (int64_t (*)(int64_t))_a3_sym("__mojo_gen_value");
@@ -6404,6 +6446,16 @@ int mojo_truthy_cstr(char *s) {
        it as a string would dereference address 0x1 (etc.) and SIGSEGV.
        Guards against BUG-2026-045's "bool-as-char*" JIT crash. */
     if ((int64_t)(intptr_t)s < 65536) return s != NULL;
+    /* A BYTES WORD in a `char *` slot: an unannotated parameter defaults to
+       `char *` and an untyped caller hands a registered `MojoBytes *` through
+       that slot, so `if not dirname:` on `dirname=b'ROOT'` would read the
+       struct's first byte (the low byte of its `data` pointer — random)
+       instead of the length: `glob.glob(b'*.py', root_dir=b'...')` took its
+       branches on a coin flip (bugs/SUITE_globcompiled). Its truth is its
+       length, and a real C string is never a registered bytes object, so the
+       probe changes no str's answer. */
+    int64_t w = (int64_t)(intptr_t)s;
+    if (mojo_is_registered_bytes(w)) return mojo_bytes_truthy((MojoBytes *)(intptr_t)w);
     return s[0] != '\0';
 }
 
@@ -14365,6 +14417,37 @@ char *mojo_cstr_or_int_str(int64_t v) {
     return _int_str_transient(v);
 }
 
+/* `mojo_cstr_or_int_str`'s VALUE sibling: the word is being handed to a
+   `char *` PARAMETER of a callee that dispatches on the word's kind (an
+   os.path.* helper, a truthiness test, `isinstance`, `glob`), not printed.
+   There a str is the same borrowed address and a registered BYTES object is
+   its own WORD — spelling it here would hand the callee a quoted repr string
+   where it wants the value: `glob.glob(b'*.py', root_dir=b'...')` passed its
+   pattern through the display spelling, so `iglob` received the 7-character
+   C string `b'*.py'`, `has_magic` searched the quoted text, and `fnmatch`
+   matched the literal `b'` prefix against the tree — [] instead of
+   [b'a.py'] (bugs/SUITE_globcompiled). A box of a str or bytes passes the
+   word it holds through the same way; any other box and a genuine integer
+   keep `mojo_cstr_or_int_str`'s answer (the integer's decimal is the one
+   spelling that is not a wild pointer). Ownership: the str/bytes arms return
+   the input address borrowed, the rest a fresh block — and the codegen's
+   value arm deliberately does NOT release the result, because the callee may
+   store it (see the call-site comment in emit_infra.py). */
+char *mojo_word_cstr_value(int64_t v) {
+    if (_box_spelled_by_kind(v)) {
+        MojoBox *bx = (MojoBox *)(intptr_t)v;
+        if (bx->kind == 'p' || bx->kind == 's')
+            return (char *)(intptr_t)bx->bits;
+        if (bx->kind == 'd') return mojo_repr_float(mojo_double_from_bits(bx->bits));
+        return mojo_repr_boxed(v);
+    }
+    if (mojo_boxed_is_str(v) || mojo_is_registered_bytes(v))
+        return (char *)(intptr_t)v;
+    if (mojo_is_re_match(v)) return mojo_re_match_repr(v);
+    if (mojo_is_registered_list(v)) return _container_key_str(v);
+    return _int_str_transient(v);
+}
+
 /* `mojo_cstr_or_int_str` for the caller that already KNOWS the word is an
    integer, so the question does not have to be asked at all.
 
@@ -15116,14 +15199,33 @@ void *mojo_sorted(void *iterable) {
      * list whose elements are char* — see mojo_list_sorted_str below for why
      * the codegen dispatches around this one. */
     /* A list that records its OWN slot kinds says when every element is a string
-     * (a drained generator, `os.listdir`-style results): sort those as strings. */
+     * (a drained generator, `os.listdir`-style results): sort those as strings.
+     * The BYTES twin is the same fact for a bytes-typed generator: `sorted()`
+     * over a list whose slots are all 's' must order as bytes (memcmp then
+     * length — Python's bytes ordering), not by the struct pointer's value.
+     * `glob.glob(b'*.py', ...)` drained its generator to registered-bytes words
+     * (bugs/SUITE_globcompiled); with two or more matches the generic int64
+     * payload sort below would order them by ADDRESS, not lexically. */
     if (src && src->len > 0) {
-        int all_str = 1;
-        for (int64_t i = 0; i < src->len && all_str; i++)
-            if (mojo_list_slot_kind(src, i) != 'p') all_str = 0;
+        int all_str = 1, all_bytes = 1;
+        for (int64_t i = 0; i < src->len && (all_str || all_bytes); i++) {
+            char k = mojo_list_slot_kind(src, i);
+            if (k != 'p') all_str = 0;
+            if (k != MOJO_KIND_BYTES) all_bytes = 0;
+        }
         if (all_str) {
             MojoList *sd = mojo_list_sorted_str(src);
             mojo_list_set_kinds_uniform(sd, 'p');
+            return (void *)sd;
+        }
+        if (all_bytes) {
+            MojoList *sd = mojo_list_copy(src);
+            /* Sorting PERMUTES the slots, so the per-slot kinds copied along no
+             * longer describe them; drop them, exactly as mojo_list_sorted_str
+             * does, then re-record the uniform kind the elements all share. */
+            mojo_list_set_kinds(sd, NULL);
+            _mojo_permute_by(sd, NULL, MOJO_KIND_BYTES, 0);
+            mojo_list_set_kinds_uniform(sd, MOJO_KIND_BYTES);
             return (void *)sd;
         }
     }

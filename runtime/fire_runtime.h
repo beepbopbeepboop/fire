@@ -2177,6 +2177,13 @@ void   *mojo_unavailable_callable_ptr(void);
 /* An int64_t used as a C string: itself when it is a boxed char*, else its
    decimal string (see mojo_cstr_or_int_str's comment in the .c). */
 char *mojo_cstr_or_int_str(int64_t v);
+/* The VALUE-parameter twin of the entry above: a word handed to a `char *`
+   parameter of a callee that dispatches on the word's kind. A str or a
+   registered bytes object comes back as the word itself (borrowed, NOT a
+   repr — the callee asks the runtime what it is), the rest as in the entry
+   above. See mojo_word_cstr_value's comment in the .c for the glob bytes
+   case that motivated it. */
+char *mojo_word_cstr_value(int64_t v);
 /* The SAME conversion for a caller that already knows `v` is an integer, so
    the runtime is not asked to guess: mojo_boxed_is_str is a range test and
    misclassifies every positive int64 in [2^31, 2^47) as a pointer, which is
