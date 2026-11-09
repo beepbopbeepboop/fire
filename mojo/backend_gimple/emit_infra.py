@@ -3587,8 +3587,8 @@ def _local_bindings(gen, name) -> list:
     to be saved or restored per function."""
     # Return cached result if available (set per function in _reset_func).
     cache = getattr(gen, '_local_bindings_cache', None)
-    if cache is not None and name in cache:
-        return cache[name]
+    if cache is not None and (id(gen._cur_func_body), name) in cache:
+        return cache[(id(gen._cur_func_body), name)]
     def idents_named(root):
         return [n for n in _iter_ast(root)
                 if isinstance(n, gimple_ctypes.IdentExpr) and n.name == name]
@@ -3626,8 +3626,11 @@ def _local_bindings(gen, name) -> list:
                 if getattr(n, 'name', None) == name:
                     found.append(None)
     # Cache the result for this name+function-body combination.
+    # Keyed by (id(body), name) so that a body swap that bypasses
+    # `_reset_func` (module_gen swaps `_cur_func_body` directly) cannot
+    # serve a stale result for a different function.
     if cache is not None:
-        cache[name] = found
+        cache[(id(gen._cur_func_body), name)] = found
     return found
 
 
