@@ -780,10 +780,10 @@ def cmd_refill(a):
         print("%s refill: breaker open for %.0f more min, starting nothing" % (
             time.strftime("%T"), (breaker_until() - time.time()) / 60), flush=True)
         return
-    if a.target is None:
-        a.target = pool_total()
     busy = running_by_slot(tasks, live_set)
     live = sum(busy.values())
+    if a.target is None:
+        a.target = max(pool_total(), live)
     items = sorted(items_all, key=lambda i: i["added"])
     started = 0
     items = [i for i in items if i["name"].startswith(tuple(a.prefix.split(",")))]
