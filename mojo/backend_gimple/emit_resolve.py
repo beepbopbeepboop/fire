@@ -346,62 +346,6 @@ def _submodule_source_path(gen, module_name: str) -> str | None:
     return None
 
 
-def _module_missing(gen, module_name: str) -> bool:
-    """True when `module_name` is neither importable as a real Python module
-    nor resolvable to a source file on the compiler's search path. A missing
-    module is a compile-time error (modular: `error: unable to locate module
-    'X'`), not something to silently skipped."""
-    _mn = (module_name or '').lstrip('.')
-    if not _mn:
-        return False
-    import importlib.util as _ilu
-    try:
-        if _ilu.find_spec(_mn) is not None:
-            return False
-    except Exception:
-        pass
-    # A sibling/source module on the compiler's search path (the same
-    # resolution `_compile_imported_module` uses).
-    try:
-        if gen._submodule_source_path(_mn):
-            return False
-    except Exception:
-        pass
-    # A dotted name may be a symbol inside its parent package, not a module;
-    # only the leaf is missing when the parent resolves.
-    try:
-        import imports as _imp
-        if _imp.resolve(_mn).source:
-            return False
-    except Exception:
-        pass
-    return True
-
-
-def _raise_missing_module(gen, module_name: str, loc=None):
-    """Raise the missing-module diagnostic for `module_name` at `loc`
-    ("line:col"), unless it is a real Python module (runtime-provided).
-
-    The diagnostic names the FIRST missing component of the dotted path:
-    `import a.b.c` where `a` resolves but `c` does not reports `c`; a
-    wrong-case root (`from TEST_BINARY_PACKAGE.inner1 import x`) reports
-    `TEST_BINARY_PACKAGE`.
-    """
-    _mn = (module_name or '').lstrip('.')
-    if not _module_missing(gen, _mn):
-        return
-    _leaf = _mn
-    _parts = _mn.split('.')
-    for _i in range(1, len(_parts) + 1):
-        if _module_missing(gen, '.'.join(_parts[:_i])):
-            _leaf = _parts[_i - 1]
-            break
-    _fn = getattr(gen, '_current_filename', '') or ''
-    _ln = (loc or '0').split(':')[0]
-    _at = f'{_fn}:{_ln}: ' if _fn else (f'{_ln}: ' if _ln != '0' else '')
-    raise RuntimeError(f"{_at}error: unable to locate module '{_leaf}'")
-
-
 def _register_closure_struct_inits(gen, stmts: list) -> None:
     """Populate `gen._struct_has_init` / `_struct_init_params` /
     `_struct_init_defaults` / `_struct_method_names` for every top-level
@@ -508,17 +452,11 @@ def publish_a3_generators(gen, meta) -> None:
             gen._generator_home_api[_key] = _api
 
 
-def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
+def _compile_imported_module(gen, module_name: str) -> tuple:
     """Find and compile an imported .mojo/.py module, extracting type
     information.
 
     Returns (code: str, stmts: list) where stmts are parsed statements from the module.
-
-    `loc` is the "line:col" of the import statement that pulled this module
-    in, used to point a missing-module diagnostic at the import site. It is
-    None for a module the compiler itself synthesized (a `from X import Y`
-    joined candidate, a link-inline module): those are not import sites and
-    must not raise a missing-module error.
     """
     # If this module already failed in this root compile, skip re-compile
     # (rollback-recompile path is the root cause of the quadratic walk).
@@ -1390,17 +1328,6 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
                 continue
 
     # Module not found (e.g. stdlib module like sys, os)
-    #
-    # A module that is a real Python module is provided by the runtime
-    # (myinterpreter's importlib path) and is NOT an error. A module that is
-    # neither on the search path nor importable as Python is a genuine
-    # missing module: modular rejects it at compile time
-    # (`error: unable to locate module 'X'`), and so do we (2026-11-09,
-    # bugs/hard/DIAGNOSTICS_missing_validation_modular.md). `loc` is None for
-    # a compiler-synthesized name (a `from X import Y` joined candidate, a
-    # link-inline module), which is not an import site and must not raise.
-    if isinstance(loc, str) and ':' in loc:
-        _raise_missing_module(gen, module_name, loc)
     return (None, [])
 
 
@@ -1711,12 +1638,6 @@ def _register_link_imports(gen, stmts: list) -> list:
     def scan(stmt_list: list):
         for stmt in stmt_list:
             if isinstance(stmt, gimple_ctypes.ImportStmt):
-                # A missing module is a compile-time error, in link mode too
-                # (modular: `error: unable to locate module 'X'`). Checked
-                # here, before the dylib/source resolution below silently
-                # skips an unresolvable name.
-                _raise_missing_module(gen, stmt.module,
-                                      f"{getattr(stmt, 'line', 0)}:{getattr(stmt, 'col', 0)}")
                 # `import M` needs TWO things registered here, and they are
                 # the only two arms of this ladder that ever matched a bare
                 # import — see the unreachable `elif isinstance(stmt,
@@ -1760,8 +1681,6 @@ def _register_link_imports(gen, stmts: list) -> list:
                     if _src2 and gen._submodule_source_path(_im_m):
                         gen._link_inline_modules.add(_im_m)
             elif isinstance(stmt, gimple_ctypes.FromImportStmt):
-                _raise_missing_module(gen, stmt.module,
-                                      f"{getattr(stmt, 'line', 0)}:{getattr(stmt, 'col', 0)}")
                 exports, from_reflection, source = _exports(stmt.module)
                 for _fip11 in (getattr(stmt, 'name_alias_strs', None) or []):
                     name = gimple_ctypes._fi_name(_fip11)

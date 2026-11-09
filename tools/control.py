@@ -637,9 +637,7 @@ def running_by_slot(tasks=None, live=frozenset()):
     by_model = {sl["model"]: sl["name"] for sl in load_pool()["slots"]}
     n = {}
     for name, t in (tasks or load()).items():
-        # a live opencode session counts only while the task is still running: a session the
-        # ledger did not start (or a task already superseded/exited) must not pin its slot.
-        if (state_of(t) == "running" and (alive(t.get("pid")) or name in live)):
+        if (state_of(t) == "running" and alive(t.get("pid"))) or name in live:
             slot = t.get("pool") or by_model.get(t.get("model"))
             n[slot] = n.get(slot, 0) + 1
     return n

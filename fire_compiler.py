@@ -4575,7 +4575,6 @@ class Parser:
                         depth -= 1
                     elif t.kind == "EOF": break
         ret = None
-        _ret_tok = self._peek()
         if self._peek().kind == "ARROW":
             self._advance()
             # Drop `ref` lifetime prefix on return type and skip lifetime parameters
@@ -4584,22 +4583,10 @@ class Parser:
                 # Skip lifetime parameters in brackets: ref[Origin]
                 if self._peek().kind == "LBRACKET":
                     self._skip_bracketed()
-            _ret_tok = self._peek()
             ret = self._parse_type_ann()
             # Skip additional qualifiers after return type
             while self._peek().kind == "NAME" and self._peek().value in ("unified", "register_passable", "capturing", "raises"):
                 self._advance()
-        # `out self` (or any `out` argument) already yields the value through
-        # the argument; a return type on the same function is contradictory.
-        # Modular rejects it at the return type's location
-        # (`functions must not declare both an 'out' argument and a return
-        # type`, mojo-parser/precompile/mojo_package_moco_773.mojo).
-        if ret is not None:
-            for _oc in param_convs.values():
-                if _oc == 'out':
-                    raise RuntimeError(
-                        f"{self._loc(_ret_tok)}error: functions must not declare both an "
-                        f"'out' argument and a return type")
         # Skip optional `where conforms_to(...)` clause
         if self._peek().kind == "NAME" and self._peek().value == "where":
             self._advance()  # where
@@ -5201,21 +5188,7 @@ class Parser:
                     saved = self._pos
                     name = self._parse_dotted_name()
                     if self._peek().kind == "COLON" or self._is_kw("as"):
-                        # Mojo's `except <target>:` binds the caught error to a
-                        # target (a bare lowercase name), unlike Python's
-                        # `except <Type>:` type pattern. A single bare
-                        # lowercase NAME with no `as` is a binding; anything
-                        # else (dotted path, uppercase type, `as` form) is a
-                        # type pattern. See modular's ParserStmts.cpp
-                        # parseTryStmt FIXME: `"except Kind" is supposed to be
-                        # a type pattern ... You need to use "except Kind as
-                        # name" to bind the error to a name.`
-                        if (self._peek().kind == "COLON" and '.' not in name
-                                and name[:1].islower()):
-                            exc_type = None
-                            exc_name = name
-                        else:
-                            exc_type = name
+                        exc_type = name
                     elif self._peek().kind == "COMMA":
                         exc_type = name
                         self._advance()
