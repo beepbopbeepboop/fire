@@ -213,6 +213,14 @@ def feed():
             continue
         if "bug:" + base in held:
             continue
+        # DONE ratchet: if any branch (landed or not) has already deleted this doc, it is
+        # fixed. Skip it so we don't re-dispatch a bug that a prior worker already resolved.
+        r = subprocess.run(["git", "log", "--all", "--diff-filter=D", "--oneline", "--",
+                           "bugs/%s.md" % base, "bugs/mid/%s.md" % base, "bugs/hard/%s.md" % base],
+                           capture_output=True, text=True, cwd=C.MAIN)
+        if r.stdout.strip():
+            log("done-ratchet: %s already deleted on a branch; skipping" % doc)
+            continue
         if base in st.get("pending", {}):
             log("held %s: due a move to %s (queued only after it moves)" % (doc, st["pending"][base]))
             continue
