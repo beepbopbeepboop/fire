@@ -452,11 +452,17 @@ def publish_a3_generators(gen, meta) -> None:
             gen._generator_home_api[_key] = _api
 
 
-def _compile_imported_module(gen, module_name: str) -> tuple:
+def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
     """Find and compile an imported .mojo/.py module, extracting type
     information.
 
     Returns (code: str, stmts: list) where stmts are parsed statements from the module.
+
+    `loc` is the "line:col" of the import statement that pulled this module
+    in, used to point a missing-module diagnostic at the import site. It is
+    None for a module the compiler itself synthesized (a `from X import Y`
+    joined candidate, a link-inline module): those are not import sites and
+    must not raise a missing-module error.
     """
     # If this module already failed in this root compile, skip re-compile
     # (rollback-recompile path is the root cause of the quadratic walk).
@@ -1328,6 +1334,27 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 continue
 
     # Module not found (e.g. stdlib module like sys, os)
+    #
+    # A module that is a real Python module is provided by the runtime
+    # (myinterpreter's importlib path) and is NOT an error. A module that is
+    # neither on the search path nor importable as Python is a genuine
+    # missing module: modular rejects it at compile time
+    # (`error: unable to locate module 'X'`), and so do we (2026-11-09,
+    # bugs/hard/DIAGNOSTICS_missing_validation_modular.md).
+    import importlib.util as _ilu
+    _mn_l = module_name.lstrip('.')
+    try:
+        _spec = _ilu.find_spec(_mn_l) if _mn_l else None
+    except Exception:
+        _spec = None
+    if _spec is None and isinstance(loc, str) and ':' in loc:
+        _fn = getattr(gen, '_current_filename', '') or ''
+        _ln, _col = (loc.split(':') + ['0'])[:2]
+        _at = f'{_fn}:{_ln}: ' if _fn else (f'{_ln}: ' if _ln != '0' else '')
+        # modular names the missing COMPONENT, not the whole dotted path
+        # (`import imported_module.does_not_exist` -> 'does_not_exist').
+        _leaf = _mn_l.rsplit('.', 1)[-1]
+        raise RuntimeError(f"{_at}error: unable to locate module '{_leaf}'")
     return (None, [])
 
 

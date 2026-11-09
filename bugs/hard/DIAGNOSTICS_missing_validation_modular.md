@@ -92,6 +92,14 @@ See build/checkfail_candidates.json (61 error-like cases).
   iterables that resolve via `gen._eval_const` to a constant list/tuple.
   Regressions: `test_comptime_assert_diagnostic.py`,
   `test_constrained_diagnostic.py`.
+- **Landed (follow-up, 2026-11-09):** compile-time diagnostic for an import
+  that names no resolvable module — `error: unable to locate module 'X'` at
+  the import's line, naming the missing COMPONENT (`import a.b.c` → `c`),
+  matching modular's `import_error_location.mojo`. A module that is a real
+  Python module is still provided by the runtime (importlib) and is not an
+  error; a `from X import Y` joined candidate (`X.Y`) is not treated as a
+  missing module because `Y` may be a symbol defined in `X`. Regression:
+  `test_import_missing_module_diagnostic.py`.
 - **Landed (follow-up, branch 3096):** `eval_const_int` resolves `IdentExpr`
   comptime bindings, enabling `range(...)` bounds that are comptime variables.
   Regressions: `test_comptime_assert_diagnostic.py`,
@@ -115,7 +123,9 @@ See build/checkfail_candidates.json (61 error-like cases).
   reflection conditions, non-gimple/formal backends, comptime-for shapes beyond
   the gimple unroller (DType/variadic iterables, computed/non-foldable
   iterables, comptime-known `dict` iteration, local `alias` bindings not always
-  visible), type/trait conformance diagnostics, import errors, and other
-  categories above. `build/checkfail_candidates.json` not present in this
+  visible), type/trait conformance diagnostics, the remaining import errors
+  (ambiguous same-name imports, qualified-member leak, mojoc conformance,
+  case-sensitivity — the missing-module diagnostic landed 2026-11-09), and
+  other categories above. `build/checkfail_candidates.json` not present in this
   worktree; re-run `tools/collect_checkfail.py` against the modular suite to
   refresh/prioritize.
