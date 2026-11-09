@@ -907,18 +907,31 @@ def cmd_ps(a):
     """Our workers' live opencode processes, told apart from the user's own opencode sessions by their
     arguments: ours are launched with `run --model M --auto ... <PARENT>/work-N/TASK.md` (opencode v1: `--model M run --auto
     --dir <PARENT>/work-N`), theirs have neither."""
-    tasks = {os.path.realpath(t["worktree"]): n for n, t in load().items()}
+    tasks = load()
+    print("%-40s %-6s %-5s %-28s %s" % ("name", "pid", "alive", "model", "claims"))
+    for name, t in sorted(tasks.items()):
+        if t.get("state") != "running":
+            continue
+        pid = t.get("pid")
+        alive = False
+        if pid:
+            try:
+                os.kill(pid, 0); alive = True
+            except (OSError, ProcessLookupError):
+                alive = False
+        claims = ",".join(t.get("claims") or [])[:40]
+        model = (t.get("model") or t.get("pool") or "?")[:28]
+        print("%-40s %-6s %-5s %-28s %s" % (name[:40], pid, "yes" if alive else "no", model, claims))
+    # live process scan
     out = subprocess.run(["ps", "-axww", "-o", "pid=,etime=,rss=,args="], capture_output=True, text=True).stdout
     mine = other = 0
     for line in out.splitlines():
         m = re.search(r"opencode .*(?:--dir |instructions are in )(\S+?)(?:/TASK\.md)?(?:\s|$)", line)
         if m and " run " in line and "sh -c" not in line[:40]:
-            pid, et, rss, _ = line.split(None, 3)
-            print("%-24s pid %-6s up %-10s %5.0f MB" % (tasks.get(os.path.realpath(m.group(1)), "?"), pid, et, int(rss) / 1024))
             mine += 1
         elif re.search(r"/opencode\s*$", line.strip()):
             other += 1
-    print("%d of our workers alive; %d other opencode process(es) belong to someone else" % (mine, other))
+    print("%d live opencode process(es) of ours; %d belong to someone else" % (mine, other))
 
 
 def cmd_guard(a):
