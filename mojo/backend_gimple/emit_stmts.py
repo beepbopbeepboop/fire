@@ -5653,19 +5653,18 @@ def _gen_stmt_AssertStmt(gen, node):
     bb_ok   = gen._new_bb()
     gen._emit(f"  if ({v}) goto {bb_ok}; else goto {bb_trap};")
     gen._emit_label(bb_trap)
+    # `stderr`/`stdout` are macOS macros (`__stderrp`) that are not legal in
+    # -fgimple's restricted subset, so the message goes through the runtime's
+    # mojo_print_stderr helper (which does its own fflush) rather than a
+    # fprintf/printf call in generated code.
+    gen._emit_call('void', '', 'mojo_print_stderr',
+                   [('char *', gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape('Assert Error: '))))])
     if node.msg is not None:
         mt, mv = gen.lower_expr(node.msg)
-        if mt == 'char *':
-            gen._emit(f'  fprintf (stderr, "Assert Error: %s\\n", {mv});')
-        elif mt in ('double', 'float', '__fp16'):
-            dv = mv if mt == 'double' else gen._new_val('double', f'(double){mv}')
-            rv = gen._call_expr('char *', 'mojo_repr_float', [('double', dv)])
-            gen._emit(f'  fprintf (stderr, "Assert Error: %s\\n", {rv});')
-        else:
-            gen._emit(f'  fprintf (stderr, "Assert Error: ");')
-            gen._emit(f'  fprintf (stderr, "{gimple_ctypes.TypeLattice.printf_fmt(mt)}\\n", {mv});')
-    else:
-        gen._emit(f'  fprintf (stderr, "Assert Error\\n");')
+        gen._emit_call('void', '', 'mojo_print_stderr',
+                       [('char *', gen._stringify_value(mt, mv, node.msg))])
+    gen._emit_call('void', '', 'mojo_print_stderr',
+                   [('char *', gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape('\n'))))])
     gen._emit("  __builtin_trap ();")
     gen._emit(f"  goto {bb_ok};")
     gen._emit_label(bb_ok)
