@@ -321,7 +321,9 @@ def apply_moves(st):
             if _git("diff", "--cached", "--name-only")[1].split():
                 log("reclass waits: the main checkout has staged changes")
                 return
-            busy = _busy_bases(C.load()) | move_busy_bases()
+            busy = {t for t in C.load().values() if C.state_of(t) == "running"}
+            busy_bases = {c[4:] for t in busy for c in t.get("claims", []) if c.startswith("bug:")}
+            busy = busy_bases | move_busy_bases()
             plan = []     # (base, old_rel, new_rel, cited_files)
             for base, to in sorted(pend.items()):
                 if base in busy:
@@ -622,10 +624,17 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--target", type=int, default=None, help="default: the pool's total slots (tools/pool.json)")
     ap.add_argument("--interval", type=int, default=120, help="seconds between passes (0: one pass)")
+    ap.add_argument("--log-file", default=os.path.join(C.ctl_dir(), "swarm.out"), help="file to write pass log to (default: .git/control/swarm.out)")
     ap.add_argument("--who", action="store_true", help="print the verified lock holder and exit")
     a = ap.parse_args()
     if a.who:
         sys.exit(who())
+    # redirect output to the log file so it is captured without a shell redirect
+    if a.log_file:
+        os.makedirs(os.path.dirname(os.path.abspath(a.log_file)), exist_ok=True)
+        _lf = open(a.log_file, "a", buffering=1)
+        sys.stdout = _lf
+        sys.stderr = _lf
     _lock = take_lock()     # held until this process exits
     while True:
         try:
