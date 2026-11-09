@@ -380,14 +380,25 @@ def _module_missing(gen, module_name: str) -> bool:
 
 def _raise_missing_module(gen, module_name: str, loc=None):
     """Raise the missing-module diagnostic for `module_name` at `loc`
-    ("line:col"), unless it is a real Python module (runtime-provided)."""
+    ("line:col"), unless it is a real Python module (runtime-provided).
+
+    The diagnostic names the FIRST missing component of the dotted path:
+    `import a.b.c` where `a` resolves but `c` does not reports `c`; a
+    wrong-case root (`from TEST_BINARY_PACKAGE.inner1 import x`) reports
+    `TEST_BINARY_PACKAGE`.
+    """
     _mn = (module_name or '').lstrip('.')
     if not _module_missing(gen, _mn):
         return
+    _leaf = _mn
+    _parts = _mn.split('.')
+    for _i in range(1, len(_parts) + 1):
+        if _module_missing(gen, '.'.join(_parts[:_i])):
+            _leaf = _parts[_i - 1]
+            break
     _fn = getattr(gen, '_current_filename', '') or ''
     _ln = (loc or '0').split(':')[0]
     _at = f'{_fn}:{_ln}: ' if _fn else (f'{_ln}: ' if _ln != '0' else '')
-    _leaf = _mn.rsplit('.', 1)[-1]
     raise RuntimeError(f"{_at}error: unable to locate module '{_leaf}'")
 
 

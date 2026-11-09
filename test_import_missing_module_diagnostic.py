@@ -47,13 +47,28 @@ def test_missing_module_from_import_fails():
 
 
 def test_missing_dotted_component_names_leaf():
-    """`import a.b.c` reports the missing COMPONENT, like modular."""
+    """`import a.b.c` reports the FIRST missing component, like modular:
+    with `a` present, the missing leaf `c` is named."""
+    _d = os.path.join(HERE, 'test_fixtures', 'imports')
     try:
-        _compile('import imported_module.does_not_exist\n\nfn main():\n    pass\n')
+        _compile('import imported_module.does_not_exist\n\nfn main():\n    pass\n',
+                 filename=os.path.join(_d, 'main.mojo'))
     except RuntimeError as e:
         assert "unable to locate module 'does_not_exist'" in str(e), e
         return
     raise AssertionError('missing dotted module compiled without error')
+
+
+def test_missing_root_component_names_root():
+    """A wrong-case/unresolved ROOT is named, not the leaf
+    (modular's mojo_import_case_sensitive_error.mojo:
+    `from TEST_BINARY_PACKAGE.inner1.myfile import x` -> 'TEST_BINARY_PACKAGE')."""
+    try:
+        _compile('from TEST_BINARY_PACKAGE.inner1.myfile import print10\n\nfn main():\n    pass\n')
+    except RuntimeError as e:
+        assert "unable to locate module 'TEST_BINARY_PACKAGE'" in str(e), e
+        return
+    raise AssertionError('wrong-case root module compiled without error')
 
 
 def test_python_module_import_passes():
