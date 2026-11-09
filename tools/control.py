@@ -1382,6 +1382,12 @@ def cmd_sync(a):
     for n in dead_running:
         print("  %s" % n)
     if dead_running and restart_dead and not dry:
+        pool = load_pool()
+        counts = {}
+        for t in tasks.values():
+            if t.get("state") == "running" and _pid_alive(t):
+                m = t.get("model", "")
+                counts[m] = counts.get(m, 0) + 1
         for n in dead_running:
             t = tasks.get(n, {})
             # DONE ratchet: if every doc claim's doc is gone (deleted on master), the task
@@ -1396,8 +1402,19 @@ def cmd_sync(a):
                     ts[n]["state"] = "superseded"
                 print("  superseded %s: all its docs are gone" % n)
                 continue
+            # Slot cap: do not restart a dead worker if its model's slot is already full.
+            m = t.get("model", "")
+            cap = 0
+            for sl in pool.get("slots", []):
+                if sl.get("model") == m:
+                    cap = sl.get("count", 0)
+                    break
+            if cap and counts.get(m, 0) >= cap:
+                print("  skipped %s: slot %s at capacity (%d/%d)" % (n, m, counts.get(m, 0), cap))
+                continue
             try:
                 new = restart(n, "process dead (sync --restart-dead)", None)
+                counts[m] = counts.get(m, 0) + 1
                 print("  restarted %s -> %s" % (n, new))
             except Exception as e:
                 print("  FAILED to restart %s: %s" % (n, e))
