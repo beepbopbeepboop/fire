@@ -404,30 +404,6 @@ def _lower_StringLiteral(gen, node):
                     # repr() the ORIGINAL typed value, not the stringified
                     # one — _repr_value(et, ev) expects the raw value.
                     part_val = gen._repr_value(et, ev, expr_node)
-                elif _conv == 'a':
-                    # `!a` is CPython's ascii(): repr() with every non-ASCII
-                    # code point escaped. Rendering the raw value through the
-                    # repr machinery first (rather than stringifying it) is
-                    # what also gives a str its quotes and a container its
-                    # element reprs; the escape pass then handles the one
-                    # thing repr leaves raw (fire_runtime.c's
-                    # mojo_ascii_escape). Falling through to
-                    # _stringify_value here was the bug: `!a` rendered the
-                    # plain `str()` value and changed nothing.
-                    _repr_val = gen._repr_value(et, ev, expr_node)
-                    _repr_fresh = _repr_val in gen._fresh_vals
-                    part_val = gen._call_expr(
-                        'char *', 'mojo_ascii_escape', [('char *', _repr_val)])
-                    if _repr_fresh:
-                        # The repr temp is a fresh runtime allocation that
-                        # nothing else can name; the ascii pass copies it, so
-                        # release it now instead of leaking one string per
-                        # `!a` field. `!r` instead hands its repr straight to
-                        # the cat, which frees it there — that is why this
-                        # free exists only on the ascii path.
-                        gen._emit_call('void', '', 'free',
-                                       [('char *', _repr_val)])
-                        gen._fresh_vals.discard(_repr_val)
                 else:
                     part_val = gen._stringify_value(et, ev, expr_node)
                 if _spec:
@@ -1220,19 +1196,9 @@ def _lower_WalrusExpr(gen, node) -> tuple[str, str]:
     vtype, vv = gen.lower_expr(node.value)
     if node.name not in gen.var_types:
         gen._declare_var(node.name, vtype)
-    # A heap-boxed local (`_boxed_mut_locals`, e.g. a class capture that the
-    # enclosing function rebinds) stores the VALUE type even though its C
-    # declaration is `{type} *`. Without this branch the source-level type was
-    # read as the pointer, so `x := 5` coerced 5 to `int64_t *` AND overwrote
-    # the box pointer itself (`x = (int64_t *)5`) instead of `*x = 5`; the
-    # method then read uninitialised heap. The assignment path above has the
-    # same branch for the same reason.
-    if node.name in getattr(gen, '_boxed_mut_locals', {}):
-        dst = gen._boxed_mut_locals[node.name]
-    else:
-        dst = gen.var_types[node.name]
-    gen._safe_coerce_emit(vtype, dst, vv, gen._write_dest(node.name))
-    return dst, gen._write_dest(node.name)
+    dst = gen.var_types[node.name]
+    gen._safe_coerce_emit(vtype, dst, vv, gen._cname(node.name))
+    return dst, gen._cname(node.name)
 
 
 def _lower_class_dyn_getattr(gen, struct_name: str, member: str) -> tuple[str, str]:

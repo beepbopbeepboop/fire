@@ -124,11 +124,6 @@ def free_docs(held, q):
     out = []
     for p in sorted(glob.glob(os.path.join(C.MAIN, "bugs", "FORMAL_*.md"))):
         b = os.path.basename(p)[:-3]
-        # DONE ratchet: skip docs already deleted on any branch
-        r = subprocess.run(["git", "log", "--all", "--diff-filter=D", "--oneline", "--", "bugs/%s.md" % b, "bugs/formal/%s.md" % b],
-                           capture_output=True, text=True, cwd=C.MAIN)
-        if r.stdout.strip():
-            continue
         if "sweep_work_map" in b or b == "FORMAL_known_limits":
             continue
         if "bug:" + b not in taken:

@@ -332,7 +332,6 @@ def main():
                   f"if it is a directory of inputs, name the directory (a "
                   f"directory is hashed by its contents).",
                   file=sys.stderr)
-            sys.exit(2)
 
     # …and the louder version of the same trap, for a pattern that WAS expanded
     # and came back empty. A missing path might be a typo; an empty set is a

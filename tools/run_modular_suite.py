@@ -32,8 +32,7 @@ def run_one(f, timeout):
 
     try:
         r = subprocess.run(
-            ["python3", "tools/cpu_cap.py", "wrap", "--name", os.path.basename(f), "--",
-             "python3", "fire.py", "build", f],
+            ["python3", "fire.py", "build", f],
             cwd=FIRE, capture_output=True, text=True, timeout=timeout)
         ok = r.returncode == 0
         out = (r.stdout or "") + "\n" + (r.stderr or "")

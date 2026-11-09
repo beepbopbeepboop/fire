@@ -501,10 +501,7 @@ def _collect_import_modules_rec(modules_to_compile: dict, node_list: list, _dept
         return
     for stmt in node_list:
         if isinstance(stmt, FromImportStmt):
-            _loc = f"{getattr(stmt, 'line', 0)}:{getattr(stmt, 'col', 0)}"
-            _prev = modules_to_compile.get(_as_str(stmt.module))
-            if not _prev:
-                modules_to_compile[_as_str(stmt.module)] = _loc
+            modules_to_compile[_as_str(stmt.module)] = True
             # `stmt.name_alias_strs` + `_fi_name`, NOT
             # `gimple_ctypes._fromimport_names(stmt)` + `_fip14[0]` — the
             # latter subscripts a freshly-built 2-tuple (each entry
@@ -523,13 +520,7 @@ def _collect_import_modules_rec(modules_to_compile: dict, node_list: list, _dept
                 # the separator dot would double-count the depth. The joined
                 # string must be EXACTLY what _module_candidate_paths resolves
                 # and what the temp_gen's module_name/qualifier derive from.
-                _jm = _as_str(gimple_ctypes._join_import_member(stmt.module, _fn))
-                if not modules_to_compile.get(_jm):
-                    # No location: `X.Y` may be a SYMBOL defined in X, not a
-                    # submodule, so an unresolved `X.Y` is not a missing-module
-                    # error. Only the primary module (`stmt.module`) carries
-                    # the import's location and can raise one.
-                    modules_to_compile[_jm] = None
+                modules_to_compile[_as_str(gimple_ctypes._join_import_member(stmt.module, _fn))] = True
         elif isinstance(stmt, ImportStmt):
             # Read `stmt.module` DIRECTLY (a char* field, exactly like the
             # FromImportStmt branch above), not via `_import_targets(stmt)`
@@ -538,14 +529,11 @@ def _collect_import_modules_rec(modules_to_compile: dict, node_list: list, _dept
             # POINTER was stored via mojo_set_add_int and every later
             # `name in modules_to_compile` missed — the compiled --dump-full
             # then emitted a truncated transitive closure.
-            _loc = f"{getattr(stmt, 'line', 0)}:{getattr(stmt, 'col', 0)}"
-            if not modules_to_compile.get(_as_str(stmt.module)):
-                modules_to_compile[_as_str(stmt.module)] = _loc
+            modules_to_compile[_as_str(stmt.module)] = True
             _mtc_extra = stmt.extra
             if _mtc_extra and len(_mtc_extra) > 0:
                 for _ex in _mtc_extra:
-                    if not modules_to_compile.get(_as_str(_ex[0])):
-                        modules_to_compile[_as_str(_ex[0])] = _loc
+                    modules_to_compile[_as_str(_ex[0])] = True
         elif isinstance(stmt, FunctionDef):
             _collect_import_modules_rec(modules_to_compile, stmt.body, _depth + 1)
         elif isinstance(stmt, IfStmt):
