@@ -1349,8 +1349,21 @@ def cmd_sync(a):
     for n, old, new in rewritten:
         print("  %s: %s -> %s" % (n, old, new))
     live = live_names(tasks)
-    dead_running = [name for name, t in tasks.items()
-                    if t.get("state") == "running" and (live is None or name not in live)]
+    def _pid_alive(t):
+        pid = t.get("pid")
+        if not pid:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
+    if live is None:
+        dead_running = [name for name, t in tasks.items()
+                        if t.get("state") == "running" and not _pid_alive(t)]
+    else:
+        dead_running = [name for name, t in tasks.items()
+                        if t.get("state") == "running" and name not in live and not _pid_alive(t)]
     print("sync: running-but-dead-in-registry=%d" % len(dead_running))
     for n in dead_running:
         print("  %s" % n)
