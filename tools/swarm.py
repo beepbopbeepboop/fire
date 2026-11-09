@@ -632,6 +632,11 @@ def main():
             if guard_ok:
                 apply_moves(load_state())        # a class change is a file move, so it lands before the feed reads the tree
             subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "reap"], capture_output=True, cwd=C.MAIN)  # jobs of finished workers
+            # keep the control plane honest: reconcile queue/registry with the filesystem and recover dead workers
+            sr = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "sync", "--restart-dead"], capture_output=True, text=True, cwd=C.MAIN)
+            for line in (sr.stdout or "").splitlines():
+                if line.strip():
+                    log("sync: " + line.strip())
             fed = cont = retired = 0
             if guard_ok:
                 fed = feed()
