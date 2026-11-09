@@ -95,10 +95,14 @@ See build/checkfail_candidates.json (61 error-like cases).
 - **Landed (follow-up, 2026-11-09):** compile-time diagnostic for an import
   that names no resolvable module — `error: unable to locate module 'X'` at
   the import's line, naming the missing COMPONENT (`import a.b.c` → `c`),
-  matching modular's `import_error_location.mojo`. A module that is a real
-  Python module is still provided by the runtime (importlib) and is not an
-  error; a `from X import Y` joined candidate (`X.Y`) is not treated as a
-  missing module because `Y` may be a symbol defined in `X`. Regression:
+  matching modular's `import_error_location.mojo`. Enforced in BOTH the inline
+  path (`_compile_imported_module`, used by `fire.py build`'s fallback) and
+  the link path (`_register_link_imports`, used by `driver.compile_program`),
+  so `fire.py build` fails with exit 1 instead of silently accepting the
+  import. A module that is a real Python module is still provided by the
+  runtime (importlib) and is not an error; a `from X import Y` joined
+  candidate (`X.Y`) is not treated as a missing module because `Y` may be a
+  symbol defined in `X`. Regression:
   `test_import_missing_module_diagnostic.py`.
 - **Landed (follow-up, branch 3096):** `eval_const_int` resolves `IdentExpr`
   comptime bindings, enabling `range(...)` bounds that are comptime variables.
