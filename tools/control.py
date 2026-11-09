@@ -637,7 +637,7 @@ def running_by_slot(tasks=None, live=frozenset()):
     by_model = {sl["model"]: sl["name"] for sl in load_pool()["slots"]}
     n = {}
     for name, t in (tasks or load()).items():
-        if state_of(t) == "running" or name in live:
+        if (state_of(t) == "running" and alive(t.get("pid"))) or name in live:
             slot = t.get("pool") or by_model.get(t.get("model"))
             n[slot] = n.get(slot, 0) + 1
     return n

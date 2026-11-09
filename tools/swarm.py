@@ -81,12 +81,15 @@ def drop_queued_busy():
 
 def busy_by_class():
     """Running workers per task class: a task counts in its own class (its `cls`), whichever slot it runs on, so a
-    slot that also takes another class does not hide that class's load."""
+    slot that also takes another class does not hide that class's load. Stale registry entries (a dead pid still
+    marked running) are not counted, or a dead worker would pin its class at capacity forever."""
     pool = C.load_pool()
     slot_cls = {sl["name"]: C.slot_class(sl) for sl in pool["slots"]}
     busy = {c: 0 for c in C.CLASSES}
     for t in C.load().values():
         if C.state_of(t) != "running":
+            continue
+        if not C.alive(t.get("pid")):
             continue
         busy[t.get("cls") or slot_cls.get(t.get("pool"), "easy")] += 1
     return busy
