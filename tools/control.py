@@ -1383,6 +1383,19 @@ def cmd_sync(a):
         print("  %s" % n)
     if dead_running and restart_dead and not dry:
         for n in dead_running:
+            t = tasks.get(n, {})
+            # DONE ratchet: if every doc claim's doc is gone (deleted on master), the task
+            # is already resolved; mark superseded instead of restarting it forever.
+            claims = [c for c in t.get("claims", []) if c.startswith("bug:")]
+            if claims and not any(os.path.exists(os.path.join(MAIN, "bugs", c[4:] + ".md")) or
+                                  os.path.exists(os.path.join(MAIN, "bugs", "mid", c[4:] + ".md")) or
+                                  os.path.exists(os.path.join(MAIN, "bugs", "hard", c[4:] + ".md")) or
+                                  os.path.exists(os.path.join(MAIN, "bugs", "formal", c[4:] + ".md"))
+                                  for c in claims):
+                with registry() as ts:
+                    ts[n]["state"] = "superseded"
+                print("  superseded %s: all its docs are gone" % n)
+                continue
             try:
                 new = restart(n, "process dead (sync --restart-dead)", None)
                 print("  restarted %s -> %s" % (n, new))
