@@ -4575,6 +4575,7 @@ class Parser:
                         depth -= 1
                     elif t.kind == "EOF": break
         ret = None
+        _ret_tok = self._peek()
         if self._peek().kind == "ARROW":
             self._advance()
             # Drop `ref` lifetime prefix on return type and skip lifetime parameters
@@ -4583,10 +4584,22 @@ class Parser:
                 # Skip lifetime parameters in brackets: ref[Origin]
                 if self._peek().kind == "LBRACKET":
                     self._skip_bracketed()
+            _ret_tok = self._peek()
             ret = self._parse_type_ann()
             # Skip additional qualifiers after return type
             while self._peek().kind == "NAME" and self._peek().value in ("unified", "register_passable", "capturing", "raises"):
                 self._advance()
+        # `out self` (or any `out` argument) already yields the value through
+        # the argument; a return type on the same function is contradictory.
+        # Modular rejects it at the return type's location
+        # (`functions must not declare both an 'out' argument and a return
+        # type`, mojo-parser/precompile/mojo_package_moco_773.mojo).
+        if ret is not None:
+            for _oc in param_convs.values():
+                if _oc == 'out':
+                    raise RuntimeError(
+                        f"{self._loc(_ret_tok)}error: functions must not declare both an "
+                        f"'out' argument and a return type")
         # Skip optional `where conforms_to(...)` clause
         if self._peek().kind == "NAME" and self._peek().value == "where":
             self._advance()  # where
