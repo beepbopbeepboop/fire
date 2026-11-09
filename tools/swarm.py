@@ -321,7 +321,9 @@ def apply_moves(st):
             if _git("diff", "--cached", "--name-only")[1].split():
                 log("reclass waits: the main checkout has staged changes")
                 return
-            busy = _busy_bases(C.load()) | move_busy_bases()
+            busy = {t for t in C.load().values() if C.state_of(t) == "running"}
+            busy_bases = {c[4:] for t in busy for c in t.get("claims", []) if c.startswith("bug:")}
+            busy = busy_bases | move_busy_bases()
             plan = []     # (base, old_rel, new_rel, cited_files)
             for base, to in sorted(pend.items()):
                 if base in busy:
