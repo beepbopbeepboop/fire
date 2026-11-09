@@ -711,6 +711,7 @@ CASES = [
     # list on a heap blob (`_list_growable`); arm64 has no heap on this path and
     # stops loudly (list_append_overflow_is_loud). A row asserting exit 0 on both
     # backends was red on arm64 for that reason. Parity is an open item in
+    # doc/finish-formal.md ("Where the work stands").
 
     # ── the gimple backend's C runtime, refused by name ───────────────────
     #

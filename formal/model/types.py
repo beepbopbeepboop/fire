@@ -3828,8 +3828,7 @@ def template_attribute_read_ambiguous(template: str, attr: str,
     Named, not counted, because the repair is a spelling rather than a number:
     the value is reachable through an INSTANCE (`d.{attr}`) or through the
     mangled name of the instantiation meant, and the reader can see which
-    instantiations this file has. the general shape (recorded in the
-    monomorph-baseline repair)
+    instantiations this file has. the general shape (recorded in `bugs/plan/step-15a-monomorph-baseline.md`)
     a type argument in a NON-CALL position is not a
     demand — and this is the one spelling of it where the consumer supplies the
     argument somewhere else in the file and here supplies none."""
