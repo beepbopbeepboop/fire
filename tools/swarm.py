@@ -53,8 +53,9 @@ def live_guard():
     try:
         dirs = C.live_session_dirs()
     except (RuntimeError, OSError, ValueError) as e:
-        log("guard: %s; this pass feeds, continues, retires and lands nothing" % e)
-        return False
+        log("guard: %s; falling back to pid-based liveness (session listing unreadable)" % e)
+        BUSY["names"], BUSY["claims"] = set(), set()
+        return True
     tasks = C.load()
     names = C.busy_task_names(dirs, tasks)
     claims = set()
