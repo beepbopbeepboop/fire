@@ -5201,7 +5201,21 @@ class Parser:
                     saved = self._pos
                     name = self._parse_dotted_name()
                     if self._peek().kind == "COLON" or self._is_kw("as"):
-                        exc_type = name
+                        # Mojo's `except <target>:` binds the caught error to a
+                        # target (a bare lowercase name), unlike Python's
+                        # `except <Type>:` type pattern. A single bare
+                        # lowercase NAME with no `as` is a binding; anything
+                        # else (dotted path, uppercase type, `as` form) is a
+                        # type pattern. See modular's ParserStmts.cpp
+                        # parseTryStmt FIXME: `"except Kind" is supposed to be
+                        # a type pattern ... You need to use "except Kind as
+                        # name" to bind the error to a name.`
+                        if (self._peek().kind == "COLON" and '.' not in name
+                                and name[:1].islower()):
+                            exc_type = None
+                            exc_name = name
+                        else:
+                            exc_type = name
                     elif self._peek().kind == "COMMA":
                         exc_type = name
                         self._advance()
