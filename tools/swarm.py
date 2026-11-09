@@ -624,10 +624,17 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--target", type=int, default=None, help="default: the pool's total slots (tools/pool.json)")
     ap.add_argument("--interval", type=int, default=120, help="seconds between passes (0: one pass)")
+    ap.add_argument("--log-file", default=os.path.join(C.ctl_dir(), "swarm.out"), help="file to write pass log to (default: .git/control/swarm.out)")
     ap.add_argument("--who", action="store_true", help="print the verified lock holder and exit")
     a = ap.parse_args()
     if a.who:
         sys.exit(who())
+    # redirect output to the log file so it is captured without a shell redirect
+    if a.log_file:
+        os.makedirs(os.path.dirname(os.path.abspath(a.log_file)), exist_ok=True)
+        _lf = open(a.log_file, "a", buffering=1)
+        sys.stdout = _lf
+        sys.stderr = _lf
     _lock = take_lock()     # held until this process exits
     while True:
         try:
