@@ -5709,7 +5709,7 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         _keys_v = gen._materialize_as_list(_keys_t, _keys_v)
         _vkind = '4'
         _vval = '0'
-        _vstr = '0'
+        _vstr = gen._new_val('char *', '(char *)0')
         if len(args) > 1:
             _vt, _vv = gen.lower_expr(args[1])
             if _vt == 'double':
@@ -5729,7 +5729,7 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             else:
                 _vkind = '0'; _vval = gen._new_val('int64_t', f'(int64_t){_vv}')
         t = gen._new_val('MojoDict *',
-                         f'mojo_dict_fromkeys_on ({ov}, {_keys_v}, {_vval}, {_vkind}, (char *){_vstr})')
+                         f'mojo_dict_fromkeys_on ({ov}, {_keys_v}, {_vval}, {_vkind}, {_vstr})')
         return 'MojoDict *', t
     if method == 'get' and args:
         key_type, key_val, key_is_bytes = _dict_key_probe(gen, *gen.lower_expr(args[0]))

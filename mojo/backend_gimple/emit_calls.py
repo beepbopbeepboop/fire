@@ -2455,7 +2455,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _keys_v = gen._materialize_as_list(_keys_t, _keys_v)
             _vkind = '4'
             _vval = '0'
-            _vstr = '0'
+            _vstr = gen._new_val('char *', '(char *)0')
             if len(node.args) > 1:
                 _vt, _vv = gen.lower_expr(node.args[1])
                 if _vt == 'double':
@@ -2475,7 +2475,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 else:
                     _vkind = '0'; _vval = gen._new_val('int64_t', f'(int64_t){_vv}')
             _rtfn = 'mojo_frozendict_fromkeys' if _mf.obj.name == 'frozendict' else 'mojo_dict_fromkeys'
-            t = gen._new_val('MojoDict *', f'{_rtfn} ({_keys_v}, {_vval}, {_vkind}, (char *){_vstr})')
+            t = gen._new_val('MojoDict *', f'{_rtfn} ({_keys_v}, {_vval}, {_vkind}, {_vstr})')
             return 'MojoDict *', t
         return gen._lower_method_call(node)
     # Subscripted method call: obj.method[TypeParam](...) — unwrap type param and route as method call.
@@ -3071,7 +3071,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if (_is_fd_fk or _is_d_fk) and node.args:
             _keys_t, _keys_v = gen.lower_expr(node.args[0])
             _keys_v = gen._materialize_as_list(_keys_t, _keys_v)
-            _vkind = '4'; _vval = '0'; _vstr = '0'
+            _vkind = '4'; _vval = '0'; _vstr = gen._new_val('char *', '(char *)0')
             if len(node.args) > 1:
                 _vt, _vv = gen.lower_expr(node.args[1])
                 if _vt == 'double':
@@ -3090,7 +3090,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 else:
                     _vkind = '0'; _vval = gen._new_val('int64_t', f'(int64_t){_vv}')
             _rtfn = 'mojo_frozendict_fromkeys' if _is_fd_fk else 'mojo_dict_fromkeys'
-            t = gen._new_val('MojoDict *', f'{_rtfn} ({_keys_v}, {_vval}, {_vkind}, (char *){_vstr})')
+            t = gen._new_val('MojoDict *', f'{_rtfn} ({_keys_v}, {_vval}, {_vkind}, {_vstr})')
             return 'MojoDict *', t
     # `String(x)` is the same operation as `str(x)`, and the interpreter
     # already treats it that way (`String(7)` -> '7' — see

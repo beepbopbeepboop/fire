@@ -5195,9 +5195,9 @@ class Parser:
                         exc_name = self._ident()
                     else:
                         self._pos = saved
-                        exc_type = self._parse_expr(_KW_PREC['as'] + 1)
+                        exc_type = self._parse_expr(0)
                 else:
-                    exc_type = self._parse_expr(_KW_PREC['as'] + 1)
+                    exc_type = self._parse_expr(0)
                 if self._is_kw("as"):
                     self._advance(); exc_name = self._ident()
                 elif self._peek().kind == "COMMA":
