@@ -188,21 +188,26 @@ def enqueue_doc(doc, base, cls, name, start=None):
 
 
 def feed():
-    """Keep every pool slot supplied: enqueue queued tasks until the total running + queued reaches the pool's total
-    slot count (plus one buffer), drawn from the pool's `feed` globs (skipping the pool's `skip` prefixes, and any doc
-    a live task or external claim holds). A doc's class decides which slots may run it (pick_slot), not whether it may
-    be queued: we do not limit by class, only by each slot's own count."""
+    """Keep every pool slot supplied: each slot gets (its count - running + 1) queued tasks, drawn from the pool's
+    `feed` globs (skipping the pool's `skip` prefixes, and any doc a live task or external claim holds). A slot is
+    fed only its own tasks; nothing moves between slots."""
     pool = C.load_pool()
     skips = pool.get("skip", [])
     st = load_state()
     held, made = held_claims(), 0
-    busy_slot = C.running_by_slot()
-    # free slots, not total queued: queued tasks whose slots are full or whose class has no
-    # slot must not block a free slot from getting work.
-    need_total = sum(max(0, sl["count"] - busy_slot.get(sl["name"], 0)) for sl in pool["slots"])
+    slot_cls = {sl["name"]: C.slot_class(sl) for sl in pool["slots"]}
+    # Each class keeps its own queue: capacity of its live slots, plus one, less what runs and what waits in it.
+    cap = {c: sum(sl["count"] for sl in pool["slots"] if C.accepts(sl, c)) for c in C.CLASSES}
+    busy = busy_by_class()
+    queued = {c: 0 for c in C.CLASSES}
+    for f in os.listdir(C.qdir()):
+        if f.endswith(".json") and f.startswith(PREFIXES):
+            item = json.load(open(os.path.join(C.qdir(), f)))
+            queued[item.get("cls") or slot_cls.get(item.get("pool"), "easy")] += 1
+    need = {c: max(0, cap[c] - busy[c] + 1 - queued[c]) if cap[c] > 0 else 0 for c in C.CLASSES}
     paths = sorted(set(p for g in pool["feed"] for p in glob.glob(os.path.join(C.MAIN, g))))
     for p in paths:
-        if need_total <= 0:
+        if not any(need.values()):
             break
         rel = os.path.relpath(p, os.path.join(C.MAIN, "bugs"))
         doc = rel[:-3] if rel.endswith(".md") else rel
@@ -227,9 +232,8 @@ def feed():
             log("stopped %s: %s" % (doc, why))
             continue
         cls = doc_class(doc, st, base)
-        # a doc is queued only if some slot that accepts its class has room right now
-        if not any(C.accepts(sl, cls) and C.slot_free(sl, busy_slot) for sl in pool["slots"]):
-            continue
+        if need[cls] <= 0:
+            continue                           # its class is full: the doc waits for a slot of that class
         name = task_name(doc)
         if name in C.load():                   # the 40-char name collides with an old task: make it unique
             name += "-%d" % int(time.time() % 10000)
@@ -238,10 +242,7 @@ def feed():
             log("re-feed %s: previous attempt %s" % (doc, prev))
         if enqueue_doc(doc, base, cls, name):
             made += 1
-            need_total -= 1
-            sl = C.pick_slot({"pool": None, "cls": cls}, busy_slot)
-            if sl:
-                busy_slot[sl["name"]] = busy_slot.get(sl["name"], 0) + 1
+            need[cls] -= 1
         st["fed"][doc] = st["fed"].get(doc, 0) + 1
     json.dump(st, open(state_path(), "w"), indent=1)
     return made

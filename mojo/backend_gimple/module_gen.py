@@ -5620,8 +5620,7 @@ def gen_module_impl(self, stmts: list):
             _mn = _as_str(_mc_iter)
             if _mn not in self._compiled_modules:
                 self._compiled_modules.add(_mn)
-                _mn_loc = modules_to_compile.get(_mn)
-                code, module_stmts = self._compile_imported_module(_mn, _mn_loc)
+                code, module_stmts = self._compile_imported_module(_mn)
                 if code:
                     imported_code.append(f"/* ─── Imported module: {_mn} ───────────────────── */")
                     imported_code.append(code)

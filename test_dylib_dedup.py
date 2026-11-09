@@ -18,14 +18,36 @@ def check(name, cond):
 
 with tempfile.TemporaryDirectory() as td:
     weak = os.path.join(td, 'weak.c'); strong = os.path.join(td, 'strong.c')
+    ref = os.path.join(td, 'ref.c')
     open(weak, 'w').write('#include <stdint.h>\n__attribute__((weak)) int64_t gpu_stub(void) { return 0; }\n')
     open(strong, 'w').write('#include <stdint.h>\nint64_t strong_fn(void) { return 1; }\n')
-    for src in (weak, strong):
+    # An object that only REFERENCES a symbol outside it. This is the shape
+    # every stdlib module has for the runtime and its imports; counting those
+    # references as definitions made almost every pair of modules "clash"
+    # (the 150-module symbol-collision exclusion).
+    open(ref, 'w').write('#include <stdint.h>\n'
+                         'extern int64_t undefined_ref(void);\n'
+                         'int64_t shared_fn(void) { return 3; }\n'
+                         'int64_t unique_fn(void) { return 4; }\n'
+                         'int64_t caller(void) { return undefined_ref(); }\n')
+    for src in (weak, strong, ref):
         subprocess.run(['cc', '-c', src, '-o', src[:-2] + '.o'], check=True)
     w = B._defined_symbols('gcc', weak[:-2] + '.o')
     s = B._defined_symbols('gcc', strong[:-2] + '.o')
+    r = B._defined_symbols('gcc', ref[:-2] + '.o')
     check('a weak definition is not a clash', '_gpu_stub' not in w and '__gpu_stub' not in w)
     check('a strong definition is counted', any('strong_fn' in x for x in s))
+    check('an undefined reference is not a definition', not any('undefined_ref' in x for x in r))
+    # ... and localizing a real clash in an object that also has undefined
+    # references must still succeed: the keep list nmedit sees is built from
+    # the same function, so an undefined name in it is a tool error and the
+    # caller silently drops the module.
+    clash = {x for x in r if 'shared_fn' in x}
+    edited = B._localize_symbols(ref[:-2] + '.o', clash, td, 'ref')
+    check('a clash is localizable beside undefined references', bool(edited))
+    if edited:
+        check('localizing keeps the other definitions',
+              any('unique_fn' in x for x in B._defined_symbols('gcc', edited)))
     # The surface questions (export table, header-orphan check) need the weak
     # definition too: it is callable from the dylib whether or not it clashes.
     wa = B._defined_symbols('gcc', weak[:-2] + '.o', include_weak=True)

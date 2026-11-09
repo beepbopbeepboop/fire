@@ -5743,8 +5743,8 @@ class GimpleGen:
         return grsl._module_candidate_paths(self, module_name)
     def _submodule_source_path(self, module_name: str) -> str | None:
         return grsl._submodule_source_path(self, module_name)
-    def _compile_imported_module(self, module_name: str, loc: str = '0:0') -> tuple:
-        return grsl._compile_imported_module(self, module_name, loc)
+    def _compile_imported_module(self, module_name: str) -> tuple:
+        return grsl._compile_imported_module(self, module_name)
     def _register_link_imports(self, stmts) -> list:
         return grsl._register_link_imports(self, stmts)
     def _register_reflected_struct(self, name, type_info, exports, parse_c_sig):
