@@ -1166,6 +1166,8 @@ def _task_text(t):
 def restart(name, why, model=None):
     """Snapshot a worker's uncommitted work, stop it, and continue it as NAME-rN from its own branch."""
     t = load()[name]
+    # strip any existing -rN suffix so restarts increment instead of nesting: foo-r2 -> foo-r3, not foo-r2-r2
+    base = re.sub(r"-r\d+$", "", name)
     wt = t["worktree"]
     git("add", "-A", cwd=wt, check=False)
     git("commit", "-q", "-m", "WIP snapshot by controller: %s's uncommitted edits when it was restarted (%s)" % (name, why),
@@ -1175,9 +1177,9 @@ def restart(name, why, model=None):
     except OSError:
         pass
     n = 2
-    while "%s-r%d" % (name, n) in load():
+    while "%s-r%d" % (base, n) in load():
         n += 1
-    new = "%s-r%d" % (name, n)
+    new = "%s-r%d" % (base, n)
     with registry() as reg:
         reg[name]["state"] = "superseded"
     task = ("You CONTINUE task '%s': the previous instance stopped (%s). Everything it had done is on your branch (its last "
