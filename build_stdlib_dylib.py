@@ -713,17 +713,9 @@ def _defined_symbols(gcc: str, obj: str, *, include_weak: bool = False) -> set:
             # copy (the empty GPU sidecar's introspection stubs, in ~every stdlib module) links fine.
             continue
         parts = line.split()
-        # -m lines: "<addr> (<section>) external <name>", while an UNDEFINED
-        # reference has no address at all: "(undefined) external <name>".
-        # Both spellings contain "external", so the address is what separates
-        # a definition from a reference. Counting a reference as a definition
-        # makes every module "clash" on the runtime symbols it imports, and
-        # then makes `_localize_symbols`'s keep list name undefined symbols,
-        # which nmedit rejects — the whole module is dropped for a collision
-        # that never existed (the 150-module exclusion).
+        # -m lines: "<addr> (<section>) external <name>"; plain: "<addr> <TYPE> <name>".
         if 'external' in parts and len(parts) >= 3:
-            if parts[0] != '(undefined)':
-                syms.add(parts[-1])
+            syms.add(parts[-1])
             continue
         # Defined external: "<addr> <TYPE> <name>"; undefined: "<TYPE=U> <name>".
         # Uppercase type letter (T/D/S/B/C/I/R) = external & defined.

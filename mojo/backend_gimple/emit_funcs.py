@@ -2648,31 +2648,6 @@ def _note_own_func_home(gen, bare_name: str, module_name: str,
         home[bare_name] = gimple_codegen._AMBIGUOUS_FUNC_HOME
 
 
-def _find_decl_location(gen, module: str, name: str):
-    """Best-effort `(path, line, col)` of `name`'s top-level declaration in
-    `module`'s source, for an ambiguity note. None when the module or the
-    declaration cannot be located."""
-    import os as _os
-    try:
-        _p = gen._submodule_source_path(module)
-    except Exception:
-        _p = None
-    if not _p:
-        return None
-    try:
-        with open(_p, 'r') as _f:
-            _lines = _f.readlines()
-    except Exception:
-        return None
-    import re as _re
-    _pat = _re.compile(r'^\s*(?:def|fn|struct|trait|enum|alias|comptime|var|let)\s+'
-                       + _re.escape(name) + r'\b')
-    for _i, _ln in enumerate(_lines, 1):
-        if _pat.match(_ln):
-            return (_p, _i, 1)
-    return None
-
-
 def _push_import_scope(gen) -> dict:
     """Push a fresh lexical-scope import-binding map onto
     _import_scope_stack (see its docstring) and return it — used at the
@@ -2727,42 +2702,7 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict) -> None:
                     q = _cb_mod.lstrip('.').replace('.', '_').replace('-', '_')
                 if not q:
                     continue
-                _local_nm = alias if alias else nm
-                _prev_q = scope.get(_local_nm)
-                if _prev_q is not None and _prev_q != q:
-                    # The same name imported from two different modules into
-                    # one function scope is ambiguous (modular's
-                    # import_fn_scope_ambiguous.mojo). A re-import from the
-                    # SAME module is a harmless shadow. Checked here, in the
-                    # pre-scan, so the diagnostic points at the SECOND import
-                    # (the body pass runs after this map is already filled and
-                    # would otherwise flag the first one).
-                    _iln = getattr(stmt, 'line', 0) or 0
-                    _ilc = getattr(stmt, 'col', 0) or 0
-                    _ifn = getattr(gen, '_current_filename', '') or ''
-                    _iat = f'{_ifn}:{_iln}:{_ilc}: ' if _ifn else f'{_iln}:{_ilc}: '
-                    # Notes naming where each module declares the name, as
-                    # modular does (`note: 'X' declared here` / `also declared
-                    # here`). Best-effort: resolve each module to a source
-                    # file and find the declaration line.
-                    _prev_mod = scope.get('__mod__' + _local_nm)
-                    _decls = []
-                    for _mod in (_prev_mod, stmt.module):
-                        if not _mod:
-                            continue
-                        _d = _find_decl_location(gen, _mod, _local_nm)
-                        if _d:
-                            _decls.append(_d)
-                    _note_txt = ''
-                    if len(_decls) == 2:
-                        _note_txt = (f"\n{_decls[0][0]}:{_decls[0][1]}:{_decls[0][2]}: "
-                                     f"note: '{_local_nm}' declared here")
-                        _note_txt += (f"\n{_decls[1][0]}:{_decls[1][1]}:{_decls[1][2]}: "
-                                      f"note: '{_local_nm}' also declared here")
-                    raise RuntimeError(
-                        f"{_iat}error: import of '{_local_nm}' is ambiguous{_note_txt}")
-                scope[_local_nm] = q
-                scope['__mod__' + _local_nm] = stmt.module
+                scope[alias if alias else nm] = q
         elif isinstance(stmt, gimple_ctypes.IfStmt):
             gen._collect_body_import_bindings(stmt.then_body, scope)
             for _, eb in stmt.elifs:

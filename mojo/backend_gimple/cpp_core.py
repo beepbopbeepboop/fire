@@ -1030,13 +1030,20 @@ def _cpp_string_literal_expr(gen, val: str, is_interp: str) -> str:
                     fn_return_types=fn_ret) or 'int64_t'
             except Exception:
                 ectype = 'int64_t'
-            if conv == 'r':
+            if conv == 'r' or conv == 'a':
                 if ectype == 'char *':
                     piece = f"mojo_repr_str((char *)({v}))"
                 elif ectype == 'double':
                     piece = f"mojo_repr_float(({v}))"
                 else:
                     piece = f"mojo_str((void *)({v}))"
+                if conv == 'a':
+                    # `!a` = CPython ascii(): the repr rendering above, with
+                    # every non-ASCII code point escaped. Same runtime helper
+                    # and same reasoning as the ordinary GIMPLE path's
+                    # `_lower_StringLiteral`; without this arm `!a` fell to
+                    # the str() arm below and rendered the plain value.
+                    piece = f"mojo_ascii_escape((char *)({piece}))"
             elif ectype == 'char *':
                 piece = v
             elif ectype == 'double':

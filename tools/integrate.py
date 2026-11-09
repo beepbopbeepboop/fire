@@ -155,15 +155,8 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
         if t.get("hold") and not (only and name in only):
             continue                                         # held (control.py hold): built in advance, released later
         st = C.state_of(t)
-        if st == "running":
-            continue                                         # a DONE-but-alive worker is finishing cleanup
-        # A DONE task that a later restart superseded is still FINISHED work: superseding it does not
-        # unsolve the bug. Excluding it stranded 1030 fixed branches — the doc stayed on master and the
-        # feed's DONE ratchet then skipped it forever, a dead end with no path forward.
-        if st not in ("exited-ok", "exited-err", "integration-failed", "superseded", "abandoned"):
+        if st not in ("exited-ok", "exited-err", "integration-failed"):
             continue
-        if t.get("fixer"):
-            continue                        # a merge/red fixer owns this branch; re-probing it would queue a second one
         if C.verdict(t) != "DONE" and name not in ignore_verdict:
             say("skip %s: worker says %s, not DONE (the swarm continues it)" % (name, C.verdict(t) or "nothing")); continue
         if not C.ahead(t):
@@ -194,7 +187,6 @@ def enqueue_merge_fix(name, t, conflict_text):
                                 file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls")))
     with C.registry() as reg:
         reg[name]["state"] = "superseded"
-        reg[name]["fixer"] = mname          # a fixer owns this branch: never hand the same one out twice
 
 
 def enqueue_red_fix(name, t, failing):
@@ -216,7 +208,6 @@ def enqueue_red_fix(name, t, failing):
     with C.registry() as reg:
         reg[name]["state"] = "superseded"
         reg[name]["needs"] = list(failing)
-        reg[name]["fixer"] = mname          # a fixer owns this branch: never hand the same one out twice
 
 
 def main():

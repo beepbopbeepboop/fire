@@ -1847,6 +1847,9 @@ _OWNS_STR_ELEMS = frozenset([
 _FRESH_STRING_RETURNS = frozenset([
     'mojo_str_cat', 'mojo_str_from_int', 'mojo_cstr_slice',
     'mojo_cstr_repeat', 'mojo_cstr_reverse', 'mojo_repr_str',
+    # `!a`'s ascii-escape pass: copies its input into a fresh allocation on
+    # every path, so a cat may free its result like any other conversion temp.
+    'mojo_ascii_escape',
     'mojo_hex', 'mojo_oct', 'mojo_bin',
     # The str methods: each returns a copy the caller owns, never its receiver
     # (runtime/fire_runtime.c, `_str_fresh_copy`).

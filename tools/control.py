@@ -162,37 +162,6 @@ def alive(pid):
         return False
 
 
-def pid_alive(t):
-    """The task's recorded process is still alive."""
-    return alive(t.get("pid"))
-
-
-def dead_running_tasks(tasks):
-    """Registry entries that claim to be running, whose process is gone, and that never wrote an exitcode.
-
-    A task that wrote an exitcode has finished: state_of already says exited-ok/exited-err for it, so
-    treating it as a dead worker and restarting it would supersede finished work (2026-11-10: r329 said
-    DONE, exited 0, and sync restarted it anyway, superseding a finished task)."""
-    return {n for n, t in tasks.items()
-            if t.get("state") == "running" and not pid_alive(t)
-            and not os.path.exists(os.path.join(t.get("worktree", ""), "exitcode"))}
-
-
-def no_restart_reason(t, pool, counts, banned=None):
-    """Why a dead worker must NOT be restarted, or None when it may be.
-
-    A slot that is disabled (count 0) or already at its count, or a model that is banned, can only
-    fail again — restarting there is what pinned one doc to an expired haiku OAuth session for 335
-    rounds. "counts" is alive running tasks keyed by model."""
-    m = t.get("model", "")
-    sl = next((sl for sl in pool.get("slots", []) if sl.get("model") == m), None)
-    if sl is not None and counts.get(m, 0) >= sl.get("count", 0):
-        return "slot %s at capacity (%d/%d)" % (sl["name"], counts.get(m, 0), sl.get("count", 0))
-    if m in (banned if banned is not None else dead_models()):
-        return "model %s is banned" % m
-    return None
-
-
 def state_of(t):
     """running / exited-ok / exited-err, unless a hand-set terminal or later state wins."""
     if t.get("state") not in (None, "running", "exited-ok", "exited-err"):
@@ -510,8 +479,6 @@ def cmd_enqueue(a):
 
 LIMIT_ERR = re.compile(r"model (is )?(unavailable|not found)|unknown model|usage limit|rate.?limit|quota|\b429\b|too many requests|insufficient (credit|balance)|"
                        r"limit (exceeded|reached)|resets? (at|in) |hit your (weekly |daily |5-hour )?limit", re.I)
-AUTH_ERR = re.compile(r"Failed to authenticate|OAuth (session )?expired|could not be refreshed|"
-                      r"invalid[_-]?api[_-]?key|401 Unauthorized|Please run .claude.*login", re.I)
 BREAKER_MIN = 30   # after a worker dies on arrival, start nothing new for this long
 
 
@@ -670,9 +637,7 @@ def running_by_slot(tasks=None, live=frozenset()):
     by_model = {sl["model"]: sl["name"] for sl in load_pool()["slots"]}
     n = {}
     for name, t in (tasks or load()).items():
-        # a live opencode session counts only while the task is still running: a session the
-        # ledger did not start (or a task already superseded/exited) must not pin its slot.
-        if (state_of(t) == "running" and (alive(t.get("pid")) or name in live)):
+        if state_of(t) == "running" or name in live:
             slot = t.get("pool") or by_model.get(t.get("model"))
             n[slot] = n.get(slot, 0) + 1
     return n
@@ -708,18 +673,6 @@ def dead_on_arrival(t):
         return False
     tail = re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:])
     return bool(LIMIT_ERR.search(tail) or NET_ERR.search(tail))
-
-
-def auth_failed(t):
-    """The worker's own log ends in an authentication failure: the model cannot be used at all until the
-    user re-authenticates, so restarting it on the same model just fails again. Distinct from a usage
-    limit (LIMIT_ERR) and a network error (NET_ERR), which is why it needs its own pattern — 2026-11-10:
-    haiku's OAuth session expired and one doc was restarted 335 times, each worker dying in 1 s."""
-    lp = os.path.join(t["worktree"], "work.log")
-    if not os.path.exists(lp):
-        return False
-    tail = re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:])
-    return bool(AUTH_ERR.search(tail))
 
 
 def bounce(name, t):
@@ -1210,14 +1163,8 @@ def _task_text(t):
     return m.group(1) if m else t["summary"]
 
 
-MAX_RESTARTS = 10   # a chain restarted this many times is not progressing: abandon it so the claim is released
-
-
 def restart(name, why, model=None):
-    """Snapshot a worker's uncommitted work, stop it, and continue it as NAME-rN from its own branch.
-    Returns the new task's name, or None once the chain is over MAX_RESTARTS: the task is then marked
-    abandoned so its claim is released and the doc is re-fed (a fresh worker, possibly a different model)
-    instead of round 300 of the same failure."""
+    """Snapshot a worker's uncommitted work, stop it, and continue it as NAME-rN from its own branch."""
     t = load()[name]
     # strip any existing -rN suffix so restarts increment instead of nesting: foo-r2 -> foo-r3, not foo-r2-r2
     base = re.sub(r"-r\d+$", "", name)
@@ -1232,11 +1179,6 @@ def restart(name, why, model=None):
     n = 2
     while "%s-r%d" % (base, n) in load():
         n += 1
-    if n > MAX_RESTARTS:
-        with registry() as reg:
-            reg[name]["state"] = "abandoned"
-        print("restart budget exhausted: %s would be round %d; marked abandoned so its claim is released" % (name, n))
-        return None
     new = "%s-r%d" % (base, n)
     with registry() as reg:
         reg[name]["state"] = "superseded"
@@ -1250,8 +1192,7 @@ def restart(name, why, model=None):
 
 
 def cmd_restart(a):
-    new = restart(a.name, a.why, a.model)
-    print("restarted as %s" % new if new else "not restarted: %s (over the restart budget, marked abandoned)" % a.name)
+    print("restarted as", restart(a.name, a.why, a.model))
 
 
 def cmd_unstick(a):
@@ -1278,8 +1219,7 @@ def cmd_unstick(a):
             stack.extend(kids.get(pid, ()))
         print("%-32s idle %5.1f min, tree cpu %5.1f%%%s" % (name, idle, busy, "  <- STALLED" if idle >= a.idle_min and busy < 3.0 else ""))
         if idle >= a.idle_min and busy < 3.0 and not a.dry_run:
-            new = restart(name, "stalled %.0f min with no CPU (a network error?)" % idle)
-            print("   restarted as %s" % new if new else "   not restarted: %s (over the restart budget)" % name)
+            print("   restarted as", restart(name, "stalled %.0f min with no CPU (a network error?)" % idle))
     cmd_unstick_dead(a)
 
 
@@ -1300,8 +1240,7 @@ def cmd_unstick_dead(a):
         if NET_ERR.search(tail):
             print("%-32s died of a network error: " % name + tail.strip().splitlines()[-1][:80])
             if not a.dry_run:
-                new = restart(name, "died of a network error")
-                print("   restarted as %s" % new if new else "   not restarted: %s (over the restart budget)" % name)
+                print("   restarted as", restart(name, "died of a network error"))
 
 
 def descendants(pid):
@@ -1426,9 +1365,19 @@ def cmd_sync(a):
     for n, old, new in rewritten:
         print("  %s: %s -> %s" % (n, old, new))
     live = live_names(tasks)
+    def _pid_alive(t):
+        pid = t.get("pid")
+        if not pid:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
     # A task is dead when its recorded pid is gone. The opencode session listing is
     # unreliable (times out, or keeps stale sessions), so it must not mask a dead pid.
-    dead_running = sorted(dead_running_tasks(tasks))
+    dead_running = [name for name, t in tasks.items()
+                    if t.get("state") == "running" and not _pid_alive(t)]
     print("sync: running-but-dead-in-registry=%d" % len(dead_running))
     for n in dead_running:
         print("  %s" % n)
@@ -1436,7 +1385,7 @@ def cmd_sync(a):
         pool = load_pool()
         counts = {}
         for t in tasks.values():
-            if t.get("state") == "running" and pid_alive(t):
+            if t.get("state") == "running" and _pid_alive(t):
                 m = t.get("model", "")
                 counts[m] = counts.get(m, 0) + 1
         for n in dead_running:
@@ -1453,25 +1402,18 @@ def cmd_sync(a):
                     ts[n]["state"] = "superseded"
                 print("  superseded %s: all its docs are gone" % n)
                 continue
+            # Slot cap: do not restart a dead worker if its model's slot is already full.
             m = t.get("model", "")
-            sl = next((sl for sl in pool.get("slots", []) if sl.get("model") == m), None)
-            # An authentication failure means the model cannot be used at all until the user
-            # re-authenticates: ban it, so nothing starts it again, rather than restarting a worker
-            # that dies in 1 s (2026-11-10: haiku's OAuth expired; one doc went 335 rounds on it).
-            if sl is not None and m not in dead_models() and auth_failed(t):
-                hours = mark_dead(m, sl)
-                print("  banned %s for %.1f h: its worker could not authenticate" % (m, hours))
-                continue
-            # Pool guard: never restart a worker whose slot is disabled (count 0) or already full,
-            # and never one whose model is banned — a banned model's new worker only fails again.
-            reason = no_restart_reason(t, pool, counts)
-            if reason:
-                print("  skipped %s: %s" % (n, reason))
+            cap = 0
+            for sl in pool.get("slots", []):
+                if sl.get("model") == m:
+                    cap = sl.get("count", 0)
+                    break
+            if cap and counts.get(m, 0) >= cap:
+                print("  skipped %s: slot %s at capacity (%d/%d)" % (n, m, counts.get(m, 0), cap))
                 continue
             try:
                 new = restart(n, "process dead (sync --restart-dead)", None)
-                if new is None:
-                    continue
                 counts[m] = counts.get(m, 0) + 1
                 print("  restarted %s -> %s" % (n, new))
             except Exception as e:

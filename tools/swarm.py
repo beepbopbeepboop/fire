@@ -15,7 +15,7 @@ One pass, repeated:
   4. VERIFY  after a landing, `verify_landed.py` (make check + stdlib-dylib) runs in the background on master; red files a
              fix-landed-* task that the next REFILL starts.
 The integrator and the verifier each take their own flock, so only one of each ever runs."""
-import argparse, fcntl, glob, hashlib, json, os, re, subprocess, sys, time, traceback
+import argparse, fcntl, glob, hashlib, json, os, re, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import control as C
@@ -45,46 +45,6 @@ def log(msg):
 # driving is BUSY: its agent is working, whatever the registry says (the CLI process may be gone while the session
 # keeps running). Busy tasks are never retired, continued, landed, or cleaned, and their claims are held for the feed.
 BUSY = {"names": set(), "claims": set()}
-
-# The code this process is running, and the lock fd that proves it is the one swarm. Both are set in
-# main() before the first pass; stale_code() compares the hash to the files now.
-_CODE_HASH = None
-_LOCK_FD = None
-SCRIPT = os.path.abspath(__file__)
-
-
-def code_hash():
-    """Hash of every tools/*.py (name + contents): the code the swarm runs. Cheap (a few dozen small
-    files) and content-based, so touching a file without changing it does not count as a change."""
-    h = hashlib.sha1()
-    for p in sorted(glob.glob(os.path.join(HERE, "*.py"))):
-        h.update(os.path.relpath(p, HERE).encode())
-        with open(p, "rb") as f:
-            h.update(f.read())
-    return h.hexdigest()
-
-
-def stale_code():
-    """Re-exec when tools/*.py no longer matches the code this process loaded. Python read the module
-    once at start, so a fix landed after that (e2aca65eb, the reclass crash) keeps failing in memory
-    every pass until a human restarts the swarm — 157 identical crashes in swarm.out. Re-exec at the
-    pass boundary: the pid is unchanged, so the workers the swarm spawned stay its children. The lock
-    fd is closed first, or the new image would see its own lock and exit. Never raises."""
-    if _CODE_HASH is None or code_hash() == _CODE_HASH:
-        return False
-    log("tools/*.py changed (%s -> %s); reloading the swarm" % (_CODE_HASH[:8], code_hash()[:8]))
-    global _LOCK_FD
-    if _LOCK_FD is not None:
-        try:
-            os.close(_LOCK_FD)
-        except OSError:
-            pass
-        _LOCK_FD = None
-    try:
-        os.execv(sys.executable, [sys.executable, SCRIPT] + sys.argv[1:])
-    except Exception as e:                       # exec failed: keep the old code, try again next pass
-        log("reload failed: %r; keeping the code this process loaded" % (e,))
-    return False
 
 
 def live_guard():
@@ -121,15 +81,12 @@ def drop_queued_busy():
 
 def busy_by_class():
     """Running workers per task class: a task counts in its own class (its `cls`), whichever slot it runs on, so a
-    slot that also takes another class does not hide that class's load. Stale registry entries (a dead pid still
-    marked running) are not counted, or a dead worker would pin its class at capacity forever."""
+    slot that also takes another class does not hide that class's load."""
     pool = C.load_pool()
     slot_cls = {sl["name"]: C.slot_class(sl) for sl in pool["slots"]}
     busy = {c: 0 for c in C.CLASSES}
     for t in C.load().values():
         if C.state_of(t) != "running":
-            continue
-        if not C.alive(t.get("pid")):
             continue
         busy[t.get("cls") or slot_cls.get(t.get("pool"), "easy")] += 1
     return busy
@@ -228,42 +185,41 @@ def enqueue_doc(doc, base, cls, name, start=None):
 
 
 def feed():
-    """Keep every pool slot supplied: enqueue queued tasks until the total running + queued reaches the pool's total
-    slot count (plus one buffer), drawn from the pool's `feed` globs (skipping the pool's `skip` prefixes, and any doc
-    a live task or external claim holds). A doc's class decides which slots may run it (pick_slot), not whether it may
-    be queued: we do not limit by class, only by each slot's own count."""
+    """Keep every pool slot supplied: each slot gets (its count - running + 1) queued tasks, drawn from the pool's
+    `feed` globs (skipping the pool's `skip` prefixes, and any doc a live task or external claim holds). A slot is
+    fed only its own tasks; nothing moves between slots."""
     pool = C.load_pool()
     skips = pool.get("skip", [])
     st = load_state()
     held, made = held_claims(), 0
-    busy_slot = C.running_by_slot()
-    # free slots, not total queued: queued tasks whose slots are full or whose class has no
-    # slot must not block a free slot from getting work.
-    need_total = sum(max(0, sl["count"] - busy_slot.get(sl["name"], 0)) for sl in pool["slots"])
+    slot_cls = {sl["name"]: C.slot_class(sl) for sl in pool["slots"]}
+    # Each class keeps its own queue: capacity of its live slots, plus one, less what runs and what waits in it.
+    cap = {c: sum(sl["count"] for sl in pool["slots"] if C.accepts(sl, c)) for c in C.CLASSES}
+    busy = busy_by_class()
+    queued = {c: 0 for c in C.CLASSES}
+    for f in os.listdir(C.qdir()):
+        if f.endswith(".json") and f.startswith(PREFIXES):
+            item = json.load(open(os.path.join(C.qdir(), f)))
+            queued[item.get("cls") or slot_cls.get(item.get("pool"), "easy")] += 1
+    need = {c: max(0, cap[c] - busy[c] + 1 - queued[c]) if cap[c] > 0 else 0 for c in C.CLASSES}
     paths = sorted(set(p for g in pool["feed"] for p in glob.glob(os.path.join(C.MAIN, g))))
     for p in paths:
-        if need_total <= 0:
-            log("feed: no free slot anywhere in the pool; %d doc(s) not considered this pass" % len(paths))
+        if not any(need.values()):
             break
         rel = os.path.relpath(p, os.path.join(C.MAIN, "bugs"))
         doc = rel[:-3] if rel.endswith(".md") else rel
         base = os.path.basename(doc)
         if any(base.startswith(x) or x in base for x in skips):
-            log("skip %s: its name matches the pool's skip pattern %s" % (
-                doc, [x for x in skips if base.startswith(x) or x in base]))
             continue
         if "bug:" + base in held:
-            log("held %s: a live task or an external claim holds it (see control.py claims)" % doc)
             continue
-        # DONE ratchet: a doc whose fix is FINISHED — a DONE task with commits, not yet landed — is
-        # not re-dispatched; its branch is in the landing queue. A deletion by a worker that never
-        # finished is NOT a fix, and skipping on it strands the doc forever with no path forward
-        # (2026-11-10: 5 docs, e.g. mid/SUITE_silentnoop, were wedged exactly this way).
+        # DONE ratchet: if any branch (landed or not) has already deleted this doc, it is
+        # fixed. Skip it so we don't re-dispatch a bug that a prior worker already resolved.
         r = subprocess.run(["git", "log", "--all", "--diff-filter=D", "--oneline", "--",
                            "bugs/%s.md" % base, "bugs/mid/%s.md" % base, "bugs/hard/%s.md" % base],
                            capture_output=True, text=True, cwd=C.MAIN)
-        if r.stdout.strip() and landable(base):
-            log("done-ratchet: %s already deleted on a branch; skipping (its branch is in the landing queue)" % doc)
+        if r.stdout.strip():
+            log("done-ratchet: %s already deleted on a branch; skipping" % doc)
             continue
         if base in st.get("pending", {}):
             log("held %s: due a move to %s (queued only after it moves)" % (doc, st["pending"][base]))
@@ -273,100 +229,20 @@ def feed():
             log("stopped %s: %s" % (doc, why))
             continue
         cls = doc_class(doc, st, base)
-        # a doc is queued only if some slot that accepts its class has room right now
-        if not any(C.accepts(sl, cls) and C.slot_free(sl, busy_slot) for sl in pool["slots"]):
-            log("wait %s: no free %s slot (%s)" % (doc, cls, ", ".join(
-                "%s count %d busy %d%s" % (sl["name"], sl["count"], busy_slot.get(sl["name"], 0),
-                                           ", banned" if sl["model"] in C.dead_models() else "")
-                for sl in pool["slots"] if C.accepts(sl, cls)) or "no slot takes class " + cls))
-            continue
+        if need[cls] <= 0:
+            continue                           # its class is full: the doc waits for a slot of that class
         name = task_name(doc)
         if name in C.load():                   # the 40-char name collides with an old task: make it unique
-            log("renamed %s: %s is already in the registry" % (doc, name))
             name += "-%d" % int(time.time() % 10000)
         prev = last_attempt(base) if st["fed"].get(doc) else None
         if prev:
             log("re-feed %s: previous attempt %s" % (doc, prev))
-        if not enqueue_doc(doc, base, cls, name):
-            log("FAILED to queue %s (class %s)" % (doc, cls))
-            continue
-        made += 1
-        need_total -= 1
-        sl = C.pick_slot({"pool": None, "cls": cls}, busy_slot)
-        if sl:
-            busy_slot[sl["name"]] = busy_slot.get(sl["name"], 0) + 1
-        else:
-            log("queued %s but no slot accepts class %s" % (doc, cls))
+        if enqueue_doc(doc, base, cls, name):
+            made += 1
+            need[cls] -= 1
         st["fed"][doc] = st["fed"].get(doc, 0) + 1
     json.dump(st, open(state_path(), "w"), indent=1)
     return made
-
-
-def landable(base):
-    """The tasks whose landing would resolve BASE: a DONE verdict, commits master lacks, and not
-    already handed to a fixer. Cheap on purpose — only the tasks that name this doc, so `why` stays
-    fast where a full pick_candidates sweep (a `git status` per worktree) would not be."""
-    claim = "bug:" + base
-    return [n for n, t in C.load().items()
-            if claim in t.get("claims", []) and C.verdict(t) == "DONE"
-            and C.ahead(t) > 0 and not t.get("fixer")]
-
-
-def claim_held(base):
-    """Whether BUG:BASE's claim is held, and by what. Cheap: only the tasks that name this doc pay
-    for holds_claims (which runs `git rev-list` per task), not the whole registry."""
-    claim = "bug:" + base
-    if claim in BUSY["claims"]:
-        return "a live opencode session is driving its tree"
-    for n, t in C.load().items():
-        if claim in t.get("claims", []) and C.holds_claims(t):
-            return "task %s (%s)" % (n, C.state_of(t))
-    for f in os.listdir(C.qdir()):
-        if f.endswith(".json"):
-            it = json.load(open(os.path.join(C.qdir(), f)))
-            if claim in it.get("claims", []):
-                return "queued task %s" % it.get("name", f)
-    for n, e in C.external().items():
-        if claim in e.get("claims", []):
-            return "external claim %s" % n
-    return None
-
-
-def why(doc):
-    """Why DOC is not being fed right now: the first feed condition that blocks it. Answers the
-    'this bug is wedged and nothing says why' question without waiting for a pass."""
-    pool = C.load_pool()
-    skips = pool.get("skip", [])
-    st = load_state()
-    base = os.path.basename(doc)
-    cls = doc_class(doc, st, base)
-    busy = C.running_by_slot()
-    if any(base.startswith(x) or x in base for x in skips):
-        return "skip pattern: its name matches %s from the pool's skip list" % [
-            x for x in skips if base.startswith(x) or x in base]
-    held = claim_held(base)
-    if held:
-        return "held: %s" % held
-    r = subprocess.run(["git", "log", "--all", "--diff-filter=D", "--oneline", "--",
-                        "bugs/%s.md" % base, "bugs/mid/%s.md" % base, "bugs/hard/%s.md" % base],
-                       capture_output=True, text=True, cwd=C.MAIN)
-    if r.stdout.strip() and landable(base):
-        return "DONE ratchet: a branch deleted it; %d DONE task(s) will land it (e.g. %s)" % (
-            len(landable(base)), landable(base)[0])
-    if base in st.get("pending", {}):
-        return "held: due a reclass to %s (queued only after the doc moves)" % st["pending"][base]
-    stop = stop_reason(doc)
-    if stop:
-        return "STOP line in the doc: %s" % stop
-    if not any(C.accepts(sl, cls) and C.slot_free(sl, busy) for sl in pool["slots"]):
-        return "no free %s slot (%s)" % (cls, ", ".join(
-            "%s count %d busy %d%s" % (sl["name"], sl["count"], busy.get(sl["name"], 0),
-                                       ", banned" if sl["model"] in C.dead_models() else "")
-            for sl in pool["slots"] if C.accepts(sl, cls)) or "no slot takes class " + cls)
-    name = task_name(doc)
-    if name in C.load():
-        return "in flight: task %s is %s" % (name, C.state_of(C.load()[name]))
-    return "would be fed on the next pass"
 
 
 def probe_free():
@@ -453,8 +329,8 @@ def apply_moves(st):
             if _git("diff", "--cached", "--name-only")[1].split():
                 log("reclass waits: the main checkout has staged changes")
                 return
-            busy_bases = {c[4:] for t in C.load().values() if C.state_of(t) == "running"
-                          for c in t.get("claims", []) if c.startswith("bug:")}
+            busy = {t for t in C.load().values() if C.state_of(t) == "running"}
+            busy_bases = {c[4:] for t in busy for c in t.get("claims", []) if c.startswith("bug:")}
             busy = busy_bases | move_busy_bases()
             plan = []     # (base, old_rel, new_rel, cited_files)
             for base, to in sorted(pend.items()):
@@ -516,7 +392,7 @@ def apply_moves(st):
                 del pend[base]
             log("reclass: moved %s" % ", ".join("%s -> %s" % (o, n) for _, o, n, _ in plan))
     except Exception as e:
-        log("reclass failed: %r\n%s" % (e, traceback.format_exc()))
+        log("reclass failed: %r" % (e,))
     finally:
         json.dump(st, open(state_path(), "w"), indent=1)
 
@@ -647,17 +523,9 @@ def find_culprit(seq, failing):
     return seq[hi - 1], failing or []
 
 
-LAND_BATCH = 8   # branches landed per pass: a larger batch merges them all into one gate run and one conflict storm
-
-
 def land():
     names = [n for n in I.pick_candidates(quiet=True) if n.startswith(PREFIXES) and n not in BUSY["names"]]
     names = fresh_first(names, C.load())
-    held = names[LAND_BATCH:]
-    names = names[:LAND_BATCH]
-    if held:
-        log("land: %d more finished branch(es) waiting behind the batch cap of %d: %s"
-            % (len(held), LAND_BATCH, ", ".join(held[:3]) + (" ..." if len(held) > 3 else "")))
     dirty = set(C.git("diff", "--name-only", "HEAD", cwd=C.MAIN).split())
     if dirty:
         tasks, keep = C.load(), []
@@ -766,25 +634,18 @@ def main():
     ap.add_argument("--interval", type=int, default=120, help="seconds between passes (0: one pass)")
     ap.add_argument("--log-file", default=os.path.join(C.ctl_dir(), "swarm.out"), help="file to write pass log to (default: .git/control/swarm.out)")
     ap.add_argument("--who", action="store_true", help="print the verified lock holder and exit")
-    ap.add_argument("--why", metavar="DOC", default=None,
-                    help="print why a bug doc is not being fed (a bugs/ path or a base name), and exit")
     a = ap.parse_args()
     if a.who:
         sys.exit(who())
-    if a.why:
-        sys.exit(why(a.why))
     # redirect output to the log file so it is captured without a shell redirect
     if a.log_file:
         os.makedirs(os.path.dirname(os.path.abspath(a.log_file)), exist_ok=True)
         _lf = open(a.log_file, "a", buffering=1)
         sys.stdout = _lf
         sys.stderr = _lf
-    global _CODE_HASH, _LOCK_FD
-    _LOCK_FD = take_lock()     # held until this process exits
-    _CODE_HASH = code_hash()   # the code this process runs; a change means re-exec (stale_code)
+    _lock = take_lock()     # held until this process exits
     while True:
         try:
-            stale_code()            # a landed tools/*.py fix must reach this process, not wait for a restart
             guard_ok = live_guard()
             if guard_ok:
                 apply_moves(load_state())        # a class change is a file move, so it lands before the feed reads the tree
