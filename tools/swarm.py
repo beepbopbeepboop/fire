@@ -638,6 +638,11 @@ def main():
             for line in (sr.stdout or "").splitlines():
                 if line.strip():
                     log("sync: " + line.strip())
+            # safe, conservative cleanup every pass: only removes merged/clean/idle trees with no outside claim
+            cr = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "cleanup"], capture_output=True, text=True, cwd=C.MAIN)
+            for line in (cr.stdout or "").splitlines():
+                if line.strip() and ("removed" in line.lower() or "deleted" in line.lower() or "worktree" in line.lower()):
+                    log("cleanup: " + line.strip())
             fed = cont = retired = 0
             if guard_ok:
                 fed = feed()
