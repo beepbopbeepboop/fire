@@ -103,9 +103,35 @@ def test_local_bindings_cache_cleared_per_function():
     assert len(b2) == 1 and b2[0].value == 2
 
 
+def test_local_bindings_cache_keyed_by_body():
+    """Cache key includes body identity: same gen, different bodies, different results.
+
+    Before the fix, both calls for 'x' would return the same cached list because
+    the cache was only keyed by name. After the fix, the cache key includes
+    id(body), so each function body gets its own cache entry even without
+    explicitly resetting the cache.
+    """
+    body1 = [AssignStmt(target=IdentExpr(name='x'), value=IntLiteral(value=1))]
+    body2 = [AssignStmt(target=IdentExpr(name='x'), value=IntLiteral(value=2))]
+    gen = make_mock_gen(body1)
+
+    # First call with body1
+    b1 = emit_infra._local_bindings(gen, 'x')
+    assert len(b1) == 1 and b1[0].value == 1
+
+    # Swap to body2 WITHOUT clearing the cache. Previously this would return
+    # the cached result from body1 (BUG). After the fix, it recomputes using
+    # the body-identity keyed cache.
+    gen._cur_func_body = body2
+    b2 = emit_infra._local_bindings(gen, 'x')
+    assert b1 is not b2, "Different bodies should return different cached objects"
+    assert len(b2) == 1 and b2[0].value == 2, f"Expected value 2, got {[v.value for v in b2]}"
+
+
 if __name__ == '__main__':
     test_local_bindings_cache_identity()
     test_local_bindings_different_names_different_caches()
     test_local_bindings_augassign()
     test_local_bindings_cache_cleared_per_function()
+    test_local_bindings_cache_keyed_by_body()
     print('All tests passed')
