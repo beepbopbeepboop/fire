@@ -22,8 +22,9 @@ lowers to `mojo_str_codepoint_len`, a plain strlen that does not dispatch on
 bytes, so it would be testing a different path than the one the stdlib takes.)
 
 Cases: the three dict values are the pin (erased word -> fixed branch ->
-must arrive as bytes); the str, literal, and dict-int cases pin the
-neighbourhood (strs and integers must keep their old answers).
+must arrive as bytes); the bytes literal fails the same way pre-fix, so it
+is a pin too; the str and dict-int cases pin the neighbourhood (strs and
+integers must keep their old answers).
 
 Each case is one print line of the compiled program; the expectation is what
 CPython prints for the same source. The program and the expectation come from
@@ -56,8 +57,8 @@ CASES = [
     "bisbytes(dd['k3'])",
     # Neighbour: a forwarded STR must stay a str.
     "bisbytes('ab')",
-    # Neighbour: a bytes literal takes the literal fast path (no coercion
-    # emitted at this site) and arrives intact either way.
+    # Pin: a bytes literal through the same slot, measured to fail pre-fix
+    # like the dict cases (isinstance saw 0) and to pass on the fix.
     "bisbytes(b'ab')",
     # Neighbour: an erased INTEGER through the same branch keeps the old
     # answer (the decimal string is not a bytes).
