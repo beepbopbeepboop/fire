@@ -2357,6 +2357,32 @@ def main():
     f()
 """, "e\n")
 
+    # The doc's source is CPython (`Lib/socketserver.py`), which is compiled
+    # under PYTHON scoping rules (`filename` ending in `.py`), not the default
+    # Mojo rules. The doc's exact shape is a `super().finish_request(...)`
+    # call forwarding `args`, a parameter of the class-declaring function
+    # that the function rebinds before AND after the `class` statement, and
+    # the method reads it as a bare call argument. Pin that path separately:
+    # the scoping analysis and the `super()` lowering are not exercised by
+    # the default-scoping case above.
+    test_gimple_stdout(
+        "gimple_nested_class_rebound_capture_python_scoping", """\
+class Server:
+    def finish_request(self, request: str, kwargs: str):
+        print(request, kwargs)
+
+def _main(args=None):
+    args = "d"
+    class ServerMixin(Server):
+        def finish_request(self, request: str):
+            super().finish_request(request, args)
+    args = "e"
+    ServerMixin().finish_request("r")
+
+def main():
+    _main()
+""", "r e\n", filename='classcatch.py')
+
     # The same problem with no REBIND: a local whose FIRST binding is after
     # the class statement. A snapshot taken at the class statement read it
     # before it was bound (the compiled path answered 0).
