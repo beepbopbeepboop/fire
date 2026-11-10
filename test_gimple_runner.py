@@ -2312,6 +2312,23 @@ def main():
     print(mk(1))
 """, "2\n")
 
+    # A captured `str` is a pointer value, not an int: the method's own C
+    # return type has to be the class attribute's semantic type (`char *`)
+    # or the string's address prints in decimal.
+    test_gimple_stdout(
+        "gimple_nested_class_method_returns_rebound_str_capture", """\
+def mk(s: str):
+    class C:
+        def tag(self):
+            return s
+    t = C()
+    s = s + "!"
+    return t.tag()
+
+def main():
+    print(mk("x"))
+""", "x!\n")
+
     # The same problem with no REBIND: a local whose FIRST binding is after
     # the class statement. A snapshot taken at the class statement read it
     # before it was bound (the compiled path answered 0).
