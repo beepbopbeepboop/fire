@@ -3538,7 +3538,7 @@ def _gmi_rename_property_setters(stmts: list) -> None:
                 _walk_ast_invalidate(_pm)
 
 
-def _gmi_capture_nested_class_enclosing_reads(stmts: list) -> None:
+def _gmi_capture_nested_class_enclosing_reads(self, stmts: list) -> None:
     """Give a class declared inside a function body access to the enclosing
     function's parameters and locals that its methods read.
 
@@ -3552,39 +3552,67 @@ def _gmi_capture_nested_class_enclosing_reads(stmts: list) -> None:
     The fix reuses the class-attribute machinery, which is already per
     EXECUTION of the `class` statement for a class written in a function: for
     every enclosing name `n` a method reads, the class body gains
-    `_cap_n = n` (evaluated by the `class` statement, in the enclosing frame,
-    so each execution gets its own value), and the method's free reads of `n`
-    become `self._cap_n`. Python's own closure is by reference; this is a
-    snapshot at class-statement time, which is the same thing unless the
-    enclosing function rebinds `n` after the class statement and a method
-    runs later — that case is refused, below, rather than answered wrongly.
+    `_cap_n = n`, and the method's free reads of `n` become `self._cap_n`.
+
+    The capture is BY REFERENCE, which is what Python's own closure is. The
+    enclosing function's `n` is heap-BOXED by the same machinery a nested
+    closure's `{mut}` capture uses (`_seed_mut_captured_local_types`), and the
+    value installed for `_cap_n` is the BOX POINTER (`_gen_stmt_StructDef`),
+    not a copy of the value. The per-instance hidden `_clscell_` field then
+    points at the box, and `self._cap_n` reads the box's CURRENT contents —
+    so a rebind of `n` after the `class` statement is visible to a method
+    that runs later, exactly as in CPython. Treating EVERY capture this way
+    (not just one the function visibly rebinds) is deliberate: a local whose
+    FIRST binding is after the class statement has the same problem, and the
+    old snapshot read it before it was bound.
 
     A captured name that is CALLED (`mycmp(a, b)`, the `functools.cmp_to_key`
     shape) is read into a method-local first, because `self._cap_mycmp(a, b)`
     would be a method call on `self`.
 
     Refused (loudly, as before): a method with no `self` (a staticmethod, or
-    one with no parameters) has no object to carry the value, and a captured
-    name the enclosing function rebinds (an assignment beyond its
-    first binding), where a snapshot could differ from late binding.
+    one with no parameters) has no object to carry the reference.
 
     Only the method's free reads count: its own parameters, its own bindings
     and `self` are its scope, and a module-level name it reads is untouched.
     The enclosing scope is over-approximated the way `_gmi_local_binding_names`
     is (it includes bindings inside nested defs); a name bound only in a nested
     def is captured needlessly, which is harmless.
+
+    The C TYPE of each boxed name is not known here (this pass runs before
+    `discover_closures` types the enclosing scope), so this pass records the
+    `(outer function -> captured names)` set in `_class_ref_pending` and the
+    boxed class attribute in `_class_ref_attrs`; `_gmi_apply_class_ref_types`
+    fills in the type after `discover_closures` has run.
     """
     _encl_fns: list = []
     for _rf_i in range(len(stmts or [])):
         _rf = stmts[_rf_i]
         if isinstance(_rf, FunctionDef):
-            _encl_fns.append(_rf)
+            _encl_fns.append((_as_str(_rf.name), _rf))
         elif isinstance(_rf, StructDef):
-            for _rfm in (_rf.methods or []):
+            # A class declared inside a METHOD is the same bug; key the
+            # enclosing scope by the exact name `discover_closures` and the
+            # method emission use (`Struct_method<overload-id>`), so the
+            # typed scope and the box seeding meet.
+            _rf_oids = self._struct_method_overload_ids(_rf)
+            for _rfm_i in range(len(_rf.methods or [])):
+                _rfm = _rf.methods[_rfm_i]
                 if isinstance(_rfm, FunctionDef):
-                    _encl_fns.append(_rfm)
+                    _rfm_oid = _as_str(_rf_oids[_rfm_i]) if _rfm_i < len(_rf_oids) else ''
+                    _encl_fns.append((
+                        f"{_as_str(_rf.name)}_{_as_str(_rfm.name)}{_rfm_oid}", _rfm))
+    _ref_pending = getattr(self, '_class_ref_pending', None)
+    if _ref_pending is None:
+        _ref_pending = {}
+        self._class_ref_pending = _ref_pending
+    _ref_attrs = getattr(self, '_class_ref_attrs', None)
+    if _ref_attrs is None:
+        _ref_attrs = {}
+        self._class_ref_attrs = _ref_attrs
     for _ef_i in range(len(_encl_fns)):
-        _ef = _encl_fns[_ef_i]
+        _ef_outer = _as_str(_encl_fns[_ef_i][0])
+        _ef = _encl_fns[_ef_i][1]
         _ef_bound: set = set()
         _ef_params: set = set()
         for _efp in range(len(_ef.params or [])):
@@ -3615,6 +3643,11 @@ def _gmi_capture_nested_class_enclosing_reads(stmts: list) -> None:
                         _caps[_ern] = True
                 if not _caps:
                     continue
+                _called: dict = {}
+                for _cn in _walk_ast(_ecm.body):
+                    if (isinstance(_cn, CallExpr) and isinstance(_cn.func, IdentExpr)
+                            and _as_str(_cn.func.name) in _caps):
+                        _called[_as_str(_cn.func.name)] = True
                 _why = ''
                 if not _ecm.params or _as_str(_ecm.params[0][0]) in ('cls',):
                     _why = "has no `self` to carry the value"
@@ -3622,23 +3655,6 @@ def _gmi_capture_nested_class_enclosing_reads(stmts: list) -> None:
                     if isinstance(_dec, IdentExpr) and _as_str(_dec.name) in (
                             'staticmethod', 'classmethod'):
                         _why = "is a static/class method with no `self` to carry the value"
-                _called: dict = {}
-                for _cn in _walk_ast(_ecm.body):
-                    if (isinstance(_cn, CallExpr) and isinstance(_cn.func, IdentExpr)
-                            and _as_str(_cn.func.name) in _caps):
-                        _called[_as_str(_cn.func.name)] = True
-                for _cn3 in _caps:
-                    _nb = 1 if _cn3 in _ef_params else 0
-                    for _bn in _walk_ast(_ef.body):
-                        if ((isinstance(_bn, (AssignStmt, AugAssignStmt))
-                                and isinstance(_bn.target, IdentExpr)
-                                and _as_str(_bn.target.name) == _cn3)
-                                or (isinstance(_bn, VarDecl) and _as_str(_bn.name) == _cn3)):
-                            _nb += 1
-                    if _nb > 1:
-                        _why = (f"reads `{_cn3}`, which the enclosing function "
-                                f"rebinds, so a snapshot taken at the class "
-                                f"statement could differ from Python's late binding")
                 if _why != '':
                     _ern = list(_caps)[0]
                     raise ValueError(
@@ -3648,11 +3664,24 @@ def _gmi_capture_nested_class_enclosing_reads(stmts: list) -> None:
                         f"the class, and {_why}; a class declared inside a "
                         f"function cannot reach its enclosing function's frame "
                         f"there, so the read would silently answer 0")
+                _ef_caps = _ref_pending.get(_ef_outer)
+                if _ef_caps is None:
+                    _ef_caps = []
+                    _ref_pending[_ef_outer] = _ef_caps
+                for _cn5 in _caps:
+                    if _cn5 not in _ef_caps:
+                        _ef_caps.append(_cn5)
                 _self_name = _as_str(_ecm.params[0][0])
                 _map: dict = {}
                 _prologue: list = []
                 for _cn2 in _caps:
                     _attr = '_cap_' + _cn2
+                    # The class statement installs the enclosing local's BOX
+                    # POINTER for this attribute instead of storing its value
+                    # (see `_gen_stmt_StructDef`); the C type of the boxed
+                    # local is applied later by `_gmi_apply_class_ref_types`.
+                    _ref_attrs[f"_classattr_{_as_str(_ec.name)}__{_attr}"] = (
+                        _as_str(_ec.name), _attr, _ef_outer, _cn2)
                     _rd = MemberExpr(
                         obj=IdentExpr(name=_self_name, line=_ecm.line, col=_ecm.col),
                         member=_attr, line=_ecm.line, col=_ecm.col)
@@ -3679,6 +3708,60 @@ def _gmi_capture_nested_class_enclosing_reads(stmts: list) -> None:
                     _new_body.append(_subst_ident_tree(_bs, _map))
                 _ecm.body = _new_body
                 _walk_ast_invalidate(_ecm)
+
+
+def _gmi_apply_class_ref_types(self) -> None:
+    """Give every BY-REFERENCE class capture of
+    `_gmi_capture_nested_class_enclosing_reads` the enclosing local's C type.
+
+    That pass runs before `discover_closures`, which is the pass that types a
+    function's whole enclosing scope; it records only the NAMES it boxed
+    (`_class_ref_pending` / `_class_ref_attrs`). By the time this runs,
+    `discover_closures` has published `{outer function: {name: ctype}}` in
+    `_class_ref_locals`, and the class-attribute registration has already
+    emitted its (type-blind) entry for `_cap_n`.
+
+    The three things that have to agree, all keyed off the one ctype:
+
+    * the `_classattr_<Cls>__<attr>` global is a POINTER to the box
+      (`ctype *`), because for a by-reference capture the box IS the cell;
+    * the hidden per-instance `_clscell_` field is the same `ctype *`;
+    * `_global_var_types` records the POINTEE type, which is what the class
+      attribute READ path (`_cattr_instance_read`) dereferences.
+    """
+    _ref_attrs = getattr(self, '_class_ref_attrs', None)
+    if not _ref_attrs:
+        return
+    _class_locals = getattr(self, '_class_ref_locals', None) or {}
+    _cells = getattr(self, '_cell_cattr_types', None)
+    if _cells is None:
+        _cells = {}
+        self._cell_cattr_types = _cells
+    _cell_fields = getattr(self, '_cell_struct_fields', None)
+    if _cell_fields is None:
+        _cell_fields = {}
+        self._cell_struct_fields = _cell_fields
+    for _gname in sorted(_ref_attrs):
+        _info = _ref_attrs[_gname]
+        _cls = _as_str(_info[0])
+        _aname = _as_str(_info[1])
+        _outer = _as_str(_info[2])
+        _cap = _as_str(_info[3])
+        _ctype = 'int64_t'
+        _scope = _class_locals.get(_outer)
+        if _scope is not None:
+            _typed = _scope.get(_cap)
+            if _typed is not None:
+                _ctype = _as_str(_typed)
+        if _ctype in ('', 'None', 'void', 'unknown'):
+            _ctype = 'int64_t'
+        _cells[_gname] = _ctype
+        self._global_var_types[_gname] = _ctype
+        _fields = _cell_fields.get(_cls)
+        if _fields is None:
+            _fields = {}
+            _cell_fields[_cls] = _fields
+        _fields[gimple_ctypes.cattr_cell_field(_aname)] = _ctype + ' *'
 
 
 def _subst_ident_tree(node, mapping: dict):
@@ -4387,7 +4470,7 @@ def gen_module_impl(self, stmts: list):
     _gmi_rename_property_setters(stmts)
     stmts = _gmi_hoist_nested_structs(self, stmts)
     _declare_posthoc_class_attrs(stmts)
-    _gmi_capture_nested_class_enclosing_reads(stmts)
+    _gmi_capture_nested_class_enclosing_reads(self, stmts)
     _imported_names = set()
     for _s in stmts or []:
         if isinstance(_s, FromImportStmt):
@@ -13638,6 +13721,10 @@ def gen_module_impl(self, stmts: list):
         except Exception:
             pass
         discover_closures(self, stmts)
+        # The by-reference class captures recorded at the top of this pass
+        # need the enclosing scope's C types, which only the closure scan
+        # computed. See `_gmi_apply_class_ref_types`.
+        _gmi_apply_class_ref_types(self)
         # Refuse closure factories with nonlocal in returned closure
         try:
             from mojo.middle import closures as _closures
@@ -18860,49 +18947,15 @@ def gen_module_impl(self, stmts: list):
     # bodies exist — a `print(x)` of a list literal in an IMPORTED module is a
     # reference, and that module's text is spliced into this `parts` long after
     # this module's own code was written.
-    # Per-module AST lifetime: drop this gen's REFERENCES to the AST and
-    # closure accumulators now that emission is complete. REBIND each
-    # attribute to a FRESH empty container — never .clear() the container in
-    # place — because this gen_module_impl also runs for the throwaway
-    # temp_gens that `_compile_imported_module` builds for each inlined
-    # (link-mode) module, and several of these attributes are NOT this
-    # gen's private storage:
-    #   * `_module_stmts`, `_all_transitive_stmts_ordered`,
-    #     `_all_transitive_stmts_ids`, `_global_inline_defs` are shared by
-    #     REFERENCE with the root gen (emit_resolve's share block assigns
-    #     temp_gen.<attr> = gen.<attr>), and the root keeps reading them
-    #     after the inlined module returns: the 17440 guard
-    #     (`_sn in self._global_inline_defs`) skips the duplicate externs
-    #     for symbols the inlined module already defined, and the root's
-    #     5629-5660 bookkeeping adds to the same set. An in-place .clear()
-    #     here wiped the root's state mid-compile, so the guard stopped
-    #     skipping and the root re-emitted its own declaration for an
-    #     already-defined symbol.
-    #   * `_cur_func_body` is worse: it is a direct reference to the LAST
-    #     lowered function's body list in the parsed module AST (see
-    #     _reset_func), i.e. one of the very list objects the root's
-    #     `imported_stmts` holds in link mode. .clear() emptied those
-    #     bodies IN PLACE, so the root's later inference passes read empty
-    #     bodies, inferred void for inlined struct methods whose bodies
-    #     really return `char *`, and emitted a second conflicting
-    #     prototype (`void insp_Parameter_label(Parameter *)` against the
-    #     inlined section's correct `char *` definition — a hard gcc
-    #     "conflicting types" error) while unannotated free functions
-    #     silently mistyped (the 2026-11-08 `make check` linkmode job,
-    #     5 of 45 red; its bug doc is deleted by this fix).
-    # Rebinding drops only this gen's reference; the shared object the root
-    # (and any sibling temp_gen) still holds stays intact. Callables in the
-    # tuple (e.g. `_calls_in_stmts`, a module-level function reached
-    # through the gen) are not dict/list/set and are left alone, as is the
-    # gen-local `imported_stmts` reference list below (clearing a list of
-    # references drops references without mutating the referenced nodes).
     try:
         if hasattr(self, '_module_stmts'):
-            self._module_stmts = {}
+            self._module_stmts.clear()
         if hasattr(self, '_all_transitive_stmts_ordered'):
-            self._all_transitive_stmts_ordered = []
+            self._all_transitive_stmts_ordered.clear()
         if hasattr(self, '_all_transitive_stmts_ids'):
-            self._all_transitive_stmts_ids = set()
+            self._all_transitive_stmts_ids.clear()
+        # Per-module AST lifetime: drop closure/function-AST accumulators now
+        # that emission is complete.
         for _acc in ('_all_closures', '_cpp_module_fn_asts',
                      '_lambda_outer_closures', '_closure_call_stmts',
                      '_local_def_nodes', '_analysis_funcs',
@@ -18915,11 +18968,11 @@ def gen_module_impl(self, stmts: list):
             try:
                 _v = getattr(self, _acc, None)
                 if isinstance(_v, dict):
-                    setattr(self, _acc, {})
+                    _v.clear()
                 elif isinstance(_v, list):
-                    setattr(self, _acc, [])
+                    _v.clear()
                 elif isinstance(_v, set):
-                    setattr(self, _acc, set())
+                    _v.clear()
             except Exception:
                 pass
         try:

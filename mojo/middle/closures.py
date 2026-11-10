@@ -315,6 +315,32 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
                         enriched_scope[_tgt] = 'int64_t'
                         ctx.var_types[_tgt] = 'int64_t'
         ctx.var_types = _saved_vt2
+        # A class declared in this scope whose methods read `enclosing` names
+        # captures them BY REFERENCE (`module_gen._gmi_capture_nested_class_
+        # enclosing_reads`), which means the enclosing local is heap-boxed.
+        # Boxing needs the local's C TYPE, and this pass is what types a
+        # function's whole enclosing scope (`enriched_scope`). Publish the
+        # answer for the names that pass recorded as still needing one; the
+        # module backend reads it back after this call
+        # (`_gmi_apply_class_ref_types`, `_seed_mut_captured_local_types`).
+        _ref_pending = getattr(ctx, '_class_ref_pending', None)
+        if _ref_pending is not None:
+            _pending_names = _ref_pending.get(outer_name)
+            if _pending_names:
+                _class_locals = getattr(ctx, '_class_ref_locals', None)
+                if _class_locals is None:
+                    _class_locals = {}
+                    ctx._class_ref_locals = _class_locals
+                _typed = {}
+                for _crn0 in _pending_names:
+                    _crn = _as_str(_crn0)
+                    _crt = 'int64_t'
+                    if _crn in enriched_scope:
+                        _crt = _as_str(enriched_scope[_crn])
+                    if _crt in ('', 'None', 'void', 'unknown'):
+                        _crt = 'int64_t'
+                    _typed[_crn] = _crt
+                _class_locals[outer_name] = _typed
         # Parallel structures instead of a list-of-3-tuples: a tuple element
         # indexed on the self-hosted compiled path erases to `int64_t`, and
         # the third field here (the set of names each sibling calls) then

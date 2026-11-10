@@ -38,12 +38,6 @@ import mlir
 from fire_compiler import for_target_is_tuple, for_target_single_name
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
-from mojo.backend_gimple.emit_calls import _box_escaping_dict_slot_read as _box_slot_read_escape
-
-
-def _lower_stmt_arg(gen, a):
-    t, v = gen.lower_expr(a)
-    return _box_slot_read_escape(gen, a, t, v)
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.module_shared as msh
 import mojo.middle.itcursor as itc
@@ -1440,14 +1434,6 @@ def _gen_stmt_AssignStmt(gen, node):
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name
-        # Propagate `d[k]` slot-read tracking to the assigned local name so
-        # later reads/prints of the name can recover the slot's runtime kind.
-        _dsr = getattr(gen, '_dict_slot_reads', None)
-        if _dsr is not None:
-            if v in _dsr:
-                _dsr[_as_str(tname)] = _dsr[v]
-            else:
-                _dsr.pop(_as_str(tname), None)
         # Track frozendict/dict fromkeys callable values
         try:
             if hasattr(gen, '_frozendict_fromkeys_callables') and v in gen._frozendict_fromkeys_callables:
@@ -2446,13 +2432,8 @@ def _gen_stmt_AssignStmt(gen, node):
             if ((vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
                     or vtype.endswith(' *'))
                     and obj_v not in getattr(gen, '_opaque_container_locals', ())):
-                # Join, not overwrite: a dict whose stores disagree (`d['n'] = None` then `d['f'] = 1.5`) has no one
-                # value type. The last store used to win, so every read took that one accessor and the other slots'
-                # kinds were lost (`print(d['n'])` gave 0.0). Disagreement records 'mixed': reads take the boxed path.
-                _prev_vt = gen._dict_val_types.get(obj_v)
-                _joined_vt = 'mixed' if _prev_vt is not None and _prev_vt != vtype else vtype
-                gen._dict_val_types[obj_v] = _joined_vt
-                _note_global_dict_store(gen, node.target.obj, _joined_vt)
+                gen._dict_val_types[obj_v] = vtype
+                _note_global_dict_store(gen, node.target.obj, vtype)
             # dict[key] = val → mojo_dict_set_str_* (key coerced via
             # _char_to_cstr, the single dict-key-to-string conversion
             # used by both read and write sides — see its docstring).
@@ -3368,28 +3349,6 @@ def _gen_stmt_ReturnStmt(gen, node):
         vtype: str = ''
         v: str = ''
         vtype, v = gen.lower_expr(node.value)
-        # A dict slot read whose runtime kind is on the slot: box it so the
-        # kind survives a return (callers cannot see this frame's dict/key temps).
-        _dsr = getattr(gen, '_dict_slot_reads', None)
-        _dsr_hit = None
-        if _dsr is not None:
-            _dsr_hit = _dsr.get(v)
-            if _dsr_hit is None and isinstance(node.value, gimple_ctypes.IdentExpr):
-                _dsr_hit = _dsr.get(_as_str(node.value.name))
-        if _dsr_hit is not None and vtype in ('int', 'int64_t'):
-            _dv, _kv, _kk = _dsr_hit
-            if _kk == 'str':
-                v = gen._call_expr('int64_t', 'mojo_dict_slot_boxed',
-                                   [('MojoDict *', _dv), ('char *', _kv)])
-            elif _kk == 'bytes':
-                v = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_bytes',
-                                   [('MojoDict *', _dv), ('MojoBytes *', _kv)])
-            elif _kk == 'none':
-                v = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_none',
-                                   [('MojoDict *', _dv)])
-            vtype = 'int64_t'
-            if hasattr(gen, '_tagged_word_vals'):
-                gen._tagged_word_vals.add(v)
         # A generator handle leaving a function whose return slot is a plain word
         # (`def iglob(...): it = _iglob(...); return it`, consumed as `list(iglob(...))`):
         # the consumer can only drain it if the run time knows which generator it is.
@@ -4183,6 +4142,7 @@ def _gen_stmt_StructDef(gen, node):
     cattrs = gen._class_attrs.get(node.name)
     if not cattrs:
         return
+    _ref_attrs = getattr(gen, '_class_ref_attrs', None) or {}
     for field in node.fields:
         if isinstance(field, gimple_ctypes.AssignStmt) \
                 and isinstance(field.target, gimple_ctypes.IdentExpr):
@@ -4192,6 +4152,19 @@ def _gen_stmt_StructDef(gen, node):
         else:
             continue
         if aname not in cattrs:
+            continue
+        # A BY-REFERENCE capture of an enclosing local: the class attribute
+        # is the local's heap box, not a copy of its value. The enclosing
+        # function was made to box the name (`_class_ref_captures`), so the
+        # box pointer already exists; install THAT as the per-execution cell
+        # (`ctype *` global, pointed at by every instance built here) instead
+        # of allocating a fresh cell and storing the current value. The
+        # method's `self._cap_n` read then dereferences the box, so it sees
+        # the variable's current contents -- Python's late binding.
+        if cattrs[aname] in _ref_attrs:
+            _src = field.value
+            if isinstance(_src, gimple_ctypes.IdentExpr):
+                gen._emit(f"  {cattrs[aname]} = {gen._cname(_as_str(_src.name))};")
             continue
         # A per-execution cell (module_gen registration): this execution gets its
         # OWN storage, and the global is pointed at it before the store below, so
@@ -5144,7 +5117,7 @@ def _gen_stmt_ExprStmt(gen, node):
             return
         if raw_name in gen._async_api:
             api = gen._async_api[raw_name]
-            arg_pairs = [_lower_stmt_arg(gen, a) for a in node.value.args]
+            arg_pairs = [gen.lower_expr(a) for a in node.value.args]
             base = api['base']
             handle = gen._call_expr('MojoAsync *', f"{base}_start", arg_pairs)
             gen._emit(f"  {base}_destroy ({handle});")
@@ -5246,7 +5219,7 @@ def _gen_stmt_ExprStmt(gen, node):
         if raw_name == gen._inner_func_name and gen._env_param:
             lifted   = gen.current_func_name
             env_var  = gen._env_param
-            arg_pairs = [_lower_stmt_arg(gen, a) for a in node.value.args]
+            arg_pairs = [gen.lower_expr(a) for a in node.value.args]
             env_type = gen.func_param_types.get(lifted, ['void *'])[0]
             full_arg_pairs = [(env_type, env_var)] + arg_pairs
             fname_c  = gimple_ctypes._safe_name(lifted)
@@ -5415,7 +5388,7 @@ def _gen_stmt_ExprStmt(gen, node):
         # all, so without this its prototype was never recorded and the
         # call stayed an implicit declaration.
         ggc._ensure_libc_self_extern(gen, raw_name)
-        arg_pairs = [_lower_stmt_arg(gen, a) for a in node.value.args]
+        arg_pairs = [gen.lower_expr(a) for a in node.value.args]
 
         # exit(msg)/quit(msg) as a bare statement — see _lower_named_
         # call's identical check (this is that fix's statement-level

@@ -155,15 +155,8 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
         if t.get("hold") and not (only and name in only):
             continue                                         # held (control.py hold): built in advance, released later
         st = C.state_of(t)
-        if st == "running":
-            continue                                         # a DONE-but-alive worker is finishing cleanup
-        # A DONE task that a later restart superseded is still FINISHED work: superseding it does not
-        # unsolve the bug. Excluding it stranded 1030 fixed branches — the doc stayed on master and the
-        # feed's DONE ratchet then skipped it forever, a dead end with no path forward.
-        if st not in ("exited-ok", "exited-err", "integration-failed", "superseded", "abandoned"):
+        if st not in ("exited-ok", "exited-err", "integration-failed"):
             continue
-        if t.get("fixer"):
-            continue                        # a merge/red fixer owns this branch; re-probing it would queue a second one
         if C.verdict(t) != "DONE" and name not in ignore_verdict:
             say("skip %s: worker says %s, not DONE (the swarm continues it)" % (name, C.verdict(t) or "nothing")); continue
         if not C.ahead(t):
@@ -174,20 +167,10 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
     return cands
 
 
-MERGE_FIX_DEPTH = 3   # fixers of fixers before a branch is abandoned
-
-
 def enqueue_merge_fix(name, t, conflict_text):
     """A branch that cannot merge onto master is handed back to a worker, not left for a human: queue a
     merge task that starts from the branch, merges master into it, resolves, and verifies narrowly."""
     import argparse as _ap
-    # A merge fixer that conflicts again gets a fixer of its own, and so on, while master keeps moving. Past a few
-    # levels the chain is not converging: abandon the branch instead of nesting `fix-merge-fix-merge-...` (2026-11-10).
-    if name.count("fix-merge-") + name.count("fix-red-") >= MERGE_FIX_DEPTH:
-        with C.registry() as reg:
-            reg[name]["state"] = "abandoned"
-        print("merge-fix depth cap: %s is abandoned, not fixed again" % name, flush=True)
-        return
     files = sorted(set(l.split("Merge conflict in ")[-1].strip() for l in conflict_text.splitlines() if "Merge conflict in" in l))
     task = ("Branch %s (a finished, verified worker branch; original task: %s) conflicts with current master in: %s. "
             "You start on that branch. Run `git merge master`, resolve every conflict by reading BOTH sides and keeping both "
@@ -204,7 +187,6 @@ def enqueue_merge_fix(name, t, conflict_text):
                                 file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls")))
     with C.registry() as reg:
         reg[name]["state"] = "superseded"
-        reg[name]["fixer"] = mname          # a fixer owns this branch: never hand the same one out twice
 
 
 def enqueue_red_fix(name, t, failing):
@@ -226,7 +208,6 @@ def enqueue_red_fix(name, t, failing):
     with C.registry() as reg:
         reg[name]["state"] = "superseded"
         reg[name]["needs"] = list(failing)
-        reg[name]["fixer"] = mname          # a fixer owns this branch: never hand the same one out twice
 
 
 def main():

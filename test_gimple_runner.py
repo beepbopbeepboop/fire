@@ -2209,10 +2209,11 @@ main()
     # exactly that reason: moving the statement out of the body would silently
     # withdraw the folded field.
     # A method of a class declared inside a function cannot reach that
-    # function's frame in the shapes refused below.
-    # Reads of an enclosing name are captured (the `functools.cmp_to_key`
-    # shape, a CALLED capture, included); a rebound one and a method with no
-    # `self` are still refused instead of answering 0.
+    # function's frame directly, so its free reads are captured.
+    # Reads of an enclosing name are captured BY REFERENCE (the
+    # `functools.cmp_to_key` shape, a CALLED capture, included), so a name the
+    # enclosing function rebinds after the class statement is late-bound; only
+    # a method with no `self` is still refused instead of answering 0.
     test_gimple_stdout("gimple_nested_class_method_calls_enclosing_param", """\
 def mkpair(mycmp: int, a: int, b: int):
     class K:
@@ -2277,10 +2278,11 @@ def main():
     print(a.get(), b.get(), a.tag(), b.tag())
 """, "21 201 x! yy!\n")
 
-    # A name the enclosing function rebinds is late-bound in Python; the
-    # snapshot would differ, so it is refused.
-    test_gimple_build_refusal(
-        "gimple_nested_class_method_reads_rebound_enclosing_local_is_refused", """\
+    # A name the enclosing function rebinds is late-bound in Python. The
+    # capture is BY REFERENCE (the enclosing local is heap-boxed and the
+    # class attribute is the box), so the method sees the CURRENT value.
+    test_gimple_stdout(
+        "gimple_nested_class_method_reads_rebound_enclosing_local", """\
 def mk(n: int):
     class C:
         def get(self):
@@ -2290,7 +2292,23 @@ def mk(n: int):
 
 def main():
     print(mk(1))
-""", "cannot reach its enclosing function's frame")
+""", "2\n")
+
+    # The same problem with no REBIND: a local whose FIRST binding is after
+    # the class statement. A snapshot taken at the class statement read it
+    # before it was bound (the compiled path answered 0).
+    test_gimple_stdout(
+        "gimple_nested_class_method_reads_local_bound_after_class", """\
+def mk():
+    class C:
+        def get(self):
+            return x
+    x = 7
+    return C().get()
+
+def main():
+    print(mk())
+""", "7\n")
 
     # A method that reads only its own names and a module-level global is not
     # refused: the refusal is for enclosing-function scope and nothing wider.
