@@ -5135,10 +5135,16 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
     if _dsr_hit is None and enode is not None and isinstance(enode, gimple_ctypes.IdentExpr):
         _dsr_hit = _dsr.get(_as_str(enode.name))
     if et in ('int', 'int64_t') and _dsr_hit is not None:
-        _dv, _kv, _kt = _dsr_hit
-        if _kt == 'char *':
+        _dv, _kv, _kk = _dsr_hit
+        if _kk == 'str':
             return gen._call_expr('char *', 'mojo_dict_repr_slot',
                                   [('MojoDict *', _dv), ('char *', _kv)])
+        if _kk == 'bytes':
+            return gen._call_expr('char *', 'mojo_dict_repr_slot_bytes',
+                                  [('MojoDict *', _dv), ('MojoBytes *', _kv)])
+        if _kk == 'none':
+            return gen._call_expr('char *', 'mojo_dict_repr_slot_none',
+                                  [('MojoDict *', _dv)])
     # A boxed char* (a string pointer stored in an int64_t var, e.g. a
     # tuple-loop var read via get_str and boxed) — stringify as the string
     # it points to, not its decimal address. Without this, f-strings /
@@ -7453,12 +7459,22 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 _nm = _as_str(args[_pi].name)
                 if _nm in _dsr:
                     _dsr_hit = _dsr[_nm]
-            if _dsr_hit is not None and _dsr_hit[2] == 'char *':
-                _dv, _kv, _kt = _dsr_hit
-                _rv = gen._call_expr('char *', 'mojo_dict_repr_slot',
-                                     [('MojoDict *', _dv), ('char *', _kv)])
-                resolved_parts.append(('char *', _rv))
-                continue
+            if _dsr_hit is not None:
+                _dv, _kv, _kk = _dsr_hit
+                if _kk == 'str':
+                    _rv = gen._call_expr('char *', 'mojo_dict_repr_slot',
+                                         [('MojoDict *', _dv), ('char *', _kv)])
+                elif _kk == 'bytes':
+                    _rv = gen._call_expr('char *', 'mojo_dict_repr_slot_bytes',
+                                         [('MojoDict *', _dv), ('MojoBytes *', _kv)])
+                elif _kk == 'none':
+                    _rv = gen._call_expr('char *', 'mojo_dict_repr_slot_none',
+                                         [('MojoDict *', _dv)])
+                else:
+                    _rv = None
+                if _rv is not None:
+                    resolved_parts.append(('char *', _rv))
+                    continue
             if (_pi < len(args) and _is_may_hold_str_param(gen, args[_pi])) or aval in gen._dyn_word_vals \
                     or (_pi < len(args) and isinstance(args[_pi], IdentExpr)
                         and _as_str(args[_pi].name) in gen._dyn_word_locals):

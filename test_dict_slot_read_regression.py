@@ -63,6 +63,32 @@ main()
 ''')
     assert out == "True False\n", repr(out)
 
+    # Bytes-keyed and None-keyed reads also carry the slot's runtime kind.
+    out = run(r'''
+def main():
+    d = {}
+    d[b'k'] = True
+    d[b'n'] = None
+    d[b'f'] = False
+    print(d[b'k'], d[b'n'], d[b'f'])
+    x = d[b'n']
+    print(x, str(x), repr(x))
+main()
+''')
+    assert out == "True None False\nNone None None\n", repr(out)
+
+    out = run(r'''
+def main():
+    d = {}
+    d[None] = False
+    d['x'] = None
+    print(d[None], d['x'])
+    y = d[None]
+    print(y, repr(y))
+main()
+''')
+    assert out == "False None\nFalse False\n", repr(out)
+
     print("test_dict_slot_read_regression: ok")
 
 

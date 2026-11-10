@@ -7645,6 +7645,17 @@ double mojo_dict_get_none_key_double(MojoDict *d)
     if (sl) memcpy(&v, &sl->val, sizeof(v));
     return v;
 }
+int64_t mojo_dict_slot_kind_none(MojoDict *d)
+{
+    _DictSlot *sl = _dict_lookup_k(d, "", 3);
+    return sl ? sl->kind : -1;
+}
+char *mojo_dict_repr_slot_none(MojoDict *d)
+{
+    _DictSlot *sl = _dict_lookup_k(d, "", 3);
+    if (!sl) return mojo_str_from_int(0);
+    return mojo_dict_slot_repr(sl->val, sl->kind);
+}
 
 /* ── bytes-keyed dict access ─────────────────────────────────────────────
  * `d[b'k']` needs its own key domain (see _DictSlot.keykind) so a bytes key
@@ -7722,6 +7733,19 @@ double mojo_dict_get_bytes_double(MojoDict *d, MojoBytes *key)
     double v;
     memcpy(&v, &sl->val, sizeof(v));
     return v;
+}
+
+int64_t mojo_dict_slot_kind_bytes(MojoDict *d, MojoBytes *key)
+{
+    _DictSlot *sl = _dict_lookup_bytes(d, key);
+    return sl ? sl->kind : -1;
+}
+
+char *mojo_dict_repr_slot_bytes(MojoDict *d, MojoBytes *key)
+{
+    _DictSlot *sl = _dict_lookup_bytes(d, key);
+    if (!sl) return mojo_str_from_int(0);
+    return mojo_dict_slot_repr(sl->val, sl->kind);
 }
 
 int mojo_dict_contains_bytes(MojoDict *d, MojoBytes *key)

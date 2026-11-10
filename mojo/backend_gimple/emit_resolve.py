@@ -2716,10 +2716,16 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
     if _dsr_hit is None and enode is not None and isinstance(enode, gimple_ctypes.IdentExpr):
         _dsr_hit = _dsr.get(_as_str(enode.name))
     if rat in ('int', 'int64_t') and _dsr_hit is not None:
-        _dv, _kv, _kt = _dsr_hit
-        if _kt == 'char *':
+        _dv, _kv, _kk = _dsr_hit
+        if _kk == 'str':
             return gen._call_expr('char *', 'mojo_dict_repr_slot',
                                   [('MojoDict *', _dv), ('char *', _kv)])
+        if _kk == 'bytes':
+            return gen._call_expr('char *', 'mojo_dict_repr_slot_bytes',
+                                  [('MojoDict *', _dv), ('MojoBytes *', _kv)])
+        if _kk == 'none':
+            return gen._call_expr('char *', 'mojo_dict_repr_slot_none',
+                                  [('MojoDict *', _dv)])
     if rat == 'char *':
         return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
     if rat == 'MojoList *':

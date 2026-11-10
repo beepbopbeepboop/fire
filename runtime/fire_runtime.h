@@ -1587,6 +1587,8 @@ void        mojo_dict_set_none_key_struct(MojoDict *d, void *v);
 int64_t     mojo_dict_get_none_key_int(MojoDict *d);
 char       *mojo_dict_get_none_key_str(MojoDict *d);
 double      mojo_dict_get_none_key_double(MojoDict *d);
+int64_t     mojo_dict_slot_kind_none(MojoDict *d);
+char       *mojo_dict_repr_slot_none(MojoDict *d);
 void        mojo_dict_set_bytes_none_key(MojoDict *d, MojoBytes *key, int64_t v);
 
 /* A STRUCT stored as a dict VALUE: the boxed pointer, tagged `kind == 5` so
@@ -1801,6 +1803,8 @@ void        mojo_dict_set_bytes_other_struct(MojoDict *d, MojoBytes *key, void *
 int64_t     mojo_dict_get_bytes_int(MojoDict *d, MojoBytes *key);
 char       *mojo_dict_get_bytes_str(MojoDict *d, MojoBytes *key);
 double      mojo_dict_get_bytes_double(MojoDict *d, MojoBytes *key);
+int64_t     mojo_dict_slot_kind_bytes(MojoDict *d, MojoBytes *key);
+char       *mojo_dict_repr_slot_bytes(MojoDict *d, MojoBytes *key);
 int         mojo_dict_contains_bytes(MojoDict *d, MojoBytes *key);
 int64_t     mojo_dict_setdefault_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt);
 int64_t     mojo_dict_pop_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt);
