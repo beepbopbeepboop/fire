@@ -39,10 +39,13 @@ Measured on this tree (before and after the by-reference class-capture fix)
 and on `git archive HEAD`: `RuntimeError: gcc -fgimple compilation failed ...
 In function 'Outer_make' ... expected expression before '(' token`.
 
-The same shape with a class attribute over a parameter
-(`class C(): name = s + "!"` inside a method) fails identically, so this is
-not specific to method-body captures: it is every non-constant class attribute
-of a class declared inside a method.
+The trigger is the class-CAPTURE attribute, not "every non-constant class
+attribute": a class declared inside a method with a plain non-constant class
+attribute and no captured enclosing name (`class C(): name = s + "!"`, with or
+without a method reading `self.name`) COMPILES and prints `x!` on both master
+and this tree. So the address-of-global save/restore is emitted around the
+`_cap_<name>` cell of a capture, which is exactly the shape this doc is
+about; a fix for the general non-constant class attribute is not required.
 
 ## Expected
 `3` — the method-local `n` is captured by the nested class exactly as it is
