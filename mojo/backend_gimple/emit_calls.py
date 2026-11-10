@@ -8562,6 +8562,16 @@ def _lower_fnptr_call(gen, fname_raw: str, var_ctype: str,
     # hand-rolling the field access here a second time.
     if fname_raw in gen._captures and gen._env_param:
         fp_type, fp_raw = gen.lower_expr(gimple_ctypes.IdentExpr(name=fname_raw))
+    elif fname_raw in getattr(gen, '_boxed_mut_locals', {}):
+        # A callable local BOXED by the by-reference capture machinery
+        # (`_seed_mut_captured_local_types` -- a nested closure's `{mut}`
+        # capture, or a class-capture fix's enclosing local): the C name is
+        # the BOX, not the value. Calling the box address passed the address
+        # of the box to `mojo_fnptr_call_N` and jumped into heap data (the
+        # enclosing function printed its lines before the call and the
+        # `print` of the result never ran). Route through the ordinary
+        # IdentExpr lowering, whose boxed-local branch emits `*name`.
+        fp_type, fp_raw = gen.lower_expr(gimple_ctypes.IdentExpr(name=fname_raw))
     elif fname_raw not in gen.var_types and fname_raw in gen._global_var_types:
         fp_type, fp_raw = gen.lower_expr(gimple_ctypes.IdentExpr(name=fname_raw))
     else:

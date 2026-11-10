@@ -2366,6 +2366,29 @@ def main():
     print(outer())
 """, "5\n")
 
+    # The enclosing function's own call through the SAME captured callable
+    # goes through a heap box (the class capture boxes the local), so the
+    # callable value is `*box`, not the box address: passing the box to
+    # `mojo_fnptr_call_N` jumped into heap data after the class use printed.
+    test_gimple_stdout(
+        "gimple_nested_class_method_calls_captured_callable_after_rebind", """\
+def mkpair(mycmp, a: int, b: int):
+    class K:
+        def __init__(self, obj: int):
+            self.obj = obj
+        def __lt__(self, other: K):
+            return mycmp(self.obj, other.obj) < 0
+    p = K(a) < K(b)
+    mycmp = dec
+    return p, mycmp(5, 3)
+
+def dec(x: int, y: int) -> int:
+    return x - y
+
+def main():
+    print(mkpair(dec, 1, 2))
+""", "(True, 2)\n")
+
     # A method that reads only its own names and a module-level global is not
     # refused: the refusal is for enclosing-function scope and nothing wider.
     test_gimple_stdout("gimple_nested_class_method_reads_module_global", """\
