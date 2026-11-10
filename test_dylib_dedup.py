@@ -18,7 +18,7 @@ def check(name, cond):
 
 with tempfile.TemporaryDirectory() as td:
     weak = os.path.join(td, 'weak.c'); strong = os.path.join(td, 'strong.c')
-    ref = os.path.join(td, 'ref.c')
+    ref = os.path.join(td, 'ref.c'); ref2 = os.path.join(td, 'ref2.c')
     open(weak, 'w').write('#include <stdint.h>\n__attribute__((weak)) int64_t gpu_stub(void) { return 0; }\n')
     open(strong, 'w').write('#include <stdint.h>\nint64_t strong_fn(void) { return 1; }\n')
     # An object that only REFERENCES a symbol outside it. This is the shape
@@ -30,11 +30,20 @@ with tempfile.TemporaryDirectory() as td:
                          'int64_t shared_fn(void) { return 3; }\n'
                          'int64_t unique_fn(void) { return 4; }\n'
                          'int64_t caller(void) { return undefined_ref(); }\n')
-    for src in (weak, strong, ref):
+    # A second module with its own definitions that merely imports the SAME
+    # name: this is the real shape of the 150-module report, where every module
+    # "defined" the libc/runtime symbols it imports and so clashed with every
+    # other module that imported them.
+    open(ref2, 'w').write('#include <stdint.h>\n'
+                          'extern int64_t undefined_ref(void);\n'
+                          'int64_t other_fn(void) { return undefined_ref(); }\n')
+    for src in (weak, strong, ref, ref2):
         subprocess.run(['cc', '-c', src, '-o', src[:-2] + '.o'], check=True)
     w = B._defined_symbols('gcc', weak[:-2] + '.o')
     s = B._defined_symbols('gcc', strong[:-2] + '.o')
     r = B._defined_symbols('gcc', ref[:-2] + '.o')
+    r2 = B._defined_symbols('gcc', ref2[:-2] + '.o')
+    check('modules that share only an imported symbol do not clash', not (r & r2))
     check('a weak definition is not a clash', '_gpu_stub' not in w and '__gpu_stub' not in w)
     check('a strong definition is counted', any('strong_fn' in x for x in s))
     check('an undefined reference is not a definition', not any('undefined_ref' in x for x in r))
