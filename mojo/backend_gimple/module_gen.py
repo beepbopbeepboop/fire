@@ -18888,7 +18888,7 @@ def gen_module_impl(self, stmts: list):
     #     inlined section's correct `char *` definition — a hard gcc
     #     "conflicting types" error) while unannotated free functions
     #     silently mistyped (the 2026-11-08 `make check` linkmode job,
-    #     5 of 44 red; its bug doc is deleted by this fix).
+    #     5 of 45 red; its bug doc is deleted by this fix).
     # Rebinding drops only this gen's reference; the shared object the root
     # (and any sibling temp_gen) still holds stays intact. Callables in the
     # tuple (e.g. `_calls_in_stmts`, a module-level function reached

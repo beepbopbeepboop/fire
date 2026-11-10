@@ -1,13 +1,15 @@
 # SUITE_doc_refs_ratchet_red: the registered `doc-refs` gate job is red with no marker
 
-**Status:** OPEN — recorded 2026-11-09 from `work/bug-suite-linkmode-5026-r3`
-(the linkmode fix round; commit 26db2bab4). NOT introduced by that branch —
-see "What I saw".
+**Status:** OPEN — recorded 2026-11-09 by the linkmode fix round (commit
+26db2bab4); r7 re-verified every claim below on this branch
+(`work/bug-suite-linkmode-5026-r7`) by re-running the ratchet at HEAD and in a
+`git archive` snapshot of the base commit (identical 28-file set, identical
+per-file counts). NOT introduced by that branch — see "What I saw".
 
 ## What I ran
 
-- `python3 tools/dangling_doc_refs.py --ratchet` at the HEAD of
-  `work/bug-suite-linkmode-5026-r3` (26db2bab4).
+- `python3 tools/dangling_doc_refs.py --ratchet` at this branch's fix commit
+  26db2bab4.
 - The same command in `git archive` snapshots of (a) the branch's base commit
   3733dc0c7 and (b) the then-tip of master, e8d10a21d (both extracted to a
   scratch dir inside the worktree; master moved underneath during the round —
