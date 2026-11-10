@@ -2329,6 +2329,34 @@ def main():
     print(mk("x"))
 """, "x!\n")
 
+    # The shape the bug was reported for (`http.server._main`'s
+    # `DualStackServerMixin.finish_request`): a PARAMETER rebound before the
+    # `class` statement, read by a method as a FIELD of the captured object
+    # (not as the method's return value). `args` is rebound AGAIN after the
+    # class, so the answer ("e") also pins that the field read goes through
+    # the late-bound box, not a snapshot of the first `Args`. The old capture
+    # pass saw "parameter + assignments" and refused this outright.
+    test_gimple_stdout(
+        "gimple_nested_class_method_reads_field_of_rebound_capture", """\
+class Args:
+    def __init__(self, d: str):
+        self.directory = d
+
+def emit(s: str):
+    print(s)
+
+def f(args=None):
+    args = Args("d")
+    class C:
+        def go(self):
+            emit(args.directory)
+    args = Args("e")
+    C().go()
+
+def main():
+    f()
+""", "e\n")
+
     # The same problem with no REBIND: a local whose FIRST binding is after
     # the class statement. A snapshot taken at the class statement read it
     # before it was bound (the compiled path answered 0).
