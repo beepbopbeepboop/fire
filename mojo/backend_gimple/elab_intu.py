@@ -3725,6 +3725,18 @@ def _materialize(work, key):
         if targs is None:
             work.refuse(f'{base}[{", ".join(args)}]: a bracket parameter is unbound')
             return None
+        # A bounded type parameter must conform before this instantiation is
+        # materialized in-TU. Without this the `.o` route's own check
+        # (`elaborate_generic_call` -> `check_bounds`) is bypassed — `_intu_func_args`
+        # then holds the name and `_elaborate_generic_call` declines — so an
+        # unsatisfiable `where` clause or trait bound compiles silently
+        # (modular: `error: invalid call to '<fn>': violated constraint`).
+        try:
+            elaborate.check_bounds(module_src, tmpl, targs)
+        except elaborate.ConformanceError:
+            raise
+        except Exception:
+            pass
         # A VARIADIC binding (part 4: the chain/zip out-res wrapper's `*Ts`
         # consumes every inner) takes `monomorphize_source`'s dedicated
         # pass; its seed-only splice knowledge (each inner's element

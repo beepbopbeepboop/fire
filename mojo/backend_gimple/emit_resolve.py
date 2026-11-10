@@ -3192,7 +3192,20 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
         # elaboration failures elsewhere, e.g. a generic this
         # elaborator just can't handle yet).
         raise
-    except Exception:
+    except Exception as _elab_e:
+        # A `ConformanceError` from `check_bounds` is a real diagnostic
+        # (`where` clause / trait bound violated by the call's type args),
+        # not a transient elaboration failure — it must surface, not fall
+        # through to the silent stub path (modular:
+        # `error: invalid call to '<fn>': violated constraint`).
+        if 'Conformance' in type(_elab_e).__name__:
+            _cfn = getattr(gen, '_current_filename', '') or ''
+            _cln = getattr(node, 'line', 0) or 0
+            _clc = getattr(node, 'col', 0) or 0
+            _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
+            raise RuntimeError(
+                f"{_cat}error: invalid call to '{g}': violated constraint\n"
+                f"note: {type(_elab_e).__name__}: {_elab_e}")
         gimple_ctypes._debug_note('generic call elaboration failed')
         info = None
     if not info:
