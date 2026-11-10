@@ -1035,6 +1035,14 @@ def _cpp_string_literal_expr(gen, val: str, is_interp: str) -> str:
                     piece = f"mojo_repr_str((char *)({v}))"
                 elif ectype == 'double':
                     piece = f"mojo_repr_float(({v}))"
+                elif ectype == '_Bool':
+                    # repr/ascii of a bool is its NAME, not its 0/1 value --
+                    # the same answer the non-conversion arm below already
+                    # gives `!s`/bare. Without this row the generic
+                    # `mojo_str` branch rendered `True` as `1`, so the cpp
+                    # path disagreed with CPython on `f"{flag!r}"` (and, via
+                    # the escape pass, `!a`).
+                    piece = f'(({v}) ? "True" : "False")'
                 else:
                     piece = f"mojo_str((void *)({v}))"
                 if conv == 'a':
