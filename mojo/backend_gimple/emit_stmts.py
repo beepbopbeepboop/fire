@@ -3357,6 +3357,30 @@ def _gen_stmt_ReturnStmt(gen, node):
         vtype: str = ''
         v: str = ''
         vtype, v = gen.lower_expr(node.value)
+        # A dict slot read whose runtime kind is on the slot: box it so the
+        # kind survives a return (callers cannot see this frame's dict/key temps).
+        _dsr = getattr(gen, '_dict_slot_reads', None)
+        _dsr_hit = None
+        if _dsr is not None:
+            _dsr_hit = _dsr.get(v)
+            if _dsr_hit is None and isinstance(node.value, gimple_ctypes.IdentExpr):
+                _dsr_hit = _dsr.get(_as_str(node.value.name))
+        if _dsr_hit is not None and vtype in ('int', 'int64_t'):
+            _dv, _kv, _kk = _dsr_hit
+            if _kk == 'str':
+                v = gen._call_expr('int64_t', 'mojo_dict_slot_boxed',
+                                   [('MojoDict *', _dv), ('char *', _kv)])
+            elif _kk == 'bytes':
+                v = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_bytes',
+                                   [('MojoDict *', _dv), ('MojoBytes *', _kv)])
+            elif _kk == 'none':
+                v = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_none',
+                                   [('MojoDict *', _dv)])
+            vtype = 'int64_t'
+            if hasattr(gen, '_tagged_word_vals'):
+                gen._tagged_word_vals.add(v)
+            if hasattr(gen, '_boxed_vals'):
+                gen._boxed_vals.add(v)
         # A generator handle leaving a function whose return slot is a plain word
         # (`def iglob(...): it = _iglob(...); return it`, consumed as `list(iglob(...))`):
         # the consumer can only drain it if the run time knows which generator it is.

@@ -5207,13 +5207,15 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
         # `str` parameter already uses for the same word.
         # An UNANNOTATED parameter is the same word: `str(ann)` in
         # `_elem_ann_consider(out, tgt, ann)` printed the annotation's address.
+        # A call result may be a boxed dict-slot value carrying its runtime kind.
         _untyped = getattr(gen, '_cur_untyped_params', ())
         if et == 'int64_t' and (
                 ev in gen._dyn_word_vals
                 or _as_str(ev) in _untyped
                 or (isinstance(enode, gimple_ctypes.IdentExpr)
                     and (enode.name in gen._dyn_word_locals
-                         or _as_str(enode.name) in _untyped))):
+                         or _as_str(enode.name) in _untyped))
+                or isinstance(enode, gimple_ctypes.CallExpr)):
             return gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', ev)])
         nv = gen._to_int64(et, ev)
         return gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
@@ -7475,6 +7477,14 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 if _rv is not None:
                     resolved_parts.append(('char *', _rv))
                     continue
+            # A call result of unknown kind may be a boxed dict-slot value.
+            if (_pi < len(args) and isinstance(args[_pi], gimple_ctypes.CallExpr)
+                    and atype in ('int', 'int64_t')):
+                _rv = gen._call_expr('char *', 'mojo_cstr_or_int_str',
+                                     [('int64_t', aval)])
+                _cstr_held.append((aval, _rv))
+                resolved_parts.append(('char *', _rv))
+                continue
             if (_pi < len(args) and _is_may_hold_str_param(gen, args[_pi])) or aval in gen._dyn_word_vals \
                     or (_pi < len(args) and isinstance(args[_pi], IdentExpr)
                         and _as_str(args[_pi].name) in gen._dyn_word_locals):

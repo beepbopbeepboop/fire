@@ -89,6 +89,48 @@ main()
 ''')
     assert out == "False None\nFalse False\n", repr(out)
 
+    # Cross-function / returned subscript reads: the slot kind must survive
+    # when the read escapes its frame (returned directly or via a local).
+    out = run(r'''
+def read(d, k):
+    return d[k]
+
+def main():
+    d = {'n': None, 'b': True, 'f': False}
+    print(read(d, 'n'), read(d, 'b'), read(d, 'f'))
+    print(str(read(d, 'n')), repr(read(d, 'b')))
+main()
+''')
+    assert out == "None True False\nNone True\n", repr(out)
+
+    out = run(r'''
+def read(d):
+    x = d['x']
+    return x
+
+def main():
+    print(read({'x': None}))
+    print(read({'x': True}))
+    print(read({'x': False}))
+    print(read({'x': 1.5}))
+main()
+''')
+    assert out == "None\nTrue\nFalse\n1.5\n", repr(out)
+
+    out = run(r'''
+def readb(d):
+    return d[b'k']
+
+def readn(d):
+    return d[None]
+
+def main():
+    print(readb({b'k': True}), readb({b'k': None}))
+    print(readn({None: False}), str(readn({None: None})))
+main()
+''')
+    assert out == "True None\nFalse None\n", repr(out)
+
     print("test_dict_slot_read_regression: ok")
 
 

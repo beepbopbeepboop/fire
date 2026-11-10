@@ -2726,6 +2726,9 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         if _kk == 'none':
             return gen._call_expr('char *', 'mojo_dict_repr_slot_none',
                                   [('MojoDict *', _dv)])
+    # A call result may be a boxed dict-slot value carrying its runtime kind.
+    if rat in ('int', 'int64_t') and isinstance(enode, gimple_ctypes.CallExpr):
+        return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav)])
     if rat == 'char *':
         return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
     if rat == 'MojoList *':

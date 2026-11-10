@@ -7603,6 +7603,21 @@ char *mojo_dict_get_str(MojoDict *d, char *key)
     return sl ? (char *)(uintptr_t)sl->val : NULL;
 }
 
+static int64_t _dict_slot_boxed(_DictSlot *sl)
+{
+    if (!sl) return 0;
+    switch (sl->kind) {
+        case 1:
+            return mojo_box_from_double(mojo_double_from_bits(sl->val));
+        case 3:
+            return mojo_box_from_bool(sl->val);
+        case 4:
+            return mojo_box_none();
+        default:
+            return sl->val;
+    }
+}
+
 int64_t mojo_dict_slot_kind(MojoDict *d, char *key)
 {
     _DictSlot *sl = _dict_lookup(d, key);
@@ -7614,6 +7629,12 @@ char *mojo_dict_repr_slot(MojoDict *d, char *key)
     _DictSlot *sl = _dict_lookup(d, key);
     if (!sl) return mojo_str_from_int(0);
     return mojo_dict_slot_repr(sl->val, sl->kind);
+}
+
+int64_t mojo_dict_slot_boxed(MojoDict *d, char *key)
+{
+    _DictSlot *sl = _dict_lookup(d, key);
+    return _dict_slot_boxed(sl);
 }
 
 int mojo_dict_contains(MojoDict *d, char *key)
@@ -7655,6 +7676,12 @@ char *mojo_dict_repr_slot_none(MojoDict *d)
     _DictSlot *sl = _dict_lookup_k(d, "", 3);
     if (!sl) return mojo_str_from_int(0);
     return mojo_dict_slot_repr(sl->val, sl->kind);
+}
+
+int64_t mojo_dict_slot_boxed_none(MojoDict *d)
+{
+    _DictSlot *sl = _dict_lookup_k(d, "", 3);
+    return _dict_slot_boxed(sl);
 }
 
 /* ── bytes-keyed dict access ─────────────────────────────────────────────
@@ -7746,6 +7773,12 @@ char *mojo_dict_repr_slot_bytes(MojoDict *d, MojoBytes *key)
     _DictSlot *sl = _dict_lookup_bytes(d, key);
     if (!sl) return mojo_str_from_int(0);
     return mojo_dict_slot_repr(sl->val, sl->kind);
+}
+
+int64_t mojo_dict_slot_boxed_bytes(MojoDict *d, MojoBytes *key)
+{
+    _DictSlot *sl = _dict_lookup_bytes(d, key);
+    return _dict_slot_boxed(sl);
 }
 
 int mojo_dict_contains_bytes(MojoDict *d, MojoBytes *key)
