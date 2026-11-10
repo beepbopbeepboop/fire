@@ -32,10 +32,9 @@ Any compiled (self-host) code that uses `!a` in an f-string diverges from
 CPython. Concrete instance: `myinterpreter.attribute_error_suggestion`'s
 non-ASCII branch under the self-host binary (the interpreter/host path is
 unaffected and matches CPython 3.15.2 byte-for-byte — differential fuzzed;
-see bugs/PYTHON3.15_improved_error_messages.md). The branch is additionally
-unreachable end-to-end in user programs while the parser rejects non-ASCII
-identifiers (a separate pre-existing parser gap), so today the blast radius
-is compiled user code that writes `!a` itself.
+the non-ASCII branch is additionally unreachable end-to-end in user programs
+while the parser rejects non-ASCII identifiers (a separate pre-existing parser
+gap), so today the blast radius is compiled user code that writes `!a` itself.
 
 ## Suggested shape of the fix
 Add an `!a` arm to `_lower_StringLiteral` that calls a new runtime

@@ -59,13 +59,36 @@ _GENEXP_ITER_NAME = '__mojo_genexp_iter__'
 # builtin exception attributes (the `e.code` note in fire.py).
 # ---------------------------------------------------------------------------
 
-def _tag_attribute_error(exc, obj, name):
+def _tag_attribute_error(exc, obj, name, self_obj=None):
     """Attach CPython 3.15's `name`/`obj` fields to a missing-attribute
     AttributeError so the print-time suggestion pass can compute its hint
-    from the real object, not by re-parsing the message string."""
+    from the real object, not by re-parsing the message string. `self_obj`
+    is the `self` binding of the failing frame (None when there is none) —
+    CPython reads it off the traceback for its hide_underscored refinement;
+    this interpreter has no CPython frame for user code, so the raise site
+    captures it here (see `_frame_self`)."""
     setattr(exc, 'name', name)
     setattr(exc, 'obj', obj)
+    setattr(exc, 'self_obj', self_obj)
     return exc
+
+
+def _frame_self(interp):
+    """The `self` binding of `interp`'s current (innermost) scope, or None.
+
+    This is the `frame.f_locals['self']` CPython 3.15's
+    `_compute_suggestion_error` reads off the failing traceback frame, which
+    this interpreter does not have: its user frames are Scope objects, and
+    the scope current at the failing member access IS that frame. Direct
+    `scope.vars` only, exactly like `_tag_name_error` — a `self` further up
+    the chain is a closure/global, which CPython does not put in the failing
+    frame's f_locals either."""
+    if interp is None:
+        return None
+    scope = interp.scope
+    if scope is not None and 'self' in scope.vars:
+        return scope.vars['self']
+    return None
 
 
 def _tag_name_error(exc, scope, name):
@@ -525,22 +548,28 @@ def _attr_candidates(obj):
     return _safe_dir(obj)
 
 
-def _attr_close_match(obj, name):
+def _attr_close_match(obj, name, self_obj=None):
     """CPython 3.15's Levenshtein half of `_compute_suggestion_error`:
     the closest resolvable attribute name to a misspelled one, or None.
 
     Candidate filtering follows CPython: no underscored names unless the
-    wrong name is underscored (CPython's refinement — also allowing
-    underscored candidates when the failing access was `self.x` — needs the
-    traceback frame, which the print-time half here does not carry). The
-    distance match itself is the engine every branch shares
-    (`_suggestion_two_passes`); the caps live there too, and a fallback cap
-    aborts CPython's function WITHOUT the nested check — so it is rechecked
-    here (a cap and a genuine no-match both return None from the engine,
-    but only the former must skip the nested check)."""
+    wrong name is underscored, OR the failing frame's `self` IS `obj`
+    (CPython's hide_underscored refinement: `self.value` inside a method may
+    suggest the private `self._value`, while the same misspell on the same
+    object from outside the method may not). The raising half captures that
+    frame `self` on the exception (`self_obj`); CPython reads it off the
+    traceback, which this interpreter does not carry. The distance match
+    itself is the engine every branch shares (`_suggestion_two_passes`); the
+    caps live there too, and a fallback cap aborts CPython's function
+    WITHOUT the nested check — so it is rechecked here (a cap and a genuine
+    no-match both return None from the engine, but only the former must skip
+    the nested check)."""
     name, not_normalized = _suggestion_normalize(name)
     d = _attr_candidates(obj)
-    if name[:1] != '_':
+    hide_underscored = name[:1] != '_'
+    if hide_underscored and self_obj is not None and self_obj is obj:
+        hide_underscored = False
+    if hide_underscored:
         d = [n for n in d if n[:1] != '_']
     suggestion = _suggestion_after_pool(d, name, not_normalized)
     if suggestion is None and len(d) <= _ATTR_MAX_CANDIDATE_ITEMS \
@@ -595,7 +624,7 @@ def _attr_nested_match(obj, name, candidates):
     return None
 
 
-def attribute_error_suggestion(obj, name):
+def attribute_error_suggestion(obj, name, self_obj=None):
     """CPython 3.15's print-time AttributeError suggestion, as the suffix to
     append to the message: '' when there is nothing to add. Priority is
     CPython's: the static cross-language/wrong-type table first, then the
@@ -606,13 +635,17 @@ def attribute_error_suggestion(obj, name):
     (`None.append(1)`); CPython computes suggestions for that too (dunder
     candidates for underscored names), so there is no None short-circuit.
     The caller is responsible for only invoking this when the exception
-    actually carried an `obj` field (see fire.py's `name` guard)."""
+    actually carried an `obj` field (see fire.py's `name` guard).
+
+    `self_obj` is the failing frame's `self` captured at raise time (None
+    when the frame had none) — CPython's traceback-frame input to the
+    hide_underscored refinement, see `_attr_close_match`."""
     if not isinstance(name, str):
         return ''
     hint = _cross_language_attr_hint(obj, name)
     if hint:
         return f". {hint}"
-    suggestion = _attr_close_match(obj, name)
+    suggestion = _attr_close_match(obj, name, self_obj)
     if suggestion is None:
         return ''
     if suggestion.isascii():
@@ -762,7 +795,9 @@ def error_suggestion_suffix(e):
     if isinstance(e, AttributeError):
         aname = getattr(e, 'name', None)
         if isinstance(aname, str):
-            return attribute_error_suggestion(getattr(e, 'obj', None), aname)
+            return attribute_error_suggestion(
+                getattr(e, 'obj', None), aname,
+                getattr(e, 'self_obj', None))
         return ''
     if isinstance(e, ModuleNotFoundError):
         mname = getattr(e, 'name', None)
@@ -2080,7 +2115,7 @@ class MojoInstance:
             return cls.comptime_aliases[name]
         raise _tag_attribute_error(
             AttributeError(f"'{cls.name}' object has no attribute '{name}'"),
-            self, name)
+            self, name, _frame_self(cls.interpreter))
 
     def _write_via(self, method_name):
         """Call a user-defined `write_to`/`write_repr_to(self, mut writer)`
@@ -2394,7 +2429,7 @@ class MojoClass:
             return cached
         raise _tag_attribute_error(
             AttributeError(f"'{self.name}' object has no attribute '{name}'"),
-            self, name)
+            self, name, _frame_self(self.interpreter))
 
     def __call__(self, *args, **kwargs):
         instance = MojoInstance(self)
@@ -7525,11 +7560,11 @@ class Interpreter:
                 return obj._mojo_class.comptime_aliases[expr.member]
             raise _tag_attribute_error(
                 AttributeError(f"{self._loc(expr)}'{obj._mojo_class.name}' object has no attribute '{expr.member}'"),
-                obj, expr.member)
+                obj, expr.member, _frame_self(self))
         if not hasattr(obj, expr.member):
             raise _tag_attribute_error(
                 AttributeError(f"{self._loc(expr)}'{type(obj).__name__}' object has no attribute '{expr.member}'"),
-                obj, expr.member)
+                obj, expr.member, _frame_self(self))
         return getattr(obj, expr.member)
 
     def eval_SubscriptExpr(self, expr):
