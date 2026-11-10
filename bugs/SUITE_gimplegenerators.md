@@ -1,10 +1,12 @@
 # SUITE_gimplegenerators: make check failure
 
-**Status:** PARTIAL — investigated and partially fixed on branch `work/bug-suite-gimplegenerators` (2026-11-07).
+**Status:** PARTIAL — investigated and partially fixed on branch `work/bug-mid-suite-gimplegenerators` (2026-11-10).
 
 Job `gimplegenerators` (`python3 test_gimple_generator_runner.py`) failed (exit 1).
-Initial run on this tree: **423 passed, 27 failed**. After fixes below: **440 passed, 10 failed**
-(verified with `python3 tools/memslot.py --gb 8 --label gimplegenerators -- python3 test_gimple_generator_runner.py`).
+Initial run on this tree: **423 passed, 27 failed**. After earlier fixes on this branch lineage:
+**440 passed, 10 failed**. After this round's fix (dynamic-call arg/kw packing in cpp for-loops):
+**444 passed, 6 failed** (verified with focused repros of the previously-failing cases listed below, run via
+`python3 tools/memslot.py --gb 8 --label <case> -- python3 -c ...` against `test_gimple_generator_runner` helpers).
 
 ## Root causes fixed
 
@@ -39,24 +41,27 @@ Initial run on this tree: **423 passed, 27 failed**. After fixes below: **440 pa
    copy, matching CPython -> `'4\n'`) to `cpp_coroutine_unpack_list_param_source` with a CPython
    oracle.
 
-## Still failing (10) — next steps
+5. **`cpp_core.py` (C++ coroutine path): for-loops over calls through callable parameters/locals built
+   `mojo_dyn_call` invocations by flattening every argument (including keyword values) into the
+   positional list and appending all values as `int64_t`, losing keyword binding and truncating
+   float arguments.** Replaced those manual packings with `_cpp_dyn_call_expr(...)` so positional and
+   keyword arguments are packed separately and doubles are appended/tagged correctly for the runtime
+   signature path. Fixed `cpp_for_over_callable_param_walks_and_globs`,
+   `cpp_fsutil_iter_files_walk_tree_glob_tree`, and
+   `cpp_generator_double_param_called_by_keywords`. (`received_or_str_operand_cpp` also passes in
+   current focused runs; the earlier wrong-output failure was not reproduced in isolation.)
 
-- `received_or_str_operand_cpp`: `1 or 'z'`-style tagged `or`/operand result prints `\x01` before
-  `z` in compiled output (`1\n\x01z\nd\nd\n-5\n2\n` vs CPython `1\nz\nd\nd\n-5\n2\n`) — tagged
-  word/bool-vs-str representation in cpp tagged-operand printing.
+## Still failing (6) — next steps
+
 - `star_args_coroutine_await_packs`, `star_args_async_method_aexit_shape`,
   `star_args_async_generator_for_packs`: compiled output empty (`''`) — `*args` packing for
   coroutine `await`/async method `__aexit__`/`async for` start calls (A3/coro lowering path),
-  not the cpp_core local-call path fixed above.
-- `cpp_for_over_callable_param_walks_and_globs`, `cpp_fsutil_iter_files_walk_tree_glob_tree`:
-  compiled output empty — `for` over calls through callable parameters (`os.walk`/`glob.iglob`
-  defaults) in cpp generator path yields no output.
-- `cpp_generator_double_param_called_by_keywords`: compiled output empty for double-parameter
-  generator called by keywords (runtime signature/dispatch).
+  distinct from the cpp_core local-call path fixed above.
 - `async_for_over_nonparking_await`: compiled output empty (`''` vs `'10\n'`).
 - `generator_closing_a_tagged_dir_iterator_then_list`: dir iterator entries printed as pointer
-  addresses (`['4378841296', '4378841456']`) instead of names — tagged dir-iterator element
+  addresses (`['4357...', '4357...']`) instead of names — tagged dir-iterator element
   boxing/printing.
 - `generator_os_fwalk_fd_relative_walk`: g++ compile error in generated cpp for `_fwalk` (fd-relative
-  posix/os.fwalk lowering in cpp coroutine path). Inspect the emitted `.cpp` from a focused repro of
+  posix/os.fwalk lowering in cpp coroutine path; `mojo_list_get_str` result assigned to `int64_t` in
+  name handling). Inspect the emitted `.cpp` from a focused repro of
   `generator_os_fwalk_fd_relative_walk` to find the bad member/type emission.
