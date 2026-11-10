@@ -243,27 +243,21 @@ def feed():
     paths = sorted(set(p for g in pool["feed"] for p in glob.glob(os.path.join(C.MAIN, g))))
     for p in paths:
         if need_total <= 0:
-            log("feed: no free slot anywhere in the pool; %d doc(s) not considered this pass" % len(paths))
             break
         rel = os.path.relpath(p, os.path.join(C.MAIN, "bugs"))
         doc = rel[:-3] if rel.endswith(".md") else rel
         base = os.path.basename(doc)
         if any(base.startswith(x) or x in base for x in skips):
-            log("skip %s: its name matches the pool's skip pattern %s" % (
-                doc, [x for x in skips if base.startswith(x) or x in base]))
             continue
         if "bug:" + base in held:
-            log("held %s: a live task or an external claim holds it (see control.py claims)" % doc)
             continue
-        # DONE ratchet: a doc whose fix is FINISHED — a DONE task with commits, not yet landed — is
-        # not re-dispatched; its branch is in the landing queue. A deletion by a worker that never
-        # finished is NOT a fix, and skipping on it strands the doc forever with no path forward
-        # (2026-11-10: 5 docs, e.g. mid/SUITE_silentnoop, were wedged exactly this way).
+        # DONE ratchet: if any branch (landed or not) has already deleted this doc, it is
+        # fixed. Skip it so we don't re-dispatch a bug that a prior worker already resolved.
         r = subprocess.run(["git", "log", "--all", "--diff-filter=D", "--oneline", "--",
                            "bugs/%s.md" % base, "bugs/mid/%s.md" % base, "bugs/hard/%s.md" % base],
                            capture_output=True, text=True, cwd=C.MAIN)
-        if r.stdout.strip() and landable(base):
-            log("done-ratchet: %s already deleted on a branch; skipping (its branch is in the landing queue)" % doc)
+        if r.stdout.strip():
+            log("done-ratchet: %s already deleted on a branch; skipping" % doc)
             continue
         if base in st.get("pending", {}):
             log("held %s: due a move to %s (queued only after it moves)" % (doc, st["pending"][base]))
@@ -275,98 +269,22 @@ def feed():
         cls = doc_class(doc, st, base)
         # a doc is queued only if some slot that accepts its class has room right now
         if not any(C.accepts(sl, cls) and C.slot_free(sl, busy_slot) for sl in pool["slots"]):
-            log("wait %s: no free %s slot (%s)" % (doc, cls, ", ".join(
-                "%s count %d busy %d%s" % (sl["name"], sl["count"], busy_slot.get(sl["name"], 0),
-                                           ", banned" if sl["model"] in C.dead_models() else "")
-                for sl in pool["slots"] if C.accepts(sl, cls)) or "no slot takes class " + cls))
             continue
         name = task_name(doc)
         if name in C.load():                   # the 40-char name collides with an old task: make it unique
-            log("renamed %s: %s is already in the registry" % (doc, name))
             name += "-%d" % int(time.time() % 10000)
         prev = last_attempt(base) if st["fed"].get(doc) else None
         if prev:
             log("re-feed %s: previous attempt %s" % (doc, prev))
-        if not enqueue_doc(doc, base, cls, name):
-            log("FAILED to queue %s (class %s)" % (doc, cls))
-            continue
-        made += 1
-        need_total -= 1
-        sl = C.pick_slot({"pool": None, "cls": cls}, busy_slot)
-        if sl:
-            busy_slot[sl["name"]] = busy_slot.get(sl["name"], 0) + 1
-        else:
-            log("queued %s but no slot accepts class %s" % (doc, cls))
+        if enqueue_doc(doc, base, cls, name):
+            made += 1
+            need_total -= 1
+            sl = C.pick_slot({"pool": None, "cls": cls}, busy_slot)
+            if sl:
+                busy_slot[sl["name"]] = busy_slot.get(sl["name"], 0) + 1
         st["fed"][doc] = st["fed"].get(doc, 0) + 1
     json.dump(st, open(state_path(), "w"), indent=1)
     return made
-
-
-def landable(base):
-    """The tasks whose landing would resolve BASE: a DONE verdict, commits master lacks, and not
-    already handed to a fixer. Cheap on purpose — only the tasks that name this doc, so `why` stays
-    fast where a full pick_candidates sweep (a `git status` per worktree) would not be."""
-    claim = "bug:" + base
-    return [n for n, t in C.load().items()
-            if claim in t.get("claims", []) and C.verdict(t) == "DONE"
-            and C.ahead(t) > 0 and not t.get("fixer")]
-
-
-def claim_held(base):
-    """Whether BUG:BASE's claim is held, and by what. Cheap: only the tasks that name this doc pay
-    for holds_claims (which runs `git rev-list` per task), not the whole registry."""
-    claim = "bug:" + base
-    if claim in BUSY["claims"]:
-        return "a live opencode session is driving its tree"
-    for n, t in C.load().items():
-        if claim in t.get("claims", []) and C.holds_claims(t):
-            return "task %s (%s)" % (n, C.state_of(t))
-    for f in os.listdir(C.qdir()):
-        if f.endswith(".json"):
-            it = json.load(open(os.path.join(C.qdir(), f)))
-            if claim in it.get("claims", []):
-                return "queued task %s" % it.get("name", f)
-    for n, e in C.external().items():
-        if claim in e.get("claims", []):
-            return "external claim %s" % n
-    return None
-
-
-def why(doc):
-    """Why DOC is not being fed right now: the first feed condition that blocks it. Answers the
-    'this bug is wedged and nothing says why' question without waiting for a pass."""
-    pool = C.load_pool()
-    skips = pool.get("skip", [])
-    st = load_state()
-    base = os.path.basename(doc)
-    cls = doc_class(doc, st, base)
-    busy = C.running_by_slot()
-    if any(base.startswith(x) or x in base for x in skips):
-        return "skip pattern: its name matches %s from the pool's skip list" % [
-            x for x in skips if base.startswith(x) or x in base]
-    held = claim_held(base)
-    if held:
-        return "held: %s" % held
-    r = subprocess.run(["git", "log", "--all", "--diff-filter=D", "--oneline", "--",
-                        "bugs/%s.md" % base, "bugs/mid/%s.md" % base, "bugs/hard/%s.md" % base],
-                       capture_output=True, text=True, cwd=C.MAIN)
-    if r.stdout.strip() and landable(base):
-        return "DONE ratchet: a branch deleted it; %d DONE task(s) will land it (e.g. %s)" % (
-            len(landable(base)), landable(base)[0])
-    if base in st.get("pending", {}):
-        return "held: due a reclass to %s (queued only after the doc moves)" % st["pending"][base]
-    stop = stop_reason(doc)
-    if stop:
-        return "STOP line in the doc: %s" % stop
-    if not any(C.accepts(sl, cls) and C.slot_free(sl, busy) for sl in pool["slots"]):
-        return "no free %s slot (%s)" % (cls, ", ".join(
-            "%s count %d busy %d%s" % (sl["name"], sl["count"], busy.get(sl["name"], 0),
-                                       ", banned" if sl["model"] in C.dead_models() else "")
-            for sl in pool["slots"] if C.accepts(sl, cls)) or "no slot takes class " + cls)
-    name = task_name(doc)
-    if name in C.load():
-        return "in flight: task %s is %s" % (name, C.state_of(C.load()[name]))
-    return "would be fed on the next pass"
 
 
 def probe_free():
@@ -766,13 +684,9 @@ def main():
     ap.add_argument("--interval", type=int, default=120, help="seconds between passes (0: one pass)")
     ap.add_argument("--log-file", default=os.path.join(C.ctl_dir(), "swarm.out"), help="file to write pass log to (default: .git/control/swarm.out)")
     ap.add_argument("--who", action="store_true", help="print the verified lock holder and exit")
-    ap.add_argument("--why", metavar="DOC", default=None,
-                    help="print why a bug doc is not being fed (a bugs/ path or a base name), and exit")
     a = ap.parse_args()
     if a.who:
         sys.exit(who())
-    if a.why:
-        sys.exit(why(a.why))
     # redirect output to the log file so it is captured without a shell redirect
     if a.log_file:
         os.makedirs(os.path.dirname(os.path.abspath(a.log_file)), exist_ok=True)

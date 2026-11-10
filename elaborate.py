@@ -637,6 +637,15 @@ def check_where_clauses(module_src: str, template_src: str, targs: dict):
                         f"type '{conc}' does not satisfy constraint "
                         f"'{clause}' (required by parameter '{pname}')")
         # Check for X.is_signed()/is_unsigned() etc if needed
+        # Check for X == Y (type-equality constraint, e.g. `where T == Int`)
+        for mp in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\s*==\s*([A-Za-z_][A-Za-z0-9_]*)', clause):
+            pname, other = mp.group(1), mp.group(2)
+            if pname in targs:
+                conc = targs[pname].split('.')[-1].strip()
+                if conc != other:
+                    raise ConformanceError(
+                        f"type '{targs[pname]}' does not satisfy constraint "
+                        f"'{clause}' (required by parameter '{pname}')")
 
 
 def check_bounds(module_src: str, template_src: str, targs: dict):
