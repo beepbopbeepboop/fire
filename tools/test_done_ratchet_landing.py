@@ -72,6 +72,12 @@ class Candidates(unittest.TestCase):
         tasks = {"bug-red": self.task("bug-red", "integration-failed", "DONE", 2)}
         self.assertIn("bug-red", pick(tasks))
 
+    def test_a_task_handed_to_a_fixer_is_not_landed_again(self):
+        tasks = {"bug-fixed": self.task("bug-fixed", "superseded", "DONE", 2)}
+        tasks["bug-fixed"]["fixer"] = "fix-merge-bug-fixed"
+        self.assertNotIn("bug-fixed", pick(tasks),
+                         "re-probing a conflicting branch queues a second fixer for it every pass")
+
 
 if __name__ == "__main__":
     unittest.main()

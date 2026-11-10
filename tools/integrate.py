@@ -162,6 +162,8 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
         # feed's DONE ratchet then skipped it forever, a dead end with no path forward.
         if st not in ("exited-ok", "exited-err", "integration-failed", "superseded", "abandoned"):
             continue
+        if t.get("fixer"):
+            continue                        # a merge/red fixer owns this branch; re-probing it would queue a second one
         if C.verdict(t) != "DONE" and name not in ignore_verdict:
             say("skip %s: worker says %s, not DONE (the swarm continues it)" % (name, C.verdict(t) or "nothing")); continue
         if not C.ahead(t):
@@ -192,6 +194,7 @@ def enqueue_merge_fix(name, t, conflict_text):
                                 file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls")))
     with C.registry() as reg:
         reg[name]["state"] = "superseded"
+        reg[name]["fixer"] = mname          # a fixer owns this branch: never hand the same one out twice
 
 
 def enqueue_red_fix(name, t, failing):
@@ -213,6 +216,7 @@ def enqueue_red_fix(name, t, failing):
     with C.registry() as reg:
         reg[name]["state"] = "superseded"
         reg[name]["needs"] = list(failing)
+        reg[name]["fixer"] = mname          # a fixer owns this branch: never hand the same one out twice
 
 
 def main():
