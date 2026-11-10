@@ -27,6 +27,11 @@ def ref_part(names):
     return "\n".join(f"{n}()" for n in names)
 
 
+def big_stub_part(name, pad_len):
+    """A single stub definition, padded so dropping it is measurable."""
+    return f"static int {name} ( void ) {{ /* {'X' * pad_len} */ return 0; }}"
+
+
 def test_all_unref_dropped():
     """When no other part references the stub names, all stub definitions are
     removed."""
@@ -44,12 +49,15 @@ def test_one_ref_def_kept():
     assert len(result) >= 1, f"Expected >= 1 kept, got {len(result)}"
     assert any(p == defs[0] for p in result), \
         f"'id' definition missing from {result}"
+    kept_texts = list(result)
+    # The unreferenced stub definitions must not be in the keep list.
+    for o in others:
+        assert o not in kept_texts, f"Unreferenced stub def kept: {o}"
 
 
 def test_size_shrinks():
     """Kept total byte size < original: unreferenced stub defs removed."""
-    input_parts = [def_part(STUB_NAMES) + " " + "X" * 100
-                   for _ in range(3)]
+    input_parts = [big_stub_part(n, 300) for n in STUB_NAMES]
     result = module_gen._drop_unreferenced_unimpl_stubs(input_parts)
     total = sum(len(p) for p in input_parts)
     kept = sum(len(p) for p in result)
@@ -68,7 +76,12 @@ def test_duplicates_cleaned():
         ref_defs + unref_defs + refs
     )
     assert len(result) == 3, f"Expected 3, got {len(result)}"
-    assert all(p.startswith('static int') for p in result)
+    kept_ids = [p for p in result if p == ref_defs[0]]
+    assert len(kept_ids) == 1, "Referenced id def kept exactly once"
+    assert not any(p.startswith('static int _Bool_items') for p in result), \
+        "Unreferenced _Bool_items def kept"
+    assert not any(p.startswith('static int _ReflectTable_in_dll') for p in result), \
+        "Unreferenced _ReflectTable_in_dll def kept"
 
 
 def test_no_refs_all_dropped_when_only_defs():
