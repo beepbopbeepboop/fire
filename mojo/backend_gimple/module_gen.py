@@ -81,7 +81,7 @@ def _is_enum_class_def(node):
 # `emit_funcs._struct_method_qualifier`'s function-local
 # `from mojo.middle.module_shared import module_qualifier`.
 from mojo.middle.exprtypes import _walk_ast, _walk_ast_invalidate, expr_provably_str as _gmi_expr_provably_str
-from mojo.middle.boundnames import bound_name_set
+from mojo.middle.boundnames import bound_name_set, global_declared_names
 from mojo.middle.literal_bindings import (
     binding_index as _gmi_binding_index, scope_index as _gmi_scope_index,
     scoped_calls as _gmi_scoped_calls, unique_literal_value as _gmi_unique_literal_value,
@@ -3640,6 +3640,17 @@ def _gmi_capture_nested_class_enclosing_reads(self, stmts: list) -> None:
             _gmi_target_leaf_names(_ef.params[_efp][0], _ef_params)
         _ef_bound = set(_ef_params)
         _gmi_local_binding_names(_ef.body, _ef_bound)
+        # A name this function declares `global` is a MODULE variable, not a
+        # local of `_ef`, even when the body assigns it. `_gmi_local_binding_names`
+        # is deliberately over-broad and cannot tell the difference, so without
+        # this subtraction the capture pass boxes the module global as if it
+        # were a local: `global G; class C: def get(self): return G; G = 10`
+        # read an unwritten heap cell instead of the global CPython reads at
+        # call time. Leave such a name UNCAPPED -- the method's read then
+        # resolves to the real C global, which is late-bound for free.
+        _ef_globals = global_declared_names(_ef.body)
+        if _ef_globals:
+            _ef_bound = _ef_bound - _ef_globals
         # The names THIS function itself binds, WITHOUT the nested-def
         # bindings `_gmi_local_binding_names` deliberately over-approximates
         # into `_ef_bound` (that over-approximation is what lets a class
@@ -3649,6 +3660,8 @@ def _gmi_capture_nested_class_enclosing_reads(self, stmts: list) -> None:
         # by-reference path below must leave it to that def's own scope.
         _ef_own = set(_ef_params)
         _ef_own |= bound_name_set(_ef.body)
+        if _ef_globals:
+            _ef_own = _ef_own - _ef_globals
         # `_gmi_local_binding_names` is the over-approximation used to decide
         # what a method's free read could refer to. It predates the shared
         # walk for a few binding shapes (a walrus target in an expression has

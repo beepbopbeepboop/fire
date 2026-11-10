@@ -2633,6 +2633,27 @@ def main():
     print(mk(4))
 """, "12\n")
 
+    # A name the enclosing function declares `global` is a module variable,
+    # not a local, even though the body assigns it: the class method must read
+    # the global at CALL time. `_gmi_local_binding_names` is deliberately
+    # over-broad, so the capture pass boxed `G` as if it were a local and the
+    # method read the unwritten heap cell (a pointer-shaped garbage value)
+    # instead of 10.
+    test_gimple_stdout("gimple_nested_class_global_declared_is_not_captured", """\
+G = 3
+
+def f():
+    global G
+    class C:
+        def get(self):
+            return G
+    G = 10
+    print(C().get())
+
+def main():
+    f()
+""", "10\n")
+
     # A `@property` read is the getter's result (it printed the bound-method
     # pointer, and `==` compared two such pointers), and `@x.setter` is a
     # call of the setter on assignment, not a second overload of `x`.

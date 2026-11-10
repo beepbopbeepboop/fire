@@ -390,3 +390,24 @@ def bound_name_set(body) -> set:
     for stmt in body or []:
         _lbn_compr_targets(bound, stmt)
     return bound
+
+
+def global_declared_names(body) -> set:
+    """The names `body` declares `global`, i.e. the assignments in it that
+    bind a MODULE variable rather than a local of this function.
+
+    `_lbn_walk` collects these into its `global_declared` set precisely so a
+    caller can subtract them (see `emit_resolve._locally_bound_names`'s
+    `bound - global_declared`, which is what makes Python's scoping rule
+    "unless `global NAME` is declared" true for the local set). `bound_name_set`
+    above deliberately returns the raw bound set without that subtraction, so
+    a caller that needs the declaration set (the class-capture pass asks "is
+    this name a local THIS frame owns") reads it from the same walk rather
+    than growing a second one.
+
+    No nested `def`/`class` adds to this set (`_lbn_walk` has no arm for those
+    nodes): a `global G` inside a nested function is that function's
+    declaration, not this one's."""
+    declared: set = set()
+    _lbn_walk(set(), declared, body)
+    return declared
