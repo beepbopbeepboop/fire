@@ -1610,7 +1610,7 @@ def _cpp_exc_ctor_value(gen, node) -> bool:
 
 _CPP_RT_RETURN_CTYPE = {
     'mojo_path_join': 'char *', 'mojo_str_cat': 'char *', 'mojo_cstr_slice': 'char *',
-    'mojo_dirent_name': 'int64_t', 'mojo_dirent_path': 'int64_t',
+    'mojo_dirent_name': 'char *', 'mojo_dirent_path': 'char *',
     'mojo_fsencode_w': 'int64_t',
     'mojo_list_new': 'MojoList *', 'mojo_list_slice_word': 'MojoList *',
     'mojo_bytes_from_str': 'MojoBytes *', 'mojo_bytes_from_cstr': 'MojoBytes *',
@@ -9263,7 +9263,10 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                         if (declared.get(_nm) == 'char *'
                             or _nm in (getattr(gen, '_cpp_str_evidence_names', None) or ()))
                         else 'mojo_list_get_int')
-                lines.append(f"{indent}    {_nm} = {_get}({_z}, {_ctr});")
+                _rhs = f"{_get}({_z}, {_ctr})"
+                if _get == 'mojo_list_get_str' and declared.get(_nm) not in (None, 'char *'):
+                    _rhs = f"(int64_t)(intptr_t){_rhs}"
+                lines.append(f"{indent}    {_nm} = {_rhs};")
             for inner in s.body:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
             lines.append(f"{indent}}}")
@@ -9626,8 +9629,10 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             lines.append(f"{indent}for (int64_t {_ctr} = 0; "
                          f"{_ctr} < mojo_list_len({_dlist}); {_ctr}++) {{")
             if _dict_iter_elem == 'char *':
-                lines.append(f"{indent}    {target} = "
-                             f"mojo_list_get_str({_dlist}, {_ctr});")
+                _rhs = f"mojo_list_get_str({_dlist}, {_ctr})"
+                if declared.get(target) not in (None, 'char *'):
+                    _rhs = f"(int64_t)(intptr_t){_rhs}"
+                lines.append(f"{indent}    {target} = {_rhs};")
             else:
                 lines.append(f"{indent}    {target} = "
                              f"mojo_list_get_int({_dlist}, {_ctr});")
@@ -9980,11 +9985,15 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 if _eff_elem == 'char *':
                     if not target_was_declared:
                         lines.append(f"{indent}char *{target};")
+                        _eff_rhs = f"mojo_list_get_str({_cpp_as('MojoList *', _itname)}, {_ctr})"
+                    elif declared.get(target) == 'char *':
+                        _eff_rhs = f"mojo_list_get_str({_cpp_as('MojoList *', _itname)}, {_ctr})"
+                    else:
+                        _eff_rhs = f"(int64_t)(intptr_t)mojo_list_get_str({_cpp_as('MojoList *', _itname)}, {_ctr})"
                     lines.append(f"{indent}for (int64_t {_ctr} = 0; "
                                  f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _itname)}); "
                                  f"{_ctr}++) {{")
-                    lines.append(f"{indent}    {target} = "
-                                 f"mojo_list_get_str({_cpp_as('MojoList *', _itname)}, {_ctr});")
+                    lines.append(f"{indent}    {target} = {_eff_rhs};")
                 elif _eff_elem == 'double':
                     if not target_was_declared:
                         lines.append(f"{indent}double {target};")
@@ -10149,9 +10158,14 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     if not target_was_declared:
                         declared[target] = 'char *'
                         lines.append(f"{indent}char *{target};")
+                        _name_asn = f"{target} = mojo_list_get_str({_cached}, {_ctr});"
+                    elif declared.get(target) == 'char *':
+                        _name_asn = f"{target} = mojo_list_get_str({_cached}, {_ctr});"
+                    else:
+                        _name_asn = f"{target} = (int64_t)(intptr_t)mojo_list_get_str({_cached}, {_ctr});"
                     lines.append(f"{indent}for (int64_t {_ctr} = 0; "
                                  f"{_ctr} < mojo_list_len({_cached}); {_ctr}++) {{")
-                    lines.append(f"{indent}    {target} = mojo_list_get_str({_cached}, {_ctr});")
+                    lines.append(f"{indent}    {_name_asn}")
                 elif _iter_elem == 'double':
                     if not target_was_declared:
                         declared[target] = 'double'

@@ -4235,7 +4235,7 @@ def _await_drive_stmts(cvar: str, inner, forward=_forward_plain) -> tuple[list, 
     rv = f'__ar{_AW_COUNTER[0]}'
     stmts = [N.VarDecl(name=h, type_ann=None, value=h_expr)]
     loop_body = [forward(cvar, _call('__mojo_gen_value', [_c_ident(h)]))]
-    stmts.append(N.WhileStmt(condition=_call('__mojo_gen_resume', [_c_ident(h), N.IntLiteral(value=0)]),
+    stmts.append(N.WhileStmt(condition=_call('__mojo_gen_resume', [_c_ident(h), _call('mojo_box_none', [])]),
                              body=loop_body, else_body=None))
     stmts.append(N.VarDecl(name=rv, type_ann=None,
                            value=_async_result_read(_result_kind_of(inner),
@@ -4266,7 +4266,7 @@ def _async_for_drive_stmts(cvar: str, target: str, iterable, body, forward=_forw
     bind = N.AssignStmt(target=N.IdentExpr(name=target),
                         value=_call('__mojo_gen_value', [_c_ident(h)]))
     loop_body = [if_wd, bind] + body
-    stmts.append(N.WhileStmt(condition=_call('__mojo_gen_resume', [_c_ident(h), N.IntLiteral(value=0)]),
+    stmts.append(N.WhileStmt(condition=_call('__mojo_gen_resume', [_c_ident(h), _call('mojo_box_none', [])]),
                              body=loop_body, else_body=None))
     stmts.append(N.ExprStmt(value=_call('__mojo_gen_destroy', [_c_ident(h)])))
     return stmts
