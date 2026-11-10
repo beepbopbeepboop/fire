@@ -4163,9 +4163,19 @@ def _gen_stmt_StructDef(gen, node):
         # the variable's current contents -- Python's late binding.
         if cattrs[aname] in _ref_attrs:
             _src = field.value
+            _src_name = ''
             if isinstance(_src, gimple_ctypes.IdentExpr):
-                gen._emit(f"  {cattrs[aname]} = {gen._cname(_as_str(_src.name))};")
-            continue
+                _src_name = _as_str(_src.name)
+            # The box exists only in the C function the capture pass boxed the
+            # local in (`_seed_mut_captured_local_types`). A class statement
+            # that is emitted somewhere else -- a nested `def`'s lifted body
+            # reaching the frame through its closure env -- has no such box
+            # here, so fall through to the by-value per-execution cell (the
+            # pre-by-reference behaviour) instead of installing a bare source
+            # name that is not declared in this function.
+            if _src_name != '' and _src_name in getattr(gen, '_boxed_mut_locals', {}):
+                gen._emit(f"  {cattrs[aname]} = {gen._cname(_src_name)};")
+                continue
         # A per-execution cell (module_gen registration): this execution gets its
         # OWN storage, and the global is pointed at it before the store below, so
         # the store and every class-name read in this call reach it, and the

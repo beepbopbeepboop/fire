@@ -3566,12 +3566,21 @@ def _gmi_capture_nested_class_enclosing_reads(self, stmts: list) -> None:
     FIRST binding is after the class statement has the same problem, and the
     old snapshot read it before it was bound.
 
+    BY REFERENCE applies to a class written DIRECTLY in the enclosing
+    function's body (`_ec_direct` below). A class inside a nested `def` has
+    its `class` statement emitted in that def's LIFTED C function, which
+    reaches this frame through its closure env; the box does not travel
+    there, so that shape keeps the by-value cell and the old rebind refusal.
+    See `bugs/CODEGEN_nested_def_class_capture_by_value.md`.
+
     A captured name that is CALLED (`mycmp(a, b)`, the `functools.cmp_to_key`
     shape) is read into a method-local first, because `self._cap_mycmp(a, b)`
     would be a method call on `self`.
 
     Refused (loudly, as before): a method with no `self` (a staticmethod, or
-    one with no parameters) has no object to carry the reference.
+    one with no parameters) has no object to carry the reference, and a
+    non-direct class whose enclosing function rebinds a captured name (see
+    the nested-`def` paragraph above).
 
     Only the method's free reads count: its own parameters, its own bindings
     and `self` are its scope, and a module-level name it reads is untouched.
@@ -3627,6 +3636,23 @@ def _gmi_capture_nested_class_enclosing_reads(self, stmts: list) -> None:
         _gmi_nested_struct_defs(_ef.body, '', _ef_classes, False)
         for _ec_i in range(len(_ef_classes)):
             _ec = _ef_classes[_ec_i][0]
+            # The triple's middle slot is the INNERMOST enclosing function
+            # key: `''` when the class is written directly in `_ef`'s body
+            # (or an if/loop/try block in it), and a lifted name when it is
+            # inside a nested `def`/`class`. Only the direct case can be
+            # captured BY REFERENCE here: the class statement is then
+            # emitted in `_ef`'s own C function, where its boxed local
+            # lives. A class inside a nested `def` has its `class`
+            # statement emitted in the LIFTED function, which reaches this
+            # frame through that closure's env, not through a box this pass
+            # creates -- installing the box pointer there emitted the bare
+            # source name and broke a case that used to compile
+            # (`def outer(): x = 5; def inner(): class C: def get(self):
+            # return x` gave gcc `'x' undeclared` in `outer_inner`). Keep
+            # the by-VALUE per-execution cell for that shape (base
+            # behaviour) and leave by-reference there to
+            # bugs/CODEGEN_nested_def_class_capture_by_value.md.
+            _ec_direct = _as_str(_ef_classes[_ec_i][1]) == ''
             _ec_have: set = set()
             for _ecf in (_ec.fields or []):
                 if isinstance(_ecf, AssignStmt) and isinstance(_ecf.target, IdentExpr):
@@ -3668,13 +3694,43 @@ def _gmi_capture_nested_class_enclosing_reads(self, stmts: list) -> None:
                         f"the class, and {_why}; a class declared inside a "
                         f"function cannot reach its enclosing function's frame "
                         f"there, so the read would silently answer 0")
-                _ef_caps = _ref_pending.get(_ef_outer)
-                if _ef_caps is None:
-                    _ef_caps = []
-                    _ref_pending[_ef_outer] = _ef_caps
-                for _cn5 in _caps:
-                    if _cn5 not in _ef_caps:
-                        _ef_caps.append(_cn5)
+                if not _ec_direct:
+                    # A non-direct class (inside a nested `def`/`class`) gets
+                    # the by-VALUE cell restored below, so the pre-existing
+                    # refusal for a name the enclosing function REBINDS still
+                    # applies: a snapshot taken at the class statement would
+                    # silently be stale instead. Keeping the loud refusal is
+                    # the honest answer until the lifted frame can share the
+                    # box -- see bugs/CODEGEN_nested_def_class_capture_by_value.md.
+                    for _cn3 in _caps:
+                        _nb = 1 if _cn3 in _ef_params else 0
+                        for _bn in _walk_ast(_ef.body):
+                            if ((isinstance(_bn, (AssignStmt, AugAssignStmt))
+                                    and isinstance(_bn.target, IdentExpr)
+                                    and _as_str(_bn.target.name) == _cn3)
+                                    or (isinstance(_bn, VarDecl) and _as_str(_bn.name) == _cn3)):
+                                _nb += 1
+                        if _nb > 1:
+                            _why = (f"reads `{_cn3}`, which the enclosing function "
+                                    f"rebinds, so a snapshot taken at the class "
+                                    f"statement could differ from Python's late binding")
+                    if _why != '':
+                        _ern = list(_caps)[0]
+                        raise ValueError(
+                            f"method `{_as_str(_ecm.name)}` of class "
+                            f"`{_as_str(_ec.name)}` reads `{_ern}`, a parameter "
+                            f"or local of `{_as_str(_ef.name)}`, which declares "
+                            f"the class, and {_why}; a class declared inside a "
+                            f"function cannot reach its enclosing function's frame "
+                            f"there, so the read would silently answer 0")
+                if _ec_direct:
+                    _ef_caps = _ref_pending.get(_ef_outer)
+                    if _ef_caps is None:
+                        _ef_caps = []
+                        _ref_pending[_ef_outer] = _ef_caps
+                    for _cn5 in _caps:
+                        if _cn5 not in _ef_caps:
+                            _ef_caps.append(_cn5)
                 _self_name = _as_str(_ecm.params[0][0])
                 _map: dict = {}
                 _prologue: list = []
@@ -3688,8 +3744,10 @@ def _gmi_capture_nested_class_enclosing_reads(self, stmts: list) -> None:
                     # self-hosted path erases to `int64_t` (see
                     # `discover_closures`' parallel-structures comment),
                     # while a list element read by index keeps its type.
-                    _ref_attrs[f"_classattr_{_as_str(_ec.name)}__{_attr}"] = [
-                        _as_str(_ec.name), _attr, _ef_outer, _cn2]
+                    # Direct classes only -- see `_ec_direct` above.
+                    if _ec_direct:
+                        _ref_attrs[f"_classattr_{_as_str(_ec.name)}__{_attr}"] = [
+                            _as_str(_ec.name), _attr, _ef_outer, _cn2]
                     _rd = MemberExpr(
                         obj=IdentExpr(name=_self_name, line=_ecm.line, col=_ecm.col),
                         member=_attr, line=_ecm.line, col=_ecm.col)

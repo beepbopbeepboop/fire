@@ -2345,6 +2345,27 @@ def main():
     print(mk())
 """, "7\n")
 
+    # A class declared inside a NESTED `def` still reaches the outer local
+    # through that closure's env, so its capture is by VALUE at the class
+    # statement (the pre-by-reference behaviour; the late-bound rebind shape
+    # there is a separate open bug). This case used to compile, and the
+    # by-reference pass must not install a box pointer in a frame that has
+    # no such box: it emitted the bare name and gcc rejected it.
+    test_gimple_stdout(
+        "gimple_nested_class_inside_nested_def_capture", """\
+def outer():
+    x = 5
+    def inner():
+        class C:
+            def get(self):
+                return x
+        return C().get()
+    return inner()
+
+def main():
+    print(outer())
+""", "5\n")
+
     # A method that reads only its own names and a module-level global is not
     # refused: the refusal is for enclosing-function scope and nothing wider.
     test_gimple_stdout("gimple_nested_class_method_reads_module_global", """\
