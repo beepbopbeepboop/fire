@@ -595,6 +595,30 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
                              if _cc == 'mut' and _cn in _cap_names_so_far}
             if _explicit_mut:
                 ci.mut_names = frozenset(set(ci.mut_names) | _explicit_mut)
+            # A class declared in this nested `def` can capture one of the
+            # ENCLOSING function's locals by reference
+            # (`module_gen._gmi_capture_nested_class_enclosing_reads`): the
+            # `class` statement is emitted in THIS lifted function, so the
+            # owner's heap box has to travel here through this closure's env.
+            # Make the name a `mut_names` member, which widens the env field
+            # to `T *` and makes the caller seed the BOX POINTER, and prune
+            # the candidate list to the names this function really captures:
+            # a local of this `def` that merely SHADOWS the same name must
+            # stay by value (its home is this frame, not the owner's).
+            _class_pending = getattr(ctx, '_class_ref_pending', None)
+            if _class_pending is not None:
+                _cand = _class_pending.get(lifted)
+                if _cand:
+                    _cap_names_now = dict(ci.captures)
+                    _kept: list = []
+                    for _cand_n in _cand:
+                        if _as_str(_cand_n) in _cap_names_now:
+                            _kept.append(_cand_n)
+                    if len(_kept) != len(_cand):
+                        _class_pending[lifted] = _kept
+                    if _kept:
+                        ci.mut_names = frozenset(
+                            set(ci.mut_names) | set(_kept))
             if outer_name not in ctx._all_closures:
                 ctx._all_closures[outer_name] = {}
             # Keyed by the `_as_str` view: the call-group merge below looks

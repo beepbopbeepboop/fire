@@ -4166,15 +4166,24 @@ def _gen_stmt_StructDef(gen, node):
             _src_name = ''
             if isinstance(_src, gimple_ctypes.IdentExpr):
                 _src_name = _as_str(_src.name)
-            # The box exists only in the C function the capture pass boxed the
-            # local in (`_seed_mut_captured_local_types`). A class statement
-            # that is emitted somewhere else -- a nested `def`'s lifted body
-            # reaching the frame through its closure env -- has no such box
-            # here, so fall through to the by-value per-execution cell (the
-            # pre-by-reference behaviour) instead of installing a bare source
-            # name that is not declared in this function.
-            if _src_name != '' and _src_name in getattr(gen, '_boxed_mut_locals', {}):
-                gen._emit(f"  {cattrs[aname]} = {gen._cname(_src_name)};")
+            # The box exists in the C function this capture was boxed in. For
+            # a class written directly in that function, the boxed name is a
+            # local (`_boxed_mut_locals`). For a class inside a nested `def`,
+            # the class statement is emitted in the LIFTED function, where the
+            # name arrives through the closure env: `_gimple_mut_ptr` holds
+            # the preloaded BOX POINTER for a by-reference capture (its env
+            # field is `T *`), so install that. A name with neither is not a
+            # capture here (it is a local of the lifted function); fall
+            # through to the ordinary by-value cell for it.
+            _box_expr = ''
+            if _src_name != '':
+                if _src_name in getattr(gen, '_boxed_mut_locals', {}):
+                    _box_expr = gen._cname(_src_name)
+                else:
+                    _box_expr = (getattr(gen, '_gimple_mut_ptr', None)
+                                 or {}).get(_src_name) or ''
+            if _box_expr != '':
+                gen._emit(f"  {cattrs[aname]} = {_box_expr};")
                 continue
         # A per-execution cell (module_gen registration): this execution gets its
         # OWN storage, and the global is pointed at it before the store below, so

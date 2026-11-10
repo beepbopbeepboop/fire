@@ -2373,12 +2373,10 @@ def main():
     print(mk())
 """, "7\n")
 
-    # A class declared inside a NESTED `def` still reaches the outer local
-    # through that closure's env, so its capture is by VALUE at the class
-    # statement (the pre-by-reference behaviour; the late-bound rebind shape
-    # there is a separate open bug). This case used to compile, and the
-    # by-reference pass must not install a box pointer in a frame that has
-    # no such box: it emitted the bare name and gcc rejected it.
+    # A class declared inside a NESTED `def` reaches the outer local
+    # through that closure's env. The non-rebind shape uses the same boxed
+    # cell as the direct case; the rebind shapes below pin that the box
+    # pointer travels through the env, so late binding still holds.
     test_gimple_stdout(
         "gimple_nested_class_inside_nested_def_capture", """\
 def outer():
@@ -2393,6 +2391,67 @@ def outer():
 def main():
     print(outer())
 """, "5\n")
+
+    # The SAME nested-`def` shape, but the outer function rebinds the local
+    # after `inner` is defined. Python's cell is shared by reference, so the
+    # method sees 7. The outer local is heap-boxed and the inner closure's
+    # env field carries the BOX POINTER (the by-reference capture), which the
+    # lifted frame installs on the class attribute.
+    test_gimple_stdout(
+        "gimple_nested_class_inside_nested_def_late_binds", """\
+def outer():
+    x = 5
+    def inner():
+        class C:
+            def get(self):
+                return x
+        return C().get()
+    x = 7
+    return inner()
+
+def main():
+    print(outer())
+""", "7\n")
+
+    # An instance built before the outer rebind must see the new value: the
+    # instance's hidden cell field points at the box, not at a snapshot.
+    test_gimple_stdout(
+        "gimple_nested_class_inside_nested_def_sees_later_rebind", """\
+def outer():
+    x = 5
+    def inner():
+        class C:
+            def get(self):
+                return x
+        return C()
+    c = inner()
+    x = 7
+    return c.get()
+
+def main():
+    print(outer())
+""", "7\n")
+
+    # A local of the nested `def` that SHADOWS an outer name is the inner
+    # function's own binding: it must stay by value (boxing the outer one
+    # would be the wrong cell entirely).
+    test_gimple_stdout(
+        "gimple_nested_class_inside_nested_def_shadows_outer_capture", """\
+def outer():
+    x = 5
+    def inner():
+        x = 100
+        class C:
+            def get(self):
+                return x
+        y = C().get()
+        x = 200
+        return y
+    return inner()
+
+def main():
+    print(outer())
+""", "100\n")
 
     # The enclosing function's own call through the SAME captured callable
     # goes through a heap box (the class capture boxes the local), so the

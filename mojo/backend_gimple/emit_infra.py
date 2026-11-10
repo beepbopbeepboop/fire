@@ -4166,6 +4166,45 @@ def _class_ref_captures(gen, func_name: str) -> dict:
     return _one
 
 
+def _class_ref_captures_deep(gen, func_name: str) -> dict:
+    """`_class_ref_captures` for `func_name` AND every lifted closure nested
+    in it, transitively.
+
+    A class declared in a nested `def` boxes the enclosing local in the
+    outer function and forwards the box through the closure env, so the
+    owner is not the function whose `class` statement installs it. Ownership
+    of that box is therefore a question about the owner's DESCENDANTS, not
+    just about classes written directly in its own body. `_all_closures` is
+    the parent -> {name: ClosureInfo} map the closure scan already built;
+    walking it (rather than testing name prefixes, which a function name can
+    forge) names exactly the descendants whose lifted functions were
+    emitted from this one."""
+    names = dict(_class_ref_captures(gen, func_name))
+    _all = getattr(gen, '_all_closures', None)
+    if not _all:
+        return names
+    _stack: list = [func_name]
+    _seen: set = set()
+    while _stack:
+        _f = _as_str(_stack.pop())
+        if _f in _seen:
+            continue
+        _seen.add(_f)
+        _children = _all.get(_f)
+        if not _children:
+            continue
+        for _k in sorted(list(_children)):
+            _ln = _as_str(getattr(_children[_k], 'lifted_name', ''))
+            if _ln == '' or _ln in _seen:
+                continue
+            _stack.append(_ln)
+            _more = _class_ref_captures(gen, _ln)
+            for _n in sorted(_more):
+                if _n not in names:
+                    names[_n] = _more[_n]
+    return names
+
+
 def _plan_mut_captured_params(gen, node, func_name: str):
     """Record which PARAMETERS of `func_name` a nested closure captures
     BY REFERENCE, and mint the C identifier each one is declared under.
@@ -4361,7 +4400,8 @@ def _emit_mut_local_box_allocs(gen, fn=None):
     # pointer, and the class object/instance can outlive the call. This is
     # the same bounded leak the coroutine capture boxes accept (a real
     # lifetime-tracked free is future work, not correctness of the value).
-    _class_ref_here = _class_ref_captures(gen, getattr(gen, 'current_func_name', '') or '')
+    _class_ref_here = _class_ref_captures_deep(
+        gen, getattr(gen, 'current_func_name', '') or '')
     for mn in sorted(gen._boxed_mut_locals):
         ctype = gen._boxed_mut_locals[mn]
         cname = gen._cname(mn)
