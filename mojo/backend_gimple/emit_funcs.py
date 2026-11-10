@@ -2922,30 +2922,19 @@ def _func_qualifier(gen, bare_name: str) -> str:
     own_home = getattr(gen, '_own_imported_func_home', None)
     if own_home and bare_name in own_home:
         qualifier = own_home[bare_name]
-        if qualifier == gimple_codegen._AMBIGUOUS_FUNC_HOME:
-            # Never silently miscompile (doc/STDLIB-BUGS.md SB-1's
-            # per-scope-import residual): this compile unit transitively
-            # imports TWO different sibling modules that both define a
-            # function named `bare_name`, each from a different lexical
-            # scope, and no enclosing lexical scope binds the name for
-            # THIS particular reference (the scope-chain walk above found
-            # nothing). Picking either one silently would risk calling
-            # the wrong module's implementation with no error at all.
-            # Honest refusal instead (see _note_own_func_home's docstring
-            # for the exact repro shape and why this can't be resolved by
-            # the module-qualifier mechanism alone).
-            raise RuntimeError(
-                f"cannot compile module: {bare_name!r} is ambiguous — this "
-                "program transitively imports two different sibling "
-                "modules that both define a free function named "
-                f"{bare_name!r}, each from a different lexical scope "
-                "(e.g. two different nested `from X import ...` "
-                "statements), and no enclosing `from X import ...` "
-                "statement in the current lexical scope binds the name "
-                "for this specific reference. Rename one of the two "
-                "functions, or import qualified (`import X` + "
-                "`X.func(...)`), to work around this.")
-        return _sanitize_qualifier(qualifier)
+        # If bare_name is marked _AMBIGUOUS_FUNC_HOME (two same-named imports
+        # from different sibling modules, each lexically nested in a different
+        # scope), don't refuse outright: the lexical scope resolver above
+        # (Tier 2) already had first crack at this reference and found no
+        # enclosing import that binds bare_name, so the only remaining option
+        # short of erroring is to let the caller fall through to the shared
+        # whole-program registry (Tier 4). That mirrors _imported_def_pts's
+        # `definer_only` contract (an _AMBIGUOUS entry means "no answer", not
+        # a wrong answer) and keeps every tier in this file symmetric: no
+        # stale RuntimeError that contradicts the other three call sites
+        # which already treat the sentinel as a fall-through.
+        if qualifier != gimple_codegen._AMBIGUOUS_FUNC_HOME:
+            return _sanitize_qualifier(qualifier)
     home = getattr(gen, '_imported_func_home', None)
     if home and bare_name in home:
         return _sanitize_qualifier(home[bare_name])

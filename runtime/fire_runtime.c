@@ -7603,21 +7603,6 @@ char *mojo_dict_get_str(MojoDict *d, char *key)
     return sl ? (char *)(uintptr_t)sl->val : NULL;
 }
 
-static int64_t _dict_slot_boxed(_DictSlot *sl)
-{
-    if (!sl) return 0;
-    switch (sl->kind) {
-        case 1:
-            return mojo_box_from_double(mojo_double_from_bits(sl->val));
-        case 3:
-            return mojo_box_from_bool(sl->val);
-        case 4:
-            return mojo_box_none();
-        default:
-            return sl->val;
-    }
-}
-
 int64_t mojo_dict_slot_kind(MojoDict *d, char *key)
 {
     _DictSlot *sl = _dict_lookup(d, key);
@@ -7629,12 +7614,6 @@ char *mojo_dict_repr_slot(MojoDict *d, char *key)
     _DictSlot *sl = _dict_lookup(d, key);
     if (!sl) return mojo_str_from_int(0);
     return mojo_dict_slot_repr(sl->val, sl->kind);
-}
-
-int64_t mojo_dict_slot_boxed(MojoDict *d, char *key)
-{
-    _DictSlot *sl = _dict_lookup(d, key);
-    return _dict_slot_boxed(sl);
 }
 
 int mojo_dict_contains(MojoDict *d, char *key)
@@ -7665,23 +7644,6 @@ double mojo_dict_get_none_key_double(MojoDict *d)
     double v = 0.0;
     if (sl) memcpy(&v, &sl->val, sizeof(v));
     return v;
-}
-int64_t mojo_dict_slot_kind_none(MojoDict *d)
-{
-    _DictSlot *sl = _dict_lookup_k(d, "", 3);
-    return sl ? sl->kind : -1;
-}
-char *mojo_dict_repr_slot_none(MojoDict *d)
-{
-    _DictSlot *sl = _dict_lookup_k(d, "", 3);
-    if (!sl) return mojo_str_from_int(0);
-    return mojo_dict_slot_repr(sl->val, sl->kind);
-}
-
-int64_t mojo_dict_slot_boxed_none(MojoDict *d)
-{
-    _DictSlot *sl = _dict_lookup_k(d, "", 3);
-    return _dict_slot_boxed(sl);
 }
 
 /* ── bytes-keyed dict access ─────────────────────────────────────────────
@@ -7760,25 +7722,6 @@ double mojo_dict_get_bytes_double(MojoDict *d, MojoBytes *key)
     double v;
     memcpy(&v, &sl->val, sizeof(v));
     return v;
-}
-
-int64_t mojo_dict_slot_kind_bytes(MojoDict *d, MojoBytes *key)
-{
-    _DictSlot *sl = _dict_lookup_bytes(d, key);
-    return sl ? sl->kind : -1;
-}
-
-char *mojo_dict_repr_slot_bytes(MojoDict *d, MojoBytes *key)
-{
-    _DictSlot *sl = _dict_lookup_bytes(d, key);
-    if (!sl) return mojo_str_from_int(0);
-    return mojo_dict_slot_repr(sl->val, sl->kind);
-}
-
-int64_t mojo_dict_slot_boxed_bytes(MojoDict *d, MojoBytes *key)
-{
-    _DictSlot *sl = _dict_lookup_bytes(d, key);
-    return _dict_slot_boxed(sl);
 }
 
 int mojo_dict_contains_bytes(MojoDict *d, MojoBytes *key)
@@ -10028,49 +9971,6 @@ char *mojo_repr_int(int64_t obj) {
 typedef struct MojoClassRec MojoClassRec;
 static MojoClassRec *_class_find(int64_t tag);
 
-/* CPython's `ascii()` applied to text that is already a `repr()` rendering:
- * every non-ASCII code point becomes `\xNN` / `\uNNNN` / `\UNNNNNNNN`, and
- * every ASCII byte (including the repr's own quotes and control escapes) is
- * copied through untouched. That is exactly the difference between
- * `repr(s)` and `ascii(s)` for a str, and it is also what CPython's ascii()
- * does to the repr of any other object -- a custom `__repr__` that returns
- * `Café()` ascii-renders as `Caf\xe9()`.
- *
- * Why a separate pass instead of escaping inside `mojo_repr_str`: repr's
- * non-ASCII escaping is a *display* choice that repr currently leaves out to
- * keep debug dumps readable (see that function's comment), while `!a` needs
- * it; passing the rendered text through here keeps the two spellings from
- * duplicating the UTF-8 decode + escape logic. The escape spelling and the
- * decoder are the codec machinery's own (`mojo_codepoint_escape` /
- * `mojo_utf8_next`), so `!a` and encode('ascii') cannot disagree about
- * whether U+03BB is `\u03bb` or `\xce\xbb`.
- *
- * Always returns a freshly allocated string: the ascii form is usually the
- * same length as its input but can be longer (`\U0001f600` for one
- * code point), so a caller may free it like any other runtime string. */
-char *mojo_ascii_escape(char *s) {
-    if (!s) s = "";
-    const unsigned char *p = (const unsigned char *)s;
-    int64_t n = (int64_t)strlen(s);
-    /* Worst case is one code point (at most 4 source bytes) rendered as
-     * `\UNNNNNNNN` (10 chars), so 4 bytes never produce more than 10 output
-     * chars and `n * 10 + 1` is a safe bound. */
-    char *out = malloc((size_t)n * 10 + 1);
-    size_t o = 0;
-    for (int64_t i = 0; i < n; ) {
-        unsigned c = p[i];
-        if (c < 0x80) { out[o++] = (char)c; i++; continue; }
-        uint32_t cp = mojo_utf8_next(p, n, &i);
-        char esc[16];
-        mojo_codepoint_escape(cp, esc, sizeof esc);
-        size_t el = strlen(esc);
-        memcpy(out + o, esc, el);
-        o += el;
-    }
-    out[o] = '\0';
-    return out;
-}
-
 char *mojo_repr_str(char *s) {
     /* Python repr() of a string is quoted: repr("hi") == "'hi'", with
      * control characters shown as escapes (repr("a\nb") == "'a\\nb'") rather
@@ -12159,9 +12059,11 @@ char *mojo_dict_slot_repr(int64_t v, int64_t kind)
              * stores, and only this tag tells them apart. */
             return strdup("None");
         default:
-            /* kind 0: an integer value. Always render as the integer; callers
-             * use this to repr a slot by its recorded kind. */
-            return mojo_str_from_int(v);
+            /* kind 0. The word 0 is the INTEGER 0, which the generic reader
+             * cannot say (its `val == 0` arm answers "None", right for the
+             * NULL pointer it was written for) — so it is answered here and
+             * a non-zero kind-0 word is left to that reader. */
+            return v == 0 ? strdup("0") : NULL;
     }
 }
 
@@ -16387,28 +16289,6 @@ int mojo_pyobject_is_container(int64_t box) {
  * calls agree within a run while differing from any small int hash —
  * test_hash asserts 42's hash != "hello"'s, never a specific value.
  * 0/None answers 0: the stub answer, no measured test hashes it. */
-/* Hasher state: FNV-1a over the 64-bit words folded in, so equal values hash
-   equal within a run and the order of the elements matters. */
-typedef struct { uint64_t state; } MojoHasher;
-
-int64_t mojo_hasher_new(void) {
-    MojoHasher *hs = (MojoHasher *)malloc(sizeof(MojoHasher));
-    hs->state = 1469598103934665603ULL;
-    return (int64_t)(intptr_t)hs;
-}
-
-void mojo_hasher_update_int(int64_t hasher, int64_t value) {
-    MojoHasher *hs = (MojoHasher *)(intptr_t)hasher;
-    if (!hs) return;
-    hs->state ^= (uint64_t)value;
-    hs->state *= 1099511628211ULL;
-}
-
-int64_t mojo_hasher_finish(int64_t hasher) {
-    MojoHasher *hs = (MojoHasher *)(intptr_t)hasher;
-    return hs ? (int64_t)(hs->state >> 1) : 0;
-}
-
 int64_t mojo_pyobject_hash(int64_t box) {
     if (box && mojo_pyobject_is_container(box)) {
         char *kind = mojo_is_registered_list(box) ? "list"

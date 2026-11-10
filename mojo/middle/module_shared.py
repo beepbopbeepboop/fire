@@ -1010,16 +1010,8 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict,
             # variable and is not the module global, so it records nothing.
             _p17_dname = _as_str(_n.target.obj.name)
             if _p17_dname not in self.var_types:
-                # The value's dict KIND (exprtypes.dict_value_kind), so the join below is the one every other dict
-                # writer uses. The lattice join promoted an int and a float to double, and read a mixed dict as double.
-                _k = gimple_exprtypes.dict_value_kind(self, _n.value)
-                if _k is None:
-                    # A container or other type the kind table does not name: its quick type, except the int64_t
-                    # default, which is no evidence of an int and would join with every other kind.
-                    _qt = self._quick_type(_n.value)
-                    if _qt and _qt != 'int64_t':
-                        _k = _qt
-                _store_hits.setdefault(_p17_dname, []).append(_k)
+                _store_hits.setdefault(_p17_dname, []).append(
+                    self._quick_type(_n.value))
         if (isinstance(_n, ExprStmt)
                 and isinstance(_n.value, CallExpr)
                 and isinstance(_n.value.func, MemberExpr)
