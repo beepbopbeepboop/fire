@@ -6463,6 +6463,13 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     if do_imports or link_mode:
         gen._record_sys_path_inserts(
             mojo_src, os.path.dirname(os.path.abspath(filename)) if filename else None)
+    # Stash the in-memory source text the module pass will process so text-only
+    # discoveries (e.g. bracket-parameter annotation scans, which the parser
+    # cannot carry in the AST) can consult it instead of re-reading the file
+    # at `filename`. The parser consumed exactly this string, so it is always
+    # consistent with `stmts` — unlike an on-disk file that could have been
+    # modified after parse or be unreadable (empty `_current_filename`).
+    gen._source_text = mojo_src
     code = gen.gen_module(stmts)
     if do_imports or link_mode:
         code = _dedup_guarded_blocks(code)

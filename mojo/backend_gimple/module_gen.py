@@ -4879,10 +4879,20 @@ def gen_module_impl(self, stmts: list):
                 _replaced.append(_s)
         stmts = _replaced
 
-    _gsrc = ''
-    if getattr(self, '_current_filename', None):
+    # Prefer the in-memory source text the parser consumed (stashed by the
+    # pipeline pass as `gen._source_text`) over re-opening `filename` on disk.
+    # Everything derived from `_gsrc` (function-typed bracket-parameter
+    # detection, comptime-param threading through nested closures) must be
+    # computed from source TEXT — the AST records only comptime parameter
+    # NAMES, not their type annotations — but that text need not come from a
+    # file at all, and a disk that differs from the parse can produce
+    # silently-wrong threading decisions. Fall back to the on-disk read only
+    # for callers that set `_current_filename` without stashing `_source_text`.
+    _gsrc = getattr(self, '_source_text', '')
+    if not _gsrc and getattr(self, '_current_filename', None):
         try:
-            _gsrc = open(self._current_filename).read()
+            with open(self._current_filename) as _f:
+                _gsrc = _f.read()
         except Exception:
             _debug_note('cannot read source for generics scan', self._current_filename)
             _gsrc = ''
