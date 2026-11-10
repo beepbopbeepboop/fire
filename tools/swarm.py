@@ -255,12 +255,14 @@ def feed():
         if "bug:" + base in held:
             log("held %s: a live task or an external claim holds it (see control.py claims)" % doc)
             continue
-        # DONE ratchet: if any branch (landed or not) has already deleted this doc, it is
-        # fixed. Skip it so we don't re-dispatch a bug that a prior worker already resolved.
+        # DONE ratchet: a doc whose fix is FINISHED — a DONE task with commits, not yet landed — is
+        # not re-dispatched; its branch is in the landing queue. A deletion by a worker that never
+        # finished is NOT a fix, and skipping on it strands the doc forever with no path forward
+        # (2026-11-10: 5 docs, e.g. mid/SUITE_silentnoop, were wedged exactly this way).
         r = subprocess.run(["git", "log", "--all", "--diff-filter=D", "--oneline", "--",
                            "bugs/%s.md" % base, "bugs/mid/%s.md" % base, "bugs/hard/%s.md" % base],
                            capture_output=True, text=True, cwd=C.MAIN)
-        if r.stdout.strip():
+        if r.stdout.strip() and landable(base):
             log("done-ratchet: %s already deleted on a branch; skipping (its branch is in the landing queue)" % doc)
             continue
         if base in st.get("pending", {}):
@@ -348,12 +350,9 @@ def why(doc):
     r = subprocess.run(["git", "log", "--all", "--diff-filter=D", "--oneline", "--",
                         "bugs/%s.md" % base, "bugs/mid/%s.md" % base, "bugs/hard/%s.md" % base],
                        capture_output=True, text=True, cwd=C.MAIN)
-    if r.stdout.strip():
-        hits = landable(base)
-        if not hits:
-            return ("DONE ratchet: a branch deleted it, but NO DONE task with commits holds it — "
-                    "nothing will ever resolve it")
-        return "DONE ratchet: a branch deleted it; %d DONE task(s) will land it (e.g. %s)" % (len(hits), hits[0])
+    if r.stdout.strip() and landable(base):
+        return "DONE ratchet: a branch deleted it; %d DONE task(s) will land it (e.g. %s)" % (
+            len(landable(base)), landable(base)[0])
     if base in st.get("pending", {}):
         return "held: due a reclass to %s (queued only after the doc moves)" % st["pending"][base]
     stop = stop_reason(doc)
