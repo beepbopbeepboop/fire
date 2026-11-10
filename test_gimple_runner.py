@@ -2294,6 +2294,24 @@ def main():
     print(mk(1))
 """, "2\n")
 
+    # An instance built BEFORE the rebind must still see the new value: that
+    # is what distinguishes Python's cell from a snapshot taken at instance
+    # construction, and it is the property the `class` statement's box exists
+    # to preserve.
+    test_gimple_stdout(
+        "gimple_nested_class_method_sees_rebind_after_instance_built", """\
+def mk(n: int):
+    class C:
+        def get(self):
+            return n
+    c = C()
+    n = n + 1
+    return c.get()
+
+def main():
+    print(mk(1))
+""", "2\n")
+
     # The same problem with no REBIND: a local whose FIRST binding is after
     # the class statement. A snapshot taken at the class statement read it
     # before it was bound (the compiled path answered 0).
