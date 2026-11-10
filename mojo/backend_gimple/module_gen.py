@@ -18860,15 +18860,49 @@ def gen_module_impl(self, stmts: list):
     # bodies exist — a `print(x)` of a list literal in an IMPORTED module is a
     # reference, and that module's text is spliced into this `parts` long after
     # this module's own code was written.
+    # Per-module AST lifetime: drop this gen's REFERENCES to the AST and
+    # closure accumulators now that emission is complete. REBIND each
+    # attribute to a FRESH empty container — never .clear() the container in
+    # place — because this gen_module_impl also runs for the throwaway
+    # temp_gens that `_compile_imported_module` builds for each inlined
+    # (link-mode) module, and several of these attributes are NOT this
+    # gen's private storage:
+    #   * `_module_stmts`, `_all_transitive_stmts_ordered`,
+    #     `_all_transitive_stmts_ids`, `_global_inline_defs` are shared by
+    #     REFERENCE with the root gen (emit_resolve's share block assigns
+    #     temp_gen.<attr> = gen.<attr>), and the root keeps reading them
+    #     after the inlined module returns: the 17440 guard
+    #     (`_sn in self._global_inline_defs`) skips the duplicate externs
+    #     for symbols the inlined module already defined, and the root's
+    #     5629-5660 bookkeeping adds to the same set. An in-place .clear()
+    #     here wiped the root's state mid-compile, so the guard stopped
+    #     skipping and the root re-emitted its own declaration for an
+    #     already-defined symbol.
+    #   * `_cur_func_body` is worse: it is a direct reference to the LAST
+    #     lowered function's body list in the parsed module AST (see
+    #     _reset_func), i.e. one of the very list objects the root's
+    #     `imported_stmts` holds in link mode. .clear() emptied those
+    #     bodies IN PLACE, so the root's later inference passes read empty
+    #     bodies, inferred void for inlined struct methods whose bodies
+    #     really return `char *`, and emitted a second conflicting
+    #     prototype (`void insp_Parameter_label(Parameter *)` against the
+    #     inlined section's correct `char *` definition — a hard gcc
+    #     "conflicting types" error) while unannotated free functions
+    #     silently mistyped (the 2026-11-08 `make check` linkmode job,
+    #     5 of 45 red; its bug doc is deleted by this fix).
+    # Rebinding drops only this gen's reference; the shared object the root
+    # (and any sibling temp_gen) still holds stays intact. Callables in the
+    # tuple (e.g. `_calls_in_stmts`, a module-level function reached
+    # through the gen) are not dict/list/set and are left alone, as is the
+    # gen-local `imported_stmts` reference list below (clearing a list of
+    # references drops references without mutating the referenced nodes).
     try:
         if hasattr(self, '_module_stmts'):
-            self._module_stmts.clear()
+            self._module_stmts = {}
         if hasattr(self, '_all_transitive_stmts_ordered'):
-            self._all_transitive_stmts_ordered.clear()
+            self._all_transitive_stmts_ordered = []
         if hasattr(self, '_all_transitive_stmts_ids'):
-            self._all_transitive_stmts_ids.clear()
-        # Per-module AST lifetime: drop closure/function-AST accumulators now
-        # that emission is complete.
+            self._all_transitive_stmts_ids = set()
         for _acc in ('_all_closures', '_cpp_module_fn_asts',
                      '_lambda_outer_closures', '_closure_call_stmts',
                      '_local_def_nodes', '_analysis_funcs',
@@ -18881,11 +18915,11 @@ def gen_module_impl(self, stmts: list):
             try:
                 _v = getattr(self, _acc, None)
                 if isinstance(_v, dict):
-                    _v.clear()
+                    setattr(self, _acc, {})
                 elif isinstance(_v, list):
-                    _v.clear()
+                    setattr(self, _acc, [])
                 elif isinstance(_v, set):
-                    _v.clear()
+                    setattr(self, _acc, set())
             except Exception:
                 pass
         try:
