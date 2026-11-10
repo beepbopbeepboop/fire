@@ -2748,6 +2748,27 @@ def main():
     print(mk(4))
 """, "12\n")
 
+    # A method of a class declared inside a NESTED `def` returning a MODULE
+    # global inferred its C return type as the internal `int` marker, while
+    # the caller in the lifted `__GIMPLE` function holds the word type: gcc
+    # rejected the call ("invalid conversion in gimple call"). The direct
+    # shape escaped only because its caller is not a GIMPLE function.
+    test_gimple_stdout(
+        "gimple_nested_class_nested_def_method_returns_module_global", """\
+G = 4
+
+def outer():
+    def inner():
+        class C:
+            def get(self):
+                return G
+        return C().get()
+    return inner()
+
+def main():
+    print(outer())
+""", "4\n")
+
     # A name the enclosing function declares `global` is a module variable,
     # not a local, even though the body assigns it: the class method must read
     # the global at CALL time. `_gmi_local_binding_names` is deliberately
