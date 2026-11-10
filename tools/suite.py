@@ -1904,17 +1904,8 @@ test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True, mem='tiny',
 # the corpus cannot land while it is that size — it would be red on arrival and
 # in every branch that did not cause it — so this is the one shape that can:
 # `--ratchet` fails only when a file GAINS a citation, against per-file ceilings
-# in `tools/dangling_refs_baseline.py`. The corpus drifted red while nothing
-# was watching it (2026-11-09: 28 files over their baselines, the same set at
-# master's tip and at this branch's base), which the `expect=` below declares:
-# a whole-job condition with no count, because the ratchet prints no summary
-# line the runner can check one against. Its doc
-# (`bugs/SUITE_doc_refs_ratchet_red.md`) is the switch — the campaign lands,
-# the doc goes, and a still-marked `doc-refs` that now PASSES reports loudly
-# until the marker drops. An `expect=` in `check` runs against this bucket's
-# stated convention on purpose: the alternative is a permanently UNDECLARED red
-# in the everyday tally, and the anti-rot above is what makes the marker
-# temporary rather than permanent.
+# in `tools/dangling_refs_baseline.py`. It is green today, and the campaign is
+# 480 one-line prose edits that each of them now makes easier to bank.
 #
 # The key covers `**/*.md` and `**/*.py` because the walk's subject is every
 # `.md` and `.py` in the tree — `fire_compiler.py` alone is 24 of the citations,
@@ -1925,14 +1916,6 @@ test('doc-refs', [PY, 'tools/dangling_doc_refs.py', '--ratchet'], cache=True,
      extra=['tools/dangling_doc_refs.py', 'tools/dangling_refs_baseline.py',
             'checked_run.py'],
      extraglob=['**/*.md', '**/*.py'],
-     expect='bugs/SUITE_doc_refs_ratchet_red.md — pre-existing red, not caused '
-            'by any one branch: the citation campaign, whose over-ceiling '
-            'files the doc lists (regenerate with `python3 '
-            'tools/dangling_doc_refs.py --ratchet`). Whole-job condition, '
-            'stated without a count because the ratchet prints no summary '
-            'line the runner can check one against. Drop the marker when the '
-            'campaign lands; a marked job that starts passing reports '
-            'loudly.',
      desc='no file cites a deleted bug doc more than it used to')
 # Reads the CHECKABLE half of FORMAL.md, doc/ABI.md and OPUS.md (counts,
 # function names, limits, refusal messages, ABI signatures, tool flags) out of
