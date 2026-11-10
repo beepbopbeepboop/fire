@@ -2,9 +2,13 @@
 
 ## Status: PARTIAL — root-cause runtime accessors (`mojo_dict_slot_kind`,
 ## `mojo_dict_repr_slot`) added in `runtime/fire_runtime.c` + header;
-## regression `test_dict_slot_read_regression.py` passes (compile/link).
-## Still open: codegen temp-tracking (`d[k]` -> recall `(dict,key)` for
-## `_repr_value`) and missing-key behaviour (`0` vs KeyError). `d['n']` still 0.
+## codegen now tracks string-keyed `d[k]` int reads as (dict,key) so
+## `_repr_value` / `_stringify_value` / `print` render the slot's runtime
+## kind (None/True/False) instead of the raw word. Regression
+## `test_dict_slot_read_regression.py` pins this.
+## Still open: cross-function / returned subscript reads (the dict,key
+## temps do not survive a return), non-string-keyed reads, and
+## missing-key behaviour (`0` vs KeyError).
 
 Landed, and each item says which half of this doc it was:
 

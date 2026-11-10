@@ -746,18 +746,10 @@ def bounce(name, t):
 
 
 def doc_class_now(item):
-    """The class a queued item runs in.
-
-    A `bug-` task's class is where its doc sits NOW: bugs/ is easy, bugs/mid/ is mid, bugs/hard/ is
-    hard (the same rule as swarm.dir_class). Such an item carries the class it was queued in, and a
-    reclass moves the file while that item is still waiting, so the stored class goes stale; refill
-    must ask the file.
-
-    Any other task keeps the class it was queued with. Controller work chooses its own class
-    deliberately — a replan of a hard doc runs at easy, because easy is the class that has a slot —
-    and deriving it from the doc would park it at an unserved class forever."""
-    if not item.get("name", "").startswith("bug-"):
-        return item.get("cls")
+    """The class of the bug doc a queued item works on, read from where its file sits NOW: bugs/ is easy, bugs/mid/ is
+    mid, bugs/hard/ is hard (the same rule as swarm.dir_class). A queued item carries the class it was queued in, and a
+    reclass moves the file while that item is still waiting, so the stored class goes stale; refill must ask the file.
+    An item with no bug claim, or whose doc is gone, keeps the class it was queued with."""
     for c in item.get("claims", []):
         if c.startswith("bug:"):
             hits = sorted(glob.glob(os.path.join(MAIN, "bugs", "**", c[4:] + ".md"), recursive=True))

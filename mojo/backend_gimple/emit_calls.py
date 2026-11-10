@@ -10811,7 +10811,7 @@ def _mark_unknown_list_elem(gen, list_val: str, t: str) -> None:
         gen._dyn_word_vals.add(t)
 
 
-def _mark_unknown_dict_value(gen, dict_val: str, t: str) -> None:
+def _mark_unknown_dict_value(gen, dict_val: str, t: str, key_val: str = None, key_ctype: str = 'char *') -> None:
     """`d[k]` read through the int view of a dict whose VALUE type was
     never recorded is a word of unknown kind -- the measured case is the
     self-hosted compiler's own `api = gen._generator_api[name]` record
@@ -10819,9 +10819,13 @@ def _mark_unknown_dict_value(gen, dict_val: str, t: str) -> None:
     formatted the name's ADDRESS as a decimal and called
     `519088207808_start`. Recorded as such, a stringification asks the
     runtime (`mojo_cstr_or_int_str`), which renders an integer as its
-    decimal and a string as itself."""
+    decimal and a string as itself. We also remember (dict,key) for
+    string-keyed reads so repr/stringify can recover the slot's runtime kind
+    (None/True/1.5), which is invisible to the bare int64_t word."""
     if dict_val not in gen._dict_val_types:
         gen._dyn_word_vals.add(t)
+    if key_val is not None and key_ctype == 'char *':
+        getattr(gen, '_dict_slot_reads', {})[t] = (dict_val, key_val, key_ctype)
 
 
 def _refuse_namedtuple_tuple_use(gen, ot: str, use: str) -> None:
@@ -11237,7 +11241,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                 gen._dict_val_types[t] = _nd
             return val_ctype, t
         t = gen._call_expr('int64_t', 'mojo_dict_get_int', [('MojoDict *', ov), (idx_type, iv)])
-        _mark_unknown_dict_value(gen, ov, t)
+        _mark_unknown_dict_value(gen, ov, t, iv, idx_type)
         return 'int64_t', t
 
     # Opaque Python object (typed as int) — treat as MojoList via cast

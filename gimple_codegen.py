@@ -3536,7 +3536,6 @@ class GimpleGen:
         'mojo_repr_list_elem_double': ('char *', ['int64_t']),
         'mojo_repr_list_elem_bool':   ('char *', ['int64_t']),
         'mojo_repr_str':         ('char *',    ['char *']),
-        'mojo_ascii_escape':     ('char *',    ['char *']),
         'mojo_repr_obj':         ('char *',    ['int64_t']),
         'mojo_repr_float':       ('char *',    ['double']),
         'mojo_print':            ('void',      ['char *']),

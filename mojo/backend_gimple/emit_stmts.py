@@ -1434,6 +1434,14 @@ def _gen_stmt_AssignStmt(gen, node):
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name
+        # Propagate `d[k]` slot-read tracking to the assigned local name so
+        # later reads/prints of the name can recover the slot's runtime kind.
+        _dsr = getattr(gen, '_dict_slot_reads', None)
+        if _dsr is not None:
+            if v in _dsr:
+                _dsr[_as_str(tname)] = _dsr[v]
+            else:
+                _dsr.pop(_as_str(tname), None)
         # Track frozendict/dict fromkeys callable values
         try:
             if hasattr(gen, '_frozendict_fromkeys_callables') and v in gen._frozendict_fromkeys_callables:

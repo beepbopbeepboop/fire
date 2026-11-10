@@ -2709,6 +2709,17 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         if _real in ('MojoList *', 'MojoSet *', 'MojoDict *'):
             rat = _real
             rav = gen._new_val(_real, f'({_real}){rav}')
+    # A `d[k]` read whose value type was unknown at compile time: the slot's
+    # runtime kind (None/True/1.5/...) is recoverable from (dict,key).
+    _dsr = getattr(gen, '_dict_slot_reads', {})
+    _dsr_hit = _dsr.get(rav)
+    if _dsr_hit is None and enode is not None and isinstance(enode, gimple_ctypes.IdentExpr):
+        _dsr_hit = _dsr.get(_as_str(enode.name))
+    if rat in ('int', 'int64_t') and _dsr_hit is not None:
+        _dv, _kv, _kt = _dsr_hit
+        if _kt == 'char *':
+            return gen._call_expr('char *', 'mojo_dict_repr_slot',
+                                  [('MojoDict *', _dv), ('char *', _kv)])
     if rat == 'char *':
         return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
     if rat == 'MojoList *':

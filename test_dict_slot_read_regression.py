@@ -1,32 +1,70 @@
 #!/usr/bin/env python3
-"""Regression: dict slot read must carry kind so d['k'] can say None/True/1.5.
-Root-cause half: runtime accessors mojo_dict_slot_kind / mojo_dict_repr_slot.
-Full fix requires codegen temp-tracking (NOT DONE — see bugs doc)."""
+"""Regression: a dict subscript read must carry the slot's runtime value kind.
 
-def test_accessors_exist():
-    # Verify the new runtime symbols are present by compiling a stub that
-    # references them against the runtime object (quick sanity, not full link).
-    import subprocess, tempfile, os, sys
-    stub = """
-#include <string.h>
-#include "runtime/fire_runtime.h"
-int main(){
-    MojoDict *d = NULL;
-    int64_t k = mojo_dict_slot_kind(d,"k");
-    char *r = mojo_dict_repr_slot(d,"k");
-    (void)k;(void)r;
-    return 0;
-}
+`d['k']` for a dict whose value kind is not recoverable from the bare int64_t
+word used to print as 0/1/bits. Stringification/repr of the read now consults
+the slot's runtime kind via `mojo_dict_repr_slot`.
 """
-    with tempfile.TemporaryDirectory() as td:
-        with open(os.path.join(td,"stub.c"),"w") as f:
-            f.write(stub)
-        # Only compile to object; don't need full link for symbol-check
-        cmd = ["gcc", "-c", "-I.", os.path.join(td,"stub.c"),
-               "-o", os.path.join(td,"stub.o")]
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        assert res.returncode == 0, f"compile failed: {res.stderr}"
-    print("PASS: mojo_dict_slot_kind / mojo_dict_repr_slot compile and link")
+
+import subprocess
+import sys
+from pathlib import Path
+
+# Import helpers from the gimple runner (same tree).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_gimple_runner import compile_mojo_to_gimple_exe  # noqa: E402
+
+
+def run(src: str) -> str:
+    exe = compile_mojo_to_gimple_exe(src)
+    r = subprocess.run([exe], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, (
+        f"exit {r.returncode}\nstderr: {r.stderr}\nstdout: {r.stdout}"
+    )
+    return r.stdout
+
+
+def main():
+    # Direct subscript reads: None and bool must not collapse to 0/1.
+    out = run(r'''
+def main():
+    d = {}
+    d['n'] = None
+    d['b'] = True
+    d['f'] = False
+    print(d['n'])
+    print(d['b'])
+    print(d['f'])
+    print(str(d['n']), repr(d['b']))
+main()
+''')
+    assert out == "None\nTrue\nFalse\nNone True\n", repr(out)
+
+    # Assigned to locals, the slot kind must still be visible.
+    out = run(r'''
+def main():
+    d = {}
+    d['n'] = None
+    d['b'] = True
+    x = d['n']
+    y = d['b']
+    print(x, y)
+    print(str(x), repr(y))
+main()
+''')
+    assert out == "None True\nNone True\n", repr(out)
+
+    # A homogeneous literal whose per-read kind matters.
+    out = run(r'''
+def main():
+    d = {'x': True, 'y': False}
+    print(d['x'], d['y'])
+main()
+''')
+    assert out == "True False\n", repr(out)
+
+    print("test_dict_slot_read_regression: ok")
+
 
 if __name__ == "__main__":
-    test_accessors_exist()
+    main()

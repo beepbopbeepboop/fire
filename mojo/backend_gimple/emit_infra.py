@@ -418,6 +418,11 @@ def _reset_func(gen, body: list = None, params: list = None,
     # unpack whose source carries no element type): same question, asked of
     # the name, because a later read of the local is the local itself.
     gen._dyn_word_locals: set = set()
+    # Temp/var name -> (dict_temp, key_temp, key_ctype) for a `d[k]` read
+    # whose value kind is only known on the slot at runtime. Repr/stringify
+    # can ask the runtime (`mojo_dict_repr_slot`) instead of printing the raw
+    # int64_t word. Cleared/overwritten on reassignment.
+    gen._dict_slot_reads: dict = {}
     # Values and locals known to hold a CLASS made at run time (`type(n, bases, ns)`) or an
     # INSTANCE of one (a call of such a class): `('v', temp)` / `('l', local)` -> 'class' |
     # 'inst'. A method call or `isinstance` on them goes to the class table, never to the
@@ -918,6 +923,7 @@ class FuncState:
         self.fs_emit_frames: list = []
         self.fs_dyn_word_vals: set = set()
         self.fs_dyn_word_locals: set = set()
+        self.fs_dict_slot_reads: dict = {}
         self.fs_rtobj_kinds: dict = {}
         self.fs_tagged_word_vals: set = set()
         self.fs_maybe_kinds_vals: set = set()
@@ -1023,6 +1029,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_emit_frames = gen._emit_frames
     st.fs_dyn_word_vals = gen._dyn_word_vals
     st.fs_dyn_word_locals = gen._dyn_word_locals
+    st.fs_dict_slot_reads = gen._dict_slot_reads
     st.fs_rtobj_kinds = gen._rtobj_kinds
     st.fs_tagged_word_vals = gen._tagged_word_vals
     st.fs_maybe_kinds_vals = gen._maybe_kinds_vals
@@ -1138,6 +1145,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._emit_frames = st.fs_emit_frames
     gen._dyn_word_vals = st.fs_dyn_word_vals
     gen._dyn_word_locals = st.fs_dyn_word_locals
+    gen._dict_slot_reads = st.fs_dict_slot_reads
     gen._rtobj_kinds = st.fs_rtobj_kinds
     gen._tagged_word_vals = st.fs_tagged_word_vals
     gen._maybe_kinds_vals = st.fs_maybe_kinds_vals
@@ -1847,9 +1855,6 @@ _OWNS_STR_ELEMS = frozenset([
 _FRESH_STRING_RETURNS = frozenset([
     'mojo_str_cat', 'mojo_str_from_int', 'mojo_cstr_slice',
     'mojo_cstr_repeat', 'mojo_cstr_reverse', 'mojo_repr_str',
-    # `!a`'s ascii-escape pass: copies its input into a fresh allocation on
-    # every path, so a cat may free its result like any other conversion temp.
-    'mojo_ascii_escape',
     'mojo_hex', 'mojo_oct', 'mojo_bin',
     # The str methods: each returns a copy the caller owns, never its receiver
     # (runtime/fire_runtime.c, `_str_fresh_copy`).
@@ -5123,6 +5128,17 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
             and gimple_exprtypes.is_python_bool_expr(gen, enode):
         return gen._call_expr('char *', 'mojo_bool_to_str',
                               [('int', gen._new_val('int', f'(int){ev}'))])
+    # A `d[k]` read whose value type was unknown at compile time: stringify
+    # by the slot's runtime kind rather than the raw int64_t word.
+    _dsr = getattr(gen, '_dict_slot_reads', {})
+    _dsr_hit = _dsr.get(ev)
+    if _dsr_hit is None and enode is not None and isinstance(enode, gimple_ctypes.IdentExpr):
+        _dsr_hit = _dsr.get(_as_str(enode.name))
+    if et in ('int', 'int64_t') and _dsr_hit is not None:
+        _dv, _kv, _kt = _dsr_hit
+        if _kt == 'char *':
+            return gen._call_expr('char *', 'mojo_dict_repr_slot',
+                                  [('MojoDict *', _dv), ('char *', _kv)])
     # A boxed char* (a string pointer stored in an int64_t var, e.g. a
     # tuple-loop var read via get_str and boxed) — stringify as the string
     # it points to, not its decimal address. Without this, f-strings /
@@ -7425,6 +7441,22 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 _rv = _own_repr(gen, 'mojo_repr_boxed',
                                 gen._call_expr('char *', 'mojo_repr_boxed',
                                                [('int64_t', aval)]), _owned_reprs)
+                resolved_parts.append(('char *', _rv))
+                continue
+            # A `d[k]` read whose value kind lives on the slot: repr it by the
+            # slot's runtime kind (None/True/1.5) rather than by the raw word.
+            _dsr = getattr(gen, '_dict_slot_reads', {})
+            _dsr_hit = None
+            if aval in _dsr:
+                _dsr_hit = _dsr[aval]
+            elif (_pi < len(args) and isinstance(args[_pi], IdentExpr)):
+                _nm = _as_str(args[_pi].name)
+                if _nm in _dsr:
+                    _dsr_hit = _dsr[_nm]
+            if _dsr_hit is not None and _dsr_hit[2] == 'char *':
+                _dv, _kv, _kt = _dsr_hit
+                _rv = gen._call_expr('char *', 'mojo_dict_repr_slot',
+                                     [('MojoDict *', _dv), ('char *', _kv)])
                 resolved_parts.append(('char *', _rv))
                 continue
             if (_pi < len(args) and _is_may_hold_str_param(gen, args[_pi])) or aval in gen._dyn_word_vals \
