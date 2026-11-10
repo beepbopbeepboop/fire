@@ -15,7 +15,7 @@ One pass, repeated:
   4. VERIFY  after a landing, `verify_landed.py` (make check + stdlib-dylib) runs in the background on master; red files a
              fix-landed-* task that the next REFILL starts.
 The integrator and the verifier each take their own flock, so only one of each ever runs."""
-import argparse, fcntl, glob, hashlib, json, os, re, subprocess, sys, time
+import argparse, fcntl, glob, hashlib, json, os, re, subprocess, sys, time, traceback
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import control as C
@@ -45,6 +45,46 @@ def log(msg):
 # driving is BUSY: its agent is working, whatever the registry says (the CLI process may be gone while the session
 # keeps running). Busy tasks are never retired, continued, landed, or cleaned, and their claims are held for the feed.
 BUSY = {"names": set(), "claims": set()}
+
+# The code this process is running, and the lock fd that proves it is the one swarm. Both are set in
+# main() before the first pass; stale_code() compares the hash to the files now.
+_CODE_HASH = None
+_LOCK_FD = None
+SCRIPT = os.path.abspath(__file__)
+
+
+def code_hash():
+    """Hash of every tools/*.py (name + contents): the code the swarm runs. Cheap (a few dozen small
+    files) and content-based, so touching a file without changing it does not count as a change."""
+    h = hashlib.sha1()
+    for p in sorted(glob.glob(os.path.join(HERE, "*.py"))):
+        h.update(os.path.relpath(p, HERE).encode())
+        with open(p, "rb") as f:
+            h.update(f.read())
+    return h.hexdigest()
+
+
+def stale_code():
+    """Re-exec when tools/*.py no longer matches the code this process loaded. Python read the module
+    once at start, so a fix landed after that (e2aca65eb, the reclass crash) keeps failing in memory
+    every pass until a human restarts the swarm — 157 identical crashes in swarm.out. Re-exec at the
+    pass boundary: the pid is unchanged, so the workers the swarm spawned stay its children. The lock
+    fd is closed first, or the new image would see its own lock and exit. Never raises."""
+    if _CODE_HASH is None or code_hash() == _CODE_HASH:
+        return False
+    log("tools/*.py changed (%s -> %s); reloading the swarm" % (_CODE_HASH[:8], code_hash()[:8]))
+    global _LOCK_FD
+    if _LOCK_FD is not None:
+        try:
+            os.close(_LOCK_FD)
+        except OSError:
+            pass
+        _LOCK_FD = None
+    try:
+        os.execv(sys.executable, [sys.executable, SCRIPT] + sys.argv[1:])
+    except Exception as e:                       # exec failed: keep the old code, try again next pass
+        log("reload failed: %r; keeping the code this process loaded" % (e,))
+    return False
 
 
 def live_guard():
@@ -331,7 +371,6 @@ def apply_moves(st):
             if _git("diff", "--cached", "--name-only")[1].split():
                 log("reclass waits: the main checkout has staged changes")
                 return
-            busy = {name for name, t in C.load().items() if C.state_of(t) == "running"}
             busy_bases = {c[4:] for t in C.load().values() if C.state_of(t) == "running"
                           for c in t.get("claims", []) if c.startswith("bug:")}
             busy = busy_bases | move_busy_bases()
@@ -395,7 +434,7 @@ def apply_moves(st):
                 del pend[base]
             log("reclass: moved %s" % ", ".join("%s -> %s" % (o, n) for _, o, n, _ in plan))
     except Exception as e:
-        log("reclass failed: %r" % (e,))
+        log("reclass failed: %r\n%s" % (e, traceback.format_exc()))
     finally:
         json.dump(st, open(state_path(), "w"), indent=1)
 
@@ -646,9 +685,12 @@ def main():
         _lf = open(a.log_file, "a", buffering=1)
         sys.stdout = _lf
         sys.stderr = _lf
-    _lock = take_lock()     # held until this process exits
+    global _CODE_HASH, _LOCK_FD
+    _LOCK_FD = take_lock()     # held until this process exits
+    _CODE_HASH = code_hash()   # the code this process runs; a change means re-exec (stale_code)
     while True:
         try:
+            stale_code()            # a landed tools/*.py fix must reach this process, not wait for a restart
             guard_ok = live_guard()
             if guard_ok:
                 apply_moves(load_state())        # a class change is a file move, so it lands before the feed reads the tree
