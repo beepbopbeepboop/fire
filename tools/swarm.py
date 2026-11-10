@@ -338,6 +338,10 @@ def why(doc):
     pool = C.load_pool()
     skips = pool.get("skip", [])
     st = load_state()
+    if doc.startswith("bugs/"):
+        doc = doc[5:]                      # accept either a bugs/ path or a path relative to bugs/
+    if doc.endswith(".md"):
+        doc = doc[:-3]                    # ... with or without the .md
     base = os.path.basename(doc)
     cls = doc_class(doc, st, base)
     busy = C.running_by_slot()
