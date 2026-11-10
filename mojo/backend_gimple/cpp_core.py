@@ -6367,12 +6367,23 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             # out to be of different known scalar kinds, `_gen_cpp_generator_unit`
             # boxes each site by this marker (a TAGGED-word value slot);
             # otherwise it is just a comment.
+            _yexpr = s.value.value
             _ysite = gimple_exprtypes._infer_simple_expr_ctype(
-                s.value.value, declared, getattr(gen, '_cpp_gen_self_fields', None),
+                _yexpr, declared, getattr(gen, '_cpp_gen_self_fields', None),
                 gen._async_api) or 'unresolved'
+            _yexpr_cpp = gen._cpp_expr(_yexpr)
             _ytag = {'char *': 'str', 'double': 'dbl', '_Bool': 'bool',
                      'int64_t': 'int', 'MojoBytes *': 'bytes'}.get(_ysite, 'other')   # no raw `*` in a comment
-            return [f"{indent}co_yield /*Y:{_ytag}*/ ({gen._cpp_expr(s.value.value)});"]
+            # DirEntry name/path and fsencode words are int64_t runtime words but
+            # represent str/bytes pointers; tag and cast them as string/bytes
+            # words so heterogeneous/tagged generator yields box and print correctly.
+            if (isinstance(_yexpr, gimple_ctypes.CallExpr)
+                    and isinstance(_yexpr.func, gimple_ctypes.IdentExpr)
+                    and _yexpr.func.name in ('mojo_dirent_name', 'mojo_dirent_path',
+                                             'mojo_fsencode_w')):
+                _ytag = 'bytes' if _yexpr.func.name == 'mojo_fsencode_w' else 'str'
+                _yexpr_cpp = f"(char *)(intptr_t)({_yexpr_cpp})"
+            return [f"{indent}co_yield /*Y:{_ytag}*/ ({_yexpr_cpp});"]
         if isinstance(s.value, gimple_ctypes.YieldFromExpr):
             if gen._cpp_emit_kind in ('async', 'async_gen'):
                 raise gimple_exprtypes._UnsupportedAsyncShape(

@@ -1144,19 +1144,95 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # consumes this generator through `for` loops, which bind the value as a
         # boxed word. Box each site by its marked ctype.
         _tagged_yield = False
+        _has_dirent_word_yield_tags = any(
+            (('/*Y:str*/' in _bl or '/*Y:bytes*/' in _bl)
+             and ('mojo_dirent_name(' in _bl or 'mojo_dirent_path(' in _bl
+                  or 'mojo_fsencode_w(' in _bl))
+            for _bl in body_lines)
+        _gvk = None
+        try:
+            _gvk = coro_mod._generator_value_kind(
+                fn, coro_mod._static_env(fn, struct_def))[0]
+        except Exception:
+            _gvk = None
         if ((value_ctype is None
                 or (value_ctype == 'char *'
                     and any('/*Y:bytes*/' in _bl for _bl in body_lines))
-                or any('/*Y:none*/' in _bl for _bl in body_lines))
+                or any('/*Y:none*/' in _bl for _bl in body_lines)
+                or (value_ctype == 'int64_t' and _has_dirent_word_yield_tags))
                 and not has_tuple_yield
-                and coro_mod._generator_value_kind(
-                    fn, coro_mod._static_env(fn, struct_def))[0] == 'w'):
+                and _gvk == 'w'):
             # the stack-switch kind analysis (which also checks the consumers)
             # must agree: every yield has a KNOWN kind -- the cpp typer alone
             # reads an unresolved name as int64_t, which would tag a hole.
             _tag_body = _cpp_tag_yield_sites(body_lines)
             if _tag_body is not None:
                 body_lines = _tag_body
+                value_ctype = 'int64_t'
+                gen._cpp_last_mixed_slots = True
+                _tagged_yield = True
+            elif value_ctype == 'int64_t' and _has_dirent_word_yield_tags:
+                # Uniform pointer-word yields (e.g. DirEntry.name/fsencode words)
+                # were marked as Y:str at emission but look like int64_t to the
+                # cpp typer; box them as tagged words so consumers see strings.
+                def _box_word_yields(lines):
+                    out = []
+                    for ln in lines:
+                        m = _Y_SITE.search(ln.strip())
+                        if m is not None:
+                            _yt = m.group(2).strip()
+                            if (_yt in ('str', 'bytes')
+                                    and ('mojo_dirent_name(' in m.group(3)
+                                         or 'mojo_dirent_path(' in m.group(3)
+                                         or 'mojo_fsencode_w(' in m.group(3))):
+                                indent = ln[:len(ln) - len(ln.lstrip())]
+                                expr = m.group(3)
+                                prefix = m.group(1)
+                                box = 'mojo_box_from_str' if _yt == 'str' else 'mojo_box_from_bytes'
+                                out.append(f"{indent}{prefix}co_yield {box}({expr});")
+                                continue
+                        out.append(ln)
+                    return out
+                body_lines = _box_word_yields(body_lines)
+                value_ctype = 'int64_t'
+                gen._cpp_last_mixed_slots = True
+                _tagged_yield = True
+        elif (value_ctype == 'int64_t'
+              and not has_tuple_yield and not _tagged_yield
+              and any(('mojo_dirent_name(' in _bl or 'mojo_dirent_path(' in _bl
+                       or 'mojo_fsencode_w(' in _bl)
+                      and ('/*Y:str*/' in _bl or '/*Y:bytes*/' in _bl)
+                      for _bl in body_lines)):
+            # Fallback: DirEntry/fsencode pointer-word yields are runtime int64_t
+            # words but must cross the cpp coroutine boundary as boxed str/bytes
+            # values. Box tagged word yields when coro kind analysis could not
+            # prove 'w' on the original AST.
+            _tag_body = _cpp_tag_yield_sites(body_lines)
+            if _tag_body is not None:
+                body_lines = _tag_body
+                value_ctype = 'int64_t'
+                gen._cpp_last_mixed_slots = True
+                _tagged_yield = True
+            else:
+                def _box_word_yields(lines):
+                    out = []
+                    for ln in lines:
+                        m = _Y_SITE.search(ln.strip())
+                        if m is not None:
+                            _yt = m.group(2).strip()
+                            if (_yt in ('str', 'bytes')
+                                    and ('mojo_dirent_name(' in m.group(3)
+                                         or 'mojo_dirent_path(' in m.group(3)
+                                         or 'mojo_fsencode_w(' in m.group(3))):
+                                indent = ln[:len(ln) - len(ln.lstrip())]
+                                expr = m.group(3)
+                                prefix = m.group(1)
+                                box = 'mojo_box_from_str' if _yt == 'str' else 'mojo_box_from_bytes'
+                                out.append(f"{indent}{prefix}co_yield {box}({expr});")
+                                continue
+                        out.append(ln)
+                    return out
+                body_lines = _box_word_yields(body_lines)
                 value_ctype = 'int64_t'
                 gen._cpp_last_mixed_slots = True
                 _tagged_yield = True
