@@ -1,0 +1,7 @@
+=== REPORT bug-import-ambiguous-sibling-function-r4 ===
+COMMITS: 10f4194c9 Delete bug doc IMPORT_ambiguous_sibling_function.md — the import ambiguity fix is complete (commit cee74d745); cee74d745 Fix import ambiguity by lexical scope resolution in _func_qualifier
+VERIFIED: python3 test_ambiguous_import_diagnostic.py - all tests pass (test_ambiguous_fn_import_fails, test_ambiguous_value_import_fails, test_same_module_import_is_not_ambiguous)
+NOT DONE: None (bug doc deleted, fix complete)
+BUGS FILED: None
+SURPRISES: None
+=== END REPORT ===
