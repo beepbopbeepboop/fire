@@ -435,8 +435,6 @@ def _async_quick_eligible(fn: FunctionDef, known_async_names=frozenset()) -> boo
                 continue
             if isinstance(v, IdentExpr):
                 continue
-            if isinstance(v, CallExpr) and isinstance(v.func, MemberExpr) and (v.func.member in known_async_names) and (not getattr(v, 'kwargs', None)):
-                continue
             if isinstance(v, CallExpr) and isinstance(v.func, MemberExpr) and (v.func.member == 'wait') and (not v.args) and (not getattr(v, 'kwargs', None)):
                 continue
             return False
@@ -2140,9 +2138,9 @@ _NESTED_CLASS_BODY_SLOTS = (
 
 
 def _gmi_nested_struct_defs(body, enclosing, out: list, top: bool = False,
-                            params=None, frame=None) -> None:
+                            params=None) -> None:
     """Every `StructDef` written INSIDE `body`, in source order, as
-    `[node, enclosing_key, params, frame]` QUADS rather than 2-tuples.
+    `[node, enclosing_key, params]` TRIPLES rather than 2-tuples.
 
     The pairs are index-addressed by the one caller for the reason the rest of
     this file writes index loops instead of `zip()`: the self-hosted backend
@@ -2165,20 +2163,11 @@ def _gmi_nested_struct_defs(body, enclosing, out: list, top: bool = False,
     carried so a class-level attribute whose value is a bare parameter name
     can take its C type from that parameter's annotation
     (a `str` parameter used to read back as a pointer-sized int).
-
-    `frame` is the innermost enclosing `FunctionDef`/method NODE (the frame
-    whose body declares the class), or None when the caller does not need it.
-    The class-capture pass reads it to decide whether a captured name is
-    LOCAL TO THE CLASS-DECLARING FRAME (`_gmi_capture_nested_class_enclosing_
-    reads`): a name owned by the same nested `def` that writes the `class`
-    statement is boxed in THAT lifted frame, not in the outermost one. Slot 3
-    is append-only for the same reason slot 2 was -- every other consumer
-    indexes `[0]`/`[1]`/`[2]`.
     """
     for _nc in (body or []):
         if isinstance(_nc, StructDef):
             if not top:
-                out.append([_nc, enclosing, params, frame])
+                out.append([_nc, enclosing, params])
             # A struct METHOD's enclosing key is `current_func_name`, which the
             # method emitter sets to `<struct>_<method>` — the class's own name
             # with no enclosing-function prefix (`closures.discover_closures`
@@ -2188,7 +2177,7 @@ def _gmi_nested_struct_defs(body, enclosing, out: list, top: bool = False,
                 if isinstance(_ncm, FunctionDef):
                     _gmi_nested_struct_defs(
                         _ncm.body, _cname + '_' + _as_str(_ncm.name), out,
-                        False, _ncm.params, _ncm)
+                        False, _ncm.params)
             continue
         if isinstance(_nc, FunctionDef):
             # A nested `def` is LIFTED as `<outer>_<name>`, and `current_func_name`
@@ -2199,25 +2188,25 @@ def _gmi_nested_struct_defs(body, enclosing, out: list, top: bool = False,
             _gmi_nested_struct_defs(
                 _nc.body,
                 enclosing + '_' + _as_str(_nc.name) if enclosing else _as_str(_nc.name),
-                out, False, _nc.params, _nc)
+                out, False, _nc.params)
             continue
         if isinstance(_nc, IfStmt):
-            _gmi_nested_struct_defs(_nc.then_body, enclosing, out, False, params, frame)
+            _gmi_nested_struct_defs(_nc.then_body, enclosing, out, False, params)
             # `elifs` is a list of (condition, body) PAIRS, so the body is an
             # indexed slot read and not another statement list — the same
             # shape `_gmi_collect_self_assigns` walks.
             for _nce in range(len(_nc.elifs or [])):
-                _gmi_nested_struct_defs(_nc.elifs[_nce][1], enclosing, out, False, params, frame)
-            _gmi_nested_struct_defs(_nc.else_body, enclosing, out, False, params, frame)
+                _gmi_nested_struct_defs(_nc.elifs[_nce][1], enclosing, out, False, params)
+            _gmi_nested_struct_defs(_nc.else_body, enclosing, out, False, params)
             continue
         if isinstance(_nc, MatchStmt):
             for _ncmc in (_nc.cases or []):
                 _gmi_nested_struct_defs(
-                    getattr(_ncmc, 'body', None), enclosing, out, False, params, frame)
+                    getattr(_ncmc, 'body', None), enclosing, out, False, params)
             continue
         for _slot in _NESTED_CLASS_BODY_SLOTS:
             _gmi_nested_struct_defs(
-                getattr(_nc, _slot, None), enclosing, out, False, params, frame)
+                getattr(_nc, _slot, None), enclosing, out, False, params)
 
 
 def _hbn_add_target(bound: set, t) -> None:

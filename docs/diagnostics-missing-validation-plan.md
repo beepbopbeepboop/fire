@@ -12,15 +12,6 @@ scope names the files, the test names the observable that must change.
 
 ## 1. Generic `where`-clause enforcement at call sites
 
-**Status: partially landed 2026-11-09** — the compiler now enforces
-`where T.is_floating_point()` / `is_integral()` and trait bounds at call
-sites (`error: invalid call to '<fn>': violated constraint`), in both the
-in-TU pre-pass and the `.o` route. Regression:
-`test_where_clause_call_site_diagnostic.py`. Remaining: the modular
-`tuple_contains_type_mismatch_error.mojo` / `tuple_first_of_error.mojo`
-expectations need the stdlib `where Self.Ts.contains[T]()` clauses, which
-this tree's stdlib does not carry — a stdlib change, tracked separately.
-
 **Scope:** `mojo/backend_gimple/emit_resolve.py`, `emit_calls.py`,
 `mojo/middle/comptime.py`. When a call instantiates a generic whose `where`
 clause is provably false for the supplied type arguments, raise

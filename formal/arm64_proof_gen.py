@@ -898,7 +898,14 @@ def _call_go(e, param: str, env: dict, scope, render) -> str:
         pass
     # try to detect: if sym names a struct
     if structs_by_name is not None:
-        # common forms: dict name->struct def, or a collection of names
+        # could be dict name->struct def
+        try:
+            import inspect
+            # check
+            pass
+        except Exception:
+            pass
+        # common forms
         is_struct = False
         if isinstance(structs_by_name, dict) and sym in structs_by_name:
             is_struct = True

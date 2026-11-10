@@ -1293,9 +1293,6 @@ class GimpleGen:
         # for why this is needed as a SEPARATE registry from `self.
         # _classmethod_names`/`self.func_return_types`.
         self._struct_generator_method_names: dict[str, set[str]] = {}
-        # C symbols of struct methods whose body was refused in this TU and emitted as a prototype only (module_gen's
-        # definition-site fallback). The class tables leave them out: they name no definition here.
-        self._prototype_only_syms: set[str] = set()
         # Struct methods called from a compiled generator/async body on
         # EITHER `self` or a non-self struct-pointer-typed local/parameter
         # (see CODEGEN_generator_struct_typed_param_refused).
@@ -3539,7 +3536,6 @@ class GimpleGen:
         'mojo_repr_list_elem_double': ('char *', ['int64_t']),
         'mojo_repr_list_elem_bool':   ('char *', ['int64_t']),
         'mojo_repr_str':         ('char *',    ['char *']),
-        'mojo_ascii_escape':     ('char *',    ['char *']),
         'mojo_repr_obj':         ('char *',    ['int64_t']),
         'mojo_repr_float':       ('char *',    ['double']),
         'mojo_print':            ('void',      ['char *']),
@@ -5427,9 +5423,6 @@ class GimpleGen:
         return ginf._elem_of(self, name)
     def _dict_val_of(self, name: str) -> str:
         return ginf._dict_val_of(self, name)
-
-    def _dict_val_mixed(self, name: str) -> bool:
-        return ginf._dict_val_mixed(self, name)
     def _dict_val_is_known(self, name: str) -> bool:
         return ginf._dict_val_is_known(self, name)
     def _dict_val_of_expr(self, expr) -> str:

@@ -1019,6 +1019,11 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # bound by a for loop or `x = next(g)`); see cpp_core._cpp_is_tagged_word_expr.
     gen._cpp_tagged_word_names = set()
     gen._cpp_param_names = set(gimple_ctypes._as_str(_p[0]) for _p in (fn.params or []))
+    # Include captured/extra parameters too (e.g. lifted async closures that
+    # capture free function values from enclosing scopes), so that `_cpp_dyn_call_expr`
+    # can correctly recognise calls to captured function-valued parameters
+    # (like `func()` where `func` was a bracket‑parameter of the enclosing function).
+    gen._cpp_param_names |= set(gimple_ctypes._as_str(_c[0]) for _c in (extra_captures or []))
     gen._cpp_mixed_list_params = set(
         getattr(gen, '_param_elem_mixed', {}).get(fn.name, ()))
     gen._cpp_mixed_list_params |= set(getattr(gen, '_cpp_inherited_mixed', ()))
