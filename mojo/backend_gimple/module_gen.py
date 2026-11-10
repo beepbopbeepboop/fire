@@ -3612,7 +3612,11 @@ def _gmi_capture_nested_class_enclosing_reads(self, stmts: list) -> None:
         self._class_ref_attrs = _ref_attrs
     for _ef_i in range(len(_encl_fns)):
         _ef_outer = _as_str(_encl_fns[_ef_i][0])
-        _ef = _encl_fns[_ef_i][1]
+        # `_as_funcdef_node`: a TUPLE element indexed on the self-hosted
+        # path erases to `int64_t` (see `discover_closures`' parallel-
+        # structures comment), so the node needs the static `FunctionDef *`
+        # view before `.params` / `.body` are read.
+        _ef = _as_funcdef_node(_encl_fns[_ef_i][1])
         _ef_bound: set = set()
         _ef_params: set = set()
         for _efp in range(len(_ef.params or [])):
@@ -3680,8 +3684,12 @@ def _gmi_capture_nested_class_enclosing_reads(self, stmts: list) -> None:
                     # POINTER for this attribute instead of storing its value
                     # (see `_gen_stmt_StructDef`); the C type of the boxed
                     # local is applied later by `_gmi_apply_class_ref_types`.
-                    _ref_attrs[f"_classattr_{_as_str(_ec.name)}__{_attr}"] = (
-                        _as_str(_ec.name), _attr, _ef_outer, _cn2)
+                    # A LIST, not a tuple: a tuple element indexed on the
+                    # self-hosted path erases to `int64_t` (see
+                    # `discover_closures`' parallel-structures comment),
+                    # while a list element read by index keeps its type.
+                    _ref_attrs[f"_classattr_{_as_str(_ec.name)}__{_attr}"] = [
+                        _as_str(_ec.name), _attr, _ef_outer, _cn2]
                     _rd = MemberExpr(
                         obj=IdentExpr(name=_self_name, line=_ecm.line, col=_ecm.col),
                         member=_attr, line=_ecm.line, col=_ecm.col)
