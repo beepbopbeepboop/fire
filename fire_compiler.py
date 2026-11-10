@@ -655,6 +655,9 @@ class ImportStmt:
     extra: object = None  # list[(module, alias|None)] for `import a, b, c`
     line: int = 0
     col: int = 0
+    # `lazy import ...` (PEP 810): bind a proxy now, resolve on first use.
+    # Only the parser can set this true, and only at module scope.
+    lazy: bool = False
     # Decorators applied to the import (`@stable(recursive=True)` in front of
     # `from ... import ...`), same shape as `FunctionDef.decorators`: bare
     # names, or CallExpr/DecoratorArgs for a parameterised form.
@@ -667,6 +670,8 @@ class FromImportStmt:
     wildcard: bool = False
     line: int = 0
     col: int = 0
+    # `lazy from ... import ...` (PEP 810) — see ImportStmt.lazy.
+    lazy: bool = False
     # Parser-built flat list[str]: `name` or `name|alias`. `names`' tuples
     # box their str slots to int64_t self-hosted. Read via gimple_ctypes._fi_name
     # / _fi_alias.
@@ -756,13 +761,6 @@ class FunctionDef:
         # valid Python "async generator"); the two flags are independent, not
         # mutually exclusive. No execution semantics are implied by this flag
         # yet — see AwaitExpr's docstring.
-    # Optional `where <expr>` clause after the parameter list / return type.
-    # Stored as the parsed expression AST node (or a list of them for a
-        # `where a, b` form). `None` when absent.  Enforcement at call sites
-        # is a separate step (DIAGNOSTICS_where_clause_call_site).
-    where_clause: object = None
-    # The `else "<message>"` expression of that clause, `None` when absent.
-    where_else: object = None
     # Explicit CAPTURE list from a brace-delimited clause on a nested `def`:
     # `def handler(...) {mut count, var s}:` — `(name, conv_or_None)` pairs,
     # `None` for a bare name, and a `None` NAME for the bare-convention form
@@ -2694,19 +2692,9 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
             continue
         indent = len(expanded) - len(raw_content)
         sub_stmts = _split_on_separators(content)
-        # Token columns are 1-based from the start of the PHYSICAL line, the
-        # way gcc and Mojo report them: the statement's offset in `content`
-        # plus the indentation the strip removed. Before this, a statement
-        # was lexed from its stripped text, so an indented token's column
-        # was short by the indentation and every column was 0-based.
-        _stmt_cursor = 0
         for stmt_idx, stmt in enumerate(sub_stmts):
             stmt = stmt.strip()
             if not stmt: continue
-            _stmt_at = content.find(stmt, _stmt_cursor)
-            if _stmt_at >= 0:
-                _stmt_cursor = _stmt_at + len(stmt)
-            _stmt_col = indent + max(_stmt_at, 0)
             # Only emit INDENT/DEDENT when at paren depth 0, and not when this
             # physical line is itself just the continuation of the previous one
             # (implicit-continuation token, or an implicit string concat whose
@@ -2740,7 +2728,7 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
             for m in _TOKEN_RE.finditer(stmt_final):
                 kind = m.lastgroup or "INT"
                 val  = m.group()
-                col  = _stmt_col + m.start() + 1
+                col  = m.start()
                 if kind in ("WS", "UNK", "XFER"): continue
                 if kind == "NAME" and val in _KEYWORDS: kind = "KW"
                 # Restore multi-line strings from cache
@@ -4345,12 +4333,19 @@ class Parser:
     _comptime_rhs_failures: list
     _struct_param_names: list
     _known_traits: set
+    _lazy_import_blockers: list
 
     def __init__(self, tokens: list[Token]):
         self._tok = tokens
         self._pos = 0
         self._filename = ""
         self._pending_decs = []  # decorators awaiting next struct/trait
+        # Enclosing scopes an explicit `lazy import` may not appear in, as
+        # PEP 810 spells them: "function", "class", "try". Empty at module
+        # level. A stack rather than a flag because the error names the
+        # INNERMOST disallowed scope (CPython's symtable checks try first,
+        # then function, then class, and each nested block starts fresh).
+        self._lazy_import_blockers = []
         # `comptime NAME = <rhs>` the parser could not parse, as
         # `[(loc, text, exception_text), ...]`. A comptime right-hand side has
         # two very different fates that used to be INDISTINGUISHABLE: a
@@ -4393,58 +4388,6 @@ class Parser:
                     self._known_traits.add(nxt.value)
 
 
-    _OUT_SELF_PARAM_KWS = ("out", "mut", "ref", "var", "read", "owned", "deinit")
-
-    def _check_out_self_declaration(self, name, fn_name_tok, params, param_convs, toks):
-        """Refuse an `out self` receiver on a method that is not a constructor,
-        the shapes the real compiler refuses at the declaration (measured
-        2026-11-11; see bugs/TEST_out_self_with_return_type_fixtures_are_invalid_mojo.md):
-
-        * `out self` with no other parameter: `self argument must be present
-          in instance method`, at the function name;
-        * `out self` followed by a first parameter whose type is not `Self`:
-          `'self' argument must have type 'Self'; ...`, at that parameter's name.
-
-        `out self, other: Self` is accepted at the declaration by the real
-        compiler (it refuses the call, which is a separate check), so it is
-        accepted here. Only the FIRST parameter after `self` is checked; the
-        real compiler's behaviour for later parameters is not measured.
-        """
-        if name == "__init__" or not params or params[0][0] != "self":
-            return
-        if param_convs.get("self") != "out":
-            return
-        # The name token of each parameter, in order, from the raw tokens.
-        name_toks = []
-        depth = 0
-        expect_name = True
-        for t in toks:
-            if t.kind in ("NEWLINE", "INDENT", "DEDENT"):
-                continue
-            if expect_name:
-                if t.kind in ("KW", "NAME") and t.value in self._OUT_SELF_PARAM_KWS:
-                    continue
-                if t.kind == "OP" and t.value in ("*", "**", "/"):
-                    continue
-                name_toks.append(t)
-                expect_name = False
-                continue
-            if t.kind in ("LPAREN", "LBRACKET", "LBRACE"):
-                depth += 1
-            elif t.kind in ("RPAREN", "RBRACKET", "RBRACE"):
-                depth -= 1
-            elif t.kind == "COMMA" and depth == 0:
-                expect_name = True
-        if len(name_toks) != len(params):
-            return  # unusual parameter forms: do not guess locations
-        if len(params) == 1:
-            raise RuntimeError(
-                f"{self._loc(fn_name_tok)}error: self argument must be present in instance method")
-        if params[1][1] != "Self":
-            raise RuntimeError(
-                f"{self._loc(name_toks[1])}error: 'self' argument must have type 'Self'; "
-                f"use a 'where' clause to constrain the 'Self' type instead")
-
     def _parse_funcdef(self, decorators=None, is_async=False):
         if decorators is None: decorators = []
         # Allow keywords, backtick identifiers as function names (e.g., def read(...), def `6bit`(...))
@@ -4466,9 +4409,7 @@ class Parser:
         if self._peek().kind == "LBRACKET":
             (comptime_params, comptime_param_defaults,
              comptime_param_annotations) = self._parse_generic_params_capture()
-        _fn_name_tok = t
         self._expect("LPAREN")
-        _params_start = self._pos
         params = []
         param_convs = {}
         param_has_default = {}
@@ -4671,30 +4612,11 @@ class Parser:
                     raise RuntimeError(
                         f"{self._loc(_ret_tok)}error: functions must not declare both an "
                         f"'out' argument and a return type")
-        # Real Mojo reports the out-and-return error first (above), then the
-        # out-self declaration errors, so this check runs after it.
-        self._check_out_self_declaration(name, _fn_name_tok, params, param_convs,
-                                         self._tok[_params_start:self._pos - 1])
-        # Parse optional `where <expr>[, <expr>...] [else <message>]` clause.
-        # The `else` message is the diagnostic Modular prints when the
-        # constraint fails (`where (Self.is_owned) else "may only be called on
-        # owned lists":`); it is parsed, not skipped, so the clause is fully
-        # consumed and the signature still ends at its COLON.
-        where_clause = None
-        where_else = None
+        # Skip optional `where conforms_to(...)` clause
         if self._peek().kind == "NAME" and self._peek().value == "where":
             self._advance()  # where
-            _wc_parts = []
             while self._peek().kind not in ("COLON", "NEWLINE", "EOF"):
-                _wc_parts.append(self._parse_expr(0))
-                if self._peek().kind == "COMMA":
-                    self._advance()
-                    continue
-                break
-            where_clause = _wc_parts[0] if len(_wc_parts) == 1 else _wc_parts
-            if self._peek().kind == "KW" and self._peek().value == "else":
-                self._advance()  # else
-                where_else = self._parse_expr(0)
+                self._advance()
         # Capture list in curly braces: `def handler(...) {mut count, var s}:`
         #
         # This used to be skipped token by token, which made the list
@@ -4730,7 +4652,9 @@ class Parser:
                     self._skip_bracketed()
             ret = self._parse_type_ann()
         self._expect("COLON")
+        self._lazy_import_blockers.append("functions")
         body = self._parse_block()
+        self._lazy_import_blockers.pop()
         is_generator, yield_bearing_node_ids = _detect_generator(body)
         return FunctionDef(name=name, params=params, return_type=ret,
                            body=body, decorators=decorators,
@@ -4745,9 +4669,7 @@ class Parser:
                            yield_bearing_node_ids=yield_bearing_node_ids,
                            is_async=is_async,
                            captures=captures,
-                           has_capture_list=has_capture_list,
-                           where_clause=where_clause,
-                           where_else=where_else)
+                           has_capture_list=has_capture_list)
 
     def _parse_capture_list(self):
         """A brace-delimited CAPTURE list on a nested `def`:
@@ -4946,7 +4868,9 @@ class Parser:
             while self._peek().kind not in ("COLON", "NEWLINE", "EOF"):
                 self._advance()
         self._expect("COLON")
+        self._lazy_import_blockers.append("classes")
         body = self._parse_block()
+        self._lazy_import_blockers.pop()
         fields  = param_fields + [s for s in body if isinstance(s, (VarDecl, AssignStmt))]
         methods = [s for s in body if isinstance(s, FunctionDef)]
 
@@ -5225,7 +5149,9 @@ class Parser:
                 elif t.kind == "EOF":
                     break
         self._expect("COLON")
+        self._lazy_import_blockers.append("classes")
         body = self._parse_block()
+        self._lazy_import_blockers.pop()
         methods = [s for s in body if isinstance(s, FunctionDef)]
         decs = getattr(self, "_pending_decs", [])
         self._pending_decs = []
@@ -5242,6 +5168,7 @@ class Parser:
         # from "always 0" to the truth.
         line = self._peek().line
         self._expect("KW", "try"); self._expect("COLON")
+        self._lazy_import_blockers.append("try/except blocks")
         body = self._parse_block()
         handlers = []
         while self._is_kw("except"):
@@ -5331,6 +5258,7 @@ class Parser:
         finally_body = None
         if self._is_kw("finally"):
             self._advance(); self._expect("COLON"); finally_body = self._parse_block()
+        self._lazy_import_blockers.pop()
         return TryStmt(body=body, handlers=handlers,
                        else_body=else_body, finally_body=finally_body,
                        line=line)
@@ -8657,6 +8585,13 @@ class Parser:
             if nxt.kind == "NAME" or (nxt.kind == "STRING" and nxt.value.startswith("`")):
                 self._advance()  # consume 'param'
                 return self._parse_comptime()
+        # `lazy` is a soft keyword (PEP 810, Python 3.15) — only a lazy
+        # import when the very next token is `import`/`from`; everywhere else
+        # it is an ordinary identifier, exactly like `match`/`async` above.
+        if t.kind == "NAME" and t.value == "lazy":
+            nxt = self._peek(1)
+            if nxt.kind == "KW" and nxt.value in ("import", "from"):
+                return self._parse_lazy_import()
         # `match` is a soft keyword (like Python's own) — only a match
         # statement when followed by a real expression and a top-level `:`
         # before the line ends; otherwise it's an ordinary identifier
@@ -9139,6 +9074,51 @@ class Parser:
         return ImportStmt(module=module, alias=alias, extra=extra,
                           line=t.line, col=t.col)
 
+    def _parse_lazy_import(self):
+        """`lazy import ...` / `lazy from ... import ...` (PEP 810).
+
+        `lazy` is a SOFT keyword: `_KEYWORDS` deliberately does not contain
+        it, so `lazy = 5`, `lazy(...)` and `import lazy` keep working. The
+        statement is recognized here only when `lazy` is immediately followed
+        by one of the two import keywords; `_parse_stmt` makes that check.
+
+        CPython's symtable rejects an explicit lazy import from an enclosing
+        function, class, or try block, and rejects `lazy from ... import *`
+        and `lazy from __future__ import ...` outright. Those are parse-time
+        errors (the module never runs), so they are raised here rather than
+        deferred to execution.
+        """
+        lazy_tok = self._advance()          # consume the soft keyword
+        is_from = self._is_kw("from")
+        import_type = "from ... import" if is_from else "import"
+        if is_from:
+            node = self._parse_from_import()
+            # CPython's parser rejects a lazy __future__ import before the
+            # symtable gets a chance to check the enclosing scope, so this
+            # message wins even inside a function/try block.
+            if not node.module.startswith('.') and node.module == '__future__':
+                raise SyntaxError(
+                    f"{self._loc(lazy_tok)}"
+                    "lazy from __future__ import is not allowed")
+            if self._lazy_import_blockers:
+                where = self._lazy_import_blockers[-1]
+                raise SyntaxError(
+                    f"{self._loc(lazy_tok)}"
+                    f"lazy {import_type} not allowed inside {where}")
+            if node.wildcard:
+                raise SyntaxError(
+                    f"{self._loc(lazy_tok)}"
+                    "lazy from ... import * is not allowed")
+        else:
+            if self._lazy_import_blockers:
+                where = self._lazy_import_blockers[-1]
+                raise SyntaxError(
+                    f"{self._loc(lazy_tok)}"
+                    f"lazy {import_type} not allowed inside {where}")
+            node = self._parse_import()
+        node.lazy = True
+        return node
+
     def _parse_import_target(self):
         # Handle relative imports: import .warp, import ..sibling
         module = ""
@@ -9182,6 +9162,11 @@ class Parser:
         elif not module:
             # No dots and no name: error
             self._expect("NAME")  # Will raise error
+        if (self._peek().kind == "NAME" and self._peek().value == "lazy"
+                and self._peek(1).kind == "KW" and self._peek(1).value == "import"):
+            raise SyntaxError(
+                f"{self._loc(self._peek())}"
+                "use 'lazy from ... ' instead of 'from ... lazy import'")
         self._expect("KW", "import")
         if self._peek().kind == "OP" and self._peek().value == "*":
             self._advance()
