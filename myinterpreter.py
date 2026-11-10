@@ -2259,6 +2259,55 @@ class BoundClassMethod:
         return self
 
 
+def _c3_linearize(cls):
+    """Return `cls.__mro__`: C3 linearization of the bases named in `cls`.
+
+    Matches CPython's `type.__mro__` exactly — including diamonds (e.g. a
+    `D(B, C)` over sibling `B(O)`/`C(O)` resolves to `D, B, C, O`) and its
+    error semantics: an entry that is neither a real Mojo class nor a real
+    Python type (typing specials like `TypedDict`, which are functions in 3.15+)
+    raises `TypeError`, and an inconsistent hierarchy raises a `TypeError`
+    naming every base, the same way `type()` does at class creation time. The
+    underlying Python-style hierarchy this interpreter synthesises only carries
+    `object` as an implicit root, so a plain class's MRO is just `(cls,)`; there
+    is no Mojo root type for it to inherit from."""
+    seqs = []
+    for b in cls.bases:
+        if isinstance(b, MojoClass):
+            seqs.append(_c3_linearize(b))
+        elif isinstance(b, type):
+            seqs.append(tuple(b.__mro__))
+        else:
+            raise TypeError(f"__mro__ entry is not a class: {b!r}")
+    seqs.append(tuple(cls.bases))
+    return (cls,) + tuple(_c3_merge(cls.bases, seqs))
+
+
+def _c3_merge(bases, seqs):
+    """Merge the sequence lists (`seqs`) one head at a time, removing every
+    head from every list's tail once taken — the standard C3 linearisation
+    step. A head that still appears in another list is rejected; if no head of
+    any list qualifies, the hierarchy is inconsistent, and the `TypeError`
+    names every base the way `type()` does at class creation."""
+    seqs = [list(s) for s in seqs if s]
+    out = []
+    while seqs:
+        for i, s in enumerate(seqs):
+            head = s[0]
+            # Only a tail appearance disqualifies a head; another list whose own
+            # head is this same element will consume it in this same step.
+            if any(head in other[1:] for j, other in enumerate(seqs) if j != i):
+                continue
+            out.append(head)
+            seqs = [o[1:] if o and o[0] is head else o for o in seqs]
+            seqs = [o for o in seqs if o]
+            break
+        else:
+            names = ', '.join(getattr(b, '__name__', type(b).__name__) or str(b) for b in bases)
+            raise TypeError(f"Cannot create a consistent method resolution order (MRO) for bases {names}")
+    return out
+
+
 class MojoClass:
     """Represents a class/struct defined in Mojo code."""
     _ARRAY_TYPE_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\[([A-Za-z_][A-Za-z0-9_]*|\d+)\]$')
@@ -2333,6 +2382,16 @@ class MojoClass:
             # ctypes/wintypes.py's `PFILETIME = POINTER(FILETIME)` raised
             # "'FILETIME' object has no attribute '__name__'".
             return self.name
+        if name == '__mro__':
+            # A real Python class built through the keywords path already owns a
+            # `__mro__`; only the plain interpreter-synthesised Mojo classes need
+            # this implemented here. Cached on the instance so repeated access is
+            # the one C3 work we do per class lifetime.
+            cached = self.__dict__.get('_mojo_mro')
+            if cached is None:
+                cached = _c3_linearize(self)
+                self.__dict__['_mojo_mro'] = cached
+            return cached
         raise _tag_attribute_error(
             AttributeError(f"'{self.name}' object has no attribute '{name}'"),
             self, name)
