@@ -38,6 +38,12 @@ with tempfile.TemporaryDirectory() as td:
     check('a weak definition is not a clash', '_gpu_stub' not in w and '__gpu_stub' not in w)
     check('a strong definition is counted', any('strong_fn' in x for x in s))
     check('an undefined reference is not a definition', not any('undefined_ref' in x for x in r))
+    # include_weak=True asks the SURFACE question (does this object define the
+    # symbol it advertises?); an undefined reference is not a definition there
+    # either, or the export table claims symbols nobody in the dylib defines.
+    rw = B._defined_symbols('gcc', ref[:-2] + '.o', include_weak=True)
+    check('an undefined reference is not a definition (include_weak)',
+          not any('undefined_ref' in x for x in rw))
     # ... and localizing a real clash in an object that also has undefined
     # references must still succeed: the keep list nmedit sees is built from
     # the same function, so an undefined name in it is a tool error and the
