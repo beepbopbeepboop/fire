@@ -1,10 +1,14 @@
 # SUITE_doc_refs_ratchet_red: the registered `doc-refs` gate job is red with no marker
 
-**Status:** OPEN — recorded 2026-11-09 by the linkmode fix round (commit
-26db2bab4); r7 re-verified every claim below on this branch
-(`work/bug-suite-linkmode-5026-r7`) by re-running the ratchet at HEAD and in a
-`git archive` snapshot of the base commit (identical 28-file set, identical
-per-file counts). NOT introduced by that branch — see "What I saw".
+**Status:** OPEN (marker landed; campaign pending) — recorded 2026-11-09 by
+the linkmode fix round (commit 26db2bab4); r7 re-verified every claim below
+by re-running the ratchet at HEAD and in a `git archive` snapshot of the base
+commit (identical 28-file set, identical per-file counts); r8 re-verified on
+`work/bug-suite-linkmode-5026-r8`: same 28-file set at HEAD and, checked in a
+scratch worktree of the base commit, identical there. Next step 4 (the
+`expect=` marker on the registered `doc-refs` job) LANDED in r8; steps 1-3
+(the campaign) remain. NOT introduced by the linkmode branch — see "What I
+saw".
 
 ## What I ran
 
@@ -74,9 +78,14 @@ which leave the ratchet's per-file counts untouched.
    carry").
 3. Raise a file's ceiling with `--write-baseline` ONLY after reading the diff
    it prints, for a citation that is a deliberate standing reference.
-4. Until the campaign lands, add a one-line `expect=` marker to `doc-refs` in
-   `tools/suite.py` naming THIS doc (a marker without a reason is a silenced
-   test; the reason is the 28-file list below).
+4. [LANDED r8, 2026-11-09] `doc-refs` in `tools/suite.py` now carries the
+   one-line `expect=` marker naming THIS doc (whole-job condition, no count —
+   the ratchet prints no summary line the runner can check a count against).
+   It is the first `expect=` in the `check` bucket: deliberate, since the
+   alternative was a permanently undeclared red in the everyday tally, and
+   the anti-rot below is what makes the marker temporary. When the campaign
+   lands, drop the marker in the same commit as this doc's deletion — a
+   marked job that starts passing is reported as a FAILURE until then.
 5. Verify with `python3 tools/dangling_doc_refs.py --ratchet` (exit 0) and the
    `doc-refs` job in `tools/suite.py`.
 
