@@ -2501,6 +2501,99 @@ def main():
     print(f())
 """, "13\n")
 
+    # A local whose ONLY binding is a `match` case body is still this
+    # function's own local, so a class method reading it captures the CELL by
+    # reference, not a snapshot taken at the `class` statement (before the
+    # case ran). The shared bound-name walk had no `MatchStmt` arm, so the
+    # capture stayed by value and printed 0; this is the shape the residual
+    # `match`/`except`/walrus doc measured.
+    test_gimple_stdout(
+        "gimple_nested_class_match_bound_local_is_late_bound", """\
+def f(v: int):
+    class C:
+        def get(self):
+            return x
+    match v:
+        case 1:
+            x = 5
+    return C().get()
+
+def main():
+    print(f(1))
+""", "5\n")
+
+    # The same shape with a `str`: the capture box's C type comes from the
+    # closure pre-pass's typing of the enclosing scope, which also had no
+    # `MatchStmt` arm and fell back to int64_t -- a wrong-width box. Printing
+    # inside the method keeps this test on the capture type alone; returning
+    # a method call through the enclosing function is the separate
+    # CODEGEN_function_return_type_from_method_call bug.
+    test_gimple_stdout(
+        "gimple_nested_class_match_bound_str_keeps_pointer_width", """\
+def f(v: int):
+    class C:
+        def show(self):
+            print(x)
+    match v:
+        case 1:
+            x = "word"
+    C().show()
+
+def main():
+    f(1)
+""", "word\n")
+
+    # `except E as e:` binds `e` in the handler. Capturing it by value took a
+    # snapshot before the handler ran; the box now receives the caught object
+    # too (the handler's own references still go through its typed temp).
+    test_gimple_stdout(
+        "gimple_nested_class_except_bound_local_is_late_bound", """\
+def f():
+    class C:
+        def show(self):
+            print(x)
+    try:
+        raise ValueError("boom")
+    except ValueError as x:
+        C().show()
+
+def main():
+    f()
+""", "boom\n")
+
+    # A walrus target is a binding in an EXPRESSION, not a statement: the
+    # capture must box it (like an assignment) and the walrus store must go
+    # THROUGH the box (`*x = 5`), not overwrite the box pointer.
+    test_gimple_stdout(
+        "gimple_nested_class_walrus_bound_local_is_late_bound", """\
+def f():
+    class C:
+        def get(self):
+            return x
+    if (x := 5):
+        pass
+    return C().get()
+
+def main():
+    print(f())
+""", "5\n")
+
+    # The walrus spelling with a `str`, so the boxed name's width is checked
+    # as well as the store (printed inside the method for the reason above).
+    test_gimple_stdout(
+        "gimple_nested_class_walrus_bound_str_keeps_pointer_width", """\
+def f():
+    class C:
+        def show(self):
+            print(x)
+    if (x := "word"):
+        pass
+    C().show()
+
+def main():
+    f()
+""", "word\n")
+
     # The enclosing function's own call through the SAME captured callable
     # goes through a heap box (the class capture boxes the local), so the
     # callable value is `*box`, not the box address: passing the box to

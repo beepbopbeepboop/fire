@@ -15,8 +15,8 @@ from fire_compiler import (
     AssignStmt, AugAssignStmt, Comprehension, ComptimeForStmt,
     ComptimeIfStmt, ForStmt, GlobalStmt,
     NonlocalStmt,
-    IdentExpr, IfStmt, ListExpr, MultiAssignStmt, TryStmt, TupleExpr,
-    VarDecl, WhileStmt, WithStmt, _as_str,
+    IdentExpr, IfStmt, ListExpr, MatchStmt, MultiAssignStmt, TryStmt,
+    TupleExpr, VarDecl, WalrusExpr, WhileStmt, WithStmt, _as_str,
     for_target_names, target_slots,
 )
 
@@ -220,9 +220,32 @@ def _lbn_walk(bound: set, global_declared: set, nodes) -> None:
             _lbn_add_all(bound, _lbn_target_names(node.target))
             _lbn_compr_targets(bound, node.iterable)
             _lbn_walk(bound, global_declared, node.body)
+        elif isinstance(node, MatchStmt):
+            # A local bound in a `case` body is this function's own local.
+            # The arm was missing, so `bound_name_set` under-approximated and
+            # a class-capture candidate whose ONLY binding is a case body was
+            # left on the by-VALUE cell -- a snapshot taken before the case
+            # ran -- and the method read 0. The guard and the subject are
+            # expression positions like an `if` condition, so comprehension
+            # (and walrus) targets in them are locals too; the patterns are
+            # not walked for bindings because this tree's match lowering
+            # treats a bare name as a comparison against an existing binding,
+            # not a PEP 634 capture (see MatchStmt's docstring).
+            _lbn_compr_targets(bound, node.subject)
+            for _mc in (node.cases or []):
+                if _mc.guard is not None:
+                    _lbn_compr_targets(bound, _mc.guard)
+                _lbn_walk(bound, global_declared, _mc.body)
         elif isinstance(node, TryStmt):
             _lbn_walk(bound, global_declared, node.body)
             for h in (node.handlers or []):
+                # `except E as e:` binds `e` in this function. The handler
+                # BODY was walked but the name was never added, so the same
+                # by-value snapshot bug applied to a name whose only binding
+                # was an `except ... as`.
+                _hn = _as_str(h.name)
+                if _hn:
+                    bound.add(_hn)
                 _lbn_walk(bound, global_declared, h.body)
             if node.else_body:
                 _lbn_walk(bound, global_declared, node.else_body)
@@ -293,6 +316,16 @@ def _lbn_compr_targets(bound: set, expr) -> None:
     `_lbn_walk` never sees them. Mirrors `eval_Comprehension`'s
     current-scope leak: `x` in `[x for x in xs]` becomes a real local."""
     if expr is None:
+        return
+    if isinstance(expr, WalrusExpr):
+        # `x := ...` binds `x` exactly like an assignment. The generic
+        # dataclass branch below would recurse into its `value` but never see
+        # the BINDING, so a name bound only by a walrus was not "own" to the
+        # function and a class capture of it stayed a by-value snapshot.
+        _wn = _as_str(expr.name)
+        if _wn:
+            bound.add(_wn)
+        _lbn_compr_targets(bound, expr.value)
         return
     if isinstance(expr, Comprehension):
         for g in expr.generators or []:

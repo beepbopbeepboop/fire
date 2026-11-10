@@ -22,8 +22,8 @@ from __future__ import annotations
 
 from fire_compiler import (
     AssignStmt, AugAssignStmt, CallExpr, ExprStmt, ForStmt, FunctionDef,
-    IdentExpr, IfStmt, LambdaExpr, MemberExpr, NonlocalStmt, ReturnStmt,
-    StructDef, TryStmt, VarDecl,
+    IdentExpr, IfStmt, LambdaExpr, MatchStmt, MemberExpr, NonlocalStmt,
+    ReturnStmt, StructDef, TryStmt, VarDecl, WalrusExpr,
     WhileStmt, WithStmt,     _as_funcdef_node, _as_str, _as_list, _as_dict,
     for_target_names,
 )
@@ -113,6 +113,14 @@ def _gmi_all_stmts_nonfunc(stmts: list) -> list:
                 result.extend(_gmi_all_stmts_nonfunc(s.else_body))
             if s.finally_body:
                 result.extend(_gmi_all_stmts_nonfunc(s.finally_body))
+        elif isinstance(s, MatchStmt):
+            # A `case` body is a control-flow block like an `if` arm. Without
+            # this arm the closure pre-pass never typed a local whose only
+            # assignment was in a case body, so the class-capture box used the
+            # `int64_t` default -- wrong for a `str` local (the method printed
+            # the pointer's digits) even once the bound-name walk saw it.
+            for _mc in (s.cases or []):
+                result.extend(_gmi_all_stmts_nonfunc(_mc.body))
         elif isinstance(s, (WhileStmt, ForStmt, WithStmt)):
             result.extend(_gmi_all_stmts_nonfunc(s.body))
             if isinstance(s, (WhileStmt, ForStmt)) and getattr(s, 'else_body', None):
@@ -314,6 +322,50 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
                     if _tgt not in enriched_scope:
                         enriched_scope[_tgt] = 'int64_t'
                         ctx.var_types[_tgt] = 'int64_t'
+            elif isinstance(bstmt, TryStmt):
+                # `except E as e:` binds `e` to the caught object. The
+                # handler body is already in this flattened list, but the
+                # NAME has no statement to hang a type on, so a class capture
+                # of it defaulted to int64_t and printed the message pointer's
+                # digits. Ask the emitter's own handler classification so the
+                # type agrees with what `_emit_except_handler` binds: a
+                # user exception class WITH fields is a struct pointer, every
+                # other handler (builtin exception, fieldless user class, bare
+                # `except`) is the message text.
+                for _h in (bstmt.handlers or []):
+                    _hn = _as_str(getattr(_h, 'name', ''))
+                    if not _hn or _hn in enriched_scope:
+                        continue
+                    _exc_name = ''
+                    _hen = getattr(type(ctx), '_handler_exc_name', None)
+                    if _hen is not None:
+                        _exc_name = _as_str(_hen(ctx, _h))
+                    _sft = getattr(ctx, 'struct_field_types', {})
+                    _ht = 'char *'
+                    if (_exc_name and _exc_name in _sft
+                            and len(_sft[_exc_name]) > 0):
+                        _ht = _exc_name + ' *'
+                    enriched_scope[_hn] = _ht
+                    ctx.var_types[_hn] = _ht
+        # A walrus target is a local binding in an EXPRESSION, not a
+        # statement, so the arms above never type it and the class-capture box
+        # fell back to `int64_t` even after the shared bound-name walk learned
+        # the spelling (a `str` would print its pointer's digits). Walk each
+        # already-flattened statement's expressions; skip nested functions and
+        # classes, whose locals belong to their own scope.
+        for _ws in _gmi_all_stmts_nonfunc(body):
+            if isinstance(_ws, (FunctionDef, StructDef)):
+                continue
+            for _wn in _walk_ast(_ws):
+                if not isinstance(_wn, WalrusExpr):
+                    continue
+                _wname = _as_str(_wn.name)
+                if _wname not in enriched_scope:
+                    _wt = ctx._quick_type(_wn.value)
+                    if _wt == 'void':
+                        _wt = 'int64_t'
+                    enriched_scope[_wname] = _wt
+                    ctx.var_types[_wname] = _wt
         ctx.var_types = _saved_vt2
         # A class declared in this scope whose methods read `enclosing` names
         # captures them BY REFERENCE (`module_gen._gmi_capture_nested_class_

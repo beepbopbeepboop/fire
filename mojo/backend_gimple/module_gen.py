@@ -3649,6 +3649,15 @@ def _gmi_capture_nested_class_enclosing_reads(self, stmts: list) -> None:
         # by-reference path below must leave it to that def's own scope.
         _ef_own = set(_ef_params)
         _ef_own |= bound_name_set(_ef.body)
+        # `_gmi_local_binding_names` is the over-approximation used to decide
+        # what a method's free read could refer to. It predates the shared
+        # walk for a few binding shapes (a walrus target in an expression has
+        # no statement arm to hang on), so fold in the exact own-binding set:
+        # a name this function really binds is a local here even when the
+        # over-approximation missed the spelling. Union, not replacement --
+        # the over-approximation also supplies nested-def/class bindings the
+        # exact walk deliberately stops at.
+        _ef_bound |= _ef_own
         _ef_classes: list = []
         _gmi_nested_struct_defs(_ef.body, '', _ef_classes, False)
         for _ec_i in range(len(_ef_classes)):
