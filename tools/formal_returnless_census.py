@@ -1,3 +1,6 @@
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from module_loader import STDLIB_PATH
 #!/usr/bin/env python3
 """Which call sites CONSUME the value of a function that returns nothing — the
 list behind `model`'s `None` refusal, and the number `make gate` has to be asked
@@ -51,7 +54,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
-from module_loader import STDLIB_PATH                       # noqa: E402
 import checked_run                                          # noqa: E402
 import fire_compiler as F                                   # noqa: E402
 from formal.build import parse_module                       # noqa: E402

@@ -4,7 +4,7 @@ Branch `crash`. **This document previously carried a wrong headline. It
 was wrong, it misled a session, and the correction is the most important
 thing here — read §1 before anything else.**
 
-`CODEGEN_bootstrap_resource_blowup` is the long history (incl.
+`bugs/hard/CODEGEN_bootstrap_resource_blowup.md` is the long history (incl.
 the ~192 GB `fire.py` run and the useful "a SIGKILL here is evidence of
 nothing" rule). This document supersedes its framing, not its history.
 
@@ -19,7 +19,7 @@ for that check:
 
 | step | state measured 2026-10-26 |
 |---|---|
-| `ab-native` | doc-disabled (`CODEGEN_ab_native_fails`). Peak has drifted **9.4 -> 8.6 -> 10.0 GB** across three runs against a `small` 8 GB ceiling. Not a correctness verdict. |
+| `ab-native` | doc-disabled (`bugs/hard/CODEGEN_ab_native_fails.md`). Peak has drifted **9.4 -> 8.6 -> 10.0 GB** across three runs against a `small` 8 GB ceiling. Not a correctness verdict. |
 | `native-dumpfull` | **GREEN, twice measured.** Both runs wrote a byte-identical `fire.ci` and exited 0: **38.3 GB** in the gate run (which included a memslot wait) and **13.9 GB** in a solo run. Its check asserts the ARTIFACT and the exit code, never the cost — the survival + correct-write fixes (the `e7fc3ec` line and the bootstrap series) closed it; the pre-pass cost did not come down. The two peaks are the accumulator's, and the variance between them is its signature. Cost stays tracked in the job's `program` (55 GB) class and in §2 — not in a marker (the one that cited this section was dropped with this update). |
 | `bootstrap-stage2-dumps` | disabled/skipped in the current gate (`bootstrap-stage2-transitive` does not finish). Last measured shape: sub-jobs returning `mojo_unsupported_iter` no-ops or a wrong dump — a **silent-wrong-answer** class that no exit code reports. |
 | `selfhost-memory-fire` | **New measurement.** `mojoc fire.py --dump-full` hit its `module` (24 GB) class ceiling **twice** on 2026-10-26 (24.1 GB at 293 s in the gate; 24.1 GB at 341 s in an exclusive solo run), still allocating at the cap, then **completed at 38.8 GB in 356 s** under the raised `program` (55 GB) class — over the test's own 16 GB budget, so the test now fails on the number, which is the tripwire working. Last budget-passing measurement: **12.2 GB** on 2026-09-30. Same direction as `ab-native`'s drift. The 38.8 GB peak is deliberately not in the ratchet table (failed runs are not trusted peaks); the class and its `memwhy` carry it until the accumulator fix makes the job pass its budget again. |

@@ -414,16 +414,6 @@ def strip_prose(src: str) -> str:
 # improvement; the remaining 22 are the previously-justified sites (generated-C
 # template casts under measured registry dispatch, deliberate measured unboxes,
 # and typed NULLs) documented in the ledger above.
-#
-# 22 -> 22 (2026-11-11, the merge of origin/master 7caa433cf): NOT five new
-# ad-hoc coercions. `bf037426a` (the container-variable f-string fix) added
-# `_cpp_fstring_list_piece`, whose five arms each spelled
-# `mojo_repr_list_<kind>((MojoList *)({v}))` -- the C++ fallback path's own
-# ad-hoc cast, which the 2026-09-13 R1 consolidation had already centralized
-# into `_cpp_as` for exactly this reason. All five now go through
-# `_cpp_as('MojoList *', v)`, whose body spells `({ctype})({expr})` and so
-# carries no literal the scanner can match. The kind is proven by the caller:
-# both call sites dispatch on `ectype == 'MojoList *'` before calling in.
 BASELINE_COUNT = 22
 
 

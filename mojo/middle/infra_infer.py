@@ -809,7 +809,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                             # 2-arg `max` then lowers to the single-iterable
                             # `mojo_max(void *args)`. See
                             # `_SCALAR_ARITY_BUILTINS`'s own comment and
-                            # COMPILE_FAIL_zipfile___init__.
+                            # bugs/COMPILE_FAIL_zipfile___init__.md.
                             if (func_name in _ITERABLE_CONSUMING_BUILTINS
                                     and not (func_name in _SCALAR_ARITY_BUILTINS
                                              and len(expr.args) > 1)):
@@ -1081,7 +1081,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     # the += emitted raw `char * + MojoList *` pointer
                     # addition — gcc -fgimple "internal compiler error: in
                     # build2, at tree.cc" (bugs/
-                    # COMPILE_FAIL_Tools_gdb_libpython).
+                    # COMPILE_FAIL_Tools_gdb_libpython.md).
                     if isinstance(node.target, gimple_ctypes.MemberExpr) \
                             and _expr_mentions_param(node.value):
                         _aug_root = node.target.obj
@@ -1918,20 +1918,7 @@ def _infer_return_type_core(gen, body: list) -> str:
     acc: list[str] = []
     gen._collect_return_types(body, acc)
     if acc:
-        _rt = gimple_ctypes.TypeLattice.join_all(acc)
-        # `int` is this compiler's INTERNAL marker for "a _Bool met an int"
-        # (see `_dict_val_of`), but it is also the C storage type of a
-        # module-level int-literal global. A method that `return G`s such a
-        # global inferred `int` here and was emitted as `int C_get(C *)`;
-        # a caller inside a `__GIMPLE` function (every lifted nested `def`)
-        # then failed the verifier with "invalid conversion in gimple call"
-        # because its own call temp is the word type. Python integers are
-        # 64-bit, so widen the marker to the word type for a RETURN type --
-        # a genuine `_Bool`/`int` join still widens the same way a C
-        # arithmetic conversion would.
-        if _rt == 'int':
-            _rt = 'int64_t'
-        return _rt
+        return gimple_ctypes.TypeLattice.join_all(acc)
     # A function that can only RAISE (an abstract method: `raise
     # NotImplementedError`) never produces a value, but a subclass overrides it
     # and every call through the base reads one: a word, not `void`.
@@ -2814,7 +2801,7 @@ def _prepass_list_elem(gen, elements) -> str | None:
     positive claim reached the call site as `_return_elem_types['a2']`, so
     `print(a2(1))` routed to `mojo_repr_list_ints` and printed the two `char *`
     slots as pointer decimals. Measured in bugs/
-    CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type; the same
+    CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md; the same
     program WITHOUT the trailing `return []` answers None and prints right,
     which is what made the branch look like the trigger when the empty literal
     is what carries the false claim.
@@ -2987,15 +2974,6 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                     # one for the same literal. Same shared rule, so the two
                     # cannot disagree about the dict they describe.
                     dict_val[v] = gimple_exprtypes.dict_literal_val_ctype(gen, val.pairs)
-                elif isinstance(val, gimple_ctypes.TupleExpr):
-                    # Tuple-literal binding: record the joined element type so
-                    # `_quick_type`'s subscript-of-IdentExpr lookup can answer
-                    # the slot type (e.g. `args = ("a","b"); return args[0]`
-                    # must be `char *`, not int64_t). The lowering records per-
-                    # slot types in `_tuple_slot_types` only at emit time, after
-                    # this pre-pass; seeding `elem` here is the cross-call /
-                    # return-type contract for the tuple's elements.
-                    elem[v] = gen._infer_list_elem_type(val.elements)
                 elif isinstance(val, gimple_ctypes.IdentExpr) and val.name in dict_val:
                     dict_val[v] = dict_val[val.name]
             elif (isinstance(n, gimple_ctypes.AssignStmt) and isinstance(n.target, gimple_ctypes.SubscriptExpr)

@@ -713,17 +713,9 @@ def _defined_symbols(gcc: str, obj: str, *, include_weak: bool = False) -> set:
             # copy (the empty GPU sidecar's introspection stubs, in ~every stdlib module) links fine.
             continue
         parts = line.split()
-        # -m lines: "<addr> (<section>) external <name>", while an UNDEFINED
-        # reference has no address at all: "(undefined) external <name>".
-        # Both spellings contain "external", so the address is what separates
-        # a definition from a reference. Counting a reference as a definition
-        # makes every module "clash" on the runtime symbols it imports, and
-        # then makes `_localize_symbols`'s keep list name undefined symbols,
-        # which nmedit rejects — the whole module is dropped for a collision
-        # that never existed (the 150-module exclusion).
+        # -m lines: "<addr> (<section>) external <name>"; plain: "<addr> <TYPE> <name>".
         if 'external' in parts and len(parts) >= 3:
-            if parts[0] != '(undefined)':
-                syms.add(parts[-1])
+            syms.add(parts[-1])
             continue
         # Defined external: "<addr> <TYPE> <name>"; undefined: "<TYPE=U> <name>".
         # Uppercase type letter (T/D/S/B/C/I/R) = external & defined.
@@ -1692,7 +1684,7 @@ def runtime_export_entries(gcc: str, objs: list) -> tuple:
         `_X`, and `reflect.export_csym` resolved the entry to some OTHER
         symbol. Nothing is missing; the shared export-csym rule is computing
         a Mojo overload-mangled name for a C prototype. This is a real,
-        currently-live defect measured on this tree: of `fire_runtime.h`'s 810
+        currently-live defect measured on this tree: of `fire_runtime.h`'s 794
         entry points, only a handful survive `build_stdlib()`'s `nm`
         cross-check, and the rest are dropped for exactly this reason. So the
         stdlib dylib has never advertised most of the runtime entry points it

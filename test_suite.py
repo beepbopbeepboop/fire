@@ -1307,7 +1307,6 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      #     with it.  The registry is the authority for both: a
                      #     census entry for a job that no longer carries an
                      #     `expect=` fails this very check.
-                     'gimplerunner': 20,
                      'x86-containers': 1,
      # `ab-native` JOINS on 2026-10-28, gate triage: it was out of this census
      # while it was DISABLED (a disabled job never runs, so it states no count
@@ -1325,8 +1324,9 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           f'per-item verdicts rather than against a summary line, see '
           f'`observed_fanout_failures`; the registry no longer carries one '
           f'(the stage2 dumps stopped failing the way the marker described). '
-          f'`gimplerunner` is here at 20 (bugs/hard/SUITE_gimplerunner_21_failing.md: '
-          f'its run prints `Results: 592 passed, 20 failed`). `formal-x86-endtoend` is the only '
+          f'`gimplerunner` is NOT here and that is the '
+          f'mechanism working: its `expect=` was removed when the last of the '
+          f'merge-interaction rows it forgave was fixed. `formal-x86-endtoend` is the only '
             f'entry that is a Lean proof sweep rather than a compiled or '
             f'interpreted one, and the count is checkable at all only because '
             f'`formal/x86_64_endtoend_test.py` prints a `PASS=n FAIL=m of N` '
@@ -2145,11 +2145,7 @@ STALE_PER_CHILD_BUDGETS = {
     # image. Both are per-child walls on an image the case built itself, which is
     # what a residue row is for; neither is the SUBJECT of its test, so neither
     # moves to `BUDGET_IS_THE_SUBJECT`.
-    'test_bootstrap_hotspots.py': 1,
-    'test_dict_slot_read_regression.py': 1,
-    'test_formal_admitted_two_args.py': 1,
     'test_formal_dylib.py': 2,
-    'test_formal_fstring_printf_regress.py': 1,
     'test_formal_proof_breadth.py': 6,  # +1 with the bulk merge of the formal-worker branches
     'test_formal_specs.py': 1,  # +1 on 2026-10-05: work/formal36-contracts-language's
                                  # `lean` run of a generated spec proof
@@ -2157,17 +2153,10 @@ STALE_PER_CHILD_BUDGETS = {
     'test_formal_sweep_truth.py': 1,  # +1 on 2026-10-04 (76143aaa), a row the
                                       # census missed when that file's literal
                                       # arrived with the derived host-import rows
-    'test_imported_decorator_regression.py': 2,
     'test_metal_codegen.py': 9,
     'test_ptr_registry.py': 2,
-    'test_python315_frozendict.py': 1,
-    'test_python315_sentinel.py': 1,
-    'test_regress_timespec_type.py': 1,
-    'test_regression_profiling_package.py': 1,
     'test_runtime_dylib.py': 1,
     'test_selfhost_memory.py': 1,
-    'test_typeddict_extra_items_regression.py': 1,
-    'test_unpacking_in_comprehensions.py': 1,
 }
 
 #: Files where a per-child literal is the SUBJECT rather than residue, with the

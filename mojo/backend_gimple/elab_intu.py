@@ -3093,21 +3093,6 @@ def _collect_inner(work, rec, queue):
             return
         if base in _IN_TU_LIST_BASES:
             return
-        # A SELF-RECURSIVE generic instantiation (`self_recursion[i + 1]()`
-        # inside `self_recursion`) cannot be materialized: the arg is not a
-        # concrete literal, so `_concrete_args` below returns None and the
-        # call would reach the generated C as a declared-never-defined extern
-        # (a dangling symbol). Refuse with a clear diagnostic instead. A
-        # CONCRETE self-call (`self_recursion[0]()`) is a legitimate
-        # instantiation and is left to `_concrete_args`.
-        if base == rec['base']:
-            _args = (_bracket_args(gen, n.func) if isinstance(n.func, SubscriptExpr)
-                     else None)
-            if _args is None or not all(_is_concrete(a) for a in _args):
-                raise RuntimeError(
-                    f'self recursive call to {base!r} will cause an '
-                    f'infinite loop')
-            return
         # Same registration, for a struct CONSTRUCTED inside the concrete body
         # (`empty`'s body is `return _Empty[T]()`) — that call names the struct
         # as a callee, never in an annotation.
@@ -3362,7 +3347,7 @@ def _erased_pointee_is_self(resolved):
 # PARAMETRIZED alias whose parameters are all ownership/origin plumbing this
 # codegen erases. Group 1 = alias name, 2 = the parameter list's open bracket.
 _PARAM_ALIAS_HEAD_RE = re.compile(
-    r'comptime\s+(_?[A-Za-z]\w*)\s*(?=\[|:[^=]*?\bwhere\b)')
+    r'comptime\s+(_?[A-Za-z]\w*)\s*\[')
 _ERASED_ORIGIN = 'MutAnyOrigin'
 
 
@@ -3437,17 +3422,11 @@ def _eval_parametrized_aliases(work, mm, base, concrete):
     nested = []
     for m in list(_PARAM_ALIAS_HEAD_RE.finditer(concrete)):
         aname = m.group(1)
-        # Parametrized `comptime X[params]: Trait = Base[...]`, or bracketless
-        # `comptime X: Trait where ... = Base[...]` (LinkedList's
-        # `IteratorOwnedType`): no parameter list, so the annotation starts at
-        # the colon.
-        bracketed = concrete[m.end()] == '['
-        # The lookahead leaves m.end() ON the '['; _balanced_end wants the index after it.
-        pend = _balanced_end(concrete, m.end() + 1) if bracketed else m.end()
+        pend = _balanced_end(concrete, m.end())
         if pend is None:
             continue
-        hm = re.match((r'\s*:\s*[^=\n]+=\s*' if bracketed else r'\s*:\s*[^=]+=\s*')
-                      + r'([A-Za-z_]\w*)\s*\[', concrete[pend:])
+        hm = re.match(r'\s*:\s*[^=\n]+=\s*([A-Za-z_]\w*)\s*\[',
+                      concrete[pend:])
         if not hm or hm.group(1) in _ERASED_WORD_STRUCTS:
             continue
         abase = hm.group(1)
@@ -3458,9 +3437,8 @@ def _eval_parametrized_aliases(work, mm, base, concrete):
         alias_params = {
             p.split(':')[0].strip() for p in
             gimple_exprtypes._split_top_level_commas(
-                concrete[m.end() + 1:pend - 1])
-            if p.strip() and not elaborate._is_param_marker(p.strip())} \
-            if bracketed else set()
+                concrete[m.end():pend - 1])
+            if p.strip() and not elaborate._is_param_marker(p.strip())}
         written = []
         origin_arg = _ERASED_ORIGIN
         for a in gimple_exprtypes._split_top_level_commas(
@@ -3495,10 +3473,6 @@ def _eval_parametrized_aliases(work, mm, base, concrete):
             targs[p] for p in elaborate.type_param_names(atmpl)))
         concrete = _replace_bracketed_mentions(
             concrete, 'Self.' + aname, name)
-        if not bracketed:
-            # A bare mention (`Self.IteratorOwnedType(self^)`, `-> Self.X`) names
-            # the same instantiation as the bracketed spelling.
-            concrete = re.sub(r'\bSelf\.' + re.escape(aname) + r'\b', name, concrete)
         nested.append(key)
     return concrete, nested or None
 
@@ -3506,150 +3480,6 @@ def _eval_parametrized_aliases(work, mm, base, concrete):
 _PTR_FIELD_HEAD_RE = re.compile(
     r'^([ \t]*var\s+\w+\s*:\s*)((?:Optional|OptionalReg|Pointer|UnsafePointer)'
     r'\s*\[)', re.M)
-
-
-def _comptime_alias_values(work, mm, module_src, base, targs, concrete):
-    """The value of every `comptime <alias> = <Base>[...]` type alias of the
-    spliced struct `concrete` (`base` at `targs`): `(aliases, paired)` where
-    `aliases` maps alias name -> the text its `Self.<alias>` mentions become
-    and `paired` lists `(alias, ('struct', name, args))` for the instantiations
-    it names. None on refusal (already recorded on `work`)."""
-    import elaborate
-    aliases = {}
-    paired = []
-    for m in _COMPTIME_ALIAS_HEAD_RE.finditer(concrete):
-        aname, abase = m.group(1), m.group(2)
-        i = m.end()
-        depth = 1
-        while i < len(concrete) and depth:
-            c = concrete[i]
-            if c == '[':
-                depth += 1
-            elif c == ']':
-                depth -= 1
-            i += 1
-        if depth:
-            work.refuse(f'{base}: comptime alias {aname} has unbalanced '
-                        'brackets in its right-hand side')
-            return None
-        args = [a.strip() for a in
-                gimple_exprtypes._split_top_level_commas(
-                    concrete[m.end():i - 1]) if a.strip()]
-        resolved = []
-        bad = None
-        for a in args:
-            if a.startswith('Self.'):
-                ref = a[len('Self.'):]
-                if ref in aliases:
-                    resolved.append(aliases[ref])
-                else:
-                    bad = f'references {ref} without a prior alias'
-            elif 'Self.' in a:
-                bad = 'carries an unbound Self. mention in its argument'
-            else:
-                resolved.append(a)
-        if bad:
-            work.refuse(f'{base}: comptime alias {aname} {bad}')
-            return None
-        if abase in _ERASED_WORD_STRUCTS:
-            # An erased-word base (`Optional[Pointer[Node[T], o]]`) is not a
-            # struct this codegen builds: every other site reads it as the
-            # tagged word. The alias therefore names its own spelling, which
-            # the layout/type readers already erase, and nothing is enqueued
-            # (materializing `Optional` is the regression
-            # `_protocol_only_overloads` documents).
-            pointee = _erased_pointee_struct(resolved)
-            if pointee is None and _erased_pointee_is_self(resolved):
-                # `Optional[Pointer[Self, o]]` (a node's own link): the
-                # pointee is the struct being spliced; nothing to enqueue.
-                aliases[aname] = mm.mangle(base, targs)
-                continue
-            if pointee is not None:
-                pbase, pargs = pointee
-                # The pointee usually lives in the SAME module as the struct
-                # being spliced (`Node` beside `LinkedList`), so it is not
-                # registered yet: register it from this struct's own file.
-                _register_named(work.gen,
-                                work.gen._imported_generic_structs.get(base),
-                                [pbase])
-                psrc = _module_src(work.gen, pbase, 'struct')
-                ptmpl = (elaborate.extract_struct_source(psrc, pbase)
-                         if psrc else None)
-                pn = elaborate.type_param_names(ptmpl) if ptmpl else None
-                if pn and len(pn) == len(pargs):
-                    aliases[aname] = mm.mangle(pbase, dict(zip(pn, pargs)))
-                    paired.append((aname, ('struct', pbase, tuple(pargs))))
-                    continue
-            aliases[aname] = f'{abase}[{", ".join(resolved)}]'
-            continue
-        tmpl = (elaborate.extract_struct_source(module_src, abase)
-                if module_src else None)
-        pnames = elaborate.type_param_names(tmpl) if tmpl else None
-        if not pnames or len(pnames) != len(resolved):
-            work.refuse(f'{base}: comptime alias {aname} names {abase}[...] '
-                        'whose template does not bind positionally')
-            return None
-        aliases[aname] = mm.mangle(abase, dict(zip(pnames, resolved)))
-        paired.append((aname, ('struct', abase, tuple(resolved))))
-    return aliases, paired
-
-
-# `Other[args]._Alias` — a mention of ANOTHER generic struct's private comptime
-# alias, spelled through the struct's name (LinkedList's owning iterator reads
-# `LinkedList[Self.T]._NodePointer()`). Group 1 = struct name.
-_FOREIGN_ALIAS_MENTION_RE = re.compile(r'(?<![\w.])([A-Za-z_]\w*)\[')
-
-
-def _eval_foreign_alias_mentions(work, mm, base, concrete):
-    """Replace every `Other[args]._Alias` mention in `concrete` with the value
-    the NAMED instantiation's own struct gives that alias: its template is
-    monomorphized at `args` and its aliases evaluated by
-    `_comptime_alias_values`, the same reading it gets when it is itself
-    materialized, so the two spellings cannot disagree. A mention that does
-    not name a generic struct, or whose alias does not evaluate, is left as
-    it is. Returns (concrete, nested_keys or None)."""
-    import elaborate
-    out, i, nested = [], 0, []
-    for m in _FOREIGN_ALIAS_MENTION_RE.finditer(concrete):
-        if m.start() < i or m.group(1) in _ERASED_WORD_STRUCTS:
-            continue
-        name = m.group(1)
-        end = _balanced_end(concrete, m.end())
-        if end is None:
-            continue
-        am = re.match(r'\.(_[A-Za-z_]\w*)\b', concrete[end:])
-        if not am:
-            continue
-        aname = am.group(1)
-        asrc = _module_src(work.gen, name, 'struct')
-        atmpl = elaborate.extract_struct_source(asrc, name) if asrc else None
-        if not atmpl:
-            continue
-        written = [a.strip() for a in
-                   gimple_exprtypes._split_top_level_commas(
-                       concrete[m.end():end - 1]) if a.strip()]
-        bound = _struct_bind_args(atmpl, written, _ERASED_ORIGIN)
-        targs = elaborate.bind_type_args(atmpl, bound) if bound else None
-        if targs is None or not all(
-                isinstance(v, str) and v for v in targs.values()):
-            continue
-        _register_named(work.gen, work.gen._imported_generic_structs.get(base),
-                        [name])
-        try:
-            _mangled, fcon = mm.monomorphize_source(atmpl, targs)
-        except Exception as e:
-            work.refuse(f'{base}: {name}[...].{aname} did not monomorphize: '
-                        f'{type(e).__name__}: {e}')
-            continue
-        got = _comptime_alias_values(work, mm, asrc, name, targs, fcon)
-        if got is None or aname not in got[0]:
-            continue
-        out.append(concrete[i:m.start()])
-        out.append(got[0][aname])
-        i = end + am.end()
-        nested.extend(k for a, k in got[1] if a == aname)
-    out.append(concrete[i:])
-    return ''.join(out), nested or None
 
 
 def _eval_pointer_fields(work, mm, base, concrete):
@@ -3895,24 +3725,6 @@ def _materialize(work, key):
         if targs is None:
             work.refuse(f'{base}[{", ".join(args)}]: a bracket parameter is unbound')
             return None
-        # A bounded type parameter must conform before this instantiation is
-        # materialized in-TU. Without this the `.o` route's own check
-        # (`elaborate_generic_call` -> `check_bounds`) is bypassed — `_intu_func_args`
-        # then holds the name and `_elaborate_generic_call` declines — so an
-        # unsatisfiable `where` clause or trait bound compiles silently
-        # (modular: `error: invalid call to '<fn>': violated constraint`).
-        try:
-            elaborate.check_bounds(module_src, tmpl, targs)
-        except elaborate.WhereConformanceError as _we:
-            # A struct's violated `where` is the same diagnostic whichever path
-            # instantiates it (emit_resolve reports it the same way).
-            if kind == 'struct':
-                raise elaborate.where_violation_error('instantiation', base, _we)
-            raise
-        except elaborate.ConformanceError:
-            raise
-        except Exception:
-            pass
         # A VARIADIC binding (part 4: the chain/zip out-res wrapper's `*Ts`
         # consumes every inner) takes `monomorphize_source`'s dedicated
         # pass; its seed-only splice knowledge (each inner's element
@@ -3951,10 +3763,6 @@ def _materialize(work, key):
             work, mm, base, concrete)
         if _pnested:
             _nested = (_nested or []) + _pnested
-        concrete, _fanested = _eval_foreign_alias_mentions(
-            work, mm, base, concrete)
-        if _fanested:
-            _nested = (_nested or []) + _fanested
         concrete, _fnested = _eval_pointer_fields(work, mm, base, concrete)
         if _fnested:
             _nested = (_nested or []) + _fnested

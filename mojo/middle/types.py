@@ -1632,20 +1632,6 @@ def cattr_cell_field(attr: str) -> str:
     return '_clscell_' + attr
 
 
-def cattr_unwind_push(gname: str) -> str:
-    """Name of the untagged C accessor that pushes `gname`'s class-attribute
-    unwind record (see module_gen's cell declaration and
-    emit_methods._cattr_restore_begin). One name, used by the emitter of the
-    accessor and its call site, so they cannot drift.
-
-    The accessor exists because the record's slot is the ADDRESS of the cell
-    global, and `-fgimple` rejects `&<variable>` inside a `__GIMPLE`-tagged
-    body — which every struct method is. The accessor's own body is plain C,
-    so it can take the address there; the tagged body only calls it.
-    """
-    return '_cattr_unwind_push_' + gname
-
-
 def _safe_field(name: str) -> str:
     """Sanitize struct field and parameter names that are C keywords or
     platform-macro names (see _C_MACRO_NAMES's `stdin`/`stdout`/`stderr`

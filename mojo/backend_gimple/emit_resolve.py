@@ -2187,46 +2187,6 @@ def _new_val(gen, ctype: str, rhs: str) -> str:
     return t
 
 
-def _select_val(gen, ctype: str, cond_ctype: str, cond_val: str, then_val, else_val) -> str:
-    """Branch-based `cond ? then : else`, producing a fresh temp of `ctype`.
-
-    A `?:` expression is not a legal GIMPLE r-value when either arm is a
-    call, and a parenthesized conditional is not a legal operand at all —
-    gcc `-fgimple` rejects `t = (c ? call (x) : lit)` with "expected
-    expression before '(' token" and `t = c ? call (x) : lit` with
-    "invalid operands in ternary operation" (both measured with
-    gcc-mp-15). So a select whose arms are not already plain variable
-    operands must be emitted as the same three-block shape
-    `_lower_TernaryExpr` uses: `if (cond) goto bb_then; else goto
-    bb_else;`, one arm per block, result merged after.
-
-    `then_val`/`else_val` are either GIMPLE values of `ctype` (strings) or
-    zero-argument callables called INSIDE their branch to produce one. The
-    callable form is what keeps a side effect (a user `__str__`/`__repr__`
-    call, say) lazy: `gen._call_expr` emits immediately, so a value passed
-    in ahead of time would already have run unconditionally — the branch
-    would guard nothing. A value that is already computed is selected
-    either way; a call is only emitted in its own block.
-    """
-    ctype = _as_str(ctype)
-    result = gen._new_temp(ctype)
-    cond = gen._ensure_bool_cond(cond_ctype, cond_val)
-    bb_then = gen._new_bb()
-    bb_else = gen._new_bb()
-    bb_merge = gen._new_bb()
-    gen._emit(f"  if ({cond}) goto {bb_then}; else goto {bb_else};")
-    gen._emit_label(bb_then)
-    tv = then_val() if callable(then_val) else then_val
-    gen._safe_coerce_emit(ctype, ctype, tv, result)
-    gen._emit(f"  goto {bb_merge};")
-    gen._emit_label(bb_else)
-    ev = else_val() if callable(else_val) else else_val
-    gen._safe_coerce_emit(ctype, ctype, ev, result)
-    gen._emit(f"  goto {bb_merge};")
-    gen._emit_label(bb_merge)
-    return result
-
-
 def _inc_val(gen, base: str) -> str:
     """`base + 1` as its own int64_t temp — the ONE way to spell a
     one-step advance in generated GIMPLE.
@@ -2749,26 +2709,6 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         if _real in ('MojoList *', 'MojoSet *', 'MojoDict *'):
             rat = _real
             rav = gen._new_val(_real, f'({_real}){rav}')
-    # A `d[k]` read whose value type was unknown at compile time: the slot's
-    # runtime kind (None/True/1.5/...) is recoverable from (dict,key).
-    _dsr = getattr(gen, '_dict_slot_reads', {})
-    _dsr_hit = _dsr.get(rav)
-    if _dsr_hit is None and enode is not None and isinstance(enode, gimple_ctypes.IdentExpr):
-        _dsr_hit = _dsr.get(_as_str(enode.name))
-    if rat in ('int', 'int64_t') and _dsr_hit is not None:
-        _dv, _kv, _kk = _dsr_hit
-        if _kk == 'str':
-            return gen._call_expr('char *', 'mojo_dict_repr_slot',
-                                  [('MojoDict *', _dv), ('char *', _kv)])
-        if _kk == 'bytes':
-            return gen._call_expr('char *', 'mojo_dict_repr_slot_bytes',
-                                  [('MojoDict *', _dv), ('MojoBytes *', _kv)])
-        if _kk == 'none':
-            return gen._call_expr('char *', 'mojo_dict_repr_slot_none',
-                                  [('MojoDict *', _dv)])
-    # A call result may be a boxed dict-slot value carrying its runtime kind.
-    if rat in ('int', 'int64_t') and isinstance(enode, gimple_ctypes.CallExpr):
-        return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav)])
     if rat == 'char *':
         return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
     if rat == 'MojoList *':
@@ -2828,11 +2768,6 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         rav_d = rav if rat == 'double' else gen._new_val('double', f'(double){rav}')
         return gen._call_expr('char *', 'mojo_repr_float', [('double', rav_d)])
     rav64 = rav if rat == 'int64_t' else gen._new_val('int64_t', f'(int64_t){rav}')
-    # A word of unknown kind (boxed dict-slot value, tagged word, string
-    # pointer held in int64_t, or plain integer): render via the runtime's
-    # generic repr discriminator. For a plain integer it is the same decimal.
-    if rat in ('int', 'int64_t'):
-        return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav64)])
     return gen._call_expr('char *', 'mojo_repr_int', [('int64_t', rav64)])
 
 
@@ -3033,27 +2968,6 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     types — slice 2). Returns (ctype, val) if elaborated, else None."""
     explicit = isinstance(node.func, gimple_ctypes.SubscriptExpr)
     g = node.func.obj.name if explicit else node.func.name
-    # A SELF-RECURSIVE generic call (`self_recursion[i + 1]()` inside
-    # `self_recursion`) cannot be monomorphized: the arg is not a concrete
-    # literal, so no instantiation exists, and the call would reach the
-    # generated C as a declared-never-defined extern (a dangling symbol).
-    # Refuse with a clear diagnostic instead. The bracketed form is decided on
-    # its arguments (`self_recursive_uninstantiable`), not on the name alone.
-    if explicit:
-        _rec = ggc.self_recursive_uninstantiable(gen, node.func)
-        if _rec is not None:
-            raise RuntimeError(
-                f'cannot compile module: self recursive call to {_rec!r} will '
-                f'cause an infinite loop')
-    else:
-        # A bare call has no bracket to inspect, so the name test stands: the
-        # enclosing function is either the bare base or its mangled instance
-        # (`self_recursion_1_i_1_3`).
-        _cfn = getattr(gen, 'current_func_name', None)
-        if _cfn and (g == _cfn or _cfn.startswith(g + '_')):
-            raise RuntimeError(
-                f'cannot compile module: self recursive call to {g!r} will '
-                f'cause an infinite loop')
     source = gen._imported_generics.get(g)
     if not source:
         return None
@@ -3278,20 +3192,7 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
         # elaboration failures elsewhere, e.g. a generic this
         # elaborator just can't handle yet).
         raise
-    except Exception as _elab_e:
-        # A `ConformanceError` from `check_bounds` is a real diagnostic
-        # (`where` clause / trait bound violated by the call's type args),
-        # not a transient elaboration failure — it must surface, not fall
-        # through to the silent stub path (modular:
-        # `error: invalid call to '<fn>': violated constraint`).
-        if 'Conformance' in type(_elab_e).__name__:
-            _cfn = getattr(gen, '_current_filename', '') or ''
-            _cln = getattr(node, 'line', 0) or 0
-            _clc = getattr(node, 'col', 0) or 0
-            _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
-            raise RuntimeError(
-                f"{_cat}error: invalid call to '{g}': violated constraint\n"
-                f"note: {type(_elab_e).__name__}: {_elab_e}")
+    except Exception:
         gimple_ctypes._debug_note('generic call elaboration failed')
         info = None
     if not info:
@@ -3523,14 +3424,6 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
                 'constraint failed' in _emsg
                 or 'comptime assertion failed' in _emsg):
             raise
-        # A `where` clause of the struct that is provably false for these type
-        # args is a real diagnostic (modular: `error: violated constraint`),
-        # not an elaboration-capability failure. Only this subclass surfaces:
-        # the bound check's other ConformanceErrors are the false positives the
-        # fall-through above exists for.
-        import elaborate as _elab_mod
-        if isinstance(e, _elab_mod.WhereConformanceError):
-            raise _elab_mod.where_violation_error('instantiation', base_name, e)
         gen._generic_struct_elaboration_failures.append(
             f"{base_name}[{', '.join(type_args)}] from {source}: "
             f"{type(e).__name__}: {e}")

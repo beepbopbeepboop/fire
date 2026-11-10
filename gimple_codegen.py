@@ -1293,13 +1293,6 @@ class GimpleGen:
         # for why this is needed as a SEPARATE registry from `self.
         # _classmethod_names`/`self.func_return_types`.
         self._struct_generator_method_names: dict[str, set[str]] = {}
-        # C symbols of struct methods whose body was refused in this TU and emitted as a prototype only (module_gen's
-        # definition-site fallback). The class tables leave them out: they name no definition here.
-        self._prototype_only_syms: set[str] = set()
-        # (function, name) -> the C kind of the last store into it, for the mixed float/str refusal in emit_stmts.
-        self._stored_kinds: dict = {}
-        # (function, name) of every dict store of None, for the mixed join in emit_stmts (a None store is a kind).
-        self._dict_none_seen: set = set()
         # Struct methods called from a compiled generator/async body on
         # EITHER `self` or a non-self struct-pointer-typed local/parameter
         # (see CODEGEN_generator_struct_typed_param_refused).
@@ -1350,7 +1343,7 @@ class GimpleGen:
         # `_cpp_param_struct_names`/`_cpp_ctor_struct_names`, just triggered
         # by the YIELDED value's type instead of a parameter/constructor —
         # merged into the same typedef-emission loop (gen_module) rather
-        # than a separate one. See CODEGEN_enum_runtime_class_creation's
+        # than a separate one. See CODEGEN_enum_runtime_class_creation.md's
         # 2026-08-20 update.
         self._cpp_value_struct_names: set[str] = set()
         # Module-level function names (for variadic-unmangled calls like os.py's
@@ -1639,16 +1632,6 @@ class GimpleGen:
         # whichever kind its first assignment site carries. Module scope, like
         # `_inferred_var_types`' per-function half it is read beside.
         self._multi_kind_locals: dict[str, set] = {}
-        # Function name -> the locals bound by an UNPACK of a single iterable
-        # (`a, b, ... = call()`/`= some_list`), whose per-element C types the
-        # pre-pass does not know and therefore leaves at the `int64_t` storage
-        # default. Read by `module_gen`'s container-vs-scalar contract: an
-        # `int64_t` there is not proof the argument is a number — it may be a
-        # container element (coro.py's `real_params` from
-        # `base, is_method, real_params, ... = _async_method_setup(...)` is a
-        # list) — while an ordinary local bound by a call or a parameter keeps
-        # counting as a scalar, so a genuinely mixed call site is still refused.
-        self._tuple_unpack_locals: dict[str, set] = {}
         # Call-result VALUE names holding a container whose kind the CALLER
         # cannot know statically (the result of a call to a
         # `_multi_kind_return_funcs` member). Per-function like the other
@@ -1838,7 +1821,7 @@ class GimpleGen:
         # or transitively) — populated by gen_module_impl. Such a struct
         # gets a synthesized `_data: MojoBytes *` payload field populated
         # by `__new__` / `super().__new__(cls, val)`, and inherited bytes
-        # ops route to it. See COMPILE_FAIL_zipfile___init__.
+        # ops route to it. See bugs/COMPILE_FAIL_zipfile___init__.md.
         self._bytes_subclass_structs: set = set()
         self._bytes_subclass_payload_argidx: dict = {}
         # Lazily-created container attributes used across gen_module/body
@@ -2165,7 +2148,7 @@ class GimpleGen:
         # functions is emitted twice into the one flattened translation unit
         # — a hard "redefinition of X" GCC error for every single symbol in
         # the file (see bugs/hard/
-        # CODEGEN_multiple_inheritance_duplicate_method_symbols, whose
+        # CODEGEN_multiple_inheritance_duplicate_method_symbols.md, whose
         # original multiple-inheritance/struct-merge hypothesis this
         # superseded: the real, confirmed cause is this self-shadowing
         # import, not the inheritance-merge machinery — `python3 fire.py
@@ -2209,7 +2192,7 @@ class GimpleGen:
         # in _module_stmts (and mirrored via _all_transitive_stmts_ordered) for the
         # whole process lifetime causing resource blowup. We now only keep the
         # flattened ordered list needed for reconciliation; module ASTs can be
-        # dropped after emission. See CODEGEN_bootstrap_resource_blowup
+        # dropped after emission. See bugs/hard/CODEGEN_bootstrap_resource_blowup.md
         self._all_transitive_stmts_ordered: list = []
         self._all_transitive_stmts_ids: set = set()
         # Phase 2 (same doc as above): per-top-level-statement memoization
@@ -2746,7 +2729,7 @@ class GimpleGen:
         # `mojo_boxed_is_str` is a RANGE test, so it calls every positive
         # int64 in [2^31, 2^47) a pointer and hands it to `strcmp` --
         # `d[3000000000] = 1` was a SIGSEGV. See
-        # RUNTIME_int64_key_above_2gb_dereferenced_as_pointer and
+        # bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md and
         # `_char_to_cstr`'s word_ok branch, the one consumer.
         self._int_word_vals: set = set()
         self._fresh_str_tmps: set = set()  # see emit_infra._emit_str_cat
@@ -3553,7 +3536,6 @@ class GimpleGen:
         'mojo_repr_list_elem_double': ('char *', ['int64_t']),
         'mojo_repr_list_elem_bool':   ('char *', ['int64_t']),
         'mojo_repr_str':         ('char *',    ['char *']),
-        'mojo_ascii_escape':     ('char *',    ['char *']),
         'mojo_repr_obj':         ('char *',    ['int64_t']),
         'mojo_repr_float':       ('char *',    ['double']),
         'mojo_print':            ('void',      ['char *']),
@@ -5441,9 +5423,6 @@ class GimpleGen:
         return ginf._elem_of(self, name)
     def _dict_val_of(self, name: str) -> str:
         return ginf._dict_val_of(self, name)
-
-    def _dict_val_mixed(self, name: str) -> bool:
-        return ginf._dict_val_mixed(self, name)
     def _dict_val_is_known(self, name: str) -> bool:
         return ginf._dict_val_is_known(self, name)
     def _dict_val_of_expr(self, expr) -> str:
@@ -5774,8 +5753,6 @@ class GimpleGen:
         return grsl._new_temp(self, ctype)
     def _new_val(self, ctype: str, rhs: str) -> str:
         return grsl._new_val(self, ctype, rhs)
-    def _select_val(self, ctype: str, cond_ctype: str, cond_val: str, then_val, else_val) -> str:
-        return grsl._select_val(self, ctype, cond_ctype, cond_val, then_val, else_val)
     def _inc_val(self, base: str) -> str:
         return grsl._inc_val(self, base)
     def _call_expr(self, ret_type: str, fname: str, arg_pairs: list, arg_nodes: list = None) -> str:
@@ -6486,13 +6463,6 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     if do_imports or link_mode:
         gen._record_sys_path_inserts(
             mojo_src, os.path.dirname(os.path.abspath(filename)) if filename else None)
-    # Stash the in-memory source text the module pass will process so text-only
-    # discoveries (e.g. bracket-parameter annotation scans, which the parser
-    # cannot carry in the AST) can consult it instead of re-reading the file
-    # at `filename`. The parser consumed exactly this string, so it is always
-    # consistent with `stmts` — unlike an on-disk file that could have been
-    # modified after parse or be unreadable (empty `_current_filename`).
-    gen._source_text = mojo_src
     code = gen.gen_module(stmts)
     if do_imports or link_mode:
         code = _dedup_guarded_blocks(code)
@@ -6632,44 +6602,11 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
                    '_ASYNC_FN_NAMES', '_STRUCT_NAMES',
                    '_UNTHREADABLE_NESTED_ASYNC_GENS', '_NATIVE_FUTURE_CLASSES',
                    '_NO_WD_FORWARD', '_VALUE_USED_FUNCS', '_FUNC_RET_KIND',
-                   '_MODULE_FUNC_NAMES', '_GEN_RESOLVING', '_GEN_REC_ASSUME',
-                   '_ASYNC_HANDLE_KIND_BY_FUNC'):
+                   '_MODULE_FUNC_NAMES', '_GEN_RESOLVING', '_GEN_REC_ASSUME'):
             _v = getattr(_coro2, _c, None)
             if isinstance(_v, (dict, list, set)):
                 try: _v.clear()
                 except Exception: pass
-        # Counters / single-slot state containers must be reset to their
-        # initial values, not just cleared (some are indexed as [0]).
-        _async_ret = getattr(_coro2, '_ASYNC_RET_KIND', None)
-        if isinstance(_async_ret, list):
-            try:
-                _async_ret[:] = ['i']
-            except Exception:
-                pass
-        _await_tmp = getattr(_coro2, '_AWAIT_TMP', None)
-        if isinstance(_await_tmp, list):
-            try:
-                _await_tmp[:] = [0]
-            except Exception:
-                pass
-        _aw_counter = getattr(_coro2, '_AW_COUNTER', None)
-        if isinstance(_aw_counter, list):
-            try:
-                _aw_counter[:] = [0]
-            except Exception:
-                pass
-        _yf_counter = getattr(_coro2, '_yf_counter', None)
-        if isinstance(_yf_counter, list):
-            try:
-                _yf_counter[:] = [0]
-            except Exception:
-                pass
-        _py_src = getattr(_coro2, '_PY_SRC', None)
-        if isinstance(_py_src, list):
-            try:
-                _py_src[:] = [False]
-            except Exception:
-                pass
     except Exception:
         pass
     try:
@@ -6722,9 +6659,11 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # compile boundary (next step).
     try:
         for _modname, _names in (
-            ('mojo.backend_gimple.cpp_async', ('_FOREIGN_CALLABLES',)),
+            ('mojo.backend_gimple.cpp_async', ('_FOREIGN_CALLABLES', '_RUNTIME_CALLABLE_WORDS')),
+            ('mojo.backend_gimple.emit_exprs', ('_RUNTIME_CALLABLE_VALUES_NAMES',)),
             ('mojo.backend_gimple.emit_methods', ('_MODULE_MEMBER_LIBC',)),
             ('mojo.backend_gimple.emit_funcs', ('_SELFHOST_EXTRA_FIELD_CACHE',)),
+            ('mojo.middle.calls_shared', ('_RUNTIME_CALLABLE_VALUES',)),
             ('mojo.middle.iter_factory', ('_MOJO_ELEM_C',)),
         ):
             import importlib as _il2
@@ -6792,10 +6731,8 @@ def compile_to_c(mojo_src: str, auto_gpu: bool = True) -> str:
     """
     c_code, _gen = _run_pipeline(mojo_src, auto_gpu=auto_gpu)
 
-    # Strip __GIMPLE annotations for executability. The tag now leads a
-    # declaration (`__GIMPLE static P * f`) as often as it follows a
-    # space, so match it as a word wherever it sits.
-    c_code = re.sub(r'\b__GIMPLE\b ', '', c_code)
+    # Strip __GIMPLE annotations for executability
+    c_code = c_code.replace(' __GIMPLE ', ' ')
     return c_code
 
 

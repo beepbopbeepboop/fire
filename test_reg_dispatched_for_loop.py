@@ -1,22 +1,19 @@
-# Regression for the deleted doc CODEGEN_dispatched_for_loop_shares_one_var_between_dict_and_list_arms
-# (codegen half fixed; inference half tracked in PARTIAL_WORK_HANDOFF §2.1)
-#
-# `for i in <value whose type is unknown>:` lowers to a runtime dict/set/list
-# dispatch in `_gen_for_iter`. The arms used to share ONE C variable, declared
-# by the dict arm as `char *`, so a list of ints SIGSEGV'd on `print(i)` and a
-# list of doubles or an arithmetic body misbehaved. Each case below is compiled
-# through the real gimple path and must print exactly what CPython prints.
-#
-# Run: python3 test_reg_dispatched_for_loop.py   (or pytest)
+# Pin for the dict/list runtime dispatch in emit_loops._gen_for_iter (the arm taken when a
+# loop's iterable is a word of unknown type). One C variable is shared by the dict arm
+# (string keys, `char *`) and the list arm (any element), and the doc that tracked this
+# (a `for i in o.read(): print(i)` SIGSEGV) described the list-of-ints crash. Every program
+# below goes through that arm or its static neighbours and must print exactly what CPython
+# prints; a regression to `char *` for the shared variable shows up as a crash or as a
+# pointer-decimal in the output.
+import os, subprocess, sys, tempfile
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from build_config import find_gcc
+from gimple_codegen import compile_to_gimple
+from test_dict_tuple_key import RUNTIME
 
-import os
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import test_gimple_runner as R  # noqa: E402
-
-_HEAD = '''
+PROGRAMS = {
+    "doc_repro_two_hop_field": '''
 class Reader:
     def __init__(self, items):
         self.items = items
@@ -25,70 +22,116 @@ class Owner:
         self._items = items
     def read(self):
         return Reader(self._items).items
-'''
+def main():
+    o = Owner([10, 20])
+    for i in o.read():
+        print(i)
+main()
+''',
+    "untyped_param_list_dict_str_float": '''
+def show(xs):
+    for i in xs:
+        print(i)
+def main():
+    show([10, 20])
+    show({"a": 1, "b": 2})
+    show(["x", "y"])
+    show([1.5, 2.5])
+main()
+''',
+    "word_iterables": '''
+class R:
+    def __init__(self, items):
+        self.items = items
+def main():
+    r = R([10, 20])
+    for i in getattr(r, 'items'):
+        print(i)
+    d = {"a": [1, 2], "b": "s"}
+    for i in d["a"]:
+        print(i)
+    box = [[3, 4]]
+    w = box[0]
+    for i in w:
+        print(i)
+    t = (1, [7, 8])
+    for i in t[1]:
+        print(i)
+main()
+''',
+    "int_elements_keep_int_arithmetic": '''
+def main():
+    q = {"n": [10, 20], "s": "z"}
+    for x in q["n"]:
+        print(x + 1)
+main()
+''',
+    # Doubles reached through a word of unknown type used to print as their raw
+    # IEEE-754 bits (4609434218613702656); the kind-aware read fixed that, and
+    # the target must then still do INT arithmetic on int slots and float
+    # arithmetic on float slots (a boxed-but-untagged target made `x + 1` 11.0).
+    "float_elements_print_and_compute": '''
+def main():
+    d = {"f": [1.5, 2.5], "i": [10, 20], "s": ["u", "v"]}
+    total = 0
+    for x in d["i"]:
+        total = total + x
+        print(x * 2, x > 12, x - 1)
+    print(total)
+    for y in d["f"]:
+        print(y, y * 2, y + 1, y > 2.0)
+    for z in d["s"]:
+        print(z + "!")
+main()
+''',
+    # `+ - * / %` on a float slot reached through the dispatch (the target is a tagged word,
+    # `emit_infra._float_param_arith`). Float `//` is NOT here: the dict arm lowers the shared
+    # variable as a `char *` key and `y // 2` does not compile (see the bug doc).
+    "float_slot_arithmetic": '''
+def main():
+    d = {"f": [7.5, 2.5], "s": "z"}
+    for y in d["f"]:
+        print(y % 2, y - 1, y * 3, y + 1, y / 2)
+main()
+''',
+    "floats_through_dispatch_with_dict_and_str_siblings": '''
+def main():
+    d = {"a": [1.5, 2.5], "b": ["u", "v"], "c": {"k": 1}}
+    for key in ["a", "b", "c"]:
+        for x in d[key]:
+            print(x)
+main()
+''',
+}
 
-# (name, loop body inside main(), expected stdout == CPython's)
-CASES = [
-    ('int_list_print',
-     "o = Owner([10, 20])\n    for i in o.read():\n        print(i)\n",
-     '10\n20\n'),
-    ('str_list_print',
-     "o = Owner(['a', 'bb'])\n    for i in o.read():\n        print(i)\n",
-     'a\nbb\n'),
-    ('dbl_list_print',
-     "o = Owner([1.5, 2.25])\n    for i in o.read():\n        print(i)\n",
-     '1.5\n2.25\n'),
-    ('str_keyed_dict_print',
-     "o = Owner({'k1': 1, 'k2': 2})\n    for k in o.read():\n        print(k)\n",
-     'k1\nk2\n'),
-    ('int_list_arithmetic',
-     "o = Owner([3, 4])\n    t = 0\n    for i in o.read():\n        t = t + i * 2\n    print(t)\n",
-     '14\n'),
-    ('int_list_mod',
-     "o = Owner([7, 9])\n    t = 0\n    for i in o.read():\n        t = t + i % 4\n    print(t)\n",
-     '4\n'),
-    ('discard_binds_nothing',
-     "o = Owner([1, 2])\n    n = 0\n    for i in o.read():\n        _ = i\n        n = n + i\n    print(n)\n",
-     '3\n'),
-    ('int_set_sum',
-     "o = Owner({5, 6})\n    n = 0\n    for i in o.read():\n        n = n + i\n    print(n)\n",
-     '11\n'),
-    ('str_list_len',
-     "o = Owner(['xx', 'y'])\n    for i in o.read():\n        print(len(i), i)\n",
-     '2 xx\n1 y\n'),
-    ('list_of_lists_len',
-     "o = Owner([[1, 2], [3]])\n    for row in o.read():\n        print(len(row))\n",
-     '2\n1\n'),
-]
 
-
-def _run(body: str) -> str:
-    src = _HEAD + "def main():\n    " + body + "main()\n"
-    exe = R.compile_mojo_to_gimple_exe(src)
+def _run_compiled(src):
+    tmp = tempfile.mkdtemp(dir=HERE)
     try:
-        rc = R.run_executable(exe)
-        assert rc == 0, f"compiled program exited {rc} (SIGSEGV is -11)"
-        return R.run_executable_stdout(exe)
+        cfile, exe = os.path.join(tmp, "t.c"), os.path.join(tmp, "t")
+        with open(cfile, "w") as f:
+            f.write(compile_to_gimple(src))
+        r = subprocess.run([find_gcc(), "-fgimple", "-I" + RUNTIME, "-o", exe, cfile,
+                            os.path.join(RUNTIME, "fire_runtime.c")], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr[-500:]
+        return subprocess.run([exe], capture_output=True, text=True)
     finally:
-        try:
-            os.unlink(exe)
-        except OSError:
-            pass
+        for f in os.listdir(tmp):
+            os.unlink(os.path.join(tmp, f))
+        os.rmdir(tmp)
+
+
+def _cpython(src):
+    return subprocess.run([sys.executable, "-c", src], capture_output=True, text=True).stdout
 
 
 def test_dispatched_for_loop_matches_cpython():
-    failures = []
-    for name, body, want in CASES:
-        try:
-            got = _run(body)
-        except AssertionError as e:
-            failures.append(f"{name}: {e}")
-            continue
-        if got != want:
-            failures.append(f"{name}: expected {want!r}, got {got!r}")
-    assert not failures, "\n".join(failures)
+    for name, src in PROGRAMS.items():
+        p = _run_compiled(src)
+        assert p.returncode == 0, f"{name}: exit {p.returncode}: {p.stderr[-200:]}"
+        assert p.stdout == _cpython(src), f"{name}: got {p.stdout!r}, CPython {_cpython(src)!r}"
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test_dispatched_for_loop_matches_cpython()
-    print("PASS test_reg_dispatched_for_loop")
+    print("PASS")

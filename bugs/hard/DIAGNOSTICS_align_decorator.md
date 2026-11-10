@@ -1,4 +1,3 @@
-SPLIT: DIAGNOSTICS_align_decorator-part1, DIAGNOSTICS_align_decorator-part2, DIAGNOSTICS_align_decorator-part3
 # DIAGNOSTICS step 6: @align decorator validation
 
 Part of the umbrella `bugs/hard/DIAGNOSTICS_missing_validation_modular.md`;

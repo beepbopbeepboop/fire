@@ -54,7 +54,7 @@ runs in both directions — `python3 test_runtime_header_scan.py --fix` writes t
 live census into every one of those quotes from the same table the check reads,
 so the two ends of this file cannot drift apart, and a commit that adds a
 runtime declaration does not have to remember which six sentences quoted the
-number it changed. (`FORMAL_known_limits` quotes the census in more
+number it changed. (`bugs/FORMAL_known_limits.md` quotes the census in more
 sentences than the five above; every one of them is in the table, which is why
 a change to that document's wording can now fail this file.)
 
@@ -360,7 +360,7 @@ def test_every_declaration_is_seen():
     #
     # 544 -> 546: `mojo_open` and `mojo_close`, declared under the same
     # `#ifndef __MOJO_STDLIB_MODE__` guard `mojo_write` uses
-    # (`runtime/fire_runtime.h`, and `FORMAL_runtime_library_on_the_link_line`
+    # (`runtime/fire_runtime.h`, and `bugs/FORMAL_runtime_library_on_the_link_line.md`
     # §0.2 for why they were left out and what decided it). Both are DEFINED by
     # `fire_runtime.c` in both arms of its `#if USE_PYTHON`, with the signature
     # declared here, so both cross the export-trie intersection and both are
@@ -497,29 +497,7 @@ def test_every_declaration_is_seen():
     # header by one more name since the 740 rung without bumping it (the
     # scanner read 741 on master), so the figure is read off the MERGED header
     # and not added up from the two sides.
-    #
-    # 806 -> 807 (2026-11-11): `mojo_dict_slot_boxed_kw`, the BOXED read's `_kw`
-    # twin. `mojo_dict_slot_boxed` keeps a slot's own kind (a bool stays a
-    # boxed bool, a None stays None), so an integer KEY could not use
-    # `mojo_dict_get_int_kw` — that hands back the raw word and
-    # `print(d[True])` would say `1` where CPython says `True`. The twin runs
-    # `_kw_kind`'s three-arm dispatch and answers through `_dict_slot_boxed`,
-    # so `d[i]` on a `Dict[Int, Int]` reads the same boxed value the char*
-    # spelling produces with nothing formatted to get there. The codegen half
-    # is ONE set entry (`emit_infra._KW_DICT_FNS`), which `_apply_kw_keys`
-    # renames through — the same mechanism as the other fourteen twins.
-    #
-    # 807 -> 810 (2026-11-12): the `str`-box predicates `mojo_is_str_box` and
-    # `mojo_word_is_text`, plus the accessor `mojo_str_box_word` (73076be07,
-    # "codegen: a str stored into a mixed tagged name is a box (step 2 part
-    # 3)"). A `str` stored into a name that also holds a tagged generator word
-    # is boxed with a kind-'p' box, so `len(x)` and `x + "!"` have to ask
-    # whether a word is such a box; all three are word-shaped (an `int64_t` in
-    # and a word or `int` out), which is why the word figure moves 415 -> 418
-    # with them. The commit added the declarations without a rung — the drift
-    # this ladder exists to catch — so the number is read off the call (810),
-    # not added up.
-    for header, want in (('fire_runtime.h', 810),   # --fix writes the live figure
+    for header, want in (('fire_runtime.h', 794),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already
@@ -641,7 +619,7 @@ def test_every_declaration_is_seen():
     # This rung is the one `bugs/CODEGEN_the_runtime_export_ladder_is_five_
     # behind.md` filed for, together with the five PROSE copies of the census
     # in `formal/model.py`, `build_stdlib_dylib.py` and
-    # `FORMAL_known_limits`. Both are closed by the same thing: this
+    # `bugs/FORMAL_known_limits.md`. Both are closed by the same thing: this
     # entry, its ladder rung, and `--fix`, which writes the live scan into
     # every quote from the table above rather than leaving five hand-typed
     # copies of a computed number to agree with each other. The doc went with
@@ -737,12 +715,47 @@ CENSUS_QUOTES = (
     ('formal/model/builtins.py',
      r'a rule that refuses all (\d+) entry points for that reason',
      ('total',)),
+    ('bugs/FORMAL_known_limits.md',
+     r'\| entry points declared \| (\d+) \|',
+     ('total',)),
+    ('bugs/FORMAL_known_limits.md',
+     r'\| every type crossing the boundary is one word \| \*\*(\d+)\*\* \|',
+     ('word',)),
+    ('bugs/FORMAL_known_limits.md',
+     r'\| a box in an argument or the return \| (\d+) \|',
+     ('box',)),
+    ('bugs/FORMAL_known_limits.md',
+     r'\*\*(\d+) of (\d+) is what a link line converts',
+     ('word', 'total')),
+    ('bugs/FORMAL_known_limits.md',
+     r'For `mojo_sqlite3_\*` it is \*\*(\d+) of (\d+)\*\*',
+     ('sqlite_word', 'sqlite_total')),
+    ('bugs/FORMAL_known_limits.md',
+     r'\| of the (\d+), refused only for want of a linked library \| (\d+) \|',
+     ('word', 'word')),
+    ('bugs/FORMAL_known_limits.md',
+     r'the shape answers the same question for all (\d+)\n'
+     r'entry points instead of',
+     ('total',)),
+    ('bugs/FORMAL_known_limits.md',
+     r'repeating this table: (\d+)\s*\nentry points, (\d+) word-shaped, '
+     r'(\d+) with a box',
+     ('total', 'word', 'box')),
     # the round-1 correction: the split by RETURN TYPE alone, which is a
     # different question from the table's (every type crossing the boundary)
     # and so a different pair of figures -- quoted here because the doc quotes
     # it, and derived with `model`'s own word rule rather than by arithmetic.
+    ('bugs/FORMAL_known_limits.md',
+     r'I measure (\d+) / (\d+) / (\d+) by return type alone, and (\d+)\s*\n',
+     ('total', 'return_word', 'return_box', 'word')),
+    ('bugs/FORMAL_known_limits.md',
+     r'So today the (\d+) are refused',
+     ('word',)),
+    ('bugs/FORMAL_known_limits.md',
+     r'it is the only thing between the (\d+) and working code',
+     ('word',)),
     # `FORMAL.md` §2.2's census table and its `N of M` sentence. **This is the
-    # gap whose bug doc was `FORMAL_phase2_export_ceiling_is_four_behind`**,
+    # gap whose bug doc was `FORMAL_phase2_export_ceiling_is_four_behind.md`**,
     # deleted with its fix on 2026-10-05 (fixed at commit 9e79c79e: the ten entry
     # points this describes are now in `FORMAL.md`, the `word` row is checked by
     # `test_formal_runtime_link.py` as well as here, and `test_runtime_header_scan.py
@@ -774,32 +787,6 @@ CENSUS_QUOTES = (
     ('FORMAL.md',
      r'So \*\*(\d+) of (\d+) \([\d.]+%\)\*\* is the reachable-surface ceiling',
      ('word', 'total')),
-    # The RESTATEMENTS of the census outside §2.2's table (§3.2's non-word
-    # sentence, §5's "N of the box-crossing", §6's phase-2 word row and the two
-    # sentences below it). They are in this table because they were exactly what
-    # a hand refresh missed: a rung that adds a word-shaped entry point moves
-    # `word` and leaves `box` alone, and the §3.2 sentence quotes `box` where
-    # §2.2's table is the thing a person edits. They are read with the same
-    # `live_census()` the table's own rows use, and `--fix` writes them, so a
-    # refresh cannot stop at the table again.
-    ('FORMAL.md',
-     r'So the \*\*(\d+)\*\* non-word entry points',
-     ('box',)),
-    ('FORMAL.md',
-     r'the (\d+)\s*\nbox-crossing entry points of §2\.2',
-     ('box',)),
-    ('FORMAL.md',
-     r'and the (\d+) become callable',
-     ('box',)),
-    ('FORMAL.md',
-     r'\| word-shaped entry points \(`runtime_abi`\) \| (\d+) \| (\d+) \|',
-     ('word', 'word')),
-    ('FORMAL.md',
-     r'gaps between the\s+(\d+) of the row above',
-     ('word',)),
-    ('FORMAL.md',
-     r'\*\*\d+ of the (\d+)\*\* the dylib\s+does not export',
-     ('word',)),
     ('formal/build.py',
      r'§3\.1 for the word-shaped surface \((\d+) entry points, (\d+) of them '
      r'word-shaped,',
@@ -827,7 +814,7 @@ def live_census():
     """Every figure the prose quotes, read off the headers exactly once.
 
     `return_word`/`return_box` are the split the round-1 correction in
-    `FORMAL_known_limits` quotes: the RETURN type alone, with the
+    `bugs/FORMAL_known_limits.md` quotes: the RETURN type alone, with the
     argument list not counted. That is a different question from the table's
     ("every type crossing the boundary"), so it is a different pair of numbers
     from the same table -- asked with `model`'s own word rule rather than by
@@ -886,7 +873,7 @@ def rewrite_quoted_figures():
         try:
             with open(full, encoding='utf-8') as f:
                 # re-read every time: two entries can name the same file (and
-                # several name FORMAL_known_limits), and an earlier write in
+                # several name FORMAL_known_limits.md), and an earlier write in
                 # this loop has to be visible to the later ones
                 text = f.read()
         except OSError as e:
