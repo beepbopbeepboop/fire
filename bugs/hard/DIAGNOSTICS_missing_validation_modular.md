@@ -120,9 +120,8 @@ See build/checkfail_candidates.json (61 error-like cases).
 - **Landed (follow-up, 2026-11-09):** `error: import of 'X' is ambiguous` at
   the second of two same-name imports from different modules into one
   function scope, with notes naming where each module declares it
-  (`import_fn_scope_ambiguous.mojo`). Regression coverage is in the
-  compiler's own diagnostics; the modular test's inputs are not in this
-  tree.
+  (`import_fn_scope_ambiguous.mojo`). Regression:
+  `test_ambiguous_import_diagnostic.py`.
 - **Landed (follow-up, 2026-11-09):** a qualified access `mod.name` must
   resolve `name` against `mod` only — `other.shared_fn` (an `__init__`
   re-export) and `other.helpers` (a sibling module) are hard errors
