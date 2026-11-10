@@ -158,16 +158,29 @@ an exited task whose branch still has commits master lacks (<code>git rev-list -
 <table>
 <tr><th>From</th><th>To</th><th>Trigger</th></tr>
 <tr><td>queued</td><td>running</td><td>spawn / refill starts the worker</td></tr>
-<tr><td>running</td><td>exited-ok</td><td>worker prints CONTROL-STATUS: DONE</td></tr>
-<tr><td>running</td><td>exited-err</td><td>worker prints PARTIAL / BLOCKED or exits nonzero</td></tr>
-<tr><td>running</td><td>superseded</td><td>restart (snapshot + continue as NAME-r2)</td></tr>
+<tr><td>running</td><td>exited-ok</td><td>worker exits 0 after CONTROL-STATUS: DONE</td></tr>
+<tr><td>running</td><td>exited-err</td><td>worker exits nonzero, is killed, or says PARTIAL / BLOCKED</td></tr>
 <tr><td>exited-ok</td><td>integrated</td><td>branch lands on master (rev-list master..BRANCH == 0)</td></tr>
-<tr><td>exited-ok</td><td>abandoned</td><td>manually declared worthless</td></tr>
-<tr><td>exited-err</td><td>superseded</td><td>restart from the failed attempt</td></tr>
+<tr><td>exited-ok</td><td>integration-failed</td><td>the landing gate is red</td></tr>
+<tr><td>exited-ok</td><td>superseded</td><td>its branch conflicts at merge: a merge-fixer task takes over (enqueue_merge_fix)</td></tr>
+<tr><td>exited-ok</td><td>superseded</td><td>restart — only when the task is genuinely dead: no exitcode file, slot free, model not banned</td></tr>
+<tr><td>exited-ok</td><td>abandoned</td><td>retire_dead (finished, no commits) or continue_partial (a continuation is queued)</td></tr>
+<tr><td>exited-err</td><td>superseded</td><td>restart from the failed attempt (same guards)</td></tr>
+<tr><td>exited-err</td><td>abandoned</td><td>retire_dead: no commits and nothing pursuing it</td></tr>
+<tr><td>integration-failed</td><td>superseded</td><td>enqueue_red_fix: a red-fix task continues from the branch</td></tr>
+<tr><td>integration-failed</td><td>integrated</td><td>a later landing of that branch is green</td></tr>
 <tr><td>integrated</td><td>(terminal)</td><td>claims released; doc deleted; no re-dispatch</td></tr>
-<tr><td>superseded</td><td>(terminal for old task)</td><td>new task holds the claims; old task is gone</td></tr>
+<tr><td>superseded</td><td>(terminal for the old task)</td><td>the new task holds the claims</td></tr>
 <tr><td>abandoned</td><td>(terminal)</td><td>claims released</td></tr>
 </table>
+<p class="warn"><b>Never.</b> A task that wrote an <code>exitcode</code> file has finished: <code>state_of</code> already reports
+<code>exited-ok</code>/<code>exited-err</code> for it, so restarting it supersedes finished work (2026-11-10: <code>r329</code> said
+DONE, exited 0, and <code>sync --restart-dead</code> restarted it anyway, superseding a finished task). A dead worker is
+never restarted into a slot that is disabled (<code>count 0</code>) or already at its count, or into a banned model —
+those can only fail again, which is what pinned one doc to an expired haiku OAuth session for 335 rounds. And a chain is
+never restarted past <code>MAX_RESTARTS</code> (10): over budget the task is abandoned, its claim is released, and the doc
+is re-fed (a fresh worker, possibly a different model). An authentication failure is a model failure, not a worker
+failure: it bans the model instead of restarting the worker.</p>
 <p class="warn">A task in integrated or superseded or abandoned never transitions back to running or exited-ok. Re-dispatching the same bug doc creates a new task with a new name, and only if the doc still exists and is not ratcheted.</p>
 <div class="note"><b>DONE ratchet (2026-11-09):</b> a doc that any branch has already deleted is treated as resolved and is never re-dispatched, even while master still lists it and even if its claim was released. It is enforced in three places: the swarm's feed (<code>tools/swarm.py</code>), the formal feeder (<code>tools/formal_feed.py</code>), and <code>control.py sync --restart-dead</code> (which supersedes a dead task whose docs are all gone instead of restarting it). This is what stops the loop where a fixed bug is re-fixed forever.</div>
 The cure is to <b>land the finished branches</b> (§7), not to release claims by hand. Hand-marking <code>integrated</code> is only right after you have verified the branch is on master (or truly worthless).</p>
