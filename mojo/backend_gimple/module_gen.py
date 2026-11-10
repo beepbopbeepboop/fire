@@ -3570,16 +3570,19 @@ def _gmi_capture_nested_class_enclosing_reads(self, stmts: list) -> None:
     BY REFERENCE applies to a class written DIRECTLY in the enclosing
     function's body (`_ec_direct` below), and to a class inside a nested
     `def`, when -- in BOTH cases -- the captured name is bound by THIS
-    function itself (`_ef_own` below). A name bound only inside a nested
-    `def`/class is not a local here at all (it is a global read), so it keeps
-    the by-value cell. For the nested-`def` case the `class` statement is
-    emitted in that def's LIFTED C function, which reaches this frame through
-    its closure env;
-    the name is therefore added to the inner closure's `mut_names` and its
-    env field becomes the box POINTER, so the lifted frame can install it on
-    the class attribute (`discover_closures` publishes the exact names that
-    survived there). A name the lifted function does not capture (a local
-    that shadows the outer one) stays on the by-value cell.
+    function itself (`_ef_own` below) OR by the nested frame that declares
+    the class (`_ec_frame_own`; a class in `inner` reading `inner`'s own
+    local). A name bound only inside a nested `def`/class is not a local here
+    at all (it is a global read), so it keeps the by-value cell. For the
+    nested-`def` case the `class` statement is emitted in that def's LIFTED C
+    function. An OUTER-owned name is therefore added to the inner closure's
+    `mut_names` and its env field becomes the box POINTER, so the lifted frame
+    can install it on the class attribute (`discover_closures` publishes the
+    exact names that survived there). An INNER-owned name is a local of the
+    lifted frame instead: it is boxed there (`_seed_mut_captured_local_types`)
+    and `discover_closures` is told not to prune it (`_class_ref_self`). A
+    name the lifted function does not capture and does not own (one that
+    merely shadows) stays on the by-value cell.
 
     A captured name that is CALLED (`mycmp(a, b)`, the `functools.cmp_to_key`
     shape) is read into a method-local first, because `self._cap_mycmp(a, b)`
@@ -3627,6 +3630,18 @@ def _gmi_capture_nested_class_enclosing_reads(self, stmts: list) -> None:
     if _ref_attrs is None:
         _ref_attrs = {}
         self._class_ref_attrs = _ref_attrs
+    # A by-reference capture of a name owned by the CLASS-DECLARING frame
+    # itself (a class inside a nested `def` reading that def's own local, not
+    # the outermost function's). `discover_closures` prunes
+    # `_class_ref_pending[lifted]` to the names the lifted function captures
+    # from its ENCLOSING scope, which is exactly wrong for these: their home
+    # IS the lifted frame, so they must survive the prune to be typed there
+    # and boxed by `_seed_mut_captured_local_types(lifted)`. Recorded
+    # separately so the prune can tell the two kinds apart.
+    _ref_self = getattr(self, '_class_ref_self', None)
+    if _ref_self is None:
+        _ref_self = {}
+        self._class_ref_self = _ref_self
     for _ef_i in range(len(_encl_fns)):
         _ef_outer = _as_str(_encl_fns[_ef_i][0])
         # `_as_funcdef_node`: a TUPLE element indexed on the self-hosted
@@ -3672,7 +3687,7 @@ def _gmi_capture_nested_class_enclosing_reads(self, stmts: list) -> None:
         # exact walk deliberately stops at.
         _ef_bound |= _ef_own
         _ef_classes: list = []
-        _gmi_nested_struct_defs(_ef.body, '', _ef_classes, False)
+        _gmi_nested_struct_defs(_ef.body, '', _ef_classes, False, None, _ef)
         for _ec_i in range(len(_ef_classes)):
             _ec = _ef_classes[_ec_i][0]
             # The triple's middle slot is the INNERMOST enclosing function
@@ -3689,6 +3704,25 @@ def _gmi_capture_nested_class_enclosing_reads(self, stmts: list) -> None:
             # (its home is that def, not this frame).
             _ec_rel = _as_str(_ef_classes[_ec_i][1])
             _ec_direct = _ec_rel == ''
+            # The frame that DECLARES this class: `_ef` itself for a direct
+            # class, the nested `def`/method node for one written inside it
+            # (slot 3 of the `_gmi_nested_struct_defs` quad). A nested class
+            # can capture a name that is local to THAT frame, which is a
+            # different (inner) box from `_ef`'s -- see `_ec_frame_own`.
+            _ec_frame = None
+            if len(_ef_classes[_ec_i]) > 3:
+                _ec_frame = _as_funcdef_node(_ef_classes[_ec_i][3])
+            _ec_frame_own: set = set()
+            _ec_frame_globals: set = set()
+            if not _ec_direct and _ec_frame is not None:
+                _ecf_params: set = set()
+                for _ecfp in range(len(_ec_frame.params or [])):
+                    _gmi_target_leaf_names(_ec_frame.params[_ecfp][0], _ecf_params)
+                _ec_frame_globals = global_declared_names(_ec_frame.body)
+                _ec_frame_own = set(_ecf_params)
+                _ec_frame_own |= bound_name_set(_ec_frame.body)
+                if _ec_frame_globals:
+                    _ec_frame_own = _ec_frame_own - _ec_frame_globals
             _ec_key = _ef_outer
             if not _ec_direct:
                 # `discover_closures` names the lifted function
@@ -3711,27 +3745,35 @@ def _gmi_capture_nested_class_enclosing_reads(self, stmts: list) -> None:
                 _caps: dict = {}
                 for _er in _used_idents_node(_ecm.body):
                     _ern = _as_str(_er)
+                    # A `global` declaration in the DECLARING frame makes the
+                    # name a module variable there, so the method must read
+                    # the global, uncaptured -- the same rule the DIRECT case
+                    # applies through `_ef_globals` above.
+                    if _ern in _ec_frame_globals:
+                        continue
                     if _ern in _ef_bound and _ern not in _ecm_own:
                         _caps[_ern] = True
                 if not _caps:
                     continue
-                # The captures this frame can box and install as a BOX
-                # POINTER on the class attribute: only a name `_ef` binds
-                # ITSELF. `_ef_bound` over-approximates with bindings inside
-                # nested defs/classes, so a name bound only there (`G` in
+                # The captures that can be BY REFERENCE: a name `_ef` binds
+                # ITSELF (the outer-owner path, whose box travels through the
+                # lifted function's env), or -- for a class inside a nested
+                # `def` -- a name local to THAT declaring frame (the inner
+                # box lives in the lifted function's own frame, where the
+                # `class` statement is emitted). `_ef_bound` over-approximates
+                # with bindings inside nested defs/classes, so a name bound
+                # only in some OTHER nested def (`G` in
                 # `def f(): def inner(): G = 1; class C: def get(): return G`)
-                # is not a local of `_ef` at all -- it is a GLOBAL read. Boxing
-                # it would declare a fresh local shadowing that global and the
-                # method would read the box, which nothing ever writes. Such a
-                # name keeps the by-VALUE cell, whose `_cap_G = G` reads what
-                # `G` means in this frame (the global), exactly as before this
-                # pass became by-reference. For a nested-`def` class,
-                # `discover_closures` prunes the candidate set once more to the
-                # names the lifted function actually captures (a local
-                # SHADOWING the same name must stay by value).
+                # is not a local of either frame at all -- it is a GLOBAL
+                # read. Such a name keeps the by-VALUE cell, whose `_cap_G =
+                # G` reads what `G` means in this frame (the global), exactly
+                # as before this pass became by-reference. For a nested-`def`
+                # class, `discover_closures` prunes the outer-owner candidates
+                # once more to the names the lifted function actually captures
+                # (a local SHADOWING the same name must stay by value).
                 _ec_by_ref: dict = {}
                 for _cn6 in sorted(_caps):
-                    if _cn6 in _ef_own:
+                    if _cn6 in _ef_own or _cn6 in _ec_frame_own:
                         _ec_by_ref[_cn6] = True
                 _called: dict = {}
                 for _cn in _walk_ast(_ecm.body):
@@ -3791,6 +3833,22 @@ def _gmi_capture_nested_class_enclosing_reads(self, stmts: list) -> None:
                     for _cn5 in sorted(_ec_by_ref):
                         if _cn5 not in _ef_caps:
                             _ef_caps.append(_cn5)
+                # The names whose home is the declaring frame ITSELF. They go
+                # into `_class_ref_pending` like every other by-reference
+                # candidate (that list is how the child scope publishes its
+                # types), but `discover_closures` must not prune them against
+                # the lifted function's captures-from-the-enclosing-scope --
+                # they are not captures, they are locals of that function.
+                if _ec_frame_own:
+                    _self_caps = _ref_self.get(_ec_key)
+                    if _self_caps is None:
+                        _self_caps = []
+                        _ref_self[_ec_key] = _self_caps
+                    for _cn7 in sorted(_ec_by_ref):
+                        if _cn7 not in _ec_frame_own:
+                            continue
+                        if _cn7 not in _self_caps:
+                            _self_caps.append(_cn7)
                 _self_name = _as_str(_ecm.params[0][0])
                 _map: dict = {}
                 _prologue: list = []

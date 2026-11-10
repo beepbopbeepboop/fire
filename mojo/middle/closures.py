@@ -661,16 +661,35 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
             if _class_pending is not None:
                 _cand = _class_pending.get(lifted)
                 if _cand:
+                    # A name owned by THIS lifted frame (a class declared in
+                    # this `def` reading this `def`'s own local) is not a
+                    # capture from the enclosing scope at all, so it must
+                    # survive the capture prune and be typed/boxed here. The
+                    # pass recorded those names separately for exactly this
+                    # reason (`_class_ref_self`).
+                    _self_now: set = set()
+                    _class_self = getattr(ctx, '_class_ref_self', None)
+                    if _class_self is not None:
+                        for _sn0 in (_class_self.get(lifted) or []):
+                            _self_now.add(_as_str(_sn0))
                     _cap_names_now = dict(ci.captures)
                     _kept: list = []
                     for _cand_n in _cand:
-                        if _as_str(_cand_n) in _cap_names_now:
+                        _cand_s = _as_str(_cand_n)
+                        if _cand_s in _cap_names_now or _cand_s in _self_now:
                             _kept.append(_cand_n)
                     if len(_kept) != len(_cand):
                         _class_pending[lifted] = _kept
-                    if _kept:
+                    # Only a real capture becomes a `mut_names` member: the
+                    # self-owned names are locals of this frame and there is
+                    # no env field to widen for them.
+                    _kept_caps: list = []
+                    for _kn in _kept:
+                        if _as_str(_kn) in _cap_names_now:
+                            _kept_caps.append(_kn)
+                    if _kept_caps:
                         ci.mut_names = frozenset(
-                            set(ci.mut_names) | set(_kept))
+                            set(ci.mut_names) | set(_kept_caps))
             if outer_name not in ctx._all_closures:
                 ctx._all_closures[outer_name] = {}
             # Keyed by the `_as_str` view: the call-group merge below looks

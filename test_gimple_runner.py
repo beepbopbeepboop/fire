@@ -2479,6 +2479,121 @@ def main():
     print(outer())
 """, "100\n")
 
+    # The class-declaring frame's OWN local (not the outermost function's):
+    # the box has to live in the lifted nested `def`, which is where the
+    # `class` statement is emitted. A name whose first binding comes after
+    # the class statement used to be captured by value (silent 0).
+    test_gimple_stdout(
+        "gimple_nested_class_nested_def_own_local_late_binds", """\
+def outer():
+    def inner():
+        class C:
+            def get(self):
+                return x
+        x = 100
+        print(C().get())
+    inner()
+
+def main():
+    outer()
+""", "100\n")
+
+    # ...and a name the SAME nested `def` binds before the class and rebinds
+    # after it was refused outright. Python's cell is late-bound: the method
+    # sees 200. `_ef_own` (the outermost frame's set) cannot answer this --
+    # the owner is `inner` -- so the capture pass has to carry the declaring
+    # frame through the walk.
+    test_gimple_stdout(
+        "gimple_nested_class_nested_def_own_local_rebind", """\
+def outer():
+    def inner():
+        x = 100
+        class C:
+            def get(self):
+                return x
+        x = 200
+        print(C().get())
+    inner()
+
+def main():
+    outer()
+""", "200\n")
+
+    # An instance built BEFORE the rebind must see the new value: the
+    # instance cell points at `inner`'s box, not at a snapshot.
+    test_gimple_stdout(
+        "gimple_nested_class_nested_def_own_local_sees_rebind", """\
+def outer():
+    def inner():
+        x = 100
+        class C:
+            def get(self):
+                return x
+        c = C()
+        x = 200
+        return c.get()
+    return inner()
+
+def main():
+    print(outer())
+""", "200\n")
+
+    # The box's C type comes from the declaring frame's scope: a `str` bound
+    # after the class statement is a pointer, so a wrong-width box would
+    # print its address as decimal.
+    test_gimple_stdout(
+        "gimple_nested_class_nested_def_own_str_keeps_pointer_width", """\
+def outer():
+    def inner():
+        class C:
+            def show(self):
+                print(x)
+        x = "word"
+        C().show()
+    inner()
+
+def main():
+    outer()
+""", "word\n")
+
+    # A PARAMETER of the class-declaring nested `def` is owned by that frame
+    # too (not by the outermost function), and must be boxed in the lifted
+    # frame the same way.
+    test_gimple_stdout(
+        "gimple_nested_class_nested_def_own_param_late_binds", """\
+def outer():
+    def inner(x: str):
+        class C:
+            def show(self):
+                print(x)
+        C().show()
+    inner("param")
+
+def main():
+    outer()
+""", "param\n")
+
+    # A `global` declared by the class-declaring nested `def` is a MODULE
+    # variable there, so it must be left uncaptured and read at call time --
+    # the same rule the direct shape already follows.
+    test_gimple_stdout(
+        "gimple_nested_class_nested_def_global_is_not_captured", """\
+G = 3
+
+def outer():
+    def inner():
+        global G
+        class C:
+            def get(self):
+                return G
+        G = 10
+        print(C().get())
+    inner()
+
+def main():
+    outer()
+""", "10\n")
+
     # A name bound ONLY inside a nested `def` is not a local of the
     # class-declaring function: Python resolves the method's read to the
     # MODULE global of that name, and the nested def's local must not become
