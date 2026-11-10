@@ -87,3 +87,37 @@ nine stubs (`append`, `update`, `items`, `object`, `issubclass`, `MojoParser`, `
 directory, then `grep -c 'unavailable in compiled mode' fire.ci`. Fixing it is what lets
 `bootstrap-stage1-transitive`, then stage2/stage3, run; do that before re-enabling the gate entries.
 
+### 2026-11-10: targeted self-host sibling home fix landed (verification pending, heavy)
+
+`mojo/backend_gimple/emit_methods.py` (`_lower_method_call`, self-host sibling
+module-qualified call path): before re-dispatching `alias.member(...)` as a bare
+call, pin `member`'s home to the imported sibling module named by the alias via
+`_note_own_func_home(method_name, <alias.module>, record_scope=False)`. This
+addresses the documented root-cause shape where the call site is lowered as an
+unqualified bare `_open_block_scope` while the definition is emitted under its
+qualified mangled symbol, which can occur when the defining sibling module is
+compiled later in a cycle and the member is absent from this gen's flat
+`func_param_types`/`func_return_types` tables.
+
+Quick checks run (memslot-wrapped): `pytest -q test_link_mode.py -k
+bare_submodule_import_call_inside_source_tree` (1 passed);
+`python3 test_module_boundary_regression.py` (6/7 passed; 1 failure
+`imported_generator_mixed_str_int_call_sites_refused` — gcc ld error for
+undefined `__mojogen_m_gen_*` symbols, not compared to a pre-change baseline in
+this session).
+
+NOT VERIFIED (requires heavy/whole-closure runs this worker must not perform):
+- Repro from this doc in an empty directory:
+  `python3 fire.py --dump-full fire.py` then
+  `grep -c 'unavailable in compiled mode' fire.ci` (expect drop from 26,
+  ideally 0 for the 17 private sibling-alias stubs listed above; the other 9
+  may need separate fixes).
+- `bootstrap-stage1-transitive`, `bootstrap-stage2-dumps`,
+  `bootstrap-stage3-dumps` and re-enabling the four gate entries once green.
+
+If the dump-full repro still shows the same private sibling stubs, the next step
+remains deeper: ensure the defining sibling's function signatures/homes are
+pre-registered into the shared/visible tables for cyclic self-host modules
+before dependent call sites are lowered (not just noting the home at call time),
+and investigate the 9 non-sibling stubs separately.
+

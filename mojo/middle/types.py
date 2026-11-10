@@ -22,7 +22,7 @@ import os
 import re
 import sys
 import dataclasses
-from fire_compiler import split_top_level_commas, target_slots, for_target_is_tuple, for_target_names, for_target_single_name, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, DottedLiteral, NoneLiteral, CastExpr, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, MatchCase, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _as_floatlit_node, _float_c_literal, _signed_int64, _signed_int64_c_literal, decode_c_escapes
+from fire_compiler import split_top_level_commas, target_slots, for_target_is_tuple, for_target_names, for_target_single_name, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, DottedLiteral, NoneLiteral, CastExpr, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, MatchCase, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal, decode_c_escapes
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
 import mlir
@@ -384,33 +384,7 @@ _BUILTIN_RET_CTYPES = {
     'frozenset': 'MojoSet *',
 }
 
-# Scalar builtins whose result type is fixed by the builtin alone, whatever
-# the arguments are. Read by `_quick_type` (resolve_shared.py) for the call's
-# type, and by the module-scope class-attribute gate (module_gen.py), which
-# must accept exactly the calls `_quick_type` can type from the builtin rather
-# than from a guess. One table, so the two cannot disagree.
-#
-# `abs(x)` is NOT here: it returns its argument's own type, so it is answered
-# where the argument is available. Same for every other name that needs its
-# arguments. Each entry is only used when the name is not shadowed by a
-# module-level def or import (`_locally_binds_name`).
-#
-# `isinstance()`/`all()`/`any()` always return a plain Python bool regardless
-# of their arguments' types, so they are `_Bool` here. The real emission
-# (_lower_builtin_isinstance/_lower_builtin_all_any) produces a C `int`, but
-# `_Bool` matches every other boolean-producing case in `_quick_type` (BinaryOp
-# compare/'in', CompareChain, UnaryOp 'not', BoolLiteral) and avoids joining as
-# an opaque int64_t/pointer against a sibling return path of a real pointer
-# type (the comprehension return-type int64_t-default bug: a comprehension
-# returned from a function whose sibling return path is a pointer).
-_BUILTIN_SCALAR_RET_CTYPES = {
-    'float': 'double', 'int': 'int64_t', 'str': 'char *',
-    'len': 'int64_t', 'ord': 'int64_t', 'chr': 'char *',
-    'bool': '_Bool', 'repr': 'char *',
-    'isinstance': '_Bool', 'all': '_Bool', 'any': '_Bool',
-}
-
-_SCALAR_INT_TYPES =frozenset({'int', 'char', '_Bool', 'int8_t', 'int16_t', 'int32_t', 'int64_t', 'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'})
+_SCALAR_INT_TYPES = frozenset({'int', 'char', '_Bool', 'int8_t', 'int16_t', 'int32_t', 'int64_t', 'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'})
 # The plain SIGNED subset: the operand types for which `a / b` is true division
 # (Float64). One definition, read by the plain tail (emit_exprs.py), the
 # coroutine emitter (cpp_core.py) and the static result-type inference
@@ -1658,20 +1632,6 @@ def cattr_cell_field(attr: str) -> str:
     return '_clscell_' + attr
 
 
-def cattr_unwind_push(gname: str) -> str:
-    """Name of the untagged C accessor that pushes `gname`'s class-attribute
-    unwind record (see module_gen's cell declaration and
-    emit_methods._cattr_restore_begin). One name, used by the emitter of the
-    accessor and its call site, so they cannot drift.
-
-    The accessor exists because the record's slot is the ADDRESS of the cell
-    global, and `-fgimple` rejects `&<variable>` inside a `__GIMPLE`-tagged
-    body — which every struct method is. The accessor's own body is plain C,
-    so it can take the address there; the tagged body only calls it.
-    """
-    return '_cattr_unwind_push_' + gname
-
-
 def _safe_field(name: str) -> str:
     """Sanitize struct field and parameter names that are C keywords or
     platform-macro names (see _C_MACRO_NAMES's `stdin`/`stdout`/`stderr`
@@ -2184,8 +2144,6 @@ def _extract_init_expr(stmt_value) -> str:
         return _signed_int64_c_literal(_v64)
     if isinstance(stmt_value, BoolLiteral):
         return '1' if _as_boollit_node(stmt_value).value else '0'
-    if isinstance(stmt_value, FloatLiteral):
-        return _float_c_literal(_as_floatlit_node(stmt_value).value)
     if isinstance(stmt_value, DictExpr):
         if not stmt_value.pairs:
             return 'mojo_dict_new()'

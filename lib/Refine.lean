@@ -972,39 +972,6 @@ theorem dylib_export_contract_of_spec (image : DylibImage)
     DylibExportContract (dylibExportProg image export_) spec n := by
   exact hspec n
 
-/-- **The guarded obligation.**  Like `export_result_spec`, but only for the
-    inputs that satisfy `pre`.  An export whose body has an overflow trap cannot
-    be stated over every `n`: on an overflowing input the trap's stop is not a
-    final state of the machine model, and the model's `svc` is a no-op, so the
-    unguarded claim would be false there.  `pre` is what the trap's guards say
-    the NORMAL path needs (no overflow), and the obligation is exactly as strong
-    as the normal path. -/
-def export_result_spec_under (pre : UInt64 → Prop) (image : DylibImage)
-    (export_ : DylibExport) (spec : UInt64 → UInt64) : Prop :=
-  ∀ (n : UInt64) (s : Arm64State), pre n →
-    runProg (dylibExportProg image export_) n = some s → s.x0 = spec n
-
-/-- The guarded contract a caller may use: on `pre`-inputs the export's result is
-    `obs`.  The guarded counterpart of `DylibExportContract`. -/
-def DylibExportContractUnder (p : Prog) (pre : UInt64 → Prop)
-    (obs : UInt64 → UInt64) (n : UInt64) : Prop :=
-  pre n → ∀ s, runProg p n = some s → s.x0 = obs n
-
-/-- The guarded obligation gives the guarded contract, with no new assumption. -/
-theorem dylib_export_contract_of_spec_under (image : DylibImage)
-    (export_ : DylibExport) (pre : UInt64 → Prop) (spec : UInt64 → UInt64)
-    (hspec : export_result_spec_under pre image export_ spec) (n : UInt64) :
-    DylibExportContractUnder (dylibExportProg image export_) pre spec n :=
-  fun hp s h => hspec n s hp h
-
-/-- The unguarded obligation is the guarded one with the trivial precondition.
-    Only exports with no trap may use it. -/
-theorem export_result_spec_of_true (image : DylibImage) (export_ : DylibExport)
-    (spec : UInt64 → UInt64)
-    (h : export_result_spec_under (fun _ => True) image export_ spec) :
-    export_result_spec image export_ spec :=
-  fun n s hr => h n s trivial hr
-
 /-- **The same, for a caller that has discharged the obligation.**  Stated over
     the machine's own run rather than `runProg`, so a proof that already has
     the run in hand does not have to re-derive it. -/

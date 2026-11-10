@@ -695,9 +695,6 @@ MojoList *mojo_exc_args(void *obj);
 MojoList *mojo_list_new(void);
 int mojo_is_registered_list(int64_t addr);
 int mojo_boxed_is_str(int64_t v);
-int mojo_is_str_box(int64_t v);
-int64_t mojo_str_box_word(int64_t v);
-int mojo_word_is_text(int64_t v);
 /* Register a non-heap string (the codegen's `__rodata` literal pool) so
  * `mojo_boxed_is_str` can tell it from a bare int64_t. See `_reg_str` in the
  * .c for the discriminator this feeds. */
@@ -764,12 +761,6 @@ MojoList *mojo_iter_gen_handle(int64_t w);
 int64_t mojo_gen_note(int64_t h, void *start);
 int64_t mojo_gen_note_a3(int64_t h, int64_t vkind);   /* 0 int, 1 bool, 2 double, 3 str */
 int64_t mojo_gen_default_word(void *start, int64_t idx);
-void mojo_gen_throw_set(int64_t hw, int64_t type, char *msg, void *obj);
-int mojo_gen_throw_take(int64_t hw, int64_t *type, char **msg, void **obj);
-int mojo_gen_cm_is_handle(int64_t w);
-int64_t mojo_gen_cm_enter(int64_t w);
-void mojo_gen_cm_exit_normal(int64_t w);
-void mojo_gen_cm_exit_exc(int64_t w);
 /* `x in <boxed container>`: resolves list/dict/set at runtime instead of
  * the old hardcoded-false fallback. See mojo_in_dispatch_str's definition. */
 int mojo_in_dispatch_str(int64_t container, char *needle);
@@ -1090,12 +1081,6 @@ int mojo_truthy_cstr(char *s);
 int mojo_pyobject_truthy(int64_t box);
 int mojo_pyobject_is_container(int64_t box);
 int64_t mojo_pyobject_hash(int64_t box);
-/* Hasher: the `hasher` argument of a stdlib `__hash__(mut hasher)`. A word that
-   holds a heap state; a scalar's `__hash__(hasher)` folds its value in, and
-   `mojo_hasher_finish` reads the result. */
-int64_t mojo_hasher_new(void);
-void mojo_hasher_update_int(int64_t hasher, int64_t value);
-int64_t mojo_hasher_finish(int64_t hasher);
 char *mojo_pyobject_str(int64_t box);
 double mojo_pyobject_box_as_double(int64_t box);
 int64_t mojo_pyobject_arith(char op, int64_t a, int64_t b, int a_dbl, int b_dbl);
@@ -1519,8 +1504,6 @@ int64_t mojo_gen_call_with(void *start, MojoList *pre, MojoList *a, MojoDict *kw
 /* run-time class attributes (see the definitions): a class is its type tag */
 void    mojo_register_getattr_dispatch(int64_t (*fn)(void *, char *));
 int64_t mojo_getattr_any(void *obj, char *attr);   /* obj.attr on a word: struct reflection of any module */
-/* getattr(obj, attr, dflt) on a word with a runtime-computed name: a miss yields dflt. */
-int64_t mojo_getattr_default(void *obj, char *attr, int64_t dflt);
 void    mojo_class_register(int64_t tag, int64_t base_tag, char *name);
 void    mojo_class_setattr(int64_t tag, char *name, int64_t word);
 void    mojo_register_classattr_reader(int (*fn)(int64_t, char *, int64_t *));
@@ -1604,9 +1587,6 @@ void        mojo_dict_set_none_key_struct(MojoDict *d, void *v);
 int64_t     mojo_dict_get_none_key_int(MojoDict *d);
 char       *mojo_dict_get_none_key_str(MojoDict *d);
 double      mojo_dict_get_none_key_double(MojoDict *d);
-int64_t     mojo_dict_slot_kind_none(MojoDict *d);
-char       *mojo_dict_repr_slot_none(MojoDict *d);
-int64_t     mojo_dict_slot_boxed_none(MojoDict *d);
 void        mojo_dict_set_bytes_none_key(MojoDict *d, MojoBytes *key, int64_t v);
 
 /* A STRUCT stored as a dict VALUE: the boxed pointer, tagged `kind == 5` so
@@ -1628,8 +1608,6 @@ double      mojo_dict_get_double(MojoDict *d, char *key);
 char *mojo_dict_get_str(MojoDict *d, char *key);
 int64_t mojo_dict_slot_kind(MojoDict *d, char *key);
 char *mojo_dict_repr_slot(MojoDict *d, char *key);
-int64_t mojo_dict_slot_boxed(MojoDict *d, char *key);
-int64_t mojo_dict_slot_boxed_kw(MojoDict *d, int64_t kw);
 int64_t     mojo_dict_setdefault_int(MojoDict *d, char *key, int64_t dflt);
 char       *mojo_dict_setdefault_str(MojoDict *d, char *key, char *dflt);
 MojoList   *mojo_dict_keys(MojoDict *d);
@@ -1823,9 +1801,6 @@ void        mojo_dict_set_bytes_other_struct(MojoDict *d, MojoBytes *key, void *
 int64_t     mojo_dict_get_bytes_int(MojoDict *d, MojoBytes *key);
 char       *mojo_dict_get_bytes_str(MojoDict *d, MojoBytes *key);
 double      mojo_dict_get_bytes_double(MojoDict *d, MojoBytes *key);
-int64_t     mojo_dict_slot_kind_bytes(MojoDict *d, MojoBytes *key);
-char       *mojo_dict_repr_slot_bytes(MojoDict *d, MojoBytes *key);
-int64_t     mojo_dict_slot_boxed_bytes(MojoDict *d, MojoBytes *key);
 int         mojo_dict_contains_bytes(MojoDict *d, MojoBytes *key);
 int64_t     mojo_dict_setdefault_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt);
 int64_t     mojo_dict_pop_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt);
@@ -2050,9 +2025,6 @@ int64_t mojo_read_type_tag_safe(int64_t addr);
 char *mojo_str(void *obj);  /* Flexible signature for both int and char* */
 char *mojo_repr_int(int64_t obj);
 char *mojo_repr_str(char *s);
-/* CPython `ascii()` of an already-repr()-rendered string: non-ASCII code
-   points escaped, ASCII bytes copied through. See fire_runtime.c. */
-char *mojo_ascii_escape(char *s);
 char *mojo_repr_obj(int64_t addr);
 char *mojo_repr_float(double v);
 char *mojo_repr_list_doubles(MojoList *l);

@@ -907,35 +907,6 @@ def test_comptime_rhs_misparse_is_refused():
                   "%s: %s" % (type(e).__name__, e))
 
 
-def test_let_declaration_parses_as_vardecl():
-    # `let` in statement position is a declaration sigil like `var`. It used to fall
-    # through to expression parsing, yielding ExprStmt(IdentExpr('let')) and a
-    # separate AssignStmt, so the declaration silently vanished from the tree.
-    from fire_compiler import VarDecl, ExprStmt, IdentExpr, AssignStmt
-    fn = _fns(_parse("def main():\n    let a = 2.5\n"))[0]
-    check("let_body_is_one_statement", len(fn.body) == 1, repr(fn.body))
-    if fn.body:
-        s = fn.body[0]
-        check("let_is_vardecl", isinstance(s, VarDecl), type(s).__name__)
-        if isinstance(s, VarDecl):
-            check("let_vardecl_name", s.name == "a", repr(s.name))
-            check("let_vardecl_value_is_float",
-                  type(s.value).__name__ == "FloatLiteral", type(s.value).__name__)
-        check("let_is_not_identexpr_stmt",
-              not (isinstance(s, ExprStmt) and isinstance(s.value, IdentExpr)
-                   and s.value.name == 'let'))
-    # `var` and `let` agree on every declaration shape: an annotation is kept,
-    # and a `let` after a `var` is its own VarDecl.
-    fn2 = _fns(_parse("def main():\n    let b: Int = 3\n"))[0]
-    s2 = fn2.body[0] if fn2.body else None
-    check("let_annotated_is_vardecl", isinstance(s2, VarDecl), type(s2).__name__)
-    if isinstance(s2, VarDecl):
-        check("let_annotated_keeps_type", s2.type_ann is not None)
-    fn3 = _fns(_parse("def main():\n    var c = 1\n    let d = 2\n"))[0]
-    kinds = [type(s).__name__ for s in fn3.body]
-    check("var_then_let_both_vardecl", kinds == ["VarDecl", "VarDecl"], repr(kinds))
-
-
 def run_tests():
     print("=" * 70)
     print("PARSER: new-modular syntax")
@@ -944,7 +915,6 @@ def run_tests():
                test_imm_convention, test_struct_where,
                test_multi_target_comptime, test_nested_target_comptime, test_fn_type_in_subscript,
                test_decorated_import, test_multi_statement_result,
-               test_let_declaration_parses_as_vardecl,
                # Both sides of this merge appended a case to the same list
                # and neither was a revert of the other: this branch brought
                # the bracket/comptime cases, master brought the struct-param

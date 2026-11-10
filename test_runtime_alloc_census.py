@@ -4,7 +4,7 @@
 The census (built with -DMOJO_ALLOC_CENSUS) attributes every malloc/calloc/
 realloc/free made by fire_runtime.c to its call site and reports, at exit,
 how many objects and bytes each site still holds live. It is the measurement
-CODEGEN_bootstrap_resource_blowup needs before choosing an AST-
+bugs/hard/CODEGEN_bootstrap_resource_blowup.md needs before choosing an AST-
 lifetime fix over a temporaries fix.
 
 The harness below includes fire_runtime.c itself (so the redirects apply to
@@ -152,7 +152,7 @@ def _run_two_tu(failures):
 # the arguments bare.
 GIMPLE_TU = [
     '#include "fire_runtime.h"',
-    '__GIMPLE void * mk_block (int64_t n)',
+    'void * __GIMPLE mk_block (int64_t n)',
     '{',
     '  void * p;',
     '',
@@ -160,7 +160,7 @@ GIMPLE_TU = [
     '  p = malloc (n);',
     '  return p;',
     '}',
-    '__GIMPLE void drop_block (void * p)',
+    'void __GIMPLE drop_block (void * p)',
     '{',
     'bb_2:',
     '  free (p);',

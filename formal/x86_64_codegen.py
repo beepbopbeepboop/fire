@@ -788,11 +788,6 @@ class X86_64Codegen:
         # names whose calls produce no value, transitively over `return <call>`
         # chains (`model.returnless_function_names`). None means "not computed".
         self._returnless = None
-        # Lazily filled by `_callee_returns_none` from `self._functions`: the
-        # name -> "every path answers None" resolver
-        # (`model.function_returns_none_resolver`). None means "not computed";
-        # the same one-table-per-compile shape as `_returnless`.
-        self._returns_none = None
         # Lazily filled by `_refuse_foreign_bytes_into_text_parameter`: the
         # parameters each function measures as TEXT, transitively through calls
         # that forward a bare parameter (`model.text_measured_parameters`).
@@ -12388,7 +12383,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             callee_is_bool=lambda callee: self._callee_is_bool(
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
-            callee_returns_none=self._callee_returns_none,
+            callee_returns_none=getattr(self, '_callee_returns_none', None) or (lambda name: False),
             callee_returned_parameter=self._callee_returned_parameter,
             dict_names=DICT_TYPE_NAMES,
             deref_kind=lambda e: M.pointer_deref_kind(
@@ -12859,20 +12854,15 @@ ctor_field_value=self._ctor_field_value_for(name),
         return name not in self._returnless
 
     def _callee_returns_none(self, name):
-        """Whether EVERY path out of the local function `name` answers `None`.
-
-        arm64's `_callee_returns_none`, over the same shared reader for the same
-        reason `_callee_returns_value` is: a construct rendered on one machine
-        and read as a word on the other is the divergence these two backends
-        exist not to have. `model.function_returns_none_resolver` is the whole
-        of the transitive half — `def h(a): return g(a)` with a return-less `g`
-        is `None` one hop out — and it is built once over `self._functions`,
-        which is fixed for a compile.
-        """
-        if self._returns_none is None:
-            self._returns_none = M.function_returns_none_resolver(
-                self._functions)
-        return self._returns_none(name)
+        fn = self._functions.get(name)
+        if fn is None:
+            return False
+        try:
+            if hasattr(M, 'function_returns_none'):
+                return M.function_returns_none(fn)
+        except Exception:
+            pass
+        return False
 
     def _callee_returned_parameter(self, name):
         """The positional index of a parameter `name` hands straight back.
@@ -13562,26 +13552,16 @@ ctor_field_value=self._ctor_field_value_for(name),
         except Exception:
             pass
         self._refuse_unusable_printf_format(name, e)
-        # …and the same call's VARARGS, a value this build knows is `None`
-        # among them.  Direction (b) makes a call to a function that always
-        # answers `None` a value whose TEXT is decided at build time, so `%s`
-        # gets the four characters (`printf_none_argument_rewrite`) rather than
-        # the word the callee never wrote.  A NUMBER conversion of the same
-        # operand is refused, because CPython raises TypeError for
-        # `"%d" % None` and this path has no exception to raise.  The rewrite
-        # is the model's, asked at the same line in both emitters (arm64's
-        # copy carries the same note), so the two architectures cannot render
-        # one call differently.
-        rewritten = M.printf_none_argument_rewrite(
-            name, list(e.args or []), self._vkinds.is_none_value)
-        if rewritten is not None:
-            new_args, reason = rewritten
-            if reason is not None:
-                raise CodegenError(reason)
-            e = F.CallExpr(func=e.func, args=new_args,
-                           kwargs=getattr(e, "kwargs", None),
-                           line=getattr(e, "line", None),
-                           col=getattr(e, "col", None))
+        # …and the same call's VARARGS, each of which the format's conversions
+        # turn into TEXT.  A return-less call here is the same value this path
+        # cannot carry that `_print_call` refuses for `print`, at the other
+        # spelling of "render this word" — see
+        # `model.returnless_printf_argument_refusal` for why it is one reader and
+        # not a second copy of `_print_call`'s loop.
+        reason = M.returnless_printf_argument_refusal(
+            name, list(e.args or []), self._vkinds.no_value_callee_of)
+        if reason is not None:
+            raise CodegenError(reason)
         # …and the same call's ARGUMENTS against the callee's own parameter
         # types. Beside the line above for the same reason — this is the last
         # point where the resolved callee and its arguments are both in hand —

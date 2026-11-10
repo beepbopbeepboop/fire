@@ -862,158 +862,6 @@ class MojoRaisedException(Exception):
     pass
 
 
-class _LazyImportState:
-    """Process-wide state for PEP 810 lazy imports (Python 3.15).
-
-    `mode` mirrors `sys.set_lazy_imports`: 'normal' honours the `lazy`
-    keyword and `__lazy_modules__` only, 'all' makes every import that can be
-    lazy potentially lazy. (CPython 3.15.2 rejects 'none' — the pre-final
-    PEP text listed it, the implementation does not — so this does too.)
-    `filter` is the optional `sys.set_lazy_imports_filter` callable and
-    `lazy_modules` is the `sys.lazy_modules` set of fully-qualified names
-    currently held by an unresolved proxy.
-    """
-    def __init__(self):
-        self.mode = 'normal'
-        env_mode = os.environ.get('PYTHON_LAZY_IMPORTS')
-        if env_mode == 'all':
-            self.mode = 'all'
-        self.filter = None
-        self.lazy_modules = set()
-
-    def set_mode(self, mode):
-        if not isinstance(mode, str):
-            raise TypeError("mode must be a string: 'normal' or 'all'")
-        if mode not in ('normal', 'all'):
-            raise ValueError("mode must be 'normal' or 'all'")
-        self.mode = mode
-
-
-_LAZY_IMPORT_STATE = _LazyImportState()
-
-
-class _LazyImportTarget:
-    """Resolution state shared by every name bound by ONE lazy import.
-
-    A `lazy from m import a, b` statement loads `m` at most once, and only
-    when the first of `a`/`b` is used; the other name stays unresolved.
-    """
-    def __init__(self, interp, module, alias=None, is_from=False, scope=None):
-        self.interp = interp
-        self.module = module
-        self.alias = alias
-        self.is_from = is_from
-        # The lexical scope the import statement executed in. Lazy
-        # resolution can happen much later, while `interp.scope` is some
-        # other frame (a function call that first touched the name), so a
-        # dotted sibling import's namespace chain must be built in THIS
-        # scope, not whatever happens to be current at resolve time.
-        self.scope = scope
-        self.loaded = False
-        self.value = None
-
-    def load(self):
-        if not self.loaded:
-            if self.is_from:
-                value = self.interp._resolve_from_import_module(self.module)
-            else:
-                value = self.interp._resolve_import_module(
-                    self.module, self.alias, self.scope)
-            self.value = value
-            self.loaded = True
-            _LAZY_IMPORT_STATE.lazy_modules.discard(self.module)
-        return self.value
-
-    def resolve_name(self, name):
-        module = self.load()
-        if module is None:
-            raise ModuleNotFoundError(
-                f"No module named {self.module!r}")
-        _LAZY_IMPORT_STATE.lazy_modules.discard(self.module + '.' + name)
-        return self.interp._resolve_from_import_name(module, self.module, name)
-
-
-class LazyImportType:
-    """The proxy bound by `lazy import` / `lazy from ... import` (PEP 810).
-
-    The name is bound immediately so the module's import-time side effects —
-    and any ImportError — are deferred until the first use of the name.
-    `Scope.get` reifies the proxy and replaces the binding, so after first
-    use the name is indistinguishable from an eager import; the dunder
-    forwarding below covers the other ways a proxy can be reached (stored in
-    a container, passed as an argument, printed directly).
-
-    `resolve()` is the explicit reification entry point CPython exposes on
-    `types.LazyImportType`.
-    """
-    __slots__ = ('_target', '_label', '_from_name', '_resolved', '_value')
-
-    def __init__(self, target, label, from_name=None):
-        self._target = target
-        self._label = label
-        self._from_name = from_name
-        self._resolved = False
-        self._value = None
-
-    def resolve(self):
-        if not self._resolved:
-            if self._from_name is None:
-                value = self._target.load()
-            else:
-                value = self._target.resolve_name(self._from_name)
-            self._value = value
-            self._resolved = True
-        return self._value
-
-    def __repr__(self):
-        return f"<lazy_import {self._label!r}>"
-
-    def __getattr__(self, name):
-        return getattr(self.resolve(), name)
-
-    def __call__(self, *args, **kwargs):
-        return self.resolve()(*args, **kwargs)
-
-    def __getitem__(self, key):
-        return self.resolve()[key]
-
-    def __setitem__(self, key, value):
-        self.resolve()[key] = value
-
-    def __delitem__(self, key):
-        del self.resolve()[key]
-
-    def __iter__(self):
-        return iter(self.resolve())
-
-    def __len__(self):
-        return len(self.resolve())
-
-    def __contains__(self, item):
-        return item in self.resolve()
-
-    def __bool__(self):
-        return bool(self.resolve())
-
-    def __str__(self):
-        return str(self.resolve())
-
-    def __eq__(self, other):
-        return self.resolve() == other
-
-    def __ne__(self, other):
-        return self.resolve() != other
-
-    def __hash__(self):
-        return hash(self.resolve())
-
-    def __enter__(self):
-        return self.resolve().__enter__()
-
-    def __exit__(self, *args):
-        return self.resolve().__exit__(*args)
-
-
 class Scope:
     """Manages variable and function scopes."""
     def __init__(self, parent=None):
@@ -1039,11 +887,7 @@ class Scope:
 
     def get(self, name: str):
         if name in self.vars:
-            value = self.vars[name]
-            if isinstance(value, LazyImportType):
-                value = value.resolve()
-                self.vars[name] = value
-            return value
+            return self.vars[name]
         # Walk the chain iteratively (the old recursion raised in the ROOT
         # scope): the lookup either finds the nearest binding in the same
         # order, or fails with the exception tagged at THIS scope — the
@@ -1052,11 +896,7 @@ class Scope:
         scope = self.parent
         while scope is not None:
             if name in scope.vars:
-                value = scope.vars[name]
-                if isinstance(value, LazyImportType):
-                    value = value.resolve()
-                    scope.vars[name] = value
-                return value
+                return scope.vars[name]
             scope = scope.parent
         raise _tag_name_error(
             NameError(f"name '{name}' is not defined"), self, name)
@@ -2289,31 +2129,13 @@ class MojoInstance:
         method(self._mojo_class.interpreter, self, writer)
         return writer.getvalue()
 
-    def _call_dunder_text(self, method_name):
-        """Call a user-defined Python-spelled `__str__`/`__repr__(self)` method
-        from the class's method table and return its text, or None if the
-        class does not define it. Mirrors the compiled path's
-        `user_dunder_repr_call` lookup, so `str(x)` / `print(x)` agree there."""
-        method = self._mojo_class.methods.get(method_name)
-        if method is None:
-            return None
-        return method(self._mojo_class.interpreter, self)
-
     def __str__(self):
-        # CPython's `str()` prefers `__str__`, then falls back to `__repr__`
-        # (via `repr(self)` below) before the default object repr.
-        result = self._call_dunder_text('__str__')
-        if result is not None:
-            return result
         result = self._write_via('write_to')
         if result is not None:
             return result
         return repr(self)
 
     def __repr__(self):
-        result = self._call_dunder_text('__repr__')
-        if result is not None:
-            return result
         result = self._write_via('write_repr_to')
         if result is not None:
             return result
@@ -4280,28 +4102,6 @@ class _SysProxy:
     """
     def __init__(self, argv):
         self.argv = argv
-        # `sys.lazy_modules` is the set of fully-qualified names currently
-        # bound to an unresolved PEP 810 lazy proxy. Deliberately OUR set,
-        # not the host interpreter's, since the interpreted program's lazy
-        # imports are resolved by this interpreter.
-        self.lazy_modules = _LAZY_IMPORT_STATE.lazy_modules
-
-    # PEP 810 lazy-import controls. These must be the interpreter's own
-    # state: the host `sys.set_lazy_imports` would govern the host's bytecode
-    # imports, not the imports this interpreter executes from source.
-    def set_lazy_imports(self, mode):
-        _LAZY_IMPORT_STATE.set_mode(mode)
-
-    def get_lazy_imports(self):
-        return _LAZY_IMPORT_STATE.mode
-
-    def set_lazy_imports_filter(self, func):
-        if func is not None and not callable(func):
-            raise ValueError("filter provided but is not callable")
-        _LAZY_IMPORT_STATE.filter = func
-
-    def get_lazy_imports_filter(self):
-        return _LAZY_IMPORT_STATE.filter
 
     def getdefaultencoding(self):
         return 'utf-8'
@@ -4317,23 +4117,6 @@ class _SysProxy:
 
     def __getattr__(self, name):
         return getattr(sys, name)
-
-
-class _TypesProxy:
-    """`import types` inside an interpreted program.
-
-    Forwards everything to the host `types` module except
-    `types.LazyImportType`, which is this interpreter's proxy class: lazy
-    imports of `.mojo` sibling modules resolve through this interpreter, so
-    the host's native lazy-import type would describe the wrong objects.
-    """
-    def __getattr__(self, name):
-        if name == 'LazyImportType':
-            return LazyImportType
-        return getattr(types, name)
-
-
-_TYPES_PROXY = _TypesProxy()
 
 
 def _sentinel_builtin():
@@ -4482,32 +4265,6 @@ def _frozendict_builtin():
     return frozendict
 
 
-def _ascii_repr(value) -> str:
-    """CPython's `ascii(value)`: `repr(value)` with every non-ASCII code
-    point escaped as `\\xNN` / `\\uNNNN` / `\\UNNNNNNNN`.
-
-    Spelled out here rather than calling the `ascii()` builtin for the same
-    reason `_eval_fstring_field` gives for repr/str: `ascii()` has no
-    compiled-path runtime backing, and this module is self-host-compiled.
-    The escape table is CPython's own (`repr` of a str and `ascii` differ
-    only in these escapes), and `mojo_ascii_escape` in fire_runtime.c is the
-    compiled engine's spelling of exactly this rule -- the two must agree
-    character for character."""
-    text = repr(value)
-    out = ''
-    for ch in text:
-        o = ord(ch)
-        if o < 0x80:
-            out += ch
-        elif o < 0x100:
-            out += '\\x%02x' % o
-        elif o < 0x10000:
-            out += '\\u%04x' % o
-        else:
-            out += '\\U%08x' % o
-    return out
-
-
 class Interpreter:
     """Executes Mojo AST nodes."""
 
@@ -4524,18 +4281,6 @@ class Interpreter:
         self._mojo_module_cache = {}
         self._func_specs = {}
         self._raised_mojo_value = None
-        # The one `_SysProxy` this interpreter binds `sys` to (see
-        # _setup_builtins). Kept here because imports must resolve the
-        # canonical sys module even when `lazy import sys` has temporarily
-        # rebound the name `sys` to a lazy proxy — looking it up through the
-        # scope there would re-enter the proxy's own resolve() forever.
-        self._sys_proxy = None
-        # PEP 810: mode 'all' leaves imports inside try/except blocks eager.
-        # Explicit `lazy` there is a parse error, so only mode 'all' consults
-        # this. execute_TryStmt keeps it incremented for every part of the
-        # statement (body, handlers, else, finally), matching CPython's
-        # symtable `ste_in_try_block`.
-        self._try_depth = 0
         # Milestone 2 of INTERP_generator_yield_entirely_unimplemented:
         # per-OS-thread storage for "the yield_fn of the generator whose body
         # is currently running on THIS thread" — see MojoGeneratorObject
@@ -4769,33 +4514,24 @@ class Interpreter:
             mod_interp.execute(stmt)
         return namespace
 
-    def _bind_dotted_import(self, module_name, mod, scope=None):
+    def _bind_dotted_import(self, module_name, mod):
         """`import std.sys` (no `as` alias) must bind the top-level name
         `std` and make `std.sys` resolve via chained attribute access — same
         as Python's own dotted-import binding rule. A flat bind of `std`
         straight to the `std.sys` shim namespace (the previous behavior)
-        broke `std.sys.whatever`, since there was no intermediate `.sys`.
-        `scope` is supplied by a lazy import, whose statement's scope may
-        differ from the frame current at reification time."""
-        target_scope = scope if scope is not None else self.scope
+        broke `std.sys.whatever`, since there was no intermediate `.sys`."""
         parts = module_name.split('.')
         top = parts[0]
         if len(parts) == 1:
-            target_scope.define(top, mod)
+            self.scope.define(top, mod)
             return
         try:
-            root = self._bind_dotted_import_lazy_safe_root(top, target_scope)
+            root = self.scope.get(top)
         except NameError:
-            root = None
-        if isinstance(root, LazyImportType):
-            # This dotted import's own lazy proxy is being reified right now
-            # (its resolver called us). Do not look it up through Scope.get —
-            # that would re-enter resolve() forever. It is about to be
-            # replaced by the namespace chain below.
             root = None
         if not isinstance(root, types.SimpleNamespace):
             root = types.SimpleNamespace()
-            target_scope.define(top, root)
+            self.scope.define(top, root)
         obj = root
         for p in parts[1:-1]:
             nxt = getattr(obj, p, None)
@@ -5121,8 +4857,7 @@ class Interpreter:
         import tempfile
         import traceback
         self.scope.define('os', os)
-        self._sys_proxy = _SysProxy(self.argv)
-        self.scope.define('sys', self._sys_proxy)
+        self.scope.define('sys', _SysProxy(self.argv))
         self.scope.define('subprocess', subprocess)
         self.scope.define('shutil', shutil)
         self.scope.define('sysconfig', sysconfig)
@@ -5563,7 +5298,6 @@ class Interpreter:
                     _ns.update(ns)
 
                 cls = types.new_class(node.name, tuple(python_bases), kw_dict, _exec_body)
-                cls = self._apply_function_decorators(node, cls)
                 self.scope.define(node.name, cls)
                 return cls
             except Exception:
@@ -5572,7 +5306,6 @@ class Interpreter:
                          comptime_aliases=comptime_aliases, static_methods=static_methods,
                          class_methods=class_methods, def_scope=self.scope,
                          keywords=kw_dict)
-        cls = self._apply_function_decorators(node, cls)
         self.scope.define(node.name, cls)
         return cls
 
@@ -5634,14 +5367,14 @@ class Interpreter:
                 return True
             return False
 
-    def _resolve_import_module(self, module, alias, scope=None):
-        """The value an eager `import module [as alias]` binds.
+    def _bind_one_import(self, module: str, alias):
+        """Resolve and bind a single `import module [as alias]` target.
 
-        Factored out of _bind_one_import so a lazy import can defer exactly
-        this resolution (including the sys/types proxies and the sibling
-        `.mojo` preference) to first use without a second implementation.
-        `scope` is the lexical scope a lazy statement ran in; it is only
-        needed to build a dotted sibling import's namespace chain there.
+        Shared by execute_ImportStmt for both the primary `module`/`alias`
+        and every extra `(module, alias)` pair from a comma-separated
+        `import a, b, c` so all targets get identical resolution logic
+        (sys special-case, sibling .mojo preference, real importlib
+        fallback) instead of only the first being handled.
         """
         # `import sys` is special: the program must see its own argv (see
         # _SysProxy), not the real process argv reinstated by a fresh
@@ -5650,22 +5383,8 @@ class Interpreter:
         # nested interpretation of fire.py would re-read the host's live
         # argv instead of the isolated one and take the same branch forever.
         if module == 'sys' or module.split('.')[0] == 'sys':
-            return self._sys_proxy
-        # A name with no dot in it resolves exactly as `from module import
-        # ...` does — the same sys/types proxies, the same sibling `.mojo`
-        # preference, the same real-importlib fallback, the same
-        # ModuleNotFoundError propagation (see `_resolve_from_import_module`
-        # for all three). Delegating rather than repeating that chain is not
-        # only DRY: it gives the two methods the SAME return type, which
-        # matters because `_LazyImportTarget.load` binds them to one slot.
-        # Returning `_TYPES_PROXY` (`_TypesProxy *`) beside `mod`
-        # (`_MojoModuleObject *`) made the join of this method's returns
-        # order-dependent — two distinct pointers join to the box, a pointer
-        # and the box join to the pointer — so the inferred type, and with it
-        # the C type every caller's temp is declared with, differed between
-        # inference passes while the emitted prototype kept the first one.
-        if alias or '.' not in module:
-            return self._resolve_from_import_module(module)
+            self.scope.define(alias or 'sys', self.scope.get('sys'))
+            return
         # Prefer a sibling .mojo file/package over a same-named *real*
         # Python module — otherwise a coincidentally-named .py file
         # anywhere on sys.path (including this very project's own helper
@@ -5677,11 +5396,11 @@ class Interpreter:
         # name collision with an installed/local Python module.
         mod = self._load_mojo_sibling_module(module)
         if mod is not None:
-            # `import a.b` binds the top-level name `a`; _bind_dotted_import
-            # builds the intermediate namespace chain (and replaces any lazy
-            # placeholder under that name rather than trying to reify it).
-            self._bind_dotted_import(module, mod, scope)
-            return (scope or self.scope).get(module.split('.')[0])
+            if alias:
+                self.scope.define(alias, mod)
+            else:
+                self._bind_dotted_import(module, mod)
+            return
         # No sibling .mojo module and no real Python module: let
         # ModuleNotFoundError propagate as a real exception (it's a real
         # Python BaseException subclass — see execute_TryStmt /
@@ -5700,94 +5419,13 @@ class Interpreter:
         # _load_mojo_sibling_module yet. That's now handled explicitly
         # above, so by the time we reach the real importlib call, a
         # ModuleNotFoundError here always means a genuinely missing module.
-        imported = importlib.import_module(module)
-        # `import a.b` binds the top-level package name `a`.
-        return importlib.import_module(module.split('.')[0])
-
-    def _bind_dotted_import_lazy_safe_root(self, top, scope=None):
-        """The current top-level binding for a dotted import, WITHOUT
-        reifying a lazy proxy that is resolving right now (that would
-        recurse forever: the proxy's resolver is the caller)."""
-        target_scope = scope if scope is not None else self.scope
-        if top in target_scope.vars:
-            return target_scope.vars[top]
-        return target_scope.get(top)
-
-    def _bind_one_import(self, module: str, alias):
-        """Resolve and bind a single `import module [as alias]` target.
-
-        Shared by execute_ImportStmt for both the primary `module`/`alias`
-        and every extra `(module, alias)` pair from a comma-separated
-        `import a, b, c` so all targets get identical resolution logic
-        (sys special-case, sibling .mojo preference, real importlib
-        fallback) instead of only the first being handled.
-        """
-        mod = self._resolve_import_module(module, alias)
-        self.scope.define(alias or module.split('.')[0], mod)
-
-    def _importing_module_name(self):
-        """`__name__` of the module whose source is executing — the first
-        argument CPython passes to a sys.set_lazy_imports_filter callable."""
-        try:
-            name = self.scope.get('__name__')
-        except NameError:
-            name = None
-        if isinstance(name, str) and name:
-            return name
-        return self.filename or '<input>'
-
-    def _declares_lazy_module(self, module):
-        """Whether this module's global `__lazy_modules__` names `module`.
-
-        PEP 810 checks it on imports at module scope only (measured against
-        CPython 3.15.2: a function-body import is eager even when the
-        module-level set names it), and consults `__contains__` on whatever
-        object is bound there.
-        """
-        if self.scope.parent is not None:
-            return False
-        if '__lazy_modules__' not in self.scope.vars:
-            return False
-        declared = self.scope.vars['__lazy_modules__']
-        try:
-            return module in declared
-        except TypeError:
-            return False
-
-    def _import_is_potentially_lazy(self, node, module, fromlist):
-        """Whether this import statement should bind lazy proxies.
-
-        `fromlist` is None for `import ...`, the tuple of imported names for
-        `from ... import ...`. A potentially lazy import (explicit `lazy`,
-        `__lazy_modules__`, or global mode 'all') still becomes eager under
-        the global filter callable, and mode 'all' leaves try-block imports
-        eager (CPython's symtable excludes them; explicit `lazy` there is a
-        SyntaxError, so the exclusion only ever applies to mode 'all').
-        """
-        mode = _LAZY_IMPORT_STATE.mode
-        potential = getattr(node, 'lazy', False)
-        if mode == 'all':
-            potential = True
-        if not potential and self._declares_lazy_module(module):
-            potential = True
-        if not potential:
-            return False
-        if mode == 'all' and self._try_depth > 0:
-            return False
-        if fromlist is not None and getattr(node, 'wildcard', False):
-            return False
-        flt = _LAZY_IMPORT_STATE.filter
-        if flt is not None:
-            if not flt(self._importing_module_name(), module, fromlist):
-                return False
-        return True
-
-    def _bind_lazy_import(self, module, alias):
-        target = _LazyImportTarget(self, module, alias, False, self.scope)
-        label = module
-        _LAZY_IMPORT_STATE.lazy_modules.add(module)
-        name = alias or module.split('.')[0]
-        self.scope.define(name, LazyImportType(target, label))
+        mod = importlib.import_module(module)
+        if alias:
+            self.scope.define(alias, mod)
+        else:
+            # `import a.b` binds the top-level package name `a`.
+            top = module.split('.')[0]
+            self.scope.define(top, importlib.import_module(top))
 
     def execute_ImportStmt(self, node):
         """Execute `import mod` / `import mod as alias` / `import a, b, c`.
@@ -5799,34 +5437,26 @@ class Interpreter:
 
         `node.extra` holds any additional comma-separated `(module, alias)`
         targets past the first (`import a, b, c`) — each gets the same
-        resolution as the primary target via _bind_one_import. A PEP 810 lazy
-        import binds a proxy for every target instead.
+        resolution as the primary target via _bind_one_import.
         """
-        targets = [(node.module, node.alias)]
-        targets.extend(node.extra or [])
-        for module, alias in targets:
-            if self._import_is_potentially_lazy(node, module, None):
-                self._bind_lazy_import(module, alias)
-            else:
-                self._bind_one_import(module, alias)
+        self._bind_one_import(node.module, node.alias)
+        for extra_module, extra_alias in (node.extra or []):
+            self._bind_one_import(extra_module, extra_alias)
         return None
 
-    def _resolve_from_import_module(self, module):
-        """The module object `from module import ...` fetches names from."""
+    def execute_FromImportStmt(self, node):
+        """Execute `from mod import a, b as c` / `from mod import *`."""
         # See execute_ImportStmt: keep the isolated-argv sys proxy, don't
         # pull attributes off the real sys module.
-        if module == 'sys':
-            return self._sys_proxy
-        if module == 'types':
-            return _TYPES_PROXY
-        if module.startswith('.'):
+        if node.module == 'sys':
+            mod = self.scope.get('sys')
+        elif node.module.startswith('.'):
             # Relative import (`from .compare_helpers import X`, inside a
             # package's __init__.mojo) — resolve relative to current module's directory.
-            mod = None
-            rel_module = module.lstrip('.')
+            rel_module = node.module.lstrip('.')
             if self.filename:
                 base_dir = os.path.dirname(os.path.abspath(self.filename))
-                level = len(module) - len(module.lstrip('.'))
+                level = len(node.module) - len(node.module.lstrip('.'))
                 base_dir = base_dir
                 for _ in range(level - 1):
                     base_dir = os.path.dirname(base_dir)
@@ -5839,84 +5469,60 @@ class Interpreter:
                         pkg_path = os.path.join(base_dir, rel_module.replace('.', os.sep), '__init__.mojo')
                         if os.path.isfile(pkg_path):
                             mod = self._load_mojo_module_from_path(pkg_path)
-            return mod
-        # Prefer a sibling .mojo file/package over a same-named *real*
-        # Python module — see execute_ImportStmt for why (a coincidental
-        # same-named .py file on sys.path, e.g. this project's own
-        # lexer.py, would otherwise silently shadow the .mojo file the
-        # source obviously meant).
-        mod = self._load_mojo_sibling_module(module)
-        if mod is None:
-            # See _bind_one_import: don't swallow ModuleNotFoundError —
-            # let it propagate as a real exception so an enclosing
-            # `except ImportError:` in the interpreted program (the
-            # extremely common `try: from _fast import * \n except
-            # ImportError: from _pure import *` idiom) actually fires,
-            # instead of the try silently continuing with nothing bound.
-            mod = importlib.import_module(module)
-        return mod
-
-    def _resolve_from_import_name(self, mod, module, name):
-        """Fetch one `from module import name` binding from `mod`."""
-        _missing = object()
-        value = getattr(mod, name, _missing)
-        if value is _missing:
-            # `from package import submodule`: a submodule of a package is
-            # not necessarily set as an attribute of the package until it
-            # has been imported (e.g. Python 3.15's `profiling` exposes
-            # `tracing`/`sampling` as submodules). Resolve it the way
-            # Python does, by importing the fully-qualified submodule, so
-            # `from profiling import tracing` binds the real module rather
-            # than an auto-stub. Only attempted for host/Python module
-            # objects with a resolvable name; fall through to the stub on
-            # any import failure.
-            base = getattr(mod, '__name__', None) or (module if not module.startswith('.') else None)
-            if base:
-                try:
-                    value = importlib.import_module(f"{base}.{name}")
-                except Exception:
-                    value = _AutoStubValue(_AUTO_STUB_VALUE)
-            else:
-                value = _AutoStubValue(_AUTO_STUB_VALUE)
-        elif value is None:
-            # Keep the historical fallback: `getattr(mod, name, None)`
-            # previously collapsed "missing" and "present but None" into a
-            # stub. Preserve that for present-but-None to avoid changing
-            # unrelated behavior; the missing case above now resolves
-            # package submodules before stubbing.
-            value = _AutoStubValue(_AUTO_STUB_VALUE)
-        return value
-
-    def execute_FromImportStmt(self, node):
-        """Execute `from mod import a, b as c` / `from mod import *`."""
-        if node.wildcard:
-            mod = self._resolve_from_import_module(node.module)
             if mod is None:
                 return None
+        else:
+            # Prefer a sibling .mojo file/package over a same-named *real*
+            # Python module — see execute_ImportStmt for why (a coincidental
+            # same-named .py file on sys.path, e.g. this project's own
+            # lexer.py, would otherwise silently shadow the .mojo file the
+            # source obviously meant).
+            mod = self._load_mojo_sibling_module(node.module)
+            if mod is None:
+                # See _bind_one_import: don't swallow ModuleNotFoundError —
+                # let it propagate as a real exception so an enclosing
+                # `except ImportError:` in the interpreted program (the
+                # extremely common `try: from _fast import * \n except
+                # ImportError: from _pure import *` idiom) actually fires,
+                # instead of the try silently continuing with nothing bound.
+                mod = importlib.import_module(node.module)
+        if node.wildcard:
             names = getattr(mod, '__all__', None)
             if names is None:
                 names = [n for n in dir(mod) if not n.startswith('_')]
             for name in names:
                 self.scope.define(name, getattr(mod, name))
             return None
-        fromlist = tuple(name for name, _alias in node.names)
-        if self._import_is_potentially_lazy(node, node.module, fromlist):
-            target = _LazyImportTarget(self, node.module, None, True, self.scope)
-            _LAZY_IMPORT_STATE.lazy_modules.add(node.module)
-            for name, alias in node.names:
-                _LAZY_IMPORT_STATE.lazy_modules.add(node.module + '.' + name)
-                label = node.module + '.' + name
-                self.scope.define(alias or name,
-                                  LazyImportType(target, label, from_name=name))
-            return None
-        mod = self._resolve_from_import_module(node.module)
-        if mod is None:
-            return None
+        _missing = object()
         for name, alias in node.names:
-            self.scope.define(alias or name,
-                              self._resolve_from_import_name(mod, node.module, name))
+            value = getattr(mod, name, _missing)
+            if value is _missing:
+                # `from package import submodule`: a submodule of a package is
+                # not necessarily set as an attribute of the package until it
+                # has been imported (e.g. Python 3.15's `profiling` exposes
+                # `tracing`/`sampling` as submodules). Resolve it the way
+                # Python does, by importing the fully-qualified submodule, so
+                # `from profiling import tracing` binds the real module rather
+                # than an auto-stub. Only attempted for host/Python module
+                # objects with a resolvable name; fall through to the stub on
+                # any import failure.
+                base = getattr(mod, '__name__', None) or (node.module if not node.module.startswith('.') else None)
+                if base:
+                    try:
+                        value = importlib.import_module(f"{base}.{name}")
+                    except Exception:
+                        value = _AutoStubValue(_AUTO_STUB_VALUE)
+                else:
+                    value = _AutoStubValue(_AUTO_STUB_VALUE)
+            elif value is None:
+                # Keep the historical fallback: `getattr(mod, name, None)`
+                # previously collapsed "missing" and "present but None" into a
+                # stub. Preserve that for present-but-None to avoid changing
+                # unrelated behavior; the missing case above now resolves
+                # package submodules before stubbing.
+                value = _AutoStubValue(_AUTO_STUB_VALUE)
+            self.scope.define(alias or name, value)
         return None
-
 
     def execute_AssignStmt(self, node):
         """Execute assignment statement."""
@@ -6821,11 +6427,7 @@ class Interpreter:
         cond = self.eval_expr(node.value)
         if not cond:
             msg = self.eval_expr(node.msg) if getattr(node, 'msg', None) is not None else None
-            # Same `Assert Error: ` prefix the compiled path prints
-            # (mojo/backend_gimple/emit_stmts.py, the assert trap), so the
-            # modular `assert_failure_message.mojo` CHECK line holds on both.
-            text = msg if msg is not None else 'assert failed'
-            raise AssertionError(f"{self._loc(node)}Assert Error: {text}")
+            raise AssertionError(f"{self._loc(node)}{msg if msg is not None else 'assert failed'}")
         return None
 
     def execute_NonlocalStmt(self, node):
@@ -7020,20 +6622,7 @@ class Interpreter:
             return False
 
     def execute_TryStmt(self, node):
-        """Execute try statement.
-
-        The PEP 810 try-block context is held for the WHOLE statement (the
-        same region CPython's symtable marks `ste_in_try_block`), so a mode
-        'all' import in a handler/else/finally is eager too.
-        """
-        self._try_depth += 1
-        try:
-            return self._execute_try_stmt_inner(node)
-        finally:
-            self._try_depth -= 1
-
-    def _execute_try_stmt_inner(self, node):
-        """execute_TryStmt body — see that method's docstring."""
+        """Execute try statement."""
         try:
             for stmt in node.body:
                 self.execute(stmt)
@@ -7568,14 +7157,8 @@ class Interpreter:
         # and silently fail once compiled.
         expr_text, conv, spec = self._split_fstring_field(field)
         value = self._eval_fstring_expr(expr_text)
-        if conv == 'r':
+        if conv == 'r' or conv == 'a':
             text = repr(value)
-        elif conv == 'a':
-            # `!a` is ascii(), NOT repr(): repr leaves non-ASCII code points
-            # raw, so `f"{'héllo'!a}"` used to print the same unquoted text
-            # as `!s` here. The compiled engines have the same rule via
-            # mojo_ascii_escape (fire_runtime.c).
-            text = _ascii_repr(value)
         else:
             text = str(value)
         if spec:
@@ -7882,38 +7465,8 @@ class Interpreter:
         else:
             raise NotImplementedError(f"{self._loc(expr)}Unary operator {op} not implemented")
 
-    def _eval_constrained_bracket(self, expr):
-        """`constrained[cond, msg]()` — the bracket form of Mojo's builtin.
-
-        The compiled path diagnoses a provably-false condition at compile time
-        (mojo/backend_gimple/emit_calls.py, `constrained`). The interpreter has
-        no compile-time pass, so it checks the condition when the call runs:
-        false raises `constraint failed: <msg>` (or `constraint failed` with no
-        message), true is a no-op. A name the user has bound themselves is a
-        real callee and is not intercepted. The message is only evaluated on
-        failure, and an error in the condition propagates rather than being
-        read as false."""
-        idx = expr.func.index
-        if isinstance(idx, (N.TupleExpr, N.ListExpr)):
-            elems = list(getattr(idx, 'elements', None) or [])
-        else:
-            elems = [idx]
-        if not elems:
-            raise TypeError(f"{self._loc(expr)}constrained[] needs a condition")
-        if self.eval_expr(elems[0]):
-            return None
-        msg = self.eval_expr(elems[1]) if len(elems) > 1 else None
-        text = 'constraint failed' if msg is None else f'constraint failed: {msg}'
-        raise RuntimeError(f"{self._loc(expr)}{text}")
-
     def eval_CallExpr(self, expr):
         """Evaluate function call."""
-        func_node = expr.func
-        if (isinstance(func_node, N.SubscriptExpr)
-                and isinstance(func_node.obj, N.IdentExpr)
-                and func_node.obj.name == 'constrained'
-                and not self.scope.has('constrained')):
-            return self._eval_constrained_bracket(expr)
         func = self.eval_expr(expr.func)
         # Call-site unpacking: `g(*args)` / `g(**opts)`. fire_compiler.py's
         # LPAREN arg-list parser lets `_parse_unary` wrap a starred argument

@@ -1,5 +1,3 @@
-SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part1, COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part2, COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4 (part3 fixed: 2026-11-12, escaping generator with empty-string first yield keeps string value slot)
-
 ## Status 2026-11-05 — repro run on this tree (next step)
 
 Ran `python3 fire.py build .tmp/ca/c_analyzer/__main__.py`; build failed fast (exit 1, RuntimeError) with the documented refusals: `fmt_summary`: unresolved callee `section(...)`; `section`: nested generator reading enclosing-scope `items` with no capture model. Imported-module cascade present (clsutil/iterutil/fsutil/strutil/tables/info/parser; `c_parser.info` now also reports `cannot access local variable 'ggc'`). No code change this round; capture-model lane remains blocked on container capture + directly-called nested generator claim.

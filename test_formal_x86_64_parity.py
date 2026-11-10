@@ -24,13 +24,6 @@ both must say so with the SAME words.  A construct that is genuinely absent
 from the value model is better refused than emitted, and "one architecture
 crashes and the other declines" is the shape that must not survive.
 
-An UNEXPECTED build failure is classified by layer before it is reported: the
-source is built on the other backend too, and a refusal both backends produce
-with the same sentence is a fixture/source error, not the backend's red.  That
-is `build_failure_detail`; the fixture-validity campaign found the harness
-calling a front-end refusal a backend failure (pinned by
-`test_out_param_return_type_diagnostic.py`'s `ParityBuildFailureIsClassifiedByLayer`).
-
 `FAILING_CASES` are the third shape: a program every machine leaves through a
 TRAP, so CPython raises too and its own stdout is the expectation.  Nothing
 about a differential-against-CPython fuzzer can reach them (it records a
@@ -50,7 +43,6 @@ backends used to reach the integer ALU with two `char *` operands.
 import argparse
 import os
 import platform
-import re
 import subprocess
 import sys
 import tempfile
@@ -1033,7 +1025,7 @@ CASES = [
      "    var a: Int\n"
      "    var b: Int\n"
      "\n"
-     "    def put(mut self, v: Int) -> Int:\n"
+     "    def put(out self, v: Int) -> Int:\n"
      "        self.a = v\n"
      "        return self.a\n"
      "\n"
@@ -1102,7 +1094,7 @@ CASES = [
      "    var a: Int\n"
      "    var b: Int\n"
      "\n"
-     "    def put(mut self, v: Int) -> Int:\n"
+     "    def put(out self, v: Int) -> Int:\n"
      "        self.a = v\n"
      "        return self.a\n"
      "\n"
@@ -1260,7 +1252,7 @@ CASES = [
      "struct In:\n"
      "    var a: Int\n"
      "    var b: Int\n"
-     "    def put(mut self, v: Int) -> Int:\n"
+     "    def put(out self, v: Int) -> Int:\n"
      "        self.a = v\n"
      "        return self.a\n"
      "    def get(self) -> Int:\n"
@@ -2828,46 +2820,6 @@ def cpython_answer(source, tmpdir, name):
     return ref.returncode, ref.stdout
 
 
-def first_error(text):
-    """The `error:` sentence of a build's output, else its last non-empty line.
-
-    Two builds of the SAME source on the two backends are compared with this,
-    so the comparison is about what the front end said rather than about the
-    whole traceback around it.
-    """
-    m = re.search(r": error: (.+)", text)
-    if m:
-        return m.group(1).strip()
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return lines[-1] if lines else ""
-
-
-def build_failure_detail(name, src, tmpdir, backend, text):
-    """Classify a build failure: the FIXTURE/source, or the backend that ran.
-
-    A fixture the front end refuses fails on BOTH backends with the same
-    sentence, and reporting that as `--backend=<b> did not build` is the
-    wrong-layer red the fixture-validity campaign exists to stop: the parity
-    harness called it a backend failure while the CPython oracle accepted the
-    Python spelling the front end refuses. The second build is paid only after
-    one has already failed, so a passing case costs nothing. `REFUSALS` keeps
-    its stricter form (`run_refusal` requires both to refuse with the SAME
-    words); this is the unexpected-failure diagnosis for the other two lists.
-    """
-    other = next(b for b in BACKENDS if b != backend)
-    other_out = os.path.join(tmpdir, f"{name}.{other}")
-    other_rc, other_text = build(src, other_out, other)
-    if other_rc == 0:
-        return f"--backend={backend} did not build: {text.strip()[-300:]}"
-    here, there = first_error(text), first_error(other_text)
-    if here == there:
-        return (f"the fixture is refused identically on both backends "
-                f"({backend} and {other}), so this is a SOURCE error, not a "
-                f"backend red: {here}")
-    return (f"both backends refused to build it ({backend}: {here}; "
-            f"{other}: {there}) — neither backend is the other's oracle here")
-
-
 def run_case(name, mojo_src, cpython_src, tmpdir, verbose):
     src = os.path.join(tmpdir, name + ".mojo")
     with open(src, "w") as f:
@@ -2881,7 +2833,7 @@ def run_case(name, mojo_src, cpython_src, tmpdir, verbose):
         out = os.path.join(tmpdir, f"{name}.{backend}")
         rc, text = build(src, out, backend)
         if rc != 0:
-            return False, build_failure_detail(name, src, tmpdir, backend, text)
+            return False, f"--backend={backend} did not build: {text.strip()[-300:]}"
         if not os.path.isfile(out):
             return False, f"--backend={backend} reported success, wrote no binary"
         r = run(out, backend)
@@ -2917,7 +2869,8 @@ def run_failing_case(name, mojo_src, cpython_src, tmpdir, verbose):
         out = os.path.join(tmpdir, f"{name}.{backend}")
         rc, text = build(src, out, backend)
         if rc != 0:
-            return False, build_failure_detail(name, src, tmpdir, backend, text)
+            return False, (f"--backend={backend} did not build: "
+                           f"{text.strip()[-300:]}")
         r = run(out, backend)
         if r.returncode != want_exit:
             return False, (f"--backend={backend} exited {r.returncode}, CPython "

@@ -1,6 +1,6 @@
 # Plan: Bootstrap resource blowup census (CODEGEN_bootstrap_resource_blowup)
 
-Source bug: CODEGEN_bootstrap_resource_blowup
+Source bug: bugs/hard/CODEGEN_bootstrap_resource_blowup.md
 
 ## Decomposition
 

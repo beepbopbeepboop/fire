@@ -74,27 +74,6 @@ def fn_returns_a_value(fn) -> bool:
     return bool(_value_return_exprs(fn))
 
 
-def _bare_return_call_name(expr):
-    """The callee NAME of a `return callee(…)`, or None for every other shape.
-
-    The ONE reader of "this `return` hands back the result of a local
-    function", shared by `_return_expr_produces_no_value` (direction (a)'s
-    "no value" reader) and `_return_expr_returns_none` (direction (b)'s "always
-    `None`" reader) so the two cannot disagree about which `return` they are
-    looking at.
-
-    A bare name only: a call through a receiver (`self.f()`) binds a method
-    whose body this table does not hold under that spelling, and a dotted
-    callee (`mod.f()`) is a name this unit did not compile. Both are the
-    conservative direction — an unrecognised shape leaves the function reading
-    exactly as it did before.
-    """
-    if (isinstance(expr, F.CallExpr)
-            and isinstance(expr.func, F.IdentExpr)):
-        return expr.func.name
-    return None
-
-
 def _return_expr_produces_no_value(expr, returnless: set) -> bool:
     """Whether a `return <expr>` produces the "no value" this path cannot carry.
 
@@ -108,7 +87,9 @@ def _return_expr_produces_no_value(expr, returnless: set) -> bool:
     It needs the function's own binding table, which is a different walk, and it
     is the rarer of the two spellings; `return _err(msg)` is the one that occurs.
     """
-    return _bare_return_call_name(expr) in returnless
+    return (isinstance(expr, F.CallExpr)
+            and isinstance(expr.func, F.IdentExpr)
+            and expr.func.name in returnless)
 
 
 def returnless_function_names(functions) -> set:
@@ -198,79 +179,19 @@ def _body_returns_a_value(fn, callee_returns_value) -> bool:
     return False
 
 
-def _return_expr_returns_none(expr, callee_returns_none) -> bool:
-    """Whether a `return <expr>` hands back `None`, given the callee table.
-
-    Two shapes, and both are facts rather than inferences: the `None`
-    singleton itself (`return None`, which is the only value-returning spelling
-    that is statically `None`), and `return callee(…)` where `callee` is already
-    known to answer `None` on every path. Everything else — a literal, an
-    arithmetic term, a call this build cannot resolve — is NOT claimed to be
-    `None`, which is the conservative direction: an unrecognised shape keeps
-    the rendering it already had.
-    """
-    if is_none_expression(expr):
-        return True
-    name = _bare_return_call_name(expr)
-    return name is not None and callee_returns_none(name)
-
-
-def function_returns_none(fn, callee_returns_none=None) -> bool:
-    """Whether EVERY path out of `fn` answers `None`.
-
-    **Direction (b)'s reader**, and the one `ValueKinds.is_none_value` asks about
-    a call: `def g(a, b): w = 1` answers `None` in CPython (it falls off the
-    end), so a call to `g` is a value whose TEXT is decided at build time, even
-    though this path has no word for it. The two spellings are both here: a
-    body with no value-returning `return` at all (falls off the end, or only
-    bare `return`s), and a body whose every value-returning `return` is `None`
-    itself or a call to another function this reader has already answered
-    `None` for (`return g(a, b)` one hop out).
-
-    `callee_returns_none` is the hook that carries the second spelling across
-    definitions, exactly as `callee_returns_value` carries the direction-(a)
-    question for `function_returns_a_value`. The emitters supply the transitive
-    resolver (`function_returns_none_resolver`) built over their own function
-    table. Without it the source-only answer is `False` for any body with a
-    `return <expr>` — which is the permissive direction, not a claim that the
-    function produces something.
-
-    A generator or coroutine is excluded, and so is a function that DECLARES a
-    non-`None` return type, for `function_returns_a_value`'s reason: the value
-    is the object, and a declaration is the source saying a value is coming.
-    `-> None` is not such a declaration at the ABI, which is why `def g(a) ->
-    None: w = 1` IS read as answering `None`.
-    """
+def function_returns_none(fn) -> bool:
+    """True if this function returns None (falls off end or only bare returns)."""
     if getattr(fn, "is_generator", False) or getattr(fn, "is_async", False):
         return False
     if fn_declares_a_return(fn):
+        # Declared non-None return - but could be None declared? fn_declares_a_return
+        # returns True only for non-None declarations
         return False
-    exprs = _value_return_exprs(fn)
-    if not exprs:
+    returns = _value_return_exprs(fn)
+    if not returns:
+        # No value-returning returns means falls off end or bare returns -> returns None
         return True
-    resolve = callee_returns_none or (lambda name: False)
-    return all(_return_expr_returns_none(e, resolve) for e in exprs)
-
-
-def function_returns_none_resolver(functions):
-    """A `name -> bool` resolver for `function_returns_none`, over a
-    `{name: FunctionDef}` table — the transitive half, in one place.
-
-    The same shape as `function_returns_a_value_resolver` and for the same
-    reason: the name→definition map is the emitter's, and a reader that stopped
-    at the first hop would call `def h(): return g()` a value while `g` falls
-    off its end. A CYCLE answers False (the name is not provably `None`), and so
-    does a name that is not in `functions` (a linked module's export, whose
-    source is not here to read). Both are the safe direction: a wrong "this is
-    `None`" would render the four characters over a value the program computed.
-    """
-    def resolve(name, _seen=frozenset()):
-        fn = functions.get(name)
-        if fn is None or name in _seen:
-            return False
-        return function_returns_none(
-            fn, lambda callee, _s=_seen | {name}: resolve(callee, _s))
-    return resolve
+    return False
 
 
 def function_returns_a_value(fn, callee_returns_value=None) -> bool:
@@ -377,78 +298,6 @@ def returnless_printf_argument_refusal(name: str, args, no_value_callee_of):
         if callee is not None:
             return returnless_value_refusal(callee, "printf()")
     return None
-
-
-def printf_none_conversion_refusal(callee: str, conv: str) -> str:
-    """Why a NON-text conversion of a value this build knows is `None` is
-    refused.
-
-    `%s` is answerable — `None` becomes the four characters, which is what
-    CPython's `"%s" % None` writes — and every other conversion is not: CPython
-    raises `TypeError` for `"%d" % None`, and this path has no exception to
-    raise and no word for `None` that is a number. Emitting the leftover word
-    would be the silent number this whole reader exists to stop, so the call is
-    refused by name with the reason and the two ways forward.
-    """
-    return (
-        f"the `%{conv}` conversion in {callee}'s format string reads a value "
-        f"that is `None`: CPython evaluates that call to `None`, `%{conv}` "
-        f"asks for a number, and CPython's own `\"%{conv}\" % None` raises "
-        f"TypeError. This path has no exception to raise and no word for "
-        f"`None` that is a number, so the conversion would render whatever the "
-        f"callee's last instruction left in the return register — a number "
-        f"nothing in the source wrote. Use `%s` to render the `None` as text, "
-        f"or give the callee a `return`"
-    )
-
-
-def printf_none_argument_rewrite(name: str, args, is_none_value):
-    """Rewrite a `printf` vararg this build knows is `None`, or refuse it.
-
-    `(new_args, refusal)`, or None when the call has no such vararg. Direction
-    (b) makes a call to a function that always answers `None` a value whose
-    TEXT is decided at build time; `printf` is the second position where that
-    text would otherwise be a raw word (`print`'s is `print_constant_text`'s).
-    `%s` is the one conversion that RENDERS text, so a known-`None` operand
-    there becomes the literal `None` — the same four characters CPython writes
-    for `"%s" % None`. A number conversion of the same operand is
-    `printf_none_conversion_refusal`'s, and the two answers are decided
-    together here so the two emitters cannot disagree about one call.
-
-    `is_none_value` is the caller's `ValueKinds.is_none_value` hook (the ONE
-    reader of "this expression is statically `None`"), and it is tri-state —
-    only a definite `True` rewrites or refuses, so an operand whose `None`-ness
-    this build cannot see keeps whatever behaviour it had.
-
-    The conversion list is `printf_conversion_specifiers`', one entry per
-    CONSUMED argument including `*` widths, so index `j` of the list is vararg
-    `j` — the same index arithmetic the text-conversion check uses. The format
-    index is `printf_format_arg_index`'s, so `sprintf`'s buffer is not mistaken
-    for the format. A non-literal format is not scanned, which is every other
-    format reader's permissive direction.
-    """
-    idx = printf_format_arg_index(name)
-    if idx is None or idx >= len(args):
-        return None
-    fmt = args[idx]
-    if not isinstance(fmt, F.StringLiteral):
-        return None
-    convs = printf_conversion_specifiers(F.decoded_literal(fmt))
-    if convs is None:
-        return None
-    new_args = list(args)
-    changed = False
-    for j, conv in enumerate(convs):
-        k = idx + 1 + j
-        if k >= len(new_args):
-            break
-        if is_none_value(new_args[k]) is not True:
-            continue
-        if conv != "s":
-            return (None, printf_none_conversion_refusal(name, conv))
-        new_args[k] = F.StringLiteral(NONE_TEXT)
-        changed = True
-    return (new_args, None) if changed else None
 
 
 class ValueKinds:
@@ -912,11 +761,6 @@ class ValueKinds:
         """
         if is_none_expression(value):
             return True
-        if isinstance(value, F.CallExpr):
-            callee = _flat_callee(value) or getattr(
-                getattr(value, "func", None), "name", None)
-            if isinstance(callee, str) and self._callee_returns_none(callee):
-                return True
         if isinstance(value, self._NOT_NONE):
             return False
         return None
@@ -1895,30 +1739,8 @@ class ValueKinds:
         return None
 
     def is_none_value(self, e):
-        """True when `e` spells `None`, False when it is a value, and None when
-        this function's source does not say.
-
-        The third of the three axes `kind_of` cannot carry. `None` has no WORD
-        on this path — a formal value is one 64-bit word and this is the absence
-        of one — so the only way to render it is to know at BUILD time that the
-        operand is `None` and write those four characters into the format
-        string (`print_constant_text`). That is direction (b): a function that
-        falls off its end, or whose every `return` is `None` or a call to one
-        that does, ALWAYS answers `None`, and a call to it is therefore as
-        decidable as the literal. `function_returns_none` is the ONE reader of
-        that question, closed over `return` chains by the emitter's
-        `callee_returns_none` hook (see `function_returns_none_resolver`).
-
-        The evidence: the `None` expression itself (`is_none_expression`, which
-        knows both spellings the parser produces), a NAME every statement of
-        this function binds to one, from `_none_of` under the unanimity rule —
-        which needs a False to be reachable at all, so a literal of another kind
-        answers False (`_NOT_NONE`) and `n = None` then `n = 5` leaves the name
-        out instead of keeping the first binding — and a CALL whose callee is
-        known to answer `None`. `n = None; print(n)` printed `0` on both
-        architectures before this existed; `n = None` then `n = 5` then
-        `print(n)` claims nothing, which is the rule that keeps the first fix
-        from being a wrong one.
+        """True when `e` is the `None` singleton, False when it is a value, and
+        None when this function's source does not say.
         """
         if e is None:
             return None
@@ -1931,10 +1753,14 @@ class ValueKinds:
                 return None
             return self._none_of.get(e.name)
         if isinstance(e, F.CallExpr):
-            callee = _flat_callee(e) or getattr(
-                getattr(e, "func", None), "name", None)
-            if isinstance(callee, str) and self._callee_returns_none(callee):
-                return True
+            callee = _flat_callee(e) or getattr(getattr(e, "func", None), "name", None)
+            if isinstance(callee, str):
+                if not self._callee_returns_value(callee):
+                    return None
+                if getattr(self, '_callee_returns_none', None) and self._callee_returns_none(callee):
+                    return True
+                # In direction (b), functions that fall off end or have bare returns return None
+                return None
         return None
 
     def is_bytes_value(self, e):

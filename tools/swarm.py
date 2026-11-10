@@ -23,15 +23,7 @@ import integrate as I
 import task_text as T
 
 PREFIXES = ("bug-", "fix-")
-def marker(word):
-    """A doc's control line `WORD: <value>` as a regex. The line is written by workers inside Markdown, and the
-    commonest way to write it is as a heading (`# SPLIT: ...`, 2026-11-12: a replan's perfectly good decomposition
-    was ignored for that reason, the replan ran a second time, and a person had to delete the `# `), so a leading
-    heading, quote, bullet or bold/code markup is accepted. Mid-line prose never matches: the word must start the line."""
-    return re.compile(r"^[ \t]*(?:#{1,6}[ \t]+|>[ \t]*|[-*+][ \t]+)?[*_`]*%s:[*_`]*[ \t]*(.+?)[ \t]*[*_`]*[ \t]*$" % word, re.M)
-
-
-STOP = marker("STOP")   # the stop indicator: a line `STOP: <reason>` in the bug doc
+STOP = re.compile(r"^STOP:[ \t]*(.+?)[ \t]*$", re.M)   # the stop indicator: a line `STOP: <reason>` in the bug doc
 
 
 def state_path():
@@ -45,21 +37,7 @@ def load_state():
         return {"fed": {}}
 
 
-_SEEN = {}                    # message key -> time it was last printed
-REPEAT_QUIET_S = 3600         # an unchanged status line is printed again at most this often
-COUNTER_LINES = ("guard:", "cleanup:", "config:", "feed ", "land:", "wait ", "held ")   # a count moving is not news
-
-
 def log(msg):
-    """Print one timestamped line, unless the same line was printed within REPEAT_QUIET_S. Passes run every few
-    minutes and most of them find the same state as the last one, so the log used to be 90% repeats (356 `guard:`,
-    246 `wait hard/...`, 209 `holding ...` in one run); a line that is an EVENT (a spawn, a landing, a retire) names
-    a pid or a task and never repeats exactly. Counter lines compare with their digits blanked."""
-    key = re.sub(r"\d+", "#", msg) if msg.startswith(COUNTER_LINES) else msg
-    now = time.time()
-    if now - _SEEN.get(key, -REPEAT_QUIET_S) < REPEAT_QUIET_S:
-        return
-    _SEEN[key] = now
     print("%s %s" % (time.strftime("%T"), msg), flush=True)
 
 
@@ -115,11 +93,9 @@ def live_guard():
     try:
         dirs = C.live_session_dirs()
     except (RuntimeError, OSError, ValueError) as e:
-        # fail closed: with no listing, "nothing is live" is unknown, and feeding or landing on that guess is how a
-        # live worker gets a second one on its doc (2026-11-03). The pass does its bookkeeping and nothing else.
-        log("guard: %s; session listing unreadable, this pass feeds and lands nothing" % e)
+        log("guard: %s; falling back to pid-based liveness (session listing unreadable)" % e)
         BUSY["names"], BUSY["claims"] = set(), set()
-        return False
+        return True
     tasks = C.load()
     names = C.busy_task_names(dirs, tasks)
     claims = set()
@@ -143,67 +119,6 @@ def drop_queued_busy():
             log("dropped queued %s: %s is held by a live session" % (item.get("name", f), ", ".join(clash)))
 
 
-def apply_orch_reviews():
-    """Act on the verdicts of orchestration reviewers (control.enqueue_orch_review), once per pass, BEFORE the feed and
-    the retire step: a FORWARD reviewer that committed nothing is retired as a no-commit worker, and its log, where the
-    verdict is, goes with its tree.
-      FORWARD  the chain is converging: reset the cap now, the capped branch is handed to fixers again from depth 0.
-      FIXED    the reviewer fixed the orchestration: wait until its branch has LANDED (its registry entry is gone), so
-               the reset happens on the fixed code (a landing reloads the swarm), then reset.
-      STOP / no verdict   the cap stays (a review that cannot help is not retried past MAX_CAP_REVIEWS)."""
-    for name, t in C.load().items():
-        cr = t.get("cap_review")
-        if not cr or cr.get("applied"):
-            continue
-        rname = cr["reviewer"]
-        r = C.load().get(rname)
-        if cr.get("verdict") == "FIXED":          # recorded earlier: waiting for the fix to land
-            if r is None:
-                C.reset_cap(name, "FIXED")
-                log("orchestration review of %s: FIXED and landed; the cap is reset, the new code handles it" % name)
-            continue
-        if r is None:
-            log("orchestration review of %s: reviewer %s is gone without a verdict; it stays capped" % (name, rname))
-            with C.registry() as reg:
-                reg[name]["cap_review"]["applied"] = "no verdict"
-            continue
-        if C.state_of(r) == "running":
-            continue
-        v = C.orch_verdict(r)
-        if v == "FORWARD":
-            C.reset_cap(name, "FORWARD")
-            log("orchestration review of %s: FORWARD (%s); the cap is reset and the chain may continue" % (name, rname))
-        elif v == "FIXED":
-            with C.registry() as reg:
-                reg[name]["cap_review"]["verdict"] = "FIXED"
-            log("orchestration review of %s: FIXED by %s; the cap is reset once its fix has landed" % (name, rname))
-        else:
-            with C.registry() as reg:
-                reg[name]["cap_review"]["applied"] = v or "no verdict"
-                reg[name]["cap_review"]["verdict"] = v or "none"
-            log("orchestration review of %s: %s by %s; it stays capped (see %s)"
-                % (name, v or "no ORCH-VERDICT line", rname, cr.get("doc", "its review doc")))
-
-
-def drop_queued_unserved(unserved):
-    """A queued task whose class no slot serves can never start, and its claim keeps the doc from the only thing that
-    can move it: the replan skips a doc whose claim a queued task holds. 2026-11-12: `bug-hard-suite-gimplerunner-part2`
-    waited for a `hard` slot that does not exist, and `SUITE_gimplerunner-part2` was never decomposed. The queue entry
-    is dropped (the feed or the replan re-queues the doc at a class that can run it). Returns how many were dropped."""
-    n = 0
-    for f in os.listdir(C.qdir()):
-        if not f.endswith(".json"):
-            continue
-        path = os.path.join(C.qdir(), f)
-        item = json.load(open(path))
-        if item.get("cls") in unserved:
-            os.remove(path)
-            log("dropped queued %s: its class %s has no slot, so it could never start (its doc is replanned instead)"
-                % (item.get("name", f), item["cls"]))
-            n += 1
-    return n
-
-
 def busy_by_class():
     """Running workers per task class: a task counts in its own class (its `cls`), whichever slot it runs on, so a
     slot that also takes another class does not hide that class's load. Stale registry entries (a dead pid still
@@ -211,11 +126,12 @@ def busy_by_class():
     pool = C.load_pool()
     slot_cls = {sl["name"]: C.slot_class(sl) for sl in pool["slots"]}
     busy = {c: 0 for c in C.CLASSES}
-    tasks = C.load()
-    live = C.live_names(tasks) or frozenset()        # the same working rule as control.running_by_slot
-    for name, t in tasks.items():
-        if C._working(name, t) and (C.alive(t.get("pid")) or name in live):
-            busy[t.get("cls") or slot_cls.get(t.get("pool"), "easy")] += 1
+    for t in C.load().values():
+        if C.state_of(t) != "running":
+            continue
+        if not C.alive(t.get("pid")):
+            continue
+        busy[t.get("cls") or slot_cls.get(t.get("pool"), "easy")] += 1
     return busy
 
 
@@ -247,12 +163,6 @@ def doc_hash(doc):
         return hashlib.sha1(open(os.path.join(C.MAIN, doc_path(doc)), "rb").read()).hexdigest()
     except OSError:
         return None
-
-
-def skip_hits(base, skips):
-    """The pool's skip patterns that a doc's base name matches (empty when it is a real bug doc). The one test every
-    path that picks docs uses: the feed, the replan, and the explanation of a wedged doc."""
-    return [x for x in skips if base.startswith(x) or x in base]
 
 
 def bug_docs(base):
@@ -338,14 +248,42 @@ def feed():
         rel = os.path.relpath(p, os.path.join(C.MAIN, "bugs"))
         doc = rel[:-3] if rel.endswith(".md") else rel
         base = os.path.basename(doc)
-        reason = block_reason(doc, st, pool, busy_slot, held)
-        if reason:
-            continue                       # the reason is a view (swarm.py --feed / --why), not a line per pass
+        if any(base.startswith(x) or x in base for x in skips):
+            log("skip %s: its name matches the pool's skip pattern %s" % (
+                doc, [x for x in skips if base.startswith(x) or x in base]))
+            continue
+        if "bug:" + base in held:
+            log("held %s: a live task or an external claim holds it (see control.py claims)" % doc)
+            continue
+        # DONE ratchet: a doc whose fix is FINISHED — a DONE task with commits, not yet landed — is
+        # not re-dispatched; its branch is in the landing queue. A deletion by a worker that never
+        # finished is NOT a fix, and skipping on it strands the doc forever with no path forward
+        # (2026-11-10: 5 docs, e.g. mid/SUITE_silentnoop, were wedged exactly this way).
+        r = subprocess.run(["git", "log", "--all", "--diff-filter=D", "--oneline", "--",
+                           "bugs/%s.md" % base, "bugs/mid/%s.md" % base, "bugs/hard/%s.md" % base],
+                           capture_output=True, text=True, cwd=C.MAIN)
+        if r.stdout.strip() and landable(base):
+            log("done-ratchet: %s already deleted on a branch; skipping (its branch is in the landing queue)" % doc)
+            continue
+        if base in st.get("pending", {}):
+            log("held %s: due a move to %s (queued only after it moves)" % (doc, st["pending"][base]))
+            continue
+        why = stop_reason(doc)
+        if why:
+            log("stopped %s: %s" % (doc, why))
+            continue
         cls = doc_class(doc, st, base)
+        # a doc is queued only if some slot that accepts its class has room right now
+        if not any(C.accepts(sl, cls) and C.slot_free(sl, busy_slot) for sl in pool["slots"]):
+            log("wait %s: no free %s slot (%s)" % (doc, cls, ", ".join(
+                "%s count %d busy %d%s" % (sl["name"], sl["count"], busy_slot.get(sl["name"], 0),
+                                           ", banned" if sl["model"] in C.dead_models() else "")
+                for sl in pool["slots"] if C.accepts(sl, cls)) or "no slot takes class " + cls))
+            continue
         name = task_name(doc)
-        if name in C.load() or os.path.exists(os.path.join(C.qdir(), name + ".json")):
-            name = C.free_task_name(name, 40 + 5)       # the 40-char name collides with an old or queued task
-            log("renamed %s: %s" % (doc, name))
+        if name in C.load():                   # the 40-char name collides with an old task: make it unique
+            log("renamed %s: %s is already in the registry" % (doc, name))
+            name += "-%d" % int(time.time() % 10000)
         prev = last_attempt(base) if st["fed"].get(doc) else None
         if prev:
             log("re-feed %s: previous attempt %s" % (doc, prev))
@@ -362,14 +300,6 @@ def feed():
         st["fed"][doc] = st["fed"].get(doc, 0) + 1
     json.dump(st, open(state_path(), "w"), indent=1)
     return made
-
-
-def deleted_on_a_branch(base):
-    """Whether some branch has deleted this doc: the one git query the DONE ratchet needs, run before anything else."""
-    r = subprocess.run(["git", "log", "--all", "--diff-filter=D", "--oneline", "--",
-                        "bugs/%s.md" % base, "bugs/mid/%s.md" % base, "bugs/hard/%s.md" % base],
-                       capture_output=True, text=True, cwd=C.MAIN)
-    return bool(r.stdout.strip())
 
 
 def landable(base):
@@ -402,82 +332,41 @@ def claim_held(base):
     return None
 
 
-def block_reason(doc, st, pool, busy, held):
-    """The first feed condition that keeps DOC from being queued now, or None when it may be queued. The one verdict
-    the feed and the views share, so a view can never disagree with what the feed does. `held` is the set of
-    'bug:BASE' claims held now (held_claims()); `busy` is running_by_slot()."""
+def why(doc):
+    """Why DOC is not being fed right now: the first feed condition that blocks it. Answers the
+    'this bug is wedged and nothing says why' question without waiting for a pass."""
+    pool = C.load_pool()
+    skips = pool.get("skip", [])
+    st = load_state()
     base = os.path.basename(doc)
     cls = doc_class(doc, st, base)
-    if skip_hits(base, pool.get("skip", [])):
-        return "skip pattern: its name matches %s from the pool's skip list" % skip_hits(base, pool.get("skip", []))
-    if "bug:" + base in held:
-        return "held: a live task or an external claim holds it"
-    np = T.no_progress_reason(base)
-    if np:
-        return np
-    if deleted_on_a_branch(base):          # cheap git check first: landable() reads the registry
-        done = landable(base)
-        if done:
-            return "DONE ratchet: a branch deleted it; %d DONE task(s) will land it (e.g. %s)" % (len(done), done[0])
+    busy = C.running_by_slot()
+    if any(base.startswith(x) or x in base for x in skips):
+        return "skip pattern: its name matches %s from the pool's skip list" % [
+            x for x in skips if base.startswith(x) or x in base]
+    held = claim_held(base)
+    if held:
+        return "held: %s" % held
+    r = subprocess.run(["git", "log", "--all", "--diff-filter=D", "--oneline", "--",
+                        "bugs/%s.md" % base, "bugs/mid/%s.md" % base, "bugs/hard/%s.md" % base],
+                       capture_output=True, text=True, cwd=C.MAIN)
+    if r.stdout.strip() and landable(base):
+        return "DONE ratchet: a branch deleted it; %d DONE task(s) will land it (e.g. %s)" % (
+            len(landable(base)), landable(base)[0])
     if base in st.get("pending", {}):
         return "held: due a reclass to %s (queued only after the doc moves)" % st["pending"][base]
     stop = stop_reason(doc)
     if stop:
         return "STOP line in the doc: %s" % stop
-    split = split_reason(doc)
-    if split:
-        if split_all_landed(doc):
-            return "SPLIT: every part has landed (%s); the parent needs a final verify and delete, not a replan" % split
-        return "SPLIT: decomposed into parts that carry the work (%s)" % split
     if not any(C.accepts(sl, cls) and C.slot_free(sl, busy) for sl in pool["slots"]):
         return "no free %s slot (%s)" % (cls, ", ".join(
             "%s count %d busy %d%s" % (sl["name"], sl["count"], busy.get(sl["name"], 0),
                                        ", banned" if sl["model"] in C.dead_models() else "")
             for sl in pool["slots"] if C.accepts(sl, cls)) or "no slot takes class " + cls)
-    return None
-
-
-def _doc_rel(doc):
-    """A bugs/ path, or a path relative to bugs/, with or without .md, as the bare doc name the feed uses."""
-    if doc.startswith("bugs/"):
-        doc = doc[5:]
-    return doc[:-3] if doc.endswith(".md") else doc
-
-
-def why(doc):
-    """Why DOC is not being fed right now, with the detail the feed does not compute per pass (which task holds it, and
-    the in-flight state). Answers 'this bug is wedged and nothing says why' without waiting for a pass."""
-    pool = C.load_pool()
-    st = load_state()
-    doc = _doc_rel(doc)
-    base = os.path.basename(doc)
-    reason = block_reason(doc, st, pool, C.running_by_slot(), held_claims())
-    if reason and reason.startswith("held:"):
-        reason = "held: %s" % (claim_held(base) or "a live task or an external claim holds it")
-    if reason:
-        return reason
     name = task_name(doc)
     if name in C.load():
         return "in flight: task %s is %s" % (name, C.state_of(C.load()[name]))
     return "would be fed on the next pass"
-
-
-def feed_view():
-    """Every doc the feed considers, with the reason it waits or 'eligible', grouped by reason. Computed now, from the
-    same block_reason the feed uses; nothing is logged for it."""
-    pool = C.load_pool()
-    st, busy, held = load_state(), C.running_by_slot(), held_claims()
-    groups = {}
-    for p in sorted(set(x for g in pool["feed"] for x in glob.glob(os.path.join(C.MAIN, g)))):
-        doc = _doc_rel(os.path.relpath(p, os.path.join(C.MAIN, "bugs")))
-        reason = block_reason(doc, st, pool, busy, held) or "eligible"
-        groups.setdefault(reason.split(" (")[0].split(":")[0], []).append(doc)
-    for key in sorted(groups, key=lambda k: (k == "eligible", -len(groups[k]))):
-        print("%5d  %s" % (len(groups[key]), key))
-        if key == "eligible" or "-v" in sys.argv:
-            for d in groups[key][:20]:
-                print("        %s" % d)
-    return 0
 
 
 def probe_free():
@@ -496,170 +385,8 @@ def refill(target):
                         "--prefix", ",".join(PREFIXES)], capture_output=True, text=True, cwd=C.MAIN)
     lines = [l for l in r.stdout.splitlines() if l.strip()]
     for l in lines[:-1]:
-        log(l if l.startswith("refill:") else "refill: " + l)   # control.py labels its own lines
+        log("refill: " + l)
     return lines[-1] if lines else ""
-
-
-SPLIT = marker("SPLIT")   # a doc decomposed into parts by a replan
-
-
-def part_stem(part):
-    """A `SPLIT:` entry (a bare name, `bugs/mid/<name>.md` or `<name>.md`) as the doc's bare name."""
-    stem = part.strip()
-    stem = re.sub(r"^bugs/", "", stem)
-    stem = re.sub(r"^(easy|mid|hard)/", "", stem)
-    return re.sub(r"\.md$", "", stem)
-
-
-def split_parts(line, own=None):
-    """The part names in a `SPLIT:` line's value. Workers annotate the line (`part1 landed: the where-clause text`,
-    `(fixed, deleted 2026-11-12)`), and the commas inside a note were read as part names, so a good split looked like
-    five missing parts and the doc was replanned again (2026-11-12, eight docs). So: parenthesised notes are dropped,
-    and an entry counts only if it is shaped like a doc name (no spaces); the doc's own name, which one worker listed
-    among its parts, is not a part of itself."""
-    line = re.sub(r"\([^)]*\)", " ", line)
-    names = []
-    for tok in line.split(","):
-        tok = tok.strip().strip("`*_ ").rstrip(".")
-        if re.fullmatch(r"[\w./-]+", tok) and part_stem(tok) != own:
-            names.append(tok)
-    return names
-
-
-def part_state(part):
-    """`exists` (a doc on disk, in whatever class directory it was filed), `landed` (no doc, but a branch deleted it:
-    a part's doc is deleted by the fix that closes it, so this is a part's NORMAL end) or `missing` (never filed)."""
-    stem = part_stem(part)
-    if glob.glob(os.path.join(C.MAIN, "bugs", "**", stem + ".md"), recursive=True):
-        return "exists"
-    return "landed" if deleted_on_a_branch(stem) else "missing"
-
-
-def part_exists(part):
-    return part_state(part) == "exists"
-
-
-def split_reason(doc):
-    """The parts listed in the doc's `SPLIT:` line, or None. A SPLIT doc's parts carry the work, so
-    the feeder leaves the original alone (it stays at its class — the ladder is one-way).
-
-    Only a split whose parts all exist or have LANDED counts. A part that was never filed is an orphan: the original
-    would stay parked forever with nothing working it, so None lets the replan queue again (2026-11-11). A part whose
-    doc is gone because its fix landed is not an orphan: treating it as one re-decomposed a parent whose parts were
-    partly done, every time a part closed (2026-11-12)."""
-    try:
-        with open(os.path.join(C.MAIN, doc_path(doc)), encoding="utf-8") as f:
-            m = SPLIT.search(f.read())
-    except OSError:
-        return None
-    if not m:
-        return None
-    parts = split_parts(m.group(1), own=os.path.basename(doc))
-    if not parts or any(part_state(p) == "missing" for p in parts):
-        return None
-    return m.group(1)
-
-
-def split_all_landed(doc):
-    """True when the doc is SPLIT and every part has landed: nothing is left in the parts, so the parent needs a final
-    verify and a delete by a person (or a worker told to), not another replan."""
-    reason = split_reason(doc)
-    if not reason:
-        return False
-    parts = split_parts(reason, own=os.path.basename(doc))
-    return bool(parts) and not any(part_state(p) == "exists" for p in parts)
-
-
-def unserved_classes(pool=None, *, warn_only=False):
-    """Classes the pool documents but cannot serve: no slot of that class has any count.
-
-    A doc at such a class can never be worked, and the escalation ladder has no way out of it —
-    2026-11-10: `hard` is documented as "bugs/hard/*.md (Opus 5.5)" while opus has count 0 and has
-    never run a task, so 25 hard docs sat there with no path forward.
-
-    warn_only: when True, omit classes whose lack of a slot is an accepted policy recorded in
-    pool.json's classes.unserved_policy — the configured handling (e.g. replan) applies, so the
-    swarm must not warn on every pass."""
-    pool = pool or C.load_pool()
-    accepted = (pool.get("classes") or {}).get("unserved_policy") or {}
-    out = {}
-    for cls in C.CLASSES:
-        slots = [sl for sl in pool["slots"] if C.accepts(sl, cls)]
-        if not any(sl.get("count", 0) > 0 for sl in slots):
-            if warn_only and cls in accepted:
-                continue
-            out[cls] = [sl["name"] for sl in slots]
-    return out
-
-
-REPLAN_TASK = """You REPLAN a bug doc. You do NOT fix the bug.
-
-Read %(doc)s. It sits at a class the pool cannot serve (%(cls)s has no slot: %(slots)s), so it can
-never be worked as written. Decompose it instead:
-
-1. Decide the parts. Each part is a self-contained piece of work, small enough for a class the pool
-   CAN serve: %(servable)s. Never file a part at %(cls)s.
-2. File each part as a new doc named "<base>-part1", "<base>-part2", ... under bugs/ or bugs/mid/
-   — the highest class you can argue it needs, within %(servable)s. Each part doc must have:
-   - a title and a Goal;
-   - a "## Acceptance" section with the observable result;
-   - a "## Done when" section naming ONE quick test (a file path and the command that runs it,
-     cheap enough to run in the gate's fast tier) that proves the part is fixed. A part with no
-     runnable test is not a part: write a test or make the part smaller.
-   Commit each new doc.
-3. Check your work before the SPLIT line: every part you named must exist on disk under bugs/ and
-   open with its title. Then add one line at the top of the ORIGINAL doc, in exactly this form:
-   SPLIT: <base>-part1, <base>-part2, ...
-   Write it as a plain line of text: no leading `#`, `>`, `-` or bold (a heading is tolerated, but plain is the form).
-   Commit it. The original stays at its class; its parts carry the work. A SPLIT line naming a part
-   that is not on disk is ignored, and the doc is replanned again.
-4. Finish with the REPORT block and CONTROL-STATUS: DONE.
-
-Do not try to fix the bug yourself. Do not delete the original doc."""
-
-
-def replan_unserved():
-    """Queue a replan for every doc at a class the pool cannot serve. Returns how many.
-
-    This is the only way such a doc can move without breaking the ladder: an easy worker decomposes
-    it into parts filed at classes that DO have capacity, and the original is marked SPLIT."""
-    pool = C.load_pool()
-    unserved = unserved_classes(pool)
-    if not unserved:
-        return 0
-    servable = [c for c in C.CLASSES if c not in unserved]
-    drop_queued_unserved(unserved)
-    made = 0
-    for cls, slots in sorted(unserved.items()):
-        for path in sorted(glob.glob(os.path.join(C.MAIN, "bugs", cls, "*.md"))):
-            base = os.path.basename(path)[:-3]
-            if skip_hits(base, pool.get("skip", [])):
-                continue                  # an index or README is not a bug doc: nothing to split (2026-11-10: a
-                                          # replan of bugs/hard/README.md was queued and ran on qwen)
-            name = "fix-replan-" + re.sub(r"[^a-z0-9]+", "-", base.lower())[:40].rstrip("-")
-            qpath = os.path.join(C.qdir(), name + ".json")
-            if os.path.exists(qpath):
-                # self-heal: sync used to rewrite a queued task's class from its doc, which parked
-                # every replan at the unserved class it was meant to escape
-                it = json.load(open(qpath))
-                if it.get("cls") != "easy":
-                    old = it.get("cls")
-                    it["cls"] = "easy"
-                    with open(qpath, "w") as f:
-                        json.dump(it, f, indent=1)
-                    log("replan %s: corrected its queued class %s -> easy" % (name, old))
-                continue
-            if name in C.load() or split_reason("%s/%s" % (cls, base)) or claim_held(base):
-                continue
-            text = REPLAN_TASK % {"doc": "bugs/%s/%s.md" % (cls, base), "cls": cls,
-                                  "slots": ", ".join(slots), "servable": ", ".join(servable)}
-            subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "enqueue", name,
-                            "--claim", "bug:" + base, "--task", text, "--cls", "easy"],
-                           capture_output=True, text=True, cwd=C.MAIN)
-            log("replan bugs/%s/%s.md: class %s has no slot (%s); queued %s to split it into parts at %s"
-                % (cls, base, cls, ", ".join(slots), name, ", ".join(servable)))
-            made += 1
-    return made
 
 
 def reclass_on_failure(st, base, doc):
@@ -839,8 +566,8 @@ def continue_partial(st):
             continue
         cls = doc_class(doc, st, base)
         cont = task_name(doc)
-        if cont in C.load() or os.path.exists(os.path.join(C.qdir(), cont + ".json")):
-            cont = C.free_task_name(cont, 40 + 5)
+        if cont in C.load():
+            cont += "-%d" % int(time.time() % 10000)
         if enqueue_doc(doc, base, cls, cont, start=t["branch"]):
             track[doc] = {"head": head, "name": cont}
             subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "mark", name, "abandoned"],
@@ -901,14 +628,9 @@ def probe(batch):
     if not pm:
         return "EMPTY", [], [], out
     fm = re.search(r"^FAILED_JOBS: ?(.*)$", out, re.M)
-    failing = fm.group(1).split() if fm else []      # JOBS only: a failing file is not a job (see failed_files)
-    return pm.group(1), pm.group(2).split(), failing, out
-
-
-def failed_files(out):
-    """The failing stdlib files a probe printed (FAILED_FILES): for the gate doc's body, never its name."""
     ff = re.search(r"^FAILED_FILES: ?(.*)$", out, re.M)
-    return ff.group(1).split() if ff else []
+    failing = (fm.group(1).split() if fm else []) + (ff.group(1).split() if ff else [])
+    return pm.group(1), pm.group(2).split(), failing, out
 
 
 def find_culprit(seq, failing):
@@ -925,20 +647,27 @@ def find_culprit(seq, failing):
     return seq[hi - 1], failing or []
 
 
+LAND_BATCH = 8   # branches landed per pass: a larger batch merges them all into one gate run and one conflict storm
+
+
 def land():
-    # No batch cap. The cap (8) existed because a batch meant one HEAVY gate run and one conflict storm. The landing
-    # gate is now cheap (tools/gates.json `landing`: stdlib-syntax; the rest runs after landing in verify_landed.py),
-    # a conflicting branch is peeled off to a merge fixer inside the loop below, and a red is bisected to its culprit
-    # by find_culprit, so everything finished lands in ONE pass instead of queueing 8 at a time behind it.
-    proofs = []
-    names = [n for n in I.pick_candidates(quiet=True, proof_out=proofs) if n.startswith(PREFIXES) and n not in BUSY["names"]]
-    for n, deleted in proofs:               # a DONE branch that deletes a doc without a test: a reviewer decides, not a person
-        if n.startswith(PREFIXES) and n not in BUSY["names"]:
-            tn = C.load()[n]
-            log("proof review: %s deletes %s with no test changed; handing it to a reviewer (TEST or NOTESTCASE)"
-                % (n, " ".join(deleted)))
-            I.enqueue_proof_review(n, tn, deleted)
+    names = [n for n in I.pick_candidates(quiet=True) if n.startswith(PREFIXES) and n not in BUSY["names"]]
     names = fresh_first(names, C.load())
+    held = names[LAND_BATCH:]
+    names = names[:LAND_BATCH]
+    if held:
+        log("land: %d more finished branch(es) waiting behind the batch cap of %d: %s"
+            % (len(held), LAND_BATCH, ", ".join(held[:3]) + (" ..." if len(held) > 3 else "")))
+    dirty = set(C.git("diff", "--name-only", "HEAD", cwd=C.MAIN).split())
+    if dirty:
+        tasks, keep = C.load(), []
+        for n in names:
+            hit = dirty & set(C.git("diff", "--name-only", "master..." + tasks[n]["branch"], check=False).split())
+            if hit:
+                log("holding %s: the main checkout has uncommitted edits to %s" % (n, ", ".join(sorted(hit))))
+            else:
+                keep.append(n)
+        names = keep
     if not names:
         return None
     tasks = C.load()
@@ -951,7 +680,7 @@ def land():
                 I.enqueue_merge_fix(c, tasks[c], out)
                 batch.remove(c)
         if verdict == "BUSY":
-            log("integrator busy (another integrator round holds the lock); landing waits for the next pass")
+            log("integrator busy (the post-landing verifier holds the lock); landing waits for the next pass")
             break
         if verdict == "EMPTY" or not merged:
             break
@@ -959,16 +688,16 @@ def land():
             r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py"), "--stdlib", "--only"] + merged,
                                capture_output=True, text=True, cwd=C.MAIN)
             for line in (r.stdout + r.stderr).splitlines():
-                if line.startswith(("GREEN", "RED", "CONFLICT", "another integrator", "master moved", "landing waits")):
+                if line.startswith(("GREEN", "RED", "CONFLICT", "another integrator", "master moved")):
                     log(line[:200])
             landed = "GREEN" in (r.stdout + r.stderr)
             break
         # RED: the batch as a whole fails the gate. Find the one branch that breaks it; that branch goes to a fixer
         # with its failing tests named, and the rest of the batch is probed again (and lands when it is green).
         culprit, failing = find_culprit(merged, failing)
-        log("red: %s breaks the gate (%s); it is held and bugs/gate-<job>.md is the work, the rest of the batch continues"
+        log("red: %s breaks the gate (%s); it goes to a fixer, the rest of the batch continues"
             % (culprit, " ".join(failing) or "jobs unknown"))
-        I.gate_doc(culprit, tasks[culprit], failing, failed_files(out))
+        I.enqueue_red_fix(culprit, tasks[culprit], failing)
         batch = [n for n in batch if n != culprit]
     return landed
 
@@ -1039,17 +768,11 @@ def main():
     ap.add_argument("--who", action="store_true", help="print the verified lock holder and exit")
     ap.add_argument("--why", metavar="DOC", default=None,
                     help="print why a bug doc is not being fed (a bugs/ path or a base name), and exit")
-    ap.add_argument("--feed", action="store_true", help="show, grouped by reason, every doc the feed considers and why it waits")
     a = ap.parse_args()
-    if a.feed:
-        sys.exit(feed_view())
     if a.who:
         sys.exit(who())
     if a.why:
         sys.exit(why(a.why))
-    # Landings move master in C.MAIN (the tree this file lives in), so that tree must have master checked out.
-    if C.git("branch", "--show-current", cwd=C.MAIN, check=False) != "master":
-        sys.exit("%s does not have master checked out, so landings cannot move it." % C.MAIN)
     # redirect output to the log file so it is captured without a shell redirect
     if a.log_file:
         os.makedirs(os.path.dirname(os.path.abspath(a.log_file)), exist_ok=True)
@@ -1070,8 +793,7 @@ def main():
             sr = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "sync", "--restart-dead"], capture_output=True, text=True, cwd=C.MAIN)
             for line in (sr.stdout or "").splitlines():
                 if line.strip():
-                    text = line.strip()
-                    log(text if text.startswith("sync:") else "sync: " + text)   # control.py labels its own lines
+                    log("sync: " + line.strip())
             # safe, conservative cleanup every pass: only removes merged/clean/idle trees with no outside claim
             cr = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "cleanup"], capture_output=True, text=True, cwd=C.MAIN)
             for line in (cr.stdout or "").splitlines():
@@ -1079,14 +801,6 @@ def main():
                     log("cleanup: " + line.strip())
             fed = cont = retired = 0
             if guard_ok:
-                unserved = unserved_classes(warn_only=True)
-                if unserved:
-                    log("config: class(es) with docs but no slot: %s" % ", ".join(
-                        "%s (%s count 0)" % (c, "/".join(s)) for c, s in sorted(unserved.items())))
-                apply_orch_reviews()
-                replanned = replan_unserved()
-                if replanned:
-                    log("replan: queued %d replan task(s) for docs at an unserved class" % replanned)
                 fed = feed()
                 cont = continue_partial(load_state())
                 retired = retire_dead()
@@ -1099,7 +813,7 @@ def main():
                 subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "cleanup"], capture_output=True, cwd=C.MAIN)  # landed trees go
                 log("landed; post-landing verifier started")
         except Exception as e:      # an unattended loop must survive one bad pass
-            log("pass failed: %r\n%s" % (e, traceback.format_exc()))   # the traceback names the line; the repr alone cost a code read (2026-11-12)
+            log("pass failed: %r" % (e,))
         if not a.interval:
             return
         time.sleep(a.interval)

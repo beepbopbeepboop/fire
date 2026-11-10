@@ -1,7 +1,5 @@
 # DIAGNOSTICS: missing validation/error reporting for modular test cases
 
-SPLIT: DIAGNOSTICS_missing_validation_modular-part1, DIAGNOSTICS_missing_validation_modular-part2, DIAGNOSTICS_missing_validation_modular-part3, DIAGNOSTICS_missing_validation_modular-part5, DIAGNOSTICS_missing_validation_modular-part6
-
 ## Symptom
 Modular test files expect compile-time errors/diagnostics that our compiler does not produce (it compiles them successfully). These are cases where modular's compiler rejects invalid code but ours accepts it.
 
@@ -112,39 +110,6 @@ See build/checkfail_candidates.json (61 error-like cases).
   an 'out' argument and a return type` at the return type's location
   (`mojo_package_moco_773.mojo`). Regression:
   `test_out_param_return_type_diagnostic.py`.
-- **Landed (2026-11-11):** `where (cond, "message")` is enforced on functions
-  and structs. The parser keeps struct `where` clauses and accepts repeated
-  `where` keywords; `elaborate.check_where_clauses` folds each clause with
-  `eval_const_bool_state` against the concrete type args, and a provably false
-  one raises `WhereConformanceError` (a ConformanceError), which the struct
-  instantiation path re-raises. An undecided clause is accepted as before, and
-  the DType regex checks run only when a clause is undecided. Regression:
-  `test_where_message_diagnostic.py`. Not done: the `lacking evidence` note.
-- **Landed (2026-11-11):** `StaticString(_get_kgen_string["text"]())` in a
-  `comptime assert` / `constrained` message folds to its text
-  (`comptime.eval_const`, by name, index folded first). An unknown index stays
-  unfolded. Regression: `test_comptime_assert_diagnostic.py`,
-  `test_constrained_diagnostic.py`.
-- **Landed (2026-11-11):** `comptime for` over a list comprehension
-  (`[i * 2 for i in range(3)]`, with `if` filters, bound by name or direct):
-  `comptime.eval_const` folds a list comprehension to its element values, so
-  the unroller binds the loop variable and `comptime assert` / `constrained`
-  fire inside it. An unknown element or iterable is left unfolded. Regression:
-  `test_comptime_assert_diagnostic.py`, `test_constrained_diagnostic.py`.
-- **Landed (2026-11-11):** bare continuation lines of string literals fold into
-  one message (`comptime assert c, "a"` / more-indented `" b"`): the tokenizer
-  drops the NEWLINE between them (`fire_compiler.py::py_tokenize`). Same-indent
-  string lines and blank-line-separated ones stay separate. Regression:
-  `test_comptime_assert_diagnostic.py`.
-- **Landed (2026-11-11):** interpreter runs the `constrained[cond, msg]()`
-  builtin: a false condition raises `constraint failed: <msg>` (exit nonzero),
-  a true one is a no-op; a user-bound `constrained` name is not intercepted.
-  The paren form `constrained(cond, msg)` is not handled. Regression:
-  `test_interpreter_constrained_diagnostic.py`.
-- **Landed (2026-11-11):** interpreter `assert` failure (`python3 fire.py run`)
-  now prints the same `Assert Error: <msg>` prefix as the compiled path, with
-  the default `assert failed` when no message is given. Regression:
-  `test_interpreter_assert_message.py`.
 - **Landed (follow-up, 2026-11-09):** runtime `assert` failure now prints
   `Assert Error: <msg>` (`assert_failure_message.mojo`), via the runtime's
   `mojo_print_stderr` helper (`stderr` is a macOS macro, illegal in gimple).

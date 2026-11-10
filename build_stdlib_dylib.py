@@ -436,14 +436,6 @@ def compile_module_to_c(src: str, path: str, module_name: str,
             sys.setrecursionlimit(120000)
             gen = GimpleGen(emit_entry_points=False, module_name=module_name)
             gen._current_filename = path
-            # Stash the text the parser consumes, exactly as gimple_codegen's
-            # pipeline does (`gen._source_text = mojo_src`). `module_gen`'s
-            # text-only generic discovery reads `_source_text` and falls back
-            # to re-reading `path` from disk; with neither, a module-local
-            # generic such as `absorb[T]` is not seen as generic at all and is
-            # lowered with T erased to int64_t (bug:CODEGEN_local_generic_
-            # float_literal_arg_erases_to_int64).
-            gen._source_text = src
             box['c'] = gen.gen_module(Parser(py_tokenize(src)).parse_module())
             box['degraded'] = list(gen._generic_struct_elaboration_failures)
             box['cpp'] = getattr(gen, 'generated_cpp', '')
@@ -1700,7 +1692,7 @@ def runtime_export_entries(gcc: str, objs: list) -> tuple:
         `_X`, and `reflect.export_csym` resolved the entry to some OTHER
         symbol. Nothing is missing; the shared export-csym rule is computing
         a Mojo overload-mangled name for a C prototype. This is a real,
-        currently-live defect measured on this tree: of `fire_runtime.h`'s 810
+        currently-live defect measured on this tree: of `fire_runtime.h`'s 794
         entry points, only a handful survive `build_stdlib()`'s `nm`
         cross-check, and the rest are dropped for exactly this reason. So the
         stdlib dylib has never advertised most of the runtime entry points it

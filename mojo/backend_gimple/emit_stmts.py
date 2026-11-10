@@ -38,20 +38,6 @@ import mlir
 from fire_compiler import for_target_is_tuple, for_target_single_name
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
-
-
-def _lower_stmt_arg(gen, a):
-    # `ggc._box_escaping_dict_slot_read`, not a module-level
-    # `from ...emit_calls import ...`: emit_calls imports gimple_codegen, which
-    # imports THIS module, so a top-level import from it makes
-    # `import mojo.backend_gimple.emit_calls` fail outright ("cannot import name
-    # ... from partially initialized module ... most likely due to a circular
-    # import") -- the backend entry-point probe in test_suite.py is the thing
-    # that catches it. The module alias `ggc` (below) is bound by the time any
-    # function here RUNS, and every other emit_calls helper in this file is
-    # already reached the same way.
-    t, v = gen.lower_expr(a)
-    return ggc._box_escaping_dict_slot_read(gen, a, t, v)
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.module_shared as msh
 import mojo.middle.itcursor as itc
@@ -564,14 +550,6 @@ def _gen_stmt_VarDecl(gen, node):
         gen._layout_hint = layout
     if node.value is not None:
         vtype, v = gen.lower_expr(node.value)
-        # A `var`-declared name bound to more than one scalar kind in this
-        # function is the int64_t box, exactly as its plain-assignment twin
-        # (`ginf.mixed_scalar_locals`): box the initializer by its kind.
-        _mixed_box = (node.type_ann is None and isinstance(node.name, str)
-                      and ',' not in node.name
-                      and ginf.mixed_box_name(gen, node.name))
-        if _mixed_box:
-            v, vtype = ginf.box_mixed_store(gen, node.value, vtype, v, node.name)
         # Type inference: if no annotation, use the value's type instead of 'int'
         if node.type_ann is None:
             ctype = vtype
@@ -593,15 +571,6 @@ def _gen_stmt_VarDecl(gen, node):
         # Use the actual declared type (may differ if variable was already declared
         # in an earlier branch with a different inferred type)
         actual_dst = gen.var_types.get(node.name, ctype)
-        if _mixed_box:
-            # Register the box-holding local so every consumer reads it by
-            # kind (print/str/repr, `==`, arithmetic, `len`); see
-            # `ginf.mixed_scalar_locals`. The DECLARATION is `int64_t` because
-            # `_mixed`/`_inferred_var_types` above chose the box.
-            _vn = gen._cname(node.name)
-            gen._boxed_vals.add(_vn)
-            gen._tagged_word_vals.add(_vn)
-            gen._dyn_word_locals.add(node.name)
         # A module-level `var name = value`/`var name: T = value` (this
         # module's OWN top-level statement, or a nested `global name`
         # declaration) writes to the module-globals STRUCT FIELD, whose
@@ -979,35 +948,6 @@ def _emit_dynattr_setattr_dispatch(gen, member: str, vtype: str, v: str,
     vp_tmp = gen._new_val('void *', f"(void *){obj64}")
     gen._emit_call('void', '', '_mojo_dispatch_setattr',
                     [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
-
-
-def _join_dict_store(gen, key: str, value_node, vtype: str):
-    """Record a dict store's value kind under `key` (a C name or a source name), joined with what is recorded (the
-    one store-side writer: every dict store comes through here). Returns the recorded kind, or None when this store
-    says nothing about the dict's value type.
-
-    A store whose kind the compiler does not know (`dict_value_kind` None) joins nothing, and a container or str/float
-    store falls back to its C type. A None store is a kind of its own, remembered per (function, name), so a later
-    known-kind store joins it: `d['n'] = None` then `d['f'] = 1.5` is 'mixed'. Two different known kinds are 'mixed'
-    (`exprtypes.dict_kind_join`).
-    """
-    _kind = gimple_exprtypes.dict_value_kind(gen, value_node)
-    if _kind is None and (vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
-                          or vtype.endswith(' *')):
-        _kind = vtype
-    _prev_vt = gen._dict_val_types.get(key)
-    _seen_key = (_as_str(gen.current_func_name), _as_str(key))
-    if _kind == 'none':
-        gen._dict_none_seen.add(_seen_key)
-    if _kind is None or (_kind == 'none' and _prev_vt is None):
-        return None
-    _joined_vt = gimple_exprtypes.dict_kind_join(_prev_vt, _kind)
-    if _joined_vt == '_Bool':
-        _joined_vt = 'int64_t'
-    if _seen_key in gen._dict_none_seen and _joined_vt not in (None, 'none'):
-        _joined_vt = 'mixed'
-    gen._dict_val_types[key] = _joined_vt
-    return _joined_vt
 
 
 def _note_global_dict_store(gen, target_obj, vtype: str) -> None:
@@ -1494,20 +1434,6 @@ def _gen_stmt_AssignStmt(gen, node):
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name
-        # A box-holding name (`ginf.mixed_box_name`): bound to more than one
-        # scalar kind, or to a tagged generator word beside plain values. It
-        # has no single C type, so it is the `int64_t` box and every store
-        # into it is boxed by kind (`ginf.box_mixed_store`). Asked for every
-        # simple-name store (cheap: the per-function walks are cached).
-        _mixed_box = ginf.mixed_box_name(gen, tname)
-        # Propagate `d[k]` slot-read tracking to the assigned local name so
-        # later reads/prints of the name can recover the slot's runtime kind.
-        _dsr = getattr(gen, '_dict_slot_reads', None)
-        if _dsr is not None:
-            if v in _dsr:
-                _dsr[_as_str(tname)] = _dsr[v]
-            else:
-                _dsr.pop(_as_str(tname), None)
         # Track frozendict/dict fromkeys callable values
         try:
             if hasattr(gen, '_frozendict_fromkeys_callables') and v in gen._frozendict_fromkeys_callables:
@@ -1633,35 +1559,20 @@ def _gen_stmt_AssignStmt(gen, node):
         # MIXED_NAME_NON_INT64_REFUSAL. Refused here, before any store is
         # emitted, rather than unwrapping the box into a str/float slot.
         _tagged_bind = (v in getattr(gen, '_tagged_word_vals', ()) or _for_copy)
-        # A float/str/bool/int store into a box-holding name is boxed by its
-        # kind here, BEFORE the refusal below reads the value's C type, so it
-        # is carried by the box rather than refused. Only a store the box has
-        # no constructor for (a container, a struct pointer) is refused:
-        # silently casting a container pointer into a tagged word's slot was
-        # exactly the miscompile the refusal prevented.
-        # A float and a str stored into the same name of one function (`val = d["key"]` on a float dict, then
-        # `val = "text"`): no representation holds both kinds, and the second store would cast a double to a pointer,
-        # which gcc rejects ("cannot convert to a pointer type"). Refuse the function, with the same reason, at the
-        # store that brings the second kind. The codegen types a name from its bindings as it goes, so the kinds
-        # already stored into the name are the record. A box-holding name is the ONE exception: it is the int64_t
-        # box, and the store below boxes each value by kind.
-        if vtype in ('double', 'char *') and not _mixed_box:
-            _sk_key = (_as_str(gen.current_func_name), _as_str(tname))
-            _sk_prev = gen._stored_kinds.get(_sk_key)
-            if _sk_prev is not None and _sk_prev != vtype:
-                raise RuntimeError(
-                    f"{tname!r}: {ginf.mixed_name_non_int64_refusal(vtype)}")
-            gen._stored_kinds[_sk_key] = vtype
-        if _mixed_box and not _keep_tagged_box:
-            v, vtype = ginf.box_mixed_store(gen, node.value, vtype, v, tname)
-            if gen.var_types.get(_as_str(tname), 'int64_t') == 'int64_t':
-                _keep_tagged_box = True
         if ((_tagged_bind and ginf.is_non_int_c_type(gen.var_types.get(tname)))
-                or (ginf.is_non_int_c_type(vtype) and _mixed_box)):
-            _other = (gen.var_types.get(tname) if _tagged_bind
-                      else vtype)
+                or (ginf.is_non_int_c_type(vtype)
+                    and ginf.tagged_mixed_name(gen, _as_str(tname)))):
             raise RuntimeError(
-                f"{tname!r}: {ginf.mixed_name_non_int64_refusal(_other)}")
+                f"{tname!r}: {ginf.MIXED_NAME_NON_INT64_REFUSAL}")
+        if (not _keep_tagged_box and vtype == 'int64_t'
+                and gen.var_types.get(tname, 'int64_t') == 'int64_t'
+                and ginf.tagged_mixed_name(gen, _as_str(tname))):
+            if (v not in getattr(gen, '_boxed_vals', ())
+                    and v not in getattr(gen, '_tagged_word_vals', ())):
+                _mb = gen._new_temp('int64_t')
+                gen._emit(f'  {_mb} = mojo_box_int ({v});')
+                v = _mb
+            _keep_tagged_box = True
         if (not _keep_tagged_box and _copy_src is not None
                 and ginf.tagged_next_bind_name(gen, _as_str(tname))):
             # The local is registered as a box by every store (the static
@@ -1803,14 +1714,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # trusted for. Real: `gen_module_impl`'s `_lens` is a dict at
             # line 1257 and a set at line 6114, and the self-host closure
             # could not be generated until this existed.
-            # A box-holding name is declared int64_t whatever the pre-pass
-            # joined its bindings to: a container-mixed name, or a name bound
-            # to a scalar of more than one kind or to a tagged generator word
-            # beside plain values (`ginf.mixed_box_name`). Without the last
-            # half the pre-pass's `double` hint declared `x` a double at its
-            # first store, and the tagged copy inside the loop was refused.
-            _mixed = (tname in ginf.mixed_container_locals(gen)
-                      or ginf.mixed_box_name(gen, tname))
+            _mixed = tname in ginf.mixed_container_locals(gen)
             if _mixed:
                 ctype = 'int64_t'
             else:
@@ -2525,14 +2429,11 @@ def _gen_stmt_AssignStmt(gen, node):
             # `keywords: dict = {}` (populated with parsed expression AST
             # nodes, then read back via `keywords.items()`) segfaulting
             # once self-hosted.
-            # Join, not overwrite (exprtypes.dict_kind_join): a dict whose stores disagree (`d['n'] = None` then
-            # `d['f'] = 1.5`, or `d['s'] = 'x'` then `d['k'] = 2`) has no one value type, and every store, literal
-            # or subscript, joins the same way. A store whose kind the compiler does not know (`_kind` None) joins
-            # nothing, and an int store is recorded when it is a known int, which before it never was.
-            if obj_v not in getattr(gen, '_opaque_container_locals', ()):
-                _joined_vt = _join_dict_store(gen, obj_v, node.value, vtype)
-                if _joined_vt is not None:
-                    _note_global_dict_store(gen, node.target.obj, _joined_vt)
+            if ((vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
+                    or vtype.endswith(' *'))
+                    and obj_v not in getattr(gen, '_opaque_container_locals', ())):
+                gen._dict_val_types[obj_v] = vtype
+                _note_global_dict_store(gen, node.target.obj, vtype)
             # dict[key] = val → mojo_dict_set_str_* (key coerced via
             # _char_to_cstr, the single dict-key-to-string conversion
             # used by both read and write sides — see its docstring).
@@ -2633,11 +2534,7 @@ def _gen_stmt_AssignStmt(gen, node):
                     # comes through THIS arm and not the typed one above:
                     # without the record here the read of the same global
                     # has no value type and prints the stored double's bits.
-                    _tgt = node.target.obj
-                    if isinstance(_tgt, IdentExpr) and msh.bare_global_read_plan(gen, _tgt.name)[0]:
-                        _gjoined = _join_dict_store(gen, _as_str(_tgt.name), node.value, vtype)
-                        if _gjoined is not None:
-                            _note_global_dict_store(gen, _tgt, _gjoined)
+                    _note_global_dict_store(gen, node.target.obj, vtype)
             elif _dsw_sn and not gen._struct_defines_method(_dsw_sn, '__setitem__'):
                 # `d[k] = v` on a builtin-`dict` subclass with no
                 # `__setitem__` override: store into the backing MojoDict.
@@ -3452,31 +3349,6 @@ def _gen_stmt_ReturnStmt(gen, node):
         vtype: str = ''
         v: str = ''
         vtype, v = gen.lower_expr(node.value)
-        # A dict slot read whose runtime kind is on the slot: box it so the
-        # kind survives a return (callers cannot see this frame's dict/key temps).
-        _dsr = getattr(gen, '_dict_slot_reads', None)
-        _dsr_hit = None
-        if _dsr is not None:
-            _dsr_hit = _dsr.get(v)
-            if _dsr_hit is None and isinstance(node.value, gimple_ctypes.IdentExpr):
-                _dsr_hit = _dsr.get(_as_str(node.value.name))
-        if _dsr_hit is not None and vtype in ('int', 'int64_t'):
-            _dv, _kv, _kk = _dsr_hit
-            if _kk == 'str':
-                v = gen._call_expr('int64_t', 'mojo_dict_slot_boxed',
-                                   [('MojoDict *', _dv), ('char *', _kv)])
-            elif _kk == 'bytes':
-                v = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_bytes',
-                                   [('MojoDict *', _dv), ('MojoBytes *', _kv)])
-            elif _kk == 'none':
-                v = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_none',
-                                   [('MojoDict *', _dv)])
-            vtype = 'int64_t'
-            # Record as boxed so kind-aware consumers can see it via _dict_slot_reads
-            # (the dict kind is stored per-key, not in _tagged_word_vals). Do NOT add
-            # to _tagged_word_vals: that set is for tagged generator words only and
-            # falsely triggers MIXED_NAME_NON_INT64_REFUSAL when a dict read name is
-            # later rebound to a non-int64 C type.
         # A generator handle leaving a function whose return slot is a plain word
         # (`def iglob(...): it = _iglob(...); return it`, consumed as `list(iglob(...))`):
         # the consumer can only drain it if the run time knows which generator it is.
@@ -4270,7 +4142,6 @@ def _gen_stmt_StructDef(gen, node):
     cattrs = gen._class_attrs.get(node.name)
     if not cattrs:
         return
-    _ref_attrs = getattr(gen, '_class_ref_attrs', None) or {}
     for field in node.fields:
         if isinstance(field, gimple_ctypes.AssignStmt) \
                 and isinstance(field.target, gimple_ctypes.IdentExpr):
@@ -4281,38 +4152,6 @@ def _gen_stmt_StructDef(gen, node):
             continue
         if aname not in cattrs:
             continue
-        # A BY-REFERENCE capture of an enclosing local: the class attribute
-        # is the local's heap box, not a copy of its value. The enclosing
-        # function was made to box the name (`_class_ref_captures`), so the
-        # box pointer already exists; install THAT as the per-execution cell
-        # (`ctype *` global, pointed at by every instance built here) instead
-        # of allocating a fresh cell and storing the current value. The
-        # method's `self._cap_n` read then dereferences the box, so it sees
-        # the variable's current contents -- Python's late binding.
-        if cattrs[aname] in _ref_attrs:
-            _src = field.value
-            _src_name = ''
-            if isinstance(_src, gimple_ctypes.IdentExpr):
-                _src_name = _as_str(_src.name)
-            # The box exists in the C function this capture was boxed in. For
-            # a class written directly in that function, the boxed name is a
-            # local (`_boxed_mut_locals`). For a class inside a nested `def`,
-            # the class statement is emitted in the LIFTED function, where the
-            # name arrives through the closure env: `_gimple_mut_ptr` holds
-            # the preloaded BOX POINTER for a by-reference capture (its env
-            # field is `T *`), so install that. A name with neither is not a
-            # capture here (it is a local of the lifted function); fall
-            # through to the ordinary by-value cell for it.
-            _box_expr = ''
-            if _src_name != '':
-                if _src_name in getattr(gen, '_boxed_mut_locals', {}):
-                    _box_expr = gen._cname(_src_name)
-                else:
-                    _box_expr = (getattr(gen, '_gimple_mut_ptr', None)
-                                 or {}).get(_src_name) or ''
-            if _box_expr != '':
-                gen._emit(f"  {cattrs[aname]} = {_box_expr};")
-                continue
         # A per-execution cell (module_gen registration): this execution gets its
         # OWN storage, and the global is pointed at it before the store below, so
         # the store and every class-name read in this call reach it, and the
@@ -5264,7 +5103,7 @@ def _gen_stmt_ExprStmt(gen, node):
             return
         if raw_name in gen._async_api:
             api = gen._async_api[raw_name]
-            arg_pairs = [_lower_stmt_arg(gen, a) for a in node.value.args]
+            arg_pairs = [gen.lower_expr(a) for a in node.value.args]
             base = api['base']
             handle = gen._call_expr('MojoAsync *', f"{base}_start", arg_pairs)
             gen._emit(f"  {base}_destroy ({handle});")
@@ -5366,7 +5205,7 @@ def _gen_stmt_ExprStmt(gen, node):
         if raw_name == gen._inner_func_name and gen._env_param:
             lifted   = gen.current_func_name
             env_var  = gen._env_param
-            arg_pairs = [_lower_stmt_arg(gen, a) for a in node.value.args]
+            arg_pairs = [gen.lower_expr(a) for a in node.value.args]
             env_type = gen.func_param_types.get(lifted, ['void *'])[0]
             full_arg_pairs = [(env_type, env_var)] + arg_pairs
             fname_c  = gimple_ctypes._safe_name(lifted)
@@ -5535,7 +5374,7 @@ def _gen_stmt_ExprStmt(gen, node):
         # all, so without this its prototype was never recorded and the
         # call stayed an implicit declaration.
         ggc._ensure_libc_self_extern(gen, raw_name)
-        arg_pairs = [_lower_stmt_arg(gen, a) for a in node.value.args]
+        arg_pairs = [gen.lower_expr(a) for a in node.value.args]
 
         # exit(msg)/quit(msg) as a bare statement — see _lower_named_
         # call's identical check (this is that fix's statement-level
@@ -6051,20 +5890,7 @@ def _emit_except_handler(gen, handler, node, bb_after: str):
         gen._emit(f"  {temp_var} = mojo_exc_obj_get ();")
         bound = gen._new_temp(exc_ctype)
         gen._emit(f"  {bound} = ({exc_ctype}) {temp_var};")
-        # The name is a heap box when a nested closure or a class declared in
-        # THIS function captures it by reference. References inside the
-        # handler go through `bound` above, but the box is what the capture
-        # reads, so the caught object has to land there too; without this the
-        # method read the box's uninitialised payload. Resolve the box lvalue
-        # BEFORE the `_c_names` redirect below, or `_write_dest` follows that
-        # redirect and dereferences the handler temp instead of the box.
-        _box_dest = None
-        if bind_name in getattr(gen, '_boxed_mut_locals', {}):
-            _box_dest = gen._write_dest(bind_name)
         gen._c_names[bind_name] = bound
-        if _box_dest is not None:
-            _box_ct = gen._boxed_mut_locals[bind_name]
-            gen._emit(f"  {_box_dest} = ({_box_ct}) {bound};")
     gen._last_was_terminal = False
     _bscope = ginf._open_block_scope(gen)
     for s in handler.body:
@@ -6424,12 +6250,10 @@ def _gen_stmt_TryStmt(gen, node):
     gen._flow_none_state = _merged
 
 
-def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs, _on_exc=False):
+def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs):
     """Emit every `with`-item's teardown (`__exit__` call, generator
     resume/destroy, or a placeholder comment), in REVERSE index order —
-    last acquired, first released. On the exception path (_on_exc), a
-    generic generator-context-manager handle uses the exception-aware
-    runtime exit so cleanup semantics are preserved.
+    last acquired, first released.
 
     HOISTED out of `_gen_stmt_WithStmt` (was a nested closure reading the
     enclosing function's `_ctx_ts`/`_ctx_vs`/`_ctx_sns`/`_gctx_bases`/
@@ -6486,47 +6310,15 @@ def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs, _on_exc=
             _gval = _as_str(_gval)
             # Generator context manager: the final resume() runs the
             # body from its bare yield to co_return (= __exit__), then
-            # the coroutine frame is destroyed. On exception path, throw the
-            # pending exception into the generator (contextmanager protocol).
-            if _gbase == '__mojo_gen_cm':
-                _hw = gen._new_temp('int64_t')
-                gen._safe_coerce_emit('MojoGenerator *', 'int64_t', _gval, _hw)
-                _exit_fn = 'mojo_gen_cm_exit_exc' if _on_exc else 'mojo_gen_cm_exit_normal'
-                gen._emit_call('void', '', _exit_fn, [('int64_t', _hw)])
-            elif _on_exc:
-                _hw = gen._new_temp('int64_t')
-                gen._safe_coerce_emit('MojoGenerator *', 'int64_t', _gval, _hw)
-                if _gbase.startswith('__mgco_'):
-                    # Stack-switch generator: use runtime throw API.
-                    _et = gen._call_expr('int64_t', 'mojo_exc_type_get', [])
-                    _em = gen._call_expr('char *', 'mojo_exc_msg_get', [])
-                    _eo = gen._call_expr('void *', 'mojo_exc_obj_get', [])
-                    _emw = gen._new_temp('int64_t')
-                    gen._safe_coerce_emit('char *', 'int64_t', _em, _emw)
-                    _eow = gen._new_temp('int64_t')
-                    gen._safe_coerce_emit('void *', 'int64_t', _eo, _eow)
-                    gen._emit_call('void', '', 'mojo_exc_pending_set', [('int', '0')])
-                    gen._emit_call('int64_t', '', '__mojo_gen_throw',
-                                   [('int64_t', _hw), ('int64_t', _et),
-                                    ('int64_t', _emw), ('int64_t', _eow)])
-                else:
-                    # C++20 compiled generator: arm throw state, then resume.
-                    _et = gen._call_expr('int64_t', 'mojo_exc_type_get', [])
-                    _em = gen._call_expr('char *', 'mojo_exc_msg_get', [])
-                    _eo = gen._call_expr('void *', 'mojo_exc_obj_get', [])
-                    gen._emit_call('void', '', 'mojo_gen_throw_set',
-                                   [('int64_t', _hw), ('int64_t', _et),
-                                    ('char *', _em), ('void *', _eo)])
-                    gen._emit_call('void', '', 'mojo_exc_pending_set', [('int', '0')])
-                    done_t = gen._new_temp('_Bool')
-                    gen._emit(f"  {done_t} = {_gbase}_resume ({_gval});")
-                gen._emit_call('void', '', f"{_gbase}_destroy",
-                               [('MojoGenerator *', _gval)])
-            else:
-                done_t = gen._new_temp('_Bool')
-                gen._emit(f"  {done_t} = {_gbase}_resume ({_gval});")
-                gen._emit_call('void', '', f"{_gbase}_destroy",
-                               [('MojoGenerator *', _gval)])
+            # the coroutine frame is destroyed. resume()'s _Bool
+            # result (False == already done) is intentionally
+            # discarded — real Python's __exit__ return value only
+            # suppresses exceptions, and this normal-path emission
+            # runs after an unexceptional body.
+            done_t = gen._new_temp('_Bool')
+            gen._emit(f"  {done_t} = {_gbase}_resume ({_gval});")
+            gen._emit_call('void', '', f"{_gbase}_destroy",
+                           [('MojoGenerator *', _gval)])
             continue
         exit_fn = gen._struct_method_csym(sn, '__exit__', '')
         if exit_fn in gen.func_return_types or f"{sn}___exit__" in gen.func_return_types:
@@ -6639,30 +6431,6 @@ def _gen_stmt_WithStmt(gen, node):
                     gen._declare_var(alias, 'int64_t')
                 gen._safe_coerce_emit('int64_t', gen.var_types[alias], val_t, alias)
             _gctx_bases.append(base)
-            _gctx_vs.append(ctx_v)
-            _ctx_ts.append(ctx_t)
-            _ctx_vs.append(ctx_v)
-            _ctx_sns.append(None)
-            continue
-        # A MojoGenerator* used as a context manager but not statically tracked
-        # in _generator_var_api (e.g. stored in a container and retrieved). If
-        # it is a registered generator handle, drive it via the runtime's
-        # generic generator-context-manager helpers.
-        if ctx_t == 'MojoGenerator *' and gen_api is None:
-            _hw = gen._new_temp('int64_t')
-            gen._safe_coerce_emit('MojoGenerator *', 'int64_t', ctx_v, _hw)
-            if item.alias is not None:
-                alias = _with_item_alias_name(item.alias)
-                val_t = gen._call_expr('int64_t', 'mojo_gen_cm_enter',
-                                       [('int64_t', _hw)])
-                if alias not in gen.var_types:
-                    gen._declare_var(alias, 'int64_t')
-                gen._safe_coerce_emit('int64_t', gen.var_types[alias], val_t, alias)
-            else:
-                gen._emit_call('int64_t', '', 'mojo_gen_cm_enter', [('int64_t', _hw)])
-            # Mark as generic generator-cm: use special sentinel base so
-            # _with_emit_exits can emit runtime-driven exit.
-            _gctx_bases.append('__mojo_gen_cm')
             _gctx_vs.append(ctx_v)
             _ctx_ts.append(ctx_t)
             _ctx_vs.append(ctx_v)
@@ -6976,23 +6744,11 @@ def _gen_stmt_WithStmt(gen, node):
 
         gen._emit_label(bb_exc)
         gen._emit("  mojo_exc_pop ();")
-        _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs, True)
-        # A context manager may suppress the exception (e.g. a
-        # @contextlib.contextmanager generator that catches and does not
-        # re-raise). Propagate only if an exception is still pending after
-        # exits.
-        _pend = gen._call_expr('int', 'mojo_exc_pending_get', [])
-        _has_pend = gen._new_temp('_Bool')
-        gen._emit(f"  {_has_pend} = {_pend} != 0;")
-        _bb_reraise = gen._new_bb()
-        _bb_supp = gen._new_bb()
-        gen._emit(f"  if ({_has_pend}) goto {_bb_reraise}; else goto {_bb_supp};")
-        gen._emit_label(_bb_reraise)
+        _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs)
         gen._emit("  mojo_raise ();")
+        # Only emit goto if the exception handler didn't end with a return
         if not gen._last_was_terminal:
             gen._emit(f"  goto {bb_after};")
-        gen._emit_label(_bb_supp)
-        gen._emit(f"  goto {bb_after};")
 
         gen._emit_label(bb_after)
     else:

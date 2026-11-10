@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The reclass pass must survive a running worker, and the swarm must reload its own code.
 
-Regression for SWARM_reclass_busy_set_crash: `apply_moves` used to build its busy set from
+Regression for bugs/SWARM_reclass_busy_set_crash.md: `apply_moves` used to build its busy set from
 task *dicts* (`{t for t in C.load().values() ...}`), which raised `TypeError: cannot use 'dict' as a
 set element` on every pass (157 times in swarm.out) whenever any worker was running. And because the
 swarm is a long-lived process, a fix landed after it started (e2aca65eb) kept failing in memory until
@@ -61,27 +61,27 @@ class ReclassBusySet(unittest.TestCase):
 
     def test_apply_moves_moves_a_doc_while_another_task_is_running(self):
         """The crash: a running worker made the busy set hold dicts. The doc must move anyway."""
-        self.write_doc("" + "SUITE_x" + ".md")
+        self.write_doc("SUITE_x.md")
         state = self.run_apply_moves({"bug-live": running_task("bug-live", ["bug:OTHER"])},
                                      {"SUITE_x": "mid"})
-        self.assertTrue(os.path.exists(os.path.join(self.main, "bugs", "mid", "" + "SUITE_x" + ".md")),
+        self.assertTrue(os.path.exists(os.path.join(self.main, "bugs", "mid", "SUITE_x.md")),
                         "the escalated doc must reach its new class")
         self.assertNotIn("SUITE_x", state.get("pending", {}),
                          "a moved doc is no longer pending: the next pass must not move it again")
 
     def test_apply_moves_leaves_a_doc_a_running_task_holds(self):
         """The busy check still works: a doc a live worker holds is not moved out from under it."""
-        self.write_doc("" + "SUITE_y" + ".md")
+        self.write_doc("SUITE_y.md")
         tasks = {"bug-live": running_task("bug-live", ["bug:SUITE_y"])}
         self.run_apply_moves(tasks, {"SUITE_y": "mid"})
-        self.assertTrue(os.path.exists(os.path.join(self.main, "bugs", "" + "SUITE_y" + ".md")),
+        self.assertTrue(os.path.exists(os.path.join(self.main, "bugs", "SUITE_y.md")),
                         "a held doc stays where it is")
-        self.assertFalse(os.path.exists(os.path.join(self.main, "bugs", "mid", "" + "SUITE_y" + ".md")))
+        self.assertFalse(os.path.exists(os.path.join(self.main, "bugs", "mid", "SUITE_y.md")))
 
     def test_no_running_task_still_moves(self):
-        self.write_doc("" + "SUITE_z" + ".md")
+        self.write_doc("SUITE_z.md")
         self.run_apply_moves({}, {"SUITE_z": "hard"})
-        self.assertTrue(os.path.exists(os.path.join(self.main, "bugs", "hard", "" + "SUITE_z" + ".md")))
+        self.assertTrue(os.path.exists(os.path.join(self.main, "bugs", "hard", "SUITE_z.md")))
 
 
 class ReloadOwnCode(unittest.TestCase):

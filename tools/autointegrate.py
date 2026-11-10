@@ -75,8 +75,10 @@ def enqueue_fixer(name, why):
             "(`git diff master...HEAD`, bisect its commits), and fix it properly without losing what the branch delivers; the "
             "branch's own tests must still pass. Light worker: no gate. Never use git stash. Commit; finish with the REPORT block "
             "and a CONTROL-STATUS line. Excerpt of the failure:\n%s" % (t["branch"], t["summary"][:150], why.splitlines()[0] if why else "?", why))
-    fname = C.free_task_name("fix-screen-" + name)
-    C.cmd_enqueue(_ap.Namespace(name=fname, claim=t["claims"] or ["task:" + fname], task=task, task_file=None, file=[],
+    fname = "fix-screen-" + name
+    if fname in C.load():
+        fname += "-%d" % int(time.time() % 100000)
+    C.cmd_enqueue(_ap.Namespace(name=fname[:60], claim=t["claims"] or ["task:" + fname], task=task, task_file=None, file=[],
                                 base=t["branch"], needs=[], model=None))
     with C.registry() as reg:
         reg[name]["state"] = "superseded"
