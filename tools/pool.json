@@ -33,7 +33,8 @@
       "count": 1,
       "kind": "opencode",
       "recover_hours": 0,
-      "class": "easy"
+      "class": "easy",
+      "also": ["mid", "hard"]
     },
     {
       "name": "llama-work",
