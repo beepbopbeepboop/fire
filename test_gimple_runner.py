@@ -2479,6 +2479,28 @@ def main():
     print(outer())
 """, "100\n")
 
+    # A name bound ONLY inside a nested `def` is not a local of the
+    # class-declaring function: Python resolves the method's read to the
+    # MODULE global of that name, and the nested def's local must not become
+    # a box in the enclosing frame (which would shadow the global and leave
+    # the method reading an unwritten box).
+    test_gimple_stdout(
+        "gimple_nested_class_ignores_nested_def_local_shadowing_global", """\
+G = 3
+
+def f():
+    def inner():
+        G = 10
+        return G
+    class C:
+        def get(self):
+            return G
+    return C().get() + inner()
+
+def main():
+    print(f())
+""", "13\n")
+
     # The enclosing function's own call through the SAME captured callable
     # goes through a heap box (the class capture boxes the local), so the
     # callable value is `*box`, not the box address: passing the box to

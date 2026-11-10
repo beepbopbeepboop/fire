@@ -3569,9 +3569,12 @@ def _gmi_capture_nested_class_enclosing_reads(self, stmts: list) -> None:
 
     BY REFERENCE applies to a class written DIRECTLY in the enclosing
     function's body (`_ec_direct` below), and to a class inside a nested
-    `def` when the captured name belongs to THIS function's own scope. For
-    the nested-`def` case the `class` statement is emitted in that def's
-    LIFTED C function, which reaches this frame through its closure env;
+    `def`, when -- in BOTH cases -- the captured name is bound by THIS
+    function itself (`_ef_own` below). A name bound only inside a nested
+    `def`/class is not a local here at all (it is a global read), so it keeps
+    the by-value cell. For the nested-`def` case the `class` statement is
+    emitted in that def's LIFTED C function, which reaches this frame through
+    its closure env;
     the name is therefore added to the inner closure's `mut_names` and its
     env field becomes the box POINTER, so the lifted frame can install it on
     the class attribute (`discover_closures` publishes the exact names that
@@ -3691,14 +3694,22 @@ def _gmi_capture_nested_class_enclosing_reads(self, stmts: list) -> None:
                 if not _caps:
                     continue
                 # The captures this frame can box and install as a BOX
-                # POINTER on the class attribute. For a nested-`def` class,
-                # a name that is only bound by the nested def is excluded;
-                # `discover_closures` prunes this set once more to the names
-                # the lifted function actually captures (a local SHADOWING
-                # the same name must stay by value).
+                # POINTER on the class attribute: only a name `_ef` binds
+                # ITSELF. `_ef_bound` over-approximates with bindings inside
+                # nested defs/classes, so a name bound only there (`G` in
+                # `def f(): def inner(): G = 1; class C: def get(): return G`)
+                # is not a local of `_ef` at all -- it is a GLOBAL read. Boxing
+                # it would declare a fresh local shadowing that global and the
+                # method would read the box, which nothing ever writes. Such a
+                # name keeps the by-VALUE cell, whose `_cap_G = G` reads what
+                # `G` means in this frame (the global), exactly as before this
+                # pass became by-reference. For a nested-`def` class,
+                # `discover_closures` prunes the candidate set once more to the
+                # names the lifted function actually captures (a local
+                # SHADOWING the same name must stay by value).
                 _ec_by_ref: dict = {}
                 for _cn6 in sorted(_caps):
-                    if _ec_direct or _cn6 in _ef_own:
+                    if _cn6 in _ef_own:
                         _ec_by_ref[_cn6] = True
                 _called: dict = {}
                 for _cn in _walk_ast(_ecm.body):
