@@ -565,9 +565,17 @@ def find_culprit(seq, failing):
     return seq[hi - 1], failing or []
 
 
+LAND_BATCH = 8   # branches landed per pass: a larger batch merges them all into one gate run and one conflict storm
+
+
 def land():
     names = [n for n in I.pick_candidates(quiet=True) if n.startswith(PREFIXES) and n not in BUSY["names"]]
     names = fresh_first(names, C.load())
+    held = names[LAND_BATCH:]
+    names = names[:LAND_BATCH]
+    if held:
+        log("land: %d more finished branch(es) waiting behind the batch cap of %d: %s"
+            % (len(held), LAND_BATCH, ", ".join(held[:3]) + (" ..." if len(held) > 3 else "")))
     dirty = set(C.git("diff", "--name-only", "HEAD", cwd=C.MAIN).split())
     if dirty:
         tasks, keep = C.load(), []

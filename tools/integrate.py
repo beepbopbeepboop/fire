@@ -155,7 +155,12 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
         if t.get("hold") and not (only and name in only):
             continue                                         # held (control.py hold): built in advance, released later
         st = C.state_of(t)
-        if st not in ("exited-ok", "exited-err", "integration-failed"):
+        if st == "running":
+            continue                                         # a DONE-but-alive worker is finishing cleanup
+        # A DONE task that a later restart superseded is still FINISHED work: superseding it does not
+        # unsolve the bug. Excluding it stranded 1030 fixed branches — the doc stayed on master and the
+        # feed's DONE ratchet then skipped it forever, a dead end with no path forward.
+        if st not in ("exited-ok", "exited-err", "integration-failed", "superseded", "abandoned"):
             continue
         if C.verdict(t) != "DONE" and name not in ignore_verdict:
             say("skip %s: worker says %s, not DONE (the swarm continues it)" % (name, C.verdict(t) or "nothing")); continue
