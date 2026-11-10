@@ -2788,6 +2788,11 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         rav_d = rav if rat == 'double' else gen._new_val('double', f'(double){rav}')
         return gen._call_expr('char *', 'mojo_repr_float', [('double', rav_d)])
     rav64 = rav if rat == 'int64_t' else gen._new_val('int64_t', f'(int64_t){rav}')
+    # A word of unknown kind (boxed dict-slot value, tagged word, string
+    # pointer held in int64_t, or plain integer): render via the runtime's
+    # generic repr discriminator. For a plain integer it is the same decimal.
+    if rat in ('int', 'int64_t'):
+        return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav64)])
     return gen._call_expr('char *', 'mojo_repr_int', [('int64_t', rav64)])
 
 

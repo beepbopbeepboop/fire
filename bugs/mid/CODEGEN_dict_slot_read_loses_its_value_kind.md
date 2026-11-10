@@ -6,12 +6,21 @@
 ## `d[k]` int reads as (dict,key,key-kind) for string, bytes, and `None` keys
 ## so `_repr_value` / `_stringify_value` / `print` render the slot's runtime
 ## kind (None/True/False) instead of the raw word. Reads that escape their
-## frame (e.g. returned) are boxed by runtime slot kind so the value carries
-## its kind across calls. Regression `test_dict_slot_read_regression.py` pins
-## in-frame and returned-read cases.
+## frame (e.g. returned, or passed as call arguments / print args) are boxed
+## by runtime slot kind so the value carries its kind across calls and through
+## unknown-kind parameters. `mojo_dict_slot_repr` now renders non-zero int
+## slots (kind 0) instead of returning NULL, fixing `print(d[None])`/repr when
+## the None-key slot holds an integer. Regression
+## `test_dict_slot_read_regression.py` pins in-frame, returned, and
+## argument-passing cases.
+## 2026-11-10: boxed escaping slot reads for call/print args and
+## statement-level calls; prevented transient dict-key release from
+## invalidating slot boxing for string-keyed reads; made generic
+## int64_t print/str/repr paths box-aware. `test_dict_none_key.py` and
+## `test_dict_slot_read_regression.py` pass.
 ## Still open: missing-key behaviour (`0` vs KeyError) and other escape paths
-## not yet carried (e.g. passing a slot-read-derived value as an argument
-## without call-site boxing, or storing it where a raw word is later required).
+## not yet carried (e.g. storing a slot-read-derived value where a raw word is
+## later required, or other contexts that bypass boxing).
 
 Landed, and each item says which half of this doc it was:
 

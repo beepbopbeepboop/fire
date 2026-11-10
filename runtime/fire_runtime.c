@@ -12116,11 +12116,9 @@ char *mojo_dict_slot_repr(int64_t v, int64_t kind)
              * stores, and only this tag tells them apart. */
             return strdup("None");
         default:
-            /* kind 0. The word 0 is the INTEGER 0, which the generic reader
-             * cannot say (its `val == 0` arm answers "None", right for the
-             * NULL pointer it was written for) — so it is answered here and
-             * a non-zero kind-0 word is left to that reader. */
-            return v == 0 ? strdup("0") : NULL;
+            /* kind 0: an integer value. Always render as the integer; callers
+             * use this to repr a slot by its recorded kind. */
+            return mojo_str_from_int(v);
     }
 }
 

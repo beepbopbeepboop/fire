@@ -131,6 +131,29 @@ main()
 ''')
     assert out == "True None\nFalse None\n", repr(out)
 
+    # Passed as arguments, slot reads must keep their runtime kind in the callee.
+    out = run(r'''
+def show(v):
+    print(v)
+
+def show_s(v):
+    print(str(v), repr(v))
+
+def main():
+    d = {'n': None, 'b': True, 'f': False}
+    show(d['n'])
+    show(d['b'])
+    show(d['f'])
+    x = d['n']
+    y = d['b']
+    show(x)
+    show(y)
+    show_s(d['n'])
+    show_s(d['b'])
+main()
+''')
+    assert out == "None\nTrue\nFalse\nNone\nTrue\nNone None\nTrue True\n", repr(out)
+
     print("test_dict_slot_read_regression: ok")
 
 
