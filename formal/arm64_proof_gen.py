@@ -8394,6 +8394,31 @@ def _is_svc(w: int) -> bool:
     return (w & 0xffe0001f) == 0xd4000001
 
 
+def _svc_static_x16(words: dict, pc: int, leaders=frozenset()):
+    """The static value of x16 at the `svc` at `pc`, or None when it is not known.
+
+    The emitter sets the Darwin syscall number right before every `svc`:
+    `movz x16, #imm` (exit is 1, write is 4). That movz is the only source of
+    the value this reader trusts, and it is trusted only when it is the
+    instruction directly before the `svc` and the `svc` does not start a
+    block: otherwise another path can reach the `svc` with a different x16,
+    and the answer is None, which the caller treats as dynamic.
+
+    `leaders` is the set of block-start addresses (branch targets and fall-
+    throughs); a `svc` at one of them is dynamic.
+    """
+    if pc in leaders:
+        return None
+    prev = words.get(pc - 4)
+    if prev is None:
+        return None
+    # MOVZ Xd, #imm16 (64-bit, hw = 0) with Rd = 16: bits 31..21 are
+    # 1 1 0 1 0 0 1 0 1 0 0 (sf=1, opc=10, 100101, hw=00), bits 4..0 are 10000.
+    if (prev & 0xffe0001f) != 0xd2800010:
+        return None
+    return (prev >> 5) & 0xffff
+
+
 def _trap_terminating(blocks: list, words: dict) -> set:
     """The start addresses of the blocks the machine CANNOT return from.
 
