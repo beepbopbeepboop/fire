@@ -1,3 +1,4 @@
+SPLIT: bugs/mid/GPU_offload_validation_modular-part1, bugs/mid/GPU_offload_validation_modular-part2, bugs/mid/GPU_offload_validation_modular-part3, bugs/mid/GPU_offload_validation_modular-part4
 # GPU: offload validation for modular test cases (category C)
 
 ## Symptom
