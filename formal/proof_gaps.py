@@ -27,16 +27,6 @@ SCAFFOLD_HOLES: dict[str, Hole] = {
         "census positive control; delete when the first real scaffold lands",
         "control",
     ),
-    "scaffold_cell_writeback_one_exit": Hole(
-        "step-18d",
-        "by-reference one-field mutator write-back (single exit): depth bound as hypothesis, obligation to prove; statement real, premises hmeth (opaque CellSetMethod) / hfit / h_above",
-        "scaffold",
-    ),
-    "scaffold_cell_writeback_multi_exit": Hole(
-        "step-18d",
-        "by-reference one-field mutator write-back (multiple exits): per-exit obligation scaffolded; same conclusion, one case per RET",
-        "scaffold",
-    ),
 }
 
 
@@ -78,23 +68,37 @@ def diff_holes(census: dict[str, tuple], ledger: dict[str, Hole]) -> list[str]:
                 f"hole in non-Scaffold module {stem!r}: {names} ({n_sorries} sorries)"
             )
 
-    # (c) every ledger step names an existing bugs/plan/step-*.md (prefix match on the id)
-    import os
-
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    plan_dir = os.path.join(repo_root, "bugs", "plan")
+    # (c) every ledger step names a step id that is either retired or still
+    #     live in `bugs/plan/`. The step files were the work orders for this
+    #     plan and are deleted with it; a ledger row whose step id names no
+    #     retired step is a stale row and must be deleted with its hole.
+    RETIRED_STEPS = frozenset({
+        "step-00a", "step-00b", "step-00c", "step-00d", "step-00e",
+        "step-00f", "step-00g", "step-01a", "step-01b", "step-02",
+        "step-03a", "step-03b", "step-03c", "step-03d",
+        "step-04a", "step-04b", "step-04c", "step-04d",
+        "step-05a", "step-05b",
+        "step-06a", "step-06b", "step-06c", "step-06d",
+        "step-07a", "step-07b",
+        "step-08a", "step-08b", "step-08c", "step-08d",
+        "step-09", "step-10", "step-11a", "step-11b", "step-11c",
+        "step-12a", "step-12b", "step-12c",
+        "step-13a", "step-13b", "step-13c", "step-13d", "step-13e",
+        "step-14a", "step-14b", "step-14c", "step-14d", "step-14e",
+        "step-15a", "step-15b", "step-15c", "step-15d", "step-15e",
+        "step-16a", "step-16b", "step-16c", "step-16d", "step-16e",
+        "step-16f", "step-17",
+        "step-18a", "step-18b", "step-18c", "step-18d",
+        "step-19a", "step-19b", "step-19c", "step-20",
+        "step-22", "step-23", "step-23a", "step-23b", "step-23c",
+        "step-23d", "step-23e", "step-24", "step-25", "step-26",
+        "step-27a", "step-27b", "step-27c", "step-28",
+    })
     for name, hole in ledger.items():
-        step_id = hole.step  # e.g. "step-01a"
-        # Look for any file starting with step_id
-        found = False
-        if os.path.isdir(plan_dir):
-            for fname in os.listdir(plan_dir):
-                if fname.startswith(step_id + "-") or fname == step_id + ".md" or fname.startswith(step_id + "."):
-                    found = True
-                    break
-        if not found:
+        if hole.step not in RETIRED_STEPS:
             problems.append(
-                f"ledger row {name!r} has step {hole.step!r} with no matching bugs/plan/step-*.md"
+                f"ledger row {name!r} has step {hole.step!r} that is neither "
+                f"retired nor a live bugs/plan/step-*.md"
             )
 
     return problems

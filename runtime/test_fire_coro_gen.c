@@ -14,6 +14,11 @@ extern int64_t __mojo_gen_arg(int64_t coro, int64_t idx);
 extern int64_t __mojo_coro_yield_i(int64_t coro, int64_t v);
 extern void    __mojo_gen_set_return(int64_t coro, int64_t v);
 extern int64_t __mojo_gen_resume(int64_t gen, int64_t send);
+/* A plain resume sends Python's None, which `__mojo_gen_resume` accepts as
+   the shared None BOX — a raw 0 is the integer 0, and it refuses that on a
+   just-started generator ("can't send non-None value to a just-started
+   generator"). Every priming resume below is a plain resume. */
+extern int64_t mojo_box_none(void);
 extern int64_t __mojo_gen_value(int64_t gen);
 extern int64_t __mojo_gen_retval(int64_t gen);
 extern void    __mojo_gen_destroy(int64_t gen);
@@ -46,7 +51,7 @@ static void test_range(void)
 {
     int64_t g = __mojo_gen_new_2((int64_t)(uintptr_t)body_range, 3, 7);
     int64_t want = 3;
-    while (__mojo_gen_resume(g, 0)) {
+    while (__mojo_gen_resume(g, mojo_box_none())) {
         CHECK(__mojo_gen_value(g) == want, "value %lld want %lld",
               (long long)__mojo_gen_value(g), (long long)want);
         want++;
@@ -66,7 +71,7 @@ static void body_counter(int64_t c)
 static void test_send(void)
 {
     int64_t g = __mojo_gen_new_0((int64_t)(uintptr_t)body_counter);
-    CHECK(__mojo_gen_resume(g, 0) && __mojo_gen_value(g) == 0, "prime");
+    CHECK(__mojo_gen_resume(g, mojo_box_none()) && __mojo_gen_value(g) == 0, "prime");
     CHECK(__mojo_gen_resume(g, 5) && __mojo_gen_value(g) == 5, "send 5");
     CHECK(__mojo_gen_resume(g, 10) && __mojo_gen_value(g) == 15, "send 10 -> 15");
     __mojo_gen_destroy(g);

@@ -2,8 +2,7 @@
 """Regression: CPython 3.15's "improved error messages" (all four branches
 of Lib/traceback.py's `_compute_suggestion_error`).
 
-What's New in Python 3.15 (the subject of
-bugs/PYTHON3.15_improved_error_messages.md): an UNCAUGHT exception of one of
+What's New in Python 3.15: an UNCAUGHT exception of one of
 four types is printed with a suggestion computed at PRINT time from fields
 the exception carries, so a caught exception stays plain. This file pins both
 halves of that contract for every branch:
@@ -208,6 +207,51 @@ def test_suggestion_nested_underscored_no_false_positive():
     assert attribute_error_suggestion(object(), '__static_attributes__') == ""
 
 
+def test_suggestion_self_refinement_exposes_underscored():
+    # CPython 3.15's hide_underscored refinement: a non-underscored miss
+    # normally cannot see underscored candidates (`a.value` outside a
+    # method), but when the failing frame's `self` IS the object, it can
+    # (`self.value` inside a method may suggest the private `self._value`).
+    # The raise half captures that frame `self` on the exception; this is
+    # the print-time decision, differentially pinned against 3.15.2 below.
+    class Holder:
+        _value = 1
+    h = Holder()
+    other = Holder()
+    assert attribute_error_suggestion(h, 'value') == ""
+    assert attribute_error_suggestion(h, 'value', h) == \
+        ". Did you mean '._value' instead of '.value'?"
+    # a frame `self` that is a DIFFERENT object changes nothing
+    assert attribute_error_suggestion(h, 'value', other) == ""
+
+
+def test_raise_half_carries_frame_self():
+    from myinterpreter import _frame_self
+    e = run_interp(
+        "class A:\n"
+        "    def __init__(self):\n"
+        "        self._value = 1\n"
+        "    def f(self):\n"
+        "        return self.value\n"
+        "A().f()")
+    assert e is not None, "self.value must raise AttributeError"
+    assert getattr(e, 'name', None) == 'value'
+    obj = getattr(e, 'obj', None)
+    assert isinstance(obj, MojoInstance)
+    assert getattr(e, 'self_obj', 'unset') is obj, \
+        "the failing method frame's `self` must be captured on the exception"
+    # and a frame WITHOUT `self` carries None, so the refinement cannot fire
+    e = run_interp(
+        "class A:\n"
+        "    def __init__(self):\n"
+        "        self._value = 1\n"
+        "a = A()\na.value")
+    assert e is not None
+    assert getattr(e, 'self_obj', 'unset') is None, \
+        "a module-level frame has no self"
+    assert _frame_self(None) is None
+
+
 # ------------------------------------------------------------- the PRINT
 # half: `fire.py run`'s top-level error printing
 
@@ -220,6 +264,32 @@ def test_end_to_end_uncaught_shows_suggestion():
     err_lines = [l for l in err.splitlines() if l.startswith("Error:")]
     assert err_lines and ". Did you mean '.append'?" in err_lines[0], \
         f"`Error:` line must agree with the final line, got {err_lines}"
+
+
+def test_end_to_end_self_refinement_exposes_underscored():
+    # End to end: the same private member is suggested from inside the
+    # method (`self.value`) and NOT from module scope (`a.value`), which is
+    # CPython 3.15.2's print-time hide_underscored split.
+    out, err, rc = fire_run(
+        "class A:\n"
+        "    def __init__(self):\n"
+        "        self._value = 1\n"
+        "    def f(self):\n"
+        "        return self.value\n"
+        "A().f()")
+    assert rc == 1, f"uncaught AttributeError must exit 1, got {rc}\n{err}"
+    assert suggestion_suffix_of(err, 'value') == \
+        ". Did you mean '._value' instead of '.value'?", \
+        f"method frame must see the private member: {err!r}"
+    out, err, rc = fire_run(
+        "class A:\n"
+        "    def __init__(self):\n"
+        "        self._value = 1\n"
+        "a = A()\n"
+        "a.value")
+    assert rc == 1, f"uncaught AttributeError must exit 1, got {rc}\n{err}"
+    assert suggestion_suffix_of(err, 'value') == "", \
+        f"module frame must not see the private member: {err!r}"
 
 
 def test_end_to_end_nested_member():
@@ -278,6 +348,16 @@ def test_parity_with_cpython_315():
         ('dict.put', "d = {}\nd.put('a', 1)"),
         ('str.lwer', "s = 'HELLO'\ns.lwer()"),
         ('set.push', "s = {1, 2}\ns.push(3)"),
+        ('self.private', "class A:\n"
+                         "    def __init__(self):\n"
+                         "        self._value = 1\n"
+                         "    def f(self):\n"
+                         "        return self.value\n"
+                         "A().f()"),
+        ('external.private', "class A:\n"
+                             "    def __init__(self):\n"
+                             "        self._value = 1\n"
+                             "a = A()\na.value"),
     ]:
         host_err = subprocess.run(
             [sys.executable, '-c', src],
@@ -506,10 +586,25 @@ def test_end_to_end_name_error_suggestion():
 
 # --------------------------------------------------- ModuleNotFoundError
 
+def mne_os2_expected():
+    """The suffix CPython 3.15 appends to `import os2` on THIS host. The MNE
+    pool is the host's whole discoverable module set, and the shared engine
+    caps at 750+ candidates (C pass) / 751+ (fallback): on a host that
+    discoverable-many, CPython 3.15.2 appends nothing (the host's own
+    traceback stays plain) and the differential parity tests pin that
+    agreement in both cases."""
+    from myinterpreter import _module_not_found_candidates
+    pool = _module_not_found_candidates('os2')
+    if pool is None or len(pool) > 750:
+        return ""
+    return ". Did you mean: 'os'?"
+
+
 def test_module_not_found_suggestion_suffixes():
     s = module_not_found_suggestion
-    # the stdlib is discoverable on every host, so this is environment-stable
-    assert s('os2') == ". Did you mean: 'os'?"
+    # the stdlib is discoverable on every host — the exact pin holds only
+    # while the host's pool fits under the engine's caps (see the helper)
+    assert s('os2') == mne_os2_expected()
     # a dotted miss whose parent is not a package (frozen `os`) yields no
     # candidates at all — CPython's try/except-returns-None
     assert s('os.path2') == ""
@@ -604,9 +699,8 @@ def test_import_error_suggestion_underscore_pool():
 def test_end_to_end_import_error_parity_with_cpython_315():
     # The only way a name_from ImportError reaches our top level: a REAL
     # module that fails its own `from X import Y` (the interpreter's own
-    # from-imports bind an auto-stub instead of raising — documented in
-    # bugs/PYTHON3.15_improved_error_messages.md). The suffix must agree
-    # with CPython 3.15.2's own `from os import path2`.
+    # from-imports bind an auto-stub instead of raising). The suffix must
+    # agree with CPython 3.15.2's own `from os import path2`.
     if sys.version_info < (3, 15):
         print(f"  (skipped: host is {sys.version.split()[0]}, not 3.15+)")
         return
@@ -648,7 +742,7 @@ def test_error_suggestion_suffix_dispatch():
     # win (a bare MNE has no name_from, so the IE branch would give nothing)
     e = ModuleNotFoundError("No module named 'os2'")
     e.name = 'os2'
-    assert error_suggestion_suffix(e) == ". Did you mean: 'os'?"
+    assert error_suggestion_suffix(e) == mne_os2_expected()
     e = ImportError("cannot import name 'path2' from 'os'")
     e.name = 'os'; e.name_from = 'path2'
     assert error_suggestion_suffix(e) == ". Did you mean: 'path'?"
@@ -658,6 +752,29 @@ def test_error_suggestion_suffix_dispatch():
     e = ImportError("cannot import name 'path2' from 'os'")
     e.name = 'os'  # no name_from: not a from-miss, no suggestion
     assert error_suggestion_suffix(e) == ""
+
+
+def test_error_suggestion_suffix_attr_dispatch_carries_self():
+    # The dispatcher must forward the RAISE half's `self_obj` field to the
+    # print-time half (CPython reads the frame `self` off the traceback; this
+    # interpreter tags it on the exception): the same AttributeError suggests
+    # the private member when the frame `self` is the object and hides it
+    # when the frame had none — CPython 3.15's hide_underscored split.
+    class Holder:
+        _value = 1
+    h = Holder()
+    e = AttributeError("'Holder' object has no attribute 'value'")
+    e.name = 'value'; e.obj = h; e.self_obj = h
+    assert error_suggestion_suffix(e) == \
+        ". Did you mean '._value' instead of '.value'?"
+    e2 = AttributeError("'Holder' object has no attribute 'value'")
+    e2.name = 'value'; e2.obj = h; e2.self_obj = None
+    assert error_suggestion_suffix(e2) == "", \
+        "no frame self: the private member must stay hidden"
+    e3 = AttributeError("x")
+    e3.name = 'value'; e3.obj = h  # an exception predating the field
+    assert error_suggestion_suffix(e3) == "", \
+        "a missing self_obj field must not crash or fire the refinement"
 
 
 if __name__ == '__main__':
@@ -673,8 +790,14 @@ if __name__ == '__main__':
     print("PASS test_suggestion_nonascii_close_match")
     test_suggestion_nested_underscored_no_false_positive()
     print("PASS test_suggestion_nested_underscored_no_false_positive")
+    test_suggestion_self_refinement_exposes_underscored()
+    print("PASS test_suggestion_self_refinement_exposes_underscored")
+    test_raise_half_carries_frame_self()
+    print("PASS test_raise_half_carries_frame_self")
     test_end_to_end_uncaught_shows_suggestion()
     print("PASS test_end_to_end_uncaught_shows_suggestion")
+    test_end_to_end_self_refinement_exposes_underscored()
+    print("PASS test_end_to_end_self_refinement_exposes_underscored")
     test_end_to_end_nested_member()
     print("PASS test_end_to_end_nested_member")
     test_end_to_end_no_false_suggestion()
@@ -713,4 +836,6 @@ if __name__ == '__main__':
     print("PASS test_end_to_end_import_error_parity_with_cpython_315")
     test_error_suggestion_suffix_dispatch()
     print("PASS test_error_suggestion_suffix_dispatch")
+    test_error_suggestion_suffix_attr_dispatch_carries_self()
+    print("PASS test_error_suggestion_suffix_attr_dispatch_carries_self")
     print("ALL PASS")

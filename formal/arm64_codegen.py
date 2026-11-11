@@ -673,15 +673,12 @@ def _emit_sub_imm(asm, xd: int, xn: int, imm: int) -> None:
                           encode_add_xd_xn_imm_sh)
 
 
-#: `if A and B:` over two integer comparisons as `cmp ; ccmp ; b.cond` (step 06c).
-#: OPT-IN (`FIRE_CCMP_LOWERING=1`), OFF by default: the machine code is correct
-#: (`test_arm64_emission.py` runs it with the variable set, answers equal CPython's)
-#: but `formal/arm64_proof_gen.py` derives a branch's condition from the flags of
-#: the LAST `cmp` and has no model for flags that a `ccmp` set from two
-#: comparisons, so turning it on makes `formal/examples/both.mojo` stop proving
-#: ("unsupported: branch condition value flow (frame/flag unavailable)", measured
-#: 2026-11-07).  Default it on only together with that generator support.
-CCMP_LOWERING = os.environ.get("FIRE_CCMP_LOWERING") == "1"
+#: `if A and B:` over two integer comparisons as `cmp ; ccmp ; b.cond` (step 06c/06d).
+#: ON by default: the machine code answers CPython's (`test_arm64_emission.py`),
+#: and the proof generator proves it (`both.mojo` 0 sorries; the full arm64 corpus
+#: went 50 -> 55 PASS with it on, no example regressed because of it).
+#: `FIRE_CCMP_LOWERING=0` turns it off for A/B comparison.
+CCMP_LOWERING = os.environ.get("FIRE_CCMP_LOWERING", "1") != "0"
 
 
 class ARM64Codegen:
@@ -12130,6 +12127,17 @@ ctor_field_value=self._ctor_field_value_for(name),
         if not is_extern_call and name == "range":
             self._emit_range_list(list(e.args))
             return
+        # `str(<integer literal>)` / `repr(<integer literal>)` is a build-time
+        # constant: the literal's decimal text, interned like any string
+        # literal. No buffer, no pointer arithmetic, same on both architectures.
+        # (`str(n)` of a RUN-TIME integer stays refused: formatting needs a
+        # buffer that outlives the call, which this path does not have.)
+        if not is_extern_call and name in ("str", "repr") \
+                and len(e.args) == 1 and not e.kwargs:
+            _lit = M.integer_literal_text(e.args[0])
+            if _lit is not None:
+                self._emit_expr(F.StringLiteral(_lit))
+                return
         if not is_extern_call and M.emitter_lowers(name):
             if name == "len":
                 self._emit_len(e)
@@ -12206,6 +12214,12 @@ ctor_field_value=self._ctor_field_value_for(name),
                             pass
                         return None
                     folded = M.printf_fold_text_widths(name, fmt_text_f, vargs, _text_of_arg)
+                    if folded is None:
+                        # Step 13d: text the build cannot see, in an image that holds non-ASCII
+                        # text, becomes the star form with widths computed in characters.
+                        folded = M.printf_runtime_rewrites(
+                            name, fmt_text_f, vargs, _text_of_arg,
+                            lambda a: self._is_string_subscript(a.obj))
                     if folded is not None:
                         new_fmt, new_vargs = folded
                         new_args = list(e.args)

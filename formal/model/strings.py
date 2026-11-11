@@ -2158,6 +2158,244 @@ def printf_fold_text_widths(callee: str, fmt_text, args: list,
     return (new_fmt, new_args)
 
 
+#: The runtime entry points the run-time `%<w>.<p>s` rewrite calls (step 13d).
+#: Word-shaped (`char *`/`int64_t` in, `int64_t` out), so a formal image calls
+#: them like any `mojo_*` word; `formal/build.py::_runtime_word_calls` adds them
+#: to its link prepass whenever `printf_runtime_width_operands` finds a use.
+PRINTF_RUNTIME_WIDTH_HELPERS = ("mojo_strlen", "mojo_str_codepoint_len",
+                                "mojo_utf8_codepoint_to_byte_offset")
+
+
+def printf_runtime_width_operands(callee: str, fmt_text, args: list) -> list:
+    """`[(operand index, spec)]` for each `%<flags><w>.<p>s` whose operand is a
+    plain NAME, in an image that holds non-ASCII text (step 13d).
+
+    The operand has to be a name because the rewrite evaluates it several times
+    (in the width and precision arguments as well as as the value) and only a
+    name is free of side effects. Text the build can SEE is not here: the fold
+    (`printf_fold_text_widths`) answers it at build time."""
+    import fire_compiler as F
+    if callee not in PRINTF_TEXT_CONVERSIONS_CALLEES or not isinstance(fmt_text, str):
+        return []
+    if not non_ascii_strings():
+        return []
+    specs = _printf_specs(fmt_text)
+    if specs is None:
+        return []
+    out = []
+    arg = 0
+    for sp in specs:
+        operand = arg + sp["stars"]
+        arg = operand + 1
+        if sp["conv"] != "s" or sp["stars"] or sp["quant"] in (None, "*"):
+            continue
+        if operand >= len(args) or not isinstance(args[operand], F.IdentExpr):
+            continue
+        qm = _PRINTF_QUANTIFIER_RE.match(sp["text"])
+        if qm is None:
+            continue
+        flags, width, prec = qm.groups()
+        if not width and prec is None:
+            continue
+        out.append((operand, sp))
+    return out
+
+
+def printf_runtime_text_widths(callee: str, fmt_text, args: list,
+                               text_of_arg=None):
+    """Rewrite `%<flags><w>.<p>s` on a run-time string NAME to the star form
+    with widths computed in CHARACTERS (step 13d), or None.
+
+    C pads and truncates in BYTES, CPython in code points, so for an operand `s`
+    the star arguments are:
+
+      precision only   `.*`  <- `mojo_utf8_codepoint_to_byte_offset(s, P)`
+                               (the byte length of the first P code points, or
+                               of the whole string when it has fewer)
+      width only       `*`   <- `W + (mojo_strlen(s) - mojo_str_codepoint_len(s))`
+      both             `.*` as above, and `*` <- `W + B - n` where `B` is the
+                               precision argument and `n = min(P, code points)`
+
+    Text the build can see is left to the fold; an operand that is not a name,
+    or a format this cannot parse, is left to the refusal. The result is
+    `(new_format, new_args)`."""
+    import fire_compiler as F
+    cands = printf_runtime_width_operands(callee, fmt_text, args)
+    if not cands:
+        return None
+    if text_of_arg is not None:
+        cands = [(o, sp) for o, sp in cands if text_of_arg(args[o]) is None]
+        if not cands:
+            return None
+
+    def call(name, *a):
+        return F.CallExpr(func=F.IdentExpr(name), args=list(a))
+
+    def num(n):
+        return F.IntLiteral(int(n))
+
+    by_operand = dict(cands)
+    specs = _printf_specs(fmt_text)
+    new_fmt, new_args, pos, arg = [], [], 0, 0
+    for sp in specs:
+        operand = arg + sp["stars"]
+        new_fmt.append(fmt_text[pos:sp["start"]])
+        pos = sp["end"]
+        # the arguments this specification consumed, unchanged, before the
+        # operand itself (its own stars)
+        new_args.extend(args[arg:operand])
+        if operand not in by_operand:
+            new_fmt.append(sp["text"])
+            if operand < len(args):
+                new_args.append(args[operand])
+            arg = operand + 1
+            continue
+        flags, width, prec = _PRINTF_QUANTIFIER_RE.match(sp["text"]).groups()
+        s = args[operand]
+        spec = "%" + flags
+        if prec is not None:
+            P = int(prec)
+            byte_prec = call("mojo_utf8_codepoint_to_byte_offset", s, num(P))
+        if width:
+            W = int(width)
+            if prec is not None:
+                shown = F.TernaryExpr(
+                    condition=F.BinaryOp(op="<", left=num(P),
+                                         right=call("mojo_str_codepoint_len", s)),
+                    then_val=num(P), else_val=call("mojo_str_codepoint_len", s))
+                wexpr = F.BinaryOp(
+                    op="-", left=F.BinaryOp(op="+", left=num(W), right=byte_prec),
+                    right=shown)
+            else:
+                wexpr = F.BinaryOp(
+                    op="+", left=num(W),
+                    right=F.BinaryOp(op="-", left=call("mojo_strlen", s),
+                                     right=call("mojo_str_codepoint_len", s)))
+            spec += "*"
+            new_args.append(wexpr)
+        if prec is not None:
+            spec += ".*"
+            new_args.append(byte_prec)
+        new_fmt.append(spec + "s")
+        new_args.append(s)
+        arg = operand + 1
+    new_fmt.append(fmt_text[pos:])
+    new_args.extend(args[arg:])
+    return ("".join(new_fmt), new_args)
+
+
+PRINTF_RUNTIME_ELEMENT_HELPER = "mojo_char_at_str_cp"
+
+
+def integer_literal_text(node):
+    """The decimal text of an integer LITERAL (`42`, `-7`), or None.
+
+    `str(42)` and `repr(42)` are build-time constants on both architectures
+    (`str`/`repr` of a run-time integer needs a buffer this path does not have)."""
+    import fire_compiler as F
+    if isinstance(node, F.IntLiteral) and not isinstance(node.value, bool):
+        return str(int(node.value))
+    if isinstance(node, F.UnaryOp) and getattr(node, "op", None) == "-" \
+            and isinstance(getattr(node, "operand", None), F.IntLiteral):
+        return str(-int(node.operand.value))
+    return None
+
+
+def printf_runtime_element_operands(callee: str, fmt_text, args: list,
+                                     is_string_subscript=None) -> list:
+    """`[(operand index, spec)]` for each plain `%c` whose operand is `name[i]`
+    on a string (step 13e), in an image that holds non-ASCII text.
+
+    `name` and `i` have to be plain names or integer literals, because the
+    rewrite evaluates them once in the helper call and the original is dropped
+    (nothing is evaluated twice, but only these shapes are known pure)."""
+    import fire_compiler as F
+    if callee not in PRINTF_TEXT_CONVERSIONS_CALLEES or not isinstance(fmt_text, str):
+        return []
+    if not non_ascii_strings():
+        return []
+    specs = _printf_specs(fmt_text)
+    if specs is None:
+        return []
+
+    def pure(e):
+        if isinstance(e, (F.IdentExpr, F.IntLiteral)):
+            return True
+        return (isinstance(e, F.UnaryOp) and getattr(e, "op", None) == "-"
+                and isinstance(getattr(e, "operand", None), F.IntLiteral))
+
+    out, arg = [], 0
+    for sp in specs:
+        operand = arg + sp["stars"]
+        arg = operand + 1
+        if sp["conv"] != "c" or sp["stars"] or sp["quant"] is not None:
+            continue
+        if operand >= len(args):
+            continue
+        a = args[operand]
+        if not (isinstance(a, F.SubscriptExpr) and isinstance(a.obj, F.IdentExpr)
+                and pure(a.index)):
+            continue
+        if is_string_subscript is not None and not is_string_subscript(a):
+            continue
+        out.append((operand, sp))
+    return out
+
+
+def printf_runtime_text_elements(callee: str, fmt_text, args: list,
+                                 is_string_subscript=None, text_of_arg=None):
+    """Rewrite `%c` of `name[i]` to `%s` of `mojo_char_at_str_cp(name, i)`
+    (step 13e): the element of a string is a CHARACTER, and the byte load that
+    the ASCII lowering uses reads one byte of a multi-byte character."""
+    import fire_compiler as F
+    cands = dict(printf_runtime_element_operands(callee, fmt_text, args,
+                                                  is_string_subscript))
+    if text_of_arg is not None:
+        # Text the build can SEE is the fold's (and, out of range, the
+        # refusal's): `s = "日本"; s[2]` must keep saying so.
+        cands = {o: sp for o, sp in cands.items()
+                 if text_of_arg(args[o].obj) is None}
+    if not cands:
+        return None
+    specs = _printf_specs(fmt_text)
+    new_fmt, new_args, pos, arg = [], [], 0, 0
+    for sp in specs:
+        operand = arg + sp["stars"]
+        new_fmt.append(fmt_text[pos:sp["start"]])
+        pos = sp["end"]
+        new_args.extend(args[arg:operand])
+        if operand in cands:
+            a = args[operand]
+            new_fmt.append("%s")
+            new_args.append(F.CallExpr(
+                func=F.IdentExpr(PRINTF_RUNTIME_ELEMENT_HELPER),
+                args=[a.obj, a.index]))
+        else:
+            new_fmt.append(sp["text"])
+            if operand < len(args):
+                new_args.append(args[operand])
+        arg = operand + 1
+    new_fmt.append(fmt_text[pos:])
+    new_args.extend(args[arg:])
+    return ("".join(new_fmt), new_args)
+
+
+def printf_runtime_rewrites(callee: str, fmt_text, args: list, text_of_arg=None,
+                            is_string_subscript=None):
+    """The run-time rewrites of a `printf` in a non-ASCII image, chained:
+    widths/precisions on a name (13d), then `%c` of a string element (13e).
+    `(new_format, new_args)` or None."""
+    cur_fmt, cur_args, changed = fmt_text, list(args), False
+    w = printf_runtime_text_widths(callee, cur_fmt, cur_args, text_of_arg)
+    if w is not None:
+        cur_fmt, cur_args, changed = w[0], w[1], True
+    el = printf_runtime_text_elements(callee, cur_fmt, cur_args,
+                                      is_string_subscript, text_of_arg)
+    if el is not None:
+        cur_fmt, cur_args, changed = el[0], el[1], True
+    return (cur_fmt, cur_args) if changed else None
+
+
 def printf_text_conversion_refusal(callee: str, fmt_text, args: list,
                                    text_of, text_of_arg=None) -> str | None:
     """Why a `%s` conversion of an argument that is not text is refused.

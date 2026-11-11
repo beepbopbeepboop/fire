@@ -4101,6 +4101,7 @@ def check_library_free_calls(importer_path: str, stmts: list,
     from formal import model as M                   # lazy — cycle
     exempt = {}
     source_of = {}
+    defining_of = {}          # the importer's local spelling -> the defining name
     for src, (bindings, _why) in (library_free or {}).items():
         for bound, defining, spelled in bindings:
             # BOTH spellings, for the ALIAS reason `library_free_edges` gives:
@@ -4112,6 +4113,7 @@ def check_library_free_calls(importer_path: str, stmts: list,
             exempt.setdefault(defining, spelled)
             source_of.setdefault(bound, src)
             source_of.setdefault(defining, src)
+            defining_of.setdefault(bound, defining)
     if not exempt:
         return
     for scope, body in _enclosing_scopes(stmts):
@@ -4125,8 +4127,14 @@ def check_library_free_calls(importer_path: str, stmts: list,
             sym = M.GlobalSymbol(callee.name, None, "imported",
                                  exempt[callee.name],
                                  getattr(callee, "line", 0) or 0)
+            # The export rule is a fact about the DEFINING module's own
+            # declaration, so it is asked by the DEFINING name: `from .philox
+            # import Random as PhiloxRandom` calls `PhiloxRandom`, which the
+            # module does not declare, and asking it by that name reported "the
+            # module declares no such name at all" about a name it declares.
+            _dname = defining_of.get(callee.name, callee.name)
             rule, declared = M.export_rule_for(
-                callee.name, exempt[callee.name],
+                _dname, exempt[callee.name],
                 source=source_of.get(callee.name))
             from formal import monomorph as _MM
             enclosing = next((x for x in stmts
@@ -4140,7 +4148,9 @@ def check_library_free_calls(importer_path: str, stmts: list,
             raise ImportBuildError(
                 M.imported_callee_refusal(callee.name, sym, scope,
                                           rule=rule, declared=declared,
-                                          existential_args=existential))
+                                          existential_args=existential,
+                                          alias_of=(_dname if _dname != callee.name
+                                                    else None)))
 
 
 def _enclosing_scopes(stmts: list) -> list:

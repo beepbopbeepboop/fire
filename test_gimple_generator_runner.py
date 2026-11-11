@@ -5585,6 +5585,55 @@ main()
 """, "1 23\n")
 
 
+def run_cpp_path_fstring_conversion_tests():
+    """f-string conversions (`!a`/`!r`/`!s`) on the cpp-path generator
+    emitter. `cpp_core._cpp_string_literal_expr` is a SEPARATE lowering from
+    the ordinary GIMPLE path's `_lower_StringLiteral`, and it had only the
+    `!r` arm: `!a` fell through to the raw-value arm and rendered `str()`
+    (so `f"{s!a}"` dropped both the repr quotes and the ascii escaping).
+    Its `!r`/`!a` arms also sent a `_Bool` through `mojo_str`, which prints
+    `1` where `repr(True)` is `True`.
+
+    Pinned against CPython on the same text: `!a` and `!r` must agree with
+    `ascii()`/`repr()`, not merely with each other, and `!s` is the control
+    that stays the plain value."""
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython(
+            "cpp_path_fstring_conversions_match_cpython", """\
+def g():
+    s = "héllo"
+    print(f"({s!a})")
+    print(f"({s!s})")
+    print(f"({('λ😀')!a})")
+    print(f"({42!a})")
+    print(f"({True!a})")
+    print(f"({True!r})")
+    print(f"({1.5!a})")
+    yield 0
+
+def main():
+    it = g()
+    print(next(it))
+main()
+""", """\
+def g():
+    s = "héllo"
+    print(f"({s!a})")
+    print(f"({s!s})")
+    print(f"({('λ😀')!a})")
+    print(f"({42!a})")
+    print(f"({True!a})")
+    print(f"({True!r})")
+    print(f"({1.5!a})")
+    yield 0
+
+def main():
+    it = g()
+    print(next(it))
+main()
+""")
+
+
 def run_send_into_just_started_regression():
     # Bug: CODEGEN_send_into_just_started_generator_is_not_refused
     # `g.send(7)` on a fresh generator must raise TypeError, not resume.
@@ -5643,6 +5692,7 @@ def run_tests():
     run_cpp_send_tests()
     run_send_into_just_started_regression()
     run_cpp_path_multi_arg_print_tests()
+    run_cpp_path_fstring_conversion_tests()
     run_none_yield_tests()
     run_tagged_none_equality_tests()
     run_tagged_none_identity_tests()

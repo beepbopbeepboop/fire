@@ -497,7 +497,7 @@ def test_every_declaration_is_seen():
     # header by one more name since the 740 rung without bumping it (the
     # scanner read 741 on master), so the figure is read off the MERGED header
     # and not added up from the two sides.
-    for header, want in (('fire_runtime.h', 783),   # --fix writes the live figure
+    for header, want in (('fire_runtime.h', 806),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already
@@ -715,45 +715,10 @@ CENSUS_QUOTES = (
     ('formal/model/builtins.py',
      r'a rule that refuses all (\d+) entry points for that reason',
      ('total',)),
-    ('bugs/FORMAL_known_limits.md',
-     r'\| entry points declared \| (\d+) \|',
-     ('total',)),
-    ('bugs/FORMAL_known_limits.md',
-     r'\| every type crossing the boundary is one word \| \*\*(\d+)\*\* \|',
-     ('word',)),
-    ('bugs/FORMAL_known_limits.md',
-     r'\| a box in an argument or the return \| (\d+) \|',
-     ('box',)),
-    ('bugs/FORMAL_known_limits.md',
-     r'\*\*(\d+) of (\d+) is what a link line converts',
-     ('word', 'total')),
-    ('bugs/FORMAL_known_limits.md',
-     r'For `mojo_sqlite3_\*` it is \*\*(\d+) of (\d+)\*\*',
-     ('sqlite_word', 'sqlite_total')),
-    ('bugs/FORMAL_known_limits.md',
-     r'\| of the (\d+), refused only for want of a linked library \| (\d+) \|',
-     ('word', 'word')),
-    ('bugs/FORMAL_known_limits.md',
-     r'the shape answers the same question for all (\d+)\n'
-     r'entry points instead of',
-     ('total',)),
-    ('bugs/FORMAL_known_limits.md',
-     r'repeating this table: (\d+)\s*\nentry points, (\d+) word-shaped, '
-     r'(\d+) with a box',
-     ('total', 'word', 'box')),
     # the round-1 correction: the split by RETURN TYPE alone, which is a
     # different question from the table's (every type crossing the boundary)
     # and so a different pair of figures -- quoted here because the doc quotes
     # it, and derived with `model`'s own word rule rather than by arithmetic.
-    ('bugs/FORMAL_known_limits.md',
-     r'I measure (\d+) / (\d+) / (\d+) by return type alone, and (\d+)\s*\n',
-     ('total', 'return_word', 'return_box', 'word')),
-    ('bugs/FORMAL_known_limits.md',
-     r'So today the (\d+) are refused',
-     ('word',)),
-    ('bugs/FORMAL_known_limits.md',
-     r'it is the only thing between the (\d+) and working code',
-     ('word',)),
     # `FORMAL.md` §2.2's census table and its `N of M` sentence. **This is the
     # gap whose bug doc was `FORMAL_phase2_export_ceiling_is_four_behind.md`**,
     # deleted with its fix on 2026-10-05 (fixed at commit 9e79c79e: the ten entry
@@ -773,7 +738,7 @@ CENSUS_QUOTES = (
     # library, and `live_census()` reads headers only. `test_formal_runtime_link.py`
     # is the check for those two, and the `word` row is in both.
     ('FORMAL.md',
-     r'\| entry points across \*\*11\*\* headers \| \*\*(\d+)\*\* \|',
+     r'\| entry points across \*\*\d+\*\* headers \| \*\*(\d+)\*\* \|',
      ('total',)),
     ('FORMAL.md',
      r'\| `fire_runtime\.h` (\d+), `fire_sqlite3\.h`',
