@@ -16681,17 +16681,17 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
             # derived spec costs nothing and is the difference between an open
             # obligation and a believed falsehood.
             contract = (
+                f"/-- The precondition of the guarded obligation: the NORMAL path's\n"
+                f"    overflow guards.  This generator does not yet derive it from the\n"
+                f"    machine code, so it is opaque: nothing is assumed about it beyond\n"
+                f"    what the obligation states. -/\n"
+                f"opaque {ident}_pre : UInt64 → Prop\n\n"
                 f"/-- OBLIGATION, not proved: this export agrees with the\n"
                 f"    specification derived from its source.  The contract could\n"
                 f"    not be emitted -- a body with a branch is not one function\n"
                 f"    of one state, so it is not a `Refine.Block` -- so the\n"
                 f"    claim is left open rather than proved.  The spec is the\n"
                 f"    source's own; none is guessed. -/\n"
-                f"/-- The precondition of the guarded obligation: the NORMAL path's\n"
-                f"    overflow guards.  This generator does not yet derive it from the\n"
-                f"    machine code, so it is opaque: nothing is assumed about it beyond\n"
-                f"    what the obligation states. -/\n"
-                f"opaque {ident}_pre : UInt64 → Prop\n\n"
                 f"theorem {ident}_spec :\n"
                 f"    Refine.export_result_spec_under {ident}_pre dylib_image {ident} {spec} := by\n"
                 f"  sorry\n\n"
