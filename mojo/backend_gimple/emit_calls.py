@@ -1863,6 +1863,15 @@ def self_recursive_uninstantiable(gen, func) -> str | None:
             and isinstance(func.obj, gimple_ctypes.IdentExpr)):
         return None
     base = func.obj.name
+    # `SIMD[.uint32, Self.length](...)` inside a method of `SIMD` is a struct
+    # CONSTRUCTOR, not a function that can recurse. Its name is shared with the
+    # enclosing method's prefix (`SIMD_cast`), and its arguments are the
+    # method's own unbound parameters while the template body is emitted. The
+    # generator registers a generic struct in these tables, so they are the
+    # discriminator (func_return_types lists struct methods too, so it is not).
+    if (base in getattr(gen, 'struct_field_types', ())
+            or base in getattr(gen, '_imported_generic_structs', ())):
+        return None
     cfn = getattr(gen, 'current_func_name', None)
     # The enclosing function is either the bare base (`self_recursion`) or its
     # mangled instance (`self_recursion_1_i_1_3`), so both spellings are checked.
