@@ -247,6 +247,24 @@ def next_slot():
     return max(used, default=0) + 1
 
 
+def claim_blocker(claims, tasks):
+    """Why a task claiming CLAIMS may not start now, or None. The one place both spawn and refill ask it: refill must
+    know before it reserves a slot (a refused spawn that kept its slot starved the whole pool, 2026-11-10: five
+    claim-blocked fix-merge tasks took all five easy slots, so qwen never got work)."""
+    for other, t in tasks.items():
+        if not holds_claims(t):
+            continue
+        for c in claims:
+            for oc in t["claims"]:
+                if conflicts(c, oc):
+                    return "claim %r conflicts with %r held by task %s (%s, %d commits)" % (
+                        c, oc, other, state_of(t), ahead(t))
+    ext = external_conflicts(claims)
+    if ext:
+        return "claim %r conflicts with %r held by external session %s" % (ext[0][1], ext[0][2], ext[0][0])
+    return None
+
+
 def cmd_spawn(a):
     """Start a worker. A task runs on a POOL SLOT (tools/pool.json): its model and runner come from the slot, and it
     never moves to another model. `--model` (a bare model, no slot) is for hand-run experiments only."""
@@ -261,17 +279,9 @@ def cmd_spawn(a):
     with registry() as tasks:
         if a.name in tasks:
             sys.exit("task %s already exists" % a.name)
-        for other, t in tasks.items():
-            if not holds_claims(t):
-                continue
-            for c in a.claim:
-                for oc in t["claims"]:
-                    if conflicts(c, oc):
-                        sys.exit("claim %r conflicts with %r held by task %s (%s, %d commits)" % (
-                            c, oc, other, state_of(t), ahead(t)))
-        ext = external_conflicts(a.claim)
-        if ext:
-            sys.exit("claim %r conflicts with %r held by external session %s" % (ext[0][1], ext[0][2], ext[0][0]))
+        blocked = claim_blocker(a.claim, tasks)
+        if blocked:
+            sys.exit(blocked)
         n = next_slot()
         wt, branch = os.path.join(PARENT, "work-%d" % n), "work/" + a.name
         git("worktree", "add", "-b", branch, wt, a.base)
@@ -865,6 +875,10 @@ def cmd_refill(a):
             print("%s: base %s no longer exists; starting from master" % (it["name"], base), flush=True)
             it = dict(it, base="master")
             _rewrite_queued(it)
+        blocked = claim_blocker(it["claims"], tasks)
+        if blocked:
+            print("refill: skip %s: %s" % (it["name"], blocked), flush=True)
+            continue                      # a claim held elsewhere: the task waits, and takes no slot
         sl = pick_slot(it, busy)
         if sl is None:
             continue                      # every slot is full or banned: the task waits
@@ -873,12 +887,13 @@ def cmd_refill(a):
         name = it["name"] if it["name"] not in tasks else "%s-%d" % (it["name"][:50], int(time.time() * 1000) % 1000000)
         ns = argparse.Namespace(name=name, claim=it["claims"], task=it["task"], task_file=None,
                                 file=it["files"], base=it["base"], model=None, pool=sl["name"], cls=it.get("cls"))
-        busy[sl["name"]] = busy.get(sl["name"], 0) + 1
         try:
             cmd_spawn(ns)
         except SystemExit as e:
-            print("skip %s: %s" % (it["name"], e))
-            continue
+            print("skip %s: %s" % (it["name"], e), flush=True)
+            continue                      # refused: no slot was taken, so the next task can use it
+        busy[sl["name"]] = busy.get(sl["name"], 0) + 1
+        tasks = load()                    # the new worker's claims must block the rest of this pass
         os.remove(os.path.join(qdir(), it["name"] + ".json"))
         started += 1
     waiting = len(items) - started
