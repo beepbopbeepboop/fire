@@ -93,9 +93,11 @@ def live_guard():
     try:
         dirs = C.live_session_dirs()
     except (RuntimeError, OSError, ValueError) as e:
-        log("guard: %s; falling back to pid-based liveness (session listing unreadable)" % e)
+        # fail closed: with no listing, "nothing is live" is unknown, and feeding or landing on that guess is how a
+        # live worker gets a second one on its doc (2026-11-03). The pass does its bookkeeping and nothing else.
+        log("guard: %s; session listing unreadable, this pass feeds and lands nothing" % e)
         BUSY["names"], BUSY["claims"] = set(), set()
-        return True
+        return False
     tasks = C.load()
     names = C.busy_task_names(dirs, tasks)
     claims = set()
@@ -126,12 +128,11 @@ def busy_by_class():
     pool = C.load_pool()
     slot_cls = {sl["name"]: C.slot_class(sl) for sl in pool["slots"]}
     busy = {c: 0 for c in C.CLASSES}
-    for t in C.load().values():
-        if C.state_of(t) != "running":
-            continue
-        if not C.alive(t.get("pid")):
-            continue
-        busy[t.get("cls") or slot_cls.get(t.get("pool"), "easy")] += 1
+    tasks = C.load()
+    live = C.live_names(tasks) or frozenset()        # the same working rule as control.running_by_slot
+    for name, t in tasks.items():
+        if C._working(name, t) and (C.alive(t.get("pid")) or name in live):
+            busy[t.get("cls") or slot_cls.get(t.get("pool"), "easy")] += 1
     return busy
 
 
@@ -163,6 +164,12 @@ def doc_hash(doc):
         return hashlib.sha1(open(os.path.join(C.MAIN, doc_path(doc)), "rb").read()).hexdigest()
     except OSError:
         return None
+
+
+def skip_hits(base, skips):
+    """The pool's skip patterns that a doc's base name matches (empty when it is a real bug doc). The one test every
+    path that picks docs uses: the feed, the replan, and the explanation of a wedged doc."""
+    return [x for x in skips if base.startswith(x) or x in base]
 
 
 def bug_docs(base):
@@ -248,9 +255,8 @@ def feed():
         rel = os.path.relpath(p, os.path.join(C.MAIN, "bugs"))
         doc = rel[:-3] if rel.endswith(".md") else rel
         base = os.path.basename(doc)
-        if any(base.startswith(x) or x in base for x in skips):
-            log("skip %s: its name matches the pool's skip pattern %s" % (
-                doc, [x for x in skips if base.startswith(x) or x in base]))
+        if skip_hits(base, skips):
+            log("skip %s: its name matches the pool's skip pattern %s" % (doc, skip_hits(base, skips)))
             continue
         if "bug:" + base in held:
             log("held %s: a live task or an external claim holds it (see control.py claims)" % doc)
@@ -349,9 +355,8 @@ def why(doc):
     base = os.path.basename(doc)
     cls = doc_class(doc, st, base)
     busy = C.running_by_slot()
-    if any(base.startswith(x) or x in base for x in skips):
-        return "skip pattern: its name matches %s from the pool's skip list" % [
-            x for x in skips if base.startswith(x) or x in base]
+    if skip_hits(base, skips):
+        return "skip pattern: its name matches %s from the pool's skip list" % skip_hits(base, skips)
     held = claim_held(base)
     if held:
         return "held: %s" % held
@@ -459,6 +464,9 @@ def replan_unserved():
     for cls, slots in sorted(unserved.items()):
         for path in sorted(glob.glob(os.path.join(C.MAIN, "bugs", cls, "*.md"))):
             base = os.path.basename(path)[:-3]
+            if skip_hits(base, pool.get("skip", [])):
+                continue                  # an index or README is not a bug doc: nothing to split (2026-11-10: a
+                                          # replan of bugs/hard/README.md was queued and ran on qwen)
             name = "fix-replan-" + re.sub(r"[^a-z0-9]+", "-", base.lower())[:40].rstrip("-")
             qpath = os.path.join(C.qdir(), name + ".json")
             if os.path.exists(qpath):
@@ -889,7 +897,8 @@ def main():
             sr = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "sync", "--restart-dead"], capture_output=True, text=True, cwd=C.MAIN)
             for line in (sr.stdout or "").splitlines():
                 if line.strip():
-                    log("sync: " + line.strip())
+                    text = line.strip()
+                    log(text if text.startswith("sync:") else "sync: " + text)   # control.py labels its own lines
             # safe, conservative cleanup every pass: only removes merged/clean/idle trees with no outside claim
             cr = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "cleanup"], capture_output=True, text=True, cwd=C.MAIN)
             for line in (cr.stdout or "").splitlines():

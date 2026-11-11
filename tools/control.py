@@ -673,6 +673,14 @@ def live_names(tasks):
         return None
 
 
+def _working(name, t):
+    """A task that has not finished: no terminal or exited state, and no exitcode file. Whether its process or session is
+    alive is the caller's question (running_by_slot)."""
+    if t.get("state") in TERMINAL or t.get("state") in ("exited-ok", "exited-err"):
+        return False
+    return not os.path.exists(os.path.join(t.get("worktree", ""), "exitcode"))
+
+
 def running_by_slot(tasks=None, live=frozenset()):
     """Running workers per pool slot: a task is running when its pid is alive OR it has a live opencode session (`live`,
     from live_names). A worker started before slots existed has no `pool`: it is counted against the slot that owns its
@@ -680,11 +688,23 @@ def running_by_slot(tasks=None, live=frozenset()):
     by_model = {sl["model"]: sl["name"] for sl in load_pool()["slots"]}
     n = {}
     for name, t in (tasks or load()).items():
-        # a live opencode session counts only while the task is still running: a session the
-        # ledger did not start (or a task already superseded/exited) must not pin its slot.
-        if (state_of(t) == "running" and (alive(t.get("pid")) or name in live)):
+        # a live opencode session counts only while the task is still working: a session the ledger did not start
+        # (or a task already superseded/exited, or one that wrote its exitcode) must not pin its slot. The pid check
+        # is not state_of()=="running": a dead pid with a live session is exactly the case the live set exists for.
+        if _working(name, t) and (alive(t.get("pid")) or name in live):
             slot = t.get("pool") or by_model.get(t.get("model"))
             n[slot] = n.get(slot, 0) + 1
+    return n
+
+
+def running_by_model(tasks=None, live=frozenset()):
+    """Working workers per model, counted exactly as running_by_slot counts them (sync's cap check must agree with
+    refill's: it had its own rule, and skipped restarts of workers that had live sessions)."""
+    n = {}
+    for name, t in (tasks or load()).items():
+        if _working(name, t) and (alive(t.get("pid")) or name in live):
+            m = t.get("model", "")
+            n[m] = n.get(m, 0) + 1
     return n
 
 
@@ -857,7 +877,9 @@ def cmd_refill(a):
     for it in items:
         if live + started >= a.target and not it["name"].startswith("fix-landed"):
             continue                      # a red master is repaired at once, whatever the slot count
-        if any(state_of(tasks[n]) != "integrated" if n in tasks else True for n in it["needs"]):
+        unmet = [n for n in it["needs"] if not (n in tasks and state_of(tasks[n]) == "integrated")]
+        if unmet:
+            print("refill: wait %s: needs %s integrated" % (it["name"], ", ".join(unmet)), flush=True)
             continue
         # A task is not tied to a model: its enqueue slot (`pool`) is only the PREFERRED one. It takes that slot if it is
         # free, else the first free, unbanned slot in pool order. Every slot runs the same kind of work.
@@ -1457,11 +1479,7 @@ def cmd_sync(a):
         print("  %s" % n)
     if dead_running and restart_dead and not dry:
         pool = load_pool()
-        counts = {}
-        for t in tasks.values():
-            if t.get("state") == "running" and pid_alive(t):
-                m = t.get("model", "")
-                counts[m] = counts.get(m, 0) + 1
+        counts = running_by_model(tasks, live_names(tasks) or frozenset())
         for n in dead_running:
             t = tasks.get(n, {})
             # DONE ratchet: if every doc claim's doc is gone (deleted on master), the task
