@@ -3347,7 +3347,7 @@ def _erased_pointee_is_self(resolved):
 # PARAMETRIZED alias whose parameters are all ownership/origin plumbing this
 # codegen erases. Group 1 = alias name, 2 = the parameter list's open bracket.
 _PARAM_ALIAS_HEAD_RE = re.compile(
-    r'comptime\s+(_?[A-Za-z]\w*)\s*\[')
+    r'comptime\s+(_?[A-Za-z]\w*)\s*(?=[\[:])')
 _ERASED_ORIGIN = 'MutAnyOrigin'
 
 
@@ -3422,11 +3422,16 @@ def _eval_parametrized_aliases(work, mm, base, concrete):
     nested = []
     for m in list(_PARAM_ALIAS_HEAD_RE.finditer(concrete)):
         aname = m.group(1)
-        pend = _balanced_end(concrete, m.end())
+        # Parametrized `comptime X[params]: Trait = Base[...]`, or bracketless
+        # `comptime X: Trait where ... = Base[...]` (LinkedList's
+        # `IteratorOwnedType`): no parameter list, so the annotation starts at
+        # the colon.
+        bracketed = concrete[m.end()] == '['
+        pend = _balanced_end(concrete, m.end()) if bracketed else m.end()
         if pend is None:
             continue
-        hm = re.match(r'\s*:\s*[^=\n]+=\s*([A-Za-z_]\w*)\s*\[',
-                      concrete[pend:])
+        hm = re.match((r'\s*:\s*[^=\n]+=\s*' if bracketed else r'\s*:\s*[^=]+=\s*')
+                      + r'([A-Za-z_]\w*)\s*\[', concrete[pend:])
         if not hm or hm.group(1) in _ERASED_WORD_STRUCTS:
             continue
         abase = hm.group(1)
@@ -3438,7 +3443,8 @@ def _eval_parametrized_aliases(work, mm, base, concrete):
             p.split(':')[0].strip() for p in
             gimple_exprtypes._split_top_level_commas(
                 concrete[m.end():pend - 1])
-            if p.strip() and not elaborate._is_param_marker(p.strip())}
+            if p.strip() and not elaborate._is_param_marker(p.strip())} \
+            if bracketed else set()
         written = []
         origin_arg = _ERASED_ORIGIN
         for a in gimple_exprtypes._split_top_level_commas(
