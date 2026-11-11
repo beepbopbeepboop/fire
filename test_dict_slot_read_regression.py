@@ -154,6 +154,19 @@ main()
 ''')
     assert out == "None\nTrue\nFalse\nNone\nTrue\nNone None\nTrue True\n", repr(out)
 
+    # Slot reads stored in containers/variables must keep kind (root cause).
+    out = run(r'''
+def main():
+    d = {'n': None, 'b': True}
+    lst = [d['n'], d['b']]
+    print(lst[0], lst[1])
+    d2 = {}
+    d2['x'] = d['n']
+    print(d2['x'])
+main()
+''')
+    assert out == "None True\nNone\n", repr(out)
+
     print("test_dict_slot_read_regression: ok")
 
 

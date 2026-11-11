@@ -11048,9 +11048,12 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             bb_done = gen._new_bb()
             gen._emit(f"  if ({has} != 0) goto {bb_hit}; else goto {bb_miss};")
             gen._emit_label(bb_hit)
-            hv = gen._call_expr('int64_t', 'mojo_dict_get_int',
+            hv = gen._call_expr('int64_t', 'mojo_dict_slot_boxed',
                                 [('MojoDict *', dp), (kt, kv)])
             gen._emit(f"  {res} = {hv};")
+            if hasattr(gen, '_tagged_word_vals'):
+                gen._tagged_word_vals.add(res)
+            _mark_unknown_dict_value(gen, dp, res, kv, 'str')
             gen._emit(f"  goto {bb_done};")
             gen._emit_label(bb_miss)
             miss_mangled = gen._struct_method_csym(_dsub_r, '__missing__', '')
@@ -11059,8 +11062,11 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             gen._emit(f"  goto {bb_done};")
             gen._emit_label(bb_done)
             return 'int64_t', res
-        t = gen._call_expr('int64_t', 'mojo_dict_get_int',
+        t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed',
                            [('MojoDict *', dp), (kt, kv)])
+        if hasattr(gen, '_tagged_word_vals'):
+            gen._tagged_word_vals.add(t)
+        _mark_unknown_dict_value(gen, dp, t, kv, 'str')
         return 'int64_t', t
 
     # `x[i]` on a builtin-`bytes` subclass with no `__getitem__` override:
@@ -11252,8 +11258,10 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             return 'double', gen._call_expr('double', 'mojo_dict_get_none_key_double', [('MojoDict *', ov)])
         if val_ctype == 'char *':
             return 'char *', gen._call_expr('char *', 'mojo_dict_get_none_key_str', [('MojoDict *', ov)])
-        t = gen._call_expr('int64_t', 'mojo_dict_get_none_key_int', [('MojoDict *', ov)])
+        t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_none', [('MojoDict *', ov)])
         _mark_unknown_dict_value(gen, ov, t, None, 'none')
+        if hasattr(gen, '_tagged_word_vals'):
+            gen._tagged_word_vals.add(t)
         return 'int64_t', t
 
     if ot == 'MojoDict *':
@@ -11269,9 +11277,11 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             if val_ctype == 'double':
                 return 'double', gen._call_expr('double', 'mojo_dict_get_bytes_double',
                                                 [('MojoDict *', ov), ('MojoBytes *', iv)])
-            t = gen._call_expr('int64_t', 'mojo_dict_get_bytes_int',
+            t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_bytes',
                                [('MojoDict *', ov), ('MojoBytes *', iv)])
             _mark_unknown_dict_value(gen, ov, t, iv, 'bytes')
+            if hasattr(gen, '_tagged_word_vals'):
+                gen._tagged_word_vals.add(t)
             return 'int64_t', t
         # Ensure index is char * for dict subscript access (all dict keys are strings in runtime)
         idx_type, iv = gen._char_to_cstr(idx_type, iv, True, True)
@@ -11299,8 +11309,10 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             _cks = getattr(gen, '_cstr_key_src', None)
             if _cks is not None:
                 _cks.pop(iv, None)
-        t = gen._call_expr('int64_t', 'mojo_dict_get_int', [('MojoDict *', ov), (idx_type, iv)])
+        t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed', [('MojoDict *', ov), (idx_type, iv)])
         _mark_unknown_dict_value(gen, ov, t, iv, 'str' if idx_type == 'char *' else None)
+        if hasattr(gen, '_tagged_word_vals'):
+            gen._tagged_word_vals.add(t)
         return 'int64_t', t
 
     # Opaque Python object (typed as int) — treat as MojoList via cast
@@ -11373,8 +11385,10 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                 _cks = getattr(gen, '_cstr_key_src', None)
                 if _cks is not None:
                     _cks.pop(idx_for_dict, None)
-            t = gen._call_expr('int64_t', 'mojo_dict_get_int', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])
+            t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])
             _mark_unknown_dict_value(gen, dp, t, idx_for_dict, 'str')
+            if hasattr(gen, '_tagged_word_vals'):
+                gen._tagged_word_vals.add(t)
             return 'int64_t', t
         # Otherwise treat as MojoList* stored as int; cast and subscript
         lp = gen._coerce_to_type(ot, 'MojoList *', gen._ensure_local(ot, ov))
