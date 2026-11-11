@@ -104,71 +104,6 @@ def _resolve_type(gen, ann: str | None) -> str:
             # instead of the correct "uint8_t *".
             if elem_ann in gen.struct_field_types and elem_ann not in gimple_ctypes._TYPE_MAP:
                 return f"{elem_ann} *"
-        # `Scalar[X]` (= `SIMD[X, 1]`): a width-1 SIMD is a plain scalar in C.
-        # Resolve X to its scalar C type when it is a known float dtype; keep
-        # unknown/unresolvable dtypes conservative (fall through, do not guess).
-        if base in ('Scalar', 'SIMD'):
-            _parts = gimple_ctypes._split_top_level_commas(rest.rstrip(']').strip())
-            _dtok = _parts[0].strip() if _parts else ''
-            _is_width1 = (base == 'Scalar' or (len(_parts) >= 2 and _parts[1].strip() == '1'))
-            if _is_width1 and _dtok:
-                def _dtype_ctype(tok):
-                    if tok is None:
-                        return None
-                    if isinstance(tok, tuple) and len(tok) == 2:
-                        if tok[0] in ('.', 'DType', 'dtype'):
-                            tok = tok[1]
-                        else:
-                            tok = None
-                    s = str(tok).strip() if tok is not None else ''
-                    if not s:
-                        return None
-                    if s.startswith('DType.'):
-                        s = s[len('DType.'):]
-                    if s.startswith('dtype.'):
-                        s = s[len('dtype.'):]
-                    if s.startswith('.'):
-                        s = s[1:]
-                    # ONE dtype-spelling table (types._SIMD_FLOAT_DTYPE_CTYPE),
-                    # the same one `emit_calls._float_dtype_arg_ctype` reads, so
-                    # the resolver and the call lowerer cannot drift apart. Its
-                    # keys are the normalized spelling (`float32`, `Float32`,
-                    # `DType.float32`); `f32`/`f64` are the remaining aliases.
-                    sl = s.lower()
-                    if sl == 'f32':
-                        sl = 'float32'
-                    elif sl == 'f64':
-                        sl = 'float64'
-                    return gimple_ctypes._SIMD_FLOAT_DTYPE_CTYPE.get(sl)
-
-                def _resolve_dtype_token(tok):
-                    _ct = _dtype_ctype(tok)
-                    if _ct is not None:
-                        return _ct
-                    # comptime-bound local/param name: look up its folded value.
-                    if isinstance(tok, str):
-                        name = tok.strip()
-                        if not name:
-                            return None
-                        _cv = getattr(gen, '_comptime_vals', None)
-                        if _cv and name in _cv:
-                            _ct = _dtype_ctype(_cv.get(name))
-                            if _ct is not None:
-                                return _ct
-                        # Some comptime bindings may live on other maps; scan a
-                        # few common containers defensively.
-                        for _attr in ('_comptime_str_names',):
-                            _m = getattr(gen, _attr, None)
-                            # _comptime_str_names is a set of names; not a value map.
-                            if isinstance(_m, dict) and name in _m:
-                                _ct = _dtype_ctype(_m.get(name))
-                                if _ct is not None:
-                                    return _ct
-                    return None
-
-                _sct = _resolve_dtype_token(_dtok)
-                if _sct is not None:
-                    return _sct
     # Same gap as above, for Mojo's OTHER raw-pointer spelling: `*T`
     # (`fn f(p: *SomeStruct)`), parsed by fire_compiler.py as the literal
     # text "*" + T. `_mojo_type` (module-level, no struct_field_types
@@ -874,7 +809,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                             # 2-arg `max` then lowers to the single-iterable
                             # `mojo_max(void *args)`. See
                             # `_SCALAR_ARITY_BUILTINS`'s own comment and
-                            # COMPILE_FAIL_zipfile___init__.
+                            # bugs/COMPILE_FAIL_zipfile___init__.md.
                             if (func_name in _ITERABLE_CONSUMING_BUILTINS
                                     and not (func_name in _SCALAR_ARITY_BUILTINS
                                              and len(expr.args) > 1)):
@@ -1146,7 +1081,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     # the += emitted raw `char * + MojoList *` pointer
                     # addition — gcc -fgimple "internal compiler error: in
                     # build2, at tree.cc" (bugs/
-                    # COMPILE_FAIL_Tools_gdb_libpython).
+                    # COMPILE_FAIL_Tools_gdb_libpython.md).
                     if isinstance(node.target, gimple_ctypes.MemberExpr) \
                             and _expr_mentions_param(node.value):
                         _aug_root = node.target.obj
@@ -1953,82 +1888,9 @@ def _collect_return_types(gen, stmts: list, acc: list):
         if isinstance(node, gimple_ctypes.ReturnStmt):
             acc.append('void' if node.value is None else gen._quick_type(node.value))
         elif isinstance(node, gimple_ctypes.IfStmt):
-            # Inside `if isinstance(x, T):` a read of `x` IS a `T *`, and
-            # that is the only way a field read whose name is ambiguous
-            # across structs (`value` is a `double` in FloatLiteral and an
-            # int64_t in half this compiler's own AST nodes) can be typed at
-            # all: `_quick_type` resolves the receiver through `var_types`,
-            # which saw only the erased parameter. Without the narrowing
-            # `comptime.eval_const`'s `return node.value` read as int64_t, the
-            # float arm was invisible to the return-type join, and the whole
-            # fix below never fired for the one function that motivated it.
-            # The overlay is exactly the one the lowering installs at the
-            # same guard (`_narrowed_exprs`), so the arm types the scan sees
-            # and the types the body emits cannot disagree.
-            _nw: list = []
-            try:
-                gen._collect_isinstance_narrowings(node.condition, _nw)
-            except Exception:
-                _nw = []
-            # name -> the entry it had (None when it had none), plus the set
-            # of names that DID have one. Dicts of strings, not a list of
-            # (name, value, had) tuples: on the self-hosted path a tuple
-            # element read back is an int64_t word, so the value would stop
-            # being a C type string (see `_apply_isinstance_narrowings`' own
-            # note on indexing its 3-tuples).
-            _saved: dict = {}
-            _had: set = set()
-            for _ni in range(len(_nw)):
-                _key = _as_str(_nw[_ni][0])
-                if not _key.startswith('i:'):
-                    continue
-                _nm = _key[2:]
-                if _nm not in _saved:
-                    if _nm in gen.var_types:
-                        _saved[_nm] = gen.var_types[_nm]
-                        _had.add(_nm)
-                    else:
-                        _saved[_nm] = None
-                gen.var_types[_nm] = _as_str(_nw[_ni][1])
-            try:
-                gen._collect_return_types(node.then_body, acc)
-            finally:
-                for _nm in _saved:
-                    if _nm in _had:
-                        gen.var_types[_nm] = _saved[_nm]
-                    else:
-                        gen.var_types.pop(_nm, None)
-            for _ec, eb in node.elifs:
-                # An `elif` body is guarded by its own condition too, and by
-                # the negations before it; only its own narrowing is applied
-                # here (a negative narrowing is not modelled anywhere).
-                _enw: list = []
-                try:
-                    gen._collect_isinstance_narrowings(_ec, _enw)
-                except Exception:
-                    _enw = []
-                _esaved: dict = {}
-                _ehad: set = set()
-                for _ni in range(len(_enw)):
-                    _key = _as_str(_enw[_ni][0])
-                    if not _key.startswith('i:'):
-                        continue
-                    _nm = _key[2:]
-                    if _nm not in _esaved:
-                        if _nm in gen.var_types:
-                            _esaved[_nm] = gen.var_types[_nm]
-                            _ehad.add(_nm)
-                        else:
-                            _esaved[_nm] = None
-                    gen.var_types[_nm] = _as_str(_enw[_ni][1])
-                try:
-                    gen._collect_return_types(eb, acc)
-                finally:
-                    for _nm in _esaved:
-                        if _nm in _ehad:
-                            gen.var_types[_nm] = _esaved[_nm]
-                        else:
-                            gen.var_types.pop(_nm, None)
+            gen._collect_return_types(node.then_body, acc)
+            for _, eb in node.elifs:
+                gen._collect_return_types(eb, acc)
             if node.else_body:
                 gen._collect_return_types(node.else_body, acc)
         elif isinstance(node, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
@@ -2051,46 +1913,12 @@ def _collect_return_types(gen, stmts: list, acc: list):
         elif isinstance(node, gimple_ctypes.WithStmt):
             gen._collect_return_types(node.body, acc)
 
-def _acc_has_float(acc: list) -> bool:
-    """Does this return-arm type list hold a float arm?"""
-    for _t in acc:
-        if _t in ('double', 'float'):
-            return True
-    return False
-
-
 def _infer_return_type_core(gen, body: list) -> str:
     """Infer return type by scanning body for ReturnStmt nodes."""
     acc: list[str] = []
     gen._collect_return_types(body, acc)
     if acc:
-        _rt = gimple_ctypes.TypeLattice.join_all(acc)
-        # A float beside a pointer has no arm type that can hold both (a
-        # pointer beats a `double` in `join`, and the float arm then truncates
-        # into it), so the function returns the TAGGED WORD instead. Body
-        # identity is recorded so the return emitter boxes exactly the
-        # functions this decision widened, rather than re-deriving the mix
-        # from a differently-seeded type table.
-        if _acc_has_float(acc) and gimple_ctypes.TypeLattice.is_pointer(_rt):
-            _mixed = getattr(gen, '_float_mixed_return_bodies', None)
-            if _mixed is None:
-                _mixed = set()
-                gen._float_mixed_return_bodies = _mixed
-            _mixed.add(id(body))
-            return 'int64_t'
-        # `int` is this compiler's INTERNAL marker for "a _Bool met an int"
-        # (see `_dict_val_of`), but it is also the C storage type of a
-        # module-level int-literal global. A method that `return G`s such a
-        # global inferred `int` here and was emitted as `int C_get(C *)`;
-        # a caller inside a `__GIMPLE` function (every lifted nested `def`)
-        # then failed the verifier with "invalid conversion in gimple call"
-        # because its own call temp is the word type. Python integers are
-        # 64-bit, so widen the marker to the word type for a RETURN type --
-        # a genuine `_Bool`/`int` join still widens the same way a C
-        # arithmetic conversion would.
-        if _rt == 'int':
-            _rt = 'int64_t'
-        return _rt
+        return gimple_ctypes.TypeLattice.join_all(acc)
     # A function that can only RAISE (an abstract method: `raise
     # NotImplementedError`) never produces a value, but a subclass overrides it
     # and every call through the base reads one: a word, not `void`.
@@ -2973,7 +2801,7 @@ def _prepass_list_elem(gen, elements) -> str | None:
     positive claim reached the call site as `_return_elem_types['a2']`, so
     `print(a2(1))` routed to `mojo_repr_list_ints` and printed the two `char *`
     slots as pointer decimals. Measured in bugs/
-    CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type; the same
+    CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md; the same
     program WITHOUT the trailing `return []` answers None and prints right,
     which is what made the branch look like the trigger when the empty literal
     is what carries the false claim.
@@ -3146,15 +2974,6 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                     # one for the same literal. Same shared rule, so the two
                     # cannot disagree about the dict they describe.
                     dict_val[v] = gimple_exprtypes.dict_literal_val_ctype(gen, val.pairs)
-                elif isinstance(val, gimple_ctypes.TupleExpr):
-                    # Tuple-literal binding: record the joined element type so
-                    # `_quick_type`'s subscript-of-IdentExpr lookup can answer
-                    # the slot type (e.g. `args = ("a","b"); return args[0]`
-                    # must be `char *`, not int64_t). The lowering records per-
-                    # slot types in `_tuple_slot_types` only at emit time, after
-                    # this pre-pass; seeding `elem` here is the cross-call /
-                    # return-type contract for the tuple's elements.
-                    elem[v] = gen._infer_list_elem_type(val.elements)
                 elif isinstance(val, gimple_ctypes.IdentExpr) and val.name in dict_val:
                     dict_val[v] = dict_val[val.name]
             elif (isinstance(n, gimple_ctypes.AssignStmt) and isinstance(n.target, gimple_ctypes.SubscriptExpr)

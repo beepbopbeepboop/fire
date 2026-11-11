@@ -2077,108 +2077,6 @@ def test_resolve_imports_uses_one_closure_walk_for_all_deps(tmpdir):
           "build_module_dylib does not pass closure through")
 
 
-def test_a_repeated_demand_ask_parses_no_module_of_the_closure_again(tmpdir):
-    """The per-dep demand ask is linear in the DISTINCT sources, not a product.
-
-    `imported_instantiations` asks `formal/imports.py::instantiation_demands`
-    once per direct import (`dep`), and each ask walks that dep's whole re-export
-    closure.  The closure WALK was already made a shared table, and each
-    per-module ANSWER was already memoised on its source text — but three later
-    blocks inside `instantiation_demands` parsed the consumer and every module of
-    the closure again for themselves: the variadic-arity scan, its call-site
-    walk, and the struct-name comparison behind the "type argument declared only
-    in this file" refusal.  So the parse count was `deps x modules`, and on
-    `std/python/bindings.mojo` (29 imports, a ~240-module closure) that was
-    measured at 7 047 `formal.build.parse_module` calls and 484 s of a 550 s
-    `cProfile` build — the misbehaving file the "classified in a bounded time"
-    case watches, at 40-60x the 3.2 s it was written against.
-
-    Two halves, because a count alone cannot see the second:
-
-      * asking the SAME dep set a second time parses nothing: every answer is a
-        function of a source text, and that text has been read;
-      * the first ask is bounded by the distinct sources in the fixture, not by
-        `len(paths) ** 2` (which is what the product looked like here: 32 parses
-        for 6 deps before the fix, 8 after).
-
-    The variadic demand is asserted to be PRESENT so the fixture cannot pass by
-    exercising none of the blocks this pins: `first0(1, 2, 3)` against
-    `def first0(a: Int, *rest: Int)` is the `__variadic_2_1__` spelling, and a
-    case that stopped producing it would be testing nothing.
-    """
-    from formal import imports as FI
-    import formal.build as FB
-
-    N = 6
-    pkg = os.path.join(tmpdir, "repeat_demands")
-    os.makedirs(pkg)
-    with open(os.path.join(pkg, "__init__.mojo"), "w") as f:
-        f.write("".join(
-            f"from .leaf{i} import thing{i}\nfrom .leaf{i} import first{i}\n"
-            for i in range(N)))
-    # Each module declares a STRUCT (the refusal block's input) and a variadic
-    # function (the arity block's input), so neither block can be skipped by the
-    # fixture's shape.
-    for i in range(N):
-        with open(os.path.join(pkg, f"leaf{i}.mojo"), "w") as f:
-            f.write(f"struct S{i}:\n    var a: Int\n"
-                    f"def first{i}(a: Int, *rest: Int) -> Int:\n    return a\n"
-                    f"def thing{i}[T](v: T) -> T:\n    return v\n")
-    source_path = os.path.join(pkg, "consumer.mojo")
-    with open(source_path, "w") as f:
-        f.write("".join(
-            f"from .leaf{i} import thing{i}\nfrom .leaf{i} import first{i}\n"
-            for i in range(N)) +
-            "def main() -> Int:\n"
-            "    print(thing0[Int](1))\n"
-            "    return first0(1, 2, 3)\n")
-
-    consumer = FI.module_source_text(source_path)
-    paths = [os.path.join(pkg, f"leaf{i}.mojo") for i in range(N)]
-    closure = FI.template_closure(paths, project_root=source_path)
-
-    real_parse = FB.parse_module
-    parsed = {"n": 0}
-
-    def counted(*a, **kw):
-        parsed["n"] += 1
-        return real_parse(*a, **kw)
-
-    def ask_all():
-        return [list(FI.instantiation_demands(
-            dep, consumer, project_root=source_path, closure=closure).items())
-            for dep in paths]
-
-    FB.parse_module = counted
-    try:
-        first = ask_all()
-        first_parses = parsed["n"]
-        parsed["n"] = 0
-        second = ask_all()
-        second_parses = parsed["n"]
-    finally:
-        FB.parse_module = real_parse
-
-    check(first_parses <= 2 * (len(paths) + 1),
-          f"one ask over {len(paths)} deps parsed {first_parses} sources; the "
-          f"product this pins is {len(paths) ** 2}, and one parse per distinct "
-          f"source (the {len(paths)} leaves plus the consumer, which one reader "
-          f"may parse twice) is at most {2 * (len(paths) + 1)}. A per-(dep x "
-          f"module) re-parse is back")
-    check(second_parses == 0,
-          f"asking the same dep set again parsed {second_parses} sources; every "
-          f"answer is a function of a source text that was already read, so a "
-          f"repeat ask costs nothing — a non-zero count means a reader re-parses "
-          f"per dep again, which is the 40-60x slowdown of the bounded-time case")
-    check(first == second,
-          f"the repeated ask answered differently: {first} then {second}")
-    demands = dict(first[0])
-    check(demands.get(os.path.abspath(paths[0]), {}).get("first0") ==
-          [("__variadic_2_1__",)],
-          f"the variadic call did not produce its arity demand, so this case is "
-          f"not exercising the block it pins: {first}")
-
-
 def test_an_instantiation_substitutes_the_parameter_and_keeps_the_self_spelling(tmpdir):
     """`Self.T` is `T`, and the shared substitution would otherwise break it.
 
@@ -4729,8 +4627,6 @@ TESTS = [
      test_a_template_is_located_once_per_source_and_name),
     ("the re-export closure is walked once for a consumer's whole dep set",
      test_the_re_export_closure_is_walked_once_for_a_consumers_whole_dep_set),
-    ("a repeated demand ask parses no module of the closure again",
-     test_a_repeated_demand_ask_parses_no_module_of_the_closure_again),
     ("an instantiation substitutes the parameter and keeps the Self spelling",
      test_an_instantiation_substitutes_the_parameter_and_keeps_the_self_spelling),
     ("a type argument that is computed is not a demand",

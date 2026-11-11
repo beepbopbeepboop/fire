@@ -59,7 +59,6 @@ Usage
     tools/suite.py                      # the `check` bucket, -j ncpu
     tools/suite.py bootstrap            # the ordered 3-stage self-host chain
     tools/suite.py gate                 # check + every heavy CLAUDE.md gate step
-    tools/suite.py orchestrator         # the swarm/registry/landing tests (no git in `check`)
     tools/suite.py check selfhost       # two buckets
     tools/suite.py gimple               # one test, by name
     tools/suite.py -j1 bootstrap        # strictly serial, output streamed live
@@ -563,7 +562,7 @@ MEASURED_PEAK_GB = {
     # (93 generated proofs, one after another) resembles. The `memwhy` on its
     # registration says the same thing and points at the doc that owns the
     # cause: `mem_read_bytes`'s `ite` chain over a 113-equation successor nest,
-    # which `FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps (deleted)`
+    # which `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`
     # is about and which a class change would not fix.
     'formal-x86-endtoend': (6.1, 'measured'),
     # The eleven `expect=`-marked tests that were registered and in NO BUCKET,
@@ -834,7 +833,7 @@ MEASURED_PEAK_GB = {
     # inputs, 2163 s each. `trusted_peaks` keeps the worst for exactly this
     # reason, and a class sized to the smaller of them would be a coin flip.
     # The spread is the finding; see
-    # PERF_stdlib_tests_peaks_35_to_52gb_on_the_same_run.
+    # bugs/PERF_stdlib_tests_peaks_35_to_52gb_on_the_same_run.md.
     'stdlib-tests':                           (52.2, 'measured'),  # 321 items, of 34.9/52.2
     # RED and recorded anyway, for the reason `formal`'s row gives: it ran all
     # 102 s to completion and peaks at 2.2 GB, so that is what it needs and not
@@ -1774,7 +1773,7 @@ test('comptime-parity', [PY, 'test_comptime_parity.py'],
 test('returned-frame-layout', [PY, 'test_returned_frame_layout.py'],
      deps=['preflight'], mem='tiny',
      desc="a frame that outlives its creator has a place to live, or is refused by name")
-# `formal/build.py`, `FORMAL.md` and
+# `formal/model.py`, `bugs/FORMAL_known_limits.md` and
 # `build_stdlib_dylib.py` are in `extra` because the check READS them, not
 # because the scanner does: `test_runtime_header_scan.py`'s census check
 # compares the figures those three quote in prose with `runtime_abi()`, and an
@@ -1788,7 +1787,7 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
             RUNTIME_HDR, 'runtime/fire_sqlite3.h', 'runtime/fire_zlib.h',
             'runtime/fire_ssl.h', 'runtime/fire_ncurses.h',
             'runtime/fire_python.h',
-            'formal/model', 'FORMAL.md', 'formal/build.py',
+            'formal/model', 'bugs/FORMAL_known_limits.md',
             'build_stdlib_dylib.py'],
      desc='runtime header export scan sees every declaration')
 # `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
@@ -1855,8 +1854,7 @@ test('interp-tokenizer-oracle', [PY, 'test_myinterpreter_validation.py'],
      mem='tiny', cache=True,
      extra=['test_myinterpreter_validation.py', 'fire_compiler.py',
             'myinterpreter.py', 'formal/examples'],
-     desc='the interpreter\'s tokenizer vs the imported one, over the corpus '
-          'of snippets and whole files')
+     desc='the interpreter\'s tokenizer vs the imported one, over 67 texts')
 test('metalgpu', [PY, 'test_metal_codegen.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_metal_codegen.py',
                              'mojo/middle/metal_ops.py',
@@ -1911,7 +1909,7 @@ test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True, mem='tiny',
 # master's tip and at this branch's base), which the `expect=` below declares:
 # a whole-job condition with no count, because the ratchet prints no summary
 # line the runner can check one against. Its doc
-# (the doc SUITE_doc_refs_ratchet_red, now retired) was the switch — the campaign landed,
+# (`bugs/SUITE_doc_refs_ratchet_red.md`) is the switch — the campaign lands,
 # the doc goes, and a still-marked `doc-refs` that now PASSES reports loudly
 # until the marker drops. An `expect=` in `check` runs against this bucket's
 # stated convention on purpose: the alternative is a permanently UNDECLARED red
@@ -1927,6 +1925,14 @@ test('doc-refs', [PY, 'tools/dangling_doc_refs.py', '--ratchet'], cache=True,
      extra=['tools/dangling_doc_refs.py', 'tools/dangling_refs_baseline.py',
             'checked_run.py'],
      extraglob=['**/*.md', '**/*.py'],
+     expect='bugs/SUITE_doc_refs_ratchet_red.md — pre-existing red, not caused '
+            'by any one branch: the citation campaign, whose over-ceiling '
+            'files the doc lists (regenerate with `python3 '
+            'tools/dangling_doc_refs.py --ratchet`). Whole-job condition, '
+            'stated without a count because the ratchet prints no summary '
+            'line the runner can check one against. Drop the marker when the '
+            'campaign lands; a marked job that starts passing reports '
+            'loudly.',
      desc='no file cites a deleted bug doc more than it used to')
 # Reads the CHECKABLE half of FORMAL.md, doc/ABI.md and OPUS.md (counts,
 # function names, limits, refusal messages, ABI signatures, tool flags) out of
@@ -1980,14 +1986,13 @@ test('nonlocal', [PY, 'test_nonlocal.py'], cache=True, mem='tiny',
 # not `'mem'`: they invoke gcc directly on a snippet-sized translation unit,
 # the same `small`-workload shape `test_gimple.py` is, and a cap on a job
 # that never loads the whole closure buys nothing (see the MEMCLASS note).
-# `gimplerunner` is red on the tree (2026-11-11): 20 cases fail, a mix of wrong output,
-# RSS over the 40 MB limit, compile-time refusals, and one CPython-side mismatch. The 20 are listed
-# in bugs/hard/SUITE_gimplerunner_21_failing.md; the 21st, `gimple_nested_class_var_attr_from_str_param`,
-# was fixed 2026-11-11 by not minting a visible struct field for a per-execution class attribute
-# (bug:CODEGEN_nested_class_var_attr_untyped_field). The count in the marker is checked against the run,
-# so a case that starts or stops failing makes this marker disagree and the gate says so.
+# `gimplerunner` carried `expect='3 failing: ...'` while the merge of ten branches
+# left compile-and-execute rows red (a bound method stored in a module global, the
+# `zip_longest` absent fill, a module's own global shadowing a from-imported
+# homonym, a list of structs built in an imported module). All of them are fixed
+# and the marker is gone: an `expect=` on this job would now be reported as a
+# FAILURE ("marked expect= ... but it PASSES"), which is the anti-rot working.
 test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True, mem='tiny',
-     expect='20 failing: see bugs/hard/SUITE_gimplerunner_21_failing.md (wrong output, RSS over limit, compile refusals)',
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
@@ -2339,7 +2344,7 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
 # `native-dumpfull` was marked with this same reason until its bootstrap chain
 # went green (2026-10-25); its registration below says why it is not marked
 # any more. This constant is
-# also the whole of §4's subject matter: CODEGEN_ab_native_fails tables
+# also the whole of §4's subject matter: bugs/hard/CODEGEN_ab_native_fails.md tables
 # every `expect=` job in the registry with its measured peak, its class and its
 # reservation, and a recommendation each.
 # `small` (8 GB), not `stage` (96): `fire.py build fire.py` is the
@@ -2366,11 +2371,19 @@ test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
             'a fact — see ' + MEM_DEBT_DOC,
      artifact='mojoc', inputs=[MOJO_MAIN] + PY_FILES + [RUNTIME_SRC, RUNTIME_HDR],
      desc='build the one managed native compiler (-O2 -g0)')
-# The A/B native campaign is past: its bug doc (`CODEGEN_ab_native_fails`) was
-# deleted with the work, and the `expect=` marker that watched `match_stmt`'s
-# divergence went with it (2026-11-13). The job keeps its registration, class
-# and memwhy for the day the corpus is run again; a marker with no live subject
-# is a red line in every gate, and this one had none left.
+# ab-native's expect= reason. Named for the 15-30 GB self-host pre-pass
+# blowup it used to describe; the blowup is closed (bugs/hard/CODEGEN_ab_native_fails.md,
+# 2026-10-26: 0.1 GB / ~10s), so the text now states the current 1-of-30
+# divergence. `2f75609d` turned the job back from disabled= to expect=
+# referencing the constant `58192261` had removed, so every import of this
+# module (i.e. every `make gate`) died with a NameError before any test ran.
+# The "1 failing" is load-bearing, not decoration: _expect_count_drift
+# re-counts the run's "Results: N passed, M failed" line against it, so a
+# second divergence cannot be absorbed silently by the marker.
+SELFHOST_TOKENIZE_BLOWUP = (
+    'bugs/hard/CODEGEN_ab_native_fails.md — 1 failing: match_stmt diverges '
+    '(29/30 byte-identical; the blowup this constant was named for is '
+    'closed, the run is now 0.1 GB / ~10s)')
 # `program` (55 GB), UP from `module` (24) — the one job the ratchet moves up,
 # and the measurement is why: registered at `small` (8 GB) it was killed by its
 # own ceiling on 2026-09-29 at a peak of 9.4 GB (a RESOURCE verdict, which is
@@ -2398,7 +2411,7 @@ test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
 # for it, which is the mechanism, and `tools/suite.py --dry-run native` prints
 # the 0.
 #
-# The bug doc IS the switch: CODEGEN_ab_native_fails is what the test
+# The bug doc IS the switch: bugs/hard/CODEGEN_ab_native_fails.md is what the test
 # is waiting on, the repo's rule is that a fixed bug's doc is DELETED, and
 # `disabled_problems` refuses to load this registry the moment that doc is
 # gone — naming the job and saying to turn the test back on. So the test cannot
@@ -2408,19 +2421,20 @@ test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
 test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
      memwhy='measured 20.5 GB when it last ran: the self-hosting bootstrap '
             'pre-pass this corpus legitimately triggers (see '
-            'CODEGEN_ab_native_fails), and 1.5x is 30.75 GB, so '
+            'bugs/hard/CODEGEN_ab_native_fails.md), and 1.5x is 30.75 GB, so '
             '`module` (24) was 85% of what it uses. Recorded, not charged: the '
             'job is disabled, so this class is what it will cost the day it is '
             'turned back on, and it reserves 0 meanwhile. Over the 4 GB line '
             'because the workload is — see ' + MEM_DEBT_DOC,
      deps=['mojoc'], excl=True, cache=True, extra=['test_ab_native.py'],
+     expect=SELFHOST_TOKENIZE_BLOWUP,  # 29/30 pass (match_stmt diverges, see bug doc); cheap (0.1 GB, ~10s)
      desc='python vs native codegen, byte-for-byte, over the A/B corpus')
 # NOT switched, deliberately, and the reason is per job rather than per
 # principle: `bootstrap-stage2-dumps` carries the same blowup in its `expect=`
 # reason and is the owner's call, because it is also the job whose run produces
 # the measurements the blowup work is steered by — a marker that cannot be
 # observed going green is weak, and this is the case for not weakening it.
-# §4 of CODEGEN_ab_native_fails tables it with its peak, class and
+# §4 of bugs/hard/CODEGEN_ab_native_fails.md tables it with its peak, class and
 # reservation and a recommendation, so the choice is a line rather than an
 # investigation.
 # `native-dumpfull` needs `mojoc` built first: it runs `./mojoc --dump-full`
@@ -2472,7 +2486,7 @@ test('stdlib-tests', [PY, 'test_stdlib.py'], mem='program',
             'any budget under 96 GB; that is a worse failure than a thin margin '
             'and it is why this is a CLASS_ABOVE_PEAK entry. Over the 4 GB '
             'line and therefore a debt, not a fact; the spread is '
-            'PERF_stdlib_tests_peaks_35_to_52gb_on_the_same_run. See ' +
+            'bugs/PERF_stdlib_tests_peaks_35_to_52gb_on_the_same_run.md. See ' +
             MEM_DEBT_DOC,
      desc='every stdlib test/benchmark through interpreter and JIT')
 # Fresh by design: reusing the built dylib would make "did this module fall
@@ -2739,7 +2753,7 @@ test('prooflib', [PY, '-c',
 #      around the whole composed `Arm64State`, which `bv_decide`'s internal
 #      normalisation cannot be configured out of, and three budgets were
 #      measured failing to fire (`FORMAL.md` §12,
-#      `FORMAL_dylib_export_loops_and_frame_bounds` §1).
+#      `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
 #      `formal/arm64_proof_gen.py` now
 #      emits the `if` resolved for every step it knows moves no pc, and keeps
 #      it only for the closing `ret`, which `BlockCert` genuinely cannot
@@ -2875,8 +2889,6 @@ test('formal-eh-tables', [PY, 'test_formal_eh_tables.py'],
 test('formal-dylib', [PY, 'test_formal_dylib.py'],
      deps=['preflight', 'prooflib'],
      mem='tiny',
-     expect='3 failing: the hole-count checks on the overflow-trapping exports, whose termination '
-            'obligations an exit svc keeps named (bugs/mid/FORMAL_svc_exit_handling_incomplete.md)',
      desc='formal dylib emission, Mach-O re-read, dlopen, prove')
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'], mem='tiny',
@@ -2965,9 +2977,6 @@ test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
 # library_census; every sorry must live only in lib/Scaffold.lean.
 test('formal-proof-gaps', [PY, 'test_formal_proof_gaps.py'],
      deps=['preflight', 'prooflib'], mem='module',
-     memwhy='the proof-gap ledger runs library_census over the whole Lean '
-            'library (module class); over the 4 GB line because the workload '
-            'is — see ' + MEM_DEBT_DOC,
      desc='proof-gap ledger matches library_census (Scaffold only)')
 test('formal-once-bound-strings', [PY, 'test_formal_once_bound_strings.py'],
      deps=['preflight'], mem='tiny',
@@ -3016,7 +3025,7 @@ test('formal-x86', [PY, 'test_formal.py', '--backend', 'x86_64'], j=True,
 # `formal/x86_64_endtoend_test.py`'s successor table against a corrected model —
 # and the only report of it was a bug doc. Fixed 2026-10-05
 # (`formal43-x86-endtoend-red`): 26 -> 1, and what is left is `wide_recv`'s
-# `lean::memory_exception`, which `FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps (deleted)`
+# `lean::memory_exception`, which `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`
 # owns and which is a resource ceiling rather than a wrong proof. That doc's own
 # 2026-10-05 Status entry carries this branch's measurement.
 #
@@ -3041,14 +3050,14 @@ test('formal-x86-endtoend', [PY, 'formal/x86_64_endtoend_test.py'],
             'debt line in ' + MEM_DEBT_DOC + ' because the generated proofs are '
             '~700 KB of `native_decide` goals and `mem_read_bytes`\'s `ite` '
             'chain, which is the subject of '
-            '`FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps (deleted)` '
+            '`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)` '
             'and not something a class change would fix.',
      expect='1 of 65: `wide_recv` only, and it is a resource ceiling rather '
             'than a wrong proof — `lean` aborts with '
             '`lean::memory_exception: excessive memory consumption detected at '
             '\'interpreter\'` (`rc=-6`) while evaluating this emitter\'s closing '
             'read over a 113-equation chain. See '
-            '`FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps (deleted)`. '
+            '`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`. '
             'The other 64 are 58 proved with no sorry and 6 proved with a '
             'counted hole; the 28 that build no path tree are reported by the '
             'harness itself (19 loop, 9 uncovered form) and are not cases.',
@@ -4118,297 +4127,9 @@ test('ab-compare', [PY, 'tools/ab_compare.py'], deps=['ab-bside'],
 # test scheduled exactly once per run — so `make gate`, which contains both
 # `selfhost` and `bootstrap`, runs `mojoc` and `native-dumpfull` once, not
 # twice, and there is no second copy of any test's name to keep in sync.
-# Test files the estate check found unregistered (2026-11-10): each one runs in `check`.
-test('ambiguous-import-diagnostic', [PY, 'test_ambiguous_import_diagnostic.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('attr-error-messages', [PY, 'test_attr_error_messages.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('backtick-import-literals', [PY, 'test_backtick_import_literals.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('bootstrap-hotspots', [PY, 'test_bootstrap_hotspots.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('compile-linked-result', [PY, 'test_compile_linked_result.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('comptime-assert-diagnostic', [PY, 'test_comptime_assert_diagnostic.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('comptime-dtype-diagnostic', [PY, 'test_comptime_dtype_diagnostic.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('constrained-diagnostic', [PY, 'test_constrained_diagnostic.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('dict-none-key', [PY, 'test_dict_none_key.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('floatliteral-special', [PY, 'test_floatliteral_special.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('foreign-callable-lambda-default', [PY, 'test_foreign_callable_lambda_default.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('implicit-string-concat', [PY, 'test_implicit_string_concat.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('import-missing-module-diagnostic', [PY, 'test_import_missing_module_diagnostic.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('lexer-double-slash-operator', [PY, 'test_lexer_double_slash_operator.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('linked-list-link-symbols', [PY, 'test_linked_list_link_symbols.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('linked-list-struct-element-step4', [PY, 'test_linked_list_struct_element_step4.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('linked-list-struct-element-step4b', [PY, 'test_linked_list_struct_element_step4b.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('linked-list-struct-element-step4c', [PY, 'test_linked_list_struct_element_step4c.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('module-loader-stdlib', [PY, 'test_module_loader_stdlib.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('mro', [PY, 'test_mro.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('out-param-return-type-diagnostic', [PY, 'test_out_param_return_type_diagnostic.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('parser-param-for', [PY, 'test_parser_param_for.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('python315-free-threaded-abi', [PY, 'test_python315_free_threaded_abi.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('python315-frozendict', [PY, 'test_python315_frozendict.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('python315-sentinel', [PY, 'test_python315_sentinel.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('qualified-member-no-leak', [PY, 'test_qualified_member_no_leak.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('reg-formal-ast-bridge-two-arg', [PY, 'test_reg_formal_ast_bridge_two_arg.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('selfhost-debug-flag', [PY, 'test_selfhost_debug_flag.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('sys-utf8-default-encoding', [PY, 'test_sys_utf8_default_encoding.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('tuple-enumerate-var-refinement', [PY, 'test_tuple_enumerate_var_refinement.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('unpacking-in-comprehensions', [PY, 'test_unpacking_in_comprehensions.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('where-clause-call-site-diagnostic', [PY, 'test_where_clause_call_site_diagnostic.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-# Landed with 06ea5b0ef ("compiler: enforce trait method requirement
-# evidence (part 2)") and registered nowhere until
-# bug:SUITE_trait_requirement_evidence_unregistered. Cheap (tiny, 0.1 GB
-# measured, sub-second, drives `compile_to_gimple` in-process only) and it
-# pins a compiler diagnostic, so it runs in the everyday loop rather than in
-# `regressions`; `test_suite.py`'s
-# test_the_trait_conformance_diagnostic_suites_are_gated pins that.
-test('trait-requirement-evidence-diagnostic', [PY, 'test_trait_requirement_evidence_diagnostic.py'], mem='tiny',
-     desc='trait method requirement evidence at use sites (part 2): '
-          'conditional methods, mismatched constraints, conditional defaults '
-          'and the MOCO-4214/4400 shapes are refused with the modular '
-          'diagnostic, and the positive controls still compile')
-# Landed with ec12b76e1 ("Diagnose missing witness table for rebind downcast
-# (trait conformance part 7)") and registered nowhere: the same hole the
-# part-2 file was in, one part later, and the same shape the part-4 file was
-# in when cd4f93687 registered it. The estate check named all three; this
-# file is the one no fix had reached. Cheap (tiny, 0.0 GB measured,
-# sub-second, `compile_to_gimple` in-process only), so it runs with its
-# siblings in the everyday loop rather than in `regressions`;
-# `test_suite.py`'s test_the_trait_conformance_diagnostic_suites_are_gated
-# pins that.
-test('downcast-witness-diagnostic', [PY, 'test_downcast_witness_diagnostic.py'], mem='tiny',
-     desc='rebind[downcast[T, Trait]] is refused when the concrete T has no '
-          'witness table for Trait (part 7), with the generic-T and '
-          'conforming-struct positive controls still compiling')
-test('dead-worker-state', [PY, 'tools/test_dead_worker_state.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('done-ratchet-landing', [PY, 'tools/test_done_ratchet_landing.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('modular', [PY, 'tools/test_modular.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('refill-claim-blocked', [PY, 'tools/test_refill_claim_blocked.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('swarm-reclass-busy-set', [PY, 'tools/test_swarm_reclass_busy_set.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('swarm-replan', [PY, 'tools/test_swarm_replan.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('swarm-why', [PY, 'tools/test_swarm_why.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('sync-restart-guards', [PY, 'tools/test_sync_restart_guards.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('enum-desugar', [PY, 'test_enum_desugar.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-test('linked-list-hash-step1', [PY, 'test_linked_list_hash_step1.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
-
-# ── pins the 2026-11-13 estate audit found unregistered ───────────────
-# These test files landed while `suite-self-test` was OFF (the recover-land
-# backlog) and no spec named them. Registered so the estate's "every test
-# file is run by something" is true again; the buckets below keep them out
-# of `check`/`gate` (the everyday loop stays curated).
-test('reg-align-decorator-literal-diagnostic', [PY, 'test_align_decorator_literal_diagnostic.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-align-decorator-parametric-diagnostic', [PY, 'test_align_decorator_parametric_diagnostic.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-align-decorator-part1-storage', [PY, 'test_align_decorator_part1_storage.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-analyzer-build', [PY, 'test_analyzer_build.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-binding-deferral-diagnostic', [PY, 'test_binding_deferral_diagnostic.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-class-rebind-late-binding', [PY, 'test_class_rebind_late_binding.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-codegen-drop-unreferenced-unimpl-stubs', [PY, 'test_codegen_drop_unreferenced_unimpl_stubs.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-codegen-enumerate-unpack-shadow-store-cast', [PY, 'test_codegen_enumerate_unpack_shadow_store_cast.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-codegen-erased-container-values', [PY, 'test_codegen_erased_container_values_pins.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-codegen-import-extern-annotated-ptr-return', [PY, 'test_codegen_import_extern_annotated_ptr_return.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-codegen-import-extern-unannotated-param-dropped-arity', [PY, 'test_codegen_import_extern_unannotated_param_dropped_arity.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-codegen-local-bindings-cache', [PY, 'test_codegen_local_bindings_cache.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-codegen-local-generic-float-literal', [PY, 'test_codegen_local_generic_float_literal.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-codegen-tuple-slot-scalar-beside-list', [PY, 'test_codegen_tuple_slot_scalar_beside_list.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-comptime-float-condition-diagnostic', [PY, 'test_comptime_float_condition_diagnostic.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-# Landed with "fix stdlib-dylib: two regressions from today's diagnostics
-# commits" (b3b2233b0) and registered nowhere until this audit, which is the
-# same hole the suite's estate check names. 0.15 s, 0.0 GB measured: it only
-# drives `compile_to_gimple`, no build.
-test('reg-conditional-conformance-declaration-diagnostic', [PY, 'test_conditional_conformance_declaration_diagnostic.py'], mem='tiny',
-     desc='conditional conformance declarations are diagnosed: the diamond, '
-          'the derived/ancestor constraint, conditional RegisterPassable, and '
-          'the `ref` origin rule; positive controls still compile')
-test('reg-conditional-conformance-synthesis-diagnostic', [PY, 'test_conditional_conformance_synthesis_diagnostic.py'], mem='tiny',
-     desc='conditional conformance copy/move synthesis is diagnosed when the '
-          'field type is unsynthesizable (part 4); positive controls still compile')
-test('reg-conforms-to-condition-diagnostic', [PY, 'test_conforms_to_condition_diagnostic.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-constrained-paren-diagnostic', [PY, 'test_constrained_paren_diagnostic.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-# Landed with "Reject membership on provably scalar containers without
-# `__contains__`" (03d4302ba) and registered nowhere until this audit. 0.0 GB
-# measured, 0.65 s.
-test('reg-contains-method-diagnostic', [PY, 'test_contains_method_diagnostic.py'], mem='tiny',
-     desc="membership on a provably scalar type is refused with the "
-          "'__contains__' diagnostic")
-test('reg-dict-mixed-join', [PY, 'test_dict_mixed_join.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-dict-slot-read-bug', [PY, 'test_dict_slot_read_bug.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-dict-slot-read-bug-demo', [PY, 'test_dict_slot_read_bug_demo.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-dict-slot-read-selfhost-modules', [PY, 'test_dict_slot_read_selfhost_modules.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-docstring-mojo-blocks', [PY, 'test_docstring_mojo_blocks.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-docstring-self-import', [PY, 'test_docstring_self_import.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-# Landed with "Refuse mutually recursive and unbounded generic instantiation"
-# (b3e501b60) and registered nowhere until this audit. 0.6 GB measured (it
-# builds and runs seven programs through `fire.py`).
-test('reg-elaboration-recursion-diagnostic', [PY, 'test_elaboration_recursion_diagnostic.py'], mem='tiny',
-     desc='mutually recursive and unbounded generic instantiation is refused in '
-          'bounded work while finite chains still run')
-test('reg-float-return-beside-tuple-return', [PY, 'test_float_return_beside_tuple_return.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-gate-rthdrscan', [PY, 'test_gate_rthdrscan.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-gimple-function-scoped-alias-extern', [PY, 'test_gimple_function_scoped_alias_extern.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-inferred-param-dependency-diagnostic', [PY, 'test_inferred_param_dependency_diagnostic.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-inferred-where-clause-diagnostic', [PY, 'test_inferred_where_clause_diagnostic.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-interpreter-assert-message', [PY, 'test_interpreter_assert_message.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-interpreter-constrained-diagnostic', [PY, 'test_interpreter_constrained_diagnostic.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-line-directives-per-generated-line', [PY, 'test_line_directives_per_generated_line.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-linked-list-hash-equality', [PY, 'test_linked_list_hash_equality.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-lsp-error-recovery-part2', [PY, 'test_lsp_error_recovery_part2.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-match-class-pattern-match-args', [PY, 'test_match_class_pattern_match_args.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-mixed-kind-name-representation', [PY, 'test_mixed_kind_name_representation.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-mlir-annotation-diagnostic', [PY, 'test_mlir_annotation_diagnostic.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-nested-generator-for-in-coroutine', [PY, 'test_nested_generator_for_in_coroutine.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-nested-generator-yield-from-in-coroutine', [PY, 'test_nested_generator_yield_from_in_coroutine.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-os-path-split-word-truthy', [PY, 'test_os_path_split_word_truthy.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-paren-ternary-gimple-operand', [PY, 'test_paren_ternary_gimple_operand.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-parser-error-recovery-part1', [PY, 'test_parser_error_recovery_part1.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-peek-result-print-link', [PY, 'test_peek_result_print_link.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-peekable-iterator-link', [PY, 'test_peekable_iterator_link.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-python315-disjoint-bases', [PY, 'test_python315_disjoint_bases.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-python315-lazy-imports', [PY, 'test_python315_lazy_imports.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-sibling-ast-name-collision', [PY, 'test_sibling_ast_name_collision.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-tagged-container-corpus', [PY, 'test_tagged_container_corpus.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('reg-tagged-mixed-readsites', [PY, 'test_tagged_mixed_readsites.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-# Landed with "elaborate: reject where clauses that name module alias
-# constants" (491ae6d5b) and registered nowhere until this audit. 0.1 GB
-# measured, 2.3 s.
-test('reg-where-alias-diagnostic', [PY, 'test_where_alias_diagnostic.py'], mem='tiny',
-     desc='a provably false where clause naming a module alias constant is '
-          'refused; an undecided one and a plain assignment stay accepted')
-test('reg-where-message-diagnostic', [PY, 'test_where_message_diagnostic.py'], mem='tiny',
-     desc='per-bug regression pin (estate backlog, 2026-11-13)')
-test('orch-chain-cap', [PY, 'tools/test_chain_cap.py'], mem='tiny',
-     desc='orchestrator unit test (estate backlog, 2026-11-13)')
-test('orch-claim-release', [PY, 'tools/test_claim_release.py'], mem='tiny',
-     desc='orchestrator unit test (estate backlog, 2026-11-13)')
-test('orch-control-branch-retire', [PY, 'tools/test_control_branch_retire.py'], mem='tiny',
-     desc='orchestrator unit test (estate backlog, 2026-11-13)')
-test('orch-control-cleanup', [PY, 'tools/test_control_cleanup.py'], mem='tiny',
-     desc='orchestrator unit test (estate backlog, 2026-11-13)')
-# Landed with "control: norm_claim treats a `bugs/<class>/` path as its
-# document's claim" (6e35ff35e) and registered nowhere until this audit. Pure
-# Python, 0.0 GB: every spelling of one bug document is one `bug:<stem>` claim,
-# whatever class directory it sits in, and an unrecognised path is refused.
-test('orch-control-norm-claim', [PY, 'tools/test_control_norm_claim.py'], mem='tiny',
-     desc="control.norm_claim: bare, .md, bugs/, bugs/hard/ and bugs/mid/ "
-          "spellings are one claim; an unplaceable path is refused")
-test('orch-control-prune-unmerged', [PY, 'tools/test_control_prune_unmerged.py'], mem='tiny',
-     desc='orchestrator unit test (estate backlog, 2026-11-13)')
-test('orch-control-retire-landed', [PY, 'tools/test_control_retire_landed.py'], mem='tiny',
-     desc='orchestrator unit test (estate backlog, 2026-11-13)')
-test('orch-finishing-first', [PY, 'tools/test_finishing_first.py'], mem='tiny',
-     desc='orchestrator unit test (estate backlog, 2026-11-13)')
-test('orch-gate-doc', [PY, 'tools/test_gate_doc.py'], mem='tiny',
-     desc='orchestrator unit test (estate backlog, 2026-11-13)')
-test('orch-gate-ledger', [PY, 'tools/test_gate_ledger.py'], mem='tiny',
-     desc='orchestrator unit test (estate backlog, 2026-11-13)')
-test('orch-integrate-dryrun', [PY, 'tools/test_integrate_dryrun.py'], mem='tiny',
-     desc='orchestrator unit test (estate backlog, 2026-11-13)')
-test('orch-land-master-moved', [PY, 'tools/test_land_master_moved.py'], mem='tiny',
-     desc='orchestrator unit test (estate backlog, 2026-11-13)')
-test('orch-orch-fixes', [PY, 'tools/test_orch_fixes.py'], mem='tiny',
-     desc='orchestrator unit test (estate backlog, 2026-11-13)')
-test('orch-orch-review', [PY, 'tools/test_orch_review.py'], mem='tiny',
-     desc='orchestrator unit test (estate backlog, 2026-11-13)')
-test('orch-orchestration-formal-unlanded-task-state', [PY, 'tools/test_orchestration_formal_unlanded_task_state.py'], mem='tiny',
-     desc='orchestrator unit test (estate backlog, 2026-11-13)')
-test('orch-proof-review', [PY, 'tools/test_proof_review.py'], mem='tiny',
-     desc='orchestrator unit test (estate backlog, 2026-11-13)')
-test('orch-stash-ff', [PY, 'tools/test_stash_ff.py'], mem='tiny',
-     desc='orchestrator unit test (estate backlog, 2026-11-13)')
-test('orch-swarm-log-quiet', [PY, 'tools/test_swarm_log_quiet.py'], mem='tiny',
-     desc='orchestrator unit test (estate backlog, 2026-11-13)')
-test('orch-verify-lock', [PY, 'tools/test_verify_lock.py'], mem='tiny',
-     desc='orchestrator unit test (estate backlog, 2026-11-13)')
-
 BUCKETS = {
     # The everyday green gate — parallel, no exclusive members, minutes.
-    'check': ['ambiguous-import-diagnostic', 'attr-error-messages', 'backtick-import-literals', 'bootstrap-hotspots', 'compile-linked-result', 'comptime-assert-diagnostic', 'comptime-dtype-diagnostic', 'constrained-diagnostic', 'dict-none-key', 'downcast-witness-diagnostic', 'floatliteral-special', 'foreign-callable-lambda-default', 'implicit-string-concat', 'import-missing-module-diagnostic', 'lexer-double-slash-operator', 'linked-list-link-symbols', 'linked-list-struct-element-step4', 'linked-list-struct-element-step4b', 'linked-list-struct-element-step4c', 'module-loader-stdlib', 'mro', 'out-param-return-type-diagnostic', 'parser-param-for', 'python315-free-threaded-abi', 'python315-frozendict', 'python315-sentinel', 'qualified-member-no-leak', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-formal-ast-bridge-two-arg', 'selfhost-debug-flag', 'sys-utf8-default-encoding', 'trait-requirement-evidence-diagnostic', 'tuple-enumerate-var-refinement', 'unpacking-in-comprehensions', 'where-clause-call-site-diagnostic', 'modular', 'enum-desugar', 'linked-list-hash-step1', 'gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
-
+    'check': ['gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
               'interp-tokenizer-oracle',
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'runtimere', 'globcompiled', 'interporacle', 'examples-parse',
@@ -4534,11 +4255,6 @@ BUCKETS = {
               # that is a word rather than an absence — both are programs that
               # build, run and answer wrongly.
               'formal-shlex', 'formal-optional',
-              # …and the four the bucket census named (TEST_formal_tests_registered_in_no_bucket, 2026-11-12):
-              # registered by 0bf96e814, c7f641b19 and 4f0755020 and in no bucket, so no run executed them. Each
-              # measured alone at about 1 s, 0.0x GB, `preflight` only: NONE runs Lean, so they belong here.
-              'formal-try-model', 'formal-eh-tables',
-              'formal-once-bound-strings', 'formal-str-trim-runtime',
               # …and the third file the estate check named (2026-10-04, on the
               # merge of the formal20 batch), measured at 0.08 s and 0.03 GB —
               # the cheapest thing registered in this bucket by an order of
@@ -4584,22 +4300,6 @@ BUCKETS = {
               # bucket, and in `check` for `formal-sys`'s reason: no Lean, four
               # seconds.
               'formal-reproducible'],
-
-    # The orchestrator's own tests (the swarm, the registry, reclass, landing).
-    # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus
-    # the heavy steps): they exercise tools/swarm.py's git-facing passes and
-    # the fleet registry, and `make check` must not be in the business of
-    # spawning git or touching checkout/fleet state — the default loop needs no
-    # git binary at all. The tests stub `_git` and the registry, but that is a
-    # property of the tests, not something a category boundary should rely on.
-    # Run them explicitly: `make check-orchestrator`.
-    'orchestrator': ['dead-worker-state', 'done-ratchet-landing', 'refill-claim-blocked',
-                     'swarm-reclass-busy-set', 'swarm-replan', 'swarm-why',
-                     'sync-restart-guards'] + ['orch-chain-cap', 'orch-claim-release', 'orch-control-branch-retire', 'orch-control-cleanup', 'orch-control-norm-claim', 'orch-control-prune-unmerged', 'orch-control-retire-landed', 'orch-finishing-first', 'orch-gate-doc', 'orch-gate-ledger', 'orch-integrate-dryrun', 'orch-land-master-moved', 'orch-orch-fixes', 'orch-orch-review', 'orch-orchestration-formal-unlanded-task-state', 'orch-proof-review', 'orch-stash-ff', 'orch-swarm-log-quiet', 'orch-verify-lock'],
-
-    # Per-bug regression pins from the same audit; explicit, not in `check`.
-    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conditional-conformance-declaration-diagnostic', 'reg-conditional-conformance-synthesis-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-gimple-function-scoped-alias-extern', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
-
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps

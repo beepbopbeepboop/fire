@@ -1255,28 +1255,6 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
                 # (importers read imported modules' signatures from it; without
                 # it every cross-module call got an int64_t prototype).
                 gen._module_stmts[module_name] = stmts
-                # Pre-register functions from self-host sibling modules before
-                # lowering dependent call sites (fixes cycles between siblings).
-                try:
-                    from fire_compiler import FunctionDef
-                    _SH_PREFIXES = ('mojo.', 'gimple_', 'ast_rewriter', 'mlir', 'regex_compile',
-                                    'module_loader', 'ownership_destruct', 'fire_compiler',
-                                    'determinism_trace', 'imports', 'elaborate', 'monomorphize',
-                                    'comptime', 'cas', 'build_stdlib_dylib', 'driver')
-                    _is_sh = False
-                    for _pref in _SH_PREFIXES:
-                        if module_name.startswith(_pref):
-                            _is_sh = True
-                            break
-                    if _is_sh and hasattr(gen, '_imported_func_home'):
-                        for _ms in (stmts or []):
-                            if isinstance(_ms, FunctionDef):
-                                try:
-                                    gen._imported_func_home.setdefault(_ms.name, module_name)
-                                except Exception:
-                                    pass
-                except Exception:
-                    pass
                 # Incrementally extend the flat, pre-deduped mirror (see
                 # the `_walk_ast` re-scan bug
                 # Phase 1) — O(this module's own stmt count), done once
@@ -1894,7 +1872,6 @@ def _register_link_imports(gen, stmts: list) -> list:
                         # available: on-demand elaboration for a generic /
                         # overloaded `def`, whole-module inlining for
                         # anything else. See `_classify_unresolved_export`.
-                        _found = False
                         if source:
                             try:
                                 msrc = open(source).read()
@@ -1926,14 +1903,6 @@ def _register_link_imports(gen, stmts: list) -> list:
                                                 _sibling, _smsrc):
                                             _found = True
                                             break
-                        # Link mode: no dylib for a local module. Inline the
-                        # module so its definitions (including global accessors)
-                        # land in this TU. This is the route that `_link_inline_modules`
-                        # already uses for functions and structs — it compiles the
-                        # sibling module into this translation unit so its globals
-                        # and their accessors are available on the link line.
-                        if not _found and not from_reflection and source and source.endswith('.mojo'):
-                            gen._link_inline_modules.add(stmt.module)
                         continue
                     if sym in seen:
                         continue
@@ -2216,46 +2185,6 @@ def _new_val(gen, ctype: str, rhs: str) -> str:
     else:
         gen._emit(f'  {t} = {rhs};')
     return t
-
-
-def _select_val(gen, ctype: str, cond_ctype: str, cond_val: str, then_val, else_val) -> str:
-    """Branch-based `cond ? then : else`, producing a fresh temp of `ctype`.
-
-    A `?:` expression is not a legal GIMPLE r-value when either arm is a
-    call, and a parenthesized conditional is not a legal operand at all —
-    gcc `-fgimple` rejects `t = (c ? call (x) : lit)` with "expected
-    expression before '(' token" and `t = c ? call (x) : lit` with
-    "invalid operands in ternary operation" (both measured with
-    gcc-mp-15). So a select whose arms are not already plain variable
-    operands must be emitted as the same three-block shape
-    `_lower_TernaryExpr` uses: `if (cond) goto bb_then; else goto
-    bb_else;`, one arm per block, result merged after.
-
-    `then_val`/`else_val` are either GIMPLE values of `ctype` (strings) or
-    zero-argument callables called INSIDE their branch to produce one. The
-    callable form is what keeps a side effect (a user `__str__`/`__repr__`
-    call, say) lazy: `gen._call_expr` emits immediately, so a value passed
-    in ahead of time would already have run unconditionally — the branch
-    would guard nothing. A value that is already computed is selected
-    either way; a call is only emitted in its own block.
-    """
-    ctype = _as_str(ctype)
-    result = gen._new_temp(ctype)
-    cond = gen._ensure_bool_cond(cond_ctype, cond_val)
-    bb_then = gen._new_bb()
-    bb_else = gen._new_bb()
-    bb_merge = gen._new_bb()
-    gen._emit(f"  if ({cond}) goto {bb_then}; else goto {bb_else};")
-    gen._emit_label(bb_then)
-    tv = then_val() if callable(then_val) else then_val
-    gen._safe_coerce_emit(ctype, ctype, tv, result)
-    gen._emit(f"  goto {bb_merge};")
-    gen._emit_label(bb_else)
-    ev = else_val() if callable(else_val) else else_val
-    gen._safe_coerce_emit(ctype, ctype, ev, result)
-    gen._emit(f"  goto {bb_merge};")
-    gen._emit_label(bb_merge)
-    return result
 
 
 def _inc_val(gen, base: str) -> str:
@@ -2614,42 +2543,6 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             v = gen._ensure_local(s, v)
             ip = gen._new_val('int64_t', f'(int64_t){v}')
             gen._emit(f'  {dest} = ({d}){ip};')
-        elif d.endswith(' *') and s in ('double', 'float'):
-            # A FLOAT returned from a function whose inferred return type is a
-            # pointer. `comptime.py`'s `eval_const` is the live case: it
-            # genuinely returns bool/int/float/str/tuple, so its return-type
-            # join lands on `char *` (the string branches), and the
-            # `return node.value` for a FloatLiteral (added by 13b16397d) then
-            # emitted a bare `(char *)<double>` — not valid C at all, gcc:
-            # "cannot convert to a pointer type", which took down
-            # `make mojoc`, `make stage2/mojo` and `test_selfhost.py`'s build.
-            # The int→pointer spellings above are accepted by gcc with a
-            # warning; a float→pointer is rejected outright, which is why only
-            # this source kind needed a branch. Same two-step as everywhere
-            # else in this file, and the same truncate-to-int word
-            # `_to_int64('double', ...)` hands every other float consumer.
-            v = gen._ensure_local(s, v)
-            ip = gen._new_val('int64_t', f'(int64_t){v}')
-            gen._emit(f'  {dest} = ({d}){ip};')
-        elif d in ('double', 'float') and s.endswith(' *'):
-            # The mirror of the branch above, and the same C rule: a pointer
-            # converts only to an INTEGER type. `(double)<ptr>` is rejected
-            # outright ("pointer value used where a floating-point was
-            # expected"); it needs the same two-step through the int64_t word
-            # that every other pointer-to-number conversion here uses (see the
-            # `s.endswith(' *') and d in ('int', 'int64_t')` branch above,
-            # including the void * intermediate GIMPLE requires).
-            #
-            # Found through `Array[Float32, buf_len](fill={})` in
-            # test/algorithm/test_vectorize.mojo: the Array fill-unroll
-            # coerces the `{}` fill value (a MojoDict *) to the element type,
-            # and b0910af72 made that arm actually fire for a comptime width,
-            # exposing this cast as gcc errors on every appended element.
-            v = gen._ensure_local(s, v)
-            if s != 'void *':
-                v = gen._new_val('void *', f'(void *){v}')
-            ip = gen._new_val('int64_t', f'(int64_t){v}')
-            gen._emit(f'  {dest} = ({d}){ip};')
         else:
             # GIMPLE: a cast operand must be a local, never a global decl
             # (e.g. a _slit_ string literal). Load it first.
@@ -2816,26 +2709,6 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         if _real in ('MojoList *', 'MojoSet *', 'MojoDict *'):
             rat = _real
             rav = gen._new_val(_real, f'({_real}){rav}')
-    # A `d[k]` read whose value type was unknown at compile time: the slot's
-    # runtime kind (None/True/1.5/...) is recoverable from (dict,key).
-    _dsr = getattr(gen, '_dict_slot_reads', {})
-    _dsr_hit = _dsr.get(rav)
-    if _dsr_hit is None and enode is not None and isinstance(enode, gimple_ctypes.IdentExpr):
-        _dsr_hit = _dsr.get(_as_str(enode.name))
-    if rat in ('int', 'int64_t') and _dsr_hit is not None:
-        _dv, _kv, _kk = _dsr_hit
-        if _kk == 'str':
-            return gen._call_expr('char *', 'mojo_dict_repr_slot',
-                                  [('MojoDict *', _dv), ('char *', _kv)])
-        if _kk == 'bytes':
-            return gen._call_expr('char *', 'mojo_dict_repr_slot_bytes',
-                                  [('MojoDict *', _dv), ('MojoBytes *', _kv)])
-        if _kk == 'none':
-            return gen._call_expr('char *', 'mojo_dict_repr_slot_none',
-                                  [('MojoDict *', _dv)])
-    # A call result may be a boxed dict-slot value carrying its runtime kind.
-    if rat in ('int', 'int64_t') and isinstance(enode, gimple_ctypes.CallExpr):
-        return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav)])
     if rat == 'char *':
         return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
     if rat == 'MojoList *':
@@ -2895,11 +2768,6 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         rav_d = rav if rat == 'double' else gen._new_val('double', f'(double){rav}')
         return gen._call_expr('char *', 'mojo_repr_float', [('double', rav_d)])
     rav64 = rav if rat == 'int64_t' else gen._new_val('int64_t', f'(int64_t){rav}')
-    # A word of unknown kind (boxed dict-slot value, tagged word, string
-    # pointer held in int64_t, or plain integer): render via the runtime's
-    # generic repr discriminator. For a plain integer it is the same decimal.
-    if rat in ('int', 'int64_t'):
-        return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav64)])
     return gen._call_expr('char *', 'mojo_repr_int', [('int64_t', rav64)])
 
 
@@ -3100,27 +2968,6 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     types — slice 2). Returns (ctype, val) if elaborated, else None."""
     explicit = isinstance(node.func, gimple_ctypes.SubscriptExpr)
     g = node.func.obj.name if explicit else node.func.name
-    # A SELF-RECURSIVE generic call (`self_recursion[i + 1]()` inside
-    # `self_recursion`) cannot be monomorphized: the arg is not a concrete
-    # literal, so no instantiation exists, and the call would reach the
-    # generated C as a declared-never-defined extern (a dangling symbol).
-    # Refuse with a clear diagnostic instead. The bracketed form is decided on
-    # its arguments (`self_recursive_uninstantiable`), not on the name alone.
-    if explicit:
-        _rec = ggc.self_recursive_uninstantiable(gen, node.func)
-        if _rec is not None:
-            raise RuntimeError(
-                f'cannot compile module: self recursive call to {_rec!r} will '
-                f'cause an infinite loop')
-    else:
-        # A bare call has no bracket to inspect, so the name test stands: the
-        # enclosing function is either the bare base or its mangled instance
-        # (`self_recursion_1_i_1_3`).
-        _cfn = getattr(gen, 'current_func_name', None)
-        if _cfn and (g == _cfn or _cfn.startswith(g + '_')):
-            raise RuntimeError(
-                f'cannot compile module: self recursive call to {g!r} will '
-                f'cause an infinite loop')
     source = gen._imported_generics.get(g)
     if not source:
         return None
@@ -3147,7 +2994,7 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     for _kn, _kexpr in (getattr(node, 'kwargs', None) or []):
         arg_pairs.append(gen.lower_expr(_kexpr))
     try:
-        module_src = gen._generic_source_text(source)
+        module_src = open(source).read()
         import elaborate
         el = elaborate.Elaborator()
         # A generic being elaborated here MAY contain a nested async/
@@ -3543,7 +3390,7 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
     if not all(gimple_exprtypes._is_concrete_type_arg(ta) for ta in type_args):
         return None
     try:
-        module_src = gen._generic_source_text(source)
+        module_src = open(source).read()
         import elaborate
         info = elaborate.Elaborator().elaborate_generic_struct(module_src, base_name, type_args)
     except Exception as e:
@@ -3588,21 +3435,8 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
         _emsg = str(e)
         if isinstance(e, RuntimeError) and (
                 'constraint failed' in _emsg
-                or 'comptime assertion failed' in _emsg
-                or ('function instantiation failed' in _emsg
-                    and 'struct alignment must be a positive power of 2' in _emsg)
-                or ('function instantiation failed' in _emsg
-                    and 'use of unknown declaration' in _emsg
-                    and '@align' in _emsg)):
+                or 'comptime assertion failed' in _emsg):
             raise
-        # A `where` clause of the struct that is provably false for these type
-        # args is a real diagnostic (modular: `error: violated constraint`),
-        # not an elaboration-capability failure. Only this subclass surfaces:
-        # the bound check's other ConformanceErrors are the false positives the
-        # fall-through above exists for.
-        import elaborate as _elab_mod
-        if isinstance(e, _elab_mod.WhereConformanceError):
-            raise _elab_mod.where_violation_error('instantiation', base_name, e)
         gen._generic_struct_elaboration_failures.append(
             f"{base_name}[{', '.join(type_args)}] from {source}: "
             f"{type(e).__name__}: {e}")
@@ -3629,7 +3463,7 @@ def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
             return None
         source = gen._imported_generic_structs.get(g)
         try:
-            module_src = gen._generic_source_text(source)
+            module_src = open(source).read()
             import elaborate
             info = elaborate.Elaborator().elaborate_generic_struct_inferred(
                 module_src, g, [ct for ct, _ in
@@ -3644,12 +3478,7 @@ def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
             _emsg = str(e)
             if isinstance(e, RuntimeError) and (
                     'constraint failed' in _emsg
-                    or 'comptime assertion failed' in _emsg
-                    or ('function instantiation failed' in _emsg
-                        and 'struct alignment must be a positive power of 2' in _emsg)
-                    or ('function instantiation failed' in _emsg
-                        and 'use of unknown declaration' in _emsg
-                        and '@align' in _emsg)):
+                    or 'comptime assertion failed' in _emsg):
                 raise
             gimple_ctypes._debug_note('inferred generic struct elaboration failed')
             info = None

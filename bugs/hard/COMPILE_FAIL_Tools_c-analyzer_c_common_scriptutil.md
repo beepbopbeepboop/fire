@@ -1,4 +1,3 @@
-SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil-part1, COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil-part2, COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil-part4
 # COMPILE_FAIL: Tools/c-analyzer/c_common/scriptutil.py
 
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/scriptutil.py`

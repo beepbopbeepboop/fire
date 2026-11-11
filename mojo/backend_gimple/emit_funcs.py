@@ -522,14 +522,11 @@ def _gen_stmt_FromImportStmt(gen, node):
         if isinstance(_fi_info, dict) and _fi_info.get('signature'):
             if not (isinstance(gen.imported_symbols.get(symbol_name), dict)
                     and 'signature' in gen.imported_symbols[symbol_name]):
-                # The signature stays under the DEFINING name, exactly as
-                # the module-scope path (`_register_sym`) stores it: it
-                # describes the defining function, and the local alias is
-                # only a binding. The import-extern block renames the
-                # original identifier to the C symbol (`original_name` ->
-                # `csym` below); renaming it to the alias here made that
-                # rename a no-op and left the extern under the alias name.
                 _fi_sig = _fi_info['signature']
+                if symbol_name != name:
+                    import re as _re_fi
+                    _fi_sig = _re_fi.sub(r'\b' + _re_fi.escape(name) + r'\b',
+                                         symbol_name, _fi_sig, count=1)
                 gen.imported_symbols[symbol_name] = {
                     # `_fi_eff_mod`, not `node.module`: when the name only
                     # REACHES this module through a re-export, every reader
@@ -597,8 +594,7 @@ def _gen_stmt_FromImportStmt(gen, node):
                                 .replace('-', '_'))
                 else:
                     _fi_home = _fi_qual
-                gen._note_own_func_home(symbol_name, _fi_home,
-                                        record_flat=False)
+                gen._note_own_func_home(symbol_name, _fi_home)
                 # BUG-2026-024: record the home module's own parameter
                 # ctypes for THIS binding, exactly like the top-level
                 # Process-imports loop's snapshot beside its
@@ -636,16 +632,6 @@ def _gen_stmt_FromImportStmt(gen, node):
                         ]
                 if _fi_pts:
                     gen._imported_home_param_types[_pair_key(_fi_home, symbol_name)] = list(_fi_pts)
-            if symbol_name != name:
-                # The C symbol every call site under this alias is emitted
-                # with, resolved HERE, inside the function-body scope whose
-                # `record_flat=False` home binding `_func_csym` reads. The
-                # module-level import-extern preamble runs after that scope
-                # is popped, so resolving it there drops the qualifier and
-                # declares the bare name (a second, independent mismatch
-                # with the call site). The preamble reads this instead.
-                gen.imported_symbols[symbol_name]['csym'] = _as_str(
-                    gen._func_csym(symbol_name))
             # Param defaults too — same gap as the top-level loop had
             # before its own BUG-2026-020 fix.
             try:
@@ -705,8 +691,7 @@ def _gen_stmt_FromImportStmt(gen, node):
                 gen.func_param_types.setdefault(name, list(_rx_pts))
                 if _rx_home:
                     gen._note_own_func_home(
-                        name, _rx_home.replace('.', '_').replace('-', '_'),
-                        record_flat=False)
+                        name, _rx_home.replace('.', '_').replace('-', '_'))
                 continue
         # A function-scoped `from M import Class as Alias` is the same shape
         # the module-scope path records (see `_register_sym` in
@@ -2457,7 +2442,7 @@ def _home_def_return_type(gen, qualifier: str, bare_name: str):
     return store.get(_pair_key(qualifier, bare_name))
 
 
-def _imported_def_pts(gen, bare_name: str) -> list | None:
+def _imported_def_pts(gen, bare_name: str, definer_only: bool = False) -> list | None:
     """BUG-2026-024 helper: the parameter ctypes recorded for `bare_name` by
     its HOME module at FromImportStmt registration time
     (_imported_home_param_types, keyed (sanitized_home_qualifier, name)),
@@ -2476,15 +2461,10 @@ def _imported_def_pts(gen, bare_name: str) -> list | None:
     vs mod.computer.network.get_energy -> call sites emitted
     computer_case_get_energy_77b31a against definition ..._0ed997).
 
-    Both tiers below are read for every caller. The import-extern block used
-    to pass `definer_only=True` so an extern could only be re-typed from a
-    definition really in the translation unit, but that left it with
-    `module_loader`'s text-scan arity whenever the definition belonged to
-    ANOTHER unit (the ordinary single-module compile): the scan drops
-    unannotated parameters, so the extern declared fewer arguments than the
-    call sites — whose mangled suffix comes from `_effective_param_types` —
-    passed. It now reads the same list the name was hashed from, which is
-    what both tiers exist to supply.
+    `definer_only=True` skips the importer's own snapshot tier, so a hit means
+    a unit that DEFINES the name committed this signature (module_gen's extern
+    block uses it: an extern may only be re-typed from a definition that is
+    really in the translation unit).
 
     Never raises: an _AMBIGUOUS_FUNC_HOME entry resolves to None here so
     the caller falls through to the shared-slot tier; the authoritative
@@ -2549,7 +2529,7 @@ def _imported_def_pts(gen, bare_name: str) -> list | None:
             pts = _def_store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts
-        if store:
+        if store and not definer_only:
             pts = store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts
@@ -2572,44 +2552,7 @@ def _effective_param_types(gen, bare_name: str) -> list | None:
         pts = _imported_def_pts(gen, bare_name)
     if pts is None:
         pts = gen.func_param_types.get(bare_name)
-    if pts is None:
-        pts = _import_entry_param_types(gen, bare_name)
     return pts
-
-
-def _import_entry_param_types(gen, bare_name: str) -> list | None:
-    """Bare c parameter types read out of the symbol's OWN import entry.
-
-    The designated tiers above are all populated by registration passes that
-    run after gen_module's early `/* from <mod> */` extern block, so on that
-    first pass they are empty and `_overload_suffix` hashed the empty list —
-    the extern went out as `extern char * mojo_middle_types__mojo_type
-    (char * ann)` (right qualifier, NO suffix) while every call site,
-    resolved later, emitted `mojo_middle_types__mojo_type_d719e0`. Two spellings
-    of one function: gcc reports the call as an implicit declaration, then
-    "conflicting types" against the real prototype.
-
-    `imported_symbols[name]['c_parameters']` is the one store that IS filled by
-    then, but it keeps the parameter NAMES (`['char * ann']`) while the
-    overload hash is defined over the BARE types (`['char *']` -> `_d719e0`).
-    Strip the trailing identifier and the hash matches the defining module's
-    own compile. Guarded on a `'signature'` being present so a module ALIAS
-    entry (`{module, return_type: 'unknown'}`) can never be hashed as a
-    function.
-    """
-    _info = _as_dict(_as_dict(getattr(gen, 'imported_symbols', None)).get(bare_name))
-    if not _info or not _as_str(_info.get('signature')):
-        return None
-    _cps = _info.get('c_parameters')
-    if not isinstance(_cps, list) or not _cps:
-        return None
-    _out = []
-    for _cp in _cps:
-        _s = _as_str(_cp)
-        if not _s:
-            continue
-        _out.append(re.sub(r'\s+[A-Za-z_][A-Za-z0-9_]*$', '', _s))
-    return _out or None
 
 
 def _overload_suffix(gen, bare_name: str) -> str:
@@ -2630,8 +2573,7 @@ def _overload_suffix(gen, bare_name: str) -> str:
 
 
 def _note_own_func_home(gen, bare_name: str, module_name: str,
-                        record_scope: bool = True,
-                        record_flat: bool = True) -> None:
+                        record_scope: bool = True) -> None:
     """Register bare_name's home module into THIS instance's own
     _own_imported_func_home (see its own comment) — or, if bare_name is
     already registered to a DIFFERENT module within this SAME compile
@@ -2650,19 +2592,6 @@ def _note_own_func_home(gen, bare_name: str, module_name: str,
     populated by _gen_stmt_FromImportStmt when the body is generated)
     pass record_scope=False so they never pollute a module scope they
     don't lexically belong to.
-
-    `record_flat=False` is for a FUNCTION-BODY-scoped import
-    (`_gen_stmt_FromImportStmt`): that binding is lexical — its frame in
-    `_import_scope_stack` is the authoritative answer for every reference
-    inside the body — and the flat map is module-scope state. Writing the
-    body binding there too made it visible to functions that lexically
-    cannot see it at all (`_func_qualifier`'s tier 2 is consulted by every
-    function), silently resolving an unbound sibling reference to the
-    module some OTHER function happened to import
-    (IMPORT_ambiguous_sibling_function). The binding still lands in
-    `_lexical_func_import_homes` (see that registry), which is what lets
-    the resolver tell a genuinely unbound reference apart from one that a
-    different lexical scope binds elsewhere.
 
     This genuine same-instance conflict is narrower than it looks: it
     can only fire when ONE gen_module call's own transitive import
@@ -2711,8 +2640,6 @@ def _note_own_func_home(gen, bare_name: str, module_name: str,
         # `from Y import alloc` in std/memory/__init__.mojo bind `alloc`
         # to the SECOND module for every reference after it.
         scopes[-1][bare_name] = module_name
-    if not record_flat:
-        return
     home = gen._own_imported_func_home
     cur = home.get(bare_name)
     if cur is None:
@@ -2764,8 +2691,7 @@ def _pop_import_scope(gen) -> None:
 
 
 
-def _collect_body_import_bindings(gen, node_list: list, scope: dict,
-                                  nested_defs: list | None = None) -> None:
+def _collect_body_import_bindings(gen, node_list: list, scope: dict) -> None:
     """Record every `from X import ...` in a function body into `scope`
     (the lexical scope of that body), so a bare-name reference anywhere in
     the body resolves to the module its lexically-closest import statement
@@ -2773,21 +2699,7 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict,
     no block scoping) but does NOT cross FunctionDef/LambdaExpr boundaries
     — a nested def's imports belong to that nested def's OWN scope, which
     is compiled by its own gen entry point (_gen_lifted_closure /
-    _gen_struct_method) and populated by its own call to this method.
-
-    `nested_defs` (optional, used only by the whole-module pre-scan) is
-    appended every IMMEDIATE nested FunctionDef this body contains —
-    control-flow bodies are descended into, a nested def's own body is
-    not — so the pre-scan can recurse into each nested scope under the
-    lifted name its body will actually be emitted under.
-
-    Every binding recorded here is also appended to
-    `gen._lexical_func_import_homes` (name -> module spellings seen in
-    any lexical body of this compile unit). `_func_qualifier` consults it
-    when a reference is bound by NO lexical scope and only the shared
-    sibling registry can answer: if some other body binds the same name
-    to a different module, the unbound reference is ambiguous and is
-    refused rather than silently resolved to either one."""
+    _gen_struct_method) and populated by its own call to this method."""
     for stmt in node_list:
         if isinstance(stmt, gimple_ctypes.FromImportStmt) and not getattr(stmt, 'wildcard', False):
             for _fip3 in (getattr(stmt, 'name_alias_strs', None) or []):
@@ -2851,93 +2763,25 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict,
                         f"{_iat}error: import of '{_local_nm}' is ambiguous{_note_txt}")
                 scope[_local_nm] = q
                 scope['__mod__' + _local_nm] = stmt.module
-                _lex = getattr(gen, '_lexical_func_import_homes', None)
-                if _lex is not None:
-                    _prev_lex = _lex.get(_local_nm)
-                    if _prev_lex is None:
-                        _lex[_local_nm] = q
-                    else:
-                        _lex[_local_nm] = _prev_lex + '|' + q
-        elif isinstance(stmt, gimple_ctypes.FunctionDef):
-            if nested_defs is not None:
-                nested_defs.append(stmt)
         elif isinstance(stmt, gimple_ctypes.IfStmt):
-            gen._collect_body_import_bindings(stmt.then_body, scope, nested_defs)
+            gen._collect_body_import_bindings(stmt.then_body, scope)
             for _, eb in stmt.elifs:
-                gen._collect_body_import_bindings(eb, scope, nested_defs)
+                gen._collect_body_import_bindings(eb, scope)
             if stmt.else_body:
-                gen._collect_body_import_bindings(stmt.else_body, scope, nested_defs)
+                gen._collect_body_import_bindings(stmt.else_body, scope)
         elif isinstance(stmt, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt, gimple_ctypes.WithStmt)):
-            gen._collect_body_import_bindings(stmt.body, scope, nested_defs)
+            gen._collect_body_import_bindings(stmt.body, scope)
             if getattr(stmt, 'else_body', None):
-                gen._collect_body_import_bindings(stmt.else_body, scope, nested_defs)
+                gen._collect_body_import_bindings(stmt.else_body, scope)
         elif isinstance(stmt, gimple_ctypes.TryStmt):
-            gen._collect_body_import_bindings(stmt.body, scope, nested_defs)
+            gen._collect_body_import_bindings(stmt.body, scope)
             for h in stmt.handlers:
                 gen._collect_body_import_bindings(
-                    getattr(h, 'body', None) or [], scope, nested_defs)
+                    getattr(h, 'body', None) or [], scope)
             if getattr(stmt, 'else_body', None):
-                gen._collect_body_import_bindings(stmt.else_body, scope, nested_defs)
+                gen._collect_body_import_bindings(stmt.else_body, scope)
             if getattr(stmt, 'finally_body', None):
-                gen._collect_body_import_bindings(stmt.finally_body, scope, nested_defs)
-
-
-def _prescan_func_import_frames(gen, body: list, owner_name: str) -> None:
-    """Record `body`'s lexical import bindings under `owner_name` before
-    any function body is emitted, recursing into every immediate nested
-    `def` under the lifted name its body will be emitted under
-    (`<owner>_<inner>`, the `closure_lifted_name` rule).
-
-    Two readers need this to be a PRE-pass rather than whatever each body
-    happened to register when its turn came:
-
-    * `_gen_lifted_closure_body` seeds a lifted closure's scope frame from
-      its enclosing function's frame. Closures are emitted depth-first,
-      BEFORE the enclosing function's body, so the frame would not exist
-      yet if it were only recorded during that body's own compile.
-    * `_func_qualifier`'s unbound-reference check must see every lexical
-      binding in the unit regardless of source order: a reference is
-      ambiguous because SOME other body binds the name differently, and
-      "some other body" may be emitted after the reference.
-
-    Owner names match what `_gen_lifted_closure` receives: a top-level
-    function's or method's own name, then each nested def's lifted name
-    (parent_lifted + '_' + inner.name)."""
-    frame: dict = {}
-    nested: list = []
-    gen._collect_body_import_bindings(body, frame, nested)
-    # Merge rather than replace: two REDEFINED top-level defs (or a method
-    # overridden in the same StructDef) share one owner name, and the
-    # last-def-wins binding must not erase the first definition's imports —
-    # every reference is resolved against the union, with the later def's
-    # own binding winning where both name the same bare name.
-    _prev_frame = _as_dict(gen._func_import_frames.get(owner_name))
-    if _prev_frame is None:
-        gen._func_import_frames[owner_name] = frame
-    else:
-        _prev_frame = _as_dict(_prev_frame)
-        for _fm_nm in frame:
-            _prev_frame[_fm_nm] = frame[_fm_nm]
-    for child in nested:
-        _prescan_func_import_frames(
-            gen, getattr(child, 'body', None) or [],
-            owner_name + '_' + _as_str(child.name))
-
-
-def _ambiguous_func_import_error(bare_name: str) -> str:
-    """The one ambiguity diagnostic for a free-function reference this
-    program's imports do not select. Shared by both refusal sites in
-    `_func_qualifier` (the flat own map's `_AMBIGUOUS_FUNC_HOME` sentinel
-    and the unbound tier-3 reference whose lexical siblings disagree) so
-    the two cannot drift and a caller can match one prefix.
-
-    Same wording as modular's own `error: import of 'X' is ambiguous`, with
-    the scope explanation fire has to add: neither `from ... import` in
-    scope selects one."""
-    return (f"error: import of '{bare_name}' is ambiguous: this program "
-            f"transitively imports two different sibling modules that "
-            f"both define a free function named '{bare_name}', and no "
-            f"enclosing `from ... import {bare_name}` in scope selects one")
+                gen._collect_body_import_bindings(stmt.finally_body, scope)
 
 
 def _func_qualifier(gen, bare_name: str) -> str:
@@ -3034,22 +2878,6 @@ def _func_qualifier(gen, bare_name: str) -> str:
         # to layer on the per-compile `_inline_module_qualifiers` remap,
         # which needs a `gen`.
         from mojo.middle.module_shared import module_qualifier
-        # An EMPTY module name means "no module" (the root compile's own
-        # `GimpleGen` is built without one), so it must sanitize to no
-        # qualifier. Without this guard the remap below answered for it:
-        # `_inline_module_qualifiers` is keyed by the SANITIZED module of
-        # every inlined file AND by `module.lstrip('.')...` for relative
-        # imports (`funcs_shared.py:1276`), so a `from . import x` writes
-        # the key `''` — and the last such writer in a whole-closure build
-        # was `mojo.middle`, making `_sanitize_qualifier('')` return
-        # `mojo_middle`. Every function the ROOT module defined then got a
-        # spurious `mojo_middle_` prefix while its importers' call sites
-        # (resolved through their own non-empty module) stayed bare:
-        # fire.py's `build_executable` was emitted as
-        # `mojo_middle_build_executable_d8f39a` against call sites emitting
-        # `build_executable_d8f39a` — undefined symbol at link.
-        if not q:
-            return ''
         key = module_qualifier(q)
         resolved = gen._inline_module_qualifiers.get(key, key)
         return module_qualifier(resolved)
@@ -3094,65 +2922,33 @@ def _func_qualifier(gen, bare_name: str) -> str:
     own_home = getattr(gen, '_own_imported_func_home', None)
     if own_home and bare_name in own_home:
         qualifier = own_home[bare_name]
-        # _AMBIGUOUS_FUNC_HOME: this program transitively imports two
-        # different sibling modules that each define `bare_name`, and the
-        # lexical scope resolver above found no enclosing `from ... import`
-        # that binds it. The reference cannot mean either module, so refuse.
-        # Falling through to the shared whole-program registry (Tier 4)
-        # here is a silent miscompile: it resolves the name to whichever
-        # sibling registered last (IMPORT_ambiguous_sibling_function).
-        # Callers that only ESTIMATE a type catch this via
-        # _func_home_qualifier and treat it as "no answer".
         if qualifier == gimple_codegen._AMBIGUOUS_FUNC_HOME:
-            raise RuntimeError(_ambiguous_func_import_error(bare_name))
+            # Never silently miscompile (doc/STDLIB-BUGS.md SB-1's
+            # per-scope-import residual): this compile unit transitively
+            # imports TWO different sibling modules that both define a
+            # function named `bare_name`, each from a different lexical
+            # scope, and no enclosing lexical scope binds the name for
+            # THIS particular reference (the scope-chain walk above found
+            # nothing). Picking either one silently would risk calling
+            # the wrong module's implementation with no error at all.
+            # Honest refusal instead (see _note_own_func_home's docstring
+            # for the exact repro shape and why this can't be resolved by
+            # the module-qualifier mechanism alone).
+            raise RuntimeError(
+                f"cannot compile module: {bare_name!r} is ambiguous — this "
+                "program transitively imports two different sibling "
+                "modules that both define a free function named "
+                f"{bare_name!r}, each from a different lexical scope "
+                "(e.g. two different nested `from X import ...` "
+                "statements), and no enclosing `from X import ...` "
+                "statement in the current lexical scope binds the name "
+                "for this specific reference. Rename one of the two "
+                "functions, or import qualified (`import X` + "
+                "`X.func(...)`), to work around this.")
         return _sanitize_qualifier(qualifier)
-    # Tier 3 (whole-program shared registry) is the only answer left. For an
-    # UNBOUND reference that is not safe to use blindly: the shared map is
-    # first-claim/first-wins, so when this unit's own lexical imports bind the
-    # SAME bare name to a DIFFERENT sibling module somewhere else, the
-    # reference is ambiguous and must be refused — never resolved to whichever
-    # of the two happened to claim tier 3. A binding in some other function's
-    # scope is invisible to THIS reference (that is the leak
-    # `_note_own_func_home`'s `record_flat=False` closes), but it is exactly
-    # the evidence that two different siblings' same-named functions are live
-    # in this program. When no lexical body binds the name at all, the shared
-    # answer stands: tier 3 is also the deliberate fallback for
-    # synthesized/transitive references.
     home = getattr(gen, '_imported_func_home', None)
     if home and bare_name in home:
-        _cand = _sanitize_qualifier(home[bare_name])
-        _lex_homes = getattr(gen, '_lexical_func_import_homes', None)
-        if _lex_homes and bare_name in _lex_homes:
-            for _lq in _as_str(_lex_homes[bare_name]).split('|'):
-                if _sanitize_qualifier(_lq) != _cand:
-                    raise RuntimeError(_ambiguous_func_import_error(bare_name))
-        return _cand
-    # Tier 4 — the symbol's OWN import entry. Every writer that records a
-    # genuine imported function (`_register_sym`, `_gen_stmt_FromImportStmt`'s
-    # body pass, the re-export resolver) stores the DEFINING module in
-    # `imported_symbols[name]['module']`, and `_func_csym` needs that module
-    # to build the same mangled symbol the defining module's own compile
-    # emitted. Tiers 1-3 are all populated by the import scan, which runs
-    # AFTER gen_module's early `/* from <mod> */` extern block — so on that
-    # first pass every tier misses and this name used to come back
-    # unqualified. The extern was then emitted as `extern char * _mojo_type
-    # (...)` while the call sites, resolved later, emitted
-    # `mojo_middle_types__mojo_type_d719e0` — "implicit declaration of
-    # function ... did you mean ..." plus a conflicting weak
-    # `int64_t _mojo_type (...)` "unavailable in compiled mode" stub from the
-    # call sites that still saw the bare name.
-    #
-    # Guarded on a `'signature'` being present (and `return_type` not
-    # `unknown`) so a module ALIAS entry — `{module, return_type: 'unknown'}`,
-    # written by `_gen_stmt_ImportStmt`/the submodule-alias path — can never
-    # be mistaken for a function and inherit a bogus qualifier.
-    _imp4 = getattr(gen, 'imported_symbols', None)
-    if _imp4 and bare_name in _imp4:
-        _info4 = _as_dict(_imp4[bare_name])
-        if _as_str(_info4.get('signature')) and _info4.get('return_type') != 'unknown':
-            _mod4 = _as_str(_info4.get('module'))
-            if _mod4 and _mod4 != 'unknown':
-                return _sanitize_qualifier(_mod4)
+        return _sanitize_qualifier(home[bare_name])
     return ''
 
 
@@ -3540,7 +3336,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # Set module context for global field access
     gen._current_module_ctx = gen.module_name if len(gen.module_name) > 0 else "root"
     gen.current_func_name = node.name
-    gen._current_func_node = node    # A module-level function is not a method: clear the struct a previous
+    # A module-level function is not a method: clear the struct a previous
     # METHOD body left behind (the method path sets it and never resets it).
     # A stale name made a local called `cls` here take the classmethod arm of
     # `_lower_MemberExpr`, lowering `cls.methods` to a dynamic
@@ -3696,8 +3492,6 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             ret_type = 'int64_t'
 
     gen.func_ret_type = ret_type
-    gen.current_func_ret_ann = (
-        node.return_type if isinstance(node.return_type, str) else '')
     # Sync so forward declarations (Phase 2b) match Phase 2a inference
     gen.func_return_types[node.name] = ret_type
     # ...and so does every CALL SITE of this definition, which reaches this
@@ -3988,9 +3782,8 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
     else:
         fn_name = gimple_ctypes._module_toplevel_name(gen.module_name)
     gen.current_func_name = fn_name
-    gen._current_func_node = None
-    gen._current_struct_name = ""   # top-level code is outside any method body    gen.func_ret_type = 'void'
-    gen.current_func_ret_ann = ''
+    gen._current_struct_name = ""   # top-level code is outside any method body
+    gen.func_ret_type = 'void'
     gen.func_return_types[fn_name] = 'void'
 
     # Generate code for each top-level statement
@@ -4889,9 +4682,9 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # Key by overload so overloaded methods don't share closure state (each
     # overload's lifted closures + capture env are distinct).
     gen.current_func_name = f"{struct_name}_{node.name}{overload_id}"
-    gen._current_func_node = node
     gimple_exprtypes.record_bool_params(gen, node)
     gen._current_struct_name = struct_name  # for Self() constructor call lowering
+
     # Seed param types for pre-pass inference
     for i, (pname, ptype) in enumerate(node.params):
         # Strip Mojo parameter modifiers (inout, borrowed, etc.)
@@ -4995,8 +4788,6 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
             ret_type = 'void'
 
     gen.func_ret_type = ret_type
-    gen.current_func_ret_ann = (
-        node.return_type if isinstance(node.return_type, str) else '')
     # Sync so forward declarations (Phase 2b) match Phase 2a inference.
     # Store BOTH the base name (for single-overload lookups) and the
     # per-overload keyed name (so multi-overload methods don't clobber each other).
@@ -5178,12 +4969,9 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # runtime segfault. Fall back to gen_func's existing LENIENT
     # (non-`__GIMPLE`) path for exactly those bodies; every other
     # method keeps `__GIMPLE` unchanged.
-    # The tag goes in FRONT of the return type (declaration-specifier
-    # position): after it (`C * __GIMPLE f`) gcc -fgimple ignores the tag
-    # for a pointer return and the body is never GIMPLE-checked.
     _sig_kw = '' if gen._func_used_setjmp else '__GIMPLE '
     lines = [
-        f"{_sig_kw}{ret_type} {mangled} ({params_str})",
+        f"{ret_type} {_sig_kw}{mangled} ({params_str})",
         "{",
         *gen.decls,
         *gen.body_lines,

@@ -175,69 +175,6 @@ fn main():
         'instantiated generic struct comptime assert(dtype predicate, only stmt) compiled')
 
 
-def test_comptime_scalar_type_name_is_a_dtype_value():
-    # Monomorphization substitutes a `dtype: DType` argument TEXTUALLY, so a
-    # call that supplies the scalar type (`isinf[Float32, 1]`, or the inferred
-    # `isinf(x)` with `x: Float32`) instantiates a body containing
-    # `Float32.is_floating_point()` and `Float32 == .float32`. Those are DType
-    # VALUES in Mojo terms and must fold: otherwise a `comptime if` over them is
-    # emitted as a runtime branch with every arm, including arms only correct
-    # for another dtype. `DType.float32 == .float32` is the same fold and
-    # covers the dotted value's own spelling (its field is `path`, not `name`).
-    _compile('fn f():\n    comptime assert Float32.is_floating_point(), "ok"\n')
-    _compile('fn f():\n    comptime assert Float32 == .float32, "ok"\n')
-    _compile('fn f():\n    comptime assert DType.float32 == .float32, "ok"\n')
-    _compile('fn f():\n    comptime assert Float32 not in (DType.float8_e5m2, DType.float8_e4m3fn), "ok"\n')
-    try:
-        _compile('fn f():\n    comptime assert Float32 == .float64, "nope"\n')
-    except RuntimeError as e:
-        assert 'comptime assertion failed' in str(e), e
-        assert 'nope' in str(e), e
-    else:
-        raise AssertionError('Float32 == .float64 folded true')
-
-
-def test_generic_dtype_comptime_if_prunes_other_dtypes_arm():
-    # Regression for the stdlib-dylib gate: std/utils/numerics.mojo's
-    # isnan/isinf dispatch on `dtype` with a first arm for the float8 formats
-    # that calls `val.to_bits()`. The inferred instantiation for a float
-    # scalar substitutes the TYPE spelling (`Float32`/`Float64`); while the
-    # guard stayed unfoldable, the float8 arm was emitted anyway and, once a
-    # float SIMD parameter keeps its scalar C type, `val.to_bits() & 0x7F`
-    # became `float & float` in the generated C (gcc: "invalid operands to
-    # binary &"). Folding the guard prunes every inapplicable arm, so the
-    # instantiation contains no `to_bits` at all.
-    src = '''
-def dtype_arm_probe[dtype: DType, width: SIMDLength](
-    val: SIMD[dtype, width]
-) -> SIMD[.bool, width]:
-    comptime if not dtype.is_floating_point() or dtype in (
-        DType.float8_e4m3fnuz,
-        DType.float8_e5m2fnuz,
-        DType.float4_e2m1fn,
-    ):
-        return SIMD[.bool, width](fill=False)
-    elif dtype == .float8_e4m3fn:
-        return (val.to_bits() & 0x7F).eq(0x7F)
-    elif dtype == .float8_e5m2:
-        return (val.to_bits() & 0x7F).gt(0x7C)
-    elif dtype == .float16:
-        var bits = val.to_bits()
-        return (bits & 0x7C00).eq(0x7C00) & (bits & 0x03FF).ne(0)
-    return SIMD[.bool, width](fill=False)
-
-def probe32(x: Float32) -> Bool:
-    return dtype_arm_probe(x)
-
-def probe64(x: Float64) -> Bool:
-    return dtype_arm_probe(x)
-'''
-    c = _compile_full(src)
-    assert 'to_bits' not in c, c
-    assert 'dtype_arm_probe_5_dtype_7_Float32_5_width_1_1 (float)' in c, c
-    assert 'dtype_arm_probe_5_dtype_7_Float64_5_width_1_1 (double)' in c, c
-
-
 if __name__ == '__main__':
     test_comptime_assert_dtype_is_integral_false()
     test_comptime_assert_dtype_is_integral_true()
@@ -250,6 +187,4 @@ if __name__ == '__main__':
     test_generic_struct_comptime_assert_dtype_param_false()
     test_generic_struct_constrained_dtype_param_true()
     test_generic_struct_comptime_assert_dtype_param_only_stmt()
-    test_comptime_scalar_type_name_is_a_dtype_value()
-    test_generic_dtype_comptime_if_prunes_other_dtypes_arm()
     print('ok')

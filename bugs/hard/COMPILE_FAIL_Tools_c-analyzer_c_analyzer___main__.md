@@ -1,39 +1,3 @@
-SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4 (part 5 fixed: consuming-loop over a captured nested generator inside a coroutine-path generator; its doc was deleted)
-
-## Status 2026-11-12 — replan after parts 1-3 landed
-
-Parts 1-3 are fixed and their docs are deleted: part 1 (`yield
-'\t'.join(columns)` value slot / str.join argument scan, commit d4b486813),
-part 2 (nested generator `yield from` handle-local delegation, commit
-b37281a59), part 3 (escaping generator whose first yield is `''` keeps the
-string value slot, commit fb5ba7c1a).
-
-Re-measured on this tree with the parent repro (`cp -R
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/. .tmp/ca/` then `python3
-tools/memslot.py --gb 8 --label ca-main-replan -- python3 fire.py build -o
-.tmp/ca/out .tmp/ca/c_analyzer/__main__.py`, exit 1, peak 0.4 GB). The
-file-local refusal list is now exactly two lines:
-
-    fmt_summary: a call to unresolved callee 'section(...)' is not supported
-      in a compiled generator/coroutine body ...
-    section: is a nested generator that reads enclosing-scope variable(s)
-      items; the coroutine path has no capture model ...
-
-A probe shows these are one defect, not two: `section` IS claimed with its
-`items` capture and compiles; `fmt_summary` then cannot see it because
-`cpp_core._cpp_yield_from` resolves callees from `_generator_api` only, not
-`_nested_generator_api`. The remaining work is split into:
-
-* part 4 (`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4.md`):
-  `yield from` a claimed nested generator from a coroutine-path generator —
-  the live `fmt_summary`/`section` blocker.
-* part 5 (fixed): the sibling consuming-loop path, `for x in <nested generator>():` inside a
-  coroutine-path generator. The part-5 bug doc was deleted when its named quick test passed.
-
-Each part has a red standalone test on disk today. The imported-module floor
-(`c_parser/info.py`, `.parser`) is unchanged and stays owned by the sibling
-docs named in this doc; it is not part of either part.
-
 ## Status 2026-11-05 — repro run on this tree (next step)
 
 Ran `python3 fire.py build .tmp/ca/c_analyzer/__main__.py`; build failed fast (exit 1, RuntimeError) with the documented refusals: `fmt_summary`: unresolved callee `section(...)`; `section`: nested generator reading enclosing-scope `items` with no capture model. Imported-module cascade present (clsutil/iterutil/fsutil/strutil/tables/info/parser; `c_parser.info` now also reports `cannot access local variable 'ggc'`). No code change this round; capture-model lane remains blocked on container capture + directly-called nested generator claim.

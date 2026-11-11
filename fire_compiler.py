@@ -655,9 +655,6 @@ class ImportStmt:
     extra: object = None  # list[(module, alias|None)] for `import a, b, c`
     line: int = 0
     col: int = 0
-    # `lazy import ...` (PEP 810): bind a proxy now, resolve on first use.
-    # Only the parser can set this true, and only at module scope.
-    lazy: bool = False
     # Decorators applied to the import (`@stable(recursive=True)` in front of
     # `from ... import ...`), same shape as `FunctionDef.decorators`: bare
     # names, or CallExpr/DecoratorArgs for a parameterised form.
@@ -670,8 +667,6 @@ class FromImportStmt:
     wildcard: bool = False
     line: int = 0
     col: int = 0
-    # `lazy from ... import ...` (PEP 810) — see ImportStmt.lazy.
-    lazy: bool = False
     # Parser-built flat list[str]: `name` or `name|alias`. `names`' tuples
     # box their str slots to int64_t self-hosted. Read via gimple_ctypes._fi_name
     # / _fi_alias.
@@ -740,9 +735,6 @@ class FunctionDef:
     # is: that list is the RUNTIME parameter list and its length is the
     # trailing-default offset arithmetic's input.
     comptime_param_annotations: dict = field(default_factory=dict)
-    # Names declared `*Name: Type` in the bracket list (variadic parameters),
-    # in declaration order. Read by _check_variadic_element_types.
-    variadic_bracket_params: list = field(default_factory=list)
     is_generator: bool = False  # True if `yield`/`yield from` appears directly in this
         # function's own body (not inside a nested def/lambda/comprehension — a `yield`
         # there belongs to THAT inner scope, matching real Python scoping rules).
@@ -764,13 +756,6 @@ class FunctionDef:
         # valid Python "async generator"); the two flags are independent, not
         # mutually exclusive. No execution semantics are implied by this flag
         # yet — see AwaitExpr's docstring.
-    # Optional `where <expr>` clause after the parameter list / return type.
-    # Stored as the parsed expression AST node (or a list of them for a
-        # `where a, b` form). `None` when absent.  Enforcement at call sites
-        # is a separate step (DIAGNOSTICS_where_clause_call_site).
-    where_clause: object = None
-    # The `else "<message>"` expression of that clause, `None` when absent.
-    where_else: object = None
     # Explicit CAPTURE list from a brace-delimited clause on a nested `def`:
     # `def handler(...) {mut count, var s}:` — `(name, conv_or_None)` pairs,
     # `None` for a bare name, and a `None` NAME for the bare-convention form
@@ -790,8 +775,6 @@ class FunctionDef:
     # directions, so the flag is explicit.
     captures: list = field(default_factory=list)
     has_capture_list: bool = False
-    # Origin parameter name of a `ref[x]`/`mut[x]` return, or "" when absent.
-    return_origin: str = ""
     line: int = 0
     col: int = 0
 
@@ -883,18 +866,8 @@ class StructDef:
     fields: list
     methods: list[FunctionDef]
     decorators: list = field(default_factory=list)
-    # Parsed argument/expression of a struct's `@align(...)` decorator, or None
-    # when absent. Kept on the StructDef so later stages (e.g. struct emission
-    # and elaboration-time validation) can inspect it directly.
-    align_expr: object = None
     comptime_aliases: dict = field(default_factory=dict)  # name -> value expr
     bases: list = field(default_factory=list)  # base class/struct names, e.g. `struct Child(Base):`
-    # Parallel to `bases`: one (base_name, where_text) per positional trait
-    # base. `where_text` is the source text of a conditional conformance
-    # (`struct S[T](Copyable where conforms_to(T, Copyable)):`) or "" when the
-    # base is unconditional. Kept separate so readers of `bases` (names only)
-    # are unchanged.
-    base_constraints: list = field(default_factory=list)
     # Keyword arguments in the class/struct base list, e.g.
     # `class M(TypedDict, extra_items=bool, closed=True):` (PEP 728/692).
     # Each entry is (name, value_expr).  The parser used to consume and
@@ -902,13 +875,6 @@ class StructDef:
     # dropped PEP 728's `extra_items`/`closed` before any consumer could see
     # them — the root cause of PYTHON3.15_typeddict_extra_items.
     keywords: list = field(default_factory=list)
-    # The `where` clauses after the parameter list, parsed the same way as
-    # FunctionDef.where_clause: None when absent, one expression, or a list.
-    # A `(cond, "message")` entry is a TupleExpr. See _parse_where_clauses.
-    where_clause: object = None
-    # (name, type-annotation source) for each bracket parameter, in declaration
-    # order. Read by _check_inferred_param_dependencies.
-    bracket_types: list = field(default_factory=list)
     line: int = 0
     col: int = 0
     # A "mark visited" flag set via plain attribute assignment (not passed to
@@ -969,9 +935,6 @@ class TraitDef:
     name: str
     methods: list[FunctionDef]
     decorators: list = field(default_factory=list)
-    # Parent trait names in declaration order, e.g. `trait Sub(Base):`.
-    # Parsed from the parenthesised trait list; empty when none declared.
-    bases: list = field(default_factory=list)
     line: int = 0
     col: int = 0
 
@@ -2386,620 +2349,6 @@ def _src_loc(src: str, pos: int, filename: str = "") -> str:
     return f"{line}:{col}: "
 
 
-def _iter_ast_nodes(root):
-    """Every dataclass node under `root`, depth-first, without recursion limits."""
-    stack = [root]
-    while stack:
-        x = stack.pop()
-        if isinstance(x, (list, tuple)):
-            stack.extend(x)
-        elif dataclasses.is_dataclass(x) and not isinstance(x, type):
-            yield x
-            for f in dataclasses.fields(x):
-                stack.append(getattr(x, f.name))
-
-
-def _parse_type_text(text):
-    """The expression AST of a type annotation's source text, or None."""
-    try:
-        return Parser(py_tokenize(text))._parse_expr(0)
-    except Exception:
-        return None
-
-
-def _is_placeholder(e) -> bool:
-    return type(e).__name__ == "IdentExpr" and e.name == "_"
-
-
-def _has_placeholder(e) -> bool:
-    if e is None:
-        return False
-    if _is_placeholder(e):
-        return True
-    if type(e).__name__ == "SubscriptExpr":
-        return _has_placeholder(e.obj) or _has_placeholder(e.index)
-    if type(e).__name__ == "TupleExpr":
-        return any(_has_placeholder(x) for x in e.elements)
-    return False
-
-
-def _type_elements(e) -> list:
-    """The bracket arguments of a subscript type, as a list (one for `T[x]`)."""
-    idx = e.index
-    if type(idx).__name__ == "TupleExpr":
-        return list(idx.elements)
-    return [idx]
-
-
-def _render_type(e, env) -> str:
-    """Source text of a type expression, with each name in `env` replaced by its
-    already-rendered text. Source is written the way Mojo prints it:
-    `Pair[c, c]`."""
-    n = type(e).__name__
-    if n == "IdentExpr":
-        return env.get(e.name, e.name) if env else e.name
-    if n == "IntLiteral":
-        return f"Int({e.value})"
-    if n == "SubscriptExpr":
-        args = ", ".join(_render_type(x, env) for x in _type_elements(e))
-        return f"{_render_type(e.obj, env)}[{args}]"
-    if n == "TupleExpr":
-        return "(" + ", ".join(_render_type(x, env) for x in e.elements) + ")"
-    return "?"
-
-
-def _idents_in_order(e, out: list) -> list:
-    """Every name in `e`, in the order it first appears, appended to `out`."""
-    n = type(e).__name__
-    if n == "IdentExpr":
-        if e.name not in out:
-            out.append(e.name)
-    elif n == "SubscriptExpr":
-        _idents_in_order(e.obj, out)
-        for x in _type_elements(e):
-            _idents_in_order(x, out)
-    elif n == "TupleExpr":
-        for x in e.elements:
-            _idents_in_order(x, out)
-    return out
-
-
-def _check_inferred_param_dependencies(stmts, filename) -> None:
-    """An inferred parameter (`_` in its type) cannot depend on a non-inferred
-    parameter of the same signature (measured with the real compiler, 2026-11-11,
-    modular test/mojo-parser/autoparam_dependency_errors.mojo):
-
-        struct NeedsPair[a: Int, b: Int, p: Pair[a, b]]: ...
-        struct RepeatedDep[c: Int, X: NeedsPair[c, c, _]]: ...
-        # error: inferred parameter of type 'Pair[c, c]' cannot depend on
-        #        non-inferred parameter 'c'
-
-    The `_` in `NeedsPair[c, c, _]` is the implicit parameter `p` of
-    NeedsPair; its type `Pair[a, b]` with `a`, `b` replaced by the arguments
-    is `Pair[c, c]`. Reported once per distinct non-inferred name it mentions,
-    at the struct's line. Only a callee declared in the same module is checked:
-    a callee this file does not declare cannot be proven, so it is skipped."""
-    structs = {}
-    for st in stmts:
-        if type(st).__name__ == "StructDef":
-            structs.setdefault(st.name, st)
-    lines = []
-    for st in stmts:
-        if type(st).__name__ != "StructDef" or not st.bracket_types:
-            continue
-        non_inferred = {name for name, t in st.bracket_types
-                        if not _has_placeholder(_parse_type_text(t or ""))}
-        for _pname, ptype in st.bracket_types:
-            outer = _parse_type_text(ptype or "")
-            if outer is None or type(outer).__name__ != "SubscriptExpr":
-                continue
-            callee = structs.get(outer.obj.name) if type(outer.obj).__name__ == "IdentExpr" else None
-            if callee is None or not callee.bracket_types:
-                continue
-            args = _type_elements(outer)
-            if len(args) != len(callee.bracket_types):
-                continue
-            for slot, arg in enumerate(args):
-                if not _is_placeholder(arg):
-                    continue
-                cname, ctype = callee.bracket_types[slot]
-                implicit = _parse_type_text(ctype or "")
-                if implicit is None:
-                    continue
-                # Callee parameter -> the rendered argument the caller passed.
-                env = {}
-                for j, (jname, _jt) in enumerate(callee.bracket_types):
-                    if j != slot:
-                        env[jname] = _render_type(args[j], None)
-                rendered = _render_type(implicit, env)
-                # The caller's names the implicit type reads: the callee's
-                # params it mentions, replaced by the arguments that carry them.
-                reads = []
-                for name in _idents_in_order(implicit, []):
-                    if name in env:
-                        j = [k for k, (n2, _t2) in enumerate(callee.bracket_types) if n2 == name][0]
-                        for dep in _idents_in_order(args[j], []):
-                            if dep not in reads:
-                                reads.append(dep)
-                for dep in reads:
-                    if dep in non_inferred:
-                        loc = f"{filename}:{st.line}:1: " if filename else f"{st.line}:1: "
-                        lines.append(f"{loc}error: inferred parameter of type "
-                                     f"'{rendered}' cannot depend on non-inferred "
-                                     f"parameter '{dep}'")
-    if lines:
-        raise RuntimeError("\n".join(lines))
-
-
-def _render_element_type(e, structs) -> str:
-    """The element type of a variadic parameter as Mojo prints it: an unnamed
-    `_` placeholder is shown as the name of the parameter it stands for in the
-    callee (`NeedsPair[a, b, _]` prints `NeedsPair[a, b, p]`)."""
-    if type(e).__name__ == "SubscriptExpr" and type(e.obj).__name__ == "IdentExpr":
-        callee = structs.get(e.obj.name)
-        parts = []
-        for k, x in enumerate(_type_elements(e)):
-            if _is_placeholder(x) and callee is not None and k < len(callee.bracket_types):
-                parts.append(callee.bracket_types[k][0])
-            else:
-                parts.append(_render_element_type(x, structs))
-        return f"{e.obj.name}[{', '.join(parts)}]"
-    return _render_type(e, None)
-
-
-def _check_variadic_element_types(stmts, filename) -> None:
-    """A variadic parameter's element type must be an inferred-free type that
-    names none of the signature's own bracket parameters (measured with the real
-    compiler, 2026-11-11, modular test/mojo-parser/autoparam_dependency_errors.mojo):
-
-        def variadic_deps[a: Int, b: Int, *Xs: NeedsPair[a, b, _]](): ...
-        # error: element type parameter 'NeedsPair[a, b, p]' must be an
-        #        'inferred' parameter
-
-    A `_` placeholder makes the element an inferred parameter, and a name from
-    the signature makes it depend on a parameter the signature declares. Neither
-    is allowed, and each variadic parameter is reported once. `*Xs: Int`,
-    `*Xs: Movable` and `*Xs: Pair[1, 2]` name no parameter and pass."""
-    structs = {}
-    for st in stmts:
-        if type(st).__name__ == "StructDef":
-            structs.setdefault(st.name, st)
-    fns = []
-    for st in stmts:
-        if type(st).__name__ == "FunctionDef":
-            fns.append(st)
-        elif type(st).__name__ == "StructDef":
-            fns.extend(m for m in (st.methods or []) if type(m).__name__ == "FunctionDef")
-    lines = []
-    for fn in fns:
-        variadic = getattr(fn, "variadic_bracket_params", None) or []
-        if not variadic:
-            continue
-        signature = set(fn.comptime_params or [])
-        for v in variadic:
-            elem_text = (fn.comptime_param_annotations or {}).get(v)
-            elem = _parse_type_text(elem_text or "")
-            if elem is None:
-                continue
-            mentioned = set(_idents_in_order(elem, []))
-            if not (_has_placeholder(elem) or (mentioned & signature)):
-                continue
-            rendered = _render_element_type(elem, structs)
-            loc = f"{filename}:{fn.line}:1: " if filename else f"{fn.line}:1: "
-            lines.append(f"{loc}error: element type parameter '{rendered}' "
-                         f"must be an 'inferred' parameter")
-    if lines:
-        raise RuntimeError("\n".join(lines))
-
-
-def _module_name_from_filename(filename: str | None) -> str | None:
-    if not filename:
-        return None
-    import os
-    base = os.path.basename(filename)
-    if not base:
-        return None
-    name, _ext = os.path.splitext(base)
-    return name or None
-
-
-def _docstring_block_abs_loc(block, node_line: int, node_col: int):
-    # node positions are 1-based within the parsed block snippet.
-    if node_line <= 1:
-        return (block.line, block.col + max(node_col - 1, 0))
-    return (block.line + node_line - 1, node_col)
-
-
-def _check_docstring_self_imports(stmts, filename) -> None:
-    """Reject `import X` / `from X import ...` (and equivalent self-imports)
-    inside mojo docstring code blocks of module X."""
-    import os
-    module_name = _module_name_from_filename(filename)
-    if not module_name:
-        return
-    try:
-        from mojo.middle.docstring_blocks import extract_module_docstring_mojo_blocks
-    except Exception:
-        return
-    # Read source text for accurate positions when possible.
-    source = None
-    if filename and os.path.exists(filename):
-        try:
-            with open(filename, "r", encoding="utf-8") as f:
-                source = f.read()
-        except Exception:
-            source = None
-    try:
-        blocks = extract_module_docstring_mojo_blocks(stmts, source=source)
-    except Exception:
-        return
-    for block in blocks:
-        try:
-            block_stmts = Parser(py_tokenize(block.code)).parse_module()
-        except Exception:
-            # A non-parsing doc example is not a self-import diagnostic.
-            continue
-        for st in block_stmts:
-            imported_modules = []
-            if isinstance(st, ImportStmt):
-                if st.module:
-                    imported_modules.append((st.module, getattr(st, "line", 1), getattr(st, "col", 1)))
-                extra = getattr(st, "extra", None) or []
-                for mod, _alias in extra:
-                    if mod:
-                        imported_modules.append((mod, getattr(st, "line", 1), getattr(st, "col", 1)))
-            elif isinstance(st, FromImportStmt):
-                mod = st.module or ""
-                if mod and not mod.startswith("."):
-                    imported_modules.append((mod, getattr(st, "line", 1), getattr(st, "col", 1)))
-            for mod, ln, col in imported_modules:
-                root = mod.split(".", 1)[0]
-                if root == module_name:
-                    abs_line, abs_col = _docstring_block_abs_loc(block, ln or 1, col or 1)
-                    loc = f"{filename}:{abs_line}:{abs_col}: " if filename else f"{abs_line}:{abs_col}: "
-                    raise SyntaxError(f"{loc}error: module '{module_name}' cannot import itself")
-
-
-def _module_function_defs(stmts) -> dict:
-    """`{name: FunctionDef}` for each module-level function whose name is
-    defined exactly once. A name defined twice (an overload, a redefinition)
-    has no single signature to check a call against, so it is left out."""
-    counts = {}
-    by_name = {}
-    for st in stmts:
-        if type(st).__name__ == "FunctionDef":
-            counts[st.name] = counts.get(st.name, 0) + 1
-            by_name[st.name] = st
-    return {name: st for name, st in by_name.items() if counts[name] == 1}
-
-
-# Literal node kinds whose value can never convert to an MLIR type. The four
-# are the kinds measured with the real compiler (tools/mojo, 2026-11-12):
-# every one is refused by a `__mlir_type.index` parameter, including `3`.
-_MLIR_REFUSED_LITERALS = ("IntLiteral", "FloatLiteral", "StringLiteral", "BoolLiteral")
-
-# The primitive value type names this front end recognises — the values a
-# `__mlir_type.*` parameter can never hold. Measured with the real compiler
-# (tools/mojo, 2026-11-12): a value of type Int, Float64, Int64, String or
-# Bool is each refused by a `__mlir_type.index` parameter, whether it arrives
-# as a literal, a `var` of that type (declared or inferred from its literal
-# initialiser) or a parameter of it. The families are the front end's own
-# scalar vocabulary (myinterpreter's _INT_TYPE_NAMES / _FLOAT_TYPE_NAMES)
-# plus Bool and String.
-_MLIR_REFUSED_PRIMITIVES = frozenset((
-    "Int", "Int8", "Int16", "Int32", "Int64", "Int128", "Int256",
-    "UInt", "UInt8", "UInt16", "UInt32", "UInt64", "UInt128", "UInt256",
-    "Float16", "Float32", "Float64", "BFloat16",
-    "Bool", "String",
-))
-
-# The type the real compiler infers for a `var` from a LITERAL initialiser
-# (measured 2026-11-12: `var y = 3` is 'Int', `var y = 2.5` is 'Float64',
-# `var y = "s"` is 'String', `var y = True` is 'Bool' — each refused at a
-# `__mlir_type.index` argument). Keys are the front end's own literal node
-# kinds, so `var y = <literal>` gets exactly the value the same literal
-# carries when passed as a call argument.
-_MLIR_LITERAL_INIT_TYPES = {
-    "IntLiteral": "Int",
-    "FloatLiteral": "Float64",
-    "StringLiteral": "String",
-    "BoolLiteral": "Bool",
-}
-
-# (node kind, field) pairs whose content belongs to a CHILD scope, not the
-# scope being walked: function and lambda bodies, struct field and method
-# lists, trait method lists, except-handler bodies, with-statement bodies and
-# the expressions of a comprehension. `_mlir_iter_scope` stops there;
-# `_mlir_child_scopes` visits each as its own scope with its own bindings.
-_MLIR_SCOPE_SKIP = frozenset((
-    ("FunctionDef", "body"),
-    ("LambdaExpr", "body"),
-    ("StructDef", "fields"),
-    ("StructDef", "methods"),
-    ("TraitDef", "methods"),
-    ("ExceptHandler", "body"),
-    ("WithStmt", "body"),
-    ("Comprehension", "element"),
-    ("Comprehension", "value"),
-    ("Comprehension", "generators"),
-))
-
-
-def _mlir_iter_scope(content):
-    """Every dataclass node under `content`, depth-first, without recursion
-    limits, without entering child-scope content (`_MLIR_SCOPE_SKIP`): that
-    content is walked by the child scope's own pass. The stack walk yields in
-    reverse document order; `_mlir_nodes_in_order` re-orders it."""
-    stack = [content]
-    while stack:
-        x = stack.pop()
-        if isinstance(x, (list, tuple)):
-            stack.extend(x)
-        elif dataclasses.is_dataclass(x) and not isinstance(x, type):
-            kind = type(x).__name__
-            yield x
-            for f in dataclasses.fields(x):
-                if (kind, f.name) in _MLIR_SCOPE_SKIP:
-                    continue
-                stack.append(getattr(x, f.name))
-
-
-def _mlir_nodes_in_order(content):
-    """`_mlir_iter_scope` in source order: bindings are collected and calls
-    checked in the order the source declares them (a later same-scope
-    declaration shadows an earlier one, and the first source-order bad call
-    is the one reported)."""
-    return reversed(list(_mlir_iter_scope(content)))
-
-
-def _mlir_decl_type(decl):
-    """The primitive type of a `var` declaration, or None. The declared
-    annotation wins when present (only if it names one of
-    _MLIR_REFUSED_PRIMITIVES); otherwise the type of a literal initialiser
-    (_MLIR_LITERAL_INIT_TYPES). None also means "bound, type unknown to this
-    front end" — a non-primitive declaration or a non-literal initialiser —
-    and it still shadows an outer binding of the same name at lookup."""
-    if isinstance(decl.type_ann, str):
-        return decl.type_ann if decl.type_ann in _MLIR_REFUSED_PRIMITIVES else None
-    if decl.value is not None:
-        return _MLIR_LITERAL_INIT_TYPES.get(type(decl.value).__name__)
-    return None
-
-
-def _mlir_bare_names(target):
-    """The local names a comma-joined unpacking target binds: a lone `y`, or
-    each element of an `a, b`. Dotted (`st.lineno`) and subscripted
-    (`d["k"]`) elements SET an existing value, and a starred (`*rest`)
-    element takes the remainder container; none of them binds a fresh local,
-    so they are left out."""
-    if not isinstance(target, str):
-        return []
-    names = []
-    for part in target.split(","):
-        part = part.strip()
-        if part and not any(ch in part for ch in '.,[*"\''):
-            names.append(part)
-    return names
-
-
-def _mlir_param_bindings(names, types):
-    """{name: type-or-None} for a scope's parameters, where `names` is the
-    parameter name list and `types` the parallel declared-type list (holes
-    are None). A parameter of a primitive type is a value of that type
-    (measured 2026-11-12: `def bar(y: Float64)` calling `foo(y)` is refused
-    at the `y`); every other parameter still binds its name, shadowing an
-    outer binding of the same name. `*args`-style parameters bind the
-    unstarred name and hold a container, so they shadow as unknown."""
-    bindings = {}
-    for i, pname in enumerate(names):
-        if not isinstance(pname, str):
-            continue
-        ptype = types[i] if i < len(types) else None
-        if pname.startswith("*"):
-            bindings[pname[1:]] = None
-        else:
-            bindings[pname] = (ptype if isinstance(ptype, str)
-                               and ptype in _MLIR_REFUSED_PRIMITIVES else None)
-    return bindings
-
-
-def _mlir_scope_bindings(content):
-    """{name: type-or-None} for the bindings DECLARED in one scope: its own
-    `var` declarations (declared or literal-initialiser type, _mlir_decl_type)
-    and comptime variables (their declared annotation is discarded at parse
-    time, so only a literal initialiser gives a type), plus the targets of
-    its `for` loops and `:=` (bound, type unknown to this front end). A None
-    entry shadows an outer binding of the same name: the lookup must stop at
-    the inner binding even when its type is unknown. In source order, so a
-    later declaration (e.g. a `for` target over a `var` of the same name)
-    shadows the earlier one."""
-    bindings = {}
-    for node in _mlir_nodes_in_order(content):
-        kind = type(node).__name__
-        if kind == "VarDecl":
-            if "," not in node.name:
-                bindings[node.name] = _mlir_decl_type(node)
-        elif kind == "ComptimeVarStmt":
-            if node.target:
-                t = None
-                if node.value is not None:
-                    t = _MLIR_LITERAL_INIT_TYPES.get(type(node.value).__name__)
-                bindings[node.target] = t
-        elif kind in ("ForStmt", "ComptimeForStmt"):
-            for name in _mlir_bare_names(node.target):
-                bindings[name] = None
-        elif kind == "WalrusExpr":
-            if node.name:
-                bindings[node.name] = None
-    return bindings
-
-
-def _mlir_child_scopes(content):
-    """(child_content, child_bindings) for every direct child scope under
-    `content`, in reverse document order (the caller reverses before
-    scheduling). Function and lambda bodies carry their parameters' bindings;
-    a struct's scope is its fields plus its methods (the methods become child
-    scopes when that scope is walked); a trait's is its methods;
-    except-handler, with-statement and comprehension bodies carry their bound
-    names (types this front end does not track: they only shadow)."""
-    for node in _mlir_iter_scope(content):
-        kind = type(node).__name__
-        if kind == "FunctionDef":
-            yield node.body, _mlir_param_bindings(
-                [p[0] for p in node.params], [p[1] for p in node.params])
-        elif kind == "LambdaExpr":
-            yield node.body, _mlir_param_bindings(
-                [p[0] for p in node.params], node.param_types)
-        elif kind == "StructDef":
-            yield list(node.fields) + list(node.methods), {}
-        elif kind == "TraitDef":
-            yield list(node.methods), {}
-        elif kind == "ExceptHandler":
-            bindings = {}
-            if node.name:
-                bindings[node.name] = None
-            yield node.body, bindings
-        elif kind == "WithStmt":
-            bindings = {}
-            for item in node.items:
-                for name in _mlir_bare_names(item.alias):
-                    bindings[name] = None
-            yield node.body, bindings
-        elif kind == "Comprehension":
-            bindings = {}
-            for gen in node.generators:
-                if isinstance(gen.target, str) and "," not in gen.target:
-                    bindings[gen.target] = None
-            yield ([node.element] + ([node.value] if node.value is not None else [])
-                   + list(node.generators)), bindings
-
-
-def _check_mlir_type_argument_calls(stmts, filename) -> None:
-    """A literal, or a value of primitive type, is not an MLIR value
-    (measured with the real compiler, 2026-11-12): `def foo(x:
-    __mlir_type.index)` called as `foo(1.5)`, `foo(3)`, `foo("s")`, `foo(True)`,
-    with a primitive-typed variable (`var y = 2.5; foo(y)`, `var y: Int64 = 3;
-    foo(y)`), or with a primitive-typed parameter (`def bar(y: Float64):
-    foo(y)`) is refused with "invalid call to 'foo': value passed to 'x'
-    cannot be converted ... to '__mlir_type.index'" at the argument. Checked
-    for a module-level function defined once, positionally up to the first
-    `*`-parameter, and for a keyword argument naming an MLIR parameter
-    (reported at the value, as the out-argument check does).
-
-    A variable's static type comes from the per-scope table merged over the
-    lexical scopes around the call: the scope's own `var`/comptime
-    declarations (declared type, or the type of a literal initialiser) and its
-    parameters, with the innermost binding of a name winning. A name whose
-    type this front end does not track (a non-literal initialiser, a
-    non-primitive declaration, a loop/handler/with/comprehension target, an
-    unannotated parameter) is never refused — and still shadows an outer
-    binding of the same name. The real message's `from '<type>'` half is not
-    reproduced."""
-    targets = {}
-    for name, fn in _module_function_defs(stmts).items():
-        mlir = {}
-        for i, (pname, ptype) in enumerate(fn.params):
-            if str(pname).startswith("*"):
-                break
-            if isinstance(ptype, str) and ptype.startswith("__mlir_type."):
-                mlir[i] = pname
-        if mlir:
-            targets[name] = (fn, mlir)
-    if not targets:
-        return
-    work = [(list(stmts), {})]
-    while work:
-        content, outer = work.pop()
-        table = {**outer, **_mlir_scope_bindings(content)}
-        for node in _mlir_nodes_in_order(content):
-            if type(node).__name__ != "CallExpr":
-                continue
-            fn_node = node.func
-            if type(fn_node).__name__ != "IdentExpr" or fn_node.name not in targets:
-                continue
-            fn, mlir = targets[fn_node.name]
-            for i, a in enumerate(node.args):
-                if type(a).__name__ == "UnaryOp":
-                    break  # `*x` at the call site shifts every later position
-                if i in mlir and _mlir_argument_refused(a, table):
-                    _raise_mlir_refusal(fn_node.name, mlir[i], fn.params[i][1], a, filename)
-            for kw_name, kw_value in (node.kwargs or []):
-                hit = [i for i, pname in mlir.items() if pname == kw_name]
-                if hit and _mlir_argument_refused(kw_value, table):
-                    _raise_mlir_refusal(fn_node.name, kw_name, fn.params[hit[0]][1], kw_value, filename)
-        children = list(_mlir_child_scopes(content))
-        for child_content, child_bindings in reversed(children):
-            work.append((child_content, {**table, **child_bindings}))
-
-
-def _mlir_argument_refused(value, table):
-    """Whether a call argument must be refused at an MLIR parameter: a
-    literal of one of _MLIR_REFUSED_LITERALS, or an identifier the scope table
-    resolves to a primitive value type."""
-    kind = type(value).__name__
-    if kind in _MLIR_REFUSED_LITERALS:
-        return True
-    if kind == "IdentExpr":
-        return table.get(value.name) is not None
-    return False
-
-
-def _raise_mlir_refusal(fn_name, pname, ptype, value, filename) -> None:
-    loc = f"{filename}:{value.line}:{value.col}: " if filename else f"{value.line}:{value.col}: "
-    raise RuntimeError(f"{loc}error: invalid call to '{fn_name}': value passed to "
-                       f"'{pname}' cannot be converted to '{ptype}'")
-
-
-def _check_out_argument_calls(stmts, filename) -> None:
-    """An `out` argument is not a call argument (measured with the real compiler,
-    2026-11-11): `def f(out x: Int)` called as `f(y)` is refused with
-    "invalid call to 'f': unexpected argument" at the argument. Checked for a
-    module-level function whose name is defined once and that has no `*args`:
-    a positional argument past the non-`out` parameters is refused. Keyword
-    arguments and a missing `out` argument are not this check."""
-    capacity = {}
-    out_names = {}
-    for st in _module_function_defs(stmts).values():
-        conv = st.param_convs or {}
-        if not any(v == "out" for v in conv.values()):
-            continue
-        if any(str(p[0]).startswith("*") for p in st.params):
-            continue
-        capacity[st.name] = len([p for p in st.params if conv.get(p[0]) != "out"])
-        out_names[st.name] = {p[0] for p in st.params if conv.get(p[0]) == "out"}
-    if not capacity:
-        return
-    for node in _iter_ast_nodes(stmts):
-        if type(node).__name__ != "CallExpr":
-            continue
-        fn = node.func
-        if type(fn).__name__ != "IdentExpr" or fn.name not in capacity:
-            continue
-        cap = capacity[fn.name]
-        if len(node.args) > cap:
-            a = node.args[cap]
-            loc = f"{filename}:{a.line}:{a.col}: " if filename else f"{a.line}:{a.col}: "
-            raise RuntimeError(f"{loc}error: invalid call to '{fn.name}': unexpected argument")
-        # An out parameter is not a keyword argument either. Real Mojo reports it
-        # at the VALUE (measured: `f(x=y)` at 6:9, the `y`).
-        for kw_name, kw_value in (node.kwargs or []):
-            if kw_name in out_names[fn.name]:
-                loc = (f"{filename}:{kw_value.line}:{kw_value.col}: " if filename
-                       else f"{kw_value.line}:{kw_value.col}: ")
-                raise RuntimeError(
-                    f"{loc}error: invalid call to '{fn.name}': unexpected keyword argument '{kw_name}'")
-
-
-def _warn_fn_keyword(filename, tok) -> None:
-    """The `fn` keyword was removed from the language. A `fn` DEFINITION is
-    still accepted and draws the real compiler's message at the keyword; the
-    decision on 2026-11-11 (6408a0b14) is a warning, not a refusal. An
-    identifier named `fn` is not a definition and is not reported: CPython code
-    uses it as a name, and the parser accepts that."""
-    loc = f"{filename}:{tok.line}:{tok.col}: " if filename else f"{tok.line}:{tok.col}: "
-    print(f"{loc}warning: 'fn' has been removed; use 'def' instead", file=sys.stderr)
-
-
 def py_tokenize(src: str) -> list[Token]:
     """Tokenize with layout rules derived from the .md spec:
         - Indentation (4 spaces) → INDENT/DEDENT
@@ -3321,8 +2670,6 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
     prev_ended_string = False  # previous physical line ended with a string literal,
                                # so this line continues an implicit string
                                # concatenation (`"a"\n "b"`)
-    prev_string_indent = -1    # indentation of that string-ending line; a
-                               # continuation must be indented further than it
     for line_idx, line in enumerate(joined):
         physical_line = line_nums[line_idx]
         expanded = _indent_expanded(line)
@@ -3340,20 +2687,9 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
             continue
         indent = len(expanded) - len(raw_content)
         sub_stmts = _split_on_separators(content)
-        # Token columns are 1-based from the start of the PHYSICAL line, the
-        # way gcc and Mojo report them: the statement's offset in `content`
-        # plus the indentation the strip removed. Before this, a statement
-        # was lexed from its stripped text, so an indented token's column
-        # was short by the indentation and every column was 0-based.
-        _stmt_cursor = 0
-        _merged_line = False  # this line joined the previous string-ending line
         for stmt_idx, stmt in enumerate(sub_stmts):
             stmt = stmt.strip()
             if not stmt: continue
-            _stmt_at = content.find(stmt, _stmt_cursor)
-            if _stmt_at >= 0:
-                _stmt_cursor = _stmt_at + len(stmt)
-            _stmt_col = indent + max(_stmt_at, 0)
             # Only emit INDENT/DEDENT when at paren depth 0, and not when this
             # physical line is itself just the continuation of the previous one
             # (implicit-continuation token, or an implicit string concat whose
@@ -3371,16 +2707,6 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                                     and (s[1] in '"\''
                                          or (len(s) >= 3 and s[1] in 'fFrRbBuUtT'
                                              and s[2] in '"\''))))
-            # A more-indented string line continuing a string-ending line is one
-            # implicit concatenation (`comptime assert c, "a"\n    " b"`). The
-            # NEWLINE that ended the previous line is already in `out`; drop it
-            # so the parser sees adjacent STRING tokens and `_merge_string_literals`
-            # folds them. Same-indent string lines stay separate statements, as
-            # they are in Python.
-            if _string_cont and indent > prev_string_indent \
-                    and out and out[-1].kind == "NEWLINE":
-                out.pop()
-                _merged_line = True
             if stmt_idx == 0 and paren_depth == 0 \
                     and not continued_from_prev \
                     and not (prev_ended_string and _string_cont):
@@ -3397,7 +2723,7 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
             for m in _TOKEN_RE.finditer(stmt_final):
                 kind = m.lastgroup or "INT"
                 val  = m.group()
-                col  = _stmt_col + m.start() + 1
+                col  = m.start()
                 if kind in ("WS", "UNK", "XFER"): continue
                 if kind == "NAME" and val in _KEYWORDS: kind = "KW"
                 # Restore multi-line strings from cache
@@ -3463,10 +2789,6 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
             _last_tok = _t
             break
         prev_ended_string = (_last_tok is not None and _last_tok.kind == "STRING")
-        # A merged continuation keeps the statement's own indent, so a third
-        # literal is still measured against the line that started the run.
-        if not _merged_line:
-            prev_string_indent = indent
     last_line = 0
     if line_nums:
         last_line = line_nums[-1]
@@ -4998,78 +4320,6 @@ def _canon_conv(conv: str):
 # ── Code generator ─────────────────────────────────────────────────
 
 
-def align_value_error(val: int) -> str | None:
-    """Shared @align value rule: None if valid, else a diagnostic suffix."""
-    try:
-        v = int(val)
-    except Exception:
-        return f"@align value must be a positive power of 2, got {val}"
-    if v <= 0 or (v & (v - 1)) != 0:
-        return f"@align value must be a positive power of 2, got {v}"
-    if v > (1 << 29):
-        return "@align value exceeds maximum alignment (2^29)"
-    return None
-
-
-def _expr_constraint_text(node):
-    """Best-effort source-like text for a conditional-conformance `where`
-    expression. Only the forms needed for declaration-time implication checks
-    are rendered precisely (conforms_to calls, and/or/not, names, members,
-    parens/tuples). Anything else degrades to a conservative string so an
-    unknown shape is never mis-interpreted as a known one."""
-    if node is None:
-        return ""
-    if isinstance(node, IdentExpr):
-        return str(node.name)
-    if isinstance(node, MemberExpr):
-        obj = _expr_constraint_text(node.obj)
-        return f"{obj}.{node.member}"
-    if isinstance(node, CallExpr):
-        func = _expr_constraint_text(node.func)
-        args = ", ".join(_expr_constraint_text(a) for a in (node.args or []))
-        return f"{func}({args})"
-    if isinstance(node, SubscriptExpr):
-        obj = _expr_constraint_text(node.obj)
-        idx = _expr_constraint_text(node.index)
-        return f"{obj}[{idx}]"
-    if isinstance(node, UnaryOp):
-        op = str(node.op)
-        operand = _expr_constraint_text(node.operand)
-        if op == 'not':
-            return f"not {operand}"
-        return f"{op}{operand}"
-    if isinstance(node, BinaryOp):
-        op = str(node.op)
-        left = _expr_constraint_text(node.left)
-        right = _expr_constraint_text(node.right)
-        return f"{left} {op} {right}"
-    if isinstance(node, BoolLiteral):
-        return "True" if node.value else "False"
-    if isinstance(node, IntLiteral):
-        raw = getattr(node, 'raw', None)
-        return str(raw) if raw is not None else str(getattr(node, 'value', 0))
-    if isinstance(node, FloatLiteral):
-        raw = getattr(node, 'raw', None)
-        return str(raw) if raw is not None else str(getattr(node, 'value', 0.0))
-    if isinstance(node, SubscriptExpr):
-        obj = _expr_constraint_text(node.obj)
-        idx = node.index
-        if isinstance(idx, TupleExpr):
-            elems = idx.elements if hasattr(idx, 'elements') else []
-            inner = ", ".join(_expr_constraint_text(e) for e in elems)
-        else:
-            inner = _expr_constraint_text(idx)
-        return f"{obj}[{inner}]"
-    if isinstance(node, TupleExpr):
-        elems = node.elements if hasattr(node, 'elements') else []
-        if len(elems) == 1:
-            return f"({_expr_constraint_text(elems[0])})"
-        return "(" + ", ".join(_expr_constraint_text(e) for e in elems) + ")"
-    if isinstance(node, StringLiteral):
-        return str(node.value)
-    return f"<{type(node).__name__}>"
-
-
 class Parser:
     _tok: list
     _pos: int
@@ -5078,35 +4328,12 @@ class Parser:
     _comptime_rhs_failures: list
     _struct_param_names: list
     _known_traits: set
-    _lazy_import_blockers: list
-    # Recovered parse diagnostics (see `self.errors = []` in __init__).
-    errors: list
-    # The `*Name: Type` variadic bracket parameters of the LAST bracket list
-    # parsed (`_parse_generic_params_capture`), read once by `_parse_funcdef`
-    # to fill `FunctionDef.variadic_bracket_params`. A plain attribute
-    # assignment rather than a dataclass field with a default: it is only
-    # meaningful immediately after a bracket list, and `_parse_funcdef` reads
-    # it only inside the `if LBRACKET` branch that just set it.
-    _last_bracket_variadics: list
 
     def __init__(self, tokens: list[Token]):
         self._tok = tokens
         self._pos = 0
         self._filename = ""
         self._pending_decs = []  # decorators awaiting next struct/trait
-        # Enclosing scopes an explicit `lazy import` may not appear in, as
-        # PEP 810 spells them: "function", "class", "try". Empty at module
-        # level. A stack rather than a flag because the error names the
-        # INNERMOST disallowed scope (CPython's symtable checks try first,
-        # then function, then class, and each nested block starts fresh).
-        self._lazy_import_blockers = []
-        # Empty until a bracket list is parsed; see the class-level note.
-        self._last_bracket_variadics = []
-        # Diagnostics recorded while parsing in recovery mode. Each entry is a
-        # SyntaxError (or a string message) describing a recovered parse error.
-        # `parse_module(recover=True)` collects errors here and continues; the
-        # default non-recovering path still raises on the first error.
-        self.errors = []
         # `comptime NAME = <rhs>` the parser could not parse, as
         # `[(loc, text, exception_text), ...]`. A comptime right-hand side has
         # two very different fates that used to be INDISTINGUISHABLE: a
@@ -5149,63 +4376,6 @@ class Parser:
                     self._known_traits.add(nxt.value)
 
 
-    _OUT_SELF_PARAM_KWS = ("out", "mut", "ref", "var", "read", "owned", "deinit")
-
-    def _check_out_self_declaration(self, name, fn_name_tok, params, param_convs, toks):
-        """Refuse an `out self` receiver on a method that is not a constructor,
-        the shapes the real compiler refuses at the declaration (measured with
-        `tools/mojo build` on 2026-11-11):
-
-        * `out self` with no other parameter: `self argument must be present
-          in instance method`, at the function name;
-        * `out self` followed by a first parameter whose type is not `Self`:
-          `'self' argument must have type 'Self'; ...`, at that parameter's name.
-
-        `out self, other: Self` is accepted at the declaration by the real
-        compiler (it refuses the call, which is a separate check), so it is
-        accepted here. Only the FIRST parameter after `self` is checked; the
-        real compiler's behaviour for later parameters is not measured.
-        """
-        if name == "__init__" or not params or params[0][0] != "self":
-            return
-        if param_convs.get("self") != "out":
-            return
-        # Only an UNANNOTATED `out self` is the method receiver the real compiler
-        # refuses. `out self: T` names its type explicitly, and the standard
-        # library uses it in nested functions (std/python/bindings.mojo:741).
-        if params[0][1] is not None:
-            return
-        # The name token of each parameter, in order, from the raw tokens.
-        name_toks = []
-        depth = 0
-        expect_name = True
-        for t in toks:
-            if t.kind in ("NEWLINE", "INDENT", "DEDENT"):
-                continue
-            if expect_name:
-                if t.kind in ("KW", "NAME") and t.value in self._OUT_SELF_PARAM_KWS:
-                    continue
-                if t.kind == "OP" and t.value in ("*", "**", "/"):
-                    continue
-                name_toks.append(t)
-                expect_name = False
-                continue
-            if t.kind in ("LPAREN", "LBRACKET", "LBRACE"):
-                depth += 1
-            elif t.kind in ("RPAREN", "RBRACKET", "RBRACE"):
-                depth -= 1
-            elif t.kind == "COMMA" and depth == 0:
-                expect_name = True
-        if len(name_toks) != len(params):
-            return  # unusual parameter forms: do not guess locations
-        if len(params) == 1:
-            raise RuntimeError(
-                f"{self._loc(fn_name_tok)}error: self argument must be present in instance method")
-        if params[1][1] != "Self":
-            raise RuntimeError(
-                f"{self._loc(name_toks[1])}error: 'self' argument must have type 'Self'; "
-                f"use a 'where' clause to constrain the 'Self' type instead")
-
     def _parse_funcdef(self, decorators=None, is_async=False):
         if decorators is None: decorators = []
         # Allow keywords, backtick identifiers as function names (e.g., def read(...), def `6bit`(...))
@@ -5224,14 +4394,10 @@ class Parser:
         comptime_params = []
         comptime_param_defaults = {}
         comptime_param_annotations = {}
-        variadic_bracket_params = []
         if self._peek().kind == "LBRACKET":
             (comptime_params, comptime_param_defaults,
              comptime_param_annotations) = self._parse_generic_params_capture()
-            variadic_bracket_params = list(self._last_bracket_variadics)
-        _fn_name_tok = t
         self._expect("LPAREN")
-        _params_start = self._pos
         params = []
         param_convs = {}
         param_has_default = {}
@@ -5409,34 +4575,15 @@ class Parser:
                         depth -= 1
                     elif t.kind == "EOF": break
         ret = None
-        return_origin = ""
         _ret_tok = self._peek()
         if self._peek().kind == "ARROW":
             self._advance()
             # Drop `ref` lifetime prefix on return type and skip lifetime parameters
             if self._is_kw("ref"):
                 self._advance()
-                # Capture/skip lifetime/origin parameters in brackets: ref[Origin]/ref[x]
+                # Skip lifetime parameters in brackets: ref[Origin]
                 if self._peek().kind == "LBRACKET":
-                    self._advance()  # [
-                    if self._peek().kind in ("NAME", "KW"):
-                        return_origin = _as_str(self._peek().value)
-                        self._advance()
-                        depth_b = 1
-                        while depth_b > 0:
-                            tb = self._peek()
-                            if tb.kind == "LBRACKET":
-                                depth_b += 1
-                            elif tb.kind == "RBRACKET":
-                                depth_b -= 1
-                                if depth_b == 0:
-                                    self._advance()
-                                    break
-                            elif tb.kind == "EOF":
-                                break
-                            self._advance()
-                    else:
-                        self._skip_bracketed()
+                    self._skip_bracketed()
             _ret_tok = self._peek()
             ret = self._parse_type_ann()
             # Skip additional qualifiers after return type
@@ -5453,16 +4600,11 @@ class Parser:
                     raise RuntimeError(
                         f"{self._loc(_ret_tok)}error: functions must not declare both an "
                         f"'out' argument and a return type")
-        # Real Mojo reports the out-and-return error first (above), then the
-        # out-self declaration errors, so this check runs after it.
-        self._check_out_self_declaration(name, _fn_name_tok, params, param_convs,
-                                         self._tok[_params_start:self._pos - 1])
-        # Parse optional `where <expr>[, <expr>...] [else <message>]` clause.
-        # The `else` message is the diagnostic Modular prints when the
-        # constraint fails (`where (Self.is_owned) else "may only be called on
-        # owned lists":`); it is parsed, not skipped, so the clause is fully
-        # consumed and the signature still ends at its COLON.
-        where_clause, where_else = self._parse_where_clauses()
+        # Skip optional `where conforms_to(...)` clause
+        if self._peek().kind == "NAME" and self._peek().value == "where":
+            self._advance()  # where
+            while self._peek().kind not in ("COLON", "NEWLINE", "EOF"):
+                self._advance()
         # Capture list in curly braces: `def handler(...) {mut count, var s}:`
         #
         # This used to be skipped token by token, which made the list
@@ -5495,30 +4637,10 @@ class Parser:
             if self._is_kw("ref"):
                 self._advance()
                 if self._peek().kind == "LBRACKET":
-                    self._advance()  # [
-                    if self._peek().kind in ("NAME", "KW"):
-                        return_origin = _as_str(self._peek().value)
-                        self._advance()
-                        depth_b = 1
-                        while depth_b > 0:
-                            tb = self._peek()
-                            if tb.kind == "LBRACKET":
-                                depth_b += 1
-                            elif tb.kind == "RBRACKET":
-                                depth_b -= 1
-                                if depth_b == 0:
-                                    self._advance()
-                                    break
-                            elif tb.kind == "EOF":
-                                break
-                            self._advance()
-                    else:
-                        self._skip_bracketed()
+                    self._skip_bracketed()
             ret = self._parse_type_ann()
         self._expect("COLON")
-        self._lazy_import_blockers.append("functions")
         body = self._parse_block()
-        self._lazy_import_blockers.pop()
         is_generator, yield_bearing_node_ids = _detect_generator(body)
         return FunctionDef(name=name, params=params, return_type=ret,
                            body=body, decorators=decorators,
@@ -5529,44 +4651,11 @@ class Parser:
                            comptime_params=comptime_params,
                            comptime_param_defaults=comptime_param_defaults,
                            comptime_param_annotations=comptime_param_annotations,
-                           variadic_bracket_params=variadic_bracket_params,
                            is_generator=is_generator,
                            yield_bearing_node_ids=yield_bearing_node_ids,
                            is_async=is_async,
                            captures=captures,
-                           has_capture_list=has_capture_list,
-                           where_clause=where_clause,
-                           where_else=where_else,
-                           return_origin=return_origin)
-
-    def _parse_where_clauses(self):
-        """Parse any `where` clauses at the current position: `(clause, else)`.
-
-        A declaration may carry several `where` keywords (`where (a > 0, "a")
-        where (b > 0, "b")`) and each keyword may take comma-separated
-        expressions. Every expression goes into one list in source order; the
-        result is `None` (no clause), the single expression, or the list. A
-        `(cond, "message")` entry stays a TupleExpr, which the consumer reads
-        as a message clause. `else "<message>"` after the clauses is returned
-        separately (FunctionDef.where_else). Stops at the COLON / NEWLINE / EOF
-        that ends the declaration header, so the caller's own COLON check
-        still applies."""
-        parts = []
-        where_else = None
-        while self._peek().kind == "NAME" and self._peek().value == "where":
-            self._advance()  # where
-            while self._peek().kind not in ("COLON", "NEWLINE", "EOF"):
-                parts.append(self._parse_expr(0))
-                if self._peek().kind == "COMMA":
-                    self._advance()
-                    continue
-                break
-        if self._peek().kind == "KW" and self._peek().value == "else" and parts:
-            self._advance()  # else
-            where_else = self._parse_expr(0)
-        if not parts:
-            return None, where_else
-        return (parts[0] if len(parts) == 1 else parts), where_else
+                           has_capture_list=has_capture_list)
 
     def _parse_capture_list(self):
         """A brace-delimited CAPTURE list on a nested `def`:
@@ -5697,7 +4786,6 @@ class Parser:
         # execute_StructDef), and keywords are preserved on the StructDef so
         # consumers that need them (e.g. TypedDict/PEP 728) can read them.
         bases = []
-        base_constraints = []
         class_keywords = []
         if self._peek().kind == "LPAREN":
             self._advance()
@@ -5748,28 +4836,25 @@ class Parser:
                         self._advance()  # consume DOT
                         last_name = self._peek().value
                         self._advance()  # consume NAME
-                    where_text = ""
-                    # Conditional conformance: `Trait where conforms_to(T, X)`
-                    # inside the base list. `where` is a NAME token here.
-                    if depth == 1 and self._peek().kind == "NAME" and self._peek().value == "where":
-                        self._advance()  # consume 'where'
-                        where_expr = self._parse_expr(0)
-                        where_text = _expr_constraint_text(where_expr)
                     bases.append(last_name)
-                    base_constraints.append((last_name, where_text))
                     expect_name = False
                     continue
                 self._advance()
-        # Optional `where` clauses after the parameter / base list, parsed as
-        # FunctionDef's are, so a struct's own constraint (`struct S[N: Int]
-        # where (N > 0, "N must be positive"):`) is enforced at instantiation.
-        # The bases themselves are a token soup above, so a `where` inside
-        # that list (`Movable where False`) is still consumed there.
-        struct_where, _ = self._parse_where_clauses()
+        # Optional `where conforms_to(...)` clause after the base list, the
+        # struct-level counterpart of the one `_parse_funcdef` already skips
+        # after a parameter list:
+        #     struct Iter[...](Iterable where conforms_to(...), ...) \
+        #         where conforms_to(T.Element, Deinitable):
+        # The bases are consumed as a token soup above, so the clause lands
+        # here. It constrains conformance and carries no codegen meaning in
+        # this backend, so it is skipped to the colon — the same treatment
+        # `_parse_funcdef`'s own `where` skip gets.
+        if self._peek().kind == "NAME" and self._peek().value == "where":
+            self._advance()
+            while self._peek().kind not in ("COLON", "NEWLINE", "EOF"):
+                self._advance()
         self._expect("COLON")
-        self._lazy_import_blockers.append("classes")
         body = self._parse_block()
-        self._lazy_import_blockers.pop()
         fields  = param_fields + [s for s in body if isinstance(s, (VarDecl, AssignStmt))]
         methods = [s for s in body if isinstance(s, FunctionDef)]
 
@@ -5949,71 +5034,10 @@ class Parser:
             aliases[_cvnode.target] = _cvnode.value
         decs    = getattr(self, "_pending_decs", [])
         self._pending_decs = []
-        self._validate_align_decorators(decs)
-        align_expr = self._extract_struct_align_expr(decs)
         return StructDef(name=name, fields=fields, methods=methods, decorators=decs,
-                         align_expr=align_expr,
-                         comptime_aliases=aliases, bases=bases,
-                         base_constraints=base_constraints,
-                         keywords=class_keywords,
+                         comptime_aliases=aliases, bases=bases, keywords=class_keywords,
                          bracket_params=bracket_params,
-                         type_param_names=type_param_names,
-                         where_clause=struct_where,
-                         bracket_types=[(f.name, f.type_ann) for f in param_fields
-                                        if isinstance(f, VarDecl)])
-
-    def _extract_struct_align_expr(self, decorators):
-        for dec in (decorators or []):
-            if isinstance(dec, CallExpr):
-                func = dec.func
-                if isinstance(func, IdentExpr) and func.name == "align":
-                    if dec.args:
-                        return dec.args[0]
-                    return None
-            elif isinstance(dec, str) and dec == "align":
-                return None
-        return None
-
-    def _validate_align_decorators(self, decorators):
-        for dec in decorators:
-            head = None
-            args = None
-            kwargs = None
-            loc_line = 0
-            loc_col = 0
-            if isinstance(dec, str):
-                if dec == "align":
-                    head = "align"
-                    args = []
-                    kwargs = []
-            elif isinstance(dec, CallExpr):
-                func = dec.func
-                if isinstance(func, IdentExpr) and func.name == "align":
-                    head = "align"
-                    args = dec.args
-                    kwargs = dec.kwargs
-                    loc_line = getattr(dec, "line", 0) or getattr(func, "line", 0)
-                    loc_col = getattr(dec, "col", 0) or getattr(func, "col", 0)
-            if head != "align":
-                continue
-            loc_tok = Token("", "", loc_line, loc_col)
-            if len(args) != 1 or (kwargs and len(kwargs) != 0):
-                raise SyntaxError(
-                    f"{self._loc(loc_tok)}@align requires exactly one argument")
-            arg = args[0]
-            val = self._eval_align_constant_int(arg)
-            if val is None:
-                continue
-            err = align_value_error(val)
-            if err is not None:
-                raise SyntaxError(f"{self._loc(loc_tok)}{err}")
-
-    def _eval_align_constant_int(self, expr):
-        if isinstance(expr, IntLiteral):
-            return expr.value
-        if isinstance(expr, UnaryOp) and expr.op == "-" and isinstance(expr.operand, IntLiteral):
-            return -expr.operand.value
-        return None
+                         type_param_names=type_param_names)
 
     def _parse_enum(self):
         # `enum Name: member1, member2, ...` — not real Mojo syntax (the real
@@ -6088,9 +5112,7 @@ class Parser:
             else:
                 aliases[member_name] = IntLiteral(next_auto, raw='')
                 next_auto += 1
-        align_expr = self._extract_struct_align_expr(decs)
         return StructDef(name=name, fields=[], methods=[], decorators=decs,
-                         align_expr=align_expr,
                          comptime_aliases=aliases)
 
     def _parse_trait(self):
@@ -6098,41 +5120,24 @@ class Parser:
         name = self._expect("NAME").value
         # Skip generic type-param block [T: Trait, ...]
         if self._peek().kind == "LBRACKET": self._skip_bracketed()
-        bases = []
         if self._peek().kind == "LPAREN":
             self._advance()
-            # Parse parent trait list, e.g. `trait Sub(Base):`.
+            # Skip balanced parentheses in trait list
             depth = 1
-            expect_name = True
             while depth > 0:
-                t = self._peek()
+                t = self._advance()
                 if t.kind == "LPAREN":
-                    self._advance(); depth += 1; continue
-                if t.kind == "RPAREN":
-                    self._advance(); depth -= 1; continue
-                if t.kind == "EOF":
+                    depth += 1
+                elif t.kind == "RPAREN":
+                    depth -= 1
+                elif t.kind == "EOF":
                     break
-                if t.kind == "COMMA" and depth == 1:
-                    self._advance(); expect_name = True; continue
-                if depth == 1 and expect_name and t.kind == "NAME":
-                    last_name = t.value
-                    self._advance()
-                    while self._peek().kind == "DOT" and self._peek(1).kind == "NAME":
-                        self._advance()
-                        last_name = self._peek().value
-                        self._advance()
-                    bases.append(last_name)
-                    expect_name = False
-                    continue
-                self._advance()
         self._expect("COLON")
-        self._lazy_import_blockers.append("classes")
         body = self._parse_block()
-        self._lazy_import_blockers.pop()
         methods = [s for s in body if isinstance(s, FunctionDef)]
         decs = getattr(self, "_pending_decs", [])
         self._pending_decs = []
-        return TraitDef(name=name, methods=methods, decorators=decs, bases=bases)
+        return TraitDef(name=name, methods=methods)
 
     def _parse_try(self):
         # The `try` keyword's own line, recorded because `TryStmt` is the one
@@ -6145,7 +5150,6 @@ class Parser:
         # from "always 0" to the truth.
         line = self._peek().line
         self._expect("KW", "try"); self._expect("COLON")
-        self._lazy_import_blockers.append("try/except blocks")
         body = self._parse_block()
         handlers = []
         while self._is_kw("except"):
@@ -6235,7 +5239,6 @@ class Parser:
         finally_body = None
         if self._is_kw("finally"):
             self._advance(); self._expect("COLON"); finally_body = self._parse_block()
-        self._lazy_import_blockers.pop()
         return TryStmt(body=body, handlers=handlers,
                        else_body=else_body, finally_body=finally_body,
                        line=line)
@@ -8323,7 +7326,6 @@ class Parser:
         return target, saw_comma
 
     def _parse_generator(self):
-        for_tok = self._peek()
         self._expect("KW", "for")
         target, _ = self._parse_generator_target()
         self._expect("KW", "in")
@@ -8331,11 +7333,7 @@ class Parser:
         conditions = []
         while self._is_kw("if"):
             self._advance(); conditions.append(self._parse_expr(1))
-        # The clause's own `for` keyword: genexp_body builds this clause's
-        # ForStmt from it, and a line-less ForStmt emits no `#line` directive
-        # for its lines (the iterable lowering, the loop header).
-        return Generator(target=target, iterable=iterable, conditions=conditions,
-                         line=for_tok.line, col=for_tok.col)
+        return Generator(target=target, iterable=iterable, conditions=conditions)
 
     def _parse_generators(self):
         """Parse one or more chained `for ... in ... [if ...]` clauses, as in
@@ -8369,13 +7367,8 @@ class Parser:
             if t.kind == 'COMMA':
                 self._advance()
                 continue
-            # Try to parse: name: Type [= default]. `mut` is a convention keyword
-            # elsewhere, but a bracket parameter may be named `mut`
-            # (`struct XOrigin[mut: Int, ...]`, modular's parameters_errors.mojo);
-            # it is a name when a colon follows it.
-            _mut_name = (t.kind == 'KW' and t.value == 'mut'
-                         and self._peek(1).kind == 'COLON')
-            if t.kind == 'NAME' or _mut_name:
+            # Try to parse: name: Type [= default]
+            if t.kind == 'NAME':
                 name = t.value
                 self._struct_param_names.append(name)
                 self._advance()
@@ -8518,8 +7511,6 @@ class Parser:
         names = []
         defaults = {}
         annotations = {}
-        variadic = []
-        pending_star = False
         depth = 1
         expect_name = True
         while depth > 0:
@@ -8543,21 +7534,10 @@ class Parser:
             if t.kind == "EOF":
                 break
             if t.kind == "COMMA" and depth == 1:
-                # A bare `*,` is the keyword-only separator, not a variadic: its
-                # star must not carry onto the next parameter's name.
-                pending_star = False
                 self._advance(); expect_name = True; continue
-            if depth == 1 and expect_name and t.kind == "OP" and t.value == "*":
-                # `*Name: Type`: a variadic bracket parameter.
-                pending_star = True
-                self._advance()
-                continue
             if depth == 1 and expect_name and t.kind in ("NAME", "KW"):
                 _nm = t.value
                 names.append(_nm)
-                if pending_star:
-                    variadic.append(_nm)
-                    pending_star = False
                 self._advance()
                 expect_name = False
                 if self._peek().kind == "COLON":
@@ -8569,7 +7549,6 @@ class Parser:
                     defaults[_nm] = self._parse_bracket_param_default()
                 continue
             self._advance()
-        self._last_bracket_variadics = variadic
         return names, defaults, annotations
 
     def _capture_bracket_param_annotation(self) -> str:
@@ -9306,16 +8285,10 @@ class Parser:
                 self._advance()  # skip =
                 keywords[keyword_name] = self._parse_expr(0)  # parse and store value
             else:
-                first_tok = self._peek()
                 first = self._parse_expr(0)
                 if self._is_kw("for"):
                     gens = self._parse_generators()  # allow chained for-clauses
-                    # The genexp's line/col is its element's first token, as
-                    # the parenthesised form's is its `(`. Without it the
-                    # hoisted `__genexp_N` body had no line, so none of its
-                    # statements carried a `#line` directive.
-                    args = [Comprehension(kind="generator", element=first, generators=gens,
-                                          line=first_tok.line, col=first_tok.col)]
+                    args = [Comprehension(kind="generator", element=first, generators=gens)]
                     continue
                 args.append(first)
             if self._peek().kind == "COMMA": self._advance()
@@ -9441,74 +8414,13 @@ class Parser:
     def _is_kw(self, *w) -> bool:
         t = self._peek(); return t.kind == "KW" and t.value in w
 
-    def parse_module(self, recover: bool = False) -> list:
+    def parse_module(self) -> list:
         stmts = []
-        self.errors = []
         self._skip_newlines()
         while not self._at_end():
-            if recover:
-                start_pos = self._pos
-                try:
-                    self._parse_stmt_into(stmts)
-                except SyntaxError as e:
-                    self.errors.append(e)
-                    # Synchronize: advance past the failing construct so parsing
-                    # can continue at the next likely top-level declaration.
-                    self._synchronize_top_level(start_pos)
-                except Exception as e:
-                    # Treat other parse-time failures as recoverable errors too
-                    # so a malformed declaration does not abort the module.
-                    self.errors.append(e)
-                    self._synchronize_top_level(start_pos)
-            else:
-                self._parse_stmt_into(stmts)
+            self._parse_stmt_into(stmts)
             self._skip_newlines()
-        stmts = _synthesize_fieldwise_inits(stmts)
-        _check_out_argument_calls(stmts, self._filename)
-        _check_mlir_type_argument_calls(stmts, self._filename)
-        _check_inferred_param_dependencies(stmts, self._filename)
-        _check_variadic_element_types(stmts, self._filename)
-        _check_docstring_self_imports(stmts, self._filename)
-        return stmts
-
-    def _synchronize_top_level(self, start_pos: int):
-        """Recover after a parse error at module scope by skipping tokens until
-        the parser is positioned at a plausible start of the next top-level
-        declaration or statement. Must always make progress when not at EOF."""
-        if self._pos == start_pos and not self._at_end():
-            self._advance()
-        # Skip to a NEWLINE at module level, then consume layout/newlines until
-        # we reach a token that is not inside an indented block we failed in.
-        while not self._at_end():
-            t = self._peek()
-            if t.kind == "NEWLINE":
-                self._advance()
-                # Consume blank lines and dedents back to module scope.
-                while not self._at_end():
-                    t2 = self._peek()
-                    if t2.kind in ("NEWLINE", "DEDENT"):
-                        self._advance()
-                        continue
-                    if t2.kind == "INDENT":
-                        # Still inside/entering an indented region (e.g. we
-                        # failed mid-block); consume and keep seeking module
-                        # level.
-                        self._advance()
-                        continue
-                    break
-                # At module scope now? A top-level token follows (no INDENT
-                # pending). Stop so the main loop can parse it.
-                if self._at_end():
-                    return
-                if self._peek().kind not in ("INDENT", "DEDENT"):
-                    return
-                continue
-            if t.kind == "DEDENT":
-                self._advance()
-                if not self._at_end() and self._peek().kind not in ("INDENT", "DEDENT", "NEWLINE"):
-                    return
-                continue
-            self._advance()
+        return _synthesize_fieldwise_inits(stmts)
 
     def _parse_stmt_into(self, stmts: list):
         """Parse one statement and append it to `stmts`.
@@ -9653,13 +8565,6 @@ class Parser:
             if nxt.kind == "NAME" or (nxt.kind == "STRING" and nxt.value.startswith("`")):
                 self._advance()  # consume 'param'
                 return self._parse_comptime()
-        # `lazy` is a soft keyword (PEP 810, Python 3.15) — only a lazy
-        # import when the very next token is `import`/`from`; everywhere else
-        # it is an ordinary identifier, exactly like `match`/`async` above.
-        if t.kind == "NAME" and t.value == "lazy":
-            nxt = self._peek(1)
-            if nxt.kind == "KW" and nxt.value in ("import", "from"):
-                return self._parse_lazy_import()
         # `match` is a soft keyword (like Python's own) — only a match
         # statement when followed by a real expression and a top-level `:`
         # before the line ends; otherwise it's an ordinary identifier
@@ -9681,8 +8586,6 @@ class Parser:
         if t.kind == "NAME" and t.value in ("async", "__async"):
             nxt = self._peek(1)
             if nxt.kind == "KW" and nxt.value in ("def", "fn"):
-                if nxt.value == "fn":
-                    _warn_fn_keyword(self._filename, nxt)
                 self._advance()  # consume 'async'/'__async'
                 self._advance()  # consume 'def'/'fn'
                 return self._parse_funcdef([], is_async=True)
@@ -9702,12 +8605,7 @@ class Parser:
         if t.kind == "KW":
             if t.value == "import": return self._parse_import()
             if t.value == "from":   return self._parse_from_import()
-            if t.value in ('var', 'let'):
-                # `let` is the constant-declaration sibling of `var` and takes
-                # exactly the same shapes (measured against the real compiler,
-                # 2026-11-12). It must be dispatched here: left to fall through,
-                # `let y = 2.5` parses as ExprStmt(IdentExpr('let')) plus a
-                # separate AssignStmt, silently dropping the declaration.
+            if t.value == 'var':
                 # `var` is ambiguous, same as `fn`/`struct`: it's both this
                 # dialect's declaration keyword AND a perfectly ordinary
                 # Python identifier (arguably more common as a plain name
@@ -9768,7 +8666,6 @@ class Parser:
                     if not looks_like_funcdef:
                         pass  # fall through to expression statement
                     else:
-                        _warn_fn_keyword(self._filename, t)
                         self._advance(); return self._parse_funcdef([])
                 else:
                     self._advance(); return self._parse_funcdef([])
@@ -9979,8 +8876,6 @@ class Parser:
                 self._advance()
                 kw = self._peek()
             if kw.kind == "KW" and kw.value in ("def", "fn"):
-                if kw.value == "fn":
-                    _warn_fn_keyword(self._filename, kw)
                 self._advance()
                 return self._parse_funcdef(decs, is_async=is_async)
             # Field-level decorators (e.g. @__allow_legacy_any_origin_fields)
@@ -10152,51 +9047,6 @@ class Parser:
         return ImportStmt(module=module, alias=alias, extra=extra,
                           line=t.line, col=t.col)
 
-    def _parse_lazy_import(self):
-        """`lazy import ...` / `lazy from ... import ...` (PEP 810).
-
-        `lazy` is a SOFT keyword: `_KEYWORDS` deliberately does not contain
-        it, so `lazy = 5`, `lazy(...)` and `import lazy` keep working. The
-        statement is recognized here only when `lazy` is immediately followed
-        by one of the two import keywords; `_parse_stmt` makes that check.
-
-        CPython's symtable rejects an explicit lazy import from an enclosing
-        function, class, or try block, and rejects `lazy from ... import *`
-        and `lazy from __future__ import ...` outright. Those are parse-time
-        errors (the module never runs), so they are raised here rather than
-        deferred to execution.
-        """
-        lazy_tok = self._advance()          # consume the soft keyword
-        is_from = self._is_kw("from")
-        import_type = "from ... import" if is_from else "import"
-        if is_from:
-            node = self._parse_from_import()
-            # CPython's parser rejects a lazy __future__ import before the
-            # symtable gets a chance to check the enclosing scope, so this
-            # message wins even inside a function/try block.
-            if not node.module.startswith('.') and node.module == '__future__':
-                raise SyntaxError(
-                    f"{self._loc(lazy_tok)}"
-                    "lazy from __future__ import is not allowed")
-            if self._lazy_import_blockers:
-                where = self._lazy_import_blockers[-1]
-                raise SyntaxError(
-                    f"{self._loc(lazy_tok)}"
-                    f"lazy {import_type} not allowed inside {where}")
-            if node.wildcard:
-                raise SyntaxError(
-                    f"{self._loc(lazy_tok)}"
-                    "lazy from ... import * is not allowed")
-        else:
-            if self._lazy_import_blockers:
-                where = self._lazy_import_blockers[-1]
-                raise SyntaxError(
-                    f"{self._loc(lazy_tok)}"
-                    f"lazy {import_type} not allowed inside {where}")
-            node = self._parse_import()
-        node.lazy = True
-        return node
-
     def _parse_import_target(self):
         # Handle relative imports: import .warp, import ..sibling
         module = ""
@@ -10240,11 +9090,6 @@ class Parser:
         elif not module:
             # No dots and no name: error
             self._expect("NAME")  # Will raise error
-        if (self._peek().kind == "NAME" and self._peek().value == "lazy"
-                and self._peek(1).kind == "KW" and self._peek(1).value == "import"):
-            raise SyntaxError(
-                f"{self._loc(self._peek())}"
-                "use 'lazy from ... ' instead of 'from ... lazy import'")
         self._expect("KW", "import")
         if self._peek().kind == "OP" and self._peek().value == "*":
             self._advance()
@@ -10296,11 +9141,7 @@ class Parser:
                               name_alias_strs=_nas, line=t.line, col=t.col)
 
     def _parse_var_decl(self):
-        # `var` and `let` are both declaration sigils with the same shapes.
-        t0 = self._peek()
-        if t0.kind != "KW" or t0.value not in ("var", "let"):
-            raise SyntaxError(f"{self._loc(t0)}Expected 'var' or 'let' got {t0.kind}({t0.value!r})")
-        self._advance()
+        self._expect("KW", 'var')
         # Allow KW, backtick identifiers as variable names (e.g., "out", "fn", `6bit`)
         t = self._peek()
         if t.kind == "NAME": name = self._advance().value

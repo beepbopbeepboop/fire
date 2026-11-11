@@ -98,7 +98,7 @@ Other measured footprints (same gates):
     interpreter and the JIT): **34.9 GB and 52.2 GB on two runs of the identical corpus**
     at the same 2163 s wall, also capped at `small`. A 1.5x spread between two
     deterministic runs is the scheduler, not the workload — see
-    `PERF_stdlib_tests_peaks_35_to_52gb_on_the_same_run`.
+    `PERF_stdlib_tests_peaks_35_to_52gb_on_the_same_run.md`.
   The 46.2 and 52.2 are memcap's SUMMED tree RSS, which `procrun.tree_usage` documents
   as an over-count when many processes share pages, so they are upper bounds and the
   unique-pages measurement that would settle both classes is written down in
@@ -112,7 +112,7 @@ Other measured footprints (same gates):
   generated proof, not concurrency. **The cause is `mem_read_bytes`'s `ite` chain
   over a 113-equation successor nest**, which `formal/x86_64_endtoend_test.py`'s
   `_concrete_read` rebuilds to evaluate one closing read;
-  `FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps` measures
+  `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md` measures
   where it crosses (`const2` 19 equations / 1.4 GB, an 8-argument call 113 / 6.5 GB
   and an ABORT). It is a per-step-invariant problem and not a size problem, so
   raising `-M` would move the ceiling and not the curve. Registered as `module`
@@ -120,7 +120,7 @@ Other measured footprints (same gates):
 
 ## Why this is one bug and not many
 
-`CODEGEN_bootstrap_resource_blowup` records the ~192 GB runaway and its attribution.
+`bugs/hard/CODEGEN_bootstrap_resource_blowup.md` records the ~192 GB runaway and its attribution.
 The self-hosted binary allocates boxed values and never frees them (no garbage collector, no
 regions), so any algorithm that re-derives a working set per iteration, per function or per
 pass turns into gigabytes: the round-5 regression is exactly that shape, one loop in one

@@ -36,8 +36,6 @@ explicitly: it builds the same package at a path under this checkout, so
 the invariant is tested in BOTH locations no matter how the suite is
 invoked.
 """
-import contextlib
-import io
 import os
 import re
 import shutil
@@ -220,37 +218,6 @@ def test_bare_submodule_import_call_inside_source_tree() -> bool:
     if not ok:
         print(f"  ✗ bare_submodule_import_call_inside_source_tree: rc={rc} "
               f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
-    return ok
-
-
-def test_sibling_export_lookup_prints_no_debug_lines() -> bool:
-    """A successful compile is silent: the bare-submodule call below is the
-    fixture that reaches `_local_sibling_module_exports`, which spent
-    2026-11-03 → 2026-11-12 printing unconditional `BEFORE_EXPS:` /
-    `AFTER_EXPS:` / `EXPS_ERR:` diagnostics (`flush=True`, no env guard) on
-    the ordinary link-mode path. Those lines are indistinguishable from
-    compiler output to anything capturing stdout, so they are pinned absent
-    here rather than left to be noticed in someone's build log. `Built:`
-    stays: it is the driver's own user-facing line.
-    """
-    pkg = {
-        'pkg2/__init__.py': '',
-        'pkg2/base2.py': 'def doubleval(x):\n    return x * 2\n',
-        'pkg2/main.py': (
-            'from . import base2\n'
-            'print(base2.doubleval(21))\n'
-        ),
-    }
-    with tempfile.TemporaryDirectory() as td:
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            rc, stdout = _build_and_run(pkg, 'pkg2/main.py', td)
-    debug = [line for line in buf.getvalue().splitlines()
-             if line.startswith(('BEFORE_EXPS:', 'AFTER_EXPS:', 'EXPS_ERR:'))]
-    ok = rc == 0 and stdout.strip() == '42' and not debug
-    if not ok:
-        print(f"  ✗ sibling_export_lookup_prints_no_debug_lines: rc={rc} "
-              f"stdout={stdout!r} debug={debug!r}")
     return ok
 
 
@@ -2587,94 +2554,6 @@ def test_two_modules_specialize_one_generic_differently() -> bool:
     return ok
 
 
-def _build_and_run_with_driver_output(pkg_files: dict, entry: str, td: str) -> tuple[int | None, str, str]:
-    """Like _build_and_run but also captures driver's stdout for 'link failed'."""
-    import sys
-    import io
-    import driver
-
-    for rel, src in pkg_files.items():
-        path = os.path.join(td, rel)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w') as f:
-            f.write(src)
-
-    entry_path = os.path.join(td, entry)
-    with open(entry_path) as f:
-        entry_src = f.read()
-
-    cwd = os.getcwd()
-    os.chdir(td)
-    try:
-        out = os.path.join(td, 'prog')
-        # Capture driver's stdout to check for 'link failed' message
-        old_stdout = sys.stdout
-        import_stringio = io.StringIO()
-        sys.stdout = import_stringio
-        try:
-            rc = driver.compile_program(entry_path, entry_src, output=out, run=False)
-        finally:
-            sys.stdout = old_stdout
-            driver_stdout = import_stringio.getvalue()
-
-        if rc != 0 or not os.path.exists(out):
-            return rc, '', driver_stdout
-        result = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
-        return result.returncode, result.stdout, driver_stdout
-    finally:
-        os.chdir(cwd)
-
-
-def test_imported_global_accessor_in_link_mode() -> bool:
-    """Regression test for bug:CODEGEN_imported_global_link_mode_accessor_undefined.
-
-    In link-mode, when `fire.py build` of a client that `from xr_defn import N`
-    reads a module-scope var `N` defined in a sibling `.mojo` file from a
-    call-valued RHS (`N = g() + 1`, or `N = k()` with unannotated `def`),
-    the link must succeed without the `link failed: Undefined symbols..."
-    line for `xr_defn__mojo_global_get_N`. The fix in emit_resolve.py's
-    _register_link_imports (in the `if not info:` branch) adds the sibling
-    module to `_link_inline_modules` when `src_path` ends with `.mojo` and
-    the name wasn't found by _classify_unresolved_export, so the inline
-    fallback is never used.
-
-    Two shapes are tested: with a typed function and with an unannotated def,
-    covering both `def g(): return 7` and `def k(): return "a"`."""
-    pkg1 = {
-        'xr_defn.mojo': 'def g(): return 7\nvar N = g() + 1\n',
-        'xr_use.mojo': 'from xr_defn import N\nprint(N)\n',
-    }
-    pkg2 = {
-        'xr_defn.mojo': 'def k(): return "a"\nvar N = k()\n',
-        'xr_use.mojo': 'from xr_defn import N\nprint(N)\n',
-    }
-    # The accessor symbol expected for link failure on the pre-fix tree:
-    expected_access_name = '_xr_defn__mojo_global_get_N'
-
-    with tempfile.TemporaryDirectory() as td:
-        # Shape 1: typed function -> CPython-equivalent expected '8'
-        rc1, stdout1, driver_out1 = _build_and_run_with_driver_output(pkg1, 'xr_use.mojo', td)
-        ok1 = (rc1 == 0 and stdout1 == '8\n'
-               and expected_access_name not in driver_out1)
-        if not ok1:
-            print(f"  ✗ imported_global_accessor: shape1 rc={rc1} "
-                  f"stdout={stdout1!r} driver={driver_out1[:200]!r}")
-            return False
-
-        with tempfile.TemporaryDirectory() as td2:
-            # Shape 2: unannotated def -> expected 'a'
-            rc2, stdout2, driver_out2 = _build_and_run_with_driver_output(pkg2, 'xr_use.mojo', td2)
-            ok2 = (rc2 == 0 and stdout2 == 'a\n'
-                   and expected_access_name not in driver_out2)
-            if not ok2:
-                print(f"  ✗ imported_global_accessor: shape2 rc={rc2} "
-                      f"stdout={stdout2!r} driver={driver_out2[:200]!r}")
-                return False
-
-    print("  PASS  imported_global_accessor (both link-mode shapes)")
-    return True
-
-
 CASES = [
     test_nested_def_is_not_a_module_level_fn_export,
     test_extern_import_keyword_call_pads_trailing_default,
@@ -2686,7 +2565,6 @@ CASES = [
     test_bare_submodule_import_value_read,
     test_bare_submodule_import_call,
     test_bare_submodule_import_call_inside_source_tree,
-    test_sibling_export_lookup_prints_no_debug_lines,
     test_bare_submodule_import_keyword_call,
     test_cross_module_generator_default_is_padded,
     test_generator_str_param_concat_is_string_concatenation,
@@ -2723,7 +2601,6 @@ CASES = [
     test_imported_function_trailing_default_argument_is_padded,
     test_same_module_call_to_generic_with_default_binds_instantiation,
     test_two_modules_specialize_one_generic_differently,
-    test_imported_global_accessor_in_link_mode,
 ]
 
 

@@ -38,20 +38,6 @@ import mlir
 from fire_compiler import for_target_is_tuple, for_target_single_name
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
-
-
-def _lower_stmt_arg(gen, a):
-    # `ggc._box_escaping_dict_slot_read`, not a module-level
-    # `from ...emit_calls import ...`: emit_calls imports gimple_codegen, which
-    # imports THIS module, so a top-level import from it makes
-    # `import mojo.backend_gimple.emit_calls` fail outright ("cannot import name
-    # ... from partially initialized module ... most likely due to a circular
-    # import") -- the backend entry-point probe in test_suite.py is the thing
-    # that catches it. The module alias `ggc` (below) is bound by the time any
-    # function here RUNS, and every other emit_calls helper in this file is
-    # already reached the same way.
-    t, v = gen.lower_expr(a)
-    return ggc._box_escaping_dict_slot_read(gen, a, t, v)
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.module_shared as msh
 import mojo.middle.itcursor as itc
@@ -107,14 +93,6 @@ def gen_stmt(gen, node):
     if (gen._frame_func and hasattr(node, 'line') and node.line and node.line > 0
             and gen.current_func_name == gen._frame_func):
         gen._void_call('mojo_frame_set_line', [('int64_t', gen._new_val('int64_t', f'(int64_t){int(node.line)}'))])
-    # Every physical line this statement emits -- its own lines, its compound
-    # header's, and the lines of any synthetic lowering -- is stamped with this
-    # statement's directive by `emit_infra._emit_raw`, so GCC numbers it from
-    # the statement's own source line. A statement with no line (a synthetic
-    # node) inherits its enclosing statement's directive. Restored on exit, so
-    # a nested statement's lines are stamped with the nested line and the
-    # enclosing statement's remaining lines with its own again.
-    _outer_line_directive = getattr(gen, '_stmt_line_directive', None)
     if hasattr(node, 'line') and node.line and node.line > 0:
         # `_line_src_file` overrides `_current_filename` for the duration of
         # one enclosing unit (a base class's method body re-emitted as a
@@ -133,8 +111,38 @@ def gen_stmt(gen, node):
         # inlined.md, which is a different mechanism and does not own this.)
         filename = '' + (getattr(gen, '_line_src_file', '')
                          or getattr(gen, '_current_filename', ''))
-        gen._stmt_line_directive = (f"#line {node.line} \"{filename}\"" if filename
-                                    else f"#line {node.line}")
+        emitted_pairs = getattr(gen, '_emitted_line_pairs', set())
+
+        # Create unique key for this (filename, line) combination
+        pair_key = (filename, node.line)
+
+        # Emit #line only if we haven't emitted this exact pair before
+        if pair_key not in emitted_pairs:
+            if filename:
+                gen._emit(f"#line {node.line} \"{filename}\"")
+            else:
+                gen._emit(f"#line {node.line}")
+            emitted_pairs.add(pair_key)
+            gen._emitted_line_pairs = emitted_pairs
+
+    # A single Mojo statement (e.g. an assignment whose RHS is a call)
+    # commonly lowers to SEVERAL physical C lines (one per temp var), but
+    # the #line directive above is only emitted once, before the first of
+    # them. GCC's own line-counting for a -fgimple diagnostic increments
+    # per PHYSICAL line since the last #line directive, not per logical
+    # Mojo statement — so an error on e.g. the 3rd physical line of a
+    # one-statement expansion gets reported 2 lines past the statement's
+    # real source line (see BUG-2026-016: a bad field assignment reported
+    # 2 lines below the assignment itself). Re-stamping every physical
+    # line of a LEAF statement's own expansion with the same #line
+    # directive eliminates that drift, since GCC resets its count at
+    # every directive. Restricted to leaf statement kinds — a compound
+    # statement (if/while/for/try/with/...) recurses into gen_stmt for
+    # its own nested body, which already got its own correct #line calls;
+    # blindly re-stamping its ENTIRE emitted range here would instead
+    # overwrite those nested statements' correct line numbers with the
+    # outer compound statement's line.
+    body_start = len(gen.body_lines) if node_kind not in gen._COMPOUND_STMT_KINDS else None
 
     # Static dispatch: an explicit isinstance chain (one branch per
     # statement kind), NOT getattr(self, name)(node) on _STMT_DISPATCH.
@@ -221,7 +229,17 @@ def gen_stmt(gen, node):
         gimple_ctypes._debug_note('unknown statement dropped', node_kind)
         gen._emit(f"  /* TODO: {node_kind} */")
 
-    gen._stmt_line_directive = _outer_line_directive
+    if (body_start is not None and hasattr(node, 'line') and node.line and node.line > 0
+            and len(gen.body_lines) - body_start > 1):
+        filename = (getattr(gen, '_line_src_file', '')
+                    or getattr(gen, '_current_filename', ''))
+        directive = f"#line {node.line} \"{filename}\"" if filename else f"#line {node.line}"
+        # Skip the very first emitted line (already directly preceded by
+        # the directive above); re-stamp every one after it, from the end
+        # backwards so earlier insertions don't shift later indices.
+        for i in range(len(gen.body_lines) - 1, body_start, -1):
+            if gen.body_lines[i] != directive and not gen.body_lines[i].lstrip().startswith('#line '):
+                gen.body_lines.insert(i, directive)
 
 
 
@@ -532,14 +550,6 @@ def _gen_stmt_VarDecl(gen, node):
         gen._layout_hint = layout
     if node.value is not None:
         vtype, v = gen.lower_expr(node.value)
-        # A `var`-declared name bound to more than one scalar kind in this
-        # function is the int64_t box, exactly as its plain-assignment twin
-        # (`ginf.mixed_scalar_locals`): box the initializer by its kind.
-        _mixed_box = (node.type_ann is None and isinstance(node.name, str)
-                      and ',' not in node.name
-                      and ginf.mixed_box_name(gen, node.name))
-        if _mixed_box:
-            v, vtype = ginf.box_mixed_store(gen, node.value, vtype, v, node.name)
         # Type inference: if no annotation, use the value's type instead of 'int'
         if node.type_ann is None:
             ctype = vtype
@@ -561,15 +571,6 @@ def _gen_stmt_VarDecl(gen, node):
         # Use the actual declared type (may differ if variable was already declared
         # in an earlier branch with a different inferred type)
         actual_dst = gen.var_types.get(node.name, ctype)
-        if _mixed_box:
-            # Register the box-holding local so every consumer reads it by
-            # kind (print/str/repr, `==`, arithmetic, `len`); see
-            # `ginf.mixed_scalar_locals`. The DECLARATION is `int64_t` because
-            # `_mixed`/`_inferred_var_types` above chose the box.
-            _vn = gen._cname(node.name)
-            gen._boxed_vals.add(_vn)
-            gen._tagged_word_vals.add(_vn)
-            gen._dyn_word_locals.add(node.name)
         # A module-level `var name = value`/`var name: T = value` (this
         # module's OWN top-level statement, or a nested `global name`
         # declaration) writes to the module-globals STRUCT FIELD, whose
@@ -949,35 +950,6 @@ def _emit_dynattr_setattr_dispatch(gen, member: str, vtype: str, v: str,
                     [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
 
 
-def _join_dict_store(gen, key: str, value_node, vtype: str):
-    """Record a dict store's value kind under `key` (a C name or a source name), joined with what is recorded (the
-    one store-side writer: every dict store comes through here). Returns the recorded kind, or None when this store
-    says nothing about the dict's value type.
-
-    A store whose kind the compiler does not know (`dict_value_kind` None) joins nothing, and a container or str/float
-    store falls back to its C type. A None store is a kind of its own, remembered per (function, name), so a later
-    known-kind store joins it: `d['n'] = None` then `d['f'] = 1.5` is 'mixed'. Two different known kinds are 'mixed'
-    (`exprtypes.dict_kind_join`).
-    """
-    _kind = gimple_exprtypes.dict_value_kind(gen, value_node)
-    if _kind is None and (vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
-                          or vtype.endswith(' *')):
-        _kind = vtype
-    _prev_vt = gen._dict_val_types.get(key)
-    _seen_key = (_as_str(gen.current_func_name), _as_str(key))
-    if _kind == 'none':
-        gen._dict_none_seen.add(_seen_key)
-    if _kind is None or (_kind == 'none' and _prev_vt is None):
-        return None
-    _joined_vt = gimple_exprtypes.dict_kind_join(_prev_vt, _kind)
-    if _joined_vt == '_Bool':
-        _joined_vt = 'int64_t'
-    if _seen_key in gen._dict_none_seen and _joined_vt not in (None, 'none'):
-        _joined_vt = 'mixed'
-    gen._dict_val_types[key] = _joined_vt
-    return _joined_vt
-
-
 def _note_global_dict_store(gen, target_obj, vtype: str) -> None:
     """Record a dict store's value type under the SOURCE name of a module-scope
     dict receiver.
@@ -1114,31 +1086,6 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str,
     # knows the NAME, which is what `_note_global_callable_store` is keyed on.
     ginf._note_global_callable_store(gen, tname, v)
     _note_global_generator_store(gen, tname, vtype, v)
-    _note_global_slot_kinds(gen, tname, v)
-
-
-def _note_global_slot_kinds(gen, tname: str, v: str) -> None:
-    """Remember the element kinds of a value stored into a module global, keyed by
-    the GLOBAL'S name. A global read mints a fresh temp, so the per-value tables
-    (`_maybe_kinds_vals`, `_elem_types`, `_struct_slot_kinds`) that the
-    subscript and loop lowerings consult are gone by then. Without this a
-    mixed list held in a global read its doubles' bits as ints (`b = a[:]` at
-    module scope printed `4612811918334230528`). The record is the last store's;
-    a read compiled before any store has no record, as before.
-    """
-    if not hasattr(gen, '_global_slot_info'):
-        gen._global_slot_info = {}
-    info = {}
-    if v in gen._maybe_kinds_vals:
-        info['mk'] = True
-    if v in gen._elem_types:
-        info['et'] = gen._elem_types[v]
-    if v in gen._struct_slot_kinds:
-        info['sk'] = gen._struct_slot_kinds[v]
-    if info:
-        gen._global_slot_info[tname] = info
-    else:
-        gen._global_slot_info.pop(tname, None)
 
 
 def _note_global_generator_store(gen, tname: str, vtype: str, v: str) -> None:
@@ -1487,20 +1434,6 @@ def _gen_stmt_AssignStmt(gen, node):
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name
-        # A box-holding name (`ginf.mixed_box_name`): bound to more than one
-        # scalar kind, or to a tagged generator word beside plain values. It
-        # has no single C type, so it is the `int64_t` box and every store
-        # into it is boxed by kind (`ginf.box_mixed_store`). Asked for every
-        # simple-name store (cheap: the per-function walks are cached).
-        _mixed_box = ginf.mixed_box_name(gen, tname)
-        # Propagate `d[k]` slot-read tracking to the assigned local name so
-        # later reads/prints of the name can recover the slot's runtime kind.
-        _dsr = getattr(gen, '_dict_slot_reads', None)
-        if _dsr is not None:
-            if v in _dsr:
-                _dsr[_as_str(tname)] = _dsr[v]
-            else:
-                _dsr.pop(_as_str(tname), None)
         # Track frozendict/dict fromkeys callable values
         try:
             if hasattr(gen, '_frozendict_fromkeys_callables') and v in gen._frozendict_fromkeys_callables:
@@ -1608,27 +1541,14 @@ def _gen_stmt_AssignStmt(gen, node):
                      and v in getattr(gen, '_boxed_vals', ())
                      and gen.var_types.get(_copy_src) == 'int64_t'
                      and ginf.tagged_for_target_name(gen, _copy_src))
-        # A call to a float+pointer function is a tagged word too
-        # (`lower_expr` marks its temp in `_tagged_word_vals`), and binding it
-        # to a name must keep the box: `mojo_box_word` below would hand a
-        # double box on unchanged but a LIST box's word as an int, and the
-        # name would lose the kind every later consumer dispatches on. Unlike
-        # the generator cases the RHS itself is proof for THIS store, so the
-        # name-level "every binding is tagged" walk is not needed.
-        _call_tagged = (vtype == 'int64_t'
-                        and isinstance(node.value, gimple_ctypes.CallExpr)
-                        and isinstance(node.value.func, gimple_ctypes.IdentExpr)
-                        and _as_str(node.value.func.name) in getattr(
-                            gen, '_ret_may_hold_float', ()))
         # A receive-only name (`x = yield`, every binding of it) keeps the
         # resume word's box too: `x = yield` after `next(it)` is the None box,
         # and the name must render it as None (`tagged_recv_name`).
         _keep_tagged_box = (vtype == 'int64_t'
                             and (v in getattr(gen, '_tagged_word_vals', ())
-                                 or _for_copy or _call_tagged)
+                                 or _for_copy)
                             and gen.var_types.get(tname, 'int64_t') == 'int64_t'
-                            and (_call_tagged
-                                 or ginf.tagged_next_bind_name(gen, _as_str(tname))
+                            and (ginf.tagged_next_bind_name(gen, _as_str(tname))
                                  or ginf.tagged_recv_name(gen, _as_str(tname))))
         # A MIXED name (`x = 0` beside `x = v` over a tagged generator) is a
         # box-holding local too, so every int64 store into it must be a box:
@@ -1638,63 +1558,21 @@ def _gen_stmt_AssignStmt(gen, node):
         # A tagged word and a non-int64 name never mix: see
         # MIXED_NAME_NON_INT64_REFUSAL. Refused here, before any store is
         # emitted, rather than unwrapping the box into a str/float slot.
-        _tagged_bind = (v in getattr(gen, '_tagged_word_vals', ()) or _for_copy
-                        or _call_tagged)
-        # A float/str/bool/int store into a box-holding name is boxed by its
-        # kind here, BEFORE any refusal below reads the value's C type, so it
-        # is carried by the box rather than refused. A container stored into a
-        # tagged-mixed name is refused (the tagged box has no container kind);
-        # remember the original type across boxing so that refusal still fires.
-        # A float and a str stored into the same name of one function
-        # (`val = d["key"]` on a float dict, then `val = "text"`): no
-        # representation holds both kinds, and the second store would cast a
-        # double to a pointer, which gcc rejects. Refuse the function at the
-        # store that brings the second kind. A box-holding name is the
-        # exception: it is the int64_t box, and stores are boxed by kind.
-        if vtype in ('double', 'char *') and not _mixed_box:
-
-            _sk_key = (_as_str(gen.current_func_name), _as_str(tname))
-            _sk_prev = gen._stored_kinds.get(_sk_key)
-            if _sk_prev is not None and _sk_prev != vtype:
-                raise RuntimeError(
-                    f"{tname!r}: {ginf.mixed_name_non_int64_refusal(vtype)}")
-            gen._stored_kinds[_sk_key] = vtype
-        _orig_vtype = vtype
-        _decl_t_before = gen.var_types.get(tname)
-        if _mixed_box and not _keep_tagged_box:
-            v, vtype = ginf.box_mixed_store(gen, node.value, vtype, v, tname)
-            if gen.var_types.get(_as_str(tname), 'int64_t') == 'int64_t':
-                _keep_tagged_box = True
-        # A tagged generator word cannot also hold a container/pointer value
-        # (the box has no container constructor/kind). Name the binding, the
-        # conflicting C type, and which side was the tagged word vs container,
-        # while keeping the substring "cannot also hold a value of another C
-        # type" that test_dict_slot_read_regression.py Test 2 asserts.
-        _tagged_mixed = ginf.tagged_mixed_name(gen, tname)
-        # Container/struct pointers (other than str `char *`) cannot be carried
-        # by the tagged box. Floats and strs are boxed above and are allowed.
-        _unboxable_ptr = (
-            _decl_t_before is not None
-            and str(_decl_t_before).endswith(' *')
-            and _decl_t_before not in ('char *', 'const char *'))
-        _unboxable_store = (
-            _orig_vtype is not None
-            and str(_orig_vtype).endswith(' *')
-            and _orig_vtype not in ('char *', 'const char *'))
-        if _tagged_bind and _unboxable_ptr:
+        _tagged_bind = (v in getattr(gen, '_tagged_word_vals', ()) or _for_copy)
+        if ((_tagged_bind and ginf.is_non_int_c_type(gen.var_types.get(tname)))
+                or (ginf.is_non_int_c_type(vtype)
+                    and ginf.tagged_mixed_name(gen, _as_str(tname)))):
             raise RuntimeError(
-                f"{tname!r}: a name bound to a container or pointer value "
-                f"(container value of C type '{_decl_t_before}') elsewhere in "
-                f"this function and also to a tagged generator word here "
-                f"cannot also hold a value of another C type; no "
-                f"representation holds both; refused")
-        if _unboxable_store and _tagged_mixed:
-            raise RuntimeError(
-                f"{tname!r}: a name bound to a tagged generator word elsewhere "
-                f"in this function and also to a container or pointer value "
-                f"(container value of C type '{_orig_vtype}') here cannot also "
-                f"hold a value of another C type; no representation holds "
-                f"both; refused")
+                f"{tname!r}: {ginf.MIXED_NAME_NON_INT64_REFUSAL}")
+        if (not _keep_tagged_box and vtype == 'int64_t'
+                and gen.var_types.get(tname, 'int64_t') == 'int64_t'
+                and ginf.tagged_mixed_name(gen, _as_str(tname))):
+            if (v not in getattr(gen, '_boxed_vals', ())
+                    and v not in getattr(gen, '_tagged_word_vals', ())):
+                _mb = gen._new_temp('int64_t')
+                gen._emit(f'  {_mb} = mojo_box_int ({v});')
+                v = _mb
+            _keep_tagged_box = True
         if (not _keep_tagged_box and _copy_src is not None
                 and ginf.tagged_next_bind_name(gen, _as_str(tname))):
             # The local is registered as a box by every store (the static
@@ -1836,14 +1714,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # trusted for. Real: `gen_module_impl`'s `_lens` is a dict at
             # line 1257 and a set at line 6114, and the self-host closure
             # could not be generated until this existed.
-            # A box-holding name is declared int64_t whatever the pre-pass
-            # joined its bindings to: a container-mixed name, or a name bound
-            # to a scalar of more than one kind or to a tagged generator word
-            # beside plain values (`ginf.mixed_box_name`). Without the last
-            # half the pre-pass's `double` hint declared `x` a double at its
-            # first store, and the tagged copy inside the loop was refused.
-            _mixed = (tname in ginf.mixed_container_locals(gen)
-                      or ginf.mixed_box_name(gen, tname))
+            _mixed = tname in ginf.mixed_container_locals(gen)
             if _mixed:
                 ctype = 'int64_t'
             else:
@@ -2558,14 +2429,11 @@ def _gen_stmt_AssignStmt(gen, node):
             # `keywords: dict = {}` (populated with parsed expression AST
             # nodes, then read back via `keywords.items()`) segfaulting
             # once self-hosted.
-            # Join, not overwrite (exprtypes.dict_kind_join): a dict whose stores disagree (`d['n'] = None` then
-            # `d['f'] = 1.5`, or `d['s'] = 'x'` then `d['k'] = 2`) has no one value type, and every store, literal
-            # or subscript, joins the same way. A store whose kind the compiler does not know (`_kind` None) joins
-            # nothing, and an int store is recorded when it is a known int, which before it never was.
-            if obj_v not in getattr(gen, '_opaque_container_locals', ()):
-                _joined_vt = _join_dict_store(gen, obj_v, node.value, vtype)
-                if _joined_vt is not None:
-                    _note_global_dict_store(gen, node.target.obj, _joined_vt)
+            if ((vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
+                    or vtype.endswith(' *'))
+                    and obj_v not in getattr(gen, '_opaque_container_locals', ())):
+                gen._dict_val_types[obj_v] = vtype
+                _note_global_dict_store(gen, node.target.obj, vtype)
             # dict[key] = val → mojo_dict_set_str_* (key coerced via
             # _char_to_cstr, the single dict-key-to-string conversion
             # used by both read and write sides — see its docstring).
@@ -2666,11 +2534,7 @@ def _gen_stmt_AssignStmt(gen, node):
                     # comes through THIS arm and not the typed one above:
                     # without the record here the read of the same global
                     # has no value type and prints the stored double's bits.
-                    _tgt = node.target.obj
-                    if isinstance(_tgt, IdentExpr) and msh.bare_global_read_plan(gen, _tgt.name)[0]:
-                        _gjoined = _join_dict_store(gen, _as_str(_tgt.name), node.value, vtype)
-                        if _gjoined is not None:
-                            _note_global_dict_store(gen, _tgt, _gjoined)
+                    _note_global_dict_store(gen, node.target.obj, vtype)
             elif _dsw_sn and not gen._struct_defines_method(_dsw_sn, '__setitem__'):
                 # `d[k] = v` on a builtin-`dict` subclass with no
                 # `__setitem__` override: store into the backing MojoDict.
@@ -2833,18 +2697,6 @@ def _gen_stmt_AssignStmt(gen, node):
                             v_cast = gen._new_temp(elem_t)
                             gen._safe_coerce_emit(vtype, elem_t, v, v_cast)
                             gen._emit(f"  *{addr} = {v_cast};")
-                    elif isinstance(ot, str) and ot in ('float', 'double', '__fp16'):
-                        # Scalar-erased SIMD/Scalar lane WRITE (same model and
-                        # reason as the read arm in `_lower_subscript`, and as
-                        # the MultiAssign chain's copy): the erased value IS the
-                        # lane, so assign the slot instead of emitting
-                        # `scalar[i] = x`, which gcc rejects.
-                        if vtype == ot:
-                            gen._emit(f"  {obj_v} = {v};")
-                        else:
-                            _wv = gen._new_temp(ot)
-                            gen._safe_coerce_emit(vtype, ot, v, _wv)
-                            gen._emit(f"  {obj_v} = {_wv};")
                     else:
                         gen._emit(f"  {obj_v}[{idx_v}] = {v};")
     elif isinstance(node.target, gimple_ctypes.SliceExpr):
@@ -3428,179 +3280,6 @@ def _redecl_upgrade_default(gen, name: str, ctype: str) -> None:
             return
 
 
-def _is_float_mixed_return(gen) -> bool:
-    """Is the body being emitted one whose return type inference widened to
-    the TAGGED WORD because its arms mix a float with a pointer?
-
-    The answer comes from `_float_mixed_return_bodies`, the set
-    `infra_infer._infer_return_type_core` records against the SAME body object,
-    so this emitter cannot disagree with the declared return type: the body is
-    only in the set because inference widened it to `int64_t`, and `func_ret_type`
-    is that answer here. A body not in the set keeps every arm's own spelling
-    exactly as before."""
-    if _as_str(getattr(gen, 'func_ret_type', '') or '') != 'int64_t':
-        return False
-    _body = getattr(gen, '_cur_func_body', None)
-    return _body is not None and id(_body) in getattr(
-        gen, '_float_mixed_return_bodies', ())
-
-
-def _box_float_mixed_return_arm(gen, vtype: str, v: str) -> tuple[str, str]:
-    """Box one return arm of a float+pointer function into the tagged word.
-
-    Every arm that has no `int64_t` spelling is boxed by its own kind, so a
-    consumer that only sees the word (`mojo_repr_boxed`, the list kind
-    reader) still renders the value: `double` -> kind 'd', `char *` -> 'p',
-    `MojoList *` (tuple or list) -> 'l', `MojoBytes *` -> 's'. An `int`/`_Bool`
-    arm is already a plain word and passes through unchanged.
-
-    Any OTHER pointer kind — a dict, a set, a struct — is refused rather than
-    guessed: a box's "container" kind renders through the LIST repr, so
-    reading a dict pointer out of it would walk dict memory as a slot array.
-    A diagnostic naming the function is the only honest answer; the shapes
-    that matter today (`comptime.eval_const`) return str/list/None/float."""
-    vt = _as_str(vtype)
-    if vt in ('int', 'int64_t'):
-        # A plain integer has an int64_t spelling, so it IS the word.
-        return vtype, v
-    if vt == '_Bool':
-        # A bool is its OWN kind in the tagged word: the raw 1/0 prints as an
-        # integer, and CPython prints True/False.
-        return 'int64_t', gen._call_expr(
-            'int64_t', 'mojo_box_from_bool',
-            [('int64_t', gen._to_int64('_Bool', v))])
-    if vt in ('double', 'float'):
-        dv = v if vt == 'double' else gen._new_val('double', f'(double){v}')
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_double',
-                                         [('double', dv)])
-    if vt == 'char *':
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_str',
-                                         [('char *', v)])
-    if vt == 'MojoList *':
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_list',
-                                         [('MojoList *', v)])
-    if vt == 'MojoBytes *':
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_bytes',
-                                         [('void *', v)])
-    raise TypeError(
-        f"function {_as_str(getattr(gen, 'current_func_name', '') or '?')!r} "
-        f"returns a float beside a {vt!r}; a tagged word can carry a float "
-        f"beside an int/str/list/tuple/bytes/None, but not beside this pointer "
-        f"kind (a box of it would be rendered by the wrong repr)")
-
-
-_NON_POINTER_SCALAR_ARM_CTYPES = ('double', 'float', 'int', 'int64_t', '_Bool')
-
-# A declaration whose scalar arm is legitimate: the annotation ITSELF is a
-# scalar value type (Bool, Int, Codepoint, SIMD[...]). Its C type may still be
-# a struct pointer (`Bool *`), but a `_Bool`/int arm is the value, not a
-# mistyped pointer.
-_SCALAR_ANNOTATION_FAMILY = {
-    'Bool': 'bool', 'BoolLiteral': 'bool',
-    'Int': 'int', 'Int8': 'int', 'Int16': 'int', 'Int32': 'int',
-    'Int64': 'int', 'UInt': 'int', 'UInt8': 'int', 'UInt16': 'int',
-    'UInt32': 'int', 'UInt64': 'int', 'Codepoint': 'int', 'Byte': 'int',
-    'Index': 'int', 'c_int': 'int', 'c_uint': 'int', 'c_long': 'int',
-    'c_ulong': 'int', 'c_short': 'int', 'c_ushort': 'int',
-    'c_ssize_t': 'int', 'c_size_t': 'int', 'c_ptrdiff_t': 'int',
-    'Float16': 'float', 'Float32': 'float', 'Float64': 'float',
-    'FloatLiteral': 'float',
-}
-
-
-def _annotation_scalar_family(ann: str) -> str | None:
-    """The scalar family a return ANNOTATION names, or None when it is not a
-    scalar value type. `SIMD[DType.bool, 4]` and `Scalar[DType.int32]` are
-    scalars too: their bracket carries the dtype, so the base alone is not
-    enough."""
-    base = (ann or '').split('[', 1)[0].strip()
-    if base in _SCALAR_ANNOTATION_FAMILY:
-        return _SCALAR_ANNOTATION_FAMILY[base]
-    if base in ('SIMD', 'Scalar', 'DTypePointer'):
-        _inner = (ann or '').lower()
-        for name, fam in (('bool', 'bool'), ('float', 'float'),
-                          ('int', 'int'), ('uint', 'int')):
-            if name in _inner:
-                return fam
-    return None
-
-
-def _scalar_shape_arm_kind(node) -> str | None:
-    """The scalar family a return arm is BY ITS SOURCE SHAPE, or None.
-
-    The C type cannot answer this question, and that is the whole reason this
-    function exists: a String or container value is an erased `int64_t` box,
-    `None` is `int 0`, and a `Bool` value is `_Bool`, so on the C side a
-    legitimate pointer arm and a mistyped scalar arm are the same word. Only
-    shapes whose static Mojo type is a scalar in every context are named here
-    — literals, comparisons, `not`, and a sign applied to a literal. An
-    IdentExpr or a call is deliberately NOT named: `return result^` returning
-    a String is an `int64_t` on the C side and must stay legal.
-    """
-    while isinstance(node, gimple_ctypes.UnaryOp) and node.op in ('-', '+'):
-        node = node.operand
-    if isinstance(node, gimple_ctypes.IntLiteral):
-        return 'int'
-    if isinstance(node, gimple_ctypes.FloatLiteral):
-        return 'float'
-    if isinstance(node, gimple_ctypes.BoolLiteral):
-        return 'bool'
-    if isinstance(node, gimple_ctypes.CompareChain):
-        return 'bool'
-    if (isinstance(node, gimple_ctypes.BinaryOp)
-            and node.op in ('==', '!=', '<', '<=', '>', '>=')):
-        return 'bool'
-    if isinstance(node, gimple_ctypes.UnaryOp) and node.op == 'not':
-        return 'bool'
-    return None
-
-
-def _check_float_arm_into_annotated_pointer(gen, vtype, node=None) -> None:
-    """Refuse a scalar return arm in a function whose return type is a pointer.
-
-    A pointer C return type reaches this emitter only from an ANNOTATION
-    (`-> String`, `-> MojoList *`, ...): an inferred scalar+pointer join is
-    widened to the tagged word before we get here (`_is_float_mixed_return`).
-    So a scalar arm is a contradiction of a static type, and Mojo rejects it
-    as a type error. The old spelling, `(char *)<scalar>` cast into the
-    pointer, compiled (gcc warns, not errors) and silently handed the caller
-    the raw bits as the pointer (`print(pick(0))` dereferenced address 7 for
-    `return 7`). The diagnostic is the honest answer: it names the function,
-    the arm's type and the annotated return type.
-
-    The C TYPE is authoritative for float arms only. For int/bool arms it is
-    not: `return result^` (String) and `return None` (a NULL pointer) both
-    emit int64_t/int, and a `-> Bool` method's comparison arm is `_Bool`; the
-    first two are ordinary pointer arms and the third matches its scalar
-    annotation. 2026-11-12: reading the C type for int/bool turned all of
-    those into errors and made 83 stdlib files fail. So an int/bool arm is
-    refused only when its SOURCE SHAPE is unambiguously scalar (see
-    `_scalar_shape_arm_kind`) and the annotation is not a scalar of that
-    family."""
-    _rt = _as_str(getattr(gen, 'func_ret_type', '') or '')
-    _vt = _as_str(vtype)
-    if not _rt.endswith(' *'):
-        return
-    if _vt in ('double', 'float'):
-        raise TypeError(
-            f"function {_as_str(getattr(gen, 'current_func_name', '') or '?')!r} "
-            f"is annotated to return {_rt!r} but has a return arm of type "
-            f"{_vt!r}; a float cannot be returned as a pointer "
-            f"(fix the annotation or the returned value)")
-    _kind = _scalar_shape_arm_kind(node) if node is not None else None
-    if _kind is None:
-        return
-    _ann_family = _annotation_scalar_family(
-        _as_str(getattr(gen, 'current_func_ret_ann', '') or ''))
-    if _ann_family == _kind:
-        return
-    raise TypeError(
-        f"function {_as_str(getattr(gen, 'current_func_name', '') or '?')!r} "
-        f"is annotated to return {_rt!r} but has a return arm of type "
-        f"{_vt!r}; a scalar of that type cannot be returned as a pointer "
-        f"(fix the annotation or the returned value)")
-
-
 def _gen_stmt_ReturnStmt(gen, node):
     # doc/OWNERSHIP_MODEL.md Phase 3 codegen wiring (TODO item 1) — see
     # gimple_gen_infra.py's "Public entry points" section for the whole
@@ -3629,13 +3308,6 @@ def _gen_stmt_ReturnStmt(gen, node):
     if node.value is None:
         ginf.emit_return_frees(gen)
         gmp._cattr_leave(gen)
-        # A bare `return` is `return None`, and in a tagged function a None is
-        # the shared None box, not the NULL word (which `mojo_repr_boxed` would
-        # read as the integer 0).
-        if _is_float_mixed_return(gen):
-            _nv = gen._call_expr('int64_t', 'mojo_box_none', [])
-            gen._emit(f"  return {_nv};")
-            return
         # If function returns non-void, return default value
         if gen.func_ret_type and gen.func_ret_type != 'void':
             ret = gen.func_ret_type
@@ -3677,32 +3349,6 @@ def _gen_stmt_ReturnStmt(gen, node):
         vtype: str = ''
         v: str = ''
         vtype, v = gen.lower_expr(node.value)
-        _check_float_arm_into_annotated_pointer(gen, vtype, node.value)
-        # A dict slot read whose runtime kind is on the slot: box it so the
-        # kind survives a return (callers cannot see this frame's dict/key temps).
-        _dsr = getattr(gen, '_dict_slot_reads', None)
-        _dsr_hit = None
-        if _dsr is not None:
-            _dsr_hit = _dsr.get(v)
-            if _dsr_hit is None and isinstance(node.value, gimple_ctypes.IdentExpr):
-                _dsr_hit = _dsr.get(_as_str(node.value.name))
-        if _dsr_hit is not None and vtype in ('int', 'int64_t'):
-            _dv, _kv, _kk = _dsr_hit
-            if _kk == 'str':
-                v = gen._call_expr('int64_t', 'mojo_dict_slot_boxed',
-                                   [('MojoDict *', _dv), ('char *', _kv)])
-            elif _kk == 'bytes':
-                v = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_bytes',
-                                   [('MojoDict *', _dv), ('MojoBytes *', _kv)])
-            elif _kk == 'none':
-                v = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_none',
-                                   [('MojoDict *', _dv)])
-            vtype = 'int64_t'
-            # Record as boxed so kind-aware consumers can see it via _dict_slot_reads
-            # (the dict kind is stored per-key, not in _tagged_word_vals). Do NOT add
-            # to _tagged_word_vals: that set is for tagged generator words only and
-            # falsely triggers MIXED_NAME_NON_INT64_REFUSAL when a dict read name is
-            # later rebound to a non-int64 C type.
         # A generator handle leaving a function whose return slot is a plain word
         # (`def iglob(...): it = _iglob(...); return it`, consumed as `list(iglob(...))`):
         # the consumer can only drain it if the run time knows which generator it is.
@@ -3866,30 +3512,6 @@ def _gen_stmt_ReturnStmt(gen, node):
         if gen.current_func_name and v in gen._func_value_names:
             gen._return_func_value_names[gen.current_func_name] = \
                 gen._func_value_names[v]
-        # A float+pointer function returns the TAGGED WORD: box this arm by
-        # its kind so the declared `int64_t` return carries the value instead
-        # of truncating it into the pointer the old join chose. AFTER the
-        # bookkeeping above, which is about the value's own container shape and
-        # still wants the unboxed `v`.
-        if _is_float_mixed_return(gen):
-            if isinstance(node.value, gimple_ctypes.NoneLiteral) or (
-                    isinstance(node.value, gimple_ctypes.IdentExpr)
-                    and _as_str(node.value.name) == 'None'):
-                # `return None` lowers as the word 0, which is an int slot's
-                # value, not the shared None box the kind reader looks for.
-                # The parser spells it as either a NoneLiteral or the bare
-                # identifier `None` (the same pair `coro.py` checks).
-                vtype, v = 'int64_t', gen._call_expr('int64_t',
-                                                     'mojo_box_none', [])
-            elif isinstance(node.value, gimple_ctypes.BoolLiteral):
-                # A bool arm lowers to the same `int` 1/0 an int arm does, so
-                # without the kind the word prints `1` where CPython prints
-                # `True`. `mojo_box_from_bool` is the tagged-word spelling.
-                vtype, v = 'int64_t', gen._call_expr(
-                    'int64_t', 'mojo_box_from_bool',
-                    [('int64_t', gen._to_int64(vtype, v))])
-            else:
-                vtype, v = _box_float_mixed_return_arm(gen, vtype, v)
         ret = gen.func_ret_type
         if ret == 'void':
             gen._emit(gimple_codegen._RETURN)
@@ -4520,7 +4142,6 @@ def _gen_stmt_StructDef(gen, node):
     cattrs = gen._class_attrs.get(node.name)
     if not cattrs:
         return
-    _ref_attrs = getattr(gen, '_class_ref_attrs', None) or {}
     for field in node.fields:
         if isinstance(field, gimple_ctypes.AssignStmt) \
                 and isinstance(field.target, gimple_ctypes.IdentExpr):
@@ -4531,38 +4152,6 @@ def _gen_stmt_StructDef(gen, node):
             continue
         if aname not in cattrs:
             continue
-        # A BY-REFERENCE capture of an enclosing local: the class attribute
-        # is the local's heap box, not a copy of its value. The enclosing
-        # function was made to box the name (`_class_ref_captures`), so the
-        # box pointer already exists; install THAT as the per-execution cell
-        # (`ctype *` global, pointed at by every instance built here) instead
-        # of allocating a fresh cell and storing the current value. The
-        # method's `self._cap_n` read then dereferences the box, so it sees
-        # the variable's current contents -- Python's late binding.
-        if cattrs[aname] in _ref_attrs:
-            _src = field.value
-            _src_name = ''
-            if isinstance(_src, gimple_ctypes.IdentExpr):
-                _src_name = _as_str(_src.name)
-            # The box exists in the C function this capture was boxed in. For
-            # a class written directly in that function, the boxed name is a
-            # local (`_boxed_mut_locals`). For a class inside a nested `def`,
-            # the class statement is emitted in the LIFTED function, where the
-            # name arrives through the closure env: `_gimple_mut_ptr` holds
-            # the preloaded BOX POINTER for a by-reference capture (its env
-            # field is `T *`), so install that. A name with neither is not a
-            # capture here (it is a local of the lifted function); fall
-            # through to the ordinary by-value cell for it.
-            _box_expr = ''
-            if _src_name != '':
-                if _src_name in getattr(gen, '_boxed_mut_locals', {}):
-                    _box_expr = gen._cname(_src_name)
-                else:
-                    _box_expr = (getattr(gen, '_gimple_mut_ptr', None)
-                                 or {}).get(_src_name) or ''
-            if _box_expr != '':
-                gen._emit(f"  {cattrs[aname]} = {_box_expr};")
-                continue
         # A per-execution cell (module_gen registration): this execution gets its
         # OWN storage, and the global is pointed at it before the store below, so
         # the store and every class-name read in this call reach it, and the
@@ -4772,192 +4361,6 @@ def _flatten_or_pattern_into(pat, out: list) -> None:
         out.append(pat)
 
 
-
-def _pattern_class_struct_name(gen, func):
-    """Resolve the struct name a class pattern's constructor names, or None."""
-    if isinstance(func, gimple_ctypes.IdentExpr):
-        return _as_str(func.name)
-    if isinstance(func, gimple_ctypes.MemberExpr):
-        # e.g. module.Class or pkg.mod.Class: best-effort last component.
-        return _as_str(getattr(func, 'member', '') or '') or None
-    return None
-
-
-def _iter_structdefs(gen):
-    """Yield StructDef objects visible to this generator, best-effort."""
-    seen = set()
-    def _yield_from(coll):
-        if not coll:
-            return
-        # dict module_name -> stmts
-        if isinstance(coll, dict):
-            for v in coll.values():
-                yield from _yield_from(v)
-            return
-        try:
-            for s in coll:
-                if isinstance(s, gimple_ctypes.StructDef):
-                    sid = id(s)
-                    if sid in seen:
-                        continue
-                    seen.add(sid)
-                    yield s
-        except TypeError:
-            return
-    for name in ('_module_stmts', 'module_stmts', '_all_transitive_stmts_ordered',
-                 '_all_struct_defs', 'all_struct_defs', 'stmts', '_stmts',
-                 '_parsed_stmts', '_root_stmts'):
-        yield from _yield_from(getattr(gen, name, None))
-    # Also scan any list-valued attrs that look like stmt lists as last resort.
-    try:
-        for k, v in list(getattr(gen, '__dict__', {}).items()):
-            if isinstance(v, list) and v and isinstance(v[0], (gimple_ctypes.StructDef,)):
-                yield from _yield_from(v)
-    except Exception:
-        pass
-
-
-def _structdef_for_name(gen, name):
-    if not name:
-        return None
-    for s in _iter_structdefs(gen):
-        if _as_str(getattr(s, 'name', '')) == name:
-            return s
-    return None
-
-
-def _extract_match_args_from_structdef(gen, sd, n_given, cname):
-    """Return (names, explicit_or_dataclass) or (None, reason)."""
-    if sd is None:
-        # Fallback: if generator already knows it as a dataclass-like struct via
-        # field types, we cannot safely synthesize explicit __match_args__ here.
-        # But we can try comptime aliases stored on gen.
-        ca_all = getattr(gen, '_struct_comptime_aliases', {}) or {}
-        ca = ca_all.get(cname, {}) if cname else {}
-        if '__match_args__' in ca:
-            val = ca['__match_args__']
-            if isinstance(val, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
-                names = []
-                ok = True
-                for el in getattr(val, 'elements', []) or []:
-                    if isinstance(el, gimple_ctypes.StringLiteral):
-                        names.append(el.value)
-                    else:
-                        ok = False
-                        break
-                if ok:
-                    return names, 'explicit'
-            return None, 'nonliteral'
-        # dataclass heuristic from struct_field_types when decorators unknown: refuse,
-        # as we cannot prove init-order vs __match_args__ without StructDef.
-        if cname and cname in getattr(gen, 'struct_field_types', {}):
-            # try to detect dataclass via known decorator tables
-            decs = None
-            for attr in ('_struct_decorators', 'struct_decorators'):
-                dmap = getattr(gen, attr, None) or {}
-                if cname in dmap:
-                    decs = dmap[cname]
-                    break
-            if decs is not None:
-                decs_s = [str(d) for d in decs]
-                if 'dataclass' in decs_s or '@dataclass' in decs_s:
-                    # Use declaration order from struct_field_types.
-                    fields = list((getattr(gen, 'struct_field_types', {}) or {}).get(cname, {}).keys())
-                    # Cannot prove init=False for dataclass fields without StructDef.
-                    return None, 'unknown'
-            # No explicit __match_args__ known
-            return None, 'missing'
-        return None, 'unknown'
-    # Explicit __match_args__ = ('x', 'y') as class-level assignment in fields/body.
-    for f in getattr(sd, 'fields', []) or []:
-        if isinstance(f, gimple_ctypes.AssignStmt):
-            tgt = getattr(f, 'target', None)
-            if isinstance(tgt, gimple_ctypes.IdentExpr) and tgt.name == '__match_args__':
-                val = getattr(f, 'value', None)
-                if isinstance(val, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
-                    names = []
-                    ok = True
-                    for el in getattr(val, 'elements', []) or []:
-                        if isinstance(el, gimple_ctypes.StringLiteral):
-                            names.append(el.value)
-                        else:
-                            ok = False
-                            break
-                    if ok:
-                        return names, 'explicit'
-                    return None, 'nonliteral'
-                return None, 'nonliteral'
-    # comptime alias form
-    ca = getattr(sd, 'comptime_aliases', None) or {}
-    if '__match_args__' in ca:
-        val = ca['__match_args__']
-        if isinstance(val, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
-            names = []
-            ok = True
-            for el in getattr(val, 'elements', []) or []:
-                if isinstance(el, gimple_ctypes.StringLiteral):
-                    names.append(el.value)
-                else:
-                    ok = False
-                    break
-            if ok:
-                return names, 'explicit'
-        return None, 'nonliteral'
-    # dataclass: synthesize from __init__-participating fields in declaration order.
-    decs = [str(d) for d in (getattr(sd, 'decorators', []) or [])]
-    # also check gen decorator maps
-    if not (('dataclass' in decs) or ('@dataclass' in decs)):
-        for attr in ('_struct_decorators', 'struct_decorators'):
-            dmap = getattr(gen, attr, None) or {}
-            if cname and cname in dmap:
-                decs2 = [str(d) for d in dmap[cname]]
-                if 'dataclass' in decs2 or '@dataclass' in decs2:
-                    decs = decs2
-                    break
-    if 'dataclass' in decs or '@dataclass' in decs:
-        names = []
-        for f in getattr(sd, 'fields', []) or []:
-            if isinstance(f, gimple_ctypes.VarDecl):
-                fname = getattr(f, 'name', None)
-                if fname is None:
-                    continue
-                # If compiler cannot prove init=False, refuse rather than guess.
-                if getattr(f, 'init', True) is False:
-                    continue
-                names.append(_as_str(fname))
-            elif isinstance(f, gimple_ctypes.AssignStmt):
-                tgt = getattr(f, 'target', None)
-                if isinstance(tgt, gimple_ctypes.IdentExpr):
-                    tname = _as_str(tgt.name)
-                    if tname.startswith('__') and tname.endswith('__'):
-                        continue
-                    names.append(tname)
-        return names, 'dataclass'
-    # No __match_args__ and not dataclass
-    return None, 'missing'
-
-
-def _resolve_class_match_args(gen, func, args, line):
-    """Return list of attribute names to bind for positional class subpatterns."""
-    from formal import diagnostics as formal_model
-    n = len(args)
-    cname = _pattern_class_struct_name(gen, func)
-    sd = _structdef_for_name(gen, cname) if cname else None
-    names, reason = _extract_match_args_from_structdef(gen, sd, n, cname)
-    display = cname or formal_model.spelled(func)
-    if reason == 'unknown' or reason == 'nonliteral':
-        raise formal_model.CodegenError(
-            f"cannot resolve __match_args__ for '{display}' in class pattern "
-            f"(needed for {n} positional sub-pattern{'s' if n != 1 else ''})")
-    if reason == 'missing':
-        raise formal_model.CodegenError(
-            f"TypeError: {display}() accepts 0 positional sub-patterns ({n} given)")
-    if n > len(names):
-        raise formal_model.CodegenError(
-            f"TypeError: {display}() accepts {len(names)} positional sub-pattern{'s' if len(names) != 1 else ''} ({n} given)")
-    return names[:n]
-
-
 def _gen_stmt_MatchStmt(gen, node):
     """`match subject: case p1: ... case p2, p3: ... case _: ...`
 
@@ -5082,16 +4485,7 @@ def _gen_stmt_MatchStmt(gen, node):
             # `.NAME` against a struct-typed subject resolves against that type
             # here, before the formal model's refusal below, which has no type.
             if isinstance(pattern, gimple_ctypes.DottedLiteral):
-                _resolved = _resolve_dotted_case_pattern(gen, subj_type, pattern)
-                if _resolved is None:
-                    # Unresolved `.NAME` (no struct alias, or no `__eq__` to make
-                    # the arm a comparison): lowering it as a value would compare
-                    # the subject with nothing, so it is refused by name.
-                    raise formal_model.CodegenError(formal_model.match_pattern_refusal(
-                        'enum pattern', formal_model.spelled(pattern),
-                        getattr(gen, 'function_name', '<module>'),
-                        getattr(pattern, 'line', 0) or getattr(match_case, 'line', 0) or 0))
-                pattern = _resolved
+                pattern = _resolve_dotted_case_pattern(gen, subj_type, pattern) or pattern
             # Ask the formal model whether this pattern is allowed here.
             _bound = set(getattr(gen, 'var_types', set()) or ())
             _bound |= set(getattr(gen, '_global_var_types', {}).keys())
@@ -5102,7 +4496,8 @@ def _gen_stmt_MatchStmt(gen, node):
             kind = formal_model.match_pattern_kind(pattern, _bound)
             if kind == "class pattern (type test)":
                 # `case C():` or positional-capture-only `case C(x):` — isinstance
-                # guard; positional args bind from C.__match_args__ (CPython).
+                # guard; positional args bind the subject's __match_args__[i]
+                # attribute via runtime getattr.
                 isinstance_node = gimple_ctypes.CallExpr(
                     func=gimple_ctypes.IdentExpr(name="isinstance"),
                     args=[subj_ref, pattern.func],
@@ -5114,16 +4509,16 @@ def _gen_stmt_MatchStmt(gen, node):
                     # Only bind when the isinstance guard holds: bail to fail_bb
                     # otherwise, so the attribute read never runs on a non-instance.
                     gen._emit(f"  if (!{cv}) goto {fail_bb};")
-                    _ma_names = _resolve_class_match_args(gen, pattern.func, args,
-                                                          getattr(pattern, 'line', 0) or getattr(match_case, 'line', 0) or 0)
-                    for _ma_i, subpat in enumerate(args):
+                    for i, subpat in enumerate(args):
                         cname = getattr(subpat, 'name', None)
-                        attr_name = _ma_names[_ma_i]
-                        if cname is not None and cname != '_':
-                            at, av = gen.lower_expr(gimple_ctypes.MemberExpr(obj=subj_ref, member=attr_name))
-                            if cname not in gen.var_types:
-                                gen._declare_var(cname, at)
-                            gen._safe_coerce_emit(at, gen.var_types.get(cname, at), av, cname)
+                        gen._emit("  _mojo_getattr_missed = 0;")
+                        attr_val = gen._call_expr('int64_t', 'mojo_getattr_any',
+                                                 [('void *', f"(void *){subj_v}"),
+                                                  ('char *', gen._intern_string(cname if cname else '_'))])
+                        if cname is not None and cname not in gen.var_types:
+                            gen._declare_var(cname, 'int64_t')
+                        if cname is not None:
+                            gen._emit(f"  {cname} = {attr_val};")
                     gen._emit(f"  goto {arm_bb};")
                     cv = None
             elif kind in formal_model.MATCH_REFUSED_KINDS:
@@ -5434,19 +4829,6 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                     v_cast = gen._new_temp(elem_t)
                     gen._safe_coerce_emit(vtype, elem_t, v, v_cast)
                     gen._emit(f"  *{addr} = {v_cast};")
-            elif ot in ('float', 'double', '__fp16'):
-                # Scalar-erased SIMD/Scalar lane WRITE, mirroring the read arm
-                # in `_lower_subscript` (and for the same reason: a scalar has
-                # no legal Mojo subscript, so this is a lane of the erased
-                # value). The erased value IS the lane, so assign the slot
-                # instead of emitting `scalar[i] = x`, which gcc rejects with
-                # "subscripted value is neither array nor pointer nor vector".
-                if vtype == ot:
-                    gen._emit(f"  {obj_v} = {v};")
-                else:
-                    _wv = gen._new_temp(ot)
-                    gen._safe_coerce_emit(vtype, ot, v, _wv)
-                    gen._emit(f"  {obj_v} = {_wv};")
             elif not gen._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
                 gen._emit(f"  {obj_v}[{idx_v}] = {v};")
         else:
@@ -5670,12 +5052,6 @@ def _gen_stmt_ContinueStmt(gen, node):
 def _gen_stmt_ExprStmt(gen, node):
     if isinstance(node.value, gimple_ctypes.CallExpr) and isinstance(node.value.func, gimple_ctypes.IdentExpr):
         raw_name = gen._ident_call_name(node.value.func)
-        # `constrained(cond, msg)` in statement position: this bare-call fast
-        # path never reaches _lower_call, so route through the shared
-        # compile-time checker before any other statement lowering.
-        _constrained_res = ggc._try_lower_constrained(gen, node.value)
-        if _constrained_res is not None:
-            return
         # A bare, value-discarding call to an offloaded DEVICE function.
         # This handler has its own fast path for statement-position calls and
         # never reaches _lower_call, so without this the launch hook only
@@ -5727,7 +5103,7 @@ def _gen_stmt_ExprStmt(gen, node):
             return
         if raw_name in gen._async_api:
             api = gen._async_api[raw_name]
-            arg_pairs = [_lower_stmt_arg(gen, a) for a in node.value.args]
+            arg_pairs = [gen.lower_expr(a) for a in node.value.args]
             base = api['base']
             handle = gen._call_expr('MojoAsync *', f"{base}_start", arg_pairs)
             gen._emit(f"  {base}_destroy ({handle});")
@@ -5829,7 +5205,7 @@ def _gen_stmt_ExprStmt(gen, node):
         if raw_name == gen._inner_func_name and gen._env_param:
             lifted   = gen.current_func_name
             env_var  = gen._env_param
-            arg_pairs = [_lower_stmt_arg(gen, a) for a in node.value.args]
+            arg_pairs = [gen.lower_expr(a) for a in node.value.args]
             env_type = gen.func_param_types.get(lifted, ['void *'])[0]
             full_arg_pairs = [(env_type, env_var)] + arg_pairs
             fname_c  = gimple_ctypes._safe_name(lifted)
@@ -5998,7 +5374,7 @@ def _gen_stmt_ExprStmt(gen, node):
         # all, so without this its prototype was never recorded and the
         # call stayed an implicit declaration.
         ggc._ensure_libc_self_extern(gen, raw_name)
-        arg_pairs = [_lower_stmt_arg(gen, a) for a in node.value.args]
+        arg_pairs = [gen.lower_expr(a) for a in node.value.args]
 
         # exit(msg)/quit(msg) as a bare statement — see _lower_named_
         # call's identical check (this is that fix's statement-level
@@ -6215,64 +5591,13 @@ def _comptime_assert_fail(gen, node, msg):
     raise RuntimeError(f'{loc}comptime assertion failed: {msg}')
 
 
-def _comptime_conforms_to_pred(gen):
-    try:
-        import mojo.middle.comptime as _comptime_eval
-        sb = getattr(gen, '_struct_bases', None) or {}
-        tb = getattr(gen, '_trait_bases', None) or {}
-        ex = getattr(gen, '_conformance_bases_extra', None) or {}
-        tbt = getattr(gen, '_conformance_trait_bases_text', None)
-        if tbt is None:
-            tbt = {}
-            try:
-                src = getattr(gen, '_source_text', '') or ''
-                if not src:
-                    fn = getattr(gen, '_current_filename', '') or ''
-                    if fn:
-                        with open(fn) as f:
-                            src = f.read()
-                if src:
-                    for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\s*(\[[^\]]*\])?\s*\(([^)]*)\)\s*:', src, re.MULTILINE):
-                        name = m.group(1)
-                        bstr = m.group(3) or ''
-                        blist = []
-                        for part in bstr.split(','):
-                            part = part.strip()
-                            if not part:
-                                continue
-                            b = part.split('[')[0].split('.')[-1].strip()
-                            if b and re.match(r'^[A-Za-z_]\w*$', b):
-                                blist.append(b)
-                        tbt[name] = blist
-                    for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\b', src, re.MULTILINE):
-                        tbt.setdefault(m.group(1), [])
-            except Exception:
-                tbt = {}
-            try:
-                gen._conformance_trait_bases_text = tbt
-            except Exception:
-                pass
-        if not sb and not tb and not ex and not tbt:
-            return None
-        bases = dict(ex)
-        bases.update(sb)
-        bases.update(tb)
-        for k, v in (tbt or {}).items():
-            if v or k not in bases:
-                bases[k] = v
-        return lambda t, tr, _b=bases: _comptime_eval.conforms_to(t, tr, _b)
-    except Exception:
-        return None
-
-
 def _eval_comptime_assert_msg(gen, node):
     msg = None
     msg_node = getattr(node, 'msg', None)
     if msg_node is not None:
         try:
             import mojo.middle.comptime as _comptime_eval
-            m = _comptime_eval.eval_const(msg_node, getattr(gen, '_comptime_vals', {}) or {},
-                                          conforms_to_pred=_comptime_conforms_to_pred(gen))
+            m = _comptime_eval.eval_const(msg_node, getattr(gen, '_comptime_vals', {}) or {})
             if isinstance(m, str):
                 msg = m
             elif m is not None:
@@ -6304,10 +5629,8 @@ def _gen_stmt_AssertStmt(gen, node):
     if getattr(node, 'is_comptime', False):
         import mojo.middle.comptime as _comptime_eval
         cvals = getattr(gen, '_comptime_vals', {}) or {}
-        _cpred = _comptime_conforms_to_pred(gen)
         try:
-            _res = _comptime_eval.eval_const_bool(getattr(node, 'value'), cvals,
-                                                  conforms_to_pred=_cpred)
+            _res = _comptime_eval.eval_const_bool(getattr(node, 'value'), cvals)
         except Exception:
             _res = None
         if _res is False:
@@ -6315,8 +5638,7 @@ def _gen_stmt_AssertStmt(gen, node):
                 return
         if _res is None:
             try:
-                _st = _comptime_eval.eval_const_bool_state(getattr(node, 'value'), cvals,
-                                                           conforms_to_pred=_cpred)
+                _st = _comptime_eval.eval_const_bool_state(getattr(node, 'value'), cvals)
             except Exception:
                 _st = None
             if _st == 0:  # CONST_FALSE
@@ -6568,20 +5890,7 @@ def _emit_except_handler(gen, handler, node, bb_after: str):
         gen._emit(f"  {temp_var} = mojo_exc_obj_get ();")
         bound = gen._new_temp(exc_ctype)
         gen._emit(f"  {bound} = ({exc_ctype}) {temp_var};")
-        # The name is a heap box when a nested closure or a class declared in
-        # THIS function captures it by reference. References inside the
-        # handler go through `bound` above, but the box is what the capture
-        # reads, so the caught object has to land there too; without this the
-        # method read the box's uninitialised payload. Resolve the box lvalue
-        # BEFORE the `_c_names` redirect below, or `_write_dest` follows that
-        # redirect and dereferences the handler temp instead of the box.
-        _box_dest = None
-        if bind_name in getattr(gen, '_boxed_mut_locals', {}):
-            _box_dest = gen._write_dest(bind_name)
         gen._c_names[bind_name] = bound
-        if _box_dest is not None:
-            _box_ct = gen._boxed_mut_locals[bind_name]
-            gen._emit(f"  {_box_dest} = ({_box_ct}) {bound};")
     gen._last_was_terminal = False
     _bscope = ginf._open_block_scope(gen)
     for s in handler.body:
@@ -6941,12 +6250,10 @@ def _gen_stmt_TryStmt(gen, node):
     gen._flow_none_state = _merged
 
 
-def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs, _on_exc=False):
+def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs):
     """Emit every `with`-item's teardown (`__exit__` call, generator
     resume/destroy, or a placeholder comment), in REVERSE index order —
-    last acquired, first released. On the exception path (_on_exc), a
-    generic generator-context-manager handle uses the exception-aware
-    runtime exit so cleanup semantics are preserved.
+    last acquired, first released.
 
     HOISTED out of `_gen_stmt_WithStmt` (was a nested closure reading the
     enclosing function's `_ctx_ts`/`_ctx_vs`/`_ctx_sns`/`_gctx_bases`/
@@ -7003,47 +6310,15 @@ def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs, _on_exc=
             _gval = _as_str(_gval)
             # Generator context manager: the final resume() runs the
             # body from its bare yield to co_return (= __exit__), then
-            # the coroutine frame is destroyed. On exception path, throw the
-            # pending exception into the generator (contextmanager protocol).
-            if _gbase == '__mojo_gen_cm':
-                _hw = gen._new_temp('int64_t')
-                gen._safe_coerce_emit('MojoGenerator *', 'int64_t', _gval, _hw)
-                _exit_fn = 'mojo_gen_cm_exit_exc' if _on_exc else 'mojo_gen_cm_exit_normal'
-                gen._emit_call('void', '', _exit_fn, [('int64_t', _hw)])
-            elif _on_exc:
-                _hw = gen._new_temp('int64_t')
-                gen._safe_coerce_emit('MojoGenerator *', 'int64_t', _gval, _hw)
-                if _gbase.startswith('__mgco_'):
-                    # Stack-switch generator: use runtime throw API.
-                    _et = gen._call_expr('int64_t', 'mojo_exc_type_get', [])
-                    _em = gen._call_expr('char *', 'mojo_exc_msg_get', [])
-                    _eo = gen._call_expr('void *', 'mojo_exc_obj_get', [])
-                    _emw = gen._new_temp('int64_t')
-                    gen._safe_coerce_emit('char *', 'int64_t', _em, _emw)
-                    _eow = gen._new_temp('int64_t')
-                    gen._safe_coerce_emit('void *', 'int64_t', _eo, _eow)
-                    gen._emit_call('void', '', 'mojo_exc_pending_set', [('int', '0')])
-                    gen._emit_call('int64_t', '', '__mojo_gen_throw',
-                                   [('int64_t', _hw), ('int64_t', _et),
-                                    ('int64_t', _emw), ('int64_t', _eow)])
-                else:
-                    # C++20 compiled generator: arm throw state, then resume.
-                    _et = gen._call_expr('int64_t', 'mojo_exc_type_get', [])
-                    _em = gen._call_expr('char *', 'mojo_exc_msg_get', [])
-                    _eo = gen._call_expr('void *', 'mojo_exc_obj_get', [])
-                    gen._emit_call('void', '', 'mojo_gen_throw_set',
-                                   [('int64_t', _hw), ('int64_t', _et),
-                                    ('char *', _em), ('void *', _eo)])
-                    gen._emit_call('void', '', 'mojo_exc_pending_set', [('int', '0')])
-                    done_t = gen._new_temp('_Bool')
-                    gen._emit(f"  {done_t} = {_gbase}_resume ({_gval});")
-                gen._emit_call('void', '', f"{_gbase}_destroy",
-                               [('MojoGenerator *', _gval)])
-            else:
-                done_t = gen._new_temp('_Bool')
-                gen._emit(f"  {done_t} = {_gbase}_resume ({_gval});")
-                gen._emit_call('void', '', f"{_gbase}_destroy",
-                               [('MojoGenerator *', _gval)])
+            # the coroutine frame is destroyed. resume()'s _Bool
+            # result (False == already done) is intentionally
+            # discarded — real Python's __exit__ return value only
+            # suppresses exceptions, and this normal-path emission
+            # runs after an unexceptional body.
+            done_t = gen._new_temp('_Bool')
+            gen._emit(f"  {done_t} = {_gbase}_resume ({_gval});")
+            gen._emit_call('void', '', f"{_gbase}_destroy",
+                           [('MojoGenerator *', _gval)])
             continue
         exit_fn = gen._struct_method_csym(sn, '__exit__', '')
         if exit_fn in gen.func_return_types or f"{sn}___exit__" in gen.func_return_types:
@@ -7156,30 +6431,6 @@ def _gen_stmt_WithStmt(gen, node):
                     gen._declare_var(alias, 'int64_t')
                 gen._safe_coerce_emit('int64_t', gen.var_types[alias], val_t, alias)
             _gctx_bases.append(base)
-            _gctx_vs.append(ctx_v)
-            _ctx_ts.append(ctx_t)
-            _ctx_vs.append(ctx_v)
-            _ctx_sns.append(None)
-            continue
-        # A MojoGenerator* used as a context manager but not statically tracked
-        # in _generator_var_api (e.g. stored in a container and retrieved). If
-        # it is a registered generator handle, drive it via the runtime's
-        # generic generator-context-manager helpers.
-        if ctx_t == 'MojoGenerator *' and gen_api is None:
-            _hw = gen._new_temp('int64_t')
-            gen._safe_coerce_emit('MojoGenerator *', 'int64_t', ctx_v, _hw)
-            if item.alias is not None:
-                alias = _with_item_alias_name(item.alias)
-                val_t = gen._call_expr('int64_t', 'mojo_gen_cm_enter',
-                                       [('int64_t', _hw)])
-                if alias not in gen.var_types:
-                    gen._declare_var(alias, 'int64_t')
-                gen._safe_coerce_emit('int64_t', gen.var_types[alias], val_t, alias)
-            else:
-                gen._emit_call('int64_t', '', 'mojo_gen_cm_enter', [('int64_t', _hw)])
-            # Mark as generic generator-cm: use special sentinel base so
-            # _with_emit_exits can emit runtime-driven exit.
-            _gctx_bases.append('__mojo_gen_cm')
             _gctx_vs.append(ctx_v)
             _ctx_ts.append(ctx_t)
             _ctx_vs.append(ctx_v)
@@ -7493,30 +6744,11 @@ def _gen_stmt_WithStmt(gen, node):
 
         gen._emit_label(bb_exc)
         gen._emit("  mojo_exc_pop ();")
-        # The body's exception arrived by longjmp (mojo_raise), which does not set
-        # the pending flag: it is in flight by definition here. Mark it, so the
-        # re-raise check after the exits sees it. Only a generator context
-        # manager that swallows the exception clears it, and that is the one
-        # suppression the check exists to honour. Without the mark the exception
-        # was dropped silently, and the enclosing `try` never ran its handler.
-        gen._emit("  mojo_exc_pending_set (1);")
-        _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs, True)
-        # A context manager may suppress the exception (e.g. a
-        # @contextlib.contextmanager generator that catches and does not
-        # re-raise). Propagate only if an exception is still pending after
-        # exits.
-        _pend = gen._call_expr('int', 'mojo_exc_pending_get', [])
-        _has_pend = gen._new_temp('_Bool')
-        gen._emit(f"  {_has_pend} = {_pend} != 0;")
-        _bb_reraise = gen._new_bb()
-        _bb_supp = gen._new_bb()
-        gen._emit(f"  if ({_has_pend}) goto {_bb_reraise}; else goto {_bb_supp};")
-        gen._emit_label(_bb_reraise)
+        _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs)
         gen._emit("  mojo_raise ();")
+        # Only emit goto if the exception handler didn't end with a return
         if not gen._last_was_terminal:
             gen._emit(f"  goto {bb_after};")
-        gen._emit_label(_bb_supp)
-        gen._emit(f"  goto {bb_after};")
 
         gen._emit_label(bb_after)
     else:

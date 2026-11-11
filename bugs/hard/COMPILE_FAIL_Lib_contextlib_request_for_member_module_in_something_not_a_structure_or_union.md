@@ -1,4 +1,3 @@
-SPLIT: COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union-part2, COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union-part3 (part1 fixed: variadic async `__aexit__` start-call packing, pinned by `test_asyncio_run_module_scope_regress.py::variadic_aexit_awaited_in_main`)
 # COMPILE_FAIL: Lib/contextlib.py — blocked on the async/coroutine codegen (title STALE)
 
 ## Status 2026-10-29 (third session) — the call-arity defect landed; the doc stays open

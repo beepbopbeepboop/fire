@@ -945,7 +945,7 @@ ELAB_DEPTH: list = [0]
 
 def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
                 gcc: str = None, nested_defs: list = None,
-                renames: list = None, conformance_bases: dict = None) -> tuple:
+                renames: list = None) -> tuple:
     """Instantiate template_src for type_args, via the shared CAS.
     Returns (mangled_name, object_path_or_None, hit, cpp_object_path_or_None)
     — both object results are PATHS into the CAS (cas.get_or_build's own
@@ -960,10 +960,6 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
     nested field resolves to the real layout. Both fold into the CAS key, so
     a nested instantiation never collides with the plain one of the same
     (template, type_args).
-
-    `conformance_bases` is an optional {name: [base names/exprs]} map of
-    struct/trait declarations visible to the instantiation, used to fold
-    `conforms_to(...)` in comptime conditions inside the instantiated body.
 
     `cpp_object_path` is non-None exactly when the instantiated template
     contains a nested `async def`/generator this codegen compiles to a real
@@ -1044,22 +1040,6 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
             _defs.append(_d)
         concrete = '\n'.join(_defs) + '\n' + concrete
         _nested_extra = (tuple(renames or []), tuple(_defs), _recv_guard)
-    # A `conforms_to` condition in an instantiation's comptime checks is
-    # decided from declared bases that live outside the instantiated fragment;
-    # the bases must therefore be part of the content key so a fix that makes
-    # a previously-undecidable condition decidable cannot be served a stale
-    # cached artifact.
-    _conf_extra = None
-    if conformance_bases and 'conforms_to' in template_src:
-        try:
-            _conf_items = tuple(sorted(
-                (k, tuple(v) if isinstance(v, list) else v)
-                for k, v in conformance_bases.items()))
-            _conf_extra = ('conforms_to_v1', _conf_items)
-        except Exception:
-            _conf_extra = ('conforms_to_v1',)
-    if _conf_extra is not None:
-        _nested_extra = (_nested_extra, _conf_extra) if _nested_extra is not None else _conf_extra
     key = cas.instantiation_key(template_src, type_args, comptime_args, gcc,
                                 _OBJ_FLAGS, extra=_nested_extra)
 
@@ -1084,7 +1064,6 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
     # rather than teaching cas.get_or_build a multi-artifact return shape
     # for this one caller).
     _cpp_bytes: dict = {}
-    _ret_bytes: dict = {}
 
     def build():
         # The instantiated function is already uniquely named (mangled); don't
@@ -1150,14 +1129,7 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
         # Mark the gen so the backend can suppress such inapplicable-overload
         # diagnostics without hiding real diagnostics in normal compilation.
         gen._is_elaborated_instantiation = True
-        if conformance_bases:
-            gen._conformance_bases_extra = dict(conformance_bases)
         c = gen.gen_module(Parser(py_tokenize(concrete)).with_filename(mfile).parse_module())
-        # The defining unit's OWN return decision for the instantiated
-        # function (an annotation, or the body's inferred type when the
-        # template has none). Recorded so the caller declares the call site
-        # with the same type the definition has — see `defined_return_ctype`.
-        _ret_bytes['data'] = (gen.func_return_types.get(mangled) or '').encode()
         cfile, ofile = os.path.join(wd, mangled + '.c'), os.path.join(wd, mangled + '.o')
         with open(cfile, 'w') as f:
             f.write(c)
@@ -1213,56 +1185,18 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
     _IN_PROGRESS.add(key)
     ELAB_DEPTH[0] += 1
     try:
-        # A hard guard on nested elaboration depth. Deep-but-finite concrete
-        # cascades are fine; an uninstantiable recursive generic must fail in
-        # bounded work rather than loop. Mirrors modular's
-        # --elaboration-max-depth (default 128).
-        _ELAB_MAX_DEPTH = 128
-        if ELAB_DEPTH[0] > _ELAB_MAX_DEPTH:
-            raise RuntimeError(
-                f'elaborator expansion is {ELAB_DEPTH[0]} levels deep - '
-                f'infinite recursion?')
         obj, hit = cas.get_or_build(key, '.o', build)
-        if not hit:
+        if not hit and 'data' in _cpp_bytes:
             # First build of this instantiation, and it genuinely needed a
             # coroutine unit: publish it now (build() already ran above).
-            if 'data' in _cpp_bytes:
-                cas.publish(key, '.cpp.o', _cpp_bytes['data'])
-            cas.publish(key, '.ret', _ret_bytes['data'])
-        elif cas.lookup(key, '.ret') is None:
-            # An entry built before the `.ret` sidecar existed: its object is
-            # still the right one, but nothing records the return type. Build
-            # once more to learn it, and publish only the missing artifacts,
-            # leaving the existing `.o` untouched.
-            build()
-            if 'data' in _cpp_bytes and cas.lookup(key, '.cpp.o') is None:
-                cas.publish(key, '.cpp.o', _cpp_bytes['data'])
-            cas.publish(key, '.ret', _ret_bytes['data'])
+            cas.publish(key, '.cpp.o', _cpp_bytes['data'])
         # A PATH (cas.lookup's own return convention), not bytes — matches
         # `obj` above exactly, so callers can treat both uniformly (e.g.
         # gimple_codegen.py's `_link_objects`, ultimately passed straight
         # to a linker command line / cas.file_digest(path), never read as
         # in-memory bytes anywhere on that path).
         cpp_obj = cas.lookup(key, '.cpp.o')
-        with open(cas.lookup(key, '.ret')) as _f:
-            _DEFINED_RET[mangled] = _f.read() or None
     finally:
         ELAB_DEPTH[0] -= 1
         _IN_PROGRESS.discard(key)
     return mangled, obj, hit, cpp_obj
-
-
-# mangled name -> the C return type its defining unit gave it, recorded by
-# `instantiate` in this process (the CAS keeps it as the `.ret` sidecar).
-_DEFINED_RET: dict = {}
-
-
-def defined_return_ctype(mangled: str):
-    """The C return type the defining unit gave the instantiation `mangled`
-    (`'int64_t'`, `'void'`, ...), as recorded by the most recent `instantiate`
-    of that name in this process; None if there is none (a re-entrant cycle).
-
-    The defining unit is the authority. A template with no return annotation
-    gets its return type from its body (gen_func's inference), so reading the
-    annotation alone declared the call site `void` and dropped the value."""
-    return _DEFINED_RET.get(mangled)

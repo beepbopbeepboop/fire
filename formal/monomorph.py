@@ -252,130 +252,20 @@ def _template_names_of(src: str) -> tuple:
     lives INSIDE the memoized computation — outside it, every caller paid a
     whole-module parse per call (a bare-call walk asks once per call node)."""
     import reflect                                  # lazy — see the module docstring
+    from formal.build import parse_module
     out = sorted(name for name, why in reflect.export_exclusions(src).items()
                  if why == reflect.EXCL_GENERIC)
-    out = sorted(set(out) | {name for name, _fixed in _declaration_facts(src)[0]})
-    return tuple(out)
-
-
-# ── declaration facts: one parse per source, not one per ask ──────────────
-#
-# Three questions are answered off a source's top-level declarations, and each
-# used to parse the whole source for itself — once per (closure walk x module):
-#
-#   * `_template_names_of` scans for variadic `def`s (`f(a, *rest)`);
-#   * `formal/imports.py::instantiation_demands` scans the same declarations to
-#     count a variadic function's FIXED parameters before the star, so a call's
-#     extra-argument arity can be part of the demand;
-#   * the same function scans the consumer and every module of the closure for
-#     the STRUCT names its type-argument check compares.
-#
-# MEASURED on `std/python/bindings.mojo` (29 imports, a ~240-module closure):
-# `cProfile` put 484 s of a 550 s build inside 7 047 `formal.build.parse_module`
-# calls, 7 047 of them from `instantiation_demands` — the ask is once per
-# (dep x module of that dep's closure), and the same file was parsed again for
-# every dep.  The wall-clock cost was 149-248 s against 3.2 s when this walk was
-# written, and it is what made the "largest swept file is classified in a
-# bounded time" case go red under load (2026-11-12) — a real slowdown rather
-# than contention, because the same command's CPU time was 214 s idle or not.
-#
-# One derivation per source text, keyed like every other `_derived_from_source`
-# answer, makes it one parse per distinct source for the whole process.  It is
-# the same fix, for the same reason, as the `_derived_from_source` note above:
-# the answer is a function of the text alone, so nothing here needs an
-# invalidation argument and a long-lived sweep cannot read a stale one.
-
-def _declaration_facts_of(src: str) -> tuple:
-    """`((variadic (name, fixed params), …), (struct name, …))` from ONE parse."""
-    from formal.build import parse_module
-    variadics: dict = {}
-    structs: set = set()
     try:
         for st in parse_module(src):
-            if isinstance(st, F.StructDef):
-                structs.add(st.name)
-            elif isinstance(st, F.FunctionDef):
-                fixed = 0
-                var_name = None
-                for pentry in getattr(st, "params", None) or []:
-                    if not (isinstance(pentry, (list, tuple)) and pentry
-                            and isinstance(pentry[0], str)):
-                        continue
-                    pname = pentry[0]
-                    if pname.startswith("**"):
-                        var_name = None
-                        break
-                    if pname.startswith("*"):
-                        var_name = pname[1:] or pname
-                        break
-                    fixed += 1
-                if var_name is not None:
-                    variadics[st.name] = fixed
-    except Exception:  # noqa: BLE001 — an unparsable source declares nothing
-        return ((), ())
-    return (tuple(sorted(variadics.items())), tuple(sorted(structs)))
-
-
-def _declaration_facts(src: str) -> tuple:
-    """`_declaration_facts_of(src)`, computed once per distinct source text."""
-    return _derived_from_source("declaration_facts", src,
-                                lambda: _declaration_facts_of(src))
-
-
-def variadic_arities(src: str) -> dict:
-    """`{name: fixed parameter count}` for every variadic `def` `src` declares.
-
-    `def f(a: Int, *rest: Int)` is `{"f": 1}`: the number of positional
-    parameters before the star, which is what turns a call with three arguments
-    into the arity demand `__variadic_2_1__` (two extra beyond the one fixed).
-    A `**kwargs` is not a positional variadic and is deliberately absent — the
-    same rule `_template_names_of` applies when it decides which declarations
-    are templates at all.
-    """
-    return dict(_declaration_facts(src)[0])
-
-
-def declared_struct_names(src: str) -> frozenset:
-    """The names of the top-level `struct` declarations `src` makes."""
-    return frozenset(_declaration_facts(src)[1])
-
-
-def variadic_demands(consumer_src: str, arities: dict, skip=()) -> dict:
-    """`{name: [(arity spelling, …)]}` for `consumer_src`'s bare calls to
-    variadic functions named in `arities`.
-
-    The arity spelling is `__variadic_<extras>_<fixed>__`, the encoding
-    `mangle`/`instantiate` read back (`formal/monomorph.py:691`), so this is the
-    producer half of ONE spelling rather than a second rule.  `skip` is the
-    names the caller's own unit compiles — a call to those is answered by the
-    local-specialization machinery, exactly as `demands` skips `own`.
-
-    The parse of `consumer_src` is `_consumer_statements`, so a caller that
-    already asked `all_instantiation_calls` about the same text pays nothing for
-    this walk.  Before this helper existed each caller re-parsed the consumer
-    per module of the closure and re-implemented the arity scan.
-    """
-    wanted = {n for n in (arities or ()) if n} - set(skip or ())
-    if not wanted:
-        return {}
-    from formal import model as M                  # lazy — cycle
-    out: dict = {}
-    for st in _consumer_statements(consumer_src):
-        for node in M.iter_nodes(st):
-            if not isinstance(node, F.CallExpr):
-                continue
-            func = getattr(node, "func", None)
-            if not isinstance(func, F.IdentExpr) or func.name not in wanted:
-                continue
-            fixed = arities[func.name]
-            extras = len(getattr(node, "args", None) or []) - fixed
-            if extras < 0:
-                continue
-            arity_args = (f"__variadic_{extras}_{fixed}__",)
-            got = out.setdefault(func.name, [])
-            if arity_args not in got:
-                got.append(arity_args)
-    return out
+            if isinstance(st, F.FunctionDef) and st.name not in out and any(
+                    isinstance(p, (list, tuple)) and p and isinstance(p[0], str)
+                    and p[0].startswith('*') and not p[0].startswith('**')
+                    for p in (getattr(st, 'params', None) or [])):
+                out.append(st.name)
+        out = sorted(set(out))
+    except Exception:
+        pass
+    return tuple(out)
 
 
 def template_struct_names(src: str) -> list:
@@ -1905,17 +1795,49 @@ def own_demands(module_src: str) -> dict:
         for a in args:
             if a not in want[name]:
                 want[name].append(a)
-    # The variadic calls this module makes to ITS OWN variadic functions.  The
-    # arities and the consumer walk are `_declaration_facts` and
-    # `_consumer_statements`, so the parse this used to do per call is now the
-    # same one every other reader of this source shares.
-    variadics = {name: fixed for name, fixed in variadic_arities(module_src).items()
-                 if name in names}
-    for name, args in variadic_demands(module_src, variadics).items():
-        want.setdefault(name, [])
-        for a in args:
-            if a not in want[name]:
-                want[name].append(a)
+    # Collect variadic calls in own module
+    try:
+        from formal.build import parse_module
+        import fire_compiler as F
+        from formal import model as M
+        stmts = parse_module(module_src)
+        # Find variadic functions in this module
+        variadics = {}
+        for st in stmts:
+            if isinstance(st, F.FunctionDef):
+                fixed = 0
+                var_name = None
+                for pentry in getattr(st, 'params', []) or []:
+                    if isinstance(pentry, (list, tuple)) and pentry:
+                        pname = pentry[0]
+                        if isinstance(pname, str):
+                            if pname.startswith('**'):
+                                break
+                            elif pname.startswith('*') and not pname.startswith('**'):
+                                var_name = pname[1:] or pname
+                                break
+                            else:
+                                fixed += 1
+                if var_name is not None and st.name in names:
+                    variadics[st.name] = fixed
+        if variadics:
+            for st in stmts:
+                for node in M.iter_nodes(st):
+                    if isinstance(node, F.CallExpr):
+                        func = getattr(node, 'func', None)
+                        if isinstance(func, F.IdentExpr):
+                            bname = func.name
+                            if bname in variadics:
+                                nargs = len(getattr(node, 'args', None) or [])
+                                fixed = variadics[bname]
+                                extras = nargs - fixed
+                                if extras >= 0:
+                                    arity_args = (f'__variadic_{extras}_{fixed}__',)
+                                    want.setdefault(bname, [])
+                                    if arity_args not in want[bname]:
+                                        want[bname].append(arity_args)
+    except Exception:
+        pass
     return want
 
 

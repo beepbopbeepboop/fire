@@ -46,7 +46,7 @@ class Landable(unittest.TestCase):
 class Why(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
-        self.doc = os.path.join(self.tmp, "bugs", "" + "X" + ".md")
+        self.doc = os.path.join(self.tmp, "bugs", "X.md")
         os.makedirs(os.path.dirname(self.doc))
         open(self.tmp and self.doc, "w").write("# X\n")
 
@@ -74,24 +74,24 @@ class Why(unittest.TestCase):
             return S.why(doc)
 
     def test_no_free_slot_names_the_slot(self):
-        w = self.why("bugs/hard/" + "X" + ".md", deletion="")
+        w = self.why("bugs/hard/X.md", deletion="")
         self.assertIn("no free hard slot", w)
         self.assertIn("opus", w, "the answer names the slot and why it cannot take the doc")
 
     def test_skip_pattern_is_reported(self):
-        w = self.why("bugs/" + "OPEN_WORK" + ".md", deletion="", pool={
+        w = self.why("bugs/OPEN_WORK.md", deletion="", pool={
             "slots": [{"name": "s", "model": "m", "count": 1, "class": "easy"}], "skip": ["OPEN_WORK"]})
         self.assertIn("skip pattern", w)
 
     def test_a_finished_fix_is_the_ratchet(self):
-        w = self.why("bugs/" + "X" + ".md", deletion="abc Deleted bugs/" + "X" + ".md\n",
+        w = self.why("bugs/X.md", deletion="abc Deleted bugs/X.md\n",
                      tasks={"bug-x": task("bug-x", "DONE", 2, base="X")})
         self.assertIn("DONE ratchet", w)
 
     def test_an_unfinished_deletion_is_not_a_ratchet(self):
         """A branch deleted the doc but no DONE task holds it: the doc is NOT skipped, so the answer
         must fall through to whatever actually blocks it (here, the hard slot)."""
-        w = self.why("bugs/hard/" + "X" + ".md", deletion="abc Deleted bugs/" + "X" + ".md\n",
+        w = self.why("bugs/hard/X.md", deletion="abc Deleted bugs/X.md\n",
                      tasks={"bug-x": task("bug-x", "", 2, base="X")})
         self.assertNotIn("DONE ratchet", w)
         self.assertIn("no free hard slot", w)

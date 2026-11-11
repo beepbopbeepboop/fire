@@ -74,13 +74,6 @@ def neg(n):
 """
 
 
-# A PROVED per-export contract, in either spelling: `agrees_of_body` for a
-# straight-line body, or `agrees_of_body_under ... gcond` for one whose
-# overflow guards are the only branches on its normal path.  IDENT is the
-# export's name (or a regex for it).
-_PROVED = r"Contracts\.agrees_of_body(?:_under)? dylib_image IDENT (?:gcond )?bodyI"
-
-
 REC = "@@"
 RUN_TIMEOUT = 300
 
@@ -716,10 +709,7 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
         check(_re.search(rf"theorem {ident}_semantics_total\b", text),
               f"{ident} has no `_semantics_total` theorem: every export gets "
               f"one, proved or named")
-        # A proved contract is either the straight-line `agrees_of_body` or,
-        # for a body with overflow guards, the guarded `agrees_of_body_under`
-        # over the guard's own `bodyI`.  Both are proved; neither is a `_spec`.
-        proved = bool(_re.search(_PROVED.replace("IDENT", ident), text))
+        proved = (f"Contracts.agrees_of_body dylib_image {ident} bodyI" in text)
         named = bool(_re.search(rf"theorem {ident}_spec\b", text))
         # The emitter's THREE states for an export's contract, and the
         # difference between the last two is the whole point: "no claim, and it
@@ -763,16 +753,12 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
               f"{ident}'s contract namespace is missing from the generated file")
         check("sorry" not in ns.group(1),
               f"{ident}'s proved contract contains a `sorry`")
-    # `triple`'s overflow trap is an exit `svc`, which the model steps to
-    # `none`, so `triple` does not return a final state for every argument
-    # and its termination is NOT a fact of the model: it stays a named
-    # obligation (see `arm64_proof_gen.py`'s `_semantics_total` fallback).
-    # Pinned in that direction: a proof here would mean the model stopped
-    # stepping the exit to `none`, which is the regression to catch.
+    # `triple` is acyclic and call-free, so its termination is PROVED by the
+    # CFG walk rather than left as the obligation above.  Pinned so a
+    # regression to the `sorry` fallback is a failure, not a quiet extra hole.
     check(":=\n  DylibExport.total_of_halts dylib_image dylib_export_0_triple "
-          "dylib_export_0_triple_halts" not in text,
-          "triple's termination is proved, but its overflow trap halts "
-          "(an exit svc) and the model steps it to none")
+          "dylib_export_0_triple_halts" in text,
+          "triple's termination is no longer proved by the CFG walk")
     # The caller's theorem must stay PROVED and sorry-free: it is the whole
     # reason the obligations are named rather than the contract being admitted.
     # The caller's theorem must be DERIVED from the export's spec obligation
@@ -816,8 +802,7 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
     # exception: fixing it IS this change.  The set is now empty, so the check
     # reads as what it now means -- the dylib proof rests on no library hole --
     # and the subset logic below still fails if a NEW one appears.
-    from formal import proof_gaps as _pg
-    KNOWN_LIB_HOLES: set = set(_pg.SCAFFOLD_HOLES)
+    KNOWN_LIB_HOLES: set = set()
     try:
         from formal.lean import library_census, find_lean
         lib = library_census(find_lean(HERE), os.path.join(HERE, "lib"))
@@ -973,7 +958,8 @@ def test_several_exports_and_no_derivable_spec(tmpdir, shared):
     for i, (ident, spec) in enumerate(
             [("dylib_export_0_add1", "n + (1 : UInt64)"),
              ("dylib_export_1_mul2", "n * (2 : UInt64)")]):
-        check(_re.search(_PROVED.replace("IDENT", ident), text),
+        check(_re.search(rf"Contracts\.agrees_of_body dylib_image {ident} bodyI",
+                         text),
               f"{ident}'s contract is not proved: a dylib with several exports "
               f"still gets a named obligation instead, which is the defect this "
               f"case exists to keep fixed")
@@ -1099,12 +1085,12 @@ def test_an_export_that_binds_a_local_still_gets_a_proved_contract(tmpdir, share
     for name in ("one_local", "two_locals"):
         ident = ("dylib_export_%d_%s"
                  % ([e["name"] for e in built["exports"]].index(name), name))
-        check(_re.search(_PROVED.replace("IDENT", ident), text),
+        check(_re.search(rf"Contracts\.agrees_of_body dylib_image {ident} bodyI",
+                         text),
               f"{name}'s contract is not proved, so widening the derivation "
               f"did not reach the proof layer")
     check(not _re.search(r"rebound\b.*_spec\b", text, _re.S)
-          or not _re.search(r"agrees_of_body(?:_under)? dylib_image "
-                            r"dylib_export_2_rebound", text),
+          or "agrees_of_body dylib_image dylib_export_2_rebound" not in text,
           "the rebound export was given a contract anyway")
     check("dylib_export_2_rebound" in text
           and "NO SPEC DERIVED for dylib_export_2_rebound" in text,
@@ -1712,6 +1698,67 @@ def test_dylib_calls_out_to_libSystem(tmpdir, shared):
     check(r.returncode == 42, f"returned {r.returncode}, expected 42")
 
 
+def test_macho_header_and_stub_metadata_match_ld(tmpdir, shared):
+    """The three Mach-O spec details that only a byte-level check can see.
+
+    None of these changes whether the image runs (the loader ignores the stub
+    `reserved*` fields unless it consults an indirect symbol table, which these
+    images do not carry), so nothing else in this file can catch a regression in
+    them. Each is a place this tree disagreed with `ld` for the same dylib, and
+    each is measured here against the value `ld` writes:
+
+      * the mach_header's flags: `NOUNDEFS DYLDLINK TWOLEVEL NO_REEXPORTED_DYLIBS`
+        = 0x100085. The buggy literal was 0x800005, which is missing
+        MH_TWOLEVEL (0x80) and instead sets MH_HAS_TLV_DESCRIPTORS (0x800000);
+      * a `S_SYMBOL_STUBS` section's `reserved1` is the indirect-symbol-table
+        index (0 here) and `reserved2` is **the size of one stub** (12 on
+        arm64), not the other way round;
+      * a GOT-carrying __DATA_CONST segment is `SG_READ_ONLY` (0x10), so dyld
+        remaps it read-only once it has applied the bind fixups.
+    """
+    lib = os.path.join(tmpdir, "stubmeta.mojo")
+    with open(lib, "w") as f:
+        f.write('def shout(x):\n  printf("hi\\n")\n  return x + 1\n')
+    out = os.path.join(tmpdir, "libstubmeta.dylib")
+    rc = run_fire(["dylib", "--formal", "--no-prove", "-o", out, lib]).returncode
+    check(rc == 0, f"dylib with an extern failed to build: {rc}")
+
+    with open(out, "rb") as f:
+        data = f.read()
+    info = parse_macho(data)
+
+    MH_TWOLEVEL = 0x80
+    MH_HAS_TLV_DESCRIPTORS = 0x800000
+    MH_NO_REEXPORTED_DYLIBS = 0x100000
+    check(info["flags"] & MH_TWOLEVEL,
+          f"MH_TWOLEVEL is not set (flags {info['flags']:#x}); dyld then reads "
+          f"the library's symbols in flat-namespace mode")
+    check(not (info["flags"] & MH_HAS_TLV_DESCRIPTORS),
+          f"MH_HAS_TLV_DESCRIPTORS is set (flags {info['flags']:#x}) on a "
+          f"library that carries no thread-local descriptors")
+    check(info["flags"] & MH_NO_REEXPORTED_DYLIBS,
+          f"MH_NO_REEXPORTED_DYLIBS is not set (flags {info['flags']:#x})")
+    check(info["flags"] & 0x4,
+          f"MH_DYLDLINK is not set (flags {info['flags']:#x})")
+
+    text = info["segments"]["__TEXT"]
+    stubs = [s for s in text["sections"] if s["sectname"] == "__stubs"]
+    check(len(stubs) == 1, "the `printf` in the library emitted no __stubs")
+    check(stubs[0]["reserved1"] == 0,
+          f"__stubs reserved1 is {stubs[0]['reserved1']}, not the indirect "
+          f"symbol table index 0")
+    check(stubs[0]["reserved2"] == 12,
+          f"__stubs reserved2 is {stubs[0]['reserved2']}, not the arm64 stub "
+          f"size 12 (the size belongs in reserved2, not reserved1)")
+
+    check("__DATA_CONST" in info["segments"],
+          "the library calls out but carries no __DATA_CONST GOT segment")
+    dc = info["segments"]["__DATA_CONST"]
+    check(dc["segflags"] & 0x10,
+          f"__DATA_CONST has no SG_READ_ONLY (segflags {dc['segflags']:#x}); it "
+          f"is not remapped read-only after the bind fixups")
+
+
 def test_frame_params_are_published_not_empty(tmpdir, shared):
     """A module that takes a FRAME publishes a per-parameter frame contract.
 
@@ -1968,15 +2015,6 @@ def test_the_library_admits_no_hole(tmpdir, shared):
     # which is what keeps this from red for the records quoted in the docstrings
     # above.
     hole = _re.compile(r"(^|\s)(by\s+sorry|:=\s*sorry|\badmit\b)")
-    # CLAUDE.md: scaffold holes live only in lib/Scaffold.lean, and each is ledgered in
-    # formal/proof_gaps.py::SCAFFOLD_HOLES (counted by test_formal_proof_gaps.py). A ledgered
-    # Scaffold hole is therefore allowed here; any other hole, or an unledgered Scaffold one, is not.
-    import sys as _sys
-    _fg = os.path.join(os.path.dirname(os.path.abspath(__file__)), "formal")
-    if _fg not in _sys.path:
-        _sys.path.insert(0, _fg)
-    import proof_gaps as _pg
-    ledgered = set(_pg.SCAFFOLD_HOLES)
     found = []
     for name in modules:
         with open(os.path.join(lib, name)) as fh:
@@ -1984,10 +2022,6 @@ def test_the_library_admits_no_hole(tmpdir, shared):
                 if line.lstrip().startswith("--"):
                     continue
                 if hole.search(line):
-                    if name == "Scaffold.lean":
-                        tm = _re.search(r"(?:theorem|lemma)\s+(\w+)", line)
-                        if tm and tm.group(1) in ledgered:
-                            continue
                     found.append(f"{name}:{n}: {line.strip()[:90]}")
     check(not found,
           "the library admits a hole, and no other check in this tree can see "
@@ -2265,11 +2299,11 @@ def test_a_conditional_value_is_not_a_branch(tmpdir, shared):
     with open(path, "w") as f:
         f.write(generate_dylib_proof(code, info, exports, specs))
     text = open(path).read()
-    check(_re.search(_PROVED.replace("IDENT", r"dylib_export_\d+_csetval"),
-                     text),
+    check(_re.search(r"Contracts\.agrees_of_body dylib_image "
+                     r"dylib_export_\d+_csetval bodyI", text),
           "the cset-bearing export got no proved contract, so a step that "
           "chooses a VALUE is still being read as a step that chooses a pc")
-    check(not _re.search(r"agrees_of_body(?:_under)? dylib_image "
+    check(not _re.search(r"agrees_of_body dylib_image "
                          r"dylib_export_\d+_branched", text)
           and _re.search(r"theorem dylib_export_\w+_branched_spec\b", text),
           "the branching export must keep its NAMED obligation and get no "
@@ -2288,76 +2322,38 @@ def test_a_conditional_value_is_not_a_branch(tmpdir, shared):
                   f"export's named `_spec`")
 
 
-def test_a_branching_exports_stack_guard_does_not_defeat_termination(
-        tmpdir, shared):
-    """A branching export's termination was a named `sorry` because its own
-    stack-floor guard's trap arm is an exit `svc` the model never reaches.
+def test_the_last_exports_walk_ignores_the_image_tail(tmpdir, shared):
+    """The LAST export's CFG walk judged the image's runtime tail, not its own
+    reachable code, so its termination was a named `sorry`.
 
-    `formal/model`'s `stack_floor_guarded_names` puts the prologue guard in
-    every body that already has a conditional branch (the widening that bounds
-    a deep DAG of distinct functions), so `def branchy(n): if n > 3: return 1`
-    carries one:
-
-        ADRP X17, page ; ADD X17, X17, #off ; LDR X16, [X17]
-        ADD X17, SP, #0 ; CMP X17, X16 ; B.HS ok
-        <write the message ; movz x0/#2 ; movz x16/#1 ; svc>   (the trap)
-      ok: …
-
-    `_cfg_blocks` makes the trap block a successor of the `B.HS`, and
-    `_trap_terminating` puts it in `trap` because it ends in `svc`.  With the
-    model's corrected `svc` arm (`x16 = 1` is `none`, f03896fff) `_gen_run_cert`
-    can no longer certify that block, so the whole walk answered `None` and
-    `_dylib_total_proof` rendered the termination claim as a `sorry` — for
-    EVERY guarded export, and for every arm64 program; the old no-op `svc` arm
-    had let the walk step straight through the trap.
-
-    The edge is dead, and the fix is to read that off the MODEL's initial state:
-    the run starts at `Arm64State.init n base`, whose `mem` is `fun _ => 0`, and
-    the startup stub that writes the floor word is not in the walked range (a
-    dylib has no stub at all), so the `LDR` reads 0 and `CMP SP, 0` cannot
-    borrow — `B.HS` is taken for every state the run visits.
-    `_stack_floor_guard_dead_fall` names the emitted sequence, the reachability
-    BFS does not follow the dead edge, and the emitted proof closes the arm with
-    an actual theorem about the branch's flags; the arm is skipped, not
-    assumed.
-
-    Fixing that exposed a second, latent defect: the walk's fuel path was
-    `len(code) / 4` — the whole `__TEXT`, including the interned strings after
-    the last `RET` — while the image (and `runExport`) use
-    `codeSize = exec_code_end`.  `total_of_halts` rejected the mismatch, which
-    is the drift check that comment promises; the walk now spells the image's
-    own `PATH`.
+    `_export_extent` is the next export's entry, or `base + code_size` for the
+    last one (the library's `DylibExport.exportEnd`, whose `exportEnd_last`
+    proves the two agree).  For the last export that extent spans what the
+    emitter laid down after its own `ret`: the stack-floor handler, the runtime
+    routines, and then the image's DATA.  `_gen_universal_e2e_cfg`'s
+    constant-fuel guard read every block `_cfg_blocks` finds in
+    `[entry, func_end)`, so the tail's back edges made `_acyclic` false AND
+    `_gen_run_cert` returned None for the first data word — and the walk then
+    reported `None`, which `_dylib_total_proof` renders as a `sorry` over a
+    termination claim that is true.  The guard now judges the blocks REACHABLE
+    from the entry, which is the CFG the run uses, so the walk proves the last
+    export like any other.
 
     No Lean here: this pins the EMITTER's verdict, and `several exports, and
-    one with no derivable spec` is what typechecks the file it produces.  The
+    one with no derivable spec` is what checks the file it produces.  The
     program is the smallest one that has the defect: a straight-line export
-    first, and the BRANCHING one LAST, which also keeps the last export's
-    extent (the one that reaches the image's end) under the walk.
+    first, and the BRANCHING one LAST, because only the last export's extent
+    reaches the image's tail.
     """
     import re as _re
     from formal.build import compile_formal_dylib
-    from formal.arm64_proof_gen import (_exec_code_limit, _is_svc,
-                                        generate_dylib_proof)
+    from formal.arm64_proof_gen import generate_dylib_proof
     src = os.path.join(tmpdir, "tail.mojo")
     with open(src, "w") as f:
         f.write("def head(n):\n  return n + 1\n\n\n"
                 "def branchy(n):\n  if n > 3:\n    return 1\n  return 0\n")
     out = os.path.join(tmpdir, "tail.dylib")
     built = compile_formal_dylib([src], output=out, prove=False)
-    # The row is about the PROLOGUE GUARD, so the guard is checked in the
-    # export's own words rather than inferred from the theorem: if the emitter
-    # ever stops guarding a branching body this row would otherwise pass
-    # without exercising the arm it exists for.
-    code, base = built["code"], built["info"]["base_addr"]
-    branchy = [e for e in built["exports"] if e["name"] == "branchy"][0]
-    later = [e["entry"] for e in built["exports"]
-             if e["entry"] > branchy["entry"]]
-    end = min(later) if later else base + _exec_code_limit(code)
-    own = [int.from_bytes(code[i - base:i - base + 4], "little")
-           for i in range(branchy["entry"], end, 4)]
-    check(any(_is_svc(w) for w in own),
-          "the branching export's own code carries no exit `svc`, so it has no "
-          "stack-floor guard and this row is not measuring the arm it names")
     path = os.path.join(tmpdir, "tail_proof.lean")
     with open(path, "w") as f:
         f.write(generate_dylib_proof(
@@ -2369,151 +2365,13 @@ def test_a_branching_exports_stack_guard_does_not_defeat_termination(
     check(m is not None, "the last, branching export has no `semantics_total` "
                          "theorem at all, so this row is not looking at it")
     check(m.group(2).strip() != "sorry",
-          "the branching export's termination is a named `sorry`: its CFG walk "
-          "was defeated by the stack-floor guard's trap arm, which no run from "
-          "`Arm64State.init` takes")
+          "the LAST export's termination is a named `sorry`: its CFG walk was "
+          "defeated by the image tail after its own `ret`, which no argument "
+          "of the export can reach")
     check("total_of_halts" in m.group(2),
-          f"the branching export's termination is not the PROVED shape: "
+          f"the last export's termination is not the PROVED shape: "
           f"{m.group(2).strip()!r}")
-    # The proved shape is only sound if the walk's fuel is the image's own:
-    # `_dylib_total_proof` must spell `exec_code_end / 4`, not `len(code) / 4`.
-    # `total_of_halts` below checks it in Lean; this pins the number the file
-    # carries, so a wrong PATH is a red row and not only a typecheck away.
-    check(f"{max(1, _exec_code_limit(code) // 4)} * n.toNat" in text,
-          "the walk's fuel path is not the image's `codeSize / 4`, so the "
-          "generated theorem is about a different run than `runExport`")
 
-
-def test_a_branching_export_termination_proves_in_lean(tmpdir, shared):
-    """The branching export's PROVED termination must be a file Lean accepts.
-
-    The sibling row above pins the EMITTER's verdict -- `total_of_halts`
-    with the walk's fuel, not a `sorry`.  That is a text check, and it is
-    not the typecheck: `DylibExport.total_of_halts` takes its hypothesis at
-    the statement `runExport` gives,
-
-        match runExport image e n with | some _ => True | none => False,
-
-    and a walk that states its `none` arm `True` where `runExport`'s is
-    `False` does not elaborate.  The arm the walk states is `none => True`
-    whenever a reachable branch targets a halt block, and the guard's dead
-    trap edge forced it on every guarded export -- so the branching
-    export's termination "proved" in the emitter's text and was REJECTED
-    by Lean (`Application type mismatch` on the `none` arm, measured on
-    this image while the row above stayed green).  The dead edge cannot
-    produce a `none` result: the cbz arm closes it by contradiction
-    (`hguard` proves the branch taken for every state the run visits), so
-    the statement states `none => False` and the application typechecks.
-
-    The image is the smallest one with the defect -- ONE branching export,
-    which has no overflow trap of its own, so no obligation anywhere else
-    in the file -- and the requirement is the whole file: it typechecks
-    with zero holes.
-    """
-    import re as _re
-    from formal.build import compile_formal_dylib
-    from formal.lean import find_lean, check_proof_cached
-    from formal.arm64_proof_gen import generate_dylib_proof
-    src = os.path.join(tmpdir, "guard.mojo")
-    with open(src, "w") as f:
-        f.write("def branchy(n):\n  if n > 3:\n    return 1\n  return 0\n")
-    out = os.path.join(tmpdir, "guard.dylib")
-    built = compile_formal_dylib([src], output=out, prove=False)
-    path = os.path.join(tmpdir, "guard_proof.lean")
-    with open(path, "w") as f:
-        f.write(generate_dylib_proof(
-            built["code"], built["info"], built["exports"], {}))
-    text = open(path).read()
-    m = _re.search(r"theorem (dylib_export_\w*branchy)_semantics_total :\n"
-                   r"    DylibExport\.Total dylib_image \1 :=\n\s*(.+)", text)
-    check(m is not None, "the branching export has no `semantics_total` "
-                         "theorem at all, so this row is not looking at it")
-    check(m.group(2).strip() != "sorry" and "total_of_halts" in m.group(2),
-          f"the branching export's termination is not the PROVED shape: "
-          f"{m.group(2).strip()!r}")
-    root = HERE
-    if not find_lean(root):
-        print("    SKIP: no lean found (the emitted file is not typechecked)")
-        return
-    ok, detail, _, n = check_proof_cached(path, repo_root=root)
-    check(ok, "lean rejected the branching export's proved termination: "
-              f"{detail[-400:]}")
-    check(n == 0, f"the one-export proof admits {n} hole(s): the branching "
-                  f"body has no trap of its own, so every obligation in the "
-                  f"file is one the walk should have discharged")
-
-
-def test_a_dylib_export_traps_at_its_stack_floor(tmpdir, shared):
-    """A recursive export in a dylib must exit `STACK_TRAP_STATUS` past its
-    budget, not die with a signal.
-
-    The guard in a prologue compares SP against a floor word in `__DATA`, and
-    the word is written by a STARTUP STUB. A library has no stub, so before the
-    load-time floor initializer landed (`formal/arm64_codegen.py` and
-    `formal/x86_64_codegen.py`, `emit_library_floor_init`) nothing ever wrote
-    it, the floor was zero, `SP >= 0` always held, and a library that exhausted
-    its stack died with SIGSEGV instead of the trap the guard exists to give.
-    The measurement is the dylib built from `deep` below, which answered signal 11.
-
-    The depth past the budget is `model.stack_floor_depth(arch)` (60 frames on
-    arm64 against the 8 MiB stack), quadrupled so the call is well over the
-    floor on either backend. The call runs in a CHILD process, because the
-    failure mode under test is a dead process: on master the child dies with
-    -11 and this test reports that, rather than taking the test runner down with
-    it. A shallow call is checked first, so a broken export cannot pass the deep
-    one by also failing the shallow one.
-
-    The x86-64 half runs only under Rosetta 2 (see `rosetta()`); elsewhere it is
-    skipped with the reason printed, not silently.
-    """
-    from formal.build import compile_formal_dylib
-    from formal.model import module as model
-
-    src = os.path.join(tmpdir, "deep_lib.mojo")
-    with open(src, "w") as f:
-        f.write("def deep(n):\n"
-                "  if n == 0:\n"
-                "    return 0\n"
-                "  return 1 + deep(n - 1)\n")
-    child = ("import ctypes, sys\n"
-             "lib = ctypes.CDLL(sys.argv[1])\n"
-             "fn = getattr(lib, sys.argv[2])\n"
-             "fn.restype = ctypes.c_int64\n"
-             "fn.argtypes = [ctypes.c_int64]\n"
-             "print(fn(int(sys.argv[3])))\n")
-    trap = model.stack_trap_message()
-    arches = [("arm64", None, sys.executable)]
-    ok, why = rosetta()
-    if ok:
-        arches.append(("x86_64", ["arch", "-x86_64"], "/usr/bin/python3"))
-    else:
-        print(f"        (x86-64 half skipped: {why})")
-    for arch, prefix, py in arches:
-        out = os.path.join(tmpdir, f"deep_lib.{arch}.dylib")
-        built = compile_formal_dylib([src], output=out, prove=False,
-                                     arch=arch)
-        symbol = None
-        for e in built.get("exports", []):
-            if e.get("name") == "deep":
-                symbol = e["symbol"]
-        check(symbol is not None, f"[{arch}] no `deep` export in the dylib")
-        argv_base = (prefix or []) + [py, "-I", "-c", child, out, symbol]
-        shallow = subprocess.run(argv_base + ["3"], capture_output=True,
-                                 text=True, timeout=RUN_TIMEOUT)
-        check(shallow.returncode == 0 and shallow.stdout.strip() == "3",
-              f"[{arch}] deep(3) should return 3, got exit "
-              f"{shallow.returncode}: {shallow.stderr.strip()[-200:]}")
-        depth = 4 * model.stack_floor_depth(arch)
-        deep = subprocess.run(argv_base + [str(depth)], capture_output=True,
-                              text=True, timeout=RUN_TIMEOUT)
-        check(deep.returncode == model.STACK_TRAP_STATUS,
-              f"[{arch}] deep({depth}) past the stack budget should exit "
-              f"{model.STACK_TRAP_STATUS} (the floor trap), got "
-              f"{deep.returncode} ({'signal ' + str(-deep.returncode) if deep.returncode < 0 else 'a plain exit'}): "
-              f"{deep.stderr.strip()[-200:]}")
-        check(trap in deep.stderr,
-              f"[{arch}] the floor trap should write model.stack_trap_message "
-              f"to stderr; stderr was {deep.stderr.strip()[-200:]!r}")
 
 
 def _segment_flags_and_section_metadata(data):
@@ -2665,12 +2523,8 @@ TESTS = [
      test_a_conditional_expression_derives_a_spec),
     ("a conditional value is not a branch",
      test_a_conditional_value_is_not_a_branch),
-    ("a branching export's termination survives its stack guard",
-     test_a_branching_exports_stack_guard_does_not_defeat_termination),
-    ("a dylib export traps at its stack floor, not a signal",
-     test_a_dylib_export_traps_at_its_stack_floor),
-    ("a branching export's termination proves in Lean",
-     test_a_branching_export_termination_proves_in_lean),
+    ("the last export's walk ignores the image tail",
+     test_the_last_exports_walk_ignores_the_image_tail),
     ("a wrong spec on a multi-export image is rejected",
      test_a_wrong_spec_on_a_multi_export_image_is_rejected),
     ("overloads build and export once", test_overloads_do_not_collide),
@@ -2685,6 +2539,8 @@ TESTS = [
      test_a_proved_dylib_is_an_arm64_artifact_and_says_so),
     ("executable links a dylib and runs", test_executable_links_a_dylib),
     ("dylib calls out to libSystem", test_dylib_calls_out_to_libSystem),
+    ("the mach_header flags and __stubs/__DATA_CONST metadata match ld",
+     test_macho_header_and_stub_metadata_match_ld),
     ("a frame parameter's contract is published, not empty",
      test_frame_params_are_published_not_empty),
 ("no module under lib/ admits a sorry or an admit",

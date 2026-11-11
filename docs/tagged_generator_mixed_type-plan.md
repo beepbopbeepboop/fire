@@ -31,29 +31,9 @@ Currently, `tagged_mixed_name` detects when a name is both a tagged word and bou
 - Files: emit_infra.py, emit_funcs.py
 - Test: compile the failing module
 - Acceptance: module compiles and runs
-- Decision (2026-11-12): floats and strs are done. Containers are refused by design: a
-  corpus census (610 stdlib and 226 repo `.mojo` files, 0 candidates) found no real program
-  that rebinds a container name to a tagged generator loop variable, so the box gets no
-  container kind. The refusal now names the two bindings
-  (`test_gimple_generator_runner.py::tagged_generator_mixed_type_container_refused`).
 
 ### Step 5: Regression test
 - Scope: Add test_tagged_generator_mixed_type.py
 - Files: test_*.py
 - Test: run test
 - Acceptance: test passes
-
-## Status (2026-11-11)
-
-- Step 1 (the box, store and read sides): documented in `docs/tagged_generator_mixed_type-box.md`.
-- Step 2 (the box carries float and str): landed in `0bce80f69` (float) and `73076be07` (str).
-  Read consumers verified: `print`, `==`, `+` (a literal-cast arm fixed), `len` (narrow
-  `mojo_is_str_box` predicate), f-strings.
-- Step 3 (read sites): covered by the step 2 consumer checks above; no separate change.
-- Step 4 (remove the refusal): floats and strs are done. The mixed container case is refused by
-  design with a named diagnostic (naming the name, the container C type, and the two binding
-  shapes); decided option 2 by the 2026-11-12 corpus census (610 stdlib + 226 repo files, 0
-  candidates). See `test_gimple_generator_runner.py::tagged_generator_mixed_type_container_refused`.
-- Step 5 (regression test): the cases are registered in `test_gimple_generator_runner.py`
-  (`run_tagged_for_target_bind_tests`, `gimplegenerators`). A separate
-  `test_tagged_generator_mixed_type.py` would duplicate them, so it is not added.

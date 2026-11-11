@@ -3285,10 +3285,9 @@ def body_has_conditional_branch(fn) -> bool:
     `stack_floor_guarded_names` widens the stack-floor guard from the call-graph
     cycles to every function whose body already branches, and the price is the
     per-export contract proof: `arm64_proof_gen._dylib_contract_proof` returns
-    `""` — no contract — for an export whose body contains a conditional branch
-    that is not an overflow guard on its normal path (`_overflow_normal_path`),
-    so the guard's own `cbnz`/`b.hs` costs a contract only in a body that had
-    one to lose. For that to be an argument rather than a hope, this
+    `""` — no contract — for an export whose body contains ANY conditional
+    branch, so the guard's own `cbnz`/`b.hs` costs a contract only in a body that
+    had one to lose. For that to be an argument rather than a hope, this
     predicate must never answer True for a body the EMITTER lays out
     straight-line — over-counting would take a contract away from an export that
     has one. So:
@@ -3403,10 +3402,9 @@ def stack_floor_guarded_names(functions, structs: dict = None,
 
     **And the second rule costs nothing the first one was careful not to.** The
     per-export contract proof (`arm64_proof_gen._dylib_contract_proof`) declines
-    to emit a contract for an export whose body contains a conditional branch
-    that is not an overflow guard on its normal path — `Refine.Block.step` is one
-    function of one state, and a conditional branch that can go either way does
-    not have one. An overflow guard is handled by its not-taken condition. So a body that already branches has no contract to lose,
+    to emit a contract for an export whose body contains ANY conditional branch —
+    `Refine.Block.step` is one function of one state, and a conditional branch
+    does not have one. So a body that already branches has no contract to lose,
     and a body that does not is left exactly as it was. "Every function" would
     trade proved contracts for nothing; "every function that already has a
     branch" does not, and `body_has_conditional_branch` is written to that
@@ -3449,36 +3447,6 @@ def stack_floor_guarded_names(functions, structs: dict = None,
             if reaches_self(name) or body_has_conditional_branch(by_name[name])}
 
 
-# The symbol the LIBRARY's load-time stack-floor initializer is emitted under,
-# shared by both backends (`_emit_library_floor_init` in each). It is internal:
-# the image publishes its address through `info["mod_init_addrs"]`, never by name.
-LIBRARY_FLOOR_INIT_LABEL = "__stack_floor_init"
-
-
-def library_floor_init_needed(functions: list, structs: list = None) -> bool:
-    """Does a LIBRARY image need the load-time stack-floor initializer?
-
-    One question with one answer, asked by BOTH halves of the build: the
-    emitters decide whether to emit the initializer (`compile`'s `_guarded_names`
-    is `stack_floor_guarded_names` over the same functions), and
-    `formal/build.py` decides whether the container declares a load-time entry
-    section BEFORE anything is emitted, because the section's size moves the
-    code's base. If the two halves asked different questions the image would be
-    laid out for an initializer it does not carry, which is the mismatch
-    `build.py::_mod_init_addrs` refuses. So the predicate lives here and nowhere
-    else.
-
-    It is `every_function=False`, the library rule: a dylib has no startup stub
-    to fill the floor, and any prologue that carries the guard reads the floor,
-    so one guarded prologue is enough to need the initializer. `structs` is the
-    same StructDef LIST `compile(structs=...)` is handed; it is keyed here the
-    way `compile` keys `self._structs`.
-    """
-    fns = list({f.name: f for f in (functions or [])}.values())
-    struct_map = {s.name: s for s in (structs or [])}
-    return bool(stack_floor_guarded_names(fns, struct_map,
-                                          every_function=False))
-
 
 # THE GUARD'S SHAPE, decided once so that neither backend can spell it twice.
 #
@@ -3490,26 +3458,26 @@ def library_floor_init_needed(functions: list, structs: list = None) -> bool:
 # Both prologues subtract a fixed frame and then do this, and the order is
 # load-bearing on both machines:
 #
-#     <floor> = the word at `stack_floor_address(...)`   (filled at load time)
+#     <floor> = the word at `stack_floor_address(...)`
+#     if <floor> == 0:  <floor> = SP - BUDGET ; store it back
 #     compare SP against <floor> and EXIT(STACK_TRAP_STATUS) if SP is below it
 #
 # Four decisions, each of which had more than one available answer:
 #
-# * **The floor is stored ONCE, by a load-time initializer, and never from a
-#   prologue.** An executable's startup stub fills it before `main`; a LIBRARY
-#   has no stub (`emit_startup=False`), so it gets its own initializer, emitted
-#   as a function and registered in the container's load-time entry list
-#   (`library_floor_init_needed` decides whether it exists). A prologue that
-#   stored the floor lazily would anchor it to whichever caller ran first, not
-#   to the process's stack: a first call near the bottom leaves the floor below
-#   the real bottom, and the guard never fires. The dylib path measured exactly
-#   that failure before the initializer landed (a dylib's stack-floor guard never fires).
+# * **The floor is stored LAZILY, in every prologue, and not from the
+#   executable's entry stub.** A stub would do it once per process for an
+#   executable, and a dylib has no entry stub (`emit_startup=False`), so that
+#   answer is one mechanism for one container kind and a hole in the other —
+#   the shape `initialization_is_lazy` below already refuses for the same
+#   reason. The store is a `cbnz`/`jne` over four instructions and runs once
+#   per process; the alternative saves those four instructions per call and
+#   costs a second code path that a library image cannot take.
 # * **Zero means "not stored yet", and that is SAFE, not a hole.** The compare
 #   is an UNSIGNED lower test, and a stack pointer is never below zero, so an
-#   unset floor cannot fire — the guard is silent rather than wrong. The word
-#   is zero only before the load-time initializer has run, and the initializer
-#   runs before any export or entry can be called, so no guarded prologue ever
-#   compares against an unset floor.
+#   unset floor cannot fire — the guard is silent rather than wrong, which is
+#   exactly today's behaviour and the state the word starts in. This is why the
+#   floor needs no initialization ORDER relative to the first prologue: the
+#   store and the compare are in the same prologue, store first.
 # * **The budget is subtracted from the SP the frame subtraction LEFT**, not
 #   from the caller's SP. The difference is this function's own frame, which is
 #   charged against the budget rather than added to it, and that is the

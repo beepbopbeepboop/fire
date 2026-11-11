@@ -348,15 +348,7 @@ def _cattr_restore_begin(gen, body) -> None:
             # without reaching a `return` writes `_saved` back during
             # `mojo_raise`'s unwind (see fire_runtime.c's MOJO_CLEANUP_CATTR).
             # Popped by `_cattr_leave` on every normal exit.
-            #
-            # Through the untagged accessor, NOT `mojo_cleanup_push_cattr
-            # ((void **) &{_gname}, ...)`: the slot is the global's ADDRESS,
-            # and a struct METHOD's body is `__GIMPLE`-tagged, where
-            # `-fgimple` rejects `&<variable>` (a function-scoped class
-            # declared in a method failed to compile with "expected expression
-            # before '(' token"). module_gen emits the accessor beside the
-            # global's declaration, so it exists exactly when the global does.
-            gen._emit(f"  {gimple_ctypes.cattr_unwind_push(_gname)} ({_saved});")
+            gen._emit(f"  mojo_cleanup_push_cattr ((void **) &{_gname}, (void *) {_saved});")
 
 
 def _cattr_snapshot(gen) -> list:
@@ -1859,33 +1851,6 @@ def _is_frame_expr(gen, node) -> bool:
     return False
 
 
-# The bit accessors of a float scalar (`SIMD[Float32, 1]` / `Float64`). Their
-# stdlib signatures return an INTEGER, so the result is the integer word of the
-# IEEE-754 pattern, not the receiver's own value (see the generic scalar-method
-# stub, which answers the receiver unchanged).
-_FLOAT_BIT_ACCESSORS = frozenset({'to_bits', '_to_bits_signed'})
-
-
-def _lower_float_bit_accessor(gen, ov_local, ot, method):
-    """`x.to_bits()` / `x._to_bits_signed()` on a `float` or `double` scalar.
-
-    Returns the bit pattern as an `int64_t` word, through the runtime's bit
-    reinterpretations (`mojo_float_to_bits` / `mojo_double_to_bits`), so the
-    result is an integer and `(x.to_bits() & mask).eq(...)` is an integer
-    expression. For a 32-bit float `_to_bits_signed` is the SIGNED reading of
-    the 32-bit pattern (sign-extended); `to_bits` is the unsigned one
-    (zero-extended). A double's 64-bit pattern is the same word either way."""
-    if ot == 'double':
-        bits = f'mojo_double_to_bits ({ov_local})'
-    else:
-        bits = f'mojo_float_to_bits ({ov_local})'
-        if method == '_to_bits_signed':
-            bits = f'(int64_t)(int32_t)({bits})'
-    t = gen._new_temp('int64_t')
-    gen._emit(f'  {t} = (int64_t)({bits});')
-    return 'int64_t', t
-
-
 def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
     func = node.func  # MemberExpr
@@ -2370,6 +2335,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     args = args[:-1]
                 if len(args) == 4:
                     try:
+                        import mojo.backend_gimple.emit_calls as ggc
                         fake = gimple_ctypes.CallExpr(func=gimple_ctypes.MemberExpr(obj=gimple_ctypes.IdentExpr(name='type'), member='__new__'), args=args, kwargs=[])
                         return ggc._lower_call(gen, fake)
                     except Exception:
@@ -2509,9 +2475,9 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         src_type, src_val = gen.lower_expr(node.args[0])
         if src_type not in ('char *', 'void *'):
             src_val = gen._new_val('char *', f'(char *){gen._ensure_local(src_type, src_val)}')
-        prog_local = gen._new_val('const ReNode *', gimple_ctypes.regex_compile.table_ref(info['prog_var']))
-        ranges_local = gen._new_val('const ReRange *', gimple_ctypes.regex_compile.table_ref(info['ranges_var']))
-        classinfo_local = gen._new_val('const ReClassInfo *', gimple_ctypes.regex_compile.table_ref(info['classinfo_var']))
+        prog_local = gen._new_val('const ReNode *', info['prog_var'])
+        ranges_local = gen._new_val('const ReRange *', info['ranges_var'])
+        classinfo_local = gen._new_val('const ReClassInfo *', info['classinfo_var'])
         t = gen._call_expr('MojoList *', 'mojo_regex_split', [
             ('const ReNode *', prog_local), ('const ReRange *', ranges_local),
             ('const ReClassInfo *', classinfo_local),
@@ -2727,15 +2693,9 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                         # the bytes-or-str word actually is; `int64_t` would
                         # read as a plain number and lose the bytes kind.
                         return 'MojoList *', t
-                    # A word argument is a str OR a bytes path (the runtime
-                    # decides which), so the parts are words of UNKNOWN kind:
-                    # the element kind is left unrecorded, as the bytes arm
-                    # above does. Recording `int64_t` here typed each unpacked
-                    # part as a plain number, so `if not head:` became
-                    # `head == 0`, and an empty str head (a live non-NULL
-                    # pointer) read as true.
                     t = gen._call_expr('MojoList *', 'mojo_os_path_split_w',
                                         [(arg_type, arg_val)])
+                    gen._elem_types[t] = 'int64_t'
                     return 'MojoList *', t
                 t = gen._call_expr('MojoList *', 'int64_t_path_split',
                                     [(arg_type, arg_val)])
@@ -3096,22 +3056,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # generalized). Gated to this compiler's own `gimple*.py` sources
         # so it can never intercept a real stdlib module method.
         if _selfhost_sibling_member_kind(gen, module_name, method_name) is not None:
-            # Pin the member's home to the sibling module the alias names so
-            # bare-name resolution below can qualify it even when that
-            # module is compiled later in a cycle (emit_infra <-> emit_stmts)
-            # and the member is not yet present in this gen's flat
-            # func_param_types/func_return_types tables. Without this, the
-            # re-dispatch resolves to an unqualified bare symbol and emits a
-            # weak "unavailable in compiled mode" stub while the real
-            # definition is emitted under its qualified mangled name.
-            _sh_info = (getattr(gen, 'imported_symbols', None) or {}).get(module_name)
-            _sh_sub_ref = ((_sh_info.get('module')
-                            if isinstance(_sh_info, dict) else None)
-                           or module_name)
-            try:
-                gen._note_own_func_home(method_name, _sh_sub_ref, record_scope=False)
-            except Exception:
-                pass
             # Re-dispatch as a BARE-name call: the alias qualifier is a
             # Python-import artifact only. `_lower_call` owns struct-ctor
             # allocation, default-argument padding, keyword ordering and
@@ -3128,6 +3072,19 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             return gen._lower_call(_bare_node)
 
         # Check if this is a known module method
+        if (method_name == 'copysign' and len(node.args) == 2):
+            try:
+                _x_t,_x_v = gen.lower_expr(node.args[0])
+                _y_t,_y_v = gen.lower_expr(node.args[1])
+                _x_d = gen._coerce_to_type(_x_t,'double',_x_v)
+                _y_d = gen._coerce_to_type(_y_t,'double',_y_v)
+                _res = gen._new_temp('double')
+                gen._emit(f'  {_res} = __builtin_copysign ({_x_d}, {_y_d});')
+                _res_i64 = gen._new_temp('int64_t')
+                gen._emit(f'  {_res_i64} = (int64_t){_res};')
+                return 'int64_t', _res_i64
+            except Exception:
+                pass
         if (module_name == 'os' and method_name in ('fspath', 'fsdecode') and len(node.args) == 1
                 and not getattr(node, 'kwargs', None)):
             # `os.fspath(p)` of a str / bytes path is the path itself (a path-like object's
@@ -3208,9 +3165,9 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                         gimple_ctypes._debug_note(f're.sub compile-time regex compile failed for {folded_pattern!r}', e)
                 is_callback = gen._re_sub_repl_is_callback(cb_arg)
                 if info is not None:
-                    prog_local = gen._new_val('const ReNode *', gimple_ctypes.regex_compile.table_ref(info['prog_var']))
-                    ranges_local = gen._new_val('const ReRange *', gimple_ctypes.regex_compile.table_ref(info['ranges_var']))
-                    classinfo_local = gen._new_val('const ReClassInfo *', gimple_ctypes.regex_compile.table_ref(info['classinfo_var']))
+                    prog_local = gen._new_val('const ReNode *', info['prog_var'])
+                    ranges_local = gen._new_val('const ReRange *', info['ranges_var'])
+                    classinfo_local = gen._new_val('const ReClassInfo *', info['classinfo_var'])
                     t = gen._new_temp('char *')
                     if is_callback:
                         fn_ptr_t, env_t = gen._lower_re_sub_callback(cb_arg)
@@ -3373,17 +3330,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                                       'sysconfig.get_config_var() stubbed')
 
         if (module_name == 'gimple_codegen' and method_name in (
-                'compile_to_gimple', 'compile_to_gimple_cached',
-                # `compile_to_gimple_parallel_frozen` (b30d14b21) has a body
-                # IDENTICAL to `compile_to_gimple`'s -- both forward to
-                # `_run_pipeline` + `_refuse_dropped_companion` -- and fire.py's
-                # `--dump-full` handler calls it. It was added to fire.py without
-                # being added here, so the compiled binary's own `--dump-full`
-                # fell through to the weak stub
-                # (`compile_to_gimple_parallel_frozen: unavailable in compiled
-                # mode`) and wrote a 0-byte .ci: `test_selfhost.py`'s
-                # run_produced_binary half, which counts those diagnostics.
-                'compile_to_gimple_parallel_frozen')):
+                'compile_to_gimple', 'compile_to_gimple_cached')):
             # gimple_codegen.compile_to_gimple(src, do_imports=False, filename="") → returns char*
             # compile_to_gimple_cached lowers to the SAME C runtime wrapper
             # (gimple_codegen_compile_to_gimple, runtime/fire_runtime.c):
@@ -3701,6 +3648,16 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     _libm_m = None
                     if module_name in ('math', 'std.math') or (isinstance(module_name,str) and module_name.endswith('.math')):
                         _libm_m = 'math'
+                    if _libm_m and method_name == 'copysign' and len(node.args) == 2:
+                        _x_t,_x_v = gen.lower_expr(node.args[0])
+                        _y_t,_y_v = gen.lower_expr(node.args[1])
+                        _x_d = gen._coerce_to_type(_x_t,'double',_x_v)
+                        _y_d = gen._coerce_to_type(_y_t,'double',_y_v)
+                        _res = gen._new_temp('double')
+                        gen._emit(f'  {_res} = __builtin_copysign ({_x_d}, {_y_d});')
+                        _res_i64 = gen._new_temp('int64_t')
+                        gen._emit(f'  {_res_i64} = (int64_t){_res};')
+                        return 'int64_t', _res_i64
                 except Exception:
                     pass
                 _mgc_is_plain_fn = (
@@ -3755,10 +3712,13 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     # qualified_call_answers_zero.md`, whose "partial fix
                     # that is NOT enough, recorded so nobody re-lands it"
                     # section is the `_note_own_func_home`-only version.
+                    print(f"BEFORE_EXPS: {module_name}.{method_name}", flush=True)
                     try:
                         _mgc_exps, _mgc_qual = gen._local_sibling_module_exports(
                             _mgc_sub_ref)
-                    except Exception:
+                        print(f"AFTER_EXPS: {module_name}.{method_name}", flush=True)
+                    except Exception as e:
+                        print(f"EXPS_ERR: {e}", flush=True)
                         _mgc_exps, _mgc_qual = None, None
                     # ONLY when nothing has registered it already. An
                     # import this compile already resolved properly --
@@ -4480,18 +4440,9 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if _ptypes and len(arg_pairs) < len(_ptypes):
             for _pad_i in range(len(arg_pairs), len(_ptypes)):
                 arg_pairs.append(('int64_t', gen._new_val('int64_t', '(int64_t)0')))
-        _mret_api = None
-        _mrt = getattr(gen, '_method_returns_generator', None)
-        if _mrt:
-            _mret_api = _mrt.get((struct_name, method))
-        if _mret_api is not None:
-            ret_type = 'MojoGenerator *'
         if ret_type == 'void':
             return gen._void_call(mangled, arg_pairs)
         t = gen._call_expr(ret_type, mangled, arg_pairs)
-        if _mret_api is not None:
-            gen._generator_var_api[t] = _mret_api
-            gen._actual_types[t] = 'MojoGenerator *'
         return ret_type, t
 
     # ── .copy() on Copyable scalars is an identity operation ──────────────
@@ -4685,70 +4636,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         method == 'get' and len(node.args) == 1
         and isinstance(node.args[0], gimple_ctypes.FloatLiteral)
     )
-
-    # ── A TAGGED word as a METHOD receiver ───────────────────────────────
-    # The result of a function whose arms mix a float with a list/tuple/str/
-    # None is carried as the erased `int64_t` word (`_tagged_word_vals`), so
-    # its kind is a runtime fact. Dispatching on the static C type took the
-    # integer fallbacks: `.append`/`.extend`/... cast the BOX to `MojoList *`
-    # and wrote through it (SIGSEGV), and `.count`/`.index` cast it to
-    # `char *` and read the box header as text (answered 0 / -1). This is the
-    # same gap the subscript closed with `mojo_word_subscript` and `len` with
-    # `mojo_len_word`; the member call gets the same runtime kind dispatch.
-    # A list word goes to the existing list arm, a str word to the existing
-    # str arm, and any other kind raises instead of reading the box as a
-    # container (CPython raises AttributeError; this runtime has one raiser
-    # for a bad receiver, and the text is exact about the fact).
-    if ot in ('int', 'int64_t') and ov in getattr(gen, '_tagged_word_vals', ()):
-        _tw = gen._new_temp('int64_t')
-        _twl = gen._ensure_local(ot, ov)
-        if ot == 'int64_t':
-            gen._emit(f"  {_tw} = {_twl};")
-        else:
-            gen._emit(f"  {_tw} = (int64_t){_twl};")
-        # List-only names: the only container kind that has them here is a
-        # list (the return widening refuses a dict/set/struct pointer arm),
-        # so `mojo_word_as_list` is the whole dispatch and raises otherwise.
-        if method in ('append', 'extend', 'insert', 'pop', 'sort',
-                      'reverse', 'copy', 'remove', 'clear'):
-            _lp = gen._call_expr('MojoList *', 'mojo_word_as_list',
-                                 [('int64_t', _tw)])
-            return gen._lower_list_method(_lp, method, node.args, node.kwargs)
-        # Names that are a real list method AND a real str method: the two
-        # arms produce the same `int64_t`, so pick by the word's kind at run
-        # time. The str arm is what raises for a float/int/None word.
-        if method in ('count', 'index') and len(node.args) == 1 \
-                and not getattr(node, 'kwargs', None):
-            _bb_list = gen._new_bb()
-            _bb_str = gen._new_bb()
-            _bb_after = gen._new_bb()
-            _uw = gen._call_expr('int64_t', 'mojo_box_word', [('int64_t', _tw)])
-            _is_list = gen._call_expr('int', 'mojo_is_registered_list',
-                                      [('int64_t', _uw)])
-            gen._emit(f"  if ({_is_list}) goto {_bb_list}; else goto {_bb_str};")
-            _tw_res = gen._new_temp('int64_t')
-            gen._emit_label(_bb_list)
-            _lp = gen._call_expr('MojoList *', 'mojo_word_as_list',
-                                 [('int64_t', _tw)])
-            _lt, _lv = gen._lower_list_method(_lp, method, node.args)
-            gen._emit(f"  {_tw_res} = {_lv};")
-            gen._emit(f"  goto {_bb_after};")
-            gen._emit_label(_bb_str)
-            _tx = gen._call_expr('char *', 'mojo_word_as_text', [('int64_t', _tw)])
-            _st, _sv = gen._lower_str_method(_tx, method, node.args)
-            gen._emit(f"  {_tw_res} = {_sv};")
-            gen._emit_label(_bb_after)
-            return 'int64_t', _tw_res
-        # str-only names: unbox the kind-'p' text pointer (or a bare string)
-        # and keep the existing str lowering, which is already total over the
-        # rest of the tag's value model (a tuple of affixes, a word needle).
-        if method in ('startswith', 'endswith', 'strip', 'lstrip', 'rstrip',
-                      'split', 'join', 'replace', 'find', 'lower', 'upper',
-                      'format', 'encode', 'rfind', 'rindex'):
-            _tx = gen._call_expr('char *', 'mojo_word_as_text',
-                                 [('int64_t', _tw)])
-            return gen._lower_str_method(_tx, method, node.args,
-                                         node.kwargs)
 
     # ── Opaque int → coerce to appropriate container type FIRST ──────────
     # Must happen before container-type checks so the casted type is seen below.
@@ -5013,27 +4900,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # GCC: "cannot convert to a pointer type". A genuine Mojo
         # `UnsafePointer[T]` receiver keeps raw-pointer semantics: T
         # itself has no unresolvable base-class inheritance.
-        #
-        # NOTE the user-method exclusion, which is the same bug one step
-        # narrower: a user struct that DEFINES a method spelled like a
-        # raw-pointer protocol method must dispatch to its OWN method, not
-        # to `*{recv}`. `class _LazyImportTarget: ... def load(self):`
-        # (myinterpreter.py, PEP 810 lazy imports) compiled
-        # `module = self.load()` to `_t = *self; module = _t;` — the call
-        # dropped, the whole struct copied by value — so the self-host
-        # closure's `_LazyImportTarget_load` returned a struct where gcc
-        # wanted a word ("aggregate value used where an integer was
-        # expected", "non-register as LHS of unary operation"), and
-        # `_LazyImportType.resolve`'s `self._target.load()` became a
-        # `*self->_target` deref. The `value` branch above already excludes
-        # every known struct; the discriminator here is narrower on purpose:
-        # only a struct that actually DEFINES the name, because a genuine
-        # `UnsafePointer[T]` receiver has no `load` in `_struct_method_names`
-        # and must keep its raw-pointer meaning.
-        _recv_struct = gimple_exprtypes._struct_name_of(ot)
-        if not (_recv_struct in (gen.struct_field_types or {})
-                and method in gen._struct_method_names.get(_recv_struct, ())):
-            return gen._lower_pointer_method(ov, ot, method, node.args)
+        return gen._lower_pointer_method(ov, ot, method, node.args)
     if ot == 'void *':
         return gen._lower_file_method(ov, method, node.args)
 
@@ -5201,6 +5068,20 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             except Exception:
                 pass
         if _libm_mod:
+                                    # Special handling for copysign to avoid function call issues
+            if method == 'copysign' and len(node.args) == 2:
+                try:
+                    _x_t, _x_v = gen.lower_expr(node.args[0])
+                    _y_t, _y_v = gen.lower_expr(node.args[1])
+                    _x_d = gen._coerce_to_type(_x_t, 'double', _x_v)
+                    _y_d = gen._coerce_to_type(_y_t, 'double', _y_v)
+                    _res = gen._new_temp('double')
+                    gen._emit(f'  {_res} = copysign ({_x_d}, {_y_d});')
+                    _res_i64 = gen._new_temp('int64_t')
+                    gen._emit(f'  {_res_i64} = (int64_t){_res};')
+                    return 'int64_t', _res_i64
+                except Exception:
+                    pass
             _lc = module_member_libc(_libm_mod, method)
             if _lc is not None and len(_lc[2]) == len(node.args):
                 # A libm symbol behind a module marker: lower it as the libc
@@ -5260,9 +5141,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                                     f'not compiled')
         if ot in ('int64_t', 'int') and method in _RE_DYN_METHODS:
             return _lower_re_dynamic_call(gen, node, ov_local, method)
-        if (ot in ('float', 'double') and not node.args
-                and method in _FLOAT_BIT_ACCESSORS):
-            return _lower_float_bit_accessor(gen, ov_local, ot, method)
         if node.args:
             at, av = gen.lower_expr(node.args[0])
             # Coerce argument to the same type; GIMPLE requires separate cast stmt.
@@ -5396,17 +5274,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # a string/pointer box answers from the pointer so same-object
         # calls agree within a run while differing from any small int
         # hash (test_hash asserts 42's hash != "hello"'s, not values).
-        # `.__hash__(hasher)` on a scalar (the stdlib's element hash inside a
-        # LinkedList/List `__hash__`): fold the value into the hasher. The hasher
-        # is the word `mojo_hasher_new` made; the stdlib's `mut hasher` is that
-        # same word, so nothing needs to be returned. Returns no value (`None`).
-        if (method == '__hash__' and ot in ('int64_t', 'int')
-                and len(node.args) == 1 and not getattr(node, 'kwargs', None)):
-            _ht, _hv = gen.lower_expr(node.args[0])
-            _hw = gen._new_val('int64_t', f"(int64_t){_hv}")
-            gen._emit_call('void', '', 'mojo_hasher_update_int',
-                           [('int64_t', _hw), ('int64_t', ov_local)])
-            return 'int64_t', gen._new_val('int64_t', '0')
         if (method == '__hash__' and ot in ('int64_t', 'int')
                 and not node.args and not getattr(node, 'kwargs', None)):
             # mojo_pyobject_hash returns `int64_t` — same raw-GIMPLE
@@ -5630,12 +5497,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 return 'MojoList *', t
             except Exception:
                 pass
-        # A FLOAT scalar's bit accessors (`to_bits` / `_to_bits_signed`) were
-        # lowered above, before this scalar-method dispatch: the result is the
-        # integer IEEE-754 pattern, through `_lower_float_bit_accessor`. Do not
-        # lower them a second time here — a "type it as an integer" copy at this
-        # point is unreachable (the earlier arm returns first) and, when the
-        # float case went through a widen-to-double, answered the WRONG bits.
         # Other scalar methods: pass the receiver through unchanged
         for ea in node.args[1:]: gen.lower_expr(ea)
         return gen._stub_result(ot, ov_local, f'{ot}.{method}() stubbed')
@@ -6042,17 +5903,9 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             _pres_word = None
             if (result_type == 'char *' and val_type not in ('char *',)
                     and not _container_vt):
-                # An int-valued dict's `raw` above IS the int getter's word:
-                # reuse it. A second call would read the key again, and a
-                # container key's placeholder was consumed by the first, so the
-                # second call missed (`t.get(("a", 1), "dflt")` printed the
-                # default for a stored value).
-                if val_type in ('int64_t', 'int', '_Bool'):
-                    _pres_word = raw
-                else:
-                    _pres_word = gen._call_expr(
-                        'int64_t', f'mojo_dict_get{_sfx}_int',
-                        [('MojoDict *', ov), (key_type, key_val)])
+                _pres_word = gen._call_expr(
+                    'int64_t', f'mojo_dict_get{_sfx}_int',
+                    [('MojoDict *', ov), (key_type, key_val)])
                 raw = gen._call_expr('char *', 'mojo_cstr_or_int_str',
                                      [('int64_t', _pres_word)])
                 val_type = 'char *'
@@ -6888,11 +6741,7 @@ def _lower_pointer_method(gen, ov: str, ot: str, method: str, args: list) -> tup
         return 'int', gen._new_val('int', '0')
     if method in ('bitcast', 'address_of',
                   'unsafe_mut_cast', 'unsafe_origin_cast', 'unsafe_ptr_cast',
-                  'origin_cast', 'mut_cast', 'decay', 'as_noalias_ptr',
-                  'get_unsafe_pointer', '_get_unsafe_pointer',
-                  'get_ref_with_unsafe_interior_origin',
-                  '_get_ref_with_unsafe_interior_origin',
-                  'get_ref_with_origin', '_get_ref_with_origin'):
+                  'origin_cast', 'mut_cast', 'decay', 'as_noalias_ptr'):
         t = gen._new_temp(ot)
         gen._emit(f"  {t} = {ov};  /* {method}: pass-through */")
         return ot, t
@@ -7323,9 +7172,8 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
         # real MojoBytes * (the same runtime constructor `bytes(s)` uses). The
         # encoding is passed through as a char*; the runtime's
         # mojo_bytes_from_str resolves it against its codec table (utf-8,
-        # ascii, latin-1; anything else is a LookupError). `errors` is the
-        # second positional argument or the `errors=` keyword, forwarded to
-        # the runtime, which honours strict (default), replace and ignore.
+        # ascii, latin-1; anything else is a LookupError). `errors` is not
+        # forwarded, so every codec runs with strict error handling.
         if arg_pairs:
             _enc = arg_pairs[0]
         else:
@@ -7335,14 +7183,8 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
             _enc_val = gen._intern_string('utf-8')
         else:
             _enc_val = _enc[1] if _enc[0] == 'char *' else gen._coerce_to_type(_enc[0], 'char *', _enc[1])
-        # `s.encode("ascii", "replace")` passes `errors` positionally; it was
-        # read from the keyword only, so the positional handler was dropped and
-        # every codec ran strict (UnicodeEncodeError where CPython replaces).
-        if len(arg_pairs) > 1:
-            _err = arg_pairs[1]
-        else:
-            _err = next(((gen.lower_expr(_kv)) for _kn, _kv in (kwargs or [])
-                         if _kn == 'errors'), None)
+        _err = next(((gen.lower_expr(_kv)) for _kn, _kv in (kwargs or [])
+                     if _kn == 'errors'), None)
         if _err is None:
             _err_val = gen._intern_string('strict')
         else:
@@ -7580,14 +7422,8 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
             enc = _enc[1]
         else:
             enc = gen._coerce_to_type(_enc[0], 'char *', _enc[1])
-        # The handler is the second positional or the `errors=` keyword, the
-        # same as str.encode above: `b"\xff".decode("ascii", "replace")` dropped
-        # a positional handler and ran strict.
-        if len(arg_pairs) > 1:
-            _err = arg_pairs[1]
-        else:
-            _err = next(((gen.lower_expr(_kv)) for _kn, _kv in (kwargs or [])
-                         if _kn == 'errors'), None)
+        _err = next(((gen.lower_expr(_kv)) for _kn, _kv in (kwargs or [])
+                     if _kn == 'errors'), None)
         if _err is None:
             err = gen._intern_string('strict')
         else:
@@ -8146,27 +7982,6 @@ def _imported_method_declared_ret(gen, struct_name: str, method: str):
 def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple:
     """Lower struct/class method calls: obj.method(args) → StructName_method(self, args)."""
     func = node.func
-    # Origin/ref accessors are semantically pointer identity in this
-    # codegen's lowered representation (refs/origins erase to addresses).
-    # Lower as pass-through when no concrete compiled method is known for
-    # the receiver, to avoid emitting undefined symbols like
-    # `int64_t__get_ref_with_unsafe_interior_origin`.
-    if method in ('get_ref_with_unsafe_interior_origin',
-                  '_get_ref_with_unsafe_interior_origin',
-                  'get_ref_with_origin', '_get_ref_with_origin',
-                  'get_unsafe_pointer', '_get_unsafe_pointer'):
-        _sn_pt = gimple_exprtypes._struct_name_of(ot) if isinstance(ot, str) and ot.endswith(' *') else ''
-        _has_concrete = False
-        if _sn_pt:
-            _has_concrete = (
-                f'{_sn_pt}_{method}' in gen.func_return_types
-                or method in gen._struct_method_names.get(_sn_pt, ())
-                or gen._struct_method_csym(_sn_pt, method, '') in gen.func_return_types
-            )
-        if not _has_concrete and not (getattr(node, 'args', None) or getattr(node, 'kwargs', None)):
-            t = gen._new_temp(ot)
-            gen._emit(f"  {t} = {ov};  /* {method}: pass-through */")
-            return ot, t
     is_class_ref = False
     # `cls.method(...)` inside a @classmethod: the receiver `cls` (in `ov`)
     # IS a real argument that must be prepended, exactly like `self` on an
@@ -8597,16 +8412,7 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
         all_arg_pairs.append(_ap0)
     if ret_type == 'void':
         return gen._void_call(mangled, all_arg_pairs)
-    _mret_api = None
-    _mrt = getattr(gen, '_method_returns_generator', None)
-    if _mrt:
-        _mret_api = _mrt.get((struct_name, method))
-    if _mret_api is not None:
-        ret_type = 'MojoGenerator *'
     t = gen._call_expr(ret_type, mangled, all_arg_pairs)
-    if _mret_api is not None:
-        gen._generator_var_api[t] = _mret_api
-        gen._actual_types[t] = 'MojoGenerator *'
 
     if mangled in gen._return_elem_types:
         gen._elem_types[t] = gen._return_elem_types[mangled]

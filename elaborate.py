@@ -18,12 +18,7 @@ import subprocess
 import monomorphize as mm
 from fire_compiler import (py_tokenize, Parser, FunctionDef, StructDef,
                           TraitDef, split_top_level_commas, VarDecl,
-                          AssignStmt, IdentExpr, TupleExpr, StringLiteral,
-                          ComptimeVarStmt, CallExpr, BinaryOp, UnaryOp,
-                          align_value_error, _expr_constraint_text, MemberExpr)
-from mojo.middle import comptime as _comptime
-from mojo.middle.comptime import (eval_const, eval_const_bool_state, CONST_TRUE,
-                                  CONST_FALSE, conforms_to, eval_const_int)
+                          AssignStmt, IdentExpr)
 from gimple_codegen import _mojo_type
 from mojo.middle.types import _body_builds_struct_tuple
 
@@ -35,16 +30,6 @@ class ConformanceError(Exception):
     trait bound that the concrete type does not meet (it is missing a required
     method, or its signature differs). The message is the compile error a user
     sees."""
-
-
-class WhereConformanceError(ConformanceError):
-    """A `where` clause of a generic is provably false for the concrete type
-    arguments (`where (N > 0, "N must be positive")`). A subclass of
-    ConformanceError, so it is an ordinary conformance diagnostic to every
-    caller, and it is the one the struct instantiation path re-raises: its
-    trait-bound swallow exists for false positives of the bound check, and
-    a where clause that folds to false is not one of those."""
-
 
 # The generic head is `monomorphize.head_match`, which finds it with BRACKETS
 # BALANCED rather than with a `[^\]]*` class -- a parameter whose type is itself
@@ -549,17 +534,6 @@ def extract_trait(module_src: str, trait_name: str):
     return None
 
 
-def _extract_trait_def(module_src: str, trait_name: str):
-    base, _ = _split_base_type_args(trait_name)
-    try:
-        for s in Parser(py_tokenize(module_src)).parse_module():
-            if isinstance(s, TraitDef) and s.name == base:
-                return s
-    except Exception:
-        return None
-    return None
-
-
 def type_methods(module_src: str, type_name: str):
     """The method signatures a concrete `struct type_name` defines, as a list
     of (name, [param_types], ret_type). None if the type is not a struct here."""
@@ -569,1082 +543,79 @@ def type_methods(module_src: str, type_name: str):
     return None
 
 
-def _split_base_type_args(name: str):
-    """'S[A,B]' -> ('S', ['A','B']); 'S' -> ('S', [])."""
-    if not isinstance(name, str):
-        return str(name), []
-    name = name.strip()
-    if '[' not in name:
-        return name, []
-    base, rest = name.split('[', 1)
-    if not rest.endswith(']'):
-        return name, []
-    inner = rest[:-1].strip()
-    if not inner:
-        return base, []
-    # split top-level commas
-    args, depth, cur = [], 0, []
-    for c in inner:
-        if c in '([{': depth += 1
-        elif c in ')]}': depth -= 1
-        if c == ',' and depth == 0:
-            args.append(''.join(cur).strip()); cur = []
-        else:
-            cur.append(c)
-    if cur:
-        args.append(''.join(cur).strip())
-    return base, [a for a in args if a]
-
-
-def _find_struct_def(module_src: str, type_name: str):
-    try:
-        stmts = Parser(py_tokenize(module_src)).parse_module()
-    except Exception:
-        return None, {}
-    base, targs_list = _split_base_type_args(type_name)
-    for s in stmts:
-        if isinstance(s, StructDef) and s.name == base:
-            return s, {'base': base, 'targs_list': targs_list}
-    return None, {}
-
-
-def _struct_targ_bindings(module_src: str, sd: StructDef, targs_list: list):
-    bindings = {}
-    try:
-        tmpl = extract_struct_source(module_src, sd.name) or ''
-        params = type_param_names(tmpl) if tmpl else []
-        for i, p in enumerate(params):
-            if i < len(targs_list):
-                bindings[p] = targs_list[i]
-    except Exception:
-        pass
-    # comptime aliases / constants on the struct (e.g. `comptime x = 0`)
-    try:
-        aliases = getattr(sd, 'comptime_aliases', None) or {}
-        for k, v in aliases.items():
-            try:
-                val = eval_const(v, bindings)
-            except Exception:
-                val = None
-            if isinstance(val, (bool, int, float, str)):
-                bindings[k] = val
-                bindings[f'Self.{k}'] = val
-        # also scan fields/body for `comptime x = ...` / `alias x = ...` parsed as AssignStmt-like in some forms
-        for fld in (getattr(sd, 'fields', None) or []):
-            if isinstance(fld, AssignStmt) and isinstance(getattr(fld, 'target', None), IdentExpr):
-                name = fld.target.name
-                try:
-                    val = eval_const(fld.value, bindings)
-                except Exception:
-                    val = None
-                if isinstance(val, (bool, int, float, str)):
-                    bindings.setdefault(name, val)
-                    bindings.setdefault(f'Self.{name}', val)
-            if isinstance(fld, ComptimeVarStmt):
-                name = getattr(fld, 'target', None)
-                if isinstance(name, str):
-                    try:
-                        val = eval_const(getattr(fld, 'value', None), bindings)
-                    except Exception:
-                        val = None
-                    if isinstance(val, (bool, int, float, str)):
-                        bindings.setdefault(name, val)
-                        bindings.setdefault(f'Self.{name}', val)
-    except Exception:
-        pass
-    return bindings
-
-
-def _substitute_constraint_text(text: str, bindings: dict) -> str:
-    if not text or not bindings:
-        return text or ''
-    out = text
-    # replace Self.X, bare params
-    for k, v in bindings.items():
-        out = re.sub(rf'\bSelf\.{re.escape(k)}\b', str(v), out)
-        out = re.sub(rf'\b{k}\b', str(v), out)
-    return out
-
-
-def _constraint_implied_for_evidence(method_where: str, assumption: str, module_src: str, bindings: dict) -> bool:
-    """Conservative implication: does `assumption` imply `method_where`?
-    Unknown/unparseable => True (accept, do not report)."""
-    mw = _substitute_constraint_text(method_where or '', bindings).strip()
-    if not mw:
-        return True
-    asn = _substitute_constraint_text(assumption or '', bindings).strip()
-    # If method clause textually contained in assumption with simple and/or forms, accept.
-    try:
-        # Build conforms_to predicate and bases for evaluation
-        cpred = _where_conforms_to_pred(module_src, bindings)
-        # If assumption is empty (unconditional conformance), only accept if method clause
-        # is provably true with no extra conforms_to facts.
-        if not asn:
-            st = eval_const_bool_state(Parser(py_tokenize(mw))._parse_expr(0), _where_bindings(bindings), conforms_to_pred=cpred)
-            return st == CONST_TRUE
-        # Try parsing and checking implication via text-level conservative rules.
-        # If assumption implies method clause syntactically/structurally, accept.
-        trait_bases, cache = _where_conformance_bases(module_src), {}
-        if _constraint_implies_text(asn, mw, trait_bases, cache):
-            return True
-        # Also try evaluating method clause assuming conformance facts implied by assumption atoms.
-        # Parse assumption as conforms_to facts and evaluate.
-        # Conservative: if undecidable, accept.
-        st = eval_const_bool_state(Parser(py_tokenize(mw))._parse_expr(0), _where_bindings(bindings), conforms_to_pred=cpred)
-        if st == CONST_TRUE:
-            return True
-        # If assumption is a conforms_to(...) equal to method clause, accept.
-        if mw == asn:
-            return True
-        # Try splitting assumption into and-atoms and see if they imply method clause
-        # by evaluating with a custom predicate that returns True for atoms in assumption.
-        a_atoms = set()
-        try:
-            aexpr = Parser(py_tokenize(asn))._parse_expr(0)
-            a_atoms = set(_constraint_atoms(aexpr))
-        except Exception:
-            a_atoms = set()
-        def _pred2(tname, trname):
-            # resolve through bindings
-            t = bindings.get(tname, tname)
-            r = bindings.get(trname, trname)
-            if cpred and cpred(t, r) is True:
-                return True
-            # check if conforms_to(t,r) implied by assumption atoms
-            try:
-                want = f"conforms_to({t}, {r})"
-                # normalize simple forms
-                for at in a_atoms:
-                    if not isinstance(at, CallExpr):
-                        continue
-                    if isinstance(at.func, IdentExpr) and at.func.name == 'conforms_to' and len(at.args or []) == 2:
-                        a0 = _expr_constraint_text(at.args[0])
-                        a1 = _expr_constraint_text(at.args[1])
-                        a0s = _substitute_constraint_text(a0, bindings)
-                        a1s = _substitute_constraint_text(a1, bindings)
-                        if a0s == str(t) and a1s == str(r):
-                            return True
-                        # ancestor implication
-                        try:
-                            bases = _where_conformance_bases(module_src)
-                            if conforms_to(str(t), a1s, bases) is True and conforms_to(a1s, str(r), bases) is True:
-                                return True
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-            return None
-        st2 = eval_const_bool_state(Parser(py_tokenize(mw))._parse_expr(0), _where_bindings(bindings), conforms_to_pred=_pred2)
-        if st2 == CONST_TRUE:
-            return True
-        return False if st2 == CONST_FALSE else True
-    except Exception:
-        # Conservative: unknown => accept
-        return True
-
-
 def check_conformance(module_src: str, type_name: str, trait_name: str):
-    """Does concrete `type_name` satisfy `trait_name`? Returns (ok, missing)."""
-    trait_base, trait_args = _split_base_type_args(trait_name)
-    trait_def = _extract_trait_def(module_src, trait_base)
-    if trait_def is None:
-        return True, []
-    required = [_method_sig(m) for m in trait_def.methods]
-    sd, info = _find_struct_def(module_src, type_name)
-    if sd is None:
-        return True, []
-    bindings = _struct_targ_bindings(module_src, sd, info.get('targs_list') or [])
-    # bind trait type params from trait_name args if available (best-effort)
-    try:
-        tparams = [p[0] for p in (getattr(trait_def, 'params', None) or []) if isinstance(p, (list, tuple)) and p]
-        for i, tp in enumerate(tparams):
-            if i < len(trait_args):
-                bindings.setdefault(tp, trait_args[i])
-    except Exception:
-        pass
+    """Does concrete `type_name` satisfy `trait_name`? Returns (ok, missing),
+    where `missing` lists human-readable descriptions of unmet requirements.
 
-    # find conformance assumption for trait (base or instantiated form)
-    trait_bases, cache = _where_conformance_bases(module_src), {}
-    assumption = None
-    bc_items = list(getattr(sd, 'base_constraints', None) or [(_as_str(b), '') for b in (getattr(sd,'bases',None) or [])])
-    # normalize bc names with substitutions
-    def _bc_match(bname_s):
-        bb, _ = _split_base_type_args(bname_s)
-        if bname_s == trait_name or bb == trait_base:
-            # if trait_name is parameterized, prefer exact instantiated match when present
-            if trait_name == bname_s:
-                return 2
-            if bb == trait_base and ('[' not in trait_name or '[' in bname_s):
-                return 1
-        return 0
-    # direct
-    best = -1
-    for bname, wtext in bc_items:
-        bname_s = _substitute_constraint_text(_as_str(bname), bindings)
-        wtext_s = _substitute_constraint_text(_as_str(wtext) if wtext is not None else '', bindings)
-        sc = _bc_match(bname_s)
-        if sc > best:
-            best = sc
-            if sc > 0:
-                assumption = wtext_s
-    # ancestor paths if not directly found
-    if best <= 0:
-        found = []
-        for bname, wtext in bc_items:
-            bname_s = _substitute_constraint_text(_as_str(bname), bindings)
-            wtext_s = _substitute_constraint_text(_as_str(wtext) if wtext is not None else '', bindings)
-            for anc, aw, path in _ancestors_with_paths(bname_s, wtext_s, trait_bases, cache):
-                ab, _ = _split_base_type_args(anc)
-                if anc == trait_name or ab == trait_base:
-                    found.append(aw)
-        if found:
-            assumption = '' if any(a == '' for a in found) else found[0]
-        else:
-            assumption = None
-
+    A requirement is met when the type defines a method of the same name whose
+    (param types, return type) match. If the trait is unknown we cannot check
+    it, so we conservatively accept (ok=True) — bounds we don't understand do
+    not block instantiation, matching the demand-driven, best-effort style."""
+    required = extract_trait(module_src, trait_name)
+    if required is None:
+        return True, []
+    have = type_methods(module_src, type_name)
+    if have is None:
+        # No struct source to inspect (e.g. a builtin like Int). We cannot
+        # verify, so we do not block — keep behaviour additive.
+        return True, []
     by_name = {}
-    for m in (getattr(sd, 'methods', None) or []):
-        sig = _method_sig(m)
-        by_name.setdefault(sig[0], []).append((sig[1], sig[2], m))
+    for name, ptypes, ret in have:
+        by_name.setdefault(name, []).append((ptypes, ret))
     missing = []
-    for tname, ptypes, ret in required:
-        cands = by_name.get(tname)
+    for name, ptypes, ret in required:
+        cands = by_name.get(name)
         if cands is None:
-            missing.append(f"missing method '{tname}'")
+            missing.append(f"missing method '{name}'")
             continue
-        impl = None
-        for cp, cr, m in cands:
-            if cp == ptypes and cr == ret:
-                impl = m
-                break
-        if impl is None:
+        if not any(cp == ptypes and cr == ret for cp, cr in cands):
             want = f"({', '.join(ptypes)}) -> {ret}"
-            missing.append(f"method '{tname}' signature mismatch (want {want})")
-            continue
-        mw = getattr(impl, 'where_clause', None)
-        if mw is not None:
-            mw_text = _expr_constraint_text(mw) if not isinstance(mw, str) else mw
-            asn = assumption if assumption is not None else ''
-            if not _constraint_implied_for_evidence(mw_text, asn, module_src, bindings):
-                return False, [f"does not implement all requirements for '{trait_base}'"]
+            missing.append(f"method '{name}' signature mismatch (want {want})")
     return (not missing), missing
 
 
-def _is_float_dtype(t: str) -> bool:
-    """Is the concrete type argument `t` a float dtype?
+_FLOAT_DTYPES = {
+    'Float64', 'Float32', 'Float16', 'BFloat16', 'Float8_E5M2', 'Float8_E4M3FN',
+    'Float8_E5M2FNUZ', 'Float8_E4M3FNUZ', 'Float8_E4M3B11FNUZ'
+}
 
-    A `dtype: DType` parameter reaches this checker as the SUBSTITUTED text, so
-    every spelling of one dtype must answer the same: the scalar type
-    (`Float32`), the qualified value (`DType.float32`) and the dot-relative
-    value (`.float32`, which is what a DottedLiteral renders as). The dtype
-    tables live in the shared comptime folder, which folds the same predicate
-    for `comptime if`, so there is one definition of which names are floats.
-    A spelling that is not a known dtype keeps the old conservative answer."""
-    return _comptime.dtype_predicate_for_spelling(t, 'is_floating_point') is True
+
+def _is_float_dtype(t: str) -> bool:
+    t = str(t).strip()
+    if t in _FLOAT_DTYPES:
+        return True
+    # DType.float32 style
+    if t.startswith('DType.'):
+        name = t.split('.')[-1]
+        if name in {'float64', 'float32', 'float16', 'bfloat16'}:
+            return True
+        if 'float' in name.lower():
+            return True
+    if 'float' in t.lower() and 'int' not in t.lower():
+        # be conservative but check common cases
+        if t in {'Float64', 'Float32'}:
+            return True
+    return False
 
 
 def _is_int_dtype(t: str) -> bool:
-    return _comptime.dtype_predicate_for_spelling(t, 'is_integral') is True
-
-
-def _template_where_clauses(template_src: str):
-    """The parsed `where` clause expressions of a generic template (a function
-    or a struct), as a list in source order, or None when the template does not
-    parse. `(cond, "message")` entries are TupleExpr, as the parser leaves them."""
-    try:
-        stmts = Parser(py_tokenize(textwrap.dedent(template_src))).parse_module()
-    except Exception:
-        return None
-    for s in stmts:
-        if isinstance(s, (FunctionDef, StructDef)):
-            w = s.where_clause
-            if w is None:
-                return []
-            return list(w) if isinstance(w, list) else [w]
-    return None
-
-
-def _header_where_texts(template_src: str):
-    """The source text of each `where` clause of a template's declaration
-    header, in source order.
-
-    Read from the header itself rather than from a regex over the whole
-    template: a `where` inside the base list (`struct S[T](Movable where
-    False)`) is part of the base list, not a clause of the declaration, and the
-    parser already leaves it out of the clauses. The header runs to the first
-    colon outside brackets and string literals; a clause runs to the next
-    `where` at the same depth, or to an `else "<message>"` tail."""
-    src = template_src
-    depth, quote, end = 0, None, len(src)
-    marks = []
-    i = 0
-    while i < len(src):
-        c = src[i]
-        if quote:
-            if c == '\\':
-                i += 2
-                continue
-            if c == quote:
-                quote = None
-        elif c in '"\'':
-            quote = c
-        elif c in '([{':
-            depth += 1
-        elif c in ')]}':
-            depth -= 1
-        elif c == ':' and depth == 0:
-            end = i
-            break
-        elif (depth == 0 and src.startswith('where', i)
-                and (i == 0 or not (src[i - 1].isalnum() or src[i - 1] == '_'))
-                and not (src[i + 5:i + 6].isalnum() or src[i + 5:i + 6] == '_')):
-            marks.append(i)
-        i += 1
-    texts = []
-    for k, start in enumerate(marks):
-        stop = marks[k + 1] if k + 1 < len(marks) else end
-        clause = src[start + len('where'):stop]
-        clause = re.sub(r'\s+else\s+(["\']).*$', '', clause, flags=re.S)
-        texts.append(clause.strip())
-    return texts
-
-
-def where_violation_error(kind: str, name: str, exc: 'WhereConformanceError'):
-    """The user-facing error for a generic instantiation that violates a `where`
-    clause. Every instantiation entry point (an explicit `Struct[...]` in a
-    body, the in-TU elaboration queue) reports through this one function, so the
-    modular wording (`error: invalid <kind> of '<name>': violated constraint`)
-    does not depend on which path reached the check."""
-    return RuntimeError(
-        f"error: invalid {kind} of '{name}': violated constraint\n"
-        f"note: {type(exc).__name__}: {exc}")
-
-
-# ── Declaration-time conditional conformance checks ──────────────────
-#
-# (synthesis checks added in part 4: copy/move constructor synthesis under
-# conditional conformance. They run as a separate declaration-time pass.)
-
-def _trait_ancestor_closure(trait_name, trait_bases, cache):
-    """All ancestors of `trait_name` reachable through known trait bases."""
-    if trait_name in cache:
-        return cache[trait_name]
-    out = set()
-    stack = list(trait_bases.get(trait_name, []))
-    while stack:
-        cur = stack.pop()
-        if cur in out:
-            continue
-        out.add(cur)
-        for nxt in (trait_bases.get(cur) or []):
-            if nxt not in out:
-                stack.append(nxt)
-    cache[trait_name] = out
-    return out
-
-
-def _parse_constraint_expr(text):
-    if not text:
-        return None
-    try:
-        toks = py_tokenize(text)
-        expr = Parser(toks)._parse_expr(0)
-        return expr
-    except Exception:
-        return None
-
-
-def _constraint_atoms(expr):
-    """Return (kind, expr_or_parts) for implication reasoning, or None if unknown."""
-    if expr is None:
-        return None
-    if isinstance(expr, CallExpr) and isinstance(expr.func, IdentExpr) and expr.func.name == 'conforms_to':
-        if len(expr.args) == 2 and isinstance(expr.args[0], IdentExpr) and isinstance(expr.args[1], IdentExpr):
-            return ('conforms', expr.args[0].name, expr.args[1].name)
-        return None
-    if isinstance(expr, UnaryOp) and str(expr.op) == 'not':
-        inner = _constraint_atoms(expr.operand)
-        if inner is None:
-            return None
-        return ('not', inner)
-    if isinstance(expr, BinaryOp) and str(expr.op) in ('and', 'or'):
-        left = _constraint_atoms(expr.left)
-        right = _constraint_atoms(expr.right)
-        if left is None or right is None:
-            return None
-        return (str(expr.op), left, right)
-    if isinstance(expr, TupleExpr):
-        elems = getattr(expr, 'elements', []) or []
-        if len(elems) == 1:
-            return _constraint_atoms(elems[0])
-    if isinstance(expr, IdentExpr):
-        # Treat bare name as unknown/opaque for implication purposes.
-        return None
-    return None
-
-
-def _conforms_implies(a, b, trait_bases, cache):
-    # a, b are ('conforms', T, TraitName)
-    if a[1] != b[1]:
-        return False
-    ta, tb = a[2], b[2]
-    if ta == tb:
+    t = str(t).strip()
+    if t.startswith('Int') or t.startswith('UInt'):
+        # exclude floats
+        if t.startswith('Float'):
+            return False
         return True
-    return tb in _trait_ancestor_closure(ta, trait_bases, cache)
-
-
-def _atom_implies(a, b, trait_bases, cache):
-    if a is None or b is None:
-        return False
-    ak, bk = a[0], b[0]
-    if ak == 'and':
-        # conjunction implies a conjunct if either side does
-        return _atom_implies(a[1], b, trait_bases, cache) or _atom_implies(a[2], b, trait_bases, cache)
-    if ak == 'or':
-        # or implies b only when every disjunct does
-        return _atom_implies(a[1], b, trait_bases, cache) and _atom_implies(a[2], b, trait_bases, cache)
-    if bk == 'and':
-        # a implies (x and y) if it implies both
-        return _atom_implies(a, b[1], trait_bases, cache) and _atom_implies(a, b[2], trait_bases, cache)
-    if bk == 'or':
-        # a implies (x or y) if it implies either
-        return _atom_implies(a, b[1], trait_bases, cache) or _atom_implies(a, b[2], trait_bases, cache)
-    if ak == 'conforms' and bk == 'conforms':
-        return _conforms_implies(a, b, trait_bases, cache)
-    if ak == bk == 'not':
-        # conservative: not X implies not Y only if Y implies X? safer to require equality of atoms
-        return _atom_implies(b[1], a[1], trait_bases, cache)
-    # unknown / mixed: be conservative
-    return a == b
-
-
-def _constraint_implies_text(derived_text, base_text, trait_bases, cache):
-    if not derived_text or not base_text:
-        return False
-    if derived_text.strip() == base_text.strip():
-        return True
-    da = _constraint_atoms(_parse_constraint_expr(derived_text))
-    ba = _constraint_atoms(_parse_constraint_expr(base_text))
-    if da is None or ba is None:
-        # anything the checker cannot parse is ACCEPTED (no diagnostic)
-        return True
-    return _atom_implies(da, ba, trait_bases, cache)
-
-
-def _ancestors_with_paths(base_name, base_where, trait_bases, cache, path=None):
-    """Yield (ancestor, where_text, path_names) for all reachable ancestors including base."""
-    if path is None:
-        path = [base_name]
-    yield (base_name, base_where, list(path))
-    for parent in (trait_bases.get(base_name) or []):
-        # Parent traits are unconditional in this part's model.
-        yield from _ancestors_with_paths(parent, base_where, trait_bases, cache, path + [parent])
-
-
-def _as_str(x):
-    return '' if x is None else str(x)
-
-
-def _struct_is_conditionally_register_passable(sd):
-    base_constraints = list(getattr(sd, 'base_constraints', []) or [])
-    if not base_constraints:
-        base_constraints = [(_as_str(b), '') for b in (getattr(sd, 'bases', []) or [])]
-    for bname, wtext in base_constraints:
-        if _as_str(bname) == 'RegisterPassable' and _as_str(wtext):
+    if t.startswith('DType.'):
+        name = t.split('.')[-1]
+        if name.startswith('int') or name.startswith('uint'):
             return True
     return False
-
-
-def _base_type_name(ann):
-    if ann is None:
-        return ''
-    s = _as_str(ann).strip()
-    # strip common prefixes? not needed for simple cases
-    if '[' in s:
-        s = s.split('[', 1)[0]
-    return s.strip()
-
-
-def _iter_function_defs(stmts):
-    for s in (stmts or []):
-        if isinstance(s, FunctionDef):
-            yield s
-        elif isinstance(s, StructDef):
-            for m in (getattr(s, 'methods', None) or []):
-                if isinstance(m, FunctionDef):
-                    yield m
-        elif isinstance(s, TraitDef):
-            for m in (getattr(s, 'methods', None) or []):
-                if isinstance(m, FunctionDef):
-                    yield m
-
-
-def check_conditional_rp_origin(stmts, struct_defs):
-    """Reject returning ref[x] tied to a conditionally-RegisterPassable arg."""
-    cond_rp = {}
-    for sd in (struct_defs or []):
-        if isinstance(sd, StructDef) and _struct_is_conditionally_register_passable(sd):
-            cond_rp[_as_str(getattr(sd, 'name', ''))] = sd
-    if not cond_rp:
-        return
-    for fn in _iter_function_defs(stmts):
-        origin = _as_str(getattr(fn, 'return_origin', '') or '')
-        if not origin:
-            continue
-        # find parameter named origin
-        param_type = None
-        is_ref_param = False
-        for pname, ptype in (getattr(fn, 'params', None) or []):
-            if _as_str(pname) == origin:
-                param_type = ptype
-                conv = (getattr(fn, 'param_convs', None) or {}).get(pname)
-                # a ref argument is exempt
-                if _as_str(conv) == 'ref':
-                    is_ref_param = True
-                break
-        if is_ref_param or param_type is None:
-            continue
-        base = _base_type_name(param_type)
-        if base in cond_rp:
-            raise RuntimeError(
-                f"cannot return '{origin}'s origin, because it might expand to a "
-                f"RegisterPassable type")
-
-
-def check_conformance_declarations(struct_defs, trait_defs):
-    """Declaration-time checks for conditional trait conformance (part 1)."""
-    trait_bases = {}
-    for td in (trait_defs or []):
-        if isinstance(td, TraitDef):
-            trait_bases[_as_str(getattr(td, 'name', ''))] = list(getattr(td, 'bases', []) or [])
-    cache = {}
-    errors = []
-    for sd in (struct_defs or []):
-        if not isinstance(sd, StructDef):
-            continue
-        sline = getattr(sd, 'line', 0) or 0
-        base_constraints = list(getattr(sd, 'base_constraints', []) or [])
-        if not base_constraints:
-            # fall back to unconditional bases if field missing/empty
-            base_constraints = [(_as_str(b), '') for b in (getattr(sd, 'bases', []) or [])]
-
-        bc_map = {}
-        for bname, wtext in base_constraints:
-            bc_map[_as_str(bname)] = _as_str(wtext) if wtext is not None else ''
-
-        # Conditional TrivialRegisterPassable not supported
-        for bname, wtext in base_constraints:
-            if _as_str(bname) == 'TrivialRegisterPassable' and _as_str(wtext):
-                errors.append((sline,
-                    "conditional conformance to 'TrivialRegisterPassable' is not supported"))
-                break
-
-        # Collect ancestor reachability by ancestor name
-        by_ancestor = {}
-        for bname, wtext in base_constraints:
-            bname = _as_str(bname)
-            wtext = _as_str(wtext) if wtext is not None else ''
-            for anc, awhere, path in _ancestors_with_paths(bname, wtext, trait_bases, cache):
-                by_ancestor.setdefault(anc, []).append((awhere, path, bname))
-
-        # Diamond: ancestor reached through different conditional paths must be explicit
-        for anc, entries in by_ancestor.items():
-            where_groups = {}
-            for aw, path, direct in entries:
-                where_groups.setdefault(aw, []).append((path, direct))
-            if len(where_groups) <= 1:
-                continue
-            if anc in bc_map:
-                continue
-            errors.append((sline,
-                f"ancestor trait '{anc}' is reached via multiple inheritance paths "
-                f"with different constraints; it must be explicitly listed in the "
-                f"conformance list with the desired constraint"))
-            break
-
-        # DerivedDoesNotImplyAncestor / UnconditionalDerivedConditionalAncestor
-        for bname, wtext in base_constraints:
-            bname = _as_str(bname)
-            wtext = _as_str(wtext) if wtext is not None else ''
-            broke = False
-            for anc in _trait_ancestor_closure(bname, trait_bases, cache):
-                if anc not in bc_map:
-                    continue
-                anc_where = bc_map[anc]
-                if not wtext and anc_where:
-                    errors.append((sline,
-                        f"constraint for '{bname}' does not imply constraint for "
-                        f"ancestor trait '{anc}'; strengthen the derived constraint "
-                        f"by adding the ancestor's constraint with 'and'"))
-                    broke = True
-                    break
-                if wtext and anc_where and not _constraint_implies_text(wtext, anc_where, trait_bases, cache):
-                    errors.append((sline,
-                        f"constraint for '{bname}' does not imply constraint for "
-                        f"ancestor trait '{anc}'; strengthen the derived constraint "
-                        f"by adding the ancestor's constraint with 'and'"))
-                    broke = True
-                    break
-            if broke:
-                break
-
-    if errors:
-        line, msg = sorted(errors, key=lambda x: x[0])[0]
-        raise RuntimeError(f"error: {msg}")
-
-
-# ── Copy/move synthesis under conditional conformance (part 4) ──────────
-
-def _sd_base_constraints_map(sd):
-    bc = list(getattr(sd, 'base_constraints', []) or [])
-    if not bc:
-        bc = [(_as_str(b), '') for b in (getattr(sd, 'bases', []) or [])]
-    out = {}
-    for bname, wtext in bc:
-        out[_as_str(bname)] = _as_str(wtext) if wtext is not None else ''
-    return out
-
-
-def _sd_bracket_param_names(sd):
-    names = []
-    # Prefer explicit type parameter name lists when present.
-    for attr in ('type_param_names', 'bracket_params'):
-        vals = getattr(sd, attr, None) or []
-        if isinstance(vals, list):
-            for v in vals:
-                if isinstance(v, (tuple, list)) and v:
-                    n = _as_str(v[0]).lstrip('*')
-                else:
-                    n = _as_str(v).lstrip('*')
-                if n and n not in names:
-                    names.append(n)
-    for bt in (getattr(sd, 'bracket_types', []) or []):
-        if isinstance(bt, (tuple, list)) and bt:
-            n = _as_str(bt[0]).lstrip('*')
-            if n and n not in names:
-                names.append(n)
-    return names
-
-
-def _ann_to_str(ann):
-    if ann is None:
-        return ''
-    if isinstance(ann, str):
-        return ann.strip()
-    if isinstance(ann, IdentExpr):
-        return _as_str(getattr(ann, 'name', '')).strip()
-    # Best-effort: some AST nodes stringify reasonably.
-    return _as_str(ann).strip()
-
-
-def _split_top_level_type_args(text):
-    s = (text or '').strip()
-    if not s.startswith('[') or not s.endswith(']'):
-        return None
-    inner = s[1:-1]
-    parts = []
-    depth = 0
-    cur = []
-    for ch in inner:
-        if ch in '([{<':
-            depth += 1
-            cur.append(ch)
-        elif ch in ')]}>':
-            depth -= 1
-            cur.append(ch)
-        elif ch == ',' and depth == 0:
-            parts.append(''.join(cur).strip())
-            cur = []
-        else:
-            cur.append(ch)
-    if cur or inner.strip() == '':
-        tail = ''.join(cur).strip()
-        if tail or parts:
-            parts.append(tail)
-    return parts
-
-
-def _parse_type_app(text):
-    s = _ann_to_str(text)
-    if not s:
-        return '', []
-    i = s.find('[')
-    if i < 0 or not s.endswith(']'):
-        return s, []
-    base = s[:i].strip()
-    args = _split_top_level_type_args(s[i:])
-    if args is None:
-        return s, []
-    return base, args
-
-
-def _subst_constraint_text(text, subs):
-    if not text:
-        return text
-    # Replace longer keys first to avoid prefix collisions.
-    for k in sorted(subs.keys(), key=len, reverse=True):
-        v = subs[k]
-        text = re.sub(rf'\b{re.escape(k)}\b', v, text)
-    return text
-
-
-def _conforms_atom(tname, trait):
-    return ('conforms', tname, trait)
-
-
-def _is_copyable_trait(trait):
-    return _as_str(trait) in ('Copyable',)
-
-
-def _is_movable_trait(trait):
-    return _as_str(trait) in ('Movable',)
-
-
-def _atom_implied_by_assumptions(atom, assumptions, trait_bases, cache):
-    """Whether `atom` is implied by `assumptions` (all assumed true)."""
-    if atom is None:
-        return False
-    ak = atom[0]
-    if ak == 'and':
-        return (_atom_implied_by_assumptions(atom[1], assumptions, trait_bases, cache)
-                and _atom_implied_by_assumptions(atom[2], assumptions, trait_bases, cache))
-    if ak == 'or':
-        # atom implied if either disjunct implied? no: (x or y) as a goal is implied
-        # if x implied or y implied.
-        return (_atom_implied_by_assumptions(atom[1], assumptions, trait_bases, cache)
-                or _atom_implied_by_assumptions(atom[2], assumptions, trait_bases, cache))
-    if ak == 'conforms':
-        for a in assumptions:
-            if _atom_implies(a, atom, trait_bases, cache):
-                return True
-        return False
-    if ak == 'not':
-        # implied if assumptions prove the negation: e.g. assume not X.
-        for a in assumptions:
-            if _atom_implies(a, atom, trait_bases, cache):
-                return True
-        # or if inner is disproved? conservative: only direct implication.
-        return False
-    return False
-
-
-def _text_implied_by_text(goal_text, assume_text, trait_bases, cache):
-    if not goal_text:
-        return True
-    # Treat empty/absent assumption as unconditional (no assumptions) only when
-    # goal is also empty; otherwise cannot prove from nothing.
-    g = _constraint_atoms(_parse_constraint_expr(goal_text))
-    a = _constraint_atoms(_parse_constraint_expr(assume_text)) if assume_text else None
-    if g is None:
-        # Unknown goal: conservative accept.
-        return True
-    if a is None:
-        if assume_text:
-            # Unparseable assumption: conservative accept.
-            return True
-        assumptions = []
-    else:
-        # Flatten top-level ands into assumptions.
-        assumptions = []
-        stack = [a]
-        while stack:
-            cur = stack.pop()
-            if cur is None:
-                continue
-            if cur[0] == 'and':
-                stack.append(cur[1])
-                stack.append(cur[2])
-            else:
-                assumptions.append(cur)
-    return _atom_implied_by_assumptions(g, assumptions, trait_bases, cache)
-
-
-def _struct_field_defs(sd):
-    out = []
-    for f in (getattr(sd, 'fields', None) or []):
-        if not hasattr(f, 'name'):
-            continue
-        name = _as_str(getattr(f, 'name', ''))
-        if not name or ',' in name:
-            continue
-        t = _ann_to_str(getattr(f, 'type_ann', None))
-        if not t:
-            continue
-        line = getattr(f, 'line', 0) or getattr(sd, 'line', 0) or 0
-        out.append((name, t, line))
-    return out
-
-
-def _field_copy_move_problem(enclosing, fname, ftype_text, want_trait, struct_map, trait_bases, cache):
-    """Return (problem, reason_kind) or None if ok/unknown-accept.
-
-    want_trait: 'Copyable' or 'Movable'.
-    """
-    # Resolve field type
-    base, targs = _parse_type_app(ftype_text)
-    if not base:
-        return None
-    enc_params = set(_sd_bracket_param_names(enclosing))
-    enc_bc = _sd_base_constraints_map(enclosing)
-    enc_assume = enc_bc.get(want_trait, '')
-    # If enclosing doesn't declare this trait, synthesis check not applicable.
-    if want_trait not in enc_bc:
-        return None
-
-    # If base is a type parameter of enclosing struct
-    if base in enc_params and not targs:
-        goal = f"conforms_to({base}, {want_trait})"
-        if _text_implied_by_text(goal, enc_assume, trait_bases, cache):
-            return None
-        # Not provable: for synthesis, an unprovable requirement blocks.
-        # But be careful not to invent diagnostics for genuinely unknown cases
-        # outside scope. For type params, this is the OR/multi-field class.
-        return ('param', goal)
-
-    fdef = struct_map.get(base)
-    if fdef is None:
-        # Unknown/imported type: accept.
-        return None
-    f_bc = _sd_base_constraints_map(fdef)
-    if want_trait not in f_bc:
-        # Field type has no Copyable/Movable conformance at all: out of scope.
-        return None
-    f_need = f_bc.get(want_trait, '')
-    if not f_need:
-        # Field type's conformance is unconditional: fine.
-        return None
-
-    # Field type has conditional conformance. Determine if enclosing implies it
-    # for this declared field instantiation.
-    fparams = _sd_bracket_param_names(fdef)
-    needed = f_need
-
-    # Variadic pack: a single type parameter used as `P.all_conforms_to[Trait]()`
-    # applies to all supplied type arguments. Expand before substitution.
-    _expanded_pack = False
-    if targs and fparams:
-        # Try any single param name as pack if condition has all_conforms_to.
-        for p in fparams:
-            m = re.search(rf'\b{re.escape(p)}\.all_conforms_to\[([A-Za-z_]\w*)\]\s*\(\s*\)', f_need)
-            if m and (len(fparams) == 1 or len(targs) != len(fparams)):
-                tr = m.group(1)
-                parts = [f"conforms_to({a.strip()}, {tr})" for a in targs if _as_str(a).strip()]
-                if parts:
-                    needed = ' and '.join(f'({p2})' for p2 in parts)
-                    _expanded_pack = True
-                break
-
-    if not _expanded_pack:
-        subs = {}
-        if targs and fparams:
-            for i, p in enumerate(fparams):
-                if i < len(targs):
-                    subs[p] = targs[i]
-        needed = _subst_constraint_text(f_need, subs) if subs else f_need
-
-    # If needed text contains unknown constructs, be conservative accept.
-    if 'all_conforms_to' in needed or 'each ' in needed:
-        return None
-
-    # Determine if needed is implied by enclosing assumptions for want_trait.
-    # Also treat enclosing unconditional (empty assume) as "no assumptions".
-    # OR-gated enclosing constraint is not definite enough: for synthesis we need
-    # the requirement provable; _text_implied_by_text treats unparseable/empty
-    # appropriately, but OR in assumption means not all disjuncts hold.
-    # Our _text_implied_by_text checks goal implied by assumptions (flattened ands);
-    # an assumption that is itself an OR does not imply its disjuncts, which is correct.
-    if _text_implied_by_text(needed, enc_assume, trait_bases, cache):
-        return None
-
-    # Not implied. But "genuinely non-copyable field type (no Copyable conformance at all)
-    # is out of scope..." - we already filtered that. A conditional conformance that can't
-    # be proven satisfied is a synthesis problem.
-    return ('cond', needed)
-
-
-def check_copy_move_synthesis(struct_defs, trait_defs):
-    """Declaration-time synthesized copy/move constructor diagnostics (part 4)."""
-    trait_bases = {}
-    for td in (trait_defs or []):
-        if isinstance(td, TraitDef):
-            trait_bases[_as_str(getattr(td, 'name', ''))] = list(getattr(td, 'bases', []) or [])
-    struct_map = {}
-    for sd in (struct_defs or []):
-        if isinstance(sd, StructDef):
-            struct_map[_as_str(getattr(sd, 'name', ''))] = sd
-    cache = {}
-    errors = []
-
-    for sd in (struct_defs or []):
-        if not isinstance(sd, StructDef):
-            continue
-        bc = _sd_base_constraints_map(sd)
-        for want_trait, kind, msg_tail in (
-            ('Copyable', 'copy', "has non-copyable type"),
-            ('Movable', 'move', "has non-movable and non-implicitly-copyable type"),
-        ):
-            if want_trait not in bc:
-                continue
-            for fname, ftype, fline in _struct_field_defs(sd):
-                prob = _field_copy_move_problem(sd, fname, ftype, want_trait, struct_map, trait_bases, cache)
-                if prob is None:
-                    continue
-                errors.append((fline or getattr(sd, 'line', 0) or 0,
-                    f"cannot synthesize {kind} constructor because field '{fname}' {msg_tail}"))
-                # one error per struct/trait is enough? modular shows per field; but
-                # report first deterministically.
-                break
-            if errors:
-                break
-        if errors:
-            break
-
-    if errors:
-        line, msg = sorted(errors, key=lambda x: x[0])[0]
-        raise RuntimeError(f"error: {msg}")
-
-
-def _split_where_message(expr):
-    """`(cond, "message")` -> (cond, message); any other clause -> (expr, None)."""
-    if (isinstance(expr, TupleExpr) and len(expr.elements) == 2
-            and isinstance(expr.elements[1], StringLiteral)):
-        return expr.elements[0], expr.elements[1].value
-    return expr, None
-
-
-def _where_bindings(targs: dict) -> dict:
-    """The comptime bindings a clause folds against: a concrete integer, float,
-    or Bool type argument. Any other argument is left out, so a clause over it
-    is undecided rather than wrong."""
-    bindings = {}
-    for name, conc in targs.items():
-        text = str(conc).strip()
-        if re.fullmatch(r'-?\d+', text):
-            bindings[name] = int(text)
-        elif re.fullmatch(r'-?\d+\.\d+([eE][-+]?\d+)?', text):
-            bindings[name] = float(text)
-        elif text in ('True', 'False'):
-            bindings[name] = (text == 'True')
-    return bindings
-
-
-def _module_alias_bindings(module_src: str) -> dict:
-    """Fold top-level `alias NAME = <literal>` bindings from module text.
-
-    The parser records `alias` as a no-op ExprStmt and the binding as an
-    ordinary AssignStmt, so the AST cannot distinguish a module alias from a
-    module-level assignment. Scan the source for `alias NAME = <literal>`
-    lines instead and fold the literal with the shared constant folder. The
-    last binding for a repeated name wins; anything that does not fold stays
-    out so the clause remains undecided rather than wrong."""
-    bindings = {}
-    if not module_src:
-        return bindings
-    for line in module_src.splitlines():
-        m = re.match(r'^alias\s+([A-Za-z_]\w*)\s*=\s*(.+)$', line)
-        if not m:
-            continue
-        name, rhs = m.group(1), m.group(2).strip()
-        try:
-            node = Parser(py_tokenize(rhs))._parse_expr(0)
-            val = eval_const(node, {})
-        except Exception:
-            val = None
-        if isinstance(val, (bool, int, float, str)):
-            bindings[name] = val
-    return bindings
-
-
-def _where_conformance_bases(module_src: str) -> dict:
-    """Declared struct/trait bases from module_src for conforms_to folding."""
-    bases = {}
-    try:
-        stmts = Parser(py_tokenize(textwrap.dedent(module_src or ''))).parse_module()
-    except Exception:
-        stmts = []
-    for s in stmts:
-        if isinstance(s, (StructDef, TraitDef)):
-            name = getattr(s, 'name', None)
-            if isinstance(name, str):
-                bases[name] = list(getattr(s, 'bases', None) or [])
-    # TraitDef AST nodes do not currently carry parent traits; extract them from
-    # source text so trait-to-trait conformance is visible.
-    try:
-        src = module_src or ''
-        for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\s*(\[[^\]]*\])?\s*\(([^)]*)\)\s*:', src, re.MULTILINE):
-            name = m.group(1)
-            bstr = m.group(3) or ''
-            blist = []
-            for part in bstr.split(','):
-                part = part.strip()
-                if not part:
-                    continue
-                b = part.split('[')[0].split('.')[-1].strip()
-                if b and re.match(r'^[A-Za-z_]\w*$', b):
-                    blist.append(b)
-            if blist or name not in bases:
-                bases[name] = blist
-        for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\b', src, re.MULTILINE):
-            bases.setdefault(m.group(1), [])
-    except Exception:
-        pass
-    return bases
-
-
-def _where_conforms_to_pred(module_src: str, targs: dict):
-    bases = _where_conformance_bases(module_src)
-    if not bases:
-        return None
-    def _resolve_name(n):
-        # Map a generic parameter name to its concrete type arg when known.
-        if isinstance(n, str) and n in targs:
-            c = str(targs[n]).strip()
-            # strip simple qualifiers/generics to base name for lookup
-            c = c.split('.')[-1]
-            if '[' in c:
-                c = c.split('[', 1)[0]
-            return c
-        return n
-    def pred(tname, trname):
-        return conforms_to(_resolve_name(tname), _resolve_name(trname), bases)
-    return pred
 
 
 def check_where_clauses(module_src: str, template_src: str, targs: dict):
-    """Enforce the template's `where` clauses for the concrete `targs`.
-
-    Each clause is folded by the shared constant folder
-    (mojo.middle.comptime.eval_const_bool_state): a provably false clause raises
-    ConformanceError with its message, or its source when it has none. A true
-    clause passes. An undecided clause (a name the folder cannot resolve, such
-    as a comptime assert proved elsewhere in the body) is accepted as before.
-    The regex checks for `T.is_floating_point()` / `is_integral()` / `T == U`
-    only run for a template the parser cannot read or whose clause the folder
-    could not decide, so DType predicates keep their existing result."""
-    clauses = _template_where_clauses(template_src)
-    undecided = clauses is None
-    if clauses:
-        src_texts = _header_where_texts(template_src)
-        bindings = _module_alias_bindings(module_src)
-        bindings.update(_where_bindings(targs))
-        _cpred = _where_conforms_to_pred(module_src, targs)
-        for i, item in enumerate(clauses):
-            cond, msg = _split_where_message(item)
-            state = eval_const_bool_state(cond, bindings, conforms_to_pred=_cpred)
-            if state == CONST_FALSE:
-                if msg is not None:
-                    raise WhereConformanceError(msg)
-                text = (src_texts[i] if len(src_texts) == len(clauses)
-                        else ' and '.join(src_texts))
-                raise WhereConformanceError(f"requirement '{text}' is not satisfied")
-            if state != CONST_TRUE:
-                undecided = True
-    if undecided:
-        _check_where_text_predicates(template_src, targs)
-
-
-def _check_where_text_predicates(template_src: str, targs: dict):
-    """The DType / type-equality where checks, by regex over the clause text."""
+    """Check where clause constraints like dtype.is_floating_point()."""
+    # Look for where clauses
+    # Simple pattern matching
     for m in re.finditer(r'where\s+(.+?)(?::|\n|$)', template_src):
         clause = m.group(1).strip()
         # Check for X.is_floating_point()
@@ -1728,28 +699,9 @@ _C_TO_MOJO = {
 }
 
 
-def c_to_mojo(ctype: str):
-    """The Mojo spelling of a C argument type, or None when the C type does not
-    name one. There is deliberately NO default: a struct, a pointer or an erased
-    SIMD value has a C type this table does not list, and answering `Int` for it
-    bound a type parameter to a type the argument is not. That binding then
-    reached `check_bounds`, which rejected it (`dtype := Int64` for an erased
-    `SIMD[.float32, 2]`), so a guess was reported as a user error."""
-    return _C_TO_MOJO.get(ctype)
+def c_to_mojo(ctype: str) -> str:
+    return _C_TO_MOJO.get(ctype, 'Int')
 
-
-def inferred_ctype_is_specific(ctype) -> bool:
-    """True when `ctype` NAMES the argument's Mojo type, rather than being a
-    placeholder this codegen substituted for a type it did not compute.
-
-    Deliberately not every key of `_C_TO_MOJO`: `int64_t` and `int` are this
-    codegen's UNIVERSAL scalar fallbacks — every SIMD value, every `Array`/
-    `Span` element whose element type was not tracked, every opaque
-    construction and every unknown subscript lowers to `int64_t` — so the C
-    spelling cannot tell a genuine Int argument from an erased one. Any C
-    type absent from `_C_TO_MOJO` (`char`, a bare `Foo *`) reaches
-    `c_to_mojo`, which now answers None for it (no `Int` default), for the same reason."""
-    return ctype in _C_TO_MOJO and ctype not in ('int64_t', 'int')
 
 _SCALAR_ANN_RE = re.compile(r'^Scalar\[\s*([^,\[\]]+)\s*\]$')
 _SIMD_ANN_RE = re.compile(r'^SIMD\[\s*([^,\[\]]+)\s*(?:,\s*([^,\[\]]+)\s*)?\]$')
@@ -1771,16 +723,11 @@ def _unify_param_ann(ann, pnames, arg_ctype) -> dict:
       every such template was declined and its call sites reached the generated
       C as bare externs.
 
-    The `SIMD[...]` and `Scalar[...]` shapes bind only from a scalar C type.
-    This codegen erases SIMD outright (`_mojo_type('SIMD[Float64, 4]')` is
-    `int64_t`, and `Scalar[DType.int32]` is `int64_t` too), so an `int64_t`
-    argument is ambiguous: `erf(SIMD[.float32, 2](2))` and `erf(Int64(2))` have
-    the same C type, and binding `dtype := Int64` from it was a guess that the
-    constraint check now rejects. That case binds nothing and the template is
-    declined as unbound. Any other scalar C type (`double`, `float`, `int32_t`)
-    cannot be an erased SIMD, so the argument is that scalar, `SIMD[dtype, 1]`,
-    and `dtype` and `width` bind from it. Recovering the dtype of a wider SIMD
-    needs the argument's declared type, not its C type.
+    `width` binds to `1`, which is not a guess about the source: this codegen
+    erases SIMD outright (`_mojo_type('SIMD[Float64, 4]')` is `int64_t`, and
+    `_TYPE_MAP` has no SIMD key), so every value that reaches here is a scalar,
+    and `SIMD[<scalar type>, 1]` is the spelling that means "that scalar". A
+    future real SIMD representation must revisit this one line.
 
     Anything else — a nested `Pointer[T]`, `Some[T]`, a param used only as a
     comptime argument, an annotation that is not a string — returns `{}`, so
@@ -1807,170 +754,20 @@ def _unify_param_ann(ann, pnames, arg_ctype) -> dict:
     if ann.startswith('Self.'):
         ann = ann[5:]
     if ann in pnames:
-        bound = c_to_mojo(arg_ctype)
-        return {} if bound is None else {ann: bound}
-    # `Scalar[dtype]` and `SIMD[dtype, width]`. SIMD is erased to `int64_t`, so
-    # an `int64_t` argument may be ANY SIMD value or a plain Int64: it binds
-    # nothing. Any other scalar C type (`double`, `float`, `int32_t`) cannot be
-    # an erased SIMD, so the argument IS that scalar, which is `SIMD[dtype, 1]`.
-    if arg_ctype == 'int64_t':
-        return {}
-    dtype = c_to_mojo(arg_ctype)
-    if dtype is None:
-        return {}
+        return {ann: c_to_mojo(arg_ctype)}
+    # `Scalar[dtype]` is `SIMD[dtype, 1]`: the argument IS that scalar.
     m = _SCALAR_ANN_RE.match(ann)
     if m and m.group(1) in pnames:
-        return {m.group(1): dtype}
+        return {m.group(1): c_to_mojo(arg_ctype)}
     m = _SIMD_ANN_RE.match(ann)
     if m and m.group(1) in pnames:
-        out = {m.group(1): dtype}
+        out = {m.group(1): c_to_mojo(arg_ctype)}
         if m.group(2) is not None:
             if m.group(2) not in pnames:
                 return {}
             out[m.group(2)] = '1'
         return out
     return {}
-
-
-def _align_int_binding_value(conc):
-    text = str(conc).strip()
-    if re.fullmatch(r'-?\d+', text):
-        try:
-            return int(text)
-        except Exception:
-            return None
-    return None
-
-
-def _align_eval_call_hook(module_src, name, argvals):
-    """Best-effort comptime call hook for @align evaluation.
-
-    Returns an int result or None when the call cannot be resolved/evaluated
-    as a pure scalar comptime call. Failures must not produce a false
-    diagnostic or crash.
-    """
-    try:
-        if not isinstance(name, str) or not all(isinstance(v, int) for v in argvals):
-            return None
-        import comptime
-        fn_src = extract_fn_source(module_src, name, arg_count=len(argvals))
-        if fn_src is None:
-            return None
-        # evaluate may raise for unsupported shapes; treat as unevaluable.
-        res = comptime.evaluate(fn_src, name, list(argvals))
-        if isinstance(res, bool):
-            return int(res)
-        if isinstance(res, int):
-            return res
-    except Exception:
-        return None
-    return None
-
-
-def _validate_align_decorators_for_struct(module_src, template_src, struct_name, targs):
-    """Validate parametric @align(...) decorators at struct instantiation.
-
-    Evaluates constant/comptime-foldable expressions using bound bracket args.
-    On provably invalid alignment, raises RuntimeError with the diagnostic text
-    required by DIAGNOSTICS_align_decorator. Unknown/unevaluable expressions are
-    accepted (no false diagnostic).
-    """
-    from fire_compiler import CallExpr, IdentExpr
-    sd = None
-    # Prefer the struct definition from the full module source so we see
-    # decorators that precede the extracted template block (extract_struct_source
-    # returns the `struct ...` block only, without leading decorators).
-    for _src in (module_src, template_src):
-        try:
-            stmts = Parser(py_tokenize(textwrap.dedent(_src))).parse_module()
-        except Exception:
-            continue
-        for s in stmts:
-            if isinstance(s, StructDef) and s.name == struct_name:
-                sd = s
-                break
-        if sd is not None and getattr(sd, 'decorators', None):
-            break
-        # keep a found struct even without decorators as fallback candidate
-    if sd is None:
-        return
-
-    bindings = {}
-    for k, v in (targs or {}).items():
-        iv = _align_int_binding_value(v)
-        if iv is not None:
-            bindings[k] = iv
-
-    # Include relevant module-level comptime/alias int bindings from the
-    # template's module when they evaluate to constants (best effort).
-    try:
-        mod_stmts = Parser(py_tokenize(module_src)).parse_module()
-        for ms in mod_stmts:
-            # fire_compiler represents module aliases as ComptimeVarStmt/Assign-like
-            # nodes in some forms; try common shapes conservatively.
-            target = None
-            value = None
-            if isinstance(ms, AssignStmt):
-                targets = getattr(ms, 'targets', None)
-                if targets and len(targets) == 1:
-                    t = targets[0]
-                else:
-                    t = getattr(ms, 'target', None)
-                if isinstance(t, IdentExpr):
-                    target = t.name
-                elif isinstance(t, str):
-                    target = t
-                value = getattr(ms, 'value', None)
-            elif hasattr(ms, 'target') and hasattr(ms, 'value'):
-                t = getattr(ms, 'target', None)
-                if isinstance(t, IdentExpr):
-                    target = t.name
-                elif isinstance(t, str):
-                    target = t
-                value = getattr(ms, 'value', None)
-            if not isinstance(target, str) or target in bindings or value is None:
-                continue
-            try:
-                iv = eval_const_int(value, {}, call_hook=None)
-            except Exception:
-                iv = None
-            if isinstance(iv, int):
-                bindings[target] = iv
-    except Exception:
-        pass
-
-    call_hook = lambda name, argvals: _align_eval_call_hook(module_src, name, argvals)
-
-    for dec in (getattr(sd, 'decorators', None) or []):
-        if not isinstance(dec, CallExpr):
-            continue
-        func = dec.func
-        if not (isinstance(func, IdentExpr) and func.name == 'align'):
-            continue
-        args = dec.args or []
-        kwargs = dec.kwargs or []
-        if len(args) != 1 or kwargs:
-            continue
-        arg = args[0]
-        try:
-            val = eval_const_int(arg, bindings, call_hook=call_hook)
-        except Exception:
-            # Evaluation failed in an unexpected way; do not crash or emit a
-            # false diagnostic for this instantiation.
-            val = None
-        if val is None:
-            # Preserve legacy diagnostics for an unknown bare name used as
-            # @align(...) in this instantiation context.
-            if isinstance(arg, IdentExpr) and arg.name not in bindings:
-                raise RuntimeError(
-                    "function instantiation failed\n"
-                    f"use of unknown declaration '{arg.name}'\n{arg.name}")
-            continue
-        if val <= 0 or (val & (val - 1)) != 0 or val > (1 << 29):
-            raise RuntimeError(
-                "function instantiation failed\n"
-                f"struct alignment must be a positive power of 2, got {val}")
-
 
 
 # ── Parameters this codegen erases ──────────────────────────────────────
@@ -2306,14 +1103,10 @@ def _struct_layout_anns(concrete_src: str, name: str):
 
 
 def _elab_signature(concrete_src: str, name: str):
-    """(ret_ctype, [param_ctypes]) of the monomorphized function, via the ABI map.
-
-    `ret_ctype` is None when the function has no return annotation: its return
-    type is then the body's inferred type, which only the defining unit knows
-    (see monomorphize.defined_return_ctype), not this source's signature."""
+    """(ret_ctype, [param_ctypes]) of the monomorphized function, via the ABI map."""
     for s in Parser(py_tokenize(concrete_src)).parse_module():
         if isinstance(s, FunctionDef) and s.name == name:
-            ret = _mojo_type(s.return_type) if s.return_type else None
+            ret = _mojo_type(s.return_type) if s.return_type else 'void'
             if (isinstance(ret, str) and ret.startswith('MojoTuple_')
                     and not _body_builds_struct_tuple(
                             getattr(s, 'body', None))):
@@ -2369,8 +1162,6 @@ def _defined_symbols(obj: str) -> set:
 _SYMBOLS_CACHE: dict = {}
 
 
-
-
 class Elaborator:
     """Demand-driven, CAS-backed elaboration service."""
 
@@ -2410,12 +1201,9 @@ class Elaborator:
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
 
-        mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc,
-                                                     conformance_bases=_where_conformance_bases(module_src))
+        mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc)
         _, concrete = mm.monomorphize_source(tmpl, targs)
         ret, ptypes = _elab_signature(concrete, mangled)
-        if ret is None:
-            ret = mm.defined_return_ctype(mangled) or 'void'
         return {'symbol': mangled, 'object': obj, 'cpp_object': cpp_obj,
                 'ret': ret, 'params': ptypes}
 
@@ -2445,7 +1233,6 @@ class Elaborator:
             return None
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
-        _validate_align_decorators_for_struct(module_src, tmpl, struct_name, targs)
 
         nested_defs, renames = [], []
         for mention, n_src, n_name, n_args in (nested or []):
@@ -2464,8 +1251,7 @@ class Elaborator:
 
         mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc,
                                                      nested_defs=nested_defs,
-                                                     renames=renames,
-                                                     conformance_bases=_where_conformance_bases(module_src))
+                                                     renames=renames)
         _, concrete = mm.monomorphize_source(tmpl, targs)
         fields, methods, anns = _struct_layout_anns(concrete, mangled)
         # `symbols`: what the TU ACTUALLY defined (`nm`). The caller registers
@@ -2499,8 +1285,6 @@ class Elaborator:
         overloads = extract_overloads(module_src, fn_name)
         if not overloads:
             return None
-        # An argument whose C type has no Mojo spelling (`None`) equals no
-        # overload's parameter type, so it matches nothing and declines here.
         arg_mojo = [c_to_mojo(ct) for ct in arg_ctypes]
         chosen = None
         for src, ptypes, ret in overloads:
@@ -2534,359 +1318,5 @@ class Elaborator:
         type_args = infer_type_args(tmpl, arg_ctypes)
         if type_args is None:
             return None
-        try:
-            return self.elaborate_generic_call(module_src, fn_name, type_args,
-                                               arg_count=len(arg_ctypes),
-                                               arg_ctypes=arg_ctypes)
-        except ConformanceError:
-            # A conformance failure inferred from an ERASED argument type is
-            # a fact about this codegen's C representation, not about the
-            # Mojo source: `tanh(x[i])` on a `Span[Float32]` lowers its
-            # argument to `char` (untracked byte element) or `int64_t` (SIMD
-            # erasure), `c_to_mojo` reads either as `Int`, and enforcing the
-            # `where dtype.is_floating_point()` clause then rejects a valid
-            # float call. Six real stdlib files hit exactly that
-            # (`std/random/philox.mojo:300`, `test/math/test_{erf,exp,ldexp,
-            # math,tanh}.mojo`).
-            #
-            # A caller that supplies the type args EXPLICITLY (`f[T](...)`)
-            # states them, so the diagnostic there is provable and
-            # `elaborate_generic_call` still raises it. Here, when ANY
-            # argument's C type is a placeholder, decline: the caller falls
-            # through to its nominal stub exactly as when no instantiation
-            # could be inferred.
-            if any(not inferred_ctype_is_specific(ct) for ct in arg_ctypes):
-                return None
-            raise
-
-
-def _collect_comptime_aliases(sd):
-    aliases = {}
-    try:
-        for k, v in (getattr(sd, 'comptime_aliases', None) or {}).items():
-            aliases[k] = v
-        for fld in (getattr(sd, 'fields', None) or []):
-            if isinstance(fld, AssignStmt) and isinstance(getattr(fld, 'target', None), IdentExpr):
-                aliases.setdefault(fld.target.name, fld.value)
-            if isinstance(fld, ComptimeVarStmt):
-                name = getattr(fld, 'target', None)
-                if isinstance(name, str):
-                    aliases.setdefault(name, getattr(fld, 'value', None))
-    except Exception:
-        pass
-    return aliases
-
-
-def _fn_type_param_bounds(fn):
-    bounds = {}
-    # comptime_params may be strings or richer; try to parse annotations
-    for p in (getattr(fn, 'comptime_params', None) or []):
-        if isinstance(p, str):
-            bounds[p] = None
-        elif isinstance(p, (list, tuple)) and p:
-            bounds[p[0]] = p[1] if len(p) > 1 else None
-    anns = getattr(fn, 'comptime_param_annotations', None) or {}
-    for k, v in anns.items():
-        if v:
-            bounds[k] = v
-    # parse from params-like bracket info not directly stored except comptime_params names
-    # also try parsing fn text? not available. Use comptime_param_annotations if present.
-    return bounds
-
-
-def _is_member_type_ref(type_ann):
-    # "Box[T].R" or "pkg.Box[T].R" - simple detection
-    if not isinstance(type_ann, str):
-        return None
-    s = type_ann.strip()
-    if '.' not in s or '[' not in s:
-        return None
-    # split last .member
-    base_part, _, member = s.rpartition('.')
-    if not member or '[' not in base_part:
-        return None
-    bname, bargs = _split_base_type_args(base_part)
-    return (bname, bargs, member, base_part)
-
-
-def check_signature_binding_evidence(module_src, fn, module_stmts=None):
-    """Detect unprovable constrained comptime member uses in signature types."""
-    if module_stmts is None:
-        try:
-            module_stmts = Parser(py_tokenize(module_src)).parse_module()
-        except Exception:
-            return
-    struct_map = {}
-    for st in module_stmts:
-        if isinstance(st, StructDef):
-            struct_map[st.name] = st
-    fn_bounds = _fn_type_param_bounds(fn)
-    # collect known conforms_to facts from fn bounds: e.g. T: CopyableT
-    known = {}
-    for p, b in fn_bounds.items():
-        if isinstance(b, str) and b:
-            known[p] = [x.strip() for x in b.replace('&',',').split(',') if x.strip()]
-    # also parse comptime params from function signature text if possible? not needed
-    annotations = []
-    rt = getattr(fn, 'return_type', None)
-    if isinstance(rt, str):
-        annotations.append(rt)
-    for n, t in (getattr(fn, 'params', None) or []):
-        if isinstance(t, str):
-            annotations.append(t)
-    for ann in annotations:
-        ref = _is_member_type_ref(ann)
-        if not ref:
-            continue
-        bname, bargs, member, base_part = ref
-        sd = struct_map.get(bname)
-        if sd is None:
-            continue
-        aliases = _collect_comptime_aliases(sd)
-        if member not in aliases:
-            continue
-        val = aliases[member]
-        # If alias value is a generic type application like NeedsCopy[T], check its bounds
-        try:
-            val_text = _expr_constraint_text(val) if not isinstance(val, str) else val
-        except Exception:
-            val_text = ''
-        # parse val_text as Type[Args]
-        vb, vargs = _split_base_type_args(val_text)
-        if not vargs:
-            continue
-        target_sd = struct_map.get(vb)
-        target_src = extract_struct_source(module_src, vb)
-        if target_sd is None or target_src is None:
-            continue
-        # bind target params to vargs, substituting function's type params
-        try:
-            tparams = type_param_names(target_src) or []
-        except Exception:
-            tparams = []
-        # Build bindings mapping target params to concrete or fn params
-        t_bind = {}
-        for i, tp in enumerate(tparams):
-            if i < len(vargs):
-                t_bind[tp] = vargs[i]
-        # Also map struct's own params in bargs context
-        sparams = []
-        try:
-            stmpl = extract_struct_source(module_src, bname)
-            sparams = type_param_names(stmpl) if stmpl else []
-        except Exception:
-            sparams = []
-        s_bind = {}
-        for i, sp in enumerate(sparams):
-            if i < len(bargs):
-                s_bind[sp] = bargs[i]
-        # resolve vargs through s_bind
-        resolved_targs = []
-        unproven = False
-        for i, tp in enumerate(tparams):
-            if i >= len(vargs):
-                break
-            arg = vargs[i]
-            arg_resolved = s_bind.get(arg, arg)
-            # check target bound for tp
-            try:
-                bounds = parse_bounds(target_src)
-            except Exception:
-                bounds = {}
-            bound = bounds.get(tp)
-            if not bound:
-                resolved_targs.append(arg_resolved)
-                continue
-            # if arg_resolved is a function type param, see if fn proves it satisfies bound
-            if arg_resolved in known:
-                k = set(known.get(arg_resolved) or [])
-                # simple check: bound name present
-                if bound in k:
-                    resolved_targs.append(arg_resolved)
-                    continue
-                # try conforms_to via known bases? limited
-            elif arg_resolved not in fn_bounds:
-                # concrete type: check conformance directly
-                ok, _ = check_conformance(module_src, arg_resolved, bound)
-                if ok:
-                    resolved_targs.append(arg_resolved)
-                    continue
-            # unproven
-            unproven = True
-            break
-        if unproven:
-            raise RuntimeError(
-                "error: invalid bindings in signature: lacking evidence to prove correctness\n"
-                "note: add a trailing 'where' clause to the function declaration"
-            )
-
-
-
-def _fn_known_bounds(fn, module_src, module_stmts):
-    known = {}
-    # from comptime_param_annotations
-    for k, v in (getattr(fn, 'comptime_param_annotations', None) or {}).items():
-        if isinstance(v, str) and v:
-            known.setdefault(k, set()).update(x.strip() for x in v.replace('&',',').split(',') if x.strip())
-    # try to parse comptime params text from source? not easy. also check comptime_params elements
-    for p in (getattr(fn, 'comptime_params', None) or []):
-        if isinstance(p, (list, tuple)) and len(p) >= 2 and isinstance(p[1], str):
-            known.setdefault(p[0], set()).update(x.strip() for x in p[1].replace('&',',').split(',') if x.strip())
-    # fallback: parse from function signature line in module_src
-    try:
-        # find "def fnname[" in module_src
-        name = getattr(fn, 'name', '')
-        if name:
-            # simple regex
-            m = re.search(rf'\bdef\s+{re.escape(name)}\s*\[([^\]]*)\]', module_src)
-            if m:
-                inner = m.group(1)
-                # split params
-                for part in gimple_exprtypes_split_commas(inner):
-                    part = part.strip()
-                    if ':' in part:
-                        pn, pb = part.split(':', 1)
-                        pn = pn.strip().lstrip('*')
-                        pb = pb.strip()
-                        if pn and pb:
-                            known.setdefault(pn, set()).update(x.strip() for x in pb.replace('&',',').split(',') if x.strip())
-    except Exception:
-        pass
-    return known
-
-
-def gimple_exprtypes_split_commas(s):
-    # local fallback
-    out, depth, cur = [], 0, []
-    for c in s:
-        if c in '([{': depth += 1
-        elif c in ')]}': depth -= 1
-        if c == ',' and depth == 0:
-            out.append(''.join(cur)); cur=[]
-        else:
-            cur.append(c)
-    if cur: out.append(''.join(cur))
-    return out
-
-
-def _walk_nodes(node):
-    if node is None:
-        return
-    if isinstance(node, list):
-        for x in node:
-            yield from _walk_nodes(x)
-        return
-    yield node
-    if isinstance(node, dict):
-        for v in node.values():
-            yield from _walk_nodes(v)
-        return
-    try:
-        fields = getattr(node, '__dataclass_fields__', None)
-        if fields:
-            for f in fields:
-                yield from _walk_nodes(getattr(node, f))
-            return
-    except Exception:
-        pass
-    # fallback common attrs
-    for attr in ('body','then_body','else_body','elifs','value','args','kwargs','func','obj','target','iterable','condition','left','right','operand','elements'):
-        if hasattr(node, attr):
-            try:
-                yield from _walk_nodes(getattr(node, attr))
-            except Exception:
-                pass
-
-
-def check_method_call_evidence(module_src, fn, module_stmts=None):
-    if module_stmts is None:
-        try:
-            module_stmts = Parser(py_tokenize(module_src)).parse_module()
-        except Exception:
-            return
-    struct_map = {}
-    for st in module_stmts:
-        if isinstance(st, StructDef):
-            struct_map[st.name] = st
-    # param name -> type annotation string
-    param_types = {}
-    for n, t in (getattr(fn, 'params', None) or []):
-        if isinstance(n, str) and isinstance(t, str):
-            param_types[n] = t
-    known_bounds = _fn_known_bounds(fn, module_src, module_stmts)
-    # build a conforms_to predicate based on known bounds (conservative)
-    bases = _where_conformance_bases(module_src)
-    def _known_conforms(t, tr):
-        # t may be a fn type param name
-        if t in known_bounds:
-            ks = known_bounds[t]
-            if tr in ks:
-                return True
-            # ancestor check via bases: if t known to conform to X and X conforms to tr
-            for k in list(ks):
-                try:
-                    if conforms_to(k, tr, bases) is True:
-                        return True
-                except Exception:
-                    pass
-        # concrete type
-        try:
-            if conforms_to(t, tr, bases) is True:
-                return True
-        except Exception:
-            pass
-        return None
-
-    for node in _walk_nodes(getattr(fn, 'body', None)):
-        if not isinstance(node, CallExpr):
-            continue
-        func = getattr(node, 'func', None)
-        if not isinstance(func, MemberExpr):
-            continue
-        obj = getattr(func, 'obj', None)
-        if not isinstance(obj, IdentExpr):
-            continue
-        recv_type = param_types.get(obj.name)
-        if not recv_type:
-            continue
-        rb, rargs = _split_base_type_args(recv_type)
-        sd = struct_map.get(rb)
-        if sd is None:
-            continue
-        method_name = func.member
-        # find method in struct
-        mdef = None
-        for m in (getattr(sd, 'methods', None) or []):
-            if getattr(m, 'name', None) == method_name:
-                mdef = m
-                break
-        if mdef is None:
-            continue
-        mw = getattr(mdef, 'where_clause', None)
-        if mw is None:
-            continue
-        mw_text = _expr_constraint_text(mw) if not isinstance(mw, str) else mw
-        # substitute struct type params with rargs
-        bindings = {}
-        try:
-            stmpl = extract_struct_source(module_src, rb)
-            sparams = type_param_names(stmpl) if stmpl else []
-            for i, sp in enumerate(sparams):
-                if i < len(rargs):
-                    bindings[sp] = rargs[i]
-                    bindings[f'Self.{sp}'] = rargs[i]
-        except Exception:
-            pass
-        mw_text = _substitute_constraint_text(mw_text, bindings)
-        try:
-            st = eval_const_bool_state(Parser(py_tokenize(mw_text))._parse_expr(0), {}, conforms_to_pred=_known_conforms)
-        except Exception:
-            st = None
-        if st == CONST_FALSE or st is None or st == -1:
-            # If provably false or undecidable given known bounds in generic context -> lacking evidence
-            # "do not report on unknown evidence" in general, but for this specific call in generic
-            # context with insufficient bounds we must report lacking evidence per case 4/5.
-            if st == CONST_TRUE:
-                continue
-            raise RuntimeError("lacking evidence to prove correctness")
-
+        return self.elaborate_generic_call(module_src, fn_name, type_args, arg_count=len(arg_ctypes),
+                                           arg_ctypes=arg_ctypes)

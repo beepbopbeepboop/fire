@@ -174,12 +174,6 @@ int64_t mojo_vararg_call_8(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t
  * the constructor allocated with it. */
 void mojo_bound_method_free(MojoBoundMethod *bm);
 void mojo_closure_free(void *bm);
-/* The two halves of a bound method, for a caller that needs them apart: a
- * capturing lambda handed to a C ABI that takes a bare function pointer plus
- * a `void *` env (re.sub's regex callback `char *(*)(void *, char *)`) gets
- * (fn, env) and calls `fn(env, ...)` exactly as mojo_bound_method_call_N does. */
-static inline void *mojo_bound_method_fn(MojoBoundMethod *bm) { return bm->fn; }
-static inline void *mojo_bound_method_self(MojoBoundMethod *bm) { return bm->self; }
 static inline int64_t mojo_bound_method_call_0(MojoBoundMethod *bm) {
     return ((int64_t (*)(void *))bm->fn)(bm->self);
 }
@@ -701,9 +695,6 @@ MojoList *mojo_exc_args(void *obj);
 MojoList *mojo_list_new(void);
 int mojo_is_registered_list(int64_t addr);
 int mojo_boxed_is_str(int64_t v);
-int mojo_is_str_box(int64_t v);
-int64_t mojo_str_box_word(int64_t v);
-int mojo_word_is_text(int64_t v);
 /* Register a non-heap string (the codegen's `__rodata` literal pool) so
  * `mojo_boxed_is_str` can tell it from a bare int64_t. See `_reg_str` in the
  * .c for the discriminator this feeds. */
@@ -760,7 +751,6 @@ int64_t mojo_next_word(int64_t w, int has_default, int64_t dflt);   /* next(x[, 
 int64_t mojo_getitem_word(int64_t w, int64_t i);   /* list element / string character of an unknown-kind word */
 void    mojo_chain_extend(MojoList *dst, int64_t src);   /* itertools.chain, one argument */
 int64_t mojo_add_words(int64_t a, int64_t b);   /* str+str concatenates, else integer add */
-int64_t mojo_mul_word(int64_t a, int64_t b);     /* str*int repeats (a str box/ptr), else integer mul */
 MojoList *mojo_iter_word(int64_t v);   /* list / dict keys / set / str / bytes of a word of unknown kind */
 /* Compiled-generator signatures (filled by each unit's constructor) and the
  * live-handle table behind a dynamic call; see the definitions. */
@@ -771,21 +761,10 @@ MojoList *mojo_iter_gen_handle(int64_t w);
 int64_t mojo_gen_note(int64_t h, void *start);
 int64_t mojo_gen_note_a3(int64_t h, int64_t vkind);   /* 0 int, 1 bool, 2 double, 3 str */
 int64_t mojo_gen_default_word(void *start, int64_t idx);
-void mojo_gen_throw_set(int64_t hw, int64_t type, char *msg, void *obj);
-int mojo_gen_throw_take(int64_t hw, int64_t *type, char **msg, void **obj);
-int mojo_gen_cm_is_handle(int64_t w);
-int64_t mojo_gen_cm_enter(int64_t w);
-void mojo_gen_cm_exit_normal(int64_t w);
-void mojo_gen_cm_exit_exc(int64_t w);
 /* `x in <boxed container>`: resolves list/dict/set at runtime instead of
  * the old hardcoded-false fallback. See mojo_in_dispatch_str's definition. */
 int mojo_in_dispatch_str(int64_t container, char *needle);
 int mojo_in_dispatch_int(int64_t container, int64_t needle);
-/* `needle in <word of unknown kind>`: the container is a TAGGED word (a
- * mixed-return value or a kind-mixed yield), so its kind is a runtime fact.
- * A list/dict/set/str word dispatches through mojo_in_dispatch_int; a float,
- * int or None word has no membership in Python and raises TypeError. */
-int mojo_word_contains(int64_t container, int64_t needle);
 void mojo_mark_as_tuple(MojoList *l);
 int mojo_is_tuple(MojoList *l);
 /* Per-slot element kinds (see the MojoList comment above for why a flat
@@ -874,8 +853,6 @@ int64_t     mojo_box_int(int64_t v);
 int64_t     mojo_box_from_double(double v);
 int64_t     mojo_box_from_bool(int64_t v);   /* a bool in a tagged word: renders True/False */
 int64_t     mojo_box_from_str(char *s);      /* a str in a tagged word: a kind-'p' box, renders the string */
-int64_t     mojo_box_from_list(MojoList *l); /* a list/tuple in a tagged word: a kind-'l' box, renders the list repr */
-int64_t     mojo_box_from_bytes(void *b);    /* a bytes value in a tagged word: kind 's', renders the bytes repr (void*: MojoBytes is declared later in this header) */
 int64_t     mojo_box_none(void);             /* None in a tagged word: renders None (one shared box) */
 void        mojo_list_append_word(MojoList *l, int64_t w);   /* append a tagged word under the kind it carries */
 void        mojo_list_append_str_kinded(MojoList *l, const char *v);   /* a string slot under the 'p' kind */
@@ -960,13 +937,6 @@ double  mojo_list_get_double(MojoList *l, int64_t i);
 double  mojo_double_from_bits(int64_t bits);
 int64_t mojo_double_to_bits(double v);
 
-/* A FLOAT (32-bit) travels the same way: its IEEE-754 bit pattern in the low
- * 32 bits of the word, zero-extended. `mojo_float_from_bits` reads the low 32
- * bits and ignores the rest. `x.to_bits()` / `x._to_bits_signed()` on a float
- * and `bitcast[Float32]` lower through these. */
-float   mojo_float_from_bits(int64_t bits);
-int64_t mojo_float_to_bits(float v);
-
 int64_t mojo_list_len(MojoList *l);
 
 int mojo_list_contains_int(MojoList *l, int64_t v);
@@ -1042,16 +1012,6 @@ int         mojo_cstr_region_eq_n(char *s, int64_t slen, int64_t start, int64_t 
 /* `w[start:stop]` on a WORD of unknown kind: a list, a string or a bytes
  * value, decided by the value itself. See the definition. */
 int64_t     mojo_word_slice(int64_t w, int64_t start, int64_t stop);
-/* `w[i]` on a word of unknown kind (a tagged mixed-return value/mixed yield):
- * dispatched by the word's kind (list/tuple, str, bytes), box-returning for a
- * float list slot; a float/int/None receiver raises TypeError. */
-int64_t     mojo_word_subscript(int64_t w, int64_t i);
-/* The `MojoList *` / `char *` a TAGGED word holds, for the member-call
- * lowering: a kind-'l' box or a registered list is the list, a kind-'p' box
- * or a bare string is the text. Any other kind raises TypeError instead of
- * reading the box header as the container it is not. */
-MojoList   *mojo_word_as_list(int64_t w);
-char       *mojo_word_as_text(int64_t w);
 char       *mojo_cstr_reverse(char *s);        /* reversed(<str>) */
 /* `s[start:stop] == needle` / `!= needle` without ever materializing the
  * slice - see mojo_cstr_region_eq's comment in fire_runtime.c for why this
@@ -1121,12 +1081,6 @@ int mojo_truthy_cstr(char *s);
 int mojo_pyobject_truthy(int64_t box);
 int mojo_pyobject_is_container(int64_t box);
 int64_t mojo_pyobject_hash(int64_t box);
-/* Hasher: the `hasher` argument of a stdlib `__hash__(mut hasher)`. A word that
-   holds a heap state; a scalar's `__hash__(hasher)` folds its value in, and
-   `mojo_hasher_finish` reads the result. */
-int64_t mojo_hasher_new(void);
-void mojo_hasher_update_int(int64_t hasher, int64_t value);
-int64_t mojo_hasher_finish(int64_t hasher);
 char *mojo_pyobject_str(int64_t box);
 double mojo_pyobject_box_as_double(int64_t box);
 int64_t mojo_pyobject_arith(char op, int64_t a, int64_t b, int a_dbl, int b_dbl);
@@ -1474,11 +1428,6 @@ typedef struct {
                      * `mojo_dict_slot_key` already formats from `ikey`.
                      * Zero-defaulted: an integer slot freshly made in this
                      * table prints unquoted, as before. */
-    void    *repr;    /* kind 6 only: the repr function (int64_t -> char *) of THIS
-                     * slot's struct type, recorded by mojo_dict_set_other_struct_repr.
-                     * The dict's one recorded function (val_repr) describes kind-5
-                     * slots only, so a second struct type otherwise had no repr at
-                     * all and printed its address. NULL everywhere else. */
 } _DictSlot;
 
 /* Value-kind tags for _DictSlot.kind. Kept in the header so generated code
@@ -1555,8 +1504,6 @@ int64_t mojo_gen_call_with(void *start, MojoList *pre, MojoList *a, MojoDict *kw
 /* run-time class attributes (see the definitions): a class is its type tag */
 void    mojo_register_getattr_dispatch(int64_t (*fn)(void *, char *));
 int64_t mojo_getattr_any(void *obj, char *attr);   /* obj.attr on a word: struct reflection of any module */
-/* getattr(obj, attr, dflt) on a word with a runtime-computed name: a miss yields dflt. */
-int64_t mojo_getattr_default(void *obj, char *attr, int64_t dflt);
 void    mojo_class_register(int64_t tag, int64_t base_tag, char *name);
 void    mojo_class_setattr(int64_t tag, char *name, int64_t word);
 void    mojo_register_classattr_reader(int (*fn)(int64_t, char *, int64_t *));
@@ -1640,9 +1587,6 @@ void        mojo_dict_set_none_key_struct(MojoDict *d, void *v);
 int64_t     mojo_dict_get_none_key_int(MojoDict *d);
 char       *mojo_dict_get_none_key_str(MojoDict *d);
 double      mojo_dict_get_none_key_double(MojoDict *d);
-int64_t     mojo_dict_slot_kind_none(MojoDict *d);
-char       *mojo_dict_repr_slot_none(MojoDict *d);
-int64_t     mojo_dict_slot_boxed_none(MojoDict *d);
 void        mojo_dict_set_bytes_none_key(MojoDict *d, MojoBytes *key, int64_t v);
 
 /* A STRUCT stored as a dict VALUE: the boxed pointer, tagged `kind == 5` so
@@ -1656,11 +1600,6 @@ void        mojo_dict_set_struct(MojoDict *d, char *key, void *obj);
  * (kind 6), so the walker sends this slot to the generic dispatch while the
  * kind-5 slots go to the recorded function. */
 void        mojo_dict_set_other_struct(MojoDict *d, char *key, void *obj);
-/* A struct of another type, with ITS OWN repr function recorded on the slot
- * (kind 6): the walker renders it through mojo_dict_repr_other_slot. */
-void        mojo_dict_set_other_struct_repr(MojoDict *d, char *key, void *obj, void *fn);
-char       *mojo_dict_repr_other_slot(MojoDict *d, int64_t i, int64_t v);
-void        mojo_dict_set_bytes_other_struct_repr(MojoDict *d, MojoBytes *key, void *obj, void *fn);
 void        mojo_dict_set_val_repr(MojoDict *d, void *fn);
 char       *mojo_dict_repr_val(MojoDict *d, int64_t v);
 
@@ -1669,8 +1608,6 @@ double      mojo_dict_get_double(MojoDict *d, char *key);
 char *mojo_dict_get_str(MojoDict *d, char *key);
 int64_t mojo_dict_slot_kind(MojoDict *d, char *key);
 char *mojo_dict_repr_slot(MojoDict *d, char *key);
-int64_t mojo_dict_slot_boxed(MojoDict *d, char *key);
-int64_t mojo_dict_slot_boxed_kw(MojoDict *d, int64_t kw);
 int64_t     mojo_dict_setdefault_int(MojoDict *d, char *key, int64_t dflt);
 char       *mojo_dict_setdefault_str(MojoDict *d, char *key, char *dflt);
 MojoList   *mojo_dict_keys(MojoDict *d);
@@ -1864,9 +1801,6 @@ void        mojo_dict_set_bytes_other_struct(MojoDict *d, MojoBytes *key, void *
 int64_t     mojo_dict_get_bytes_int(MojoDict *d, MojoBytes *key);
 char       *mojo_dict_get_bytes_str(MojoDict *d, MojoBytes *key);
 double      mojo_dict_get_bytes_double(MojoDict *d, MojoBytes *key);
-int64_t     mojo_dict_slot_kind_bytes(MojoDict *d, MojoBytes *key);
-char       *mojo_dict_repr_slot_bytes(MojoDict *d, MojoBytes *key);
-int64_t     mojo_dict_slot_boxed_bytes(MojoDict *d, MojoBytes *key);
 int         mojo_dict_contains_bytes(MojoDict *d, MojoBytes *key);
 int64_t     mojo_dict_setdefault_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt);
 int64_t     mojo_dict_pop_bytes_int(MojoDict *d, MojoBytes *key, int64_t dflt);
@@ -2260,9 +2194,6 @@ char *mojo_word_cstr_value(int64_t v);
    Transient block, same ownership and same release rule as the entry above. */
 char *mojo_int_str_transient(int64_t v);
 void mojo_cstr_or_int_release(int64_t orig, char *s);
-/* `str(v)` for an Int-kinded word: a FRESH heap copy of the conversion, owned
-   by the caller (free it once its one use is done). See the .c comment. */
-char *mojo_str_word_fresh(int64_t v);
 /* The dict-STORE twin of the release above: same ownership protocol, plus
    the key's SPELLING — a pooled canonical decimal reached the store as an
    INTEGER, so the slot the store just wrote prints its key unquoted, while
@@ -2339,8 +2270,6 @@ MojoList *mojo_py_tokenize(char *source);
 
 /* Builtin file I/O - defined in runtime */
 int64_t mojo_open_file(char *path);  /* opens a file, returns handle as int64_t */
-/* open() with optional mode/newline; newline==NULL means "not provided". */
-int64_t mojo_open_file_ex(char *path, char *mode, char *newline);
 
 /* Wrappers for C library functions that take pointer-to-pointer args.
    Generated GIMPLE code passes int64_t/void* opaque values; these wrappers
@@ -2710,8 +2639,3 @@ char *mojo_regex_sub_str(const ReNode *prog, const ReRange *ranges, const ReClas
 #ifdef __cplusplus
 }
 #endif
-
-/* csv.reader as a callable value for compiled code (tabled foreign callable).
- * Returns a list of rows, each row a MojoList* of string fields. */
-int64_t   mojo_csv_reader_vf(int64_t lines_word, MojoList *packed, MojoDict *kw);
-extern void *mojo_csv_reader_w;

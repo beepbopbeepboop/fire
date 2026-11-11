@@ -98,7 +98,7 @@ SUFFIXES = ('.md', '.py')
 # requires the `bugs/` prefix, so a comment that wrote
 # `FORMAL_dataclass_partial_construction` with no directory — which is how all
 # eleven sites in `formal/` and its tests were written, and how the survey at
-# `bugs/mid/FORMAL_arm64_instruction_coverage.md` still cites its deleted bit-test
+# `bugs/FORMAL_arm64_instruction_coverage.md` still cites its deleted bit-test
 # doc — was invisible to a census whose entire job is to find those.
 #
 # It is a SEPARATE class rather than a second regex over one list, because the
@@ -613,9 +613,6 @@ SAID_TO_STATUS = {
     'refused': 'refused',
     'too-large': 'too-large',
     'sorry': 'sorry',
-    # The census records a crashed run as its own verdict (`fib`,
-    # `for_two_bounds`); it is a status the reader owns, like the others.
-    'crash': 'crash',
 }
 
 

@@ -788,11 +788,6 @@ class X86_64Codegen:
         # names whose calls produce no value, transitively over `return <call>`
         # chains (`model.returnless_function_names`). None means "not computed".
         self._returnless = None
-        # Lazily filled by `_callee_returns_none` from `self._functions`: the
-        # name -> "every path answers None" resolver
-        # (`model.function_returns_none_resolver`). None means "not computed";
-        # the same one-table-per-compile shape as `_returnless`.
-        self._returns_none = None
         # Lazily filled by `_refuse_foreign_bytes_into_text_parameter`: the
         # parameters each function measures as TEXT, transitively through calls
         # that forward a bare parameter (`model.text_measured_parameters`).
@@ -1067,7 +1062,7 @@ class X86_64Codegen:
         both backends through one `_codegen_and_link` and hands both the same
         list). Accepting it here is what keeps `--backend=x86_64` from dying
         with a TypeError on a keyword meant for the other backend (see
-        bugs/mid/FORMAL_arm64_instruction_coverage.md, "Landed alongside: dylib_syms"),
+        bugs/FORMAL_arm64_instruction_coverage.md, "Landed alongside: dylib_syms"),
         and USING it is what keeps the two backends from disagreeing about
         which callee names are types: without it a struct constructor fell
         through to the extern path and became a `call _Point` against a symbol
@@ -1258,18 +1253,6 @@ class X86_64Codegen:
             self._def_labels.append(label)
             self._entry_labels[f.name] = label
         functions = reordered
-        # A LIBRARY's stack-floor initializer, when one is needed. Emitted BEFORE
-        # the bodies, where the startup stub sits in an executable, and for the
-        # same reason as arm64's: a function nothing branches to, registered as
-        # the first load-time entry below. Here it is also the same frame state:
-        # `_frame_bytes` is only reassigned inside `_emit_function`, so at this
-        # point it is the value the stub reads.
-        self._floor_init_label = None
-        if not emit_startup and self._guarded_names:
-            self._floor_init_label = M.LIBRARY_FLOOR_INIT_LABEL
-            self._internal_labels.add(M.LIBRARY_FLOOR_INIT_LABEL)
-            self._emit_library_floor_init()
-
         for f, label in zip(functions, self._def_labels):
             self._emit_function(f, label)
 
@@ -1354,14 +1337,10 @@ class X86_64Codegen:
             # `.init_array` here and `__TEXT,__init_offsets` on the Mach-O
             # side. Empty for every module with no body, which is every program
             # on this path (a program enters its body through the startup stub).
-            # The library's floor initializer, when there is one, is FIRST (see
-            # the arm64 twin): the guarded bodies read the floor it fills.
-            "mod_init_addrs": (
-                ([self.asm.labels[self._floor_init_label]]
-                 if self._floor_init_label else [])
-                + [self.asm.labels[f.name]
-                   for f in M.module_body_functions(functions)
-                   if f.name in self.asm.labels]),
+            "mod_init_addrs": [
+                self.asm.labels[f.name]
+                for f in M.module_body_functions(functions)
+                if f.name in self.asm.labels],
             # The EXCEPTION KIND TABLE — the same publisher, the same key and
             # the same reason as arm64's copy: the word an unwinder writes on one
             # side has to mean the same integer on the other, and `info` is how
@@ -2072,36 +2051,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             "the register allocator collected no home for it, so the emitter "
             "and the allocation walk disagree about this function's locals")
 
-    def _emit_library_floor_init(self) -> None:
-        """The LIBRARY's load-time stack-floor initializer, as a function.
-
-        The x86-64 twin of arm64's `_emit_library_floor_init`, and the reason is
-        the same: a library has no startup stub, so its floor word was never
-        written and every guarded prologue compared against zero. The floor is
-        anchored at LOAD time, the moment a program's is anchored at process
-        entry; see the arm64 method for why the lazy store is wrong either way.
-
-        The frame is `push rbp ; mov rbp, rsp`, and it is what keeps the
-        `getrlimit` CALL aligned: the loader calls this with RSP 8 mod 16 (the
-        return address is on the stack), and SysV wants RSP 16-byte aligned AT a
-        `call`. The stub avoids the same problem by reading the floor before its
-        own `push rbp`; a function has to push first, because it is entered with
-        a return address on the stack. `pop rbp ; ret` returns to the loader.
-        """
-        self.asm.label(M.LIBRARY_FLOOR_INIT_LABEL)
-        self.asm.emit(encode_push_r64(Reg.RBP))
-        self.asm.emit(encode_mov_r64_r64(Reg.RBP, Reg.RSP))
-        self._emit_stack_floor_init()
-        self.asm.emit(encode_pop_r64(Reg.RBP))
-        self.asm.emit(encode_ret())
-
     def _emit_stack_floor_init(self) -> None:
         """Read `RLIMIT_STACK` once and park the floor in `__DATA`.
 
-        Called from the STARTUP STUB (`compile`'s `emit_startup` branch, before
-        the entry function is called) and from the LIBRARY's load-time
-        initializer (`_emit_library_floor_init`), both outside every function
-        body. That placement is the whole reason this is its own method. See the
+        Called from the STARTUP STUB only — `compile`'s `emit_startup` branch,
+        before the entry function is called and outside every function body —
+        and that placement is the whole reason this is its own method. See the
         note at the call site: a `getrlimit` inside a guarded prologue ends that
         function's path tree at the call, because
         `formal/x86_64_endtoend_test.py::_tree` proves a call that leaves the
@@ -2194,9 +2149,9 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         Four instructions, all of them forms `lib/X86.lean` already has a step
         lemma for, and that constraint is the design rather than a coincidence:
         the WALKED sequence of a guarded function is what the corpus decoder has
-        to name, and the floor is a `__DATA` word filled once at load time (by
-        the startup stub, or by `_emit_library_floor_init` for a library), so the
-        guard only has to LOAD it and compare. Every instruction the first attempt at a runtime-derived
+        to name, and the floor is a `__DATA` word this backend's startup stub
+        filled once (`_emit_stack_floor_init`), so the guard only has to LOAD it
+        and compare. Every instruction the first attempt at a runtime-derived
         floor put here — `mov r64, imm64` for the `__DATA` addresses, `pop r64`
         for the parked argument, `alu_ri8:add`/`sub` for the alignment pair,
         `cmov` for the clamp, and the `call getrlimit` itself — was an
@@ -12428,7 +12383,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             callee_is_bool=lambda callee: self._callee_is_bool(
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
-            callee_returns_none=self._callee_returns_none,
+            callee_returns_none=getattr(self, '_callee_returns_none', None) or (lambda name: False),
             callee_returned_parameter=self._callee_returned_parameter,
             dict_names=DICT_TYPE_NAMES,
             deref_kind=lambda e: M.pointer_deref_kind(
@@ -12899,20 +12854,15 @@ ctor_field_value=self._ctor_field_value_for(name),
         return name not in self._returnless
 
     def _callee_returns_none(self, name):
-        """Whether EVERY path out of the local function `name` answers `None`.
-
-        arm64's `_callee_returns_none`, over the same shared reader for the same
-        reason `_callee_returns_value` is: a construct rendered on one machine
-        and read as a word on the other is the divergence these two backends
-        exist not to have. `model.function_returns_none_resolver` is the whole
-        of the transitive half — `def h(a): return g(a)` with a return-less `g`
-        is `None` one hop out — and it is built once over `self._functions`,
-        which is fixed for a compile.
-        """
-        if self._returns_none is None:
-            self._returns_none = M.function_returns_none_resolver(
-                self._functions)
-        return self._returns_none(name)
+        fn = self._functions.get(name)
+        if fn is None:
+            return False
+        try:
+            if hasattr(M, 'function_returns_none'):
+                return M.function_returns_none(fn)
+        except Exception:
+            pass
+        return False
 
     def _callee_returned_parameter(self, name):
         """The positional index of a parameter `name` hands straight back.
@@ -13602,26 +13552,16 @@ ctor_field_value=self._ctor_field_value_for(name),
         except Exception:
             pass
         self._refuse_unusable_printf_format(name, e)
-        # …and the same call's VARARGS, a value this build knows is `None`
-        # among them.  Direction (b) makes a call to a function that always
-        # answers `None` a value whose TEXT is decided at build time, so `%s`
-        # gets the four characters (`printf_none_argument_rewrite`) rather than
-        # the word the callee never wrote.  A NUMBER conversion of the same
-        # operand is refused, because CPython raises TypeError for
-        # `"%d" % None` and this path has no exception to raise.  The rewrite
-        # is the model's, asked at the same line in both emitters (arm64's
-        # copy carries the same note), so the two architectures cannot render
-        # one call differently.
-        rewritten = M.printf_none_argument_rewrite(
-            name, list(e.args or []), self._vkinds.is_none_value)
-        if rewritten is not None:
-            new_args, reason = rewritten
-            if reason is not None:
-                raise CodegenError(reason)
-            e = F.CallExpr(func=e.func, args=new_args,
-                           kwargs=getattr(e, "kwargs", None),
-                           line=getattr(e, "line", None),
-                           col=getattr(e, "col", None))
+        # …and the same call's VARARGS, each of which the format's conversions
+        # turn into TEXT.  A return-less call here is the same value this path
+        # cannot carry that `_print_call` refuses for `print`, at the other
+        # spelling of "render this word" — see
+        # `model.returnless_printf_argument_refusal` for why it is one reader and
+        # not a second copy of `_print_call`'s loop.
+        reason = M.returnless_printf_argument_refusal(
+            name, list(e.args or []), self._vkinds.no_value_callee_of)
+        if reason is not None:
+            raise CodegenError(reason)
         # …and the same call's ARGUMENTS against the callee's own parameter
         # types. Beside the line above for the same reason — this is the last
         # point where the resolved callee and its arguments are both in hand —

@@ -32,7 +32,7 @@ from mojo.middle.solvers import *  # noqa: F401,F403
 from mojo.middle.types import (  # underscore names: `import *` won't carry these
     _struct_value_codes, _struct_slot_kinds, _struct_elem_ctype,
     _SCALAR_FLOAT_TYPES, _LIBM_FN_RETVALS, _BUILTIN_RET_CTYPES,
-    _body_builds_struct_tuple, _BUILTIN_SCALAR_RET_CTYPES,
+    _body_builds_struct_tuple,
 )
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.comptime as comptime_eval
@@ -277,15 +277,6 @@ def _quick_type(gen, node) -> str:
         # agree by construction.
         if node.name in getattr(gen, '_own_global_var_types', {}):
             return _as_str(gen._own_global_var_types[node.name])
-        # A bare name this module IMPORTS as a module-scope global (BUG-2026-009)
-        # is read through the defining module's accessor, whose declared C
-        # return type is the answer `_lower_IdentExpr` itself uses for the read
-        # (emit_exprs' imported-global arm). Answering int64_t here typed a
-        # `var fl = F` class attribute as a box, so a float global came out as
-        # its truncated integer.
-        _imp_acc = getattr(gen, '_imported_global_accessors', {}).get(node.name)
-        if _imp_acc is not None:
-            return _as_str(_imp_acc[0])
         return 'int64_t'
     if (isinstance(node, gimple_ctypes.SubscriptExpr)
             and (isinstance(node.obj, gimple_ctypes.IdentExpr)
@@ -301,16 +292,13 @@ def _quick_type(gen, node) -> str:
         if isinstance(node.obj, gimple_ctypes.IdentExpr):
             _name = node.obj.name
             _dvt = (getattr(gen, '_dict_val_types', None) or {}).get(_name)
-            # 'mixed' is the store-side join of a dict whose values disagree:
-            # it names no C type, so it answers nothing and falls through to
-            # the boxed word (the chokepoint `_dict_val_of` maps it the same way).
-            if _dvt and _dvt != 'mixed':
+            if _dvt:
                 return _as_str(_dvt)
         else:
             # Nested: d["k"][i] — `node.obj.obj.name` is the dict name.
             _name = node.obj.obj.name
             _dvt = (getattr(gen, '_dict_val_types', None) or {}).get(_name)
-            if _dvt and _dvt != 'mixed':
+            if _dvt:
                 # If the dict value is a container, answer its element type.
                 # For char* (string subscript) the element is char*; for
                 # MojoList* it is the list's element type; for scalars
@@ -439,7 +427,7 @@ def _quick_type(gen, node) -> str:
         # was right, the declaration was not).
         #
         _BUILTIN_CTORS = _BUILTIN_RET_CTYPES
-        # Same `_locally_binds_name` gate as `_BUILTIN_SCALAR_RET_CTYPES` just
+        # Same `_locally_binds_name` gate as `_BUILTIN_SCALARS` just
         # below — `set`/`dict`/`list` are ordinary identifiers a module
         # could shadow with its own top-level def/import.
         if fname in _BUILTIN_CTORS and not gen._locally_binds_name(fname):
@@ -447,6 +435,26 @@ def _quick_type(gen, node) -> str:
         # Scalar builtins, matching the lowering (float()->double, etc.). Without
         # these, [float(i), ...] infers an int element type and nested float
         # lists silently read/return as int.
+        _BUILTIN_SCALARS = {'float': 'double', 'int': 'int64_t', 'str': 'char *',
+                            'len': 'int64_t', 'ord': 'int64_t', 'chr': 'char *',
+                            'bool': '_Bool', 'repr': 'char *',
+                            # isinstance()/all()/any() always return a plain
+                            # Python bool regardless of their arguments' types
+                            # (same "no argument-type inspection needed"
+                            # reasoning as len/ord above) — without this,
+                            # `return isinstance(...)`/`return all(...)`/
+                            # `return any(...)` fell through to the int64_t
+                            # default below. Real emission (_lower_builtin_
+                            # isinstance/_lower_builtin_all_any) actually
+                            # produces a C `int`, but declaring the more
+                            # precise `_Bool` here still matches every other
+                            # boolean-producing case above (BinaryOp compare/
+                            # 'in', CompareChain, UnaryOp 'not', BoolLiteral)
+                            # and avoids joining as an opaque int64_t/pointer
+                            # against a sibling return path of a real pointer
+                            # type (see bugs/hard/CODEGEN_comprehension_
+                            # return_type_defaults_int64.md's follow-up note).
+                            'isinstance': '_Bool', 'all': '_Bool', 'any': '_Bool'}
         # `abs(x)` returns x's own type, so it cannot sit in that table
         # (which answers without looking at arguments) — it is answered
         # here, where the argument is available. Without it the estimator
@@ -478,8 +486,8 @@ def _quick_type(gen, node) -> str:
         # Mirrors the `open` builtin-shadowing gate at this class's
         # `_lower_builtin_all_any` call site — same `_locally_binds_name`
         # mechanism, see its docstring.
-        if fname in _BUILTIN_SCALAR_RET_CTYPES and not gen._locally_binds_name(fname):
-            return _BUILTIN_SCALAR_RET_CTYPES[fname]
+        if fname in _BUILTIN_SCALARS and not gen._locally_binds_name(fname):
+            return _BUILTIN_SCALARS[fname]
         # `struct_field_types` is keyed by the struct's own bare name as
         # written in its DEFINING module, so a `from M import Class as
         # Alias` call site misses it and falls through to the int64_t
@@ -602,40 +610,17 @@ def _quick_type(gen, node) -> str:
         # correct body, which is the same value-identity failure this row
         # exists to prevent, one level below the parameter it fixed.
         #
-        # The receiver's type is asked of _quick_type so constructor calls
-        # (`C().get()`) and other expressions whose result type is known are
-        # answered, not only plain identifiers already in var_types.
-        _sot = ''
+        # Gated on `var_types` actually naming a registered struct, so every
+        # still-unknown receiver keeps exactly the old behaviour and only a
+        # provable one changes.
         if isinstance(node.func.obj, gimple_ctypes.IdentExpr):
             _sot = gen.var_types.get(node.func.obj.name, '')
-        if not (_sot and _sot.endswith(' *')):
-            _sot = gen._quick_type(node.func.obj)
-        if isinstance(_sot, str) and _sot.endswith(' *'):
-            _ssn = gimple_exprtypes._struct_name_of(_sot)
-            if _ssn in gen.struct_field_types:
-                _smeth = node.func.member
-                if (_ssn, _smeth) in gen._generator_method_api:
-                    return 'MojoGenerator *'
-                # Method return type, including overload-id manglings, the
-                # same way the auto-invoked @property path resolves below.
-                _srt = gen.func_return_types.get(f"{_ssn}_{_smeth}")
-                if _srt:
-                    return _srt
-                candidates = gen._struct_method_signatures.get(_sms_key(_ssn, _smeth))
-                if candidates:
-                    overload_id = ''
-                    if len(candidates) == 1:
-                        overload_id = candidates[0].get('overload_id', '') or ''
-                    mangled = gen._struct_method_csym(_ssn, _smeth, overload_id)
-                    _srt = gen.func_return_types.get(
-                        mangled, gen.func_return_types.get(f"{_ssn}_{_smeth}"))
-                    if _srt:
-                        return _srt
-                # @property: a field with the same name but no method symbol
-                # is a stored field; otherwise the property getter's return
-                # type is the answer (mirrors the auto-invoke resolution
-                # further down).
-                if _smeth not in gen.struct_field_types.get(_ssn, {}):
+            if _sot.endswith(' *'):
+                _ssn = gimple_exprtypes._struct_name_of(_sot)
+                if _ssn in gen.struct_field_types:
+                    _smeth = node.func.member
+                    if (_ssn, _smeth) in gen._generator_method_api:
+                        return 'MojoGenerator *'
                     _srt = gen.func_return_types.get(f"{_ssn}_{_smeth}")
                     if _srt:
                         return _srt
@@ -892,25 +877,6 @@ def _quick_type(gen, node) -> str:
         _fields = gen.struct_field_types.get(sn, {})
         if node.member in _fields:
             return _fields[node.member]
-        # A CLASS attribute (not an instance field): `_lower_MemberExpr`'s
-        # class-attribute branch redirects the read to the
-        # `_classattr_<Cls>__<attr>` global and returns that global's
-        # SEMANTIC type, which is what `_global_var_types` holds (the POINTEE
-        # type for a per-execution cell, `_cattr_instance_read` dereferences
-        # the cell). Without this arm the estimator fell to the int64_t
-        # default while the lowering produced a real pointer: a method whose
-        # SOLE `return` was a captured enclosing name (`return s`, an
-        # enclosing `s: str`, which the class-capture pass rewrites to
-        # `self._cap_s`) declared `int64_t C_tag (...)` against a body that
-        # returned a `char *`, so the string's ADDRESS was printed in decimal
-        # at exit 0. Both the bare `return s` and a rebound `s` hit it; the
-        # latter was a loud refusal before the capture became by-reference.
-        _cattrs = (getattr(gen, '_class_attrs', None) or {}).get(sn)
-        if _cattrs and node.member in _cattrs:
-            _cgt = (getattr(gen, '_global_var_types', None) or {}).get(
-                _cattrs[node.member])
-            if _cgt:
-                return _as_str(_cgt)
         # `node.member` isn't a real FIELD on this struct — it may be a
         # bound METHOD/`@property` read without call syntax (`self.
         # filename.parent`, `filename` a 0-arg method/property). Real
@@ -1100,23 +1066,6 @@ def _quick_type(gen, node) -> str:
                 _dv_types.append(gen._quick_type(_dp[1]))
             if not _dv_spread:
                 return gimple_ctypes.TypeLattice.join_all(_dv_types)
-        # A subscript of a tuple literal (`("a", "b")[0]`) or of any other
-        # tuple expression whose slot types are statically knowable from the
-        # literal: answer the indexed slot's type when the index is a constant
-        # integer, else the joined slot type. Without this the estimator fell
-        # through to int64_t and a function returning the slot was declared
-        # `int64_t` even when the slot holds a `char *`.
-        if (isinstance(obj, gimple_ctypes.TupleExpr) and obj.elements
-                and not isinstance(node.index, gimple_ctypes.SliceExpr)):
-            _idx = node.index
-            if isinstance(_idx, gimple_ctypes.IntLiteral):
-                try:
-                    _i = int(_idx.value)
-                except Exception:
-                    _i = None
-                if _i is not None and -len(obj.elements) <= _i < len(obj.elements):
-                    return gen._quick_type(obj.elements[_i])
-            return gen._infer_list_elem_type(obj.elements)
         if isinstance(obj, gimple_ctypes.IdentExpr):
             # `s[i]` where s is a plain char* string: the element is a
             # ONE-CHAR STRING, not a scalar. `_elem_types` has no entry for
@@ -1642,12 +1591,6 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
     # is tracked through `_quick_type`'s shape, not just direct literals, so
     # `q = n + 0` (n a real int parameter) boxes too.
     confident_scalars: set = set()
-    # Names bound by an UNPACK of a single iterable (whose per-element C type
-    # this scan does not know, so each target gets the int64_t storage
-    # default below). They are not evidence of a scalar at a call site: the
-    # element may be a container (`coro.py`'s `real_params`). Recorded for
-    # `module_gen`'s container-vs-scalar refusal.
-    unpacked_locals: set = set()
 
     # This pre-pass runs before self.var_types is populated for this
     # function, so _quick_type(IdentExpr(param_name)) falls through to its
@@ -1721,10 +1664,6 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
                             and isinstance(_cv.func, gimple_ctypes.MemberExpr)
                             and _cv.func.member == '_decode_str_literal_text')
                         elem_types = [('char *' if _is_decode else 'int64_t')] * len(targets)
-                        if not _is_decode:
-                            for _tu in targets:
-                                if isinstance(_tu, gimple_ctypes.IdentExpr):
-                                    unpacked_locals.add(_as_str(_tu.name))
                 else:
                     targets = [_as_node.target]
                     elem_types = [_local_value_type(gen, _as_node.value)]
@@ -1967,14 +1906,6 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
         if len(_kinds) > 1 or _float_conflict or _int_conflict:
             conflicting.add(_as_str(vname))
     gen._multi_kind_locals[_as_str(getattr(func, 'name', ''))] = conflicting
-    # The unpack targets, per function, for the container-vs-scalar contract:
-    # an `int64_t` target of a multi-value unpack is the storage DEFAULT, not
-    # proof of a number (a tuple element may be a list).
-    _tul = getattr(gen, '_tuple_unpack_locals', None)
-    if _tul is None:
-        gen._tuple_unpack_locals = {}
-        _tul = gen._tuple_unpack_locals
-    _tul[_as_str(getattr(func, 'name', ''))] = unpacked_locals
     # A conflicting name has no single C type, so its inferred type is the
     # BOX (`int64_t`), not whatever the pointer-wins lattice join answered.
     # For two container kinds the join already lands on `int64_t`; for a
@@ -2267,32 +2198,11 @@ def _type_expr_to_ann(gen, node) -> str:
         return f"{gen._type_expr_to_ann(node.obj)}.{node.member}"
     if isinstance(node, gimple_ctypes.IntLiteral):
         return str(node.value)
-    if isinstance(node, gimple_ctypes.FloatLiteral):
-        return _float_type_arg_text(node.value)
     if isinstance(node, gimple_ctypes.BoolLiteral):
         return 'True' if node.value else 'False'
     if isinstance(node, gimple_ctypes.UnaryOp) and node.op == '-' and isinstance(node.operand, gimple_ctypes.IntLiteral):
         return str(-node.operand.value)
-    if isinstance(node, gimple_ctypes.UnaryOp) and node.op == '-' and isinstance(node.operand, gimple_ctypes.FloatLiteral):
-        _text = _float_type_arg_text(node.operand.value)
-        return '-' + _text if _text else ''
     return ''
-
-def _float_type_arg_text(value) -> str:
-    """A float literal's rendering as a comptime bracket argument, or '' when
-    it has none (a non-finite value such as `1e999`, which is not a literal a
-    type argument can spell, so the call stays unbound). Python's repr drops
-    the decimal point from an exponent form (`1e+16`), which the elaborator
-    would not read back as a float (`where`-bindings match
-    `-?\\d+\\.\\d+([eE][-+]?\\d+)?`), so the point is always written: `1.0e+16`."""
-    value = float(value)
-    if value != value or value in (float('inf'), float('-inf')):
-        return ''
-    text = repr(value)
-    if '.' in text:
-        return text
-    mantissa, sep, exponent = text.partition('e')
-    return f"{mantissa}.0{sep}{exponent}"
 
 def _refine_generic_return_type(gen, info: dict, module_src: str, g: str,
                                  mangled_type_args: list, arg_count: int,

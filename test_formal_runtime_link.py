@@ -504,12 +504,9 @@ def test_link_line_is_the_dylibs_exports():
         # Some are C symbols used internally or by specific subsystems; the
         # formal runtime link line must offer them (it's the dylib's table), but
         # they aren't declared in the ABI headers the model scans.
-        # `mojo_csv_reader_w` is a global data symbol (the csv reader's word
-        # handle), declared as a VARIABLE in fire_runtime.h, so the function
-        # scanner `runtime_abi()` never sees it and the dylib's table does.
         expected_extra = ['MojoParser', 'Python', 'PythonObject',
                           'compile_to_gimple', 'int64_t_as_unsafe_any_origin',
-                          'mojo_csv_reader_w', 'note_list_literal', 'scan_expr']
+                          'note_list_literal', 'scan_expr']
         check(sorted(extra) == sorted(expected_extra),
               f'{arch}: the set of names exported with no header declarations '
               'is as expected (header gap closed for others)',

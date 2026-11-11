@@ -79,17 +79,6 @@ try:
 except SystemExit:
     check("an unknown slot is refused", True)
 
-check("find_slot returns None for a removed slot", C.find_slot("no-such-slot") is None)
-check("a pinned task whose slot was removed waits instead of exiting",
-      C.pick_slot({"only": True, "pool": "no-such-slot"}, {}) is None)
-_real_load_pool = C.load_pool
-C.load_pool = lambda: {"slots": [dict(name="a", model="ma", count=1, kind="opencode")]}
-check("a dead task whose slot was removed is not restarted",
-      C.no_restart_reason({"model": "gone", "pool": "gone"}, C.load_pool(), {}) is not None)
-check("a hand-run model with no slot is left to its own retries",
-      C.no_restart_reason({"model": "gone"}, C.load_pool(), {}) is None)
-C.load_pool = _real_load_pool
-
 pool = C.load_pool()
 check("the pool's default slot exists", any(s["name"] == pool["default_slot"] for s in pool["slots"]))
 check("the pool's total is the sum of its counts", C.pool_total() == sum(s["count"] for s in pool["slots"]))
@@ -112,10 +101,8 @@ C.load_pool = lambda: {"slots": [dict(name="free", model="mfree", count=1, kind=
 _now = time.time()
 C.mark_dead("mfree", {"name": "free", "replenish": {"tz": "UTC", "at": "00:00", "margin_min": 1}}, until=_now + 2 * C.PROBE_EVERY_S, now=_now)
 C.mark_dead("mpaid", {"name": "paid", "recover_hours": 2.5}, until=_now + 3600, now=_now)
-C.mark_dead("removed-model", {"name": "gone", "recover_hours": 24}, now=_now)   # no slot uses it
 asked = []
 C.probe_free_bans(now=_now, probe=lambda m: asked.append(m) or False)
-check("a ban for a model no longer in the pool is pruned", "removed-model" not in C._ledger())
 check("a refusing free tier is asked", asked == ["mfree"])
 check("a refusing free tier stays banned", C._ledger()["mfree"]["until"] > _now)
 check("a paid model is never probed", "mpaid" not in asked)

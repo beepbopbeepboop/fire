@@ -50,7 +50,7 @@ writing it.
 3. THE STRING PRIMITIVES ARE NOT STRING FEATURES. Concatenation, `strip`,
    `replace` and `split` are refused on this path because a string is a bare
    NUL-terminated `char *` in a read-only text section with no heap to grow
-   into (the string value model). That does NOT make a new string
+   into (bugs/FORMAL_string_value_model.md). That does NOT make a new string
    impossible: `malloc` is in libSystem, and a buffer it hands back IS
    writable. So a string this module returns is either an INTERIOR POINTER
    into its input (no allocation, and the caller's buffer outlives the call) or
@@ -251,7 +251,7 @@ def str_prefix(s, n) -> str:
 
     What a string SLICE would be. `s[0:n]` is refused on this path — the count
     would be read from offset 0 of a `char *`, which is the first eight
-    CHARACTERS (the string value model) — so every substring here is
+    CHARACTERS (bugs/FORMAL_string_value_model.md) — so every substring here is
     built with `memmove` and a terminator instead. `n` may exceed the length of
     `s`, which copies the whole string; every caller bounds it first.
     """

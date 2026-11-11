@@ -119,30 +119,16 @@ MINMAX_OPS: dict[str, bool] = {
 }
 
 # Unary scalar ops → C operator or libm call ("{}" is the operand slot).
-# `pop.trunc` is a VALUE-PRESERVING pass-through: the slot is bare, because
-# a group of parens around the operand (`(_tN)`) has no form in a GIMPLE
-# assignment RHS.
 UNARY_OPS: dict[str, str] = {
     'pop.neg': '-{}', 'pop.abs': '__builtin_llabs({})',
     'pop.floor': '__builtin_floor({})', 'pop.ceil': '__builtin_ceil({})',
-    'pop.round': '__builtin_round({})', 'pop.trunc': '{}',
+    'pop.round': '__builtin_round({})', 'pop.trunc': '({})',
 }
 
 # Ternary scalar ops → C expression over three operands ({0},{1},{2}).
-# `lower_op` rewrites these shapes for GIMPLE (a fused product needs its own
-# statement, a group of parens has no form at all) — the values here are the
-# reference shape, not the emitted one.
 TERNARY_OPS: dict[str, str] = {
     'pop.fma': '({0} * {1} + {2})',       # fused multiply-add
     'pop.select': '({0} ? {1} : {2})',    # select(cond, a, b)
-}
-
-# Which of a ternary op's operands carry the joined value type.  fma's three
-# operands all do; select's FIRST operand is the condition, a `_Bool` outside
-# the join (a GIMPLE ternary's condition is a `_Bool`, its arms one type).
-TERNARY_SLOTS: dict[str, list[int]] = {
-    'pop.fma': [0, 1, 2],
-    'pop.select': [1, 2],
 }
 
 # Comparisons: the C operator comes from the predicate attribute, not the op.
@@ -316,53 +302,26 @@ def lower_op(op: str, args: list[str], attrs: list[str],
       args:        already-lowered operand C value strings.
       attrs:       unwrapped attribute strings from the op's ``[...]`` params
                    (e.g. the ``pred=`` of a compare).
-      result_hint: the C type the caller has established for the op's result
-                   (the JOIN of the operand types, see `TypeLattice.join` —
-                   the caller passes it after materializing each operand to
-                   that type). A value-producing branch reports it instead of
-                   a blanket ``'int64_t'``: a `__GIMPLE`-checked body is
-                   rejected by gcc the moment a variable's declared type
-                   differs from the type of the expression it is assigned,
-                   and a blanket int64_t over _Bool operands is exactly the
-                   `std/builtin/bool.mojo` gate regression (bugs/gate-
-                   stdlib-syntax.md).
+      result_hint: a C type the caller expects, if known.
 
-    Returns ``(result_ctype, c_expr, prelude)`` or ``None`` if the op isn't
-    lowered (either deferred — see ``deferral_reason`` — or simply unmet).
-    ``prelude`` is a list of ``(ctype, c_expr)`` statements the caller must
-    emit BEFORE the main assignment; ``c_expr`` references them as ``{t0}``,
-    ``{t1}``, ....  A GIMPLE statement is ONE operation, so an fma's product
-    and a min/max's comparison each need their own temp before the select /
-    the sum — the old one-statement shapes (`(a * b + c)`,
-    `(a < b ? a : b)`) have no form in GIMPLE at all (group parens are
-    rejected outright).
+    Returns ``(result_ctype, c_expr)`` or ``None`` if the op isn't lowered
+    (either deferred — see ``deferral_reason`` — or simply unmet).
     """
     name = unwrap(op)
 
     if name in BINARY_OPS and len(args) == 2:
-        return (result_hint or 'int64_t', f"{args[0]} {BINARY_OPS[name]} {args[1]}", [])
+        return ('int64_t', f"{args[0]} {BINARY_OPS[name]} {args[1]}")
 
     if name in MINMAX_OPS and len(args) == 2:
         a, b = args
         cmp = '<' if MINMAX_OPS[name] else '>'
-        # The comparison is a GIMPLE statement of its own (a `_Bool` temp);
-        # the select is the second. One statement, one operation.
-        return (result_hint or 'int64_t', f"{{t0}} ? {a} : {b}",
-                [('_Bool', f"{a} {cmp} {b}")])
+        return ('int64_t', f"({a} {cmp} {b} ? {a} : {b})")
 
     if name in UNARY_OPS and len(args) == 1:
-        return (result_hint or 'int64_t', UNARY_OPS[name].format(args[0]), [])
+        return ('int64_t', UNARY_OPS[name].format(args[0]))
 
     if name in TERNARY_OPS and len(args) == 3:
-        if name == 'pop.fma':
-            # One GIMPLE statement per operation: the product in its own
-            # temp, then the sum — both operands of the joined type (the
-            # caller materialized all three to it).
-            return (result_hint or 'int64_t', f"{{t0}} + {args[2]}",
-                    [(result_hint or 'int64_t', f"{args[0]} * {args[1]}")])
-        # pop.select: the one-statement ternary is legal GIMPLE as soon as
-        # the group parens are off and the arms share a type.
-        return (result_hint or 'int64_t', f"{args[0]} ? {args[1]} : {args[2]}", [])
+        return ('int64_t', TERNARY_OPS[name].format(*args))
 
     if name in CMP_OPS and len(args) == 2:
         pred = None
@@ -373,13 +332,13 @@ def lower_op(op: str, args: list[str], attrs: list[str],
                 break
         if pred is None or pred not in CMP_PRED:
             return None  # predicate not recoverable
-        return ('_Bool', f"{args[0]} {CMP_PRED[pred]} {args[1]}", [])
+        return ('_Bool', f"{args[0]} {CMP_PRED[pred]} {args[1]}")
 
     if name in CAST_OPS and len(args) == 1:
         target = result_hint or 'int64_t'
-        return (target, f"({target}) {args[0]}", [])
+        return (target, f"({target}) {args[0]}")
 
     if name in NOOP_OPS and len(args) == 1:
-        return (result_hint or 'int64_t', args[0], [])
+        return (result_hint or 'int64_t', args[0])
 
     return None

@@ -2659,18 +2659,58 @@ def instantiation_demands(module_path: str, consumer_src: str,
                 for a in args:
                     if a not in got[name]:
                         got[name].append(a)
-        # The variadic calls the consumer makes to this module's variadic
-        # functions.  `variadic_arities` and `variadic_demands` are memoised on
-        # the source text (`formal/monomorph.py::_declaration_facts`), so the
-        # per-module parse this block used to do is the ONE parse every reader of
-        # that module shares — see the measurement beside that helper.
-        for name, args in MM.variadic_demands(
-                consumer_src, MM.variadic_arities(module_source_text(p)),
-                skip=own_here).items():
-            got.setdefault(name, [])
-            for a in args:
-                if a not in got[name]:
-                    got[name].append(a)
+        # Collect variadic call demands
+        try:
+            from formal.build import parse_module
+            import fire_compiler as F
+            from formal import model as M
+            mod_src = module_source_text(p)
+            mod_stmts = parse_module(mod_src)
+            # Find variadic functions in this module
+            variadics = {}
+            for st in mod_stmts:
+                if isinstance(st, F.FunctionDef):
+                    # count fixed params before variadic
+                    fixed = 0
+                    var_name = None
+                    for pentry in getattr(st, 'params', []) or []:
+                        if isinstance(pentry, (list, tuple)) and pentry:
+                            pname = pentry[0]
+                            if isinstance(pname, str):
+                                if pname.startswith('**'):
+                                    break
+                                elif pname.startswith('*') and not pname.startswith('**'):
+                                    var_name = pname[1:] or pname
+                                    break
+                                else:
+                                    fixed += 1
+                    if var_name is not None:
+                        variadics[st.name] = fixed
+            if variadics:
+                cons_stmts = parse_module(consumer_src)
+                for st in cons_stmts:
+                    for node in M.iter_nodes(st):
+                        if isinstance(node, F.CallExpr):
+                            func = getattr(node, 'func', None)
+                            if isinstance(func, F.IdentExpr):
+                                bname = func.name
+                                if bname in variadics and bname not in own_here:
+                                    # Don't count if it's bracketed
+                                    if isinstance(getattr(func, 'obj', None), F.SubscriptExpr) or hasattr(node.func, '__class__') and 'Subscript' in str(type(node.func)):
+                                        pass  # might be bracketed
+                                    # Count extras
+                                    nargs = len(getattr(node, 'args', None) or [])
+                                    fixed = variadics[bname]
+                                    extras = nargs - fixed
+                                    if extras >= 0:  # allow zero extras
+                                        # Encode arity as demand args for mangle
+                                        # Use a special encoding - store both extras and fixed for easier matching
+                                        arity_args = (f'__variadic_{extras}_{fixed}__',)
+                                        got.setdefault(bname, [])
+                                        if arity_args not in got[bname]:
+                                            got[bname].append(arity_args)
+        except Exception:
+            pass
         # Also try inferred bare calls
         try:
             res = MM.inferred_demands_for(
@@ -2691,14 +2731,21 @@ def instantiation_demands(module_path: str, consumer_src: str,
                 raise
         except Exception:
             pass
-        # Refuse type arguments declared only in the consumer's file.  The two
-        # name sets are `_declaration_facts`, memoised on the source text, so the
-        # consumer and each module of the closure are parsed once between them
-        # rather than once per (dep x module); the parse this block used to do
-        # here was 7 047 calls on `std/python/bindings.mojo`.
+        # Refuse type arguments declared only in the consumer's file
         try:
-            consumer_structs = MM.declared_struct_names(consumer_src)
-            module_structs = MM.declared_struct_names(module_source_text(p))
+            import fire_compiler as F
+            from formal.build import parse_module
+            cons_stmts = parse_module(consumer_src) if consumer_src else []
+            mod_src = module_source_text(p)
+            mod_stmts = parse_module(mod_src) if mod_src else []
+            consumer_structs = set()
+            for st in cons_stmts:
+                if isinstance(st, F.StructDef):
+                    consumer_structs.add(st.name)
+            module_structs = set()
+            for st in mod_stmts:
+                if isinstance(st, F.StructDef):
+                    module_structs.add(st.name)
             # Builtins are fine
             builtins = {'Int', 'Bool', 'String', 'Float64', 'Float32', 'UInt', 'UInt64', 'Int64'}
             failed_list = []
@@ -3120,6 +3167,11 @@ HOST_MODULE_ADVICE = {
         "`formal/model.py`'s `InitShape`, `tools/formal_sweep.py`'s three). "
         "`Counter` is a dict rather than a record, so it is the other question: "
         "see bugs/FORMAL_listdir_no_run_time_sequence.md",
+    "copy":
+        "a field-wise copy of a type the COMPILER KNOWS at the call site is a "
+        "struct construction: build a new one and assign the fields. A copy "
+        "chosen at run time, over a graph whose shape the build cannot see, has "
+        "no answer here — the same missing thing as a type built at run time",
 }
 
 
@@ -3214,15 +3266,6 @@ def unresolvable_import_error(source_path: str, module_name: str) -> str:
     elif _is_host_module(module_name):
         kind = ("a host module (CPython standard library), which has no Mojo "
                 "source for this backend to compile")
-    elif (module_name.split(".")[0] in hostmod_source_modules()
-          and host_module_advice(module_name)):
-        # A WRITTEN host module with advice: its source is in the tree, but it
-        # declares constants only, so there is no boundary an importer can bind.
-        # Saying "no Mojo source" here would be false, and it is what the branch
-        # below says, so this case is named first.
-        kind = ("a host module (CPython standard library), whose Mojo source in "
-                "this tree declares only module-level constants, so it has no "
-                "function or type an importer could bind")
     elif is_cpython_stdlib(module_name):
         # The one sentence that used to be FALSE about the target.  CPython
         # ships `binascii`, `cmath`, `getopt`, `html`, `tomllib` and 217 other

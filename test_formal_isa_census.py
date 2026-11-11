@@ -100,7 +100,7 @@ class TestEmittedFormCoverage(unittest.TestCase):
                 unwired,
                 "every encoder in formal/%s.py reads as emitted, so the census "
                 "has stopped distinguishing the TABLE from the CALLERS — which "
-                "is the mistake `bugs/mid/FORMAL_arm64_instruction_coverage.md` "
+                "is the mistake `bugs/FORMAL_arm64_instruction_coverage.md` "
                 "records as overstating coverage by 120,647 real instructions"
                 % arch)
 

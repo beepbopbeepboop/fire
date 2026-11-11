@@ -2095,9 +2095,6 @@ def test_in_tu_instantiation(wd):
                                   'list.mojo'),
         }
         struct_field_types: dict = {}
-
-        def _generic_source_text(self, path):
-            return open(path).read() if _os.path.exists(path) else ''
     check("intu#1: an iterator whose only overload is `__iter__` is carried "
           "(`_Empty`, `_Once`, `_RepeatIterator`)",
           all(EI._protocol_only_overloads(_G(), n)

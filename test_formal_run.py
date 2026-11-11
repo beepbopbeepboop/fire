@@ -16,7 +16,6 @@ broken one differ in load-command details, and this is the test that notices.
     python3 test_formal_run.py [-v] [case ...]
 """
 import argparse
-import glob
 import os
 import platform
 import re
@@ -4329,7 +4328,7 @@ BYREF_REFUSALS = [
      "struct Holder:\n"
      "    var src: R\n"
      "    var n: Int\n\n"
-     "    def grab(mut self):\n"
+     "    def grab(out self):\n"
      "        var t = R()\n"
      "        t.a = 5\n"
      "        t.b = 6\n"
@@ -4987,10 +4986,10 @@ CROSS_MODULE_CASES = [
      {"mod": "struct Cell:\n"
              "    var _value: Int\n"
              "\n"
-             "    def bump(mut self, k: Int):\n"
+             "    def bump(out self, k: Int):\n"
              "        self._value = self._value + k\n"
              "\n"
-             "    def pop(mut self) -> Int:\n"
+             "    def pop(out self) -> Int:\n"
              "        var old = self._value\n"
              "        self._value = self._value - 1\n"
              "        return old\n",
@@ -5154,7 +5153,7 @@ CROSS_MODULE_CASES = [
               "    var src: S\n"
               "    var n: Int\n"
               "\n"
-              "    def fill(mut self, r: S):\n"
+              "    def fill(out self, r: S):\n"
               "        self.src = r\n"
               "        self.n = 1\n"
               "\n"
@@ -7209,7 +7208,7 @@ BOTH_ARCH_CASES = [
     # 46 = `scaled(Reg.RSP, 3)`'s 36, `is_bp(Reg.RBP)`'s 10, `is_bp(Reg.RAX)`'s
     # 0 — under 256 because the exit status is a byte, and a weighted sum wide
     # enough to overflow it would compare against `expected & 0xFF` and invent a
-    # mismatch (the lesson `bugs/mid/FORMAL_arm64_instruction_coverage.md` §"Every
+    # mismatch (the lesson `bugs/FORMAL_arm64_instruction_coverage.md` §"Every
     # expected value must fit in a byte" records, having been learned there).
     # `is_bp` is a COMPARISON and `scaled` is arithmetic on purpose: the rewrite
     # has to put the bare name where an operand goes, and a row that only
@@ -7607,7 +7606,7 @@ BOTH_ARCH_CASES = [
      "struct Box:\n"
      "    var inner: Opt\n"
      "\n"
-     "    def setboth(mut self, a: Int, b: Int):\n"
+     "    def setboth(out self, a: Int, b: Int):\n"
      "        self.inner.v = a\n"
      "        self.inner.has = b\n"
      "\n"
@@ -7875,7 +7874,7 @@ BOTH_ARCH_CASES = [
      "    var a: Int\n"
      "    var b: Int\n"
      "\n"
-     "    def copy_from(mut self, other: Self):\n"
+     "    def copy_from(out self, other: Self):\n"
      "        self = other\n"
      "\n"
      "def main(n: Int) -> Int:\n"
@@ -7896,7 +7895,7 @@ BOTH_ARCH_CASES = [
      "    var a: Int\n"
      "    var b: Int\n"
      "\n"
-     "    def zero(mut self):\n"
+     "    def zero(out self):\n"
      "        self = R()\n"
      "        self.a = 5\n"
      "        self.b = 6\n"
@@ -8149,10 +8148,10 @@ BOTH_ARCH_CASES = [
      "struct T:\n"
      "    var a: Int\n"
      "\n"
-     "    def take(mut self, other: Self):\n"
+     "    def take(out self, other: Self):\n"
      "        self.a = other.a\n"
      "\n"
-     "    def bump(mut self):\n"
+     "    def bump(out self):\n"
      "        self = self + 4\n"
      "\n"
      "def main(n: Int) -> Int:\n"
@@ -8602,7 +8601,7 @@ BOTH_ARCH_CASES = [
      "    def __init__(_value: Int) -> Cell:\n"
      "        return _value\n"
      "\n"
-     "    def bump(mut self, k: Int):\n"
+     "    def bump(out self, k: Int):\n"
      "        self._value = self._value + k\n"
      "\n"
      "def main() -> Int:\n"
@@ -12482,7 +12481,7 @@ SOLE_FIELD_CTOR_STORE_CASES = [
      "    def __init__(out self):\n"
      "        self.inner = Opt()\n"
      "\n"
-     "    def set(mut self, o: Opt):\n"
+     "    def set(out self, o: Opt):\n"
      "        self.inner = o\n"
      "\n"
      "def main() -> Int:\n"
@@ -18511,7 +18510,7 @@ CTOR_RECEIVER_CASES = [
      "        self.b = self.ten()\n"
      "        self.c = self.a + self.b\n"
      "\n"
-     "    def ten(mut self) -> Int:\n"
+     "    def ten(out self) -> Int:\n"
      "        return 10\n"
      "\n"
      "def main() -> Int:\n"
@@ -18545,10 +18544,10 @@ CTOR_RECEIVER_CASES = [
      "        self.area = self.scaled()\n"
      "        self.tag = self.pick(3)\n"
      "\n"
-     "    def scaled(mut self) -> Int:\n"
+     "    def scaled(out self) -> Int:\n"
      "        return self.w * self.h\n"
      "\n"
-     "    def pick(mut self, k: Int) -> Int:\n"
+     "    def pick(out self, k: Int) -> Int:\n"
      "        if k == 3:\n"
      "            return 7\n"
      "        return 0\n"
@@ -18588,7 +18587,7 @@ CTOR_RECEIVER_CASES = [
      "        self.a = n\n"
      "        self.b = self.ten()\n"
      "\n"
-     "    def ten(mut self) -> Int:\n"
+     "    def ten(out self) -> Int:\n"
      "        return 10\n"
      "\n"
      "def main() -> Int:\n"
@@ -18624,10 +18623,10 @@ CTOR_RECEIVER_CASES = [
      "        self.spec_len = self.measure()\n"
      "        self.type_count = self.count_types()\n"
      "\n"
-     "    def measure(mut self) -> Int:\n"
+     "    def measure(out self) -> Int:\n"
      "        return len(self.spec_file)\n"
      "\n"
-     "    def count_types(mut self) -> Int:\n"
+     "    def count_types(out self) -> Int:\n"
      "        return self.spec_len + 2\n"
      "\n"
      "def main() -> Int:\n"
@@ -22504,7 +22503,7 @@ EQ_DISPATCH_CASES = [
     ("one_field_receiver_rebound_to_a_parameter_is_refused",
      "struct T:\n"
      "    var a: Int\n"
-     "    def take(mut self, other: Self):\n"
+     "    def take(out self, other: Self):\n"
      "        self = other\n"
      "def main(n):\n"
      "    var x = T()\n"
@@ -22522,7 +22521,7 @@ EQ_DISPATCH_CASES = [
     ("one_field_receiver_rebound_to_a_local_of_its_own_type_is_refused",
      "struct T:\n"
      "    var a: Int\n"
-     "    def grab(mut self):\n"
+     "    def grab(out self):\n"
      "        var t = T()\n"
      "        t.a = 9\n"
      "        self = t\n"
@@ -22674,7 +22673,7 @@ EQ_DISPATCH_CASES = [
      "struct R:\n"
      "    var a: Int\n"
      "    var b: Int\n"
-     "    def noop(mut self):\n"
+     "    def noop(out self):\n"
      "        self = self\n"
      "def main(n):\n"
      "    var r = R()\n"
@@ -24461,7 +24460,7 @@ MUTATING_RECEIVER_REFUSALS = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def bump(mut self, k: Int):\n"
+     "    def bump(out self, k: Int):\n"
      "        self._value = self._value + k\n"
      "\n"
      "def main() -> Int:\n"
@@ -24481,7 +24480,7 @@ MUTATING_RECEIVER_REFUSALS = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def pop(mut self) -> Int:\n"
+     "    def pop(out self) -> Int:\n"
      "        var old = self._value\n"
      "        self._value = self._value - 1\n"
      "        return old\n"
@@ -24509,7 +24508,7 @@ MUTATING_RECEIVER_REFUSALS = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def bump(mut self, k: Int):\n"
+     "    def bump(out self, k: Int):\n"
      "        self._value = self._value + k\n"
      "\n"
      "def use(xs: List[Cell]):\n"
@@ -24539,7 +24538,7 @@ MUTATING_RECEIVER_REFUSALS = [
      "struct Cell:\n"
      "    var _p: Pair\n"
      "\n"
-     "    def swap(mut self) -> Pair:\n"
+     "    def swap(out self) -> Pair:\n"
      "        var old = self._p\n"
      "        self._p = Pair()\n"
      "        return old\n"
@@ -24876,7 +24875,7 @@ ONE_FIELD_MUTATOR_CASES = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def bump(mut self):\n"
+     "    def bump(out self):\n"
      "        self._value = self._value + 4\n"
      "\n"
      "def main() -> Int:\n"
@@ -24909,7 +24908,7 @@ ONE_FIELD_MUTATOR_CASES = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def bump(mut self, k: Int):\n"
+     "    def bump(out self, k: Int):\n"
      "        self._value = self._value + k\n"
      "\n"
      "def main() -> Int:\n"
@@ -24937,7 +24936,7 @@ ONE_FIELD_MUTATOR_CASES = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def bump(mut self, k: Int):\n"
+     "    def bump(out self, k: Int):\n"
      "        if k > 100:\n"
      "            return\n"
      "        self._value = self._value + k\n"
@@ -25021,7 +25020,7 @@ ONE_FIELD_MUTATOR_CASES = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def pop(mut self) -> Int:\n"
+     "    def pop(out self) -> Int:\n"
      "        var old = self._value\n"
      "        self._value = self._value - 1\n"
      "        return old\n"
@@ -25057,7 +25056,7 @@ ONE_FIELD_MUTATOR_CASES = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def take(mut self, k: Int) -> Int:\n"
+     "    def take(out self, k: Int) -> Int:\n"
      "        if k > 100:\n"
      "            self._value = 0\n"
      "            return -1\n"
@@ -25103,7 +25102,7 @@ ONE_FIELD_MUTATOR_CASES = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def pop(mut self) -> Int:\n"
+     "    def pop(out self) -> Int:\n"
      "        var old = self._value\n"
      "        self._value = self._value - 1\n"
      "        return old\n"
@@ -25141,7 +25140,7 @@ ONE_FIELD_MUTATOR_CASES = [
      "struct Cell:\n"
      "    var _value: Int\n"
      "\n"
-     "    def bump(mut self, k: Int):\n"
+     "    def bump(out self, k: Int):\n"
      "        if k > 100:\n"
      "            return 1\n"
      "        self._value = self._value + k\n"
@@ -25170,7 +25169,7 @@ ONE_FIELD_MUTATOR_CASES = [
      "    var a: Int\n"
      "    var b: Int\n"
      "\n"
-     "    def bump(mut self, k: Int):\n"
+     "    def bump(out self, k: Int):\n"
      "        self.a = self.a + k\n"
      "\n"
      "def main() -> Int:\n"
@@ -27204,17 +27203,11 @@ def check_type_value_tag_generator(verbose=False):
     stdlib = os.environ.get("MOJO_STDLIB") or os.path.join(
         os.path.dirname(os.path.dirname(here)),
         "modular", "mojo", "stdlib", "std")
-    # The closure is of MOJO imports, from the Mojo programs this file builds
-    # (formal/examples). Python modules are not walked: the compiler's own
-    # Python files import Python's host modules (`importlib.util` in
-    # emit_resolve.py), which are not Mojo imports and do not belong to this
-    # check. Measured: 94 example programs reach 94 .mojo files, 0 unresolved.
-    seen, unresolved = set(), set()
-    stack = sorted(glob.glob(os.path.join(os.path.dirname(here), "formal", "examples", "*.mojo")))
+    seen, stack, unresolved = set(), [here], set()
     while stack:
         p = stack.pop()
         rp = os.path.realpath(p)
-        if rp in seen or not p or not os.path.exists(p) or not p.endswith(".mojo"):
+        if rp in seen or not p or not os.path.exists(p):
             continue
         seen.add(rp)
         for m in I.imported_modules(I.module_statements(p)):

@@ -1561,81 +1561,6 @@ void mojo_list_inherit_kinds(MojoList *dst, MojoList *src)
     else if (k) mojo_list_set_elem_repr(dst, NULL);
 }
 
-/* Kinds strings for list SLICES, interned by content. A slice's kinds are a
- * new string (slot k takes the source's kind at first + k*step), but the
- * distinct slot patterns a program builds are few, so each is stored once and
- * shared, never freed -- the same lifetime every other kinds row already has.
- * An open-addressed table keyed by the string's bytes (FNV-1a). Not
- * thread-safe, like the rest of the list registry. */
-static const char **_kinds_intern_tab;
-static size_t _kinds_intern_cap, _kinds_intern_used;
-
-static uint64_t _kinds_intern_hash(const char *s, size_t n) {
-    uint64_t h = 1469598103934665603ULL;
-    for (size_t i = 0; i < n; i++) { h ^= (unsigned char)s[i]; h *= 1099511628211ULL; }
-    return h;
-}
-
-static const char *_kinds_intern(const char *s, size_t n) {
-    if ((_kinds_intern_used + 1) * 2 > _kinds_intern_cap) {
-        size_t ncap = _kinds_intern_cap ? _kinds_intern_cap * 2 : 64;
-        const char **nt = (const char **)calloc(ncap, sizeof *nt);
-        for (size_t i = 0; i < _kinds_intern_cap; i++) {
-            if (!_kinds_intern_tab[i]) continue;
-            size_t m = strlen(_kinds_intern_tab[i]);
-            size_t j = (size_t)(_kinds_intern_hash(_kinds_intern_tab[i], m) & (ncap - 1));
-            while (nt[j]) j = (j + 1) & (ncap - 1);
-            nt[j] = _kinds_intern_tab[i];
-        }
-        free((void *)_kinds_intern_tab);
-        _kinds_intern_tab = nt;
-        _kinds_intern_cap = ncap;
-    }
-    size_t mask = _kinds_intern_cap - 1;
-    size_t j = (size_t)(_kinds_intern_hash(s, n) & mask);
-    while (_kinds_intern_tab[j]) {
-        if (strlen(_kinds_intern_tab[j]) == n && memcmp(_kinds_intern_tab[j], s, n) == 0)
-            return _kinds_intern_tab[j];
-        j = (j + 1) & mask;
-    }
-    char *c = (char *)malloc(n + 1);
-    memcpy(c, s, n);
-    c[n] = '\0';
-    _kinds_intern_tab[j] = c;
-    _kinds_intern_used++;
-    return c;
-}
-
-/* `dst` is a slice of `src`: slot k of dst is slot first + k*step of src, so
- * dst's kinds are src's kinds PICKED at those slots. mojo_list_inherit_kinds
- * copies src's whole string from slot 0, which mislabels every slice that does
- * not start there: `a = [1, 2.5]; c = a[1:]; c[0]` read the double's bits as an
- * int (gimple_list_slice_mixed). A slot past the end of src's string has no
- * kind, and is an int as the slot reader says. The element repr follows as in
- * mojo_list_inherit_kinds. */
-static void _mojo_list_inherit_kinds_slice(MojoList *dst, MojoList *src,
-                                           int64_t first, int64_t step, int64_t count)
-{
-    if (!dst || !src) return;
-    const char *k = mojo_list_get_kinds(src);
-    if (k && count > 0) {
-        size_t klen = strlen(k);
-        char *pick = (char *)malloc((size_t)count + 1);
-        for (int64_t i = 0; i < count; i++) {
-            int64_t idx = first + i * step;
-            pick[i] = (idx >= 0 && (size_t)idx < klen && k[idx]) ? k[idx] : 'i';
-        }
-        pick[count] = '\0';
-        mojo_list_set_kinds(dst, _kinds_intern(pick, (size_t)count));
-        free(pick);
-    } else if (k) {
-        mojo_list_set_kinds(dst, "");
-    }
-    _KindRow *sr = _kinds_row((uint64_t)(uintptr_t)src);
-    if (sr && sr->repr_fn) mojo_list_set_elem_repr(dst, (void *)sr->repr_fn);
-    else if (k) mojo_list_set_elem_repr(dst, NULL);
-}
-
 /* ── The per-list ELEMENT REPR ────────────────────────────────────────────
    `mojo_list_set_elem_repr` records how to render one element of this list;
    `mojo_list_repr_elem` is what a repr walker asks per slot and gets NULL from
@@ -1865,19 +1790,6 @@ int64_t mojo_double_to_bits(double v) {
     return bits;
 }
 
-float mojo_float_from_bits(int64_t bits) {
-    uint32_t w = (uint32_t)bits;
-    float v;
-    memcpy(&v, &w, sizeof(v));
-    return v;
-}
-
-int64_t mojo_float_to_bits(float v) {
-    uint32_t w;
-    memcpy(&w, &v, sizeof(w));
-    return (int64_t)w;
-}
-
 /* The box read as a double. A value that is NOT a box — or a box of a kind
  * that is not a double's — comes back as its own numeric value, not 0: the
  * codegen marks a whole READ SITE as possibly boxed (the runtime decides per
@@ -1937,39 +1849,6 @@ int64_t mojo_box_from_str(char *s)
     bx->magic = MOJO_BOX_MAGIC;
     bx->bits = (int64_t)(intptr_t)s;
     bx->kind = 'p';
-    _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
-    return (int64_t)(uintptr_t)bx;
-}
-
-/* A LIST (or runtime tuple: a MojoList carrying mojo_mark_as_tuple) travelling
- * in a TAGGED word — the return value of a function whose arms mix a float
- * with a list/tuple (`comptime.eval_const` returns a built tuple beside a
- * float). A heap cell, because a double beside a pointer has no arm type of
- * its own; the box is kind-'l' and `mojo_repr_boxed` renders it through
- * `mojo_repr_list_kinds`, which reads the list's own per-slot kinds and its
- * tuple marker. Nothing else in this runtime creates a kind-'l' box: 'l' is
- * otherwise only a LIST-SLOT kind (see `mojo_repr_slot_kind`), so the two
- * meanings cannot be confused — both are "the pointer to a list". */
-int64_t mojo_box_from_list(MojoList *l)
-{
-    MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
-    if (!bx) return (int64_t)(intptr_t)l;
-    bx->magic = MOJO_BOX_MAGIC;
-    bx->bits = (int64_t)(intptr_t)l;
-    bx->kind = 'l';
-    _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
-    return (int64_t)(uintptr_t)bx;
-}
-
-/* A bytes value in a TAGGED word: kind 's', whose repr `mojo_repr_boxed`
- * already spells (`mojo_bytes_repr`). Same reason as `mojo_box_from_list`. */
-int64_t mojo_box_from_bytes(void *b)
-{
-    MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
-    if (!bx) return (int64_t)(intptr_t)b;
-    bx->magic = MOJO_BOX_MAGIC;
-    bx->bits = (int64_t)(intptr_t)b;
-    bx->kind = 's';
     _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
     return (int64_t)(uintptr_t)bx;
 }
@@ -2047,10 +1926,6 @@ void mojo_list_append_word(MojoList *l, int64_t w)
              * is ignored -- the same shape `None` takes in every other list. */
             case 'n': _list_word_push(l, MOJO_KIND_NONE, 0, 'i'); return;
             case 's': _list_word_push(l, MOJO_KIND_BYTES, bx->bits, 'i'); return;
-            /* A list/tuple box (`mojo_box_from_list`): the slot IS that nested
-             * container, so it takes the container kind — not the int word,
-             * which is the pointer and printed as a decimal address. */
-            case 'l': _list_word_push(l, MOJO_KIND_LIST, bx->bits, 'i'); return;
             default:  _list_word_push(l, 'i', bx->bits, 'i'); return;
         }
     }
@@ -2058,9 +1933,6 @@ void mojo_list_append_word(MojoList *l, int64_t w)
     /* a bytes object is a pointer too, but not a str: its own slot kind, so the
      * list reads and prints it as bytes (not as its address, an int) */
     if (mojo_is_registered_bytes(w)) { _list_word_push(l, MOJO_KIND_BYTES, w, 'i'); return; }
-    /* a list (or tuple) pointer is a nested container: its own kind, so the element is read and
-     * printed as that container (`[1, 2]` inside `([1, 2], 0)`), not as its address, an int */
-    if (mojo_is_registered_list(w)) { _list_word_push(l, MOJO_KIND_LIST, w, 'i'); return; }
     _list_word_push(l, 'i', w, 'i');
 }
 
@@ -2292,12 +2164,10 @@ char *mojo_repr_boxed(int64_t v)
         }
     }
     /* Not a box: a word of unknown kind. A live heap string (or a registered
-     * literal) is a string, and a registered bytes object is bytes, not the
-     * integer its address spells; every other word keeps its integer
-     * rendering. The caller strdup'd the box arms above, so this arm hands
-     * back its own copy too. */
+     * literal) is a string, not the integer its address spells; every other
+     * word keeps its integer rendering. The caller strdup'd the box arms
+     * above, so this arm hands back its own copy too. */
     if (mojo_boxed_is_str(v)) return strdup((char *)(intptr_t)v);
-    if (mojo_is_registered_bytes(v)) return mojo_bytes_repr((MojoBytes *)(intptr_t)v);
     if (mojo_is_re_match(v)) return mojo_re_match_repr(v);
     return mojo_str_from_int(v);
 }
@@ -2555,27 +2425,6 @@ int mojo_boxed_is_str(int64_t v) {
          * `_reg_struct_tag`): a struct handle is not a string. */
         return !_mojo_is_struct_word(v);
     return 0;
-}
-
-/* A kind-'p' STRING BOX (`mojo_box_from_str`): true only for that kind, so a
- * float, bytes, None or bool box is not taken as a string. The narrow predicate
- * `len()` needs, because `mojo_boxed_is_str` deliberately rejects every box. */
-int mojo_is_str_box(int64_t v)
-{
-    if (!mojo_is_boxed(v)) return 0;
-    return ((MojoBox *)(intptr_t)v)->kind == 'p';
-}
-/* The text pointer a kind-'p' box holds, and the word itself for anything else. */
-int64_t mojo_str_box_word(int64_t v)
-{
-    if (!mojo_is_str_box(v)) return v;
-    return ((MojoBox *)(intptr_t)v)->bits;
-}
-/* A word whose text `len()` should measure: a kind-'p' box, or a bare word
- * `mojo_boxed_is_str` already accepts. */
-int mojo_word_is_text(int64_t v)
-{
-    return mojo_is_str_box(v) || mojo_boxed_is_str(v);
 }
 
 /* A Python tuple literal lowers to the exact same MojoList as a list literal
@@ -2907,7 +2756,7 @@ static MojoList *_gen_drain(void *h, MojoGenSig *sg)
     int pending = mojo_exc_pending_get();
     ((void (*)(void *))sg->destroy)(h);
     if (pending) { mojo_exc_pending_set(0); mojo_raise(); }
-    if (sg->vkind == 5) {
+    if (sg->vkind == 5 || sg->vkind == 3) {
         /* Uniform from the FIRST element's classification, the way the vkind-5
          * arm did for str/int — extended to the bytes word that arm used to
          * call an int. */
@@ -2916,10 +2765,6 @@ static MojoList *_gen_drain(void *h, MojoGenSig *sg)
             else if (mojo_boxed_is_str(out->data[0])) mojo_list_set_kinds_uniform(out, 'p');
             else mojo_list_set_kinds_uniform(out, 'i');
         }
-    }
-    else if (sg->vkind == 3) {
-        if (out->len > 0 && mojo_is_registered_bytes(out->data[0])) mojo_list_set_kinds_uniform(out, MOJO_KIND_BYTES);
-        else mojo_list_set_kinds_uniform(out, 'p');
     }
     else if (sg->vkind == 0) mojo_list_set_kinds_uniform(out, 'i');
     else if (sg->vkind == 2) mojo_list_set_kinds_uniform(out, 'd');
@@ -3086,21 +2931,9 @@ int64_t mojo_dyn_call(int64_t fn, MojoList *args, MojoDict *kw)
         for (int64_t i = 0; i < n; i++) v[i] = mojo_list_get_int(args, i);
         return _mojo_vararg_invoke((MojoVarargFn *)fp, v, n, kw);
     }
-    /* A plain function pointer has no name-based parameter binding, but a
-     * dynamic call may still carry keyword arguments in call order (e.g. a
-     * call through a callable-valued parameter). Append their values after
-     * the positional arguments so they bind positionally. */
-    MojoList *_merged_args = NULL;
     if (kw && mojo_dict_len(kw) > 0) {
-        _merged_args = mojo_list_new();
-        for (int64_t i = 0; i < n; i++) mojo_list_append_int(_merged_args, mojo_list_get_int(args, i));
-        MojoList *_kws = mojo_dict_keys(kw);
-        for (int64_t i = 0; i < mojo_list_len(_kws); i++) {
-            char *_k = mojo_list_get_str(_kws, i);
-            mojo_list_append_int(_merged_args, mojo_dict_get_int(kw, _k));
-        }
-        args = _merged_args;
-        n = mojo_list_len(args);
+        mojo_raise_type_error((char *)"got an unexpected keyword argument");
+        return 0;
     }
     int64_t a[5] = {0, 0, 0, 0, 0};
     if (n > 5) n = 5;
@@ -3608,7 +3441,7 @@ MojoList *mojo_list_slice(MojoList *l, int64_t start, int64_t stop)
      * as `l` does (a `struct.unpack` of a mixed format, a heterogeneous
      * literal). The comprehension above appends as plain int64_t, which loses
      * that description. */
-    _mojo_list_inherit_kinds_slice(r, l, start, 1, stop > start ? stop - start : 0);
+    mojo_list_inherit_kinds(r, l);
     /* `t[:]` is a tuple when `t` is: slicing does not change a container's
      * type in Python, and the marker is a per-address registry entry rather
      * than a distinct container type, so without this the slice printed
@@ -3752,7 +3585,7 @@ MojoList *mojo_list_slice_step(MojoList *l,
         mojo_list_append_int(r, l->data[idx]);
         idx += step;
     }
-    _mojo_list_inherit_kinds_slice(r, l, s, step, slen);
+    mojo_list_inherit_kinds(r, l);
     if (mojo_is_tuple(l)) mojo_mark_as_tuple(r);
     return r;
 }
@@ -4704,70 +4537,10 @@ int mojo_bytes_endswith(MojoBytes *b, MojoBytes *p)
     return mojo_bytes_endswith_from(b, p, 0, MOJO_SLICE_STOP_OMITTED);
 }
 
-/* The lenient decoder for `errors="replace"` / `"ignore"` on the ascii and
- * utf-8 codecs. Strict decoding stays with mojo_bytes_decode (its messages are
- * the strict ones). A malformed run is one error, as CPython counts it: for
- * UTF-8 the MAXIMAL SUBPART -- the start byte plus the continuation bytes that
- * are still a valid prefix (second-byte ranges per the standard: E0 A0..BF,
- * ED 80..9F, F0 90..BF, F4 80..8F) -- and a start byte with no valid sequence
- * is one error of length 1. `replace` writes U+FFFD once per error, `ignore`
- * writes nothing. For ascii every byte >= 0x80 is its own error. */
-static char *_mojo_decode_lenient(const unsigned char *d, int64_t n, int ascii_only, int replace)
-{
-    char *s = malloc((size_t)n * 3 + 1);
-    size_t k = 0;
-    int64_t i = 0;
-    while (i < n) {
-        unsigned c = d[i];
-        if (c < 0x80) { s[k++] = (char)c; i++; continue; }
-        if (ascii_only) goto bad_one;
-        {
-            int extra;
-            unsigned lo = 0x80, hi = 0xBF;
-            if (c >= 0xC2 && c <= 0xDF) extra = 1;
-            else if (c >= 0xE0 && c <= 0xEF) {
-                extra = 2;
-                if (c == 0xE0) lo = 0xA0;
-                if (c == 0xED) hi = 0x9F;
-            } else if (c >= 0xF0 && c <= 0xF4) {
-                extra = 3;
-                if (c == 0xF0) lo = 0x90;
-                if (c == 0xF4) hi = 0x8F;
-            } else goto bad_one;
-            int64_t j = i + 1;
-            int ok = 1;
-            for (int m = 0; m < extra; m++, j++) {
-                if (j >= n) { ok = 0; break; }
-                unsigned ch = d[j];
-                unsigned l = m == 0 ? lo : 0x80, h = m == 0 ? hi : 0xBF;
-                if (ch < l || ch > h) { ok = 0; break; }
-            }
-            if (ok) {
-                for (int64_t q = i; q < j; q++) s[k++] = (char)d[q];
-                i = j;
-                continue;
-            }
-            /* The maximal subpart: bytes i .. j-1 are one error. */
-            if (replace) { s[k++] = (char)0xEF; s[k++] = (char)0xBF; s[k++] = (char)0xBD; }
-            i = j;
-            continue;
-        }
-    bad_one:
-        if (replace) { s[k++] = (char)0xEF; s[k++] = (char)0xBF; s[k++] = (char)0xBD; }
-        i++;
-    }
-    s[k] = 0;
-    return s;
-}
-
 char *mojo_bytes_decode(MojoBytes *b, char *encoding, char *errors)
 {
     MojoCodec codec = mojo_codec_lookup(encoding);
     int64_t n = b ? b->len : 0;
-    if (errors && (strcmp(errors, "replace") == 0 || strcmp(errors, "ignore") == 0)
-            && (codec == MOJO_CODEC_ASCII || codec == MOJO_CODEC_UTF8))
-        return _mojo_decode_lenient(b ? b->data : NULL, n, codec == MOJO_CODEC_ASCII,
-                                    strcmp(errors, "replace") == 0);
     if (codec == MOJO_CODEC_ASCII) {
         for (int64_t i = 0; i < n; i++) {
             if (b->data[i] >= 0x80) {
@@ -6537,45 +6310,32 @@ int64_t mojo_str_find(char *s, char *needle) {
  * == 2), and an inverted or out-of-range window is a miss rather than the
  * empty-slice answer. Mirrors mojo_bytes_rfind_from, which is the same
  * search over a length-tagged buffer. */
-/* Python's str.find / str.rfind over a window: start and stop are CODEPOINT
- * indices with slice semantics (negative counts from the end and is clamped,
- * an omitted stop is the end). A start past the end, or a stop before the
- * window's start, is no window: -1. An empty needle matches at the window's
- * start for find and at its end for rfind, and answers that index. Returns the
- * codepoint index of the first (or last) match wholly inside the window.
- *
- * mojo_str_find_from / mojo_str_rfind_from used to convert the raw start and
- * stop straight to byte offsets: a negative bound fell through the conversion
- * and the search ran over the wrong span, so `"abcabc".find("b", -2, -1)` read
- * -1 where CPython reads 4 (gimple_str_window_matches_cpython). */
-static int64_t _mojo_str_find_window(char *s, char *needle, int64_t start, int64_t stop, int reverse)
-{
+int64_t mojo_str_rfind_from(char *s, char *needle, int64_t start, int64_t stop) {
     if ((intptr_t)s < 65536 || (intptr_t)needle < 65536) return -1;
-    int64_t len = mojo_str_codepoint_len(s);
-    int64_t lo = start;
-    int64_t hi = (stop == MOJO_SLICE_STOP_OMITTED) ? len : stop;
-    if (lo < 0) { lo += len; if (lo < 0) lo = 0; }
-    if (hi < 0) { hi += len; if (hi < 0) hi = 0; }
-    if (hi > len) hi = len;
-    if (lo > len || hi < lo) return -1;
-    int64_t blen = (int64_t)strlen(s);
-    int64_t blo = lo >= len ? blen : mojo_utf8_codepoint_to_byte_offset(s, lo);
-    int64_t bhi = hi >= len ? blen : mojo_utf8_codepoint_to_byte_offset(s, hi);
-    int64_t nlen = (int64_t)strlen(needle);
-    if (nlen == 0) return reverse ? hi : lo;
-    if (bhi - blo < nlen) return -1;
-    if (reverse) {
-        for (int64_t i = bhi - nlen; i >= blo; i--)
-            if (memcmp(s + i, needle, (size_t)nlen) == 0) return mojo_utf8_codepoint_index(s, i);
+    if (!s || !needle) return -1;
+    int64_t byte_start = mojo_utf8_codepoint_to_byte_offset(s, start);
+    int64_t byte_stop;
+    if (stop == MOJO_SLICE_STOP_OMITTED) {
+        byte_stop = (int64_t)strlen(s);
     } else {
-        for (int64_t i = blo; i + nlen <= bhi; i++)
-            if (memcmp(s + i, needle, (size_t)nlen) == 0) return mojo_utf8_codepoint_index(s, i);
+        byte_stop = mojo_utf8_codepoint_to_byte_offset(s, stop);
+    }
+    if (byte_stop < byte_start) return -1;
+    int64_t nlen = (int64_t)strlen(needle);
+    if (nlen == 0) {
+        /* empty needle matches at end of window in codepoints */
+        /* return stop in codepoints */
+        if (stop == MOJO_SLICE_STOP_OMITTED) {
+            return mojo_str_codepoint_len(s);
+        }
+        return stop;
+    }
+    for (int64_t i = byte_stop - nlen; i >= byte_start; i--) {
+        if (memcmp(s + i, needle, (size_t)nlen) == 0) {
+            return mojo_utf8_codepoint_index(s, i);
+        }
     }
     return -1;
-}
-
-int64_t mojo_str_rfind_from(char *s, char *needle, int64_t start, int64_t stop) {
-    return _mojo_str_find_window(s, needle, start, stop, 1);
 }
 
 /* str.rfind(needle): index of the LAST occurrence of needle in s, or -1.
@@ -6591,7 +6351,27 @@ int64_t mojo_str_rfind(char *s, char *needle) {
  * 2) == 2 but "ab".find("", 3) == -1). On a hit the returned index is absolute
  * (relative to `s`, not to `s + start`). */
 int64_t mojo_str_find_from(char *s, char *needle, int64_t start, int64_t stop) {
-    return _mojo_str_find_window(s, needle, start, stop, 0);
+    if ((intptr_t)s < 65536 || (intptr_t)needle < 65536) return -1;
+    if (!s || !needle) return -1;
+    /* start/stop are in codepoint units now */
+    int64_t byte_start = mojo_utf8_codepoint_to_byte_offset(s, start);
+    int64_t byte_stop;
+    if (stop == MOJO_SLICE_STOP_OMITTED) {
+        byte_stop = (int64_t)strlen(s);
+    } else {
+        /* stop is exclusive end in codepoints? Or we need to search within range */
+        byte_stop = mojo_utf8_codepoint_to_byte_offset(s, stop);
+    }
+    int64_t slen = (int64_t)strlen(s);
+    if (byte_start > slen || byte_stop < byte_start) return -1;
+    int64_t nlen = (int64_t)strlen(needle);
+    if (nlen == 0) return start;
+    for (int64_t i = byte_start; i + nlen <= byte_stop; i++) {
+        if (memcmp(s + i, needle, (size_t)nlen) == 0) {
+            return mojo_utf8_codepoint_index(s, i);
+        }
+    }
+    return -1;
 }
 
 /* Deliberately NOT named mojo_getenv: `getenv` is in _FORCE_RENAME_RESERVED
@@ -7748,23 +7528,6 @@ void mojo_dict_set_other_struct(MojoDict *d, char *key, void *obj)
     _dict_set_raw(d, key, (int64_t)(uintptr_t)obj, 6);
 }
 
-/* The string-key store of a struct of another type, with its repr function
- * kept on the slot (see the field's comment in fire_runtime.h). The slot is
- * found after the store, so grow and the int-key canonicalisation are handled
- * by the same lookup every other reader uses. */
-void mojo_dict_set_other_struct_repr(MojoDict *d, char *key, void *obj, void *fn)
-{
-    mojo_dict_set_other_struct(d, key, obj);
-    _DictSlot *sl = _dict_find_k(d, key, 0);
-    if (sl && sl->key) sl->repr = fn;
-}
-
-char *mojo_dict_repr_other_slot(MojoDict *d, int64_t i, int64_t v)
-{
-    if (!d || i < 0 || i >= d->cap || !d->slots[i].repr) return NULL;
-    return ((char *(*)(int64_t))d->slots[i].repr)(v);
-}
-
 void mojo_dict_set_val_repr(MojoDict *d, void *fn)
 {
     if (!d) return;
@@ -7840,21 +7603,6 @@ char *mojo_dict_get_str(MojoDict *d, char *key)
     return sl ? (char *)(uintptr_t)sl->val : NULL;
 }
 
-static int64_t _dict_slot_boxed(_DictSlot *sl)
-{
-    if (!sl) return 0;
-    switch (sl->kind) {
-        case 1:
-            return mojo_box_from_double(mojo_double_from_bits(sl->val));
-        case 3:
-            return mojo_box_from_bool(sl->val);
-        case 4:
-            return mojo_box_none();
-        default:
-            return sl->val;
-    }
-}
-
 int64_t mojo_dict_slot_kind(MojoDict *d, char *key)
 {
     _DictSlot *sl = _dict_lookup(d, key);
@@ -7866,12 +7614,6 @@ char *mojo_dict_repr_slot(MojoDict *d, char *key)
     _DictSlot *sl = _dict_lookup(d, key);
     if (!sl) return mojo_str_from_int(0);
     return mojo_dict_slot_repr(sl->val, sl->kind);
-}
-
-int64_t mojo_dict_slot_boxed(MojoDict *d, char *key)
-{
-    _DictSlot *sl = _dict_lookup(d, key);
-    return _dict_slot_boxed(sl);
 }
 
 int mojo_dict_contains(MojoDict *d, char *key)
@@ -7902,23 +7644,6 @@ double mojo_dict_get_none_key_double(MojoDict *d)
     double v = 0.0;
     if (sl) memcpy(&v, &sl->val, sizeof(v));
     return v;
-}
-int64_t mojo_dict_slot_kind_none(MojoDict *d)
-{
-    _DictSlot *sl = _dict_lookup_k(d, "", 3);
-    return sl ? sl->kind : -1;
-}
-char *mojo_dict_repr_slot_none(MojoDict *d)
-{
-    _DictSlot *sl = _dict_lookup_k(d, "", 3);
-    if (!sl) return mojo_str_from_int(0);
-    return mojo_dict_slot_repr(sl->val, sl->kind);
-}
-
-int64_t mojo_dict_slot_boxed_none(MojoDict *d)
-{
-    _DictSlot *sl = _dict_lookup_k(d, "", 3);
-    return _dict_slot_boxed(sl);
 }
 
 /* ── bytes-keyed dict access ─────────────────────────────────────────────
@@ -7977,15 +7702,6 @@ static _DictSlot *_dict_lookup_bytes(MojoDict *d, MojoBytes *key)
     return sl;
 }
 
-/* The bytes-key twin of mojo_dict_set_other_struct_repr: a second struct type
- * under a bytes key, with its own repr kept on the slot. */
-void mojo_dict_set_bytes_other_struct_repr(MojoDict *d, MojoBytes *key, void *obj, void *fn)
-{
-    mojo_dict_set_bytes_other_struct(d, key, obj);
-    _DictSlot *sl = _dict_lookup_bytes(d, key);
-    if (sl && sl->key) sl->repr = fn;
-}
-
 int64_t mojo_dict_get_bytes_int(MojoDict *d, MojoBytes *key)
 {
     _DictSlot *sl = _dict_lookup_bytes(d, key);
@@ -8006,25 +7722,6 @@ double mojo_dict_get_bytes_double(MojoDict *d, MojoBytes *key)
     double v;
     memcpy(&v, &sl->val, sizeof(v));
     return v;
-}
-
-int64_t mojo_dict_slot_kind_bytes(MojoDict *d, MojoBytes *key)
-{
-    _DictSlot *sl = _dict_lookup_bytes(d, key);
-    return sl ? sl->kind : -1;
-}
-
-char *mojo_dict_repr_slot_bytes(MojoDict *d, MojoBytes *key)
-{
-    _DictSlot *sl = _dict_lookup_bytes(d, key);
-    if (!sl) return mojo_str_from_int(0);
-    return mojo_dict_slot_repr(sl->val, sl->kind);
-}
-
-int64_t mojo_dict_slot_boxed_bytes(MojoDict *d, MojoBytes *key)
-{
-    _DictSlot *sl = _dict_lookup_bytes(d, key);
-    return _dict_slot_boxed(sl);
 }
 
 int mojo_dict_contains_bytes(MojoDict *d, MojoBytes *key)
@@ -9174,38 +8871,6 @@ int mojo_in_dispatch_int(int64_t container, int64_t needle)
     return 0;
 }
 
-/* `needle in container` where the CONTAINER is a TAGGED word: the result of a
- * function whose arms mix a float with a list/tuple/str/None, or a kind-mixed
- * yield. Its static C type is the erased int64_t that carries the box, so the
- * ordinary membership lowering took its integer fallback and answered False for
- * every such test (`3 in t` printed False where CPython prints True) — the box
- * address is not a registered container. Unbox by kind, exactly as
- * `mojo_word_subscript` / `mojo_len_word` / `mojo_word_slice` do for the same
- * value model, and ask the same registry dispatch a bare container would.
- *
- * A float, int, bool or None word is not iterable in Python, so it raises
- * TypeError (CPython's answer for `1 in 2.5`) rather than reporting "no". A
- * bytes container is matched only by an already-bytes needle: converting the
- * other needle kinds is the static path's job (`_lower_in_dispatch`'s
- * `MojoBytes *` arm), which owns the codegen's evidence about them. */
-int mojo_word_contains(int64_t container, int64_t needle)
-{
-    int64_t c = mojo_box_word(container);
-    int64_t n = mojo_box_word(needle);
-    if (mojo_is_registered_bytes(c)) {
-        if (mojo_is_registered_bytes(n))
-            return mojo_bytes_contains((MojoBytes *)(intptr_t)c,
-                                       (MojoBytes *)(intptr_t)n);
-        mojo_raise_type_error((char *)"a bytes-like object is required");
-        return 0;
-    }
-    if (mojo_is_registered_list(c) || mojo_is_registered_dict(c)
-        || mojo_is_registered_set(c) || mojo_boxed_is_str(c))
-        return mojo_in_dispatch_int(c, n);
-    mojo_raise_type_error((char *)"argument is not iterable");
-    return 0;
-}
-
 /* ── `==` / `!=` between values: Python value equality ──────────────────────
  *
  * The compiled path used to lower every comparison between two containers to
@@ -9352,13 +9017,7 @@ int mojo_dict_eq(MojoDict *a, MojoDict *b, int va, int vb)
     for (int64_t i = 0; i < a->cap; i++) {
         _DictSlot *sa = &a->slots[i];
         if (!sa->key) continue;
-        /* The key is looked up with the dict's OWN probe: an integer-domain slot
-         * (keykind 2) holds its number in ikey, not in the text, so it goes through
-         * _dict_lookup_ik; every other domain uses the string probe. The string
-         * probe on an integer slot missed, so equal int-keyed dicts compared
-         * unequal (d = {1: 2}; e = {1: 2}; d == e was False). */
-        _DictSlot *sb = sa->keykind == 2 ? _dict_lookup_ik(b, sa->ikey)
-                                          : _dict_lookup_k(b, sa->key, sa->keykind);
+        _DictSlot *sb = _dict_find_k(b, sa->key, sa->keykind);
         if (!sb || !sb->key) return 0;               /* key absent from b */
         /* The value is an untagged word: the codegen's static value type when
          * it has one, else this slot's own `kind` tag. */
@@ -9465,17 +9124,6 @@ static int _value_kind(int64_t v)
  * empty sequence slices to. */
 int64_t mojo_word_slice(int64_t w, int64_t start, int64_t stop)
 {
-    /* A TAGGED word (a mixed-return value or a kind-mixed yield) carries its
-     * container pointer in the box's bits; slicing the BOX's own address
-     * would read the heap cell as a container. Unbox the pointer kinds that
-     * have one, exactly as `mojo_len_word` does. */
-    if (mojo_is_boxed(w)) {
-        MojoBox *bx = (MojoBox *)(intptr_t)w;
-        if (bx->kind == 'l') w = bx->bits;
-        else if (bx->kind == 'p') w = bx->bits;
-        else if (bx->kind == 's') w = bx->bits;
-        else { mojo_raise_type_error((char *)"object is not sliceable"); return 0; }
-    }
     if (mojo_is_registered_list(w))
         return (int64_t)(intptr_t)mojo_list_slice((MojoList *)(intptr_t)w, start, stop);
     if (mojo_is_registered_bytes(w))
@@ -9483,70 +9131,6 @@ int64_t mojo_word_slice(int64_t w, int64_t start, int64_t stop)
     if (mojo_boxed_is_str(w))
         return (int64_t)(intptr_t)mojo_cstr_slice((char *)(intptr_t)w, start, stop);
     return (int64_t)(intptr_t)mojo_list_new();
-}
-
-/* `w[i]` where the receiver is a WORD of unknown kind — the tagged result of a
- * function whose arms mix a float with a pointer (or a kind-mixed yield). The
- * value could be a list/tuple, a str or a bytes object, so the answer is
- * dispatched by the word's kind, exactly as `mojo_len_word` and
- * `mojo_word_slice` do for the same value model. A list/tuple slot comes back
- * BOXED when it holds a float (`mojo_list_get_boxed`), which is the same word
- * a caller of a mixed-return function already handles; a str subscript is the
- * one-char string `mojo_char_at_str_cp` answers everywhere else. A float, int
- * or None receiver has no subscript in Python, so it raises rather than
- * reading the heap cell as a container. */
-int64_t mojo_word_subscript(int64_t w, int64_t i)
-{
-    if (mojo_is_boxed(w)) {
-        MojoBox *bx = (MojoBox *)(intptr_t)w;
-        if (bx->kind == 'l') return mojo_list_get_boxed((MojoList *)(intptr_t)bx->bits, i);
-        if (bx->kind == 'p')
-            return (int64_t)(intptr_t)mojo_char_at_str_cp((char *)(intptr_t)bx->bits, i);
-        if (bx->kind == 's')
-            return mojo_bytes_get_checked((MojoBytes *)(intptr_t)bx->bits, i);
-        if (bx->kind == 'n')
-            mojo_raise_type_error((char *)"'NoneType' object is not subscriptable");
-        mojo_raise_type_error((char *)"object is not subscriptable");
-        return 0;
-    }
-    if (mojo_is_registered_list(w))
-        return mojo_list_get_boxed((MojoList *)(intptr_t)w, i);
-    if (mojo_is_registered_bytes(w))
-        return mojo_bytes_get_checked((MojoBytes *)(intptr_t)w, i);
-    if (mojo_boxed_is_str(w))
-        return (int64_t)(intptr_t)mojo_char_at_str_cp((char *)(intptr_t)w, i);
-    mojo_raise_type_error((char *)"object is not subscriptable");
-    return 0;
-}
-
-/* The MojoList* a TAGGED word holds, for `word.method(...)` on a receiver whose
- * static C type is the erased int64_t: a kind-'l' box (or a bare registered
- * list) is the list. Every other kind — a float, a str, bytes, None — is not a
- * list, so this raises TypeError instead of letting the caller read the box
- * header as a MojoList header (which is what the old cast did: `t.append(5)`
- * on a tagged list crashed writing through the box). The caller's list arms
- * all take that pointer; nothing here guesses an element type. */
-MojoList *mojo_word_as_list(int64_t w)
-{
-    int64_t u = mojo_box_word(w);
-    if (mojo_is_registered_list(u))
-        return (MojoList *)(intptr_t)u;
-    mojo_raise_type_error((char *)"object is not a list");
-    return mojo_list_new();
-}
-
-/* The text pointer a TAGGED word holds, for the str arms of `word.method(...)`:
- * a kind-'p' string box, or a bare string word. A float/int/None/bytes word has
- * no text, so raise rather than hand the box address to strlen (which is what
- * the old `(char *)` cast of an int64_t receiver did). */
-char *mojo_word_as_text(int64_t w)
-{
-    if (mojo_is_str_box(w))
-        return (char *)(intptr_t)mojo_str_box_word(w);
-    if (mojo_boxed_is_str(w))
-        return (char *)(intptr_t)w;
-    mojo_raise_type_error((char *)"object has no string methods");
-    return (char *)"";
 }
 
 /* `s.startswith(p)` / `s.endswith(p)` with `p` held as a word: Python's
@@ -11065,12 +10649,6 @@ char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
            strictly more information than a slot's storage kind ('i' for a
            struct pointer is as true as 'i' for a small int and as useless). */
         char *_re = mojo_list_repr_elem(l, mojo_list_get_int(l, _i));
-        /* ...except a slot the kinds row calls a STRING: an element repr is a
-         * thunk for a value word (a struct pointer, or a dict's value kind), and
-         * handing it a char* key printed the key's address. A dict item pair is
-         * the case that set it for slot 1 alone (mojo_dict_items), and this loop
-         * asks every slot. A string slot is spelled by its own kind. */
-        if (_re && _k == MOJO_KIND_STR) { free(_re); _re = NULL; }
         if (_re) {
             _buf = mojo_str_cat_free(_buf, _re);
             free(_re);
@@ -11342,76 +10920,6 @@ int64_t mojo_open_file(char *path) {
     FILE *f = fopen(path, "r");
     if (!f) mojo_raise_file_not_found(path);
     return (int64_t)(intptr_t)f;
-}
-
-int64_t mojo_open_file_ex(char *path, char *mode, char *newline) {
-    /* Extended open honoring an explicit newline argument when provided.
-     * newline==NULL means "not provided" (default behavior). */
-    if (mode == NULL) mode = "r";
-#if USE_PYTHON
-    PyObject *builtins = PyImport_ImportModule("builtins");
-    if (!builtins) {
-        PyErr_Print();
-        return 0;
-    }
-    PyObject *open_func = PyObject_GetAttrString(builtins, "open");
-    Py_DECREF(builtins);
-    if (!open_func) {
-        PyErr_Print();
-        return 0;
-    }
-    PyObject *fh = NULL;
-    if (newline != NULL) {
-        PyObject *args = Py_BuildValue("(ss)", path, mode);
-        PyObject *kwargs = Py_BuildValue("{s:s}", "newline", newline);
-        if (args && kwargs) {
-            fh = PyObject_Call(open_func, args, kwargs);
-        }
-        Py_XDECREF(args);
-        Py_XDECREF(kwargs);
-    } else {
-        fh = PyObject_CallFunction(open_func, "ss", path, mode);
-    }
-    Py_DECREF(open_func);
-    if (!fh) {
-        PyErr_Print();
-        return 0;
-    }
-    return (int64_t)(intptr_t)fh;
-#else
-    const char *eff_mode = mode;
-    char mode_buf[8];
-    /* newline='' requests no universal newline translation; approximate
-     * with binary mode for read-like opens when not already binary. */
-    if (newline != NULL && newline[0] == '\0') {
-        int has_b = 0;
-        for (const char *p = mode; *p; p++) if (*p == 'b') { has_b = 1; break; }
-        if (!has_b) {
-            size_t n = strlen(mode);
-            if (n < sizeof(mode_buf) - 1) {
-                memcpy(mode_buf, mode, n);
-                mode_buf[n] = 'b';
-                mode_buf[n + 1] = '\0';
-                eff_mode = mode_buf;
-            }
-        }
-    }
-    FILE *f = fopen(path, eff_mode);
-    if (!f) {
-        FILE *probe = fopen(path, "r");
-        mojo_exc_type_set(probe ? _MOJO_EXC_TAG_OSERROR
-                                : _MOJO_EXC_TAG_FILENOTFOUND);
-        char msg[512];
-        snprintf(msg, sizeof msg, "[Errno 2] cannot open '%s' (mode '%s')",
-                 path ? path : "?", eff_mode ? eff_mode : "?");
-        char *heap_msg = strdup(msg);
-        mojo_exc_msg_set(heap_msg);
-        mojo_exc_obj_set(heap_msg);
-        mojo_raise();
-        return 0;
-    }
-    return (int64_t)(intptr_t)f;
-#endif
 }
 
 /* ── REPL and utility functions ──────────────────────────────────────*/
@@ -12197,49 +11705,16 @@ int64_t mojo_getitem_word(int64_t w, int64_t i)
 }
 
 /* `a + b` where both are words of unknown kind: two strings concatenate, both
- * lists concatenate via mojo_list_concat, double boxes add as a double,
- * otherwise adds as integers (the word is its own value). */
+ * lists concatenate via mojo_list_concat, otherwise adds as integers (the word
+ * is its own value). */
 int64_t mojo_add_words(int64_t a, int64_t b)
 {
     if (mojo_boxed_is_str(a) && mojo_boxed_is_str(b))
-        return (int64_t)(intptr_t)mojo_str_cat((char *)(intptr_t)mojo_unbox_plain(a),
-                                               (char *)(intptr_t)mojo_unbox_plain(b));
+        return (int64_t)(intptr_t)mojo_str_cat((char *)(intptr_t)a, (char *)(intptr_t)b);
     if (mojo_is_registered_list(a) && mojo_is_registered_list(b))
         return (int64_t)(intptr_t)mojo_list_concat((MojoList *)(intptr_t)a,
                                                   (MojoList *)(intptr_t)b);
-    {
-        int da = mojo_is_boxed(a) && ((MojoBox *)(intptr_t)a)->kind == 'd';
-        int db = mojo_is_boxed(b) && ((MojoBox *)(intptr_t)b)->kind == 'd';
-        if (da || db) {
-            double av = da ? mojo_box_double(a) : (double)mojo_box_int(a);
-            double bv = db ? mojo_box_double(b) : (double)mojo_box_int(b);
-            return mojo_box_from_double(av + bv);
-        }
-    }
-    return mojo_box_int(a) + mojo_box_int(b);
-}
-
-/* `a * b` where one side is a word of unknown kind that may be a string (a
- * kind-'p' str box or a string pointer), a double box, or an integer: string
- * repetition when a side is a string, a boxed double product when a side is a
- * double box, otherwise integer multiplication of the words' integer values.
- * Used by tagged mixed-generator values whose kind is a runtime fact. */
-int64_t mojo_mul_word(int64_t a, int64_t b)
-{
-    if (mojo_boxed_is_str(a))
-        return (int64_t)(intptr_t)mojo_cstr_repeat((char *)(intptr_t)mojo_unbox_plain(a), mojo_box_int(b));
-    if (mojo_boxed_is_str(b))
-        return (int64_t)(intptr_t)mojo_cstr_repeat((char *)(intptr_t)mojo_unbox_plain(b), mojo_box_int(a));
-    {
-        int da = mojo_is_boxed(a) && ((MojoBox *)(intptr_t)a)->kind == 'd';
-        int db = mojo_is_boxed(b) && ((MojoBox *)(intptr_t)b)->kind == 'd';
-        if (da || db) {
-            double av = da ? mojo_box_double(a) : (double)mojo_box_int(a);
-            double bv = db ? mojo_box_double(b) : (double)mojo_box_int(b);
-            return mojo_box_from_double(av * bv);
-        }
-    }
-    return mojo_box_int(a) * mojo_box_int(b);
+    return a + b;
 }
 
 MojoList *mojo_iter_boxed_list(int64_t v)
@@ -12627,9 +12102,11 @@ char *mojo_dict_slot_repr(int64_t v, int64_t kind)
              * stores, and only this tag tells them apart. */
             return strdup("None");
         default:
-            /* kind 0: an integer value. Always render as the integer; callers
-             * use this to repr a slot by its recorded kind. */
-            return mojo_str_from_int(v);
+            /* kind 0. The word 0 is the INTEGER 0, which the generic reader
+             * cannot say (its `val == 0` arm answers "None", right for the
+             * NULL pointer it was written for) — so it is answered here and
+             * a non-zero kind-0 word is left to that reader. */
+            return v == 0 ? strdup("0") : NULL;
     }
 }
 
@@ -12639,23 +12116,7 @@ char *mojo_dict_slot_repr(int64_t v, int64_t kind)
  * and the dict-level `val_repr` (a struct shim) keeps precedence over all of
  * them. Indices are `_DictSlot.kind`; 5/6 have no thunk and are NULL, which
  * `mojo_list_repr_elem`'s contract already treats as "this says nothing". */
-static char *_dict_val_repr_int(int64_t v)
-{
-    /* Kind 0 is also how a CONTAINER is stored (`mojo_dict_set_int` stores the
-     * handle as a plain int64_t word), so a non-zero word under this thunk may
-     * be a POINTER and only the caller's dispatch can render it. Answering
-     * `mojo_str_from_int` for one printed the container's ADDRESS as the value:
-     * `print(d.items())` on `{'c': [1, 2]}` gave `[('c', 4374364288)]` where
-     * CPython gives `[('c', [1, 2])]`, and `print(d.values())` gave the same
-     * decimal. Decline exactly those words — the registered-container probe,
-     * NOT a range test, so a large INTEGER stored under kind 0 (2^40) still
-     * renders as itself rather than being read as a pointer. */
-    if (v > 65536 && (mojo_is_registered_list(v) || mojo_is_registered_dict(v)
-                      || mojo_is_registered_set(v)
-                      || mojo_is_registered_bytes(v)))
-        return NULL;
-    return mojo_dict_slot_repr(v, 0);
-}
+static char *_dict_val_repr_int(int64_t v)    { return mojo_dict_slot_repr(v, 0); }
 static char *_dict_val_repr_double(int64_t v) { return mojo_dict_slot_repr(v, 1); }
 static char *_dict_val_repr_str(int64_t v)    { return mojo_dict_slot_repr(v, 2); }
 static char *_dict_val_repr_bool(int64_t v)   { return mojo_dict_slot_repr(v, 3); }
@@ -14108,12 +13569,6 @@ typedef struct { char *name; char *path; int is_dir_nofollow; int is_symlink; in
  * a registered list slices as a list, anything else as a string. */
 int64_t mojo_word_slice_step(int64_t w, int has_start, int64_t start,
                              int has_stop, int64_t stop, int64_t step) {
-    /* A TAGGED word: see mojo_word_slice's identical unbox. */
-    if (mojo_is_boxed(w)) {
-        MojoBox *bx = (MojoBox *)(intptr_t)w;
-        if (bx->kind == 'l' || bx->kind == 'p' || bx->kind == 's') w = bx->bits;
-        else { mojo_raise_type_error((char *)"object is not sliceable"); return 0; }
-    }
     if (mojo_is_registered_list(w))
         return (int64_t)(intptr_t)mojo_list_slice_step((MojoList *)(intptr_t)w, has_start,
                                                        start, has_stop, stop, step);
@@ -15086,33 +14541,11 @@ void mojo_cstr_or_int_release(int64_t orig, char *s) {
      it is the SAME predicate mojo_cstr_or_int_str chose the branch with: a
      registered list is the only value that produces this kind of string, so
      the two cannot disagree about which allocation `s` is. */
-    /* A regex match's repr (`mojo_re_match_repr`) is an ordinary malloc of its
-     * own size, not a pool block: pooling it would hand a block that may be
-     * larger than _INT_STR_BLOCK out as an Int key's scratch. Freed outright,
-     * like the other two non-integer spellings. */
-    if (mojo_is_registered_list(orig) || mojo_is_registered_bytes(orig)
-            || mojo_is_re_match(orig)) { free(s); return; }
+    if (mojo_is_registered_list(orig) || mojo_is_registered_bytes(orig)) { free(s); return; }
     /* `s` is the decimal `mojo_cstr_or_int_str` made through mojo_str_from_int,
      * i.e. a block from `_int_str_block`: back to the pool it came from. */
     *(char **)s = _int_str_pool;
     _int_str_pool = s;
-}
-
-/* `str(v)` for a word the codegen treats as an Int (the int arm of
- * `_stringify_value`): the spelling `mojo_cstr_or_int_str` gives, as a FRESH
- * heap string the caller owns outright. The conversion's own result is
- * borrowed (a str word), transient (a pool block) or a heap string of its own
- * (a box, a container repr); it is copied here and released through its own
- * protocol, so the copy is always the caller's to free. The codegen registers
- * the result as fresh, which lets `len`, `+` and an f-string cat free it after
- * its one use. Before this, `len(String(i))` and `"n=" + String(i)` never
- * freed the conversion: ~32 B per iteration, measured over 100k and 400k. */
-char *mojo_str_word_fresh(int64_t v)
-{
-    char *s = mojo_cstr_or_int_str(v);
-    char *d = strdup(s);
-    mojo_cstr_or_int_release(v, s);
-    return d;
 }
 
 /* The dict-STORE twin of `mojo_cstr_or_int_release`: the SAME ownership
@@ -15252,13 +14685,9 @@ static void _tuple_key_elem(char **buf, size_t *len, size_t *cap, int64_t w,
                             char k, int ecode)
 {
     if (ecode == MOJO_EQ_UNKNOWN) {
-        /* A 'p' slot is a str BY ITS RECORDED KIND, whether the string is a
-         * literal in the registered pool or a heap string built at run time (a
-         * `+`, a call result). Asking the literal pool first encoded every heap
-         * string as an integer, so `(s,)` for a computed `s` got a different key
-         * from the same tuple built from a literal. A slot with no recorded kind
-         * reads as 'i' (mojo_list_slot_kind), so 'p' is never a guess. */
-        ecode = (k == 'p') ? MOJO_EQ_STR : _kind_to_eq(k);
+        if (k == 'p' && _pr_has(&_reg_str, (uint64_t)w)) ecode = MOJO_EQ_STR;
+        else if (k == 'p') ecode = MOJO_EQ_INT;
+        else ecode = _kind_to_eq(k);
     }
     char tmp[_INT_STR_BLOCK];
     if (ecode == MOJO_EQ_DOUBLE) {
@@ -15480,26 +14909,6 @@ int64_t mojo_dict_get_int_kw(MojoDict *d, int64_t kw)
     }
     _DictSlot *sl = _dict_lookup_ik(d, kw);
     return sl ? sl->val : 0;
-}
-
-/* The BOXED read's `_kw` twin. `mojo_dict_slot_boxed` is the one dict read that
- * keeps a slot's own kind (a bool stays a boxed bool, a None stays None), so it
- * cannot be replaced by `mojo_dict_get_int_kw` — that hands back the raw word
- * and `print(d[True])` would say `1` where CPython says `True`. This is the same
- * three-arm `_kw_kind` dispatch as every other twin, with `_dict_slot_boxed`
- * (not `->val`) as the answer, so an INTEGER key reaches the same boxed value
- * the char* spelling produces and nothing is formatted to get there. */
-int64_t mojo_dict_slot_boxed_kw(MojoDict *d, int64_t kw)
-{
-    char *ck; int k = _kw_kind(kw, &ck);
-    if (k == _KW_STR) { return mojo_dict_slot_boxed(d, (char *)(intptr_t)kw); }
-    if (k == _KW_CONT) {
-        int64_t v = mojo_dict_slot_boxed(d, ck);
-        mojo_dict_key_free(ck);
-        return v;
-    }
-    _DictSlot *sl = _dict_lookup_ik(d, kw);
-    return _dict_slot_boxed(sl);
 }
 
 double mojo_dict_get_double_kw(MojoDict *d, int64_t kw)
@@ -16193,20 +15602,6 @@ int64_t mojo_len(int obj) { (void)obj; return 0; }
  * CPython says for an int), not a quiet 0. */
 int64_t mojo_len_word(int64_t v)
 {
-    /* A boxed word: only the kinds with a length have one. A str box ('p')
-     * holds its pointer; a bytes box ('s') its MojoBytes. Anything else (a
-     * float, an int, None) has no len() in Python, so raise rather than read
-     * the box header as a list (which is what `mojo_list_len` below would
-     * do -- it has no way to tell a box from a list pointer). */
-    if (mojo_is_boxed(v)) {
-        MojoBox *bx = (MojoBox *)(intptr_t)v;
-        if (mojo_is_str_box(v)) return (int64_t)strlen((char *)(intptr_t)mojo_str_box_word(v));
-        if (bx->kind == 's') return mojo_bytes_len((MojoBytes *)(intptr_t)bx->bits);
-        /* A list/tuple box (`mojo_box_from_list`): the bits ARE the list. */
-        if (bx->kind == 'l') return mojo_list_len((MojoList *)(intptr_t)bx->bits);
-        mojo_raise_type_error((char *)"object has no len()");
-        return 0;
-    }
     if (mojo_is_registered_list(v)) return mojo_list_len((MojoList *)(intptr_t)v);
     if (mojo_is_registered_dict(v)) return mojo_dict_len((MojoDict *)(intptr_t)v);
     if (mojo_is_registered_set(v)) return mojo_set_len((MojoSet *)(intptr_t)v);
@@ -16937,28 +16332,6 @@ int mojo_pyobject_is_container(int64_t box) {
  * calls agree within a run while differing from any small int hash —
  * test_hash asserts 42's hash != "hello"'s, never a specific value.
  * 0/None answers 0: the stub answer, no measured test hashes it. */
-/* Hasher state: FNV-1a over the 64-bit words folded in, so equal values hash
-   equal within a run and the order of the elements matters. */
-typedef struct { uint64_t state; } MojoHasher;
-
-int64_t mojo_hasher_new(void) {
-    MojoHasher *hs = (MojoHasher *)malloc(sizeof(MojoHasher));
-    hs->state = 1469598103934665603ULL;
-    return (int64_t)(intptr_t)hs;
-}
-
-void mojo_hasher_update_int(int64_t hasher, int64_t value) {
-    MojoHasher *hs = (MojoHasher *)(intptr_t)hasher;
-    if (!hs) return;
-    hs->state ^= (uint64_t)value;
-    hs->state *= 1099511628211ULL;
-}
-
-int64_t mojo_hasher_finish(int64_t hasher) {
-    MojoHasher *hs = (MojoHasher *)(intptr_t)hasher;
-    return hs ? (int64_t)(hs->state >> 1) : 0;
-}
-
 int64_t mojo_pyobject_hash(int64_t box) {
     if (box && mojo_pyobject_is_container(box)) {
         char *kind = mojo_is_registered_list(box) ? "list"
@@ -18153,43 +17526,26 @@ void mojo_register_getattr_dispatch(int64_t (*fn)(void *, char *))
     }
     _getattr_dispatchers[_n_getattr_dispatchers++] = fn;
 }
-/* The one lookup behind mojo_getattr_any (raises on a miss) and
- * mojo_getattr_default (yields the caller's default). *found reports
- * whether any registered unit or the class-object table had `attr`. */
-static int64_t _getattr_any_lookup(void *obj, char *attr, int *found)
+int64_t mojo_getattr_any(void *obj, char *attr)
 {
-    { int64_t _cw; if (mojo_classobj_lookup(obj, attr, &_cw)) { *found = 1; return _cw; } }
+    { int64_t _cw; if (mojo_classobj_lookup(obj, attr, &_cw)) return _cw; }
     int saved = _mojo_getattr_nothrow;
     _mojo_getattr_nothrow = 1;
     for (int i = 0; i < _n_getattr_dispatchers; i++) {
         _mojo_getattr_missed = 0;
         int64_t r = _getattr_dispatchers[i](obj, attr);
-        if (!_mojo_getattr_missed) { _mojo_getattr_nothrow = saved; *found = 1; return r; }
+        if (!_mojo_getattr_missed) { _mojo_getattr_nothrow = saved; return r; }
     }
     _mojo_getattr_nothrow = saved;
-    *found = 0;
+    mojo_raise_attribute_error(attr);
     return 0;
 }
-int64_t mojo_getattr_any(void *obj, char *attr)
-{
-    int found;
-    int64_t r = _getattr_any_lookup(obj, attr, &found);
-    if (!found) mojo_raise_attribute_error(attr);
-    return r;
-}
-/* `getattr(obj, attr, dflt)` with a runtime-computed name: the same lookup
- * as mojo_getattr_any, a miss yields `dflt` instead of raising. */
-int64_t mojo_getattr_default(void *obj, char *attr, int64_t dflt)
-{
-    int found;
-    int64_t r = _getattr_any_lookup(obj, attr, &found);
-    return found ? r : dflt;
-}
 
-/* Peek a registered generator handle's signature without removing it.
- * Exposed so compiled `with` blocks can drive @contextlib.contextmanager
- * handles even when static _generator_var_api tracking was lost (e.g. the
- * handle was stored in a container). */
+/* ───────── next(word[, default]) ─────────
+ * `next(x)` where `x` is a word of unknown kind: a generator handle the run time has been told
+ * about (`mojo_gen_note*`, `mojo_gen_call_with`, a dynamic call) is stepped one value; anything
+ * else is not an iterator. StopIteration (or the default) when it is exhausted. */
+#define _MOJO_EXC_TAG_STOPITERATION 590612416
 static MojoGenSig *_gen_handle_peek(int64_t w)
 {
     if (!_ghnd_cap) return 0;
@@ -18201,108 +17557,6 @@ static MojoGenSig *_gen_handle_peek(int64_t w)
     }
     return 0;
 }
-
-/* Per-handle throw state for generator context manager exit: when exiting a
- * `with` block with an exception, the context manager protocol throws the
- * exception into the generator at its yield point. Keyed by handle address. */
-typedef struct MojoGenThrow { void *h; int64_t type; char *msg; void *obj; struct MojoGenThrow *next; } MojoGenThrow;
-static MojoGenThrow *_gen_throw_head;
-void mojo_gen_throw_set(int64_t hw, int64_t type, char *msg, void *obj)
-{
-    void *h = (void *)(intptr_t)hw;
-    for (MojoGenThrow *p = _gen_throw_head; p; p = p->next) {
-        if (p->h == h) { p->type = type; p->msg = msg; p->obj = obj; return; }
-    }
-    MojoGenThrow *n = (MojoGenThrow *)malloc(sizeof *n);
-    if (!n) return;
-    n->h = h; n->type = type; n->msg = msg; n->obj = obj; n->next = _gen_throw_head; _gen_throw_head = n;
-}
-int mojo_gen_throw_take(int64_t hw, int64_t *type, char **msg, void **obj)
-{
-    void *h = (void *)(intptr_t)hw;
-    MojoGenThrow **pp = &_gen_throw_head;
-    while (*pp) {
-        if ((*pp)->h == h) {
-            MojoGenThrow *dead = *pp;
-            if (type) *type = dead->type;
-            if (msg) *msg = dead->msg;
-            if (obj) *obj = dead->obj;
-            *pp = dead->next;
-            free(dead);
-            return 1;
-        }
-        pp = &(*pp)->next;
-    }
-    return 0;
-}
-
-int mojo_gen_cm_is_handle(int64_t w)
-{
-    return _gen_handle_peek(w) != 0;
-}
-
-/* __enter__ for a generator-based context manager: resume once and return
- * the yielded value (boxed as a word). Returns 0 and leaves exception state
- * if the generator does not yield. */
-int64_t mojo_gen_cm_enter(int64_t w)
-{
-    MojoGenSig *sg = _gen_handle_peek(w);
-    if (!sg) { mojo_raise_type_error((char *)"generator context manager is not a registered handle"); return 0; }
-    void *h = (void *)(intptr_t)w;
-    if (!((bool (*)(void *))sg->resume)(h)) {
-        /* Did not yield - treat as exhausted/error. */
-        return 0;
-    }
-    switch (sg->vkind) {
-    case 1: return ((bool (*)(void *))sg->value)(h) ? 1 : 0;
-    case 2: return mojo_box_from_double(((double (*)(void *))sg->value)(h));
-    default: return ((int64_t (*)(void *))sg->value)(h);
-    }
-}
-
-/* __exit__ for a generator-based context manager on the normal path:
- * resume once to run post-yield/cleanup, then destroy. */
-void mojo_gen_cm_exit_normal(int64_t w)
-{
-    MojoGenSig *sg = _gen_handle_peek(w);
-    if (!sg) return;
-    void *h = (void *)(intptr_t)w;
-    (void)((bool (*)(void *))sg->resume)(h);
-    ((void (*)(void *))sg->destroy)(h);
-}
-
-/* __exit__ for a generator-based context manager on the exception path.
- * Throw the currently pending exception into the generator (as
- * contextlib.contextmanager requires), let it run to completion or handle
- * it, then destroy the handle. If the generator suppresses the exception by
- * returning normally, the pending exception is cleared; if it propagates
- * (re-raises the same or raises a different one), that exception remains
- * pending for the caller. */
-void mojo_gen_cm_exit_exc(int64_t w)
-{
-    MojoGenSig *sg = _gen_handle_peek(w);
-    if (!sg) return;
-    void *h = (void *)(intptr_t)w;
-    int64_t et = mojo_exc_type_get();
-    char *em = mojo_exc_msg_get();
-    void *eo = mojo_exc_obj_get();
-    /* Arm the throw for this handle: C++20 compiled generators consume it in
-     * await_resume; stack-switch generators may need runtime-specific throw
-     * handling, but setting state is harmless if unused. */
-    mojo_gen_throw_set(w, et, em, eo);
-    mojo_exc_pending_set(0);
-    (void)((bool (*)(void *))sg->resume)(h);
-    /* If resume completed without setting a new pending exception, the
-     * generator handled/suppressed the exception. If it set pending, that's
-     * the exception to propagate (possibly the same one re-raised). */
-    ((void (*)(void *))sg->destroy)(h);
-}
-
-/* ───────── next(word[, default]) ─────────
- * `next(x)` where `x` is a word of unknown kind: a generator handle the run time has been told
- * about (`mojo_gen_note*`, `mojo_gen_call_with`, a dynamic call) is stepped one value; anything
- * else is not an iterator. StopIteration (or the default) when it is exhausted. */
-#define _MOJO_EXC_TAG_STOPITERATION 590612416
 int64_t mojo_next_word(int64_t w, int has_default, int64_t dflt)
 {
     if (mojo_is_listiter(w)) {
@@ -18339,70 +17593,4 @@ int64_t mojo_next_word(int64_t w, int has_default, int64_t dflt)
     case 2: return mojo_box_from_double(((double (*)(void *))sg->value)(h));
     default: return ((int64_t (*)(void *))sg->value)(h);
     }
-}
-
-/* ── csv.reader (tabled foreign callable) ────────────────────────────── */
-static int64_t _csv_reader_impl(int64_t lines_word, MojoDict *kw)
-{
-    char delim = ',';
-    if (kw && mojo_dict_contains(kw, (char *)"delimiter")) {
-        int64_t dv = mojo_dict_get_int(kw, (char *)"delimiter");
-        char *s = 0;
-        if (mojo_word_is_text(dv)) s = (char *)(intptr_t)mojo_str_box_word(dv);
-        else if (mojo_boxed_is_str(dv)) s = (char *)(intptr_t)dv;
-        else if ((intptr_t)dv > 4096) s = (char *)(intptr_t)dv;
-        if (s && s[0]) delim = s[0];
-    }
-    MojoList *rows = mojo_list_new();
-    MojoList *lines = 0;
-    if (mojo_is_registered_list(lines_word)) {
-        lines = (MojoList *)(intptr_t)lines_word;
-    } else {
-        lines = mojo_iter_word(lines_word);
-    }
-    if (!lines) return (int64_t)(intptr_t)rows;
-    int64_t n = mojo_list_len(lines);
-    for (int64_t i = 0; i < n; i++) {
-        int64_t lw = mojo_list_get_boxed(lines, i);
-        char *line = 0;
-        if (mojo_word_is_text(lw)) line = (char *)(intptr_t)mojo_str_box_word(lw);
-        else if (mojo_boxed_is_str(lw)) line = (char *)(intptr_t)lw;
-        else line = (char *)(intptr_t)lw;
-        if (!line) line = (char *)"";
-        size_t len = strlen(line);
-        char *tmp = (char *)malloc(len + 1);
-        if (!tmp) continue;
-        memcpy(tmp, line, len + 1);
-        while (len > 0 && (tmp[len-1] == '\n' || tmp[len-1] == '\r')) tmp[--len] = 0;
-        MojoList *row = mojo_list_new();
-        char *p = tmp;
-        for (;;) {
-            char *q = strchr(p, delim);
-            if (!q) {
-                mojo_list_append_str(row, strdup(p));
-                break;
-            }
-            *q = 0;
-            mojo_list_append_str(row, strdup(p));
-            p = q + 1;
-        }
-        mojo_list_append_int(rows, (int64_t)(intptr_t)row);
-        free(tmp);
-    }
-    return (int64_t)(intptr_t)rows;
-}
-int64_t mojo_csv_reader_vf(int64_t lines_word, MojoList *packed, MojoDict *kw)
-{
-    (void)packed;
-    return _csv_reader_impl(lines_word, kw);
-}
-
-static MojoVarargFn *_csv_reader_vfn = 0;
-void *mojo_csv_reader_w = 0;
-__attribute__((constructor)) static void _mojo_csv_reader_init(void)
-{
-    if (!_csv_reader_vfn) {
-        _csv_reader_vfn = mojo_vararg_fn_new((void *)mojo_csv_reader_vf, 0, 1, 1, 0);
-    }
-    mojo_csv_reader_w = (void *)_csv_reader_vfn;
 }

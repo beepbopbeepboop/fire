@@ -328,23 +328,6 @@ class _Emitter:
         return len(self.nodes) - 1
 
 
-def table_ref(decl_name: str) -> str:
-    """The C expression that refers to an emitted ARRAY table as a POINTER.
-
-    The tables `compile_pattern` emits are arrays (`static const T name[] =
-    {...}`), and every consumer needs a pointer to them. Writing the bare name
-    (`_tN = name;`) relies on array-to-pointer decay, which gcc's C frontend
-    applies for us in an ordinary function but NOT in a `__GIMPLE`-tagged body
-    (a struct method or a lifted closure — and the whole-closure self-host
-    build compiles those with `-x c`, so gcc reads the body as raw GIMPLE).
-    There the decay is a hard error, "non-trivial conversion in 'var_decl'":
-    the assignment's RHS has array type and the var_decl has pointer type.
-    `&name[0]` is an ADDR_EXPR in both paths and has exactly the pointer type
-    the caller declares, so spell it out at every use.
-    """
-    return f'&{decl_name}[0]'
-
-
 def compile_pattern(pattern: str, c_prefix: str) -> dict:
     """Compile a Python regex source string into C data.
 
@@ -354,9 +337,8 @@ def compile_pattern(pattern: str, c_prefix: str) -> dict:
       'ngroups': total capturing group count
       'group_names': {name: 1-based group index}
       'prog_var', 'ranges_var', 'classinfo_var', 'names_var': the emitted
-        array names. A caller that binds one to a POINTER temp must pass it
-        through `table_ref` — see that function for why the bare name is a
-        hard error inside a `__GIMPLE` body.
+        array names (for the caller to reference in the
+        mojo_regex_search(...)/mojo_regex_lastgroup(...) calls).
     """
     ast, ngroups, group_names = parse_regex(pattern)
     em = _Emitter()

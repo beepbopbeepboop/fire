@@ -700,7 +700,7 @@ def test_a_base_mnemonic_is_either_wired_or_named():
 def test_the_survey_does_not_count_an_encoder_nothing_emits():
     """The survey's headline number must be about IMAGES, not about the table.
 
-    `bugs/mid/FORMAL_arm64_instruction_coverage.md`'s own lesson is that byte-exact
+    `bugs/FORMAL_arm64_instruction_coverage.md`'s own lesson is that byte-exact
     encoders are not instructions: `Assembler.resolve()` had no `B.cond` case,
     every conditional branch pointed at itself, and the whole encoder suite was
     green. An encoder with no caller is that one step earlier — the bytes are
@@ -792,7 +792,7 @@ def test_a_reference_from_something_that_cannot_emit_is_not_a_caller():
       compiler output — `tst` 16,345 and `cmn` 10,603, plus the 359 `br` its
       `br_xn` model arm names — were counted as COVERED for images that cannot
       contain them. That is this survey's own sharpest lesson
-      (`bugs/mid/FORMAL_arm64_instruction_coverage.md`: "an encoder with no CALLER
+      (`bugs/FORMAL_arm64_instruction_coverage.md`: "an encoder with no CALLER
       is that failure one step earlier") applied one level deeper than it was
       written for: the caller has to be a lowering.
 

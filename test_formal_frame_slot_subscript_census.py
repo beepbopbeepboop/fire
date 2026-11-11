@@ -77,7 +77,7 @@ class TestFrameSlotSubscriptCensus(unittest.TestCase):
                   "    var d: Deep\n"
                   "    var t: Int\n"
                   "\n"
-                  "    def first(mut self) -> Int:\n"
+                  "    def first(out self) -> Int:\n"
                   "        return self.d[0]\n"),
             [("self.d", "Deep", C.M.FRAME_KIND)])
 
@@ -116,7 +116,7 @@ class TestFrameSlotSubscriptCensus(unittest.TestCase):
             sites("struct Single:\n"
                   "    var only: Int\n"
                   "\n"
-                  "    def first(mut self) -> Int:\n"
+                  "    def first(out self) -> Int:\n"
                   "        return self.only[0]\n"),
             [("self.only", "Int", C.M.INT_KIND)])
 
@@ -153,7 +153,7 @@ class TestFrameSlotSubscriptCensus(unittest.TestCase):
                   "    var xs: List[Int]\n"
                   "    var n: Int\n"
                   "\n"
-                  "    def first(mut self) -> Int:\n"
+                  "    def first(out self) -> Int:\n"
                   "        return self.xs[0]\n"),
             [("self.xs", "List[Int]", "list")])
 

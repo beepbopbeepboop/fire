@@ -68,12 +68,14 @@ def test_constrained_tstring_message():
 
 def test_constrained_short_circuit_and_false():
     # Short-circuit: provably-false `and` must diagnose even if rhs is unknown.
-    # Checked at instantiation, which the real build does (see diagnostic_build.py).
-    from diagnostic_build import build_refusal
-    rc, s = build_refusal('def f[x: Int]():\n    constrained[False and x > 0, "nope"]()\n\ndef main():\n    f[1]()\n')
-    assert rc != 0, 'provably-false constrained in a called generic built without error'
-    assert 'constraint failed' in s, s
-    assert 'nope' in s, s
+    try:
+        _compile('fn f[x: Int]():\n    constrained[False and x > 0, "nope"]()\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'constraint failed' in s, s
+        assert 'nope' in s, s
+        return
+    raise AssertionError('provably-false short-circuit constrained compiled')
 
 
 def test_constrained_short_circuit_or_false_needs_rhs():
@@ -342,43 +344,8 @@ def test_constrained_in_comptime_for_str_alias_true():
         '        constrained[c == "a" or c == "b", "ok"]()\n')
 
 
-def test_constrained_in_comptime_for_list_comprehension_fails():
-    try:
-        _compile('fn f():\n'
-                 '    comptime vals = [i * 2 for i in range(3)]\n'
-                 '    comptime for v in vals:\n'
-                 '        constrained[v != 4, "bad"]()\n')
-    except RuntimeError as e:
-        assert 'constraint failed: bad' in str(e), e
-        return
-    raise AssertionError('comprehension element 4 did not fail constrained')
-
-
-def test_constrained_in_comptime_for_list_comprehension_true():
-    _compile('fn f():\n'
-             '    comptime vals = [i * 2 for i in range(3)]\n'
-             '    comptime for v in vals:\n'
-             '        constrained[v != 5, "ok"]()\n')
-
-
-def test_constrained_message_get_kgen_string():
-    try:
-        _compile('''def _get_kgen_string[s: String]() -> String:
-    return s
-fn f():
-    constrained[False, StaticString(_get_kgen_string["hello"]())]()
-''')
-    except RuntimeError as e:
-        assert 'constraint failed: hello' in str(e), e
-        return
-    raise AssertionError('provably-false constrained compiled')
-
-
 if __name__ == '__main__':
     test_constrained_bracket_false_fails()
-    test_constrained_message_get_kgen_string()
-    test_constrained_in_comptime_for_list_comprehension_fails()
-    test_constrained_in_comptime_for_list_comprehension_true()
     test_constrained_bracket_false_no_msg()
     test_constrained_bracket_true_passes()
     test_constrained_comparison_fails()

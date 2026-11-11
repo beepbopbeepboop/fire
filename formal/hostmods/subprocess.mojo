@@ -78,8 +78,8 @@ WHAT A CALL ACTUALLY DOES AT RUN TIME
 diagnostic naming the contract they rest on and exit with `ADMITTED_EXIT_STATUS`.
 A program that calls `subprocess.run` on this target stops with a number that says
 so, rather than printing a number the source never wrote — the failure this
-project treats as its worst, recorded in the known-limits audit under
-"fabricated a value".
+project treats as its worst, recorded in `bugs/FORMAL_known_limits.md`
+§"fabricated a value".
 
 **What that status can and cannot do**, because this file's earlier version of
 this paragraph claimed something false about it and the claim was worth more

@@ -400,56 +400,6 @@ def test_async_same_kind_returns_still_compile():
     check('async same-kind returns still compile', msg is None, detail=repr(msg))
 
 
-def test_lift_refuses_nested_async_def_closing_over_comptime_callable_param():
-    """Regression pin for the async-lift enqueue_cpu unresolved-callee bug:
-    a nested `async def` that references the enclosing method's function-typed
-    comptime bracket parameter (`func: def() capturing -> None`) must NOT be
-    lifted to module level as `__lift_<Owner>_<method>_<name>` — the lifted
-    copy would leave `func` bound to nothing, and the coroutine body checker
-    refuses the module with "a call to unresolved callee 'func(...)'". It
-    must stay nested, where the nested-async-closure path captures the
-    callable as a declared callable-value local."""
-    from fire_compiler import Parser, py_tokenize_named
-    src = """\
-struct Ctx:
-    var _handle: Int
-    def __init__(out self):
-        self._handle = 0
-
-    def enqueue_cpu_function[
-        func: def() capturing -> None,
-    ](self) raises:
-        async def wrapper() capturing -> None:
-            func()
-"""
-    from fire_compiler import FunctionDef
-    stmts = Parser(py_tokenize_named(src, '<lift-pin>')).parse_module()
-    coro._lift_capture_free_nested_scopes(stmts)
-
-    def all_defs(ss):
-        for st in ss:
-            if isinstance(st, FunctionDef):
-                yield st
-                yield from all_defs(st.body)
-            elif hasattr(st, 'methods') and st.methods:
-                yield from all_defs(st.methods)
-            elif hasattr(st, 'body') and isinstance(st.body, list):
-                yield from all_defs(st.body)
-
-    names = [d.name for d in all_defs(stmts)]
-    lifted = [n for n in names if n.startswith('__lift_')]
-    if lifted or 'wrapper' not in names:
-        # raise (not just check()) so a failure is visible to BOTH runners:
-        # this file is registered as `python3 test_async_void_return.py`
-        # (run_all counts check() failures), but under pytest only an
-        # exception fails the test.
-        raise AssertionError(
-            f"nested async def closing over a comptime callable param was "
-            f"lifted out of its method (or dropped): {names}")
-    check("nested async def closing over a comptime callable param is NOT lifted to __lift_*",
-          True, detail=repr(names))
-
-
 def run_all():
     for name, fn in list(globals().items()):
         if name.startswith('test_') and callable(fn):

@@ -386,16 +386,3 @@ theorem work_step_cbnz (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
       if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15,
       if_neg hne_16, if_neg hne_17]
   simp [h, cbz_off64, cbnz_off64]
-
-/-- The NOT-TAKEN case of a CBNZ: when the tested register is zero, `arm64_step`
-    falls through to the next instruction and changes nothing else.  This is the
-    fact an overflow guard needs on the normal path: a `cbnz x2, <trap>` whose
-    `x2` is `0` on the non-overflowing inputs is the fall-through, so the composed
-    effect of the guarded body is one function of the entry state under the guard
-    (`lib/Refine.lean`, `GuardedBlockCert`). -/
-theorem cbnz_not_taken (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
-    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
-    (h : (w &&& 0xff000000) = 0xb5000000)
-    (hz : arm64_reg ((w &&& 0x1f).toNat) s = 0) :
-    arm64_step s code = some { s with pc := s.pc + 4 } := by
-  rw [work_step_cbnz s code pc w hpc hread h, if_neg (fun hne => hne hz)]

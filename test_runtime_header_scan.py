@@ -54,7 +54,7 @@ runs in both directions — `python3 test_runtime_header_scan.py --fix` writes t
 live census into every one of those quotes from the same table the check reads,
 so the two ends of this file cannot drift apart, and a commit that adds a
 runtime declaration does not have to remember which six sentences quoted the
-number it changed. (`FORMAL_known_limits` quotes the census in more
+number it changed. (`bugs/FORMAL_known_limits.md` quotes the census in more
 sentences than the five above; every one of them is in the table, which is why
 a change to that document's wording can now fail this file.)
 
@@ -360,7 +360,7 @@ def test_every_declaration_is_seen():
     #
     # 544 -> 546: `mojo_open` and `mojo_close`, declared under the same
     # `#ifndef __MOJO_STDLIB_MODE__` guard `mojo_write` uses
-    # (`runtime/fire_runtime.h`, and `FORMAL_runtime_library_on_the_link_line`
+    # (`runtime/fire_runtime.h`, and `bugs/FORMAL_runtime_library_on_the_link_line.md`
     # §0.2 for why they were left out and what decided it). Both are DEFINED by
     # `fire_runtime.c` in both arms of its `#if USE_PYTHON`, with the signature
     # declared here, so both cross the export-trie intersection and both are
@@ -497,114 +497,7 @@ def test_every_declaration_is_seen():
     # header by one more name since the 740 rung without bumping it (the
     # scanner read 741 on master), so the figure is read off the MERGED header
     # and not added up from the two sides.
-    #
-    # 806 -> 807 (2026-11-11): `mojo_dict_slot_boxed_kw`, the BOXED read's `_kw`
-    # twin. `mojo_dict_slot_boxed` keeps a slot's own kind (a bool stays a
-    # boxed bool, a None stays None), so an integer KEY could not use
-    # `mojo_dict_get_int_kw` — that hands back the raw word and
-    # `print(d[True])` would say `1` where CPython says `True`. The twin runs
-    # `_kw_kind`'s three-arm dispatch and answers through `_dict_slot_boxed`,
-    # so `d[i]` on a `Dict[Int, Int]` reads the same boxed value the char*
-    # spelling produces with nothing formatted to get there. The codegen half
-    # is ONE set entry (`emit_infra._KW_DICT_FNS`), which `_apply_kw_keys`
-    # renames through — the same mechanism as the other fourteen twins.
-    #
-    # 807 -> 810 (2026-11-12): the `str`-box predicates `mojo_is_str_box` and
-    # `mojo_word_is_text`, plus the accessor `mojo_str_box_word` (73076be07,
-    # "codegen: a str stored into a mixed tagged name is a box (step 2 part
-    # 3)"). A `str` stored into a name that also holds a tagged generator word
-    # is boxed with a kind-'p' box, so `len(x)` and `x + "!"` have to ask
-    # whether a word is such a box; all three are word-shaped (an `int64_t` in
-    # and a word or `int` out), which is why the word figure moves 415 -> 418
-    # with them. The commit added the declarations without a rung — the drift
-    # this ladder exists to catch — so the number is read off the call (810),
-    # not added up.
-    #
-    # 810 -> 821 (2026-11-12, the gate fix for `rthdrscan` at 203fd5ea3c):
-    # ELEVEN names, none of which bumped this ladder, so the job was red on
-    # 810 vs 821 (and already on 810 vs 817 at the gate commit, where seven of
-    # them had landed) and the prose copies of the census were stale with it.
-    # Read off the call (821), the whole delta, in four commits:
-    #   +6  `mojo_gen_cm_is_handle` / `mojo_gen_cm_enter` /
-    #       `mojo_gen_cm_exit_normal` / `mojo_gen_cm_exit_exc` and
-    #       `mojo_gen_throw_set` / `mojo_gen_throw_take` (b04aaf28c,
-    #       "codegen: lower contextmanager generators used in `with`") — the
-    #       handle test, the enter/exit entries, and the throw state an
-    #       exception escaping a `with` leaves for `__exit__` to inspect.
-    #   +1  `mojo_getattr_default` (37c877f7c, "codegen: a runtime-named
-    #       getattr in a compiled generator dispatches, not refuses") — the
-    #       three-argument `getattr(obj, name, default)` miss arm.
-    #   +1  `mojo_str_word_fresh` (75931501a, "codegen: str(int) and
-    #       String(int) results are owned") — the owned conversion whose one
-    #       use can be freed, rather than the borrowed transient.
-    #   +3  `mojo_dict_set_other_struct_repr` /
-    #       `mojo_dict_set_bytes_other_struct_repr` /
-    #       `mojo_dict_repr_other_slot` (46d36b17f, "dict keys and dict value
-    #       reprs: tuple keys read back, items pairs print, struct values per
-    #       slot") — a dict slot holding a struct type the dict's recorded repr
-    #       does not describe, in both key domains, and the walker's reader.
-    # Seven are word-shaped (the five generator entries, `getattr_default` and
-    # `str_word_fresh`) and four are box-shaped (`throw_take` and the three
-    # dict entries), which is the whole 418 -> 425 word and 502 -> 506 box
-    # movement in the quoted figures — `--fix` wrote those from this scan.
-    # 821 -> 822 (2026-11-12): ONE name, read off the call on the live header.
-    # `mojo_mul_word` (63dd14dda, "codegen: handle str-box ops in tagged
-    # generator words") — the `*`/str-repeat word picker. Word-shaped (two
-    # int64_t in, one int64_t out), so the word figure moves 425 -> 426 and
-    # the box figure stays at 506, total 931 -> 932. The declaration landed
-    # without a ladder rung, which this check exists to catch; `formal-doc-truth`
-    # and `rthdrscan` both went red on the same drift and were fixed in parallel.
-    # 822 -> 826 (2026-11-12, the gate fix for `formal-doc-truth` at 827020b319):
-    # THREE names, all read off the call on the live header, all from
-    # 29aa3f763 ("codegen: a float beside a pointer return travels as a
-    # tagged word"), which landed on master via 95227994d after the 822 rung:
-    #   +1  `mojo_box_from_list` — box the list/tuple arm of a tagged
-    #       mixed return as a kind-'l' word. Box-shaped: its first argument is
-    #       a `MojoList *` the boundary cannot pass by value (the
-    #       argument-crosses-as-a-box rule), so the word figure does NOT move
-    #       for it — the whole box figure 507 -> 508, total 933 -> 934.
-    #   +1  `mojo_box_from_bytes` — box the bytes arm as a kind-'s' word.
-    #       Word-shaped (a `void *` parameter is one 64-bit word and is not a
-    #       named container type), word 426 -> 427, total 934 -> 935.
-    #   +1  `mojo_word_subscript` — `w[i]` on a word of unknown kind, the
-    #       receiver dispatching by kind (list/tuple, str, bytes). Word-shaped
-    #       (two int64_t in, int64_t out), word 427 -> 428, total 935 -> 936.
-    # The declarations landed without a ladder rung, which this check exists
-    # to catch; `formal-doc-truth` went red on the same drift and this rung
-    # closes it. fire_runtime.c grew with them (785 -> 790 KB).
-    # 826 -> 829 (2026-11-12, the gate fix for `formal-doc-truth` at 77937cfa2):
-    # THREE names, all read off the calls on the live header, all from
-    # 9d97fb1d9 ("codegen: kind-dispatch member calls and `in` on a tagged
-    # mixed-return word") and 364787542 (re.sub capturing lambda), which landed
-    # after the 826 rung:
-    #   +1  `mojo_word_contains` — `needle in <tagged word>`. Word-shaped (two
-    #       int64_t in, int in), word 428 -> 429, total 936 -> 937.
-    #   +1  `mojo_word_as_list` — the list a tagged word holds for the member
-    #       call lowering. Box-shaped: it returns a `MojoList *`, which the
-    #       boundary cannot hand back by value, so the box figure 508 -> 509,
-    #       total 937 -> 938.
-    #   +1  `mojo_word_as_text` — the `char *` a tagged word holds. Word-shaped
-    #       (one int64_t in, one `char *` out, both one word), word 429 -> 430,
-    #       total 938 -> 939.
-    # `mojo_bound_method_fn` / `mojo_bound_method_self` are `static inline`,
-    # which the scanner does not count, so they move nothing.
-    # fire_runtime.c grew by 62 lines with the three (811763 bytes, 793 KB).
-    # 829 -> 830 (2026-11-13, the gate fix for `formal-doc-truth` at 4eba365d99):
-    # ONE name, read off the call on the live header, from a912f5987 ("codegen:
-    # model open() as context manager in compiled generator with-stmts"),
-    # which landed after the 829 rung without one:
-    #   +1  `mojo_open_file_ex` — `open()` with optional mode and newline
-    #       (`newline == NULL` means "not provided"). Word-shaped (three `char *`
-    #       in, one int64_t out, every one a single word), word 430 -> 431,
-    #       total 939 -> 940. Box figure unchanged.
-    # fire_runtime.c grew by 70 lines with it (814067 bytes, 795 KB).
-    # 830 -> 832 (7553dd570, "codegen: a float's bit accessors and bitcast are
-    # bit reinterpretations"): TWO names, read off the live header:
-    #   +1  `mojo_float_from_bits` (int64_t in, float out)
-    #   +1  `mojo_float_to_bits`   (float in, int64_t out)
-    #       Both carry a float across the boundary, so neither is word-shaped:
-    #       total 940 -> 942, word 431 unchanged, box 509 -> 511.
-    for header, want in (('fire_runtime.h', 832),   # --fix writes the live figure
+    for header, want in (('fire_runtime.h', 794),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already
@@ -726,7 +619,7 @@ def test_every_declaration_is_seen():
     # This rung is the one `bugs/CODEGEN_the_runtime_export_ladder_is_five_
     # behind.md` filed for, together with the five PROSE copies of the census
     # in `formal/model.py`, `build_stdlib_dylib.py` and
-    # `FORMAL_known_limits`. Both are closed by the same thing: this
+    # `bugs/FORMAL_known_limits.md`. Both are closed by the same thing: this
     # entry, its ladder rung, and `--fix`, which writes the live scan into
     # every quote from the table above rather than leaving five hand-typed
     # copies of a computed number to agree with each other. The doc went with
@@ -822,12 +715,47 @@ CENSUS_QUOTES = (
     ('formal/model/builtins.py',
      r'a rule that refuses all (\d+) entry points for that reason',
      ('total',)),
+    ('bugs/FORMAL_known_limits.md',
+     r'\| entry points declared \| (\d+) \|',
+     ('total',)),
+    ('bugs/FORMAL_known_limits.md',
+     r'\| every type crossing the boundary is one word \| \*\*(\d+)\*\* \|',
+     ('word',)),
+    ('bugs/FORMAL_known_limits.md',
+     r'\| a box in an argument or the return \| (\d+) \|',
+     ('box',)),
+    ('bugs/FORMAL_known_limits.md',
+     r'\*\*(\d+) of (\d+) is what a link line converts',
+     ('word', 'total')),
+    ('bugs/FORMAL_known_limits.md',
+     r'For `mojo_sqlite3_\*` it is \*\*(\d+) of (\d+)\*\*',
+     ('sqlite_word', 'sqlite_total')),
+    ('bugs/FORMAL_known_limits.md',
+     r'\| of the (\d+), refused only for want of a linked library \| (\d+) \|',
+     ('word', 'word')),
+    ('bugs/FORMAL_known_limits.md',
+     r'the shape answers the same question for all (\d+)\n'
+     r'entry points instead of',
+     ('total',)),
+    ('bugs/FORMAL_known_limits.md',
+     r'repeating this table: (\d+)\s*\nentry points, (\d+) word-shaped, '
+     r'(\d+) with a box',
+     ('total', 'word', 'box')),
     # the round-1 correction: the split by RETURN TYPE alone, which is a
     # different question from the table's (every type crossing the boundary)
     # and so a different pair of figures -- quoted here because the doc quotes
     # it, and derived with `model`'s own word rule rather than by arithmetic.
+    ('bugs/FORMAL_known_limits.md',
+     r'I measure (\d+) / (\d+) / (\d+) by return type alone, and (\d+)\s*\n',
+     ('total', 'return_word', 'return_box', 'word')),
+    ('bugs/FORMAL_known_limits.md',
+     r'So today the (\d+) are refused',
+     ('word',)),
+    ('bugs/FORMAL_known_limits.md',
+     r'it is the only thing between the (\d+) and working code',
+     ('word',)),
     # `FORMAL.md` §2.2's census table and its `N of M` sentence. **This is the
-    # gap whose bug doc was `FORMAL_phase2_export_ceiling_is_four_behind`**,
+    # gap whose bug doc was `FORMAL_phase2_export_ceiling_is_four_behind.md`**,
     # deleted with its fix on 2026-10-05 (fixed at commit 9e79c79e: the ten entry
     # points this describes are now in `FORMAL.md`, the `word` row is checked by
     # `test_formal_runtime_link.py` as well as here, and `test_runtime_header_scan.py
@@ -856,41 +784,9 @@ CENSUS_QUOTES = (
     ('FORMAL.md',
      r'\| not word-shaped \| \*\*(\d+)\*\* \|',
      ('box',)),
-    # The same sentence's PERCENTAGE is a third derived figure, and the one the
-    # fixer used to leave behind: 9bd4ce75c moved the total 940 -> 942 with
-    # `word` unchanged, `--fix` rewrote the two counts it could see, and the
-    # published share stayed at 45.9% — the ratio of the OLD pair — until
-    # formal-doc-truth went red on it. A derived figure a tool does not write is
-    # a figure a human has to remember.
     ('FORMAL.md',
-     r'So \*\*(\d+) of (\d+) \(([\d.]+)%\)\*\* is the reachable-surface ceiling',
-     ('word', 'total', 'word_pct')),
-    # The RESTATEMENTS of the census outside §2.2's table (§3.2's non-word
-    # sentence, §5's "N of the box-crossing", §6's phase-2 word row and the two
-    # sentences below it). They are in this table because they were exactly what
-    # a hand refresh missed: a rung that adds a word-shaped entry point moves
-    # `word` and leaves `box` alone, and the §3.2 sentence quotes `box` where
-    # §2.2's table is the thing a person edits. They are read with the same
-    # `live_census()` the table's own rows use, and `--fix` writes them, so a
-    # refresh cannot stop at the table again.
-    ('FORMAL.md',
-     r'So the \*\*(\d+)\*\* non-word entry points',
-     ('box',)),
-    ('FORMAL.md',
-     r'the (\d+)\s*\nbox-crossing entry points of §2\.2',
-     ('box',)),
-    ('FORMAL.md',
-     r'and the (\d+) become callable',
-     ('box',)),
-    ('FORMAL.md',
-     r'\| word-shaped entry points \(`runtime_abi`\) \| (\d+) \| (\d+) \|',
-     ('word', 'word')),
-    ('FORMAL.md',
-     r'gaps between the\s+(\d+) of the row above',
-     ('word',)),
-    ('FORMAL.md',
-     r'\*\*\d+ of the (\d+)\*\* the dylib\s+does not export',
-     ('word',)),
+     r'So \*\*(\d+) of (\d+) \([\d.]+%\)\*\* is the reachable-surface ceiling',
+     ('word', 'total')),
     ('formal/build.py',
      r'§3\.1 for the word-shaped surface \((\d+) entry points, (\d+) of them '
      r'word-shaped,',
@@ -918,19 +814,13 @@ def live_census():
     """Every figure the prose quotes, read off the headers exactly once.
 
     `return_word`/`return_box` are the split the round-1 correction in
-    `FORMAL_known_limits` quotes: the RETURN type alone, with the
+    `bugs/FORMAL_known_limits.md` quotes: the RETURN type alone, with the
     argument list not counted. That is a different question from the table's
     ("every type crossing the boundary"), so it is a different pair of numbers
     from the same table -- asked with `model`'s own word rule rather than by
     arithmetic on the table's figures, because the two questions are answered
     by two different predicates and subtracting one from the other would
     answer neither.
-
-    `word_pct` is the share §2.2 publishes beside those two counts. It is
-    derived HERE, from the same two figures the table publishes, with the same
-    one-decimal rounding `test_formal_doc_truth.py` checks against — because a
-    percentage written down beside a count is a second copy of the ratio, and
-    the copy that no tool writes is the copy that goes stale.
     """
     sys.path.insert(0, HERE)
     from formal import model as M
@@ -950,7 +840,6 @@ def live_census():
         'total': total,
         'word': word,
         'box': box,
-        'word_pct': round(100 * word / total, 1) if total else 0.0,
         'return_word': return_word,
         'return_box': total - return_word,
         'sqlite_word': sum(1 for e in sqlite.values() if e['word']),
@@ -984,7 +873,7 @@ def rewrite_quoted_figures():
         try:
             with open(full, encoding='utf-8') as f:
                 # re-read every time: two entries can name the same file (and
-                # several name FORMAL_known_limits), and an earlier write in
+                # several name FORMAL_known_limits.md), and an earlier write in
                 # this loop has to be visible to the later ones
                 text = f.read()
         except OSError as e:
@@ -1063,43 +952,6 @@ def test_the_fixer_touches_only_the_figures():
           'the narrower figure was spliced at a stale offset')
 
 
-def test_the_word_share_is_a_fixable_quote():
-    """The §2.2 percentage is a DERIVED figure, so `--fix` must rewrite it.
-
-    The census refresh at 9bd4ce75c moved the total 940 -> 942 with `word`
-    unchanged and left `45.9%` behind: 431/940 is 45.85% (45.9) and 431/942 is
-    45.75% (45.8), so FORMAL.md published the share of a pair that no longer
-    existed and `formal-doc-truth` went red on that one figure. The sentence's
-    two counts were in the quote table below and its percentage was not, which
-    is the whole defect: the half a tool could not write is the half that went
-    stale, and it left a human to notice a ratio the tool had the inputs for.
-    This pins the ratio into that same table row.
-    """
-    live = live_census()
-    check('word_pct' in live,
-          'live_census() publishes the word-shaped share')
-    sentence = (r'So \*\*(\d+) of (\d+) \(([\d.]+)%\)\*\* is the '
-                r'reachable-surface ceiling')
-    rows = [keys for _path, pattern, keys in CENSUS_QUOTES
-            if 'reachable-surface ceiling' in pattern]
-    check(any('word_pct' in keys for keys in rows),
-          'the §2.2 word share is a figure `--fix` rewrites',
-          'no CENSUS_QUOTES row for the §2.2 sentence captures the '
-          'percentage, so a census refresh leaves it describing the old pair')
-    text = (f'So **{live["word"]} of {live["total"]} (99.9%)** is the '
-            f'reachable-surface ceiling')
-    m = re.search(sentence, text)
-    check(m is not None, 'the §2.2 word-share sentence has its fixable shape')
-    if m is not None and 'word_pct' in live:
-        got = splice_quoted_figures(text, m, ('word', 'total', 'word_pct'),
-                                    live)
-        want = (f'So **{live["word"]} of {live["total"]} '
-                f'({live["word_pct"]}%)** is the reachable-surface ceiling')
-        check(got == want,
-              'the fixer rewrites the word share to the live ratio',
-              f'got {got!r}, want {want!r}')
-
-
 def test_the_quoted_census_is_the_live_census():
     """Every prose copy of the ABI census agrees with `runtime_abi()`.
 
@@ -1131,12 +983,9 @@ def test_the_quoted_census_is_the_live_census():
                   f'is a stale TABLE, not a passing check')
             continue
         for i, key in enumerate(keys, start=1):
-            # `word_pct` is the one ratio in the table, so it is read as a
-            # float; every other figure is a count.
-            got = (float(m.group(i)) if key == 'word_pct'
-                   else int(m.group(i)))
+            got = int(m.group(i))
             check(got == live[key],
-                  f'{path}: the quoted {key} figure is {live[key]}',
+                  f'{path}: the quoted {key} count is {live[key]}',
                   f'the text says {got}; `runtime_abi()` says {live[key]}')
 
 
@@ -1192,7 +1041,6 @@ def main():
     test_every_declaration_is_seen()
     test_non_exports_stay_excluded()
     test_the_fixer_touches_only_the_figures()
-    test_the_word_share_is_a_fixable_quote()
     test_the_quoted_census_is_the_live_census()
     test_call_arity_families_are_whole()
     npass = sum(1 for ok, _w in RESULTS if ok)

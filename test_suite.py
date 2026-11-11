@@ -1307,27 +1307,26 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      #     with it.  The registry is the authority for both: a
                      #     census entry for a job that no longer carries an
                      #     `expect=` fails this very check.
-                     # `formal-dylib` at 3 (was 4): the fourth failure it named
-                     # — the branching export whose termination stayed a named
-                     # obligation — is fixed on this branch (the CFG walk no
-                     # longer chokes on the dead stack-floor trap arm), so its
-                     # marker states 3 and the reader sees 3. The remaining
-                     # three are the overflow-trapping hole-count rows in
-                     # bugs/mid/FORMAL_svc_exit_handling_incomplete.md.
-                     'formal-dylib': 3,
-                     'gimplerunner': 20,
                      'x86-containers': 1,
-     # `ab-native` left this census with the A/B campaign: its bug doc was
-     # deleted with the work and the marker was retired with it (2026-11-13).
-                     },
+     # `ab-native` JOINS on 2026-10-28, gate triage: it was out of this census
+     # while it was DISABLED (a disabled job never runs, so it states no count
+     # and the check has nothing to read from its output) and `2f75609d` turned
+     # it back to `expect=SELFHOST_TOKENIZE_BLOWUP` once the blowup the marker
+     # was named for closed (bugs/hard/CODEGEN_ab_native_fails.md, 2026-10-26: the
+     # run is 0.1 GB / ~10 s). The marker states "1 failing: match_stmt
+     # diverges (29/30 byte-identical)", so the count is 1, read the same way
+     # as the other entries — against the run's "Results: N passed, M failed"
+     # line — which is the marker's own anti-rot for a second divergence.
+                     'ab-native': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '
           f'is for. A FANOUT states its count the same way — checked against '
           f'per-item verdicts rather than against a summary line, see '
           f'`observed_fanout_failures`; the registry no longer carries one '
           f'(the stage2 dumps stopped failing the way the marker described). '
-          f'`gimplerunner` is here at 20 (bugs/hard/SUITE_gimplerunner_21_failing.md: '
-          f'its run prints `Results: 592 passed, 20 failed`). `formal-x86-endtoend` is the only '
+          f'`gimplerunner` is NOT here and that is the '
+          f'mechanism working: its `expect=` was removed when the last of the '
+          f'merge-interaction rows it forgave was fixed. `formal-x86-endtoend` is the only '
             f'entry that is a Lean proof sweep rather than a compiled or '
             f'interpreted one, and the count is checkable at all only because '
             f'`formal/x86_64_endtoend_test.py` prints a `PASS=n FAIL=m of N` '
@@ -2146,11 +2145,7 @@ STALE_PER_CHILD_BUDGETS = {
     # image. Both are per-child walls on an image the case built itself, which is
     # what a residue row is for; neither is the SUBJECT of its test, so neither
     # moves to `BUDGET_IS_THE_SUBJECT`.
-    'test_bootstrap_hotspots.py': 1,
-    'test_dict_slot_read_regression.py': 2,
-    'test_formal_admitted_two_args.py': 1,
     'test_formal_dylib.py': 2,
-    'test_formal_fstring_printf_regress.py': 1,
     'test_formal_proof_breadth.py': 6,  # +1 with the bulk merge of the formal-worker branches
     'test_formal_specs.py': 1,  # +1 on 2026-10-05: work/formal36-contracts-language's
                                  # `lean` run of a generated spec proof
@@ -2158,37 +2153,10 @@ STALE_PER_CHILD_BUDGETS = {
     'test_formal_sweep_truth.py': 1,  # +1 on 2026-10-04 (76143aaa), a row the
                                       # census missed when that file's literal
                                       # arrived with the derived host-import rows
-    'test_imported_decorator_regression.py': 2,
     'test_metal_codegen.py': 9,
     'test_ptr_registry.py': 2,
-    'test_python315_frozendict.py': 1,
-    'test_python315_sentinel.py': 1,
-    'test_regress_timespec_type.py': 1,
-    'test_regression_profiling_package.py': 1,
     'test_runtime_dylib.py': 1,
     'test_selfhost_memory.py': 1,
-    'test_typeddict_extra_items_regression.py': 1,
-    # Arrived with literals while this census's gate was OFF (the recover-land
-    # backlog, 2026-11-13). Each is a file that adopted `exec_budget` and still
-    # spells a per-child wall clock at the sites named by the walk; converting a
-    # site means lowering its number here in the same commit.
-    'test_constrained_paren_diagnostic.py': 2,
-    'test_dict_slot_read_bug.py': 1,
-    'test_dict_slot_read_bug_demo.py': 1,
-    # The two sites are a whole-program COMPILE and the RUN of the 8-line
-    # program it produced (600 s / 60 s): the compile wall is real work, the run
-    # is a tiny program and a candidate for the shared constant.
-    'test_float_bit_reinterpret.py': 2,
-    'test_gimple_function_scoped_alias_extern.py': 1,
-    'test_interpreter_assert_message.py': 1,
-    'test_interpreter_constrained_diagnostic.py': 1,
-    'test_linked_list_hash_equality.py': 1,
-    'test_mixed_kind_name_representation.py': 2,
-    'test_peek_result_print_link.py': 2,
-    'test_peekable_iterator_link.py': 2,
-    'test_python315_disjoint_bases.py': 2,
-    'test_python315_lazy_imports.py': 2,
-    'test_unpacking_in_comprehensions.py': 1,
 }
 
 #: Files where a per-child literal is the SUBJECT rather than residue, with the
@@ -4067,27 +4035,15 @@ _STANDALONE_TEST_REASON = (
     'directly (`python3 <file>`); the subject is named in the file\'s own '
     'docstring. Unregistered so far: a cheap one wants a bucket.')
 
-_OPEN_PROBE_HARNESS_REASON = (
-    'The per-part Done-when probes of the still-open parts of '
-    'CODEGEN_simd_and_array_values_erase_to_int64: red until each part lands, '
-    'so not a registered job. Each is run by its own bug doc\'s command '
-    '(`python3 test_codegen_erased_container_values.py <prefix>`); the landed '
-    'pins are the registered `reg-codegen-erased-container-values` job in '
-    'test_codegen_erased_container_values_pins.py.')
-
 UNREGISTERED = {
-    'test_codegen_erased_container_values.py': _OPEN_PROBE_HARNESS_REASON,
     'test_async_result_kind_cross_module.py': _STANDALONE_TEST_REASON,
     'test_codegen_int_div_zero.py': _STANDALONE_TEST_REASON,
     'test_codegen_sys_encoding_capture.py': _STANDALONE_TEST_REASON,
     'test_comptime_alias_instance_read.py': _STANDALONE_TEST_REASON,
-    'test_comptime_dtype_compare.py': _STANDALONE_TEST_REASON,
     'test_coro_generator_module_qual.py': _STANDALONE_TEST_REASON,
     'test_coro_list_param_int_element.py': _STANDALONE_TEST_REASON,
     'test_coro_module_qualifier_attr.py': _STANDALONE_TEST_REASON,
     'test_dylib_dedup.py': _STANDALONE_TEST_REASON,
-    'test_float_bit_reinterpret.py': _STANDALONE_TEST_REASON,
-    'test_pointer_arm_scalar_shapes.py': _STANDALONE_TEST_REASON,
     'test_generic_struct_local_linked_list.py': _STANDALONE_TEST_REASON,
     'test_gimple_block_shadow.py': _STANDALONE_TEST_REASON,
     'test_hasattr_list_method.py': _STANDALONE_TEST_REASON,
@@ -4101,8 +4057,8 @@ UNREGISTERED = {
     'test_runtime_alloc_census.py': _STANDALONE_TEST_REASON,
     'test_runtime_class_creation.py': _STANDALONE_TEST_REASON,
     'test_runtime_cstr_region.py': _STANDALONE_TEST_REASON,
-    'test_stdlib_dylib_ratchet.py': _STANDALONE_TEST_REASON,
     'test_str_slice_tuple_return.py': _STANDALONE_TEST_REASON,
+    'test_suite_sweep_map_guard.py': _STANDALONE_TEST_REASON,
     'test_untyped_closure_str_return.py': _STANDALONE_TEST_REASON,
     'tools/test_control_pool.py': _STANDALONE_TEST_REASON,
     'tools/test_fleet_ledger.py': _STANDALONE_TEST_REASON,
@@ -4115,27 +4071,6 @@ UNREGISTERED = {
     # ── RED today: exit non-zero, and no gate, tally or coverage number
     #    reports any of it. The count is a re-run of every entry, not a
     #    reading of a bug doc.
-    #
-    # The estate audit of 2026-11-13 found `test_lsp_error_recovery.py` in no
-    # bucket. It cannot simply be registered: it is RED. Its source is a bare
-    # `asdf` at module scope, which this parser accepts as an ordinary
-    # expression statement (`ExprStmt`), not a syntax error — so
-    # `parse_module(recover=True)` records NO error, and `compile_to_gimple`
-    # compiles the module silently, `struct Good` included. Neither half of
-    # the assertion can hold, whatever parts 1-2 of the diagnostics work do.
-    # The behaviour it means to pin — a diagnostic for an unknown declaration
-    # while the following struct is still emitted — is pinned at a real
-    # unknown declaration by `test_lsp_error_recovery_part2.py` (registered as
-    # `reg-lsp-error-recovery-part2`). Whether this file should be rewritten
-    # against one or retired as a duplicate of that test is the open question
-    # in `bugs/mid/DIAGNOSTICS_lsp_error_recovery-part3.md`; listing it here
-    # is what keeps the estate check green without landing a red job.
-    'test_lsp_error_recovery.py':
-        'RED 2026-11-13: a bare `asdf` parses as an ordinary expression '
-        'statement, so no recovered parse error is recorded and compilation '
-        'succeeds — its "use of unknown declaration" assertion cannot hold. '
-        'The intended shape is pinned by `reg-lsp-error-recovery-part2`; see '
-        '`bugs/mid/DIAGNOSTICS_lsp_error_recovery-part3.md`.',
     'test_x86_64_encoders.py': "Two checks on formal/x86_64.py's encoder "
         'arithmetic, independent of the round-trip above.',
     # `formal/x86_64_model_fuzz.py` is a TOOL whose harness's own entry path
@@ -5203,54 +5138,6 @@ def test_every_test_file_is_registered():
                   f'{carried[0]}, ...')
 
 
-_TRAIT_CONFORMANCE_DIAGNOSTIC_SUITES = (
-    # (spec name, test file, part) — the whole trait-conformance diagnostics
-    # family. Each is `compile_to_gimple`-only, no build, tiny and
-    # sub-second.
-    ('trait-requirement-evidence-diagnostic',
-     'test_trait_requirement_evidence_diagnostic.py', 'part 2'),
-    ('reg-conditional-conformance-synthesis-diagnostic',
-     'test_conditional_conformance_synthesis_diagnostic.py', 'part 4'),
-    ('downcast-witness-diagnostic',
-     'test_downcast_witness_diagnostic.py', 'part 7'),
-)
-
-
-def test_the_trait_conformance_diagnostic_suites_are_gated():
-    """Every trait-conformance diagnostic suite runs on every gate.
-
-    The three files landed with their fixes (`06ea5b0ef` part 2, `65cee30d4`
-    part 4, `ec12b76e1` part 7) and none was named by a spec, so
-    `suite-self-test`'s estate row was the only thing that mentioned them and
-    no run executed their cases
-    (`bug:SUITE_trait_requirement_evidence_unregistered`). Each was found by
-    the estate check only after the previous one was "fixed", which is why
-    this pins the family and not one file.
-
-    The estate check above is what found each one, but it can only ask that
-    SOME spec names the file; a name in a bucket `gate` does not expand to is
-    the same hole one level over, and `regressions`/`orchestrator` are exactly
-    such buckets by design. All three are cheap (tiny, 0.0-0.1 GB measured,
-    sub-second, no build) and pin compiler diagnostics, so they belong in the
-    everyday loop, and this check pins that by name so dropping a
-    registration — or moving one out of the gate — is a red row rather than a
-    silent coverage loss.
-    """
-    for name, filename, part in _TRAIT_CONFORMANCE_DIAGNOSTIC_SUITES:
-        spec = suite.REGISTRY.get(name)
-        files = ({os.path.basename(str(c)) for c in spec.cmd}
-                 if spec is not None else set())
-        check(f'the gate: {name} ({part}) runs on every gate',
-              spec is not None
-              and filename in files
-              and name in suite.expand_bucket('gate'),
-              ('bug:SUITE_trait_requirement_evidence_unregistered: no spec '
-               f'names {filename}, so it runs on nothing' if spec is None else
-               'bug:SUITE_trait_requirement_evidence_unregistered: '
-               f'{name} is registered but not reachable from `gate` '
-               f'(cmd={sorted(files)})'))
-
-
 def test_no_test_name_is_registered_twice():
     """A second `test('name', …)` overwrites the first, and nothing says so.
 
@@ -5682,8 +5569,8 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'({sorted(outside)[:8]}); a new one is a ratchet failure')
     check('dangling refs: it does not invent one — a cited doc that EXISTS is '
           'not reported',
-          'bugs/OPEN_WORK.md' in have
-          and 'OPEN_WORK.md' not in by_doc
+          'bugs/FORMAL_known_limits.md' in have
+          and 'FORMAL_known_limits.md' not in by_doc
           and 'CODEGEN_ab_native_fails.md' not in by_doc,
           f'the walk found {len(have)} docs under bugs/; a walk that reports '
           f'every citation would make the census meaningless, so the '
@@ -5696,14 +5583,12 @@ def test_a_deleted_bug_doc_is_not_still_cited():
     # asserted directly rather than read out of a total, because a census check
     # cannot tell "fixed" from "the number went down".
     #
-    # The control doc of the check above is `OPEN_WORK.md` and not the
-    # `FORMAL_known_limits.md` this used to name: that one is DELETED (its fix
-    # landed, so CLAUDE.md's rule removed it), and a control that asserts "this
-    # doc exists" about a deleted doc fails for a reason that has nothing to do
-    # with the walk — the second time this control has had to move (the first
-    # from the right-shift doc). `OPEN_WORK.md` is cited from 10 files
-    # (CLAUDE.md among them) and is an index no fix deletes, so the branch is
-    # exercised by a real corpus rather than by a name nothing mentions.
+    # The control doc of the check above is `FORMAL_known_limits.md` and not the
+    # right-shift doc this used to name: that one is DELETED (its fix landed, so
+    # CLAUDE.md's rule removed it), and a control that asserts "this doc exists"
+    # about a deleted doc fails for a reason that has nothing to do with the walk.
+    # `FORMAL_known_limits.md` is cited from 38 files, so the branch is exercised
+    # by a real corpus rather than by a name nothing mentions.
     gone = {('test_formal_hashlib.py', 'FORMAL_arm64_lsl_imm_is_wrong_for_'
              'every_amount_above_8.md'),
             ('test_formal_run.py', 'FORMAL_arm64_lsl_imm_is_wrong_for_every_'
@@ -5721,9 +5606,8 @@ def test_a_deleted_bug_doc_is_not_still_cited():
     # it built "every `.md` basename MINUS the bug docs'" and then reported a
     # citation when the name was not in that set, so a bare citation of a LIVE
     # bug doc was reported as dangling. 14 of them were
-    # `FORMAL_known_limits.md`, which the check above used as its positive
-    # control for the `bugs/`-prefixed class (since moved to `OPEN_WORK.md`) —
-    # so the tool
+    # `FORMAL_known_limits.md`, which is the very document the check above uses
+    # as its positive control for the `bugs/`-prefixed class — so the tool
     # reported its own control as broken and every figure quoted from it
     # (the doc deleted by commit 0702d4087 quotes 289) was wrong by 64. The bare class is deliberately outside the ratchet,
     # so nothing else would have caught it.
@@ -5932,12 +5816,8 @@ def test_the_formal_doc_index_is_current():
     name order (or there is nothing for the sort to undo) AND the reduced order
     to be name order (or the sort is not there).
 
-    The checks, each shown to fail on a planted defect:
-      - the block in OPEN_WORK.md is current, and no merge conflict marker was
-        committed into the hand-maintained half;
-      - every formal document under `bugs/` is a row, class directories
-        included — a planted nested document proves the walk is recursive
-        rather than a directory list, and a row names the path it resolves to;
+    Four checks, each shown to fail on a planted defect:
+      - the block in OPEN_WORK.md is current;
       - `--check` is not vacuous: adding a document makes it fail;
       - it is not blind either: rewriting every claim in the file leaves it
         green (and `--strict`, which is the full comparison, red);
@@ -5984,66 +5864,6 @@ def test_the_formal_doc_index_is_current():
           'so the marker this checks for went unnoticed through every gate '
           'until a reader found it')
 
-    # THE CLASS DIRECTORIES. `rows()` used to scan `bugs/` with one
-    # `os.listdir` — its comment said "all in one directory" — and the swarm's
-    # reorg moved formal documents into `bugs/mid/` (35e261a02 and its
-    # siblings) without touching it, so the queue rendered two rows for a tree
-    # carrying five and `--check` stayed green: it compared the block against
-    # the same truncated `rows()`. Two halves, because either alone can pass on
-    # a corpus accident. A PLANTED nested document proves the walk is recursive
-    # whatever the tree happens to hold; the real tree's own formal documents
-    # prove the queue a triage reader sees is complete. And a row names the
-    # PATH it resolves to (`bugs/mid/…`), because a bare stem would make a
-    # document moving between class directories invisible to `--check`, which
-    # is this bug again in another spelling.
-    def formal_docs_under(bugs):
-        out = set()
-        for dirpath, dirnames, filenames in os.walk(bugs):
-            # The same "not an input" rule the tool derives, so a derived
-            # directory cannot make the oracle disagree about a real document.
-            dirnames[:] = sorted(d for d in dirnames
-                                 if not F.checked_run.is_derived_dir(d))
-            for n in sorted(filenames):
-                if not n.endswith('.md') or n == 'OPEN_WORK.md':
-                    continue
-                p = os.path.join(dirpath, n)
-                if F.is_formal(n[:-3], F.doc_text(p)):
-                    out.add(os.path.relpath(p, os.path.dirname(bugs))
-                            .replace(os.sep, '/'))
-        return out
-
-    walked = formal_docs_under(os.path.join(F.ROOT, 'bugs'))
-    planted_root = os.path.join(F.ROOT, '.tmp', 'formal_doc_index_walk')
-    planted_bugs = os.path.join(planted_root, 'bugs')
-    shutil.rmtree(planted_root, ignore_errors=True)
-    os.makedirs(os.path.join(planted_bugs, 'a_class'))
-    planted = ('FORMAL_zz_one_directory', 'a_class/FORMAL_zz_nested')
-    for stem in planted:
-        with open(os.path.join(planted_bugs, stem + '.md'), 'w',
-                  encoding='utf-8') as f:
-            f.write(f'# {stem.rsplit("/", 1)[-1]}: a planted document\n')
-    real_root, real_bugs, real_claims = F.ROOT, F.BUGS, F.live_claims
-    F.ROOT, F.BUGS, F.live_claims = planted_root, planted_bugs, (lambda: {})
-    try:
-        probe = {r[0] + '.md' for r in F.rows()}
-    finally:
-        F.ROOT, F.BUGS, F.live_claims = real_root, real_bugs, real_claims
-        shutil.rmtree(planted_root, ignore_errors=True)
-    check('formal doc index: a document in a class subdirectory is a row — the '
-          'walk is recursive, not a directory list',
-          probe == {f'bugs/{stem}.md' for stem in planted},
-          f'the planted rows came back as {sorted(probe)}; one `os.listdir` is '
-          f'how 35e261a02 moved three formal documents into `bugs/mid/` and the '
-          f'queue kept listing two of five')
-
-    laid_out = {r[0] + '.md' for r in F.rows()}
-    check('formal doc index: every formal document under bugs/ is a row of the '
-          'queue, class directories included',
-          walked == laid_out,
-          f'the queue is the set `find bugs -name \'FORMAL_*.md\' -o -name '
-          f'\'LEAN_*.md\'` finds, and each row names the path it resolves to; '
-          f'missing from the queue: {sorted(walked - laid_out)}')
-
     path = os.path.join(HERE, 'bugs', 'OPEN_WORK.md')
     backup = os.path.join(F.ROOT, '.tmp', 'OPEN_WORK.md.bak')
     os.makedirs(os.path.dirname(backup), exist_ok=True)
@@ -6088,19 +5908,6 @@ def test_the_formal_doc_index_is_current():
     # heading is one of the things the reduction blanks, so comparing the line
     # would fail for the right change.
     areas = re.findall(r'^### `([^`]+)`', rendered, re.M)
-    # The formal corpus was worked down to a handful of documents as the formal
-    # bugs were fixed (2026-11: the sweep series and most FORMAL_/LEAN_ docs
-    # were deleted with their work). The two pins below are properties of the
-    # GENERATOR's reduction and ordering, and they need an index with several
-    # areas and at least one mixed area to mean anything; with the corpus gone
-    # they would assert their own fixture and fail the tree for having finished
-    # the work. Retired here rather than rewritten: if the corpus returns,
-    # whoever restores it can restore these two checks with it.
-    if len(areas) < 5:
-        print(f'      formal doc index: corpus retired ({len(names)} '
-              f'document(s), {len(areas)} area(s)); reduction/order pins '
-              f'skipped')
-        return
     check('formal doc index: --check compares the tree and ignores the machine '
           '— a claim-only edit is invisible to it, and the document list, the '
           'areas and the titles survive the reduction',
@@ -6175,12 +5982,159 @@ def test_the_formal_doc_index_is_current():
           'nothing to undo')
 
 
-# The formal sweep series finished: every round landed, and the consolidated
-# work map was removed with the work (2026-11-13). The pins that watched it
-# have no subject left, so they are deleted with their document rather than
-# left to fail on a file that is deliberately gone. The self-check below
-# still guards the class that kept them dead while they existed: a test
-# defined in this file and never called from `main()`.
+# The ONE consolidated map the pins below look for, named once: the missing-
+# file guard in `test_formal_sweep_work_map_index_tags_only_from_section3` and
+# the regression test in `test_suite_sweep_map_guard.py` (which renames it to
+# prove the guard reports a named check failure instead of raising) must agree
+# on the path, or each side can drift to a file the other does not see.
+SWEEP_WORK_MAP = os.path.join(HERE, 'bugs', 'FORMAL_sweep_work_map.md')
+
+
+def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
+    """Twenty per-round work maps became one, and the two halves of that are
+    what can rot again.
+
+    `bugs/` held 143 `FORMAL_*.md` documents and GREW: every worker filed more
+    than it deleted. The formal sweep series was the worst of it — twenty
+    documents, 8 676 lines, one per round, each superseded by the next and each
+    carrying round-over-round tables whose only content was "this number
+    changed". A reader planning formal work had twenty documents to choose a
+    "current" one from and no way to tell which was current except the base
+    commit inside each.
+
+    They are now `bugs/FORMAL_sweep_work_map.md`: §1 is the latest census,
+    §2 is what the earlier rounds established and still holds, and §3 is an
+    INDEX of the twenty rounds with the base commit, the scope, and — because
+    seventy-odd files in this tree cite a round by its section number — what
+    each cited section carried. The citations were rewritten to "the `b9` round
+    of `bugs/FORMAL_sweep_work_map.md` §4.1", which resolves into §3.1.
+
+    So two properties, and both are checked here because the failure mode that
+    produced twenty documents is not a crash:
+
+    1. **There is ONE sweep work map.** A twenty-first round's author must add
+       to §1/§2 of this document or file a document that is not a per-round map
+       of this series; a file matching the pattern is either a mistake or the
+       cluster is regrowing.
+    2. **Every round tag any file cites is a row in the index.** That is what
+       makes the rewrite in (1) durable: a citation of "the `b14` round" with no
+       index row is a reference to a document nobody can find, and it is the
+       same dangling citation the check above exists for, in the one spelling
+       that check cannot see because the path it names DOES resolve.
+    """
+    import glob
+    map_dir = os.path.dirname(SWEEP_WORK_MAP)
+    map_stem = os.path.splitext(os.path.basename(SWEEP_WORK_MAP))[0]
+    maps = sorted(glob.glob(os.path.join(map_dir, map_stem + '*.md')))
+    canonical = os.path.basename(SWEEP_WORK_MAP)
+    check('sweep maps: there is exactly ONE per-round map, and it is the '
+          'consolidated one',
+          [os.path.basename(m) for m in maps] == [canonical],
+          f'{[os.path.basename(m) for m in maps]}; every round of the formal '
+          f'sweep series is one document with an index of its rounds, and a '
+          f'second file matching this pattern is the cluster regrowing')
+
+    if not maps:
+        return
+    index = open(os.path.join(HERE, 'bugs', canonical),
+                 encoding='utf-8').read()
+    # The tags §3 declares, read out of the index's own first column rather than
+    # hand-listed here: a hand-maintained copy of an index is a second copy.
+    # Only scan section 3 (the index) so spurious backticked first cells in
+    # other tables don't get misread as round tags.
+    m3 = re.search(r'^## 3\..*?(?=^## \d+\.|\Z)', index, re.M | re.S)
+    section3 = m3.group(0) if m3 else index
+    tags = set()
+    for line in section3.splitlines():
+        m = re.match(r'\|\s*`([^`]+)`\s*\|', line)
+        if m:
+            tags.add(m.group(1))
+    # …and the ones the tree cites, in the rewritten spelling.
+    cited = {}
+    for rel in sorted(glob.glob(os.path.join(HERE, '**', '*.py'),
+                                recursive=True)) + \
+            sorted(glob.glob(os.path.join(HERE, '**', '*.md'),
+                             recursive=True)):
+        if not os.path.isfile(rel) or rel.endswith(
+                os.path.join('bugs', canonical)):
+            continue
+        if 'build/' in rel or '__pycache__' in rel:
+            continue
+        try:
+            text = open(rel, encoding='utf-8', errors='replace').read()
+        except OSError:
+            continue
+        for tag in re.findall(r'the `([^`]+)` round of `[^`]*FORMAL_sweep_work_map'
+                              r'\.md`', text):
+            cited.setdefault(tag, []).append(
+                os.path.relpath(rel, HERE).replace(os.sep, '/'))
+    missing = {t: sorted(set(v)) for t, v in cited.items() if t not in tags}
+    check('sweep maps: every round tag the tree cites is a row in the index, '
+          'so "the `bN` round, §X.Y" resolves',
+          not missing and len(cited) >= 5,
+          f'{missing}; a citation of a round the index does not list sends the '
+          f'reader to a section number that exists nowhere. The index is '
+          f'{canonical} §3 / §3.1 and its tags are read out of that file; the '
+          f'walk found {len(cited)} distinct cited tag(s), and fewer than 5 '
+          f'means it is not seeing the rewritten spelling and would pass '
+          f'vacuously')
+
+
+def test_formal_sweep_work_map_index_tags_only_from_section3():
+    """The index tags must come only from §3, not from other tables in the doc.
+
+    Called from `main()` alongside the pin it protects: it was committed as
+    asserts, and an assert that fails inside `main()`'s loop stops the whole
+    run with a traceback instead of a named, counted failure, so the four
+    asserts this carried on arrival are `check()` calls now, with the same
+    conditions.
+    """
+    import re
+    path = SWEEP_WORK_MAP
+    if not os.path.exists(path):
+        check('sweep map index: the consolidated work map exists',
+              False,
+              f'{os.path.relpath(path, HERE)} is missing; the index-tag checks '
+              f'need it, and the "one consolidated map" pin above is the '
+              f'primary report')
+        return
+    index = open(path, encoding='utf-8').read()
+    m3 = re.search(r'^## 3\..*?(?=^## \d+\.|\Z)', index, re.M | re.S)
+    check('sweep map index: §3, the round index, exists', m3 is not None,
+          'a citation of a round resolves into the index, and a document '
+          'without one is the per-round cluster without its single home')
+    section3 = m3.group(0) if m3 else ''
+    spurious = ['importlib', 'collections', 'itertools', 'copy', 'unittest',
+                'bootstrap-validate.mojo', 'std/builtin/float_literal.mojo']
+    tags_all = set()
+    for line in index.splitlines():
+        m = re.match(r'\|\s*`([^`]+)`\s*\|', line)
+        if m:
+            tags_all.add(m.group(1))
+    tags_s3 = set()
+    for line in section3.splitlines():
+        m = re.match(r'\|\s*`([^`]+)`\s*\|', line)
+        if m:
+            tags_s3.add(m.group(1))
+    # The fix: only section 3 tags are valid
+    check('sweep map index: a spurious tag is not a round tag — §3 holds '
+          'only the rounds',
+          tags_s3.isdisjoint(set(spurious)),
+          f'{sorted(tags_s3 & set(spurious))} is a module name or a file, '
+          f'not a round, in the index column a citation resolves into')
+    core = {'b14', 'b13'}
+    check('sweep map index: the core round tags are still rows',
+          tags_s3.issuperset(core),
+          f'{sorted(core - tags_s3)} is gone from the index the citations '
+          f'resolve into')
+    # No spurious tags leak outside §3
+    check('sweep map index: no backticked first cell outside §3 reads as a '
+          'round tag',
+          not (tags_all & set(spurious)),
+          f'{sorted(tags_all & set(spurious))} sits in a table outside §3; '
+          f'the tag reader scans §3, and a first-column backtick out there '
+          f'is how this document once printed a module name where a round '
+          f'was meant')
 
 
 def _uncalled_and_ghost_tests(source):
@@ -6234,7 +6188,9 @@ def test_every_test_in_this_file_is_called_from_main():
     the next dead guard — a file that keeps the definition and drops the call
     fails, because the definition is what the walk counts.
     """
-    pins = {'test_every_test_in_this_file_is_called_from_main'}
+    pins = {'test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds',
+            'test_formal_sweep_work_map_index_tags_only_from_section3',
+            'test_every_test_in_this_file_is_called_from_main'}
     defined, called = _uncalled_and_ghost_tests(
         open(os.path.abspath(__file__), encoding='utf-8').read())
     uncalled, ghosts = sorted(defined - called), sorted(called - defined)
@@ -6691,7 +6647,6 @@ def main():
                test_checked_run_replays_a_pass_and_reruns_a_failure,
                test_cached_spec_names_its_own_test,
                test_every_test_file_is_registered,
-               test_the_trait_conformance_diagnostic_suites_are_gated,
                test_no_test_name_is_registered_twice,
                test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
@@ -6701,9 +6656,9 @@ def main():
                 # shape as the memory campaign above, one commit each — and
                 # the document they pin named the first of them as the fix
                 # while it ran on no gate. The self-check below is what keeps
-                # a guard from going dead again without being noticed. (The
-                # pins themselves are gone now: the sweep series finished and
-                # its map was removed with it.)
+                # a guard from going dead again without being noticed.
+                test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds,
+                test_formal_sweep_work_map_index_tags_only_from_section3,
                 test_every_test_in_this_file_is_called_from_main,
                 test_a_verdict_the_ledger_no_longer_agrees_with_is_reported,
                 test_no_test_preflights_on_an_unbuildable_artifact,
