@@ -16,7 +16,7 @@ program aborts at load. The job did not report it.
 That prints the reference, and the job still reports only the skip list.
 
 ## Status
-Open. Not started. The gate gap, not the missing methods themselves (those are `CODEGEN_peekable_iterator_methods_not_emitted`).
+Open. Not started. The gate gap, not the missing methods themselves (those are fixed in 2b7ac5562).
 
 ## Done when
 `stdlib-dylib` FAILS when the built dylib has an undefined reference into the stdlib (a `_std_` symbol referenced

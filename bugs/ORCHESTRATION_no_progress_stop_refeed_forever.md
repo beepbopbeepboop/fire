@@ -6,7 +6,7 @@ no progress. Nothing says "this doc has had N rounds with no change to its failu
 manual.
 
 ## Evidence
-- `bugs/CODEGEN_class_rebind_late_binding.md` had 33 superseded rounds (r2 to r31 plus 4223 and the fixers),
+- the class-rebind doc (since retired) had 33 superseded rounds (r2 to r31 plus 4223 and the fixers),
   and its status text never changed.
 - The import-shapes chain ran 197 rounds before it was stopped by hand.
 

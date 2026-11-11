@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Done-when test for bugs/CODEGEN_class_rebind_late_binding.md.
+"""Regression test for the class-rebind late-binding bug (its doc is retired).
 
 A method of a class declared inside a function reads a name that the enclosing function rebinds AFTER the class
 statement. Python late-binds that name, so the method must see the rebound value. The compiled path must answer

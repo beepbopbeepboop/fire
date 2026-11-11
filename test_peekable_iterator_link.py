@@ -2,7 +2,7 @@
 """std/iter's `peekable` must build and run through the real `fire.py build` path (the stdlib dylib), not only through
 the gimple test harness.
 
-Regression for bugs/CODEGEN_peekable_iterator_methods_not_emitted.md: the stdlib dylib referenced
+Regression for the peekable link-abort bug (fixed in 2b7ac5562): the stdlib dylib referenced
 `_std_iter___init____PeekableIterator_peek` and never defined it, so every compiled program aborted at load. The
 generic template's refused method bodies are prototype-only by design, and their class-table entries named a symbol
 no translation unit here defines. The table now leaves those entries out; the instantiating unit still emits its copy.

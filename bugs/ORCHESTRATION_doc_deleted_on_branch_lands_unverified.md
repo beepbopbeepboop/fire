@@ -5,7 +5,7 @@ A worker can delete a bug doc on its branch and report DONE, and nothing checks 
 The branch is a normal landing candidate, so landing it would close the bug on master with no proof.
 
 ## Evidence
-- `work/bug-codegen-class-rebind-late-binding-4223`: one commit that deletes `bugs/CODEGEN_class_rebind_late_binding.md`,
+- `work/bug-codegen-class-rebind-late-binding-4223`: one commit that deletes the class-rebind doc (since retired),
   state `exited-ok`, verdict DONE, NOT held. The doc had no named test, and the bug was not fixed.
 - Round 31 of the same chain also lacks the doc on its branch: every round deleted it.
 - The planner (`task_text.py`) now treats a deleted doc as "not proof", but landing has no such check.
