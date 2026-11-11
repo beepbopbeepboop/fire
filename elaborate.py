@@ -709,6 +709,10 @@ def c_to_mojo(ctype: str):
     return _C_TO_MOJO.get(ctype)
 
 
+_SCALAR_ANN_RE = re.compile(r'^Scalar\[\s*([^,\[\]]+)\s*\]$')
+_SIMD_ANN_RE = re.compile(r'^SIMD\[\s*([^,\[\]]+)\s*(?:,\s*([^,\[\]]+)\s*)?\]$')
+
+
 def _unify_param_ann(ann, pnames, arg_ctype) -> dict:
     """{type-param: concrete value} from unifying ONE parameter's declared type
     annotation against ONE argument's actual C type, or `{}` when the shape is
@@ -725,17 +729,16 @@ def _unify_param_ann(ann, pnames, arg_ctype) -> dict:
       every such template was declined and its call sites reached the generated
       C as bare externs.
 
-    The `SIMD[...]` and `Scalar[...]` shapes bind NOTHING. This codegen erases
-    SIMD outright (`_mojo_type('SIMD[Float64, 4]')` is `int64_t`, and
-    `Scalar[DType.int32]` is `int64_t` too), so the C type of every such
-    argument is `int64_t`, which is also the C type of a plain `Int64`. It says
-    nothing about the element dtype or the width: `erf(SIMD[.float32, 2](2))`
-    and `erf(Int64(2))` have the same C type. The earlier reading bound
-    `dtype := Int64, width := 1` from it, which is a guess, and the constraint
-    check now rejects it. A template whose parameters only appear inside
-    `SIMD`/`Scalar` is declined as unbound, which is what `infer_type_args`
-    does for every shape it cannot prove. Recovering the element dtype needs
-    the argument's declared type, not its C type.
+    The `SIMD[...]` and `Scalar[...]` shapes bind only from a scalar C type.
+    This codegen erases SIMD outright (`_mojo_type('SIMD[Float64, 4]')` is
+    `int64_t`, and `Scalar[DType.int32]` is `int64_t` too), so an `int64_t`
+    argument is ambiguous: `erf(SIMD[.float32, 2](2))` and `erf(Int64(2))` have
+    the same C type, and binding `dtype := Int64` from it was a guess that the
+    constraint check now rejects. That case binds nothing and the template is
+    declined as unbound. Any other scalar C type (`double`, `float`, `int32_t`)
+    cannot be an erased SIMD, so the argument is that scalar, `SIMD[dtype, 1]`,
+    and `dtype` and `width` bind from it. Recovering the dtype of a wider SIMD
+    needs the argument's declared type, not its C type.
 
     Anything else — a nested `Pointer[T]`, `Some[T]`, a param used only as a
     comptime argument, an annotation that is not a string — returns `{}`, so
@@ -764,8 +767,26 @@ def _unify_param_ann(ann, pnames, arg_ctype) -> dict:
     if ann in pnames:
         bound = c_to_mojo(arg_ctype)
         return {} if bound is None else {ann: bound}
-    # `Scalar[...]` and `SIMD[...]` fall through to here: erased, see the
-    # docstring, so they bind nothing.
+    # `Scalar[dtype]` and `SIMD[dtype, width]`. SIMD is erased to `int64_t`, so
+    # an `int64_t` argument may be ANY SIMD value or a plain Int64: it binds
+    # nothing. Any other scalar C type (`double`, `float`, `int32_t`) cannot be
+    # an erased SIMD, so the argument IS that scalar, which is `SIMD[dtype, 1]`.
+    if arg_ctype == 'int64_t':
+        return {}
+    dtype = c_to_mojo(arg_ctype)
+    if dtype is None:
+        return {}
+    m = _SCALAR_ANN_RE.match(ann)
+    if m and m.group(1) in pnames:
+        return {m.group(1): dtype}
+    m = _SIMD_ANN_RE.match(ann)
+    if m and m.group(1) in pnames:
+        out = {m.group(1): dtype}
+        if m.group(2) is not None:
+            if m.group(2) not in pnames:
+                return {}
+            out[m.group(2)] = '1'
+        return out
     return {}
 
 
