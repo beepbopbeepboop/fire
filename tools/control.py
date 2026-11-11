@@ -678,7 +678,10 @@ def _working(name, t):
     alive is the caller's question (running_by_slot)."""
     if t.get("state") in TERMINAL or t.get("state") in ("exited-ok", "exited-err"):
         return False
-    return not os.path.exists(os.path.join(t.get("worktree", ""), "exitcode"))
+    wt = t.get("worktree", "")
+    if wt and not os.path.isdir(wt):      # its worktree is gone (removed, or never made): nothing can be working in it
+        return False
+    return not os.path.exists(os.path.join(wt, "exitcode"))
 
 
 def running_by_slot(tasks=None, live=frozenset()):
@@ -1497,6 +1500,13 @@ def cmd_sync(a):
         counts = running_by_model(tasks, live_names(tasks) or frozenset())
         for n in dead_running:
             t = tasks.get(n, {})
+            if t.get("worktree") and not os.path.isdir(t["worktree"]):
+                # a dead worker whose worktree is gone cannot be restarted: retire it, so it stops holding its claim and
+                # its slot (2026-11-10: a killed README worker was counted against qwen-local on every pass)
+                with registry() as ts:
+                    ts[n]["state"] = "abandoned"
+                print("  abandoned %s: its worktree %s is gone" % (n, t["worktree"]))
+                continue
             # DONE ratchet: if every doc claim's doc is gone (deleted on master), the task
             # is already resolved; mark superseded instead of restarting it forever.
             claims = [c for c in t.get("claims", []) if c.startswith("bug:")]
