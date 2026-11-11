@@ -1023,6 +1023,31 @@ def _cpp_string_literal_expr(gen, val: str, is_interp: str) -> str:
                     f"f-string interpolation '{{{part_text}}}' could not "
                     "be parsed in a compiled generator/coroutine body "
                     f"({type(ex).__name__}: {ex})")
+            # A collection LITERAL (`f"{[1, 2]}"`, `f"{(1, 2)}"`, a dict/set)
+            # has no scalar C++ value: `_cpp_expr` lowers it to a
+            # braced-init-list, which is only valid where this emitter puts
+            # it into a container-typed local / a real runtime constructor
+            # (see `_cpp_container_literal_init` and
+            # `_cpp_list_literal_arg_expr`). Every arm below assumes the
+            # interpolation lowered to ONE scalar value and stringifies it
+            # (`mojo_str((void *)({v}))` and friends), so wrapping the
+            # raw `{1, 2}` emitted invalid C++ that only g++ caught
+            # ("expected ';' before '}' token"). There is no container-repr
+            # walker in this expression-only emitter (the ordinary GIMPLE
+            # path's `_stringify_value`/`_repr_value` container arms need a
+            # statement side channel this emitter does not have), so refuse
+            # honestly at the same chokepoint the direct `yield [1, 2]`
+            # shape is refused rather than emit broken C++.
+            if isinstance(expr_node, (gimple_ctypes.ListExpr,
+                                      gimple_ctypes.TupleExpr,
+                                      gimple_ctypes.DictExpr,
+                                      gimple_ctypes.SetExpr)):
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    f"f-string interpolation '{{{part_text}}}' is a "
+                    "collection literal, which has no scalar C++ value in "
+                    "a compiled generator/coroutine body (this emitter has "
+                    "no container-repr walker; the value would lower to a "
+                    "C++ braced-init-list, not a string)")
             v = gen._cpp_expr(expr_node)
             try:
                 ectype = gimple_exprtypes._infer_simple_expr_ctype(

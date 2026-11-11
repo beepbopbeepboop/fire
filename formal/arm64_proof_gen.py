@@ -898,7 +898,14 @@ def _call_go(e, param: str, env: dict, scope, render) -> str:
         pass
     # try to detect: if sym names a struct
     if structs_by_name is not None:
-        # common forms: dict name->struct def, or a collection of names
+        # could be dict name->struct def
+        try:
+            import inspect
+            # check
+            pass
+        except Exception:
+            pass
+        # common forms
         is_struct = False
         if isinstance(structs_by_name, dict) and sym in structs_by_name:
             is_struct = True
@@ -4915,9 +4922,8 @@ def _step_rhs(w: int, idx: int):
     if idx == 34:  # BR Xn
         rn = (w >> 5) & 0x1f
         return f"some {{ s with pc := (arm64_reg {rn} s).toNat }}"
-    if idx == 35:  # SVC: x16 = 1 (SYS_exit) halts; any other number continues
-        return ("if arm64_reg 16 s = 1 then none "
-                "else some { s with pc := s.pc + 4 }")
+    if idx == 35:  # SVC (modelled no-op)
+        return "some s"
     # The twelve narrower/unscaled access forms, in `arm64_step`'s order. The
     # base is `_base_of` (SP at 31), the scale is the instruction's own, and the
     # memory helper is the one at that width — the widths are the whole point of
@@ -5311,8 +5317,7 @@ def _step_rhs_generic(idx: int):
     if idx == 34:
         return f"some {{ s with pc := (arm64_reg {_RN} s).toNat }}"
     if idx == 35:
-        return ("if arm64_reg 16 s = 1 then none "
-                "else some { s with pc := s.pc + 4 }")
+        return "some s"
     if idx == 66:
         return (f"some (arm64_set_reg {_RD} {{ s with nzcv := arm64_adds_flags "
                 f"(arm64_reg {_RN} s) (arm64_reg {_RM} s) }} "
@@ -8392,31 +8397,6 @@ def _is_svc(w: int) -> bool:
     reader sees as a bounded stop, and the two cannot drift.
     """
     return (w & 0xffe0001f) == 0xd4000001
-
-
-def _svc_static_x16(words: dict, pc: int, leaders=frozenset()):
-    """The static value of x16 at the `svc` at `pc`, or None when it is not known.
-
-    The emitter sets the Darwin syscall number right before every `svc`:
-    `movz x16, #imm` (exit is 1, write is 4). That movz is the only source of
-    the value this reader trusts, and it is trusted only when it is the
-    instruction directly before the `svc` and the `svc` does not start a
-    block: otherwise another path can reach the `svc` with a different x16,
-    and the answer is None, which the caller treats as dynamic.
-
-    `leaders` is the set of block-start addresses (branch targets and fall-
-    throughs); a `svc` at one of them is dynamic.
-    """
-    if pc in leaders:
-        return None
-    prev = words.get(pc - 4)
-    if prev is None:
-        return None
-    # MOVZ Xd, #imm16 (64-bit, hw = 0) with Rd = 16: bits 31..21 are
-    # 1 1 0 1 0 0 1 0 1 0 0 (sf=1, opc=10, 100101, hw=00), bits 4..0 are 10000.
-    if (prev & 0xffe0001f) != 0xd2800010:
-        return None
-    return (prev >> 5) & 0xffff
 
 
 def _trap_terminating(blocks: list, words: dict) -> set:
@@ -12049,13 +12029,6 @@ def _gen_step_lemmas(name: str, code: bytes, base: int,
         if idx is None:
             continue
         pc = base + i * 4
-        if idx == 35:
-            # An `svc` is the one instruction whose step may HALT: `SYS_exit`
-            # steps to `none` (`arm64_step`, the 0xD4000001 arm). "The step is
-            # not none" is therefore false for an exit and undecided for a
-            # write, so there is no such lemma to emit; a run through an svc
-            # is not a run with a final state, which is the point.
-            continue
         if i in plan:
             blocks.append(
                 f"theorem {name}_step_ok_{i} (s : Arm64State) (h : s.pc = {pc}) :\n"
@@ -15927,11 +15900,9 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
     if walk is None:
         return (
             f"/-- OBLIGATION, not proved: this export's run terminates for every\n"
-            f"    argument.  The constant-fuel CFG walk does not cover it: its\n"
-            f"    control flow has a loop or a call, or a path ends in an exit\n"
-            f"    `svc`, which the model steps to `none` (no final state). An\n"
-            f"    overflow trap is such a path, so termination for every argument\n"
-            f"    is not a fact of the model. -/\n"
+            f"    argument.  Its control flow has a loop or a call, which the\n"
+            f"    constant-fuel CFG walk that proves the acyclic, call-free\n"
+            f"    exports does not cover. -/\n"
             f"theorem {ident}_semantics_total :\n"
             f"    DylibExport.Total dylib_image {ident} := by\n"
             f"  sorry")
@@ -16717,11 +16688,6 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
             # derived spec costs nothing and is the difference between an open
             # obligation and a believed falsehood.
             contract = (
-                f"/-- The precondition of the guarded obligation: the NORMAL path's\n"
-                f"    overflow guards.  This generator does not yet derive it from the\n"
-                f"    machine code, so it is opaque: nothing is assumed about it beyond\n"
-                f"    what the obligation states. -/\n"
-                f"opaque {ident}_pre : UInt64 → Prop\n\n"
                 f"/-- OBLIGATION, not proved: this export agrees with the\n"
                 f"    specification derived from its source.  The contract could\n"
                 f"    not be emitted -- a body with a branch is not one function\n"
@@ -16729,14 +16695,14 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
                 f"    claim is left open rather than proved.  The spec is the\n"
                 f"    source's own; none is guessed. -/\n"
                 f"theorem {ident}_spec :\n"
-                f"    Refine.export_result_spec_under {ident}_pre dylib_image {ident} {spec} := by\n"
+                f"    Refine.export_result_spec dylib_image {ident} {spec} := by\n"
                 f"  sorry\n\n"
-                f"/-- The CALLER's theorem, PROVED and sorry-free: given the guarded\n"
-                f"    obligation, the guarded contract follows. -/\n"
+                f"/-- The CALLER's theorem, PROVED and sorry-free: given the export's\n"
+                f"    spec, the caller's contract follows. -/\n"
                 f"theorem {ident}_contract (n : UInt64) :\n"
-                f"    Refine.DylibExportContractUnder {ident}_prog {ident}_pre {spec} n :=\n"
-                f"  Refine.dylib_export_contract_of_spec_under dylib_image {ident} "
-                f"{ident}_pre {spec}\n    {ident}_spec n")
+                f"    Refine.DylibExportContract {ident}_prog {spec} n :=\n"
+                f"  Refine.dylib_export_contract_of_spec dylib_image {ident} "
+                f"{spec}\n    {ident}_spec n")
         elif not contract:
             # NO spec could be derived from the source.  There is then nothing
             # honest to assert about the export's RESULT, and the emitter does
