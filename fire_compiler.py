@@ -756,13 +756,6 @@ class FunctionDef:
         # valid Python "async generator"); the two flags are independent, not
         # mutually exclusive. No execution semantics are implied by this flag
         # yet — see AwaitExpr's docstring.
-    # Optional `where <expr>` clause after the parameter list / return type.
-    # Stored as the parsed expression AST node (or a list of them for a
-        # `where a, b` form). `None` when absent.  Enforcement at call sites
-        # is a separate step (DIAGNOSTICS_where_clause_call_site).
-    where_clause: object = None
-    # The `else "<message>"` expression of that clause, `None` when absent.
-    where_else: object = None
     # Explicit CAPTURE list from a brace-delimited clause on a nested `def`:
     # `def handler(...) {mut count, var s}:` — `(name, conv_or_None)` pairs,
     # `None` for a bare name, and a `None` NAME for the bare-convention form
@@ -4607,26 +4600,11 @@ class Parser:
                     raise RuntimeError(
                         f"{self._loc(_ret_tok)}error: functions must not declare both an "
                         f"'out' argument and a return type")
-        # Parse optional `where <expr>[, <expr>...] [else <message>]` clause.
-        # The `else` message is the diagnostic Modular prints when the
-        # constraint fails (`where (Self.is_owned) else "may only be called on
-        # owned lists":`); it is parsed, not skipped, so the clause is fully
-        # consumed and the signature still ends at its COLON.
-        where_clause = None
-        where_else = None
+        # Skip optional `where conforms_to(...)` clause
         if self._peek().kind == "NAME" and self._peek().value == "where":
             self._advance()  # where
-            _wc_parts = []
             while self._peek().kind not in ("COLON", "NEWLINE", "EOF"):
-                _wc_parts.append(self._parse_expr(0))
-                if self._peek().kind == "COMMA":
-                    self._advance()
-                    continue
-                break
-            where_clause = _wc_parts[0] if len(_wc_parts) == 1 else _wc_parts
-            if self._peek().kind == "KW" and self._peek().value == "else":
-                self._advance()  # else
-                where_else = self._parse_expr(0)
+                self._advance()
         # Capture list in curly braces: `def handler(...) {mut count, var s}:`
         #
         # This used to be skipped token by token, which made the list
@@ -4677,9 +4655,7 @@ class Parser:
                            yield_bearing_node_ids=yield_bearing_node_ids,
                            is_async=is_async,
                            captures=captures,
-                           has_capture_list=has_capture_list,
-                           where_clause=where_clause,
-                           where_else=where_else)
+                           has_capture_list=has_capture_list)
 
     def _parse_capture_list(self):
         """A brace-delimited CAPTURE list on a nested `def`:

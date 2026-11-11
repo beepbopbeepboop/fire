@@ -1280,31 +1280,12 @@ def chain_depth(name):
     return len(re.findall(r"-r\d+", name))
 
 
-def doc_exists_for(claims):
-    """Whether a bug doc exists for these claims. The one rule for work: it exists only while its doc does. A
-    `bug:NAME` (or `gate:NAME`) claim matches a doc anywhere under MAIN/bugs whose file name contains NAME, with `_`
-    read as `-`. Sync and restart both ask this, so they cannot disagree about whether work still has a doc."""
-    for c in claims:
-        tail = c.split(":")[-1].lower().replace("_", "-")
-        for _root, _dirs, files in os.walk(os.path.join(MAIN, "bugs")):
-            if any(fn.endswith(".md") and tail in fn.lower().replace("_", "-") for fn in files):
-                return True
-    return False
-
-
 def restart(name, why, model=None):
     """Snapshot a worker's uncommitted work, stop it, and continue it as NAME-rN from its own branch.
     Returns the new task's name, or None once the chain is over MAX_RESTARTS: the task is then marked
     abandoned so its claim is released and the doc is re-fed (a fresh worker, possibly a different model)
-    instead of round 300 of the same failure. A task whose doc is gone is not continued at all: 197 rounds of
-    fix-gate-formal-host-import-shapes ran with no doc behind them (2026-11-10)."""
+    instead of round 300 of the same failure."""
     t = load()[name]
-    if not doc_exists_for(t.get("claims", [])):
-        with registry() as reg:
-            reg[name]["state"] = "abandoned"
-        print("restart refused: %s has no bug doc for its claims %s; work exists only while its doc does"
-              % (name, t.get("claims")))
-        return None
     # strip any existing -rN suffix so restarts increment instead of nesting: foo-r2 -> foo-r3, not foo-r2-r2
     base = re.sub(r"-r\d+$", "", name)
     wt = t["worktree"]
@@ -1487,7 +1468,17 @@ def cmd_sync(a):
         if it.get("files"):
             doc_exists = any(_os.path.exists(c) for c in it["files"])
         else:
-            doc_exists = doc_exists_for(it.get("claims", []))
+            for c in it.get("claims", []):
+                tail = c.split(":")[-1].lower().replace("_", "-")
+                for root, _, files in _os.walk("bugs"):
+                    for fn in files:
+                        if fn.endswith(".md") and tail in fn.lower().replace("_", "-"):
+                            doc_exists = True
+                            break
+                    if doc_exists:
+                        break
+                if doc_exists:
+                    break
         if not doc_exists:
             removed.append(it["name"])
             if not dry:

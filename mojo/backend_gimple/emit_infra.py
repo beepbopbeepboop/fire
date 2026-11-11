@@ -4166,63 +4166,6 @@ def _write_dest(gen, name: str) -> str:
 
 
 
-def _class_ref_captures(gen, func_name: str) -> dict:
-    """`{name: pointee ctype}` of the enclosing locals that a class declared
-    in `func_name` captures BY REFERENCE.
-
-    Filled by `module_gen._gmi_apply_class_ref_types` (the names come from
-    `_gmi_capture_nested_class_enclosing_reads`, the types from the closure
-    scan). They are boxed with the same heap-box machinery as a nested
-    closure's `{mut}` capture: the class statement installs the BOX pointer,
-    so a method sees the variable's CURRENT value, like CPython's cell."""
-    _all = getattr(gen, '_class_ref_locals', None)
-    if not _all:
-        return {}
-    _one = _all.get(func_name)
-    if not _one:
-        return {}
-    return _one
-
-
-def _class_ref_captures_deep(gen, func_name: str) -> dict:
-    """`_class_ref_captures` for `func_name` AND every lifted closure nested
-    in it, transitively.
-
-    A class declared in a nested `def` boxes the enclosing local in the
-    outer function and forwards the box through the closure env, so the
-    owner is not the function whose `class` statement installs it. Ownership
-    of that box is therefore a question about the owner's DESCENDANTS, not
-    just about classes written directly in its own body. `_all_closures` is
-    the parent -> {name: ClosureInfo} map the closure scan already built;
-    walking it (rather than testing name prefixes, which a function name can
-    forge) names exactly the descendants whose lifted functions were
-    emitted from this one."""
-    names = dict(_class_ref_captures(gen, func_name))
-    _all = getattr(gen, '_all_closures', None)
-    if not _all:
-        return names
-    _stack: list = [func_name]
-    _seen: set = set()
-    while _stack:
-        _f = _as_str(_stack.pop())
-        if _f in _seen:
-            continue
-        _seen.add(_f)
-        _children = _all.get(_f)
-        if not _children:
-            continue
-        for _k in sorted(list(_children)):
-            _ln = _as_str(getattr(_children[_k], 'lifted_name', ''))
-            if _ln == '' or _ln in _seen:
-                continue
-            _stack.append(_ln)
-            _more = _class_ref_captures(gen, _ln)
-            for _n in sorted(_more):
-                if _n not in names:
-                    names[_n] = _more[_n]
-    return names
-
-
 def _plan_mut_captured_params(gen, node, func_name: str):
     """Record which PARAMETERS of `func_name` a nested closure captures
     BY REFERENCE, and mint the C identifier each one is declared under.
@@ -4260,21 +4203,6 @@ def _plan_mut_captured_params(gen, node, func_name: str):
                     continue
                 gen._mut_boxed_param_c[_mn] = f"_mutbox_{gen._param_safe_name(_mn)}"
                 break
-    # A class declared in this function captures enclosing names by reference
-    # too (`_class_ref_captures`). Match on the BARE parameter name, because a
-    # `*args`/`**kwargs` parameter is stored as `*name` in `node.params` while
-    # the capture name is bare; this is a class attribute, not a closure env
-    # field, so the box is a real pointer and the varargs ABI box is the right
-    # one (the closure rule above skips them for a different reason).
-    _ref_names = _class_ref_captures(gen, func_name)
-    for _crn in sorted(_ref_names):
-        if _crn in gen._mut_boxed_param_c:
-            continue
-        for _pn, _pt in (node.params or []):
-            if _as_str(_pn).lstrip('*') != _crn:
-                continue
-            gen._mut_boxed_param_c[_crn] = f"_mutbox_{gen._param_safe_name(_crn)}"
-            break
 
 
 def _seed_mut_captured_local_types(gen, func_name: str):
@@ -4352,23 +4280,6 @@ def _seed_mut_captured_local_types(gen, func_name: str):
                 # "'name' undeclared" gcc error, hit and fixed during
                 # this feature's own verification).
                 gen._declare_var(mn, f"{ctype} *")
-    # The class-declared-here by-reference captures (`_class_ref_captures`):
-    # same box treatment. The C type came from the closure scan's typing of
-    # the enclosing scope, and a parameter among them was given a second C
-    # name by `_plan_mut_captured_params`, exactly as above.
-    _ref_types = _class_ref_captures(gen, func_name)
-    for _crn in sorted(_ref_types):
-        ctype = _as_str(_ref_types[_crn])
-        if ctype in ('', 'None', 'void', 'unknown'):
-            ctype = 'int64_t'
-        if _crn in gen._mut_boxed_param_c:
-            gen._boxed_mut_locals[_crn] = ctype
-            gen.decls.append(f"  {ctype} * {gen._cname(_crn)};")
-            gen.var_types[_crn] = f"{ctype} *"
-            continue
-        if _crn not in gen.var_types:
-            gen._boxed_mut_locals[_crn] = ctype
-            gen._declare_var(_crn, f"{ctype} *")
 
 
 def _emit_mut_local_box_allocs(gen, fn=None):
@@ -4413,19 +4324,12 @@ def _emit_mut_local_box_allocs(gen, fn=None):
     if not gen._boxed_mut_locals:
         return
     owned = fn is not None and _no_closure_escapes(fn)
-    # A box that a CLASS captures must NOT be freed at this function's exit
-    # even when no closure escapes: the class's instances keep the box
-    # pointer, and the class object/instance can outlive the call. This is
-    # the same bounded leak the coroutine capture boxes accept (a real
-    # lifetime-tracked free is future work, not correctness of the value).
-    _class_ref_here = _class_ref_captures_deep(
-        gen, getattr(gen, 'current_func_name', '') or '')
     for mn in sorted(gen._boxed_mut_locals):
         ctype = gen._boxed_mut_locals[mn]
         cname = gen._cname(mn)
         vp = gen._new_val('void *', f"malloc ({gen._scalar_ctype_size(ctype, 8)})")
         gen._emit(f"  {cname} = ({ctype} *) {vp};")
-        if owned and mn not in _class_ref_here:
+        if owned:
             gen._owned_box_names.add(mn)
             gen._emit(f"  mojo_cleanup_push_ptr ({cname});")
         _box_param_c = gen._mut_boxed_param_c.get(mn)

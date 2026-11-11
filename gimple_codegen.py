@@ -1293,9 +1293,6 @@ class GimpleGen:
         # for why this is needed as a SEPARATE registry from `self.
         # _classmethod_names`/`self.func_return_types`.
         self._struct_generator_method_names: dict[str, set[str]] = {}
-        # C symbols of struct methods whose body was refused in this TU and emitted as a prototype only (module_gen's
-        # definition-site fallback). The class tables leave them out: they name no definition here.
-        self._prototype_only_syms: set[str] = set()
         # Struct methods called from a compiled generator/async body on
         # EITHER `self` or a non-self struct-pointer-typed local/parameter
         # (see CODEGEN_generator_struct_typed_param_refused).
