@@ -694,6 +694,20 @@ def c_to_mojo(ctype: str) -> str:
     return _C_TO_MOJO.get(ctype, 'Int')
 
 
+def inferred_ctype_is_specific(ctype) -> bool:
+    """True when `ctype` NAMES the argument's Mojo type, rather than being a
+    placeholder this codegen substituted for a type it did not compute.
+
+    Deliberately not every key of `_C_TO_MOJO`: `int64_t` and `int` are this
+    codegen's UNIVERSAL scalar fallbacks — every SIMD value, every `Array`/
+    `Span` element whose element type was not tracked, every opaque
+    construction and every unknown subscript lowers to `int64_t` — so the C
+    spelling cannot tell a genuine Int argument from an erased one. Any C
+    type absent from `_C_TO_MOJO` (`char`, a bare `Foo *`) reaches
+    `c_to_mojo` as its `Int` default for the same reason."""
+    return ctype in _C_TO_MOJO and ctype not in ('int64_t', 'int')
+
+
 _SCALAR_ANN_RE = re.compile(r'^Scalar\[\s*([^,\[\]]+)\s*\]$')
 _SIMD_ANN_RE = re.compile(r'^SIMD\[\s*([^,\[\]]+)\s*(?:,\s*([^,\[\]]+)\s*)?\]$')
 
@@ -1309,5 +1323,27 @@ class Elaborator:
         type_args = infer_type_args(tmpl, arg_ctypes)
         if type_args is None:
             return None
-        return self.elaborate_generic_call(module_src, fn_name, type_args, arg_count=len(arg_ctypes),
-                                           arg_ctypes=arg_ctypes)
+        try:
+            return self.elaborate_generic_call(module_src, fn_name, type_args,
+                                               arg_count=len(arg_ctypes),
+                                               arg_ctypes=arg_ctypes)
+        except ConformanceError:
+            # A conformance failure inferred from an ERASED argument type is
+            # a fact about this codegen's C representation, not about the
+            # Mojo source: `tanh(x[i])` on a `Span[Float32]` lowers its
+            # argument to `char` (untracked byte element) or `int64_t` (SIMD
+            # erasure), `c_to_mojo` reads either as `Int`, and enforcing the
+            # `where dtype.is_floating_point()` clause then rejects a valid
+            # float call. Six real stdlib files hit exactly that
+            # (`std/random/philox.mojo:300`, `test/math/test_{erf,exp,ldexp,
+            # math,tanh}.mojo`).
+            #
+            # A caller that supplies the type args EXPLICITLY (`f[T](...)`)
+            # states them, so the diagnostic there is provable and
+            # `elaborate_generic_call` still raises it. Here, when ANY
+            # argument's C type is a placeholder, decline: the caller falls
+            # through to its nominal stub exactly as when no instantiation
+            # could be inferred.
+            if any(not inferred_ctype_is_specific(ct) for ct in arg_ctypes):
+                return None
+            raise
