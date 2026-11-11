@@ -3093,21 +3093,6 @@ def _collect_inner(work, rec, queue):
             return
         if base in _IN_TU_LIST_BASES:
             return
-        # A SELF-RECURSIVE generic instantiation (`self_recursion[i + 1]()`
-        # inside `self_recursion`) cannot be materialized: the arg is not a
-        # concrete literal, so `_concrete_args` below returns None and the
-        # call would reach the generated C as a declared-never-defined extern
-        # (a dangling symbol). Refuse with a clear diagnostic instead. A
-        # CONCRETE self-call (`self_recursion[0]()`) is a legitimate
-        # instantiation and is left to `_concrete_args`.
-        if base == rec['base']:
-            _args = (_bracket_args(gen, n.func) if isinstance(n.func, SubscriptExpr)
-                     else None)
-            if _args is None or not all(_is_concrete(a) for a in _args):
-                raise RuntimeError(
-                    f'self recursive call to {base!r} will cause an '
-                    f'infinite loop')
-            return
         # Same registration, for a struct CONSTRUCTED inside the concrete body
         # (`empty`'s body is `return _Empty[T]()`) — that call names the struct
         # as a callee, never in an annotation.

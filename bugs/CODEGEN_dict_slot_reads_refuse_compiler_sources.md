@@ -57,21 +57,6 @@ tagging a dict read whose name is later rebound with another C type. The fix is 
 `module_shared.py` and `coro.py` compile in the fire.ci build, and `test_dict_slot_read_regression.py` still passes.
 Check it against the fire.ci build, not only this probe.
 
-## Status (2026-11-11)
-
-- FIXED: `ast_rewriter.py` and `module_shared.py` compile (the refusal was the dict-slot tag, fixed in 7fe6798cc).
-- REFUSED BY DESIGN: `mojo/middle/coro.py` is refused with `parameter 'real_params' of '_mark_coro_param_elem_kinds' is
-  passed a container at one call site and a str or number at another`. The compiled path has no representation that
-  holds both kinds (`module_gen.py`, `_refuse_mixed_container_params`). Expected until that representation exists:
-  see `CODEGEN_mixed_kind_names_need_a_representation.md`.
-- REFUSED BY DESIGN: a float and a str stored into one name (regression test case 2) now refuse with the mixed-name
-  reason, instead of emitting a double-to-pointer cast gcc rejects. The same design gap.
-- `test_dict_slot_read_regression.py` passes with case 2 expecting that refusal.
-- NOT RUN: the fire.ci self-host build. Its check needs `coro.py` to compile, which is blocked on the design gap.
-
-Done when the mixed-kind representation exists, `coro.py` compiles, and the fire.ci build is green. Until then this doc
-stays open with the status above.
-
 ## Process note
 
 The dict-slot branch was merged to master (6b5c68c5b) without compiling the compiler's own sources. Add that compile to
