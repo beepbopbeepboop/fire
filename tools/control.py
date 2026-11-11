@@ -464,7 +464,7 @@ def cmd_release(a):
 
 def cmd_claims(a):
     for name, t in sorted(load().items()):
-        if state_of(t) not in TERMINAL:
+        if holds_claims(t):                  # the same rule refill and spawn use: a finished worker with no commits holds nothing
             print("%-24s %s" % (name, ", ".join(t["claims"])))
     for name, e in sorted(external().items()):
         print("%-24s %s   [external: %s]" % (name, ", ".join(e["claims"]), e.get("who") or "?"))
