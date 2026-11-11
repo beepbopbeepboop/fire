@@ -1794,7 +1794,48 @@ def _dict_literal_spread_operand(key_expr):
     return None
 
 
-def dict_literal_val_ctype(gen, pairs) -> str:
+def dict_value_kind(gen, node):
+    """The kind a dict VALUE node stores under, or None when the node does not say.
+
+    Only KNOWN kinds answer: a literal, a float- or str-typed expression, or a registered struct pointer. Anything
+    else is None, which joins nothing (see `dict_kind_join`), so an unknown value never turns a dict into `mixed`.
+    `'none'` is the None literal; it is a kind of its own, so `{'n': None, 'z': 0}` is mixed.
+    """
+    if node is None:
+        return None
+    if gen._is_none_literal(node):
+        return 'none'
+    if isinstance(node, BoolLiteral):
+        return '_Bool'
+    if isinstance(node, IntLiteral):
+        return 'int64_t'
+    if isinstance(node, FloatLiteral):
+        return 'double'
+    if isinstance(node, StringLiteral):
+        return 'char *'
+    _vt = gen._quick_type(node)
+    if _vt in _FLOAT_TYPES:
+        return 'double'
+    if _vt == 'char *':
+        return 'char *'
+    if _vt and _vt.endswith(' *') and gen.struct_field_types.get(_vt[:-2].strip()):
+        return _vt
+    return None
+
+
+def dict_kind_join(a, b):
+    """The join of two dict value kinds: an unknown (None) side joins to the other; equal kinds stay; two different
+    kinds are 'mixed', because no single accessor reads both. Used by every writer of a dict's value type, so a
+    literal and a later store cannot disagree about the same dict."""
+    if a is None:
+        return b
+    if b is None or a == b:
+        return a
+    return 'mixed'
+
+
+def _dict_literal_first_sample_ctype(gen, pairs) -> str:
+    """The first-sample rule a literal used before the join (kept for literals with no known value kind)."""
     """The dict VALUE ctype a `{k: v, ...}` LITERAL stores under, by the
     first-pair sample rule the dict-literal lowering has always used.
 
@@ -1853,6 +1894,25 @@ def dict_literal_val_ctype(gen, pairs) -> str:
             return _vt
         return 'int64_t'
     return 'int64_t'
+
+
+def dict_literal_val_ctype(gen, pairs) -> str:
+    """The dict VALUE ctype a `{k: v, ...}` literal stores under: the join of every value's known kind (see
+    `dict_value_kind`). 'mixed' when the values disagree, so reads take the boxed path. A literal whose values
+    are all unknown keeps the first-sample rule. Callers: `_lower_dict_literal` and `module_gen`'s cross-call
+    contract, which both use this one definition."""
+    kind = None
+    for _pair in (pairs or ()):
+        if _dict_literal_spread_operand(_pair[0]) is not None:
+            continue
+        kind = dict_kind_join(kind, dict_value_kind(gen, _pair[1]))
+    if kind == 'mixed':
+        return 'mixed'
+    if kind == '_Bool':
+        return 'int64_t'
+    if kind not in (None, 'none'):
+        return kind
+    return _dict_literal_first_sample_ctype(gen, pairs)
 
 
 def _struct_name_of(ctype: str) -> str:

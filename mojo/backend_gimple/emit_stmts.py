@@ -2454,14 +2454,22 @@ def _gen_stmt_AssignStmt(gen, node):
             # `keywords: dict = {}` (populated with parsed expression AST
             # nodes, then read back via `keywords.items()`) segfaulting
             # once self-hosted.
-            if ((vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
-                    or vtype.endswith(' *'))
+            # Join, not overwrite (exprtypes.dict_kind_join): a dict whose stores disagree (`d['n'] = None` then
+            # `d['f'] = 1.5`, or `d['s'] = 'x'` then `d['k'] = 2`) has no one value type, and every store, literal
+            # or subscript, joins the same way. A store whose kind the compiler does not know (`_kind` None) joins
+            # nothing, and an int store is recorded when it is a known int, which before it never was.
+            _kind = gimple_exprtypes.dict_value_kind(gen, node.value)
+            if _kind is None and (vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
+                                  or vtype.endswith(' *')):
+                _kind = vtype                       # a container/str/float store the kind table does not name
+            _prev_vt = gen._dict_val_types.get(obj_v)
+            if (_kind is not None and not (_kind == 'none' and _prev_vt is None)
                     and obj_v not in getattr(gen, '_opaque_container_locals', ())):
-                # Join, not overwrite: a dict whose stores disagree (`d['n'] = None` then `d['f'] = 1.5`) has no one
-                # value type. The last store used to win, so every read took that one accessor and the other slots'
-                # kinds were lost (`print(d['n'])` gave 0.0). Disagreement records 'mixed': reads take the boxed path.
-                _prev_vt = gen._dict_val_types.get(obj_v)
-                _joined_vt = 'mixed' if _prev_vt is not None and _prev_vt != vtype else vtype
+                # A None store only joins a dict that already has a kind (None differs from every known kind; on its
+                # own it says nothing about the dict's value type).
+                _joined_vt = gimple_exprtypes.dict_kind_join(_prev_vt, _kind)
+                if _joined_vt == '_Bool':
+                    _joined_vt = 'int64_t'
                 gen._dict_val_types[obj_v] = _joined_vt
                 _note_global_dict_store(gen, node.target.obj, _joined_vt)
             # dict[key] = val → mojo_dict_set_str_* (key coerced via
