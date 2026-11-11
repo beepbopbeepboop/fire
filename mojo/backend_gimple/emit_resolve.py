@@ -2993,6 +2993,18 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     types — slice 2). Returns (ctype, val) if elaborated, else None."""
     explicit = isinstance(node.func, gimple_ctypes.SubscriptExpr)
     g = node.func.obj.name if explicit else node.func.name
+    # A SELF-RECURSIVE generic call (`self_recursion[i + 1]()` inside
+    # `self_recursion`) cannot be monomorphized: the arg is not a concrete
+    # literal, so no instantiation exists, and the call would reach the
+    # generated C as a declared-never-defined extern (a dangling symbol).
+    # Refuse with a clear diagnostic instead. The enclosing function's own
+    # name is either the bare base (`self_recursion`) or its mangled
+    # instantiation (`self_recursion_1_i_1_3`), so match both spellings.
+    _cfn = getattr(gen, 'current_func_name', None)
+    if _cfn and (g == _cfn or _cfn.startswith(g + '_')):
+        raise RuntimeError(
+            f'cannot compile module: self recursive call to {g!r} will '
+            f'cause an infinite loop')
     source = gen._imported_generics.get(g)
     if not source:
         return None

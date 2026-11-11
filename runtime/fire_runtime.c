@@ -16387,28 +16387,6 @@ int mojo_pyobject_is_container(int64_t box) {
  * calls agree within a run while differing from any small int hash —
  * test_hash asserts 42's hash != "hello"'s, never a specific value.
  * 0/None answers 0: the stub answer, no measured test hashes it. */
-/* Hasher state: FNV-1a over the 64-bit words folded in, so equal values hash
-   equal within a run and the order of the elements matters. */
-typedef struct { uint64_t state; } MojoHasher;
-
-int64_t mojo_hasher_new(void) {
-    MojoHasher *hs = (MojoHasher *)malloc(sizeof(MojoHasher));
-    hs->state = 1469598103934665603ULL;
-    return (int64_t)(intptr_t)hs;
-}
-
-void mojo_hasher_update_int(int64_t hasher, int64_t value) {
-    MojoHasher *hs = (MojoHasher *)(intptr_t)hasher;
-    if (!hs) return;
-    hs->state ^= (uint64_t)value;
-    hs->state *= 1099511628211ULL;
-}
-
-int64_t mojo_hasher_finish(int64_t hasher) {
-    MojoHasher *hs = (MojoHasher *)(intptr_t)hasher;
-    return hs ? (int64_t)(hs->state >> 1) : 0;
-}
-
 int64_t mojo_pyobject_hash(int64_t box) {
     if (box && mojo_pyobject_is_container(box)) {
         char *kind = mojo_is_registered_list(box) ? "list"

@@ -3055,6 +3055,17 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 raise RuntimeError(
                     f"cannot compile module: a bracketed call {_base_name}[...]() "
                     f"needs link-mode specialisation, which this build does not do")
+        # A SELF-RECURSIVE generic call (`self_recursion[i + 1]()` inside the
+        # monomorphized `self_recursion`) cannot be materialized: the arg is
+        # not a concrete literal, so no instantiation exists, and stubbing it
+        # to 0 (below) would be a silent wrong answer. Refuse loudly.
+        if isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr):
+            _base_name = node.func.obj.name
+            _cfn2 = getattr(gen, 'current_func_name', None)
+            if _cfn2 and (_base_name == _cfn2 or _cfn2.startswith(_base_name + '_')):
+                raise RuntimeError(
+                    f"cannot compile module: self recursive call to "
+                    f"{_base_name!r} will cause an infinite loop")
         gimple_ctypes._debug_note('indirect call stubbed', type(node.func).__name__)
         t = gen._new_temp('int64_t')
         gen._emit(f'  {t} = (int64_t)0;  /* indirect call via {type(node.func).__name__} */')
@@ -5196,12 +5207,11 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
 def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     obj_type, obj_val = gen.lower_expr(node.args[0])
     type_arg = node.args[1]
-    # `_Bool`, like any()/all(): an isinstance result printed as a bool (print(isinstance(1, int)) -> True).
-    t = gen._new_temp('_Bool')
+    t = gen._new_temp('int')
     _single_tn = _isinstance_type_name(type_arg)
     if _single_tn is not None:
         cmp_t = gen._isinstance_one_type(obj_type, obj_val, _single_tn)
-        gen._emit(f'  {t} = (_Bool){cmp_t};')
+        gen._emit(f'  {t} = (int){cmp_t};')
     elif isinstance(type_arg, gimple_ctypes.TupleExpr):
         # isinstance(x, (A, B, ...)) — OR together a per-alternative check
         # (see _isinstance_one_type). Previously stubbed to always-False,
@@ -5227,11 +5237,11 @@ def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, s
             acc = one if acc is None else gen._new_val('_Bool', _as_str(acc) + ' | ' + one)
         if acc is None:
             acc = gen._new_val('_Bool', '0')
-        gen._emit(f'  {t} = (_Bool){acc};')
+        gen._emit(f'  {t} = (int){acc};')
     else:
         gimple_ctypes._debug_note('isinstance with complex type arg stubbed to 0')
         gen._emit(f'  {t} = 0;  /* TODO: isinstance with complex type arg */')
-    return '_Bool', t
+    return 'int', t
 
 
 def _lower_next_iter_cursor(gen, node, rec, args) -> tuple[str, str]:

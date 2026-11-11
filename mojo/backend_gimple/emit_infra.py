@@ -5161,10 +5161,6 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
     # %s of such a value emitted `static char * <address> = "<address>"`.
     if et in ('int', 'int64_t') and gen._get_actual_type(et, ev) == 'char *':
         return gen._new_val('char *', f'(char *){ev}')
-    # A slot read at a non-constant index may be a float BOX: `str(t[i])` and `f'{t[i]}'` render it as `mojo_repr_boxed`
-    # does, the same as print (print(t[i]) already did; str() printed the box's integer word, 1 for 1.5).
-    if et in ('int', 'int64_t') and _as_str(ev) in getattr(gen, '_boxed_vals', ()):
-        return gen._call_expr('char *', 'mojo_repr_boxed', [('int64_t', _as_str(ev))])   # the raw word: _to_int64 would box it
     # A boxed container (a call result whose static type is int64_t/void*
     # but whose real value, per _get_actual_type, is a container) — same
     # re-typing `print`'s dispatch already does before falling to its own

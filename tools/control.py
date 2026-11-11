@@ -1275,11 +1275,6 @@ def _task_text(t):
 MAX_RESTARTS = 10   # a chain restarted this many times is not progressing: abandon it so the claim is released
 
 
-def chain_depth(name):
-    """How many restarts a task's name records: each "-rN" suffix is one restart, so `X-r2-r2-r5` is depth 3."""
-    return len(re.findall(r"-r\d+", name))
-
-
 def restart(name, why, model=None):
     """Snapshot a worker's uncommitted work, stop it, and continue it as NAME-rN from its own branch.
     Returns the new task's name, or None once the chain is over MAX_RESTARTS: the task is then marked
@@ -1296,14 +1291,10 @@ def restart(name, why, model=None):
         fleet_ledger.kill_group(ctl_dir(), t["name"], "restart")
     except OSError:
         pass
-    # The budget counts the chain's depth, not the free name: stripping one "-rN" leaves a nested base (`X-r2-r2`),
-    # and the first free "-r2" under it always looks like round 2, so a chain of 300 restarts never reached the budget
-    # (2026-11-10: fix-gate-formal-doc-truth-r2-...-r134 kept restarting against a master that moved every pass).
-    depth = chain_depth(name)
     n = 2
     while "%s-r%d" % (base, n) in load():
         n += 1
-    if depth + 1 > MAX_RESTARTS or n > MAX_RESTARTS:
+    if n > MAX_RESTARTS:
         with registry() as reg:
             reg[name]["state"] = "abandoned"
         print("restart budget exhausted: %s would be round %d; marked abandoned so its claim is released" % (name, n))
