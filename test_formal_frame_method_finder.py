@@ -136,6 +136,7 @@ class TestFrameMethodFinder(unittest.TestCase):
         """A one-field struct's mutating method by reference gets a contract."""
         import tempfile
         import formal.build as fb
+        from types import SimpleNamespace
         src = '''struct Box:
     v: Int
     fn set_v(mut self, x: Int):

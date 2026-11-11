@@ -2889,10 +2889,6 @@ test('formal-eh-tables', [PY, 'test_formal_eh_tables.py'],
 test('formal-dylib', [PY, 'test_formal_dylib.py'],
      deps=['preflight', 'prooflib'],
      mem='tiny',
-     expect='6 failing: two wrong-spec teeth checks (a wrong spec is accepted, since the overflow traps, '
-            'bugs/FORMAL_wrong_spec_accepted_since_overflow_traps.md) and four contract checks on branchy exports '
-            '(an exit svc steps to none, so their contracts are guarded obligations, '
-            'bugs/FORMAL_svc_exit_handling_incomplete.md)',
      desc='formal dylib emission, Mach-O re-read, dlopen, prove')
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'], mem='tiny',
@@ -4212,7 +4208,7 @@ test('swarm-why', [PY, 'tools/test_swarm_why.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('sync-restart-guards', [PY, 'tools/test_sync_restart_guards.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
-test('enum-desugar', [PY, 'test_enum_desugar.py'], mem='tiny', expect='enum member comparison prints 1 where CPython prints True; see bugs/CODEGEN_enum_member_eq_prints_int_not_bool.md',
+test('enum-desugar', [PY, 'test_enum_desugar.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('linked-list-hash-step1', [PY, 'test_linked_list_hash_step1.py'], mem='tiny', expect='LinkedList.__hash__ lowers to a stub; see bugs/CODEGEN_linked_list_hash_stubbed.md',
      desc='registered by the estate audit (every test file runs)')

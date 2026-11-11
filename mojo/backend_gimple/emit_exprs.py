@@ -1220,19 +1220,9 @@ def _lower_WalrusExpr(gen, node) -> tuple[str, str]:
     vtype, vv = gen.lower_expr(node.value)
     if node.name not in gen.var_types:
         gen._declare_var(node.name, vtype)
-    # A heap-boxed local (`_boxed_mut_locals`, e.g. a class capture that the
-    # enclosing function rebinds) stores the VALUE type even though its C
-    # declaration is `{type} *`. Without this branch the source-level type was
-    # read as the pointer, so `x := 5` coerced 5 to `int64_t *` AND overwrote
-    # the box pointer itself (`x = (int64_t *)5`) instead of `*x = 5`; the
-    # method then read uninitialised heap. The assignment path above has the
-    # same branch for the same reason.
-    if node.name in getattr(gen, '_boxed_mut_locals', {}):
-        dst = gen._boxed_mut_locals[node.name]
-    else:
-        dst = gen.var_types[node.name]
-    gen._safe_coerce_emit(vtype, dst, vv, gen._write_dest(node.name))
-    return dst, gen._write_dest(node.name)
+    dst = gen.var_types[node.name]
+    gen._safe_coerce_emit(vtype, dst, vv, gen._cname(node.name))
+    return dst, gen._cname(node.name)
 
 
 def _lower_class_dyn_getattr(gen, struct_name: str, member: str) -> tuple[str, str]:
@@ -4374,16 +4364,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             lv = _none_arith_guard(gen, op, lv, _numeric_type_name(rt), 1)
         if rv in _tagged and rv in _boxed and lt in ('int', 'int64_t', 'double', 'float'):
             rv = _none_arith_guard(gen, op, rv, _numeric_type_name(lt), 0)
-    # A BOXED operand beside a str under `+` is a string concatenation, for any
-    # boxed value and not only a tagged word: Python's `int + str` and
-    # `double + str` are TypeErrors, so no valid program adds a boxed number to
-    # a string. The box is kept and marked a dynamic word, and the concatenation
-    # below renders it by its run-time kind (`mojo_cstr_or_int_str`). Unboxing it
-    # to a double here made `_f + '@'` (a path from `_files: list`) a
-    # `double + char *` gcc error in the self-hosted fire.ci.
-    if lv in getattr(gen, '_boxed_vals', ()) and rt == 'char *' and op == '+':
-        gen._dyn_word_vals.add(lv)
-    elif lv in getattr(gen, '_boxed_vals', ()):
+    if lv in getattr(gen, '_boxed_vals', ()) and not (
+            lv in _tagged and rt == 'char *' and op == '+'):
         if op in _ident_ops and (op in ('is', 'is not')
                                  or rt not in ('double', 'float')):
             lv = gen._new_val('int64_t', f"mojo_box_word ({lv})")
@@ -4395,9 +4377,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         else:
             lv = gen._new_val('double', f"mojo_box_double ({lv})")
             lt = 'double'
-    if rv in getattr(gen, '_boxed_vals', ()) and lt == 'char *' and op == '+':
-        gen._dyn_word_vals.add(rv)
-    elif rv in getattr(gen, '_boxed_vals', ()):
+    if rv in getattr(gen, '_boxed_vals', ()) and not (
+            rv in _tagged and lt == 'char *' and op == '+'):
         if op in _ident_ops and (op in ('is', 'is not')
                                  or lt not in ('double', 'float')):
             rv = gen._new_val('int64_t', f"mojo_box_word ({rv})")
@@ -7417,10 +7398,7 @@ def _lower_dict_literal(gen, node: gimple_ctypes.DictExpr) -> tuple[str, str]:
     # literal written at the call site, and two copies of this rule could
     # type the parameter one way while the literal stores another. Its skip of
     # a `**spread` pair (which carries no value sample) moved in with it.
-    # An EMPTY literal has no value kind to record: `int64_t` here would be false evidence of an int, and a later
-    # float store into the same dict would then join with it as 'mixed' (module-scope `d = {}; d[(1, 2)] = 9.5`).
-    if node.pairs:
-        gen._dict_val_types[t] = gimple_exprtypes.dict_literal_val_ctype(gen, node.pairs)
+    gen._dict_val_types[t] = gimple_exprtypes.dict_literal_val_ctype(gen, node.pairs)
     for key_expr, val_expr in node.pairs:
         # A `**expr` pair MERGES; it is not a store. Treated as a store it put
         # the spread's own dict into the KEY slot and the None sentinel into
