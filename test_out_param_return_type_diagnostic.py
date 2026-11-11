@@ -111,7 +111,6 @@ class OutParamReturnTypeDiagnostic(unittest.TestCase):
 
     # --- real Mojo refuses; we accept. Each is a gap, not a pass. -------------
 
-    @unittest.expectedFailure  # gap: out self on a non-constructor method, no return type
     def test_method_out_self_without_return_type_is_refused(self):
         with self.assertRaises(RuntimeError) as cm:
             _compile('struct A:\n'
@@ -138,7 +137,6 @@ class OutParamReturnTypeDiagnostic(unittest.TestCase):
         self.assertIn("'fn' has been removed; use 'def' instead", str(cm.exception))
 
 
-    @unittest.expectedFailure  # gap: out self with a non-Self parameter (real Mojo refuses the declaration)
     def test_method_out_self_with_int_parameter_is_refused_at_the_parameter(self):
         with self.assertRaises(RuntimeError) as cm:
             _compile('struct R:\n'
@@ -147,7 +145,6 @@ class OutParamReturnTypeDiagnostic(unittest.TestCase):
                      '        self.a = v\n')
         self.assertIn("'self' argument must have type 'Self'", str(cm.exception))
 
-    @unittest.expectedFailure  # gap: out self with no other parameters (real Mojo: self must be present)
     def test_method_out_self_without_parameters_is_refused(self):
         with self.assertRaises(RuntimeError) as cm:
             _compile('struct R:\n'
