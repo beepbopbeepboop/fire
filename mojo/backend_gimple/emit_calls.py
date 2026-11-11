@@ -6169,6 +6169,10 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr,
                 gen.var_types.get(arg0.func.obj.obj.name, ''))
             if _fsn:
                 _siv = gen._field_dict_val_types.get(_fsn, {}).get(arg0.func.obj.member)
+        # 'mixed' is the store-side join of a dict whose values disagree: it is
+        # no C type, and its items carry the boxed word (as `_dict_val_of` says).
+        if _siv == 'mixed':
+            _siv = 'int64_t'
         gen._dict_items_val_elems[t] = _siv or 'int64_t'
         return 'MojoList *', t
 

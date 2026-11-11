@@ -292,13 +292,16 @@ def _quick_type(gen, node) -> str:
         if isinstance(node.obj, gimple_ctypes.IdentExpr):
             _name = node.obj.name
             _dvt = (getattr(gen, '_dict_val_types', None) or {}).get(_name)
-            if _dvt:
+            # 'mixed' is the store-side join of a dict whose values disagree:
+            # it names no C type, so it answers nothing and falls through to
+            # the boxed word (the chokepoint `_dict_val_of` maps it the same way).
+            if _dvt and _dvt != 'mixed':
                 return _as_str(_dvt)
         else:
             # Nested: d["k"][i] — `node.obj.obj.name` is the dict name.
             _name = node.obj.obj.name
             _dvt = (getattr(gen, '_dict_val_types', None) or {}).get(_name)
-            if _dvt:
+            if _dvt and _dvt != 'mixed':
                 # If the dict value is a container, answer its element type.
                 # For char* (string subscript) the element is char*; for
                 # MojoList* it is the list's element type; for scalars
