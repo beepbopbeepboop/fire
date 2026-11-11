@@ -329,9 +329,6 @@ def block_reason(doc, st, pool, busy, held):
         return "skip pattern: its name matches %s from the pool's skip list" % skip_hits(base, pool.get("skip", []))
     if "bug:" + base in held:
         return "held: a live task or an external claim holds it"
-    np = T.no_progress_reason(base)
-    if np:
-        return np
     if deleted_on_a_branch(base):          # cheap git check first: landable() reads the registry
         done = landable(base)
         if done:
@@ -809,9 +806,9 @@ def land():
         # RED: the batch as a whole fails the gate. Find the one branch that breaks it; that branch goes to a fixer
         # with its failing tests named, and the rest of the batch is probed again (and lands when it is green).
         culprit, failing = find_culprit(merged, failing)
-        log("red: %s breaks the gate (%s); it is held and bugs/gate-<job>.md is the work, the rest of the batch continues"
+        log("red: %s breaks the gate (%s); it goes to a fixer, the rest of the batch continues"
             % (culprit, " ".join(failing) or "jobs unknown"))
-        I.gate_doc(culprit, tasks[culprit], failing)
+        I.enqueue_red_fix(culprit, tasks[culprit], failing)
         batch = [n for n in batch if n != culprit]
     return landed
 
