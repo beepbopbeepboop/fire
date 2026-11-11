@@ -21882,7 +21882,7 @@ def _runtime_library_for(ordered: list, arch: str, fmt: str):
 
     The tree-level figures live in one place and are checked against the live
     census by `test_runtime_header_scan.py` — `bugs/FORMAL_known_limits.md`
-    §3.1 for the word-shaped surface (908 entry points, 411 of them word-shaped,
+    §3.1 for the word-shaped surface (910 entry points, 413 of them word-shaped,
     measured over every header in `runtime/`).
     """
     named = _runtime_word_calls(ordered)
