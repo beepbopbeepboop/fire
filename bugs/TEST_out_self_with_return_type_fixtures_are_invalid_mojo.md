@@ -113,3 +113,29 @@ type (`fix/selected.json` in the measurement scratchpad):
 
 - `e26a073ed` (master): the three parity fixtures, `out self` to `mut self`.
 - `test_out_param_return_type_diagnostic.py`: pins the current wording; updated in step 4.
+
+## Explained: the three unflagged fixtures in `test_formal_run.py` (lines 7873, 22504, 5150)
+
+Measured with the real compiler on self-contained variants (`out self` shapes, 2026-11-11):
+
+| shape | real Mojo | ours |
+|---|---|---|
+| `def copy_from(out self, other: Self)`, declaration only | accepted | accepted |
+| same, called as `r.copy_from(q)` | `invalid call to 'copy_from': unexpected argument` at `q` | accepted: gap |
+| `def set(out self, v: Int)` | `'self' argument must have type 'Self'`, at `v` | accepted: gap |
+| `def fill(out self, r: S)` (S a struct in the same file) | `'self' argument must have type 'Self'`, at `r` | accepted: gap |
+| `def reset(out self)` (no other parameters) | `self argument must be present in instance method`, at `self` | accepted: gap |
+
+- Fixtures 7873 and 22504 (`copy_from`, `take`) are valid declarations but invalid call sites. Real Mojo's first error
+  for them is in `main`, not in the declaration.
+- Fixture 5150 (`fill(out self, r: S)`) is refused at its declaration. Real Mojo never reached that check because its
+  `from byref_xmod import` does not resolve.
+
+Decided behaviour, from these measurements: an `out self` method that is not a constructor is refused by the real
+compiler in every shape measured, either at the declaration or at the call. Our compiler must refuse it too, at the real
+location, with the real message. These are pinned as `expectedFailure` cases in
+`test_out_param_return_type_diagnostic.py`. Fixing one means removing its marker in the same commit.
+
+What is not decided: the exact general rule behind the messages. The real messages depend on the parameter list, so the
+fixer should take the rule from the table, not from a summary. A full measurement of every fixture is still the first
+step of the fixture gate.
