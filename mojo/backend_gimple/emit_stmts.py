@@ -956,6 +956,35 @@ def _emit_dynattr_setattr_dispatch(gen, member: str, vtype: str, v: str,
                     [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
 
 
+def _join_dict_store(gen, key: str, value_node, vtype: str):
+    """Record a dict store's value kind under `key` (a C name or a source name), joined with what is recorded (the
+    one store-side writer: every dict store comes through here). Returns the recorded kind, or None when this store
+    says nothing about the dict's value type.
+
+    A store whose kind the compiler does not know (`dict_value_kind` None) joins nothing, and a container or str/float
+    store falls back to its C type. A None store is a kind of its own, remembered per (function, name), so a later
+    known-kind store joins it: `d['n'] = None` then `d['f'] = 1.5` is 'mixed'. Two different known kinds are 'mixed'
+    (`exprtypes.dict_kind_join`).
+    """
+    _kind = gimple_exprtypes.dict_value_kind(gen, value_node)
+    if _kind is None and (vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
+                          or vtype.endswith(' *')):
+        _kind = vtype
+    _prev_vt = gen._dict_val_types.get(key)
+    _seen_key = (_as_str(gen.current_func_name), _as_str(key))
+    if _kind == 'none':
+        gen._dict_none_seen.add(_seen_key)
+    if _kind is None or (_kind == 'none' and _prev_vt is None):
+        return None
+    _joined_vt = gimple_exprtypes.dict_kind_join(_prev_vt, _kind)
+    if _joined_vt == '_Bool':
+        _joined_vt = 'int64_t'
+    if _seen_key in gen._dict_none_seen and _joined_vt not in (None, 'none'):
+        _joined_vt = 'mixed'
+    gen._dict_val_types[key] = _joined_vt
+    return _joined_vt
+
+
 def _note_global_dict_store(gen, target_obj, vtype: str) -> None:
     """Record a dict store's value type under the SOURCE name of a module-scope
     dict receiver.
@@ -2458,20 +2487,10 @@ def _gen_stmt_AssignStmt(gen, node):
             # `d['f'] = 1.5`, or `d['s'] = 'x'` then `d['k'] = 2`) has no one value type, and every store, literal
             # or subscript, joins the same way. A store whose kind the compiler does not know (`_kind` None) joins
             # nothing, and an int store is recorded when it is a known int, which before it never was.
-            _kind = gimple_exprtypes.dict_value_kind(gen, node.value)
-            if _kind is None and (vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
-                                  or vtype.endswith(' *')):
-                _kind = vtype                       # a container/str/float store the kind table does not name
-            _prev_vt = gen._dict_val_types.get(obj_v)
-            if (_kind is not None and not (_kind == 'none' and _prev_vt is None)
-                    and obj_v not in getattr(gen, '_opaque_container_locals', ())):
-                # A None store only joins a dict that already has a kind (None differs from every known kind; on its
-                # own it says nothing about the dict's value type).
-                _joined_vt = gimple_exprtypes.dict_kind_join(_prev_vt, _kind)
-                if _joined_vt == '_Bool':
-                    _joined_vt = 'int64_t'
-                gen._dict_val_types[obj_v] = _joined_vt
-                _note_global_dict_store(gen, node.target.obj, _joined_vt)
+            if obj_v not in getattr(gen, '_opaque_container_locals', ()):
+                _joined_vt = _join_dict_store(gen, obj_v, node.value, vtype)
+                if _joined_vt is not None:
+                    _note_global_dict_store(gen, node.target.obj, _joined_vt)
             # dict[key] = val → mojo_dict_set_str_* (key coerced via
             # _char_to_cstr, the single dict-key-to-string conversion
             # used by both read and write sides — see its docstring).
@@ -2572,7 +2591,11 @@ def _gen_stmt_AssignStmt(gen, node):
                     # comes through THIS arm and not the typed one above:
                     # without the record here the read of the same global
                     # has no value type and prints the stored double's bits.
-                    _note_global_dict_store(gen, node.target.obj, vtype)
+                    _tgt = node.target.obj
+                    if isinstance(_tgt, IdentExpr) and msh.bare_global_read_plan(gen, _tgt.name)[0]:
+                        _gjoined = _join_dict_store(gen, _as_str(_tgt.name), node.value, vtype)
+                        if _gjoined is not None:
+                            _note_global_dict_store(gen, _tgt, _gjoined)
             elif _dsw_sn and not gen._struct_defines_method(_dsw_sn, '__setitem__'):
                 # `d[k] = v` on a builtin-`dict` subclass with no
                 # `__setitem__` override: store into the backing MojoDict.
