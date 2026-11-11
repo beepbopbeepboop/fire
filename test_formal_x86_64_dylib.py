@@ -434,12 +434,14 @@ def test_an_elf_module_dylib_is_a_loadable_object(tmpdir, shared):
 def test_the_elf_dylib_tail_is_zero_past_the_last_segment(tmpdir, shared):
     """Every byte past the last PT_LOAD is page padding, and padding is zero.
 
-    This is the regression test for `FORMAL_elf_dylib_nonzero_tail_past_last_segment`.
-    The first PT_LOAD used to stop at the globals' own PT_LOAD start, leaving the
-    `.rela.dyn` at the end of the file claimed by nothing — and the page padding
-    after it, which the emitter wrote with the next section's bytes, was non-zero.
-    The first PT_LOAD now covers the whole body, so the tail is padding and padding
-    is zeros.
+    The regression test for the non-zero bytes an ELF module dylib used to
+    leave past its last segment: the first PT_LOAD was sized
+    `body_size - globals_size`, which stops part-way through `.rela.dyn`
+    (the section that follows `.globals` in the body), so the tail of the
+    relocation table sat past the last segment — non-zero data where only
+    zero padding may be, and a `DT_RELA` that named bytes the loader could
+    not read. The first PT_LOAD now covers the whole body, so the tail is
+    the zero padding `_assemble` writes.
     """
     from formal import elf
     from formal.build import compile_formal_dylib
