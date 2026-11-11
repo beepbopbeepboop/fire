@@ -22,8 +22,8 @@ from __future__ import annotations
 
 from fire_compiler import (
     AssignStmt, AugAssignStmt, CallExpr, ExprStmt, ForStmt, FunctionDef,
-    IdentExpr, IfStmt, LambdaExpr, MatchStmt, MemberExpr, NonlocalStmt,
-    ReturnStmt, StructDef, TryStmt, VarDecl, WalrusExpr,
+    IdentExpr, IfStmt, LambdaExpr, MemberExpr, NonlocalStmt, ReturnStmt,
+    StructDef, TryStmt, VarDecl,
     WhileStmt, WithStmt,     _as_funcdef_node, _as_str, _as_list, _as_dict,
     for_target_names,
 )
@@ -113,14 +113,6 @@ def _gmi_all_stmts_nonfunc(stmts: list) -> list:
                 result.extend(_gmi_all_stmts_nonfunc(s.else_body))
             if s.finally_body:
                 result.extend(_gmi_all_stmts_nonfunc(s.finally_body))
-        elif isinstance(s, MatchStmt):
-            # A `case` body is a control-flow block like an `if` arm. Without
-            # this arm the closure pre-pass never typed a local whose only
-            # assignment was in a case body, so the class-capture box used the
-            # `int64_t` default -- wrong for a `str` local (the method printed
-            # the pointer's digits) even once the bound-name walk saw it.
-            for _mc in (s.cases or []):
-                result.extend(_gmi_all_stmts_nonfunc(_mc.body))
         elif isinstance(s, (WhileStmt, ForStmt, WithStmt)):
             result.extend(_gmi_all_stmts_nonfunc(s.body))
             if isinstance(s, (WhileStmt, ForStmt)) and getattr(s, 'else_body', None):
@@ -322,77 +314,7 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
                     if _tgt not in enriched_scope:
                         enriched_scope[_tgt] = 'int64_t'
                         ctx.var_types[_tgt] = 'int64_t'
-            elif isinstance(bstmt, TryStmt):
-                # `except E as e:` binds `e` to the caught object. The
-                # handler body is already in this flattened list, but the
-                # NAME has no statement to hang a type on, so a class capture
-                # of it defaulted to int64_t and printed the message pointer's
-                # digits. Ask the emitter's own handler classification so the
-                # type agrees with what `_emit_except_handler` binds: a
-                # user exception class WITH fields is a struct pointer, every
-                # other handler (builtin exception, fieldless user class, bare
-                # `except`) is the message text.
-                for _h in (bstmt.handlers or []):
-                    _hn = _as_str(getattr(_h, 'name', ''))
-                    if not _hn or _hn in enriched_scope:
-                        continue
-                    _exc_name = ''
-                    _hen = getattr(type(ctx), '_handler_exc_name', None)
-                    if _hen is not None:
-                        _exc_name = _as_str(_hen(ctx, _h))
-                    _sft = getattr(ctx, 'struct_field_types', {})
-                    _ht = 'char *'
-                    if (_exc_name and _exc_name in _sft
-                            and len(_sft[_exc_name]) > 0):
-                        _ht = _exc_name + ' *'
-                    enriched_scope[_hn] = _ht
-                    ctx.var_types[_hn] = _ht
-        # A walrus target is a local binding in an EXPRESSION, not a
-        # statement, so the arms above never type it and the class-capture box
-        # fell back to `int64_t` even after the shared bound-name walk learned
-        # the spelling (a `str` would print its pointer's digits). Walk each
-        # already-flattened statement's expressions; skip nested functions and
-        # classes, whose locals belong to their own scope.
-        for _ws in _gmi_all_stmts_nonfunc(body):
-            if isinstance(_ws, (FunctionDef, StructDef)):
-                continue
-            for _wn in _walk_ast(_ws):
-                if not isinstance(_wn, WalrusExpr):
-                    continue
-                _wname = _as_str(_wn.name)
-                if _wname not in enriched_scope:
-                    _wt = ctx._quick_type(_wn.value)
-                    if _wt == 'void':
-                        _wt = 'int64_t'
-                    enriched_scope[_wname] = _wt
-                    ctx.var_types[_wname] = _wt
         ctx.var_types = _saved_vt2
-        # A class declared in this scope whose methods read `enclosing` names
-        # captures them BY REFERENCE (`module_gen._gmi_capture_nested_class_
-        # enclosing_reads`), which means the enclosing local is heap-boxed.
-        # Boxing needs the local's C TYPE, and this pass is what types a
-        # function's whole enclosing scope (`enriched_scope`). Publish the
-        # answer for the names that pass recorded as still needing one; the
-        # module backend reads it back after this call
-        # (`_gmi_apply_class_ref_types`, `_seed_mut_captured_local_types`).
-        _ref_pending = getattr(ctx, '_class_ref_pending', None)
-        if _ref_pending is not None:
-            _pending_names = _ref_pending.get(outer_name)
-            if _pending_names:
-                _class_locals = getattr(ctx, '_class_ref_locals', None)
-                if _class_locals is None:
-                    _class_locals = {}
-                    ctx._class_ref_locals = _class_locals
-                _typed = {}
-                for _crn0 in _pending_names:
-                    _crn = _as_str(_crn0)
-                    _crt = 'int64_t'
-                    if _crn in enriched_scope:
-                        _crt = _as_str(enriched_scope[_crn])
-                    if _crt in ('', 'None', 'void', 'unknown'):
-                        _crt = 'int64_t'
-                    _typed[_crn] = _crt
-                _class_locals[outer_name] = _typed
         # Parallel structures instead of a list-of-3-tuples: a tuple element
         # indexed on the self-hosted compiled path erases to `int64_t`, and
         # the third field here (the set of names each sibling calls) then
@@ -647,49 +569,6 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
                              if _cc == 'mut' and _cn in _cap_names_so_far}
             if _explicit_mut:
                 ci.mut_names = frozenset(set(ci.mut_names) | _explicit_mut)
-            # A class declared in this nested `def` can capture one of the
-            # ENCLOSING function's locals by reference
-            # (`module_gen._gmi_capture_nested_class_enclosing_reads`): the
-            # `class` statement is emitted in THIS lifted function, so the
-            # owner's heap box has to travel here through this closure's env.
-            # Make the name a `mut_names` member, which widens the env field
-            # to `T *` and makes the caller seed the BOX POINTER, and prune
-            # the candidate list to the names this function really captures:
-            # a local of this `def` that merely SHADOWS the same name must
-            # stay by value (its home is this frame, not the owner's).
-            _class_pending = getattr(ctx, '_class_ref_pending', None)
-            if _class_pending is not None:
-                _cand = _class_pending.get(lifted)
-                if _cand:
-                    # A name owned by THIS lifted frame (a class declared in
-                    # this `def` reading this `def`'s own local) is not a
-                    # capture from the enclosing scope at all, so it must
-                    # survive the capture prune and be typed/boxed here. The
-                    # pass recorded those names separately for exactly this
-                    # reason (`_class_ref_self`).
-                    _self_now: set = set()
-                    _class_self = getattr(ctx, '_class_ref_self', None)
-                    if _class_self is not None:
-                        for _sn0 in (_class_self.get(lifted) or []):
-                            _self_now.add(_as_str(_sn0))
-                    _cap_names_now = dict(ci.captures)
-                    _kept: list = []
-                    for _cand_n in _cand:
-                        _cand_s = _as_str(_cand_n)
-                        if _cand_s in _cap_names_now or _cand_s in _self_now:
-                            _kept.append(_cand_n)
-                    if len(_kept) != len(_cand):
-                        _class_pending[lifted] = _kept
-                    # Only a real capture becomes a `mut_names` member: the
-                    # self-owned names are locals of this frame and there is
-                    # no env field to widen for them.
-                    _kept_caps: list = []
-                    for _kn in _kept:
-                        if _as_str(_kn) in _cap_names_now:
-                            _kept_caps.append(_kn)
-                    if _kept_caps:
-                        ci.mut_names = frozenset(
-                            set(ci.mut_names) | set(_kept_caps))
             if outer_name not in ctx._all_closures:
                 ctx._all_closures[outer_name] = {}
             # Keyed by the `_as_str` view: the call-group merge below looks

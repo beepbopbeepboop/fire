@@ -2709,26 +2709,6 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         if _real in ('MojoList *', 'MojoSet *', 'MojoDict *'):
             rat = _real
             rav = gen._new_val(_real, f'({_real}){rav}')
-    # A `d[k]` read whose value type was unknown at compile time: the slot's
-    # runtime kind (None/True/1.5/...) is recoverable from (dict,key).
-    _dsr = getattr(gen, '_dict_slot_reads', {})
-    _dsr_hit = _dsr.get(rav)
-    if _dsr_hit is None and enode is not None and isinstance(enode, gimple_ctypes.IdentExpr):
-        _dsr_hit = _dsr.get(_as_str(enode.name))
-    if rat in ('int', 'int64_t') and _dsr_hit is not None:
-        _dv, _kv, _kk = _dsr_hit
-        if _kk == 'str':
-            return gen._call_expr('char *', 'mojo_dict_repr_slot',
-                                  [('MojoDict *', _dv), ('char *', _kv)])
-        if _kk == 'bytes':
-            return gen._call_expr('char *', 'mojo_dict_repr_slot_bytes',
-                                  [('MojoDict *', _dv), ('MojoBytes *', _kv)])
-        if _kk == 'none':
-            return gen._call_expr('char *', 'mojo_dict_repr_slot_none',
-                                  [('MojoDict *', _dv)])
-    # A call result may be a boxed dict-slot value carrying its runtime kind.
-    if rat in ('int', 'int64_t') and isinstance(enode, gimple_ctypes.CallExpr):
-        return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav)])
     if rat == 'char *':
         return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
     if rat == 'MojoList *':
@@ -2788,11 +2768,6 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         rav_d = rav if rat == 'double' else gen._new_val('double', f'(double){rav}')
         return gen._call_expr('char *', 'mojo_repr_float', [('double', rav_d)])
     rav64 = rav if rat == 'int64_t' else gen._new_val('int64_t', f'(int64_t){rav}')
-    # A word of unknown kind (boxed dict-slot value, tagged word, string
-    # pointer held in int64_t, or plain integer): render via the runtime's
-    # generic repr discriminator. For a plain integer it is the same decimal.
-    if rat in ('int', 'int64_t'):
-        return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav64)])
     return gen._call_expr('char *', 'mojo_repr_int', [('int64_t', rav64)])
 
 
@@ -2993,27 +2968,6 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     types — slice 2). Returns (ctype, val) if elaborated, else None."""
     explicit = isinstance(node.func, gimple_ctypes.SubscriptExpr)
     g = node.func.obj.name if explicit else node.func.name
-    # A SELF-RECURSIVE generic call (`self_recursion[i + 1]()` inside
-    # `self_recursion`) cannot be monomorphized: the arg is not a concrete
-    # literal, so no instantiation exists, and the call would reach the
-    # generated C as a declared-never-defined extern (a dangling symbol).
-    # Refuse with a clear diagnostic instead. The bracketed form is decided on
-    # its arguments (`self_recursive_uninstantiable`), not on the name alone.
-    if explicit:
-        _rec = ggc.self_recursive_uninstantiable(gen, node.func)
-        if _rec is not None:
-            raise RuntimeError(
-                f'cannot compile module: self recursive call to {_rec!r} will '
-                f'cause an infinite loop')
-    else:
-        # A bare call has no bracket to inspect, so the name test stands: the
-        # enclosing function is either the bare base or its mangled instance
-        # (`self_recursion_1_i_1_3`).
-        _cfn = getattr(gen, 'current_func_name', None)
-        if _cfn and (g == _cfn or _cfn.startswith(g + '_')):
-            raise RuntimeError(
-                f'cannot compile module: self recursive call to {g!r} will '
-                f'cause an infinite loop')
     source = gen._imported_generics.get(g)
     if not source:
         return None
