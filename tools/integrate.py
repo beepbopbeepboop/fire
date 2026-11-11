@@ -225,8 +225,8 @@ def gate_doc(culprit, t, failing):
                 "# Gate: %s is red on master\n\n"
                 "**Job:** `%s`. Created when branch `%s` (task `%s`) turned the gate red.\n"
                 "**Two states:** this doc exists = the job is red and this is the work. Delete it when the job is green on master.\n\n"
-                "Reproduce it on master first (`python3 tools/suite.py %s`), then fix the cause. Do not skip or mark the test.\n"
-                % (j, j, t["branch"], culprit, j))
+                "It is red on branch `%s`, not necessarily on master: reproduce it there (`python3 tools/suite.py %s`), then fix the cause. Do not skip or mark the test.\n"
+                % (j, j, t["branch"], culprit, t["branch"], j))
     with C.registry() as reg:
         reg[culprit]["state"] = "superseded"
         reg[culprit]["hold"] = True
