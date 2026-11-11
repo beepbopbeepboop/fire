@@ -1843,6 +1843,47 @@ def _try_lower_constrained(gen, node):
     return 'int64_t', gen._new_val('int64_t', '0')
 
 
+def self_recursive_uninstantiable(gen, func) -> str | None:
+    """The base name of a bracketed callee that calls the function being
+    compiled with type arguments that cannot be instantiated, else None.
+
+    `self_recursion[i + 1]()` inside `self_recursion` is an infinite loop: the
+    argument is not a concrete type, so there is no instantiation to call, and
+    stubbing the call would be a silent wrong answer. The decision is made on
+    the ARGUMENTS, not the name alone. A name match is a false positive for
+    `test[.uint8]()` inside `test_simd` (a different function that shares a
+    prefix) and for `SIMD[.uint32, 4](...)` inside a method of `SIMD` (another
+    instantiation of the struct, perfectly materializable). A concrete argument
+    list is left to the instantiation path, which is what elab_intu's
+    `_collect_inner` does for the same shape.
+
+    Both the stub path in `_lower_call` and `_elaborate_generic_call` ask this,
+    so the two cannot disagree about which calls are refused."""
+    if not (isinstance(func, gimple_ctypes.SubscriptExpr)
+            and isinstance(func.obj, gimple_ctypes.IdentExpr)):
+        return None
+    base = func.obj.name
+    cfn = getattr(gen, 'current_func_name', None)
+    # The enclosing function is either the bare base (`self_recursion`) or its
+    # mangled instance (`self_recursion_1_i_1_3`), so both spellings are checked.
+    if not cfn or not (base == cfn or cfn.startswith(base + '_')):
+        return None
+    idx = func.index
+    elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
+
+    def _concrete(e) -> bool:
+        # `.uint8` is a DType variant named by its spelling: always concrete.
+        if isinstance(e, gimple_ctypes.DottedLiteral):
+            return True
+        # An expression (`i + 1`), an unsubstituted `Self.x`, or any shape
+        # `_type_expr_to_ann` cannot render comes back '' or non-concrete.
+        return gimple_exprtypes._is_concrete_type_arg(gen._type_expr_to_ann(e))
+
+    if all(_concrete(e) for e in elems):
+        return None
+    return base
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     _c = _try_lower_constrained(gen, node)
     if _c is not None:
@@ -3056,16 +3097,13 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     f"cannot compile module: a bracketed call {_base_name}[...]() "
                     f"needs link-mode specialisation, which this build does not do")
         # A SELF-RECURSIVE generic call (`self_recursion[i + 1]()` inside the
-        # monomorphized `self_recursion`) cannot be materialized: the arg is
-        # not a concrete literal, so no instantiation exists, and stubbing it
-        # to 0 (below) would be a silent wrong answer. Refuse loudly.
-        if isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr):
-            _base_name = node.func.obj.name
-            _cfn2 = getattr(gen, 'current_func_name', None)
-            if _cfn2 and (_base_name == _cfn2 or _cfn2.startswith(_base_name + '_')):
-                raise RuntimeError(
-                    f"cannot compile module: self recursive call to "
-                    f"{_base_name!r} will cause an infinite loop")
+        # monomorphized `self_recursion`) cannot be materialized, and stubbing
+        # it to 0 (below) would be a silent wrong answer. Refuse loudly.
+        _rec = self_recursive_uninstantiable(gen, node.func)
+        if _rec is not None:
+            raise RuntimeError(
+                f"cannot compile module: self recursive call to "
+                f"{_rec!r} will cause an infinite loop")
         gimple_ctypes._debug_note('indirect call stubbed', type(node.func).__name__)
         t = gen._new_temp('int64_t')
         gen._emit(f'  {t} = (int64_t)0;  /* indirect call via {type(node.func).__name__} */')
