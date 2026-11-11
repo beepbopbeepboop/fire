@@ -272,10 +272,6 @@ def feed():
         if why:
             log("stopped %s: %s" % (doc, why))
             continue
-        split = split_reason(doc)
-        if split:
-            log("split %s: its parts carry the work (%s)" % (doc, split))
-            continue
         cls = doc_class(doc, st, base)
         # a doc is queued only if some slot that accepts its class has room right now
         if not any(C.accepts(sl, cls) and C.slot_free(sl, busy_slot) for sl in pool["slots"]):
@@ -366,9 +362,6 @@ def why(doc):
     stop = stop_reason(doc)
     if stop:
         return "STOP line in the doc: %s" % stop
-    split = split_reason(doc)
-    if split:
-        return "SPLIT: decomposed into parts that carry the work (%s)" % split
     if not any(C.accepts(sl, cls) and C.slot_free(sl, busy) for sl in pool["slots"]):
         return "no free %s slot (%s)" % (cls, ", ".join(
             "%s count %d busy %d%s" % (sl["name"], sl["count"], busy.get(sl["name"], 0),
@@ -400,91 +393,6 @@ def refill(target):
     return lines[-1] if lines else ""
 
 
-SPLIT = re.compile(r"^SPLIT:[ \t]*(.+?)[ \t]*$", re.M)   # a doc decomposed into parts by a replan
-
-
-def split_reason(doc):
-    """The parts listed in the doc's `SPLIT:` line, or None. A SPLIT doc's parts carry the work, so
-    the feeder leaves the original alone (it stays at its class — the ladder is one-way)."""
-    try:
-        with open(os.path.join(C.MAIN, doc_path(doc)), encoding="utf-8") as f:
-            m = SPLIT.search(f.read())
-    except OSError:
-        return None
-    return m.group(1) if m else None
-
-
-def unserved_classes(pool=None):
-    """Classes the pool documents but cannot serve: no slot of that class has any count.
-
-    A doc at such a class can never be worked, and the escalation ladder has no way out of it —
-    2026-11-10: `hard` is documented as "bugs/hard/*.md (Opus 5.5)" while opus has count 0 and has
-    never run a task, so 25 hard docs sat there with no path forward."""
-    pool = pool or C.load_pool()
-    out = {}
-    for cls in C.CLASSES:
-        slots = [sl for sl in pool["slots"] if C.accepts(sl, cls)]
-        if not any(sl.get("count", 0) > 0 for sl in slots):
-            out[cls] = [sl["name"] for sl in slots]
-    return out
-
-
-REPLAN_TASK = """You REPLAN a bug doc. You do NOT fix the bug.
-
-Read %(doc)s. It sits at a class the pool cannot serve (%(cls)s has no slot: %(slots)s), so it can
-never be worked as written. Decompose it instead:
-
-1. Decide the parts. Each part is a self-contained piece of work with its own acceptance check,
-   small enough for a class the pool CAN serve: %(servable)s. Never file a part at %(cls)s.
-2. File each part as a new doc named "<base>-part1", "<base>-part2", ... under bugs/ or bugs/mid/
-   — the highest class you can argue it needs, within %(servable)s. Commit each new doc.
-3. Add one line at the top of the ORIGINAL doc: SPLIT: <base>-part1, <base>-part2, ...
-   Commit it. The original stays at its class; its parts carry the work.
-4. Finish with the REPORT block and CONTROL-STATUS: DONE.
-
-Do not try to fix the bug yourself. Do not delete the original doc."""
-
-
-def replan_unserved():
-    """Queue a replan for every doc at a class the pool cannot serve. Returns how many.
-
-    This is the only way such a doc can move without breaking the ladder: an easy worker decomposes
-    it into parts filed at classes that DO have capacity, and the original is marked SPLIT."""
-    pool = C.load_pool()
-    unserved = unserved_classes(pool)
-    if not unserved:
-        return 0
-    servable = [c for c in C.CLASSES if c not in unserved]
-    made = 0
-    for cls, slots in sorted(unserved.items()):
-        for path in sorted(glob.glob(os.path.join(C.MAIN, "bugs", cls, "*.md"))):
-            base = os.path.basename(path)[:-3]
-            name = "fix-replan-" + re.sub(r"[^a-z0-9]+", "-", base.lower())[:40].rstrip("-")
-            qpath = os.path.join(C.qdir(), name + ".json")
-            if os.path.exists(qpath):
-                # self-heal: sync used to rewrite a queued task's class from its doc, which parked
-                # every replan at the unserved class it was meant to escape
-                it = json.load(open(qpath))
-                if it.get("cls") != "easy":
-                    old = it.get("cls")
-                    it["cls"] = "easy"
-                    with open(qpath, "w") as f:
-                        json.dump(it, f, indent=1)
-                    log("replan %s: corrected its queued class %s -> easy" % (name, old))
-                continue
-            if name in C.load() or split_reason("%s/%s" % (cls, base)) or claim_held(base):
-                continue
-            text = REPLAN_TASK % {"doc": "bugs/%s/%s.md" % (cls, base), "cls": cls,
-                                  "slots": ", ".join(slots), "servable": ", ".join(servable)}
-            subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "enqueue", name,
-                            "--claim", "bug:" + base, "--task", text, "--cls", "easy"],
-                           capture_output=True, text=True, cwd=C.MAIN)
-            log("replan bugs/%s/%s.md: class %s has no slot (%s); queued %s to split it into parts at %s"
-                % (cls, base, cls, ", ".join(slots), name, ", ".join(servable)))
-            made += 1
-    return made
-
-
 def reclass_on_failure(st, base, doc):
     """Count a no-commit attempt at the doc's class; after ESCALATE_AFTER of them the doc is due one class up. The move
     itself is apply_moves': the doc's file goes to the new class's directory once nothing unlanded touches it. The top
@@ -494,11 +402,6 @@ def reclass_on_failure(st, base, doc):
     cur = doc_class(doc, st, base)
     nxt = escalate(cur)
     if nxt and fails[base] >= ESCALATE_AFTER:
-        if nxt in unserved_classes():
-            # Escalating into a class with no slot would strand the doc there forever.
-            log("reclass %s: stays at %s — %s has no slot, so moving it there would strand it" % (doc, cur, nxt))
-            fails[base] = 0
-            return
         st.setdefault("pending", {})[base] = nxt
         fails[base] = 0
         log("reclass %s: %s -> %s after %d no-commit attempts (moves when nothing unlanded touches it)"
@@ -902,13 +805,6 @@ def main():
                     log("cleanup: " + line.strip())
             fed = cont = retired = 0
             if guard_ok:
-                unserved = unserved_classes()
-                if unserved:
-                    log("config: class(es) with docs but no slot: %s" % ", ".join(
-                        "%s (%s count 0)" % (c, "/".join(s)) for c, s in sorted(unserved.items())))
-                replanned = replan_unserved()
-                if replanned:
-                    log("replan: queued %d replan task(s) for docs at an unserved class" % replanned)
                 fed = feed()
                 cont = continue_partial(load_state())
                 retired = retire_dead()
