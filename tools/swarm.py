@@ -243,21 +243,27 @@ def feed():
     paths = sorted(set(p for g in pool["feed"] for p in glob.glob(os.path.join(C.MAIN, g))))
     for p in paths:
         if need_total <= 0:
+            log("feed: no free slot anywhere in the pool; %d doc(s) not considered this pass" % len(paths))
             break
         rel = os.path.relpath(p, os.path.join(C.MAIN, "bugs"))
         doc = rel[:-3] if rel.endswith(".md") else rel
         base = os.path.basename(doc)
         if any(base.startswith(x) or x in base for x in skips):
+            log("skip %s: its name matches the pool's skip pattern %s" % (
+                doc, [x for x in skips if base.startswith(x) or x in base]))
             continue
         if "bug:" + base in held:
+            log("held %s: a live task or an external claim holds it (see control.py claims)" % doc)
             continue
-        # DONE ratchet: if any branch (landed or not) has already deleted this doc, it is
-        # fixed. Skip it so we don't re-dispatch a bug that a prior worker already resolved.
+        # DONE ratchet: a doc whose fix is FINISHED — a DONE task with commits, not yet landed — is
+        # not re-dispatched; its branch is in the landing queue. A deletion by a worker that never
+        # finished is NOT a fix, and skipping on it strands the doc forever with no path forward
+        # (2026-11-10: 5 docs, e.g. mid/SUITE_silentnoop, were wedged exactly this way).
         r = subprocess.run(["git", "log", "--all", "--diff-filter=D", "--oneline", "--",
                            "bugs/%s.md" % base, "bugs/mid/%s.md" % base, "bugs/hard/%s.md" % base],
                            capture_output=True, text=True, cwd=C.MAIN)
-        if r.stdout.strip():
-            log("done-ratchet: %s already deleted on a branch; skipping" % doc)
+        if r.stdout.strip() and landable(base):
+            log("done-ratchet: %s already deleted on a branch; skipping (its branch is in the landing queue)" % doc)
             continue
         if base in st.get("pending", {}):
             log("held %s: due a move to %s (queued only after it moves)" % (doc, st["pending"][base]))
@@ -266,25 +272,112 @@ def feed():
         if why:
             log("stopped %s: %s" % (doc, why))
             continue
+        split = split_reason(doc)
+        if split:
+            log("split %s: its parts carry the work (%s)" % (doc, split))
+            continue
         cls = doc_class(doc, st, base)
         # a doc is queued only if some slot that accepts its class has room right now
         if not any(C.accepts(sl, cls) and C.slot_free(sl, busy_slot) for sl in pool["slots"]):
+            log("wait %s: no free %s slot (%s)" % (doc, cls, ", ".join(
+                "%s count %d busy %d%s" % (sl["name"], sl["count"], busy_slot.get(sl["name"], 0),
+                                           ", banned" if sl["model"] in C.dead_models() else "")
+                for sl in pool["slots"] if C.accepts(sl, cls)) or "no slot takes class " + cls))
             continue
         name = task_name(doc)
         if name in C.load():                   # the 40-char name collides with an old task: make it unique
+            log("renamed %s: %s is already in the registry" % (doc, name))
             name += "-%d" % int(time.time() % 10000)
         prev = last_attempt(base) if st["fed"].get(doc) else None
         if prev:
             log("re-feed %s: previous attempt %s" % (doc, prev))
-        if enqueue_doc(doc, base, cls, name):
-            made += 1
-            need_total -= 1
-            sl = C.pick_slot({"pool": None, "cls": cls}, busy_slot)
-            if sl:
-                busy_slot[sl["name"]] = busy_slot.get(sl["name"], 0) + 1
+        if not enqueue_doc(doc, base, cls, name):
+            log("FAILED to queue %s (class %s)" % (doc, cls))
+            continue
+        made += 1
+        need_total -= 1
+        sl = C.pick_slot({"pool": None, "cls": cls}, busy_slot)
+        if sl:
+            busy_slot[sl["name"]] = busy_slot.get(sl["name"], 0) + 1
+        else:
+            log("queued %s but no slot accepts class %s" % (doc, cls))
         st["fed"][doc] = st["fed"].get(doc, 0) + 1
     json.dump(st, open(state_path(), "w"), indent=1)
     return made
+
+
+def landable(base):
+    """The tasks whose landing would resolve BASE: a DONE verdict, commits master lacks, and not
+    already handed to a fixer. Cheap on purpose — only the tasks that name this doc, so `why` stays
+    fast where a full pick_candidates sweep (a `git status` per worktree) would not be."""
+    claim = "bug:" + base
+    return [n for n, t in C.load().items()
+            if claim in t.get("claims", []) and C.verdict(t) == "DONE"
+            and C.ahead(t) > 0 and not t.get("fixer")]
+
+
+def claim_held(base):
+    """Whether BUG:BASE's claim is held, and by what. Cheap: only the tasks that name this doc pay
+    for holds_claims (which runs `git rev-list` per task), not the whole registry."""
+    claim = "bug:" + base
+    if claim in BUSY["claims"]:
+        return "a live opencode session is driving its tree"
+    for n, t in C.load().items():
+        if claim in t.get("claims", []) and C.holds_claims(t):
+            return "task %s (%s)" % (n, C.state_of(t))
+    for f in os.listdir(C.qdir()):
+        if f.endswith(".json"):
+            it = json.load(open(os.path.join(C.qdir(), f)))
+            if claim in it.get("claims", []):
+                return "queued task %s" % it.get("name", f)
+    for n, e in C.external().items():
+        if claim in e.get("claims", []):
+            return "external claim %s" % n
+    return None
+
+
+def why(doc):
+    """Why DOC is not being fed right now: the first feed condition that blocks it. Answers the
+    'this bug is wedged and nothing says why' question without waiting for a pass."""
+    pool = C.load_pool()
+    skips = pool.get("skip", [])
+    st = load_state()
+    if doc.startswith("bugs/"):
+        doc = doc[5:]                      # accept either a bugs/ path or a path relative to bugs/
+    if doc.endswith(".md"):
+        doc = doc[:-3]                    # ... with or without the .md
+    base = os.path.basename(doc)
+    cls = doc_class(doc, st, base)
+    busy = C.running_by_slot()
+    if any(base.startswith(x) or x in base for x in skips):
+        return "skip pattern: its name matches %s from the pool's skip list" % [
+            x for x in skips if base.startswith(x) or x in base]
+    held = claim_held(base)
+    if held:
+        return "held: %s" % held
+    r = subprocess.run(["git", "log", "--all", "--diff-filter=D", "--oneline", "--",
+                        "bugs/%s.md" % base, "bugs/mid/%s.md" % base, "bugs/hard/%s.md" % base],
+                       capture_output=True, text=True, cwd=C.MAIN)
+    if r.stdout.strip() and landable(base):
+        return "DONE ratchet: a branch deleted it; %d DONE task(s) will land it (e.g. %s)" % (
+            len(landable(base)), landable(base)[0])
+    if base in st.get("pending", {}):
+        return "held: due a reclass to %s (queued only after the doc moves)" % st["pending"][base]
+    stop = stop_reason(doc)
+    if stop:
+        return "STOP line in the doc: %s" % stop
+    split = split_reason(doc)
+    if split:
+        return "SPLIT: decomposed into parts that carry the work (%s)" % split
+    if not any(C.accepts(sl, cls) and C.slot_free(sl, busy) for sl in pool["slots"]):
+        return "no free %s slot (%s)" % (cls, ", ".join(
+            "%s count %d busy %d%s" % (sl["name"], sl["count"], busy.get(sl["name"], 0),
+                                       ", banned" if sl["model"] in C.dead_models() else "")
+            for sl in pool["slots"] if C.accepts(sl, cls)) or "no slot takes class " + cls)
+    name = task_name(doc)
+    if name in C.load():
+        return "in flight: task %s is %s" % (name, C.state_of(C.load()[name]))
+    return "would be fed on the next pass"
 
 
 def probe_free():
@@ -307,6 +400,81 @@ def refill(target):
     return lines[-1] if lines else ""
 
 
+SPLIT = re.compile(r"^SPLIT:[ \t]*(.+?)[ \t]*$", re.M)   # a doc decomposed into parts by a replan
+
+
+def split_reason(doc):
+    """The parts listed in the doc's `SPLIT:` line, or None. A SPLIT doc's parts carry the work, so
+    the feeder leaves the original alone (it stays at its class — the ladder is one-way)."""
+    try:
+        with open(os.path.join(C.MAIN, doc_path(doc)), encoding="utf-8") as f:
+            m = SPLIT.search(f.read())
+    except OSError:
+        return None
+    return m.group(1) if m else None
+
+
+def unserved_classes(pool=None):
+    """Classes the pool documents but cannot serve: no slot of that class has any count.
+
+    A doc at such a class can never be worked, and the escalation ladder has no way out of it —
+    2026-11-10: `hard` is documented as "bugs/hard/*.md (Opus 5.5)" while opus has count 0 and has
+    never run a task, so 25 hard docs sat there with no path forward."""
+    pool = pool or C.load_pool()
+    out = {}
+    for cls in C.CLASSES:
+        slots = [sl for sl in pool["slots"] if C.accepts(sl, cls)]
+        if not any(sl.get("count", 0) > 0 for sl in slots):
+            out[cls] = [sl["name"] for sl in slots]
+    return out
+
+
+REPLAN_TASK = """You REPLAN a bug doc. You do NOT fix the bug.
+
+Read %(doc)s. It sits at a class the pool cannot serve (%(cls)s has no slot: %(slots)s), so it can
+never be worked as written. Decompose it instead:
+
+1. Decide the parts. Each part is a self-contained piece of work with its own acceptance check,
+   small enough for a class the pool CAN serve: %(servable)s. Never file a part at %(cls)s.
+2. File each part as a new doc named "<base>-part1", "<base>-part2", ... under bugs/ or bugs/mid/
+   — the highest class you can argue it needs, within %(servable)s. Commit each new doc.
+3. Add one line at the top of the ORIGINAL doc: SPLIT: <base>-part1, <base>-part2, ...
+   Commit it. The original stays at its class; its parts carry the work.
+4. Finish with the REPORT block and CONTROL-STATUS: DONE.
+
+Do not try to fix the bug yourself. Do not delete the original doc."""
+
+
+def replan_unserved():
+    """Queue a replan for every doc at a class the pool cannot serve. Returns how many.
+
+    This is the only way such a doc can move without breaking the ladder: an easy worker decomposes
+    it into parts filed at classes that DO have capacity, and the original is marked SPLIT."""
+    pool = C.load_pool()
+    unserved = unserved_classes(pool)
+    if not unserved:
+        return 0
+    servable = [c for c in C.CLASSES if c not in unserved]
+    made = 0
+    for cls, slots in sorted(unserved.items()):
+        for path in sorted(glob.glob(os.path.join(C.MAIN, "bugs", cls, "*.md"))):
+            base = os.path.basename(path)[:-3]
+            if split_reason("%s/%s" % (cls, base)) or claim_held(base):
+                continue
+            name = "fix-replan-" + re.sub(r"[^a-z0-9]+", "-", base.lower())[:40].rstrip("-")
+            if name in C.load() or os.path.exists(os.path.join(C.qdir(), name + ".json")):
+                continue
+            text = REPLAN_TASK % {"doc": "bugs/%s/%s.md" % (cls, base), "cls": cls,
+                                  "slots": ", ".join(slots), "servable": ", ".join(servable)}
+            subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "enqueue", name,
+                            "--claim", "bug:" + base, "--task", text, "--cls", "easy"],
+                           capture_output=True, text=True, cwd=C.MAIN)
+            log("replan bugs/%s/%s.md: class %s has no slot (%s); queued %s to split it into parts at %s"
+                % (cls, base, cls, ", ".join(slots), name, ", ".join(servable)))
+            made += 1
+    return made
+
+
 def reclass_on_failure(st, base, doc):
     """Count a no-commit attempt at the doc's class; after ESCALATE_AFTER of them the doc is due one class up. The move
     itself is apply_moves': the doc's file goes to the new class's directory once nothing unlanded touches it. The top
@@ -316,6 +484,11 @@ def reclass_on_failure(st, base, doc):
     cur = doc_class(doc, st, base)
     nxt = escalate(cur)
     if nxt and fails[base] >= ESCALATE_AFTER:
+        if nxt in unserved_classes():
+            # Escalating into a class with no slot would strand the doc there forever.
+            log("reclass %s: stays at %s — %s has no slot, so moving it there would strand it" % (doc, cur, nxt))
+            fails[base] = 0
+            return
         st.setdefault("pending", {})[base] = nxt
         fails[base] = 0
         log("reclass %s: %s -> %s after %d no-commit attempts (moves when nothing unlanded touches it)"
@@ -684,9 +857,13 @@ def main():
     ap.add_argument("--interval", type=int, default=120, help="seconds between passes (0: one pass)")
     ap.add_argument("--log-file", default=os.path.join(C.ctl_dir(), "swarm.out"), help="file to write pass log to (default: .git/control/swarm.out)")
     ap.add_argument("--who", action="store_true", help="print the verified lock holder and exit")
+    ap.add_argument("--why", metavar="DOC", default=None,
+                    help="print why a bug doc is not being fed (a bugs/ path or a base name), and exit")
     a = ap.parse_args()
     if a.who:
         sys.exit(who())
+    if a.why:
+        sys.exit(why(a.why))
     # redirect output to the log file so it is captured without a shell redirect
     if a.log_file:
         os.makedirs(os.path.dirname(os.path.abspath(a.log_file)), exist_ok=True)
@@ -715,6 +892,13 @@ def main():
                     log("cleanup: " + line.strip())
             fed = cont = retired = 0
             if guard_ok:
+                unserved = unserved_classes()
+                if unserved:
+                    log("config: class(es) with docs but no slot: %s" % ", ".join(
+                        "%s (%s count 0)" % (c, "/".join(s)) for c, s in sorted(unserved.items())))
+                replanned = replan_unserved()
+                if replanned:
+                    log("replan: queued %d replan task(s) for docs at an unserved class" % replanned)
                 fed = feed()
                 cont = continue_partial(load_state())
                 retired = retire_dead()
