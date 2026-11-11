@@ -2694,9 +2694,19 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
             continue
         indent = len(expanded) - len(raw_content)
         sub_stmts = _split_on_separators(content)
+        # Token columns are 1-based from the start of the PHYSICAL line, the
+        # way gcc and Mojo report them: the statement's offset in `content`
+        # plus the indentation the strip removed. Before this, a statement
+        # was lexed from its stripped text, so an indented token's column
+        # was short by the indentation and every column was 0-based.
+        _stmt_cursor = 0
         for stmt_idx, stmt in enumerate(sub_stmts):
             stmt = stmt.strip()
             if not stmt: continue
+            _stmt_at = content.find(stmt, _stmt_cursor)
+            if _stmt_at >= 0:
+                _stmt_cursor = _stmt_at + len(stmt)
+            _stmt_col = indent + max(_stmt_at, 0)
             # Only emit INDENT/DEDENT when at paren depth 0, and not when this
             # physical line is itself just the continuation of the previous one
             # (implicit-continuation token, or an implicit string concat whose
@@ -2730,7 +2740,7 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
             for m in _TOKEN_RE.finditer(stmt_final):
                 kind = m.lastgroup or "INT"
                 val  = m.group()
-                col  = m.start()
+                col  = _stmt_col + m.start() + 1
                 if kind in ("WS", "UNK", "XFER"): continue
                 if kind == "NAME" and val in _KEYWORDS: kind = "KW"
                 # Restore multi-line strings from cache
