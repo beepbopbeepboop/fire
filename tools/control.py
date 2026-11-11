@@ -162,6 +162,39 @@ def alive(pid):
         return False
 
 
+def pid_alive(t):
+    """The task's recorded process is still alive."""
+    return alive(t.get("pid"))
+
+
+def dead_running_tasks(tasks):
+    """Registry entries that are running or were recorded as exited-err, whose process is gone, and that never wrote
+    an exitcode. A dead worker stays here until it is restarted or superseded, so a restart skipped for want of a
+    slot is retried on a later pass (sync marks the dead ones exited-err, so the record matches the pid).
+
+    A task that wrote an exitcode has finished: state_of already says exited-ok/exited-err for it, so
+    treating it as a dead worker and restarting it would supersede finished work (2026-11-10: r329 said
+    DONE, exited 0, and sync restarted it anyway, superseding a finished task)."""
+    return {n for n, t in tasks.items()
+            if t.get("state") in ("running", "exited-err") and not pid_alive(t)
+            and not os.path.exists(os.path.join(t.get("worktree", ""), "exitcode"))}
+
+
+def no_restart_reason(t, pool, counts, banned=None):
+    """Why a dead worker must NOT be restarted, or None when it may be.
+
+    A slot that is disabled (count 0) or already at its count, or a model that is banned, can only
+    fail again — restarting there is what pinned one doc to an expired haiku OAuth session for 335
+    rounds. "counts" is alive running tasks keyed by model."""
+    m = t.get("model", "")
+    sl = next((sl for sl in pool.get("slots", []) if sl.get("model") == m), None)
+    if sl is not None and counts.get(m, 0) >= sl.get("count", 0):
+        return "slot %s at capacity (%d/%d)" % (sl["name"], counts.get(m, 0), sl.get("count", 0))
+    if m in (banned if banned is not None else dead_models()):
+        return "model %s is banned" % m
+    return None
+
+
 def state_of(t):
     """running / exited-ok / exited-err, unless a hand-set terminal or later state wins."""
     if t.get("state") not in (None, "running", "exited-ok", "exited-err"):
@@ -216,6 +249,24 @@ def next_slot():
     return max(used, default=0) + 1
 
 
+def claim_blocker(claims, tasks):
+    """Why a task claiming CLAIMS may not start now, or None. The one place both spawn and refill ask it: refill must
+    know before it reserves a slot (a refused spawn that kept its slot starved the whole pool, 2026-11-10: five
+    claim-blocked fix-merge tasks took all five easy slots, so qwen never got work)."""
+    for other, t in tasks.items():
+        if not holds_claims(t):
+            continue
+        for c in claims:
+            for oc in t["claims"]:
+                if conflicts(c, oc):
+                    return "claim %r conflicts with %r held by task %s (%s, %d commits)" % (
+                        c, oc, other, state_of(t), ahead(t))
+    ext = external_conflicts(claims)
+    if ext:
+        return "claim %r conflicts with %r held by external session %s" % (ext[0][1], ext[0][2], ext[0][0])
+    return None
+
+
 def cmd_spawn(a):
     """Start a worker. A task runs on a POOL SLOT (tools/pool.json): its model and runner come from the slot, and it
     never moves to another model. `--model` (a bare model, no slot) is for hand-run experiments only."""
@@ -230,17 +281,9 @@ def cmd_spawn(a):
     with registry() as tasks:
         if a.name in tasks:
             sys.exit("task %s already exists" % a.name)
-        for other, t in tasks.items():
-            if not holds_claims(t):
-                continue
-            for c in a.claim:
-                for oc in t["claims"]:
-                    if conflicts(c, oc):
-                        sys.exit("claim %r conflicts with %r held by task %s (%s, %d commits)" % (
-                            c, oc, other, state_of(t), ahead(t)))
-        ext = external_conflicts(a.claim)
-        if ext:
-            sys.exit("claim %r conflicts with %r held by external session %s" % (ext[0][1], ext[0][2], ext[0][0]))
+        blocked = claim_blocker(a.claim, tasks)
+        if blocked:
+            sys.exit(blocked)
         n = next_slot()
         wt, branch = os.path.join(PARENT, "work-%d" % n), "work/" + a.name
         git("worktree", "add", "-b", branch, wt, a.base)
@@ -423,7 +466,7 @@ def cmd_release(a):
 
 def cmd_claims(a):
     for name, t in sorted(load().items()):
-        if state_of(t) not in TERMINAL:
+        if holds_claims(t):                  # the same rule refill and spawn use: a finished worker with no commits holds nothing
             print("%-24s %s" % (name, ", ".join(t["claims"])))
     for name, e in sorted(external().items()):
         print("%-24s %s   [external: %s]" % (name, ", ".join(e["claims"]), e.get("who") or "?"))
@@ -479,6 +522,8 @@ def cmd_enqueue(a):
 
 LIMIT_ERR = re.compile(r"model (is )?(unavailable|not found)|unknown model|usage limit|rate.?limit|quota|\b429\b|too many requests|insufficient (credit|balance)|"
                        r"limit (exceeded|reached)|resets? (at|in) |hit your (weekly |daily |5-hour )?limit", re.I)
+AUTH_ERR = re.compile(r"Failed to authenticate|OAuth (session )?expired|could not be refreshed|"
+                      r"invalid[_-]?api[_-]?key|401 Unauthorized|Please run .claude.*login", re.I)
 BREAKER_MIN = 30   # after a worker dies on arrival, start nothing new for this long
 
 
@@ -630,6 +675,17 @@ def live_names(tasks):
         return None
 
 
+def _working(name, t):
+    """A task that has not finished: no terminal or exited state, and no exitcode file. Whether its process or session is
+    alive is the caller's question (running_by_slot)."""
+    if t.get("state") in TERMINAL or t.get("state") in ("exited-ok", "exited-err"):
+        return False
+    wt = t.get("worktree", "")
+    if wt and not os.path.isdir(wt):      # its worktree is gone (removed, or never made): nothing can be working in it
+        return False
+    return not os.path.exists(os.path.join(wt, "exitcode"))
+
+
 def running_by_slot(tasks=None, live=frozenset()):
     """Running workers per pool slot: a task is running when its pid is alive OR it has a live opencode session (`live`,
     from live_names). A worker started before slots existed has no `pool`: it is counted against the slot that owns its
@@ -637,9 +693,23 @@ def running_by_slot(tasks=None, live=frozenset()):
     by_model = {sl["model"]: sl["name"] for sl in load_pool()["slots"]}
     n = {}
     for name, t in (tasks or load()).items():
-        if state_of(t) == "running" or name in live:
+        # a live opencode session counts only while the task is still working: a session the ledger did not start
+        # (or a task already superseded/exited, or one that wrote its exitcode) must not pin its slot. The pid check
+        # is not state_of()=="running": a dead pid with a live session is exactly the case the live set exists for.
+        if _working(name, t) and (alive(t.get("pid")) or name in live):
             slot = t.get("pool") or by_model.get(t.get("model"))
             n[slot] = n.get(slot, 0) + 1
+    return n
+
+
+def running_by_model(tasks=None, live=frozenset()):
+    """Working workers per model, counted exactly as running_by_slot counts them (sync's cap check must agree with
+    refill's: it had its own rule, and skipped restarts of workers that had live sessions)."""
+    n = {}
+    for name, t in (tasks or load()).items():
+        if _working(name, t) and (alive(t.get("pid")) or name in live):
+            m = t.get("model", "")
+            n[m] = n.get(m, 0) + 1
     return n
 
 
@@ -675,6 +745,18 @@ def dead_on_arrival(t):
     return bool(LIMIT_ERR.search(tail) or NET_ERR.search(tail))
 
 
+def auth_failed(t):
+    """The worker's own log ends in an authentication failure: the model cannot be used at all until the
+    user re-authenticates, so restarting it on the same model just fails again. Distinct from a usage
+    limit (LIMIT_ERR) and a network error (NET_ERR), which is why it needs its own pattern — 2026-11-10:
+    haiku's OAuth session expired and one doc was restarted 335 times, each worker dying in 1 s."""
+    lp = os.path.join(t["worktree"], "work.log")
+    if not os.path.exists(lp):
+        return False
+    tail = re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:])
+    return bool(AUTH_ERR.search(tail))
+
+
 def bounce(name, t):
     """Take a dead-on-arrival task back to the QUEUE, leaving no trace: drop its worktree and branch (only after proving
     nothing in it is the worker's: no commits, and nothing beyond the files spawn itself wrote) and re-enqueue it under
@@ -699,10 +781,18 @@ def bounce(name, t):
 
 
 def doc_class_now(item):
-    """The class of the bug doc a queued item works on, read from where its file sits NOW: bugs/ is easy, bugs/mid/ is
-    mid, bugs/hard/ is hard (the same rule as swarm.dir_class). A queued item carries the class it was queued in, and a
-    reclass moves the file while that item is still waiting, so the stored class goes stale; refill must ask the file.
-    An item with no bug claim, or whose doc is gone, keeps the class it was queued with."""
+    """The class a queued item runs in.
+
+    A `bug-` task's class is where its doc sits NOW: bugs/ is easy, bugs/mid/ is mid, bugs/hard/ is
+    hard (the same rule as swarm.dir_class). Such an item carries the class it was queued in, and a
+    reclass moves the file while that item is still waiting, so the stored class goes stale; refill
+    must ask the file.
+
+    Any other task keeps the class it was queued with. Controller work chooses its own class
+    deliberately — a replan of a hard doc runs at easy, because easy is the class that has a slot —
+    and deriving it from the doc would park it at an unserved class forever."""
+    if not item.get("name", "").startswith("bug-"):
+        return item.get("cls")
     for c in item.get("claims", []):
         if c.startswith("bug:"):
             hits = sorted(glob.glob(os.path.join(MAIN, "bugs", "**", c[4:] + ".md"), recursive=True))
@@ -780,10 +870,10 @@ def cmd_refill(a):
         print("%s refill: breaker open for %.0f more min, starting nothing" % (
             time.strftime("%T"), (breaker_until() - time.time()) / 60), flush=True)
         return
-    if a.target is None:
-        a.target = pool_total()
     busy = running_by_slot(tasks, live_set)
     live = sum(busy.values())
+    if a.target is None:
+        a.target = max(pool_total(), live)
     items = sorted(items_all, key=lambda i: i["added"])
     started = 0
     items = [i for i in items if i["name"].startswith(tuple(a.prefix.split(",")))]
@@ -792,8 +882,9 @@ def cmd_refill(a):
     for it in items:
         if live + started >= a.target and not it["name"].startswith("fix-landed"):
             continue                      # a red master is repaired at once, whatever the slot count
-        if any(state_of(tasks[n]) != "integrated" if n in tasks else True for n in it["needs"]):
-            continue
+        unmet = [n for n in it["needs"] if not (n in tasks and state_of(tasks[n]) == "integrated")]
+        if unmet:
+            continue                      # waiting on a task: `control.py queue` says what it waits on
         # A task is not tied to a model: its enqueue slot (`pool`) is only the PREFERRED one. It takes that slot if it is
         # free, else the first free, unbanned slot in pool order. Every slot runs the same kind of work.
         # The class comes from the doc's file NOW, not from the queue entry: a reclass moves the doc while its task is
@@ -810,6 +901,9 @@ def cmd_refill(a):
             print("%s: base %s no longer exists; starting from master" % (it["name"], base), flush=True)
             it = dict(it, base="master")
             _rewrite_queued(it)
+        blocked = claim_blocker(it["claims"], tasks)
+        if blocked:
+            continue                      # a claim held elsewhere: the task waits, and takes no slot (see `queue`)
         sl = pick_slot(it, busy)
         if sl is None:
             continue                      # every slot is full or banned: the task waits
@@ -818,12 +912,13 @@ def cmd_refill(a):
         name = it["name"] if it["name"] not in tasks else "%s-%d" % (it["name"][:50], int(time.time() * 1000) % 1000000)
         ns = argparse.Namespace(name=name, claim=it["claims"], task=it["task"], task_file=None,
                                 file=it["files"], base=it["base"], model=None, pool=sl["name"], cls=it.get("cls"))
-        busy[sl["name"]] = busy.get(sl["name"], 0) + 1
         try:
             cmd_spawn(ns)
         except SystemExit as e:
-            print("skip %s: %s" % (it["name"], e))
-            continue
+            print("skip %s: %s" % (it["name"], e), flush=True)
+            continue                      # refused: no slot was taken, so the next task can use it
+        busy[sl["name"]] = busy.get(sl["name"], 0) + 1
+        tasks = load()                    # the new worker's claims must block the rest of this pass
         os.remove(os.path.join(qdir(), it["name"] + ".json"))
         started += 1
     waiting = len(items) - started
@@ -883,10 +978,24 @@ def cmd_priority(a):
 
 
 def cmd_queue(a):
+    """Every queued task, and what it waits on right now (computed here, so no pass has to log it)."""
+    tasks, pool = load(), load_pool()
+    busy = running_by_slot(tasks, live_names(tasks) or frozenset())
     for f in sorted(os.listdir(qdir())):
-        if f.endswith(".json"):
-            i = json.load(open(os.path.join(qdir(), f)))
-            print("%-28s needs: %-40s claims: %s" % (i["name"], ", ".join(i["needs"]) or "-", ", ".join(i["claims"])))
+        if not f.endswith(".json"):
+            continue
+        i = json.load(open(os.path.join(qdir(), f)))
+        unmet = [n for n in i["needs"] if not (n in tasks and state_of(tasks[n]) == "integrated")]
+        blocked = claim_blocker(i["claims"], tasks)
+        if unmet:
+            why = "needs %s integrated" % ", ".join(unmet)
+        elif blocked:
+            why = blocked
+        elif pick_slot(i, busy) is None:
+            why = "no free slot (%s)" % ", ".join(sl["name"] for sl in pool["slots"] if accepts(sl, i.get("cls") or "easy"))
+        else:
+            why = "startable now"
+        print("%-44s %-22s %s" % (i["name"][:44], ", ".join(i["claims"])[:22], why))
 
 
 def cmd_hold(a):
@@ -907,18 +1016,32 @@ def cmd_ps(a):
     """Our workers' live opencode processes, told apart from the user's own opencode sessions by their
     arguments: ours are launched with `run --model M --auto ... <PARENT>/work-N/TASK.md` (opencode v1: `--model M run --auto
     --dir <PARENT>/work-N`), theirs have neither."""
-    tasks = {os.path.realpath(t["worktree"]): n for n, t in load().items()}
+    tasks = load()
+    print("%-40s %-6s %-5s %-6s %-28s %s" % ("name", "pid", "alive", "cls", "model", "claims"))
+    for name, t in sorted(tasks.items()):
+        if t.get("state") != "running":
+            continue
+        pid = t.get("pid")
+        alive = False
+        if pid:
+            try:
+                os.kill(pid, 0); alive = True
+            except (OSError, ProcessLookupError):
+                alive = False
+        claims = ",".join(t.get("claims") or [])[:40]
+        model = (t.get("model") or t.get("pool") or "?")[:28]
+        cls = (t.get("cls") or "?")[:6]
+        print("%-40s %-6s %-5s %-6s %-28s %s" % (name[:40], pid, "yes" if alive else "no", cls, model, claims))
+    # live process scan
     out = subprocess.run(["ps", "-axww", "-o", "pid=,etime=,rss=,args="], capture_output=True, text=True).stdout
     mine = other = 0
     for line in out.splitlines():
         m = re.search(r"opencode .*(?:--dir |instructions are in )(\S+?)(?:/TASK\.md)?(?:\s|$)", line)
         if m and " run " in line and "sh -c" not in line[:40]:
-            pid, et, rss, _ = line.split(None, 3)
-            print("%-24s pid %-6s up %-10s %5.0f MB" % (tasks.get(os.path.realpath(m.group(1)), "?"), pid, et, int(rss) / 1024))
             mine += 1
         elif re.search(r"/opencode\s*$", line.strip()):
             other += 1
-    print("%d of our workers alive; %d other opencode process(es) belong to someone else" % (mine, other))
+    print("%d live opencode process(es) of ours; %d belong to someone else" % (mine, other))
 
 
 def cmd_guard(a):
@@ -1149,9 +1272,41 @@ def _task_text(t):
     return m.group(1) if m else t["summary"]
 
 
+MAX_RESTARTS = 10   # a chain restarted this many times is not progressing: abandon it so the claim is released
+
+
+def chain_depth(name):
+    """How many restarts a task's name records: each "-rN" suffix is one restart, so `X-r2-r2-r5` is depth 3."""
+    return len(re.findall(r"-r\d+", name))
+
+
+def doc_exists_for(claims):
+    """Whether a bug doc exists for these claims. The one rule for work: it exists only while its doc does. A
+    `bug:NAME` (or `gate:NAME`) claim matches a doc anywhere under MAIN/bugs whose file name contains NAME, with `_`
+    read as `-`. Sync and restart both ask this, so they cannot disagree about whether work still has a doc."""
+    for c in claims:
+        tail = c.split(":")[-1].lower().replace("_", "-")
+        for _root, _dirs, files in os.walk(os.path.join(MAIN, "bugs")):
+            if any(fn.endswith(".md") and tail in fn.lower().replace("_", "-") for fn in files):
+                return True
+    return False
+
+
 def restart(name, why, model=None):
-    """Snapshot a worker's uncommitted work, stop it, and continue it as NAME-rN from its own branch."""
+    """Snapshot a worker's uncommitted work, stop it, and continue it as NAME-rN from its own branch.
+    Returns the new task's name, or None once the chain is over MAX_RESTARTS: the task is then marked
+    abandoned so its claim is released and the doc is re-fed (a fresh worker, possibly a different model)
+    instead of round 300 of the same failure. A task whose doc is gone is not continued at all: 197 rounds of
+    fix-gate-formal-host-import-shapes ran with no doc behind them (2026-11-10)."""
     t = load()[name]
+    if not doc_exists_for(t.get("claims", [])):
+        with registry() as reg:
+            reg[name]["state"] = "abandoned"
+        print("restart refused: %s has no bug doc for its claims %s; work exists only while its doc does"
+              % (name, t.get("claims")))
+        return None
+    # strip any existing -rN suffix so restarts increment instead of nesting: foo-r2 -> foo-r3, not foo-r2-r2
+    base = re.sub(r"-r\d+$", "", name)
     wt = t["worktree"]
     git("add", "-A", cwd=wt, check=False)
     git("commit", "-q", "-m", "WIP snapshot by controller: %s's uncommitted edits when it was restarted (%s)" % (name, why),
@@ -1160,10 +1315,19 @@ def restart(name, why, model=None):
         fleet_ledger.kill_group(ctl_dir(), t["name"], "restart")
     except OSError:
         pass
+    # The budget counts the chain's depth, not the free name: stripping one "-rN" leaves a nested base (`X-r2-r2`),
+    # and the first free "-r2" under it always looks like round 2, so a chain of 300 restarts never reached the budget
+    # (2026-11-10: fix-gate-formal-doc-truth-r2-...-r134 kept restarting against a master that moved every pass).
+    depth = chain_depth(name)
     n = 2
-    while "%s-r%d" % (name, n) in load():
+    while "%s-r%d" % (base, n) in load():
         n += 1
-    new = "%s-r%d" % (name, n)
+    if depth + 1 > MAX_RESTARTS or n > MAX_RESTARTS:
+        with registry() as reg:
+            reg[name]["state"] = "abandoned"
+        print("restart budget exhausted: %s would be round %d; marked abandoned so its claim is released" % (name, n))
+        return None
+    new = "%s-r%d" % (base, n)
     with registry() as reg:
         reg[name]["state"] = "superseded"
     task = ("You CONTINUE task '%s': the previous instance stopped (%s). Everything it had done is on your branch (its last "
@@ -1176,7 +1340,8 @@ def restart(name, why, model=None):
 
 
 def cmd_restart(a):
-    print("restarted as", restart(a.name, a.why, a.model))
+    new = restart(a.name, a.why, a.model)
+    print("restarted as %s" % new if new else "not restarted: %s (over the restart budget, marked abandoned)" % a.name)
 
 
 def cmd_unstick(a):
@@ -1203,7 +1368,8 @@ def cmd_unstick(a):
             stack.extend(kids.get(pid, ()))
         print("%-32s idle %5.1f min, tree cpu %5.1f%%%s" % (name, idle, busy, "  <- STALLED" if idle >= a.idle_min and busy < 3.0 else ""))
         if idle >= a.idle_min and busy < 3.0 and not a.dry_run:
-            print("   restarted as", restart(name, "stalled %.0f min with no CPU (a network error?)" % idle))
+            new = restart(name, "stalled %.0f min with no CPU (a network error?)" % idle)
+            print("   restarted as %s" % new if new else "   not restarted: %s (over the restart budget)" % name)
     cmd_unstick_dead(a)
 
 
@@ -1224,7 +1390,8 @@ def cmd_unstick_dead(a):
         if NET_ERR.search(tail):
             print("%-32s died of a network error: " % name + tail.strip().splitlines()[-1][:80])
             if not a.dry_run:
-                print("   restarted as", restart(name, "died of a network error"))
+                new = restart(name, "died of a network error")
+                print("   restarted as %s" % new if new else "   not restarted: %s (over the restart budget)" % name)
 
 
 def descendants(pid):
@@ -1297,6 +1464,115 @@ def cmd_reap(a):
 
 
 
+def cmd_sync(a):
+    '''Reconcile the queue and registry with the filesystem and live processes.
+
+    - Queue entries whose bug doc no longer exists on disk are stale: drop them.
+    - Queue entries whose class drifted from the doc's current class: rewrite.
+    - Registry tasks marked 'running' whose process is dead: report (not auto-fixed).
+    --dry-run: report only, change nothing.'''
+    import os as _os
+    dry = getattr(a, "dry_run", False)
+    restart_dead = getattr(a, "restart_dead", False)
+    tasks = load()
+    removed = []
+    rewritten = []
+    for f in sorted(_os.listdir(qdir())):
+        if not f.endswith(".json"):
+            continue
+        path = _os.path.join(qdir(), f)
+        with open(path) as fh:
+            it = json.load(fh)
+        doc_exists = False
+        if it.get("files"):
+            doc_exists = any(_os.path.exists(c) for c in it["files"])
+        else:
+            doc_exists = doc_exists_for(it.get("claims", []))
+        if not doc_exists:
+            removed.append(it["name"])
+            if not dry:
+                _os.remove(path)
+            continue
+        new_cls = doc_class_now(it)
+        if new_cls != it.get("cls"):
+            rewritten.append((it["name"], it.get("cls"), new_cls))
+            if not dry:
+                it2 = dict(it, cls=new_cls)
+                _rewrite_queued(it2)
+    if removed:
+        print("sync: queued stale removed=%d%s" % (len(removed), " (dry-run)" if dry else ""))
+    for n in removed:
+        print("  removed %s" % n)
+    if rewritten:
+        print("sync: queued class-rewritten=%d" % len(rewritten))
+    for n, old, new in rewritten:
+        print("  %s: %s -> %s" % (n, old, new))
+    live = live_names(tasks)
+    # A task is dead when its recorded pid is gone. The opencode session listing is
+    # unreliable (times out, or keeps stale sessions), so it must not mask a dead pid.
+    dead_running = sorted(dead_running_tasks(tasks))
+    if dead_running and not dry and live is not None:
+        # A pid that is gone is not running. Record that, so the registry stops saying "running" for a worker that is
+        # not (2026-11-10: a killed README worker stayed "running" for hours, shown by ps and claims). A task whose
+        # session is still live is left alone, and an unreadable listing (live is None) changes nothing.
+        with registry() as reg:
+            for n in dead_running:
+                if n not in live and n in reg and reg[n].get("state") == "running":
+                    reg[n]["state"] = "exited-err"
+    if dead_running:
+        print("sync: running-but-dead-in-registry=%d" % len(dead_running))
+        for n in dead_running:
+            print("  %s" % n)
+    if dead_running and restart_dead and not dry:
+        pool = load_pool()
+        counts = running_by_model(tasks, live_names(tasks) or frozenset())
+        for n in dead_running:
+            t = tasks.get(n, {})
+            if t.get("worktree") and not os.path.isdir(t["worktree"]):
+                # a dead worker whose worktree is gone cannot be restarted: retire it, so it stops holding its claim and
+                # its slot (2026-11-10: a killed README worker was counted against qwen-local on every pass)
+                with registry() as ts:
+                    ts[n]["state"] = "abandoned"
+                print("  abandoned %s: its worktree %s is gone" % (n, t["worktree"]))
+                continue
+            # DONE ratchet: if every doc claim's doc is gone (deleted on master), the task
+            # is already resolved; mark superseded instead of restarting it forever.
+            claims = [c for c in t.get("claims", []) if c.startswith("bug:")]
+            if claims and not any(os.path.exists(os.path.join(MAIN, "bugs", c[4:] + ".md")) or
+                                  os.path.exists(os.path.join(MAIN, "bugs", "mid", c[4:] + ".md")) or
+                                  os.path.exists(os.path.join(MAIN, "bugs", "hard", c[4:] + ".md")) or
+                                  os.path.exists(os.path.join(MAIN, "bugs", "formal", c[4:] + ".md"))
+                                  for c in claims):
+                with registry() as ts:
+                    ts[n]["state"] = "superseded"
+                print("  superseded %s: all its docs are gone" % n)
+                continue
+            m = t.get("model", "")
+            sl = next((sl for sl in pool.get("slots", []) if sl.get("model") == m), None)
+            # An authentication failure means the model cannot be used at all until the user
+            # re-authenticates: ban it, so nothing starts it again, rather than restarting a worker
+            # that dies in 1 s (2026-11-10: haiku's OAuth expired; one doc went 335 rounds on it).
+            if sl is not None and m not in dead_models() and auth_failed(t):
+                hours = mark_dead(m, sl)
+                print("  banned %s for %.1f h: its worker could not authenticate" % (m, hours))
+                continue
+            # Pool guard: never restart a worker whose slot is disabled (count 0) or already full,
+            # and never one whose model is banned — a banned model's new worker only fails again.
+            reason = no_restart_reason(t, pool, counts)
+            if reason:
+                print("  skipped %s: %s" % (n, reason))
+                continue
+            try:
+                new = restart(n, "process dead (sync --restart-dead)", None)
+                if new is None:
+                    continue
+                counts[m] = counts.get(m, 0) + 1
+                print("  restarted %s -> %s" % (n, new))
+            except Exception as e:
+                print("  FAILED to restart %s: %s" % (n, e))
+    elif dead_running and not dry:
+        print("  (not auto-fixed; use control.py mark NAME abandoned/exited-err by hand, or --restart-dead)")
+
 def cmd_report(a):
     rows = []
     for name, t in sorted(load().items(), key=lambda kv: kv[1]["slot"]):
@@ -1366,6 +1642,7 @@ def main():
     s = sub.add_parser("hold"); s.add_argument("name"); s.add_argument("--release", action="store_true"); s.set_defaults(f=cmd_hold)
     sub.add_parser("ps").set_defaults(f=cmd_ps)
     s = sub.add_parser("reap"); s.add_argument("--dry-run", action="store_true"); s.set_defaults(f=cmd_reap)
+    s = sub.add_parser("sync"); s.add_argument("--dry-run", action="store_true"); s.add_argument("--restart-dead", action="store_true"); s.set_defaults(f=cmd_sync)
     sub.add_parser("report").set_defaults(f=cmd_report)
     a = ap.parse_args()
     a.f(a)

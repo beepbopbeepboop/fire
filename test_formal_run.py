@@ -711,7 +711,6 @@ CASES = [
     # list on a heap blob (`_list_growable`); arm64 has no heap on this path and
     # stops loudly (list_append_overflow_is_loud). A row asserting exit 0 on both
     # backends was red on arm64 for that reason. Parity is an open item in
-    # doc/finish-formal.md ("Where the work stands").
 
     # ── the gimple backend's C runtime, refused by name ───────────────────
     #
@@ -14808,9 +14807,16 @@ PRINTF_TEXT_CASES = [
      "    printf(\"[%s]\", 2 + 4)\n"
      "    return 0\n",
      "refuse:an EXPRESSION whose own shape holds a number", None),
+    # `str(<integer literal>)` is a BUILD-TIME constant (the literal's decimal
+    # text), so it is text and prints; `str(n)` of a run-time integer is not, and
+    # stays refused (formatting needs a buffer that outlives the call).
+    ("printf_s_of_a_conversion_of_a_number_literal_prints",
+     "def main(n):\n"
+     "    printf(\"[%s][%s]\", str(42), repr(-7))\n"
+     "    return 0\n", 0, "[42][-7]"),
     ("printf_s_of_a_conversion_of_a_number_is_refused",
      "def main(n):\n"
-     "    printf(\"[%s]\", str(42))\n"
+     "    printf(\"[%s]\", str(n))\n"
      "    return 0\n",
      "refuse:walking the bytes at address", None),
     # And the GUARD for that unwrapping: a conversion of TEXT is text, and the

@@ -1552,6 +1552,22 @@ def module_member_libc(module: str, member: str):
     return _mods.get(_as_str(member))
 
 
+def _mojo_declares(path: str, name: str) -> bool:
+    """True when the Mojo source at `path` has a top-level declaration of
+    `name` (`def`/`fn`/`struct`/`trait`/`enum`/`alias`/`comptime`/`var`/`let`).
+    Best-effort: a read failure is "not declared" (the caller then reports the
+    missing declaration, which is the safer direction for a diagnostic)."""
+    import re as _re
+    try:
+        with open(path, 'r') as _f:
+            _txt = _f.read()
+    except Exception:
+        return False
+    _pat = _re.compile(r'^\s*(?:def|fn|struct|trait|enum|alias|comptime|var|let)\s+'
+                       + _re.escape(name) + r'\b', _re.M)
+    return _pat.search(_txt) is not None
+
+
 def _uncompiled_module_marker(gen, node) -> str:
     """The module name behind `mod.member(...)` when `mod` is a bare-import
     marker for a module THIS COMPILE never compiled, else `''`.
@@ -2936,6 +2952,36 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
                 t = gen._call_expr('char *', 'int64_t_realpath', [(arg_type, arg_val)])
                 return 'char *', t
+
+    # `mod.submod.func(...)` where `mod` is a module marker: `submod` must be
+    # either a real submodule of `mod` (`mod/submod.mojo`) or a name `mod`
+    # declares. A sibling module that merely shares `mod`'s package is NOT a
+    # member of `mod` — modular rejects the qualified access
+    # (import_qualified_member_no_leak.mojo).
+    if (isinstance(func.obj, gimple_ctypes.MemberExpr)
+            and isinstance(func.obj.obj, gimple_ctypes.IdentExpr)):
+        _bk_base = _as_str(func.obj.obj.name)
+        _bk_member = _as_str(func.obj.member)
+        if (_bk_base in getattr(gen, '_module_alias_names', ())
+                and _bk_member and _bk_member != _bk_base):
+            _bk_path = None
+            try:
+                _bk_path = gen._submodule_source_path(_bk_base)
+            except Exception:
+                _bk_path = None
+            _bk_is_sub = False
+            try:
+                _bk_is_sub = bool(gen._submodule_source_path(_bk_base + '.' + _bk_member))
+            except Exception:
+                _bk_is_sub = False
+            if (_bk_path and _bk_path.endswith('.mojo') and not _bk_is_sub
+                    and not _mojo_declares(_bk_path, _bk_member)):
+                _bln = getattr(func.obj, 'line', 0) or 0
+                _blc = getattr(func.obj, 'col', 0) or 0
+                _bfn = getattr(gen, '_current_filename', '') or ''
+                _bat = f'{_bfn}:{_bln}:{_blc}: ' if _bfn else f'{_bln}:{_blc}: '
+                raise RuntimeError(
+                    f"{_bat}error: module '{_bk_base}' has no declaration '{_bk_member}'")
 
     # `import a.b` binds `a`, so `a.b.f(...)` is a TWO-hop attribute call
     # ...
@@ -5061,6 +5107,26 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 return _ret, _raw
             for _ea in node.args:
                 gen.lower_expr(_ea)
+            # A qualified access `mod.name` where `mod` resolves to a local
+            # `.mojo` module that does NOT declare `name` is a hard compile
+            # error (modular's import_qualified_member_no_leak.mojo), not a
+            # runtime "module not compiled" stub. Only a resolvable Mojo
+            # module is checked — a Python module (`os`, `argparse`, ...) or
+            # an external package keeps the existing stub behaviour.
+            _mm_path = None
+            try:
+                _mm_path = gen._submodule_source_path(_marker_mod)
+            except Exception:
+                _mm_path = None
+            if (_marker_mod and _marker_mod.strip('.')
+                    and _mm_path and _mm_path.endswith('.mojo')
+                    and not _mojo_declares(_mm_path, method)):
+                _mln = getattr(node, 'line', 0) or 0
+                _mlc = getattr(node, 'col', 0) or 0
+                _mfn = getattr(gen, '_current_filename', '') or ''
+                _mat = f'{_mfn}:{_mln}:{_mlc}: ' if _mfn else f'{_mln}:{_mlc}: '
+                raise RuntimeError(
+                    f"{_mat}error: module '{_marker_mod.lstrip('.')}' has no declaration '{method}'")
             gen._emit_call(
                 'void', '', 'mojo_module_not_compiled',
                 [('char *', gen._intern_string(_as_str(_marker_mod))),
@@ -5208,6 +5274,17 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # a string/pointer box answers from the pointer so same-object
         # calls agree within a run while differing from any small int
         # hash (test_hash asserts 42's hash != "hello"'s, not values).
+        # `.__hash__(hasher)` on a scalar (the stdlib's element hash inside a
+        # LinkedList/List `__hash__`): fold the value into the hasher. The hasher
+        # is the word `mojo_hasher_new` made; the stdlib's `mut hasher` is that
+        # same word, so nothing needs to be returned. Returns no value (`None`).
+        if (method == '__hash__' and ot in ('int64_t', 'int')
+                and len(node.args) == 1 and not getattr(node, 'kwargs', None)):
+            _ht, _hv = gen.lower_expr(node.args[0])
+            _hw = gen._new_val('int64_t', f"(int64_t){_hv}")
+            gen._emit_call('void', '', 'mojo_hasher_update_int',
+                           [('int64_t', _hw), ('int64_t', ov_local)])
+            return 'int64_t', gen._new_val('int64_t', '0')
         if (method == '__hash__' and ot in ('int64_t', 'int')
                 and not node.args and not getattr(node, 'kwargs', None)):
             # mojo_pyobject_hash returns `int64_t` — same raw-GIMPLE
@@ -5709,7 +5786,7 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         _keys_v = gen._materialize_as_list(_keys_t, _keys_v)
         _vkind = '4'
         _vval = '0'
-        _vstr = '0'
+        _vstr = gen._new_val('char *', '(char *)0')
         if len(args) > 1:
             _vt, _vv = gen.lower_expr(args[1])
             if _vt == 'double':
@@ -5729,7 +5806,7 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             else:
                 _vkind = '0'; _vval = gen._new_val('int64_t', f'(int64_t){_vv}')
         t = gen._new_val('MojoDict *',
-                         f'mojo_dict_fromkeys_on ({ov}, {_keys_v}, {_vval}, {_vkind}, (char *){_vstr})')
+                         f'mojo_dict_fromkeys_on ({ov}, {_keys_v}, {_vval}, {_vkind}, {_vstr})')
         return 'MojoDict *', t
     if method == 'get' and args:
         key_type, key_val, key_is_bytes = _dict_key_probe(gen, *gen.lower_expr(args[0]))

@@ -898,14 +898,7 @@ def _call_go(e, param: str, env: dict, scope, render) -> str:
         pass
     # try to detect: if sym names a struct
     if structs_by_name is not None:
-        # could be dict name->struct def
-        try:
-            import inspect
-            # check
-            pass
-        except Exception:
-            pass
-        # common forms
+        # common forms: dict name->struct def, or a collection of names
         is_struct = False
         if isinstance(structs_by_name, dict) and sym in structs_by_name:
             is_struct = True
@@ -5857,7 +5850,12 @@ def loop_test(words: dict, pc: int):
 # a reason rather than being quietly dropped.
 _COND_ARITH: dict = {}
 _COND_ARITH_DEFAULT = [
-    _tag_leaf(f"all_goals first | decide | omega | grind | done | {_HOLE}",
+    # `(simp; done)` before the hole: the equality flag of `while n != 0`
+    # (`cmp x19, 0 ; b.eq`) leaves `x19 + 0 = (0 + 0) <<< 0 <-> x19 = 0`, which
+    # none of the arithmetic closers evaluates and `simp` does. Written as
+    # `simp; done` so a `simp` that only makes progress falls through to the hole
+    # instead of leaving an unsolved goal.
+    _tag_leaf(f"all_goals first | decide | omega | grind | (simp; done) | done | {_HOLE}",
               "loop-cond-flag"),
 ]
 
@@ -7150,7 +7148,15 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
     body_pc = cbz_fall
     exit_pc_val = cbz_taken
 
+    def _is_vs_trapcheck(b) -> bool:
+        """A conditional block ending in `b.vs`: the signed-overflow trap check."""
+        if b["kind"] != "cbz":
+            return False
+        w = words[b["instrs"][-1]]
+        return _step_branch_index(w) == 51 and (w & 0xf) == 6
+
     # Find body blocks
+    trapped = False
     body_blocks = []
     visited = set()
     queue = [body_pc]
@@ -7166,6 +7172,13 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
         b = blocks[bi]
         if b["kind"] == "b" and b["targets"][0] == cbz_start:
             break
+        if _is_vs_trapcheck(b):
+            # The signed-overflow trap check (`subs ...; b.vs trap`): the body
+            # continues on the FALL-THROUGH edge, and the taken edge is the
+            # emitter's own trap block, which is not part of the loop.
+            trapped = True
+            queue.append(b["targets"][0])
+            continue
         for t in b["targets"]:
             queue.append(t)
     if not any(blocks[bi]["kind"] == "b" and blocks[bi]["targets"][0] == cbz_start
@@ -7223,7 +7236,9 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
     body_pcs = list(cbz_prefix_pcs)
     for bi in body_blocks:
         body_pcs.extend(blocks[bi]["instrs"])
-    ci_m = _emit_defs("ci", body_pcs)
+    # A trapped body has a conditional branch in it, which a straight-line state
+    # chain cannot represent; its body is composed from block certificates below.
+    ci_m = 1 if trapped else _emit_defs("ci", body_pcs)
 
     # Exit: cbz prefix + CBZ (forced taken) + exit blocks + RET
     ex_pcs = list(cbz_prefix_pcs)
@@ -7241,7 +7256,7 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
     body_only_pcs = []
     for bi in body_blocks:
         body_only_pcs.extend(blocks[bi]["instrs"])
-    cb_m = _emit_defs("cb", body_only_pcs)
+    cb_m = 1 if trapped else _emit_defs("cb", body_only_pcs)
 
     if ck_m == 0 or ci_m == 0 or cz_m == 0 or ce_m == 0 or cb_m == 0:
         return None
@@ -7283,6 +7298,202 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
     SLOT = _slot_off + 8
     Pf = f"(fun s => mem_read_u64 s.mem (s.sp + UInt64.ofNat {SLOT}).toNat = UInt64.ofNat {exit_pc})"
     fuel_bound = f"({mc} + {mb} + 2) * arg.toNat + ({mc} + {me} + 2)"
+
+    if trapped:
+        # --- a body that crosses the signed-overflow trap check ---------------
+        # The shape the emitter produces for `n = n - 1` over `x19`:
+        #   block A: add x0,x19,#0 ; stp ; movz w0,#1 ; add x1,x0,#0 ; ldp ; subs x0,x0,x1 ; b.vs
+        #   block B: b <block C>
+        #   block C: add x19,x0,#0 ; b <loop test>
+        # Anything else is declined (None) and keeps its named refusal.
+        if len(body_blocks) != 3:
+            return None
+        _ba, _bb, _bc = (blocks[i] for i in body_blocks)
+        _ra = _ba["instrs"][:-1]
+        _rc = _bc["instrs"][:-1]
+        if (len(_ra) != 6 or _bb["kind"] != "b" or len(_bb["instrs"]) != 1
+                or _bb["targets"][0] != _bc["start"]
+                or _bc["kind"] != "b" or _bc["targets"][0] != cbz_start
+                or len(_rc) != 1):
+            return None
+        if ([_step_branch_index(words[x]) for x in _ra] != [10, 21, 23, 10, 22, 6]
+                or ((words[_ra[2]] >> 5) & 0xffff) != 1
+                or words[_ra[0]] != 0x91000260 or words[_ra[3]] != 0x91000001
+                or words[_ra[5]] != 0xeb010000 or words[_rc[0]] != 0x91000013):
+            return None
+        bi_a, bi_b, bi_c = body_blocks
+        # composed state definitions (names carry the pc they stand at)
+        _stage = []          # (def name, rhs given previous-state text)
+        _cur = "st"
+        _k = 0
+        _chain = []          # [(kind, bi, from_text, to_name)]
+        for bi in body_blocks:
+            _b = blocks[bi]
+            _mrun = len(_b["instrs"]) - 1
+            _term = _b["instrs"][-1]
+            if _mrun > 0:
+                _k += 1
+                _nm = f"{name}_cd_t{_k}"
+                _stage.append((_nm, f"{{ {name}_b{bi}_qT{_mrun - 1} ({_cur}) with pc := {_term} }}"))
+                _chain.append(("run", bi, _cur, _nm, _mrun))
+                _cur = f"{_nm} st"
+            _k += 1
+            _nm = f"{name}_cd_t{_k}" if bi != body_blocks[-1] else f"{name}_cd_body"
+            _nxt = (_term + 4) if _is_vs_trapcheck(_b) else _b["targets"][0]
+            _stage.append((_nm, f"{{ {_cur} with pc := {_nxt} }}"))
+            _chain.append(("vs" if _is_vs_trapcheck(_b) else "b", bi, _cur, _nm, _term))
+            _cur = f"{_nm} st"
+        mb = sum(len(blocks[i]["instrs"]) for i in body_blocks)
+        bbody = f"({name}_cd_body s)"
+        fuel_bound = f"({mc} + {mb} + 2) * arg.toNat + ({mc} + {me} + 2)"
+        A(f"/- The loop body crosses the signed-overflow trap check, so it is not one")
+        A(f"    straight-line run: it is the composition of block {bi_a}'s run, the `b.vs`")
+        A(f"    (NOT taken while the counter is in range), a `b`, and block {bi_c}'s run and")
+        A(f"    back edge.  Valid only for a counter that is nonzero and below 2^63. -/")
+        for _nm, _rhs in _stage:
+            A(f"def {_nm} (st : Arm64State) : Arm64State := {_rhs}")
+        A("")
+        _cd = f"{name}_cd"
+        _qa = f"{name}_b{bi_a}"
+        _ma = len(_ra)
+        _chain_defs = ", ".join([f"{_qa}_qS{k}" for k in range(_ma)]
+                                + [f"{_qa}_qT{k}" for k in range(_ma - 1)])
+        A(f"theorem {_cd}_x0 (st : Arm64State) : ({_qa}_qS{_ma - 1} st).x0 = st.x19 := by")
+        A(f"  simp only [{_chain_defs}, arm64_reg, arm64_set_reg]")
+        A(f"  rw [mem_read_push_low st.mem st.sp]")
+        A(f"  simp")
+        A(f"theorem {_cd}_x1 (st : Arm64State) : ({_qa}_qS{_ma - 1} st).x1 = 1 := by")
+        A(f"  simp only [{_chain_defs}, arm64_reg, arm64_set_reg]")
+        A(f"  decide")
+        A(f"theorem {_cd}_nzcv (st : Arm64State) : ({_stage[0][0]} st).nzcv = arm64_subs_flags st.x19 1 := by")
+        A(f"  have h0 : arm64_reg 0 ({_qa}_qS{_ma - 1} st) = st.x19 := {_cd}_x0 st")
+        A(f"  have h1 : arm64_reg 1 ({_qa}_qS{_ma - 1} st) = 1 := {_cd}_x1 st")
+        A(f"  simp only [{_stage[0][0]}, {_qa}_qT{_ma - 1}, h0, h1]")
+        A(f"  rfl")
+        # per-terminator step lemmas
+        _steps = []
+        for kind_, bi, frm, to, aux in _chain:
+            if kind_ == "run":
+                continue
+            _i = (aux - base) // 4
+            _fn = f"{_cd}_step{len(_steps)}"
+            _steps.append((_fn, frm, to))
+            if kind_ == "vs":
+                A(f"theorem {_fn} (st : Arm64State) (hne : st.x19 ≠ 0)")
+                A(f"    (hlt : st.x19.toNat < 9223372036854775808) :")
+                A(f"    arm64_step ({frm}) {C} = some ({to} st) := by")
+                A(f"  have hf : arm64_matches_condition 6 ({_stage[0][0]} st).nzcv = false := by")
+                A(f"    rw [{_cd}_nzcv]; exact subs_one_no_overflow st.x19 hlt hne")
+                A(f"  rw [{name}_sr_{_i} ({frm}) rfl]")
+                A(f"  simp only [hf]")
+                A(f"  rfl")
+            else:
+                _w = words[aux]
+                _imm26 = _w & 0x03ffffff
+                _tgt = blocks[bi]["targets"][0]
+                A(f"theorem {_fn} (st : Arm64State) :")
+                A(f"    arm64_step ({frm}) {C} = some ({to} st) := by")
+                A(f"  have e : (UInt64.ofNat {aux} + (if (({_imm26} : UInt32) &&& 0x02000000) ≠ 0 then "
+                  f"(UInt64.ofNat ({_imm26} : UInt32).toNat) - (UInt64.ofNat (2^26)) else "
+                  f"UInt64.ofNat ({_imm26} : UInt32).toNat) * 4).toNat = {_tgt} := by native_decide")
+                A(f"  rw [{name}_sr_{_i} ({frm}) rfl]")
+                A(f"  have hp : ({frm}).pc = {aux} := rfl")
+                A(f"  simp only [hp, e]")
+                A(f"  rfl")
+        # the composed run: a chain of runs/steps, then seq them
+        A(f"theorem {_cd}_body_run (st : Arm64State) (hpc : st.pc = {body_pc})")
+        A(f"    (hne : st.x19 ≠ 0) (hlt : st.x19.toNat < 9223372036854775808) :")
+        A(f"    arm64_runs {C} {mb} st = some ({name}_cd_body st) := by")
+        _segs = []     # (have name, steps count, from text, to text)
+        _si = 0
+        for kind_, bi, frm, to, aux in _chain:
+            _si += 1
+            _hn = f"h{_si}"
+            if kind_ == "run":
+                _hp = "hpc" if frm == "st" else "rfl"
+                A(f"  have {_hn} : arm64_runs {C} {aux} ({frm}) = some ({to} st) := by")
+                A(f"    unfold {to}; exact {name}_b{bi}_runs ({frm}) {_hp}")
+                _segs.append((_hn, aux))
+            else:
+                _fn = next(f for (f, a, b_) in _steps if a == frm and b_ == to)
+                _args = " hne hlt" if kind_ == "vs" else ""
+                A(f"  have {_hn} : arm64_runs {C} 1 ({frm}) = some ({to} st) :=")
+                A(f"    runs_one_jump _ _ _ ({_fn} st{_args}) (by simp [{to}, {frm.split(' ')[0]}])")
+                _segs.append((_hn, 1))
+        _acc, _accn = _segs[0][0], _segs[0][1]
+        for _hn, _n in _segs[1:]:
+            A(f"  have a{_hn} := runs_seq _ _ _ _ _ _ {_acc} {_hn}")
+            _acc, _accn = f"a{_hn}", _accn + _n
+        A(f"  exact {_acc}")
+        _body_run_acc = _acc
+        # --- no intermediate state of the body is at the exit pc ---------------
+        _allpcs = [pc for i in body_blocks for pc in blocks[i]["instrs"]]
+        _nm_ = ", ".join(f"e{k}" for k in range(len(_allpcs)))
+        A(f"theorem {_cd}_body_mid (exit : Nat) (st : Arm64State) (hpc : st.pc = {body_pc})")
+        A(f"    (hne : st.x19 ≠ 0) (hlt : st.x19.toNat < 9223372036854775808)")
+        A(f"    (hexit : " + " ∧ ".join(f"exit ≠ {pc}" for pc in _allpcs) + ") :")
+        A(f"    ∀ u < {mb}, ∀ su, arm64_runs {C} u st = some su → su.pc ≠ exit := by")
+        A(f"  obtain ⟨{_nm_}⟩ := hexit")
+        _si = 0
+        _hseg = []
+        for kind_, bi, frm, to, aux in _chain:
+            _si += 1
+            _hn = f"h{_si}"
+            if kind_ == "run":
+                _hp = "hpc" if frm == "st" else "rfl"
+                A(f"  have {_hn} : arm64_runs {C} {aux} ({frm}) = some ({to} st) := by")
+                A(f"    unfold {to}; exact {name}_b{bi}_runs ({frm}) {_hp}")
+            else:
+                _fn = next(f for (f, a, b_) in _steps if a == frm and b_ == to)
+                _args = " hne hlt" if kind_ == "vs" else ""
+                A(f"  have {_hn} : arm64_runs {C} 1 ({frm}) = some ({to} st) :=")
+                A(f"    runs_one_jump _ _ _ ({_fn} st{_args}) (by simp [{to}, {frm.split(' ')[0]}])")
+            _hseg.append((_hn, kind_, bi, frm, to, aux))
+        # mid of each segment, then compose left to right
+        _midnames = []
+        _pc_index = {pc: k for k, pc in enumerate(_allpcs)}
+        for _hn, kind_, bi, frm, to, aux in _hseg:
+            _mn = "m" + _hn[1:]
+            if kind_ == "run":
+                _runpcs = blocks[bi]["instrs"][:-1]
+                _hp = "hpc" if frm == "st" else "rfl"
+                _alts = " | ".join(["rfl"] * len(_runpcs))
+                A(f"  have {_mn} := {name}_b{bi}_mid exit ({frm}) {_hp} (by")
+                A(f"    intro p hp")
+                A(f"    simp only [List.mem_cons, List.mem_nil_iff, or_false] at hp")
+                A(f"    rcases hp with " + " | ".join(["rfl"] * len(_runpcs)) + " <;> omega)")
+            else:
+                A(f"  have {_mn} := mid_one {C} exit ({frm}) (by show ({aux} : Nat) ≠ exit; omega)")
+            _midnames.append(_mn)
+        _accr, _accm, _accn = _hseg[0][0], _midnames[0], (_chain[0][4] if _chain[0][0] == "run" else 1)
+        _prev_to = _hseg[0][4]
+        for k in range(1, len(_hseg)):
+            _hn, kind_, bi, frm, to, aux = _hseg[k]
+            _n = aux if kind_ == "run" else 1
+            A(f"  have x{k} := mid_seq {C} exit {_accn} {_n} st ({_prev_to} st) {_accr} {_accm} {_midnames[k]}")
+            A(f"  have y{k} := runs_seq _ _ _ _ _ _ {_accr} {_hn}")
+            _accm, _accr, _accn = f"x{k}", f"y{k}", _accn + _n
+            _prev_to = to
+        A(f"  exact {_accm}")
+        # --- the counter decrements ---------------------------------------------
+        _all_stage = ", ".join(nm for nm, _ in _stage)
+        _qc = f"{name}_b{bi_c}"
+        A(f"theorem {_cd}_body_dec (st : Arm64State) : ({name}_cd_body st).x19 = st.x19 - 1 := by")
+        A(f"  simp only [{_all_stage}, {_qc}_qT0, {_qc}_qS0, {_qa}_qT{_ma - 1},")
+        A(f"    arm64_reg, arm64_set_reg, {_cd}_x0, {_cd}_x1]")
+        A(f"  have h1 : ((1 : UInt64) <<< UInt64.ofNat 0) = 1 := by decide")
+        A(f"  simp")
+        # --- the frame slot survives the body ----------------------------------
+        A(f"theorem {_cd}_frame_body (s : Arm64State)")
+        A(f"    (h : mem_read_u64 s.mem (s.sp + UInt64.ofNat {SLOT}).toNat = UInt64.ofNat {exit_pc}) :")
+        A(f"    mem_read_u64 ({name}_cd_body s).mem (({name}_cd_body s).sp + UInt64.ofNat {SLOT}).toNat "
+          f"= UInt64.ofNat {exit_pc} := by")
+        A(f"  simp only [{_all_stage}, {_qc}_qT0, {_qc}_qS0,")
+        A(f"    " + ", ".join(f"{_qa}_qS{k}" for k in range(_ma)) + ", "
+          + ", ".join(f"{_qa}_qT{k}" for k in range(_ma)) + ", arm64_set_reg]")
+        A(f"  have e : s.sp - UInt64.ofNat 16 + UInt64.ofNat 16 + UInt64.ofNat {SLOT} = s.sp + UInt64.ofNat {SLOT} := by grind")
+        A(f"  rw [e, mem_read_push_frame _ _ (by decide : {SLOT} < 2^63)]")
+        A(f"  exact h")
 
     _qdefs, _qsym = loop_test_def(name, words, cbz_pc)
     A(f"/- The loop's exit test, as the predicate the contract is stated over. -/")
@@ -7339,6 +7550,9 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
          f"    arm64_step s {C} = some {{ s with pc := {cbz_start} }}",
          None),
     ]:
+        if trapped and hname in (f"{name}_loop_frame_body", f"{name}_loop_body_dec",
+                                 f"{name}_loop_body_step"):
+            continue          # a trapped body has its own `_cd_*` lemmas, above
         A(f"theorem {hname} {hsig} := by")
         if hname == f"{name}_loop_cond_x19":
             _ch, _ = _emit_reg_chain(name, words, f"b{ck_bi}", cbz_prefix_pcs, 19, st="s")
@@ -7418,6 +7632,66 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
         else:
             raise ValueError(f"unsupported countdown helper theorem: {hname}")
         A("")
+    if trapped:
+        # `hcondDone` by REWRITING, never by asking Lean to unify the two exit
+        # states: the exit block's result does not read `pc`, `rfl` says so
+        # cheaply, and the defeq check between `{{ X with pc := a }}` chains of the
+        # exit block and the bare chain is what stalled the elaborator.
+        A(f"theorem {name}_cd_ex_pc (X : Arm64State) (p : Nat) :")
+        A(f"    ({eqt} {{ X with pc := p }}).x0 = ({eqt} X).x0 := by rfl")
+        A(f"theorem {name}_cd_hdone (s : Arm64State) (hs : s.pc = {cbz_start})")
+        A(f"    (hq : {_qsym} ({{ {cqt} s with pc := {cbz_pc} }}) = true) :")
+        A(f"    ({eqt} ({{ {{ {cqt} s with pc := {cbz_pc} }} with pc := {cbz_taken} }} : Arm64State)).x0 = mojo s.x19 := by")
+        A(f"  have h := {name}_loop_exit_x0 ({cqt} s) (({name}_loop_cond_flag s hs).mp hq)")
+        A(f"  have hx : arm64_reg 19 ({cqt} s) = arm64_reg 19 s := {name}_loop_cond_x19 s hs")
+        A(f"  have hx' : ({cqt} s).x19 = s.x19 := hx")
+        A(f"  rw [hx'] at h")
+        A(f"  rw [{name}_cd_ex_pc, {name}_cd_ex_pc]")
+        A(f"  exact h")
+        A(f"theorem {name}_cd_hmojo (a : UInt64) (ha : a ≠ 0)")
+        A(f"    (hlt : a.toNat < 9223372036854775808) : mojo (a - 1) = mojo a := by")
+        A(f"  have h1 : (a - 1).toNat < 9223372036854775808 := by")
+        A(f"    rw [toNat_sub_one a ha]; exact Nat.lt_of_le_of_lt (Nat.sub_le _ _) hlt")
+        A(f"  simp [mojo, {name}_go_zero, hlt, h1]")
+        A(f"theorem {name}_cd_loop (arg : UInt64) (st : Arm64State)")
+        A(f"    (hpc : st.pc = {cbz_start}) (hx19 : st.x19 = arg)")
+        A(f"    (hframe : mem_read_u64 st.mem (st.sp + UInt64.ofNat {SLOT}).toNat = UInt64.ofNat {exit_pc})")
+        A(f"    (hlt : arg.toNat < 9223372036854775808) :")
+        A(f"    ∀ (fuel : Nat), {fuel_bound} ≤ fuel →")
+        A(f"      ∃ s, arm64_go_exit st {C} {exit_pc} fuel = some s ∧ s.x0 = mojo arg := by")
+        A(f"  intro fuel hfuel")
+        A(f"  refine while_dec_exit_contract_lt 9223372036854775808 {C} {exit_pc} {cbz_start} {cbz_pc} {cbz_fall} {cbz_taken} {_qsym}")
+        A(f"    mojo")
+        A(f"    (fun s => {{ {cqt} s with pc := {cbz_pc} }})")
+        A(f"    (fun s => {bbody})")
+        A(f"    (fun s => {eqt} s)")
+        A(f"    {mc} {mb} {me}")
+        A(f"    {Pf}")
+        A(f"    (by intro s pc h; simpa using h)")
+        A(f"    (by intro s hs h; exact {name}_loop_frame_cond s hs h)")
+        A(f"    (by intro s hs hne hlt' h; exact {name}_cd_frame_body s h)")
+        for _l in _cond_step_arg(name, cbz_idx, _qsym):
+            A(f"    {_l}")
+        A(f"    {cc}_runs")
+        A(f"    (fun st hs => {cc}_mid {exit_pc} st hs (by simp))")
+        A(f"    (by intro s hs; rfl)")
+        A(f"    (by intro s hs hx0; exact ({name}_loop_cond_flag s hs).mpr hx0)")
+        A(f"    (by intro s hs hq hx0; exact absurd (({name}_loop_cond_flag s hs).mpr hx0) hq)")
+        A(f"    {name}_loop_cond_x19")
+        A(f"    (by intro s hs hne hlt' hP; exact {name}_cd_body_run s hs hne hlt')")
+        A(f"    (by intro s hs hne hlt' hP; exact {name}_cd_body_mid {exit_pc} s hs hne hlt' (by decide))")
+        A(f"    (by intro s hs hne hlt' hP; rfl)")
+        A(f"    (by intro s hs hne hlt' hP; exact {name}_cd_body_dec s)")
+        A(f"    (by intro s hs h; exact {qe}_runs s hs ({name}_loop_exit_x30 s hs h))")
+        A(f"    (fun st hs => {qe}_mid {exit_pc} st hs (by simp))")
+        A(f"    (by intro s hs h; exact {name}_loop_exit_pc s hs h)")
+        A(f"    (by intro s hs hx; exact {name}_loop_exit_x0 s hx)")
+        A(f"    {name}_cd_hdone")
+        A(f"    {name}_cd_hmojo")
+        A(f"    (by decide) (by decide) (by decide)")
+        A(f"    arg st fuel hlt (work_loop_fuel {mc} {mb} {me} arg.toNat fuel hfuel) hpc hx19 hframe")
+        A("")
+        return "\n".join(L), SLOT, trapped
     A(f"theorem {name}_cd_loop (arg : UInt64) (st : Arm64State)")
     A(f"    (hpc : st.pc = {cbz_start}) (hx19 : st.x19 = arg)")
     A(f"    (hframe : mem_read_u64 st.mem (st.sp + UInt64.ofNat {SLOT}).toNat = UInt64.ofNat {exit_pc}) :")
@@ -7460,7 +7734,7 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
     A(f"    (by decide) (by decide) (by decide)")
     A(f"    arg st fuel (work_loop_fuel {mc} {mb} {me} arg.toNat fuel hfuel) hpc hx19 hframe")
     A("")
-    return "\n".join(L), SLOT
+    return "\n".join(L), SLOT, trapped
 
 
 
@@ -9826,8 +10100,14 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         _cfg_leaf(A, IND + "  ", "dec-while-back-edge-frame-slot",
                                   "all_goals (first | done | sorry)",
                                   note="the frame slot")
+                        _bounded = bool(ctx["loop_contract"].get("bounded"))
+                        if _bounded:
+                            A(f"{IND}have hlt_arg : (n - 1).toNat < 9223372036854775808 := by")
+                            A(f"{IND}  have hnz : n ≠ 0 := by intro h0; rw [h0] at {_bsrc}; simp at {_bsrc}")
+                            A(f"{IND}  rw [toNat_sub_one n hnz]")
+                            A(f"{IND}  exact Nat.lt_of_le_of_lt (Nat.sub_le _ _) hltn")
                         A(f"{IND}have hlc_{bi} := {_lc_name}_cd_loop (n - 1) {_over(s_cur, tgt)}")
-                        A(f"{IND}  (by rfl) hx19_arg hframe_arg")
+                        A(f"{IND}  (by rfl) hx19_arg hframe_arg" + (" hlt_arg" if _bounded else ""))
                         A(f"{IND}  ({fuel_1}) (by")
                         A(f"{IND}    have hnz : n ≠ 0 := by intro h0; rw [h0] at {_bsrc}; simp at {_bsrc}")
                         A(f"{IND}    have hnge1 : 1 ≤ n.toNat := Nat.pos_of_ne_zero (fun h0 => hnz (UInt64.toNat_inj.mp (by rw [h0]; rfl)))")
@@ -9842,7 +10122,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}  have hnge1 : 1 ≤ n.toNat := Nat.pos_of_ne_zero (fun h0 => hnz (UInt64.toNat_inj.mp (by rw [h0]; rfl)))")
                         A(f"{IND}  rw [toNat_sub_one n (by intro h; subst h; simp at {_bsrc})]")
                         A(f"{IND}  omega")
-                        A(f"{IND}simp [hx0f_{bi}, mojo, {name}_go_zero, hltc]")
+                        A(f"{IND}simp [hx0f_{bi}, mojo, {name}_go_zero, hltc"
+                          + (", hltn" if _bounded else "") + "]")
                 else:
                     if tgt_bi is None:
                         raise ValueError(
@@ -11491,6 +11772,10 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         "exit_pc": exit_pc,
                         "body_pc": blocks[cbz_bi]["targets"][0],
                         "slot": cd[1],
+                        # a body that crosses the overflow check: the contract
+                        # is bounded (`arg.toNat < 2^63`) and the universal
+                        # theorem carries that premise as `hltn`
+                        "bounded": bool(cd[2]),
                         # The loop's TEST block, so the back-edge arm names it
                         # instead of assuming a numbering: the contract's
                         # hypotheses are stated at `s_{check_bi}`, and the
@@ -11609,6 +11894,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         A(f"    (hn : {stride} * (n.toNat + 1) + {stride} ≤ 18446744073709551600)")
     for _h in _narrow_hyps:
         A(f"    ({_h})")
+    if _loop_contract and _loop_contract.get("bounded"):
+        A("    (hltn : n.toNat < 9223372036854775808)")
     for _h in (_fr.get("hyps") or []):
         A(f"    ({_h[0]} : {_h[1]})")
     if _fr.get("hbnd_binder"):
@@ -12341,24 +12628,152 @@ def _program_extern_calls(info: dict) -> list:
 
 
 
-def _gen_strlen_post_extern(name, code, base, li, bl, tgt, s_call, n, addr, cont, scope):
-    """Emit the step-12c post-extern strlen theorem for arm64.
-    Proved from hcall.ret/hcall.res; no sorry.  The full symbolic continuation
-    (run_result_exit through the epilogue from a general s_ret) is left for a
-    follow-up: the epilogue reads only sp/mem (preserved) and preserves x0, so
-    the key consequence x0 = UInt64.ofNat n and the return-pc fact are proved
-    here from the contract."""
+def _strlen_epilogue_plan(cont):
+    """The standard epilogue after a result-bearing extern call, or None.
+
+    `cont` is `[(pc, word)]` from the instruction after the `BL` up to and
+    including the first `RET`. The vocabulary is exactly what the backend's
+    epilogue uses and nothing else, because the generated proof walks it with
+    the per-instruction step lemmas and must know each one's effect:
+
+      * `add sp, sp, #imm{, lsl #12}`            -> sp += imm
+      * `ldp xA, xB, [sp], #imm` (64-bit, post)  -> reads [sp], [sp+8]; sp += imm
+      * `ret`
+
+    No instruction may write `x0` (or `xzr`/`sp` as a loaded register), and the
+    return address must be loaded by exactly one `ldp` that is followed by the
+    `ret`. Returns `(steps, sp_terms, x30_extra)`: `steps` is `[(pc, kind)]`,
+    `sp_terms` the stack-pointer increments applied before the `ldp` that loads
+    `x30`, and `x30_extra` the byte offset (0 or 8) of `x30` inside that pair."""
+    steps, sp_terms, x30_extra, x30_loaded = [], [], None, False
+    for pc, w in cont:
+        if (w & 0xff800000) == 0x91000000 and (w & 0x1f) == 31 and ((w >> 5) & 0x1f) == 31:
+            if x30_loaded:
+                return None
+            delta = ((w >> 10) & 0xfff) << (12 if (w >> 22) & 1 else 0)
+            if delta <= 0:
+                return None
+            sp_terms.append(delta)
+            steps.append((pc, "add"))
+        elif (w & 0xffc00000) == 0xa8c00000 and ((w >> 5) & 0x1f) == 31:
+            rt, rt2 = w & 0x1f, (w >> 10) & 0x1f
+            imm7 = (w >> 15) & 0x7f
+            imm = (imm7 - 128 if imm7 >= 64 else imm7) * 8
+            if imm <= 0 or any(r in (0, 31) for r in (rt, rt2)):
+                return None
+            if x30_loaded:
+                return None
+            if 30 in (rt, rt2):
+                x30_extra = 8 if rt2 == 30 else 0
+                x30_loaded = True
+                steps.append((pc, "ldp30"))
+            else:
+                sp_terms.append(imm)
+                steps.append((pc, "ldp"))
+                continue
+            # the pair that loads x30 is the last thing before ret: its own sp
+            # increment is applied AFTER its reads, so it is not a read-time term
+        elif w == 0xd65f03c0:
+            if not x30_loaded:
+                return None
+            steps.append((pc, "ret"))
+            return steps, sp_terms, x30_extra
+        else:
+            return None
+    return None
+
+
+def _gen_strlen_post_extern(name, code, base, li, bl, tgt, s_call, n, addr, cont, scope,
+                            exit_addr=None, mojo_app=None):
+    """Emit the step-12c post-extern strlen theorems for arm64.
+
+    `<name>_post_extern_strlen` (always): the contract's consequence, proved from
+    `hcall.res`/`hcall.ret.pc_ret`, no `sorry`.
+
+    `<name>_post_extern_strlen_returns` (when `_strlen_epilogue_plan` recognises the
+    code after the call): from ANY post-call state `s_ret` the contract allows,
+    running the epilogue returns `UInt64.ofNat n`. The callee-saved registers, `sp`
+    and memory are as the caller left them (`hcall.ret`), so the epilogue's loads
+    read what the prologue stored, `ret` goes to the exit address, and `x0` is
+    never written. Proved by stepping the epilogue with the per-instruction step
+    lemmas over the abstract `s_ret`; `<name>_post_extern_strlen_matches_model`
+    states the same value as the model's `mojo`."""
     retpc = bl + 4
     L = []
     L.append(f"/-- Step 12c: post-extern contract consequence for `strlen`, proved")
     L.append(f"    from `hcall.ret` and `hcall.res` (no `sorry`).  The callee")
-    L.append(f"    returns `x0 = UInt64.ofNat n` to `pc = retpc`.  The full")
-    L.append(f"    symbolic continuation through the epilogue is follow-up work")
-    L.append(f"    (the continuation needs block-walk from a symbolic state). -/")
+    L.append(f"    returns `x0 = UInt64.ofNat n` to `pc = retpc`. -/")
     L.append(f"theorem {name}_post_extern_strlen (s_ret : Arm64State)")
     L.append(f"    (hcall : StrlenReturns ({s_call} : Arm64State) s_ret {addr} {n}) :")
     L.append(f"    s_ret.x0 = UInt64.ofNat {n} ∧ s_ret.pc = {retpc} := by")
     L.append(f"  exact ⟨hcall.res, hcall.ret.pc_ret⟩")
+    plan = _strlen_epilogue_plan(cont) if exit_addr is not None else None
+    if plan is None:
+        return "\n".join(L)
+    steps, sp_terms, x30_extra = plan
+    pre0 = s_call.split("{ ", 1)[1].split(" with", 1)[0].strip()  # `<name>_pre_<i>`
+    sp_expr = "s_ret.sp" + "".join(f" + UInt64.ofNat {d}" for d in sp_terms)
+    sp_expr0 = pre0 + ".sp" + "".join(f" + UInt64.ofNat {d}" for d in sp_terms)
+    if x30_extra:
+        sp_expr += f" + {x30_extra}"
+        sp_expr0 += f" + {x30_extra}"
+    nsteps = len(steps)               # includes the ret
+    idx = lambda pc: (pc - base) // 4
+    L.append("")
+    L.append(f"/-- Step 12c: the PROGRAM's answer.  From any state `s_ret` the `strlen`")
+    L.append(f"    contract allows, the epilogue after the call returns `UInt64.ofNat {n}`:")
+    L.append(f"    the callee-saved registers, `sp` and memory are as the caller left them,")
+    L.append(f"    so the epilogue reloads the saved return address, `ret` goes to the exit")
+    L.append(f"    address, and no instruction writes `x0`.  Conditional on the contract and")
+    L.append(f"    on the image holding the string's {n} bytes + NUL (`hcall`), and on")
+    L.append(f"    nothing else. -/")
+    L.append(f"theorem {name}_post_extern_strlen_returns (s_ret : Arm64State)")
+    L.append(f"    (hcall : StrlenReturns ({s_call} : Arm64State) s_ret {addr} {n}) :")
+    L.append(f"    run_result_exit {{ s_ret with pc := {retpc} }} {name}_code {exit_addr} 200000")
+    L.append(f"      = UInt64.ofNat {n} := by")
+    L.append(f"  have hmem : s_ret.mem = {pre0}.mem := hcall.ret.mem_same")
+    L.append(f"  have hsp : s_ret.sp = {pre0}.sp := hcall.ret.sp_same")
+    L.append(f"  have hx0 : s_ret.x0 = UInt64.ofNat {n} := hcall.res")
+    L.append(f"  have hx30 : mem_read_u64 {pre0}.mem ({sp_expr0}).toNat")
+    L.append(f"      = UInt64.ofNat {exit_addr} := by native_decide")
+    L.append(f"  have hx30' : mem_read_u64 s_ret.mem ({sp_expr}).toNat")
+    L.append(f"      = UInt64.ofNat {exit_addr} := by rw [hmem, hsp]; exact hx30")
+    L.append(f"  unfold run_result_exit arm64_exec_go_exit")
+    pad = " + 1" * (nsteps + 1)
+    L.append(f"  rw [show (200000 : Nat) = {200000 - nsteps - 1}{pad} from rfl]")
+    for pc, kind in steps:
+        if kind == "ret":
+            L.append(f"  rw [go_exit_step _ _ {name}_code {exit_addr} _ {exit_addr} {pc} "
+                     f"({name}_sr_{idx(pc)} _ rfl) ?hpc' ?hpcb (by decide) (by decide)]")
+        else:
+            L.append(f"  rw [go_exit_step_adv _ _ {name}_code _ _ (by simp) "
+                     f"({name}_sr_{idx(pc)} _ rfl) (by simp [set_reg_pc_keeps])]")
+    L.append(f"  case hpcb => rfl")
+    L.append(f"  case hpc' =>")
+    L.append(f"    dsimp only")
+    L.append(f"    simp only [set_reg_x30_same, set_reg_sp_keeps, set_reg_mem_keeps]")
+    L.append(f"    rw [hx30']")
+    L.append(f"    native_decide")
+    L.append(f"  rw [arm64_go_exit_hit _ {name}_code _ _ (by omega) ?hit]")
+    L.append(f"  case hit =>")
+    L.append(f"    dsimp only")
+    L.append(f"    simp only [set_reg_x30_same, set_reg_sp_keeps, set_reg_mem_keeps]")
+    L.append(f"    rw [hx30']")
+    L.append(f"    native_decide")
+    L.append(f"  dsimp only")
+    L.append(f"  simp only [set_reg_x0_keeps 19 (by decide), set_reg_x0_keeps 20 (by decide), "
+             f"set_reg_x0_keeps 29 (by decide), set_reg_x0_keeps 30 (by decide)]")
+    L.append(f"  exact hx0")
+    if mojo_app:
+        L.append("")
+        L.append(f"/-- Step 12c: that answer IS the model's.  `mojo` is the semantic model of the")
+        L.append(f"    source; for this program it is the numeral the build folded `len(...)` to. -/")
+        L.append(f"theorem {name}_post_extern_strlen_matches_model (s_ret : Arm64State)")
+        L.append(f"    (hcall : StrlenReturns ({s_call} : Arm64State) s_ret {addr} {n}) :")
+        L.append(f"    run_result_exit {{ s_ret with pc := {retpc} }} {name}_code {exit_addr} 200000")
+        L.append(f"      = {mojo_app} := by")
+        L.append(f"  rw [{name}_post_extern_strlen_returns s_ret hcall]")
+        L.append(f"  rfl")
     return "\n".join(L)
 
 
@@ -12849,7 +13264,9 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
             # For the full run_result_exit to a fixed exit, it's hard symbolically.
             # I'll state it more directly:
             _strlen_extra = _gen_strlen_post_extern(
-                name, code, base, li, last_bl, _tgt, _s_call, _n, _addr, _cont, scope)
+                name, code, base, li, last_bl, _tgt, _s_call, _n, _addr, _cont, scope,
+                exit_addr=exit_addr,
+                mojo_app=(_apply_args('mojo', vals) if _info is not None else None))
         else:
             _strlen_extra = ""
     else:
@@ -14405,7 +14822,11 @@ def generate_arm64_proof(prog, code, info) -> str:
             "    statement is FALSE, which is the defect these close. -/\n"
             + "\n\n".join(_narrow_lemmas) + "\n")
 
-    _extern_imp = "import Extern\n" if _needs_extern_import else ""
+    # `Extern` also carries the generic walk lemmas a bounded loop contract
+    # composes (`runs_seq`, `mid_seq`, `subs_one_no_overflow`).
+    _extern_imp = ("import Extern\n"
+                   if (_needs_extern_import
+                       or "subs_one_no_overflow" in str(universal_section)) else "")
     return f"""{SPECS.header_imports(bool(refines))}
 {_extern_imp}set_option maxRecDepth 100000
 set_option maxHeartbeats 20000000

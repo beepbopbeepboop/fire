@@ -74,7 +74,7 @@ def main():
     if got != want:
         print('FAIL  glob compiled differs from CPython\n--- CPython\n' + want + '--- compiled\n' + got)
         return 1
-    print('PASS  glob.py + fnmatch.py compiled and run: 12 lines identical to CPython')
+    print('PASS  glob.py + fnmatch.py compiled and run: 13 lines identical to CPython')
     return 0
 
 

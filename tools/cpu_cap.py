@@ -38,7 +38,25 @@ def wrap(name, hours, argv):
         resource.setrlimit(resource.RLIMIT_CPU, (cap, cap + GRACE_S))
 
     p = subprocess.Popen(argv, preexec_fn=limit)
+
+    # A TERM (or INT/HUP) to the wrapper is passed to the child, and the wrapper exits when the child does, so the
+    # run's CPU is still recorded. Without this, killing the wrapper orphaned the child (2026-11-10: the README worker's
+    # opencode kept running after its wrapper died). A child that ignores TERM for GRACE_S is KILLed, so the wrapper
+    # cannot outlive a stop request.
+    def forward(signum, _frame):
+        if p.poll() is None:
+            p.send_signal(signal.SIGTERM)
+            signal.signal(signal.SIGALRM, escalate)
+            signal.alarm(GRACE_S)
+
+    def escalate(_signum, _frame):
+        if p.poll() is None:
+            p.kill()
+
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(s, forward)
     rc = p.wait()
+    signal.alarm(0)
     ru = resource.getrusage(resource.RUSAGE_CHILDREN)
     cpu = ru.ru_utime + ru.ru_stime
     rec = {"name": name, "cpu_s": round(cpu, 1), "cap_s": cap, "exit": rc,

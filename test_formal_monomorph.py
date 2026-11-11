@@ -1305,6 +1305,40 @@ def test_an_instantiation_agrees_with_the_concrete_struct_of_the_same_shape(
 # ── behavioural: what must stay refused ─────────────────────────────────────
 
 
+def test_a_refusal_for_an_aliased_import_names_the_alias_and_the_real_name(tmpdir):
+    """`from pairlib import widen as w` then `w(5)`: step 22 row 39.
+
+    The export rule is asked by the DEFINING name. It used to be asked by the
+    importer's local alias, and the module (rightly) declares no `w`, so the
+    refusal said the module "declares no function or struct named `w` at all"
+    about a module that declares `widen` -- true of the alias, false of the
+    file. Now the sentence names the alias, the real name, and the real reason
+    (a generic template)."""
+    lib = ("def widen[T: Intable](v: T) -> T:\n"
+           "    return v\n"
+           "\n"
+           "def helper(x: Int) -> Int:\n"
+           "    return x\n")
+    for arch in ARCHES:
+        fresh_cas()
+        text = run_pair_case(
+            tmpdir, arch, "mm_alias_bare", lib,
+            ("from pairlib import widen as w\n"
+             "\n"
+             "def main():\n"
+             "    print(w(5))\n"),
+            "", expect_ok=False)
+        check("this file's own alias for `widen`" in text,
+              f"[{arch}] the refusal does not name the alias and the real "
+              f"name: {text.strip()[-500:]}")
+        check("declares no function or struct named" not in text,
+              f"[{arch}] the refusal still says the module declares no such "
+              f"name, about a name it declares: {text.strip()[-500:]}")
+        check("generic template" in text,
+              f"[{arch}] the refusal does not give the real reason (a generic "
+              f"template): {text.strip()[-500:]}")
+
+
 def test_a_bare_call_to_an_imported_generic_is_still_refused(tmpdir):
     """`widen(5)` names no instantiation, so no boundary symbol can mean it.
 
@@ -4545,6 +4579,8 @@ TESTS = [
      test_a_package_reexport_attributes_the_demand_to_the_defining_module),
     ("an instantiation agrees with the concrete struct of the same shape",
      test_an_instantiation_agrees_with_the_concrete_struct_of_the_same_shape),
+    ("a refusal for an aliased import names the alias and the real name",
+     test_a_refusal_for_an_aliased_import_names_the_alias_and_the_real_name),
     ("a bare call to an imported generic is still refused",
      test_a_bare_call_to_an_imported_generic_is_still_refused),
     ("a bare call to an imported template is inferred from argument annotation",

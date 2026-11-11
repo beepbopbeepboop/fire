@@ -1293,6 +1293,9 @@ class GimpleGen:
         # for why this is needed as a SEPARATE registry from `self.
         # _classmethod_names`/`self.func_return_types`.
         self._struct_generator_method_names: dict[str, set[str]] = {}
+        # C symbols of struct methods whose body was refused in this TU and emitted as a prototype only (module_gen's
+        # definition-site fallback). The class tables leave them out: they name no definition here.
+        self._prototype_only_syms: set[str] = set()
         # Struct methods called from a compiled generator/async body on
         # EITHER `self` or a non-self struct-pointer-typed local/parameter
         # (see CODEGEN_generator_struct_typed_param_refused).
@@ -3536,6 +3539,7 @@ class GimpleGen:
         'mojo_repr_list_elem_double': ('char *', ['int64_t']),
         'mojo_repr_list_elem_bool':   ('char *', ['int64_t']),
         'mojo_repr_str':         ('char *',    ['char *']),
+        'mojo_ascii_escape':     ('char *',    ['char *']),
         'mojo_repr_obj':         ('char *',    ['int64_t']),
         'mojo_repr_float':       ('char *',    ['double']),
         'mojo_print':            ('void',      ['char *']),
@@ -5423,6 +5427,9 @@ class GimpleGen:
         return ginf._elem_of(self, name)
     def _dict_val_of(self, name: str) -> str:
         return ginf._dict_val_of(self, name)
+
+    def _dict_val_mixed(self, name: str) -> bool:
+        return ginf._dict_val_mixed(self, name)
     def _dict_val_is_known(self, name: str) -> bool:
         return ginf._dict_val_is_known(self, name)
     def _dict_val_of_expr(self, expr) -> str:
@@ -5743,8 +5750,8 @@ class GimpleGen:
         return grsl._module_candidate_paths(self, module_name)
     def _submodule_source_path(self, module_name: str) -> str | None:
         return grsl._submodule_source_path(self, module_name)
-    def _compile_imported_module(self, module_name: str) -> tuple:
-        return grsl._compile_imported_module(self, module_name)
+    def _compile_imported_module(self, module_name: str, loc: str = '0:0') -> tuple:
+        return grsl._compile_imported_module(self, module_name, loc)
     def _register_link_imports(self, stmts) -> list:
         return grsl._register_link_imports(self, stmts)
     def _register_reflected_struct(self, name, type_info, exports, parse_c_sig):
@@ -6463,6 +6470,13 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     if do_imports or link_mode:
         gen._record_sys_path_inserts(
             mojo_src, os.path.dirname(os.path.abspath(filename)) if filename else None)
+    # Stash the in-memory source text the module pass will process so text-only
+    # discoveries (e.g. bracket-parameter annotation scans, which the parser
+    # cannot carry in the AST) can consult it instead of re-reading the file
+    # at `filename`. The parser consumed exactly this string, so it is always
+    # consistent with `stmts` — unlike an on-disk file that could have been
+    # modified after parse or be unreadable (empty `_current_filename`).
+    gen._source_text = mojo_src
     code = gen.gen_module(stmts)
     if do_imports or link_mode:
         code = _dedup_guarded_blocks(code)

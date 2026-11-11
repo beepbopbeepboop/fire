@@ -756,6 +756,13 @@ class FunctionDef:
         # valid Python "async generator"); the two flags are independent, not
         # mutually exclusive. No execution semantics are implied by this flag
         # yet — see AwaitExpr's docstring.
+    # Optional `where <expr>` clause after the parameter list / return type.
+    # Stored as the parsed expression AST node (or a list of them for a
+        # `where a, b` form). `None` when absent.  Enforcement at call sites
+        # is a separate step (DIAGNOSTICS_where_clause_call_site).
+    where_clause: object = None
+    # The `else "<message>"` expression of that clause, `None` when absent.
+    where_else: object = None
     # Explicit CAPTURE list from a brace-delimited clause on a nested `def`:
     # `def handler(...) {mut count, var s}:` — `(name, conv_or_None)` pairs,
     # `None` for a bare name, and a `None` NAME for the bare-convention form
@@ -4575,6 +4582,7 @@ class Parser:
                         depth -= 1
                     elif t.kind == "EOF": break
         ret = None
+        _ret_tok = self._peek()
         if self._peek().kind == "ARROW":
             self._advance()
             # Drop `ref` lifetime prefix on return type and skip lifetime parameters
@@ -4583,15 +4591,42 @@ class Parser:
                 # Skip lifetime parameters in brackets: ref[Origin]
                 if self._peek().kind == "LBRACKET":
                     self._skip_bracketed()
+            _ret_tok = self._peek()
             ret = self._parse_type_ann()
             # Skip additional qualifiers after return type
             while self._peek().kind == "NAME" and self._peek().value in ("unified", "register_passable", "capturing", "raises"):
                 self._advance()
-        # Skip optional `where conforms_to(...)` clause
+        # `out self` (or any `out` argument) already yields the value through
+        # the argument; a return type on the same function is contradictory.
+        # Modular rejects it at the return type's location
+        # (`functions must not declare both an 'out' argument and a return
+        # type`, mojo-parser/precompile/mojo_package_moco_773.mojo).
+        if ret is not None:
+            for _oc in param_convs.values():
+                if _oc == 'out':
+                    raise RuntimeError(
+                        f"{self._loc(_ret_tok)}error: functions must not declare both an "
+                        f"'out' argument and a return type")
+        # Parse optional `where <expr>[, <expr>...] [else <message>]` clause.
+        # The `else` message is the diagnostic Modular prints when the
+        # constraint fails (`where (Self.is_owned) else "may only be called on
+        # owned lists":`); it is parsed, not skipped, so the clause is fully
+        # consumed and the signature still ends at its COLON.
+        where_clause = None
+        where_else = None
         if self._peek().kind == "NAME" and self._peek().value == "where":
             self._advance()  # where
+            _wc_parts = []
             while self._peek().kind not in ("COLON", "NEWLINE", "EOF"):
-                self._advance()
+                _wc_parts.append(self._parse_expr(0))
+                if self._peek().kind == "COMMA":
+                    self._advance()
+                    continue
+                break
+            where_clause = _wc_parts[0] if len(_wc_parts) == 1 else _wc_parts
+            if self._peek().kind == "KW" and self._peek().value == "else":
+                self._advance()  # else
+                where_else = self._parse_expr(0)
         # Capture list in curly braces: `def handler(...) {mut count, var s}:`
         #
         # This used to be skipped token by token, which made the list
@@ -4642,7 +4677,9 @@ class Parser:
                            yield_bearing_node_ids=yield_bearing_node_ids,
                            is_async=is_async,
                            captures=captures,
-                           has_capture_list=has_capture_list)
+                           has_capture_list=has_capture_list,
+                           where_clause=where_clause,
+                           where_else=where_else)
 
     def _parse_capture_list(self):
         """A brace-delimited CAPTURE list on a nested `def`:
@@ -5188,16 +5225,30 @@ class Parser:
                     saved = self._pos
                     name = self._parse_dotted_name()
                     if self._peek().kind == "COLON" or self._is_kw("as"):
-                        exc_type = name
+                        # Mojo's `except <target>:` binds the caught error to a
+                        # target (a bare lowercase name), unlike Python's
+                        # `except <Type>:` type pattern. A single bare
+                        # lowercase NAME with no `as` is a binding; anything
+                        # else (dotted path, uppercase type, `as` form) is a
+                        # type pattern. See modular's ParserStmts.cpp
+                        # parseTryStmt FIXME: `"except Kind" is supposed to be
+                        # a type pattern ... You need to use "except Kind as
+                        # name" to bind the error to a name.`
+                        if (self._peek().kind == "COLON" and '.' not in name
+                                and name[:1].islower()):
+                            exc_type = None
+                            exc_name = name
+                        else:
+                            exc_type = name
                     elif self._peek().kind == "COMMA":
                         exc_type = name
                         self._advance()
                         exc_name = self._ident()
                     else:
                         self._pos = saved
-                        exc_type = self._parse_expr(_KW_PREC['as'] + 1)
+                        exc_type = self._parse_expr(0)
                 else:
-                    exc_type = self._parse_expr(_KW_PREC['as'] + 1)
+                    exc_type = self._parse_expr(0)
                 if self._is_kw("as"):
                     self._advance(); exc_name = self._ident()
                 elif self._peek().kind == "COMMA":

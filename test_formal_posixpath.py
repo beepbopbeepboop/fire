@@ -774,7 +774,7 @@ def group_constants(tmpdir, verbose):
     check(not bad, f"{len(bad)} constant(s) differ from CPython" + detail)
     # And the spelling: the ATTRIBUTE is refused, naming itself, because
     # `None`-like module state has no representation on this path
-    # (`FORMAL_module_state_no_storage.md (deleted) (deleted)`).
+    # (`FORMAL_module_state_no_storage.md (deleted)`).
     src = ("import posixpath\n\ndef main():\n"
            "    printf(\"[%s]\\n\", posixpath.sep)\n")
     tmp = os.path.join(TEMP, "attr.mojo")

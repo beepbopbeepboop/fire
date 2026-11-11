@@ -59,13 +59,36 @@ _GENEXP_ITER_NAME = '__mojo_genexp_iter__'
 # builtin exception attributes (the `e.code` note in fire.py).
 # ---------------------------------------------------------------------------
 
-def _tag_attribute_error(exc, obj, name):
+def _tag_attribute_error(exc, obj, name, self_obj=None):
     """Attach CPython 3.15's `name`/`obj` fields to a missing-attribute
     AttributeError so the print-time suggestion pass can compute its hint
-    from the real object, not by re-parsing the message string."""
+    from the real object, not by re-parsing the message string. `self_obj`
+    is the `self` binding of the failing frame (None when there is none) —
+    CPython reads it off the traceback for its hide_underscored refinement;
+    this interpreter has no CPython frame for user code, so the raise site
+    captures it here (see `_frame_self`)."""
     setattr(exc, 'name', name)
     setattr(exc, 'obj', obj)
+    setattr(exc, 'self_obj', self_obj)
     return exc
+
+
+def _frame_self(interp):
+    """The `self` binding of `interp`'s current (innermost) scope, or None.
+
+    This is the `frame.f_locals['self']` CPython 3.15's
+    `_compute_suggestion_error` reads off the failing traceback frame, which
+    this interpreter does not have: its user frames are Scope objects, and
+    the scope current at the failing member access IS that frame. Direct
+    `scope.vars` only, exactly like `_tag_name_error` — a `self` further up
+    the chain is a closure/global, which CPython does not put in the failing
+    frame's f_locals either."""
+    if interp is None:
+        return None
+    scope = interp.scope
+    if scope is not None and 'self' in scope.vars:
+        return scope.vars['self']
+    return None
 
 
 def _tag_name_error(exc, scope, name):
@@ -525,22 +548,28 @@ def _attr_candidates(obj):
     return _safe_dir(obj)
 
 
-def _attr_close_match(obj, name):
+def _attr_close_match(obj, name, self_obj=None):
     """CPython 3.15's Levenshtein half of `_compute_suggestion_error`:
     the closest resolvable attribute name to a misspelled one, or None.
 
     Candidate filtering follows CPython: no underscored names unless the
-    wrong name is underscored (CPython's refinement — also allowing
-    underscored candidates when the failing access was `self.x` — needs the
-    traceback frame, which the print-time half here does not carry). The
-    distance match itself is the engine every branch shares
-    (`_suggestion_two_passes`); the caps live there too, and a fallback cap
-    aborts CPython's function WITHOUT the nested check — so it is rechecked
-    here (a cap and a genuine no-match both return None from the engine,
-    but only the former must skip the nested check)."""
+    wrong name is underscored, OR the failing frame's `self` IS `obj`
+    (CPython's hide_underscored refinement: `self.value` inside a method may
+    suggest the private `self._value`, while the same misspell on the same
+    object from outside the method may not). The raising half captures that
+    frame `self` on the exception (`self_obj`); CPython reads it off the
+    traceback, which this interpreter does not carry. The distance match
+    itself is the engine every branch shares (`_suggestion_two_passes`); the
+    caps live there too, and a fallback cap aborts CPython's function
+    WITHOUT the nested check — so it is rechecked here (a cap and a genuine
+    no-match both return None from the engine, but only the former must skip
+    the nested check)."""
     name, not_normalized = _suggestion_normalize(name)
     d = _attr_candidates(obj)
-    if name[:1] != '_':
+    hide_underscored = name[:1] != '_'
+    if hide_underscored and self_obj is not None and self_obj is obj:
+        hide_underscored = False
+    if hide_underscored:
         d = [n for n in d if n[:1] != '_']
     suggestion = _suggestion_after_pool(d, name, not_normalized)
     if suggestion is None and len(d) <= _ATTR_MAX_CANDIDATE_ITEMS \
@@ -595,7 +624,7 @@ def _attr_nested_match(obj, name, candidates):
     return None
 
 
-def attribute_error_suggestion(obj, name):
+def attribute_error_suggestion(obj, name, self_obj=None):
     """CPython 3.15's print-time AttributeError suggestion, as the suffix to
     append to the message: '' when there is nothing to add. Priority is
     CPython's: the static cross-language/wrong-type table first, then the
@@ -606,13 +635,17 @@ def attribute_error_suggestion(obj, name):
     (`None.append(1)`); CPython computes suggestions for that too (dunder
     candidates for underscored names), so there is no None short-circuit.
     The caller is responsible for only invoking this when the exception
-    actually carried an `obj` field (see fire.py's `name` guard)."""
+    actually carried an `obj` field (see fire.py's `name` guard).
+
+    `self_obj` is the failing frame's `self` captured at raise time (None
+    when the frame had none) — CPython's traceback-frame input to the
+    hide_underscored refinement, see `_attr_close_match`."""
     if not isinstance(name, str):
         return ''
     hint = _cross_language_attr_hint(obj, name)
     if hint:
         return f". {hint}"
-    suggestion = _attr_close_match(obj, name)
+    suggestion = _attr_close_match(obj, name, self_obj)
     if suggestion is None:
         return ''
     if suggestion.isascii():
@@ -762,7 +795,9 @@ def error_suggestion_suffix(e):
     if isinstance(e, AttributeError):
         aname = getattr(e, 'name', None)
         if isinstance(aname, str):
-            return attribute_error_suggestion(getattr(e, 'obj', None), aname)
+            return attribute_error_suggestion(
+                getattr(e, 'obj', None), aname,
+                getattr(e, 'self_obj', None))
         return ''
     if isinstance(e, ModuleNotFoundError):
         mname = getattr(e, 'name', None)
@@ -2080,7 +2115,7 @@ class MojoInstance:
             return cls.comptime_aliases[name]
         raise _tag_attribute_error(
             AttributeError(f"'{cls.name}' object has no attribute '{name}'"),
-            self, name)
+            self, name, _frame_self(cls.interpreter))
 
     def _write_via(self, method_name):
         """Call a user-defined `write_to`/`write_repr_to(self, mut writer)`
@@ -2259,6 +2294,55 @@ class BoundClassMethod:
         return self
 
 
+def _c3_linearize(cls):
+    """Return `cls.__mro__`: C3 linearization of the bases named in `cls`.
+
+    Matches CPython's `type.__mro__` exactly — including diamonds (e.g. a
+    `D(B, C)` over sibling `B(O)`/`C(O)` resolves to `D, B, C, O`) and its
+    error semantics: an entry that is neither a real Mojo class nor a real
+    Python type (typing specials like `TypedDict`, which are functions in 3.15+)
+    raises `TypeError`, and an inconsistent hierarchy raises a `TypeError`
+    naming every base, the same way `type()` does at class creation time. The
+    underlying Python-style hierarchy this interpreter synthesises only carries
+    `object` as an implicit root, so a plain class's MRO is just `(cls,)`; there
+    is no Mojo root type for it to inherit from."""
+    seqs = []
+    for b in cls.bases:
+        if isinstance(b, MojoClass):
+            seqs.append(_c3_linearize(b))
+        elif isinstance(b, type):
+            seqs.append(tuple(b.__mro__))
+        else:
+            raise TypeError(f"__mro__ entry is not a class: {b!r}")
+    seqs.append(tuple(cls.bases))
+    return (cls,) + tuple(_c3_merge(cls.bases, seqs))
+
+
+def _c3_merge(bases, seqs):
+    """Merge the sequence lists (`seqs`) one head at a time, removing every
+    head from every list's tail once taken — the standard C3 linearisation
+    step. A head that still appears in another list is rejected; if no head of
+    any list qualifies, the hierarchy is inconsistent, and the `TypeError`
+    names every base the way `type()` does at class creation."""
+    seqs = [list(s) for s in seqs if s]
+    out = []
+    while seqs:
+        for i, s in enumerate(seqs):
+            head = s[0]
+            # Only a tail appearance disqualifies a head; another list whose own
+            # head is this same element will consume it in this same step.
+            if any(head in other[1:] for j, other in enumerate(seqs) if j != i):
+                continue
+            out.append(head)
+            seqs = [o[1:] if o and o[0] is head else o for o in seqs]
+            seqs = [o for o in seqs if o]
+            break
+        else:
+            names = ', '.join(getattr(b, '__name__', type(b).__name__) or str(b) for b in bases)
+            raise TypeError(f"Cannot create a consistent method resolution order (MRO) for bases {names}")
+    return out
+
+
 class MojoClass:
     """Represents a class/struct defined in Mojo code."""
     _ARRAY_TYPE_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\[([A-Za-z_][A-Za-z0-9_]*|\d+)\]$')
@@ -2333,9 +2417,19 @@ class MojoClass:
             # ctypes/wintypes.py's `PFILETIME = POINTER(FILETIME)` raised
             # "'FILETIME' object has no attribute '__name__'".
             return self.name
+        if name == '__mro__':
+            # A real Python class built through the keywords path already owns a
+            # `__mro__`; only the plain interpreter-synthesised Mojo classes need
+            # this implemented here. Cached on the instance so repeated access is
+            # the one C3 work we do per class lifetime.
+            cached = self.__dict__.get('_mojo_mro')
+            if cached is None:
+                cached = _c3_linearize(self)
+                self.__dict__['_mojo_mro'] = cached
+            return cached
         raise _tag_attribute_error(
             AttributeError(f"'{self.name}' object has no attribute '{name}'"),
-            self, name)
+            self, name, _frame_self(self.interpreter))
 
     def __call__(self, *args, **kwargs):
         instance = MojoInstance(self)
@@ -4169,6 +4263,32 @@ def _frozendict_builtin():
     frozendict.__qualname__ = 'frozendict'
     frozendict.__module__ = 'builtins'
     return frozendict
+
+
+def _ascii_repr(value) -> str:
+    """CPython's `ascii(value)`: `repr(value)` with every non-ASCII code
+    point escaped as `\\xNN` / `\\uNNNN` / `\\UNNNNNNNN`.
+
+    Spelled out here rather than calling the `ascii()` builtin for the same
+    reason `_eval_fstring_field` gives for repr/str: `ascii()` has no
+    compiled-path runtime backing, and this module is self-host-compiled.
+    The escape table is CPython's own (`repr` of a str and `ascii` differ
+    only in these escapes), and `mojo_ascii_escape` in fire_runtime.c is the
+    compiled engine's spelling of exactly this rule -- the two must agree
+    character for character."""
+    text = repr(value)
+    out = ''
+    for ch in text:
+        o = ord(ch)
+        if o < 0x80:
+            out += ch
+        elif o < 0x100:
+            out += '\\x%02x' % o
+        elif o < 0x10000:
+            out += '\\u%04x' % o
+        else:
+            out += '\\U%08x' % o
+    return out
 
 
 class Interpreter:
@@ -7063,8 +7183,14 @@ class Interpreter:
         # and silently fail once compiled.
         expr_text, conv, spec = self._split_fstring_field(field)
         value = self._eval_fstring_expr(expr_text)
-        if conv == 'r' or conv == 'a':
+        if conv == 'r':
             text = repr(value)
+        elif conv == 'a':
+            # `!a` is ascii(), NOT repr(): repr leaves non-ASCII code points
+            # raw, so `f"{'héllo'!a}"` used to print the same unquoted text
+            # as `!s` here. The compiled engines have the same rule via
+            # mojo_ascii_escape (fire_runtime.c).
+            text = _ascii_repr(value)
         else:
             text = str(value)
         if spec:
@@ -7466,11 +7592,11 @@ class Interpreter:
                 return obj._mojo_class.comptime_aliases[expr.member]
             raise _tag_attribute_error(
                 AttributeError(f"{self._loc(expr)}'{obj._mojo_class.name}' object has no attribute '{expr.member}'"),
-                obj, expr.member)
+                obj, expr.member, _frame_self(self))
         if not hasattr(obj, expr.member):
             raise _tag_attribute_error(
                 AttributeError(f"{self._loc(expr)}'{type(obj).__name__}' object has no attribute '{expr.member}'"),
-                obj, expr.member)
+                obj, expr.member, _frame_self(self))
         return getattr(obj, expr.member)
 
     def eval_SubscriptExpr(self, expr):

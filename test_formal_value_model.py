@@ -2133,7 +2133,7 @@ REFUSALS = [
     # that would answer it soundly is the field's own default initializer, which
     # no file in the corpus spells — and what is missing underneath is a dict
     # FIELD with a value at all, which is the module-state question
-    # (`FORMAL_module_state_no_storage.md (deleted) (deleted)`), not this one.
+    # (`FORMAL_module_state_no_storage.md (deleted)`), not this one.
     #
     # The needle is the unclassified-operand sentence because that is what the
     # build produces: the slot has no kind to classify the subscript with, so the

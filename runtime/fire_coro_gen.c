@@ -12,7 +12,7 @@
            <original body; yield e -> __mojo_coro_yield_i(__c, box e);
                             return e -> __mojo_gen_set_return(__c, box e); return>
        fn __mgco_g_start(a, b) -> Int:  return __mojo_gen_new_2(__mgco_g_body, a, b)
-       fn __mgco_g_resume(g) -> Bool:   return __mojo_gen_resume(g, 0)
+       fn __mgco_g_resume(g) -> Bool:   return __mojo_gen_resume(g, mojo_box_none ())
        fn __mgco_g_value(g)  -> T:      return __mojo_gen_value(g)
        fn __mgco_g_destroy(g):          __mojo_gen_destroy(g)
    and _generator_api[g] points the ordinary for/next/yield-from consumers
@@ -631,7 +631,9 @@ __mojo_gen_close(int64_t gen, int64_t ge_type)
 void
 __mojo_gen_resume_once(int64_t gen)
 {
-    (void)__mojo_gen_resume(gen, 0);
+    /* A plain resume: the just-started check in `__mojo_gen_resume` refuses
+       anything other than the shared None box (a raw 0 is the integer 0). */
+    (void)__mojo_gen_resume(gen, mojo_box_none());
 }
 
 /* Nested-async mutable closure capture (bugs/hard/CODEGEN_coro_nested_
