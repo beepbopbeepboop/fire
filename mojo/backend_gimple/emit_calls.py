@@ -10969,6 +10969,22 @@ def _refuse_namedtuple_tuple_use(gen, ot: str, use: str) -> None:
             '(bug:COMPILE_FAIL_collections___init__)')
 
 
+def _list_slot_bytes(gen, list_val: str, idx64: str) -> tuple[str, str]:
+    """A `bytes` slot read off a list at a constant index.
+
+    The slot is held in the list's raw int64_t word and the word IS the
+    `MojoBytes *` pointer (see fire_runtime.h's MojoList comment), so the
+    accessor reads the int and the cast rebuilds the pointer. Shared by the
+    two constant-index slot arms in `_lower_subscript` -- the per-slot
+    `_struct_slot_kinds` table and the `_tuple_slot_types` table -- which
+    would otherwise spell the same coercion twice: the no-new-casts guard
+    counts spellings, and a duplicate is a second site to keep in sync.
+    """
+    _bt = gen._new_val('int64_t', f"mojo_list_get_int ({list_val}, {idx64})")
+    return 'MojoBytes *', gen._new_val(
+        'MojoBytes *', f"(MojoBytes *)(uintptr_t){_bt}")
+
+
 def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     # Keyword-parametrized slice, e.g. `x[byte=:-1]` (slice by byte offset).
     # The parser stashes the real SliceExpr in node.attrs (obj=None, since
@@ -11169,10 +11185,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                     return 'double', gen._new_val(
                         'double', f"mojo_list_get_double ({ov}, {idx64})")
                 if _skd == 'bytes':
-                    _bt = gen._new_val('int64_t',
-                                       f"mojo_list_get_int ({ov}, {idx64})")
-                    return 'MojoBytes *', gen._new_val(
-                        'MojoBytes *', f"(MojoBytes *)(uintptr_t){_bt}")
+                    return _list_slot_bytes(gen, ov, idx64)
                 if _skd == 'str':
                     # A `char *` slot, held in the raw int64_t slot (see
                     # fire_runtime.h's MojoList comment), so this is the
@@ -11210,10 +11223,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                     return 'char *', gen._new_val(
                         'char *', f"mojo_list_get_str ({ov}, {idx64})")
                 if _sct == 'MojoBytes *':
-                    _bt = gen._new_val('int64_t',
-                                       f"mojo_list_get_int ({ov}, {idx64})")
-                    return 'MojoBytes *', gen._new_val(
-                        'MojoBytes *', f"(MojoBytes *)(uintptr_t){_bt}")
+                    return _list_slot_bytes(gen, ov, idx64)
                 if _sct == '_Bool':
                     return '_Bool', gen._new_val(
                         '_Bool', f"(_Bool) mojo_list_get_int ({ov}, {idx64})")

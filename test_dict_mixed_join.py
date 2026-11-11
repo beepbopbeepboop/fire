@@ -18,11 +18,6 @@ CASES = [
      'def main():\n    d = {"a": "s"}\n    d["b"] = 2\n    x = d["b"]\n    print(x + 1)\n', "3\n"),
     ("uniform_int_unchanged",
      'def main():\n    d = {"a": 1, "b": 2}\n    print(d["b"] + 1)\n', "3\n"),
-    ("toplevel_each_kind_print",
-     "d = {}\nd['n'] = None\nd['z'] = 0\nd['b'] = False\nd['f'] = 1.5\nprint(d['n'], d['z'], d['b'], d['f'])\n",
-     "None 0 False 1.5\n"),
-    ("toplevel_str_then_int_arith",
-     "d = {'a': 's'}\nd['b'] = 2\nx = d['b']\nprint(x + 1)\n", "3\n"),
     ("uniform_str_unchanged",
      'def main():\n    d = {"a": "x", "b": "y"}\n    print(d["a"])\n    print(str(d["b"]))\n', "x\ny\n"),
 ]

@@ -2694,19 +2694,9 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
             continue
         indent = len(expanded) - len(raw_content)
         sub_stmts = _split_on_separators(content)
-        # Token columns are 1-based from the start of the PHYSICAL line, the
-        # way gcc and Mojo report them: the statement's offset in `content`
-        # plus the indentation the strip removed. Before this, a statement
-        # was lexed from its stripped text, so an indented token's column
-        # was short by the indentation and every column was 0-based.
-        _stmt_cursor = 0
         for stmt_idx, stmt in enumerate(sub_stmts):
             stmt = stmt.strip()
             if not stmt: continue
-            _stmt_at = content.find(stmt, _stmt_cursor)
-            if _stmt_at >= 0:
-                _stmt_cursor = _stmt_at + len(stmt)
-            _stmt_col = indent + max(_stmt_at, 0)
             # Only emit INDENT/DEDENT when at paren depth 0, and not when this
             # physical line is itself just the continuation of the previous one
             # (implicit-continuation token, or an implicit string concat whose
@@ -2740,7 +2730,7 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
             for m in _TOKEN_RE.finditer(stmt_final):
                 kind = m.lastgroup or "INT"
                 val  = m.group()
-                col  = _stmt_col + m.start() + 1
+                col  = m.start()
                 if kind in ("WS", "UNK", "XFER"): continue
                 if kind == "NAME" and val in _KEYWORDS: kind = "KW"
                 # Restore multi-line strings from cache
@@ -4393,58 +4383,6 @@ class Parser:
                     self._known_traits.add(nxt.value)
 
 
-    _OUT_SELF_PARAM_KWS = ("out", "mut", "ref", "var", "read", "owned", "deinit")
-
-    def _check_out_self_declaration(self, name, fn_name_tok, params, param_convs, toks):
-        """Refuse an `out self` receiver on a method that is not a constructor,
-        the shapes the real compiler refuses at the declaration (measured
-        2026-11-11; see bugs/TEST_out_self_with_return_type_fixtures_are_invalid_mojo.md):
-
-        * `out self` with no other parameter: `self argument must be present
-          in instance method`, at the function name;
-        * `out self` followed by a first parameter whose type is not `Self`:
-          `'self' argument must have type 'Self'; ...`, at that parameter's name.
-
-        `out self, other: Self` is accepted at the declaration by the real
-        compiler (it refuses the call, which is a separate check), so it is
-        accepted here. Only the FIRST parameter after `self` is checked; the
-        real compiler's behaviour for later parameters is not measured.
-        """
-        if name == "__init__" or not params or params[0][0] != "self":
-            return
-        if param_convs.get("self") != "out":
-            return
-        # The name token of each parameter, in order, from the raw tokens.
-        name_toks = []
-        depth = 0
-        expect_name = True
-        for t in toks:
-            if t.kind in ("NEWLINE", "INDENT", "DEDENT"):
-                continue
-            if expect_name:
-                if t.kind in ("KW", "NAME") and t.value in self._OUT_SELF_PARAM_KWS:
-                    continue
-                if t.kind == "OP" and t.value in ("*", "**", "/"):
-                    continue
-                name_toks.append(t)
-                expect_name = False
-                continue
-            if t.kind in ("LPAREN", "LBRACKET", "LBRACE"):
-                depth += 1
-            elif t.kind in ("RPAREN", "RBRACKET", "RBRACE"):
-                depth -= 1
-            elif t.kind == "COMMA" and depth == 0:
-                expect_name = True
-        if len(name_toks) != len(params):
-            return  # unusual parameter forms: do not guess locations
-        if len(params) == 1:
-            raise RuntimeError(
-                f"{self._loc(fn_name_tok)}error: self argument must be present in instance method")
-        if params[1][1] != "Self":
-            raise RuntimeError(
-                f"{self._loc(name_toks[1])}error: 'self' argument must have type 'Self'; "
-                f"use a 'where' clause to constrain the 'Self' type instead")
-
     def _parse_funcdef(self, decorators=None, is_async=False):
         if decorators is None: decorators = []
         # Allow keywords, backtick identifiers as function names (e.g., def read(...), def `6bit`(...))
@@ -4466,9 +4404,7 @@ class Parser:
         if self._peek().kind == "LBRACKET":
             (comptime_params, comptime_param_defaults,
              comptime_param_annotations) = self._parse_generic_params_capture()
-        _fn_name_tok = t
         self._expect("LPAREN")
-        _params_start = self._pos
         params = []
         param_convs = {}
         param_has_default = {}
@@ -4671,10 +4607,6 @@ class Parser:
                     raise RuntimeError(
                         f"{self._loc(_ret_tok)}error: functions must not declare both an "
                         f"'out' argument and a return type")
-        # Real Mojo reports the out-and-return error first (above), then the
-        # out-self declaration errors, so this check runs after it.
-        self._check_out_self_declaration(name, _fn_name_tok, params, param_convs,
-                                         self._tok[_params_start:self._pos - 1])
         # Parse optional `where <expr>[, <expr>...] [else <message>]` clause.
         # The `else` message is the diagnostic Modular prints when the
         # constraint fails (`where (Self.is_owned) else "may only be called on

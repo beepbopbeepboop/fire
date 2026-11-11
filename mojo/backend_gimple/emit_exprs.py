@@ -7417,10 +7417,7 @@ def _lower_dict_literal(gen, node: gimple_ctypes.DictExpr) -> tuple[str, str]:
     # literal written at the call site, and two copies of this rule could
     # type the parameter one way while the literal stores another. Its skip of
     # a `**spread` pair (which carries no value sample) moved in with it.
-    # An EMPTY literal has no value kind to record: `int64_t` here would be false evidence of an int, and a later
-    # float store into the same dict would then join with it as 'mixed' (module-scope `d = {}; d[(1, 2)] = 9.5`).
-    if node.pairs:
-        gen._dict_val_types[t] = gimple_exprtypes.dict_literal_val_ctype(gen, node.pairs)
+    gen._dict_val_types[t] = gimple_exprtypes.dict_literal_val_ctype(gen, node.pairs)
     for key_expr, val_expr in node.pairs:
         # A `**expr` pair MERGES; it is not a store. Treated as a store it put
         # the spread's own dict into the KEY slot and the None sentinel into
