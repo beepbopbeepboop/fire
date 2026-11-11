@@ -1019,11 +1019,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # bound by a for loop or `x = next(g)`); see cpp_core._cpp_is_tagged_word_expr.
     gen._cpp_tagged_word_names = set()
     gen._cpp_param_names = set(gimple_ctypes._as_str(_p[0]) for _p in (fn.params or []))
-    # Include captured/extra parameters too (e.g. lifted async closures that
-    # capture free function values from enclosing scopes), so that `_cpp_dyn_call_expr`
-    # can correctly recognise calls to captured function-valued parameters
-    # (like `func()` where `func` was a bracket‑parameter of the enclosing function).
-    gen._cpp_param_names |= set(gimple_ctypes._as_str(_c[0]) for _c in (extra_captures or []))
     gen._cpp_mixed_list_params = set(
         getattr(gen, '_param_elem_mixed', {}).get(fn.name, ()))
     gen._cpp_mixed_list_params |= set(getattr(gen, '_cpp_inherited_mixed', ()))
@@ -2603,20 +2598,6 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
     for _pn, _ in param_ctypes:
         if _pn in gimple_ctypes._C_KEYWORDS or _pn in gimple_ctypes._CPP_KEYWORD_FIELDS or _pn in gimple_ctypes._C_PARAM_EXTRA_KEYWORDS:
             gen._cpp_kw_param_renames[_pn] = f"_kw_{_pn}"
-    # Per-unit set of this unit's parameter names — the async unit's
-    # twin of the generator unit's identical seed (see
-    # _gen_cpp_generator_unit), with mutable captures included for the
-    # same reason the generator unit's `extra_captures` union exists: a
-    # function-valued bracket parameter threaded through as an ordinary
-    # trailing `int64_t` capture (e.g. a nested `async def wrapper()
-    # capturing: func()` calling the enclosing method's `func`) must be
-    # recognised by `_cpp_dyn_call_expr` (which gates on
-    # `_cpp_param_names`) for the call to lower through
-    # `mojo_dyn_call` instead of falling through to the "unresolved
-    # callee" refusal. `param_ctypes` already includes the widened
-    # pointer entries for mut-captures, so the plain name set covers
-    # them too.
-    gen._cpp_param_names = set(gimple_ctypes._as_str(_p[0]) for _p in (param_ctypes or []))
     declared: dict[str, str] = {}
     for _pn, _pct in param_ctypes:
         if _pn in mut_capture_names and _pct.endswith(' *'):

@@ -594,7 +594,11 @@ def _assemble(lay: dict, code: bytes, dynstr_data: bytes, dynsym_data: bytes,
     p_flags = PF_R | PF_X
     if dynamic:
         p_flags |= PF_W        # the loader writes the .got slots
-    code_and_dyn_size = lay["body_size"] - lay["globals_size"]
+    # The first PT_LOAD covers the entire body (code + all read-only data + rela).
+    # The second PT_LOAD (if globals present) maps just the globals for write access.
+    # They overlap; that's fine — the loader maps both, and the globals region is
+    # writable in the second mapping while read-only in the first.
+    code_and_dyn_size = lay["body_size"]
     buf.extend(struct.pack("<IIQQQQQQ",
         PT_LOAD, p_flags, text_file_offset, vaddr, vaddr,
         code_and_dyn_size, code_and_dyn_size, code_align,

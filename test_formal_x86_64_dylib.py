@@ -431,6 +431,39 @@ def test_an_elf_module_dylib_is_a_loadable_object(tmpdir, shared):
           f"the padding is not what the PT_LOAD's p_align says it is")
 
 
+def test_the_elf_dylib_tail_is_zero_past_the_last_segment(tmpdir, shared):
+    """Every byte past the last PT_LOAD is page padding, and padding is zero.
+
+    This is the regression test for `FORMAL_elf_dylib_nonzero_tail_past_last_segment`.
+    The first PT_LOAD used to stop at the globals' own PT_LOAD start, leaving the
+    `.rela.dyn` at the end of the file claimed by nothing — and the page padding
+    after it, which the emitter wrote with the next section's bytes, was non-zero.
+    The first PT_LOAD now covers the whole body, so the tail is padding and padding
+    is zeros.
+    """
+    from formal import elf
+    from formal.build import compile_formal_dylib
+    src = os.path.join(tmpdir, "tailzero.mojo")
+    with open(src, "w") as f:
+        f.write("def add1(x):\n  return x + 1\n\ndef twice(x):\n  return x * 2\n")
+    out = os.path.join(tmpdir, "tailzero.so")
+    compile_formal_dylib([src], output=out, arch="x86_64", fmt="elf",
+                         prove=False, check=False)
+    with open(out, "rb") as f:
+        data = f.read()
+    head = elf._read_header(data, out)
+    e_phoff, = struct.unpack_from("<Q", data, 32)
+    e_phentsize, e_phnum = struct.unpack_from("<HH", data, 54)
+    body_start = e_phoff + e_phnum * e_phentsize
+    covered = [(p[2], p[2] + p[4])
+               for p in elf._program_headers(data, head) if p[0] == 1]
+    body_end = max(e for _s, e in covered)
+    tail = data[body_end:]
+    check(not any(tail),
+          f"{sum(1 for b in tail if b)} non-zero byte(s) past the last "
+          f"segment's {len(tail)}-byte tail")
+
+
 def _st_name_at(strings, offset):
     """The name at a `.dynstr` offset, or "" past the end.
 
@@ -1141,6 +1174,8 @@ TESTS = [
      test_x86_64_dylib_passes_strict_validation),
     ("the dylib container is what the caller asked for",
      test_the_dylib_container_is_what_the_caller_asked_for),
+    ("the ELF dylib tail past the last segment is zero",
+     test_the_elf_dylib_tail_is_zero_past_the_last_segment),
     ("an ELF module dylib is a loadable object",
      test_an_elf_module_dylib_is_a_loadable_object),
     ("a module body is a load-time initializer in both containers",
