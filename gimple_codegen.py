@@ -5423,6 +5423,9 @@ class GimpleGen:
         return ginf._elem_of(self, name)
     def _dict_val_of(self, name: str) -> str:
         return ginf._dict_val_of(self, name)
+
+    def _dict_val_mixed(self, name: str) -> bool:
+        return ginf._dict_val_mixed(self, name)
     def _dict_val_is_known(self, name: str) -> bool:
         return ginf._dict_val_is_known(self, name)
     def _dict_val_of_expr(self, expr) -> str:

@@ -167,6 +167,21 @@ main()
 ''')
     assert out == "None True\nNone\n", repr(out)
 
+    # The bug doc's own case. The dict's values are None, 0, False and 1.5, so the codegen sees
+    # several value types at once; every subscript read must still say its own kind.
+    out = run(r'''
+def main():
+    d = {}
+    d['n'] = None
+    d['z'] = 0
+    d['b'] = False
+    d['f'] = 1.5
+    print(d)
+    print(d['n'], d['z'], d['b'], d['f'])
+main()
+''')
+    assert out == "{'n': None, 'z': 0, 'b': False, 'f': 1.5}\nNone 0 False 1.5\n", repr(out)
+
     print("test_dict_slot_read_regression: ok")
 
 

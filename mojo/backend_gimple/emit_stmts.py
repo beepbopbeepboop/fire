@@ -2446,8 +2446,13 @@ def _gen_stmt_AssignStmt(gen, node):
             if ((vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
                     or vtype.endswith(' *'))
                     and obj_v not in getattr(gen, '_opaque_container_locals', ())):
-                gen._dict_val_types[obj_v] = vtype
-                _note_global_dict_store(gen, node.target.obj, vtype)
+                # Join, not overwrite: a dict whose stores disagree (`d['n'] = None` then `d['f'] = 1.5`) has no one
+                # value type. The last store used to win, so every read took that one accessor and the other slots'
+                # kinds were lost (`print(d['n'])` gave 0.0). Disagreement records 'mixed': reads take the boxed path.
+                _prev_vt = gen._dict_val_types.get(obj_v)
+                _joined_vt = 'mixed' if _prev_vt is not None and _prev_vt != vtype else vtype
+                gen._dict_val_types[obj_v] = _joined_vt
+                _note_global_dict_store(gen, node.target.obj, _joined_vt)
             # dict[key] = val → mojo_dict_set_str_* (key coerced via
             # _char_to_cstr, the single dict-key-to-string conversion
             # used by both read and write sides — see its docstring).

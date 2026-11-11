@@ -2252,7 +2252,14 @@ def _dict_val_of(gen, name: str) -> str:
     a C variable comes through here.
     """
     vt = gen._dict_val_types.get(name, 'int64_t')
-    return 'int64_t' if vt == 'int' else vt
+    # 'mixed' is the store-side join for a dict whose values disagree: it is no C type, so a declaration gets the word.
+    return 'int64_t' if vt in ('int', 'mixed') else vt
+
+
+def _dict_val_mixed(gen, name: str) -> bool:
+    """True when the dict's stores disagree on value type (see the store in emit_stmts). Its reads must not use a
+    typed accessor: each slot carries its own kind, and only the boxed read keeps it."""
+    return gen._dict_val_types.get(name) == 'mixed'
 
 
 def _dict_val_is_known(gen, name: str) -> bool:

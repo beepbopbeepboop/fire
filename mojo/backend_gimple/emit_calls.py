@@ -11254,9 +11254,10 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     if ot == 'MojoDict *' and gen._is_none_literal(node.index):
         # `d[None]`: the None-key entry (keykind 3), not the integer-0 one.
         val_ctype = gen._dict_val_of(ov)
-        if val_ctype == 'double':
+        _mixed = gen._dict_val_mixed(ov)
+        if val_ctype == 'double' and not _mixed:
             return 'double', gen._call_expr('double', 'mojo_dict_get_none_key_double', [('MojoDict *', ov)])
-        if val_ctype == 'char *':
+        if val_ctype == 'char *' and not _mixed:
             return 'char *', gen._call_expr('char *', 'mojo_dict_get_none_key_str', [('MojoDict *', ov)])
         t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_none', [('MojoDict *', ov)])
         _mark_unknown_dict_value(gen, ov, t, None, 'none')
@@ -11271,10 +11272,11 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         # stored. Keyed by content, exactly like the str path.
         if idx_type == 'MojoBytes *':
             val_ctype = gen._dict_val_of(ov)
-            if val_ctype == 'char *':
+            _mixed = gen._dict_val_mixed(ov)
+            if val_ctype == 'char *' and not _mixed:
                 return 'char *', gen._call_expr('char *', 'mojo_dict_get_bytes_str',
                                                 [('MojoDict *', ov), ('MojoBytes *', iv)])
-            if val_ctype == 'double':
+            if val_ctype == 'double' and not _mixed:
                 return 'double', gen._call_expr('double', 'mojo_dict_get_bytes_double',
                                                 [('MojoDict *', ov), ('MojoBytes *', iv)])
             t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_bytes',
@@ -11286,10 +11288,11 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         # Ensure index is char * for dict subscript access (all dict keys are strings in runtime)
         idx_type, iv = gen._char_to_cstr(idx_type, iv, True, True)
         val_ctype = gen._dict_val_of(ov)
-        if val_ctype == 'double':
+        _mixed = gen._dict_val_mixed(ov)   # a dict of disagreeing values: only the boxed read keeps each slot's kind
+        if val_ctype == 'double' and not _mixed:
             t = gen._call_expr('double', 'mojo_dict_get_double', [('MojoDict *', ov), (idx_type, iv)])
             return 'double', t
-        if val_ctype == 'char *':
+        if val_ctype == 'char *' and not _mixed:
             t = gen._call_expr('char *', 'mojo_dict_get_str', [('MojoDict *', ov), (idx_type, iv)])
             return 'char *', t
         if val_ctype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
