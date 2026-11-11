@@ -2648,15 +2648,9 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
   else if (insn &&& 0xfffffc1f) = 0xD61F0000 then
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     some { s with pc := (arm64_reg rn s).toNat }
-  -- SVC #imm: 0xD4000001. Darwin's syscall number is in x16. SYS_exit (1)
-  -- halts: the machine has no successor, so the step is `none`. Any other
-  -- number (SYS_write, 4, is the one the emitter uses) returns to the next
-  -- instruction. The return value in x0 is NOT modelled: a path that reads
-  -- x0 after a continuing svc is outside this model (see
-  -- `work_step_svc_write`'s hypothesis and the bug doc).
+  -- SVC #imm: 0xD4000001 (trap; modelled as a no-op step)
   else if (insn &&& 0xffe0001f) = 0xD4000001 then
-    if arm64_reg 16 s = 1 then none
-    else some { s with pc := s.pc + 4 }
+    some s
   -- SXTB Wd, Wn: 0x13001c00 (sign-extend byte 0 to 32 bits, zero-extended to 64)
   --
   -- The `t32u` is not decoration. A W DESTINATION means the instruction writes
