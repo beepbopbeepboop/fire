@@ -260,28 +260,6 @@ BUILTIN_PROGRAMS = {
             var s = f"value={x}"
             print(s)
     """),
-    # `!a` is CPython's ascii(): repr() with every NON-ASCII code point
-    # escaped, and it is a conversion, so it applies to the value itself
-    # rather than to str(value). The compiled path parsed the conversion but
-    # had only the `!r` arm, so `!a` fell through to the str() arm and printed
-    # the plain value; the interpreter did the same by treating `!a` as repr,
-    # whose display spelling leaves non-ASCII raw. `!s` and the bare spelling
-    # are the control: both ARE str(), so they stay unquoted/unescaped.
-    # The λ/😀 row pins code-point escaping (`\u03bb`/`\U0001f600`) rather
-    # than a byte-wise `\xce\xbb`, and the list row pins that the escape pass
-    # also reaches the repr walker's nested strings.
-    "fstring_ascii_conversion": textwrap.dedent("""\
-        def main():
-            s = "héllo"
-            print(f"({s!a})")
-            print(f"({s!s})")
-            print(f"({s})")
-            print(f"({('λ😀')!a})")
-            print(f"({['é']!a})")
-            print(f"({42!a})")
-            print(f"({True!a})")
-            print(f"({1.5!a})")
-    """),
     # An ordinary string whose own TEXT begins with an f/t prefix and a quote.
     # Both engines printed the STRIPPED body (`n`, `x`) and exited 0, so the
     # diff between them was clean — which is why this program is also in
@@ -1718,10 +1696,6 @@ CPYTHON_COMPARABLE = {
     "dynamic_getattr_of_a_method",
     "dict_update_preserves_insertion_order",
     "string_body_that_starts_with_a_prefix",
-    # `!a` has to agree with CPython, not merely with the interpreter: ascii()
-    # and repr() differ on non-ASCII, so engine-vs-engine alone could have
-    # been satisfied by making both engines wrong the same way.
-    "fstring_ascii_conversion",
     # The interpreter yielded characters where the compiled path yielded ints;
     # only CPython can say which is right, and it says ints.
     "bytes_iterates_as_ints",
