@@ -1,6 +1,15 @@
 # FORMAL: `svc` exit handling is not structurally complete
 
-Status: OPEN. Filed 2026-11-11. Parent: `FORMAL_wrong_spec_accepted_since_overflow_traps.md`.
+Status: PARTIALLY LANDED 2026-11-11. Parent: `FORMAL_wrong_spec_accepted_since_overflow_traps.md`.
+
+Landed as 574813206 (archive) and f03896fff (master): the x16-discriminating model (exit is `none`, write
+continues at `pc + 4`), `work_step_svc` / `_exit` / `_write`, the svc step's right-hand side in the generator, no
+`_step_ok` lemma for an svc word, and the termination obligation's comment and pin. The dylib test is PASS=23 FAIL=6,
+the marker's count. Helper `_svc_static_x16` is on the archive (21b4a98cb), not yet called.
+
+STILL OPEN: the per-site x16 threading (design items 2 and 4 below). The generated proofs for the overflow example close
+without it, because svc steps are not walked on the default path. Items 2 and 4 are needed before a dynamic svc can be
+proved rather than refused.
 
 ## Symptom
 
