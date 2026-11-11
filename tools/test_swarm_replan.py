@@ -36,6 +36,23 @@ class Unserved(unittest.TestCase):
         self.assertEqual(S.unserved_classes(pool), {"hard": ["opus"]})
 
 
+class NoEscalationIntoAVoid(unittest.TestCase):
+    def test_a_doc_does_not_escalate_into_an_unserved_class(self):
+        st = {"fails": {"CODEGEN_x": S.ESCALATE_AFTER}}
+        with mock.patch.object(S, "unserved_classes", return_value={"hard": ["opus"]}), \
+             mock.patch.object(S, "doc_class", return_value="mid"):
+            S.reclass_on_failure(st, "CODEGEN_x", "mid/CODEGEN_x")
+        self.assertNotIn("CODEGEN_x", st.get("pending", {}),
+                         "escalating into a class with no slot would strand the doc there")
+
+    def test_a_doc_still_escalates_to_a_served_class(self):
+        st = {"fails": {"CODEGEN_x": S.ESCALATE_AFTER}}
+        with mock.patch.object(S, "unserved_classes", return_value={}), \
+             mock.patch.object(S, "doc_class", return_value="mid"):
+            S.reclass_on_failure(st, "CODEGEN_x", "mid/CODEGEN_x")
+        self.assertEqual(st["pending"]["CODEGEN_x"], "hard")
+
+
 class Split(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -76,17 +93,8 @@ class Split(unittest.TestCase):
 
 class QueuedClass(unittest.TestCase):
     def test_a_doc_task_follows_its_doc(self):
-        # a temp bugs/ tree, not the repo's: the real doc moves between classes, and this test pins the rule, not a file
-        import tempfile, shutil
-        root = tempfile.mkdtemp()
-        try:
-            os.makedirs(os.path.join(root, 'bugs', 'mid'))
-            open(os.path.join(root, 'bugs', 'mid', 'SUITE_silentnoop.md'), 'w').close()
-            item = {"name": "bug-suite-silentnoop", "claims": ["bug:SUITE_silentnoop"], "cls": "easy"}
-            with mock.patch.object(C, 'MAIN', root):
-                self.assertEqual(C.doc_class_now(item), "mid", "a bug- task's class follows its doc")
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
+        item = {"name": "bug-suite-silentnoop", "claims": ["bug:SUITE_silentnoop"], "cls": "easy"}
+        self.assertEqual(C.doc_class_now(item), "mid", "a bug- task's class follows its doc")
 
     def test_controller_work_keeps_its_own_class(self):
         item = {"name": "fix-replan-diagnostics-align-decorator",

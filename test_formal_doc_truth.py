@@ -161,11 +161,8 @@ def group_census():
     if row is not None:
         note = row.group(0)
         counted = 0
-        from formal.model.builtins import _OPT_IN_RUNTIME_HEADERS
         for path in sorted(glob.glob(os.path.join(HERE, 'runtime', '*.h'))):
             base = os.path.basename(path)
-            if base in _OPT_IN_RUNTIME_HEADERS:
-                continue          # not part of the default ABI; runtime_abi() leaves it out too
             real = len(reflect.collect_runtime_exports_h(path))
             counted += real
             m = re.search(re.escape(f'`{base}`') + r'\s+(\d+)', note)
