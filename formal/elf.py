@@ -22,9 +22,16 @@ the extern machinery and not a second analysis of it.
 
 Layout, all after a single PT_LOAD that starts at the code:
 
-    ET_EXEC   .text | .dynstr | .dynsym | .dynamic | .got | [.globals] | .rela.dyn
+    ET_EXEC   .text | .dynstr | .dynsym | .dynamic | .got | .rela.dyn | [.globals]
     ET_DYN    .text | .dynstr | .dynsym | .hash | .dynamic | .got |
-              [.globals] | .rela.dyn
+              .rela.dyn | [.globals]
+
+`.rela.dyn` sits BEFORE `.globals`, and `.globals` is last. The first PT_LOAD
+covers everything up to the globals' own PT_LOAD, so the loader can read the
+relocations through it: with the relocations after the globals, the first
+PT_LOAD (sized as "everything but the globals") covered the globals' bytes and
+left the relocation table outside every segment, and the file's tail held
+non-zero bytes (`test_formal_x86_64_dylib.py`'s tail check, measured 2026-11-11).
 
 with a second PT_DYNAMIC program header when there is anything dynamic at all.
 The shared object adds `.hash` (a 2-bucket `DT_HASH` chain), the exported
@@ -368,10 +375,10 @@ def _layout(code_size: int, external_syms: list[str], needed: list[str],
     # image the tree already builds; it is not this change's, and it is recorded
     # as an observation in `FORMAL_elf_globals_segment` rather than
     # half-applied here.
-    globals_off = off
-    off += globals_size
     rela_off = off
     off += rela_size
+    globals_off = off
+    off += globals_size
     return {
         "phnum": phnum,
         "text_file_offset": text_file_offset,
@@ -637,8 +644,12 @@ def _assemble(lay: dict, code: bytes, dynstr_data: bytes, dynsym_data: bytes,
                          f"DT_INIT_ARRAYSZ in .dynamic would name the wrong "
                          f"number of initializers")
     buf.extend(init_array)                 # .init_array, called at load
-    buf.extend(gblob)                      # .globals, the module-global slots
-    buf.extend(rela_data)                  # .rela.dyn
+    if len(rela_data) != lay["rela_size"]:
+        raise ValueError(f"the .rela.dyn is {len(rela_data)} bytes and the "
+                         f"layout reserved {lay['rela_size']}, so DT_RELA and "
+                         f"DT_RELASZ would name the wrong bytes")
+    buf.extend(rela_data)                  # .rela.dyn, inside the first PT_LOAD
+    buf.extend(gblob)                      # .globals, the module-global slots, last
 
     buf.extend(b"\x00" * (total_size_padded - total_size))
     return bytes(buf)
