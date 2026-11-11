@@ -168,13 +168,15 @@ def pid_alive(t):
 
 
 def dead_running_tasks(tasks):
-    """Registry entries that claim to be running, whose process is gone, and that never wrote an exitcode.
+    """Registry entries that are running or were recorded as exited-err, whose process is gone, and that never wrote
+    an exitcode. A dead worker stays here until it is restarted or superseded, so a restart skipped for want of a
+    slot is retried on a later pass (sync marks the dead ones exited-err, so the record matches the pid).
 
     A task that wrote an exitcode has finished: state_of already says exited-ok/exited-err for it, so
     treating it as a dead worker and restarting it would supersede finished work (2026-11-10: r329 said
     DONE, exited 0, and sync restarted it anyway, superseding a finished task)."""
     return {n for n, t in tasks.items()
-            if t.get("state") == "running" and not pid_alive(t)
+            if t.get("state") in ("running", "exited-err") and not pid_alive(t)
             and not os.path.exists(os.path.join(t.get("worktree", ""), "exitcode"))}
 
 
@@ -1491,6 +1493,14 @@ def cmd_sync(a):
     # A task is dead when its recorded pid is gone. The opencode session listing is
     # unreliable (times out, or keeps stale sessions), so it must not mask a dead pid.
     dead_running = sorted(dead_running_tasks(tasks))
+    if dead_running and not dry and live is not None:
+        # A pid that is gone is not running. Record that, so the registry stops saying "running" for a worker that is
+        # not (2026-11-10: a killed README worker stayed "running" for hours, shown by ps and claims). A task whose
+        # session is still live is left alone, and an unreadable listing (live is None) changes nothing.
+        with registry() as reg:
+            for n in dead_running:
+                if n not in live and n in reg and reg[n].get("state") == "running":
+                    reg[n]["state"] = "exited-err"
     if dead_running:
         print("sync: running-but-dead-in-registry=%d" % len(dead_running))
         for n in dead_running:
