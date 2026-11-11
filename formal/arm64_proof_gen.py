@@ -16687,15 +16687,20 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
                 f"    of one state, so it is not a `Refine.Block` -- so the\n"
                 f"    claim is left open rather than proved.  The spec is the\n"
                 f"    source's own; none is guessed. -/\n"
+                f"/-- The precondition of the guarded obligation: the NORMAL path's\n"
+                f"    overflow guards.  This generator does not yet derive it from the\n"
+                f"    machine code, so it is opaque: nothing is assumed about it beyond\n"
+                f"    what the obligation states. -/\n"
+                f"opaque {ident}_pre : UInt64 → Prop\n\n"
                 f"theorem {ident}_spec :\n"
-                f"    Refine.export_result_spec dylib_image {ident} {spec} := by\n"
+                f"    Refine.export_result_spec_under {ident}_pre dylib_image {ident} {spec} := by\n"
                 f"  sorry\n\n"
-                f"/-- The CALLER's theorem, PROVED and sorry-free: given the export's\n"
-                f"    spec, the caller's contract follows. -/\n"
+                f"/-- The CALLER's theorem, PROVED and sorry-free: given the guarded\n"
+                f"    obligation, the guarded contract follows. -/\n"
                 f"theorem {ident}_contract (n : UInt64) :\n"
-                f"    Refine.DylibExportContract {ident}_prog {spec} n :=\n"
-                f"  Refine.dylib_export_contract_of_spec dylib_image {ident} "
-                f"{spec}\n    {ident}_spec n")
+                f"    Refine.DylibExportContractUnder {ident}_prog {ident}_pre {spec} n :=\n"
+                f"  Refine.dylib_export_contract_of_spec_under dylib_image {ident} "
+                f"{ident}_pre {spec}\n    {ident}_spec n")
         elif not contract:
             # NO spec could be derived from the source.  There is then nothing
             # honest to assert about the export's RESULT, and the emitter does
