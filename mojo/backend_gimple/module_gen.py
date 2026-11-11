@@ -14403,6 +14403,13 @@ def gen_module_impl(self, stmts: list):
             _vt = self._quick_type(_value.pairs[0][1])
             for _k, _v in _value.pairs[1:]:
                 _vt = TypeLattice.join(_vt, self._quick_type(_v))
+            # A literal whose values are of disagreeing KNOWN kinds is 'mixed' (exprtypes.dict_kind_join); the lattice
+            # join above would promote an int beside a float to double and read the int slot as a double.
+            _kind = None
+            for _k, _v in _value.pairs:
+                _kind = gimple_exprtypes.dict_kind_join(_kind, gimple_exprtypes.dict_value_kind(self, _v))
+            if _kind == 'mixed':
+                _vt = 'mixed'
             self._global_dict_val_types[_gname] = _vt
             # A dict literal of LAMBDAS: what a later `d['k'](...)` call site
             # needs is the callee's return type, and the dict's own value
@@ -14885,10 +14892,10 @@ def gen_module_impl(self, stmts: list):
         if _gname in self._global_dict_val_types:
             continue
         _dvt = None
-        for _sv in _gvals:
-            _dvt = _sv if _dvt is None else TypeLattice.join(_dvt, _sv)
-        if _dvt:
-            self._global_dict_val_types[_gname] = _dvt
+        for _sv in _gvals:                  # each entry is a value KIND, or None when unknown
+            _dvt = gimple_exprtypes.dict_kind_join(_dvt, _sv)
+        if _dvt not in (None, 'none'):
+            self._global_dict_val_types[_gname] = 'int64_t' if _dvt == '_Bool' else _dvt
 
     _gmi_scan_try_imports(
         self, _phase17_mod,

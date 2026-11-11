@@ -1298,6 +1298,8 @@ class GimpleGen:
         self._prototype_only_syms: set[str] = set()
         # (function, name) -> the C kind of the last store into it, for the mixed float/str refusal in emit_stmts.
         self._stored_kinds: dict = {}
+        # (function, name) of every dict store of None, for the mixed join in emit_stmts (a None store is a kind).
+        self._dict_none_seen: set = set()
         # Struct methods called from a compiled generator/async body on
         # EITHER `self` or a non-self struct-pointer-typed local/parameter
         # (see CODEGEN_generator_struct_typed_param_refused).
