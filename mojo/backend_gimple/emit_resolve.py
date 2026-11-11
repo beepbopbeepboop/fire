@@ -1255,6 +1255,28 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
                 # (importers read imported modules' signatures from it; without
                 # it every cross-module call got an int64_t prototype).
                 gen._module_stmts[module_name] = stmts
+                # Pre-register functions from self-host sibling modules before
+                # lowering dependent call sites (fixes cycles between siblings).
+                try:
+                    from fire_compiler import FunctionDef
+                    _SH_PREFIXES = ('mojo.', 'gimple_', 'ast_rewriter', 'mlir', 'regex_compile',
+                                    'module_loader', 'ownership_destruct', 'fire_compiler',
+                                    'determinism_trace', 'imports', 'elaborate', 'monomorphize',
+                                    'comptime', 'cas', 'build_stdlib_dylib', 'driver')
+                    _is_sh = False
+                    for _pref in _SH_PREFIXES:
+                        if module_name.startswith(_pref):
+                            _is_sh = True
+                            break
+                    if _is_sh and hasattr(gen, '_imported_func_home'):
+                        for _ms in (stmts or []):
+                            if isinstance(_ms, FunctionDef):
+                                try:
+                                    gen._imported_func_home.setdefault(_ms.name, module_name)
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
                 # Incrementally extend the flat, pre-deduped mirror (see
                 # the `_walk_ast` re-scan bug
                 # Phase 1) — O(this module's own stmt count), done once

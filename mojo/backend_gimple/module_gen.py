@@ -5674,6 +5674,33 @@ def gen_module_impl(self, stmts: list):
             if hasattr(self, '_all_transitive_stmts_ids'):
                 self._all_transitive_stmts_ids.clear()
 
+        # Pre-register all functions from self-host sibling modules into shared
+        # tables before dependent call sites are lowered (fixes cycles between
+        # sibling modules like emit_infra <-> emit_stmts).
+        try:
+            _SH_PREFIXES = ('mojo.', 'gimple_', 'ast_rewriter', 'mlir', 'regex_compile',
+                            'module_loader', 'ownership_destruct', 'fire_compiler',
+                            'determinism_trace', 'imports', 'elaborate', 'monomorphize',
+                            'comptime', 'cas', 'build_stdlib_dylib', 'driver')
+            _mod_stmts_map = getattr(self, '_module_stmts', None) or {}
+            for _mod_name, _mod_stmts in _mod_stmts_map.items():
+                _is_sh = False
+                for _pref in _SH_PREFIXES:
+                    if _mod_name.startswith(_pref):
+                        _is_sh = True
+                        break
+                if not _is_sh:
+                    continue
+                for _ms in (_mod_stmts or []):
+                    if isinstance(_ms, FunctionDef):
+                        try:
+                            if hasattr(self, '_imported_func_home'):
+                                self._imported_func_home.setdefault(_ms.name, _mod_name)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
     # No epoch bump here, and the absence is worth stating because it looks
     # like the omission a reader would expect to correct. Every nested
     # `_compile_imported_module` above ran a whole `gen_module_impl` of its
