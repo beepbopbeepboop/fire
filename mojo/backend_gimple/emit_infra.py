@@ -125,6 +125,11 @@ def _reset_func(gen, body: list = None, params: list = None,
     # inline into). Cheap: a reference, and the body is already alive for
     # the whole function.
     gen._cur_func_body = body
+    # Cache for _local_bindings per-function-body: avoids an O(S) walk
+    # on every per-name query during statement emission, turning the total
+    # per-function cost from O(K*S) (K names queried) to O(S + K) after the
+    # first walk.  Reset per function so that a new body gets a fresh cache.
+    gen._local_bindings_cache = {}
     # The enclosing function's PARAMETER names, for the same reason the body
     # is kept. `mojo/middle/lambdareduce` uses this to refuse inlining a
     # lambda that captures a PARAMETER: a parameter's ctype is the least
@@ -991,6 +996,7 @@ class FuncState:
         self.fs_fresh_str_tmps_items: set = set()
         self.fs_struct_field_owners_items: dict = {}
         self.fs_struct_slot_kinds_items: dict = {}
+        self.fs_local_bindings_cache: dict = {}
 
 
 def save_func_state(gen) -> FuncState:
@@ -1107,6 +1113,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_struct_slot_kinds = gen._struct_slot_kinds
     for _k in gen._struct_slot_kinds:
         st.fs_struct_slot_kinds_items[_k] = gen._struct_slot_kinds[_k]
+    st.fs_local_bindings_cache = gen._local_bindings_cache
     return st
 
 
@@ -1190,6 +1197,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen.current_func_name = st.fscurrent_func_name
     gen._loop_depth = st.fs_loop_depth
     gen._captures = st.fs_captures
+    gen._local_bindings_cache = st.fs_local_bindings_cache
     gen._env_param = st.fs_env_param
     gen._closure_envs = st.fs_closure_envs
     gen._inner_func_name = st.fs_inner_func_name
@@ -3603,6 +3611,10 @@ def _local_bindings(gen, name) -> list:
     over-count only refuses the caller's optimisation, which is the safe
     answer. Computed on demand from `gen._cur_func_body`, so nothing new has
     to be saved or restored per function."""
+    # Return cached result if available (set per function in _reset_func).
+    cache = getattr(gen, '_local_bindings_cache', None)
+    if cache is not None and (id(gen._cur_func_body), name) in cache:
+        return cache[(id(gen._cur_func_body), name)]
     def idents_named(root):
         return [n for n in _iter_ast(root)
                 if isinstance(n, gimple_ctypes.IdentExpr) and n.name == name]
@@ -3639,6 +3651,12 @@ def _local_bindings(gen, name) -> list:
             elif not isinstance(n, gimple_ctypes.IdentExpr):
                 if getattr(n, 'name', None) == name:
                     found.append(None)
+    # Cache the result for this name+function-body combination.
+    # Keyed by (id(body), name) so that a body swap that bypasses
+    # `_reset_func` (module_gen swaps `_cur_func_body` directly) cannot
+    # serve a stale result for a different function.
+    if cache is not None:
+        cache[(id(gen._cur_func_body), name)] = found
     return found
 
 

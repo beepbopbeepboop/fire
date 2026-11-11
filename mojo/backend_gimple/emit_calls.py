@@ -8968,11 +8968,11 @@ def _box_escaping_dict_slot_read(gen, enode, vtype: str, v: str) -> tuple[str, s
                            [('MojoDict *', _dv)])
     else:
         return vtype, v
-    # A tagged/boxed word: record as tagged so kind-aware consumers can see it,
-    # but do NOT add to _boxed_vals (generic boxed-slot set) because _emit_call
-    # would unbox_plain it for user functions and lose None/bool kinds.
-    if hasattr(gen, '_tagged_word_vals'):
-        gen._tagged_word_vals.add(v)
+    # Record as boxed so kind-aware consumers can see it via _dict_slot_reads
+    # (the dict kind is stored per-key, not in _tagged_word_vals). Do NOT add
+    # to _tagged_word_vals: that set is for tagged generator words only and
+    # falsely triggers MIXED_NAME_NON_INT64_REFUSAL when a dict read name is
+    # later rebound to a non-int64 C type.
     return 'int64_t', v
 
 
@@ -11120,8 +11120,6 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             hv = gen._call_expr('int64_t', 'mojo_dict_slot_boxed',
                                 [('MojoDict *', dp), (kt, kv)])
             gen._emit(f"  {res} = {hv};")
-            if hasattr(gen, '_tagged_word_vals'):
-                gen._tagged_word_vals.add(res)
             _mark_unknown_dict_value(gen, dp, res, kv, 'str')
             gen._emit(f"  goto {bb_done};")
             gen._emit_label(bb_miss)
@@ -11133,8 +11131,6 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             return 'int64_t', res
         t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed',
                            [('MojoDict *', dp), (kt, kv)])
-        if hasattr(gen, '_tagged_word_vals'):
-            gen._tagged_word_vals.add(t)
         _mark_unknown_dict_value(gen, dp, t, kv, 'str')
         return 'int64_t', t
 
@@ -11330,8 +11326,6 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             return 'char *', gen._call_expr('char *', 'mojo_dict_get_none_key_str', [('MojoDict *', ov)])
         t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_none', [('MojoDict *', ov)])
         _mark_unknown_dict_value(gen, ov, t, None, 'none')
-        if hasattr(gen, '_tagged_word_vals'):
-            gen._tagged_word_vals.add(t)
         return 'int64_t', t
 
     if ot == 'MojoDict *':
@@ -11351,8 +11345,6 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_bytes',
                                [('MojoDict *', ov), ('MojoBytes *', iv)])
             _mark_unknown_dict_value(gen, ov, t, iv, 'bytes')
-            if hasattr(gen, '_tagged_word_vals'):
-                gen._tagged_word_vals.add(t)
             return 'int64_t', t
         # Ensure index is char * for dict subscript access (all dict keys are strings in runtime)
         idx_type, iv = gen._char_to_cstr(idx_type, iv, True, True)
@@ -11383,8 +11375,6 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                 _cks.pop(iv, None)
         t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed', [('MojoDict *', ov), (idx_type, iv)])
         _mark_unknown_dict_value(gen, ov, t, iv, 'str' if idx_type == 'char *' else None)
-        if hasattr(gen, '_tagged_word_vals'):
-            gen._tagged_word_vals.add(t)
         return 'int64_t', t
 
     # Opaque Python object (typed as int) — treat as MojoList via cast
@@ -11459,8 +11449,6 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                     _cks.pop(idx_for_dict, None)
             t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])
             _mark_unknown_dict_value(gen, dp, t, idx_for_dict, 'str')
-            if hasattr(gen, '_tagged_word_vals'):
-                gen._tagged_word_vals.add(t)
             return 'int64_t', t
         # Otherwise treat as MojoList* stored as int; cast and subscript
         lp = gen._coerce_to_type(ot, 'MojoList *', gen._ensure_local(ot, ov))

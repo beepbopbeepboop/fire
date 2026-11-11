@@ -3388,8 +3388,11 @@ def _gen_stmt_ReturnStmt(gen, node):
                 v = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_none',
                                    [('MojoDict *', _dv)])
             vtype = 'int64_t'
-            if hasattr(gen, '_tagged_word_vals'):
-                gen._tagged_word_vals.add(v)
+            # Record as boxed so kind-aware consumers can see it via _dict_slot_reads
+            # (the dict kind is stored per-key, not in _tagged_word_vals). Do NOT add
+            # to _tagged_word_vals: that set is for tagged generator words only and
+            # falsely triggers MIXED_NAME_NON_INT64_REFUSAL when a dict read name is
+            # later rebound to a non-int64 C type.
         # A generator handle leaving a function whose return slot is a plain word
         # (`def iglob(...): it = _iglob(...); return it`, consumed as `list(iglob(...))`):
         # the consumer can only drain it if the run time knows which generator it is.

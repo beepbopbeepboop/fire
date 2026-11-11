@@ -1592,21 +1592,36 @@ def _drop_unreferenced_unimpl_stubs(parts: list) -> list:
     identifier: a stub kept by mistake costs bytes, a stub dropped by mistake
     is an undeclared call, so the test errs toward keeping.
     """
+    # The keep/drop decision is per stub name, and a stub is dropped only if
+    # NO other part names it. Scan every part's text ONCE per name (O(parts
+    # × names)) and collect the set of texts that reference each name, then
+    # test membership -- instead of re-scanning every part for every candidate
+    # stub (O(parts² × names)). The outcome is byte-identical: a stub is kept
+    # iff some part whose text differs from its own names it, which is the
+    # same test the per-other-part loop ran (its `otext is not text and
+    # otext != text` excludes both the same object and any equal-text part,
+    # so a duplicate stub does not keep its twin).
+    pats = {
+        name: re.compile(r'(?<![A-Za-z0-9_])' + name + r'(?![A-Za-z0-9_])')
+        for name in UNIMPL_STUB_NAMES
+    }
+    referenced_by = {name: set() for name in UNIMPL_STUB_NAMES}
+    for part in parts:
+        text = _as_str(part)
+        for name in UNIMPL_STUB_NAMES:
+            if pats[name].search(text):
+                referenced_by[name].add(text)
     keep: list = []
     for part in parts:
         text = _as_str(part)
         dropped = False
-        for name in UNIMPL_STUB_NAMES:
-            if text.startswith('static ') and (' ' + name + ' (') in text and text.endswith('}'):
-                used = False
-                pat = re.compile(r'(?<![A-Za-z0-9_])' + name + r'(?![A-Za-z0-9_])')
-                for other in parts:
-                    otext = _as_str(other)
-                    if otext is not text and otext != text and pat.search(otext):
-                        used = True
-                        break
-                if not used:
-                    dropped = True
+        if text.startswith('static ') and text.endswith('}'):
+            for name in UNIMPL_STUB_NAMES:
+                if (' ' + name + ' (') in text:
+                    # A stub definition for `name`. Dropped iff no other part
+                    # (a part whose text differs from this one) references it.
+                    if not any(t != text for t in referenced_by[name]):
+                        dropped = True
         if not dropped:
             keep.append(part)
     return keep
@@ -5169,10 +5184,20 @@ def gen_module_impl(self, stmts: list):
                 _replaced.append(_s)
         stmts = _replaced
 
-    _gsrc = ''
-    if getattr(self, '_current_filename', None):
+    # Prefer the in-memory source text the parser consumed (stashed by the
+    # pipeline pass as `gen._source_text`) over re-opening `filename` on disk.
+    # Everything derived from `_gsrc` (function-typed bracket-parameter
+    # detection, comptime-param threading through nested closures) must be
+    # computed from source TEXT — the AST records only comptime parameter
+    # NAMES, not their type annotations — but that text need not come from a
+    # file at all, and a disk that differs from the parse can produce
+    # silently-wrong threading decisions. Fall back to the on-disk read only
+    # for callers that set `_current_filename` without stashing `_source_text`.
+    _gsrc = getattr(self, '_source_text', '')
+    if not _gsrc and getattr(self, '_current_filename', None):
         try:
-            _gsrc = open(self._current_filename).read()
+            with open(self._current_filename) as _f:
+                _gsrc = _f.read()
         except Exception:
             _debug_note('cannot read source for generics scan', self._current_filename)
             _gsrc = ''

@@ -57,6 +57,18 @@ tagging a dict read whose name is later rebound with another C type. The fix is 
 `module_shared.py` and `coro.py` compile in the fire.ci build, and `test_dict_slot_read_regression.py` still passes.
 Check it against the fire.ci build, not only this probe.
 
+## Status (2026-11-11): partial fix landed (7fe6798cc, merged with master)
+
+- FIXED: `ast_rewriter.py` and `module_shared.py` now compile through the probe (the refusal was the dict-slot tag).
+- NOT FIXED: `mojo/middle/coro.py` is still refused, now with `parameter 'real_params' of '_mark_coro_param_elem_kinds'
+  is passed a container at one call site and a str or number at another`. Master refuses it with the same message,
+  so it is a separate refusal, not the dict-slot one.
+- NOT FIXED: `test_dict_slot_read_regression.py` case 2 fails with gcc `cannot convert to a pointer type`, on master and
+  on this branch alike.
+- NOT RUN: the fire.ci self-host build the done-when asks for. `stdlib-syntax` exits 0 with this change.
+
+The branch commit deleted this doc; it is restored here because the done-when is not met. Still open.
+
 ## Process note
 
 The dict-slot branch was merged to master (6b5c68c5b) without compiling the compiler's own sources. Add that compile to
