@@ -2015,6 +2015,15 @@ def test_the_library_admits_no_hole(tmpdir, shared):
     # which is what keeps this from red for the records quoted in the docstrings
     # above.
     hole = _re.compile(r"(^|\s)(by\s+sorry|:=\s*sorry|\badmit\b)")
+    # CLAUDE.md: scaffold holes live only in lib/Scaffold.lean, and each is ledgered in
+    # formal/proof_gaps.py::SCAFFOLD_HOLES (counted by test_formal_proof_gaps.py). A ledgered
+    # Scaffold hole is therefore allowed here; any other hole, or an unledgered Scaffold one, is not.
+    import sys as _sys
+    _fg = os.path.join(os.path.dirname(os.path.abspath(__file__)), "formal")
+    if _fg not in _sys.path:
+        _sys.path.insert(0, _fg)
+    import proof_gaps as _pg
+    ledgered = set(_pg.SCAFFOLD_HOLES)
     found = []
     for name in modules:
         with open(os.path.join(lib, name)) as fh:
@@ -2022,6 +2031,10 @@ def test_the_library_admits_no_hole(tmpdir, shared):
                 if line.lstrip().startswith("--"):
                     continue
                 if hole.search(line):
+                    if name == "Scaffold.lean":
+                        tm = _re.search(r"(?:theorem|lemma)\s+(\w+)", line)
+                        if tm and tm.group(1) in ledgered:
+                            continue
                     found.append(f"{name}:{n}: {line.strip()[:90]}")
     check(not found,
           "the library admits a hole, and no other check in this tree can see "
