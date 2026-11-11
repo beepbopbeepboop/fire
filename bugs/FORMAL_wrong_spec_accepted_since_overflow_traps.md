@@ -51,3 +51,5 @@ Fix, in order:
 3. `formal/arm64_proof_gen.py`: the SVC row (`5433`) and `_is_svc` (`8381`) say which svc is which.
 4. Then the guarded contract: a body whose only branches are overflow traps gets the non-overflow precondition and a
    proved normal path. Until then the teeth check stays an expected failure.
+
+Exit handling, the structural gap that remains after the Lean split: `FORMAL_svc_exit_handling_incomplete.md`.
