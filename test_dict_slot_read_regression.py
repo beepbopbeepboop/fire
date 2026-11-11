@@ -1,149 +1,189 @@
 #!/usr/bin/env python3
-"""Regression test for the dict slot read refusal bug.
+"""Regression: a dict subscript read must carry the slot's runtime value kind.
 
-This test verifies that dict slot reads do NOT incorrectly trigger
-MIXED_NAME_NON_INT64_REFUSAL.
-
-Before the fix (with bug): compilation refuses with:
-  "a name bound to a tagged generator word ... cannot also hold a value of another C type (str or float)"
-After the fix: compilation succeeds without refusal
+`d['k']` for a dict whose value kind is not recoverable from the bare int64_t
+word used to print as 0/1/bits. Stringification/repr of the read now consults
+the slot's runtime kind via `mojo_dict_repr_slot`.
 """
 
 import subprocess
 import sys
 from pathlib import Path
 
+# Import helpers from the gimple runner (same tree).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_gimple_runner import compile_mojo_to_gimple_exe
+from test_gimple_runner import compile_mojo_to_gimple_exe  # noqa: E402
 
-def run(src: str) -> tuple:
-    """Compile a Mojo source to GIMPLE executable and return (stdout, stderr, returncode)."""
+
+def run(src: str) -> str:
     exe = compile_mojo_to_gimple_exe(src)
     r = subprocess.run([exe], capture_output=True, text=True, timeout=30)
-    return r.stdout, r.stderr, r.returncode
+    assert r.returncode == 0, (
+        f"exit {r.returncode}\nstderr: {r.stderr}\nstdout: {r.stdout}"
+    )
+    return r.stdout
+
 
 def main():
-    # Test 1: Dict slot read followed by rebind to string
-    # This is the pattern from ast_rewriter.py: node = node.edges[key] then rebind to str
-    src1 = '''
-def test():
-    d = {"key": None}
-    node = d["key"]  # dict slot read
-    node = "hello"     # rebind to string
-    return node
-
+    # Direct subscript reads: None and bool must not collapse to 0/1.
+    out = run(r'''
 def main():
-    test()
+    d = {}
+    d['n'] = None
+    d['b'] = True
+    d['f'] = False
+    print(d['n'])
+    print(d['b'])
+    print(d['f'])
+    print(str(d['n']), repr(d['b']))
 main()
-'''
+''')
+    assert out == "None\nTrue\nFalse\nNone True\n", repr(out)
 
-    print("Test 1: Dict slot read then rebind to string")
-    try:
-        stdout, stderr, returncode = run(src1)
-        # If we get here, compilation succeeded (no refusal)
-        print(f"  PASS: Compilation succeeded without refusal (returncode={returncode})")
-        if stderr and "refused" in stderr.lower():
-            print(f"  FAIL: Refusal detected in stderr: {stderr[:200]}")
-            return 1
-        # Execute the program to verify correct behavior
-        exe_path = stdout.strip() if stdout else None
-        if exe_path and returncode == 0:
-            run_r = subprocess.run([exe_path], capture_output=True, text=True, timeout=10)
-            print(f"  Program output: {run_r.stdout.strip()}")
-            # Verify the program actually works
-            if "hello" in run_r.stdout:
-                print(f"  PASS: Program executed correctly")
-            else:
-                print(f"  WARN: Unexpected output: {run_r.stdout}")
-    except Exception as e:
-        # If compilation raised an exception with "refused", the bug is present
-        print(f"  FAIL: Compilation raised exception: {e}")
-        return 1
+    # Assigned to locals, the slot kind must still be visible.
+    out = run(r'''
+def main():
+    d = {}
+    d['n'] = None
+    d['b'] = True
+    x = d['n']
+    y = d['b']
+    print(x, y)
+    print(str(x), repr(y))
+main()
+''')
+    assert out == "None True\nNone True\n", repr(out)
 
-    # Test 2: Dict slot read followed by rebind to float
-    src2 = '''
-def test():
-    d = {"key": 1.5}
-    val = d["key"]  # dict slot read
-    val = "text"    # rebind to string
-    return val
+    # A homogeneous literal whose per-read kind matters.
+    out = run(r'''
+def main():
+    d = {'x': True, 'y': False}
+    print(d['x'], d['y'])
+main()
+''')
+    assert out == "True False\n", repr(out)
+
+    # Bytes-keyed and None-keyed reads also carry the slot's runtime kind.
+    out = run(r'''
+def main():
+    d = {}
+    d[b'k'] = True
+    d[b'n'] = None
+    d[b'f'] = False
+    print(d[b'k'], d[b'n'], d[b'f'])
+    x = d[b'n']
+    print(x, str(x), repr(x))
+main()
+''')
+    assert out == "True None False\nNone None None\n", repr(out)
+
+    out = run(r'''
+def main():
+    d = {}
+    d[None] = False
+    d['x'] = None
+    print(d[None], d['x'])
+    y = d[None]
+    print(y, repr(y))
+main()
+''')
+    assert out == "False None\nFalse False\n", repr(out)
+
+    # Cross-function / returned subscript reads: the slot kind must survive
+    # when the read escapes its frame (returned directly or via a local).
+    out = run(r'''
+def read(d, k):
+    return d[k]
 
 def main():
-    test()
+    d = {'n': None, 'b': True, 'f': False}
+    print(read(d, 'n'), read(d, 'b'), read(d, 'f'))
+    print(str(read(d, 'n')), repr(read(d, 'b')))
 main()
-'''
+''')
+    assert out == "None True False\nNone True\n", repr(out)
 
-    # A float and a str in ONE name have no representation (the box carries only int kinds). The compiler refuses the
-    # program with the mixed-name reason, rather than emitting a double-to-pointer cast gcc rejects.
-    print("\nTest 2: float dict read then rebind to string: refused with the mixed-name reason")
-    try:
-        run(src2)
-        print("  FAIL: compiled, but a float and a str share one name")
-        return 1
-    except RuntimeError as e:
-        if "cannot also hold a value of another C type" in str(e):
-            print("  PASS: refused with the mixed-name reason")
-        else:
-            print(f"  FAIL: refused for another reason: {str(e)[:200]}")
-            return 1
-
-    # Test 3: Dict slot read stored in a list
-    src3 = '''
-def test():
-    d = {"key": None}
-    lst = [d["key"]]  # dict slot read stored
-    lst.append("other")
-    return lst[0]
-
-def main():
-    test()
-main()
-'''
-
-    print("\nTest 3: Dict slot read stored in list then rebind")
-    try:
-        stdout, stderr, returncode = run(src3)
-        print(f"  PASS: Compilation succeeded without refusal (returncode={returncode})")
-        if stderr and "refused" in stderr.lower():
-            print(f"  FAIL: Refusal detected in stderr: {stderr[:200]}")
-            return 1
-    except Exception as e:
-        print(f"  FAIL: Compilation raised exception: {e}")
-        return 1
-
-    # Test 4: Dict slot read passed as argument (escaping)
-    src4 = '''
-def show(v):
-    print(v)
-
-def test():
-    d = {"key": None}
-    x = d["key"]  # dict slot read
-    show(x)         # passed as argument
+    out = run(r'''
+def read(d):
+    x = d['x']
     return x
 
 def main():
-    test()
+    print(read({'x': None}))
+    print(read({'x': True}))
+    print(read({'x': False}))
+    print(read({'x': 1.5}))
 main()
-'''
+''')
+    assert out == "None\nTrue\nFalse\n1.5\n", repr(out)
 
-    print("\nTest 4: Dict slot read passed as argument (escaping)")
-    try:
-        stdout, stderr, returncode = run(src4)
-        print(f"  PASS: Compilation succeeded without refusal (returncode={returncode})")
-        if stderr and "refused" in stderr.lower():
-            print(f"  FAIL: Refusal detected in stderr: {stderr[:200]}")
-            return 1
-    except Exception as e:
-        print(f"  FAIL: Compilation raised exception: {e}")
-        return 1
+    out = run(r'''
+def readb(d):
+    return d[b'k']
 
-    print("\n" + "="*60)
-    print("All regression tests passed!")
-    print("Dict slot reads are no longer incorrectly tagged as generator words.")
-    print("The MIXED_NAME_NON_INT64_REFUSAL does not fire for dict reads.")
-    print("="*60)
-    return 0
+def readn(d):
+    return d[None]
+
+def main():
+    print(readb({b'k': True}), readb({b'k': None}))
+    print(readn({None: False}), str(readn({None: None})))
+main()
+''')
+    assert out == "True None\nFalse None\n", repr(out)
+
+    # Passed as arguments, slot reads must keep their runtime kind in the callee.
+    out = run(r'''
+def show(v):
+    print(v)
+
+def show_s(v):
+    print(str(v), repr(v))
+
+def main():
+    d = {'n': None, 'b': True, 'f': False}
+    show(d['n'])
+    show(d['b'])
+    show(d['f'])
+    x = d['n']
+    y = d['b']
+    show(x)
+    show(y)
+    show_s(d['n'])
+    show_s(d['b'])
+main()
+''')
+    assert out == "None\nTrue\nFalse\nNone\nTrue\nNone None\nTrue True\n", repr(out)
+
+    # Slot reads stored in containers/variables must keep kind (root cause).
+    out = run(r'''
+def main():
+    d = {'n': None, 'b': True}
+    lst = [d['n'], d['b']]
+    print(lst[0], lst[1])
+    d2 = {}
+    d2['x'] = d['n']
+    print(d2['x'])
+main()
+''')
+    assert out == "None True\nNone\n", repr(out)
+
+    # The bug doc's own case. The dict's values are None, 0, False and 1.5, so the codegen sees
+    # several value types at once; every subscript read must still say its own kind.
+    out = run(r'''
+def main():
+    d = {}
+    d['n'] = None
+    d['z'] = 0
+    d['b'] = False
+    d['f'] = 1.5
+    print(d)
+    print(d['n'], d['z'], d['b'], d['f'])
+main()
+''')
+    assert out == "{'n': None, 'z': 0, 'b': False, 'f': 1.5}\nNone 0 False 1.5\n", repr(out)
+
+    print("test_dict_slot_read_regression: ok")
+
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

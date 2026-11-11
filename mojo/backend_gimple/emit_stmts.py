@@ -956,35 +956,6 @@ def _emit_dynattr_setattr_dispatch(gen, member: str, vtype: str, v: str,
                     [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
 
 
-def _join_dict_store(gen, key: str, value_node, vtype: str):
-    """Record a dict store's value kind under `key` (a C name or a source name), joined with what is recorded (the
-    one store-side writer: every dict store comes through here). Returns the recorded kind, or None when this store
-    says nothing about the dict's value type.
-
-    A store whose kind the compiler does not know (`dict_value_kind` None) joins nothing, and a container or str/float
-    store falls back to its C type. A None store is a kind of its own, remembered per (function, name), so a later
-    known-kind store joins it: `d['n'] = None` then `d['f'] = 1.5` is 'mixed'. Two different known kinds are 'mixed'
-    (`exprtypes.dict_kind_join`).
-    """
-    _kind = gimple_exprtypes.dict_value_kind(gen, value_node)
-    if _kind is None and (vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
-                          or vtype.endswith(' *')):
-        _kind = vtype
-    _prev_vt = gen._dict_val_types.get(key)
-    _seen_key = (_as_str(gen.current_func_name), _as_str(key))
-    if _kind == 'none':
-        gen._dict_none_seen.add(_seen_key)
-    if _kind is None or (_kind == 'none' and _prev_vt is None):
-        return None
-    _joined_vt = gimple_exprtypes.dict_kind_join(_prev_vt, _kind)
-    if _joined_vt == '_Bool':
-        _joined_vt = 'int64_t'
-    if _seen_key in gen._dict_none_seen and _joined_vt not in (None, 'none'):
-        _joined_vt = 'mixed'
-    gen._dict_val_types[key] = _joined_vt
-    return _joined_vt
-
-
 def _note_global_dict_store(gen, target_obj, vtype: str) -> None:
     """Record a dict store's value type under the SOURCE name of a module-scope
     dict receiver.
@@ -1607,17 +1578,6 @@ def _gen_stmt_AssignStmt(gen, node):
                     and ginf.tagged_mixed_name(gen, _as_str(tname)))):
             raise RuntimeError(
                 f"{tname!r}: {ginf.MIXED_NAME_NON_INT64_REFUSAL}")
-        # A float and a str stored into the same name of one function (`val = d["key"]` on a float dict, then
-        # `val = "text"`): no representation holds both kinds, and the second store would cast a double to a pointer,
-        # which gcc rejects ("cannot convert to a pointer type"). Refuse the function, with the same reason, at the
-        # store that brings the second kind. The codegen types a name from its bindings as it goes, so the kinds
-        # already stored into the name are the record.
-        if vtype in ('double', 'char *'):
-            _sk_key = (_as_str(gen.current_func_name), _as_str(tname))
-            _sk_prev = gen._stored_kinds.get(_sk_key)
-            if _sk_prev is not None and _sk_prev != vtype:
-                raise RuntimeError(f"{tname!r}: {ginf.MIXED_NAME_NON_INT64_REFUSAL}")
-            gen._stored_kinds[_sk_key] = vtype
         if (not _keep_tagged_box and vtype == 'int64_t'
                 and gen.var_types.get(tname, 'int64_t') == 'int64_t'
                 and ginf.tagged_mixed_name(gen, _as_str(tname))):
@@ -2483,14 +2443,16 @@ def _gen_stmt_AssignStmt(gen, node):
             # `keywords: dict = {}` (populated with parsed expression AST
             # nodes, then read back via `keywords.items()`) segfaulting
             # once self-hosted.
-            # Join, not overwrite (exprtypes.dict_kind_join): a dict whose stores disagree (`d['n'] = None` then
-            # `d['f'] = 1.5`, or `d['s'] = 'x'` then `d['k'] = 2`) has no one value type, and every store, literal
-            # or subscript, joins the same way. A store whose kind the compiler does not know (`_kind` None) joins
-            # nothing, and an int store is recorded when it is a known int, which before it never was.
-            if obj_v not in getattr(gen, '_opaque_container_locals', ()):
-                _joined_vt = _join_dict_store(gen, obj_v, node.value, vtype)
-                if _joined_vt is not None:
-                    _note_global_dict_store(gen, node.target.obj, _joined_vt)
+            if ((vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
+                    or vtype.endswith(' *'))
+                    and obj_v not in getattr(gen, '_opaque_container_locals', ())):
+                # Join, not overwrite: a dict whose stores disagree (`d['n'] = None` then `d['f'] = 1.5`) has no one
+                # value type. The last store used to win, so every read took that one accessor and the other slots'
+                # kinds were lost (`print(d['n'])` gave 0.0). Disagreement records 'mixed': reads take the boxed path.
+                _prev_vt = gen._dict_val_types.get(obj_v)
+                _joined_vt = 'mixed' if _prev_vt is not None and _prev_vt != vtype else vtype
+                gen._dict_val_types[obj_v] = _joined_vt
+                _note_global_dict_store(gen, node.target.obj, _joined_vt)
             # dict[key] = val → mojo_dict_set_str_* (key coerced via
             # _char_to_cstr, the single dict-key-to-string conversion
             # used by both read and write sides — see its docstring).
@@ -2591,11 +2553,7 @@ def _gen_stmt_AssignStmt(gen, node):
                     # comes through THIS arm and not the typed one above:
                     # without the record here the read of the same global
                     # has no value type and prints the stored double's bits.
-                    _tgt = node.target.obj
-                    if isinstance(_tgt, IdentExpr) and msh.bare_global_read_plan(gen, _tgt.name)[0]:
-                        _gjoined = _join_dict_store(gen, _as_str(_tgt.name), node.value, vtype)
-                        if _gjoined is not None:
-                            _note_global_dict_store(gen, _tgt, _gjoined)
+                    _note_global_dict_store(gen, node.target.obj, vtype)
             elif _dsw_sn and not gen._struct_defines_method(_dsw_sn, '__setitem__'):
                 # `d[k] = v` on a builtin-`dict` subclass with no
                 # `__setitem__` override: store into the backing MojoDict.
@@ -3430,11 +3388,8 @@ def _gen_stmt_ReturnStmt(gen, node):
                 v = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_none',
                                    [('MojoDict *', _dv)])
             vtype = 'int64_t'
-            # Record as boxed so kind-aware consumers can see it via _dict_slot_reads
-            # (the dict kind is stored per-key, not in _tagged_word_vals). Do NOT add
-            # to _tagged_word_vals: that set is for tagged generator words only and
-            # falsely triggers MIXED_NAME_NON_INT64_REFUSAL when a dict read name is
-            # later rebound to a non-int64 C type.
+            if hasattr(gen, '_tagged_word_vals'):
+                gen._tagged_word_vals.add(v)
         # A generator handle leaving a function whose return slot is a plain word
         # (`def iglob(...): it = _iglob(...); return it`, consumed as `list(iglob(...))`):
         # the consumer can only drain it if the run time knows which generator it is.
@@ -4228,7 +4183,6 @@ def _gen_stmt_StructDef(gen, node):
     cattrs = gen._class_attrs.get(node.name)
     if not cattrs:
         return
-    _ref_attrs = getattr(gen, '_class_ref_attrs', None) or {}
     for field in node.fields:
         if isinstance(field, gimple_ctypes.AssignStmt) \
                 and isinstance(field.target, gimple_ctypes.IdentExpr):
@@ -4239,38 +4193,6 @@ def _gen_stmt_StructDef(gen, node):
             continue
         if aname not in cattrs:
             continue
-        # A BY-REFERENCE capture of an enclosing local: the class attribute
-        # is the local's heap box, not a copy of its value. The enclosing
-        # function was made to box the name (`_class_ref_captures`), so the
-        # box pointer already exists; install THAT as the per-execution cell
-        # (`ctype *` global, pointed at by every instance built here) instead
-        # of allocating a fresh cell and storing the current value. The
-        # method's `self._cap_n` read then dereferences the box, so it sees
-        # the variable's current contents -- Python's late binding.
-        if cattrs[aname] in _ref_attrs:
-            _src = field.value
-            _src_name = ''
-            if isinstance(_src, gimple_ctypes.IdentExpr):
-                _src_name = _as_str(_src.name)
-            # The box exists in the C function this capture was boxed in. For
-            # a class written directly in that function, the boxed name is a
-            # local (`_boxed_mut_locals`). For a class inside a nested `def`,
-            # the class statement is emitted in the LIFTED function, where the
-            # name arrives through the closure env: `_gimple_mut_ptr` holds
-            # the preloaded BOX POINTER for a by-reference capture (its env
-            # field is `T *`), so install that. A name with neither is not a
-            # capture here (it is a local of the lifted function); fall
-            # through to the ordinary by-value cell for it.
-            _box_expr = ''
-            if _src_name != '':
-                if _src_name in getattr(gen, '_boxed_mut_locals', {}):
-                    _box_expr = gen._cname(_src_name)
-                else:
-                    _box_expr = (getattr(gen, '_gimple_mut_ptr', None)
-                                 or {}).get(_src_name) or ''
-            if _box_expr != '':
-                gen._emit(f"  {cattrs[aname]} = {_box_expr};")
-                continue
         # A per-execution cell (module_gen registration): this execution gets its
         # OWN storage, and the global is pointed at it before the store below, so
         # the store and every class-name read in this call reach it, and the
@@ -6009,20 +5931,7 @@ def _emit_except_handler(gen, handler, node, bb_after: str):
         gen._emit(f"  {temp_var} = mojo_exc_obj_get ();")
         bound = gen._new_temp(exc_ctype)
         gen._emit(f"  {bound} = ({exc_ctype}) {temp_var};")
-        # The name is a heap box when a nested closure or a class declared in
-        # THIS function captures it by reference. References inside the
-        # handler go through `bound` above, but the box is what the capture
-        # reads, so the caught object has to land there too; without this the
-        # method read the box's uninitialised payload. Resolve the box lvalue
-        # BEFORE the `_c_names` redirect below, or `_write_dest` follows that
-        # redirect and dereferences the handler temp instead of the box.
-        _box_dest = None
-        if bind_name in getattr(gen, '_boxed_mut_locals', {}):
-            _box_dest = gen._write_dest(bind_name)
         gen._c_names[bind_name] = bound
-        if _box_dest is not None:
-            _box_ct = gen._boxed_mut_locals[bind_name]
-            gen._emit(f"  {_box_dest} = ({_box_ct}) {bound};")
     gen._last_was_terminal = False
     _bscope = ginf._open_block_scope(gen)
     for s in handler.body:
