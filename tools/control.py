@@ -879,8 +879,7 @@ def cmd_refill(a):
             continue                      # a red master is repaired at once, whatever the slot count
         unmet = [n for n in it["needs"] if not (n in tasks and state_of(tasks[n]) == "integrated")]
         if unmet:
-            print("refill: wait %s: needs %s integrated" % (it["name"], ", ".join(unmet)), flush=True)
-            continue
+            continue                      # waiting on a task: `control.py queue` says what it waits on
         # A task is not tied to a model: its enqueue slot (`pool`) is only the PREFERRED one. It takes that slot if it is
         # free, else the first free, unbanned slot in pool order. Every slot runs the same kind of work.
         # The class comes from the doc's file NOW, not from the queue entry: a reclass moves the doc while its task is
@@ -899,8 +898,7 @@ def cmd_refill(a):
             _rewrite_queued(it)
         blocked = claim_blocker(it["claims"], tasks)
         if blocked:
-            print("refill: skip %s: %s" % (it["name"], blocked), flush=True)
-            continue                      # a claim held elsewhere: the task waits, and takes no slot
+            continue                      # a claim held elsewhere: the task waits, and takes no slot (see `queue`)
         sl = pick_slot(it, busy)
         if sl is None:
             continue                      # every slot is full or banned: the task waits
@@ -975,10 +973,24 @@ def cmd_priority(a):
 
 
 def cmd_queue(a):
+    """Every queued task, and what it waits on right now (computed here, so no pass has to log it)."""
+    tasks, pool = load(), load_pool()
+    busy = running_by_slot(tasks, live_names(tasks) or frozenset())
     for f in sorted(os.listdir(qdir())):
-        if f.endswith(".json"):
-            i = json.load(open(os.path.join(qdir(), f)))
-            print("%-28s needs: %-40s claims: %s" % (i["name"], ", ".join(i["needs"]) or "-", ", ".join(i["claims"])))
+        if not f.endswith(".json"):
+            continue
+        i = json.load(open(os.path.join(qdir(), f)))
+        unmet = [n for n in i["needs"] if not (n in tasks and state_of(tasks[n]) == "integrated")]
+        blocked = claim_blocker(i["claims"], tasks)
+        if unmet:
+            why = "needs %s integrated" % ", ".join(unmet)
+        elif blocked:
+            why = blocked
+        elif pick_slot(i, busy) is None:
+            why = "no free slot (%s)" % ", ".join(sl["name"] for sl in pool["slots"] if accepts(sl, i.get("cls") or "easy"))
+        else:
+            why = "startable now"
+        print("%-44s %-22s %s" % (i["name"][:44], ", ".join(i["claims"])[:22], why))
 
 
 def cmd_hold(a):
@@ -1464,19 +1476,22 @@ def cmd_sync(a):
             if not dry:
                 it2 = dict(it, cls=new_cls)
                 _rewrite_queued(it2)
-    print("sync: queued stale removed=%d%s" % (len(removed), " (dry-run)" if dry else ""))
+    if removed:
+        print("sync: queued stale removed=%d%s" % (len(removed), " (dry-run)" if dry else ""))
     for n in removed:
         print("  removed %s" % n)
-    print("sync: queued class-rewritten=%d" % len(rewritten))
+    if rewritten:
+        print("sync: queued class-rewritten=%d" % len(rewritten))
     for n, old, new in rewritten:
         print("  %s: %s -> %s" % (n, old, new))
     live = live_names(tasks)
     # A task is dead when its recorded pid is gone. The opencode session listing is
     # unreliable (times out, or keeps stale sessions), so it must not mask a dead pid.
     dead_running = sorted(dead_running_tasks(tasks))
-    print("sync: running-but-dead-in-registry=%d" % len(dead_running))
-    for n in dead_running:
-        print("  %s" % n)
+    if dead_running:
+        print("sync: running-but-dead-in-registry=%d" % len(dead_running))
+        for n in dead_running:
+            print("  %s" % n)
     if dead_running and restart_dead and not dry:
         pool = load_pool()
         counts = running_by_model(tasks, live_names(tasks) or frozenset())
