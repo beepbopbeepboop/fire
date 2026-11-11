@@ -77,6 +77,37 @@ def doc_on(branch, base):
     return None
 
 
+# A doc whose last attempts changed no code (only its own bugs/ doc or TASK.md) is making no progress. After this many
+# such attempts in a row the feeder stops re-feeding it, and a person decides. Progress is code outside bugs/ and TASK.md.
+NO_PROGRESS_LIMIT = 3
+
+
+def code_moved(branch):
+    """Whether BRANCH changes any file outside bugs/ and TASK.md, relative to master."""
+    r = subprocess.run(["git", "diff", "--name-only", "master...%s" % branch], capture_output=True, text=True, cwd=C.MAIN)
+    return any(not (p.startswith("bugs/") or p == "TASK.md") for p in r.stdout.split())
+
+
+def no_progress_streak(attempt_list, moved=None):
+    """How many of the NEWEST attempts in a row changed no code. Stops at the first attempt that did (newest first)."""
+    moved = moved or (lambda a: code_moved(a["branch"]))
+    n = 0
+    for a in reversed(attempt_list):
+        if moved(a):
+            break
+        n += 1
+    return n
+
+
+def no_progress_reason(base):
+    """The feeder's stop for a doc whose last NO_PROGRESS_LIMIT attempts made no code change, or None."""
+    n = no_progress_streak(attempts(base))
+    if n >= NO_PROGRESS_LIMIT:
+        return ("no progress: its last %d attempt(s) changed no code outside bugs/ and TASK.md; "
+                "a person decides what it needs" % n)
+    return None
+
+
 def plan(doc_or_path, continue_from=None):
     """Everything a worker needs for one doc: where it starts, where the doc is there, and the task text. CONTINUE_FROM
     names the branch of a round the swarm is continuing; otherwise the newest unlanded attempt is used."""

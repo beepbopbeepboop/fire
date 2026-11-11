@@ -20,7 +20,7 @@ One round:
      (`control.py spawn --base work/<culprit>`); the next round is master + what
      is still outstanding, so one bad set never blocks the rest.
 """
-import argparse, fcntl, os, re, subprocess, sys, time
+import argparse, fcntl, os, re, shutil, subprocess, sys, tempfile, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control as C
 
@@ -145,6 +145,23 @@ def mark_landed(merged):
             reg[n]["state"] = "integrated"
 
 
+def deletes_doc_without_test(deleted, changed):
+    """A branch that deletes an open bug doc is only landed by the integrator when it also changes a test file: the
+    doc's named test is then part of the same change. Without one, a deleted doc is a claim, not a proof (2026-11-11:
+    a one-commit branch deleted an open doc with no test and was a normal landing candidate)."""
+    return bool(deleted) and not any(os.path.basename(p).startswith("test_") and p.endswith(".py") for p in changed)
+
+
+def red_on_master(job):
+    """Whether suite JOB fails on master itself. Run on a snapshot of master, so the shared tree is not touched."""
+    d = tempfile.mkdtemp(prefix="masterred_")
+    try:
+        subprocess.run("git archive master | tar -x -C %s" % d, shell=True, cwd=C.MAIN, check=True)
+        return run(["python3", "tools/suite.py", job], d, os.path.join(d, "job.log")) != 0
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
     """Tasks whose worker has exited with commits, a clean tree and a DONE verdict: only a finished bug is integrated."""
     cands = []
@@ -170,6 +187,13 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
             say("skip %s: no commits" % name); continue
         if C.git("status", "--short", cwd=t["worktree"]) and name not in allow_dirty:
             say("skip %s: dirty worktree (unfinished)" % name); continue
+        deleted = [p for p in C.git("diff", "--name-only", "--diff-filter=D", "master...%s" % t["branch"],
+                                    check=False).split() if p.startswith("bugs/") and p.endswith(".md")]
+        changed = C.git("diff", "--name-only", "master...%s" % t["branch"], check=False).split()
+        if deletes_doc_without_test(deleted, changed):
+            say("skip %s: deletes %s with no test file changed; the doc's named test must land with the deletion, "
+                "so a person lands it" % (name, " ".join(deleted)))
+            continue
         cands.append(name)
     return cands
 
@@ -208,12 +232,13 @@ def enqueue_merge_fix(name, t, conflict_text):
 
 
 def gate_doc(culprit, t, failing):
-    """A branch that turns the landing gate red is not handed to a chain of fresh workers. The gate's failure is a bug
-    like any other, so it gets a doc: bugs/gate-<job>.md, one per failing job, which the feeder routes easy -> mid ->
-    hard like every doc. The culprit is superseded (its claims release, so the doc can be worked on master) and held
-    (`hold` keeps it out of the landing candidates, so it cannot go red again in a loop). An existing doc is left
-    alone. Returns the doc paths."""
+    """A red landing gate is not handed to a chain of fresh workers. The gate's failure is a bug like any other, so it
+    gets a doc: bugs/gate-<job>.md, one per failing job, which the feeder routes easy -> mid -> hard like every doc.
+    The culprit is superseded (its claims release, so the doc can be worked on master) and held (`hold` keeps it out
+    of the landing candidates, so it cannot go red again in a loop). With culprit None the job was already red on
+    master: only the docs are written and no branch is held. An existing doc is left alone. Returns the doc paths."""
     jobs = failing or ["landing"]
+    branch = t["branch"] if t else "master"
     paths = []
     for j in jobs:
         p = os.path.join(C.MAIN, "bugs", "gate-%s.md" % j)
@@ -225,12 +250,13 @@ def gate_doc(culprit, t, failing):
                 "# Gate: %s is red on master\n\n"
                 "**Job:** `%s`. Created when branch `%s` (task `%s`) turned the gate red.\n"
                 "**Two states:** this doc exists = the job is red and this is the work. Delete it when the job is green on master.\n\n"
-                "It is red on branch `%s`, not necessarily on master: reproduce it there (`python3 tools/suite.py %s`), then fix the cause. Do not skip or mark the test.\n"
-                % (j, j, t["branch"], culprit, t["branch"], j))
-    with C.registry() as reg:
-        reg[culprit]["state"] = "superseded"
-        reg[culprit]["hold"] = True
-        reg[culprit]["gate_red"] = jobs
+                "It is red on `%s`: reproduce it there (`python3 tools/suite.py %s`), then fix the cause. Do not skip or mark the test.\n"
+                % (j, j, branch, culprit or "master", branch, j))
+    if culprit is not None:
+        with C.registry() as reg:
+            reg[culprit]["state"] = "superseded"
+            reg[culprit]["hold"] = True
+            reg[culprit]["gate_red"] = jobs
     return paths
 
 
@@ -379,6 +405,15 @@ def main():
             else:
                 failed = failed_job_names(os.path.join(INTEG, "confirm.log")) or failed
             print("FAILED_JOBS: %s" % " ".join(failed))
+    if rc != 0 and failed:
+        pre = [j for j in failed if red_on_master(j)]
+        if pre:
+            print("PRE-EXISTING on master (not this round's): %s; their docs are written, no branch is held" % " ".join(pre))
+            gate_doc(None, None, pre)
+            failed = [j for j in failed if j not in pre]
+            if not failed:
+                print("no failing job is new against master: the round is judged on the jobs that master also passes")
+                rc = 0
     judg = subprocess.run("grep -h -E '^skip [a-z_./]+:|FAILED: [0-9]+' build/suite.log gate.log | sort | uniq -c | tail -20",
                           shell=True, cwd=INTEG, capture_output=True, text=True).stdout
     open(os.path.join(INTEG, "gate-judgement.txt"), "w").write(judg)
