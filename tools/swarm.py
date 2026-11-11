@@ -401,7 +401,7 @@ def refill(target):
                         "--prefix", ",".join(PREFIXES)], capture_output=True, text=True, cwd=C.MAIN)
     lines = [l for l in r.stdout.splitlines() if l.strip()]
     for l in lines[:-1]:
-        log("refill: " + l)
+        log(l if l.startswith("refill:") else "refill: " + l)   # control.py labels its own lines
     return lines[-1] if lines else ""
 
 
