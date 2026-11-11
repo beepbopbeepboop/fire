@@ -435,6 +435,8 @@ def _async_quick_eligible(fn: FunctionDef, known_async_names=frozenset()) -> boo
                 continue
             if isinstance(v, IdentExpr):
                 continue
+            if isinstance(v, CallExpr) and isinstance(v.func, MemberExpr) and (v.func.member in known_async_names) and (not getattr(v, 'kwargs', None)):
+                continue
             if isinstance(v, CallExpr) and isinstance(v.func, MemberExpr) and (v.func.member == 'wait') and (not v.args) and (not getattr(v, 'kwargs', None)):
                 continue
             return False

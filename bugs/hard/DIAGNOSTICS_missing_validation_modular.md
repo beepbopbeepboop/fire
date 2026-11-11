@@ -122,6 +122,16 @@ See build/checkfail_candidates.json (61 error-like cases).
   function scope, with notes naming where each module declares it
   (`import_fn_scope_ambiguous.mojo`). Regression:
   `test_ambiguous_import_diagnostic.py`.
+- **Landed (follow-up, 2026-11-09):** generic `where`-clause / trait-bound
+  enforcement at call sites — `error: invalid call to '<fn>': violated
+  constraint` when the supplied type arguments cannot satisfy the generic's
+  `where` clause (`where T.is_floating_point()` etc.) or a trait bound. The
+  in-TU pre-pass now runs `check_bounds` before materializing an
+  instantiation, and a `ConformanceError` from the `.o` route surfaces
+  instead of falling through to the silent stub path. Regression:
+  `test_where_clause_call_site_diagnostic.py`. (Plan §1; the modular
+  `tuple_*` tests additionally need the stdlib `where` clauses, which this
+  tree's stdlib does not carry.)
 - **Landed (follow-up, 2026-11-09):** a qualified access `mod.name` must
   resolve `name` against `mod` only — `other.shared_fn` (an `__init__`
   re-export) and `other.helpers` (a sibling module) are hard errors

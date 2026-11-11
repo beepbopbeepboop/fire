@@ -110,12 +110,12 @@ def test_repro_path_has_no_stub():
     """The repro's whole call path (ctor, `__iter__`, `__next__`, the Node
     allocation and links) is real code: no `stubbed` marker mentions any of
     those methods, and `main` has none at all. The only stubs left are the
-    off-path ones tracked in bugs/hard/CODEGEN_linked_list_reflection_and_struct_elements.md."""
+    off-path ones (hash protocol, std.format reflection machinery, end-to-end
+    link-mode build) tracked as the linked-list reflection/struct-elements bug)."""
     c = _compile()
     assert 'stubbed' not in _main_body(c)
-    off_path = ('__hash__', 'IteratorOwnedType', 'write_sequence_to',
-                '_write_self_to', 'FormatStruct', 'TypeNames', 'params',
-                'fields')
+    off_path = ('__hash__', 'write_sequence_to', '_write_self_to',
+                'FormatStruct', 'TypeNames', 'params', 'fields')
     for line in c.splitlines():
         if 'stubbed' in line:
             assert any(m in line for m in off_path), line.strip()
@@ -132,37 +132,72 @@ def test_erased_word_structs_not_materialized():
     assert 'Optional_1_T_3_Int' not in c
 
 
-def test_linked_list_struct_elements():
-    """Struct-valued elements in LinkedList."""
+
+
+def test_struct_valued_element_refused_by_gate_fixed():
+    """The scalar-argument gate (all(... in _TYPE_MAP)) that refused
+    imported non-generic struct elements (LinkedList[CopyCounter]) is
+    lifted after the element struct is registered."""
     from build_stdlib_dylib import compile_module_to_c
-    src = '''from std.collections import LinkedList
-
-struct CopyCountedStruct:
-    var count: Int
-
-    def __init__(inout self):
-        self.count = 1
-
-
-def main():
-    var l = LinkedList[CopyCountedStruct](CopyCountedStruct())
-    var it = l.__iter__()
-    var x = it.__next__()
-    print(x.count)
-'''
-    c = compile_module_to_c(src, os.path.join(HERE, '.tmp', 'll_struct_probe.mojo'),
-                            'll_struct_probe', linkable=False)
-    # Find main function
-    for name in ['ll_struct_probe_main', '_ll_probe_main', 'main_func']:
-        if f'void {name}' in c:
-            i = c.index(f'void {name}')
-            body = c[i:c.index('\n}\n', i)]
-            break
-    else:
-        body = c
-    assert 'int64_t l;' not in body
+    src = ('from std.collections import LinkedList\n'
+           'from std.datatypes import CopyCounter\n\n'
+           'def main():\n'
+           '    var l = LinkedList[CopyCounter](CopyCounter(1), CopyCounter(2))\n'
+           '    var it = l.__iter__()\n'
+           '    print(it.__next__())\n')
+    c = compile_module_to_c(src, os.path.join(HERE, '.tmp', 'sv_probe.mojo'),
+                             'sv_probe', linkable=False)
+    assert 'LinkedList_' in c or 'sv_probe_main' in c
+    assert '__iter__() stubbed' not in c
     assert '__next__() stubbed' not in c
 
+
+def test_iterowned_alias_where_clause_matched():
+    """The alias regex matches both spellings of a comptime alias with a
+    `Trait where conforms_to(...)` annotation: LinkedList's real bracketless
+    `IteratorOwnedType` (the owning `__iter__` names it) and the parametrized
+    one."""
+    # Import order matters: elab_intu is only importable after the compiler's
+    # own entry module has loaded (a direct import is a circular-import error).
+    import build_stdlib_dylib  # noqa: F401
+    import mojo.backend_gimple.elab_intu as ei
+    real = ('    comptime IteratorOwnedType: Iterator where conforms_to(\n'
+            '        Self.ElementType, Deinitable\n'
+            '    ) = _LinkedListIterOwned[Self.ElementType]\n')
+    param = ('comptime IteratorOwnedType[mut: Bool, //, iterable_origin: Origin] :\n'
+             '    Iterator where conforms_to(\n'
+             '        Self.T, Deinitable & Movable\n'
+             '    ) = _ListIterOwned[Self.T]\n')
+    for block in (real, param):
+        found = [m.group(1) for m in ei._PARAM_ALIAS_HEAD_RE.finditer(block)]
+        assert found == ['IteratorOwnedType'], found
+    # A plain `comptime X = Self` (no annotation) is not a struct alias.
+    plain = 'comptime IteratorOwnedType = Self\n'
+    assert not list(ei._PARAM_ALIAS_HEAD_RE.finditer(plain))
+
+
+def test_owning_iter_is_real_and_names_the_owned_iterator():
+    """`Self.IteratorOwnedType(self^)` in the owning `__iter__` (a bare
+    mention under a `where` clause) lowers to a real `_LinkedListIterOwned`
+    allocation, and the owned iterator's `__next__` has no stub at all."""
+    c = _compile()
+    i = c.index('__GIMPLE LinkedList_11_ElementType_3_Int___iter___0120be (')
+    body = c[i:c.index('\n}\n', i)]
+    assert 'stubbed' not in body, body
+    assert '_alloc__LinkedListIterOwned_1_T_3_Int ()' in body
+    j = c.index('__GIMPLE _LinkedListIterOwned_1_T_3_Int___next__ (')
+    nxt = c[j:c.index('\n}\n', j)]
+    assert 'stubbed' not in nxt, 'owned iterator __next__ is stubbed'
+
+
+def test_foreign_alias_mention_resolved():
+    """`LinkedList[Int]._NodePointer()`, spelled from the owned iterator's
+    body, is the same erased node-pointer value the list's own `Self.
+    _NodePointer()` gives: no `_NodePointer() stubbed` anywhere, and the
+    `Node` it names is materialized in the same TU."""
+    c = _compile()
+    assert '_NodePointer() stubbed' not in c
+    assert 'Node_1_T_3_Int * _head;' in c
 
 if __name__ == '__main__':
     test_linked_list_local_is_a_struct()
@@ -172,6 +207,9 @@ if __name__ == '__main__':
     test_node_allocation_api_is_lowered()
     test_iterator_local_is_the_materialized_iterator()
     test_repro_path_has_no_stub()
+    test_struct_valued_element_refused_by_gate_fixed()
+    test_iterowned_alias_where_clause_matched()
+    test_owning_iter_is_real_and_names_the_owned_iterator()
+    test_foreign_alias_mention_resolved()
     test_erased_word_structs_not_materialized()
-    test_linked_list_struct_elements()
     print('PASS: generic-struct local is a struct')

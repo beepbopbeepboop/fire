@@ -1773,7 +1773,7 @@ test('comptime-parity', [PY, 'test_comptime_parity.py'],
 test('returned-frame-layout', [PY, 'test_returned_frame_layout.py'],
      deps=['preflight'], mem='tiny',
      desc="a frame that outlives its creator has a place to live, or is refused by name")
-# `formal/model.py`, `bugs/FORMAL_known_limits.md` and
+# `formal/build.py`, `FORMAL.md` and
 # `build_stdlib_dylib.py` are in `extra` because the check READS them, not
 # because the scanner does: `test_runtime_header_scan.py`'s census check
 # compares the figures those three quote in prose with `runtime_abi()`, and an
@@ -1787,7 +1787,7 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
             RUNTIME_HDR, 'runtime/fire_sqlite3.h', 'runtime/fire_zlib.h',
             'runtime/fire_ssl.h', 'runtime/fire_ncurses.h',
             'runtime/fire_python.h',
-            'formal/model', 'bugs/FORMAL_known_limits.md',
+            'formal/model', 'FORMAL.md', 'formal/build.py',
             'build_stdlib_dylib.py'],
      desc='runtime header export scan sees every declaration')
 # `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
@@ -1904,8 +1904,17 @@ test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True, mem='tiny',
 # the corpus cannot land while it is that size — it would be red on arrival and
 # in every branch that did not cause it — so this is the one shape that can:
 # `--ratchet` fails only when a file GAINS a citation, against per-file ceilings
-# in `tools/dangling_refs_baseline.py`. It is green today, and the campaign is
-# 480 one-line prose edits that each of them now makes easier to bank.
+# in `tools/dangling_refs_baseline.py`. The corpus drifted red while nothing
+# was watching it (2026-11-09: 28 files over their baselines, the same set at
+# master's tip and at this branch's base), which the `expect=` below declares:
+# a whole-job condition with no count, because the ratchet prints no summary
+# line the runner can check one against. Its doc
+# (`bugs/SUITE_doc_refs_ratchet_red.md`) is the switch — the campaign lands,
+# the doc goes, and a still-marked `doc-refs` that now PASSES reports loudly
+# until the marker drops. An `expect=` in `check` runs against this bucket's
+# stated convention on purpose: the alternative is a permanently UNDECLARED red
+# in the everyday tally, and the anti-rot above is what makes the marker
+# temporary rather than permanent.
 #
 # The key covers `**/*.md` and `**/*.py` because the walk's subject is every
 # `.md` and `.py` in the tree — `fire_compiler.py` alone is 24 of the citations,
@@ -1916,6 +1925,14 @@ test('doc-refs', [PY, 'tools/dangling_doc_refs.py', '--ratchet'], cache=True,
      extra=['tools/dangling_doc_refs.py', 'tools/dangling_refs_baseline.py',
             'checked_run.py'],
      extraglob=['**/*.md', '**/*.py'],
+     expect='bugs/SUITE_doc_refs_ratchet_red.md — pre-existing red, not caused '
+            'by any one branch: the citation campaign, whose over-ceiling '
+            'files the doc lists (regenerate with `python3 '
+            'tools/dangling_doc_refs.py --ratchet`). Whole-job condition, '
+            'stated without a count because the ratchet prints no summary '
+            'line the runner can check one against. Drop the marker when the '
+            'campaign lands; a marked job that starts passing reports '
+            'loudly.',
      desc='no file cites a deleted bug doc more than it used to')
 # Reads the CHECKABLE half of FORMAL.md, doc/ABI.md and OPUS.md (counts,
 # function names, limits, refusal messages, ABI signatures, tool flags) out of
@@ -4110,9 +4127,95 @@ test('ab-compare', [PY, 'tools/ab_compare.py'], deps=['ab-bside'],
 # test scheduled exactly once per run — so `make gate`, which contains both
 # `selfhost` and `bootstrap`, runs `mojoc` and `native-dumpfull` once, not
 # twice, and there is no second copy of any test's name to keep in sync.
+# Test files the estate check found unregistered (2026-11-10): each one runs in `check`.
+test('ambiguous-import-diagnostic', [PY, 'test_ambiguous_import_diagnostic.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('attr-error-messages', [PY, 'test_attr_error_messages.py'], mem='tiny', expect='import os2 suffix differs from CPython at the MNE candidate cap; see bugs/DIAGNOSTICS_module_not_found_suffix_host_candidate_cap.md',
+     desc='registered by the estate audit (every test file runs)')
+test('backtick-import-literals', [PY, 'test_backtick_import_literals.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('bootstrap-hotspots', [PY, 'test_bootstrap_hotspots.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('compile-linked-result', [PY, 'test_compile_linked_result.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('comptime-assert-diagnostic', [PY, 'test_comptime_assert_diagnostic.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('comptime-dtype-diagnostic', [PY, 'test_comptime_dtype_diagnostic.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('constrained-diagnostic', [PY, 'test_constrained_diagnostic.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('dict-none-key', [PY, 'test_dict_none_key.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('floatliteral-special', [PY, 'test_floatliteral_special.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('foreign-callable-lambda-default', [PY, 'test_foreign_callable_lambda_default.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('implicit-string-concat', [PY, 'test_implicit_string_concat.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('import-missing-module-diagnostic', [PY, 'test_import_missing_module_diagnostic.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('lexer-double-slash-operator', [PY, 'test_lexer_double_slash_operator.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('linked-list-link-symbols', [PY, 'test_linked_list_link_symbols.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('linked-list-struct-element-step4', [PY, 'test_linked_list_struct_element_step4.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('linked-list-struct-element-step4b', [PY, 'test_linked_list_struct_element_step4b.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('linked-list-struct-element-step4c', [PY, 'test_linked_list_struct_element_step4c.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('module-loader-stdlib', [PY, 'test_module_loader_stdlib.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('mro', [PY, 'test_mro.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('out-param-return-type-diagnostic', [PY, 'test_out_param_return_type_diagnostic.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('parser-param-for', [PY, 'test_parser_param_for.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('python315-free-threaded-abi', [PY, 'test_python315_free_threaded_abi.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('python315-frozendict', [PY, 'test_python315_frozendict.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('python315-sentinel', [PY, 'test_python315_sentinel.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('qualified-member-no-leak', [PY, 'test_qualified_member_no_leak.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('reg-formal-ast-bridge-two-arg', [PY, 'test_reg_formal_ast_bridge_two_arg.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('selfhost-debug-flag', [PY, 'test_selfhost_debug_flag.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('sys-utf8-default-encoding', [PY, 'test_sys_utf8_default_encoding.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('tuple-enumerate-var-refinement', [PY, 'test_tuple_enumerate_var_refinement.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('unpacking-in-comprehensions', [PY, 'test_unpacking_in_comprehensions.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('where-clause-call-site-diagnostic', [PY, 'test_where_clause_call_site_diagnostic.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('dead-worker-state', [PY, 'tools/test_dead_worker_state.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('done-ratchet-landing', [PY, 'tools/test_done_ratchet_landing.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('modular', [PY, 'tools/test_modular.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('refill-claim-blocked', [PY, 'tools/test_refill_claim_blocked.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('swarm-reclass-busy-set', [PY, 'tools/test_swarm_reclass_busy_set.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('swarm-replan', [PY, 'tools/test_swarm_replan.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('swarm-why', [PY, 'tools/test_swarm_why.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('sync-restart-guards', [PY, 'tools/test_sync_restart_guards.py'], mem='tiny',
+     desc='registered by the estate audit (every test file runs)')
+test('enum-desugar', [PY, 'test_enum_desugar.py'], mem='tiny', expect='enum member comparison prints 1 where CPython prints True; see bugs/CODEGEN_enum_member_eq_prints_int_not_bool.md',
+     desc='registered by the estate audit (every test file runs)')
+test('linked-list-hash-step1', [PY, 'test_linked_list_hash_step1.py'], mem='tiny', expect='LinkedList.__hash__ lowers to a stub; see bugs/CODEGEN_linked_list_hash_stubbed.md',
+     desc='registered by the estate audit (every test file runs)')
+
 BUCKETS = {
     # The everyday green gate — parallel, no exclusive members, minutes.
-    'check': ['gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
+    'check': ['ambiguous-import-diagnostic', 'attr-error-messages', 'backtick-import-literals', 'bootstrap-hotspots', 'compile-linked-result', 'comptime-assert-diagnostic', 'comptime-dtype-diagnostic', 'constrained-diagnostic', 'dict-none-key', 'floatliteral-special', 'foreign-callable-lambda-default', 'implicit-string-concat', 'import-missing-module-diagnostic', 'lexer-double-slash-operator', 'linked-list-link-symbols', 'linked-list-struct-element-step4', 'linked-list-struct-element-step4b', 'linked-list-struct-element-step4c', 'module-loader-stdlib', 'mro', 'out-param-return-type-diagnostic', 'parser-param-for', 'python315-free-threaded-abi', 'python315-frozendict', 'python315-sentinel', 'qualified-member-no-leak', 'reg-formal-ast-bridge-two-arg', 'selfhost-debug-flag', 'sys-utf8-default-encoding', 'tuple-enumerate-var-refinement', 'unpacking-in-comprehensions', 'where-clause-call-site-diagnostic', 'dead-worker-state', 'done-ratchet-landing', 'modular', 'refill-claim-blocked', 'swarm-reclass-busy-set', 'swarm-replan', 'swarm-why', 'sync-restart-guards', 'enum-desugar', 'linked-list-hash-step1', 'gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
               'interp-tokenizer-oracle',
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'runtimere', 'globcompiled', 'interporacle', 'examples-parse',

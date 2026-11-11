@@ -100,15 +100,15 @@ opencode run --model opencode-go/deepseek-v4.1-flash "reply with the single word
 <p class="warn">The OLD form <code>opencode --model M run --dir D</code> now prints a usage screen and exits. If you probe models and see nothing, you are
 probably using the old form. The background service is <code>opencode serve --service</code>; <code>opencode service status|restart</code> manages it.</p>
 <h3>Pool and models (tools/pool.json is the source of truth)</h3>
-<p>A <b>slot</b> is one named model with a fixed worker count, a work class, and a recovery rule. The slots below are what <code>tools/pool.json</code> says on 2026-11-02. The pool total (the sum of the counts) is the swarm's default target. Models that are not in <code>pool.json</code> are not started by the swarm, so the older model notes (space-bunny, big-pickle, Qwen as a merger, the DeepSeek-only rule) are gone from this table. Change the pool by editing that file; <code>control.py</code> reads it on every call.</p>
+<p>A <b>slot</b> is one named model with a fixed worker count, a work class, and a recovery rule. The slots below are what <code>tools/pool.json</code> says on 2026-11-10 (pool total 5). The pool total (the sum of the counts) is the swarm's default target. Models that are not in <code>pool.json</code> are not started by the swarm, so the older model notes (space-bunny, big-pickle, Qwen as a merger, the DeepSeek-only rule) are gone from this table. Change the pool by editing that file; <code>control.py</code> reads it on every call.</p>
 <table>
 <tr><th>Slot</th><th>Model</th><th>Count</th><th>Class</th><th>Recovery and notes</th></tr>
-<tr><td><code>iceman</code></td><td><code>opencode-go/iceman-contributor-free</code></td><td>20</td><td>mid</td><td>The bulk of the pool. Recovers 2.5 h after a usage limit.</td></tr>
+<tr><td><code>iceman</code></td><td><code>opencode-go/iceman-contributor-free</code></td><td>1</td><td>mid</td><td>The contributor variant of Iceman (not the plain free one). Recovers 2.5 h after a usage limit; also takes easy docs.</td></tr>
 <tr><td><code>opencode-paid</code></td><td><code>opencode-go/deepseek-v4.1-flash</code></td><td>1</td><td>easy</td><td>Paid Go plan. Recovers 2.5 h after a limit; a second limit within a day bans it 15 days (<code>long_recover_days</code>).</td></tr>
 <tr><td><code>openrouter-free</code></td><td><code>openrouter/openrouter/free</code></td><td>1</td><td>easy</td><td>Free tier with a daily replenish (00:00 UTC, 1 min margin). A limit bans it 24 h.</td></tr>
 <tr><td><code>opencode-free</code></td><td><code>opencode/deepseek-v4.1-flash-free</code></td><td>1</td><td>easy</td><td>Free tier with the same daily replenish. A limit bans it 2.5 h.</td></tr>
 <tr><td><code>qwen-local</code></td><td><code>omlx/Qwen3.8-27B-oQ4e-mtp</code></td><td>1</td><td>easy</td><td>Local server at <code>http://127.0.0.1:8000</code>; slow. Has exited early with "oMLX memory guard abort".</td></tr>
-<tr><td><code>haiku</code></td><td><code>claude-haiku-5-5</code></td><td>2</td><td>easy</td><td><code>kind: claude</code>. Recovers 4.23 h after a limit.</td></tr>
+<tr><td><code>haiku</code></td><td><code>claude-haiku-5-5</code></td><td>0</td><td>easy</td><td><code>kind: claude</code>. Recovers 4.23 h after a limit.</td></tr>
 <tr><td><code>sonnet</code></td><td><code>claude-sonnet-5-5</code></td><td>0</td><td>mid</td><td>Defined, not running (count 0).</td></tr>
 <tr><td><code>opus</code></td><td><code>claude-opus-5-5</code></td><td>0</td><td>hard</td><td>Defined, not running (count 0).</td></tr>
 <tr><td><code>llama-work</code></td><td><code>llama-local/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS</code></td><td>0</td><td>easy</td><td>Defined, not running (count 0).</td></tr>
@@ -158,18 +158,32 @@ an exited task whose branch still has commits master lacks (<code>git rev-list -
 <table>
 <tr><th>From</th><th>To</th><th>Trigger</th></tr>
 <tr><td>queued</td><td>running</td><td>spawn / refill starts the worker</td></tr>
-<tr><td>running</td><td>exited-ok</td><td>worker prints CONTROL-STATUS: DONE</td></tr>
-<tr><td>running</td><td>exited-err</td><td>worker prints PARTIAL / BLOCKED or exits nonzero</td></tr>
-<tr><td>running</td><td>superseded</td><td>restart (snapshot + continue as NAME-r2)</td></tr>
+<tr><td>running</td><td>exited-ok</td><td>worker exits 0 after CONTROL-STATUS: DONE</td></tr>
+<tr><td>running</td><td>exited-err</td><td>worker exits nonzero, is killed, or says PARTIAL / BLOCKED</td></tr>
 <tr><td>exited-ok</td><td>integrated</td><td>branch lands on master (rev-list master..BRANCH == 0)</td></tr>
-<tr><td>exited-ok</td><td>abandoned</td><td>manually declared worthless</td></tr>
-<tr><td>exited-err</td><td>superseded</td><td>restart from the failed attempt</td></tr>
+<tr><td>exited-ok</td><td>integration-failed</td><td>the landing gate is red</td></tr>
+<tr><td>exited-ok</td><td>superseded</td><td>its branch conflicts at merge: a merge-fixer task takes over (enqueue_merge_fix)</td></tr>
+<tr><td>exited-ok</td><td>superseded</td><td>restart — only when the task is genuinely dead: no exitcode file, slot free, model not banned</td></tr>
+<tr><td>exited-ok</td><td>abandoned</td><td>retire_dead (finished, no commits) or continue_partial (a continuation is queued)</td></tr>
+<tr><td>exited-err</td><td>superseded</td><td>restart from the failed attempt (same guards)</td></tr>
+<tr><td>exited-err</td><td>abandoned</td><td>retire_dead: no commits and nothing pursuing it</td></tr>
+<tr><td>integration-failed</td><td>superseded</td><td>enqueue_red_fix: a red-fix task continues from the branch</td></tr>
+<tr><td>integration-failed</td><td>integrated</td><td>a later landing of that branch is green</td></tr>
 <tr><td>integrated</td><td>(terminal)</td><td>claims released; doc deleted; no re-dispatch</td></tr>
-<tr><td>superseded</td><td>(terminal for old task)</td><td>new task holds the claims; old task is gone</td></tr>
+<tr><td>superseded</td><td>(terminal for the old task)</td><td>the new task holds the claims</td></tr>
 <tr><td>abandoned</td><td>(terminal)</td><td>claims released</td></tr>
 </table>
+<p class="warn"><b>Never.</b> A task that wrote an <code>exitcode</code> file has finished: <code>state_of</code> already reports
+<code>exited-ok</code>/<code>exited-err</code> for it, so restarting it supersedes finished work (2026-11-10: <code>r329</code> said
+DONE, exited 0, and <code>sync --restart-dead</code> restarted it anyway, superseding a finished task). A dead worker is
+never restarted into a slot that is disabled (<code>count 0</code>) or already at its count, or into a banned model —
+those can only fail again, which is what pinned one doc to an expired haiku OAuth session for 335 rounds. And a chain is
+never restarted past <code>MAX_RESTARTS</code> (10): over budget the task is abandoned, its claim is released, and the doc
+is re-fed (a fresh worker, possibly a different model). An authentication failure is a model failure, not a worker
+failure: it bans the model instead of restarting the worker.</p>
 <p class="warn">A task in integrated or superseded or abandoned never transitions back to running or exited-ok. Re-dispatching the same bug doc creates a new task with a new name, and only if the doc still exists and is not ratcheted.</p>
 <div class="note"><b>DONE ratchet (2026-11-09):</b> a doc that any branch has already deleted is treated as resolved and is never re-dispatched, even while master still lists it and even if its claim was released. It is enforced in three places: the swarm's feed (<code>tools/swarm.py</code>), the formal feeder (<code>tools/formal_feed.py</code>), and <code>control.py sync --restart-dead</code> (which supersedes a dead task whose docs are all gone instead of restarting it). This is what stops the loop where a fixed bug is re-fixed forever.</div>
+<div class="note"><b>The ratchet's premise must hold (2026-11-10):</b> "deleted on a branch" only means fixed if that branch reaches master. A DONE task with commits is now landable in <code>superseded</code>/<code>abandoned</code> state too (it is finished work; a restart does not unsolve the bug), so the branch the ratchet relies on actually lands. Before this, 1030 fixed branches were stranded — the doc stayed on master, the ratchet skipped it, and no worker ever touched it. <code>land()</code> takes <code>LAND_BATCH</code> (8) per pass so the drain is gradual.</div>
 The cure is to <b>land the finished branches</b> (§7), not to release claims by hand. Hand-marking <code>integrated</code> is only right after you have verified the branch is on master (or truly worthless).</p>
 <p>Before dispatching new work on a topic, also search for overlap the claim system cannot see (different docs, same subject):
 <code>git branch --no-merged master | grep work/</code>, <code>git log master --oneline -S&lt;identifier&gt;</code>, <code>git cherry master BRANCH</code>.</p>

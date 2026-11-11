@@ -418,6 +418,11 @@ def _reset_func(gen, body: list = None, params: list = None,
     # unpack whose source carries no element type): same question, asked of
     # the name, because a later read of the local is the local itself.
     gen._dyn_word_locals: set = set()
+    # Temp/var name -> (dict_temp, key_temp, key_ctype) for a `d[k]` read
+    # whose value kind is only known on the slot at runtime. Repr/stringify
+    # can ask the runtime (`mojo_dict_repr_slot`) instead of printing the raw
+    # int64_t word. Cleared/overwritten on reassignment.
+    gen._dict_slot_reads: dict = {}
     # Values and locals known to hold a CLASS made at run time (`type(n, bases, ns)`) or an
     # INSTANCE of one (a call of such a class): `('v', temp)` / `('l', local)` -> 'class' |
     # 'inst'. A method call or `isinstance` on them goes to the class table, never to the
@@ -918,6 +923,7 @@ class FuncState:
         self.fs_emit_frames: list = []
         self.fs_dyn_word_vals: set = set()
         self.fs_dyn_word_locals: set = set()
+        self.fs_dict_slot_reads: dict = {}
         self.fs_rtobj_kinds: dict = {}
         self.fs_tagged_word_vals: set = set()
         self.fs_maybe_kinds_vals: set = set()
@@ -1023,6 +1029,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_emit_frames = gen._emit_frames
     st.fs_dyn_word_vals = gen._dyn_word_vals
     st.fs_dyn_word_locals = gen._dyn_word_locals
+    st.fs_dict_slot_reads = gen._dict_slot_reads
     st.fs_rtobj_kinds = gen._rtobj_kinds
     st.fs_tagged_word_vals = gen._tagged_word_vals
     st.fs_maybe_kinds_vals = gen._maybe_kinds_vals
@@ -1138,6 +1145,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._emit_frames = st.fs_emit_frames
     gen._dyn_word_vals = st.fs_dyn_word_vals
     gen._dyn_word_locals = st.fs_dyn_word_locals
+    gen._dict_slot_reads = st.fs_dict_slot_reads
     gen._rtobj_kinds = st.fs_rtobj_kinds
     gen._tagged_word_vals = st.fs_tagged_word_vals
     gen._maybe_kinds_vals = st.fs_maybe_kinds_vals
@@ -1847,6 +1855,9 @@ _OWNS_STR_ELEMS = frozenset([
 _FRESH_STRING_RETURNS = frozenset([
     'mojo_str_cat', 'mojo_str_from_int', 'mojo_cstr_slice',
     'mojo_cstr_repeat', 'mojo_cstr_reverse', 'mojo_repr_str',
+    # `!a`'s ascii-escape pass: copies its input into a fresh allocation on
+    # every path, so a cat may free its result like any other conversion temp.
+    'mojo_ascii_escape',
     'mojo_hex', 'mojo_oct', 'mojo_bin',
     # The str methods: each returns a copy the caller owns, never its receiver
     # (runtime/fire_runtime.c, `_str_fresh_copy`).
@@ -2244,7 +2255,14 @@ def _dict_val_of(gen, name: str) -> str:
     a C variable comes through here.
     """
     vt = gen._dict_val_types.get(name, 'int64_t')
-    return 'int64_t' if vt == 'int' else vt
+    # 'mixed' is the store-side join for a dict whose values disagree: it is no C type, so a declaration gets the word.
+    return 'int64_t' if vt in ('int', 'mixed') else vt
+
+
+def _dict_val_mixed(gen, name: str) -> bool:
+    """True when the dict's stores disagree on value type (see the store in emit_stmts). Its reads must not use a
+    typed accessor: each slot carries its own kind, and only the boxed read keeps it."""
+    return gen._dict_val_types.get(name) == 'mixed'
 
 
 def _dict_val_is_known(gen, name: str) -> bool:
@@ -5216,12 +5234,33 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
             and gimple_exprtypes.is_python_bool_expr(gen, enode):
         return gen._call_expr('char *', 'mojo_bool_to_str',
                               [('int', gen._new_val('int', f'(int){ev}'))])
+    # A `d[k]` read whose value type was unknown at compile time: stringify
+    # by the slot's runtime kind rather than the raw int64_t word.
+    _dsr = getattr(gen, '_dict_slot_reads', {})
+    _dsr_hit = _dsr.get(ev)
+    if _dsr_hit is None and enode is not None and isinstance(enode, gimple_ctypes.IdentExpr):
+        _dsr_hit = _dsr.get(_as_str(enode.name))
+    if et in ('int', 'int64_t') and _dsr_hit is not None:
+        _dv, _kv, _kk = _dsr_hit
+        if _kk == 'str':
+            return gen._call_expr('char *', 'mojo_dict_repr_slot',
+                                  [('MojoDict *', _dv), ('char *', _kv)])
+        if _kk == 'bytes':
+            return gen._call_expr('char *', 'mojo_dict_repr_slot_bytes',
+                                  [('MojoDict *', _dv), ('MojoBytes *', _kv)])
+        if _kk == 'none':
+            return gen._call_expr('char *', 'mojo_dict_repr_slot_none',
+                                  [('MojoDict *', _dv)])
     # A boxed char* (a string pointer stored in an int64_t var, e.g. a
     # tuple-loop var read via get_str and boxed) — stringify as the string
     # it points to, not its decimal address. Without this, f-strings /
     # %s of such a value emitted `static char * <address> = "<address>"`.
     if et in ('int', 'int64_t') and gen._get_actual_type(et, ev) == 'char *':
         return gen._new_val('char *', f'(char *){ev}')
+    # A slot read at a non-constant index may be a float BOX: `str(t[i])` and `f'{t[i]}'` render it as `mojo_repr_boxed`
+    # does, the same as print (print(t[i]) already did; str() printed the box's integer word, 1 for 1.5).
+    if et in ('int', 'int64_t') and _as_str(ev) in getattr(gen, '_boxed_vals', ()):
+        return gen._call_expr('char *', 'mojo_repr_boxed', [('int64_t', _as_str(ev))])   # the raw word: _to_int64 would box it
     # A boxed container (a call result whose static type is int64_t/void*
     # but whose real value, per _get_actual_type, is a container) — same
     # re-typing `print`'s dispatch already does before falling to its own
@@ -5258,35 +5297,13 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
         return gen._call_expr('char *', 'mojo_bool_to_str', [('int', ev)])
     if et in ('int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
               'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
-        # A value read through `mojo_list_get_boxed` (a slot of a
-        # heterogeneous list whose index was not a compile-time constant)
-        # may be a BOX: a heap cell whose payload is a float, because a
-        # float has no int64_t spelling. `mojo_repr_boxed` resolves both
-        # cases in one call, so nothing below has to branch — and for a
-        # value that is NOT a box it is the same answer, and the same
-        # allocation, as the mojo_str_from_int arm below.
-        if ev in getattr(gen, '_boxed_vals', ()):
-            nv = gen._ensure_local('int64_t', ev)
-            return gen._call_expr('char *', 'mojo_repr_boxed', [('int64_t', nv)])
-        # An untyped attribute read (`_dyn_word_vals`): a string as often as
-        # an int -- `f"{sd.name}_{m.name}"` over a boxed StructDef, whose
-        # `name` no struct types unambiguously, formatted the name's ADDRESS
-        # as a decimal in the self-hosted compiler, so every
-        # `func_return_types` key it built missed. The runtime's own
-        # discriminator is right in both directions (a string comes back as
-        # itself, an int as its decimal) and is what argument coercion to a
-        # `str` parameter already uses for the same word.
-        # An UNANNOTATED parameter is the same word: `str(ann)` in
-        # `_elem_ann_consider(out, tgt, ann)` printed the annotation's address.
-        _untyped = getattr(gen, '_cur_untyped_params', ())
-        if et == 'int64_t' and (
-                ev in gen._dyn_word_vals
-                or _as_str(ev) in _untyped
-                or (isinstance(enode, gimple_ctypes.IdentExpr)
-                    and (enode.name in gen._dyn_word_locals
-                         or _as_str(enode.name) in _untyped))):
-            return gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', ev)])
         nv = gen._to_int64(et, ev)
+        # A word that may be a box, a tagged dict-slot value, a string pointer
+        # held in an int64_t, or a plain integer: str() via the runtime's
+        # discriminator so kinds survive. For a plain integer it is the same
+        # decimal string.
+        if et in ('int', 'int64_t'):
+            return gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', nv)])
         return gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
     if et in ('double', 'float', '__fp16'):
         fv = ev if et == 'double' else gen._new_val('double', f'(double){ev}')
@@ -7389,7 +7406,11 @@ def _gen_print(gen, args: list, kwargs: list = None):
     if not args:
         _emit_literal_print('', print_fn)
         return
-    parts = [gen.lower_expr(a) for a in args]
+    from mojo.backend_gimple.emit_calls import _box_escaping_dict_slot_read as _box_slot_read_escape
+    parts = []
+    for a in args:
+        at, av = gen.lower_expr(a)
+        parts.append(_box_slot_read_escape(gen, a, at, av))
     # The STATIC type of each printed expression, for the dispatch below.
     # Needed because a boolean's C type is often a plain `int`: a BoolLiteral
     # lowers to int, and any/all/isinstance lower to `int` on purpose (they
@@ -7518,6 +7539,15 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 _rv = _own_repr(gen, 'mojo_repr_boxed',
                                 gen._call_expr('char *', 'mojo_repr_boxed',
                                                [('int64_t', aval)]), _owned_reprs)
+                resolved_parts.append(('char *', _rv))
+                continue
+
+            # A call result of unknown kind may be a boxed dict-slot value.
+            if (_pi < len(args) and isinstance(args[_pi], gimple_ctypes.CallExpr)
+                    and atype in ('int', 'int64_t')):
+                _rv = gen._call_expr('char *', 'mojo_cstr_or_int_str',
+                                     [('int64_t', aval)])
+                _cstr_held.append((aval, _rv))
                 resolved_parts.append(('char *', _rv))
                 continue
             if (_pi < len(args) and _is_may_hold_str_param(gen, args[_pi])) or aval in gen._dyn_word_vals \
@@ -7713,18 +7743,28 @@ def _gen_print(gen, args: list, kwargs: list = None):
             gen._emit(f'  {_fs} = mojo_sprintf_ptr ({_ft}, {_fp});')
             gen._emit(f'  {print_fn} ({_fs});')
         else:
-            t = gen._new_temp('char *')
-            vp = gen._new_temp('void *')
-            # The format string is itself an inline literal in a call
-            # argument position — same __GIMPLE restriction as the
-            # separator/newline literals above, so pool it too.
-            fmt_slit = gen._intern_string(gimple_ctypes.TypeLattice.printf_fmt(atype))
-            fmt_t = gen._new_val('char *', fmt_slit)
-            gen._emit(f'  {vp} = malloc (256);')
-            gen._emit(f'  {t} = (char *) {vp};')
-            gen._emit(f'  sprintf ({t}, {fmt_t}, {aval});')
-            gen._emit(f'  {print_fn} ({t});')
-            gen._emit(f'  free ({t});')
+            if atype in ('int', 'int64_t'):
+                # A word of unknown kind (e.g. boxed dict-slot value, or a string
+                # pointer held in an int64_t): render via the runtime's generic
+                # discriminator so None/bool/float kinds and string pointers print
+                # correctly. For a plain integer it returns the same decimal text.
+                rv = gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', aval)])
+                gen._emit(f'  {print_fn} ({rv});')
+                gen._emit_call('void', '', 'mojo_cstr_or_int_release',
+                               [('int64_t', aval), ('char *', rv)])
+            else:
+                t = gen._new_temp('char *')
+                vp = gen._new_temp('void *')
+                # The format string is itself an inline literal in a call
+                # argument position — same __GIMPLE restriction as the
+                # separator/newline literals above, so pool it too.
+                fmt_slit = gen._intern_string(gimple_ctypes.TypeLattice.printf_fmt(atype))
+                fmt_t = gen._new_val('char *', fmt_slit)
+                gen._emit(f'  {vp} = malloc (256);')
+                gen._emit(f'  {t} = (char *) {vp};')
+                gen._emit(f'  sprintf ({t}, {fmt_t}, {aval});')
+                gen._emit(f'  {print_fn} ({t});')
+                gen._emit(f'  free ({t});')
         if i < len(parts) - 1:
             _emit_literal_print(' ', print_fn)
     # Index-walk, not a two-element for-target unpack: that boxes both slots

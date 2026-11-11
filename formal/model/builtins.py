@@ -2036,7 +2036,7 @@ GIMPLE_RUNTIME_PREFIX = "mojo_"
 #
 # This is the generalisation of the `GIMPLE_LIST_PREFIX` special case that
 # stood here before, and that constant is gone: a hand-kept list of prefixes is
-# a list that rots, and the shape answers the same question for all 908 entry
+# a list that rots, and the shape answers the same question for all 916 entry
 # points the headers declare rather than for the 40-odd names one prefix
 # happened to cover.
 
@@ -2049,6 +2049,13 @@ def _runtime_header_dir() -> str:
 
 
 _RUNTIME_ABI = None      # name -> entry; built once, see runtime_abi()
+
+# Headers in runtime/ whose every declaration is behind a build flag. The scanner reads prototypes and ignores the
+# preprocessor, so without this list a flag-guarded header counts as part of the default ABI: fire_alloc_census.h's
+# four mojo_census_* prototypes sit inside `#ifdef MOJO_ALLOC_CENSUS` and do not exist in a default build, and counting
+# them put the census at 875/406/469 against the published 871/405/466. test_runtime_header_scan.py checks that the
+# guard really is in front of the declarations, so this list cannot go stale silently.
+_OPT_IN_RUNTIME_HEADERS = frozenset({'fire_alloc_census.h'})
 
 
 def runtime_abi() -> dict:
@@ -2087,6 +2094,8 @@ def runtime_abi() -> dict:
     except OSError:
         headers = []
     for h in headers:
+        if h in _OPT_IN_RUNTIME_HEADERS:
+            continue          # every declaration is behind a build flag: not part of the default ABI
         for e in reflect.collect_runtime_exports_h(os.path.join(hdr_dir, h)):
             # First header wins, so the order is decided by a sorted list and
             # not by which file the scanner happened to reach first.
@@ -2209,7 +2218,7 @@ def _parse_ctype(decl: str, is_param: bool = False) -> tuple:
     because it does in a parameter list and does not in a return type:
     `void *db` is a `void *` with a name, `void *` is not. Getting that backwards
     makes every parameter a type called `void db`, which nothing recognises as a
-    scalar — and a rule that refuses all 908 entry points for that reason looks
+    scalar — and a rule that refuses all 916 entry points for that reason looks
     exactly like a rule that has measured them all and found none reachable.
 
     The result is the RESOLVED type, which is what every reader of it wants:

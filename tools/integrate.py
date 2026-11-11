@@ -155,8 +155,15 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
         if t.get("hold") and not (only and name in only):
             continue                                         # held (control.py hold): built in advance, released later
         st = C.state_of(t)
-        if st not in ("exited-ok", "exited-err", "integration-failed"):
+        if st == "running":
+            continue                                         # a DONE-but-alive worker is finishing cleanup
+        # A DONE task that a later restart superseded is still FINISHED work: superseding it does not
+        # unsolve the bug. Excluding it stranded 1030 fixed branches — the doc stayed on master and the
+        # feed's DONE ratchet then skipped it forever, a dead end with no path forward.
+        if st not in ("exited-ok", "exited-err", "integration-failed", "superseded", "abandoned"):
             continue
+        if t.get("fixer"):
+            continue                        # a merge/red fixer owns this branch; re-probing it would queue a second one
         if C.verdict(t) != "DONE" and name not in ignore_verdict:
             say("skip %s: worker says %s, not DONE (the swarm continues it)" % (name, C.verdict(t) or "nothing")); continue
         if not C.ahead(t):
@@ -167,10 +174,20 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
     return cands
 
 
+MERGE_FIX_DEPTH = 3   # fixers of fixers before a branch is abandoned
+
+
 def enqueue_merge_fix(name, t, conflict_text):
     """A branch that cannot merge onto master is handed back to a worker, not left for a human: queue a
     merge task that starts from the branch, merges master into it, resolves, and verifies narrowly."""
     import argparse as _ap
+    # A merge fixer that conflicts again gets a fixer of its own, and so on, while master keeps moving. Past a few
+    # levels the chain is not converging: abandon the branch instead of nesting `fix-merge-fix-merge-...` (2026-11-10).
+    if name.count("fix-merge-") + name.count("fix-red-") >= MERGE_FIX_DEPTH:
+        with C.registry() as reg:
+            reg[name]["state"] = "abandoned"
+        print("merge-fix depth cap: %s is abandoned, not fixed again" % name, flush=True)
+        return
     files = sorted(set(l.split("Merge conflict in ")[-1].strip() for l in conflict_text.splitlines() if "Merge conflict in" in l))
     task = ("Branch %s (a finished, verified worker branch; original task: %s) conflicts with current master in: %s. "
             "You start on that branch. Run `git merge master`, resolve every conflict by reading BOTH sides and keeping both "
@@ -187,27 +204,34 @@ def enqueue_merge_fix(name, t, conflict_text):
                                 file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls")))
     with C.registry() as reg:
         reg[name]["state"] = "superseded"
+        reg[name]["fixer"] = mname          # a fixer owns this branch: never hand the same one out twice
 
 
-def enqueue_red_fix(name, t, failing):
-    """A branch that merges clean but turns the landing gate red is handed back to a worker with the failing tests
-    named: queue a fixer that starts from the branch, and supersede the original (registry `needs` keeps the list)."""
-    import argparse as _ap
-    tests = ", ".join(failing) or "the failing gate jobs (see the gate log)"
-    task = ("Branch %s (a finished worker branch; original task: %s) merges onto master but turns the landing gate RED. "
-            "The failing gate jobs with it are: %s. You start on that branch. Make those tests pass by fixing the ROOT CAUSE "
-            "in the branch's own change (not by skipping, marking expect= or disabling a test). Verify with the narrow tests "
-            "for each failing job, each wrapped in python3 tools/memslot.py --gb 8 --label x --. You are a light worker: no "
-            "gate, no self-host build. Never use git stash. Commit, then finish with the REPORT block and a CONTROL-STATUS line."
-            % (t["branch"], t["summary"][:150], tests))
-    mname = "fix-red-" + name
-    if mname in C.load():
-        mname += "-%d" % int(time.time() % 100000)
-    C.cmd_enqueue(_ap.Namespace(name=mname[:60], claim=t["claims"] or ["task:" + mname], task=task, task_file=None,
-                                file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls")))
+def gate_doc(culprit, t, failing):
+    """A branch that turns the landing gate red is not handed to a chain of fresh workers. The gate's failure is a bug
+    like any other, so it gets a doc: bugs/gate-<job>.md, one per failing job, which the feeder routes easy -> mid ->
+    hard like every doc. The culprit is superseded (its claims release, so the doc can be worked on master) and held
+    (`hold` keeps it out of the landing candidates, so it cannot go red again in a loop). An existing doc is left
+    alone. Returns the doc paths."""
+    jobs = failing or ["landing"]
+    paths = []
+    for j in jobs:
+        p = os.path.join(C.MAIN, "bugs", "gate-%s.md" % j)
+        paths.append(p)
+        if os.path.exists(p):
+            continue
+        with open(p, "w") as f:
+            f.write(
+                "# Gate: %s is red on master\n\n"
+                "**Job:** `%s`. Created when branch `%s` (task `%s`) turned the gate red.\n"
+                "**Two states:** this doc exists = the job is red and this is the work. Delete it when the job is green on master.\n\n"
+                "It is red on branch `%s`, not necessarily on master: reproduce it there (`python3 tools/suite.py %s`), then fix the cause. Do not skip or mark the test.\n"
+                % (j, j, t["branch"], culprit, t["branch"], j))
     with C.registry() as reg:
-        reg[name]["state"] = "superseded"
-        reg[name]["needs"] = list(failing)
+        reg[culprit]["state"] = "superseded"
+        reg[culprit]["hold"] = True
+        reg[culprit]["gate_red"] = jobs
+    return paths
 
 
 def main():

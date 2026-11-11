@@ -5196,11 +5196,12 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
 def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     obj_type, obj_val = gen.lower_expr(node.args[0])
     type_arg = node.args[1]
-    t = gen._new_temp('int')
+    # `_Bool`, like any()/all(): an isinstance result printed as a bool (print(isinstance(1, int)) -> True).
+    t = gen._new_temp('_Bool')
     _single_tn = _isinstance_type_name(type_arg)
     if _single_tn is not None:
         cmp_t = gen._isinstance_one_type(obj_type, obj_val, _single_tn)
-        gen._emit(f'  {t} = (int){cmp_t};')
+        gen._emit(f'  {t} = (_Bool){cmp_t};')
     elif isinstance(type_arg, gimple_ctypes.TupleExpr):
         # isinstance(x, (A, B, ...)) — OR together a per-alternative check
         # (see _isinstance_one_type). Previously stubbed to always-False,
@@ -5226,11 +5227,11 @@ def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, s
             acc = one if acc is None else gen._new_val('_Bool', _as_str(acc) + ' | ' + one)
         if acc is None:
             acc = gen._new_val('_Bool', '0')
-        gen._emit(f'  {t} = (int){acc};')
+        gen._emit(f'  {t} = (_Bool){acc};')
     else:
         gimple_ctypes._debug_note('isinstance with complex type arg stubbed to 0')
         gen._emit(f'  {t} = 0;  /* TODO: isinstance with complex type arg */')
-    return 'int', t
+    return '_Bool', t
 
 
 def _lower_next_iter_cursor(gen, node, rec, args) -> tuple[str, str]:
@@ -8882,6 +8883,41 @@ def _annotated_call_slots(gen, operand):
     return None
 
 
+def _box_escaping_dict_slot_read(gen, enode, vtype: str, v: str) -> tuple[str, str]:
+    """Box a `d[k]` read whose runtime kind lives on the slot so the kind
+    survives when the value escapes this frame (return, call argument, etc.).
+    Only values of unknown static kind are boxed; a statically-typed read
+    (or a non-slot-read) is returned unchanged."""
+    if vtype not in ('int', 'int64_t'):
+        return vtype, v
+    _dsr = getattr(gen, '_dict_slot_reads', None)
+    if not _dsr:
+        return vtype, v
+    _hit = _dsr.get(v)
+    if _hit is None and enode is not None and isinstance(enode, gimple_ctypes.IdentExpr):
+        _hit = _dsr.get(_as_str(enode.name))
+    if _hit is None:
+        return vtype, v
+    _dv, _kv, _kk = _hit
+    if _kk == 'str':
+        v = gen._call_expr('int64_t', 'mojo_dict_slot_boxed',
+                           [('MojoDict *', _dv), ('char *', _kv)])
+    elif _kk == 'bytes':
+        v = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_bytes',
+                           [('MojoDict *', _dv), ('MojoBytes *', _kv)])
+    elif _kk == 'none':
+        v = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_none',
+                           [('MojoDict *', _dv)])
+    else:
+        return vtype, v
+    # A tagged/boxed word: record as tagged so kind-aware consumers can see it,
+    # but do NOT add to _boxed_vals (generic boxed-slot set) because _emit_call
+    # would unbox_plain it for user functions and lose None/bool kinds.
+    if hasattr(gen, '_tagged_word_vals'):
+        gen._tagged_word_vals.add(v)
+    return 'int64_t', v
+
+
 def lower_call_args(gen, args: list) -> list:
     """Lower a call's positional arguments, expanding `*x` when `x` is a
     tuple of statically known ARITY into that many positional pairs.
@@ -8905,7 +8941,8 @@ def lower_call_args(gen, args: list) -> list:
             _qt = _as_str(gen._quick_type(a.operand) or '')
             if (_qt.endswith(' *') and _qt not in (
                     'MojoList *', 'MojoDict *', 'MojoSet *', 'void *', 'char *')):
-                out.append(gen.lower_expr(a))
+                _lt, _lv = gen.lower_expr(a)
+                out.append(_box_escaping_dict_slot_read(gen, a, _lt, _lv))
                 continue
             _st, _sv = gen.lower_expr(a.operand)
             _slots = gen._tuple_slot_types.get(_sv)
@@ -8913,14 +8950,16 @@ def lower_call_args(gen, args: list) -> list:
                 _slots = _annotated_call_slots(gen, a.operand)
             if _slots is not None and len(_slots) > 0:
                 for _i in range(len(_slots)):
-                    out.append(gen._tuple_elem_value(_st, _sv, _i))
+                    _et, _ev = gen._tuple_elem_value(_st, _sv, _i)
+                    out.append(_box_escaping_dict_slot_read(gen, None, _et, _ev))
                 continue
             # Unknown arity: the single pass-through pair `_lower_UnaryOp`
             # gives a spread, built from the operand already lowered rather
             # than lowering it a second time.
             out.append((_st, _sv))
             continue
-        out.append(gen.lower_expr(a))
+        _lt, _lv = gen.lower_expr(a)
+        out.append(_box_escaping_dict_slot_read(gen, a, _lt, _lv))
     return out
 
 
@@ -10821,7 +10860,7 @@ def _mark_unknown_list_elem(gen, list_val: str, t: str) -> None:
         gen._dyn_word_vals.add(t)
 
 
-def _mark_unknown_dict_value(gen, dict_val: str, t: str) -> None:
+def _mark_unknown_dict_value(gen, dict_val: str, t: str, key_val: str = None, key_kind: str = None) -> None:
     """`d[k]` read through the int view of a dict whose VALUE type was
     never recorded is a word of unknown kind -- the measured case is the
     self-hosted compiler's own `api = gen._generator_api[name]` record
@@ -10829,9 +10868,25 @@ def _mark_unknown_dict_value(gen, dict_val: str, t: str) -> None:
     formatted the name's ADDRESS as a decimal and called
     `519088207808_start`. Recorded as such, a stringification asks the
     runtime (`mojo_cstr_or_int_str`), which renders an integer as its
-    decimal and a string as itself."""
+    decimal and a string as itself. We also remember (dict,key,key_kind)
+    for reads whose slot kind is only known at runtime so repr/stringify can
+    recover it (None/True/1.5, etc.) instead of printing the raw int64_t word."""
     if dict_val not in gen._dict_val_types:
         gen._dyn_word_vals.add(t)
+    _dsr = getattr(gen, '_dict_slot_reads', None)
+    if _dsr is None:
+        return
+    if key_kind == 'str' and key_val is not None:
+        # A transient dict-key string may be released after the read/get call;
+        # keep it alive for later boxing or slot-repr lookups.
+        _cks = getattr(gen, '_cstr_key_src', None)
+        if _cks is not None:
+            _cks.pop(key_val, None)
+        _dsr[t] = (dict_val, key_val, 'str')
+    elif key_kind == 'bytes' and key_val is not None:
+        _dsr[t] = (dict_val, key_val, 'bytes')
+    elif key_kind == 'none':
+        _dsr[t] = (dict_val, None, 'none')
 
 
 def _refuse_namedtuple_tuple_use(gen, ot: str, use: str) -> None:
@@ -11004,9 +11059,12 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             bb_done = gen._new_bb()
             gen._emit(f"  if ({has} != 0) goto {bb_hit}; else goto {bb_miss};")
             gen._emit_label(bb_hit)
-            hv = gen._call_expr('int64_t', 'mojo_dict_get_int',
+            hv = gen._call_expr('int64_t', 'mojo_dict_slot_boxed',
                                 [('MojoDict *', dp), (kt, kv)])
             gen._emit(f"  {res} = {hv};")
+            if hasattr(gen, '_tagged_word_vals'):
+                gen._tagged_word_vals.add(res)
+            _mark_unknown_dict_value(gen, dp, res, kv, 'str')
             gen._emit(f"  goto {bb_done};")
             gen._emit_label(bb_miss)
             miss_mangled = gen._struct_method_csym(_dsub_r, '__missing__', '')
@@ -11015,8 +11073,11 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             gen._emit(f"  goto {bb_done};")
             gen._emit_label(bb_done)
             return 'int64_t', res
-        t = gen._call_expr('int64_t', 'mojo_dict_get_int',
+        t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed',
                            [('MojoDict *', dp), (kt, kv)])
+        if hasattr(gen, '_tagged_word_vals'):
+            gen._tagged_word_vals.add(t)
+        _mark_unknown_dict_value(gen, dp, t, kv, 'str')
         return 'int64_t', t
 
     # `x[i]` on a builtin-`bytes` subclass with no `__getitem__` override:
@@ -11204,11 +11265,16 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     if ot == 'MojoDict *' and gen._is_none_literal(node.index):
         # `d[None]`: the None-key entry (keykind 3), not the integer-0 one.
         val_ctype = gen._dict_val_of(ov)
-        if val_ctype == 'double':
+        _mixed = gen._dict_val_mixed(ov)
+        if val_ctype == 'double' and not _mixed:
             return 'double', gen._call_expr('double', 'mojo_dict_get_none_key_double', [('MojoDict *', ov)])
-        if val_ctype == 'char *':
+        if val_ctype == 'char *' and not _mixed:
             return 'char *', gen._call_expr('char *', 'mojo_dict_get_none_key_str', [('MojoDict *', ov)])
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_dict_get_none_key_int', [('MojoDict *', ov)])
+        t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_none', [('MojoDict *', ov)])
+        _mark_unknown_dict_value(gen, ov, t, None, 'none')
+        if hasattr(gen, '_tagged_word_vals'):
+            gen._tagged_word_vals.add(t)
+        return 'int64_t', t
 
     if ot == 'MojoDict *':
         # A bytes KEY reads from its own key domain (see _DictSlot.keykind);
@@ -11217,21 +11283,27 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         # stored. Keyed by content, exactly like the str path.
         if idx_type == 'MojoBytes *':
             val_ctype = gen._dict_val_of(ov)
-            if val_ctype == 'char *':
+            _mixed = gen._dict_val_mixed(ov)
+            if val_ctype == 'char *' and not _mixed:
                 return 'char *', gen._call_expr('char *', 'mojo_dict_get_bytes_str',
                                                 [('MojoDict *', ov), ('MojoBytes *', iv)])
-            if val_ctype == 'double':
+            if val_ctype == 'double' and not _mixed:
                 return 'double', gen._call_expr('double', 'mojo_dict_get_bytes_double',
                                                 [('MojoDict *', ov), ('MojoBytes *', iv)])
-            return 'int64_t', gen._call_expr('int64_t', 'mojo_dict_get_bytes_int',
-                                             [('MojoDict *', ov), ('MojoBytes *', iv)])
+            t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed_bytes',
+                               [('MojoDict *', ov), ('MojoBytes *', iv)])
+            _mark_unknown_dict_value(gen, ov, t, iv, 'bytes')
+            if hasattr(gen, '_tagged_word_vals'):
+                gen._tagged_word_vals.add(t)
+            return 'int64_t', t
         # Ensure index is char * for dict subscript access (all dict keys are strings in runtime)
         idx_type, iv = gen._char_to_cstr(idx_type, iv, True, True)
         val_ctype = gen._dict_val_of(ov)
-        if val_ctype == 'double':
+        _mixed = gen._dict_val_mixed(ov)   # a dict of disagreeing values: only the boxed read keeps each slot's kind
+        if val_ctype == 'double' and not _mixed:
             t = gen._call_expr('double', 'mojo_dict_get_double', [('MojoDict *', ov), (idx_type, iv)])
             return 'double', t
-        if val_ctype == 'char *':
+        if val_ctype == 'char *' and not _mixed:
             t = gen._call_expr('char *', 'mojo_dict_get_str', [('MojoDict *', ov), (idx_type, iv)])
             return 'char *', t
         if val_ctype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
@@ -11246,8 +11318,15 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             if _nd and val_ctype == 'MojoDict *':
                 gen._dict_val_types[t] = _nd
             return val_ctype, t
-        t = gen._call_expr('int64_t', 'mojo_dict_get_int', [('MojoDict *', ov), (idx_type, iv)])
-        _mark_unknown_dict_value(gen, ov, t)
+        # Keep the key alive for later slot-repr/boxing lookups (recorded below).
+        if idx_type == 'char *':
+            _cks = getattr(gen, '_cstr_key_src', None)
+            if _cks is not None:
+                _cks.pop(iv, None)
+        t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed', [('MojoDict *', ov), (idx_type, iv)])
+        _mark_unknown_dict_value(gen, ov, t, iv, 'str' if idx_type == 'char *' else None)
+        if hasattr(gen, '_tagged_word_vals'):
+            gen._tagged_word_vals.add(t)
         return 'int64_t', t
 
     # Opaque Python object (typed as int) — treat as MojoList via cast
@@ -11316,8 +11395,14 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             if val_ctype == 'char *':
                 t = gen._call_expr('char *', 'mojo_dict_get_str', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])
                 return 'char *', t
-            t = gen._call_expr('int64_t', 'mojo_dict_get_int', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])
-            _mark_unknown_dict_value(gen, dp, t)
+            if idx_type_for_dict == 'char *':
+                _cks = getattr(gen, '_cstr_key_src', None)
+                if _cks is not None:
+                    _cks.pop(idx_for_dict, None)
+            t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])
+            _mark_unknown_dict_value(gen, dp, t, idx_for_dict, 'str')
+            if hasattr(gen, '_tagged_word_vals'):
+                gen._tagged_word_vals.add(t)
             return 'int64_t', t
         # Otherwise treat as MojoList* stored as int; cast and subscript
         lp = gen._coerce_to_type(ot, 'MojoList *', gen._ensure_local(ot, ov))
