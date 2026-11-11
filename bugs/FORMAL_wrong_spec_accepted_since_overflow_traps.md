@@ -32,3 +32,22 @@ Teach the export's control-flow walk to treat a branch whose target is an overfl
 returns normally) as an exit that cannot be taken on a non-overflowing input, so the normal path is straight-line and the
 contract is proved again. Then the wrong multiplier must be rejected with a counterexample, and the right one accepted.
 Also: an exported contract that is an admitted `sorry` must not pass the teeth check. Delete this doc in the commit that fixes it.
+
+## Correction (2026-11-11): the soundness hole is the machine model's `svc`
+
+The cause above is only half of it. The overflow trap block is `trap:` label, the write `svc`, the exit `svc`, then the
+`ok:` label (`formal/arm64_codegen.py::_emit_int_overflow_trap_block`). In the Lean model, `arm64_step` steps every
+`svc` as a no-op (`lib/ProofLib.lean`, the `0xD4000001` arm: "trap; modelled as a no-op step", proved by
+`work_step_svc` in `lib/ProofLibSteps2.lean`). So on an overflowing input the model falls through to `ok:` and carries on
+with a result the real program never produces, while the real program stops at the exit `svc`.
+
+That makes the model unsound on every trap path, not only the one in `triple`. The generator's "body with a branch" refusal
+is the honest response to the branch; the teeth check fails because the wrong spec is only admitted as a `sorry`.
+
+Fix, in order:
+1. `lib/ProofLib.lean`: `svc` with `x16 = 1` (Darwin exit) steps to `none`, so `runProg` cannot return a final state from
+   a trap. `svc` with `x16 = 4` (write) stays a no-op.
+2. `lib/ProofLibSteps2.lean`: `work_step_svc` split on `x16`; the `hne_*` facts in `ProofLibSteps6..8` are unaffected.
+3. `formal/arm64_proof_gen.py`: the SVC row (`5433`) and `_is_svc` (`8381`) say which svc is which.
+4. Then the guarded contract: a body whose only branches are overflow traps gets the non-overflow precondition and a
+   proved normal path. Until then the teeth check stays an expected failure.
