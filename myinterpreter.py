@@ -4265,6 +4265,32 @@ def _frozendict_builtin():
     return frozendict
 
 
+def _ascii_repr(value) -> str:
+    """CPython's `ascii(value)`: `repr(value)` with every non-ASCII code
+    point escaped as `\\xNN` / `\\uNNNN` / `\\UNNNNNNNN`.
+
+    Spelled out here rather than calling the `ascii()` builtin for the same
+    reason `_eval_fstring_field` gives for repr/str: `ascii()` has no
+    compiled-path runtime backing, and this module is self-host-compiled.
+    The escape table is CPython's own (`repr` of a str and `ascii` differ
+    only in these escapes), and `mojo_ascii_escape` in fire_runtime.c is the
+    compiled engine's spelling of exactly this rule -- the two must agree
+    character for character."""
+    text = repr(value)
+    out = ''
+    for ch in text:
+        o = ord(ch)
+        if o < 0x80:
+            out += ch
+        elif o < 0x100:
+            out += '\\x%02x' % o
+        elif o < 0x10000:
+            out += '\\u%04x' % o
+        else:
+            out += '\\U%08x' % o
+    return out
+
+
 class Interpreter:
     """Executes Mojo AST nodes."""
 
@@ -7157,8 +7183,14 @@ class Interpreter:
         # and silently fail once compiled.
         expr_text, conv, spec = self._split_fstring_field(field)
         value = self._eval_fstring_expr(expr_text)
-        if conv == 'r' or conv == 'a':
+        if conv == 'r':
             text = repr(value)
+        elif conv == 'a':
+            # `!a` is ascii(), NOT repr(): repr leaves non-ASCII code points
+            # raw, so `f"{'héllo'!a}"` used to print the same unquoted text
+            # as `!s` here. The compiled engines have the same rule via
+            # mojo_ascii_escape (fire_runtime.c).
+            text = _ascii_repr(value)
         else:
             text = str(value)
         if spec:

@@ -2025,6 +2025,9 @@ int64_t mojo_read_type_tag_safe(int64_t addr);
 char *mojo_str(void *obj);  /* Flexible signature for both int and char* */
 char *mojo_repr_int(int64_t obj);
 char *mojo_repr_str(char *s);
+/* CPython `ascii()` of an already-repr()-rendered string: non-ASCII code
+   points escaped, ASCII bytes copied through. See fire_runtime.c. */
+char *mojo_ascii_escape(char *s);
 char *mojo_repr_obj(int64_t addr);
 char *mojo_repr_float(double v);
 char *mojo_repr_list_doubles(MojoList *l);
