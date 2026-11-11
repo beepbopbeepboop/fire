@@ -23,6 +23,21 @@ def main():
 ```
 `python3 fire.py build t.mojo -o t.bin && ./t.bin` prints `7` when the stdlib dylib is right; on master it aborts.
 
+## Investigation (2026-11-11), mechanism found
+- The reference is in the runtime class table, not in user code. `__mojo_register_classes` and
+  `__mojo_classattr_read` load the GOT slot for `_std_iter___init____PeekableIterator_peek` (`dyld_info -fixups`
+  shows two binds; `llvm-objdump -d` shows the `adrp`/`ldr` in those two functions).
+- The table is emitted in `mojo/backend_gimple/module_gen.py` (around lines 18517-18570): for every static struct,
+  each non-dunder method gets `mojo_class_setattr(tag, "<name>", &<csym>)`, whether or not its body is emitted.
+- In the arm64 dylib, `_PeekableIterator`'s non-dunder methods are `init`, `iter`, `bounds` (defined) and `peek`
+  (table entry only). `__next__` is a dunder, so it has no table entry, and its body is also absent.
+- So the body of `peek` (and `__next__`) is dropped somewhere in method emission while the table still names it.
+  Hypothesis, not yet checked: the drop is caused by the return type
+  `Optional[Pointer[Self.Element, ImmOrigin(origin_of(self._next[]))]]`, which carries an origin.
+- Next step: find where `peek`'s body is dropped in the emitter (start from the methods of a generic struct whose
+  return type is an origin-parametrised `Pointer`), write a user-level repro with the same shape, and make the body
+  emit. Do NOT fix this by skipping table entries for missing bodies: that hides the drop.
+
 ## Status
 Open. The likely area is generic-struct elaboration: `_PeekableIterator[InnerIterator]` is a parameterised
 struct whose methods are referenced but never instantiated. Not started.
