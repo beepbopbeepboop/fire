@@ -6,19 +6,28 @@ deleted in the same commit, as for any bug.
 
 | doc | what it needs | for |
 |---|---|---|
-| `CODEGEN_a_none_held_in_an_int64_local_is_indistinguishable_from_zero_in_membership.md` | see doc | workers |
-| `CODEGEN_bootstrap_resource_blowup.md` | see doc | workers |
-| `CODEGEN_enum_runtime_class_creation.md` | see doc | workers |
-| `CODEGEN_linked_list_reflection_and_struct_elements.md` | see doc | workers |
+| `CODEGEN_simd_and_array_values_erase_to_int64.md` | see doc | workers |
+| `CODEGEN_tagged_generator_mixed_type_step1.md` | see doc | workers |
+| `CODEGEN_tagged_generator_mixed_type_step2.md` | see doc | workers |
+| `CODEGEN_tagged_generator_mixed_type_step3.md` | see doc | workers |
+| `CODEGEN_tagged_generator_mixed_type_step4.md` | see doc | workers |
+| `CODEGEN_tagged_generator_mixed_type_step5.md` | see doc | workers |
 | `COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_cases_generator_analyzer.md` | see doc | workers |
-| `COMPILE_FAIL_Tools_gdb_libpython.md` | see doc | workers |
+| `DIAGNOSTICS_align_decorator.md` | see doc | workers |
+| `DIAGNOSTICS_binding_deferrals.md` | see doc | workers |
+| `DIAGNOSTICS_docstring_self_import.md` | see doc | workers |
 | `DIAGNOSTICS_formatting_modular.md` | see doc | workers |
+| `DIAGNOSTICS_inferred_param_dependency.md` | see doc | workers |
+| `DIAGNOSTICS_lsp_error_recovery.md` | see doc | workers |
+| `DIAGNOSTICS_missing_validation_modular.md` | see doc | workers |
+| `DIAGNOSTICS_mlir_annotations.md` | see doc | workers |
+| `DIAGNOSTICS_mojoc_imports.md` | see doc | workers |
+| `DIAGNOSTICS_trait_conformance.md` | see doc | workers |
 | `GPU_offload_validation_modular.md` | see doc | workers |
-| `PYTHON3.15_disjoint_bases.md` | see doc | workers |
-| `PYTHON3.15_lazy_modules_attribute.md` | see doc | workers |
-| `SUITE_gimple_runner_buckets_red_on_master.md` | see doc | workers |
+| `SUITE_gimplerunner.md` | see doc | workers |
+| `SUITE_silentnoop.md` | see doc | workers |
