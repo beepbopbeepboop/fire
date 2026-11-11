@@ -1275,12 +1275,36 @@ def _task_text(t):
 MAX_RESTARTS = 10   # a chain restarted this many times is not progressing: abandon it so the claim is released
 
 
+def chain_depth(name):
+    """How many restarts a task's name records: each "-rN" suffix is one restart, so `X-r2-r2-r5` is depth 3."""
+    return len(re.findall(r"-r\d+", name))
+
+
+def doc_exists_for(claims):
+    """Whether a bug doc exists for these claims. The one rule for work: it exists only while its doc does. A
+    `bug:NAME` (or `gate:NAME`) claim matches a doc anywhere under MAIN/bugs whose file name contains NAME, with `_`
+    read as `-`. Sync and restart both ask this, so they cannot disagree about whether work still has a doc."""
+    for c in claims:
+        tail = c.split(":")[-1].lower().replace("_", "-")
+        for _root, _dirs, files in os.walk(os.path.join(MAIN, "bugs")):
+            if any(fn.endswith(".md") and tail in fn.lower().replace("_", "-") for fn in files):
+                return True
+    return False
+
+
 def restart(name, why, model=None):
     """Snapshot a worker's uncommitted work, stop it, and continue it as NAME-rN from its own branch.
     Returns the new task's name, or None once the chain is over MAX_RESTARTS: the task is then marked
     abandoned so its claim is released and the doc is re-fed (a fresh worker, possibly a different model)
-    instead of round 300 of the same failure."""
+    instead of round 300 of the same failure. A task whose doc is gone is not continued at all: 197 rounds of
+    fix-gate-formal-host-import-shapes ran with no doc behind them (2026-11-10)."""
     t = load()[name]
+    if not doc_exists_for(t.get("claims", [])):
+        with registry() as reg:
+            reg[name]["state"] = "abandoned"
+        print("restart refused: %s has no bug doc for its claims %s; work exists only while its doc does"
+              % (name, t.get("claims")))
+        return None
     # strip any existing -rN suffix so restarts increment instead of nesting: foo-r2 -> foo-r3, not foo-r2-r2
     base = re.sub(r"-r\d+$", "", name)
     wt = t["worktree"]
@@ -1291,10 +1315,14 @@ def restart(name, why, model=None):
         fleet_ledger.kill_group(ctl_dir(), t["name"], "restart")
     except OSError:
         pass
+    # The budget counts the chain's depth, not the free name: stripping one "-rN" leaves a nested base (`X-r2-r2`),
+    # and the first free "-r2" under it always looks like round 2, so a chain of 300 restarts never reached the budget
+    # (2026-11-10: fix-gate-formal-doc-truth-r2-...-r134 kept restarting against a master that moved every pass).
+    depth = chain_depth(name)
     n = 2
     while "%s-r%d" % (base, n) in load():
         n += 1
-    if n > MAX_RESTARTS:
+    if depth + 1 > MAX_RESTARTS or n > MAX_RESTARTS:
         with registry() as reg:
             reg[name]["state"] = "abandoned"
         print("restart budget exhausted: %s would be round %d; marked abandoned so its claim is released" % (name, n))
@@ -1459,17 +1487,7 @@ def cmd_sync(a):
         if it.get("files"):
             doc_exists = any(_os.path.exists(c) for c in it["files"])
         else:
-            for c in it.get("claims", []):
-                tail = c.split(":")[-1].lower().replace("_", "-")
-                for root, _, files in _os.walk("bugs"):
-                    for fn in files:
-                        if fn.endswith(".md") and tail in fn.lower().replace("_", "-"):
-                            doc_exists = True
-                            break
-                    if doc_exists:
-                        break
-                if doc_exists:
-                    break
+            doc_exists = doc_exists_for(it.get("claims", []))
         if not doc_exists:
             removed.append(it["name"])
             if not dry:

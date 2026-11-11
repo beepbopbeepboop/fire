@@ -5274,6 +5274,17 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # a string/pointer box answers from the pointer so same-object
         # calls agree within a run while differing from any small int
         # hash (test_hash asserts 42's hash != "hello"'s, not values).
+        # `.__hash__(hasher)` on a scalar (the stdlib's element hash inside a
+        # LinkedList/List `__hash__`): fold the value into the hasher. The hasher
+        # is the word `mojo_hasher_new` made; the stdlib's `mut hasher` is that
+        # same word, so nothing needs to be returned. Returns no value (`None`).
+        if (method == '__hash__' and ot in ('int64_t', 'int')
+                and len(node.args) == 1 and not getattr(node, 'kwargs', None)):
+            _ht, _hv = gen.lower_expr(node.args[0])
+            _hw = gen._new_val('int64_t', f"(int64_t){_hv}")
+            gen._emit_call('void', '', 'mojo_hasher_update_int',
+                           [('int64_t', _hw), ('int64_t', ov_local)])
+            return 'int64_t', gen._new_val('int64_t', '0')
         if (method == '__hash__' and ot in ('int64_t', 'int')
                 and not node.args and not getattr(node, 'kwargs', None)):
             # mojo_pyobject_hash returns `int64_t` — same raw-GIMPLE

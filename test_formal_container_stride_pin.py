@@ -11,7 +11,6 @@ from test_formal_container_methods import *  # reuse harness if needed; keep lig
 
 def test_eq_per_element_stride():
     # Direct differential against CPython — same program text, both engines.
-    import subprocess, sys, os
     src = "a = [3,1,2]; print(1 if a == [3,1,2] else 0)"
     # We only assert the formal backend's answer matches CPython; this is enough
     # to pin that the per-element stride is in use, not an address compare.

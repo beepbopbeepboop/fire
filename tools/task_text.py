@@ -23,8 +23,14 @@ INSTRUCTIONS = (
     "test that FAILS before your fix and passes after (next to the existing tests for that area), and run just "
     "that test plus the one existing test file that covers the code you touched, each wrapped in python3 "
     "tools/memslot.py --gb 8 --label x --. No gate, no stdlib sweep, no self-host build: an integrator gates on "
-    "the stdlib compile after you land. If the bug is fully fixed, git rm its doc in the same commit and run "
-    "python3 tools/dangling_doc_refs.py --ratchet. Commit, end with a clean tree and the CONTROL-STATUS line."
+    "the stdlib compile after you land. The doc's `## Done when` section names the quick test that proves the bug fixed; if the doc has "
+    "none, add one in your commit. Delete the doc (git rm, then python3 tools/dangling_doc_refs.py --ratchet) only "
+    "in the commit where that named test passes. Commit, end with a clean tree and the CONTROL-STATUS line."
+)
+# Added when the branch the worker starts from deleted the doc.
+DELETED = (
+    "That branch deleted the doc, which is not proof the bug is fixed. The doc on master stands: read %(doc)s there "
+    "for the bug's status and its Done when test, and keep the bug open until that test passes. "
 )
 # Prepended when the worker starts from an earlier attempt's branch.
 CONTINUE = (
@@ -54,9 +60,11 @@ def attempts(base):
 
 
 def start_from(base):
-    """The newest attempt with commits not on master that is not integrated: the work a fresh worker builds on."""
+    """The attempt furthest along: the most commits not on master among those not integrated (ties go to the newer).
+    A chain's later rounds are cumulative, so this is the one a fresh worker should build on. Recency is not enough:
+    a later one-commit attempt would shadow the round that carries the work."""
     live = [a for a in attempts(base) if a["state"] != "integrated" and a["ahead"] > 0]
-    return live[-1] if live else None
+    return max(live, key=lambda a: (a["ahead"], a["started"])) if live else None
 
 
 def doc_on(branch, base):
@@ -78,17 +86,22 @@ def plan(doc_or_path, continue_from=None):
         start = {"branch": continue_from, "ahead": C.ahead({"branch": continue_from})}
     else:
         start = start_from(base)
-    path, ahead = None, 0
+    path, ahead, deleted = None, 0, False
     if start:
         path = doc_on(start["branch"], base)
-        if path:
-            ahead = start["ahead"]
-        else:                                   # the branch no longer has the doc (fixed there): start from master
-            start = None
-    where = path if start else master_path
-    text = (CONTINUE % {"ahead": ahead, "branch": start["branch"]} if start else "") + INSTRUCTIONS % {"where": where}
+        ahead = start["ahead"]
+        # A branch that deleted the doc has claimed the bug fixed without a passing Done-when test. That claim is not
+        # evidence: the doc on master still stands, so the worker starts from the branch's code, reads the doc on master,
+        # and the bug stays open until the named test passes.
+        deleted = path is None
+    where = path or master_path
+    text = (CONTINUE % {"ahead": ahead, "branch": start["branch"]} if start else "")
+    if deleted:
+        text += DELETED % {"doc": master_path}
+    text += INSTRUCTIONS % {"where": where}
     return {"doc": doc, "base": base, "master_path": master_path, "attempts": attempts(base),
-            "start_branch": start and start["branch"], "start_path": where, "ahead": ahead, "text": text}
+            "start_branch": start and start["branch"], "start_path": where, "ahead": ahead, "deleted": deleted,
+            "text": text}
 
 
 def main():
