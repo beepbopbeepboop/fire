@@ -4374,8 +4374,16 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             lv = _none_arith_guard(gen, op, lv, _numeric_type_name(rt), 1)
         if rv in _tagged and rv in _boxed and lt in ('int', 'int64_t', 'double', 'float'):
             rv = _none_arith_guard(gen, op, rv, _numeric_type_name(lt), 0)
-    if lv in getattr(gen, '_boxed_vals', ()) and not (
-            lv in _tagged and rt == 'char *' and op == '+'):
+    # A BOXED operand beside a str under `+` is a string concatenation, for any
+    # boxed value and not only a tagged word: Python's `int + str` and
+    # `double + str` are TypeErrors, so no valid program adds a boxed number to
+    # a string. The box is kept and marked a dynamic word, and the concatenation
+    # below renders it by its run-time kind (`mojo_cstr_or_int_str`). Unboxing it
+    # to a double here made `_f + '@'` (a path from `_files: list`) a
+    # `double + char *` gcc error in the self-hosted fire.ci.
+    if lv in getattr(gen, '_boxed_vals', ()) and rt == 'char *' and op == '+':
+        gen._dyn_word_vals.add(lv)
+    elif lv in getattr(gen, '_boxed_vals', ()):
         if op in _ident_ops and (op in ('is', 'is not')
                                  or rt not in ('double', 'float')):
             lv = gen._new_val('int64_t', f"mojo_box_word ({lv})")
@@ -4387,8 +4395,9 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         else:
             lv = gen._new_val('double', f"mojo_box_double ({lv})")
             lt = 'double'
-    if rv in getattr(gen, '_boxed_vals', ()) and not (
-            rv in _tagged and lt == 'char *' and op == '+'):
+    if rv in getattr(gen, '_boxed_vals', ()) and lt == 'char *' and op == '+':
+        gen._dyn_word_vals.add(rv)
+    elif rv in getattr(gen, '_boxed_vals', ()):
         if op in _ident_ops and (op in ('is', 'is not')
                                  or lt not in ('double', 'float')):
             rv = gen._new_val('int64_t', f"mojo_box_word ({rv})")

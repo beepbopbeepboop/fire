@@ -7424,11 +7424,14 @@ def _gen_print(gen, args: list, kwargs: list = None):
     if not args:
         _emit_literal_print('', print_fn)
         return
-    from mojo.backend_gimple.emit_calls import _box_escaping_dict_slot_read as _box_slot_read_escape
+    # Through the module object `ggc` (imported at the top of this file), not a
+    # function-local `from ... import`: the self-hosted C compiler saw the local
+    # alias as an undeclared function (implicit declaration, then a conflicting
+    # prototype), and a module-level from-import would be a circular import.
     parts = []
     for a in args:
         at, av = gen.lower_expr(a)
-        parts.append(_box_slot_read_escape(gen, a, at, av))
+        parts.append(ggc._box_escaping_dict_slot_read(gen, a, at, av))
     # The STATIC type of each printed expression, for the dispatch below.
     # Needed because a boolean's C type is often a plain `int`: a BoolLiteral
     # lowers to int, and any/all/isinstance lower to `int` on purpose (they
