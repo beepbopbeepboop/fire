@@ -877,6 +877,25 @@ def _quick_type(gen, node) -> str:
         _fields = gen.struct_field_types.get(sn, {})
         if node.member in _fields:
             return _fields[node.member]
+        # A CLASS attribute (not an instance field): `_lower_MemberExpr`'s
+        # class-attribute branch redirects the read to the
+        # `_classattr_<Cls>__<attr>` global and returns that global's
+        # SEMANTIC type, which is what `_global_var_types` holds (the POINTEE
+        # type for a per-execution cell, `_cattr_instance_read` dereferences
+        # the cell). Without this arm the estimator fell to the int64_t
+        # default while the lowering produced a real pointer: a method whose
+        # SOLE `return` was a captured enclosing name (`return s`, an
+        # enclosing `s: str`, which the class-capture pass rewrites to
+        # `self._cap_s`) declared `int64_t C_tag (...)` against a body that
+        # returned a `char *`, so the string's ADDRESS was printed in decimal
+        # at exit 0. Both the bare `return s` and a rebound `s` hit it; the
+        # latter was a loud refusal before the capture became by-reference.
+        _cattrs = (getattr(gen, '_class_attrs', None) or {}).get(sn)
+        if _cattrs and node.member in _cattrs:
+            _cgt = (getattr(gen, '_global_var_types', None) or {}).get(
+                _cattrs[node.member])
+            if _cgt:
+                return _as_str(_cgt)
         # `node.member` isn't a real FIELD on this struct — it may be a
         # bound METHOD/`@property` read without call syntax (`self.
         # filename.parent`, `filename` a 0-arg method/property). Real

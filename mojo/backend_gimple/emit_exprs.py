@@ -1220,9 +1220,19 @@ def _lower_WalrusExpr(gen, node) -> tuple[str, str]:
     vtype, vv = gen.lower_expr(node.value)
     if node.name not in gen.var_types:
         gen._declare_var(node.name, vtype)
-    dst = gen.var_types[node.name]
-    gen._safe_coerce_emit(vtype, dst, vv, gen._cname(node.name))
-    return dst, gen._cname(node.name)
+    # A heap-boxed local (`_boxed_mut_locals`, e.g. a class capture that the
+    # enclosing function rebinds) stores the VALUE type even though its C
+    # declaration is `{type} *`. Without this branch the source-level type was
+    # read as the pointer, so `x := 5` coerced 5 to `int64_t *` AND overwrote
+    # the box pointer itself (`x = (int64_t *)5`) instead of `*x = 5`; the
+    # method then read uninitialised heap. The assignment path above has the
+    # same branch for the same reason.
+    if node.name in getattr(gen, '_boxed_mut_locals', {}):
+        dst = gen._boxed_mut_locals[node.name]
+    else:
+        dst = gen.var_types[node.name]
+    gen._safe_coerce_emit(vtype, dst, vv, gen._write_dest(node.name))
+    return dst, gen._write_dest(node.name)
 
 
 def _lower_class_dyn_getattr(gen, struct_name: str, member: str) -> tuple[str, str]:
