@@ -7,27 +7,35 @@ continues at `pc + 4`), `work_step_svc` / `_exit` / `_write`, the svc step's rig
 `_step_ok` lemma for an svc word, and the termination obligation's comment and pin. The dylib test is PASS=23 FAIL=6,
 the marker's count. Helper `_svc_static_x16` is on the archive (21b4a98cb), not yet called.
 
-STILL OPEN: the per-site x16 threading (design items 2 and 4 below). The generated proofs for the overflow example close
+STILL OPEN: the per-site x16 threading and the dynamic-write hypothesis (design items 2 and 4 below). The generated proofs for the overflow example close
 without it, because svc steps are not walked on the default path. Items 2 and 4 are needed before a dynamic svc can be
 proved rather than refused.
 
-## Symptom
+## Symptom (before 574813206)
 
-On an overflowing input the Lean model falls through the overflow trap block and returns a value the real program never
-produces. The machine stops at the exit `svc`; the model does not. Every `svc` is modelled as a no-op, so there is no
-exit at all. The wrong spec is therefore admitted only as a `sorry`, and the teeth check cannot reject it.
+On an overflowing input the Lean model fell through the overflow trap block and returned a value the real program never
+produces. The machine stops at the exit `svc`; the model did not, because every `svc` was a no-op. The wrong spec was
+admitted only as a `sorry`, and the teeth check could not reject it.
 
-## What is in place
+## What is in place (after 574813206 / f03896fff)
 
-- `lib/ProofLib.lean`, the `0xD4000001` arm of `arm64_step`: a staged split. `x16 = 1` gives `none`; otherwise `some
-  { s with pc := s.pc + 4 }`. This is NOT on master. It is in `git stash` entry `svc-model-wip` on the archive branch
-  (with `lib/ProofLibSteps2.lean` and `formal/arm64_proof_gen.py`). Both Lean files typecheck with it.
+- `lib/ProofLib.lean`, the svc arm of `arm64_step`: x16 = 1 gives `none`; otherwise `some { s with pc := s.pc + 4 }`.
+  The x0 return value of a write is not modelled.
 - `lib/ProofLibSteps2.lean`: `work_step_svc` states the x16 `if`; `work_step_svc_exit` and `work_step_svc_write` are its
-  two corollaries (staged, same stash).
-- `formal/arm64_proof_gen.py` (staged): SVC right-hand side at `_step_rhs` idx 35 and `_step_rhs_generic` idx 35 is the x16
-  `if`. Committed on master: none of this.
-- The emitter always sets x16 before an `svc`: `movz x16, #1 ; svc #0x80` for exit (`formal/arm64_codegen.py`
-  `_emit_exit`, `2148-2157`, `3251-3331`) and `movz x16, #4` for write (`8852-8883`, and the trap block at `2217-2266`).
+  corollaries.
+- `formal/arm64_proof_gen.py`: the svc step's right-hand side at both sites is the same `if`. No `_step_ok` lemma is
+  emitted for an svc word. The termination obligation's comment names the trap path.
+- `formal/arm64_proof_gen.py::_svc_static_x16` (archive 21b4a98cb, master fd89c015b): reads the static x16 from the
+  `movz` directly before an svc. Not called yet.
+- `test_formal_dylib.py`: the termination pin is reversed (a trap halts, so termination is not a model fact). The
+  no-hole check reads the Scaffold ledger.
+
+Measured: the dylib test is PASS=23 FAIL=6, the marker's count. The six are the two wrong-spec teeth checks and four
+contract checks on branchy exports, which are guarded obligations now.
+
+Consequences of the model change (not bugs in themselves, but to know):
+- `triple`'s termination (`_semantics_total`) is an obligation, not a theorem, because its overflow trap is an exit svc.
+- The contract of every export with a trap path is a guarded obligation (`_spec` under `_pre`), not a proved fact.
 
 ## What is NOT in place structurally
 
