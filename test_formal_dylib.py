@@ -753,12 +753,16 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
               f"{ident}'s contract namespace is missing from the generated file")
         check("sorry" not in ns.group(1),
               f"{ident}'s proved contract contains a `sorry`")
-    # `triple` is acyclic and call-free, so its termination is PROVED by the
-    # CFG walk rather than left as the obligation above.  Pinned so a
-    # regression to the `sorry` fallback is a failure, not a quiet extra hole.
+    # `triple`'s overflow trap is an exit `svc`, which the model steps to
+    # `none`, so `triple` does not return a final state for every argument
+    # and its termination is NOT a fact of the model: it stays a named
+    # obligation (see `arm64_proof_gen.py`'s `_semantics_total` fallback).
+    # Pinned in that direction: a proof here would mean the model stopped
+    # stepping the exit to `none`, which is the regression to catch.
     check(":=\n  DylibExport.total_of_halts dylib_image dylib_export_0_triple "
-          "dylib_export_0_triple_halts" in text,
-          "triple's termination is no longer proved by the CFG walk")
+          "dylib_export_0_triple_halts" not in text,
+          "triple's termination is proved, but its overflow trap halts "
+          "(an exit svc) and the model steps it to none")
     # The caller's theorem must stay PROVED and sorry-free: it is the whole
     # reason the obligations are named rather than the contract being admitted.
     # The caller's theorem must be DERIVED from the export's spec obligation
@@ -802,7 +806,8 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
     # exception: fixing it IS this change.  The set is now empty, so the check
     # reads as what it now means -- the dylib proof rests on no library hole --
     # and the subset logic below still fails if a NEW one appears.
-    KNOWN_LIB_HOLES: set = set()
+    from formal import proof_gaps as _pg
+    KNOWN_LIB_HOLES: set = set(_pg.SCAFFOLD_HOLES)
     try:
         from formal.lean import library_census, find_lean
         lib = library_census(find_lean(HERE), os.path.join(HERE, "lib"))

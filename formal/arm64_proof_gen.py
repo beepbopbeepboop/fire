@@ -4915,8 +4915,9 @@ def _step_rhs(w: int, idx: int):
     if idx == 34:  # BR Xn
         rn = (w >> 5) & 0x1f
         return f"some {{ s with pc := (arm64_reg {rn} s).toNat }}"
-    if idx == 35:  # SVC (modelled no-op)
-        return "some s"
+    if idx == 35:  # SVC: x16 = 1 (SYS_exit) halts; any other number continues
+        return ("if arm64_reg 16 s = 1 then none "
+                "else some { s with pc := s.pc + 4 }")
     # The twelve narrower/unscaled access forms, in `arm64_step`'s order. The
     # base is `_base_of` (SP at 31), the scale is the instruction's own, and the
     # memory helper is the one at that width — the widths are the whole point of
@@ -5310,7 +5311,8 @@ def _step_rhs_generic(idx: int):
     if idx == 34:
         return f"some {{ s with pc := (arm64_reg {_RN} s).toNat }}"
     if idx == 35:
-        return "some s"
+        return ("if arm64_reg 16 s = 1 then none "
+                "else some { s with pc := s.pc + 4 }")
     if idx == 66:
         return (f"some (arm64_set_reg {_RD} {{ s with nzcv := arm64_adds_flags "
                 f"(arm64_reg {_RN} s) (arm64_reg {_RM} s) }} "
@@ -12022,6 +12024,13 @@ def _gen_step_lemmas(name: str, code: bytes, base: int,
         if idx is None:
             continue
         pc = base + i * 4
+        if idx == 35:
+            # An `svc` is the one instruction whose step may HALT: `SYS_exit`
+            # steps to `none` (`arm64_step`, the 0xD4000001 arm). "The step is
+            # not none" is therefore false for an exit and undecided for a
+            # write, so there is no such lemma to emit; a run through an svc
+            # is not a run with a final state, which is the point.
+            continue
         if i in plan:
             blocks.append(
                 f"theorem {name}_step_ok_{i} (s : Arm64State) (h : s.pc = {pc}) :\n"
@@ -15893,9 +15902,11 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
     if walk is None:
         return (
             f"/-- OBLIGATION, not proved: this export's run terminates for every\n"
-            f"    argument.  Its control flow has a loop or a call, which the\n"
-            f"    constant-fuel CFG walk that proves the acyclic, call-free\n"
-            f"    exports does not cover. -/\n"
+            f"    argument.  The constant-fuel CFG walk does not cover it: its\n"
+            f"    control flow has a loop or a call, or a path ends in an exit\n"
+            f"    `svc`, which the model steps to `none` (no final state). An\n"
+            f"    overflow trap is such a path, so termination for every argument\n"
+            f"    is not a fact of the model. -/\n"
             f"theorem {ident}_semantics_total :\n"
             f"    DylibExport.Total dylib_image {ident} := by\n"
             f"  sorry")
