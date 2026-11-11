@@ -51,11 +51,40 @@ is the one intentional case: it pins our diagnostic text and must stay.
 
 `formal/build.py`'s two matches are docstring prose, not code.
 
-## Second defect: the diagnostic does not match the real compiler
+## Measured with the real compiler (`tools/mojo build`, 2026-11-11)
 
-Our wording ("functions must not declare both an 'out' argument and a return type") describes the wrong rule for a
-method. The real rule is that `out self` is a constructor receiver. A user who writes the mistake is told about a
-conflict between two arguments that is not the actual problem.
+Corrects the first draft of this report, which said our diagnostic was a second defect. It is not.
+
+| case | real Mojo, in order | ours |
+|---|---|---|
+| `def ten(out self) -> Int:` in a struct | `functions must not declare both an 'out' argument and a return type` (at the `->`); then `self argument must be present in instance method` (at `self`) | `functions must not declare both an 'out' argument and a return type` (same primary message) |
+| `def __init__(out self) -> A:` | `functions must not declare both an 'out' argument and a return type` (at the `->`) | same primary message |
+| `def set(out self, v: Int):` (no return type) | `'self' argument must have type 'Self'; use a 'where' clause to constrain the 'Self' type instead` | not yet measured |
+| `def f(out x: Int) -> Int:` | `functions must not declare both an 'out' argument and a return type`; then `'out' argument cannot be returned by name; ...` | not yet measured |
+| `def f(out x: Int)` called as `f(y)` | `invalid call to 'f': unexpected argument` | not yet measured |
+| `def ten(mut self) -> Int:` | accepted | accepted |
+| `def __init__(out self, v: Int):` | accepted | accepted |
+| `fn f(...)` | `'fn' has been removed; use 'def' instead` | not yet measured |
+
+The primary message is the same. Real Mojo adds a second error on the same declaration.
+
+Scope limits, measured on the 49 fixtures that use `out self` on a non-constructor or an `out` parameter with a return
+type (`fix/selected.json` in the measurement scratchpad):
+
+- Real Mojo flags the declaration line itself in 46 of 49 fixtures. The other three are in `test_formal_run.py`
+  (lines 7873, 22504, 5150) and are not yet explained.
+- Most of the other errors in those fixtures come from the rest of the fixture (`'main()' does not return a value`,
+  missing `move` for a struct with no `__init__`, `int` for `Int`, unknown modules). Those are not the `out` bug.
+- Real Mojo does not support all of Python, so it is not a valid oracle for whole fixtures. The validity check must be
+  per declaration: does real Mojo flag this `out` declaration?
+
+## Decisions and what is still open
+
+- Real Mojo is the reference for the `out`-declaration constructs only, not for whole fixtures.
+- The expected behaviour of our compiler for each row of the table above is the real compiler's primary message at the
+  same `file:line:col`. The rows marked "not yet measured" need that check before the test is written.
+- Whether a fixture that uses Mojo-only syntax belongs in a Python-only suite is not decided here. The project target is
+  100% Python, so the fixture set needs its own review.
 
 ## Design
 
