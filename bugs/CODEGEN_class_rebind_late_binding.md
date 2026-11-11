@@ -12,29 +12,19 @@ method `finish_request` of class `DualStackServerMixin` reads `args`, a paramete
 ## Status
 Open. Python late-binds the name, so the class must see the value the enclosing function has when the method runs.
 
-Attempt history (2026-11-11): 33 registry rounds, all superseded. The newest one holds the work:
-`work/bug-codegen-class-rebind-late-binding-r31` (19 commits not on master, ~1,475 lines across
-`mojo/backend_gimple/` and `mojo/middle/`). Its own test run reported 19 failures it called pre-existing, and
-the landing gate went red on `stdlib-syntax` (`std/random/philox.mojo`, `test/math/*`) with that branch in the
-batch. The next worker starts from that branch (the planner does this), reads `git diff master...HEAD` first,
-and must make the stdlib compile green before the branch can land.
+Attempt history (2026-11-11): 33 registry rounds, all superseded. Round 31 (19 commits, ~1,475 lines across
+`mojo/backend_gimple/` and `mojo/middle/`) is on master, merged as `67083801e` (via `77cd9afae`). Its own 19
+reported failures in `test_gimple_runner.py` are not yet verified on master. The registry entries and branches for
+the rounds have been removed; this doc is the only record. Nothing is left to start from.
 
-Landed 2026-11-11 (partial fix): round 31's compiler change is on master. The doc's repro now COMPILES
-instead of being refused; it does not yet run correctly, because every compiled program currently aborts at load
-(`CODEGEN_peekable_iterator_methods_not_emitted`). Still open: the Done-when test below, and the runtime answer `2`.
+Landed 2026-11-11 (partial fix): the repro now COMPILES instead of being refused. Its runtime answer is checked by
+`test_class_rebind_late_binding.py` (2026-11-11): it FAILS on the tree before round 31 with the original refusal,
+and PASSES on master, printing `2`. The `fire.py build` path still aborts at load for every program
+(`CODEGEN_peekable_iterator_methods_not_emitted`), which this test does not exercise (it runs through the gimple harness).
 The `stdlib-syntax` red (six files, `CODEGEN_simd_math_call_violated_constraint`) is pre-existing on master and unchanged.
 
 ## Done when
-A quick regression test `test_class_rebind_late_binding.py` (to be written; the branch's cases are inside the
-slow `test_gimple_runner.py`, so they are not the quick test) compiles and runs:
-```
-def outer(args):
-    class C:
-        def m(self):
-            return args
-    args = 2
-    return C().m()
-print(outer(1))
-```
-and requires output `2` (CPython's answer). It passes on the branch, and the stdlib compile is green. Then this
-doc is deleted in the same commit.
+`python3 test_class_rebind_late_binding.py` passes: it compiles the late-binding program and prints `2` (CPython's
+answer). That is now true on master. Open question for the owner: the doc also asked for the stdlib compile to be green.
+That red is pre-existing and filed separately, so it is not this bug's. If you agree, delete this doc in a commit that
+says so; until then it stays open.
