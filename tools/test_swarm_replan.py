@@ -91,5 +91,17 @@ class Split(unittest.TestCase):
             self.assertIn("SPLIT", S.why("hard/X"))
 
 
+class QueuedClass(unittest.TestCase):
+    def test_a_doc_task_follows_its_doc(self):
+        item = {"name": "bug-suite-silentnoop", "claims": ["bug:SUITE_silentnoop"], "cls": "easy"}
+        self.assertEqual(C.doc_class_now(item), "mid", "a bug- task's class follows its doc")
+
+    def test_controller_work_keeps_its_own_class(self):
+        item = {"name": "fix-replan-diagnostics-align-decorator",
+                "claims": ["bug:DIAGNOSTICS_align_decorator"], "cls": "easy"}
+        self.assertEqual(C.doc_class_now(item), "easy",
+                         "a replan runs at the class with a slot, not the doc's unserved class")
+
+
 if __name__ == "__main__":
     unittest.main()

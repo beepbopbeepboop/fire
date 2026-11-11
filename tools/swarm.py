@@ -459,10 +459,20 @@ def replan_unserved():
     for cls, slots in sorted(unserved.items()):
         for path in sorted(glob.glob(os.path.join(C.MAIN, "bugs", cls, "*.md"))):
             base = os.path.basename(path)[:-3]
-            if split_reason("%s/%s" % (cls, base)) or claim_held(base):
-                continue
             name = "fix-replan-" + re.sub(r"[^a-z0-9]+", "-", base.lower())[:40].rstrip("-")
-            if name in C.load() or os.path.exists(os.path.join(C.qdir(), name + ".json")):
+            qpath = os.path.join(C.qdir(), name + ".json")
+            if os.path.exists(qpath):
+                # self-heal: sync used to rewrite a queued task's class from its doc, which parked
+                # every replan at the unserved class it was meant to escape
+                it = json.load(open(qpath))
+                if it.get("cls") != "easy":
+                    old = it.get("cls")
+                    it["cls"] = "easy"
+                    with open(qpath, "w") as f:
+                        json.dump(it, f, indent=1)
+                    log("replan %s: corrected its queued class %s -> easy" % (name, old))
+                continue
+            if name in C.load() or split_reason("%s/%s" % (cls, base)) or claim_held(base):
                 continue
             text = REPLAN_TASK % {"doc": "bugs/%s/%s.md" % (cls, base), "cls": cls,
                                   "slots": ", ".join(slots), "servable": ", ".join(servable)}
