@@ -1918,7 +1918,20 @@ def _infer_return_type_core(gen, body: list) -> str:
     acc: list[str] = []
     gen._collect_return_types(body, acc)
     if acc:
-        return gimple_ctypes.TypeLattice.join_all(acc)
+        _rt = gimple_ctypes.TypeLattice.join_all(acc)
+        # `int` is this compiler's INTERNAL marker for "a _Bool met an int"
+        # (see `_dict_val_of`), but it is also the C storage type of a
+        # module-level int-literal global. A method that `return G`s such a
+        # global inferred `int` here and was emitted as `int C_get(C *)`;
+        # a caller inside a `__GIMPLE` function (every lifted nested `def`)
+        # then failed the verifier with "invalid conversion in gimple call"
+        # because its own call temp is the word type. Python integers are
+        # 64-bit, so widen the marker to the word type for a RETURN type --
+        # a genuine `_Bool`/`int` join still widens the same way a C
+        # arithmetic conversion would.
+        if _rt == 'int':
+            _rt = 'int64_t'
+        return _rt
     # A function that can only RAISE (an abstract method: `raise
     # NotImplementedError`) never produces a value, but a subclass overrides it
     # and every call through the base reads one: a word, not `void`.

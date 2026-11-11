@@ -4183,6 +4183,7 @@ def _gen_stmt_StructDef(gen, node):
     cattrs = gen._class_attrs.get(node.name)
     if not cattrs:
         return
+    _ref_attrs = getattr(gen, '_class_ref_attrs', None) or {}
     for field in node.fields:
         if isinstance(field, gimple_ctypes.AssignStmt) \
                 and isinstance(field.target, gimple_ctypes.IdentExpr):
@@ -4193,6 +4194,38 @@ def _gen_stmt_StructDef(gen, node):
             continue
         if aname not in cattrs:
             continue
+        # A BY-REFERENCE capture of an enclosing local: the class attribute
+        # is the local's heap box, not a copy of its value. The enclosing
+        # function was made to box the name (`_class_ref_captures`), so the
+        # box pointer already exists; install THAT as the per-execution cell
+        # (`ctype *` global, pointed at by every instance built here) instead
+        # of allocating a fresh cell and storing the current value. The
+        # method's `self._cap_n` read then dereferences the box, so it sees
+        # the variable's current contents -- Python's late binding.
+        if cattrs[aname] in _ref_attrs:
+            _src = field.value
+            _src_name = ''
+            if isinstance(_src, gimple_ctypes.IdentExpr):
+                _src_name = _as_str(_src.name)
+            # The box exists in the C function this capture was boxed in. For
+            # a class written directly in that function, the boxed name is a
+            # local (`_boxed_mut_locals`). For a class inside a nested `def`,
+            # the class statement is emitted in the LIFTED function, where the
+            # name arrives through the closure env: `_gimple_mut_ptr` holds
+            # the preloaded BOX POINTER for a by-reference capture (its env
+            # field is `T *`), so install that. A name with neither is not a
+            # capture here (it is a local of the lifted function); fall
+            # through to the ordinary by-value cell for it.
+            _box_expr = ''
+            if _src_name != '':
+                if _src_name in getattr(gen, '_boxed_mut_locals', {}):
+                    _box_expr = gen._cname(_src_name)
+                else:
+                    _box_expr = (getattr(gen, '_gimple_mut_ptr', None)
+                                 or {}).get(_src_name) or ''
+            if _box_expr != '':
+                gen._emit(f"  {cattrs[aname]} = {_box_expr};")
+                continue
         # A per-execution cell (module_gen registration): this execution gets its
         # OWN storage, and the global is pointed at it before the store below, so
         # the store and every class-name read in this call reach it, and the
@@ -5931,7 +5964,20 @@ def _emit_except_handler(gen, handler, node, bb_after: str):
         gen._emit(f"  {temp_var} = mojo_exc_obj_get ();")
         bound = gen._new_temp(exc_ctype)
         gen._emit(f"  {bound} = ({exc_ctype}) {temp_var};")
+        # The name is a heap box when a nested closure or a class declared in
+        # THIS function captures it by reference. References inside the
+        # handler go through `bound` above, but the box is what the capture
+        # reads, so the caught object has to land there too; without this the
+        # method read the box's uninitialised payload. Resolve the box lvalue
+        # BEFORE the `_c_names` redirect below, or `_write_dest` follows that
+        # redirect and dereferences the handler temp instead of the box.
+        _box_dest = None
+        if bind_name in getattr(gen, '_boxed_mut_locals', {}):
+            _box_dest = gen._write_dest(bind_name)
         gen._c_names[bind_name] = bound
+        if _box_dest is not None:
+            _box_ct = gen._boxed_mut_locals[bind_name]
+            gen._emit(f"  {_box_dest} = ({_box_ct}) {bound};")
     gen._last_was_terminal = False
     _bscope = ginf._open_block_scope(gen)
     for s in handler.body:
