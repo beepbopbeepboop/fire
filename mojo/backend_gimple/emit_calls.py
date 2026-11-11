@@ -5196,11 +5196,12 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
 def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     obj_type, obj_val = gen.lower_expr(node.args[0])
     type_arg = node.args[1]
-    t = gen._new_temp('int')
+    # `_Bool`, like any()/all(): an isinstance result printed as a bool (print(isinstance(1, int)) -> True).
+    t = gen._new_temp('_Bool')
     _single_tn = _isinstance_type_name(type_arg)
     if _single_tn is not None:
         cmp_t = gen._isinstance_one_type(obj_type, obj_val, _single_tn)
-        gen._emit(f'  {t} = (int){cmp_t};')
+        gen._emit(f'  {t} = (_Bool){cmp_t};')
     elif isinstance(type_arg, gimple_ctypes.TupleExpr):
         # isinstance(x, (A, B, ...)) — OR together a per-alternative check
         # (see _isinstance_one_type). Previously stubbed to always-False,
@@ -5226,11 +5227,11 @@ def _lower_builtin_isinstance(gen, node: gimple_ctypes.CallExpr) -> tuple[str, s
             acc = one if acc is None else gen._new_val('_Bool', _as_str(acc) + ' | ' + one)
         if acc is None:
             acc = gen._new_val('_Bool', '0')
-        gen._emit(f'  {t} = (int){acc};')
+        gen._emit(f'  {t} = (_Bool){acc};')
     else:
         gimple_ctypes._debug_note('isinstance with complex type arg stubbed to 0')
         gen._emit(f'  {t} = 0;  /* TODO: isinstance with complex type arg */')
-    return 'int', t
+    return '_Bool', t
 
 
 def _lower_next_iter_cursor(gen, node, rec, args) -> tuple[str, str]:
