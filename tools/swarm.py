@@ -93,11 +93,9 @@ def live_guard():
     try:
         dirs = C.live_session_dirs()
     except (RuntimeError, OSError, ValueError) as e:
-        # fail closed: with no listing, "nothing is live" is unknown, and feeding or landing on that guess is how a
-        # live worker gets a second one on its doc (2026-11-03). The pass does its bookkeeping and nothing else.
-        log("guard: %s; session listing unreadable, this pass feeds and lands nothing" % e)
+        log("guard: %s; falling back to pid-based liveness (session listing unreadable)" % e)
         BUSY["names"], BUSY["claims"] = set(), set()
-        return False
+        return True
     tasks = C.load()
     names = C.busy_task_names(dirs, tasks)
     claims = set()
@@ -128,11 +126,12 @@ def busy_by_class():
     pool = C.load_pool()
     slot_cls = {sl["name"]: C.slot_class(sl) for sl in pool["slots"]}
     busy = {c: 0 for c in C.CLASSES}
-    tasks = C.load()
-    live = C.live_names(tasks) or frozenset()        # the same working rule as control.running_by_slot
-    for name, t in tasks.items():
-        if C._working(name, t) and (C.alive(t.get("pid")) or name in live):
-            busy[t.get("cls") or slot_cls.get(t.get("pool"), "easy")] += 1
+    for t in C.load().values():
+        if C.state_of(t) != "running":
+            continue
+        if not C.alive(t.get("pid")):
+            continue
+        busy[t.get("cls") or slot_cls.get(t.get("pool"), "easy")] += 1
     return busy
 
 
@@ -164,12 +163,6 @@ def doc_hash(doc):
         return hashlib.sha1(open(os.path.join(C.MAIN, doc_path(doc)), "rb").read()).hexdigest()
     except OSError:
         return None
-
-
-def skip_hits(base, skips):
-    """The pool's skip patterns that a doc's base name matches (empty when it is a real bug doc). The one test every
-    path that picks docs uses: the feed, the replan, and the explanation of a wedged doc."""
-    return [x for x in skips if base.startswith(x) or x in base]
 
 
 def bug_docs(base):
@@ -255,10 +248,42 @@ def feed():
         rel = os.path.relpath(p, os.path.join(C.MAIN, "bugs"))
         doc = rel[:-3] if rel.endswith(".md") else rel
         base = os.path.basename(doc)
-        reason = block_reason(doc, st, pool, busy_slot, held)
-        if reason:
-            continue                       # the reason is a view (swarm.py --feed / --why), not a line per pass
+        if any(base.startswith(x) or x in base for x in skips):
+            log("skip %s: its name matches the pool's skip pattern %s" % (
+                doc, [x for x in skips if base.startswith(x) or x in base]))
+            continue
+        if "bug:" + base in held:
+            log("held %s: a live task or an external claim holds it (see control.py claims)" % doc)
+            continue
+        # DONE ratchet: a doc whose fix is FINISHED — a DONE task with commits, not yet landed — is
+        # not re-dispatched; its branch is in the landing queue. A deletion by a worker that never
+        # finished is NOT a fix, and skipping on it strands the doc forever with no path forward
+        # (2026-11-10: 5 docs, e.g. mid/SUITE_silentnoop, were wedged exactly this way).
+        r = subprocess.run(["git", "log", "--all", "--diff-filter=D", "--oneline", "--",
+                           "bugs/%s.md" % base, "bugs/mid/%s.md" % base, "bugs/hard/%s.md" % base],
+                           capture_output=True, text=True, cwd=C.MAIN)
+        if r.stdout.strip() and landable(base):
+            log("done-ratchet: %s already deleted on a branch; skipping (its branch is in the landing queue)" % doc)
+            continue
+        if base in st.get("pending", {}):
+            log("held %s: due a move to %s (queued only after it moves)" % (doc, st["pending"][base]))
+            continue
+        why = stop_reason(doc)
+        if why:
+            log("stopped %s: %s" % (doc, why))
+            continue
+        split = split_reason(doc)
+        if split:
+            log("split %s: its parts carry the work (%s)" % (doc, split))
+            continue
         cls = doc_class(doc, st, base)
+        # a doc is queued only if some slot that accepts its class has room right now
+        if not any(C.accepts(sl, cls) and C.slot_free(sl, busy_slot) for sl in pool["slots"]):
+            log("wait %s: no free %s slot (%s)" % (doc, cls, ", ".join(
+                "%s count %d busy %d%s" % (sl["name"], sl["count"], busy_slot.get(sl["name"], 0),
+                                           ", banned" if sl["model"] in C.dead_models() else "")
+                for sl in pool["slots"] if C.accepts(sl, cls)) or "no slot takes class " + cls))
+            continue
         name = task_name(doc)
         if name in C.load():                   # the 40-char name collides with an old task: make it unique
             log("renamed %s: %s is already in the registry" % (doc, name))
@@ -279,14 +304,6 @@ def feed():
         st["fed"][doc] = st["fed"].get(doc, 0) + 1
     json.dump(st, open(state_path(), "w"), indent=1)
     return made
-
-
-def deleted_on_a_branch(base):
-    """Whether some branch has deleted this doc: the one git query the DONE ratchet needs, run before anything else."""
-    r = subprocess.run(["git", "log", "--all", "--diff-filter=D", "--oneline", "--",
-                        "bugs/%s.md" % base, "bugs/mid/%s.md" % base, "bugs/hard/%s.md" % base],
-                       capture_output=True, text=True, cwd=C.MAIN)
-    return bool(r.stdout.strip())
 
 
 def landable(base):
@@ -319,23 +336,31 @@ def claim_held(base):
     return None
 
 
-def block_reason(doc, st, pool, busy, held):
-    """The first feed condition that keeps DOC from being queued now, or None when it may be queued. The one verdict
-    the feed and the views share, so a view can never disagree with what the feed does. `held` is the set of
-    'bug:BASE' claims held now (held_claims()); `busy` is running_by_slot()."""
+def why(doc):
+    """Why DOC is not being fed right now: the first feed condition that blocks it. Answers the
+    'this bug is wedged and nothing says why' question without waiting for a pass."""
+    pool = C.load_pool()
+    skips = pool.get("skip", [])
+    st = load_state()
+    if doc.startswith("bugs/"):
+        doc = doc[5:]                      # accept either a bugs/ path or a path relative to bugs/
+    if doc.endswith(".md"):
+        doc = doc[:-3]                    # ... with or without the .md
     base = os.path.basename(doc)
     cls = doc_class(doc, st, base)
-    if skip_hits(base, pool.get("skip", [])):
-        return "skip pattern: its name matches %s from the pool's skip list" % skip_hits(base, pool.get("skip", []))
-    if "bug:" + base in held:
-        return "held: a live task or an external claim holds it"
-    np = T.no_progress_reason(base)
-    if np:
-        return np
-    if deleted_on_a_branch(base):          # cheap git check first: landable() reads the registry
-        done = landable(base)
-        if done:
-            return "DONE ratchet: a branch deleted it; %d DONE task(s) will land it (e.g. %s)" % (len(done), done[0])
+    busy = C.running_by_slot()
+    if any(base.startswith(x) or x in base for x in skips):
+        return "skip pattern: its name matches %s from the pool's skip list" % [
+            x for x in skips if base.startswith(x) or x in base]
+    held = claim_held(base)
+    if held:
+        return "held: %s" % held
+    r = subprocess.run(["git", "log", "--all", "--diff-filter=D", "--oneline", "--",
+                        "bugs/%s.md" % base, "bugs/mid/%s.md" % base, "bugs/hard/%s.md" % base],
+                       capture_output=True, text=True, cwd=C.MAIN)
+    if r.stdout.strip() and landable(base):
+        return "DONE ratchet: a branch deleted it; %d DONE task(s) will land it (e.g. %s)" % (
+            len(landable(base)), landable(base)[0])
     if base in st.get("pending", {}):
         return "held: due a reclass to %s (queued only after the doc moves)" % st["pending"][base]
     stop = stop_reason(doc)
@@ -349,50 +374,10 @@ def block_reason(doc, st, pool, busy, held):
             "%s count %d busy %d%s" % (sl["name"], sl["count"], busy.get(sl["name"], 0),
                                        ", banned" if sl["model"] in C.dead_models() else "")
             for sl in pool["slots"] if C.accepts(sl, cls)) or "no slot takes class " + cls)
-    return None
-
-
-def _doc_rel(doc):
-    """A bugs/ path, or a path relative to bugs/, with or without .md, as the bare doc name the feed uses."""
-    if doc.startswith("bugs/"):
-        doc = doc[5:]
-    return doc[:-3] if doc.endswith(".md") else doc
-
-
-def why(doc):
-    """Why DOC is not being fed right now, with the detail the feed does not compute per pass (which task holds it, and
-    the in-flight state). Answers 'this bug is wedged and nothing says why' without waiting for a pass."""
-    pool = C.load_pool()
-    st = load_state()
-    doc = _doc_rel(doc)
-    base = os.path.basename(doc)
-    reason = block_reason(doc, st, pool, C.running_by_slot(), held_claims())
-    if reason and reason.startswith("held:"):
-        reason = "held: %s" % (claim_held(base) or "a live task or an external claim holds it")
-    if reason:
-        return reason
     name = task_name(doc)
     if name in C.load():
         return "in flight: task %s is %s" % (name, C.state_of(C.load()[name]))
     return "would be fed on the next pass"
-
-
-def feed_view():
-    """Every doc the feed considers, with the reason it waits or 'eligible', grouped by reason. Computed now, from the
-    same block_reason the feed uses; nothing is logged for it."""
-    pool = C.load_pool()
-    st, busy, held = load_state(), C.running_by_slot(), held_claims()
-    groups = {}
-    for p in sorted(set(x for g in pool["feed"] for x in glob.glob(os.path.join(C.MAIN, g)))):
-        doc = _doc_rel(os.path.relpath(p, os.path.join(C.MAIN, "bugs")))
-        reason = block_reason(doc, st, pool, busy, held) or "eligible"
-        groups.setdefault(reason.split(" (")[0].split(":")[0], []).append(doc)
-    for key in sorted(groups, key=lambda k: (k == "eligible", -len(groups[k]))):
-        print("%5d  %s" % (len(groups[key]), key))
-        if key == "eligible" or "-v" in sys.argv:
-            for d in groups[key][:20]:
-                print("        %s" % d)
-    return 0
 
 
 def probe_free():
@@ -411,7 +396,7 @@ def refill(target):
                         "--prefix", ",".join(PREFIXES)], capture_output=True, text=True, cwd=C.MAIN)
     lines = [l for l in r.stdout.splitlines() if l.strip()]
     for l in lines[:-1]:
-        log(l if l.startswith("refill:") else "refill: " + l)   # control.py labels its own lines
+        log("refill: " + l)
     return lines[-1] if lines else ""
 
 
@@ -474,9 +459,6 @@ def replan_unserved():
     for cls, slots in sorted(unserved.items()):
         for path in sorted(glob.glob(os.path.join(C.MAIN, "bugs", cls, "*.md"))):
             base = os.path.basename(path)[:-3]
-            if skip_hits(base, pool.get("skip", [])):
-                continue                  # an index or README is not a bug doc: nothing to split (2026-11-10: a
-                                          # replan of bugs/hard/README.md was queued and ran on qwen)
             name = "fix-replan-" + re.sub(r"[^a-z0-9]+", "-", base.lower())[:40].rstrip("-")
             qpath = os.path.join(C.qdir(), name + ".json")
             if os.path.exists(qpath):
@@ -512,6 +494,11 @@ def reclass_on_failure(st, base, doc):
     cur = doc_class(doc, st, base)
     nxt = escalate(cur)
     if nxt and fails[base] >= ESCALATE_AFTER:
+        if nxt in unserved_classes():
+            # Escalating into a class with no slot would strand the doc there forever.
+            log("reclass %s: stays at %s — %s has no slot, so moving it there would strand it" % (doc, cur, nxt))
+            fails[base] = 0
+            return
         st.setdefault("pending", {})[base] = nxt
         fails[base] = 0
         log("reclass %s: %s -> %s after %d no-commit attempts (moves when nothing unlanded touches it)"
@@ -809,9 +796,9 @@ def land():
         # RED: the batch as a whole fails the gate. Find the one branch that breaks it; that branch goes to a fixer
         # with its failing tests named, and the rest of the batch is probed again (and lands when it is green).
         culprit, failing = find_culprit(merged, failing)
-        log("red: %s breaks the gate (%s); it is held and bugs/gate-<job>.md is the work, the rest of the batch continues"
+        log("red: %s breaks the gate (%s); it goes to a fixer, the rest of the batch continues"
             % (culprit, " ".join(failing) or "jobs unknown"))
-        I.gate_doc(culprit, tasks[culprit], failing)
+        I.enqueue_red_fix(culprit, tasks[culprit], failing)
         batch = [n for n in batch if n != culprit]
     return landed
 
@@ -882,10 +869,7 @@ def main():
     ap.add_argument("--who", action="store_true", help="print the verified lock holder and exit")
     ap.add_argument("--why", metavar="DOC", default=None,
                     help="print why a bug doc is not being fed (a bugs/ path or a base name), and exit")
-    ap.add_argument("--feed", action="store_true", help="show, grouped by reason, every doc the feed considers and why it waits")
     a = ap.parse_args()
-    if a.feed:
-        sys.exit(feed_view())
     if a.who:
         sys.exit(who())
     if a.why:
@@ -910,8 +894,7 @@ def main():
             sr = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "sync", "--restart-dead"], capture_output=True, text=True, cwd=C.MAIN)
             for line in (sr.stdout or "").splitlines():
                 if line.strip():
-                    text = line.strip()
-                    log(text if text.startswith("sync:") else "sync: " + text)   # control.py labels its own lines
+                    log("sync: " + line.strip())
             # safe, conservative cleanup every pass: only removes merged/clean/idle trees with no outside claim
             cr = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "cleanup"], capture_output=True, text=True, cwd=C.MAIN)
             for line in (cr.stdout or "").splitlines():
