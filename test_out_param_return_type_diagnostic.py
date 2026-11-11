@@ -75,7 +75,6 @@ class OutParamReturnTypeDiagnostic(unittest.TestCase):
     # --- refused, at the real location (the return type) -----------------------
     # Real Mojo: `    def ten(out self) -> Int:` reports 5:26, the `I` of `Int`.
 
-    @unittest.expectedFailure  # ours reports at the close paren / arrow; see BUG
     def test_method_return_type_error_is_at_the_return_type(self):
         with self.assertRaises(RuntimeError) as cm:
             _compile('struct A:\n'
@@ -85,7 +84,6 @@ class OutParamReturnTypeDiagnostic(unittest.TestCase):
         line, col = _location(cm.exception)
         self.assertEqual((line, col), (3, 26))
 
-    @unittest.expectedFailure  # ours reports at the arrow; see BUG
     def test_function_return_type_error_is_at_the_return_type(self):
         with self.assertRaises(RuntimeError) as cm:
             _compile('def f(out x: Int) -> Int:\n'
