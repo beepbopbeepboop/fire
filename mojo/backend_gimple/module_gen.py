@@ -15314,6 +15314,17 @@ def gen_module_impl(self, stmts: list):
                     self._dict_val_types.clear(); self._dict_val_types.update(_dval_snap)
                     self._line_src_file = _prev_line_src
                     self._pop_import_scope()
+                    # The class tables name this method's symbol (a `mojo_class_setattr` and a classattr-reader
+                    # entry for every non-dunder method). The body above was refused, so that symbol is never
+                    # defined in THIS TU: a link reference to it is an undefined symbol (measured: std/iter's
+                    # `_PeekableIterator_peek`, which the dylib referenced and never defined). Record it, and the
+                    # two table loops leave it out. Only the methods that were refused are recorded.
+                    try:
+                        _proto_cname = self._struct_cname_by_id.get(id(stmt), stmt.name)
+                        self._prototype_only_syms.add(
+                            self._struct_method_csym(_proto_cname, _as_str(m.name), _as_str(overload_id or '')))
+                    except Exception:
+                        pass
                     func_parts.append(
                         f"/* {stmt.name}.{m.name}{overload_id}: definition-site "
                         f"body not lowerable in this TU — {_me_err} — prototype "
@@ -18553,6 +18564,8 @@ def gen_module_impl(self, stmts: list):
                         _msym = f"{_sdcname}_{_mname_s}"
                     except Exception:
                         continue
+                if _msym in self._prototype_only_syms:
+                    continue   # refused body, prototype only in this TU (see the fallback above)
                 parts.append(f'    mojo_class_setattr({_sdtag}LL, "{_c_escape(_mname_s)}", (int64_t)(intptr_t){_msym});')
         parts.append('}')
         parts.append('')
@@ -18605,6 +18618,8 @@ def gen_module_impl(self, stmts: list):
                         _msym = f"{_sdcname}_{_mname_s}"
                     except Exception:
                         continue
+                if _msym in self._prototype_only_syms:
+                    continue   # refused body, prototype only in this TU (see the fallback above)
                 _method_entries.append(
                     f'    if (tag == {_sdtag}LL && !strcmp(name, "{_c_escape(_mname_s)}")) '
                     f'{{ *out = (int64_t)(intptr_t){_msym}; return 1; }}')
