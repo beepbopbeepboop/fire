@@ -1081,6 +1081,12 @@ int mojo_truthy_cstr(char *s);
 int mojo_pyobject_truthy(int64_t box);
 int mojo_pyobject_is_container(int64_t box);
 int64_t mojo_pyobject_hash(int64_t box);
+/* Hasher: the `hasher` argument of a stdlib `__hash__(mut hasher)`. A word that
+   holds a heap state; a scalar's `__hash__(hasher)` folds its value in, and
+   `mojo_hasher_finish` reads the result. */
+int64_t mojo_hasher_new(void);
+void mojo_hasher_update_int(int64_t hasher, int64_t value);
+int64_t mojo_hasher_finish(int64_t hasher);
 char *mojo_pyobject_str(int64_t box);
 double mojo_pyobject_box_as_double(int64_t box);
 int64_t mojo_pyobject_arith(char op, int64_t a, int64_t b, int a_dbl, int b_dbl);
