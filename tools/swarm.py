@@ -806,9 +806,9 @@ def land():
         # RED: the batch as a whole fails the gate. Find the one branch that breaks it; that branch goes to a fixer
         # with its failing tests named, and the rest of the batch is probed again (and lands when it is green).
         culprit, failing = find_culprit(merged, failing)
-        log("red: %s breaks the gate (%s); it goes to a fixer, the rest of the batch continues"
+        log("red: %s breaks the gate (%s); it is held and bugs/gate-<job>.md is the work, the rest of the batch continues"
             % (culprit, " ".join(failing) or "jobs unknown"))
-        I.enqueue_red_fix(culprit, tasks[culprit], failing)
+        I.gate_doc(culprit, tasks[culprit], failing)
         batch = [n for n in batch if n != culprit]
     return landed
 

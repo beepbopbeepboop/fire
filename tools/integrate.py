@@ -207,26 +207,31 @@ def enqueue_merge_fix(name, t, conflict_text):
         reg[name]["fixer"] = mname          # a fixer owns this branch: never hand the same one out twice
 
 
-def enqueue_red_fix(name, t, failing):
-    """A branch that merges clean but turns the landing gate red is handed back to a worker with the failing tests
-    named: queue a fixer that starts from the branch, and supersede the original (registry `needs` keeps the list)."""
-    import argparse as _ap
-    tests = ", ".join(failing) or "the failing gate jobs (see the gate log)"
-    task = ("Branch %s (a finished worker branch; original task: %s) merges onto master but turns the landing gate RED. "
-            "The failing gate jobs with it are: %s. You start on that branch. Make those tests pass by fixing the ROOT CAUSE "
-            "in the branch's own change (not by skipping, marking expect= or disabling a test). Verify with the narrow tests "
-            "for each failing job, each wrapped in python3 tools/memslot.py --gb 8 --label x --. You are a light worker: no "
-            "gate, no self-host build. Never use git stash. Commit, then finish with the REPORT block and a CONTROL-STATUS line."
-            % (t["branch"], t["summary"][:150], tests))
-    mname = "fix-red-" + name
-    if mname in C.load():
-        mname += "-%d" % int(time.time() % 100000)
-    C.cmd_enqueue(_ap.Namespace(name=mname[:60], claim=t["claims"] or ["task:" + mname], task=task, task_file=None,
-                                file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls")))
+def gate_doc(culprit, t, failing):
+    """A branch that turns the landing gate red is not handed to a chain of fresh workers. The gate's failure is a bug
+    like any other, so it gets a doc: bugs/gate-<job>.md, one per failing job, which the feeder routes easy -> mid ->
+    hard like every doc. The culprit is superseded (its claims release, so the doc can be worked on master) and held
+    (`hold` keeps it out of the landing candidates, so it cannot go red again in a loop). An existing doc is left
+    alone. Returns the doc paths."""
+    jobs = failing or ["landing"]
+    paths = []
+    for j in jobs:
+        p = os.path.join(C.MAIN, "bugs", "gate-%s.md" % j)
+        paths.append(p)
+        if os.path.exists(p):
+            continue
+        with open(p, "w") as f:
+            f.write(
+                "# Gate: %s is red on master\n\n"
+                "**Job:** `%s`. Created when branch `%s` (task `%s`) turned the gate red.\n"
+                "**Two states:** this doc exists = the job is red and this is the work. Delete it when the job is green on master.\n\n"
+                "Reproduce it on master first (`python3 tools/suite.py %s`), then fix the cause. Do not skip or mark the test.\n"
+                % (j, j, t["branch"], culprit, j))
     with C.registry() as reg:
-        reg[name]["state"] = "superseded"
-        reg[name]["needs"] = list(failing)
-        reg[name]["fixer"] = mname          # a fixer owns this branch: never hand the same one out twice
+        reg[culprit]["state"] = "superseded"
+        reg[culprit]["hold"] = True
+        reg[culprit]["gate_red"] = jobs
+    return paths
 
 
 def main():
