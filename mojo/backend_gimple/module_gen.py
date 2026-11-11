@@ -6293,6 +6293,8 @@ def gen_module_impl(self, stmts: list):
         # is — it is a real Python bool on the dataclass.
         'captures': 'MojoList *',
         'has_capture_list': '_Bool',
+        'where_clause': 'int64_t',
+        'where_else': 'int64_t',
         'line': 'int64_t',
         'col': 'int64_t',
     }
