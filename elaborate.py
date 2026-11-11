@@ -699,28 +699,9 @@ _C_TO_MOJO = {
 }
 
 
-def c_to_mojo(ctype: str):
-    """The Mojo spelling of a C argument type, or None when the C type does not
-    name one. There is deliberately NO default: a struct, a pointer or an erased
-    SIMD value has a C type this table does not list, and answering `Int` for it
-    bound a type parameter to a type the argument is not. That binding then
-    reached `check_bounds`, which rejected it (`dtype := Int64` for an erased
-    `SIMD[.float32, 2]`), so a guess was reported as a user error."""
-    return _C_TO_MOJO.get(ctype)
+def c_to_mojo(ctype: str) -> str:
+    return _C_TO_MOJO.get(ctype, 'Int')
 
-
-def inferred_ctype_is_specific(ctype) -> bool:
-    """True when `ctype` NAMES the argument's Mojo type, rather than being a
-    placeholder this codegen substituted for a type it did not compute.
-
-    Deliberately not every key of `_C_TO_MOJO`: `int64_t` and `int` are this
-    codegen's UNIVERSAL scalar fallbacks — every SIMD value, every `Array`/
-    `Span` element whose element type was not tracked, every opaque
-    construction and every unknown subscript lowers to `int64_t` — so the C
-    spelling cannot tell a genuine Int argument from an erased one. Any C
-    type absent from `_C_TO_MOJO` (`char`, a bare `Foo *`) reaches
-    `c_to_mojo`, which now answers None for it (no `Int` default), for the same reason."""
-    return ctype in _C_TO_MOJO and ctype not in ('int64_t', 'int')
 
 _SCALAR_ANN_RE = re.compile(r'^Scalar\[\s*([^,\[\]]+)\s*\]$')
 _SIMD_ANN_RE = re.compile(r'^SIMD\[\s*([^,\[\]]+)\s*(?:,\s*([^,\[\]]+)\s*)?\]$')
@@ -742,16 +723,11 @@ def _unify_param_ann(ann, pnames, arg_ctype) -> dict:
       every such template was declined and its call sites reached the generated
       C as bare externs.
 
-    The `SIMD[...]` and `Scalar[...]` shapes bind only from a scalar C type.
-    This codegen erases SIMD outright (`_mojo_type('SIMD[Float64, 4]')` is
-    `int64_t`, and `Scalar[DType.int32]` is `int64_t` too), so an `int64_t`
-    argument is ambiguous: `erf(SIMD[.float32, 2](2))` and `erf(Int64(2))` have
-    the same C type, and binding `dtype := Int64` from it was a guess that the
-    constraint check now rejects. That case binds nothing and the template is
-    declined as unbound. Any other scalar C type (`double`, `float`, `int32_t`)
-    cannot be an erased SIMD, so the argument is that scalar, `SIMD[dtype, 1]`,
-    and `dtype` and `width` bind from it. Recovering the dtype of a wider SIMD
-    needs the argument's declared type, not its C type.
+    `width` binds to `1`, which is not a guess about the source: this codegen
+    erases SIMD outright (`_mojo_type('SIMD[Float64, 4]')` is `int64_t`, and
+    `_TYPE_MAP` has no SIMD key), so every value that reaches here is a scalar,
+    and `SIMD[<scalar type>, 1]` is the spelling that means "that scalar". A
+    future real SIMD representation must revisit this one line.
 
     Anything else — a nested `Pointer[T]`, `Some[T]`, a param used only as a
     comptime argument, an annotation that is not a string — returns `{}`, so
@@ -778,23 +754,14 @@ def _unify_param_ann(ann, pnames, arg_ctype) -> dict:
     if ann.startswith('Self.'):
         ann = ann[5:]
     if ann in pnames:
-        bound = c_to_mojo(arg_ctype)
-        return {} if bound is None else {ann: bound}
-    # `Scalar[dtype]` and `SIMD[dtype, width]`. SIMD is erased to `int64_t`, so
-    # an `int64_t` argument may be ANY SIMD value or a plain Int64: it binds
-    # nothing. Any other scalar C type (`double`, `float`, `int32_t`) cannot be
-    # an erased SIMD, so the argument IS that scalar, which is `SIMD[dtype, 1]`.
-    if arg_ctype == 'int64_t':
-        return {}
-    dtype = c_to_mojo(arg_ctype)
-    if dtype is None:
-        return {}
+        return {ann: c_to_mojo(arg_ctype)}
+    # `Scalar[dtype]` is `SIMD[dtype, 1]`: the argument IS that scalar.
     m = _SCALAR_ANN_RE.match(ann)
     if m and m.group(1) in pnames:
-        return {m.group(1): dtype}
+        return {m.group(1): c_to_mojo(arg_ctype)}
     m = _SIMD_ANN_RE.match(ann)
     if m and m.group(1) in pnames:
-        out = {m.group(1): dtype}
+        out = {m.group(1): c_to_mojo(arg_ctype)}
         if m.group(2) is not None:
             if m.group(2) not in pnames:
                 return {}
@@ -1318,8 +1285,6 @@ class Elaborator:
         overloads = extract_overloads(module_src, fn_name)
         if not overloads:
             return None
-        # An argument whose C type has no Mojo spelling (`None`) equals no
-        # overload's parameter type, so it matches nothing and declines here.
         arg_mojo = [c_to_mojo(ct) for ct in arg_ctypes]
         chosen = None
         for src, ptypes, ret in overloads:
@@ -1353,27 +1318,5 @@ class Elaborator:
         type_args = infer_type_args(tmpl, arg_ctypes)
         if type_args is None:
             return None
-        try:
-            return self.elaborate_generic_call(module_src, fn_name, type_args,
-                                               arg_count=len(arg_ctypes),
-                                               arg_ctypes=arg_ctypes)
-        except ConformanceError:
-            # A conformance failure inferred from an ERASED argument type is
-            # a fact about this codegen's C representation, not about the
-            # Mojo source: `tanh(x[i])` on a `Span[Float32]` lowers its
-            # argument to `char` (untracked byte element) or `int64_t` (SIMD
-            # erasure), `c_to_mojo` reads either as `Int`, and enforcing the
-            # `where dtype.is_floating_point()` clause then rejects a valid
-            # float call. Six real stdlib files hit exactly that
-            # (`std/random/philox.mojo:300`, `test/math/test_{erf,exp,ldexp,
-            # math,tanh}.mojo`).
-            #
-            # A caller that supplies the type args EXPLICITLY (`f[T](...)`)
-            # states them, so the diagnostic there is provable and
-            # `elaborate_generic_call` still raises it. Here, when ANY
-            # argument's C type is a placeholder, decline: the caller falls
-            # through to its nominal stub exactly as when no instantiation
-            # could be inferred.
-            if any(not inferred_ctype_is_specific(ct) for ct in arg_ctypes):
-                return None
-            raise
+        return self.elaborate_generic_call(module_src, fn_name, type_args, arg_count=len(arg_ctypes),
+                                           arg_ctypes=arg_ctypes)
