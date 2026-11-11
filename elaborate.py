@@ -637,6 +637,15 @@ def check_where_clauses(module_src: str, template_src: str, targs: dict):
                         f"type '{conc}' does not satisfy constraint "
                         f"'{clause}' (required by parameter '{pname}')")
         # Check for X.is_signed()/is_unsigned() etc if needed
+        # Check for X == Y (type-equality constraint, e.g. `where T == Int`)
+        for mp in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\s*==\s*([A-Za-z_][A-Za-z0-9_]*)', clause):
+            pname, other = mp.group(1), mp.group(2)
+            if pname in targs:
+                conc = targs[pname].split('.')[-1].strip()
+                if conc != other:
+                    raise ConformanceError(
+                        f"type '{targs[pname]}' does not satisfy constraint "
+                        f"'{clause}' (required by parameter '{pname}')")
 
 
 def check_bounds(module_src: str, template_src: str, targs: dict):
@@ -690,12 +699,14 @@ _C_TO_MOJO = {
 }
 
 
-def c_to_mojo(ctype: str) -> str:
-    return _C_TO_MOJO.get(ctype, 'Int')
-
-
-_SCALAR_ANN_RE = re.compile(r'^Scalar\[\s*([^,\[\]]+)\s*\]$')
-_SIMD_ANN_RE = re.compile(r'^SIMD\[\s*([^,\[\]]+)\s*(?:,\s*([^,\[\]]+)\s*)?\]$')
+def c_to_mojo(ctype: str):
+    """The Mojo spelling of a C argument type, or None when the C type does not
+    name one. There is deliberately NO default: a struct, a pointer or an erased
+    SIMD value has a C type this table does not list, and answering `Int` for it
+    bound a type parameter to a type the argument is not. That binding then
+    reached `check_bounds`, which rejected it (`dtype := Int64` for an erased
+    `SIMD[.float32, 2]`), so a guess was reported as a user error."""
+    return _C_TO_MOJO.get(ctype)
 
 
 def _unify_param_ann(ann, pnames, arg_ctype) -> dict:
@@ -714,11 +725,17 @@ def _unify_param_ann(ann, pnames, arg_ctype) -> dict:
       every such template was declined and its call sites reached the generated
       C as bare externs.
 
-    `width` binds to `1`, which is not a guess about the source: this codegen
-    erases SIMD outright (`_mojo_type('SIMD[Float64, 4]')` is `int64_t`, and
-    `_TYPE_MAP` has no SIMD key), so every value that reaches here is a scalar,
-    and `SIMD[<scalar type>, 1]` is the spelling that means "that scalar". A
-    future real SIMD representation must revisit this one line.
+    The `SIMD[...]` and `Scalar[...]` shapes bind NOTHING. This codegen erases
+    SIMD outright (`_mojo_type('SIMD[Float64, 4]')` is `int64_t`, and
+    `Scalar[DType.int32]` is `int64_t` too), so the C type of every such
+    argument is `int64_t`, which is also the C type of a plain `Int64`. It says
+    nothing about the element dtype or the width: `erf(SIMD[.float32, 2](2))`
+    and `erf(Int64(2))` have the same C type. The earlier reading bound
+    `dtype := Int64, width := 1` from it, which is a guess, and the constraint
+    check now rejects it. A template whose parameters only appear inside
+    `SIMD`/`Scalar` is declined as unbound, which is what `infer_type_args`
+    does for every shape it cannot prove. Recovering the element dtype needs
+    the argument's declared type, not its C type.
 
     Anything else — a nested `Pointer[T]`, `Some[T]`, a param used only as a
     comptime argument, an annotation that is not a string — returns `{}`, so
@@ -745,19 +762,10 @@ def _unify_param_ann(ann, pnames, arg_ctype) -> dict:
     if ann.startswith('Self.'):
         ann = ann[5:]
     if ann in pnames:
-        return {ann: c_to_mojo(arg_ctype)}
-    # `Scalar[dtype]` is `SIMD[dtype, 1]`: the argument IS that scalar.
-    m = _SCALAR_ANN_RE.match(ann)
-    if m and m.group(1) in pnames:
-        return {m.group(1): c_to_mojo(arg_ctype)}
-    m = _SIMD_ANN_RE.match(ann)
-    if m and m.group(1) in pnames:
-        out = {m.group(1): c_to_mojo(arg_ctype)}
-        if m.group(2) is not None:
-            if m.group(2) not in pnames:
-                return {}
-            out[m.group(2)] = '1'
-        return out
+        bound = c_to_mojo(arg_ctype)
+        return {} if bound is None else {ann: bound}
+    # `Scalar[...]` and `SIMD[...]` fall through to here: erased, see the
+    # docstring, so they bind nothing.
     return {}
 
 
@@ -1276,6 +1284,8 @@ class Elaborator:
         overloads = extract_overloads(module_src, fn_name)
         if not overloads:
             return None
+        # An argument whose C type has no Mojo spelling (`None`) equals no
+        # overload's parameter type, so it matches nothing and declines here.
         arg_mojo = [c_to_mojo(ct) for ct in arg_ctypes]
         chosen = None
         for src, ptypes, ret in overloads:
