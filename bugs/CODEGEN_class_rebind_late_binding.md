@@ -19,6 +19,11 @@ the landing gate went red on `stdlib-syntax` (`std/random/philox.mojo`, `test/ma
 batch. The next worker starts from that branch (the planner does this), reads `git diff master...HEAD` first,
 and must make the stdlib compile green before the branch can land.
 
+Landed 2026-11-11 (partial fix): round 31's compiler change is on master. The doc's repro now COMPILES
+instead of being refused; it does not yet run correctly, because every compiled program currently aborts at load
+(`CODEGEN_peekable_iterator_methods_not_emitted`). Still open: the Done-when test below, and the runtime answer `2`.
+The `stdlib-syntax` red (six files, `CODEGEN_simd_math_call_violated_constraint`) is pre-existing on master and unchanged.
+
 ## Done when
 A quick regression test `test_class_rebind_late_binding.py` (to be written; the branch's cases are inside the
 slow `test_gimple_runner.py`, so they are not the quick test) compiles and runs:
