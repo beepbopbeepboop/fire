@@ -1578,6 +1578,17 @@ def _gen_stmt_AssignStmt(gen, node):
                     and ginf.tagged_mixed_name(gen, _as_str(tname)))):
             raise RuntimeError(
                 f"{tname!r}: {ginf.MIXED_NAME_NON_INT64_REFUSAL}")
+        # A float and a str stored into the same name of one function (`val = d["key"]` on a float dict, then
+        # `val = "text"`): no representation holds both kinds, and the second store would cast a double to a pointer,
+        # which gcc rejects ("cannot convert to a pointer type"). Refuse the function, with the same reason, at the
+        # store that brings the second kind. The codegen types a name from its bindings as it goes, so the kinds
+        # already stored into the name are the record.
+        if vtype in ('double', 'char *'):
+            _sk_key = (_as_str(gen.current_func_name), _as_str(tname))
+            _sk_prev = gen._stored_kinds.get(_sk_key)
+            if _sk_prev is not None and _sk_prev != vtype:
+                raise RuntimeError(f"{tname!r}: {ginf.MIXED_NAME_NON_INT64_REFUSAL}")
+            gen._stored_kinds[_sk_key] = vtype
         if (not _keep_tagged_box and vtype == 'int64_t'
                 and gen.var_types.get(tname, 'int64_t') == 'int64_t'
                 and ginf.tagged_mixed_name(gen, _as_str(tname))):

@@ -57,17 +57,20 @@ tagging a dict read whose name is later rebound with another C type. The fix is 
 `module_shared.py` and `coro.py` compile in the fire.ci build, and `test_dict_slot_read_regression.py` still passes.
 Check it against the fire.ci build, not only this probe.
 
-## Status (2026-11-11): partial fix landed (7fe6798cc, merged with master)
+## Status (2026-11-11)
 
-- FIXED: `ast_rewriter.py` and `module_shared.py` now compile through the probe (the refusal was the dict-slot tag).
-- NOT FIXED: `mojo/middle/coro.py` is still refused, now with `parameter 'real_params' of '_mark_coro_param_elem_kinds'
-  is passed a container at one call site and a str or number at another`. Master refuses it with the same message,
-  so it is a separate refusal, not the dict-slot one.
-- NOT FIXED: `test_dict_slot_read_regression.py` case 2 fails with gcc `cannot convert to a pointer type`, on master and
-  on this branch alike.
-- NOT RUN: the fire.ci self-host build the done-when asks for. `stdlib-syntax` exits 0 with this change.
+- FIXED: `ast_rewriter.py` and `module_shared.py` compile (the refusal was the dict-slot tag, fixed in 7fe6798cc).
+- REFUSED BY DESIGN: `mojo/middle/coro.py` is refused with `parameter 'real_params' of '_mark_coro_param_elem_kinds' is
+  passed a container at one call site and a str or number at another`. The compiled path has no representation that
+  holds both kinds (`module_gen.py`, `_refuse_mixed_container_params`). Expected until that representation exists:
+  see `CODEGEN_mixed_kind_names_need_a_representation.md`.
+- REFUSED BY DESIGN: a float and a str stored into one name (regression test case 2) now refuse with the mixed-name
+  reason, instead of emitting a double-to-pointer cast gcc rejects. The same design gap.
+- `test_dict_slot_read_regression.py` passes with case 2 expecting that refusal.
+- NOT RUN: the fire.ci self-host build. Its check needs `coro.py` to compile, which is blocked on the design gap.
 
-The branch commit deleted this doc; it is restored here because the done-when is not met. Still open.
+Done when the mixed-kind representation exists, `coro.py` compiles, and the fire.ci build is green. Until then this doc
+stays open with the status above.
 
 ## Process note
 

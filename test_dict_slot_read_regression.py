@@ -73,16 +73,19 @@ def main():
 main()
 '''
 
-    print("\nTest 2: Dict slot read then rebind to string (from float dict)")
+    # A float and a str in ONE name have no representation (the box carries only int kinds). The compiler refuses the
+    # program with the mixed-name reason, rather than emitting a double-to-pointer cast gcc rejects.
+    print("\nTest 2: float dict read then rebind to string: refused with the mixed-name reason")
     try:
-        stdout, stderr, returncode = run(src2)
-        print(f"  PASS: Compilation succeeded without refusal (returncode={returncode})")
-        if stderr and "refused" in stderr.lower():
-            print(f"  FAIL: Refusal detected in stderr: {stderr[:200]}")
-            return 1
-    except Exception as e:
-        print(f"  FAIL: Compilation raised exception: {e}")
+        run(src2)
+        print("  FAIL: compiled, but a float and a str share one name")
         return 1
+    except RuntimeError as e:
+        if "cannot also hold a value of another C type" in str(e):
+            print("  PASS: refused with the mixed-name reason")
+        else:
+            print(f"  FAIL: refused for another reason: {str(e)[:200]}")
+            return 1
 
     # Test 3: Dict slot read stored in a list
     src3 = '''

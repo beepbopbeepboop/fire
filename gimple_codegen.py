@@ -1296,6 +1296,8 @@ class GimpleGen:
         # C symbols of struct methods whose body was refused in this TU and emitted as a prototype only (module_gen's
         # definition-site fallback). The class tables leave them out: they name no definition here.
         self._prototype_only_syms: set[str] = set()
+        # (function, name) -> the C kind of the last store into it, for the mixed float/str refusal in emit_stmts.
+        self._stored_kinds: dict = {}
         # Struct methods called from a compiled generator/async body on
         # EITHER `self` or a non-self struct-pointer-typed local/parameter
         # (see CODEGEN_generator_struct_typed_param_refused).
