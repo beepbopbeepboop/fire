@@ -35,6 +35,7 @@ import mojo.backend_gimple.device_glue as _gmi_glue
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+from mojo.middle.stmts_shared import _annotation_container_elem_type
 import fire_compiler as N
 from fire_compiler import is_fstring_literal, decode_c_escapes
 from mojo.middle.exprtypes import _walk_ast_invalidate
@@ -2886,6 +2887,53 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gen._emit_container_new(t, _generic_ctype)
             gen._note_fresh_result(t)
             return _generic_ctype, t
+        if base in ('Array', 'FixedSizeArray'):
+            _idx = node.func.index
+            _elems_idx = _idx.elements if isinstance(_idx, gimple_ctypes.TupleExpr) else [_idx]
+            _ann_inner = ', '.join([gen._type_expr_to_ann(e) or '' for e in _elems_idx])
+            _ann = '%s[%s]' % (base, _ann_inner)
+            _et = _annotation_container_elem_type(gen, _ann, 'MojoList *')
+            t = gen._new_val('MojoList *', 'mojo_list_new ()')
+            gen._note_fresh_result(t)
+            if _et:
+                gen._elem_types[t] = _et
+            # Determine fill value, if any.
+            _fill_expr = None
+            for _kw in (getattr(node, 'kwargs', None) or []):
+                try:
+                    _kn, _kv = _kw
+                except Exception:
+                    continue
+                if _as_str(_kn) == 'fill':
+                    _fill_expr = _kv
+                    break
+            if _fill_expr is None and node.args:
+                _fill_expr = node.args[0]
+            # Determine element count N from type args when statically known.
+            _count = None
+            if len(_elems_idx) >= 2:
+                _n_expr = _elems_idx[1]
+                try:
+                    if isinstance(_n_expr, gimple_ctypes.IntLiteral):
+                        _count = int(_n_expr.value)
+                    elif hasattr(gen, '_try_eval_const_int'):
+                        _count = gen._try_eval_const_int(_n_expr)
+                except Exception:
+                    _count = None
+            if _count is not None and _count > 0 and _fill_expr is not None:
+                _ft, _fv = gen.lower_expr(_fill_expr)
+                for _ in range(_count):
+                    if _et == 'double' or _ft == 'double':
+                        gen._emit(f'  mojo_list_append_double ({t}, {_fv});')
+                    elif _et == 'char *' or _ft == 'char *':
+                        gen._emit(f'  mojo_list_append_str ({t}, {_fv});')
+                    else:
+                        _iv = gen._to_int64(_ft, _fv) if hasattr(gen, '_to_int64') else _fv
+                        gen._emit(f'  mojo_list_append_int ({t}, {_iv});')
+            else:
+                for a in node.args:
+                    gen.lower_expr(a)
+            return 'MojoList *', t
         if base in ('List', 'InlineList', 'SmallVector', 'DynamicVector', 'InlineArray',
                     'Buffer', 'NDBuffer'):
             t = gen._new_val('MojoList *', 'mojo_list_new ()')
