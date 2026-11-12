@@ -40,8 +40,10 @@ issues are tracked by their own bug docs/markers or are green on this tree.
 
 ## Pre-existing, not from this round
 
-`bugs/TEST_out_self_with_return_type_fixtures_are_invalid_mojo.md` (OPEN, HARD)
-tracks `out self` fixtures modular refuses; separate campaign.
+Fixtures that declare `out self` on a non-constructor (Modular refuses them)
+are fixed and now swept by `test_out_param_return_type_diagnostic.py`'s
+`FixtureCorpusValidity`; the remaining invalid-Mojo fixture content is a
+separate campaign, `bugs/TEST_formal_fixtures_are_invalid_mojo_beyond_out_self.md`.
 
 ## Done when
 

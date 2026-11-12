@@ -56,6 +56,5 @@ A grep finds `fn` at the start of a line. It misses `fn` after a decorator, insi
 
 ## Related
 
-- `test_out_param_return_type_diagnostic.py`: the `fn` keyword case, an expected failure today. It becomes a plain
-  assertion when the refusal lands.
-- `bugs/TEST_out_self_with_return_type_fixtures_are_invalid_mojo.md`: the same family of fixture-validity problem.
+- `test_out_param_return_type_diagnostic.py`: the stage-1 `fn` keyword warning is pinned there.
+- `bugs/TEST_formal_fixtures_are_invalid_mojo_beyond_out_self.md`: the same family of fixture-validity problem, outside the `out` declaration shapes.
