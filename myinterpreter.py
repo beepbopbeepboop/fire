@@ -2289,13 +2289,31 @@ class MojoInstance:
         method(self._mojo_class.interpreter, self, writer)
         return writer.getvalue()
 
+    def _call_dunder_text(self, method_name):
+        """Call a user-defined Python-spelled `__str__`/`__repr__(self)` method
+        from the class's method table and return its text, or None if the
+        class does not define it. Mirrors the compiled path's
+        `user_dunder_repr_call` lookup, so `str(x)` / `print(x)` agree there."""
+        method = self._mojo_class.methods.get(method_name)
+        if method is None:
+            return None
+        return method(self._mojo_class.interpreter, self)
+
     def __str__(self):
+        # CPython's `str()` prefers `__str__`, then falls back to `__repr__`
+        # (via `repr(self)` below) before the default object repr.
+        result = self._call_dunder_text('__str__')
+        if result is not None:
+            return result
         result = self._write_via('write_to')
         if result is not None:
             return result
         return repr(self)
 
     def __repr__(self):
+        result = self._call_dunder_text('__repr__')
+        if result is not None:
+            return result
         result = self._write_via('write_repr_to')
         if result is not None:
             return result
