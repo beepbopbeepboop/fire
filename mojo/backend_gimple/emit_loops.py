@@ -3773,12 +3773,9 @@ def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
     # _gen_struct_method's identical handling just above -- a lifted
     # closure whose OWN body emitted a real setjmp must not be tagged
     # `__GIMPLE` either, for the same reason.
-    # Tag in declaration-specifier position (before the return type), for
-    # the same reason as emit_funcs' method header: after a pointer return
-    # the tag is ignored by gcc -fgimple.
     _sig_kw = '' if gen._func_used_setjmp else '__GIMPLE '
     lines = [
-        f"{_sig_kw}{ret_type} {ci.lifted_name} ({params_str})",
+        f"{ret_type} {_sig_kw}{ci.lifted_name} ({params_str})",
         "{",
         *gen.decls,
         *gen.body_lines,

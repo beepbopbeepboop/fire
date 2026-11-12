@@ -4536,13 +4536,11 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                                   gen._is_fresh_operand(right_node, rv2))
             return 'char *', t
         # int/int64_t + char* or char* + int/int64_t when one side is a string literal
-        # → this is Python string concatenation where one operand is a string stored as int.
+        # → this is Python string concatenation where one operand is a string stored as int
         # A box or dynamic word on the other side is not an integer to cast:
         # its kind decides the spelling, so it falls through to the rendering
         # branch below (`mojo_cstr_or_int_str`). Casting the box's word here
-        # concatenated its heap ADDRESS as a C string (a mixed-kind local
-        # `x = "s"; x = 1.5` printed a control byte before the `!`), and made
-        # `x + "!"` read a kind-'p' box as a pointer to its own header.
+        # made `x + "!"` read a kind-'p' box as a pointer to its own header.
         _lhs_boxed = (lv in getattr(gen, '_boxed_vals', ())
                       or gen._is_dyn_word(left_node, lv))
         _rhs_boxed = (rv in getattr(gen, '_boxed_vals', ())

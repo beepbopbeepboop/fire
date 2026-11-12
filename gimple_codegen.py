@@ -1639,16 +1639,6 @@ class GimpleGen:
         # whichever kind its first assignment site carries. Module scope, like
         # `_inferred_var_types`' per-function half it is read beside.
         self._multi_kind_locals: dict[str, set] = {}
-        # Function name -> the locals bound by an UNPACK of a single iterable
-        # (`a, b, ... = call()`/`= some_list`), whose per-element C types the
-        # pre-pass does not know and therefore leaves at the `int64_t` storage
-        # default. Read by `module_gen`'s container-vs-scalar contract: an
-        # `int64_t` there is not proof the argument is a number — it may be a
-        # container element (coro.py's `real_params` from
-        # `base, is_method, real_params, ... = _async_method_setup(...)` is a
-        # list) — while an ordinary local bound by a call or a parameter keeps
-        # counting as a scalar, so a genuinely mixed call site is still refused.
-        self._tuple_unpack_locals: dict[str, set] = {}
         # Call-result VALUE names holding a container whose kind the CALLER
         # cannot know statically (the result of a call to a
         # `_multi_kind_return_funcs` member). Per-function like the other
@@ -3300,13 +3290,6 @@ class GimpleGen:
         'mojo_vararg_fn_new':  ('MojoVarargFn *', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_gen_note':       ('int64_t', ['int64_t', 'void *']),
         'mojo_gen_note_a3':    ('int64_t', ['int64_t', 'int64_t']),
-        'mojo_gen_throw_set':  ('void', ['int64_t', 'int64_t', 'char *', 'void *']),
-        'mojo_gen_throw_take': ('int', ['int64_t', 'int64_t *', 'char **', 'void **']),
-        'mojo_gen_cm_is_handle': ('int', ['int64_t']),
-        'mojo_gen_cm_enter':   ('int64_t', ['int64_t']),
-        'mojo_gen_cm_exit_normal': ('void', ['int64_t']),
-        'mojo_gen_cm_exit_exc':    ('void', ['int64_t']),
-        '__mojo_gen_throw':    ('int64_t', ['int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_add_words':      ('int64_t', ['int64_t', 'int64_t']),
         'mojo_re_compile':     ('int64_t', ['char *', 'int64_t']),
         'mojo_re_compile_bytes': ('int64_t', ['MojoBytes *', 'int64_t']),
@@ -3607,7 +3590,6 @@ class GimpleGen:
         'mojo_cstr_or_int_str':  ('char *',    ['int64_t']),
         'mojo_int_str_transient': ('char *',   ['int64_t']),
         'mojo_cstr_or_int_release': ('void',   ['int64_t', 'char *']),
-        'mojo_str_word_fresh':   ('char *',    ['int64_t']),
         'mojo_dict_new':         ('MojoDict *', []),
         'mojo_dict_set_str': ('void',      ['MojoDict *', 'char *', 'char *']),
         'mojo_dict_set_int': ('void',      ['MojoDict *', 'char *', 'int64_t']),
@@ -5044,23 +5026,6 @@ class GimpleGen:
         return gfn._find_generic_source(self, module, name, kind, depth)
     def _register_imported_generics(self, stmts) -> None:
         return gfn._register_imported_generics(self, stmts)
-    def _generic_source_text(self, path: str) -> str:
-        """The source text of the module that defines a generic at `path`.
-
-        A generic defined in the module being compiled is registered under
-        `_current_filename` (module_gen's local-generics scan), and that file
-        may not exist on disk: the harness and any caller that compiles from
-        memory pass the text, not a path. The text the parser consumed
-        (`_source_text`) is the authority for that file, so it is used
-        whenever `path` names it; any other path is read from disk. Every
-        generic-instantiation site reads through here so that a local generic
-        is instantiated the same way whether or not its file exists."""
-        cur = getattr(self, '_current_filename', None)
-        text = getattr(self, '_source_text', '')
-        if text and cur and os.path.abspath(path) == os.path.abspath(cur):
-            return text
-        with open(path) as f:
-            return f.read()
     def _register_imported_generic_structs(self, stmts) -> None:
         return gfn._register_imported_generic_structs(self, stmts)
     @staticmethod
@@ -5799,8 +5764,6 @@ class GimpleGen:
         return grsl._new_temp(self, ctype)
     def _new_val(self, ctype: str, rhs: str) -> str:
         return grsl._new_val(self, ctype, rhs)
-    def _select_val(self, ctype: str, cond_ctype: str, cond_val: str, then_val, else_val) -> str:
-        return grsl._select_val(self, ctype, cond_ctype, cond_val, then_val, else_val)
     def _inc_val(self, base: str) -> str:
         return grsl._inc_val(self, base)
     def _call_expr(self, ret_type: str, fname: str, arg_pairs: list, arg_nodes: list = None) -> str:
@@ -6657,44 +6620,11 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
                    '_ASYNC_FN_NAMES', '_STRUCT_NAMES',
                    '_UNTHREADABLE_NESTED_ASYNC_GENS', '_NATIVE_FUTURE_CLASSES',
                    '_NO_WD_FORWARD', '_VALUE_USED_FUNCS', '_FUNC_RET_KIND',
-                   '_MODULE_FUNC_NAMES', '_GEN_RESOLVING', '_GEN_REC_ASSUME',
-                   '_ASYNC_HANDLE_KIND_BY_FUNC'):
+                   '_MODULE_FUNC_NAMES', '_GEN_RESOLVING', '_GEN_REC_ASSUME'):
             _v = getattr(_coro2, _c, None)
             if isinstance(_v, (dict, list, set)):
                 try: _v.clear()
                 except Exception: pass
-        # Counters / single-slot state containers must be reset to their
-        # initial values, not just cleared (some are indexed as [0]).
-        _async_ret = getattr(_coro2, '_ASYNC_RET_KIND', None)
-        if isinstance(_async_ret, list):
-            try:
-                _async_ret[:] = ['i']
-            except Exception:
-                pass
-        _await_tmp = getattr(_coro2, '_AWAIT_TMP', None)
-        if isinstance(_await_tmp, list):
-            try:
-                _await_tmp[:] = [0]
-            except Exception:
-                pass
-        _aw_counter = getattr(_coro2, '_AW_COUNTER', None)
-        if isinstance(_aw_counter, list):
-            try:
-                _aw_counter[:] = [0]
-            except Exception:
-                pass
-        _yf_counter = getattr(_coro2, '_yf_counter', None)
-        if isinstance(_yf_counter, list):
-            try:
-                _yf_counter[:] = [0]
-            except Exception:
-                pass
-        _py_src = getattr(_coro2, '_PY_SRC', None)
-        if isinstance(_py_src, list):
-            try:
-                _py_src[:] = [False]
-            except Exception:
-                pass
     except Exception:
         pass
     try:
@@ -6747,9 +6677,11 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # compile boundary (next step).
     try:
         for _modname, _names in (
-            ('mojo.backend_gimple.cpp_async', ('_FOREIGN_CALLABLES',)),
+            ('mojo.backend_gimple.cpp_async', ('_FOREIGN_CALLABLES', '_RUNTIME_CALLABLE_WORDS')),
+            ('mojo.backend_gimple.emit_exprs', ('_RUNTIME_CALLABLE_VALUES_NAMES',)),
             ('mojo.backend_gimple.emit_methods', ('_MODULE_MEMBER_LIBC',)),
             ('mojo.backend_gimple.emit_funcs', ('_SELFHOST_EXTRA_FIELD_CACHE',)),
+            ('mojo.middle.calls_shared', ('_RUNTIME_CALLABLE_VALUES',)),
             ('mojo.middle.iter_factory', ('_MOJO_ELEM_C',)),
         ):
             import importlib as _il2
@@ -6817,10 +6749,8 @@ def compile_to_c(mojo_src: str, auto_gpu: bool = True) -> str:
     """
     c_code, _gen = _run_pipeline(mojo_src, auto_gpu=auto_gpu)
 
-    # Strip __GIMPLE annotations for executability. The tag now leads a
-    # declaration (`__GIMPLE static P * f`) as often as it follows a
-    # space, so match it as a word wherever it sits.
-    c_code = re.sub(r'\b__GIMPLE\b ', '', c_code)
+    # Strip __GIMPLE annotations for executability
+    c_code = c_code.replace(' __GIMPLE ', ' ')
     return c_code
 
 

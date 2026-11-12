@@ -53,3 +53,74 @@ Fix, in order:
    proved normal path. Until then the teeth check stays an expected failure.
 
 Exit handling, the structural gap that remains after the Lean split: `FORMAL_svc_exit_handling_incomplete.md`.
+
+## Status (2026-11-12): steps 1-3 are on the branch; step 4 is the open work
+
+Landed earlier as `f03896fff` (an ancestor of this branch): the `svc` arm of `arm64_step` is x16-discriminating
+(`lib/ProofLib.lean` ~2651-2658), `work_step_svc` / `_exit` / `_write` (`lib/ProofLibSteps2.lean` ~340-402), the generator's
+svc step RHS at both sites, and `_is_svc` (`formal/arm64_proof_gen.py` ~8383). Re-checked by reading, not assumed.
+
+**Measured this round** (`python3 tools/memslot.py --gb 8 --label baseline-dylib -- python3 test_formal_dylib.py -v`):
+`PASS=22 FAIL=6`, exit 1. (The companion doc says 23/6; that count is stale.) The two wrong-spec cases fail with the
+same message: `lean ACCEPTED` the wrong spec, because the export's contract is an admitted `sorry` obligation. The other
+four failures (`several exports, and one with no derivable spec`, `an export that binds a local still gets a proved
+contract`, `a conditional value is not a branch`, `the last export's walk ignores the image tail`) were NOT inspected
+this round; check their messages before assuming they share this root.
+
+**Done when:** `test_formal_dylib.py`, case "a wrong spec is rejected, not believed" (and "a wrong spec on a multi-export
+image is rejected") PASS, with the CONTROL (right spec) still accepted. Then delete this doc in that commit and run
+`python3 tools/dangling_doc_refs.py --ratchet`.
+
+### Why it is not a one-line fix
+
+- `formal/arm64_proof_gen.py::_dylib_contract_proof` (~16190) returns `""` for any body with a branch anywhere but its end
+  (its docstring, ~16225). `lib/Refine.lean:59` `Block` is a single `step : Instr` over one state, so a conditional branch
+  has nothing to say. The caller then emits `_spec` as `sorry` (~16720-16752).
+- The guarded form already exists: `Refine.export_result_spec_under pre` (`lib/Refine.lean` ~982). But the generator
+  passes `pre` as an OPAQUE `{ident}_pre`. An opaque `pre` cannot make a wrong spec fail: Lean has no concrete
+  non-overflow input to exhibit. So step 4 is not just "prove the normal path"; `pre` must become the concrete guard.
+- The teeth test needs PARTIAL correctness only (`runProg ... = some s → s.x0 = spec n`), not termination. The exit
+  `svc` makes termination an obligation (`_semantics_total`), and that obligation is NOT on the path this test checks.
+- Counterexample arithmetic: for `n * 5` against the machine's `n * 3`, `n = 1` already differs (5 vs 3), and `pre 1`
+  holds for any sane guard. So a concrete `pre` is satisfiable on the counterexample.
+
+### Decisions (with the recommendation)
+
+1. **Shape of a branchy body.** Recommended: keep `Block` straight-line and model each conditional branch to an overflow
+   trap as a hypothesis on the NORMAL path (the branch is not taken). The block is the fall-through instruction sequence
+   from `entry` to `func_end`, and each trap branch contributes `¬ cond_i` to `pre`. Alternative (a two-path `Block`) is
+   more general and costs more Lean; not needed for the overflow traps this doc is about.
+2. **What `pre` is.** Recommended: a CONCRETE predicate, computed from the machine's branch condition at the guard's
+   state (the `arm64_step` flags after the `mul`/`umulh` pair on the prefix state, with `x0 = n`). It must be a Lean
+   `def`, not `opaque`, and the emitter keeps `opaque` only when no concrete guard can be derived.
+3. **Where it is proved.** Recommended: a new lemma in `lib/Refine.lean` next to `block_advance`: if `pre n` holds and
+   the block's `BlockCert` holds, then on the fall-through path `runProg` agrees with the composed effect. Then
+   `export_result_spec_under pre` is discharged from the spec's bitvector identity, the same `bv_decide` pattern the
+   existing `hreg` uses.
+
+### Implementation plan (ordered, exact)
+
+1. `lib/Refine.lean`: add `Block.guardedAdvance` (fall-through correctness under a list of not-taken conditions). Prove it
+   from `block_advance`. No `sorry`; the Scaffold ledger is the only place a hole may live.
+2. `formal/arm64_proof_gen.py::_dylib_contract_proof` (~16190): accept a body whose interior branches are all BCONDs to a
+   `*_ovf*_t` trap (recognised by `_trap_terminating` / `_is_trap_bl`, ~8422, ~8474). Collect each branch's condition
+   as a Lean expression over the prefix state. Keep the refusal for any other interior branch.
+3. `formal/arm64_proof_gen.py` (~16720-16752): when that works, emit `def {ident}_pre : UInt64 → Prop := fun n => ...`
+   concretely, and prove `{ident}_spec` with `bv_decide` over the composed effect. Keep the `opaque` + `sorry` path only
+   as the fallback for a body it cannot derive.
+4. Do NOT touch the `svc` model or `work_step_svc*`: they are landed and correct (see the companion doc).
+5. Termination (`_semantics_total`) stays an obligation. This round does not change it.
+
+### Tests that prove it
+
+- `test_formal_dylib.py`: "a wrong spec is rejected, not believed" and "a wrong spec on a multi-export image is rejected"
+  must PASS. Their CONTROL (the right spec) must still be accepted.
+- The pin in `test_formal_dylib.py` (~756-764) that `triple`'s termination is NOT proved must still hold.
+- Run only `test_formal_dylib.py` under `tools/memslot.py --gb 8`. Do not run `make check`/`gate`.
+
+### Known hazards from reading the code
+
+- Using `opaque` for `pre` makes every obligation vacuous-looking and un-refutable. That is the failure this doc exists to
+  fix, so the new `pre` must be concrete, and a test must show a wrong multiplier is refuted on a non-overflow input.
+- `_is_svc` treats every `svc` as a bounded stop. The companion doc's item 4 is still open, so a trap block with a write
+  `svc` inside it is not handled yet.

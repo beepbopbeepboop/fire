@@ -77,16 +77,11 @@ def failed_job_names(log):
         txt = open(log, errors="replace").read()
     except OSError:
         return []
-    m = re.search(r"^FAILED:\n", txt, re.M)
+    m = re.search(r"^FAILED:\n(.*?)(?=^[A-Z][A-Z-]+.*:\n|^suite:)", txt, re.S | re.M)
     if not m:
         return []
     names = []
-    # The section is its INDENTED lines: it ends at the first line that starts in column 0 (the `time: wall ...`
-    # summary, `suite: ...`, another heading). A lookahead on capitalised headings let `time: wall 0:36 | ... (0
-    # replayed ...)` through, and `time` was filed as a failing job (the red-gate crash, fixed in 4340a0f17).
-    for line in txt[m.end():].splitlines():
-        if line.strip() and not line[0].isspace():
-            break
+    for line in m.group(1).splitlines():
         t = line.strip().split()
         if t and re.fullmatch(r"[\w.:-]+", t[0]) and "(" in line:
             names.append(t[0].split(":")[0])
@@ -99,40 +94,23 @@ def test_failures(tree):
     return set(re.findall(r"^FAIL\s+(.+?)(?::|$)", r.stdout, re.M)), r
 
 
-def land_on_master(regate=None, tries=3):
+def land_on_master():
     """Move master (checked out in C.MAIN, where people edit) to `integ`. The merge goes through stash_ff, so an
     uncommitted edit to a file the landing also changes no longer stops it: the edits are carried across, and only a
-    real textual conflict with them makes the landing wait (the merge is undone, the edits are exactly as they were).
-
-    Master moves while a round gates (other lanes land here too, and a round takes minutes), so "master moved" is the
-    normal case on a busy machine, not an error. Redoing the whole round never converges there: it was the reason a
-    24-branch backlog could not land (2026-11-12). Instead the round absorbs it:
-      - master moved in no file, or only controller files: merge the gated tree over it, as before;
-      - master moved in real files: merge master INTO the round, re-run the landing gate (REGATE, the same cheap gate)
-        on that result so what lands is exactly what was gated, and retry; a textual conflict or a red re-gate stops
-        the landing with master untouched."""
-    for attempt in range(tries):
-        st, detail = SF.merge(C.MAIN, "--ff-only", "integ")
+    real textual conflict with them makes the landing wait (the merge is undone, the edits are exactly as they were)."""
+    st, detail = SF.merge(C.MAIN, "--ff-only", "integ")
+    if st == "ok":
+        return
+    if st == "blocked":
+        sys.exit("landing waits: %s" % detail)
+    base = C.git("merge-base", "master", "integ")
+    moved = C.git("diff", "--name-only", base, "master").splitlines()
+    if moved and all(f in CONTROLLER_FILES for f in moved):
+        st, detail = SF.merge(C.MAIN, "--no-edit", "-m", "integrate: merge gated tree over controller-tool commits", "integ")
         if st == "ok":
             return
-        if st == "blocked":
-            sys.exit("landing waits: %s" % detail)
-        base = C.git("merge-base", "master", "integ", cwd=C.MAIN)
-        moved = C.git("diff", "--name-only", base, "master", cwd=C.MAIN).splitlines()
-        if all(f in CONTROLLER_FILES for f in moved):
-            st, detail = SF.merge(C.MAIN, "--no-edit", "-m", "integrate: merge gated tree over controller-tool commits", "integ")
-            if st == "ok":
-                return
-            sys.exit("landing waits: %s" % detail)
-        r = subprocess.run(["git", "merge", "--no-edit", "master"], cwd=INTEG, capture_output=True, text=True)
-        if r.returncode:
-            subprocess.run(["git", "merge", "--abort"], cwd=INTEG)
-            sys.exit("master moved under the round (%s) and conflicts with it: redo the round" % ", ".join(moved[:5]))
-        print("master moved (%s): merged it into the round%s; retrying the landing"
-              % (", ".join(moved[:5]), " and re-gating" if regate else ""))
-        if regate and regate() != 0:
-            sys.exit("RED after master moved (%s): master untouched; redo the round" % ", ".join(moved[:5]))
-    sys.exit("master kept moving under the round (%d tries): redo the round" % tries)
+        sys.exit("landing waits: %s" % detail)
+    sys.exit("master moved under the round (%s): cannot fast-forward; redo the round" % ", ".join(moved[:5]))
 
 
 def ungate_red(names, merged, why):
@@ -173,63 +151,6 @@ def mark_landed(merged):
             if left:
                 sys.exit("refusing to mark %s integrated: %d commit(s) of %s are not on master" % (n, left, reg[n]["branch"]))
             reg[n]["state"] = "integrated"
-    for n in merged:                         # landing is not finished until the tree and branch are gone too
-        C.retire_landed(n)
-
-
-def has_notestcase(branch):
-    """Whether some commit master lacks carries a line `NOTESTCASE: <reason>`: a reviewer's recorded decision that this
-    deletion is justified without a test (the doc is obsolete or a duplicate, the fix already landed under a named
-    commit, or an existing test the reviewer ran covers it). The reason is required: an empty marker is no decision."""
-    log = C.git("log", "master.." + branch, "--format=%B", check=False)
-    return bool(re.search(r"^NOTESTCASE:[ \t]*\S", log, re.M))
-
-
-PROOF_DEPTH = 2          # a reviewer that finishes with neither a test, a NOTESTCASE nor a restored doc is reviewed once more
-
-
-def enqueue_proof_review(name, t, deleted):
-    """A finished branch that deletes a bug doc but changes no test is handed to a REVIEWER, not to a person. The
-    deletion is a claim, not proof (2026-11-11: a one-commit branch deleted an open doc with no test and landed). The
-    reviewer, a worker starting on the branch, decides one of three things and records it in a commit:
-      TEST        the fix is real but unproven: it writes the regression test;
-      NOTESTCASE  the deletion is justified without one: it commits a `NOTESTCASE: <reason and evidence>` line;
-      (restore)   neither can be shown: it puts the doc back, so the bug is open again.
-    The branch lands once it has a changed test file, a NOTESTCASE line from a `fix-proof-*` task, or no deletion."""
-    import argparse as _ap
-    if C.fixer_depth(name, t, "proof_depth") >= PROOF_DEPTH:
-        _cap_merge_fix(name, "proof review depth cap: %s finished %d reviews with neither a test, a NOTESTCASE nor a "
-                             "restored doc; it is abandoned" % (name, PROOF_DEPTH), kind="proof review depth")
-        return
-    task = ("Branch %s (a finished worker branch; original task: %s) deletes the bug doc(s) %s but changes no test file. "
-            "A deletion is a claim, not proof. You are the REVIEWER: you start on that branch. Read the doc(s) as they are "
-            "on master (`git show master:PATH`), the branch's diff (`git diff master...HEAD`) and its commit messages, then "
-            "decide EXACTLY ONE of the outcomes below. Both TEST and NOTESTCASE are legitimate and both land the branch: "
-            "landing without a test is fine when there is a real reason, and a test is better when you can write one that "
-            "means something. Prefer TEST when it is feasible; choose NOTESTCASE when a test would add nothing, and say why.\n"
-            "1. TEST. The fix is real but unproven. Write a focused regression test at the repo root (`test_<area>_<what>.py`, "
-            "narrow and fast, run under `python3 tools/memslot.py --gb 8 --label t --`) that exercises what the doc's "
-            "Acceptance / Done-when / Test section asks for. A test that cannot fail proves nothing: say in the commit message "
-            "which assertion would fail without the branch's change. Commit it.\n"
-            "2. NOTESTCASE. The deletion is justified without a new test (a valid outcome, not a shortcut): the doc is obsolete, a duplicate, an index or "
-            "planning doc, already fixed on master by a commit you can name, or its fix is covered by an EXISTING test you "
-            "ran and name. Make a new commit whose message contains a line `NOTESTCASE: <the concrete reason and the "
-            "evidence: the commit hash, or the test file you ran and its result>`. If you cannot name the evidence you may "
-            "not choose this.\n"
-            "3. If neither can be shown, the bug is not proven fixed: restore the doc(s) (`git show master:PATH > PATH`, "
-            "then commit) and say why.\n"
-            "Do not change the fix itself unless review shows it is wrong. You are a light worker: no gate, no self-host "
-            "build, never git stash. Finish with the REPORT block, naming which of TEST / NOTESTCASE / restored you chose, "
-            "and a CONTROL-STATUS line."
-            % (t["branch"], t["summary"][:150], ", ".join(deleted)))
-    pname = C.free_task_name("fix-proof-" + name)
-    C.cmd_enqueue(_ap.Namespace(name=pname, claim=t["claims"] or ["task:" + pname], task=task, task_file=None,
-                                file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls"),
-                                meta=C.depth_meta(t, "proof_depth", name)))
-    with C.registry() as reg:
-        reg[name]["state"] = "superseded"
-        reg[name]["fixer"] = pname          # the reviewer owns this branch: never hand the same one out twice
-    C.retire_task(name)                     # its tree goes; the branch is the reviewer's base
 
 
 def deletes_doc_without_test(deleted, changed):
@@ -249,7 +170,7 @@ def red_on_master(job):
         shutil.rmtree(d, ignore_errors=True)
 
 
-def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=(), proof_out=None):
+def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
     """Tasks whose worker has exited with commits, a clean tree and a DONE verdict: only a finished bug is integrated."""
     cands = []
     say = (lambda *_: None) if quiet else print
@@ -274,16 +195,14 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=(), p
             say("skip %s: worker says %s, not DONE (the swarm continues it)" % (name, C.verdict(t) or "nothing")); continue
         if not C.ahead(t):
             say("skip %s: no commits" % name); continue
-        if C.tree_extras(t["worktree"]) and name not in allow_dirty:
+        if C.git("status", "--short", cwd=t["worktree"]) and name not in allow_dirty:
             say("skip %s: dirty worktree (unfinished)" % name); continue
         deleted = [p for p in C.git("diff", "--name-only", "--diff-filter=D", "master...%s" % t["branch"],
                                     check=False).split() if p.startswith("bugs/") and p.endswith(".md")]
         changed = C.git("diff", "--name-only", "master...%s" % t["branch"], check=False).split()
-        if deletes_doc_without_test(deleted, changed) and not (name.startswith("fix-proof-") and has_notestcase(t["branch"])):
-            say("skip %s: deletes %s with no test file changed; a reviewer decides TEST or NOTESTCASE (fix-proof-*)"
-                % (name, " ".join(deleted)))
-            if proof_out is not None:
-                proof_out.append((name, deleted))
+        if deletes_doc_without_test(deleted, changed):
+            say("skip %s: deletes %s with no test file changed; the doc's named test must land with the deletion, "
+                "so a person lands it" % (name, " ".join(deleted)))
             continue
         cands.append(name)
     return cands
@@ -292,7 +211,7 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=(), p
 MERGE_FIX_DEPTH = 3   # fixers of fixers before a branch is abandoned
 
 
-def _cap_merge_fix(name, why, kind=None):
+def _cap_merge_fix(name, why):
     """Stop handing NAME to merge fixers. `merge_capped` is what pick_candidates reads: the state alone is not enough,
     because abandoned/superseded branches are still landing candidates (their work is finished), so without the flag
     a capped branch conflicted and was "capped" again on every pass, forever."""
@@ -300,11 +219,6 @@ def _cap_merge_fix(name, why, kind=None):
         reg[name]["state"] = "abandoned"
         reg[name]["merge_capped"] = why
     print(why, flush=True)
-    if kind:
-        # A depth cap is a symptom: either the chain is converging and the cap is too tight, or the orchestration is
-        # looping on a defect. A Sonnet reviewer decides which (FORWARD / FIXED / STOP); until it answers the branch
-        # stays capped. Caps that are not about depth (no doc for a fixer to serve) get no reviewer: nothing to reset.
-        C.enqueue_orch_review(name, kind, why)
 
 
 def enqueue_merge_fix(name, t, conflict_text):
@@ -313,8 +227,8 @@ def enqueue_merge_fix(name, t, conflict_text):
     import argparse as _ap
     # A merge fixer that conflicts again gets a fixer of its own, and so on, while master keeps moving. Past a few
     # levels the chain is not converging: abandon the branch instead of nesting `fix-merge-fix-merge-...` (2026-11-10).
-    if C.fixer_depth(name, t, "merge_depth") >= MERGE_FIX_DEPTH:
-        _cap_merge_fix(name, "merge-fix depth cap: %s is abandoned, not fixed again" % name, kind="merge-fix depth")
+    if name.count("fix-merge-") + name.count("fix-red-") >= MERGE_FIX_DEPTH:
+        _cap_merge_fix(name, "merge-fix depth cap: %s is abandoned, not fixed again" % name)
         return
     if not C.doc_exists_for(t.get("claims") or []):
         # sync drops a queued task whose claims name no doc, so this fixer would be removed on the next pass and the
@@ -334,31 +248,20 @@ def enqueue_merge_fix(name, t, conflict_text):
             % (t["branch"], t["summary"][:150], ", ".join(files) or "see `git merge master`"))
     mname = C.free_task_name("fix-merge-" + name)
     C.cmd_enqueue(_ap.Namespace(name=mname, claim=t["claims"] or ["task:" + mname], task=task, task_file=None,
-                                file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls"),
-                                meta=C.depth_meta(t, "merge_depth", name)))
+                                file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls")))
     with C.registry() as reg:
         reg[name]["state"] = "superseded"
         reg[name]["fixer"] = mname          # a fixer owns this branch: never hand the same one out twice
 
 
-def gate_doc(culprit, t, failing, files=()):
+def gate_doc(culprit, t, failing):
     """A red landing gate is not handed to a chain of fresh workers. The gate's failure is a bug like any other, so it
     gets a doc: bugs/gate-<job>.md, one per failing job, which the feeder routes easy -> mid -> hard like every doc.
     The culprit is superseded (its claims release, so the doc can be worked on master) and held (`hold` keeps it out
     of the landing candidates, so it cannot go red again in a loop). With culprit None the job was already red on
     master: only the docs are written and no branch is held. An existing doc is left alone. Returns the doc paths."""
-    # A job name becomes a file name: keep only things that are job names (never a path such as a failing stdlib file).
-    jobs = [j for j in (failing or []) if re.fullmatch(r"[\w.-]+", j)] or ["landing"]
+    jobs = failing or ["landing"]
     branch = t["branch"] if t else "master"
-    if culprit is not None:
-        # Hold the culprit FIRST: if writing a doc fails, the branch must still stay out of the landing candidates,
-        # or the next pass probes it, finds it red and fails the same way for ever.
-        with C.registry() as reg:
-            reg[culprit]["state"] = "superseded"
-            reg[culprit]["hold"] = True
-            reg[culprit]["gate_red"] = jobs
-    if culprit is not None:
-        C.retire_task(culprit)            # held for good: archive its tip, drop its tree and branch
     paths = []
     for j in jobs:
         p = os.path.join(C.MAIN, "bugs", "gate-%s.md" % j)
@@ -372,8 +275,11 @@ def gate_doc(culprit, t, failing, files=()):
                 "**Two states:** this doc exists = the job is red and this is the work. Delete it when the job is green on master.\n\n"
                 "It is red on `%s`: reproduce it there (`python3 tools/suite.py %s`), then fix the cause. Do not skip or mark the test.\n"
                 % (j, j, branch, culprit or "master", branch, j))
-            if files:
-                f.write("\nFailing files at the time:\n%s\n" % "\n".join("- `%s`" % x for x in files))
+    if culprit is not None:
+        with C.registry() as reg:
+            reg[culprit]["state"] = "superseded"
+            reg[culprit]["hold"] = True
+            reg[culprit]["gate_red"] = jobs
     return paths
 
 
@@ -568,8 +474,7 @@ def main():
         print("FAILED_FILES: %s" % " ".join(files))
         sys.exit(rc)
     if rc == 0:
-        land_on_master(None if a.jobs or (a.stdlib and not landing_left)
-                       else lambda: run(gate_cmd, INTEG, os.path.join(INTEG, "gate.log")))
+        land_on_master()
         mark_landed(merged)
         print("GREEN: master fast-forwarded to %s; integrated %s" % (C.git("rev-parse", "--short", "master"), merged))
     else:
