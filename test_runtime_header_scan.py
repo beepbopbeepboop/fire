@@ -497,7 +497,18 @@ def test_every_declaration_is_seen():
     # header by one more name since the 740 rung without bumping it (the
     # scanner read 741 on master), so the figure is read off the MERGED header
     # and not added up from the two sides.
-    for header, want in (('fire_runtime.h', 806),   # --fix writes the live figure
+    #
+    # 806 -> 807 (2026-11-11): `mojo_dict_slot_boxed_kw`, the BOXED read's `_kw`
+    # twin. `mojo_dict_slot_boxed` keeps a slot's own kind (a bool stays a
+    # boxed bool, a None stays None), so an integer KEY could not use
+    # `mojo_dict_get_int_kw` — that hands back the raw word and
+    # `print(d[True])` would say `1` where CPython says `True`. The twin runs
+    # `_kw_kind`'s three-arm dispatch and answers through `_dict_slot_boxed`,
+    # so `d[i]` on a `Dict[Int, Int]` reads the same boxed value the char*
+    # spelling produces with nothing formatted to get there. The codegen half
+    # is ONE set entry (`emit_infra._KW_DICT_FNS`), which `_apply_kw_keys`
+    # renames through — the same mechanism as the other fourteen twins.
+    for header, want in (('fire_runtime.h', 807),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already
