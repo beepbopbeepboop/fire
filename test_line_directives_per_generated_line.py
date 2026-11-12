@@ -108,45 +108,7 @@ def test_compound_statement_lines_each_carry_a_line_directive():
         f"generated lines with no #line above them: {_unstamped_statement_lines(c)[:5]}"
 
 
-def test_stack_switch_generator_body_lines_each_carry_a_line_directive():
-    # A generator on the stack-switch path is lowered to `__mgco_<name>_body`,
-    # a plain function built from its body. Its parameter prologue is
-    # synthesized, and that is where the first unstamped lines came from.
-    src = (
-        "def counts(n: Int) -> Int:\n"
-        "    i = 0\n"
-        "    while i < n:\n"
-        "        yield i\n"
-        "        i = i + 1\n"
-    )
-    c = _compile(src)
-    assert '__mgco_counts_body (int64_t __c)' in c, "generator did not take the stack-switch path"
-    assert _unstamped_statement_lines(c) == [], \
-        f"generated lines with no #line above them: {_unstamped_statement_lines(c)[:5]}"
-
-
-def test_call_argument_genexp_body_lines_carry_its_source_line():
-    # `", ".join(... for c, s in ...)`: a generator expression written as a
-    # call's sole argument is hoisted to `__genexp_N`, which is on the
-    # stack-switch path. Its Comprehension used to be built without a line,
-    # so its body's statements had none and emitted no `#line` at all.
-    src = (
-        "def show(d: Dict[String, Int]) -> String:\n"
-        "    return \", \".join(\"%s=%d\" % (c, s) for c, s in sorted(d.items()))\n"
-    )
-    c = _compile(src)
-    assert _unstamped_statement_lines(c) == [], \
-        f"generated lines with no #line above them: {_unstamped_statement_lines(c)[:5]}"
-    body = c[c.index('\nvoid __mgco___genexp_0_body (int64_t __c)\n'):]
-    body = body[:body.index('\n}\n')]
-    directives = re.findall(r'^#line (\d+) "prog\.py"$', body, re.M)
-    assert directives and set(directives) == {'2'}, \
-        f"genexp body directives: {directives}"
-
-
 if __name__ == '__main__':
     test_lambda_body_lines_each_carry_a_line_directive()
     test_compound_statement_lines_each_carry_a_line_directive()
-    test_stack_switch_generator_body_lines_each_carry_a_line_directive()
-    test_call_argument_genexp_body_lines_carry_its_source_line()
     print('ok')

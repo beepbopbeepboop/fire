@@ -7278,6 +7278,66 @@ class TestTheStackFloorGuardReadsTheLimitInTheStartupStub(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestTheStackFloorTrapIsAProofObligation(unittest.TestCase):
+    """The stack-floor guard's trap is a real HALT, not a fall-through.
+
+    f03896fff made `svc` x16-discriminating: an exit `svc` steps to `none`.
+    Every compiled function carries the stack-floor guard whose taken edge is
+    a write-then-exit `svc` tail, so the universal walk has to close that edge
+    with a halt certificate rather than certify a `some` result through it.
+    Before this, every ordinary program's proof was refused with "CFG
+    decomposition unsupported" -- `def plain(a, b): return a + b` was enough.
+    """
+
+    SOURCE = "def plain(a, b):\n    return a + b\n"
+
+    @staticmethod
+    def _words(exit_x16=1, write_x16=4):
+        """The two system calls by ENCODING, with their own movz before each."""
+        movz_x16 = lambda imm: 0xd2800010 | (imm << 5)
+        return {
+            0x40: movz_x16(write_x16), 0x44: 0xd4000001,
+            0x48: movz_x16(exit_x16), 0x4c: 0xd4000001,
+        }
+
+    def test_the_structural_predicate_is_the_exit_form_not_the_encoding(self):
+        import formal.arm64_proof_gen as G
+        self.assertTrue(G._is_svc_exit(self._words(), 0x4c),
+                        "an exit svc with x16 = 1 is not a bounded stop")
+        self.assertFalse(G._is_svc_exit(self._words(), 0x44),
+                         "a write svc (x16 = 4) falls through at pc + 4; "
+                         "closing it as a trap loses the path the machine takes")
+        self.assertEqual(G._svc_static_x16(self._words(), 0x44), 4)
+
+    def test_the_guard_trap_gets_a_halt_certificate_and_none_arm(self):
+        tmp = tempfile.mkdtemp(prefix="a2-stacktrap-")
+        try:
+            src = os.path.join(tmp, "plain.mojo")
+            with open(src, "w") as f:
+                f.write(self.SOURCE)
+            r = _compile(src, os.path.join(tmp, "plain.aout"), "arm64")
+            with open(r["proof_path"], encoding="utf-8") as f:
+                text = f.read()
+            self.assertRegex(
+                text, r"(?m)^theorem plain_b\d+_halt_halts",
+                "the block whose own tail is the exit svc has no halt "
+                "certificate, so the walk must still be refusing the guard "
+                "trap (or is certifying a `some` result through a `none` step)")
+            self.assertIn(
+                "arm64_go_exit_step_jump_at",
+                text,
+                "the write svc in the trap tail is not composed with its "
+                "`hx` discharged from the block's own x16 chain")
+            self.assertIn(
+                "| none => True",
+                text,
+                "a reachable halt block requires the statement's honest "
+                "`none => True` arm; without it the trap edge is claimed "
+                "to return a value it does not")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestAPlaceholderModelClaimsNothing(unittest.TestCase):
     """A model the shared generator cannot write must be CLAIMED as unwritten.
 

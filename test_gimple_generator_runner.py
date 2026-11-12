@@ -393,39 +393,6 @@ def test_generator_c_compiles(name: str, mojo_src: str):
         _FAIL += 1
 
 
-def _stray_include_lines(c_code: str) -> list:
-    """Return the 1-based line numbers of every `#include` directive that sits
-    inside a brace-delimited body (brace depth > 0). The module prelude is the
-    only place a header may appear; a copy inside a function is a gcc error."""
-    depth = 0
-    stray = []
-    for n, line in enumerate(c_code.splitlines(), 1):
-        if depth > 0 and line.lstrip().startswith('#include'):
-            stray.append(n)
-        depth += line.count('{') - line.count('}')
-    return stray
-
-
-def test_generator_c_no_stray_include(name: str, mojo_src: str):
-    """Emit the generator module's C and assert no `#include` lands inside a
-    function body. Pins the nested generator / generator method emitter
-    (the 2026-11-12 `#include <sys/types.h>` inside `T_run` gcc error, fixed
-    on this tree)."""
-    global _PASS, _FAIL
-    try:
-        c_code, _cpp = gimple_codegen.compile_to_gimple_with_cpp(mojo_src)
-        stray = _stray_include_lines(c_code)
-        if not stray:
-            print(f"PASS  {name}")
-            _PASS += 1
-        else:
-            print(f"FAIL  {name}: #include inside a function body at line(s) {stray}")
-            _FAIL += 1
-    except Exception as e:
-        print(f"FAIL  {name}: {e}")
-        _FAIL += 1
-
-
 def test_generator_refused(name: str, mojo_src: str, expected_substr: str):
     """Assert this generator shape is honestly REFUSED at compile time
     (raises with a message containing `expected_substr`) rather than
@@ -614,26 +581,6 @@ def main():
 main()
 print(next(it))
 """)
-
-    # A non-literal element of a list-literal argument is typed by its inferred
-    # ctype (`_cpp_typed_list_elem`), so `[top, "x"]` with `top` of an unknown
-    # kind (a popped word) is a MIXED-kind list and is refused as one, rather
-    # than refused for being non-literal at all. Pins the new reason.
-    test_generator_refused("generator_list_literal_arg_mixed_kind_refused", """\
-def g(name):
-    stack = [name]
-    while stack:
-        top = stack.pop()
-        if isinstance(top, tuple):
-            yield top
-            continue
-        yield ",".join([top, "x"])
-
-def main():
-    for v in g("ab"):
-        print(v)
-main()
-""", "a list-literal argument with mixed element types")
 
     # A global bound TWICE to a generator is not one fact, so the read from
     # the function keeps the honest refusal rather than a guessed api.
@@ -2894,74 +2841,6 @@ def run_struct_ptr_through_local_dict_tests():
         "9\n")
 
 
-def run_tuple_target_for_and_method_stmt_generator_tests():
-    # A generator body with: `for a, b in pairs:` over a parameter (each
-    # element a 2-tuple), element reads off the first half (`fileinfo.filename`,
-    # `fileinfo.lno`), method calls on a stored struct instance as an expression
-    # statement and in `if`/`while` conditions, and a tuple-unpacking assignment
-    # from struct member reads. Mirrors the measured _iter_source shape
-    # (cpp-path generator tuple-target for-loop / method-call / tuple-unpack).
-    T_TUPLE_CPP_PKG_FILES = {
-        '__init__.py': '',
-        'info.py': (
-            "class FileInfo:\n"
-            "    def __init__(self, filename, lno):\n"
-            "        self.filename = filename\n"
-            "        self.lno = lno\n"
-            "\n"
-            "class SourceInfo:\n"
-            "    def __init__(self, filename):\n"
-            "        self.filename = filename\n"
-            "        self.text = \"\"\n"
-            "        self._start = 0\n"
-            "        self.count = 0\n"
-            "        self.done = False\n"
-            "    def _add_line(self, line, lno):\n"
-            "        self.text = self.text + line\n"
-            "        self.count = self.count + 1\n"
-            "        self._start = lno\n"
-            "    def too_much(self, maxtext, maxlines):\n"
-            "        return self.count > maxlines\n"
-            "    def _used(self):\n"
-            "        if not self.done and self.count > 0:\n"
-            "            self.done = True\n"
-            "            return True\n"
-            "        return False\n"
-        ),
-    }
-    _saved_pkg_files = _FOREIGN_PKG_FILES
-    try:
-        globals()['_FOREIGN_PKG_FILES'] = T_TUPLE_CPP_PKG_FILES
-        _test_foreign_a3_generator_handle(
-            "generator_tuple_target_for_and_method_stmts",
-            "from .info import FileInfo, SourceInfo\n"
-            "\n"
-            "def _iter_source(lines, *, maxlines=10, start=[]):\n"
-            "    srcinfo = SourceInfo(\"file.c\")\n"
-            "    for fileinfo, line in lines:\n"
-            "        srcinfo._add_line(fileinfo.filename + line, fileinfo.lno)\n"
-            "        if srcinfo.too_much(0, maxlines):\n"
-            "            break\n"
-            "        while srcinfo._used():\n"
-            "            yield srcinfo.count\n"
-            "    else:\n"
-            "        yield srcinfo.count\n"
-            "    filename, lno, text = srcinfo.filename, srcinfo._start, srcinfo.text\n"
-            "    yield lno\n"
-            "    yield srcinfo.count\n"
-            "\n"
-            "def main():\n"
-            "    pairs = [(FileInfo(\"a.c:\", 10), \"hello\"),"
-            " (FileInfo(\"b.c:\", 20), \"world\")]\n"
-            "    for v in _iter_source(pairs):\n"
-            "        print(v)\n"
-            "\n"
-            "main()\n",
-            "1\n2\n20\n2\n")
-    finally:
-        globals()['_FOREIGN_PKG_FILES'] = _saved_pkg_files
-
-
 def run_nested_generator_capture_tests():
     # A generator defined INSIDE another def that reads one of that def's
     # parameters or locals. The coroutine path has no capture model for a
@@ -3164,36 +3043,6 @@ def outer():
         yield k
     return g
 """, "variable(s) k")
-    test_generator_c_no_stray_include("nested_generator_method_no_stray_include", """\
-struct T:
-    var k: Int
-    def __init__(out self, k: Int):
-        self.k = k
-    def run(self):
-        def g():
-            yield self.k
-            yield self.k + 1
-        for v in g():
-            print(v)
-
-def main():
-    var t = T(7)
-    t.run()
-""")
-    test_generator_c_no_stray_include("generator_method_no_stray_include", """\
-struct T:
-    var k: Int
-    def __init__(out self, k: Int):
-        self.k = k
-    def run(self) -> Generator[Int]:
-        yield self.k
-        yield self.k + 1
-
-def main():
-    var t = T(3)
-    for v in t.run():
-        print(v)
-""")
     # A nested generator defined in a METHOD that reads `self` (test_frame.py's
     # `g`). `self` is handed over as a hidden pointer, not boxed, so the
     # generator sees the live receiver: a read, a write that lands on the
@@ -6384,63 +6233,6 @@ def main():
 main()
 """, "0\n1\n")
 
-    # The same walk reached through a NESTED def: `inner` is an ordinary def
-    # nested in `outer`, and the list reaches `walk` only through `inner`'s
-    # parameter. Used to refuse ("yields ['xs'] ... call sites do not all pass
-    # the same statically-known type"): the scan typed `walk(fn)` with
-    # `outer`'s env, where `fn` is not bound, and never recorded `inner`'s own
-    # call sites. The scan now types each nested def's body with that def's own
-    # env, and records its call sites, so `fn` is `outer`'s `body`, a list.
-    test_generator_stdout("nested_def_returned_generator_iterated_in_for", """\
-def walk(xs):
-    for i, st in enumerate(list(xs)):
-        yield xs, i
-def outer(body):
-    def inner(fn):
-        return walk(fn)
-    return inner(body)
-def main():
-    for p in outer([1, 2]):
-        print(p[1])
-main()
-""", "0\n1\n")
-
-    # The nested def's argument must be typable for the walk to be. A value
-    # the scan cannot type at the nested call still refuses.
-    test_generator_refused("nested_def_returned_generator_untypable_arg_refuses", """\
-def walk(xs):
-    for i, st in enumerate(list(xs)):
-        yield xs, i
-def outer(body):
-    def inner(fn):
-        return walk(fn)
-    return inner(body)
-def main():
-    for p in outer(getattr(main, 'x', None)):
-        print(p[1])
-main()
-""", "yields ['xs']")
-
-    # A nested def that ESCAPES as a value (here returned, then called through
-    # another name) has call sites this scan cannot see, so its parameter must
-    # not be typed from the direct call alone. The string passed through `f`
-    # would otherwise reach `walk`'s list slot.
-    test_generator_refused("nested_def_escaping_value_call_refuses", """\
-def walk(xs):
-    for i, st in enumerate(list(xs)):
-        yield xs, i
-def outer(body):
-    def inner(fn):
-        return walk(fn)
-    inner(body)
-    return inner
-def main():
-    f = outer([1, 2])
-    for p in f("abc"):
-        print(p[1])
-main()
-""", "yields ['xs']")
-
     # The guard is what makes the recursive argument a list. Without it the
     # argument is an untypable hole and the slot must still refuse.
     test_generator_refused("module_level_recursive_tuple_generator_unguarded_refuses", """\
@@ -6482,88 +6274,6 @@ main()
 """, "yields ['xs']")
 
 
-def run_for_over_literal_in_generator_tests():
-    # `for x in <list/tuple literal>:` inside a generator/coroutine body.
-    # The literal is already lowered to a real `MojoList *` by `_cpp_expr` (a
-    # self-invoking lambda that constructs and fills one -- this model has no
-    # braced-init-list C++ value for a container), but the generic range-for
-    # fallback emitted `for (auto x : <that lambda>())`. A raw `MojoList *`
-    # has no ADL `begin`/`end`, so g++ rejected every such loop with
-    # "'begin' was not declared in this scope" / "'end' was not declared in
-    # this scope". The loop now iterates the lowered list through the same
-    # cached-local + indexed `mojo_list_len` / `mojo_list_get_*` lowering
-    # every other list-valued iterable in a generator body already used.
-    # Real: the nested recursive generator in
-    # `run_nested_recursive_generator_getattr_tests` above, whose inner
-    # `for fld in ('v', 'missing')` is exactly this shape.
-    test_generator_stdout("generator_for_over_tuple_literal", """\
-def outer():
-    def inner():
-        for fld in ('v', 'missing'):
-            yield fld
-    yield from inner()
-
-def main():
-    for x in outer():
-        print(x)
-main()
-""", "v\nmissing\n")
-
-    test_generator_stdout("generator_for_over_int_list_literal", """\
-def outer():
-    def g():
-        for v in [10, 20, 30]:
-            yield v
-    yield from g()
-
-def main():
-    for x in outer():
-        print(x)
-main()
-""", "10\n20\n30\n")
-
-    # The double element path: yield is not used for the value here because an
-    # unannotated generator's yield slot is int64_t in this body model (a
-    # separate, unrelated limitation); the loop's own read of the literal is
-    # what this pins.
-    test_generator_stdout("generator_for_over_float_tuple_literal", """\
-def outer():
-    def g():
-        for v in (1.5, 2.5):
-            print(v)
-            yield 0
-    yield from g()
-
-def main():
-    for x in outer():
-        pass
-main()
-""", "1.5\n2.5\n")
-
-    # A literal iterable with a `for/else`: the else body runs only when the
-    # loop completes without a break. The literal lowering returns before the
-    # generic for/else block, so it carries the shared break flag itself.
-    test_generator_stdout("generator_for_else_over_literal", """\
-def outer():
-    def g():
-        for v in (1, 2):
-            yield v
-            break
-        else:
-            yield -1
-        for v in (3, 4):
-            yield v
-        else:
-            yield -1
-    yield from g()
-
-def main():
-    for x in outer():
-        print(x)
-main()
-""", "1\n3\n4\n-1\n")
-
-
 def run_generator_tuple_repr_tests():
     # A tuple yielded by a generator is built by `__mojo_tuple_box_N` (the
     # A3 runtime, runtime/fire_coro_gen.c), and `list(gen)` puts that box
@@ -6600,7 +6310,6 @@ main()
 def run_tests():
     run_generator_tuple_repr_tests()
     run_nested_recursive_generator_getattr_tests()
-    run_for_over_literal_in_generator_tests()
     run_cpp_send_tests()
     run_send_into_just_started_regression()
     run_cpp_path_multi_arg_print_tests()
@@ -6623,7 +6332,6 @@ def run_tests():
     run_variadic_lambda_value_tests()
     run_unpack_call_forward_tests()
     run_ctor_default_arg_in_generator_tests()
-    run_tuple_target_for_and_method_stmt_generator_tests()
     run_struct_ptr_through_local_dict_tests()
     run_mixed_yield_kind_tests()
     run_next_method_tests()
@@ -10064,7 +9772,6 @@ def main():
     _foreign_a3_generator_handle_for_loop()
     _foreign_cpp_module_global_value()
     _cpp_for_over_callable_local_is_named()
-    _regression_read_table_callable_reader()
     _cpp_coroutine_builtin_module_constant()
     _cpp_coroutine_exc_ctor_value()
 

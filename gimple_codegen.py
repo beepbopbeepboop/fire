@@ -2958,12 +2958,6 @@ class GimpleGen:
         # importer needs it to find the defining module's generator api for a
         # read through the accessor. Set beside `_imported_global_accessors`.
         self._imported_global_home: dict = {}
-        # Imported global name (as bound here) -> (the DEFINING module's
-        # qualified name, the global's name in that module). Keys are the
-        # `_module_globals` spelling, not the C-mangled one. Read by
-        # `_reconcile_imported_global_accessors` to take the definer's final
-        # C type once that module is compiled into this unit.
-        self._imported_global_module: dict = {}
         # Concrete imported structs used as parameter types here: their StructDefs
         # (so the layout typedef is emitted in dylib mode) and their names (so only
         # these — not local structs — get the authoritative struct-pointer param
@@ -5478,8 +5472,6 @@ class GimpleGen:
         return ginf._emit_stdlib_import_externs(self, stmts)
     def _emit_imported_global_accessors(self, stmts) -> None:
         return ginf._emit_imported_global_accessors(self, stmts)
-    def _reconcile_imported_global_accessors(self) -> None:
-        return ginf._reconcile_imported_global_accessors(self)
     def _new_bb(self) -> str:
         return ginf._new_bb(self)
     def _emit(self, line: str):
@@ -6765,18 +6757,16 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
                 except Exception: pass
     except Exception:
         pass
-    # Clear the module-level PER-COMPILE accumulators (foreign callables, the
-    # selfhost extra field cache) so they do not survive past the compile
-    # boundary. Not the module's fixed tables: `_MODULE_MEMBER_LIBC` (the libm
-    # members of an uncompiled module) and `_MOJO_ELEM_C` (Mojo element type
-    # to C type) are constants, and clearing them here made the first compile
-    # in a process empty them for every later one: `math.floor` then lowered to
-    # the uncompiled-module stub, a NotImplementedError at run time, depending
-    # on which tests ran before it.
+    # Clear remaining backend_gimple/middle module-level accumulators (foreign
+    # callables, runtime callable words/values, module member libc, selfhost
+    # extra field cache, mojo elem ctype map) so they do not survive past the
+    # compile boundary (next step).
     try:
         for _modname, _names in (
             ('mojo.backend_gimple.cpp_async', ('_FOREIGN_CALLABLES',)),
+            ('mojo.backend_gimple.emit_methods', ('_MODULE_MEMBER_LIBC',)),
             ('mojo.backend_gimple.emit_funcs', ('_SELFHOST_EXTRA_FIELD_CACHE',)),
+            ('mojo.middle.iter_factory', ('_MOJO_ELEM_C',)),
         ):
             import importlib as _il2
             _m = _il2.import_module(_modname)
