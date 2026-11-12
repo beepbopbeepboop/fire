@@ -3285,9 +3285,10 @@ def body_has_conditional_branch(fn) -> bool:
     `stack_floor_guarded_names` widens the stack-floor guard from the call-graph
     cycles to every function whose body already branches, and the price is the
     per-export contract proof: `arm64_proof_gen._dylib_contract_proof` returns
-    `""` — no contract — for an export whose body contains ANY conditional
-    branch, so the guard's own `cbnz`/`b.hs` costs a contract only in a body that
-    had one to lose. For that to be an argument rather than a hope, this
+    `""` — no contract — for an export whose body contains a conditional branch
+    that is not an overflow guard on its normal path (`_overflow_normal_path`),
+    so the guard's own `cbnz`/`b.hs` costs a contract only in a body that had
+    one to lose. For that to be an argument rather than a hope, this
     predicate must never answer True for a body the EMITTER lays out
     straight-line — over-counting would take a contract away from an export that
     has one. So:
@@ -3402,9 +3403,10 @@ def stack_floor_guarded_names(functions, structs: dict = None,
 
     **And the second rule costs nothing the first one was careful not to.** The
     per-export contract proof (`arm64_proof_gen._dylib_contract_proof`) declines
-    to emit a contract for an export whose body contains ANY conditional branch —
-    `Refine.Block.step` is one function of one state, and a conditional branch
-    does not have one. So a body that already branches has no contract to lose,
+    to emit a contract for an export whose body contains a conditional branch
+    that is not an overflow guard on its normal path — `Refine.Block.step` is one
+    function of one state, and a conditional branch that can go either way does
+    not have one. An overflow guard is handled by its not-taken condition. So a body that already branches has no contract to lose,
     and a body that does not is left exactly as it was. "Every function" would
     trade proved contracts for nothing; "every function that already has a
     branch" does not, and `body_has_conditional_branch` is written to that
