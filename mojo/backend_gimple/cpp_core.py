@@ -2953,16 +2953,19 @@ def _cpp_expr(gen, e) -> str:
             return f"({gen._cpp_expr(e.condition)} ? {_tb(e.then_val)} : {_tb(e.else_val)})"
         return f"({gen._cpp_expr(e.condition)} ? {gen._cpp_expr(e.then_val)} : {gen._cpp_expr(e.else_val)})"
     if isinstance(e, gimple_ctypes.BinaryOp):
-        if e.op in _NONE_ARITH_BINOPS:
-            _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
-            _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
         if e.op == '//':
             # Python floor division — uses the same __mojo_floordiv
             # runtime helper the GIMPLE path's _lower_floordiv emits (a
             # plain C `/` truncates toward zero, which differs for
             # negative operands; this helper floors like Python).
+            if e.op in _NONE_ARITH_BINOPS:
+                _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
+                _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
             return f"__mojo_floordiv({gen._cpp_expr(e.left)}, {gen._cpp_expr(e.right)})"
         if e.op == '**':
+            if e.op in _NONE_ARITH_BINOPS:
+                _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
+                _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
             return f"pow({gen._cpp_expr(e.left)}, {gen._cpp_expr(e.right)})"
         if e.op == '+':
             # String concatenation (`current + part`, pprint.py's shape;
@@ -2996,6 +2999,9 @@ def _cpp_expr(gen, e) -> str:
                 except Exception:
                     return False
             if _is_str_operand(e.left) and _is_str_operand(e.right):
+                # String concatenation: do not install numeric None-arith
+                # guards, which would force tagged-word string operands
+                # through an int64_t path and lose char* conversions.
                 return (f"mojo_str_cat((char *)({gen._cpp_expr(e.left)}), "
                         f"(char *)({gen._cpp_expr(e.right)}))")
             # `word + "literal"` / `"literal" + word`: Python's `+` with a str
@@ -3018,6 +3024,31 @@ def _cpp_expr(gen, e) -> str:
                     or (isinstance(e.left, gimple_ctypes.StringLiteral) and _is_word_ident(e.right))):
                 return (f"mojo_str_cat((char *)(intptr_t)({gen._cpp_expr(e.left)}), "
                         f"(char *)(intptr_t)({gen._cpp_expr(e.right)}))")
+            _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
+            _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
+        elif e.op == '*':
+            # String repetition (`"=" * (70 - len(text))`, Apple/
+            # __main__.py's `group()` generator) → mojo_cstr_repeat,
+            # mirroring the ordinary GIMPLE path's char*/int lowering
+            # (gimple_gen_exprs.py's `mojo_cstr_repeat` case, both
+            # operand orders). Real Python's `str * int` (and `int *
+            # str`) is always string repetition — never overloaded to
+            # mean anything else — so this only needs to tell "is one
+            # side string-typed", not inspect both sides' exact types.
+            # Falls through to the plain `*` below for a genuinely
+            # all-numeric multiply (the overwhelmingly common case).
+            if _cpp_is_str_expr(gen, e.left) and not _cpp_is_str_expr(gen, e.right):
+                return (f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.left)}), "
+                        f"(int64_t)({gen._cpp_expr(e.right)}))")
+            if _cpp_is_str_expr(gen, e.right) and not _cpp_is_str_expr(gen, e.left):
+                return (f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.right)}), "
+                        f"(int64_t)({gen._cpp_expr(e.left)}))")
+            _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
+            _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
+        else:
+            if e.op in _NONE_ARITH_BINOPS:
+                _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
+                _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
         if e.op == '*':
             # String repetition (`"=" * (70 - len(text))`, Apple/
             # __main__.py's `group()` generator) → mojo_cstr_repeat,
