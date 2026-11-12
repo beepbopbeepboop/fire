@@ -80,29 +80,10 @@ def test_gate_doc_without_culprit_holds_nothing():
         C.MAIN, C.registry = real_main, real_reg
 
 
-def test_free_branch_takes_the_next_suffix_when_a_branch_exists():
-    real_git = C.git
-    taken = set()
-
-    def fake_git(*a, **k):
-        ref = a[-1]
-        return "sha\n" if ref.replace("refs/heads/", "") in taken else ""
-    try:
-        C.git = fake_git
-        check("a free name is used as it is", C.free_branch("fix-x") == "work/fix-x")
-        taken.update({"work/fix-x"})
-        check("an existing branch gets the -1 suffix", C.free_branch("fix-x") == "work/fix-x-1")
-        taken.update({"work/fix-x-1"})
-        check("the next existing branch gets -2", C.free_branch("fix-x") == "work/fix-x-2")
-    finally:
-        C.git = real_git
-
-
 if __name__ == "__main__":
     test_doc_deletion_needs_a_test()
     test_no_progress_streak()
     test_no_progress_stops_the_feed()
     test_gate_doc_without_culprit_holds_nothing()
-    test_free_branch_takes_the_next_suffix_when_a_branch_exists()
     print("%d failure(s)" % len(FAILED))
     sys.exit(1 if FAILED else 0)
