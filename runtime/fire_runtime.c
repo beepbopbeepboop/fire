@@ -2779,7 +2779,7 @@ static MojoList *_gen_drain(void *h, MojoGenSig *sg)
     int pending = mojo_exc_pending_get();
     ((void (*)(void *))sg->destroy)(h);
     if (pending) { mojo_exc_pending_set(0); mojo_raise(); }
-    if (sg->vkind == 5 || sg->vkind == 3) {
+    if (sg->vkind == 5) {
         /* Uniform from the FIRST element's classification, the way the vkind-5
          * arm did for str/int — extended to the bytes word that arm used to
          * call an int. */
@@ -2788,6 +2788,10 @@ static MojoList *_gen_drain(void *h, MojoGenSig *sg)
             else if (mojo_boxed_is_str(out->data[0])) mojo_list_set_kinds_uniform(out, 'p');
             else mojo_list_set_kinds_uniform(out, 'i');
         }
+    }
+    else if (sg->vkind == 3) {
+        if (out->len > 0 && mojo_is_registered_bytes(out->data[0])) mojo_list_set_kinds_uniform(out, MOJO_KIND_BYTES);
+        else mojo_list_set_kinds_uniform(out, 'p');
     }
     else if (sg->vkind == 0) mojo_list_set_kinds_uniform(out, 'i');
     else if (sg->vkind == 2) mojo_list_set_kinds_uniform(out, 'd');
