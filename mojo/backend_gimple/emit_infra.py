@@ -1815,10 +1815,54 @@ def _emit_imported_global_accessors(gen, stmts: list) -> None:
             # The defining module's mangled name, the same one its own
             # `global_generator_key` uses: `accessor_csym` is built from it.
             gen._imported_global_home[sym] = gimple_ctypes._c_field_name(_home_qual or 'root')
+            gen._imported_global_module[sym] = (_home_qual or '', name)
             guard = gimple_ctypes._stub_guard_name(accessor_csym)
             decl = (f'#ifndef {guard}\n#define {guard}\n'
                     f'extern {ctype} {accessor_csym} (void);\n#endif')
             gen._link_import_decl_list.append(decl)
+
+
+def _reconcile_imported_global_accessors(gen) -> None:
+    """Take each imported global's accessor type from the DEFINING module's
+    own final decision, once that module is compiled into this translation
+    unit.
+
+    `_emit_imported_global_accessors` types the accessor from module_loader's
+    text-scan export, and that scan cannot reproduce the definer's rule for a
+    call-valued RHS: `var N = g() + 1` exports `void *` where the definer
+    types the global `int64_t`, and `var N = k()` with an unannotated
+    `def k(): return "a"` exports `int64_t` where the definer types it
+    `char *`. The importer's extern then disagrees with the accessor the
+    definer emits in the same unit, and gcc stops with "conflicting types for
+    '<mod>__mojo_global_get_N'".
+
+    The definer's `_module_globals[mod]` entry is the exact (name, c_type)
+    its accessor is generated from (`_module_global_field_type`), so reading it
+    makes the extern and every read site agree with the definition by
+    construction rather than by a second inference. A `do_imports` compile has
+    already run that module's generator by the time phase 1.7 is complete,
+    which is when this runs. When the defining module is NOT compiled in this
+    unit (link mode, separate translation units), there is no entry and the
+    export's answer stands.
+    """
+    for sym in list(gen._imported_global_accessors.keys()):
+        home_name = gen._imported_global_module.get(sym)
+        if not home_name or not home_name[0]:
+            continue
+        entry = gen._module_global_field_type(home_name[0], home_name[1])
+        if entry is None:
+            continue
+        old_ctype, accessor_csym = gen._imported_global_accessors[sym]
+        new_ctype = entry[0]
+        if new_ctype == old_ctype:
+            continue
+        gen._imported_global_accessors[sym] = (new_ctype, accessor_csym)
+        old_decl = f'extern {old_ctype} {accessor_csym} (void);'
+        new_decl = f'extern {new_ctype} {accessor_csym} (void);'
+        rewritten = []
+        for decl in gen._link_import_decl_list:
+            rewritten.append(decl.replace(old_decl, new_decl))
+        gen._link_import_decl_list = rewritten
 
 
 # Runtime functions that ALWAYS return a container they just allocated and
@@ -7845,27 +7889,6 @@ def _own_repr(gen, fn: str, value: str, out: list) -> str:
     return value
 
 
-def _peek_is_user_method(gen, call) -> bool:
-    """True when a zero-argument `<obj>.peek()` call is a USER method, not the
-    peekable iterator's `Optional[Pointer]` niche that `_gen_print` describes.
-
-    The niche is recognised by the method NAME alone, which made a user class
-    with its own `peek()` print `Optional(Some)` for its int result. The receiver
-    settles it: an object of a struct that defines `peek` is that method. An
-    unknown receiver is a user method when any struct in the program defines
-    `peek`, so the niche is only assumed where no such class exists.
-    """
-    fn = getattr(call, 'func', None)
-    if not isinstance(fn, gimple_ctypes.MemberExpr):
-        return False
-    obj = fn.obj
-    if isinstance(obj, gimple_ctypes.IdentExpr):
-        rt = gen._type_of(_as_str(obj.name))
-        if isinstance(rt, str) and rt.endswith(' *'):
-            return 'peek' in gen._struct_method_names.get(rt[:-2], ())
-    return any('peek' in ms for ms in gen._struct_method_names.values())
-
-
 def _gen_print(gen, args: list, kwargs: list = None):
     # print(..., file=sys.stderr): kwargs used to be silently dropped
     # entirely (the file= expression was never even inspected), so every
@@ -8053,8 +8076,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                     if (isinstance(_cfunc, gimple_ctypes.MemberExpr)
                             and _as_str(getattr(_cfunc, 'member', '')) == 'peek'
                             and not getattr(_call_arg, 'args', None)
-                            and not getattr(_call_arg, 'kwargs', None)
-                            and not _peek_is_user_method(gen, _call_arg)):
+                            and not getattr(_call_arg, 'kwargs', None)):
                         _is_opt_ptr_niche = True
                 if _is_opt_ptr_niche:
                     # Optional[Pointer[...]] is lowered as a nullable pointer
@@ -8288,8 +8310,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                     if (isinstance(_efunc, gimple_ctypes.MemberExpr)
                             and _as_str(getattr(_efunc, 'member', '')) == 'peek'
                             and not getattr(_earg, 'args', None)
-                            and not getattr(_earg, 'kwargs', None)
-                            and not _peek_is_user_method(gen, _earg)):
+                            and not getattr(_earg, 'kwargs', None)):
                         _opt_ptr_niche_emit = True
             if _opt_ptr_niche_emit and (atype in ('int', 'int64_t') or (isinstance(atype, str) and atype.endswith('*'))):
                 bb_some = gen._new_bb()

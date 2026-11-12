@@ -3036,21 +3036,9 @@ int64_t mojo_dyn_call(int64_t fn, MojoList *args, MojoDict *kw)
         for (int64_t i = 0; i < n; i++) v[i] = mojo_list_get_int(args, i);
         return _mojo_vararg_invoke((MojoVarargFn *)fp, v, n, kw);
     }
-    /* A plain function pointer has no name-based parameter binding, but a
-     * dynamic call may still carry keyword arguments in call order (e.g. a
-     * call through a callable-valued parameter). Append their values after
-     * the positional arguments so they bind positionally. */
-    MojoList *_merged_args = NULL;
     if (kw && mojo_dict_len(kw) > 0) {
-        _merged_args = mojo_list_new();
-        for (int64_t i = 0; i < n; i++) mojo_list_append_int(_merged_args, mojo_list_get_int(args, i));
-        MojoList *_kws = mojo_dict_keys(kw);
-        for (int64_t i = 0; i < mojo_list_len(_kws); i++) {
-            char *_k = mojo_list_get_str(_kws, i);
-            mojo_list_append_int(_merged_args, mojo_dict_get_int(kw, _k));
-        }
-        args = _merged_args;
-        n = mojo_list_len(args);
+        mojo_raise_type_error((char *)"got an unexpected keyword argument");
+        return 0;
     }
     int64_t a[5] = {0, 0, 0, 0, 0};
     if (n > 5) n = 5;
@@ -11970,49 +11958,16 @@ int64_t mojo_getitem_word(int64_t w, int64_t i)
 }
 
 /* `a + b` where both are words of unknown kind: two strings concatenate, both
- * lists concatenate via mojo_list_concat, double boxes add as a double,
- * otherwise adds as integers (the word is its own value). */
+ * lists concatenate via mojo_list_concat, otherwise adds as integers (the word
+ * is its own value). */
 int64_t mojo_add_words(int64_t a, int64_t b)
 {
     if (mojo_boxed_is_str(a) && mojo_boxed_is_str(b))
-        return (int64_t)(intptr_t)mojo_str_cat((char *)(intptr_t)mojo_unbox_plain(a),
-                                               (char *)(intptr_t)mojo_unbox_plain(b));
+        return (int64_t)(intptr_t)mojo_str_cat((char *)(intptr_t)a, (char *)(intptr_t)b);
     if (mojo_is_registered_list(a) && mojo_is_registered_list(b))
         return (int64_t)(intptr_t)mojo_list_concat((MojoList *)(intptr_t)a,
                                                   (MojoList *)(intptr_t)b);
-    {
-        int da = mojo_is_boxed(a) && ((MojoBox *)(intptr_t)a)->kind == 'd';
-        int db = mojo_is_boxed(b) && ((MojoBox *)(intptr_t)b)->kind == 'd';
-        if (da || db) {
-            double av = da ? mojo_box_double(a) : (double)mojo_box_int(a);
-            double bv = db ? mojo_box_double(b) : (double)mojo_box_int(b);
-            return mojo_box_from_double(av + bv);
-        }
-    }
-    return mojo_box_int(a) + mojo_box_int(b);
-}
-
-/* `a * b` where one side is a word of unknown kind that may be a string (a
- * kind-'p' str box or a string pointer), a double box, or an integer: string
- * repetition when a side is a string, a boxed double product when a side is a
- * double box, otherwise integer multiplication of the words' integer values.
- * Used by tagged mixed-generator values whose kind is a runtime fact. */
-int64_t mojo_mul_word(int64_t a, int64_t b)
-{
-    if (mojo_boxed_is_str(a))
-        return (int64_t)(intptr_t)mojo_cstr_repeat((char *)(intptr_t)mojo_unbox_plain(a), mojo_box_int(b));
-    if (mojo_boxed_is_str(b))
-        return (int64_t)(intptr_t)mojo_cstr_repeat((char *)(intptr_t)mojo_unbox_plain(b), mojo_box_int(a));
-    {
-        int da = mojo_is_boxed(a) && ((MojoBox *)(intptr_t)a)->kind == 'd';
-        int db = mojo_is_boxed(b) && ((MojoBox *)(intptr_t)b)->kind == 'd';
-        if (da || db) {
-            double av = da ? mojo_box_double(a) : (double)mojo_box_int(a);
-            double bv = db ? mojo_box_double(b) : (double)mojo_box_int(b);
-            return mojo_box_from_double(av * bv);
-        }
-    }
-    return mojo_box_int(a) * mojo_box_int(b);
+    return a + b;
 }
 
 MojoList *mojo_iter_boxed_list(int64_t v)
