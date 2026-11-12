@@ -4426,6 +4426,11 @@ class Parser:
             return
         if param_convs.get("self") != "out":
             return
+        # Only an UNANNOTATED `out self` is the method receiver the real compiler
+        # refuses. `out self: T` names its type explicitly, and the standard
+        # library uses it in nested functions (std/python/bindings.mojo:741).
+        if params[0][1] is not None:
+            return
         # The name token of each parameter, in order, from the raw tokens.
         name_toks = []
         depth = 0

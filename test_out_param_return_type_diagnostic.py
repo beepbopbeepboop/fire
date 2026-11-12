@@ -154,5 +154,16 @@ class OutParamReturnTypeDiagnostic(unittest.TestCase):
         self.assertIn("self argument must be present in instance method", str(cm.exception))
 
 
+    def test_out_self_with_an_explicit_type_passes(self):
+        # The standard library's nested `def default_init_func(out self: T, ...)`
+        # (std/python/bindings.mojo:741): an explicitly typed `out self` is not
+        # the method receiver, and real Mojo compiles it.
+        _compile('struct R:\n'
+                 '    var a: Int\n'
+                 '    def make(args: Int):\n'
+                 '        def init(out self: R, k: Int):\n'
+                 '            self.a = k\n')
+
+
 if __name__ == '__main__':
     unittest.main()
