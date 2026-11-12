@@ -60,6 +60,16 @@ make the check ignore them). Resolved with our version; both directions of
      `_check_out_self_declaration` refused the last `out self` fixture
      (`7c06a4ffe`).
 
+3. `ea14049db` / `2e3c98267` — 27 more commits (the container-variable
+   f-string fix, the c-analyzer replans, the linked-list hash probe). One
+   conflict, `bugs/mid/DIAGNOSTICS_missing_validation_modular-part1.md`, where
+   master had independently fixed the same dangling citation by naming the bug
+   instead of the deleted doc's path; master's wording is taken. Two more reds:
+   the merge re-exposed the ratchet on this round's own status doc (it had
+   quoted the fixture's synthetic doc path), and `test_no_new_container_casts.py`
+   went to 27 — the new `_cpp_fstring_list_piece` spelled five ad-hoc
+   `(MojoList *)` casts, now routed through `_cpp_as` (`e638c9447`).
+
 ## Still open
 
 From the report, the jobs not addressed here: `gimplegenerators`, `gimplerunner`,
