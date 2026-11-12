@@ -4,11 +4,13 @@ Part 1 of the split of `bugs/hard/DIAGNOSTICS_missing_validation_modular.md`.
 Plan: `docs/diagnostics-missing-validation-plan.md` §1 (the partially-landed
 generic constraint step). The other clusters of the umbrella are already filed
 as their own docs (`DIAGNOSTICS_trait_conformance.md`,
-`DIAGNOSTICS_elaboration_recursion.md`, `DIAGNOSTICS_inferred_param_dependency.md`,
+`DIAGNOSTICS_inferred_param_dependency.md`,
 `DIAGNOSTICS_binding_deferrals.md`, `DIAGNOSTICS_align_decorator.md`,
 `DIAGNOSTICS_mlir_annotations.md`, `DIAGNOSTICS_lsp_error_recovery.md`,
 `DIAGNOSTICS_docstring_self_import.md`, `DIAGNOSTICS_mojoc_imports.md`,
-`GPU_offload_validation_modular.md`); this part does not duplicate them.
+`GPU_offload_validation_modular.md`); the elaboration-recursion cluster was
+fixed, and `DIAGNOSTICS_elaboration_recursion.md` is deleted. This part does
+not duplicate any of them.
 
 ## Why this part
 

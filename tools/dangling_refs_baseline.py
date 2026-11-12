@@ -19,6 +19,14 @@ under test, and a sweep that turned them into prose would silently delete the
 proof while leaving the check green. `tools/suite.py` cites a `.md` path as a
 fixture for the same reason.
 
+`tools/test_swarm_replan.py` is the third, and its fixture is a whole synthetic
+BUG DOC rather than a name: the tests write `bugs/hard/X.md` into a temp dir and
+hand its stem to `split_reason`, so the `bugs/hard/X.md` in the REPLAN_TASK
+format argument is a file the test creates, not a claim about the tree. It
+cannot be renamed out of the pattern -- `REF` matches every `bugs/**.md` -- so
+it is entered here at the count it has (1) rather than left to fail the ratchet
+on every run.
+
 THE LEDGER ITSELF (`tools/dangling_refs_baseline.py`) is EXCLUDED from the
 walk, and it is excluded rather than entered because an entry for it cannot
 mean anything. Its whole content is the set of doc names other files still
@@ -98,7 +106,7 @@ BASELINE = {
     'test_formal_host_import_wall.py': 1,
     'test_formal_hostmods_census.py': 1,
     'test_formal_hostmods_conformance.py': 1,
-    'test_formal_imports.py': 12,
+    'test_formal_imports.py': 11,
     'test_formal_interop.py': 1,
     'test_formal_isa_census.py': 1,
     'test_formal_link_accounting.py': 3,
@@ -165,6 +173,7 @@ BASELINE = {
     'tools/task_text.py': 4,
     'tools/test_swarm_class_refresh.py': 2,
     'tools/test_swarm_feed.py': 13,
+    'tools/test_swarm_replan.py': 1,
 }
 
 # `BARE_BASELINE`: the same per-file ceilings for the BARE class — a citation
