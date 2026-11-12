@@ -40,9 +40,8 @@ is stored and read", with a header line pointing at
    pointer-shaped int token (interned per identity in `_id_tab`). The `'s'`
    (bytes) and `'l'` (nested list) kinds ride the list slot's own kind byte
    (see `mojo_list_get_boxed`, which copies the slot kind into the box). The
-   full kind/producer/consumer table in
-   `bugs/CODEGEN_tagged_generator_mixed_type_step2-part1.md` is already
-   verified in the tree — reuse it, do not re-derive it.
+   full kind/producer/consumer table for the mixed-type step 2 work (since
+   landed) is already verified in the tree — reuse it, do not re-derive it.
 2. **The tracking.** Where codegen records "a name's value is a box", all
    per-function in `mojo/backend_gimple/emit_infra.py`: `gen._boxed_vals`
    (a value name is a box), `gen._tagged_word_vals` (subset: a mixed-

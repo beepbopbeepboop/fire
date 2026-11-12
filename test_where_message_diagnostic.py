@@ -7,8 +7,8 @@ instantiation (struct), with the user's message in the note. Before this, the
 parser skipped struct `where` clauses and the elaborator's check was a regex
 that only knew the DType predicates, so both programs compiled silently.
 
-Each case is one row of the table in
-bugs/mid/DIAGNOSTICS_missing_validation_modular-part1.md, compiled with
+Each case is one row of the where-message table in the modular
+DIAGNOSTICS umbrella (bugs/hard/DIAGNOSTICS_missing_validation_modular.md), compiled with
 do_imports=True from a real temp file (the elaborator reads the template back
 from there).
 """
