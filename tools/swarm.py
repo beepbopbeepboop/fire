@@ -37,7 +37,21 @@ def load_state():
         return {"fed": {}}
 
 
+_SEEN = {}                    # message key -> time it was last printed
+REPEAT_QUIET_S = 3600         # an unchanged status line is printed again at most this often
+COUNTER_LINES = ("guard:", "cleanup:", "config:", "feed ", "land:", "wait ", "held ")   # a count moving is not news
+
+
 def log(msg):
+    """Print one timestamped line, unless the same line was printed within REPEAT_QUIET_S. Passes run every few
+    minutes and most of them find the same state as the last one, so the log used to be 90% repeats (356 `guard:`,
+    246 `wait hard/...`, 209 `holding ...` in one run); a line that is an EVENT (a spawn, a landing, a retire) names
+    a pid or a task and never repeats exactly. Counter lines compare with their digits blanked."""
+    key = re.sub(r"\d+", "#", msg) if msg.startswith(COUNTER_LINES) else msg
+    now = time.time()
+    if now - _SEEN.get(key, -REPEAT_QUIET_S) < REPEAT_QUIET_S:
+        return
+    _SEEN[key] = now
     print("%s %s" % (time.strftime("%T"), msg), flush=True)
 
 
@@ -260,9 +274,9 @@ def feed():
             continue                       # the reason is a view (swarm.py --feed / --why), not a line per pass
         cls = doc_class(doc, st, base)
         name = task_name(doc)
-        if name in C.load():                   # the 40-char name collides with an old task: make it unique
-            log("renamed %s: %s is already in the registry" % (doc, name))
-            name += "-%d" % int(time.time() % 10000)
+        if name in C.load() or os.path.exists(os.path.join(C.qdir(), name + ".json")):
+            name = C.free_task_name(name, 40 + 5)       # the 40-char name collides with an old or queued task
+            log("renamed %s: %s" % (doc, name))
         prev = last_attempt(base) if st["fed"].get(doc) else None
         if prev:
             log("re-feed %s: previous attempt %s" % (doc, prev))
@@ -717,8 +731,8 @@ def continue_partial(st):
             continue
         cls = doc_class(doc, st, base)
         cont = task_name(doc)
-        if cont in C.load():
-            cont += "-%d" % int(time.time() % 10000)
+        if cont in C.load() or os.path.exists(os.path.join(C.qdir(), cont + ".json")):
+            cont = C.free_task_name(cont, 40 + 5)
         if enqueue_doc(doc, base, cls, cont, start=t["branch"]):
             track[doc] = {"head": head, "name": cont}
             subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "mark", name, "abandoned"],
