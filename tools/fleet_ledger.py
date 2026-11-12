@@ -30,6 +30,24 @@ def _log(ctl_dir, msg):
     print(line, flush=True)
 
 
+def _first_refusal(ctl_dir, task, pgid, pid):
+    """True the first time this (task, pgid, leader pid) is refused, False on every later pass. The refusal is the safe
+    behaviour and its reason does not change while the group is left alone, so logging it once per pass wrote 4,612
+    lines (1.3 MB) in an hour and hid the real kill events. The record is a sidecar file, not memory: every pass is a
+    fresh process."""
+    path = os.path.join(ctl_dir, "refused.json")
+    key = "%s|%d|%d" % (task, pgid, pid)
+    try:
+        seen = json.load(open(path))
+    except (OSError, ValueError):
+        seen = []
+    if key in seen:
+        return False
+    with open(path, "w") as f:
+        json.dump(seen[-2000:] + [key], f)
+    return True
+
+
 def _lstart(pid):
     """Start time of `pid` as ps prints it, or None if no such process. Pins a pid to one process."""
     r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True)
@@ -91,9 +109,11 @@ def kill_group(ctl_dir, task, reason, grace=GRACE_S):
         if not members:
             continue
         if not _leader_is_ours(e):
-            _log(ctl_dir, "REFUSED task=%s pgid=%d: the recorded leader pid %d is gone or is not the process recorded; "
-                          "%d member(s) left alone: %s" % (task, e["pgid"], e["pid"], len(members),
-                                                         "; ".join("%d %s" % (p, c[:60]) for p, c in members)))
+            if _first_refusal(ctl_dir, task, e["pgid"], e["pid"]):
+                _log(ctl_dir, "REFUSED task=%s pgid=%d: the recorded leader pid %d is gone or is not the process "
+                              "recorded; %d member(s) left alone: %s"
+                     % (task, e["pgid"], e["pid"], len(members),
+                        "; ".join("%d %s" % (p, c[:60]) for p, c in members)))
             continue
         _log(ctl_dir, "TERM task=%s pgid=%d reason=%s members=%s" % (
             task, e["pgid"], reason, "; ".join("%d %s" % (p, c[:60]) for p, c in members)))
