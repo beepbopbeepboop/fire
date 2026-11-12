@@ -1,6 +1,6 @@
 # DIAGNOSTICS: missing validation/error reporting for modular test cases
 
-SPLIT: DIAGNOSTICS_missing_validation_modular-part1, DIAGNOSTICS_missing_validation_modular-part2, DIAGNOSTICS_missing_validation_modular-part3, DIAGNOSTICS_missing_validation_modular-part4, DIAGNOSTICS_missing_validation_modular-part6
+SPLIT: DIAGNOSTICS_missing_validation_modular-part1, DIAGNOSTICS_missing_validation_modular-part2, DIAGNOSTICS_missing_validation_modular-part3, DIAGNOSTICS_missing_validation_modular-part4
 
 ## Symptom
 Modular test files expect compile-time errors/diagnostics that our compiler does not produce (it compiles them successfully). These are cases where modular's compiler rejects invalid code but ours accepts it.
@@ -112,6 +112,11 @@ See build/checkfail_candidates.json (61 error-like cases).
   an 'out' argument and a return type` at the return type's location
   (`mojo_package_moco_773.mojo`). Regression:
   `test_out_param_return_type_diagnostic.py`.
+- **Landed (2026-11-11):** interpreter runs the `constrained[cond, msg]()`
+  builtin: a false condition raises `constraint failed: <msg>` (exit nonzero),
+  a true one is a no-op; a user-bound `constrained` name is not intercepted.
+  The paren form `constrained(cond, msg)` is not handled. Regression:
+  `test_interpreter_constrained_diagnostic.py`.
 - **Landed (2026-11-11):** interpreter `assert` failure (`python3 fire.py run`)
   now prints the same `Assert Error: <msg>` prefix as the compiled path, with
   the default `assert failed` when no message is given. Regression:

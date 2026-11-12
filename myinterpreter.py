@@ -7876,8 +7876,38 @@ class Interpreter:
         else:
             raise NotImplementedError(f"{self._loc(expr)}Unary operator {op} not implemented")
 
+    def _eval_constrained_bracket(self, expr):
+        """`constrained[cond, msg]()` — the bracket form of Mojo's builtin.
+
+        The compiled path diagnoses a provably-false condition at compile time
+        (mojo/backend_gimple/emit_calls.py, `constrained`). The interpreter has
+        no compile-time pass, so it checks the condition when the call runs:
+        false raises `constraint failed: <msg>` (or `constraint failed` with no
+        message), true is a no-op. A name the user has bound themselves is a
+        real callee and is not intercepted. The message is only evaluated on
+        failure, and an error in the condition propagates rather than being
+        read as false."""
+        idx = expr.func.index
+        if isinstance(idx, (N.TupleExpr, N.ListExpr)):
+            elems = list(getattr(idx, 'elements', None) or [])
+        else:
+            elems = [idx]
+        if not elems:
+            raise TypeError(f"{self._loc(expr)}constrained[] needs a condition")
+        if self.eval_expr(elems[0]):
+            return None
+        msg = self.eval_expr(elems[1]) if len(elems) > 1 else None
+        text = 'constraint failed' if msg is None else f'constraint failed: {msg}'
+        raise RuntimeError(f"{self._loc(expr)}{text}")
+
     def eval_CallExpr(self, expr):
         """Evaluate function call."""
+        func_node = expr.func
+        if (isinstance(func_node, N.SubscriptExpr)
+                and isinstance(func_node.obj, N.IdentExpr)
+                and func_node.obj.name == 'constrained'
+                and not self.scope.has('constrained')):
+            return self._eval_constrained_bracket(expr)
         func = self.eval_expr(expr.func)
         # Call-site unpacking: `g(*args)` / `g(**opts)`. fire_compiler.py's
         # LPAREN arg-list parser lets `_parse_unary` wrap a starred argument
