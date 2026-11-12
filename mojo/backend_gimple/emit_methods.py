@@ -7209,8 +7209,9 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
         # real MojoBytes * (the same runtime constructor `bytes(s)` uses). The
         # encoding is passed through as a char*; the runtime's
         # mojo_bytes_from_str resolves it against its codec table (utf-8,
-        # ascii, latin-1; anything else is a LookupError). `errors` is not
-        # forwarded, so every codec runs with strict error handling.
+        # ascii, latin-1; anything else is a LookupError). `errors` is the
+        # second positional argument or the `errors=` keyword, forwarded to
+        # the runtime, which honours strict (default), replace and ignore.
         if arg_pairs:
             _enc = arg_pairs[0]
         else:
@@ -7220,8 +7221,14 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
             _enc_val = gen._intern_string('utf-8')
         else:
             _enc_val = _enc[1] if _enc[0] == 'char *' else gen._coerce_to_type(_enc[0], 'char *', _enc[1])
-        _err = next(((gen.lower_expr(_kv)) for _kn, _kv in (kwargs or [])
-                     if _kn == 'errors'), None)
+        # `s.encode("ascii", "replace")` passes `errors` positionally; it was
+        # read from the keyword only, so the positional handler was dropped and
+        # every codec ran strict (UnicodeEncodeError where CPython replaces).
+        if len(arg_pairs) > 1:
+            _err = arg_pairs[1]
+        else:
+            _err = next(((gen.lower_expr(_kv)) for _kn, _kv in (kwargs or [])
+                         if _kn == 'errors'), None)
         if _err is None:
             _err_val = gen._intern_string('strict')
         else:
@@ -7459,8 +7466,14 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
             enc = _enc[1]
         else:
             enc = gen._coerce_to_type(_enc[0], 'char *', _enc[1])
-        _err = next(((gen.lower_expr(_kv)) for _kn, _kv in (kwargs or [])
-                     if _kn == 'errors'), None)
+        # The handler is the second positional or the `errors=` keyword, the
+        # same as str.encode above: `b"\xff".decode("ascii", "replace")` dropped
+        # a positional handler and ran strict.
+        if len(arg_pairs) > 1:
+            _err = arg_pairs[1]
+        else:
+            _err = next(((gen.lower_expr(_kv)) for _kn, _kv in (kwargs or [])
+                         if _kn == 'errors'), None)
         if _err is None:
             err = gen._intern_string('strict')
         else:

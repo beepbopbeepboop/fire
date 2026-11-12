@@ -5080,9 +5080,9 @@ print(type(b) == bytes, len(b) == 3, b == b'abc')
 s = "é"
 print(s.encode("ascii", "replace"))
 print(s.encode("ascii", "ignore"))
-print(b"\xff".decode("ascii", "replace"))
+print(b"\\xff".decode("ascii", "replace"))
 try:
-    b"\xff\xfe".decode("utf-8")
+    b"\\xff\\xfe".decode("utf-8")
 except UnicodeDecodeError:
     print("utf-8 decode refused malformed")
 """)

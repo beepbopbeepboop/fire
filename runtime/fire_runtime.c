@@ -4564,10 +4564,70 @@ int mojo_bytes_endswith(MojoBytes *b, MojoBytes *p)
     return mojo_bytes_endswith_from(b, p, 0, MOJO_SLICE_STOP_OMITTED);
 }
 
+/* The lenient decoder for `errors="replace"` / `"ignore"` on the ascii and
+ * utf-8 codecs. Strict decoding stays with mojo_bytes_decode (its messages are
+ * the strict ones). A malformed run is one error, as CPython counts it: for
+ * UTF-8 the MAXIMAL SUBPART -- the start byte plus the continuation bytes that
+ * are still a valid prefix (second-byte ranges per the standard: E0 A0..BF,
+ * ED 80..9F, F0 90..BF, F4 80..8F) -- and a start byte with no valid sequence
+ * is one error of length 1. `replace` writes U+FFFD once per error, `ignore`
+ * writes nothing. For ascii every byte >= 0x80 is its own error. */
+static char *_mojo_decode_lenient(const unsigned char *d, int64_t n, int ascii_only, int replace)
+{
+    char *s = malloc((size_t)n * 3 + 1);
+    size_t k = 0;
+    int64_t i = 0;
+    while (i < n) {
+        unsigned c = d[i];
+        if (c < 0x80) { s[k++] = (char)c; i++; continue; }
+        if (ascii_only) goto bad_one;
+        {
+            int extra;
+            unsigned lo = 0x80, hi = 0xBF;
+            if (c >= 0xC2 && c <= 0xDF) extra = 1;
+            else if (c >= 0xE0 && c <= 0xEF) {
+                extra = 2;
+                if (c == 0xE0) lo = 0xA0;
+                if (c == 0xED) hi = 0x9F;
+            } else if (c >= 0xF0 && c <= 0xF4) {
+                extra = 3;
+                if (c == 0xF0) lo = 0x90;
+                if (c == 0xF4) hi = 0x8F;
+            } else goto bad_one;
+            int64_t j = i + 1;
+            int ok = 1;
+            for (int m = 0; m < extra; m++, j++) {
+                if (j >= n) { ok = 0; break; }
+                unsigned ch = d[j];
+                unsigned l = m == 0 ? lo : 0x80, h = m == 0 ? hi : 0xBF;
+                if (ch < l || ch > h) { ok = 0; break; }
+            }
+            if (ok) {
+                for (int64_t q = i; q < j; q++) s[k++] = (char)d[q];
+                i = j;
+                continue;
+            }
+            /* The maximal subpart: bytes i .. j-1 are one error. */
+            if (replace) { s[k++] = (char)0xEF; s[k++] = (char)0xBF; s[k++] = (char)0xBD; }
+            i = j;
+            continue;
+        }
+    bad_one:
+        if (replace) { s[k++] = (char)0xEF; s[k++] = (char)0xBF; s[k++] = (char)0xBD; }
+        i++;
+    }
+    s[k] = 0;
+    return s;
+}
+
 char *mojo_bytes_decode(MojoBytes *b, char *encoding, char *errors)
 {
     MojoCodec codec = mojo_codec_lookup(encoding);
     int64_t n = b ? b->len : 0;
+    if (errors && (strcmp(errors, "replace") == 0 || strcmp(errors, "ignore") == 0)
+            && (codec == MOJO_CODEC_ASCII || codec == MOJO_CODEC_UTF8))
+        return _mojo_decode_lenient(b ? b->data : NULL, n, codec == MOJO_CODEC_ASCII,
+                                    strcmp(errors, "replace") == 0);
     if (codec == MOJO_CODEC_ASCII) {
         for (int64_t i = 0; i < n; i++) {
             if (b->data[i] >= 0x80) {
