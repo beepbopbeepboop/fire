@@ -14989,8 +14989,15 @@ def main():
                   test_namedtuple_mixed_literal_types_is_refused,
                   test_namedtuple_tuple_protocol_is_refused_by_name,
                   test_nested_class_attr_reads_enclosing_local_regression,
+                  test_nested_class_in_method_captures_enclosing_param_regression,
                   test_nested_class_attr_from_str_param_regression,
                   test_nested_class_var_attr_from_str_param_regression,
+                  test_nested_class_var_attr_annotated_from_str_param_regression,
+                  test_nested_class_attr_annotated_from_str_param_regression,
+                  test_nested_class_var_attr_from_enclosing_local_regression,
+                  test_nested_class_var_attr_method_read_regression,
+                  test_nested_class_var_attr_rebind_after_construction_regression,
+                  test_nested_class_var_attr_instance_write_shadows_regression,
                   test_nested_class_attr_expr_over_str_param_regression,
                   test_instance_write_shadows_class_attr_regression,
                   test_nested_class_attr_rebind_after_construction_regression,
@@ -15130,6 +15137,43 @@ def main():
 """, "5\n7\n")
 
 
+def test_nested_class_in_method_captures_enclosing_param_regression():
+    """Regression: a `class` statement inside a struct METHOD, whose attribute
+    captures the method's parameter. The class-capture save/restore emits the
+    address of the `_classattr_` cell global for its unwind record, and a
+    method body is `__GIMPLE`-tagged, where `-fgimple` rejects
+    `&<variable>`: the whole program failed to compile with
+    "expected expression before '(' token". The capture must behave exactly
+    as it does from a plain function, including per-execution cells.
+
+    The enclosing method returns an `int`, deliberately: a POINTER-returning
+    function's `__GIMPLE` tag is not honoured by gcc's parser at all (measured;
+    see `_alloc_C`'s shape), so a pointer-returning method would pass even
+    with the address-of emitted and would not pin this bug."""
+    test_gimple_stdout("gimple_nested_class_in_method_captures_param", """\
+class Outer:
+    def make(self, n: int):
+        class C:
+            def get(self):
+                return n
+        return C().get()
+
+    def twice(self, n: int) -> int:
+        class C:
+            def get(self):
+                return n
+        a = C()
+        b = C()
+        return a.get() * 10 + b.get()
+
+def main():
+    print(Outer().make(3))
+    o = Outer()
+    print(o.make(4), o.make(5))
+    print(o.twice(6))
+""", "3\n4 5\n66\n")
+
+
 def test_instance_write_shadows_class_attr_regression():
     """Pins the instance-read half of CPython's class-attribute lookup order.
     An instance write to a name its class defines as an attribute shadows the
@@ -15205,6 +15249,136 @@ def main():
     print(a.name)
     print(b.name)
 """, "x\ny\n")
+
+
+def test_nested_class_var_attr_annotated_from_str_param_regression():
+    """Regression: the ANNOTATED `var` form (bug:CODEGEN_nested_class_var_attr_
+    untyped_field). `var name: str = s` typed its struct field `char *` right,
+    but the per-execution cell never seeded the field — the allocator's
+    per-instance init fires only when the field type and the `_classattr_`
+    global type agree, and a cell attribute's global is a POINTER to the cell —
+    so every instance read the never-written field and printed `None`. A
+    per-execution attribute is not a visible struct field at all; the read
+    goes through the cell this instance was built under, exactly like the
+    unannotated bare spelling `name = s` (which never minted a field and
+    always worked)."""
+    test_gimple_stdout("gimple_nested_class_var_attr_annotated_str_param", """\
+def h(s: str):
+    class C():
+        var name: str = s
+    return C()
+
+def main():
+    a = h("x")
+    b = h("y")
+    print(a.name)
+    print(b.name)
+""", "x\ny\n")
+
+
+def test_nested_class_attr_annotated_from_str_param_regression():
+    """Regression: the annotation alone, in the BARE spelling, mints the
+    shadowing field too. `name: str = s` (no `var`) goes through the typed-
+    assign field loop, so before the fix it failed exactly like the `var`
+    form — `None` through the instance — while the unannotated `name = s`
+    printed right. An annotation on a per-execution attribute must not turn
+    it into a visible struct field."""
+    test_gimple_stdout("gimple_nested_class_attr_annotated_str_param", """\
+def h(s: str):
+    class C():
+        name: str = s
+    return C()
+
+def main():
+    a = h("x")
+    b = h("y")
+    print(a.name)
+    print(b.name)
+""", "x\ny\n")
+
+
+def test_nested_class_var_attr_from_enclosing_local_regression():
+    """Regression: the value is an enclosing LOCAL, not a parameter of the
+    class's declaring function (so it is not in the parameter-type table the
+    class-attribute registration resolves from). The read must still reach
+    the per-execution cell; the `var` spelling's shadowing field made it
+    answer 0 for a string the `class` statement stored right."""
+    test_gimple_stdout("gimple_nested_class_var_attr_from_local", """\
+def h():
+    s = "x"
+    class C():
+        var name = s
+    return C()
+
+def main():
+    print(h().name)
+    print(h().name)
+""", "x\nx\n")
+
+
+def test_nested_class_var_attr_method_read_regression():
+    """Regression: a METHOD of the function-scoped class reads the cell
+    attribute through `self`. With the `var` spelling's visible field gone,
+    `self.name` resolves through the same class-attribute path as an external
+    read — the cell the instance was built under — so each call's method
+    answers its own value."""
+    test_gimple_stdout("gimple_nested_class_var_attr_method_read", """\
+def h(s: str):
+    class C():
+        var name = s
+        def get(self):
+            return self.name
+    return C()
+
+def main():
+    a = h("x")
+    b = h("y")
+    print(a.get())
+    print(b.get())
+""", "x\ny\n")
+
+
+def test_nested_class_var_attr_rebind_after_construction_regression():
+    """Pins CPython's lookup order for the `var` spelling, mirroring
+    `test_nested_class_attr_rebind_after_construction_regression` (the bare
+    form). A class attribute rebound on the CLASS after an instance was built
+    is seen by that instance — the instance holds no attribute of its own, so
+    it reads the class's current value, 3. The pre-fix read went through the
+    visible struct field the `var` spelling minted and answered 0/None; a
+    per-construction SNAPSHOT copy into that field would answer 5 here, which
+    is also wrong — the read must reach the cell, where the rebind lands."""
+    test_gimple_stdout("gimple_nested_class_var_attr_rebind_after_construct", """\
+def make(version: int):
+    class Tag():
+        var __version__ = version
+    t = Tag()
+    Tag.__version__ = 3
+    return t
+
+def main():
+    t = make(5)
+    print(t.__version__)
+""", "3\n")
+
+
+def test_nested_class_var_attr_instance_write_shadows_regression():
+    """Pins the instance-write half for the `var` spelling: an instance write
+    to a name its class defines as an attribute shadows the class attribute
+    on a later read. With no visible struct field, the write lands in the
+    instance's dynamic storage and the read probes it before the cell — the
+    same machinery the bare spelling already used (the companion test for it
+    is `test_instance_write_shadows_class_attr_regression`)."""
+    test_gimple_stdout("gimple_nested_class_var_attr_instance_write_shadows", """\
+def f(v: int):
+    class A():
+        var x = v
+    a = A()
+    a.x = 9
+    return a.x
+
+def main():
+    print(f(4))
+""", "9\n")
 
 
 def test_nested_class_attr_expr_over_str_param_regression():
@@ -15383,6 +15557,35 @@ def main():
             print("skip")
         else:
             print("keep")
+main()
+""")
+
+
+def test_dict_equality_by_value_for_integer_keys():
+    """`d == e` on two separately-built dicts with integer keys was False: the
+    comparison probed an integer-domain slot (keykind 2) with the string probe,
+    which cannot find it. The probe is the dict's own, so equal dicts compare
+    equal, unequal values and unequal keys still differ, and key order does not
+    matter (the convergence loop `nxt == proven` depends on this)."""
+    test_gimple_matches_cpython("gimple_dict_eq_int_keys", """\
+def main():
+    d = {1: 2}
+    e = {1: 2}
+    print(d == e)
+    f = {1: 2}
+    g = {1: 3}
+    print(f == g)
+    h = {5: 'a', 7: 'b'}
+    k = {7: 'b', 5: 'a'}
+    print(h == k)
+    m = {'x': 1, 'y': 2}
+    n = {'y': 2, 'x': 1}
+    print(m == n)
+    p = {1: 2}
+    q = {2: 2}
+    print(p == q)
+    print({} == {})
+    print({1: 2, 3: 4} == {1: 2})
 main()
 """)
 

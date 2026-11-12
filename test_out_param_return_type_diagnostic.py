@@ -189,5 +189,44 @@ class OutParamReturnTypeDiagnostic(unittest.TestCase):
                  '            self.a = k\n')
 
 
+    def test_out_argument_passed_by_keyword_is_refused_at_the_value(self):
+        # Measured with tools/mojo: `f(x=y)` is refused at the value, 6:9.
+        with self.assertRaises(RuntimeError) as cm:
+            _compile('def f(out x: Int):\n'
+                     '    x = 2\n'
+                     '\n'
+                     'def main():\n'
+                     '    var y: Int\n'
+                     '    f(x=y)\n')
+        self.assertIn("invalid call to 'f': unexpected keyword argument 'x'", str(cm.exception))
+        self.assertEqual(_location(cm.exception), (6, 9))
+
+    def test_mixed_signature_positional_extra_is_refused_at_the_argument(self):
+        # Measured with tools/mojo: `f(1, y)` for `f(a: Int, out x: Int)` is refused at 6:10.
+        with self.assertRaises(RuntimeError) as cm:
+            _compile('def f(a: Int, out x: Int):\n'
+                     '    x = a\n'
+                     '\n'
+                     'def main():\n'
+                     '    var y: Int\n'
+                     '    f(1, y)\n')
+        self.assertIn("invalid call to 'f': unexpected argument", str(cm.exception))
+        self.assertEqual(_location(cm.exception), (6, 10))
+
+    def test_mixed_signature_omitting_the_out_argument_passes(self):
+        # Measured with tools/mojo: `f(1)` is accepted (the out argument is returned, not passed).
+        _compile('def f(a: Int, out x: Int):\n'
+                 '    x = a\n'
+                 'def main():\n'
+                 '    var y: Int\n'
+                 '    f(1)\n')
+
+    def test_ordinary_keyword_arguments_still_pass(self):
+        _compile('def f(a: Int, b: Int):\n'
+                 '    pass\n'
+                 'def main():\n'
+                 '    f(a=1, b=2)\n')
+
+
 if __name__ == '__main__':
     unittest.main()

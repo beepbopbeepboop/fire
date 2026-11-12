@@ -129,9 +129,11 @@ enough to tag the body `__GIMPLE`), compiles the result with
 before the binary exists with `expected expression before '(' token` at the
 `", ".join(...)` line (measured 2026-11-11).
 
-Do **not** use `python3 fire.py run` as the oracle for this fixture: the
-interpreter currently ignores a user `__str__` and prints `<Item instance>`
-(separate bug, `bugs/INTERP_python_str_dunder_ignored.md`).
+The interpreter's ignoring of a user `__str__` (printing `<Item instance>`) was
+a separate bug, now fixed in `myinterpreter.py` (`MojoInstance.__str__` /
+`__repr__` call the class's own dunders; regression case
+`python_str_and_repr_dunders_are_called` in `test_interp_oracle.py`). Whether
+`python3 fire.py run` now matches CPython on this fixture is not re-checked here.
 
 ## Out of scope
 
