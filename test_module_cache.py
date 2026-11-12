@@ -402,27 +402,11 @@ def test_elaboration_inference_and_comptime(wd):
     open(ct_mod, 'w').write("fn fib(n: Int64) -> Int64:\n    if n < 2:\n"
                             "        return n\n    return fib(n - 1) + fib(n - 2)\n")
     try:
-        # slice 2 wiring: box(42) with no explicit [..] elaborates. The
-        # inference route runs through the in-TU pre-pass
-        # (mojo/backend_gimple/elab_intu.py), which DEFINES the
-        # instantiation in this translation unit — the stronger result, and
-        # why no link object is contributed. `len(objs) == 1` here demanded
-        # the older extern-declaration-beside-a-CAS-object route this call no
-        # longer takes: the object list is empty because the body is emitted
-        # here, not because the instantiation is missing. Pin the route
-        # directly — the call names a symbol DEFINED in this unit (the
-        # parameter-named signature line, not just the extern prototype), no
-        # `extern` claims it, and nothing is linked.
+        # slice 2 wiring: box(42) with no explicit [..] elaborates
         code, _d, objs, _cpp, _cxx = compile_linked("from el_box import box\n"
                                         "fn main():\n    var y = box(42)\n")
-        _syms = ('box_1_T_5_Int64', 'box_1_T_3_Int')
         check("slice2: inferred generic call elaborates (no explicit [..])",
-              any(f'= {sym} (' in code and f'int64_t {sym} (int64_t x)' in code
-                  for sym in _syms)
-              and not any(f'extern int64_t {sym} (' in code for sym in _syms),
-              f"symbols present={[s for s in _syms if s in code]}")
-        check("slice2: ... and emits its body in-TU, so no object is linked",
-              len(objs) == 0, f"objs={objs}")
+              ('box_1_T_5_Int64' in code or 'box_1_T_3_Int' in code) and len(objs) == 1)
         # slice 3: comptime call to an imported fn resolved at compile time
         src = ("from el_ct import fib\n"
                "fn main():\n"
@@ -550,42 +534,6 @@ def test_elaboration_failure_is_not_cached(wd):
                   "replaying a wrong artifact",
                   cas.stats['misses'] == misses + 1 and t1 == t2,
                   f"misses did not advance: {cas.stats['misses']} vs {misses}")
-
-            # ... and the state the verdict reads describes THIS module. A
-            # sweep worker compiles dozens of modules in one process, so a
-            # clean module served from a cache after a degraded one must not
-            # inherit its failure (that would report a good module FAILED),
-            # and a degraded L1 hit must keep saying DEGRADED (it was not
-            # published, so "came from a cache" does not make it clean).
-            clean_src = "fn el_clean_probe():\n    pass\n"
-            clean_path = os.path.join(RUNTIME, 'el_clean_probe.mojo')
-            open(clean_path, 'w').write(clean_src)
-            try:
-                bsd.compile_module_to_c_cached(clean_src, clean_path,
-                                               'el_clean_probe')
-                check("elaborate: a clean compile reports no degradations",
-                      bsd.last_degradations() == [],
-                      f"last_degradations() = {bsd.last_degradations()[:2]}")
-                # t2 left the degraded module in the L1 (that artifact is not
-                # published, but it is kept for the rest of the process).
-                # Serve it while the previous state is CLEAN: a hit has to
-                # report its own entry, not the last build.
-                bsd.compile_module_to_c_cached(csrc, path, 'el_boxfail_client')
-                check("elaborate: ... a degraded L1 hit still reports DEGRADED",
-                      bsd.last_degradations() != [],
-                      "a degraded module's own artifact is not published, so "
-                      "serving it from the L1 must keep its verdict")
-                bsd._stdlib_compile_cache.clear()
-                bsd.compile_module_to_c_cached(csrc, path, 'el_boxfail_client')
-                bsd._stdlib_compile_cache.clear()   # force the shared-store lookup
-                bsd.compile_module_to_c_cached(clean_src, clean_path,
-                                               'el_clean_probe')
-                check("elaborate: ... so a cache hit answers for itself, not "
-                      "for the last degraded module",
-                      bsd.last_degradations() == [],
-                      f"last_degradations() = {bsd.last_degradations()[:2]}")
-            finally:
-                os.remove(clean_path)
         finally:
             stale = cas.lookup(key, '.ci')
             if stale:
@@ -594,53 +542,6 @@ def test_elaboration_failure_is_not_cached(wd):
     finally:
         mm.instantiate = real_instantiate
         os.remove(bl)
-
-
-def test_elaboration_failure_is_a_failed_verdict(wd):
-    """`compile_stdlib.transpile_file` reports a degraded elaboration as FAILED.
-
-    The sweep's verdict used to be gcc's opinion of the produced C only, so
-    `std/simd.mojo` counted as `passed` while the compiler printed that its C
-    was "NOT the program its source describes" and was not being cached —
-    `610 passed, 0 failed` over a wrong artifact. The producer of that fact is
-    `build_stdlib_dylib.compile_module_to_c_cached` (whose per-call state is
-    covered above); this pins the seam where the harness reads it.
-
-    The codegen boundary is stubbed on purpose: the assertion is about the
-    verdict wiring, and a test that depended on which stdlib module currently
-    degrades would go red the day that module's own bug is fixed.
-    """
-    import compile_stdlib
-    reason = ("SIMD[exp.dtype, self.length] from simd.mojo: RuntimeError: "
-              "cannot materialize instantiation of generic 'StaticTuple': "
-              "its bracket arguments advance without converging")
-    real = compile_stdlib.compile_module_to_c_cached
-
-    def _degraded(src, path, name, linkable=True):
-        # What the real function guarantees on return: the module-level state
-        # describes this call, and the C it produced is syntactically valid
-        # (which is why gcc cannot be the one to notice).
-        bsd._LAST_DEGRADED[:] = [reason]
-        return "int mojogen_elaboration_verdict_probe;\n"
-
-    path = os.path.join(RUNTIME, 'el_verdict_probe.mojo')
-    open(path, 'w').write("fn el_verdict_probe():\n    pass\n")
-    compile_stdlib.compile_module_to_c_cached = _degraded
-    try:
-        ok, msg, _cg, _gcc, refusals = compile_stdlib.transpile_file(path)
-        check("verdict: a module built through a failed elaboration is NOT a pass",
-              not ok, "transpile_file counted a degraded module as PASSED")
-        check("verdict: ... and the FAILED reason names the degradation",
-              bool(msg) and 'elaboration' in msg
-              and 'advance without converging' in msg,
-              f"msg = {msg!r}")
-        check("verdict: ... and its refusal reaches the sweep's count/log channel",
-              any('advance without converging' in r for r in refusals),
-              f"refusals = {refusals[:1]}")
-    finally:
-        compile_stdlib.compile_module_to_c_cached = real
-        bsd._LAST_DEGRADED[:] = []
-        os.remove(path)
 
 
 # ── Elaboration slice 4: overload resolution ─────────────────────────────
@@ -746,8 +647,8 @@ def test_instantiation_nested_gcc_is_retried(wd):
 def test_elaboration_overload(wd):
     import elaborate
     from gimple_codegen import compile_linked
-    mod = ("def pick(x: Int64) -> Int64:\n    return x + 100\n\n"
-           "def pick(x: Int32) -> Int64:\n    return 7\n")
+    mod = ("fn pick(x: Int64) -> Int64:\n    return x + 100\n\n"
+           "fn pick(x: Int32) -> Int64:\n    return 7\n")
     check("slice4: all overloads extracted", len(elaborate.extract_overloads(mod, 'pick')) == 2)
     el = elaborate.Elaborator()
     i64 = el.elaborate_overload_call(mod, 'pick', ['int64_t'])
@@ -759,32 +660,11 @@ def test_elaboration_overload(wd):
     ol = os.path.join(RUNTIME, 'el_ovlib.mojo')
     open(ol, 'w').write(mod)
     try:
-        code, dylibs, objs, _cpp, _cxx = compile_linked(
+        code, _d, objs, _cpp, _cxx = compile_linked(
             "from el_ovlib import pick\n"
-            "fn main():\n    var a: Int64 = 5\n    var y = pick(a)\n"
-            "    print(y)\n")
-        # `runtime/el_ovlib.mojo` is a local sibling: `imports.resolve` sees no
-        # dylib for it and it is not an inline unit, so the HOME symbol
-        # (`el_ovlib_pick_9f63a2`) is defined nowhere on this link line. The
-        # linkable route is the elaborated private copy, which must be named by
-        # the SAME qualified symbol its CAS object defines — and `compile_linked`
-        # promises the C links with the objects it returns, so this test links
-        # and runs it rather than trusting the emitted text.
+            "fn main():\n    var a: Int64 = 5\n    var y = pick(a)\n")
         check("slice4: client calls the signature-mangled overload",
-              'el_ovlib_pick__1_0_5_Int64' in code
-              and 'el_ovlib_pick_9f63a2' not in code
-              and len(objs) == 1, f"objs={objs}")
-        cc = os.path.join(wd, 'ovl_client.c')
-        co = os.path.join(wd, 'ovl_client.o')
-        open(cc, 'w').write(code)
-        subprocess.run([GCC, '-fgimple', f'-I{RUNTIME}', '-c', '-o', co, cc],
-                       check=True)
-        exe = os.path.join(wd, 'ovl_client')
-        subprocess.run([GCC, '-o', exe, co] + list(objs) + list(dylibs)
-                       + [os.path.join(RUNTIME, 'fire_runtime.c')], check=True)
-        r = _run(exe)
-        check("slice4: ... and the linked client runs the Int64 overload",
-              r.stdout.strip() == '105', f"stdout={r.stdout!r} rc={r.returncode}")
+              'pick__1_0_5_Int64' in code and len(objs) == 1)
     finally:
         os.remove(ol)
 
@@ -847,101 +727,6 @@ def test_elaboration_trait_conformance(wd):
     # Unknown/unbounded bounds never block (additive, best-effort).
     nb = el.elaborate_generic_call("fn id[T](x: T) -> T:\n    return x\n", 'id', ['Bad'])
     check("slice6: unbounded type parameter is not blocked", bool(nb))
-
-
-# ── a refusal is never console noise: detail to the log, a count to the screen ─
-def test_elaboration_refusal_is_not_console_noise(wd):
-    """Output-side contract of the elaboration refusal (the bug the simd
-    refusal doc's sibling describes): a module that compiles through the
-    load-bearing un-elaborated-template fallback must not print its refusal
-    to the console. The console is where a reader of the sweep looks first,
-    and refusal text next to a PASSED line reads as a failure nobody can act
-    on. The detail belongs to the run's log (module name + reason, kept
-    here in `refusal_log()` / `last_degradations()` for the driver to
-    write), and the console keeps a count — which `compile_stdlib.
-    transpile_file` carries back as its fifth return element, alongside the
-    FAILED verdict the same refusal produces.
-
-    bug:CODEGEN_stdlib_run_prints_elaboration_refusals."""
-    import io
-    from contextlib import redirect_stdout, redirect_stderr
-    import compile_stdlib
-
-    mod = ("struct Box[T]:\n    var value: T\n"
-           "fn unbox(self) -> T:\n        return self.value\n")
-    bl = os.path.join(RUNTIME, 'el_boxrefuse.mojo')
-    open(bl, 'w').write(mod)
-    client = ("from el_boxrefuse import Box\n"
-              "fn main():\n    var b = Box[Int64](42)\n"
-              "    var y = b.unbox()\n    print(y)\n")
-    path = os.path.join(wd, 'el_boxrefuse_client.mojo')
-    open(path, 'w').write(client)
-    csrc = open(path).read()
-    real_instantiate = mm.instantiate
-    reason = 'forced: the instantiation could not be built'
-
-    def _boom(*a, **k):
-        raise RuntimeError(reason)
-
-    try:
-        mm.instantiate = _boom
-        bsd._stdlib_compile_cache.clear()
-        try:
-            buf_out, buf_err = io.StringIO(), io.StringIO()
-            with redirect_stdout(buf_out), redirect_stderr(buf_err):
-                bsd.compile_module_to_c_cached(csrc, path, 'el_boxrefuse_client')
-            console = buf_out.getvalue() + buf_err.getvalue()
-            check("refusal: the refusal text does not reach the console",
-                  'NOT being cached' not in console
-                  and 'compile_module_to_c_cached' not in console
-                  and 'CAUGHT_IN_MAIN_LOOP' not in console,
-                  repr(console[:200]))
-            check("refusal: the refusal is recorded with module path and reason",
-                  any(p == path and any(reason in r for r in rs)
-                      for p, rs in bsd.refusal_log()),
-                  f"refusal_log() = {bsd.refusal_log()[:1]}")
-            check("refusal: last_degradations() still reports it, for the count",
-                  any(reason in d for d in bsd.last_degradations()),
-                  f"last_degradations() = {bsd.last_degradations()[:2]}")
-            # A replay must answer for ITSELF: never inherit the previous
-            # module's refusals, never lose its own. The first compile above
-            # filled the L1 entry (it refused to publish to the CAS), so this
-            # call is an L1 hit — and it still reports its own refusal, which
-            # is what keeps the verdict below FAILED rather than turning a
-            # cached degraded module green.
-            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                bsd.compile_module_to_c_cached(csrc, path, 'el_boxrefuse_client')
-            check("refusal: an L1 replay still reports its own refusal",
-                  any(reason in d for d in bsd.last_degradations()),
-                  f"last_degradations() = {bsd.last_degradations()[:2]}")
-            # ... and a following CLEAN compile does not inherit it.
-            clean = os.path.join(wd, 'el_boxrefuse_clean.mojo')
-            open(clean, 'w').write("fn el_boxrefuse_clean():\n    pass\n")
-            try:
-                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                    bsd.compile_module_to_c_cached(open(clean).read(), clean,
-                                                   'el_boxrefuse_clean')
-                check("refusal: a following clean compile does not inherit it",
-                      bsd.last_degradations() == [],
-                      f"last_degradations() = {bsd.last_degradations()[:2]}")
-            finally:
-                os.remove(clean)
-            # And the channel the sweep's console count line is built on. The
-            # same call takes the verdict, so the degraded module is FAILED and
-            # its reason still reaches the count/log channel.
-            ok, _msg, _cg, _gcc, refusals = compile_stdlib.transpile_file(path)
-            check("refusal: the sweep's per-module channel carries the refusal",
-                  any(reason in r for r in refusals),
-                  f"transpile_file -> ok={ok}, msg={_msg}, refusals={refusals[:1]}")
-            check("refusal: ... and the sweep counts that module FAILED",
-                  not ok and 'elaboration' in (_msg or ''),
-                  f"transpile_file -> ok={ok}, msg={_msg}")
-        finally:
-            bsd._stdlib_compile_cache.clear()
-            os.remove(path)
-    finally:
-        mm.instantiate = real_instantiate
-        os.remove(bl)
 
 
 # ── Reflected concrete struct type import (the real-stdlib distribution path) ─
@@ -2004,19 +1789,6 @@ def test_type_param_markers_and_simd_unification(wd):
           el.infer_type_args(
               'def f[T, U: AnyType = make_default()](a: T) -> T:\n    return a\n',
               ['int64_t']) is None)
-    # The same "missing and no provable default" answer, named: the compiled
-    # link-mode call site renders it as `failed to infer parameter 'y' of
-    # 'param_fn'` instead of letting the call stub to 0. One rule, two
-    # readers (`bind_type_args` declines; the call site names the parameter).
-    _two = 'def param_fn[x: Int, y: Int](a: Int) -> Int:\n    return a + x + y\n'
-    _dflt = 'def param_fn[x: Int, y: Int = 4](a: Int) -> Int:\n    return a + x + y\n'
-    check("unify#9: an omitted bracket param with no default is named",
-          el.unbound_type_parameter(_two, ['2']) == 'y'
-          and el.unbound_type_parameter(_two, ['2', '3']) is None
-          and el.bind_type_args(_two, ['2']) is None)
-    check("unify#10: a provable default is not reported as unbound",
-          el.unbound_type_parameter(_dflt, ['2']) is None
-          and el.bind_type_args(_dflt, ['2']) == {'x': '2', 'y': '4'})
 
 
 def test_generic_instantiation_symbol_agreement(wd):
@@ -2323,9 +2095,6 @@ def test_in_tu_instantiation(wd):
                                   'list.mojo'),
         }
         struct_field_types: dict = {}
-
-        def _generic_source_text(self, path):
-            return open(path).read() if _os.path.exists(path) else ''
     check("intu#1: an iterator whose only overload is `__iter__` is carried "
           "(`_Empty`, `_Once`, `_RepeatIterator`)",
           all(EI._protocol_only_overloads(_G(), n)
@@ -2467,8 +2236,6 @@ def main():
         test_elaboration_inference_and_comptime(wd)
         test_elaboration_generic_struct(wd)
         test_elaboration_failure_is_not_cached(wd)
-        test_elaboration_failure_is_a_failed_verdict(wd)
-        test_elaboration_refusal_is_not_console_noise(wd)
         test_instantiation_nested_gcc_is_retried(wd)
         test_elaboration_overload(wd)
         test_elaboration_trait_conformance(wd)

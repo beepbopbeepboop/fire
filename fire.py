@@ -151,76 +151,6 @@ def _extract_codegen_flags(args: list):
     return opt_flag, debug_flag, remaining
 
 
-def _extract_diagnostic_format(args: list):
-    """Pull --diagnostic-format <text|json> (or --diagnostic-format=<fmt>) out
-    of an argument list. Returns (fmt, remaining_args); 'text' is the default.
-    The json form is the modular compiler's machine-readable diagnostic
-    stream (see myinterpreter.mojo_diagnostic)."""
-    fmt = 'text'
-    rest = []
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a == '--diagnostic-format' and i + 1 < len(args):
-            fmt = args[i + 1]
-            i += 2
-            continue
-        if a.startswith('--diagnostic-format='):
-            fmt = a.split('=', 1)[1]
-            i += 1
-            continue
-        rest.append(a)
-        i += 1
-    if fmt not in ('text', 'json'):
-        print(f"error: unknown --diagnostic-format '{fmt}' (expected text or json)",
-              file=sys.stderr)
-        sys.exit(2)
-    return fmt, rest
-
-
-def _extract_werror(args: list):
-    """Pull --Werror / --Wno-error out of an argument list (last wins). Returns
-    (werror, remaining_args): warnings the static pass finds are reported as
-    errors, and stop the program, under --Werror."""
-    werror = False
-    rest = []
-    for a in args:
-        if a == '--Werror':
-            werror = True
-        elif a == '--Wno-error':
-            werror = False
-        else:
-            rest.append(a)
-    return werror, rest
-
-
-def _extract_use_mlir_diagnostics(args: list, diagnostic_format: str):
-    """Pull --use-mlir-diagnostics[=true|false] out of an argument list. There
-    is no MLIR layer here, so the flag has no effect on text output, but the
-    modular front end rejects the JSON stream combined with it, and so do we:
-    `{"kind":"error","message":"--diagnostic-format=json is incompatible with
-    --use-mlir-diagnostics=true"}` on stdout/stderr, exit 1 (the spelling is
-    the one modular's test/mojo-parser/diagnostic_format.mojo checks)."""
-    rest = []
-    value = None
-    for a in args:
-        if a == '--use-mlir-diagnostics':
-            value = 'true'
-        elif a.startswith('--use-mlir-diagnostics='):
-            value = a.split('=', 1)[1]
-        else:
-            rest.append(a)
-    if value not in (None, 'true', 'false'):
-        print(f"error: invalid value '{value}' for --use-mlir-diagnostics "
-              "(expected true or false)", file=sys.stderr)
-        sys.exit(2)
-    if value == 'true' and diagnostic_format == 'json':
-        print('{"kind":"error","message":"--diagnostic-format=json is incompatible '
-              'with --use-mlir-diagnostics=true"}', file=sys.stderr)
-        sys.exit(1)
-    return rest
-
-
 def _extract_backend(args: list):
     """Pull --backend=<name> (or --backend <name>) out of an argument list.
 
@@ -794,38 +724,7 @@ def _format_error_message(e):
     return msg
 
 
-def _is_user_diagnostic(exc):
-    """True for an exception that IS the program's compile error (a
-    RuntimeError whose text is a modular-style `error: ...` diagnostic, with or
-    without a leading `file:line:col:`), as opposed to the compiler failing to
-    handle the program. The first must be reported and stop the build; the
-    second may fall back to another path."""
-    if not isinstance(exc, RuntimeError):
-        return False
-    text = str(exc).lstrip()
-    return text.startswith('error:') or ': error: ' in text.split('\n', 1)[0]
-
-
-def static_gate(src_code, filename, werror=False):
-    """Declaration-level diagnostics the modular compiler reports before
-    compiling anything (see myinterpreter.static_module_diagnostics): print them
-    and return True when any is an error, so `build`/the bare compile-and-run
-    path stop exactly as `run` does. A source that does not parse is left to
-    the compiler's own error."""
-    try:
-        from fire_compiler import py_tokenize, Parser
-        from myinterpreter import static_module_diagnostics
-        stmts = Parser(py_tokenize(src_code)).with_filename(filename or "<stdin>").parse_module()
-        text, errors = static_module_diagnostics(stmts, filename, src_code, werror)
-    except Exception:
-        return False
-    if text is not None:
-        print(text, file=sys.stderr)
-    return bool(errors)
-
-
-def interpret_and_execute(src_code, filename=None, argv=None, diagnostic_format='text',
-                          werror=False):
+def interpret_and_execute(src_code, filename=None, argv=None):
     """Runs the interpretation in a worker thread with a large native stack.
 
     Deep *Mojo-level* recursion (e.g. a recursive-descent parser written in
@@ -853,19 +752,10 @@ def interpret_and_execute(src_code, filename=None, argv=None, diagnostic_format=
         try:
             sys.argv = argv if argv is not None else [filename or "<stdin>"]
             from fire_compiler import py_tokenize, Parser, FunctionDef, IfStmt, ExprStmt, CallExpr, IdentExpr
-            from myinterpreter import Interpreter, mojo_diagnostic, static_module_diagnostics
+            from myinterpreter import Interpreter
             tokens = py_tokenize(src_code)
             stmts = Parser(tokens).with_filename(filename or "<stdin>").parse_module()
             interpreter = Interpreter(filename=filename, argv=argv)
-            # Declaration-level errors the modular compiler reports before
-            # anything runs (all of them, in source order).
-            static_diag, static_errors = static_module_diagnostics(
-                stmts, filename, src_code, werror)
-            if static_diag is not None:
-                print(static_diag, file=sys.stderr)
-            if static_errors:
-                exit_code.append(1)
-                return
             for stmt in stmts:
                 interpreter.execute(stmt)
 
@@ -900,14 +790,6 @@ def interpret_and_execute(src_code, filename=None, argv=None, diagnostic_format=
             base_msg = str(e)
             msg = _format_error_message(e)
             tb_lines = None
-            # An unknown declaration in Mojo source is a diagnostic, not a
-            # crash: print the modular-format block (file:line:col, the
-            # source line, the caret) and no Python traceback.
-            diag = mojo_diagnostic(e, filename, src_code, diagnostic_format)
-            if diag is not None:
-                print(diag, file=sys.stderr)
-                exit_code.append(1)
-                return
             if msg != base_msg:
                 # A 3.15 suggestion was appended — CPython prints it on the
                 # exception's own final line, so the traceback's last line
@@ -1420,9 +1302,6 @@ def main():
     # flags, so it is stripped from argv before `program_args = sys.argv[2:]`
     # and never reaches the executed program as an argument of its own.
     auto_gpu, rest = _extract_gpu_flags(rest)
-    diagnostic_format, rest = _extract_diagnostic_format(rest)
-    rest = _extract_use_mlir_diagnostics(rest, diagnostic_format)
-    werror, rest = _extract_werror(rest)
     if formal and not backend_explicit:
         # --formal alone means the arm64 formal backend, but an explicit
         # --backend wins: `build --formal --backend=x86_64` is how the x86-64
@@ -1511,21 +1390,6 @@ def main():
               "(X0) and requires --formal", file=sys.stderr)
         sys.exit(2)
     formal_test_input = _pop_test_input(sys.argv)
-
-    # precompile: parse a package directory and write a .mojoc signature
-    # artifact (no codegen/compilation). Used by the mojoc import diagnostics
-    # path to carry signatures across a source-deleted boundary.
-    if sys.argv[1] == 'precompile':
-        sys.argv.pop(1)
-        pre_out = _pop_flag_value(sys.argv, '-o')
-        pre_inputs = [a for a in sys.argv[1:] if not a.startswith('-')]
-        if not pre_inputs or pre_out is None:
-            print(f"{_tool_name()} precompile: usage: precompile <pkg-dir> -o <out>.mojoc",
-                  file=sys.stderr)
-            sys.exit(2)
-        from mojo.middle import mojoc_artifact
-        mojoc_artifact.write_artifact(pre_inputs[0], pre_out)
-        return
 
     # Check for dylib command: compile one or more .mojo LIBRARY modules
     # (no main()/top-level entry point needed — same "library module" shape
@@ -1713,17 +1577,12 @@ def main():
                 arch=backend, check_contracts=check_contracts,
                 loop_invariants=loop_invariants, opt=opt))
 
-        if static_gate(src, input_file, werror):
-            sys.exit(1)
         try:
             import driver
             rc = driver.compile_program(
                 input_file, src, output=build_output, run=False,
                 opt_flag=opt_flag, debug_flag=debug_flag, auto_gpu=auto_gpu)
-        except Exception as e:
-            if _is_user_diagnostic(e):
-                print(f"Error building: {e}", file=sys.stderr)
-                sys.exit(1)
+        except Exception:
             rc = None
         if rc is None:
             success = build_executable(input_file, src, output=build_output,
@@ -1861,8 +1720,7 @@ def main():
 
     # `fire run <file>`: force the interpreter, no compile attempt at all.
     if run_interp:
-        interpret_and_execute(src, filename=input_file, argv=[input_file] + program_args,
-                          diagnostic_format=diagnostic_format, werror=werror)
+        interpret_and_execute(src, filename=input_file, argv=[input_file] + program_args)
         return
 
     # Default for a .mojo program: compile and run it through the module-cache
@@ -1883,8 +1741,6 @@ def main():
                 prove, run_it=True, arch=backend,
                 check_contracts=check_contracts,
                 loop_invariants=loop_invariants, opt=opt))
-        if static_gate(src, input_file, werror):
-            sys.exit(1)
         try:
             import driver
             rc = driver.compile_program(
@@ -1892,17 +1748,13 @@ def main():
                 debug_flag=debug_flag, program_args=program_args,
                 auto_gpu=auto_gpu)
         except Exception as e:
-            if _is_user_diagnostic(e):
-                print(f"Error: {e}", file=sys.stderr)
-                sys.exit(1)
             print(f"driver error, interpreting instead: {e}", file=sys.stderr)
             rc = None
         if rc is not None:
             sys.exit(rc)
 
     # Otherwise interpret as Mojo
-    interpret_and_execute(src, filename=input_file, argv=[input_file] + program_args,
-                          diagnostic_format=diagnostic_format, werror=werror)
+    interpret_and_execute(src, filename=input_file, argv=[input_file] + program_args)
 
 if __name__ == '__main__':
     main()

@@ -332,26 +332,10 @@ def _assign_target(gen, tgt, et, ev):
         # `strdup` as a "type".
         if et == 'int64_t' and ev in getattr(gen, '_boxed_vals', ()):
             _un = gen._new_temp('int64_t')
-            gen._rt_into(_un, 'mojo_unbox_plain', [f"{ev}"])
+            gen._emit(f"  {_un} = mojo_unbox_plain ({ev});")
             if ev in gen._dyn_word_vals:
                 gen._dyn_word_vals.add(_un)
             gen._boxed_vals.add(_un)
-            # A tagged word stays tagged through the bind: the local holds the
-            # same box, and the arithmetic/comparison selectors key off
-            # `_tagged_word_vals` to read it by kind. Without this a call
-            # result bound to a name (`l = eval_const(x)`) was boxed for
-            # printing but read as a plain integer by `l + r`. The NAME is
-            # recorded too, not just the temp: a later read of a plain local
-            # lowers to the name itself, so a temp-only marker never reached
-            # the operand (`a = f(0); print(a * 2)` printed the box address).
-            if ev in getattr(gen, '_tagged_word_vals', ()):
-                gen._tagged_word_vals.add(_un)
-                if (isinstance(tgt, IdentExpr)
-                        and gen.var_types.get(_as_str(tgt.name), 'int64_t')
-                        == 'int64_t'):
-                    _tn = _as_str(tgt.name)
-                    gen._tagged_word_vals.add(_tn)
-                    gen._boxed_vals.add(_tn)
             ev = _un
         gen._track_pointer_actual_type(tgt.name, gen.var_types[tgt.name], ev, et)
         gen._safe_coerce_emit(et, gen.var_types[tgt.name], ev, gen._write_dest(tgt.name))
@@ -393,11 +377,11 @@ def _assign_target(gen, tgt, et, ev):
         # (unpacks the dict's keys), not just an ambiguous boxed handle.
         lp = gen._materialize_as_list(et, ev)
         for i, sub in enumerate(tgt.elements):
-            idx64 = gen._cast('int64_t', f"{i}")
+            idx64 = gen._new_val('int64_t', f"(int64_t){i}")
             elem_type = gen._elem_of(lp)
             suf = gimple_ctypes.TypeLattice.list_suffix(elem_type)
             set_et = elem_type if elem_type != 'unknown' else 'int64_t'
-            sev = gen._rt_call(set_et, f"mojo_list_get_{suf}", [lp, f"{idx64}"])
+            sev = gen._new_val(set_et, f"mojo_list_get_{suf} ({lp}, {idx64})")
             # No element record for the unpacked value at all: each slot is a
             # word whose kind only the runtime knows (`r, p, m = TABLE[k]`
             # over a dict of tuples, `m` a str or None).
@@ -493,12 +477,7 @@ def _collect_isinstance_narrowings(gen, cond, out: list) -> None:
         key = gen._narrow_key_for_expr(cond.args[0])
         sn = gen._isinstance_narrow_struct(cond.args[1])
         if key and sn:
-            # `_MojoFloat8Value` is a float8 box word, not a struct pointer: the
-            # narrowed value is the word (emit_calls._lower_float8_value_box).
-            if sn == '_MojoFloat8Value':
-                out.append((key, 'int64_t', cond.args[0]))
-            else:
-                out.append((key, sn + ' *', cond.args[0]))
+            out.append((key, sn + ' *', cond.args[0]))
 
 def _handler_exc_name(gen, h) -> str:
     if h.exc_type is None:

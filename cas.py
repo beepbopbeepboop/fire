@@ -146,12 +146,6 @@ for _p in _list_py_files(HERE, prefix='gimple_', recursive=False):
 # repo-relative with forward slashes so the fingerprint is host-OS-stable.
 for _p in _list_py_files(os.path.join(HERE, 'mojo')):
     _COMPILER_SOURCES.append(os.path.relpath(_p, HERE).replace(os.sep, '/'))
-# `formal/` is imported by fire.py (the proof/model side of the compiler), so a
-# change there changes the compiler a cached artifact was built by. It was
-# outside this key, which the self-host-key completeness check catches: the
-# import walk reached 21 `formal/*.py` modules with no hash covering them.
-for _p in _list_py_files(os.path.join(HERE, 'formal')):
-    _COMPILER_SOURCES.append(os.path.relpath(_p, HERE).replace(os.sep, '/'))
 
 # Runtime ABI: every cached object is compiled against this header (and links the
 # runtime). A change to either MUST invalidate the cache, or stale objects link
@@ -288,7 +282,6 @@ _SELFHOST_EXTRA = [
     'cas.py',
     'determinism_trace.py',
     'jit/arm64.py',
-    'unknown_decl_check.py',  # compiler-provided builtins, reached from fire.py
     # The `formal` package's __init__, reached because
     # mojo/backend_gimple/emit_stmts.py does a function-local
     # `from formal import model as formal_model` (delayed inside the function

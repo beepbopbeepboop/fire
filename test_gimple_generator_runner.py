@@ -259,74 +259,6 @@ def _build_foreign_package_run(entry_rel, entry_src, cwd):
     return out, cpython_stdout
 
 
-def _build_foreign_package_run_files(entry_src, files, cwd):
-    """`_build_foreign_package_run` with the caller's OWN package content —
-    `files` is the full package (rel path -> source, including `__init__.py`
-    and the entry's `main.py`) instead of the shared `_FOREIGN_PKG_FILES`.
-    For cross-module fixtures whose sibling modules differ from the shared
-    package (the tables.py part-4/part-5 regressions below). Returns
-    (compiled_stdout, cpython_stdout, cpython_completed)."""
-    pkg = os.path.join(cwd, 'fpp')
-    os.makedirs(pkg, exist_ok=True)
-    for rel, src in files.items():
-        with open(os.path.join(pkg, rel), 'w') as f:
-            f.write(src)
-    entry = os.path.join(pkg, 'main.py')
-    with open(entry, 'w') as f:
-        f.write(entry_src)
-    cp = subprocess.run([sys.executable, '-m', 'fpp.main'], cwd=cwd,
-                        capture_output=True, text=True,
-                        timeout=RUN_TIMEOUT_S)
-    cpython_stdout = cp.stdout
-    c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
-        entry_src, do_imports=True, filename=entry)
-    if not cpp_code:
-        raise RuntimeError(
-            "expected a non-empty generated .cpp — the entry's generator "
-            "should be cpp-path (the fixture's unrepresentable kwonly "
-            "default is what forces it down the cpp path)")
-    exe = _build_generator_program_from_code(c_code, cpp_code)
-    out = subprocess.run([exe], capture_output=True,
-                         timeout=RUN_TIMEOUT_S).stdout.decode()
-    return out, cpython_stdout, cp
-
-
-def _test_foreign_package_case(name, files, entry_src, want):
-    """`_test_foreign_a3_generator_handle` for a caller-defined package
-    (`files` is the FULL package content — `_build_foreign_package_run_files`
-    instead of the shared `_FOREIGN_PKG_FILES`). `want` is asserted against
-    CPython's own output first, so a fixture that drifted from its documented
-    expectation fails as a FIXTURE bug and not as a compiler regression."""
-    global _PASS, _FAIL
-    try:
-        wd = tempfile.mkdtemp(prefix='mojo_gen_fpp_')
-        got, cpy, cp = _build_foreign_package_run_files(entry_src, files, wd)
-    except subprocess.TimeoutExpired as e:
-        print(f"TIMEOUT {name}: {e}")
-        _FAIL += 1
-        return
-    except Exception as e:
-        print(f"FAIL  {name}: {e}")
-        _FAIL += 1
-        return
-    if cp.returncode != 0:
-        print(f"FAIL  {name}: CPython reference exited {cp.returncode}: "
-              f"{cp.stderr[-500:]} — fixture is wrong, not the compiler")
-        _FAIL += 1
-        return
-    if cpy != want:
-        print(f"FAIL  {name}: CPython baseline is not {want!r} (got {cpy!r}) "
-              f"— fixture is wrong, not the compiler")
-        _FAIL += 1
-        return
-    if got == cpy:
-        print(f"PASS  {name}")
-        _PASS += 1
-    else:
-        print(f"FAIL  {name}: compiled stdout {got!r} != CPython {cpy!r}")
-        _FAIL += 1
-
-
 def _test_foreign_a3_generator_handle(name, entry_src, want):
     """Compile+run the package fixture and compare against CPython on the
     very same files. `want` is asserted against CPython's own output first,
@@ -342,42 +274,6 @@ def _test_foreign_a3_generator_handle(name, entry_src, want):
         return
     except Exception as e:
         print(f"FAIL  {name}: {e}")
-        _FAIL += 1
-        return
-    if cpy != want:
-        print(f"FAIL  {name}: CPython baseline is not {want!r} (got {cpy!r}) "
-              f"— fixture is wrong, not the compiler")
-        _FAIL += 1
-        return
-    if got == cpy:
-        print(f"PASS  {name}")
-        _PASS += 1
-    else:
-        print(f"FAIL  {name}: compiled stdout {got!r} != CPython {cpy!r}")
-        _FAIL += 1
-
-
-def _test_foreign_package_case(name, files, entry_src, want):
-    """`_test_foreign_a3_generator_handle` for a caller-defined package
-    (`files` is the FULL package content — `_build_foreign_package_run_files`
-    instead of the shared `_FOREIGN_PKG_FILES`). `want` is asserted against
-    CPython's own output first, so a fixture that drifted from its documented
-    expectation fails as a FIXTURE bug and not as a compiler regression."""
-    global _PASS, _FAIL
-    try:
-        wd = tempfile.mkdtemp(prefix='mojo_gen_fpp_')
-        got, cpy, cp = _build_foreign_package_run_files(entry_src, files, wd)
-    except subprocess.TimeoutExpired as e:
-        print(f"TIMEOUT {name}: {e}")
-        _FAIL += 1
-        return
-    except Exception as e:
-        print(f"FAIL  {name}: {e}")
-        _FAIL += 1
-        return
-    if cp.returncode != 0:
-        print(f"FAIL  {name}: CPython reference exited {cp.returncode}: "
-              f"{cp.stderr[-500:]} — fixture is wrong, not the compiler")
         _FAIL += 1
         return
     if cpy != want:
@@ -455,111 +351,6 @@ def _foreign_a3_generator_handle_for_loop():
         "60\n")
 
 
-def _foreign_module_qualified_generator_tuple_for():
-    # `for a, b in <module>.<generator>(...):` inside a compiled generator
-    # body — the module-qualified (not `self.method`, not a bare imported
-    # name) delegation form, with a tuple-unpacked loop target. Real:
-    # c_common/tables.py's `parse_table` consuming
-    # `strutil.parse_entries(entries, ignoresep=sep)` (a cross-module
-    # generator, delegated with a keyword argument, tuple-unpacked).
-    global _PASS, _FAIL
-    name = "foreign_module_qualified_generator_tuple_for"
-    try:
-        wd = tempfile.mkdtemp(prefix='mojo_gen_fqm_', dir='.tmp')
-        os.makedirs(os.path.join(wd, 'fpq'), exist_ok=True)
-        with open(os.path.join(wd, 'fpq', '__init__.py'), 'w') as f:
-            f.write('')
-        # A tuple-yielding generator in another module. Scalar int pairs keep
-        # the value protocol simple and the cpp path eligible.
-        with open(os.path.join(wd, 'fpq', 'sub.py'), 'w') as f:
-            f.write("def pairs(n):\n"
-                    "    i = 0\n"
-                    "    while i < n:\n"
-                    "        yield i, i * 2\n"
-                    "        i = i + 1\n")
-        entry_src = ("from . import sub\n"
-                     "\n"
-                     "def consume(n, *, start=[]):\n"
-                     "    for a, b in sub.pairs(n):\n"
-                     "        yield a + b\n"
-                     "\n"
-                     "def main():\n"
-                     "    print(sum(consume(4)))\n"
-                     "\n"
-                     "main()\n")
-        entry = os.path.join(wd, 'fpq', 'main.py')
-        with open(entry, 'w') as f:
-            f.write(entry_src)
-        cp = subprocess.run([sys.executable, '-m', 'fpq.main'],
-                            cwd=wd, capture_output=True, text=True,
-                            timeout=RUN_TIMEOUT_S)
-        cpython_stdout = cp.stdout
-        c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
-            entry_src, do_imports=True, filename=entry)
-        if not cpp_code:
-            raise RuntimeError(
-                "expected a non-empty generated .cpp (consumer must take the "
-                "cpp C++20-coroutine path)")
-        exe = _build_generator_program_from_code(c_code, cpp_code)
-        out = subprocess.run([exe], capture_output=True,
-                             timeout=RUN_TIMEOUT_S).stdout.decode()
-        if cpython_stdout != "18\n":
-            print(f"FAIL  {name}: CPython baseline wrong (got {cpython_stdout!r})")
-            _FAIL += 1
-            return
-        if out == cpython_stdout:
-            print(f"PASS  {name}")
-            _PASS += 1
-        else:
-            print(f"FAIL  {name}: compiled stdout {out!r} != CPython {cpython_stdout!r}")
-            _FAIL += 1
-    except subprocess.TimeoutExpired as e:
-        print(f"TIMEOUT {name}: {e}")
-        _FAIL += 1
-    except Exception as e:
-        print(f"FAIL  {name}: {e}")
-        _FAIL += 1
-
-
-
-def _regression_tables_callable_param_generator_handle_arg():
-    # COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part5: a call THROUGH a
-    # callable-valued parameter whose ARGUMENT is a compiled-generator HANDLE
-    # local — tables.py's read_table doing
-    # `lines = strutil._iter_significant_lines(infile)` then
-    # `for row in _get_reader(lines, delimiter=sep or '\t'):`. Before the fix
-    # `cpp_core._cpp_dyn_call_expr` refused the handle argument ("C type is not
-    # statically a word, string or container"); the lowering now materializes
-    # the handle into a fresh `MojoList *` and packs that.
-    #
-    # `mlines.iter_lines` is A3-lowered exactly like
-    # `strutil._iter_significant_lines`; `_get_reader=csv.reader` (a callable
-    # default) keeps `read_table` on the cpp path, and the csv.reader tabled
-    # runtime iterates the materialized list of lines.
-    _test_foreign_package_case(
-        "tables_callable_param_generator_handle_arg",
-        {'__init__.py': '',
-         'mlines.py': (
-             "def iter_lines(lines):\n"
-             "    for line in lines:\n"
-             "        yield line\n")},
-        (
-            "import csv\n"
-            "from . import mlines\n"
-            "\n"
-            "def read_table(entries, header, *, sep=',', _get_reader=csv.reader):\n"
-            "    lines = mlines.iter_lines(entries)\n"
-            "    for row in _get_reader(lines, delimiter=sep):\n"
-            "        yield row[0]\n"
-            "\n"
-            "def main():\n"
-            "    for v in read_table([\"a,b\", \"1,2\"], \"a,b\", sep=','):\n"
-            "        print(v)\n"
-            "\n"
-            "main()\n"),
-        "a\n1\n")
-
-
 def test_generator_stdout(name: str, mojo_src: str, expected_stdout: str):
     global _PASS, _FAIL
     try:
@@ -596,39 +387,6 @@ def test_generator_c_compiles(name: str, mojo_src: str):
             _PASS += 1
         else:
             print(f"FAIL  {name}: gcc -fgimple errors:\n{r.stderr}")
-            _FAIL += 1
-    except Exception as e:
-        print(f"FAIL  {name}: {e}")
-        _FAIL += 1
-
-
-def _stray_include_lines(c_code: str) -> list:
-    """Return the 1-based line numbers of every `#include` directive that sits
-    inside a brace-delimited body (brace depth > 0). The module prelude is the
-    only place a header may appear; a copy inside a function is a gcc error."""
-    depth = 0
-    stray = []
-    for n, line in enumerate(c_code.splitlines(), 1):
-        if depth > 0 and line.lstrip().startswith('#include'):
-            stray.append(n)
-        depth += line.count('{') - line.count('}')
-    return stray
-
-
-def test_generator_c_no_stray_include(name: str, mojo_src: str):
-    """Emit the generator module's C and assert no `#include` lands inside a
-    function body. Pins the nested generator / generator method emitter
-    (the 2026-11-12 `#include <sys/types.h>` inside `T_run` gcc error, fixed
-    on this tree)."""
-    global _PASS, _FAIL
-    try:
-        c_code, _cpp = gimple_codegen.compile_to_gimple_with_cpp(mojo_src)
-        stray = _stray_include_lines(c_code)
-        if not stray:
-            print(f"PASS  {name}")
-            _PASS += 1
-        else:
-            print(f"FAIL  {name}: #include inside a function body at line(s) {stray}")
             _FAIL += 1
     except Exception as e:
         print(f"FAIL  {name}: {e}")
@@ -823,26 +581,6 @@ def main():
 main()
 print(next(it))
 """)
-
-    # A non-literal element of a list-literal argument is typed by its inferred
-    # ctype (`_cpp_typed_list_elem`), so `[top, "x"]` with `top` of an unknown
-    # kind (a popped word) is a MIXED-kind list and is refused as one, rather
-    # than refused for being non-literal at all. Pins the new reason.
-    test_generator_refused("generator_list_literal_arg_mixed_kind_refused", """\
-def g(name):
-    stack = [name]
-    while stack:
-        top = stack.pop()
-        if isinstance(top, tuple):
-            yield top
-            continue
-        yield ",".join([top, "x"])
-
-def main():
-    for v in g("ab"):
-        print(v)
-main()
-""", "a list-literal argument with mixed element types")
 
     # A global bound TWICE to a generator is not one fact, so the read from
     # the function keeps the honest refusal rather than a guessed api.
@@ -1385,393 +1123,53 @@ def _regression_read_table_callable_reader():
     # Root-cause regression for bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
     # `_get_reader` is a callable-valued parameter (default csv.reader); the
     # loop `for row in _get_reader(lines, ...):` in `read_table` must compile
-    # and produce output matching CPython ground truth.
-    mojo_src = """\
-import csv
-
-def read_table(infile, header, *, sep='\\t',
-               _get_reader=csv.reader):
-    lines = infile.splitlines()
-    for row in _get_reader(lines, delimiter=sep):
-        yield row
-
-def main():
-    data = "a\\tb\\n1\\t2\\n3\\t4\\n"
-    for r in read_table(data, "a\\tb", sep='\\t'):
-        print(r[0], r[1])
-main()
-"""
-    cpy_src = """\
-import csv
-
-def read_table(infile, header, *, sep='\\t',
-               _get_reader=csv.reader):
-    lines = infile.splitlines()
-    for row in _get_reader(lines, delimiter=sep):
-        yield row
-
-def main():
-    data = "a\\tb\\n1\\t2\\n3\\t4\\n"
-    for r in read_table(data, "a\\tb", sep='\\t'):
-        print(r[0], r[1])
-main()
-"""
+    # and run correctly.
     test_generator_matches_cpython(
         "cpp_for_callable_param_read_table_like",
-        mojo_src,
-        cpy_src)
+        """\
+def _get_reader_list(lines, delimiter='\t'):
+    res = []
+    for line in lines:
+        if delimiter in line:
+            res.append(line.split(delimiter))
+        else:
+            res.append([line])
+    return res
 
-
-def _regression_read_table_callable_reader_untabled_refusal():
-    # An untabled callable-valued parameter must still be refused by name
-    # (honest refusal, no silent wrong behavior).
-    src = """\
-def my_reader(lines):
-    return []
-
-def read_table(infile, *, _get_reader=my_reader):
+def read_table(infile, header, *, sep='\t',
+               _get_reader=_get_reader_list):
     lines = infile.splitlines()
-    for row in _get_reader(lines):
+    for row in _get_reader(lines, delimiter=sep):
         yield row
 
 def main():
-    for r in read_table("a"):
-        print(r)
-"""
-    test_generator_refused(
-        "cpp_for_callable_param_read_table_like_untabled_refusal",
-        src,
-        "_get_reader")
-
-
-def _regression_for_over_file_object():
-    global _PASS, _FAIL
-    # A compiled generator's `for line in <open file>` (fixed 2026-11-14; the
-    # bug doc that tracked it was deleted with the fix). A file word is not a
-    # MojoList, a dict or a set,
-    # so the `int64_t`-word iterator dispatch used to read the FILE* as a
-    # container (garbage length: the body ran ZERO times -- the c-analyzer
-    # consumer's `read_table` then raised `bad header ''`) or, on the cpp
-    # path, `TypeError: object is not iterable`. Both fixtures below are
-    # asserted against CPython run on the same source at test time, because
-    # the failure mode is a silent zero-iteration loop, not a crash.
-    _p = os.path.join('.tmp', '_for_over_file_object_regression.txt')
-    with open(_p, 'w', newline='') as _f:
-        _f.write('a\nb\n')
-    try:
-        # 1. The plain single-module shape (A3 stack-switch path).
-        mojo_src = f"""\
-def gen(p):
-    with open(p) as f:
-        for line in f:
-            yield line.strip()
-
-def main():
-    p = r'''{_p}'''
-    for x in gen(p):
-        print(repr(x))
-
+    data = "a\\tb\\n1\\t2\\n3\\t4\\n"
+    for r in read_table(data, "a\tb", sep='\t'):
+        print(r[0], r[1])
 main()
-"""
-        cpy_src = f"""\
-def gen(p):
-    with open(p) as f:
-        for line in f:
-            yield line.strip()
-
-def main():
-    p = r'''{_p}'''
-    for x in gen(p):
-        print(repr(x))
-
-main()
-"""
-        test_generator_matches_cpython(
-            "for_over_file_object_lines", mojo_src, cpy_src)
-
-        # 1b. The cpp C++20-coroutine companion path: a keyword-only parameter
-        # the A3 gate cannot fill (`*, start=[]`) keeps this generator on the
-        # cpp path, whose boxed-list arm used to read the FILE* as a
-        # MojoList. Also covers `_open=open` as a manager PARAMETER
-        # (`with _open(p, newline='') as f:`), the read_table shape.
-        mojo_src = f"""\
-def gen_iter(p, *, start=[]):
-    with open(p) as f:
-        for line in f:
-            yield line.strip()
-
-def gen_iter_param(p, *, _open=open, start=[]):
-    with _open(p, newline='') as f:
-        for line in f:
-            yield line.strip()
-
-def main():
-    p = r'''{_p}'''
-    for x in gen_iter(p):
-        print(repr(x))
-    for x in gen_iter_param(p):
-        print(repr(x))
-
-main()
-"""
-        cpy_src = f"""\
-def gen_iter(p):
-    with open(p) as f:
-        for line in f:
-            yield line.strip()
-
-def gen_iter_param(p, _open=open):
-    with _open(p, newline='') as f:
-        for line in f:
-            yield line.strip()
-
-def main():
-    p = r'''{_p}'''
-    for x in gen_iter(p):
-        print(repr(x))
-    for x in gen_iter_param(p):
-        print(repr(x))
-
-main()
-"""
-        test_generator_matches_cpython(
-            "for_over_file_object_lines_cpp", mojo_src, cpy_src)
-
-        # 2. The SAME generator (in ANOTHER module) is called with a list of
-        # strings at one call site and an open file at another --
-        # c_common/strutil.py's `_iter_significant_lines(lines)` exactly. The
-        # list call site records string element evidence, which used to make
-        # the file call read the handle as a MojoList and run zero times;
-        # iteration must dispatch on the runtime kind of the word, not on one
-        # call site's type. The foreign module keeps the generator on the A3
-        # path (as strutil's is), while the entry's own `with open` is what
-        # hands it the file word across the module boundary.
-        wd = tempfile.mkdtemp(prefix='mojo_gen_fileobj_')
-        pkg = os.path.join(wd, 'fpp')
-        os.makedirs(pkg)
-        with open(os.path.join(pkg, '__init__.py'), 'w') as _f:
-            _f.write('')
-        with open(os.path.join(pkg, 'mlines.py'), 'w') as _f:
-            _f.write("def iter_lines(lines):\n"
-                     "    for line in lines:\n"
-                     "        yield line.strip()\n")
-        entry_src = (
-            "from . import mlines\n"
-            "\n"
-            "def main():\n"
-            f"    p = r'''{os.path.abspath(_p)}'''\n"
-            "    data = ['  one  ', '  two  ']\n"
-            "    for x in mlines.iter_lines(data):\n"
-            "        print(repr(x))\n"
-            "    with open(p) as f:\n"
-            "        for x in mlines.iter_lines(f):\n"
-            "            print(repr(x))\n"
-            "\n"
-            "main()\n")
-        entry = os.path.join(pkg, 'main.py')
-        with open(entry, 'w') as _f:
-            _f.write(entry_src)
-        _cp = subprocess.run([sys.executable, '-m', 'fpp.main'], cwd=wd,
-                             capture_output=True, text=True,
-                             timeout=RUN_TIMEOUT_S)
-        c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
-            entry_src, do_imports=True, filename=entry)
-        if '__mgco_mlines_iter_lines' not in c_code:
-            raise RuntimeError(
-                "fixture no longer A3-lowers the imported generator "
-                "iter_lines, so it does not exercise the stack-switch "
-                "file-object loop it exists for")
-        _exe = _build_generator_program_from_code(c_code, cpp_code)
-        _got = subprocess.run([_exe], capture_output=True,
-                              timeout=RUN_TIMEOUT_S).stdout.decode()
-        _want = "'one'\n'two'\n'a'\n'b'\n"
-        if _cp.returncode != 0 or _cp.stdout != _want:
-            raise RuntimeError(
-                f"CPython reference did not produce {_want!r} "
-                f"(rc={_cp.returncode}, stdout={_cp.stdout!r})")
-        if _got == _want:
-            print("PASS  for_over_file_object_list_or_file")
-            _PASS += 1
+""",
+        """\
+def _get_reader_list(lines, delimiter='\t'):
+    res = []
+    for line in lines:
+        if delimiter in line:
+            res.append(line.split(delimiter))
         else:
-            print(f"FAIL  for_over_file_object_list_or_file: "
-                  f"CPython {_want!r}, compiled {_got!r}")
-            _FAIL += 1
-    finally:
-        try:
-            os.remove(_p)
-        except Exception:
-            pass
+            res.append([line])
+    return res
 
-
-def _regression_with_tabled_open_in_generator():
-    # The tables.py `read_table` `with open(...)` refusal: a `with open(...)`
-    # (and a call through a parameter whose default is builtin open) in a plain
-    # compiled generator body (cpp C++20 coroutine path) must evaluate the
-    # manager, bind the alias, run the body, and close on the normal path.
-    # `*, start=[]` forces the cpp coroutine path (rejects the A3 stack-switch
-    # pass).
-    _p = os.path.join('.tmp', '_part2_open_regression.txt')
-    with open(_p, 'w', newline='') as _f:
-        _f.write('hello\nworld\n')
-    try:
-        mojo_src = f"""\
-def gen_read(p, *, start=[]):
-    with open(p) as f:
-        yield f.read()
-
-def gen_read_param(p, *, _open=open, start=[]):
-    with _open(p, newline='') as f:
-        yield f.read()
+def read_table(infile, header, *, sep='\t',
+               _get_reader=_get_reader_list):
+    lines = infile.splitlines()
+    for row in _get_reader(lines, delimiter=sep):
+        yield row
 
 def main():
-    p = r'''{_p}'''
-    for x in gen_read(p):
-        print(repr(x))
-    for x in gen_read_param(p):
-        print(repr(x))
-
+    data = "a\\tb\\n1\\t2\\n3\\t4\\n"
+    for r in read_table(data, "a\tb", sep='\t'):
+        print(r[0], r[1])
 main()
-"""
-        cpy_src = f"""\
-def gen_read(p):
-    with open(p) as f:
-        yield f.read()
-
-def gen_read_param(p, _open=open):
-    with _open(p, newline='') as f:
-        yield f.read()
-
-def main():
-    p = r'''{_p}'''
-    for x in gen_read(p):
-        print(repr(x))
-    for x in gen_read_param(p):
-        print(repr(x))
-
-main()
-"""
-        test_generator_matches_cpython(
-            "cpp_with_tabled_open_in_generator",
-            mojo_src,
-            cpy_src)
-    finally:
-        try:
-            os.remove(_p)
-        except Exception:
-            pass
-
-    # Untabled manager default must still be refused by name.
-    src = """\
-class CM:
-    pass
-
-def make_cm():
-    return CM()
-
-def g(*, _cm=make_cm, start=[]):
-    with _cm() as x:
-        yield 1
-
-def main():
-    for v in g():
-        print(v)
-main()
-"""
-    test_generator_refused(
-        "cpp_with_tabled_open_in_generator_untabled_refusal",
-        src,
-        "`with <context manager> as <name>:` over a manager")
-
-def _regression_raise_mixed_tuple_literal_in_generator():
-    # A compiled generator (cpp coroutine path) raising with a mixed-scalar
-    # tuple message like `raise NotImplementedError((header, line))` must
-    # get past the cpp coroutine lowering (the pre-fix refusal:
-    # "a list-literal argument with mixed element types is not supported at a
-    # compiled-generator call in a coroutine body" on the raise-message tuple)
-    # and build the message as a char* repr string. Directly exercises the
-    # cpp coroutine generator unit that parse_table hit.
-    global _PASS, _FAIL
-    name = "cpp_raise_mixed_tuple_literal_in_generator"
-    try:
-        import fire_compiler as _fc
-        src = (
-            "def gen(header, code):\n"
-            "    raise NotImplementedError((header, code))\n"
-            "    yield 1\n"
-        )
-        stmts = _fc.Parser(_fc.py_tokenize(src)).parse_module()
-        fn = stmts[0]
-        g = gimple_codegen.GimpleGen()
-        g._cpp_module_fn_names = set()
-        g._cpp_early_global_names = set()
-        cpp_text, _value_ctype, _base, _params = g._gen_cpp_generator_unit(fn)
-        # The raise must lower to a throw with a string-built message (no
-        # mixed-element list-literal refusal), so the message is a char*.
-        if "throw _MojoCppExc" not in cpp_text:
-            raise AssertionError("no throw _MojoCppExc in generated cpp coroutine unit")
-        if "mojo_str_cat_free" not in cpp_text and "strdup" not in cpp_text:
-            raise AssertionError("raise message was not lowered to a string repr")
-        print(f"PASS  {name}")
-        _PASS += 1
-    except Exception as e:
-        print(f"FAIL  {name}: {e}")
-        _FAIL += 1
-
-
-def _regression_tables_module_qualified_tuple_for():
-    # The tables.py part-4 shape (fixed 2026-11-13): a TUPLE-target
-    # `for` over a MODULE-QUALIFIED call to a FOREIGN module's compiled
-    # generator, with a KEYWORD argument, inside a cpp C++20-coroutine
-    # generator body — tables.py's parse_table doing
-    # `for line, filename in strutil.parse_entries(entries, ignoresep=sep):`.
-    #
-    # `consume` is forced down the cpp path by the unrepresentable `start=[]`
-    # kwonly default (the list literal the A3 gate does not admit — same trick
-    # as `_foreign_a3_generator_handle_next`); `mpe.parse_entries` yields
-    # (str, None) tuples like the real `strutil.parse_entries` does, and is
-    # A3-lowered (kwonly `ignoresep` alone does NOT keep it off A3, measured
-    # 2026-11-13), so it registers in `_generator_home_api` via
-    # `publish_a3_generators`. On the 2026-11-13 tree the refusal was the
-    # ROUTING: `_cpp_iterable_is_delegatable_generator_call` (cpp_async.py)
-    # accepted only bare names and self/cls methods, so the loop fell to the
-    # generic emitter and `_cpp_refuse_unpacking_target` (cpp_core.py)
-    # refused the tuple target:
-    #
-    #     consume: a tuple `for` target (line, filename) over this iterable
-    #     is not supported in a compiled generator/coroutine body ...
-    #
-    # Part 4 fixed the routing, the delegate's per-slot unpack, and the A3
-    # kind of a local bound to `str.split()` (so `item` is a string slot).
-    # Wired into run_tests() next to
-    # `_regression_raise_mixed_tuple_literal_in_generator` by that fix.
-    _test_foreign_package_case(
-        "tables_module_qualified_tuple_for",
-        {'__init__.py': '',
-         'mpe.py': (
-             "def parse_entries(entries, *, ignoresep=None):\n"
-             "    for entry in entries:\n"
-             "        if ignoresep and ignoresep in entry:\n"
-             "            subentries = [entry]\n"
-             "        else:\n"
-             "            subentries = entry.strip().replace(',', ' ').split()\n"
-             "        for item in subentries:\n"
-             "            yield item, None\n")},
-        (
-            "from . import mpe\n"
-            "\n"
-            "def consume(entries, *, sep=',', start=[]):\n"
-            "    for line, filename in mpe.parse_entries(entries, ignoresep=sep):\n"
-            "        if filename:\n"
-            "            yield line + '/' + filename\n"
-            "        else:\n"
-            "            yield line\n"
-            "\n"
-            "def main():\n"
-            "    for v in consume([\"x,y\", \"a b\", \"c\"]):\n"
-            "        print(v)\n"
-            "\n"
-            "main()\n"),
-        "x,y\na\nb\nc\n")
+""")
 
 
 def _cpp_coroutine_builtin_module_constant():
@@ -3443,74 +2841,6 @@ def run_struct_ptr_through_local_dict_tests():
         "9\n")
 
 
-def run_tuple_target_for_and_method_stmt_generator_tests():
-    # A generator body with: `for a, b in pairs:` over a parameter (each
-    # element a 2-tuple), element reads off the first half (`fileinfo.filename`,
-    # `fileinfo.lno`), method calls on a stored struct instance as an expression
-    # statement and in `if`/`while` conditions, and a tuple-unpacking assignment
-    # from struct member reads. Mirrors the measured _iter_source shape
-    # (cpp-path generator tuple-target for-loop / method-call / tuple-unpack).
-    T_TUPLE_CPP_PKG_FILES = {
-        '__init__.py': '',
-        'info.py': (
-            "class FileInfo:\n"
-            "    def __init__(self, filename, lno):\n"
-            "        self.filename = filename\n"
-            "        self.lno = lno\n"
-            "\n"
-            "class SourceInfo:\n"
-            "    def __init__(self, filename):\n"
-            "        self.filename = filename\n"
-            "        self.text = \"\"\n"
-            "        self._start = 0\n"
-            "        self.count = 0\n"
-            "        self.done = False\n"
-            "    def _add_line(self, line, lno):\n"
-            "        self.text = self.text + line\n"
-            "        self.count = self.count + 1\n"
-            "        self._start = lno\n"
-            "    def too_much(self, maxtext, maxlines):\n"
-            "        return self.count > maxlines\n"
-            "    def _used(self):\n"
-            "        if not self.done and self.count > 0:\n"
-            "            self.done = True\n"
-            "            return True\n"
-            "        return False\n"
-        ),
-    }
-    _saved_pkg_files = _FOREIGN_PKG_FILES
-    try:
-        globals()['_FOREIGN_PKG_FILES'] = T_TUPLE_CPP_PKG_FILES
-        _test_foreign_a3_generator_handle(
-            "generator_tuple_target_for_and_method_stmts",
-            "from .info import FileInfo, SourceInfo\n"
-            "\n"
-            "def _iter_source(lines, *, maxlines=10, start=[]):\n"
-            "    srcinfo = SourceInfo(\"file.c\")\n"
-            "    for fileinfo, line in lines:\n"
-            "        srcinfo._add_line(fileinfo.filename + line, fileinfo.lno)\n"
-            "        if srcinfo.too_much(0, maxlines):\n"
-            "            break\n"
-            "        while srcinfo._used():\n"
-            "            yield srcinfo.count\n"
-            "    else:\n"
-            "        yield srcinfo.count\n"
-            "    filename, lno, text = srcinfo.filename, srcinfo._start, srcinfo.text\n"
-            "    yield lno\n"
-            "    yield srcinfo.count\n"
-            "\n"
-            "def main():\n"
-            "    pairs = [(FileInfo(\"a.c:\", 10), \"hello\"),"
-            " (FileInfo(\"b.c:\", 20), \"world\")]\n"
-            "    for v in _iter_source(pairs):\n"
-            "        print(v)\n"
-            "\n"
-            "main()\n",
-            "1\n2\n20\n2\n")
-    finally:
-        globals()['_FOREIGN_PKG_FILES'] = _saved_pkg_files
-
-
 def run_nested_generator_capture_tests():
     # A generator defined INSIDE another def that reads one of that def's
     # parameters or locals. The coroutine path has no capture model for a
@@ -3713,36 +3043,6 @@ def outer():
         yield k
     return g
 """, "variable(s) k")
-    test_generator_c_no_stray_include("nested_generator_method_no_stray_include", """\
-struct T:
-    var k: Int
-    def __init__(out self, k: Int):
-        self.k = k
-    def run(self):
-        def g():
-            yield self.k
-            yield self.k + 1
-        for v in g():
-            print(v)
-
-def main():
-    var t = T(7)
-    t.run()
-""")
-    test_generator_c_no_stray_include("generator_method_no_stray_include", """\
-struct T:
-    var k: Int
-    def __init__(out self, k: Int):
-        self.k = k
-    def run(self) -> Generator[Int]:
-        yield self.k
-        yield self.k + 1
-
-def main():
-    var t = T(3)
-    for v in t.run():
-        print(v)
-""")
     # A nested generator defined in a METHOD that reads `self` (test_frame.py's
     # `g`). `self` is handed over as a hidden pointer, not boxed, so the
     # generator sees the live receiver: a read, a write that lands on the
@@ -6933,63 +6233,6 @@ def main():
 main()
 """, "0\n1\n")
 
-    # The same walk reached through a NESTED def: `inner` is an ordinary def
-    # nested in `outer`, and the list reaches `walk` only through `inner`'s
-    # parameter. Used to refuse ("yields ['xs'] ... call sites do not all pass
-    # the same statically-known type"): the scan typed `walk(fn)` with
-    # `outer`'s env, where `fn` is not bound, and never recorded `inner`'s own
-    # call sites. The scan now types each nested def's body with that def's own
-    # env, and records its call sites, so `fn` is `outer`'s `body`, a list.
-    test_generator_stdout("nested_def_returned_generator_iterated_in_for", """\
-def walk(xs):
-    for i, st in enumerate(list(xs)):
-        yield xs, i
-def outer(body):
-    def inner(fn):
-        return walk(fn)
-    return inner(body)
-def main():
-    for p in outer([1, 2]):
-        print(p[1])
-main()
-""", "0\n1\n")
-
-    # The nested def's argument must be typable for the walk to be. A value
-    # the scan cannot type at the nested call still refuses.
-    test_generator_refused("nested_def_returned_generator_untypable_arg_refuses", """\
-def walk(xs):
-    for i, st in enumerate(list(xs)):
-        yield xs, i
-def outer(body):
-    def inner(fn):
-        return walk(fn)
-    return inner(body)
-def main():
-    for p in outer(getattr(main, 'x', None)):
-        print(p[1])
-main()
-""", "yields ['xs']")
-
-    # A nested def that ESCAPES as a value (here returned, then called through
-    # another name) has call sites this scan cannot see, so its parameter must
-    # not be typed from the direct call alone. The string passed through `f`
-    # would otherwise reach `walk`'s list slot.
-    test_generator_refused("nested_def_escaping_value_call_refuses", """\
-def walk(xs):
-    for i, st in enumerate(list(xs)):
-        yield xs, i
-def outer(body):
-    def inner(fn):
-        return walk(fn)
-    inner(body)
-    return inner
-def main():
-    f = outer([1, 2])
-    for p in f("abc"):
-        print(p[1])
-main()
-""", "yields ['xs']")
-
     # The guard is what makes the recursive argument a list. Without it the
     # argument is an untypable hole and the slot must still refuse.
     test_generator_refused("module_level_recursive_tuple_generator_unguarded_refuses", """\
@@ -7031,88 +6274,6 @@ main()
 """, "yields ['xs']")
 
 
-def run_for_over_literal_in_generator_tests():
-    # `for x in <list/tuple literal>:` inside a generator/coroutine body.
-    # The literal is already lowered to a real `MojoList *` by `_cpp_expr` (a
-    # self-invoking lambda that constructs and fills one -- this model has no
-    # braced-init-list C++ value for a container), but the generic range-for
-    # fallback emitted `for (auto x : <that lambda>())`. A raw `MojoList *`
-    # has no ADL `begin`/`end`, so g++ rejected every such loop with
-    # "'begin' was not declared in this scope" / "'end' was not declared in
-    # this scope". The loop now iterates the lowered list through the same
-    # cached-local + indexed `mojo_list_len` / `mojo_list_get_*` lowering
-    # every other list-valued iterable in a generator body already used.
-    # Real: the nested recursive generator in
-    # `run_nested_recursive_generator_getattr_tests` above, whose inner
-    # `for fld in ('v', 'missing')` is exactly this shape.
-    test_generator_stdout("generator_for_over_tuple_literal", """\
-def outer():
-    def inner():
-        for fld in ('v', 'missing'):
-            yield fld
-    yield from inner()
-
-def main():
-    for x in outer():
-        print(x)
-main()
-""", "v\nmissing\n")
-
-    test_generator_stdout("generator_for_over_int_list_literal", """\
-def outer():
-    def g():
-        for v in [10, 20, 30]:
-            yield v
-    yield from g()
-
-def main():
-    for x in outer():
-        print(x)
-main()
-""", "10\n20\n30\n")
-
-    # The double element path: yield is not used for the value here because an
-    # unannotated generator's yield slot is int64_t in this body model (a
-    # separate, unrelated limitation); the loop's own read of the literal is
-    # what this pins.
-    test_generator_stdout("generator_for_over_float_tuple_literal", """\
-def outer():
-    def g():
-        for v in (1.5, 2.5):
-            print(v)
-            yield 0
-    yield from g()
-
-def main():
-    for x in outer():
-        pass
-main()
-""", "1.5\n2.5\n")
-
-    # A literal iterable with a `for/else`: the else body runs only when the
-    # loop completes without a break. The literal lowering returns before the
-    # generic for/else block, so it carries the shared break flag itself.
-    test_generator_stdout("generator_for_else_over_literal", """\
-def outer():
-    def g():
-        for v in (1, 2):
-            yield v
-            break
-        else:
-            yield -1
-        for v in (3, 4):
-            yield v
-        else:
-            yield -1
-    yield from g()
-
-def main():
-    for x in outer():
-        print(x)
-main()
-""", "1\n3\n4\n-1\n")
-
-
 def run_generator_tuple_repr_tests():
     # A tuple yielded by a generator is built by `__mojo_tuple_box_N` (the
     # A3 runtime, runtime/fire_coro_gen.c), and `list(gen)` puts that box
@@ -7149,7 +6310,6 @@ main()
 def run_tests():
     run_generator_tuple_repr_tests()
     run_nested_recursive_generator_getattr_tests()
-    run_for_over_literal_in_generator_tests()
     run_cpp_send_tests()
     run_send_into_just_started_regression()
     run_cpp_path_multi_arg_print_tests()
@@ -7172,7 +6332,6 @@ def run_tests():
     run_variadic_lambda_value_tests()
     run_unpack_call_forward_tests()
     run_ctor_default_arg_in_generator_tests()
-    run_tuple_target_for_and_method_stmt_generator_tests()
     run_struct_ptr_through_local_dict_tests()
     run_mixed_yield_kind_tests()
     run_next_method_tests()
@@ -9121,55 +8280,6 @@ def main():
         print(v)
 """, "5\n3\n1\n")
 
-    # ── keyword arguments at a DELEGATED generator call bind by NAME ──
-    # (`c_common/tables.py`'s `read_table` build bug: it does `yield from
-    # read_table(infile, header, sep=sep, fix=fix, _open=_open,
-    # _get_reader=_get_reader)`, and `c_common/fsutil.py`'s
-    # `yield from iter_files(root, suffix, relparent, get_files=..., ...)` /
-    # `yield from iter_many(items, onempty=None)` are the same shape.)
-    #
-    # The cpp coroutine path used to drop `call.kwargs` entirely at a
-    # delegated call: the arity check counted only positional arguments and
-    # refused the whole module ("`yield from tick(...)`: expected 3
-    # argument(s), got 1"). Appending the keywords positionally instead would
-    # pass the arity check but put `bump` in `step`'s slot, so this case
-    # writes them in REVERSE declaration order and pins the real values.
-    test_generator_stdout("generator_recursive_yield_from_keywords_bind_by_name", """\
-def tick(n, *, step, bump=100):
-    if n <= 0:
-        return
-    yield n + bump
-    yield from tick(n - step, bump=bump + 1, step=step)
-
-def main():
-    for v in tick(5, step=2, bump=0):
-        print(v)
-""", "5\n4\n3\n")
-
-    # The same binder serves `for ... in <generator>(...)` consumption
-    # (`cpp_core._cpp_for_generator_delegate`), which used to flatten the
-    # keywords into `call.args` in place — mutating the AST node, and
-    # correct only in declaration order. `extra=1, scale=scale` is reversed
-    # against `def pairs(n, *, scale, extra=0)`: the old flattening bound
-    # extra=1 to `scale` and printed 46, CPython prints 64.
-    test_generator_stdout("generator_for_in_keywords_bind_by_name", """\
-def pairs(n, *, scale, extra=0):
-    i = 0
-    while i < n:
-        yield i * scale + extra, 0
-        i = i + 1
-
-def consume(n, *, scale):
-    total = 0
-    for a, b in pairs(n, extra=1, scale=scale):
-        total = total + a + b
-    yield total
-
-def main():
-    for v in consume(4, scale=10):
-        print(v)
-""", "64\n")
-
     # ── lambda literals inside a generator body ───────────────────────
     # (the (since-fixed) compiled-generator lambda-expression bug) -- 0-, 1-
     # and 2-parameter lambdas, a lambda re-bound on each branch of an
@@ -9729,40 +8839,6 @@ def main():
 main()
 """, "multi-slot `for` target over a generator whose yield arity is not a tuple")
 
-    # The same refusal for the FOR-STATEMENT consumer, whose body need not bind
-    # the target at all: `print(x)` reads an undeclared name, and before the
-    # pipeline pre-pass (mojo/middle/coro.py's
-    # refuse_multi_slot_target_over_nontuple_generator) walked `ForStmt` too,
-    # `unknown_decl_check` answered first with its own, less specific message.
-    test_generator_refused("gen_multi_slot_for_target_unknown_body_refused", """\
-def g():
-    yield 1
-
-def main():
-    for a, b in g():
-        print(x)
-main()
-""", "multi-slot `for` target over a generator whose yield arity is not a tuple")
-
-    # The pre-pass must not refuse what codegen accepts: here the CALL reaches
-    # a nested `def g` that yields a real tuple, so the module-level one-value
-    # `g` is not the callee at all — for the `for` statement or for the
-    # comprehension. Counting the enclosing scope's bound names as shadows is
-    # what keeps both out of the refusal (before that, the comprehension
-    # spelling below was refused for a program codegen compiles).
-    test_generator_stdout("gen_multi_slot_target_nested_shadowing_generator_ok", """\
-def g():
-    yield 1
-
-def main():
-    def g():
-        yield 1, 2
-    for a, b in g():
-        print(a, b)
-    print([a for a, b in g()])
-main()
-""", "1 2\n[1]\n")
-
     # The same refusal for the COMPREHENSION consumer, which reaches
     # `_compr_generator_loop` rather than `_gen_for_generator_iter`.
     test_generator_refused("gen_multi_slot_comprehension_target_over_one_value_generator_refused", """\
@@ -9771,25 +8847,6 @@ def g():
 
 def main():
     print([x for a, b in g()])
-main()
-""", "multi-slot comprehension target over a generator whose yield arity is not a tuple")
-
-    # The SET-comprehension spelling pins the precedence, not just the
-    # consumer: the unknown-declaration pass runs BEFORE codegen, so an
-    # element expression reading an undeclared name (here `x`) used to reach
-    # that pass first and die with `use of unknown declaration 'x'` instead
-    # of the arity mismatch that makes this comprehension uncompilable.
-    # The refusal is raised by a dedicated pipeline pre-pass
-    # (mojo/middle/coro.py's
-    # refuse_multi_slot_target_over_nontuple_generator) that shares
-    # one message builder with _compr_generator_loop's own raise — which of
-    # the two stages noticed first no longer changes the diagnostic.
-    test_generator_refused("gen_multi_slot_set_comprehension_target_over_one_value_generator_refused", """\
-def g():
-    yield 1
-
-def main():
-    print({x for a, b in g()})
 main()
 """, "multi-slot comprehension target over a generator whose yield arity is not a tuple")
 
@@ -10713,16 +9770,8 @@ def main():
 
     _foreign_a3_generator_handle_next()
     _foreign_a3_generator_handle_for_loop()
-    _foreign_module_qualified_generator_tuple_for()
-    _regression_tables_callable_param_generator_handle_arg()
     _foreign_cpp_module_global_value()
     _cpp_for_over_callable_local_is_named()
-    _regression_read_table_callable_reader()
-    _regression_read_table_callable_reader_untabled_refusal()
-    _regression_with_tabled_open_in_generator()
-    _regression_for_over_file_object()
-    _regression_raise_mixed_tuple_literal_in_generator()
-    _regression_tables_module_qualified_tuple_for()
     _cpp_coroutine_builtin_module_constant()
     _cpp_coroutine_exc_ctor_value()
 
@@ -13012,67 +12061,10 @@ def main():
 main()
 """, "1\n7\n")
 
-    _test_method_returns_generator_via_subclass_inchain()
-
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)
     print(f"\n{_PASS} passed, {_FAIL} failed")
-
-
-def _test_method_returns_generator_via_subclass_inchain():
-    """In-chain import: a base method returns cls.gen_method(...) or None
-    (polymorphic generator method on subclasses) and a caller unpacks the
-    result. The imported module must compile without 'no known generator API'."""
-    global _PASS, _FAIL
-    name = "method_returns_generator_via_subclass_inchain"
-    try:
-        wd = tempfile.mkdtemp(prefix='mojo_gen_mrg_')
-        os.makedirs(os.path.join(wd, 'pkg', 'parser'), exist_ok=True)
-        files = {
-            'pkg/__init__.py': '',
-            'pkg/parser/__init__.py': 'from ..info import Sub\n',
-            'pkg/info.py': (
-                "class Base:\n"
-                "    @classmethod\n"
-                "    def _format_data(cls, data):\n"
-                "        raise NotImplementedError\n"
-                "    @classmethod\n"
-                "    def _render_item(cls, data):\n"
-                "        if data is None:\n"
-                "            return None\n"
-                "        return cls._format_data(data)\n"
-                "    @classmethod\n"
-                "    def _row(cls):\n"
-                "        rendered = cls._render_item([1])\n"
-                "        rendered, = rendered\n"
-                "        return rendered\n"
-                "\n"
-                "class Sub(Base):\n"
-                "    @classmethod\n"
-                "    def _format_data(cls, data):\n"
-                "        for x in data:\n"
-                "            yield str(x)\n"
-            ),
-        }
-        for rel, src in files.items():
-            p = os.path.join(wd, rel)
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            with open(p, 'w') as f:
-                f.write(src)
-        entry = os.path.join(wd, 'pkg', 'parser', '__init__.py')
-        with open(entry) as f:
-            entry_src = f.read()
-        c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
-            entry_src, do_imports=True, filename=entry)
-        if '# ERROR: compiling imported module' in c_code:
-            raise RuntimeError('imported module compile error:\n' + '\n'.join(
-                l for l in c_code.splitlines() if '# ERROR' in l))
-        print(f"PASS  {name}")
-        _PASS += 1
-    except Exception as e:
-        print(f"FAIL  {name}: {e}")
-        _FAIL += 1
 
 
 # ONE entry point. This file used to carry TWO `if __name__ == '__main__':`

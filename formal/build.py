@@ -2401,20 +2401,9 @@ def compile_formal(source_path: str, output: str = None,
             from formal.arm64_proof_gen import generate_arm64_proof
             generate_proof = generate_arm64_proof
         # Build structs_by_name if not in scope
-        #
-        # The `locals().get('structs_by_name')` / `'structs' in locals()`
-        # probes this replaces could only ever answer "absent": neither name
-        # is a PARAMETER of `compile_formal` (`structs` is the local bound by
-        # the `_prepare_functions` unpack above, unconditionally, and
-        # `structs_by_name` is not a local at all), and a bare `locals()`
-        # call is one of the builtins the compiled path cannot lower — the
-        # self-host closure emitted an `unavailable in compiled mode` weak
-        # stub for it, whose `0` answer the probes were reading. The `globals()`
-        # probe is kept (that lowering exists) because `structs_by_name` is
-        # still a name some host may define at module scope.
         try:
-            _sb = globals().get('structs_by_name')
-            if _sb is None and structs is not None:
+            _sb = locals().get('structs_by_name') or globals().get('structs_by_name')
+            if _sb is None and 'structs' in locals() and structs is not None:
                 _sb = {getattr(s, 'name', None): s for s in structs if getattr(s, 'name', None)}
         except Exception:
             _sb = None
@@ -2422,7 +2411,7 @@ def compile_formal(source_path: str, output: str = None,
                                admitted=result["admitted"],
                                admitted_calls=_admitted_calls(
                                    source_path, result["admitted"]),
-                               structs=structs,
+                               structs=(locals().get('structs') or None),
                                structs_by_name=_sb)
         # Also attach to info for convenience
         try:
@@ -21901,7 +21890,7 @@ def _runtime_library_for(ordered: list, arch: str, fmt: str):
 
     The tree-level figures live in one place and are checked against the live
     census by `test_runtime_header_scan.py` — `bugs/FORMAL_known_limits.md`
-    §3.1 for the word-shaped surface (967 entry points, 449 of them word-shaped,
+    §3.1 for the word-shaped surface (931 entry points, 425 of them word-shaped,
     measured over every header in `runtime/`).
     """
     named = _runtime_word_calls(ordered)
@@ -23825,12 +23814,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         })
 
     mod_init_addrs: list = []
-    # A load-time entry exists for a module body AND for the stack-floor
-    # initializer a guarded library needs (`library_floor_init_needed` is the
-    # emitters' own question, so the section is declared exactly when they emit
-    # the initializer). `_mod_init_addrs` checks the answer afterwards.
-    has_mod_init = (bool(M.module_body_functions(ordered))
-                    or M.library_floor_init_needed(ordered, library_structs))
+    has_mod_init = bool(M.module_body_functions(ordered))
     if fmt == "elf":
         # ONE pass, not two, and the reason is the layout: a Mach-O dylib's
         # code starts after a load-command list whose SIZE depends on whether

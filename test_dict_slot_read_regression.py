@@ -7,10 +7,6 @@ MIXED_NAME_NON_INT64_REFUSAL.
 Before the fix (with bug): compilation refuses with:
   "a name bound to a tagged generator word ... cannot also hold a value of another C type (str or float)"
 After the fix: compilation succeeds without refusal
-
-Test 6 is the same claim about the compiler's own source: fire_compiler.py
-must lower to GIMPLE, which is what the stage1 bootstrap dump
-(`fire.py --dump fire_compiler.py`) does.
 """
 
 import subprocess
@@ -184,30 +180,6 @@ main()
     except Exception as e:
         print(f"  FAIL: Compilation raised exception: {e}")
         return 1
-
-    # Test 6: the compiler's OWN fire_compiler.py lowers to GIMPLE. This is the
-    # exact compile the stage1 bootstrap dump runs
-    # (`python3 fire.py --dump fire_compiler.py` -> `compile_to_gimple(...,
-    # do_imports=False)`), and it was red on master at 0cce3da396: the
-    # container-store refusal fired whenever the name was any box-holding
-    # local (`_mixed_box`), so fire_compiler.py's own container-beside-scalar
-    # name `body` was refused as though it were a tagged generator word.
-    # c8f06fe35 narrowed the refusal to `_tagged_mixed`; Test 5 pins the
-    # minimal shape, this one pins the compiler source the gate job dumps.
-    print("\nTest 6: the compiler's own fire_compiler.py compiles to GIMPLE")
-    import gimple_codegen
-    path6 = Path(__file__).resolve().parent / "fire_compiler.py"
-    try:
-        c_text = gimple_codegen.compile_to_gimple(
-            path6.read_text(encoding="utf-8", errors="replace"),
-            do_imports=False, filename="fire_compiler.py")
-    except Exception as e:
-        print(f"  FAIL: refused: {str(e)[:300]}")
-        return 1
-    if not c_text or not c_text.strip():
-        print("  FAIL: produced no C text")
-        return 1
-    print(f"  PASS: compiled ({len(c_text)} bytes of C)")
 
     print("\n" + "="*60)
     print("All regression tests passed!")

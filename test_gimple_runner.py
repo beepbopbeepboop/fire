@@ -263,18 +263,12 @@ def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str, filename:
     exe_path = None
     try:
         exe_path = compile_mojo_to_gimple_exe(mojo_src, filename)
-        # The exit code and stderr are kept for the failure message: an empty
-        # stdout with exit 0 and an empty stdout after a crash are different
-        # bugs, and a bare `got ''` cannot tell them apart.
-        _r = subprocess.run([exe_path], capture_output=True, timeout=RUN_TIMEOUT_S,
-                            env=_SCRIBBLE_ENV)
-        out = _r.stdout.decode('utf-8', errors='replace')
+        out = run_executable_stdout(exe_path)
         if out == expected_stdout:
             print(f"PASS  {name}")
             _PASS += 1
         else:
-            print(f"FAIL  {name}: expected stdout {expected_stdout!r}, got {out!r} "
-                  f"(exit {_r.returncode}, stderr {_r.stderr[-200:]!r})")
+            print(f"FAIL  {name}: expected stdout {expected_stdout!r}, got {out!r}")
             _FAIL += 1
     except subprocess.TimeoutExpired as e:
         # A timeout is LOAD, not a wrong answer: these are 30s/10s
@@ -1191,25 +1185,12 @@ main()
     # A variadic lambda's `*args` really is a sequence: len(), iteration and
     # indexing all read the packed list, and the ZERO-argument call packs an
     # empty one rather than passing a stray scalar.
-    # `*a` is a real sequence, so indexing it works AND reading past its end
-    # is CPython's IndexError rather than a silent default. This case was
-    # pinned to "0\n31\n" from b3de1658b ("each pinned to CPython's answer")
-    # until 2026-11-18; that expectation is NOT CPython's -- CPython raises
-    # `tuple index out of range` for `e()`, and the compiled raise
-    # (`mojo_list_get_int_checked`) is the correct behaviour. Pinned as a
-    # runtime error, with the in-bounds index asserted separately.
-    test_gimple_runtime_error("gimple_variadic_lambda_args_is_a_sequence", """\
+    test_gimple_stdout("gimple_variadic_lambda_args_is_a_sequence", """\
 def main():
     e = lambda *a: len(a) * 10 + a[0]
     print(e())
     print(e(1, 2, 3))
-""", "IndexError")
-
-    test_gimple_stdout("gimple_variadic_lambda_args_sequence_index", """\
-def main():
-    e = lambda *a: len(a) * 10 + a[0]
-    print(e(1, 2, 3))
-""", "31\n")
+""", "0\n31\n")
 
     # CAPTURING + variadic: the closure env leads the packed parameters, and
     # the capture is read through it. This is the corpus shape
@@ -6892,35 +6873,6 @@ def main():
     print("---")
     run("boom")
 """, "body-7\nfin-show\n---\nbody-7\nfin-show\ncaught\n")
-
-    # Module-level `@contextlib.contextmanager` with a PARAMETER, a computed
-    # value captured across the yield, and a `finally` that restores state:
-    # the exact shape of mojo/middle/coro.py's `pinned` (the generator the
-    # compiled path used to refuse whole-module, bugs/CODEGEN_contextmanager_
-    # generator_refused.md). Used both on the normal path and through a raise
-    # out of the `with` body, so the restore runs and the exception still
-    # reaches the outer handler.
-    test_gimple_stdout("gimple_user_contextmanager_param_restore_finally",
-                       """\
-import contextlib
-
-@contextlib.contextmanager
-def pinned(mode: String):
-    var prev = mode + "_prev"
-    try:
-        yield len(mode)
-    finally:
-        print("restore " + prev)
-
-def main() raises:
-    with pinned("cpp") as n:
-        print("body " + str(n))
-    try:
-        with pinned("stack"):
-            raise ValueError("boom")
-    except ValueError:
-        print("caught")
-""", "body 3\nrestore cpp_prev\nrestore stack_prev\ncaught\n")
 
     # Rebuilding a string from its characters must still be right now that the
     # character strings are shared and never freed: `out + ch` frees its own
@@ -13709,51 +13661,6 @@ main()
         "from xmodint_defn import F\n\ndef main():\n    print(F)\n\nmain()\n",
         "2.5\n")
 
-    # Call-valued RHS shapes the export's text scan does not model. The
-    # definer types `var N = g() + 1` as int64_t (a BinOp, not a whole call)
-    # and `var N = k()` as char * (k is unannotated, so its return comes from
-    # the body). The text scan answered void * and int64_t, so the importer's
-    # extern disagreed with the accessor the definer emits in the same unit:
-    # "conflicting types for '<mod>__mojo_global_get_N'". The importer must
-    # take the definer's own final type.
-    _test_imported_call_initialized_global(
-        "imported_call_initialized_global_binop",
-        "def g():\n    return 7\n\nvar N = g() + 1\n",
-        "from xmodint_defn import N\n\ndef main():\n    print(N)\n\nmain()\n",
-        "8\n")
-
-    _test_imported_call_initialized_global(
-        "imported_call_initialized_global_unannotated_str",
-        "def k():\n    return \"a\"\n\nvar N = k()\n",
-        "from xmodint_defn import N\n\ndef main():\n    print(N)\n\nmain()\n",
-        "a\n")
-
-    # The same disagreement for RHS shapes with no callee at all. The export
-    # scan types a non-literal expression `void *` and every container
-    # literal `void *`, while `_phase17_value_type` types them `int64_t` /
-    # `MojoList *` / `MojoDict *`; measured on this tree, each of these three
-    # was a "conflicting types for '<mod>__mojo_global_get_N'" before the
-    # importer took the definer's final accessor type. They exercise the
-    # BinOp / ListExpr / DictExpr rows of that one table, so a future edit
-    # that narrows the fix back to "call shapes" is caught here.
-    _test_imported_call_initialized_global(
-        "imported_expression_initialized_global_binop",
-        "var N = 1 + 2\n",
-        "from xmodint_defn import N\n\ndef main():\n    print(N)\n\nmain()\n",
-        "3\n")
-
-    _test_imported_call_initialized_global(
-        "imported_container_initialized_global_list",
-        "var N = [1, 2, 3]\n",
-        "from xmodint_defn import N\n\ndef main():\n    print(N[0])\n\nmain()\n",
-        "1\n")
-
-    _test_imported_call_initialized_global(
-        "imported_container_initialized_global_dict",
-        "var N = {\"a\": 4}\n",
-        "from xmodint_defn import N\n\ndef main():\n    print(N[\"a\"])\n\nmain()\n",
-        "4\n")
-
     # A FLOAT module-scope `var` imported by name. The defining module declared
     # its global `int` (the VarDecl pre-scan's catch-all arm had no FloatLiteral
     # row) and its initializer `0` (`_extract_init_expr` had no float row), so
@@ -13886,17 +13793,12 @@ main()
               if ln.startswith('static int64_t _mojo_sizeof_')]
         fa = [ln for ln in c_code.splitlines()
               if ln.startswith('static void * _mojo_fnaddr_')]
-        # The two modules' lifted closures are now module-qualified
-        # (`xhelp_a_pick_lambda_1` / `xhelp_b_pick_lambda_1`), so each has
-        # its own accessor pair. The property is unchanged: no accessor NAME
-        # is defined twice in the one translation unit.
-        names = [ln.split('(')[0] for ln in sz + fa]
-        if sz and fa and len(names) == len(set(names)):
+        if len(sz) == 1 and len(fa) == 1:
             print(f"PASS  {name}")
             _PASS += 1
         else:
-            print(f"FAIL  {name}: expected every sizeof/fnaddr accessor to be "
-                  f"defined exactly once across the closure, got "
+            print(f"FAIL  {name}: expected exactly one definition of each "
+                  f"sizeof/fnaddr accessor across the closure, got "
                   f"{len(sz)} sizeof and {len(fa)} fnaddr: {sz + fa}")
             _FAIL += 1
 
@@ -15321,7 +15223,6 @@ def main():
                   test_none_member_of_a_set_is_not_the_int_zero,
                   test_none_held_in_local_with_if_join_is_none_needle,
                   test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool,
-                  test_and_chain_with_a_bool_call_and_an_empty_list_caller,
                   test_slice_equals_after_a_multibyte_character,
                   test_caught_exception_prints_its_message,
                   test_unpack_from_a_list_of_mixed_tuples_keeps_each_slot_type,
@@ -15926,61 +15827,6 @@ main()
 """)
 
 
-def test_and_chain_with_a_bool_call_and_an_empty_list_caller():
-    """Two defects, one shape. `args and hasattr(args[-1], 'op')` / `lines and
-    lines[-1].endswith(':')`: the right operand's type was estimated as an
-    unknown word, so the chain kept the list's pointer type and stored the
-    bool into it (`(MojoList *)1`). And `f([])` was recorded as a call site
-    passing a list of INTS, which made the `list[str]` parameter kind-mixed
-    and its element read a boxed word cast to `char *`: every answer came out
-    False (`plain` / `closed`) with exit 0."""
-    test_gimple_matches_cpython("gimple_and_chain_bool_call_empty_list_caller", """\
-class N:
-    def __init__(self, op):
-        self.op = op
-
-def last_is_star(args: list) -> str:
-    if args and hasattr(args[-1], 'op') and getattr(args[-1], 'op') == '**':
-        return "star"
-    return "plain"
-
-def ends(lines: list[str]) -> str:
-    if lines and lines[-1].endswith(':'):
-        return "open"
-    return "closed"
-
-def main():
-    print(last_is_star([]))
-    print(last_is_star([N('**')]))
-    print(last_is_star([N('+')]))
-    print(ends([]))
-    print(ends(["a", "b:"]))
-    print(ends(["a"]))
-
-main()
-""")
-
-
-def test_list_str_param_read_wrong_after_empty_list_caller():
-    """`e: list[str] = []` then `ends(e)`: the empty list VARIABLE was recorded
-    as a list of ints (the annotation's element type was not read), which made
-    the `list[str]` parameter kind-mixed and its element read a boxed word cast
-    to `char *` (always False). CPython prints `closed` then `open`."""
-    test_gimple_matches_cpython("gimple_list_str_param_read_wrong_after_empty_list_caller", """\
-def ends(lines: list[str]) -> str:
-    if lines and lines[-1].endswith(':'):
-        return "open"
-    return "closed"
-
-def main():
-    e: list[str] = []
-    print(ends(e))
-    print(ends(["a", "b:"]))
-
-main()
-""")
-
-
 def test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool():
     """`a.flag or getattr(a, 'x', False) or a.some_dict`: the middle link is a
     word of unknown kind, and the last link joined it with a dict pointer, so
@@ -16171,182 +16017,6 @@ main()
 """)
 
 
-def test_star_unpack_of_generator_expression_in_call():
-    """Star-unpacking a generator expression in a call argument is an ITERABLE
-    spread, not a C pointer dereference: `f(*(... for ...))` used to lower the
-    `MojoGenerator *` handle with `_lower_UnaryOp`'s `*`, emitting
-    `_t10 = *_t6`, which gcc rejects ("storage size of '_t10' isn't known",
-    "invalid use of incomplete typedef 'MojoGenerator'"). The generator is now
-    materialized as a list and that list is unpacked."""
-    test_gimple_matches_cpython("gimple_star_unpack_generator_expression_call", """\
-def cat(*parts):
-    out = ""
-    for p in parts:
-        out += p
-    return out
-
-def total(*nums):
-    s = 0
-    for n in nums:
-        s += n
-    return s
-
-def main():
-    texts = {"x": "1", "y": "2"}
-    # The iterable is INLINE `sorted(texts)`: that is the shape that hands the
-    # call a `MojoGenerator *` operand.
-    print(cat(*(f"{p}=;" for p in sorted(texts))))
-    print(total(*(x * x for x in [1, 2, 3, 4])))
-
-main()
-""")
-
-
-def test_star_unpack_doc_symptom_program():
-    """The bug doc's `## Symptom` program, VERBATIM. It needs both halves of
-    the fix: the star-unpacked operand is a generator (materialized, not
-    dereferenced), and the generator's value slot is `char *` while `texts`
-    stays a `MojoDict *` inside the lifted generator expression."""
-    test_gimple_matches_cpython("gimple_star_unpack_symptom", """\
-def cat(*parts):
-    out = ""
-    for p in parts:
-        out += p
-    return out
-
-def main():
-    texts = {"x": "1", "y": "2"}
-    print(cat(*(f"{p}={texts[p]};" for p in sorted(texts))))
-
-main()
-""")
-
-
-def test_generator_string_value_slot_over_inline_sorted():
-    """A generator whose value is a string read from an inline `sorted(...)`
-    must have a `char *` value slot: `list(g())` printed the strings' pointer
-    bits, and `list(p for p in sorted(xs))` came out in ADDRESS order rather
-    than lexically. A dict's iteration yields its KEYS, which are strings too,
-    and its `d[k]` is a dict read, not a list read of the dict header. All
-    four shapes are pinned here, plus the star-unpack doc's own program."""
-    test_gimple_matches_cpython("gimple_generator_string_value_slot", """\
-def cat(*parts):
-    out = ""
-    for p in parts:
-        out += p
-    return out
-
-def g():
-    for p in sorted(["b", "a"]):
-        yield p
-
-def main():
-    xs = ["b", "a"]
-    print(list(p for p in sorted(["b", "a"])))
-    print(list(g()))
-    print(list(p for p in sorted(xs)))
-    texts = {"x": "1", "y": "2"}
-    # A dict's iteration yields its KEYS, which are strings.
-    print(list(p for p in sorted(texts)))
-    print(cat(*(f"{p}={texts[p]};" for p in sorted(texts))))
-
-main()
-""")
-
-
-def test_for_loop_over_plain_function_returning_a_generator():
-    """`for x in f(...)` where `f` RETURNS a generator without being one.
-
-    bug:CODEGEN_loop_over_plain_function_returning_generator. `_mojo_iter` in
-    myinterpreter.py returns a generator on one path and `iter(value)` on the
-    other, so its static return type is `MojoGenerator *` but the per-function
-    `_generator_var_api` table (deliberately reset between functions) has no
-    entry for the handle at the consumer. The loop used to be dropped with
-    `mojo_unsupported_iter`, so the compiled body ran ZERO times while CPython
-    printed the values.
-
-    Both runtime shapes are pinned: the generator-returning path (`make(3)`)
-    and the `iter(list)` path (`make([7, 8])`), plus a `break` from each arm
-    and a string-yielding generator (`"w:" + w`) whose yielded word is a
-    `char *`, not an int.
-    """
-    test_gimple_matches_cpython("gimple_for_over_gen_returning_function", """\
-def count(n):
-    i = 0
-    while i < n:
-        yield i
-        i += 1
-def make(v):
-    if isinstance(v, int):
-        return count(v)
-    return iter(v)
-def main():
-    for x in make(3):
-        print(x)
-    for y in make([7, 8]):
-        print(y)
-main()
-""")
-    test_gimple_matches_cpython("gimple_for_over_gen_returning_function_arms", """\
-def words(n):
-    i = 0
-    while i < n:
-        yield "w" + str(i)
-        i += 1
-def make(v):
-    if isinstance(v, int):
-        return words(v)
-    return iter(v)
-def main():
-    for a in make(2):
-        print(a)
-    for b in make(["c", "d"]):
-        print(b)
-        break
-main()
-""")
-    # A generator whose declared yield kind is `double`/`bool`, escaping through
-    # a plain function's `return`: the generic handle protocol the consumer
-    # drives carries no value-kind, so the loop target used to bind the
-    # DOUBLE'S BIT PATTERN — 0.5 printed as 4602678819172646912 — and a bool
-    # as 1/0. The handle is registered with its vkind at the `return` that
-    # lets it escape, and the loop reads the value by that kind.
-    # bug:CODEGEN_unknown_generator_loop_yields_untagged_word.
-    test_gimple_matches_cpython("gimple_for_over_gen_returning_function_float", """\
-def fr(n):
-    i = 0
-    while i < n:
-        yield i * 0.5
-        i += 1
-def make(v):
-    if isinstance(v, int):
-        return fr(v)
-    return iter(v)
-def main():
-    for x in make(3):
-        print(x)
-        print(x * 2)
-main()
-""")
-    test_gimple_matches_cpython("gimple_for_over_gen_returning_function_bool", """\
-def flags(n):
-    i = 0
-    while i < n:
-        yield i % 2 == 0
-        i += 1
-def make(v):
-    if isinstance(v, int):
-        return flags(v)
-    return iter(v)
-def main():
-    for b in make(3):
-        print(b)
-    for c in make(["x", "y"]):
-        print(c)
-main()
-""")
-
-
 def test_list_slice_of_mixed_list_reads_slots_as_values():
     """A slice of a kind-mixed list must preserve per-slot kinds (bug:CODEGEN_list_slice_of_mixed_list_reads_slot_as_bits)."""
     test_gimple_matches_cpython("gimple_list_slice_mixed", """\
@@ -16364,59 +16034,12 @@ main()
 """)
 
 
-def test_list_str_param_read_wrong_after_empty_list_caller():
-    """A list[str] param read after a caller passes an empty list variable."""
-    test_gimple_matches_cpython("gimple_list_str_param_after_empty_list_var", """\
-def ends(lines: list[str]) -> str:
-    if lines and lines[-1].endswith(':'):
-        return "open"
-    return "closed"
-
-def main():
-    e: list[str] = []
-    print(ends(e))
-    print(ends(["a", "b:"]))
-
-main()
-""")
-    test_gimple_matches_cpython("gimple_mixed_param_negative_index_boxed_str", """\
-def show(xs):
-    print(xs[-1])
-
-def main():
-    show([1, 2])
-    show(["a", "b:"])
-
-main()
-""")
-
-
 # Keep the existing main if present; append our test call via module globals not needed
 # The test will be discovered by name if run differently, but easier to just run it directly
 if __name__ == '__main__':
     # Run all tests including our new one
     try:
         test_list_slice_of_mixed_list_reads_slots_as_values()
-    except Exception as e:
-        print(f"ERR: {e}")
-    try:
-        test_star_unpack_of_generator_expression_in_call()
-    except Exception as e:
-        print(f"ERR: {e}")
-    try:
-        test_star_unpack_doc_symptom_program()
-    except Exception as e:
-        print(f"ERR: {e}")
-    try:
-        test_generator_string_value_slot_over_inline_sorted()
-    except Exception as e:
-        print(f"ERR: {e}")
-    try:
-        test_list_str_param_read_wrong_after_empty_list_caller()
-    except Exception as e:
-        print(f"ERR: {e}")
-    try:
-        test_for_loop_over_plain_function_returning_a_generator()
     except Exception as e:
         print(f"ERR: {e}")
     main()

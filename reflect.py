@@ -16,8 +16,7 @@ import hashlib
 from fire_compiler import py_tokenize, Parser, FunctionDef, StructDef, VarDecl, IdentExpr
 from gimple_codegen import _mojo_type, _safe_name, GimpleGen
 from mojo.backend_gimple.emit_funcs import dup_def_signature_key
-from mojo.middle.types import (_c_field_name, is_bare_string_param_annotation,
-                               param_annotation_ctype)
+from mojo.middle.types import _c_field_name
 
 # Free functions whose C symbol the codegen does NOT overload-mangle (must match
 # GimpleGen._NO_OVERLOAD_MANGLE).
@@ -76,27 +75,6 @@ SYM_GLOBAL = 2
 SYM_TYPE = 3
 
 
-def _param_mt(ann, struct_names) -> str:
-    """C type of a function/method PARAMETER annotated `ann`.
-
-    `_mt` is the field/return resolver; a parameter additionally has the
-    string-wrapper rule (`StringSlice` bare -> `char *`, bracketed
-    `StringSlice[_]`/`Span[...]` -> `Span *`), which is the SAME rule the
-    defining module's `_signature_ctypes` applies. Using `_mt`/`_mojo_type`
-    here resolved a bare `StringSlice` parameter to `int64_t`, so
-    `_func_export_csym` hashed a different overload suffix than the emitted
-    definition — the reflection table then advertised a `_std_*_<hex>` symbol
-    nothing defines (the stdlib-dylib undefined-reference red). One rule, in
-    `mojo/middle/types.param_annotation_ctype`.
-
-    The bare-string test comes FIRST, matching `funcs_shared._param_ctype`,
-    where the string rule is applied after `_resolve_type` and therefore wins
-    even if a module defines a struct of one of those names."""
-    if ann in struct_names and not is_bare_string_param_annotation(ann):
-        return f"{ann} *"
-    return param_annotation_ctype(ann)
-
-
 def _c_signature(name: str, return_type, params, struct_names=frozenset()) -> str:
     """Build the C signature string for an exported function, per ABI.md.
 
@@ -113,7 +91,7 @@ def _c_signature(name: str, return_type, params, struct_names=frozenset()) -> st
     expected symbol and drops the export as "stale", even though the real
     compiled function IS present under its own (differently-hashed) name."""
     cret = _mt(return_type, struct_names) if return_type else 'void'
-    cparams = ', '.join(_param_mt(t, struct_names) for _, t in params) if params else 'void'
+    cparams = ', '.join(_mt(t, struct_names) for _, t in params) if params else 'void'
     return f"{cret} {name} ({cparams})"
 
 
@@ -301,7 +279,7 @@ def collect_exports(stmts, module_prefix: str = '', known_structs=None) -> list:
                 msym = GimpleGen._struct_method_csym_static(module_prefix, s.name, m.name, _oid)
                 cret = _mt(m.return_type, struct_names) if m.return_type else 'void'
                 cparams = [f"{s.name} *"] + [
-                    _param_mt(t, struct_names) for n, t in m.params if n != 'self']
+                    _mt(t, struct_names) for n, t in m.params if n != 'self']
                 exports.append({
                     'name': f"{s.name}.{m.name}",   # lookup key (method)
                     'signature': f"{cret} {msym} ({', '.join(cparams)})",

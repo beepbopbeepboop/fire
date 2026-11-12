@@ -1,38 +1,4 @@
-SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4 (part 5 fixed: consuming-loop over a captured nested generator inside a coroutine-path generator; its doc was deleted)
-
-## Status 2026-11-12 — replan after parts 1-3 landed
-
-Parts 1-3 are fixed and their docs are deleted: part 1 (`yield
-'\t'.join(columns)` value slot / str.join argument scan, commit d4b486813),
-part 2 (nested generator `yield from` handle-local delegation, commit
-b37281a59), part 3 (escaping generator whose first yield is `''` keeps the
-string value slot, commit fb5ba7c1a).
-
-Re-measured on this tree with the parent repro (`cp -R
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/. .tmp/ca/` then `python3
-tools/memslot.py --gb 8 --label ca-main-replan -- python3 fire.py build -o
-.tmp/ca/out .tmp/ca/c_analyzer/__main__.py`, exit 1, peak 0.4 GB). The
-file-local refusal list is now exactly two lines:
-
-    fmt_summary: a call to unresolved callee 'section(...)' is not supported
-      in a compiled generator/coroutine body ...
-    section: is a nested generator that reads enclosing-scope variable(s)
-      items; the coroutine path has no capture model ...
-
-A probe shows these are one defect, not two: `section` IS claimed with its
-`items` capture and compiles; `fmt_summary` then cannot see it because
-`cpp_core._cpp_yield_from` resolves callees from `_generator_api` only, not
-`_nested_generator_api`. The remaining work is split into:
-
-* part 4 (`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4.md`):
-  `yield from` a claimed nested generator from a coroutine-path generator —
-  the live `fmt_summary`/`section` blocker.
-* part 5 (fixed): the sibling consuming-loop path, `for x in <nested generator>():` inside a
-  coroutine-path generator. The part-5 bug doc was deleted when its named quick test passed.
-
-Each part has a red standalone test on disk today. The imported-module floor
-(`c_parser/info.py`, `.parser`) is unchanged and stays owned by the sibling
-docs named in this doc; it is not part of either part.
+SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4 (part1 fixed: 2026-11-12, `yield '\t'.join(columns)` value slot / str.join arg scan; part2 fixed: nested generator yield-from handle-local delegation; part3 fixed: 2026-11-12, escaping generator with empty-string first yield keeps string value slot)
 
 ## Status 2026-11-05 — repro run on this tree (next step)
 
@@ -335,43 +301,3 @@ diagnosable, and treating it as an ordering bug would be chasing the
    `c_parser/parser/_func_body.py` and `c_parser/match.py` still fail in this
    closure (callable-valued loop refusal fixed in `c_analyzer/__init__.py:check_all`),
    so clearing `render` alone will not make this file build.
-
-## 2026-11-16 (wakeup 32): re-measured -- the "exactly two lines" above is stale
-
-`python3 fire.py build -o .tmp/ca/out .tmp/ca/c_analyzer/__main__.py` on this
-tree: exit 1, and the failure is no longer only the two coroutine refusals.
-
-* the same two `Unsupported shape(s)` lines for `fmt_summary` / `section` are
-  still there;
-* the link step now also emits the per-module C++ generator units, and **6 of
-  the 10 captured units fail `g++ -std=c++20 -fsyntax-only`** (32 errors in
-  total; the build log's 38 includes the link-stage repeat). Two distinct
-  defects, both reproduced in `lm_003.cpp` (the `c_parser/info.py` unit):
-
-  - **The module's own `KIND` enum is never emitted.** `KIND` is declared at
-    `c_parser/info.py:22` (`class KIND(enum.Enum)`), in the SAME module the
-    unit is generated for, yet the unit has no declaration of it, so every
-    `KIND.FUNCTION` is `use of undeclared identifier 'KIND'`. Mechanism
-    located: the preamble block is built at `module_gen.py:5376-5394` from
-    FOUR name sets only -- `_supported_generator_methods`,
-    `_cpp_param_struct_names`, `_cpp_ctor_struct_names`,
-    `_cpp_value_struct_names` -- and it emits each as `struct <name>;`. An
-    ENUM class is in none of those four sets (they are all struct lists), so
-    `KIND` is the one module-level type the block cannot see. The fix is to
-    source the enum names too (and emit whatever an enum needs, not a struct
-    forward decl).
-  - **A local is typed `char *` where the source treats it as a struct value.**
-    Generated:
-    `char * parent; ... parent = mojo_getattr_any((void*)(intptr_t)(parsed),
-    (char*)"parent"); ... if ((parent.kind == KIND.FUNCTION)) ... parent.name`
-    -- so `parent` is assigned a boxed attribute value, then read as a struct
-    (`member reference base type 'char *' is not a structure or union`). The
-    `char *` comes from the earlier `parent = "";` string assignment; the
-    backend keeps one C type for a name the source reuses across kinds.
-
-* a third unresolved callee appears in the log, `anonymous_names(...)`.
-
-So the file's remaining work is not one capture-model defect: the C++ unit
-generator drops a module's own enum and pins a reused local to its first
-assignment's type. Recorded separately from the coroutine item; different
-owners.

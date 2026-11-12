@@ -61,55 +61,11 @@ def load_pool():
     return json.load(open(POOL_FILE))
 
 
-def find_slot(name):
-    """The slot named NAME, or None when tools/pool.json no longer has it.
-
-    Internal callers follow a STORED pool name (a task or queue item written under
-    an older pool.json). A slot removed since then means that task has no home —
-    it is skipped or bounced — not that the whole runner should exit. The CLI's
-    explicit `--pool` keeps using `pool_slot`, which stays loud about a typo."""
+def pool_slot(name):
     for sl in load_pool()["slots"]:
         if sl["name"] == name:
             return sl
-    return None
-
-
-def pool_slot(name):
-    sl = find_slot(name)
-    if sl is None:
-        sys.exit("no pool slot named %r in %s" % (name, POOL_FILE))
-    return sl
-
-
-def model_instructions(model):
-    """Extra rules a pool slot adds to every worker prompt that runs on MODEL (the slot's `instructions` list in
-    tools/pool.json), or [].
-
-    Keyed by MODEL, not by slot name, so a hand-run `--model` spawn of the same model gets the same rules as the
-    slot that normally runs it. The first use is the free OpenRouter router: a worker on it ran
-    `git config user.name openhands` in a linked worktree (2026-11-15), which writes the repository's shared
-    .git/config and so rewrote the author of every worktree's commits."""
-    out = []
-    for sl in load_pool()["slots"]:
-        if sl.get("model") == model:
-            for x in sl.get("instructions") or []:
-                if x not in out:
-                    out.append(x)
-    return out
-
-
-def with_model_rules(prompt, model):
-    """PROMPT with MODEL's extra rules added as their own section just before `## When you finish`, so they sit with
-    the rules and after `## Rules`: `_task_text` reads only what lies between `## The task` and `## Rules`, and must
-    keep reading the original task. Unchanged when the model has none."""
-    extra = model_instructions(model)
-    if not extra:
-        return prompt
-    block = "## Rules for this model\n\n" + "\n".join("- " + x for x in extra) + "\n\n"
-    marker = "## When you finish"
-    if marker in prompt:
-        return prompt.replace(marker, block + marker, 1)
-    return prompt.rstrip("\n") + "\n\n" + block.rstrip("\n") + "\n"
+    sys.exit("no pool slot named %r in %s" % (name, POOL_FILE))
 
 
 GATES_FILE = os.path.join(MAIN, "tools", "gates.json")
@@ -131,18 +87,6 @@ def gate_skip_args():
 
 def pool_total():
     return sum(sl["count"] for sl in load_pool()["slots"])
-
-
-def mode():
-    """The campaign the pool is running, from tools/pool.json `mode`: `build` (high volume: the light --stdlib gate,
-    no batch cap, land everything fast) or `drain` (work the backlog down: finishing and gate-repair work starts first,
-    the full landing gate, batches of 8). One declaration, read by refill and the lander, instead of each guessing
-    from who is running or how the owner feels. An unreadable or unknown value is `drain`: the careful campaign."""
-    try:
-        m = load_pool().get("mode", "drain")
-    except (OSError, ValueError):
-        return "drain"
-    return m if m in ("build", "drain") else "drain"
 TERMINAL = {"integrated", "abandoned", "superseded"}
 
 
@@ -254,10 +198,6 @@ def no_restart_reason(t, pool, counts, banned=None):
     rounds. "counts" is alive running tasks keyed by model."""
     m = t.get("model", "")
     sl = next((sl for sl in pool.get("slots", []) if sl.get("model") == m), None)
-    if sl is None and t.get("pool"):
-        # The slot this task ran on was removed from tools/pool.json. Restarting it
-        # would run the model with no slot to charge/recover it, every pass, forever.
-        return "pool slot %r is no longer in %s (model %s has no home)" % (t["pool"], POOL_FILE, m)
     if sl is not None and counts.get(m, 0) >= sl.get("count", 0):
         return "slot %s at capacity (%d/%d)" % (sl["name"], counts.get(m, 0), sl.get("count", 0))
     if m in (banned if banned is not None else dead_models()):
@@ -312,23 +252,6 @@ def ahead(t):
     r = subprocess.run(["git", "rev-list", "--count", "master.." + t["branch"]],
                        cwd=MAIN, capture_output=True, text=True)
     return int(r.stdout.strip() or 0) if r.returncode == 0 else 0
-
-
-def ahead_since_base(t):
-    """Commits the WORKER added since its spawn base.
-
-    `ahead()` counts `master..branch`, but a fixer or a continuation is cut from a branch that
-    already has commits master lacks: the fixer that died in its first second still shows the
-    five commits of the branch it repairs. `base..branch` is the worker's own contribution — zero
-    when it did nothing. Falls back to `ahead` when the base is gone or unreadable, so an unknown
-    base can never turn a real attempt into a bounce."""
-    base = t.get("base") or "master"
-    branch = t.get("branch") or ""
-    if not branch or base == branch:
-        return ahead(t)
-    r = subprocess.run(["git", "rev-list", "--count", base + ".." + branch],
-                       cwd=MAIN, capture_output=True, text=True)
-    return int(r.stdout.strip() or 0) if r.returncode == 0 else ahead(t)
 
 
 def next_slot():
@@ -393,7 +316,6 @@ def cmd_spawn(a):
         prompt = open(os.path.join(MAIN, "tools", "control_prompt.md")).read().format(
             name=a.name, worktree=wt, branch=branch, main=MAIN, task=task.strip(),
             claims=", ".join(a.claim), control=os.path.join(MAIN, "tools", "control.py"))
-        prompt = with_model_rules(prompt, a.model)
         for src in a.file:  # reference inputs the worker may read, copied inside its sandbox
             shutil.copy(src, os.path.join(wt, ".tmp", os.path.basename(src)))
         open(os.path.join(wt, "TASK.md"), "w").write(prompt)
@@ -543,16 +465,11 @@ def external():
 
 
 def norm_claim(c):
-    """A bare doc name, a name with the .md suffix, and a bugs/ path, in the top directory or in any one class
-    directory (bugs/hard/, bugs/mid/, ...), all mean the same `bug:<name>` claim: the document is the identity, not
-    the directory the swarm has moved it to. Namespaced keys (bug:, gate:, ...) pass through. Any other path is refused
-    rather than passed through, because a literal path claim conflicts with nothing and admits a second holder."""
+    """A bare doc name, a name with the .md suffix, and a bugs/ path all mean the same `bug:<name>` claim."""
     if ":" in c:
         return c
-    m = re.fullmatch(r"(?:bugs/(?:[A-Za-z0-9_-]+/)?)?([A-Za-z0-9_]+?)(?:\.md)?", c)
-    if not m:
-        raise ValueError("not a bug document or claim key: %r" % c)
-    return "bug:" + m.group(1)
+    m = re.fullmatch(r"(?:bugs/(?:hard/)?)?([A-Za-z0-9_]+?)(?:\.md)?", c)
+    return "bug:" + m.group(1) if m else c
 
 
 def external_conflicts(claims, skip=None):
@@ -562,11 +479,7 @@ def external_conflicts(claims, skip=None):
 def cmd_claim(a):
     """Register claims for work started outside control, so control's workers (and the feeder) stay off it, and the
     caller learns at once if a control worker or another outside session already holds it. Run it again to renew."""
-    try:
-        claims = [norm_claim(c) for c in a.claim]
-    except ValueError as e:
-        print("REFUSED: %s" % e)
-        sys.exit(2)
+    claims = [norm_claim(c) for c in a.claim]
     with registry() as tasks:
         bad = [(n, c, oc) for n, t in tasks.items() if state_of(t) not in TERMINAL for c in claims for oc in t["claims"]
                if conflicts(c, oc)] + external_conflicts(claims, skip=a.name)
@@ -753,11 +666,7 @@ def mark_dead(model, sl, until=None, now=None):
     if until and until > now:
         end = until + RESET_MARGIN_S
     elif replenish_at(sl, now):
-        # a daily free tier: back when its tokens come back, not a fixed block — but never SOONER than one attempt
-        # window: the replenish is a wall-clock time, so a limit that lands just before it would otherwise buy an
-        # hour of quiet, and the next attempt would burn the same exhausted quota (2026-11-17: 12 h of work needs
-        # 12 h of quota, so a limit event always buys at least PROBE_EVERY_S)
-        end = max(replenish_at(sl, now), now + PROBE_EVERY_S)
+        end = replenish_at(sl, now)     # a daily free tier: back when its tokens come back, not a fixed block
     else:
         hours = sl.get("long_recover_days", 0) * 24 if strikes >= 2 and sl.get("long_recover_days") else sl["recover_hours"]
         end = now + hours * 3600
@@ -783,23 +692,13 @@ def probe_model(model):
 
 
 def probe_free_bans(now=None, probe=probe_model):
-    """Lift the ban on each banned daily free tier that answers, and drop bans for models no longer in the pool.
-
-    A free tier's ban is a guess (its replenish time), and a limit can land minutes after a replenish, so the tier's
-    own answer decides: the ban is lifted at once when the tier answers, and otherwise re-asked every PROBE_EVERY_S.
-    A ban is keyed by MODEL, not by slot, so removing the slot never cleared it: a model removed from pool.json kept
-    its ledger row forever, and re-adding it inherited the old ban. Removing the model now means removing its ban.
-
-    Returns the models it lifted. Called by refill, so a free tier recovers without a human running `probe-free`."""
+    """Lift the ban on each banned daily free tier that answers. A free tier's ban is a guess (its replenish time),
+    and a limit can land minutes after a replenish, so the tier's own answer decides: the ban is lifted at once when
+    the tier answers, and otherwise re-asked every PROBE_EVERY_S. Returns the models it lifted."""
     now = time.time() if now is None else now
     d = _ledger()
-    slots = load_pool()["slots"]
-    pool_models = {sl["model"] for sl in slots}
-    removed = [m for m in d if m not in pool_models]
-    for m in removed:
-        del d[m]
-    daily = {sl["model"] for sl in slots if sl.get("replenish")}
-    lifted, changed = [], bool(removed)
+    daily = {sl["model"] for sl in load_pool()["slots"] if sl.get("replenish")}
+    lifted, changed = [], False
     for m, e in d.items():
         if m not in daily or e["until"] <= now or now - e.get("probed", 0) < PROBE_EVERY_S:
             continue
@@ -894,7 +793,7 @@ def dead_on_arrival(t):
     rate limit or an API connection failure. 2026-10-24: 'Go usage limit exceeded' killed every worker the second it
     started, refill and formal_feed replaced each one, and the loop minted ~2,000 worktrees and `work/formalNNNN-docs`
     branches (202 GB) holding no work at all."""
-    if state_of(t) != "exited-err" or verdict(t) or ahead_since_base(t):
+    if state_of(t) != "exited-err" or verdict(t) or ahead(t):
         return False
     lp = os.path.join(t["worktree"], "work.log")
     if not os.path.exists(lp):
@@ -915,10 +814,7 @@ def auth_failed(t):
     return bool(AUTH_ERR.search(tail))
 
 
-FINISHING_PREFIXES = ("fix-merge-", "fix-red-", "fix-proof-", "fix-orch-", "fix-gate-", "fix-landed-", "bug-land-")   # tasks that carry finished work to master
-# bug-land-* is a LAND doc (integrate.land_doc): a finished branch that could not land.
-# fix-gate-* repairs master itself (a red gate job) and fix-landed-* repairs what verify_landed.py found after a
-# landing: both finish work that already exists, so both are finishing work, not fresh docs.
+FINISHING_PREFIXES = ("fix-merge-", "fix-red-", "fix-proof-", "fix-orch-")   # tasks that carry finished work to master
 def refill_key(item):
     """Queue order for refill: tasks that finish done work first, then oldest first."""
     return (0 if item["name"].startswith(FINISHING_PREFIXES) else 1, item["added"])
@@ -1050,52 +946,11 @@ def reset_cap(name, verdict):
         cr = t.setdefault("cap_review", {})
         cr["verdict"], cr["applied"] = verdict, time.strftime("%F %T")
         doc = cr.get("doc")
-    remove_review_doc(doc)
-
-
-def remove_review_doc(doc):
     if doc and os.path.exists(doc):
         os.remove(doc)
 
 
-def sweep_review_docs(dry_run=False):
-    """Remove every bugs/ORCH_REVIEW_*.md that nothing needs any more, and return the paths (removed, or to be removed).
-
-    A review doc is the evidence a capped chain is judged on, so it is needed exactly while something still depends on
-    it: a task that is still capped (`merge_capped`) and names it in its `cap_review`, or a live task or queued item
-    holding its `bug:ORCH_REVIEW_<slug>` claim (the reviewer working on it). Everything else is trash. The cases that
-    used to leave it behind: a STOP or no-verdict review (only FORWARD/FIXED removed it), a reviewer that vanished, a
-    capped task later abandoned or pruned, and a doc whose enqueue failed after the write. Derived from the state, so
-    it cleans up the docs those cases already left as well as any new ones. Called once per swarm pass."""
-    tasks = load()
-    needed = set()
-    for n, t in tasks.items():
-        cr = t.get("cap_review") or {}
-        if t.get("merge_capped") and cr.get("doc"):
-            needed.add(os.path.basename(cr["doc"]))
-        if t.get("state") not in TERMINAL and _working(n, t):
-            needed |= _review_claims(t.get("claims", []))
-    for f in os.listdir(qdir()):
-        if f.endswith(".json"):
-            try:
-                needed |= _review_claims(json.load(open(os.path.join(qdir(), f))).get("claims", []))
-            except (OSError, ValueError):
-                continue
-    gone = []
-    for path in sorted(glob.glob(os.path.join(MAIN, "bugs", "ORCH_REVIEW_*.md"))):
-        if os.path.basename(path) not in needed:
-            gone.append(path)
-            if not dry_run:
-                remove_review_doc(path)
-    return gone
-
-
-def _review_claims(claims):
-    """The review doc file names (`ORCH_REVIEW_<slug>.md`) that a list of claim keys holds."""
-    return {c[len("bug:"):] + ".md" for c in claims if c.startswith("bug:ORCH_REVIEW_")}
-
-
-CONTROLLER_FILES = {"TASK.md", "TASK_REPORT.md", "work.log", "exitcode", "REPORT.md"}   # written into a worker's tree by the controller, or (REPORT.md / TASK_REPORT.md) the worker's closing report, left untracked
+CONTROLLER_FILES = {"TASK.md", "work.log", "exitcode", "REPORT.md"}   # written into a worker's tree by the controller, or (REPORT.md) the worker's closing report, left untracked
 
 
 def tree_extras(wt):
@@ -1185,9 +1040,7 @@ def bounce(name, t):
     if tree_extras(wt):
         return False
     if t.get("pool") and limit_hit(t):
-        _sl = find_slot(t["pool"])
-        if _sl is not None:          # the slot may have been removed from pool.json since the task started
-            mark_dead(t["model"], _sl, limit_reset(t))   # the ban ends at the printed reset, else the recovery time
+        mark_dead(t["model"], pool_slot(t["pool"]), limit_reset(t))   # the ban ends at the printed reset, else the recovery time
     git("worktree", "remove", "--force", wt, check=False)
     git("branch", "-D", t["branch"], check=False)
     with registry() as reg:
@@ -1237,8 +1090,7 @@ def pick_slot(item, busy):
     """The slot a queued task starts on now: its preferred slot if that is free, else the first free, unbanned slot in
     pool order; None if every slot is full or banned. `busy` is running_by_slot() plus this pass's starts."""
     if item.get("only"):                       # pinned: its slot or nothing
-        _sl = find_slot(item["pool"]) if item.get("pool") else None
-        return _sl if _sl is not None and slot_free(_sl, busy) else None
+        return pool_slot(item["pool"]) if item.get("pool") and slot_free(pool_slot(item["pool"]), busy) else None
     slots = load_pool()["slots"]
     # A slot whose class is not a work class (`orch`, the reserved Sonnet slot for orchestration reviews) takes only
     # tasks PINNED to it (`only`, above). Without this an UNCLASSED task (the verifier's fix-gate-*) overflowed into it
@@ -1270,9 +1122,7 @@ def cmd_refill(a):
 
     Circuit breaker: workers that died on arrival (a usage limit, an API outage) are bounced back to the queue with
     their worktree and branch removed, and nothing new starts for BREAKER_MIN minutes. Without it a limit turns this
-    loop into a worktree-and-branch factory. Drain mode (tools/pool.json `mode`) only ORDERS the queue
-    (refill_key: finishing work first); it never leaves a free slot idle. A free slot takes the best startable task,
-    a plain bug doc included (owner, 2026-11-15: qwen sat idle for hours behind a drain filter)."""
+    loop into a worktree-and-branch factory."""
     bounced = [n for n, t in list(load().items()) if dead_on_arrival(t) and bounce(n, t)]
     if bounced and not dead_models():   # a limit moved the work to another model; only an outage needs the pause
         json.dump({"until": time.time() + BREAKER_MIN * 60, "why": "%d workers died on arrival" % len(bounced)},
@@ -1379,7 +1229,8 @@ def cmd_gate(a):
 
 
 def gate_off_in(path, pattern, reason, doc, worker):
-    """Add one OFF entry to the gates file at PATH (the single writer of tools/gates.json: `gate off` comes through here)."""
+    """Add one OFF entry to the gates file at PATH (the single writer of tools/gates.json: `gate off` and the
+    integrator's automatic ungate both come through here)."""
     cfg = json.load(open(path))
     cfg.setdefault("off", {})[pattern] = dict(reason=reason, doc=doc, worker=worker, since=time.strftime("%F %T"))
     json.dump(cfg, open(path, "w"), indent=2)
@@ -1405,17 +1256,6 @@ def cmd_priority(a):
     if a.names:
         json.dump(a.names, open(os.path.join(ctl_dir(), "priority.json"), "w"))
     print("integration priority: " + " > ".join(priority_list() or ["(none: slot order)"]))
-
-
-def cmd_mode(a):
-    """mode [build|drain] — declare which campaign the swarm is running (see mode()). With no argument, print it."""
-    if a.name:
-        if a.name not in ("build", "drain"):
-            sys.exit("mode is one of: build, drain")
-        p = load_pool()
-        p["mode"] = a.name
-        json.dump(p, open(POOL_FILE, "w"), indent=2)
-    print("mode: %s" % mode())
 
 
 def cmd_queue(a):
@@ -1458,7 +1298,7 @@ def cmd_ps(a):
     arguments: ours are launched with `run --model M --auto ... <PARENT>/work-N/TASK.md` (opencode v1: `--model M run --auto
     --dir <PARENT>/work-N`), theirs have neither."""
     tasks = load()
-    print("%-40s %-6s %-5s %-8s %-6s %-28s %s" % ("name", "pid", "alive", "tag", "cls", "model", "claims"))
+    print("%-40s %-6s %-5s %-6s %-28s %s" % ("name", "pid", "alive", "cls", "model", "claims"))
     for name, t in sorted(tasks.items()):
         if t.get("state") != "running":
             continue
@@ -1472,10 +1312,7 @@ def cmd_ps(a):
         claims = ",".join(t.get("claims") or [])[:40]
         model = (t.get("model") or t.get("pool") or "?")[:28]
         cls = (t.get("cls") or "?")[:6]
-        # a worker that exited with a DONE verdict and commits master lacks is waiting to LAND, not dead: the registry
-        # still says `running` until the integrator moves it, so `alive: no` alone reads as a crash (2026-11-15)
-        tag = "landable" if (not alive and state_of(t) == "exited-ok" and verdict(t) == "DONE" and ahead(t) > 0) else ""
-        print("%-40s %-6s %-5s %-8s %-6s %-28s %s" % (name[:40], pid, "yes" if alive else "no", tag, cls, model, claims))
+        print("%-40s %-6s %-5s %-6s %-28s %s" % (name[:40], pid, "yes" if alive else "no", cls, model, claims))
     # live process scan
     out = subprocess.run(["ps", "-axww", "-o", "pid=,etime=,rss=,args="], capture_output=True, text=True).stdout
     mine = other = 0
@@ -1689,8 +1526,6 @@ def cmd_cleanup(a):
     2026-11-10: a tree a plain PROCESS is working in (a hand-started test run, not a worker, not an
     opencode session, no outside claim) is also left alone — the run's cwd check is rescanned at the
     moment of removal, since the run of one is irreversible."""
-    for path in sweep_review_docs(dry_run=a.dry_run):
-        print("%s orchestration review doc %s" % ("would remove" if a.dry_run else "removed", path))
     reg = load()
     byw = {os.path.realpath(t["worktree"]): (n, t) for n, t in reg.items()}
     wt, cur = [], {}
@@ -2114,24 +1949,10 @@ def cmd_sync(a):
         # A pid that is gone is not running. Record that, so the registry stops saying "running" for a worker that is
         # not (2026-11-10: a killed README worker stayed "running" for hours, shown by ps and claims). A task whose
         # session is still live is left alone, and an unreadable listing (live is None) changes nothing.
-        newly_dead = []
         with registry() as reg:
             for n in dead_running:
                 if n not in live and n in reg and reg[n].get("state") == "running":
                     reg[n]["state"] = "exited-err"
-                    newly_dead.append(n)
-        # Record a limit death HERE, on the pass that records the death: limit_hit reads the worker's work.log from
-        # its worktree, and the cleanup later in this same pass deletes a dead worker's tree. The ban's other
-        # readers (swarm's retire_dead, refill's bounce) run after that cleanup, so a limit death recorded there
-        # finds no log and the ban never lands — the exhausted model is then re-fed its next worker, which dies in
-        # a second (2026-11-17: two quota deaths left the ledger untouched and the model kept spawning).
-        for n in newly_dead:
-            t = tasks.get(n, {})
-            if t.get("pool") and t.get("model") and t.get("model") not in dead_models() and limit_hit(t):
-                _sl = find_slot(t["pool"])
-                if _sl is not None:
-                    h = mark_dead(t["model"], _sl, limit_reset(t))
-                    print("  banned %s for %.1f h: its worker hit a usage limit" % (t["model"], h), flush=True)
     if dead_running:
         print("sync: running-but-dead-in-registry=%d" % len(dead_running))
         for n in dead_running:
@@ -2172,12 +1993,6 @@ def cmd_sync(a):
             if sl is not None and m not in dead_models() and auth_failed(t):
                 hours = mark_dead(m, sl)
                 print("  banned %s for %.1f h: its worker could not authenticate" % (m, hours))
-                continue
-            # A usage-limit death is never restarted on the same model: the day's quota is spent, the next worker
-            # would die in a second, and the doc re-feeds to another model instead. (The ban usually lands in the
-            # state update above and is then caught by no_restart_reason; this covers the trees it missed.)
-            if limit_hit(t):
-                print("  skipped %s: its worker died on a usage limit; the doc is re-fed, not restarted" % n)
                 continue
             # Pool guard: never restart a worker whose slot is disabled (count 0) or already full,
             # and never one whose model is banned — a banned model's new worker only fails again.
@@ -2257,8 +2072,6 @@ def main():
     s = sub.add_parser("refill"); s.add_argument("--target", type=int, default=None, help="default: the pool's total slots")
     s.add_argument("--prefix", default="", help="start only queued tasks whose name begins with this"); s.set_defaults(f=cmd_refill)
     s = sub.add_parser("priority"); s.add_argument("names", nargs="*"); s.set_defaults(f=cmd_priority)
-    s = sub.add_parser("mode"); s.add_argument("name", nargs="?", choices=["build", "drain"])
-    s.set_defaults(f=cmd_mode)
     sub.add_parser("queue").set_defaults(f=cmd_queue)
     s = sub.add_parser("memtrim"); s.add_argument("--floor", type=float, default=4.0)
     s.add_argument("--interval", type=float, default=3.0); s.add_argument("--once", action="store_true"); s.set_defaults(f=cmd_memtrim)

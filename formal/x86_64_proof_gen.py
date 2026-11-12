@@ -255,15 +255,6 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     simp_lems = ", ".join(["mojo", "%s_go" % func_name, "ast", "evalFunc",
                            "MojoEnv", "evalBody", "evalBodyEnv", "evalExpr",
                            "u64pow", "u64powGo", "sKey"] + list(go_lemmas or []))
-    # Same rule as arm64's `_gen_universal_e2e`: a user call evaluates through
-    # `evalExpr`'s `MojoExpr.call` arm as `callFunc name (evalArgs …)`, and
-    # `evalArgs` is not among the defs the `simp only` line unfolds, so without
-    # it the bridge leaves the argument packed and the theorem does not close.
-    # Conditional on a call of this entry's own body, so a program with none
-    # keeps its byte-identical proof; the three builtins have `evalExpr` arms.
-    if any(AP._call_name(c) not in ("len", "str_len", "strlen")
-           for c in AP._calls_in(fn)):
-        simp_lems += ", evalArgs"
     if not conds:
         proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n  simp +decide [{simp_lems}]"
     else:

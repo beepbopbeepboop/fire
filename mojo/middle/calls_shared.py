@@ -166,31 +166,13 @@ def _callable_value_symbol(gen, node, cxx: bool = False):
     _vshapes = getattr(gen, '_variadic_func_shape', None) or {}
     _vshape = _vshapes.get(_target) or _vshapes.get(_c_name) or _vshapes.get(_fname)
     if _vshape is not None:
-        # The address of a function is not a legal GIMPLE operand either as
-        # `&f` (no unary `&` in the grammar) or as `(void *)f` ("invalid
-        # operand in unary operation"); read the `static void * _funcptr_`
-        # global this codegen emits for every function-as-a-value site (a
-        # generator's bare csym is redirected to `<base>_start` by gen_module's
-        # `_funcptr_target`, which is exactly the address wanted here).
-        gen._funcptr_builtins_needed.add(_target)
-        _fnv = gen._new_val('void *', f'_funcptr_{_target}')
-        # The three counts go through `_new_val` as real operands, NOT as
-        # parenthesized literals: a parenthesized sub-expression is not a
-        # legal GIMPLE operand, so `(2)` as a call argument is a hard parse
-        # failure ("expected expression before '(' token" / "invalid
-        # argument to gimple call") whenever this value is referenced from a
-        # `__GIMPLE`-tagged body — which is every compiled free function.
-        # Real: c_common/scriptutil.py's `add_progress_cli` binding the
-        # variadic generator `track_progress_compact` as a value.
-        _nfv = gen._new_val('int64_t', str(_vshape[0]))
-        _kdv = gen._new_val('int64_t', str(_vshape[1]))
-        _hsv = gen._new_val('int64_t', '0')
+        _fnv = gen._new_val('void *', f'(void *){_target}')
         _vf = gen._call_expr('MojoVarargFn *', 'mojo_vararg_fn_new',
                              [('void *', _fnv), ('void *', '0'),
-                              ('int64_t', _nfv),
-                              ('int64_t', _kdv),
-                              ('int64_t', _hsv)])
-        return 'void *', gen._cast('void *', _vf)
+                              ('int64_t', f'({_vshape[0]})'),
+                              ('int64_t', f'({_vshape[1]})'),
+                              ('int64_t', '(0)')])
+        return 'void *', gen._new_val('void *', f'(void *){_vf}')
     if cxx:
         return ('void *', f'(void *){_target}')
     gen._funcptr_builtins_needed.add(_c_name)
@@ -377,10 +359,6 @@ def _default_expr_to_pair(gen, _dflt, cxx: bool = False,
     is deliberately not made louder here — what changed is that every
     RESOLVABLE callable default stopped being indistinguishable from it.
     """
-    # A `std::function<...>`-typed slot is only spellable in a C++ unit;
-    # in C emission the callable travels as the runtime's boxed word.
-    if not cxx and isinstance(param_ctype, str) and param_ctype.startswith('std::function<'):
-        param_ctype = 'int64_t'
     if _dflt is None:
         return _null_default_pair(param_ctype)
     _cv = _callable_value_symbol(gen, _dflt, cxx=cxx)
@@ -457,11 +435,11 @@ def _default_expr_to_pair(gen, _dflt, cxx: bool = False,
         # int64_t-in/int64_t-out ABI `mojo_fnptr_call_N` dispatches through.
         _rt_fn = _RUNTIME_CALLABLE_VALUES.get(_nm)
         if _rt_fn is not None:
-            return ('void *', gen._cast('void *', f"{_rt_fn}"))
+            return ('void *', gen._new_val('void *', f'(void *){_rt_fn}'))
         _slit = gen._new_val('char *',
                              gen._intern_string(gimple_ctypes._c_escape(_nm)))
-        gen._rt_void('mojo_set_unavailable_callable_name', [_slit])
-        return ('void *', gen._rt_call('void *', 'mojo_unavailable_callable_ptr', []))
+        gen._emit(f'  mojo_set_unavailable_callable_name ({_slit});')
+        return ('void *', gen._new_val('void *', 'mojo_unavailable_callable_ptr ()'))
     return _null_default_pair(param_ctype)
 
 # `module.attr` callables the runtime implements, as function VALUES (the
@@ -471,7 +449,6 @@ _RUNTIME_CALLABLE_VALUES = {
     'os.walk': 'mojo_os_walk_w',
     'glob.glob': 'mojo_glob_w',
     'glob.iglob': 'mojo_glob_w',
-    'csv.reader': 'mojo_csv_reader_w',
 }
 
 def _resolve_overload(gen, candidates: list, args: list, kwargs: list | None) -> dict | None:
@@ -624,7 +601,7 @@ def _pack_kwargs_dict(gen, kwarg_pairs) -> str:
     and later read it back as one), doubles through mojo_dict_set_double.
     Everything else — ints, pointers — goes through mojo_dict_set_int, which _emit_call coerces,
     matching how `d[k] = v` already lowers a subscript store."""
-    d = gen._rt_call('MojoDict *', 'mojo_dict_new', [])
+    d = gen._new_val('MojoDict *', 'mojo_dict_new ()')
     _val_ty = ''
     _kwp = kwarg_pairs if kwarg_pairs else {}
     for kname in _kwp:

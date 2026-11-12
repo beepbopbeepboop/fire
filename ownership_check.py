@@ -128,7 +128,6 @@ value). Re-run that sweep after any change to this file.
 
 import fire_compiler as N
 from fire_compiler import conv_is_exclusive
-from mojo.middle.builtin_types import TRIVIAL_REGISTER_PASSABLE_TYPES
 
 
 from dataclasses import dataclass as _dataclass
@@ -156,11 +155,8 @@ _COMPTIME_TYPE_MEMBERS = {'type', 'origins'}
 # call instead of a member access. Found for real against Modular's actual
 # `test/memory/test_arc.mojo`: `_ = p^; ...; var vec =
 # List[type_of(p)]()` — `type_of(p)` here needs only `p`'s type (already
-# known from its declaration), not its now-moved-from runtime value. The set
-# itself lives in `fire_compiler._COMPTIME_TYPE_FUNCS`, because
-# unknown_decl_check needs the same fact to accept the name in a bracket
-# argument (`taker[type_of(x)]`); one definition keeps the two from drifting.
-_COMPTIME_TYPE_FUNCS = N._COMPTIME_TYPE_FUNCS
+# known from its declaration), not its now-moved-from runtime value.
+_COMPTIME_TYPE_FUNCS = {'type_of', '__type_of'}
 
 
 # Builtin types that are ALWAYS trivially register-passable in real Mojo, so
@@ -171,11 +167,12 @@ _COMPTIME_TYPE_FUNCS = N._COMPTIME_TYPE_FUNCS
 # values of raw MLIR type are always trivial". `Address` and `Pointer[...]`
 # are thin pointers with no destructor: std/memory/pointer.mojo declares the
 # TrivialRegisterPassable conformance on both structs directly.
-#
-# The set itself lives in `mojo/middle/builtin_types.py` because the comptime
-# conformance predicate asks the same question (`conforms_to(Int,
-# TrivialRegisterPassable)`) and the two answers must not drift.
-_TRIVIAL_BUILTIN_TYPES = TRIVIAL_REGISTER_PASSABLE_TYPES
+_TRIVIAL_BUILTIN_TYPES = frozenset((
+    'Int', 'Int8', 'Int16', 'Int32', 'Int64', 'Int128',
+    'UInt8', 'UInt16', 'UInt32', 'UInt64', 'UInt128',
+    'Float', 'Float16', 'Float32', 'Float64', 'Float128',
+    'Bool', 'Byte', 'Char', 'Address',
+))
 
 
 def _struct_def_is_trivial(st, struct_table, depth=0):

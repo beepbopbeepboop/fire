@@ -790,8 +790,6 @@ class FunctionDef:
     # directions, so the flag is explicit.
     captures: list = field(default_factory=list)
     has_capture_list: bool = False
-    # Origin parameter name of a `ref[x]`/`mut[x]` return, or "" when absent.
-    return_origin: str = ""
     line: int = 0
     col: int = 0
 
@@ -883,18 +881,8 @@ class StructDef:
     fields: list
     methods: list[FunctionDef]
     decorators: list = field(default_factory=list)
-    # Parsed argument/expression of a struct's `@align(...)` decorator, or None
-    # when absent. Kept on the StructDef so later stages (e.g. struct emission
-    # and elaboration-time validation) can inspect it directly.
-    align_expr: object = None
     comptime_aliases: dict = field(default_factory=dict)  # name -> value expr
     bases: list = field(default_factory=list)  # base class/struct names, e.g. `struct Child(Base):`
-    # Parallel to `bases`: one (base_name, where_text) per positional trait
-    # base. `where_text` is the source text of a conditional conformance
-    # (`struct S[T](Copyable where conforms_to(T, Copyable)):`) or "" when the
-    # base is unconditional. Kept separate so readers of `bases` (names only)
-    # are unchanged.
-    base_constraints: list = field(default_factory=list)
     # Keyword arguments in the class/struct base list, e.g.
     # `class M(TypedDict, extra_items=bool, closed=True):` (PEP 728/692).
     # Each entry is (name, value_expr).  The parser used to consume and
@@ -906,24 +894,9 @@ class StructDef:
     # FunctionDef.where_clause: None when absent, one expression, or a list.
     # A `(cond, "message")` entry is a TupleExpr. See _parse_where_clauses.
     where_clause: object = None
-    # Parallel tables for comptime member declarations, keyed by member name:
-    # the declared type annotation ('' when the member has none) and the
-    # member's own `where` clause text ('' when none). Kept beside
-    # StructDef.comptime_aliases so that table's many value readers are
-    # unchanged. Two string-valued dicts rather than one dict of tuples: the
-    # self-hosted compiled path stores dict values as one machine word, and a
-    # tuple value has no such representation (a list of tuples is used for
-    # `base_constraints`, but `bases`-style parallel lists are the established
-    # spelling for a table the compiled path has to read back).
-    comptime_member_types: dict = field(default_factory=dict)
-    comptime_member_wheres: dict = field(default_factory=dict)
     # (name, type-annotation source) for each bracket parameter, in declaration
     # order. Read by _check_inferred_param_dependencies.
     bracket_types: list = field(default_factory=list)
-    # Full bracket-parameter records in declaration order, one per name in the
-    # bracket block: (name, type_annotation_source_or_"", default_source_text_or_None).
-    # Includes trait-bounded type parameters that bracket_types omits.
-    bracket_param_info: list = field(default_factory=list)
     line: int = 0
     col: int = 0
     # A "mark visited" flag set via plain attribute assignment (not passed to
@@ -984,11 +957,6 @@ class TraitDef:
     name: str
     methods: list[FunctionDef]
     decorators: list = field(default_factory=list)
-    # Parent trait names in declaration order, e.g. `trait Sub(Base):`.
-    # Parsed from the parenthesised trait list; empty when none declared.
-    bases: list = field(default_factory=list)
-    # Trait comptime member requirements: (name, type_ann, where_clause).
-    comptime_members: list = field(default_factory=list)
     line: int = 0
     col: int = 0
 
@@ -1097,25 +1065,11 @@ class ComptimeForStmt:
 
 @dataclass
 class ComptimeVarStmt:
-    """Compile-time variable assignment: comptime NAME = expr
-
-    `comptime_params` is the bracket parameter block of a GENERIC comptime
-    alias (`comptime IsTriviallyDeinitable[T: AnyType]: Bool = ...`), in
-    declaration order. Such an alias has no value of its own — its RHS names
-    the parameters — so the evaluator cannot fold it until an APPLICATION
-    (`IsTriviallyDeinitable[Int]`) supplies them. Keeping the names (instead
-    of only skipping the brackets, which is what the parser did before) is
-    what lets that substitution happen; see mojo/middle/comptime.py's
-    `_comptime_alias_template` / `_eval_alias_application` and
-    `_gmi_find_comptime_one`.
-    """
+    """Compile-time variable assignment: comptime NAME = expr"""
     target: str
     value: object
-    type_ann: str = None
-    where_clause: str = ""
     line: int = 0
     col: int = 0
-    comptime_params: list = None
 
 
 # ── Unpacking-target representation ─────────────────────────────────
@@ -2623,74 +2577,6 @@ def _check_variadic_element_types(stmts, filename) -> None:
         raise RuntimeError("\n".join(lines))
 
 
-def _module_name_from_filename(filename: str | None) -> str | None:
-    if not filename:
-        return None
-    import os
-    base = os.path.basename(filename)
-    if not base:
-        return None
-    name, _ext = os.path.splitext(base)
-    return name or None
-
-
-def _docstring_block_abs_loc(block, node_line: int, node_col: int):
-    # node positions are 1-based within the parsed block snippet.
-    if node_line <= 1:
-        return (block.line, block.col + max(node_col - 1, 0))
-    return (block.line + node_line - 1, node_col)
-
-
-def _check_docstring_self_imports(stmts, filename) -> None:
-    """Reject `import X` / `from X import ...` (and equivalent self-imports)
-    inside mojo docstring code blocks of module X."""
-    import os
-    module_name = _module_name_from_filename(filename)
-    if not module_name:
-        return
-    try:
-        from mojo.middle.docstring_blocks import extract_module_docstring_mojo_blocks
-    except Exception:
-        return
-    # Read source text for accurate positions when possible.
-    source = None
-    if filename and os.path.exists(filename):
-        try:
-            with open(filename, "r", encoding="utf-8") as f:
-                source = f.read()
-        except Exception:
-            source = None
-    try:
-        blocks = extract_module_docstring_mojo_blocks(stmts, source=source)
-    except Exception:
-        return
-    for block in blocks:
-        try:
-            block_stmts = Parser(py_tokenize(block.code)).parse_module()
-        except Exception:
-            # A non-parsing doc example is not a self-import diagnostic.
-            continue
-        for st in block_stmts:
-            imported_modules = []
-            if isinstance(st, ImportStmt):
-                if st.module:
-                    imported_modules.append((st.module, getattr(st, "line", 1), getattr(st, "col", 1)))
-                extra = getattr(st, "extra", None) or []
-                for mod, _alias in extra:
-                    if mod:
-                        imported_modules.append((mod, getattr(st, "line", 1), getattr(st, "col", 1)))
-            elif isinstance(st, FromImportStmt):
-                mod = st.module or ""
-                if mod and not mod.startswith("."):
-                    imported_modules.append((mod, getattr(st, "line", 1), getattr(st, "col", 1)))
-            for mod, ln, col in imported_modules:
-                root = mod.split(".", 1)[0]
-                if root == module_name:
-                    abs_line, abs_col = _docstring_block_abs_loc(block, ln or 1, col or 1)
-                    loc = f"{filename}:{abs_line}:{abs_col}: " if filename else f"{abs_line}:{abs_col}: "
-                    raise SyntaxError(f"{loc}error: module '{module_name}' cannot import itself")
-
-
 def _module_function_defs(stmts) -> dict:
     """`{name: FunctionDef}` for each module-level function whose name is
     defined exactly once. A name defined twice (an overload, a redefinition)
@@ -3726,18 +3612,6 @@ _BUILTIN_NAMES = frozenset({
     'filter', 'isinstance', 'hasattr', 'getattr', 'setattr', 'type', 'open',
     'input', 'self', 'super',
 })
-
-
-# Builtins whose argument is consulted for its STATIC TYPE only, at compile
-# time (`type_of(x)` — real Mojo's compile-time analogue of Python's `type(x)`;
-# `__type_of` is the double-underscore spelling the stdlib also uses). They are
-# compiler-provided: no source file declares them. The consumer that explained
-# this first is `ownership_check._COMPTIME_TYPE_FUNCS` (a moved-from binding is
-# still readable as a TYPE), and `unknown_decl_check` uses the same fact to
-# accept the name in a bracket argument (`taker[type_of(x)]`). One definition,
-# because two copies of a builtin list is how one of them goes stale and a
-# valid program becomes "use of unknown declaration 'type_of'".
-_COMPTIME_TYPE_FUNCS = frozenset({'type_of', '__type_of'})
 
 
 # Calls whose result is a fresh, side-effect-free iterable — the ones the
@@ -5041,78 +4915,6 @@ def _canon_conv(conv: str):
 # ── Code generator ─────────────────────────────────────────────────
 
 
-def align_value_error(val: int) -> str | None:
-    """Shared @align value rule: None if valid, else a diagnostic suffix."""
-    try:
-        v = int(val)
-    except Exception:
-        return f"@align value must be a positive power of 2, got {val}"
-    if v <= 0 or (v & (v - 1)) != 0:
-        return f"@align value must be a positive power of 2, got {v}"
-    if v > (1 << 29):
-        return "@align value exceeds maximum alignment (2^29)"
-    return None
-
-
-def _expr_constraint_text(node: object) -> str:
-    """Best-effort source-like text for a conditional-conformance `where`
-    expression. Only the forms needed for declaration-time implication checks
-    are rendered precisely (conforms_to calls, and/or/not, names, members,
-    parens/tuples). Anything else degrades to a conservative string so an
-    unknown shape is never mis-interpreted as a known one."""
-    if node is None:
-        return ""
-    if isinstance(node, IdentExpr):
-        return str(node.name)
-    if isinstance(node, MemberExpr):
-        obj = _expr_constraint_text(node.obj)
-        return f"{obj}.{node.member}"
-    if isinstance(node, CallExpr):
-        func = _expr_constraint_text(node.func)
-        args = ", ".join(_expr_constraint_text(a) for a in (node.args or []))
-        return f"{func}({args})"
-    if isinstance(node, SubscriptExpr):
-        obj = _expr_constraint_text(node.obj)
-        idx = _expr_constraint_text(node.index)
-        return f"{obj}[{idx}]"
-    if isinstance(node, UnaryOp):
-        op = str(node.op)
-        operand = _expr_constraint_text(node.operand)
-        if op == 'not':
-            return f"not {operand}"
-        return f"{op}{operand}"
-    if isinstance(node, BinaryOp):
-        op = str(node.op)
-        left = _expr_constraint_text(node.left)
-        right = _expr_constraint_text(node.right)
-        return f"{left} {op} {right}"
-    if isinstance(node, BoolLiteral):
-        return "True" if node.value else "False"
-    if isinstance(node, IntLiteral):
-        raw = getattr(node, 'raw', None)
-        return str(raw) if raw is not None else str(getattr(node, 'value', 0))
-    if isinstance(node, FloatLiteral):
-        raw = getattr(node, 'raw', None)
-        return str(raw) if raw is not None else str(getattr(node, 'value', 0.0))
-    if isinstance(node, SubscriptExpr):
-        obj = _expr_constraint_text(node.obj)
-        idx = node.index
-        if isinstance(idx, TupleExpr):
-            elems = idx.elements if hasattr(idx, 'elements') else []
-            inner = ", ".join(_expr_constraint_text(e) for e in elems)
-        else:
-            inner = _expr_constraint_text(idx)
-        return f"{obj}[{inner}]"
-    if isinstance(node, TupleExpr):
-        elems = node.elements if hasattr(node, 'elements') else []
-        if len(elems) == 1:
-            return f"({_expr_constraint_text(elems[0])})"
-        return "(" + ", ".join(_expr_constraint_text(e) for e in elems) + ")"
-    if isinstance(node, StringLiteral):
-        return str(node.value)
-    return f"<{type(node).__name__}>"
-
-
 class Parser:
     _tok: list
     _pos: int
@@ -5122,8 +4924,6 @@ class Parser:
     _struct_param_names: list
     _known_traits: set
     _lazy_import_blockers: list
-    # Recovered parse diagnostics (see `self.errors = []` in __init__).
-    errors: list
     # The `*Name: Type` variadic bracket parameters of the LAST bracket list
     # parsed (`_parse_generic_params_capture`), read once by `_parse_funcdef`
     # to fill `FunctionDef.variadic_bracket_params`. A plain attribute
@@ -5145,11 +4945,6 @@ class Parser:
         self._lazy_import_blockers = []
         # Empty until a bracket list is parsed; see the class-level note.
         self._last_bracket_variadics = []
-        # Diagnostics recorded while parsing in recovery mode. Each entry is a
-        # SyntaxError (or a string message) describing a recovered parse error.
-        # `parse_module(recover=True)` collects errors here and continues; the
-        # default non-recovering path still raises on the first error.
-        self.errors = []
         # `comptime NAME = <rhs>` the parser could not parse, as
         # `[(loc, text, exception_text), ...]`. A comptime right-hand side has
         # two very different fates that used to be INDISTINGUISHABLE: a
@@ -5452,34 +5247,15 @@ class Parser:
                         depth -= 1
                     elif t.kind == "EOF": break
         ret = None
-        return_origin = ""
         _ret_tok = self._peek()
         if self._peek().kind == "ARROW":
             self._advance()
             # Drop `ref` lifetime prefix on return type and skip lifetime parameters
             if self._is_kw("ref"):
                 self._advance()
-                # Capture/skip lifetime/origin parameters in brackets: ref[Origin]/ref[x]
+                # Skip lifetime parameters in brackets: ref[Origin]
                 if self._peek().kind == "LBRACKET":
-                    self._advance()  # [
-                    if self._peek().kind in ("NAME", "KW"):
-                        return_origin = _as_str(self._peek().value)
-                        self._advance()
-                        depth_b = 1
-                        while depth_b > 0:
-                            tb = self._peek()
-                            if tb.kind == "LBRACKET":
-                                depth_b += 1
-                            elif tb.kind == "RBRACKET":
-                                depth_b -= 1
-                                if depth_b == 0:
-                                    self._advance()
-                                    break
-                            elif tb.kind == "EOF":
-                                break
-                            self._advance()
-                    else:
-                        self._skip_bracketed()
+                    self._skip_bracketed()
             _ret_tok = self._peek()
             ret = self._parse_type_ann()
             # Skip additional qualifiers after return type
@@ -5538,25 +5314,7 @@ class Parser:
             if self._is_kw("ref"):
                 self._advance()
                 if self._peek().kind == "LBRACKET":
-                    self._advance()  # [
-                    if self._peek().kind in ("NAME", "KW"):
-                        return_origin = _as_str(self._peek().value)
-                        self._advance()
-                        depth_b = 1
-                        while depth_b > 0:
-                            tb = self._peek()
-                            if tb.kind == "LBRACKET":
-                                depth_b += 1
-                            elif tb.kind == "RBRACKET":
-                                depth_b -= 1
-                                if depth_b == 0:
-                                    self._advance()
-                                    break
-                            elif tb.kind == "EOF":
-                                break
-                            self._advance()
-                    else:
-                        self._skip_bracketed()
+                    self._skip_bracketed()
             ret = self._parse_type_ann()
         self._expect("COLON")
         self._lazy_import_blockers.append("functions")
@@ -5579,8 +5337,7 @@ class Parser:
                            captures=captures,
                            has_capture_list=has_capture_list,
                            where_clause=where_clause,
-                           where_else=where_else,
-                           return_origin=return_origin)
+                           where_else=where_else)
 
     def _parse_where_clauses(self):
         """Parse any `where` clauses at the current position: `(clause, else)`.
@@ -5724,13 +5481,11 @@ class Parser:
         # Parse struct parameter block [x: Type, y: Type = default, ...] as fields
         param_fields = []
         bracket_params = []
-        bracket_param_info = []
         if self._peek().kind == "LBRACKET":
             param_fields = self._parse_struct_params_as_fields()
             bracket_params = [f.name for f in param_fields
                               if isinstance(f, VarDecl)]
             type_param_names = list(getattr(self, '_struct_param_names', []) or [])
-            bracket_param_info = list(getattr(self, '_struct_bracket_param_info', []) or [])
         else:
             type_param_names = []
         # `struct Child(Base1, Base2):` / `class Child(Base):` — Python-style
@@ -5742,7 +5497,6 @@ class Parser:
         # execute_StructDef), and keywords are preserved on the StructDef so
         # consumers that need them (e.g. TypedDict/PEP 728) can read them.
         bases = []
-        base_constraints = []
         class_keywords = []
         if self._peek().kind == "LPAREN":
             self._advance()
@@ -5793,15 +5547,7 @@ class Parser:
                         self._advance()  # consume DOT
                         last_name = self._peek().value
                         self._advance()  # consume NAME
-                    where_text = ""
-                    # Conditional conformance: `Trait where conforms_to(T, X)`
-                    # inside the base list. `where` is a NAME token here.
-                    if depth == 1 and self._peek().kind == "NAME" and self._peek().value == "where":
-                        self._advance()  # consume 'where'
-                        where_expr = self._parse_expr(0)
-                        where_text = _expr_constraint_text(where_expr)
                     bases.append(last_name)
-                    base_constraints.append((last_name, where_text))
                     expect_name = False
                     continue
                 self._advance()
@@ -5987,45 +5733,21 @@ class Parser:
         # _as_comptimevar_node). `_cs` is statically ComptimeVarStmt, so
         # `.target` compiles to a direct `char *` load on both backends.
         aliases = {}
-        comptime_member_types = {}
-        comptime_member_wheres = {}
         for _cs in body:
             if not isinstance(_cs, ComptimeVarStmt):
                 continue
             _cvnode = _as_comptimevar_node(_cs)
             aliases[_cvnode.target] = _cvnode.value
-            comptime_member_types[_cvnode.target] = _cvnode.type_ann or ""
-            comptime_member_wheres[_cvnode.target] = _cvnode.where_clause or ""
         decs    = getattr(self, "_pending_decs", [])
         self._pending_decs = []
         self._validate_align_decorators(decs)
-        align_expr = self._extract_struct_align_expr(decs)
         return StructDef(name=name, fields=fields, methods=methods, decorators=decs,
-                         align_expr=align_expr,
-                         comptime_aliases=aliases,
-                         comptime_member_types=comptime_member_types,
-                         comptime_member_wheres=comptime_member_wheres,
-                         bases=bases,
-                         base_constraints=base_constraints,
-                         keywords=class_keywords,
+                         comptime_aliases=aliases, bases=bases, keywords=class_keywords,
                          bracket_params=bracket_params,
                          type_param_names=type_param_names,
                          where_clause=struct_where,
-                         bracket_param_info=bracket_param_info,
                          bracket_types=[(f.name, f.type_ann) for f in param_fields
                                         if isinstance(f, VarDecl)])
-
-    def _extract_struct_align_expr(self, decorators):
-        for dec in (decorators or []):
-            if isinstance(dec, CallExpr):
-                func = dec.func
-                if isinstance(func, IdentExpr) and func.name == "align":
-                    if dec.args:
-                        return dec.args[0]
-                    return None
-            elif isinstance(dec, str) and dec == "align":
-                return None
-        return None
 
     def _validate_align_decorators(self, decorators):
         for dec in decorators:
@@ -6057,9 +5779,12 @@ class Parser:
             val = self._eval_align_constant_int(arg)
             if val is None:
                 continue
-            err = align_value_error(val)
-            if err is not None:
-                raise SyntaxError(f"{self._loc(loc_tok)}{err}")
+            if val <= 0 or (val & (val - 1)) != 0:
+                raise SyntaxError(
+                    f"{self._loc(loc_tok)}@align value must be a positive power of 2")
+            if val > (1 << 29):
+                raise SyntaxError(
+                    f"{self._loc(loc_tok)}@align value exceeds maximum alignment (2^29)")
 
     def _eval_align_constant_int(self, expr):
         if isinstance(expr, IntLiteral):
@@ -6141,9 +5866,7 @@ class Parser:
             else:
                 aliases[member_name] = IntLiteral(next_auto, raw='')
                 next_auto += 1
-        align_expr = self._extract_struct_align_expr(decs)
         return StructDef(name=name, fields=[], methods=[], decorators=decs,
-                         align_expr=align_expr,
                          comptime_aliases=aliases)
 
     def _parse_trait(self):
@@ -6151,51 +5874,26 @@ class Parser:
         name = self._expect("NAME").value
         # Skip generic type-param block [T: Trait, ...]
         if self._peek().kind == "LBRACKET": self._skip_bracketed()
-        bases = []
         if self._peek().kind == "LPAREN":
             self._advance()
-            # Parse parent trait list, e.g. `trait Sub(Base):`.
+            # Skip balanced parentheses in trait list
             depth = 1
-            expect_name = True
             while depth > 0:
-                t = self._peek()
+                t = self._advance()
                 if t.kind == "LPAREN":
-                    self._advance(); depth += 1; continue
-                if t.kind == "RPAREN":
-                    self._advance(); depth -= 1; continue
-                if t.kind == "EOF":
+                    depth += 1
+                elif t.kind == "RPAREN":
+                    depth -= 1
+                elif t.kind == "EOF":
                     break
-                if t.kind == "COMMA" and depth == 1:
-                    self._advance(); expect_name = True; continue
-                if depth == 1 and expect_name and t.kind == "NAME":
-                    last_name = t.value
-                    self._advance()
-                    while self._peek().kind == "DOT" and self._peek(1).kind == "NAME":
-                        self._advance()
-                        last_name = self._peek().value
-                        self._advance()
-                    bases.append(last_name)
-                    expect_name = False
-                    continue
-                self._advance()
         self._expect("COLON")
         self._lazy_import_blockers.append("classes")
         body = self._parse_block()
         self._lazy_import_blockers.pop()
         methods = [s for s in body if isinstance(s, FunctionDef)]
-        # A trait's `comptime NAME: Type` is a REQUIREMENT; the same spelling
-        # with a value (`comptime NAME: Type = default`, e.g. EnumLike's
-        # `_enum_elt_type_for_case`) supplies a default and imposes nothing on
-        # conforming types. Only the value-less form is a requirement.
-        comptime_members = []
-        for s in body:
-            if isinstance(s, ComptimeVarStmt) and s.value is None:
-                comptime_members.append(
-                    (s.target, s.type_ann or "", s.where_clause or ""))
         decs = getattr(self, "_pending_decs", [])
         self._pending_decs = []
-        return TraitDef(name=name, methods=methods, decorators=decs, bases=bases,
-                        comptime_members=comptime_members)
+        return TraitDef(name=name, methods=methods)
 
     def _parse_try(self):
         # The `try` keyword's own line, recorded because `TryStmt` is the one
@@ -6364,33 +6062,47 @@ class Parser:
         # Also allow backtick-quoted identifiers: comptime `A` = Byte(ord("A"))
         if t.kind == "NAME" or (t.kind == "STRING" and t.value.startswith("`")):
             name = self._advance().value
-            type_ann = None
-            where_clause = ""
-            # `comptime Alias[T, U]: Type = ...` — CAPTURE the bracket
-            # parameters, do not only skip them. A generic comptime alias is
-            # applied at a call site (`Alias[Int]`), and the evaluator binds
-            # these names to that application's arguments; without the names
-            # the alias stays an undeclared identifier and a `comptime if`
-            # over it becomes a runtime branch on a zero word.
-            comptime_params = None
-            if self._peek().kind == "LBRACKET":
-                comptime_params, _cp_defaults, _cp_anns = \
-                    self._parse_generic_params_capture()
-            # Optional type annotation: comptime MIN: Bool = False
+            # Skip optional type parameters: comptime Alias[T, U]: Type = ...
+            if self._peek().kind == "LBRACKET": self._skip_bracketed()
+            # Skip optional type annotation: comptime MIN: Bool = False
             if self._peek().kind == "COLON":
                 self._advance()  # skip colon
-                type_ann = self._parse_type_ann()
-                # Optional `where <expr>` clause AFTER the annotation —
-                # `comptime F: Trait where conforms_to(T, Movable) = ...`.
-                # Parsed as an expression and retained (as text) for trait
-                # comptime member requirement checking, while preserving the
-                # tolerant fallback behavior.
+                self._parse_type_ann()  # parse and discard type annotation
+                # Skip an optional `where <expr>` clause AFTER the annotation —
+                # the mid-statement form the funcdef/struct-head `where` skips
+                # (see _parse_funcdef's own and _parse_struct's) have no
+                # business with: `comptime F: Trait where conforms_to(T,
+                # Movable & Deinitable) = ...`. Every std/collections
+                # container (Array, List, Deque, LinkedList, Dict) spells its
+                # `IteratorOwnedType` alias exactly this way, MULTI-LINE:
+                #
+                #     comptime IteratorOwnedType: Iterator where conforms_to(
+                #         Self.T, Deinitable & Movable
+                #     ) = _ListIterOwned[Self.T]
+                #
+                # Without this the next token after the annotation is the NAME
+                # `where`, not `ASSIGN`, so the function returned
+                # ExprStmt(IdentExpr(name)) — the alias silently dropped — and
+                # the continuation `where conforms_to(...) = ...` parsed as an
+                # ORDINARY assignment statement, which _parse_struct then put
+                # into StructDef.fields, where every `.name` reader (elaborate
+                # .py's _struct_layout_anns is the measured crash) died with
+                # "AttributeError: 'AssignStmt' object has no attribute
+                # 'name'".
+                #
+                # The clause is an EXPRESSION (`conforms_to(...) and
+                # conforms_to(...)` — Dict's is two calls joined by `and` with
+                # no enclosing parens), followed by `= <RHS>`, so it is parsed
+                # as one expression and discarded — a skip-to-NEWLINE (the
+                # funcdef form) would swallow the `= <RHS>` for the single-line
+                # spelling, since NEWLINE is only emitted once brackets balance.
+                # The fallback token-skip (on a misparse of the clause itself)
+                # stops at the `=` so the RHS stays reachable.
                 if self._peek().kind == "NAME" and self._peek().value == "where":
                     self._advance()  # where
                     _where_saved = self._pos
-                    _wexpr = None
                     try:
-                        _wexpr = self._parse_expr(0)
+                        self._parse_expr(0)
                     except (SyntaxError, ValueError, TypeError, AttributeError,
                             IndexError, KeyError):
                         self._pos = _where_saved
@@ -6399,7 +6111,7 @@ class Parser:
                             self._parse_type_ann()
                             self._pos = _where_saved
                             try:
-                                _wexpr = self._parse_expr(0)
+                                self._parse_expr(0)
                             except Exception:
                                 self._pos = _where_saved
                                 while self._peek().kind not in (
@@ -6410,11 +6122,6 @@ class Parser:
                             while self._peek().kind not in (
                                     "ASSIGN", "NEWLINE", "DEDENT", "EOF"):
                                 self._advance()
-                    if _wexpr is not None:
-                        try:
-                            where_clause = _expr_constraint_text(_wexpr) or ""
-                        except Exception:
-                            where_clause = ""
             # A multi-target comptime binding: `comptime a, b = expr(...)`,
             # which unpacks ONE compile-time value into two names, and each
             # target may itself be a parenthesised (possibly nested) group —
@@ -6478,26 +6185,12 @@ class Parser:
                 # `test_gimple_runner.py`. The rename stays: it is free, and it
                 # keeps this function's own C output identical to what the
                 # self-host stages were compared byte-for-byte against.
-                return [ComptimeVarStmt(target=_name, value=rhs,
-                                        type_ann=type_ann,
-                                        where_clause=where_clause,
-                                        comptime_params=comptime_params)
-                        for _name in targets]
+                return [ComptimeVarStmt(target=_name, value=rhs) for _name in targets]
             if self._peek().kind == "ASSIGN":
                 self._advance()
                 # Parse/skip RHS expression, handling complex function types
                 rhs = self._skip_comptime_rhs()
-                return [ComptimeVarStmt(target=name, value=rhs,
-                                        type_ann=type_ann,
-                                        where_clause=where_clause,
-                                        comptime_params=comptime_params)]
-            # Declaration form without value, e.g. trait comptime requirement:
-            #   `comptime _enum_is_exhaustive: Bool`
-            if type_ann is not None or where_clause:
-                return [ComptimeVarStmt(target=name, value=None,
-                                        type_ann=type_ann,
-                                        where_clause=where_clause,
-                                        comptime_params=comptime_params)]
+                return [ComptimeVarStmt(target=name, value=rhs)]
             return ExprStmt(IdentExpr(name))
         raise SyntaxError(f"{self._loc(t)}Unexpected token after comptime: {t.value!r}")
 
@@ -7806,7 +7499,7 @@ class Parser:
             self._advance()
             if t.value == "lambda" and t.kind == "NAME" and (
                 self._peek().kind == "COLON"
-                or self._peek().kind in ("NAME", "KW")
+                or self._peek().kind == "NAME"
                 # LBRACKET/LPAREN/LBRACE are the Mojo lambda's own parameter
                 # block, capture list and parameter list; `lambda` is a real
                 # Python keyword and so is never an ordinary identifier, which
@@ -8391,7 +8084,6 @@ class Parser:
         return target, saw_comma
 
     def _parse_generator(self):
-        for_tok = self._peek()
         self._expect("KW", "for")
         target, _ = self._parse_generator_target()
         self._expect("KW", "in")
@@ -8399,11 +8091,7 @@ class Parser:
         conditions = []
         while self._is_kw("if"):
             self._advance(); conditions.append(self._parse_expr(1))
-        # The clause's own `for` keyword: genexp_body builds this clause's
-        # ForStmt from it, and a line-less ForStmt emits no `#line` directive
-        # for its lines (the iterable lowering, the loop header).
-        return Generator(target=target, iterable=iterable, conditions=conditions,
-                         line=for_tok.line, col=for_tok.col)
+        return Generator(target=target, iterable=iterable, conditions=conditions)
 
     def _parse_generators(self):
         """Parse one or more chained `for ... in ... [if ...]` clauses, as in
@@ -8423,7 +8111,6 @@ class Parser:
         # not comptime VALUE parameters), but the StructDef's type_param_names
         # must still see them — see that field's comment.
         self._struct_param_names = []
-        self._struct_bracket_param_info = []
         while True:
             t = self._peek()
             if t.kind in ('RBRACKET', 'EOF'):
@@ -8448,41 +8135,34 @@ class Parser:
                 name = t.value
                 self._struct_param_names.append(name)
                 self._advance()
-                type_ann = ''
-                default_text = None
                 if self._peek().kind == 'COLON':
                     self._advance()  # consume ':'
                     type_ann = self._parse_type_ann()
-                    # Optional default value ('=' tokenizes as ASSIGN)
+                    # Skip optional default value ('=' tokenizes as ASSIGN)
                     if self._peek().kind in ('EQUAL', 'ASSIGN') or (
                             self._peek().kind == 'OP' and self._peek().value == '='):
                         self._advance()  # consume '='
-                        # Capture default value expression as source text.
+                        # Skip default value expression (balanced brackets)
                         depth = 0
-                        parts = []
                         while True:
                             pk = self._peek()
                             if pk.kind == 'EOF':
                                 break
                             if pk.kind in ('LPAREN', 'LBRACKET', 'LBRACE'):
                                 depth += 1
-                                parts.append(self._advance().value)
+                                self._advance()
                             elif pk.kind in ('RPAREN', 'RBRACE'):
                                 depth -= 1
-                                parts.append(self._advance().value)
+                                self._advance()
                             elif pk.kind == 'RBRACKET':
                                 if depth <= 0:
                                     break
                                 depth -= 1
-                                parts.append(self._advance().value)
+                                self._advance()
                             elif pk.kind == 'COMMA' and depth == 0:
                                 break
                             else:
-                                parts.append(self._advance().value)
-                        text = " ".join(parts).strip()
-                        for ch in "[](),.":
-                            text = text.replace(" " + ch, ch).replace(ch + " ", ch)
-                        default_text = text if text else None
+                                self._advance()
                     # `name: TraitName` is a generic TYPE parameter (T conforms
                     # to the trait), not a comptime VALUE parameter — it must
                     # NOT become a real field, or @fieldwise_init's synthesized
@@ -8494,7 +8174,6 @@ class Parser:
                 else:
                     # No colon — skip this token (could be a bare type name)
                     pass
-                self._struct_bracket_param_info.append((name, type_ann, default_text))
             else:
                 self._advance()  # skip unexpected token
         return fields
@@ -8566,8 +8245,7 @@ class Parser:
         """Consume a `def f[dtype: DType, width: SIMDSize, //, ...](...)`
         generic/comptime parameter block like `_skip_bracketed`, but also
         return the parameter names in declaration order together with the
-        DECLARED DEFAULTS of the ones written `name = expr` or
-        `name: Type = expr` — enough for
+        DECLARED DEFAULTS of the ones written `name = expr` — enough for
         the interpreter to bind a call-site subscript (`f[Int32]()`) to
         names by position, e.g. so the function body can read `dtype` as a
         plain value, and to answer `f[T=Int]()` for a parameter the bracket
@@ -8641,16 +8319,6 @@ class Parser:
                 if self._peek().kind == "COLON":
                     self._advance()
                     annotations[_nm] = self._capture_bracket_param_annotation()
-                    # `name: Type = default`: the annotation span stops at the
-                    # top-level `=`, so the default is read here, exactly as for
-                    # the unannotated `name = default` spelling above. Without
-                    # this the `= 4` was swallowed into the annotation text and
-                    # `comptime_param_defaults` had no entry, which made a
-                    # legal declaration look like an omitted required parameter
-                    # at the bracket.
-                    if self._peek().kind == "ASSIGN":
-                        self._advance()
-                        defaults[_nm] = self._parse_bracket_param_default()
                     continue
                 if self._peek().kind == "ASSIGN":
                     self._advance()
@@ -8663,15 +8331,12 @@ class Parser:
     def _capture_bracket_param_annotation(self) -> str:
         """The DECLARED TYPE of a bracketed parameter, as source text.
 
-        Consumes tokens until the next top-level COMMA or RBRACKET -- or a
-        top-level `=` that introduces the parameter's default
-        (`def f[x: Int = 4]`), which `_parse_generic_params_capture` then reads
-        with `_parse_bracket_param_default` -- and returns them joined with
-        spaces. Same span discipline as `_parse_bracket_param_default`, and for
-        the same reason: what FOLLOWS is parameter-list punctuation (`//`, `,`,
-        `]`), not part of the type. Text and not a parsed expression because a
-        type is not an expression here, and the consumers
-        (`model.param_annotation` -> `declared_type_kind`,
+        Consumes tokens until the next top-level COMMA or RBRACKET and returns
+        them joined with spaces -- the same span discipline as
+        `_parse_bracket_param_default`, and for the same reason: what FOLLOWS is
+        parameter-list punctuation (`//`, `,`, `]`), not part of the type. Text
+        and not a parsed expression because a type is not an expression here, and
+        the consumers (`model.param_annotation` -> `declared_type_kind`,
         `model.optional_receiver_types`) reduce it from text.
 
         The span is consumed whether or not anybody wants it, so the caller's
@@ -8688,11 +8353,6 @@ class Parser:
             if t.kind == "COMMA" and depth == 1:
                 break
             if t.kind == "RBRACKET" and depth == 1:
-                break
-            # A `=` at bracket depth 1 is the parameter's DEFAULT, not part of
-            # its type (`def f[x: Int = 4]`). One inside a function-typed
-            # annotation's parens lives at depth > 1 and stays part of it.
-            if t.kind == "ASSIGN" and depth == 1:
                 break
             if t.kind in ("LBRACKET", "LPAREN", "LBRACE"):
                 depth += 1
@@ -8770,14 +8430,6 @@ class Parser:
             self._pos = len(self._tok)
         if not _span:
             return None
-        # The span is a sub-stream: terminate it with an EOF token exactly as
-        # `py_tokenize` terminates every real stream. `_advance` never steps
-        # past the LAST token, so without one a span ending in a STRING (a
-        # default like `= "x"`) made the implicit-concatenation loop in
-        # `_parse_primary` spin forever, appending to its list until the
-        # machine ran out of memory.
-        _last = _span[-1]
-        _span.append(Token("EOF", "", line=_last.line, col=_last.col))
         return Parser(_span).with_filename(self._filename)._parse_expr(0)
 
     def _skip_fn_quals(self):
@@ -9410,16 +9062,10 @@ class Parser:
                 self._advance()  # skip =
                 keywords[keyword_name] = self._parse_expr(0)  # parse and store value
             else:
-                first_tok = self._peek()
                 first = self._parse_expr(0)
                 if self._is_kw("for"):
                     gens = self._parse_generators()  # allow chained for-clauses
-                    # The genexp's line/col is its element's first token, as
-                    # the parenthesised form's is its `(`. Without it the
-                    # hoisted `__genexp_N` body had no line, so none of its
-                    # statements carried a `#line` directive.
-                    args = [Comprehension(kind="generator", element=first, generators=gens,
-                                          line=first_tok.line, col=first_tok.col)]
+                    args = [Comprehension(kind="generator", element=first, generators=gens)]
                     continue
                 args.append(first)
             if self._peek().kind == "COMMA": self._advance()
@@ -9545,74 +9191,18 @@ class Parser:
     def _is_kw(self, *w) -> bool:
         t = self._peek(); return t.kind == "KW" and t.value in w
 
-    def parse_module(self, recover: bool = False) -> list:
+    def parse_module(self) -> list:
         stmts = []
-        self.errors = []
         self._skip_newlines()
         while not self._at_end():
-            if recover:
-                start_pos = self._pos
-                try:
-                    self._parse_stmt_into(stmts)
-                except SyntaxError as e:
-                    self.errors.append(e)
-                    # Synchronize: advance past the failing construct so parsing
-                    # can continue at the next likely top-level declaration.
-                    self._synchronize_top_level(start_pos)
-                except Exception as e:
-                    # Treat other parse-time failures as recoverable errors too
-                    # so a malformed declaration does not abort the module.
-                    self.errors.append(e)
-                    self._synchronize_top_level(start_pos)
-            else:
-                self._parse_stmt_into(stmts)
+            self._parse_stmt_into(stmts)
             self._skip_newlines()
         stmts = _synthesize_fieldwise_inits(stmts)
         _check_out_argument_calls(stmts, self._filename)
         _check_mlir_type_argument_calls(stmts, self._filename)
         _check_inferred_param_dependencies(stmts, self._filename)
         _check_variadic_element_types(stmts, self._filename)
-        _check_docstring_self_imports(stmts, self._filename)
         return stmts
-
-    def _synchronize_top_level(self, start_pos: int):
-        """Recover after a parse error at module scope by skipping tokens until
-        the parser is positioned at a plausible start of the next top-level
-        declaration or statement. Must always make progress when not at EOF."""
-        if self._pos == start_pos and not self._at_end():
-            self._advance()
-        # Skip to a NEWLINE at module level, then consume layout/newlines until
-        # we reach a token that is not inside an indented block we failed in.
-        while not self._at_end():
-            t = self._peek()
-            if t.kind == "NEWLINE":
-                self._advance()
-                # Consume blank lines and dedents back to module scope.
-                while not self._at_end():
-                    t2 = self._peek()
-                    if t2.kind in ("NEWLINE", "DEDENT"):
-                        self._advance()
-                        continue
-                    if t2.kind == "INDENT":
-                        # Still inside/entering an indented region (e.g. we
-                        # failed mid-block); consume and keep seeking module
-                        # level.
-                        self._advance()
-                        continue
-                    break
-                # At module scope now? A top-level token follows (no INDENT
-                # pending). Stop so the main loop can parse it.
-                if self._at_end():
-                    return
-                if self._peek().kind not in ("INDENT", "DEDENT"):
-                    return
-                continue
-            if t.kind == "DEDENT":
-                self._advance()
-                if not self._at_end() and self._peek().kind not in ("INDENT", "DEDENT", "NEWLINE"):
-                    return
-                continue
-            self._advance()
 
     def _parse_stmt_into(self, stmts: list):
         """Parse one statement and append it to `stmts`.
@@ -9939,39 +9529,7 @@ class Parser:
                 if looks_like_enumdef:
                     return self._parse_enum()
                 # else: fall through to expression statement
-            if t.value == "trait":
-                # `trait` is ambiguous the same way `fn`/`struct`/`enum` are:
-                # real Python has no `trait` keyword, so a local named `trait`
-                # is a legal identifier (`trait = ...`, `trait.foo(...)`,
-                # `trait(...)`). Without this carve-out the compiler's own
-                # Python sources cannot use `trait` as a variable name at all —
-                # mojo/middle/mojoc_conformance.py's
-                # `trait = (records or {}).get(...)` was refused with
-                # "Expected NAME got ASSIGN('=')", which aborted every
-                # whole-program compile of the self-host.
-                #
-                # Only commit to the trait declaration parse when the shape
-                # that follows could actually BE one: `trait` immediately
-                # followed by a name-like token and then `[` (generic params),
-                # `(` (bases), or `:` (straight into the body). If it is clearly
-                # used as an ordinary identifier, fall through to
-                # expression/assignment parsing. Otherwise (e.g. a malformed or
-                # incomplete declaration like bare `trait` on its own line) keep
-                # routing to `_parse_trait` so parse errors/recovery behave as
-                # before.
-                nxt, nxt2 = self._peek(1), self._peek(2)
-                name_like = nxt.kind in ("NAME", "KW") or (
-                    nxt.kind == "STRING" and nxt.value.startswith("`"))
-                looks_like_traitdef = name_like and nxt2.kind in ("LBRACKET", "LPAREN", "COLON")
-                if looks_like_traitdef:
-                    return self._parse_trait()
-                if nxt.kind in ("ASSIGN", "DOT", "LPAREN", "LBRACKET"):
-                    # Ordinary identifier use at statement position.
-                    pass  # fall through to expression/assignment parsing
-                else:
-                    # Malformed/incomplete trait declaration: let _parse_trait
-                    # produce the diagnostic/recovery.
-                    return self._parse_trait()
+            if t.value == "trait": return self._parse_trait()
             if t.value == "try": return self._parse_try()
             if t.value == "with": return self._parse_with()
             if t.value == "comptime" or t.value == "param":

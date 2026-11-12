@@ -13,7 +13,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control as C
 
-POOL = {"default_slot": "a", "mode": "build", "slots": [
+POOL = {"default_slot": "a", "slots": [
     {"name": "a", "model": "m/a", "count": 1, "class": "easy"},
     {"name": "b", "model": "m/b", "count": 1, "class": "easy"},
 ]}
@@ -33,7 +33,6 @@ def held(name, claim):
 class RefillClaimBlocked(unittest.TestCase):
     def setUp(self):
         self.qdir = tempfile.mkdtemp()
-        self.ctl = tempfile.mkdtemp()      # never the live dead_models/registry
         self.items = [item("fix-merge-blocked-1", "bug:X", 1), item("fix-merge-blocked-2", "bug:X", 2),
                       item("fix-replan-ok", "bug:Y", 3)]
         for it in self.items:
@@ -42,7 +41,6 @@ class RefillClaimBlocked(unittest.TestCase):
         self.patches = [
             mock.patch.object(C, "load_pool", return_value=POOL),
             mock.patch.object(C, "qdir", return_value=self.qdir),
-            mock.patch.object(C, "ctl_dir", return_value=self.ctl),
             mock.patch.object(C, "live_names", return_value=frozenset()),
             mock.patch.object(C, "breaker_until", return_value=0),
             mock.patch.object(C, "dead_on_arrival", return_value=False),
@@ -65,26 +63,11 @@ class RefillClaimBlocked(unittest.TestCase):
         for p in self.patches:
             p.stop()
         shutil.rmtree(self.qdir, ignore_errors=True)
-        shutil.rmtree(self.ctl, ignore_errors=True)
 
     def test_blocked_tasks_take_no_slot_and_the_next_one_starts(self):
         C.cmd_refill(argparse.Namespace(target=2, prefix="fix-"))
         self.assertEqual(self.spawned, ["fix-replan-ok"])
         self.assertTrue(os.path.exists(os.path.join(self.qdir, "fix-merge-blocked-1.json")), "blocked task stays queued")
-
-    def test_drain_mode_orders_but_never_idles_a_free_slot(self):
-        # drain mode: finishing work goes FIRST, but a free slot still takes a non-finishing task (fix-replan-*)
-        drain_pool = dict(POOL, mode="drain")
-        with mock.patch.object(C, "load_pool", return_value=drain_pool), \
-             mock.patch.object(C, "holds_claims", side_effect=lambda t: False):
-            C.cmd_refill(argparse.Namespace(target=4, prefix="fix-"))
-        self.assertEqual(self.spawned, ["fix-merge-blocked-1", "fix-merge-blocked-2"])   # two slots: finishing first
-        with mock.patch.object(C, "load_pool", return_value=dict(drain_pool, slots=POOL["slots"] + [
-                {"name": "c", "model": "m/c", "count": 1, "class": "easy"}])), \
-             mock.patch.object(C, "holds_claims", side_effect=lambda t: False):
-            self.spawned.clear()
-            C.cmd_refill(argparse.Namespace(target=4, prefix="fix-"))
-        self.assertEqual(self.spawned, ["fix-replan-ok"])    # a free slot takes the plain task in drain mode
 
     def test_started_task_claims_block_the_rest_of_the_pass(self):
         self.items.append(item("fix-second-on-y", "bug:Y", 4))

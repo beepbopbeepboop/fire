@@ -693,48 +693,29 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
           "generated dylib proof does not mention the exported function")
     # The generated file admits nothing, and that is the point.
     # [3]'s IR-3-to-2-dylib-stubs.md replaced three `sorry`s-over-false-claims
-    # with NAMED obligations -- `_semantics_total` (the run terminates for every
-    # argument) and `_spec` (the export matches its specification) -- so that
-    # the caller's theorem is proved and sorry-free.  Grepping for "no sorry
-    # anywhere" would therefore be red for the right reason, and silencing it
-    # would be wrong.
+    # with two NAMED obligations -- `_semantics_total` (the run terminates for
+    # every argument) and `_spec` (the export matches its specification) -- so
+    # that the caller's theorem is proved and sorry-free.  Grepping for "no
+    # sorry anywhere" would therefore be red for the right reason, and silencing
+    # it would be wrong.
     #
     # What changed on 2026-10-03 is that an export whose spec `_dylib_spec_lean`
     # CAN derive no longer emits a `_spec` obligation at all: its contract is
     # emitted PROVED (`hreg`, `agrees_of_body`) and `bv_decide` checks the
-    # machine against the source.
-    #
-    # What changed 2026-11-17 is the termination half: `_semantics_total` was a
-    # FALSE statement for an export that can trap, not a hard one.  An
-    # integer-overflow guard's trap tail ends in an exit `svc`, `arm64_step`
-    # answers `none` there, and `Total` ("the run leaves a final state for
-    # EVERY argument") then has no witness -- measured, on a dylib built from
-    # `def add1(n): return n + 1`, `DylibExport.runExport dylib_image add1
-    # 0x7FFFFFFFFFFFFFFF = none` by `native_decide`.  A named `sorry` over that
-    # is the one hole no census in this tree can tell from an unfinished true
-    # one, so such an export now carries `NO TERMINATION CLAIM for <ident>` and
-    # NO `_semantics_total` theorem.  So the set is pinned per export as
-    # "PROVED, or NAMED, or NO CLAIM WITH A MARKER, and EITHER a proved
-    # contract OR a named `_spec` obligation" -- never equality against a fixed
-    # set, which cannot tell "no obligation because it is PROVED" from "no
-    # obligation because the emitter forgot", and treats those two as the same
-    # observation.  That distinction is
-    # `FORMAL_dylib_export_loops_and_frame_bounds.md` §`OPUS-2`, and the
-    # asymmetry is now checked in the direction that matters.
+    # machine against the source.  So the set is pinned per export as
+    # "terminates, and EITHER a proved contract OR a named `_spec`
+    # obligation" -- never equality against a fixed set, which cannot tell
+    # "no obligation because it is PROVED" from "no obligation because the
+    # emitter forgot", and treats those two as the same observation.  That
+    # distinction is `FORMAL_dylib_export_loops_and_frame_bounds.md` §`OPUS-2`, and
+    # the asymmetry is now checked in the direction that matters.
     import re as _re
     idents = set(_re.findall(r"^def (dylib_export_\w+) : DylibExport :=", text, _re.M))
     check(idents, "the generated proof names no export at all")
     for ident in sorted(idents):
-        no_total = f"NO TERMINATION CLAIM for {ident}" in text
-        has_total = bool(_re.search(rf"theorem {ident}_semantics_total\b", text))
-        check(no_total != has_total,
-              f"{ident} "
-              + ("states a `_semantics_total` theorem AND says it makes no "
-                 "termination claim, so one of the two is not what it says"
-                 if no_total and has_total else
-                 "has neither a `_semantics_total` theorem nor a `NO TERMINATION "
-                 "CLAIM` marker: every export's termination is proved, named, "
-                 "or explicitly not claimed"))
+        check(_re.search(rf"theorem {ident}_semantics_total\b", text),
+              f"{ident} has no `_semantics_total` theorem: every export gets "
+              f"one, proved or named")
         # A proved contract is either the straight-line `agrees_of_body` or,
         # for a body with overflow guards, the guarded `agrees_of_body_under`
         # over the guard's own `bodyI`.  Both are proved; neither is a `_spec`.
@@ -783,23 +764,11 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
         check("sorry" not in ns.group(1),
               f"{ident}'s proved contract contains a `sorry`")
     # `triple`'s overflow trap is an exit `svc`, which the model steps to
-    # `none`, so `triple` does not return a final state for every argument and
-    # its termination is NOT a fact of the model.  It is therefore not claimed
-    # at all, and the marker says so -- the claim it used to name was FALSE, and
-    # a `sorry` over a false statement is indistinguishable from one over a true
-    # statement to every census here (`IR-2-to-integrator-lib-registration-and-
-    # total-shape.md` §3).  Pinned in that direction: a proof here would mean
-    # the model stopped stepping the exit to `none`, which is the regression to
-    # catch.
-    check("NO TERMINATION CLAIM for dylib_export_0_triple" in text,
-          "triple's termination is neither claimed nor declined: its overflow "
-          "trap halts (an exit svc), so `Total` is false for it and the emitter "
-          "must say that rather than name an obligation `Total` cannot fill")
-    check(not _re.search(r"theorem dylib_export_0_triple_semantics_total\b",
-                         text),
-          "triple has a `_semantics_total` theorem, but `Total` is false for "
-          "it: its overflow trap halts (an exit svc) and the model steps it to "
-          "none")
+    # `none`, so `triple` does not return a final state for every argument
+    # and its termination is NOT a fact of the model: it stays a named
+    # obligation (see `arm64_proof_gen.py`'s `_semantics_total` fallback).
+    # Pinned in that direction: a proof here would mean the model stopped
+    # stepping the exit to `none`, which is the regression to catch.
     check(":=\n  DylibExport.total_of_halts dylib_image dylib_export_0_triple "
           "dylib_export_0_triple_halts" not in text,
           "triple's termination is proved, but its overflow trap halts "
@@ -2319,173 +2288,38 @@ def test_a_conditional_value_is_not_a_branch(tmpdir, shared):
                   f"export's named `_spec`")
 
 
-def test_an_overflow_trapping_export_makes_no_termination_claim(
-        tmpdir, shared):
-    """`Total` is FALSE for an export that can trap, so it is not claimed.
+def test_the_last_exports_walk_ignores_the_image_tail(tmpdir, shared):
+    """The LAST export's CFG walk judged the image's runtime tail, not its own
+    reachable code, so its termination was a named `sorry`.
 
-    `DylibExport.Total` says the run leaves a final state for EVERY argument.
-    An integer-overflow guard's trap tail ends in an exit `svc`, and
-    `arm64_step` steps that to `none` -- the truth the model was corrected to
-    state (`f03896fff`) -- so for the arguments that overflow there is no final
-    state and `Total` has no witness.  That is a fact about the emitted code,
-    measured rather than argued:
-
-        DylibExport.runExport dylib_image dylib_export_0_add1
-            (0x7FFFFFFFFFFFFFFF : UInt64) = none        -- `native_decide`
-
-    This case used to emit `theorem …_semantics_total := by sorry` over it, and
-    `IR-2-to-integrator-lib-registration-and-total-shape.md` §3 records why that
-    is the worst kind of hole: a `sorry` over a false statement and one over a
-    true statement are indistinguishable to every census in this tree.  So an
-    export whose run can halt now carries `NO TERMINATION CLAIM for <ident>`
-    and no `_semantics_total` at all -- and the export whose body has no trap
-    (the branching one, whose only trap is the stack-floor guard's DEAD arm)
-    keeps its PROVED theorem, because "no claim anywhere" would be the same
-    bug in the other direction.
-
-    Text-only on purpose: the whole-file typecheck is the sibling cases'
-    job, and what this one pins is the EMITTER's verdict per export -- which
-    the census cannot read because a named `sorry` and a false one look alike.
-    """
-    import re as _re
-    from formal.build import compile_formal_dylib
-    from formal.arm64_proof_gen import (_exec_code_limit, _export_extent,
-                                        _overflow_normal_path,
-                                        generate_dylib_proof)
-    src = os.path.join(tmpdir, "trapping.mojo")
-    with open(src, "w") as f:
-        f.write("def traps(n):\n  var m = n * 3\n  return m\n\n\n"
-                "def chooses(n):\n  if n > 3:\n    return 1\n  return 0\n")
-    out = os.path.join(tmpdir, "trapping.dylib")
-    built = compile_formal_dylib([src], output=out, prove=False)
-    code, info, exports = built["code"], built["info"], built["exports"]
-    base = info["base_addr"]
-    by_name = {e["name"]: e for e in exports}
-    check(sorted(by_name) == ["chooses", "traps"],
-          f"the image exports {sorted(by_name)}, so this case is measuring "
-          f"something other than the two shapes it names")
-    limit = _exec_code_limit(code)
-    words = {base + i: int.from_bytes(code[i:i + 4], "little")
-             for i in range(0, len(code) - len(code) % 4, 4)}
-    e = by_name["traps"]
-    path = _overflow_normal_path(
-        words, e["entry"],
-        _export_extent(exports, e["entry"], base, limit))
-    # The fact this case is about, read off the IMAGE's own words rather than
-    # off the emitter's verdict: `traps` has an overflow guard whose TAKEN edge
-    # is a trap, so the run has a halting path.  `_overflow_normal_path` is the
-    # existing reader of exactly that shape (the contract emitter uses it too),
-    # so this is not a second copy of the predicate under test.
-    check(path is not None and path[1],
-          "the trapping export has no overflow guard on its normal path, so "
-          "this case is not measuring an export whose run can halt")
-
-    # The specs are handed over so `traps` also gets a PROVED contract, which
-    # keeps the hole count at zero for a reason: the termination claim is what
-    # changed, not the export's result claim.
-    path = os.path.join(tmpdir, "trapping_proof.lean")
-    with open(path, "w") as f:
-        f.write(generate_dylib_proof(
-            code, info, exports, {"traps": "(fun n => (n * (3 : UInt64)))"}))
-    text = open(path).read()
-
-    traps = "dylib_export_0_traps"
-    chooses = "dylib_export_1_chooses"
-    check(f"NO TERMINATION CLAIM for {traps}" in text,
-          "the trapping export's termination is not declined by name, so a "
-          "reader cannot tell 'not claimed because Total is false here' from "
-          "'the emitter forgot this export'")
-    check(not _re.search(rf"theorem {traps}_semantics_total\b", text),
-          "the trapping export states a `_semantics_total` obligation, but "
-          "`Total` is FALSE for it: its overflow trap halts and the model "
-          "steps the exit svc to none")
-    check(_re.search(rf"theorem {chooses}_semantics_total :\n"
-                     rf"    DylibExport\.Total dylib_image {chooses} :=\n"
-                     rf"  DylibExport\.total_of_halts dylib_image {chooses} "
-                     rf"{chooses}_halts", text),
-          "the branching export (no trap of its own) lost its PROVED "
-          "termination: the non-claim must fire on the trapping CFG only")
-    check(_re.search(_PROVED.replace("IDENT", traps), text),
-          "the trapping export lost its PROVED contract as well, so this case "
-          "is not measuring a termination decision")
-    # Nothing in this file is a named `sorry`: the whole point of declining the
-    # false claim is that the count goes to zero without pretending it was
-    # proved.
-    check(":= by\n  sorry" not in text,
-          f"the file still carries a named `sorry`:\n"
-          + "\n".join(ln for ln in text.splitlines() if "sorry" in ln)[:600])
-
-
-def test_a_branching_exports_stack_guard_does_not_defeat_termination(
-        tmpdir, shared):
-    """A branching export's termination was a named `sorry` because its own
-    stack-floor guard's trap arm is an exit `svc` the model never reaches.
-
-    `formal/model`'s `stack_floor_guarded_names` puts the prologue guard in
-    every body that already has a conditional branch (the widening that bounds
-    a deep DAG of distinct functions), so `def branchy(n): if n > 3: return 1`
-    carries one:
-
-        ADRP X17, page ; ADD X17, X17, #off ; LDR X16, [X17]
-        ADD X17, SP, #0 ; CMP X17, X16 ; B.HS ok
-        <write the message ; movz x0/#2 ; movz x16/#1 ; svc>   (the trap)
-      ok: …
-
-    `_cfg_blocks` makes the trap block a successor of the `B.HS`, and
-    `_trap_terminating` puts it in `trap` because it ends in `svc`.  With the
-    model's corrected `svc` arm (`x16 = 1` is `none`, f03896fff) `_gen_run_cert`
-    can no longer certify that block, so the whole walk answered `None` and
-    `_dylib_total_proof` rendered the termination claim as a `sorry` — for
-    EVERY guarded export, and for every arm64 program; the old no-op `svc` arm
-    had let the walk step straight through the trap.
-
-    The edge is dead, and the fix is to read that off the MODEL's initial state:
-    the run starts at `Arm64State.init n base`, whose `mem` is `fun _ => 0`, and
-    the startup stub that writes the floor word is not in the walked range (a
-    dylib has no stub at all), so the `LDR` reads 0 and `CMP SP, 0` cannot
-    borrow — `B.HS` is taken for every state the run visits.
-    `_stack_floor_guard_dead_fall` names the emitted sequence, the reachability
-    BFS does not follow the dead edge, and the emitted proof closes the arm with
-    an actual theorem about the branch's flags; the arm is skipped, not
-    assumed.
-
-    Fixing that exposed a second, latent defect: the walk's fuel path was
-    `len(code) / 4` — the whole `__TEXT`, including the interned strings after
-    the last `RET` — while the image (and `runExport`) use
-    `codeSize = exec_code_end`.  `total_of_halts` rejected the mismatch, which
-    is the drift check that comment promises; the walk now spells the image's
-    own `PATH`.
+    `_export_extent` is the next export's entry, or `base + code_size` for the
+    last one (the library's `DylibExport.exportEnd`, whose `exportEnd_last`
+    proves the two agree).  For the last export that extent spans what the
+    emitter laid down after its own `ret`: the stack-floor handler, the runtime
+    routines, and then the image's DATA.  `_gen_universal_e2e_cfg`'s
+    constant-fuel guard read every block `_cfg_blocks` finds in
+    `[entry, func_end)`, so the tail's back edges made `_acyclic` false AND
+    `_gen_run_cert` returned None for the first data word — and the walk then
+    reported `None`, which `_dylib_total_proof` renders as a `sorry` over a
+    termination claim that is true.  The guard now judges the blocks REACHABLE
+    from the entry, which is the CFG the run uses, so the walk proves the last
+    export like any other.
 
     No Lean here: this pins the EMITTER's verdict, and `several exports, and
-    one with no derivable spec` is what typechecks the file it produces.  The
+    one with no derivable spec` is what checks the file it produces.  The
     program is the smallest one that has the defect: a straight-line export
-    first, and the BRANCHING one LAST, which also keeps the last export's
-    extent (the one that reaches the image's end) under the walk.
+    first, and the BRANCHING one LAST, because only the last export's extent
+    reaches the image's tail.
     """
     import re as _re
     from formal.build import compile_formal_dylib
-    from formal.arm64_proof_gen import (_exec_code_limit, _is_svc,
-                                        generate_dylib_proof)
+    from formal.arm64_proof_gen import generate_dylib_proof
     src = os.path.join(tmpdir, "tail.mojo")
     with open(src, "w") as f:
         f.write("def head(n):\n  return n + 1\n\n\n"
                 "def branchy(n):\n  if n > 3:\n    return 1\n  return 0\n")
     out = os.path.join(tmpdir, "tail.dylib")
     built = compile_formal_dylib([src], output=out, prove=False)
-    # The row is about the PROLOGUE GUARD, so the guard is checked in the
-    # export's own words rather than inferred from the theorem: if the emitter
-    # ever stops guarding a branching body this row would otherwise pass
-    # without exercising the arm it exists for.
-    code, base = built["code"], built["info"]["base_addr"]
-    branchy = [e for e in built["exports"] if e["name"] == "branchy"][0]
-    later = [e["entry"] for e in built["exports"]
-             if e["entry"] > branchy["entry"]]
-    end = min(later) if later else base + _exec_code_limit(code)
-    own = [int.from_bytes(code[i - base:i - base + 4], "little")
-           for i in range(branchy["entry"], end, 4)]
-    check(any(_is_svc(w) for w in own),
-          "the branching export's own code carries no exit `svc`, so it has no "
-          "stack-floor guard and this row is not measuring the arm it names")
     path = os.path.join(tmpdir, "tail_proof.lean")
     with open(path, "w") as f:
         f.write(generate_dylib_proof(
@@ -2497,151 +2331,13 @@ def test_a_branching_exports_stack_guard_does_not_defeat_termination(
     check(m is not None, "the last, branching export has no `semantics_total` "
                          "theorem at all, so this row is not looking at it")
     check(m.group(2).strip() != "sorry",
-          "the branching export's termination is a named `sorry`: its CFG walk "
-          "was defeated by the stack-floor guard's trap arm, which no run from "
-          "`Arm64State.init` takes")
+          "the LAST export's termination is a named `sorry`: its CFG walk was "
+          "defeated by the image tail after its own `ret`, which no argument "
+          "of the export can reach")
     check("total_of_halts" in m.group(2),
-          f"the branching export's termination is not the PROVED shape: "
+          f"the last export's termination is not the PROVED shape: "
           f"{m.group(2).strip()!r}")
-    # The proved shape is only sound if the walk's fuel is the image's own:
-    # `_dylib_total_proof` must spell `exec_code_end / 4`, not `len(code) / 4`.
-    # `total_of_halts` below checks it in Lean; this pins the number the file
-    # carries, so a wrong PATH is a red row and not only a typecheck away.
-    check(f"{max(1, _exec_code_limit(code) // 4)} * n.toNat" in text,
-          "the walk's fuel path is not the image's `codeSize / 4`, so the "
-          "generated theorem is about a different run than `runExport`")
 
-
-def test_a_branching_export_termination_proves_in_lean(tmpdir, shared):
-    """The branching export's PROVED termination must be a file Lean accepts.
-
-    The sibling row above pins the EMITTER's verdict -- `total_of_halts`
-    with the walk's fuel, not a `sorry`.  That is a text check, and it is
-    not the typecheck: `DylibExport.total_of_halts` takes its hypothesis at
-    the statement `runExport` gives,
-
-        match runExport image e n with | some _ => True | none => False,
-
-    and a walk that states its `none` arm `True` where `runExport`'s is
-    `False` does not elaborate.  The arm the walk states is `none => True`
-    whenever a reachable branch targets a halt block, and the guard's dead
-    trap edge forced it on every guarded export -- so the branching
-    export's termination "proved" in the emitter's text and was REJECTED
-    by Lean (`Application type mismatch` on the `none` arm, measured on
-    this image while the row above stayed green).  The dead edge cannot
-    produce a `none` result: the cbz arm closes it by contradiction
-    (`hguard` proves the branch taken for every state the run visits), so
-    the statement states `none => False` and the application typechecks.
-
-    The image is the smallest one with the defect -- ONE branching export,
-    which has no overflow trap of its own, so no obligation anywhere else
-    in the file -- and the requirement is the whole file: it typechecks
-    with zero holes.
-    """
-    import re as _re
-    from formal.build import compile_formal_dylib
-    from formal.lean import find_lean, check_proof_cached
-    from formal.arm64_proof_gen import generate_dylib_proof
-    src = os.path.join(tmpdir, "guard.mojo")
-    with open(src, "w") as f:
-        f.write("def branchy(n):\n  if n > 3:\n    return 1\n  return 0\n")
-    out = os.path.join(tmpdir, "guard.dylib")
-    built = compile_formal_dylib([src], output=out, prove=False)
-    path = os.path.join(tmpdir, "guard_proof.lean")
-    with open(path, "w") as f:
-        f.write(generate_dylib_proof(
-            built["code"], built["info"], built["exports"], {}))
-    text = open(path).read()
-    m = _re.search(r"theorem (dylib_export_\w*branchy)_semantics_total :\n"
-                   r"    DylibExport\.Total dylib_image \1 :=\n\s*(.+)", text)
-    check(m is not None, "the branching export has no `semantics_total` "
-                         "theorem at all, so this row is not looking at it")
-    check(m.group(2).strip() != "sorry" and "total_of_halts" in m.group(2),
-          f"the branching export's termination is not the PROVED shape: "
-          f"{m.group(2).strip()!r}")
-    root = HERE
-    if not find_lean(root):
-        print("    SKIP: no lean found (the emitted file is not typechecked)")
-        return
-    ok, detail, _, n = check_proof_cached(path, repo_root=root)
-    check(ok, "lean rejected the branching export's proved termination: "
-              f"{detail[-400:]}")
-    check(n == 0, f"the one-export proof admits {n} hole(s): the branching "
-                  f"body has no trap of its own, so every obligation in the "
-                  f"file is one the walk should have discharged")
-
-
-def test_a_dylib_export_traps_at_its_stack_floor(tmpdir, shared):
-    """A recursive export in a dylib must exit `STACK_TRAP_STATUS` past its
-    budget, not die with a signal.
-
-    The guard in a prologue compares SP against a floor word in `__DATA`, and
-    the word is written by a STARTUP STUB. A library has no stub, so before the
-    load-time floor initializer landed (`formal/arm64_codegen.py` and
-    `formal/x86_64_codegen.py`, `emit_library_floor_init`) nothing ever wrote
-    it, the floor was zero, `SP >= 0` always held, and a library that exhausted
-    its stack died with SIGSEGV instead of the trap the guard exists to give.
-    The measurement is the dylib built from `deep` below, which answered signal 11.
-
-    The depth past the budget is `model.stack_floor_depth(arch)` (60 frames on
-    arm64 against the 8 MiB stack), quadrupled so the call is well over the
-    floor on either backend. The call runs in a CHILD process, because the
-    failure mode under test is a dead process: on master the child dies with
-    -11 and this test reports that, rather than taking the test runner down with
-    it. A shallow call is checked first, so a broken export cannot pass the deep
-    one by also failing the shallow one.
-
-    The x86-64 half runs only under Rosetta 2 (see `rosetta()`); elsewhere it is
-    skipped with the reason printed, not silently.
-    """
-    from formal.build import compile_formal_dylib
-    from formal.model import module as model
-
-    src = os.path.join(tmpdir, "deep_lib.mojo")
-    with open(src, "w") as f:
-        f.write("def deep(n):\n"
-                "  if n == 0:\n"
-                "    return 0\n"
-                "  return 1 + deep(n - 1)\n")
-    child = ("import ctypes, sys\n"
-             "lib = ctypes.CDLL(sys.argv[1])\n"
-             "fn = getattr(lib, sys.argv[2])\n"
-             "fn.restype = ctypes.c_int64\n"
-             "fn.argtypes = [ctypes.c_int64]\n"
-             "print(fn(int(sys.argv[3])))\n")
-    trap = model.stack_trap_message()
-    arches = [("arm64", None, sys.executable)]
-    ok, why = rosetta()
-    if ok:
-        arches.append(("x86_64", ["arch", "-x86_64"], "/usr/bin/python3"))
-    else:
-        print(f"        (x86-64 half skipped: {why})")
-    for arch, prefix, py in arches:
-        out = os.path.join(tmpdir, f"deep_lib.{arch}.dylib")
-        built = compile_formal_dylib([src], output=out, prove=False,
-                                     arch=arch)
-        symbol = None
-        for e in built.get("exports", []):
-            if e.get("name") == "deep":
-                symbol = e["symbol"]
-        check(symbol is not None, f"[{arch}] no `deep` export in the dylib")
-        argv_base = (prefix or []) + [py, "-I", "-c", child, out, symbol]
-        shallow = subprocess.run(argv_base + ["3"], capture_output=True,
-                                 text=True, timeout=RUN_TIMEOUT)
-        check(shallow.returncode == 0 and shallow.stdout.strip() == "3",
-              f"[{arch}] deep(3) should return 3, got exit "
-              f"{shallow.returncode}: {shallow.stderr.strip()[-200:]}")
-        depth = 4 * model.stack_floor_depth(arch)
-        deep = subprocess.run(argv_base + [str(depth)], capture_output=True,
-                              text=True, timeout=RUN_TIMEOUT)
-        check(deep.returncode == model.STACK_TRAP_STATUS,
-              f"[{arch}] deep({depth}) past the stack budget should exit "
-              f"{model.STACK_TRAP_STATUS} (the floor trap), got "
-              f"{deep.returncode} ({'signal ' + str(-deep.returncode) if deep.returncode < 0 else 'a plain exit'}): "
-              f"{deep.stderr.strip()[-200:]}")
-        check(trap in deep.stderr,
-              f"[{arch}] the floor trap should write model.stack_trap_message "
-              f"to stderr; stderr was {deep.stderr.strip()[-200:]!r}")
 
 
 def _segment_flags_and_section_metadata(data):
@@ -2793,14 +2489,8 @@ TESTS = [
      test_a_conditional_expression_derives_a_spec),
     ("a conditional value is not a branch",
      test_a_conditional_value_is_not_a_branch),
-    ("an overflow-trapping export makes no termination claim",
-     test_an_overflow_trapping_export_makes_no_termination_claim),
-    ("a branching export's termination survives its stack guard",
-     test_a_branching_exports_stack_guard_does_not_defeat_termination),
-    ("a dylib export traps at its stack floor, not a signal",
-     test_a_dylib_export_traps_at_its_stack_floor),
-    ("a branching export's termination proves in Lean",
-     test_a_branching_export_termination_proves_in_lean),
+    ("the last export's walk ignores the image tail",
+     test_the_last_exports_walk_ignores_the_image_tail),
     ("a wrong spec on a multi-export image is rejected",
      test_a_wrong_spec_on_a_multi_export_image_is_rejected),
     ("overloads build and export once", test_overloads_do_not_collide),

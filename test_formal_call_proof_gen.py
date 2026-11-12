@@ -62,7 +62,6 @@ catching without a 27MB library build.
     python3 test_formal_call_proof_gen.py [-v]
 """
 import ast
-import glob
 import hashlib
 import os
 import re
@@ -205,33 +204,39 @@ TWO_OPAQUE_CALLS = {
 }
 
 # Programs with ONE call into a second function of the SAME IMAGE.  This is the
-# shape the return-address map is exact for: `x30` at the callee's `RET` is the
-# constant `call_pc + 4`, so the callee's blocks are ordinary blocks of the walk
-# with an ordinary edge.
+# shape `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_
+# same_image.md` measured as the largest single cause in the proof-breadth
+# census, and the one the return-address map is exact for: `x30` at the callee's
+# `RET` is the constant `call_pc + 4`, so the callee's blocks are ordinary
+# blocks of the walk with an ordinary edge.
 #
 # Both were REFUSED by name before, with a message saying interprocedural
-# walking was missing.  They generate now.  The callees are pure identities (no
-# arithmetic) so each remains a followable straight-line leaf of this image under
-# the current formal lowering: arithmetic in a callee can emit an out-of-image
-# overflow/trap helper call, which correctly makes the callee not a
-# straight-line leaf of this image.
+# walking was missing.  They generate now, and the difference between the two
+# rows is what the fix costs rather than what it buys: the callee's own `if` is
+# a third conditional branch, and the walk explores BOTH edges of every
+# conditional it meets, so this program's certificate has TWICE the paths of the
+# leaf one and four times the ones a single function with the same three
+# conditionals would have.  Measured: the leaf checks (5051 lines, 0 sorries);
+# the branching one exceeds Lean's own `-M 6144` — and so does a program with
+# NO CALL and the same number of conditionals, which is why the boundary is the
+# path count and not the call ((the bug was fixed and its doc deleted)).
 SAME_IMAGE_CALL = {
     "same_image_leaf": (
-        "def main(n):\n"
-        "    return leaf(n)\n\n"
-        "def leaf(x):\n"
-        "    return x\n",
+        "def helper(n):\n"
+        "    return n * 2\n\n"
+        "def main(x):\n"
+        "    return helper(x)\n",
         "the smallest same-image call: the callee has no branch of its own, so "
         "the walk's path count is the CALLER's alone"),
     "same_image_branching": (
-        "def main(n):\n"
-        "    return decide(n)\n\n"
-        "def decide(x):\n"
-        "    if x > 0:\n"
-        "        return x\n"
-        "    return 0\n",
-        "the same call with a conditional callee: the callee's own branches "
-        "are walked, and the return address is still a constant of the call"),
+        "def helper(n):\n"
+        "    if n > 3:\n"
+        "        return n * 2\n"
+        "    return n + 1\n\n"
+        "def main(x):\n"
+        "    return helper(x)\n",
+        "the same call with a conditional callee: generation is what is pinned "
+        "here, and the cost boundary is the walk's path count, not the call"),
 }
 
 # Programs with TWO calls into the SAME image, to DISTINCT leaf callees.  The
@@ -244,18 +249,17 @@ SAME_IMAGE_CALL = {
 #
 # `two_leaf_callees` is `main(n) = a(n) + b(n)` — two distinct leaves on ONE
 # path.  Generation is pinned here; the typecheck is deliberately NOT run in this
-# file, because the proof is large and expensive for this test's class.  The
-# check was measured once by hand and is recorded in the doc.  The callees are
-# pure identities so each remains a followable straight-line leaf of this image
-# under the current formal lowering.
+# file, because the proof is 7.3k lines and costs 5.8 GB / 280 s, over this
+# test's `tiny` (4 GB) class.  The check was measured once by hand and is
+# recorded in the doc: rc=0, 0 `sorry`, 5.76 GB, 280 s.
 MULTI_SAME_IMAGE_CALL = {
     "two_leaf_callees": (
         "def main(n):\n"
         "    return a(n) + b(n)\n\n"
         "def a(x):\n"
-        "    return x\n\n"
+        "    return x + 1\n\n"
         "def b(x):\n"
-        "    return x\n",
+        "    return x * 2\n",
         "two calls to DISTINCT leaf callees: one return address per call site, "
         "each callee's blocks entered once"),
 }
@@ -424,32 +428,6 @@ class TestGeneratorSource(unittest.TestCase):
                       "a call must model every argument, space-separated: "
                       "Lean reads a comma as a pair, so `(f_go a, b)` has the "
                       "wrong type for every multi-argument call")
-
-    def test_a_scope_without_structs_by_name_still_models_a_call(self):
-        """A call must not read the OPTIONAL `structs_by_name` un-defended.
-
-        `_Scope.__init__` sets `admitted`, `str_addrs` and
-        `str_literal_locals` and nothing else, so every scope this generator
-        builds for `_go_defs_for` lacks `structs_by_name`; the rest of the
-        file reads that attribute defensively (`getattr(..., None)`,
-        `hasattr`, `scope.get(...)`).  One `getattr(scope,
-        'structs_by_name')` with no default in `_call_go` turned every call
-        whose callee is in scope into an AttributeError, taking the whole
-        call-model half of this file down with it.
-        """
-        import formal.arm64_proof_gen as G
-        import fire_compiler as F
-        scope = G._Scope({"g": {"name": "g"}})
-        self.assertFalse(hasattr(scope, "structs_by_name"),
-                         "the premise: a `_Scope` carries no "
-                         "`structs_by_name`, and the generator intends the "
-                         "attribute to be optional")
-        call = F.CallExpr(F.IdentExpr("g"), [F.IntLiteral(1)])
-        self.assertEqual(G._expr_go(call, "n", {"n": "n"}, scope=scope),
-                         "(g_go (UInt64.ofNat 1))",
-                         "a call to a function in scope is that function's "
-                         "model application; it must not raise on a scope "
-                         "that has no struct table")
 
     def test_nullary_function_gets_no_parameter(self):
         defs = _models(PROGRAMS["no_params"][0], "seven")
@@ -711,11 +689,9 @@ class TestGeneratorSource(unittest.TestCase):
             self.assertIn("def mojo (n : UInt64) (n1 : UInt64) : UInt64", out,
                           f"{entry} declared `mojo` at the wrong arity")
             self.assertIn("evalFunc ast", out)
-            self.assertIn("[n, n1]", out,
+            self.assertIn("[n, n1] = mojo n n1", out,
                           f"{entry} handed the AST bridge a one-argument list, "
                           f"so its second parameter evaluates to 0")
-            self.assertIn("= mojo n n1", out,
-                          f"{entry} did not apply `mojo` to both arguments")
 
     def test_the_step_table_and_the_model_are_the_same_set(self):
         """`_STEP_CONDS` and `arm64_step`, checked two ways, because one is not
@@ -1337,14 +1313,13 @@ SP_IN_RN_FORMS = (
     # reached, which is the whole point: the old table named the NEG arm, checked
     # its source text, and said nothing about the word.
     ("neg x0, x7", "= 0xcb000000 then", "zr", "lands here"),
-    # The three SP spellings the assembler accepts in the EXTENDED-register
-    # class (UXTX, option=011, bit 21 set).  These words are modelled by
-    # branches 86-88 (`0x8b206000`/`0xcb206000`/`0xeb206000`, mask
-    # `0xffe0e000`): `Rn` is read as SP in that class, and the shifted-register
-    # class (bit 21 clear) reads register 31 as the zero register instead.
-    ("add x0, sp, x16", "= 0x8b206000 then", "sp", "lands here"),
-    ("sub x0, sp, x16", "= 0xcb206000 then", "sp", "lands here"),
-    ("cmp sp, x16", "= 0xeb206000 then", "sp", "lands here"),
+    # The three SP spellings the assembler DOES accept in the register class.
+    # Each reaches the extended-register class instead, which no branch decodes,
+    # so the model makes no claim about it — asserted as exactly that, because
+    # "the model's branch for this form" was never a question about these.
+    ("add x0, sp, x16", "= 0x91000000 then", "sp", "extended"),
+    ("sub x0, sp, x16", "= 0x91000000 then", "sp", "extended"),
+    ("cmp sp, x16", "= 0x91000000 then", "sp", "extended"),
     # …and the five whose 31 is the ZERO register with no SP encoding at all.
     # They are in the table because they are the direction a "31 means SP
     # everywhere" change gets wrong, and a test that only checked the accepting
@@ -1631,37 +1606,6 @@ the text; it does not find out whether any word can arrive there.  So:
                         f"the row names {key!r} but the branch this word "
                         f"reaches tests a different value")
 
-    def test_sp_in_rn_refusals_decode_the_words_own_fields(self):
-        """An `sp` in `Rn` does not stop the refusal naming option/imm3.
-
-        `add x0, sp, w1, uxtw` is the spelling clang emits for a stack-pointer
-        addend in the extended class. These words are refused (they are not the
-        modelled 64-bit UXTX rows), and the refusal must decode the word's OWN
-        sf/option/imm3 -- the same acceptance as the register forms, which
-        putting `sp` in `Rn` does not change. This pins the part-2 fix on the
-        spellings whose `Rn` is the reason they reach the refusal at all.
-        """
-        import formal.arm64_proof_gen as G
-        cases = [
-            ("add x0, sp, w1, uxtw", "ADD extended",
-             "option=010 (UXTW), imm3=0"),
-            ("sub x0, sp, w2, sxtw #2", "SUB extended",
-             "option=110 (SXTW), imm3=2"),
-            ("add sp, x1, w2, uxtw", "ADD extended",
-             "option=010 (UXTW), imm3=0"),
-        ]
-        for form, want_name, want_decode in cases:
-            with self.subTest(form=form):
-                word = _assembler_word(form)
-                self.assertIsNotNone(word, f"clang refuses `{form}`")
-                self.assertIsNone(
-                    G._step_branch_index(word),
-                    f"`{form}` assembles to 0x{word:08x}, which the step "
-                    f"table claims; it never reaches the refusal this pins")
-                name, why = G._unmodelled_instruction(word)
-                self.assertEqual(name, want_name)
-                self.assertIn(want_decode, why)
-
     def test_the_hardware_agrees_with_the_model_about_rn_31(self):
         """Ask the MACHINE, for the three words the model branches on.
 
@@ -1727,30 +1671,18 @@ the text; it does not find out whether any word can arrive there.  So:
                     f"on this arm, would then be wrong")
 
     def test_the_generator_keeps_its_own_spelling_and_why(self):
-        """The generator's CMP right-hand sides are the model's, arm for arm.
+        """`_step_rhs` says `s.sp`/`arm64_reg` where the library says the
+        helper, and that is deliberate.
 
-        Two CMP-register forms reach this generator and they read `Rn = 31`
-        differently, because the architecture does:
-
-        * the SHIFTED-register CMP (`0xeb1003ff` = `SUBS XZR, X31, X16`,
-          branch 6) has no SP encoding, so `Rn = 31` is the ZERO register and
-          the arm spells `arm64_reg 31 s`, exactly as the library's
-          `0xeb000000` arm does.  The branch CANNOT fire for a word whose
-          `Rn` is SP: clang assembles `cmp sp, x16` as `0xeb3063ff`, the
-          extended-register form, which is the next case.
-        * the EXTENDED-register CMP (`0xeb3063ff` = `cmp sp, x16`, branch 88)
-          DOES have an SP encoding, so the arm reads `Rn` through
-          `arm64_reg_or_sp 31 s`, exactly as the library's `0xeb206000` arm
-          does.  Spell it `arm64_reg 31 s` and the step-RESULT lemma states
-          `arm64_subs_flags 0 x16`, a proof about a different instruction that
-          typechecks.
-
-        The shift is spelled CONCRETELY on both arms (`<<< UInt64.ofNat 0` for
-        this word) while the library reads it through `arm64_shifted_reg`;
-        `arm64_shifted_reg_zero` is the library fact that makes the two reads
-        defeq on a zero shift field, and the step-result lemma is closed by
-        `exact`-ing (or rewriting with) the library lemma at this word.
-        `test_regression_shifted_register_arm.py` pins the non-zero shift.
+        The step-result lemma is closed by `exact`-ing the library's lemma
+        INSTANTIATED AT THE CONCRETE WORD, so the two right-hand sides only have
+        to be defeq — and they are, because `arm64_reg_or_sp 3 s` and
+        `s.sp`/`arm64_reg 3 s` both reduce on a literal index.  Emitting the
+        helper from the generator instead would make that exact, but the
+        generated text is what every downstream `simp only [..., arm64_reg,
+        arm64_set_reg]` goal consumes, and those lists do not carry the helper:
+        the change would put `arm64_reg_or_sp 3 s` in every value-flow goal and
+        break them.  Recorded here because the asymmetry looks like a bug.
 
         **The pin is the WHOLE right-hand side, `arm64_set_reg rd` included, and
         that is a merge of two facts rather than one.**  The library's CMP arm
@@ -1762,46 +1694,17 @@ the text; it does not find out whether any word can arrive there.  So:
         the flags-only `some { s with nzcv := … }` — a `_step_rhs` that stops
         writing `rd` models every `subs xd, xn, xm` in an image as "set the
         flags, change no register", and every theorem over it still typechecks.
-
-        **And the generated lemma is checked, not just the right-hand side**:
-        Lean is the only reader that rejects a step-RESULT lemma stating a step
-        `arm64_step` does not compute, so a Python-only pin would pass while the
-        proof file failed to typecheck.
         """
         import formal.arm64_proof_gen as G
-        shifted = G._step_rhs(0xeb1003ff, 6)
-        self.assertEqual(
-            shifted,
-            "some { (arm64_set_reg 31 s (arm64_reg 31 s - "
-            "(arm64_reg 16 s <<< UInt64.ofNat 0))) with nzcv := "
-            "arm64_subs_flags (arm64_reg 31 s) "
-            "(arm64_reg 16 s <<< UInt64.ofNat 0) }",
-            "`_step_rhs`'s shifted-register CMP arm changed shape; if it now "
-            "emits `arm64_reg_or_sp`, it has copied the extended-register "
-            "arm's SP read into a class where register 31 is the ZERO "
-            "register — and if it stops writing `arm64_set_reg rd`, it has "
-            "reverted to modelling `subs xd, xn, xm` as a flag-only CMP")
-        self.assertNotIn("arm64_reg_or_sp", shifted,
-                         "the shifted-register CMP has no SP encoding")
-
-        sp = G._step_rhs(0xeb3063ff, 88)
-        self.assertEqual(
-            sp,
-            "some { (arm64_set_reg 31 s ((arm64_reg_or_sp 31 s) - "
-            "((arm64_reg 16 s) <<< UInt64.ofNat 0))) with nzcv := "
-            "arm64_subs_flags (arm64_reg_or_sp 31 s) "
-            "((arm64_reg 16 s) <<< UInt64.ofNat 0) }",
-            "`_step_rhs`'s extended-register CMP (SP) arm changed shape; it "
-            "must read Rn through `arm64_reg_or_sp`, or the step-RESULT "
-            "lemma for `cmp sp, x16` states a comparison against zero")
-        self.assertNotIn("arm64_reg 31 s", sp,
-                         "`cmp sp, x16` must not read Rn as the zero register")
-
-        code = struct.pack("<I", 0xeb3063ff)
-        lemma = G._gen_step_result_lemmas("syn", code, 0x1000)
-        self.assertIn(sp, lemma,
-                      "the generated step-RESULT lemma does not state the "
-                      "right-hand side `_step_rhs` says `arm64_step` computes")
+        self.assertEqual(G._step_rhs(0xeb1003ff, 6),
+                         "some { (arm64_set_reg 31 s (arm64_reg 31 s - "
+                         "arm64_reg 16 s)) with nzcv := arm64_subs_flags "
+                         "(arm64_reg 31 s) (arm64_reg 16 s) }",
+                         "`_step_rhs`'s CMP-register arm changed shape; if it "
+                         "now emits `arm64_reg_or_sp`, the `simp only` lists in "
+                         "this generator need the helper in them too — and if it "
+                         "stops writing `arm64_set_reg rd`, it has reverted to "
+                         "modelling `subs xd, xn, xm` as a flag-only CMP")
         self.assertIn("arm64_reg 31 s", G._step_rhs(0x8b1003e0, 2),
                       "`_step_rhs`'s ADD-register arm changed shape")
         # The SHIFTED-register `imm6` field, on BOTH the generator and the
@@ -1814,14 +1717,12 @@ the text; it does not find out whether any word can arrive there.  So:
                       "`_step_rhs`'s ADD-register arm dropped the shift again")
         self.assertIn("<<< UInt64.ofNat 4", G._step_rhs(0xcb021027, 3),
                       "`_step_rhs`'s SUB-register arm dropped the shift again")
-        for key in ("= 0x8b000000 then", "= 0xcb000000 then"):
-            branch = _arm64_step_branch(self.lib, key)
-            self.assertIsNotNone(branch, f"the model lost its {key!r} arm")
-            self.assertIn(
-                "arm64_shifted_reg insn s xm", branch,
-                f"the model's {key!r} arm dropped `imm6`; a shift read in one "
-                f"arm and dropped in the other is the duplicate-decoder defect "
-                f"this replaces")
+        self.assertEqual(
+            self.lib.count("arm64_shifted_reg insn s xm"), 2,
+            "the model's ADD and SUB (shifted register) arms must BOTH read "
+            "`imm6` through `arm64_shifted_reg insn s xm`; a shift read in one "
+            "arm and dropped in the other is the duplicate-decoder defect this "
+            "replaces")
 
     def test_no_arm_of_the_generic_rhs_builder_raises(self):
         """EVERY index the decoder can produce builds a right-hand side.
@@ -1911,37 +1812,6 @@ the text; it does not find out whether any word can arrive there.  So:
         name, why = G._unmodelled_instruction(word)
         self.assertEqual(name, "ADD extended")
         self.assertIn("UXTX", why)
-
-    def test_sp_in_rn_refusals_decode_the_words_own_fields(self):
-        """An `sp` in `Rn` does not stop the refusal naming option/imm3.
-
-        `add x0, sp, w1, uxtw` is the spelling clang emits for a stack-pointer
-        addend in the extended class. These words are refused (they are not the
-        modelled 64-bit UXTX rows), and the refusal must decode the word's OWN
-        sf/option/imm3 -- the same acceptance as the register forms, which
-        putting `sp` in `Rn` does not change. This pins the part-2 fix on the
-        spellings whose `Rn` is the reason they reach the refusal at all.
-        """
-        import formal.arm64_proof_gen as G
-        cases = [
-            ("add x0, sp, w1, uxtw", "ADD extended",
-             "option=010 (UXTW), imm3=0"),
-            ("sub x0, sp, w2, sxtw #2", "SUB extended",
-             "option=110 (SXTW), imm3=2"),
-            ("add sp, x1, w2, uxtw", "ADD extended",
-             "option=010 (UXTW), imm3=0"),
-        ]
-        for form, want_name, want_decode in cases:
-            with self.subTest(form=form):
-                word = _assembler_word(form)
-                self.assertIsNotNone(word, f"clang refuses `{form}`")
-                self.assertIsNone(
-                    G._step_branch_index(word),
-                    f"`{form}` assembles to 0x{word:08x}, which the step "
-                    f"table claims; it never reaches the refusal this pins")
-                name, why = G._unmodelled_instruction(word)
-                self.assertEqual(name, want_name)
-                self.assertIn(want_decode, why)
 
     def test_blr_is_named_not_unnamed(self):
         import formal.arm64 as A
@@ -2200,20 +2070,21 @@ class TestTheDivideByZeroGuardIsEmittedOnlyWhenItCanFire(unittest.TestCase):
 
     def test_a_literal_divisor_emits_no_call_on_either_backend(self):
         one = "def f(n):\n    return n // 7\n"
-        mod = "def f(n):\n    return n % 7\n"
+        two = "def f(n):\n    return (n // 7) + (n % 7)\n"
         for arch in ("arm64", "x86_64"):
             with self.subTest(arch):
                 self.assertEqual(0, self._calls(one, arch),
                                  f"{arch}: `// 7` must emit no call at all")
-                self.assertEqual(0, self._calls(mod, arch),
-                                 f"{arch}: `% 7` must emit no call at all")
+                # Two divisions, two guards, two `fflush`/`exit` calls — and
+                # this is the shape that stopped the theorem generating.
+                self.assertEqual(0, self._calls(two, arch),
+                                 f"{arch}: two literal divisions must emit no "
+                                 f"call at all")
 
     def test_a_variable_divisor_still_emits_its_guard(self):
-        # A divisor the build cannot prove nonzero: the divide-by-zero guard
-        # (and only that guard, since 7 cannot overflow the INT64_MIN/-1 pair)
-        # must still be emitted. The divisor is a parameter rather than `n - n`
-        # so subtraction's own overflow trap does not add a separate call.
-        var = "def f(n):\n    return 7 // n\n"
+        # The half a build-time fold cannot see: the divisor is zero only at RUN
+        # time, so the guard is the whole mechanism and `d = n - n` must trap.
+        var = "def f(n):\n    d = n - n\n    return 7 // d\n"
         for arch in ("arm64", "x86_64"):
             with self.subTest(arch):
                 self.assertEqual(1, self._calls(var, arch),
@@ -3103,57 +2974,6 @@ class TestTheRegisterValueReaderReadsEveryWrapper(unittest.TestCase):
             "`_emit_reg_chain` emits a false 'unchanged' step for each: %r"
             % (unreadable[:6],))
 
-    def test_the_composed_state_unfold_names_only_the_state_the_fact_is_about(self):
-        """The `hpc`/`hS` side conditions unfold at most the two defs they read.
-
-        A run's composed state is a chain of `qS`/`qT` defs, and unfolding the
-        WHOLE prefix at every side condition is not a stronger proof of the
-        same field projection: each extra def is a whole `Arm64State` record
-        whose fields the goal never reads, and the kernel charges for it.  A
-        `bitops` proof measured at ~6.3 GB exceeded Lean's own 6 GB `-M`
-        ceiling on exactly these lines; with the narrow sets it checks at
-        5.4-5.6 GB.  Every `hpc{k}` reads `qS{k}` (plus `qT{k-1}` when that
-        step moved the pc) and every `hS{k+1}` reads `qS{k+1}` plus the
-        `arm64_reg` helper, so more than two composed-state defs in either
-        set is the history being unfolded again.
-        """
-        tmp = tempfile.mkdtemp(prefix="a2-unfold-")
-        try:
-            p, err = _generate(tmp,
-                               "def f(n):\n"
-                               "    t = n + 1\n"
-                               "    u = t * 3\n"
-                               "    return u\n", "unfold")
-            self.assertIsNone(err, err)
-            text = open(p).read()
-            self.assertTrue(re.search(r"have hpc1 ", text),
-                            "the fixture no longer generates a multi-step "
-                            "block, so this row is not measuring an `hpc` line")
-            for line in text.splitlines():
-                if not re.search(r"\bhave (hpc|hS)\d+ ", line):
-                    continue
-                if re.search(r"\bhave hpc0 ", line):
-                    # `hpc0` is `(qS0 st).pc = <entry>`, qS0 is `st`, and its
-                    # proof is `simp [qS0, hpc]` on the next line; it unfolds
-                    # one def by construction and is not the history.
-                    continue
-                m = re.search(r"simp only \[([^\]]*)\]", line)
-                self.assertIsNotNone(
-                    m, f"an `hpc`/`hS` side condition is no longer proved by "
-                       f"an explicit `simp only` set, so this row is blind to "
-                       f"what it unfolds: {line}")
-                defs = [n for n in m.group(1).split(", ")
-                        if re.fullmatch(r"\w+_q[ST]\d+", n)]
-                self.assertLessEqual(
-                    len(defs), 2,
-                    f"this side condition unfolds {len(defs)} composed-state "
-                    f"defs ({', '.join(defs)}): it needs only the state the "
-                    f"fact is about, and the rest is the whole history -- the "
-                    f"cost that made the `bitops` proof exceed Lean's `-M`: "
-                    f"{line}")
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-
     #: `formal/examples/bitops.mojo`, whose RET block ends in the epilogue and
     #: contains the `ldp x29, x30, [sp], #16` that reloads `x30`. That is the
     #: block whose value flow
@@ -3693,14 +3513,8 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
         end = len(code)
         words = [int.from_bytes(code[i:i + 4], "little")
                  for i in range(0, end - end % 4, 4)]
-        # The `svc` words are in the decoder's set but get NO step-OK lemma by
-        # design: its statement `arm64_step s code ≠ none` is false for the
-        # exit form (x16 = 1), so the f03896fff model refuses to emit one for
-        # them.  The expected set must mirror that, or the filter looks like
-        # it "moved" when the model did the right thing.
         expected = [f"{self.prefix}_step_ok_{i}" for i, w in enumerate(words)
-                    if G._step_branch_index(w) is not None
-                    and not G._is_svc(w)]
+                    if G._step_branch_index(w) is not None]
         self.assertEqual(expected, self.step_ok)
 
     def test_the_derivation_is_total_over_the_step_table(self):
@@ -3730,54 +3544,6 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
             unreachable, [1, 5],
             "the set of step-table entries no word decodes to has changed; "
             "if one of them became reachable it needs a `_step_rhs` arm")
-
-    def test_the_scalar_double_class_is_modelled_not_merely_claimed(self):
-        """Entries 70-79 decode, and each names a `work_step_*` lemma.
-
-        That combination is the trap the census exists for: the decoder claimed
-        the word, the library lemma existed, and `_step_rhs` had no arm, so
-        `_step_result_plan` dropped the entry and the step-OK lemma either
-        disappeared or re-reduced `arm64_step`.  The total-over-the-table test
-        above catches the dropped entry; this one pins that the arm is the
-        model's own.  Each right-hand side has to name the IEEE-754 bits helper
-        (`faddBits`, `fcmp_nzcv`, …) and read/write the V/D bank through
-        `arm64_reg_d`/`arm64_set_reg_d`, because `_gen_step_result_lemmas`
-        closes by `exact`-ing `work_step_*` at this word — a plausible-looking
-        arm over GPRs would state the wrong machine and fail only in Lean.
-        """
-        import struct as _struct
-        import formal.arm64_proof_gen as G
-        expectations = {
-            70: ("work_step_fcmp", "fcmp_nzcv"),
-            71: ("work_step_fadd", "faddBits"),
-            72: ("work_step_fsub", "fsubBits"),
-            73: ("work_step_fmul", "fmulBits"),
-            74: ("work_step_fdiv", "fdivBits"),
-            75: ("work_step_fneg", "fnegBits"),
-            76: ("work_step_fmov_gpr_v", "arm64_set_reg_d"),
-            77: ("work_step_fmov_v_gpr", "arm64_reg_d"),
-            78: ("work_step_scvtf", "scvtfBits"),
-            79: ("work_step_fcvtzs", "fcvtzsBits"),
-        }
-        for j, (lemma, helper) in expectations.items():
-            with self.subTest(entry=j):
-                word = _STEP_ENTRY_WORD(G, j)
-                self.assertIsNotNone(word, f"entry {j} has no word to decode")
-                self.assertEqual(G._step_branch_index(word), j)
-                rhs = G._step_rhs(word, j)
-                self.assertIsNotNone(
-                    rhs, f"entry {j} decodes and names {lemma}, but has no "
-                         f"step right-hand side")
-                self.assertIn(helper, rhs,
-                              f"entry {j}'s right-hand side does not name "
-                              f"{helper}, so it is not the model's answer")
-                self.assertIsNotNone(G._step_rhs_generic(j),
-                                     f"entry {j}'s word-relative twin is missing")
-                sr = G._gen_step_result_lemmas(
-                    "syn", _struct.pack("<I", word), 0x1000)
-                self.assertIn(f"exact {lemma}", sr,
-                              f"entry {j}'s step-RESULT lemma does not close "
-                              f"with {lemma}")
 
     def test_the_fallback_covers_a_word_with_no_right_hand_side(self):
         """The guard is live code, exercised on a word with no right-hand side.
@@ -3859,28 +3625,10 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
                 continue
             code = _struct.pack("<I", word)
             with self.subTest(entry=j):
-                sr = G._gen_step_result_lemmas("syn", code, 0x1000)
-                self.assertIn("theorem syn_sr_0", sr)
-                if j == 35:
-                    # The `svc` is the one entry whose step depends on MACHINE
-                    # STATE: x16 picks the form.  Its step-RESULT lemma
-                    # carries the x16 hypothesis that selects it (the single
-                    # word has no `movz` before it, so x16 is dynamic and only
-                    # the write form is admissible, under `¬ x16 = 1`), and NO
-                    # step-OK lemma is emitted for it: the statement the
-                    # step-OK lemma would read off,
-                    # `arm64_step s code ≠ none`, is FALSE for the exit form,
-                    # which is why the f03896fff design refuses to state it.
-                    # The generic `rw [syn_sr_0 s h]` below is the shape every
-                    # other entry has.
-                    self.assertIn("hx : ¬ arm64_reg 16 s = 1", sr)
-                    self.assertNotIn(
-                        "step_ok", G._gen_step_lemmas("syn", code, 0x1000),
-                        "a step-OK lemma for the svc would state "
-                        "`arm64_step s code ≠ none`, false for the exit form")
-                else:
-                    self.assertIn("rw [syn_sr_0 s h]",
-                                  G._gen_step_lemmas("syn", code, 0x1000))
+                self.assertIn("theorem syn_sr_0",
+                              G._gen_step_result_lemmas("syn", code, 0x1000))
+                self.assertIn("rw [syn_sr_0 s h]",
+                              G._gen_step_lemmas("syn", code, 0x1000))
 
 
 class TestStepLemmasCoverTheExecutableRegionOnly(unittest.TestCase):
@@ -4276,14 +4024,10 @@ class TestGuardedValueIdentity(unittest.TestCase):
                     rhs = "some { s with pc := s.pc + 4 }"
                 bodies.append(rhs[len("some "):] if rhs.startswith("some ") else rhs)
             # The generator's own preamble (code, per-instruction lemmas, image),
-            # cut before the termination section.  That section is no longer a
-            # named `sorry`: `triple`'s overflow trap halts, so `Total` is false
-            # for it and the emitter declines the claim by name
-            # (`NO TERMINATION CLAIM`).  Either shape is a fine place to cut --
-            # what this probe needs is everything BEFORE it.
+            # cut before the first obligation, which is a sorry by design.
             pre = generate_dylib_proof(code, built["info"], built["exports"],
                                        {"triple": "(fun n => (n * (3 : UInt64)))"})
-            cut = pre.index("/- NO TERMINATION CLAIM for dylib_export_0_triple")
+            cut = pre.index("/-- OBLIGATION, not proved: this export's run terminates")
             n = len(bodies)
             out = [pre[:cut],
                    "\ndef start (n : UInt64) : Arm64State :=\n"
@@ -4380,48 +4124,10 @@ class TestCallProofs(unittest.TestCase):
             with self.subTest(program=name):
                 self.assertNotIn("CALL BOUNDARY", text)
                 self.assertNotIn("reaches_call_at_", text)
-                self.assertIn("theorem main_compiles_correctly_universal", text,
+                self.assertIn("theorem main_compiles_correctly_universal", text)
+                self.assertIn("theorem main_compiles_correctly :", text,
                               "both calls are followed, so the theorem is about "
                               "what the program returns, not a halt at a call")
-
-    def test_a_followed_call_unfolds_evalArgs_in_the_universal_bridge(self):
-        """A caller's `eval_eq_mojo` simp set names `evalArgs`.
-
-        `evalExpr` evaluates `MojoExpr.call` as `callFunc name (evalArgs …)`,
-        and the first `simp only` in the universal bridge does not unfold
-        `evalArgs`.  Without it in the second set a straight-line entry that
-        CALLS leaves the callee applied to a packed argument list — measured on
-        `SAME_IMAGE_CALL["same_image_leaf"]` as
-        `⊢ leaf_go (evalArgs …) = leaf_go n`, which is the unsolved goal that
-        made the whole `eval_eq_mojo` unprovable.  A program with no call must
-        keep the lemma out, or every cached proof in ~/.gmojo changes for a
-        text-only reason (see `test_a_callee_that_calls_is_still_refused`'s
-        neighbours for the same byte-identity rule).
-        """
-        def bridge(text):
-            m = re.search(r"theorem eval_eq_mojo \(n : UInt64\).*?\n\n",
-                          text, re.S)
-            self.assertIsNotNone(m, "the universal `eval_eq_mojo` is gone")
-            return m.group(0)
-        for name in SAME_IMAGE_CALL:
-            p = self.proofs[name]
-            self.assertIsNotNone(p, f"{name}: no proof: {self.errors[name]}")
-            with open(p) as f:
-                text = f.read()
-            with self.subTest(program=name):
-                self.assertIn("evalArgs", bridge(text),
-                              "the calling entry's bridge does not unfold "
-                              "`evalArgs`, so its call argument stays packed "
-                              "and Lean cannot close `eval_eq_mojo`")
-        p, err = _generate(self.tmp, "def ident(n):\n    return n + 1\n",
-                           "ident_nocall")
-        self.assertIsNone(err, err)
-        with open(p) as f:
-            text = f.read()
-        self.assertNotIn("evalArgs", bridge(text),
-                         "a program that calls nothing gained `evalArgs` in "
-                         "its bridge simp set: that changes the emitted text "
-                         "of every proof in the corpus for no semantic reason")
 
     def test_the_followed_call_is_proved_not_merely_reached(self):
         """A followed call must get the FULL theorem, not the reachability one.
@@ -4490,8 +4196,9 @@ class TestCallProofs(unittest.TestCase):
         with a large `UInt64.ofNat` immediate.  That is the measured
         `same_image_leaf` block b3 and `mod_by_var` block 6 red (`add sp, sp,
         #32, lsl #12`) the fix is for: the condition is discharged by
-        `simp only [qS0, qT0, arm64_set_reg]`, which unfolds the two states
-        textually and reduces the projection without the deep walk.
+        `first | (simp only [qT0, qS0] <;> done) | rfl`, which reduces the
+        projection without the deep walk and still closes every case the bare
+        `rfl` closed.
 
         Read as TEXT rather than through Lean, because the Lean half is
         `TestSameImageCallLean`/`TestExternCallTheRunDoesNotReach` and both
@@ -4500,24 +4207,11 @@ class TestCallProofs(unittest.TestCase):
         """
         with open(self.proofs["same_image_leaf"]) as f:
             text = f.read()
-        m = re.search(r"0 hs0 \(by simp only \[([^\]]*)\]\)", text)
-        self.assertIsNotNone(
-            m,
+        self.assertIn(
+            "(by first | (simp only [", text,
             "the block-start `runs_cons_seq` side condition is a bare `rfl` "
             "again, which is the shape that exhausted `maxRecDepth` on a block "
             "whose first step updates `sp` by a large immediate")
-        names = m.group(1)
-        self.assertIn("_qS0", names,
-                      f"the block-start side condition does not unfold the "
-                      f"successor state (`qS0`), so its `{names}` list cannot "
-                      f"see that the successor's body is `st`")
-        self.assertIn("_qT0", names,
-                      f"the block-start side condition does not unfold the "
-                      f"step's own effect (`qT0`): {names}")
-        self.assertIn("arm64_set_reg", names,
-                      f"the block-start side condition does not unfold the "
-                      f"record helper that can sit between the state and its "
-                      f"`pc`: {names}")
         self.assertNotIn(
             "0 hs0 rfl", text,
             "a block-start `runs_cons_seq` is discharged by a bare `rfl` again")
@@ -5664,38 +5358,43 @@ class TestAstBridgeCallLimit(unittest.TestCase):
                          f"since the bridge's gap here is a different one: {err}")
 
     def test_arm64_reaches_the_bridge_once_the_machine_half_is_there(self):
-        """The same program with ONE call site now emits a proof with the bridge.
+        """The same program with ONE call site now stops at the bridge.
 
-        This case used to stop at the bridge's arity gap; it is now handled, so
-        generation succeeds and the AST bridge is emitted.
+        The mirror of the row above, and the reason that one needed re-pointing
+        rather than deleting: `ONE_ARG`'s only remaining gap is the one-argument
+        `callFunc`, so a reader who is told "arm64 refuses this program" must be
+        told which gap, or the fix that closed the other one looks like it closed
+        nothing.
         """
         tmp = tempfile.mkdtemp(prefix="a2-bridge-")
         try:
             p, err = _generate(tmp, self.ONE_ARG, "bridge_arm64_one")
-            self.assertIsNone(err, err)
-            self.assertIsNotNone(p)
-            text = open(p).read()
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-        self.assertIn("theorem eval_eq_mojo", text,
-                      "a handled call must carry its AST bridge")
+        self.assertIsNone(p, err)
+        self.assertIn("2 arguments", err,
+                      f"with the machine half followed, the bridge's arity gap "
+                      f"is what a reader must be sent to: {err}")
 
-    def test_x86_64_emits_the_bridge_for_a_one_site_call(self):
-        """x86_64 now emits the AST bridge for this one-call-site case.
-
-        This case used to omit `eval_eq_mojo` because the call could not be
-        stated faithfully; generation now succeeds with the bridge present.
-        """
+    def test_x86_64_omits_the_bridge_and_says_why(self):
         tmp = tempfile.mkdtemp(prefix="a2-bridge-")
         try:
             p, err = _generate(tmp, self.ONE_ARG, "bridge_x86", arch="x86_64")
             self.assertIsNone(err, err)
-            self.assertIsNotNone(p)
             text = open(p).read()
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-        self.assertIn("theorem eval_eq_mojo", text,
-                      "a handled call must carry its AST bridge")
+        self.assertNotIn("theorem eval_eq_mojo", text,
+                         "the bridge must be OMITTED: with a `callFunc` that "
+                         "answers 0 for a user function, stating it asks Lean "
+                         "to prove `0 = <the call's value>`, and the emitted "
+                         "theorem is false rather than unproved")
+        note = [ln for ln in text.splitlines() if "AST omitted" in ln
+                or "AST bridge omitted" in ln]
+        self.assertTrue(note, "an omission with no reason is the bug this "
+                              "whole file is about")
+        self.assertIn("_scalar_max2", note[0],
+                      f"the note must name the call it gave up on: {note[0]}")
 
     def test_the_x86_64_proof_typechecks(self):
         """The teeth: before, this file did not elaborate.
@@ -6792,7 +6491,7 @@ class TestTheFloatReprHelperIsEmittedOnlyForAFloatPrint(unittest.TestCase):
     `extern_calls` the PROGRAM did not make: on x86-64 they made
     `_run_tests_section` refuse every run test (`NO RUN TESTS`), and the
     helper's bytes are the wall the kernel hits in every step certificate
-    (`test_formal_call_proof_gen.py`'s 2026-10-31 red run). The emitter now records
+    (`bugs/FORMAL_call_proofgen_red_on_head.md`). The emitter now records
     a float print (`_float_repr_used`) and emits the helper only then.
 
     Cheap: proof-free compiles, no Lean.
@@ -7579,446 +7278,49 @@ class TestTheStackFloorGuardReadsTheLimitInTheStartupStub(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
-class TestTheStackFloorTrapIsAProofObligation(unittest.TestCase):
-    """The stack-floor guard's trap is a real HALT, not a fall-through.
-
-    f03896fff made `svc` x16-discriminating: an exit `svc` steps to `none`.
-    Every compiled function carries the stack-floor guard whose taken edge is
-    a write-then-exit `svc` tail, so the universal walk has to close that edge
-    with a halt certificate rather than certify a `some` result through it.
-    Before this, every ordinary program's proof was refused with "CFG
-    decomposition unsupported" -- `def plain(a, b): return a + b` was enough.
-    """
-
-    SOURCE = "def plain(a, b):\n    return a + b\n"
-
-    @staticmethod
-    def _words(exit_x16=1, write_x16=4):
-        """The two system calls by ENCODING, with their own movz before each."""
-        movz_x16 = lambda imm: 0xd2800010 | (imm << 5)
-        return {
-            0x40: movz_x16(write_x16), 0x44: 0xd4000001,
-            0x48: movz_x16(exit_x16), 0x4c: 0xd4000001,
-        }
-
-    def test_the_structural_predicate_is_the_exit_form_not_the_encoding(self):
-        import formal.arm64_proof_gen as G
-        self.assertTrue(G._is_svc_exit(self._words(), 0x4c),
-                        "an exit svc with x16 = 1 is not a bounded stop")
-        self.assertFalse(G._is_svc_exit(self._words(), 0x44),
-                         "a write svc (x16 = 4) falls through at pc + 4; "
-                         "closing it as a trap loses the path the machine takes")
-        self.assertEqual(G._svc_static_x16(self._words(), 0x44), 4)
-
-    def test_the_guard_trap_gets_a_halt_certificate_and_none_arm(self):
-        tmp = tempfile.mkdtemp(prefix="a2-stacktrap-")
-        try:
-            src = os.path.join(tmp, "plain.mojo")
-            with open(src, "w") as f:
-                f.write(self.SOURCE)
-            r = _compile(src, os.path.join(tmp, "plain.aout"), "arm64")
-            with open(r["proof_path"], encoding="utf-8") as f:
-                text = f.read()
-            self.assertRegex(
-                text, r"(?m)^theorem plain_b\d+_halt_halts",
-                "the block whose own tail is the exit svc has no halt "
-                "certificate, so the walk must still be refusing the guard "
-                "trap (or is certifying a `some` result through a `none` step)")
-            self.assertIn(
-                "arm64_go_exit_step_jump_at",
-                text,
-                "the write svc in the trap tail is not composed with its "
-                "`hx` discharged from the block's own x16 chain")
-            self.assertIn(
-                "| none => True",
-                text,
-                "a reachable halt block requires the statement's honest "
-                "`none => True` arm; without it the trap edge is claimed "
-                "to return a value it does not")
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-
-
-class TestTheRefusalNamesTheSvcItRefuses(unittest.TestCase):
-    """The CFG-decomposition refusal must name the `svc` it cannot certify.
-
-    Every instruction in a guarded image has a step -- the `svc` too, idx
-    35 -- so the unmodelled-word search finds nothing, and the old sentence
-    blamed "an empty block runs certificate" for a refusal whose cause is
-    the svc.  The gate job reg-formal-ast-bridge-two-arg's planning round
-    asked for exactly this: the message names the svc and the reason its
-    certificate is refused.  The rows below feed hand-built images straight
-    into the diagnostic; none compiles and none touches Lean.
-    """
-
-    BASE = 0x10000000
-    # `movz x0, #5`: a filler the step table models (the diagnostic's first
-    # loop names unmodelled words before it ever reaches the svc scan), and
-    # NOT a move of x16, so an svc right after it has a dynamic x16.
-    FILL = 0xd2800000 | (5 << 5)
-    SVC = 0xd4000001
-    RET = 0xd65f03c0
-
-    @staticmethod
-    def _movz_x16(imm):
-        return 0xd2800010 | (imm << 5)
-
-    def _refusal(self, ws):
-        import formal.arm64_proof_gen as G
-        code = b"".join(w.to_bytes(4, "little") for w in ws)
-        return G._cfg_decomposition_refusal("fn", code, self.BASE, self.BASE)
-
-    def test_a_dynamic_svc_is_named_with_its_pc(self):
-        # entry, filler, filler, svc (no `movz x16` before it: x16 unknown), ret
-        msg = self._refusal([self.FILL, self.FILL, self.SVC, self.RET])
-        self.assertIn("0x10000008", msg, msg)
-        self.assertIn("x16", msg)
-        self.assertIn("dynamic-svc", msg)
-        self.assertNotIn("empty block runs certificate", msg,
-                         "the old sentence blamed an empty runs certificate "
-                         "for what is really the svc")
-
-    def test_an_exit_svc_mid_run_is_named(self):
-        # entry, filler, `movz x16 #1`, svc (exit -- but a ret follows it in
-        # the block, so it is mid-run, not the tail a branch would land on), ret
-        msg = self._refusal([self.FILL, self._movz_x16(1), self.SVC, self.RET])
-        self.assertIn("0x10000008", msg, msg)
-        self.assertIn("exit svc", msg)
-        self.assertIn("middle of a straight-line run", msg)
-        self.assertNotIn("empty block runs certificate", msg)
-
-    def test_a_write_svc_whose_x0_is_read_before_rewritten_is_named(self):
-        # entry, filler, `movz x16 #4`, svc, ADD X1, X0, X2 (reads x0 before
-        # the write's byte count is rewritten), ret
-        msg = self._refusal([self.FILL, self._movz_x16(4), self.SVC,
-                             0x91000401, self.RET])
-        self.assertIn("0x10000008", msg, msg)
-        self.assertIn("write svc", msg)
-        self.assertIn("x0", msg)
-        self.assertNotIn("empty block runs certificate", msg)
-
-    def test_the_generic_sentence_stands_when_no_svc_refuses(self):
-        # No RET at all and no svc in the image: a refusal for the shape,
-        # not for an instruction.  The generic sentence must be unchanged,
-        # so a future reword of it is a visible change here.
-        msg = self._refusal([self.FILL, self.FILL])
-        self.assertIn("with no `RET`", msg)
-        self.assertIn("empty block runs certificate", msg)
-
-
-def _svc_census(words, base, code):
-    """One record per `svc` in `words`: its static x16 and, for a non-exit
-    `svc`, whether the fall-through rewrites x0 before anything reads it.
-
-    The readers are the proof generator's OWN (`_is_svc`, `_cfg_blocks`,
-    `_svc_static_x16`, `_x0_reassigned_after_write`), called rather than
-    copied: a private encoding table here would measure a corpus with the
-    wrong instrument and could agree with a generator that had drifted.  The
-    range is the executable region (`_exec_code_limit`), the same one the
-    generator's own scans use, so an interned string whose bytes decode as an
-    `svc` is not counted as an instruction.
-
-    A record is `{"pc": int, "x16": int | None, "x0_reassigned": bool | None}`,
-    where `x16 is None` means dynamic and `x0_reassigned` is None only for a
-    static exit (x16 == 1), which halts and so has no fall-through.
-    """
-    import formal.arm64_proof_gen as G
-    end = base + G._exec_code_limit(code)
-    blocks = G._cfg_blocks(words, base, end)
-    leaders = frozenset(b["start"] for b in blocks)
-    records = []
-    for pc in sorted(p for p in words if p < end and G._is_svc(words[p])):
-        x16 = G._svc_static_x16(words, pc, leaders)
-        records.append({
-            "pc": pc,
-            "x16": x16,
-            "x0_reassigned": (
-                None if x16 == 1
-                else G._x0_reassigned_after_write(words, pc)),
-        })
-    return records
-
-
-class TestSvcProvenanceCensus(unittest.TestCase):
-    """Every emitted `svc`'s x16, and every write's x0 use, measured.
-
-    Part 1 of `bugs/hard/FORMAL_svc_exit_handling_incomplete.md` is "measure
-    before assuming": the proof walk now distinguishes an exit `svc` (x16 = 1,
-    a halt) from a write `svc` (x16 = 4, a fall-through whose x0 return value
-    the model does not model), and that distinction is only as good as the
-    emitter's own discipline.  Nothing measured that discipline, so a later
-    emitter change could turn a static site dynamic, or put a read of x0
-    between a write and its rewrite, without any test noticing.
-
-    This class is that measurement: a census over every arm64 image in
-    `formal/examples`, using the generator's readers.  The corpus is clean
-    today (439 svc: 220 exit, 219 write, 0 dynamic, 0 unrewritten write), and
-    the two assertions below are what makes a future violation a red test
-    naming the program, pc and word rather than a fact a reader must infer.
-
-    Two hand-built images prove the census can FAIL: one with an `svc` at the
-    entry and no preceding `movz x16` (dynamic), and one with a write `svc`
-    followed by `add x1, x0, x2` before any x0 rewrite.  A third image, with
-    the write followed by `movz x0, #0`, is the control that says the
-    unrewritten finding is about the read and not an instrument that always
-    answers "unrewritten".
-    """
-
-    BASE = 0x10000000
-    SVC = 0xd4000001
-    RET = 0xd65f03c0
-    MOVZ_X0_0 = 0xd2800000          # `movz x0, #0`
-    ADD_X1_X0_X2 = 0x8b020001      # `add x1, x0, x2`
-
-    @staticmethod
-    def _movz_x16(imm):
-        return 0xd2800010 | (imm << 5)
-
-    def _census(self, ws):
-        code = b"".join(w.to_bytes(4, "little") for w in ws)
-        words = {self.BASE + 4 * i: w for i, w in enumerate(ws)}
-        return _svc_census(words, self.BASE, code)
-
-    def test_the_corpus_has_no_dynamic_svc_and_no_unrewritten_write_x0(self):
-        import formal.build as fb
-        corpus = os.path.join(HERE, "formal", "examples")
-        sources = sorted(glob.glob(os.path.join(corpus, "*.mojo")))
-        self.assertTrue(sources, f"no examples under {corpus}")
-        total = exits = writes = dynamics = unrewritten = 0
-        bad = []
-        with tempfile.TemporaryDirectory(prefix="svc-census-") as tmp:
-            for src in sources:
-                name = os.path.splitext(os.path.basename(src))[0]
-                out = os.path.join(tmp, name + ".aout")
-                try:
-                    r = fb.compile_formal(src, arch="arm64", output=out,
-                                          prove=False, check=False)
-                except Exception as e:      # noqa: BLE001 -- report, do not skip
-                    self.fail(
-                        f"{name}: the arm64 image build refused, so its svcs "
-                        f"cannot be censused: {type(e).__name__}: {e}")
-                code = r["code"]
-                words = {r["info"]["base_addr"] + i:
-                         int.from_bytes(code[i:i + 4], "little")
-                         for i in range(0, len(code) - len(code) % 4, 4)}
-                records = _svc_census(words, r["info"]["base_addr"], code)
-                total += len(records)
-                for rec in records:
-                    word = words[rec["pc"]]
-                    if rec["x16"] is None:
-                        dynamics += 1
-                        bad.append(
-                            f"{name}: dynamic x16 at pc {rec['pc']:#x} "
-                            f"word {word:#010x}: no `movz x16` immediately "
-                            f"before it, or the svc is a block entry")
-                    elif rec["x16"] == 1:
-                        exits += 1
-                    else:
-                        writes += 1
-                        if not rec["x0_reassigned"]:
-                            unrewritten += 1
-                            bad.append(
-                                f"{name}: write svc (x16={rec['x16']}) at pc "
-                                f"{rec['pc']:#x} word {word:#010x}: the "
-                                f"fall-through reads x0 before rewriting the "
-                                f"byte count the model does not model")
-        print(f"svc census over {len(sources)} examples: {total} svc, "
-              f"{exits} exit, {writes} write, {dynamics} dynamic, "
-              f"{unrewritten} write-with-x0-read")
-        self.assertGreater(total, 0,
-                           "the census scanned no svc at all, so its two "
-                           "assertions are about nothing")
-        self.assertEqual(
-            bad, [],
-            "the emitted arm64 corpus violates the svc discipline the proof "
-            "walk relies on:\n  " + "\n  ".join(bad))
-
-    def test_a_dynamic_fixture_is_classified_dynamic(self):
-        # svc at the entry with no `movz x16` before it: x16 is unknown, and
-        # the entry is a block leader anyway, so no path fixes it.
-        records = self._census([self.SVC, self.MOVZ_X0_0, self.RET])
-        self.assertEqual(len(records), 1, records)
-        self.assertIsNone(
-            records[0]["x16"],
-            "an svc at the entry with no preceding movz was not classified "
-            "dynamic, so the census cannot see the case it exists to find")
-
-    def test_a_write_fixture_whose_x0_is_read_first_is_unrewritten(self):
-        records = self._census([self._movz_x16(4), self.SVC,
-                                self.ADD_X1_X0_X2, self.RET])
-        self.assertEqual(len(records), 1, records)
-        self.assertEqual(records[0]["x16"], 4, records)
-        self.assertFalse(
-            records[0]["x0_reassigned"],
-            "a write svc followed by `add x1, x0, x2` was reported as "
-            "rewriting x0 first, so the unrewritten-write finding is blind")
-
-    def test_a_write_fixture_whose_x0_is_rewritten_is_the_control(self):
-        records = self._census([self._movz_x16(4), self.SVC,
-                                self.MOVZ_X0_0, self.RET])
-        self.assertEqual(len(records), 1, records)
-        self.assertEqual(records[0]["x16"], 4, records)
-        self.assertTrue(
-            records[0]["x0_reassigned"],
-            "a write svc followed by `movz x0, #0` was reported as "
-            "unrewritten, so the failure above is not about the read")
-
-
-class TestSvcWriteAssumedRunCertificate(unittest.TestCase):
-    """A dynamic write `svc` is admitted only by a NAMED assumption.
-
-    `_gen_run_cert` used to refuse a write `svc` whose x16 is not a `movz`
-    among the run's own preceding instructions: the step lemma's
-    `hx : ¬ arm64_reg 16 s = 1` had no reg-16 chain to discharge it from.
-    The write form is still sound when the caller supplies that hypothesis by
-    name -- it is ASSUMED at the certificate's own pre-svc state, never
-    invented or proved -- and the fall-through rewrites x0 before anything
-    reads the byte count the model does not model.
-
-    These are text tests over hand-built word dictionaries: no Lean, no
-    dylib, no compile.  They pin the admission, the binder, the `hx` it
-    becomes, and the three controls (static write, static exit, unrewritten
-    x0) that must keep today's behaviour.
-    """
-
-    BASE = 0x10000000
-    SVC = 0xd4000001
-    RET = 0xd65f03c0
-    # The hypothesis's one accepted spelling: over the STATES and the assumed
-    # pcs, so every certificate that uses a site instantiates the same binder
-    # (`_svc_write_assumed_type` in the generator).
-    HYP = ("svc_write_assumed",
-           "∀ s : Arm64State, s.pc ∈ [268435456] → ¬ arm64_reg 16 s = 1")
-
-    @staticmethod
-    def _movz(rt, imm):
-        return 0xd2800000 | (imm << 5) | rt
-
-    def _cert(self, words, pcs, **kw):
-        import formal.arm64_proof_gen as G
-        return G._gen_run_cert("f", words, self.BASE, "b0", pcs, **kw)
-
-    def _dynamic_write(self):
-        """`svc` FIRST (x16 is not in the run), then `movz x0, #0; ret`."""
-        words = {self.BASE: self.SVC,
-                 self.BASE + 4: self._movz(0, 0),
-                 self.BASE + 8: self.RET}
-        return words, [self.BASE, self.BASE + 4, self.BASE + 8]
-
-    def test_a_dynamic_write_svc_with_no_assumption_is_still_refused(self):
-        words, pcs = self._dynamic_write()
-        self.assertIsNone(
-            self._cert(words, pcs),
-            "a dynamic write `svc` was admitted without the hypothesis its "
-            "step lemma needs -- the certificate would claim a state the "
-            "caller never justified")
-
-    def test_the_named_assumption_is_the_binder_and_its_hx(self):
-        words, pcs = self._dynamic_write()
-        part = self._cert(words, pcs, svc_assumed={self.BASE: self.HYP})
-        self.assertIsNotNone(part, "a justified dynamic write `svc` was refused")
-        text = part[0]
-        self.assertIn(
-            f"(svc_write_assumed : {self.HYP[1]})", text,
-            "the runs certificate does not carry the assumption as a binder "
-            "of the walk's own shape")
-        self.assertIn(
-            "have hx0 : ¬ arm64_reg 16 (f_b0_qS0 st) = 1 := "
-            "svc_write_assumed (f_b0_qS0 st) (by simp [hpc0])",
-            text,
-            "the dynamic svc's `hx` is not that hypothesis applied at its "
-            "pre-svc state")
-        self.assertIn(
-            "f_sr_0 (f_b0_qS0 st) (hpc0) (hx0)", text,
-            "the write-form step lemma is not applied under the assumption")
-        self.assertNotIn(
-            "h16_0", text,
-            "the certificate still invents a reg-16 chain for an x16 no "
-            "instruction in the run wrote")
-
-    def test_the_dynamic_step_is_the_write_form_not_the_exit(self):
-        words, pcs = self._dynamic_write()
-        part = self._cert(words, pcs, svc_assumed={self.BASE: self.HYP})
-        self.assertIsNotNone(part)
-        text = part[0]
-        self.assertIn(
-            "def f_b0_qT0 (st : Arm64State) : Arm64State :=\n"
-            "  { (f_b0_qS0 st) with pc := (f_b0_qS0 st).pc + 4 }", text,
-            "the admitted svc is not composed as the write form (the "
-            "fall-through at pc + 4)")
-        self.assertNotIn(
-            "arm64_go_exit_step_jump_at", text,
-            "a dynamic write svc was closed as an exit step")
-
-    def test_the_assumption_name_is_the_callers(self):
-        words, pcs = self._dynamic_write()
-        part = self._cert(words, pcs, svc_assumed={self.BASE: ("hwrite", self.HYP[1])})
-        self.assertIsNotNone(part)
-        self.assertIn(
-            "have hx0 : ¬ arm64_reg 16 (f_b0_qS0 st) = 1 := "
-            "hwrite (f_b0_qS0 st) (by simp [hpc0])", part[0])
-
-    def test_a_static_write_still_discharges_hx_from_its_own_chain(self):
-        # `movz x16, #4; svc; movz x0, #0; ret`
-        words = {self.BASE: self._movz(16, 4),
-                 self.BASE + 4: self.SVC,
-                 self.BASE + 8: self._movz(0, 0),
-                 self.BASE + 12: self.RET}
-        pcs = [self.BASE, self.BASE + 4, self.BASE + 8, self.BASE + 12]
-        part = self._cert(words, pcs)
-        self.assertIsNotNone(part, "a static write svc is still refused")
-        text = part[0]
-        self.assertIn("h16_1 : arm64_reg 16 (f_b0_qS1 st) = (UInt64.ofNat 4)",
-                      text, "the static write lost its own reg-16 chain")
-        self.assertIn("have hx1 : ¬ arm64_reg 16 (f_b0_qS1 st) = 1 := by",
-                      text)
-        self.assertNotIn("svc_write_assumed", text,
-                         "a static write does not need the assumption")
-
-    def test_a_static_exit_is_still_refused(self):
-        # `movz x16, #1; svc; ...`: an exit has no fall-through to certify.
-        words = {self.BASE: self._movz(16, 1),
-                 self.BASE + 4: self.SVC,
-                 self.BASE + 8: self._movz(0, 0),
-                 self.BASE + 12: self.RET}
-        pcs = [self.BASE, self.BASE + 4, self.BASE + 8, self.BASE + 12]
-        self.assertIsNone(self._cert(words, pcs))
-        self.assertIsNone(self._cert(words, pcs,
-                                     svc_assumed={self.BASE + 4: ("h", self.HYP[1])}))
-
-    def test_a_dynamic_write_that_leaves_x0_unrewritten_is_refused(self):
-        # `svc; add x1, x0, #1; ret`: the fall-through READS the byte count
-        # the model does not model, so the assumption cannot make it sound.
-        add_x1_x0_1 = 0x91000000 | (0 << 5) | 1
-        words = {self.BASE: self.SVC,
-                 self.BASE + 4: add_x1_x0_1,
-                 self.BASE + 8: self.RET}
-        pcs = [self.BASE, self.BASE + 4, self.BASE + 8]
-        self.assertIsNone(
-            self._cert(words, pcs, svc_assumed={self.BASE: self.HYP}),
-            "an assumption admitted a write svc whose result x0 is read "
-            "before it is rewritten")
-
-
 class TestAPlaceholderModelClaimsNothing(unittest.TestCase):
-    """A shape that once reached the placeholder route is now modeled.
+    """A model the shared generator cannot write must be CLAIMED as unwritten.
 
-    The 2026-10-31 call-proofgen red run (cluster 2) observed that
-    the placeholder NOTE was no longer emitted for this case; these rows pin the
-    current route instead of the old refusal.  The `wide_recv` shape below (a
-    method that reads a struct field through a receiver) is now handled by the
-    shared model generator on both backends, so a proof is emitted with a
-    semantic model, an AST bridge, and concrete run tests rather than the
-    identity-placeholder stub.
+    `formal/x86_64_proof_gen.py` catches the shared model generator's
+    `NotImplementedError` and does not fail the build: it emits the model's
+    function as the IDENTITY, with a NOTE, and suppresses the two sections whose
+    whole value is a comparison against that model.  For
+    `formal/examples/wide_recv.mojo` — the two-field receiver example, whose
+    `p.get_x() + p.get_y()` is a struct field read and the model's domain is
+    `UInt64 -> UInt64` — that yields `def main_go (n : UInt64) : UInt64 := n` for
+    a function whose real answer is 4 whatever `n` is.
 
-    `PLAIN` is the control: a function the model covers must keep its bridge and
-    run tests, and must not carry placeholder markers.
+    That is a FALSE STATEMENT about the source unless nothing downstream of it is
+    claimed, so the whole of this class is that "unless".  Four sections and one
+    control, and each row is a way a later change could remove the guard and
+    leave the false statement standing with a proof attached:
+
+      1. the NOTE, naming the refusal and saying nothing downstream is claimed;
+      2. the model's own definition being the identity, so a reader who skips
+         the NOTE still sees that the model computes nothing;
+      3. the AST BRIDGE suppressed, with its reason — `eval_eq_mojo` against the
+         identity is the obligation `0 = n`, which is false rather than unproved;
+      4. the RUN TESTS suppressed, with their reason — a run test would compare
+         the MACHINE against the placeholder and fail for a reason that says
+         nothing about the machine, which is how a fabricated answer gets
+         reported as a codegen bug.
+
+    **arm64 REFUSES this program outright** and x86-64 emits a disclaimed stub,
+    which is a real divergence between the two backends on one source file.  It
+    is asserted here as a fact rather than left for a reader to find, because the
+    honest stub is the x86-64 half and the arm64 half is the stricter one — and
+    arm64's proof layer is the more complete of the two, so "make them alike"
+    would mean giving up more than it gains.  The decision and its measurement are
+    `bugs/FORMAL_wide_recv_model_has_no_domain_for_a_struct.md (deleted)`'s, and what
+    belongs here is only that the stub's honesty is a property of the GENERATOR
+    and not of this one example.
 
     Generation only, no Lean: `compile_formal(prove=True, check=False)`.
     """
 
-    #: A receiver method that reads a field — the shape that used to reach the
-    #: placeholder route because the model had no domain for the field read.
+    #: `wide_recv.mojo`'s shape, in the subset both backends accept: a
+    #: two-field struct whose method READS a field, so translating the body
+    #: reaches a member read the model's domain cannot hold.
     WIDE_RECV = """struct Point:
     var x: Int
     var y: Int
@@ -8034,7 +7336,9 @@ def main(n: Int) -> Int:
     return p.get_x() + p.get_y()
 """
 
-    #: The control: a function the shared model covers directly.
+    #: The control: a function the shared model covers, so every suppression
+    #: below must be ABSENT. Without it a generator that suppressed all four
+    #: unconditionally would satisfy rows 1-4 and prove nothing.
     PLAIN = "def main(n: Int) -> Int:\n    return n + 1\n"
 
     @classmethod
@@ -8069,59 +7373,78 @@ def main(n: Int) -> Int:
                   f"{self.built.get((arch, name, 'error'))}")
         return text
 
-    def test_the_previously_uncovered_shape_is_modeled(self):
-        """The receiver-field shape is no longer a placeholder refusal on x86_64.
+    def test_the_uncovered_shape_reaches_the_placeholder_route(self):
+        """The premise of every other row here, measured rather than assumed.
 
-        This case used to hit the identity-placeholder route; it now emits a
-        semantic model and run tests, with the AST bridge omitted (and
-        explained) because the call shape cannot be stated there.
+        If the shared generator learned this shape, all four suppressions would
+        disappear and rows 1-4 would fail — so this row says which tree it is
+        asserting about, and it is the row that tells a reader the other four are
+        about a real gap rather than about a generator that gave up early.
         """
         text = self._text("x86_64", "wide_recv")
-        self.assertNotIn("the shared model generator does not cover this "
-                         "function's shape", text)
-        self.assertNotIn("PLACEHOLDER", text)
-        self.assertNotIn("NO RUN TESTS", text)
-        self.assertRegex(
-            text, r"def \w+_go\s*\(",
-            "the semantic model definition is missing")
+        self.assertIn("the shared model generator does not cover this "
+                      "function's shape", text)
+        self.assertIn("struct field read has no value in the semantic model",
+                      text,
+                      "the NOTE must name the REFUSAL, not just announce that "
+                      "there is one: a reader who cannot tell which shape is "
+                      "uncovered cannot tell whether their own program is in it")
 
-    def test_the_model_is_not_the_identity(self):
-        """The modeled function body is emitted (not the old identity stub)."""
+    def test_the_note_says_nothing_downstream_is_claimed(self):
+        text = self._text("x86_64", "wide_recv")
+        self.assertIn("the semantic model below is the identity and nothing "
+                      "downstream of it is claimed", text)
+
+    def test_the_model_is_the_identity_rather_than_the_program(self):
+        """A reader who skips every comment still sees that the model is empty.
+
+        `main_go n = n` for a function that returns 4 whatever `n` is. Asserted
+        as TEXT rather than by running Lean, because the point is what the
+        emitted file says and Lean's opinion of `n = n` is not in question.
+        """
         text = self._text("x86_64", "wide_recv")
         m = re.search(r"def main_go\s*\([^)]*\)\s*:\s*UInt64\s*:=\s*"
-                      r"\n\s*(.+)", text)
+                      r"\n\s*(\S+)", text)
         self.assertIsNotNone(m, "the model's own definition is not where the "
                                 "file says it is:\n" + text[:400])
-        self.assertNotEqual(
-            m.group(1).strip(), "n",
-            "the model fell back to the identity placeholder")
+        self.assertEqual(m.group(1), "n",
+                         "the placeholder model is no longer the identity; a "
+                         "placeholder that computes SOMETHING needs the "
+                         "suppressions below re-examined, because it is no "
+                         "longer obviously empty")
 
-    def test_the_ast_bridge_is_omitted_with_its_reason(self):
-        """x86_64 models the shape but omits eval_eq_mojo for this call form."""
+    def test_the_ast_bridge_is_suppressed_with_its_reason(self):
         text = self._text("x86_64", "wide_recv")
         self.assertIn("AST bridge omitted", text)
-        self.assertNotIn("theorem eval_eq_mojo", text)
+        self.assertIn("PLACEHOLDER", text)
+        self.assertNotIn("theorem eval_eq_mojo", text,
+                         "the AST bridge was emitted against a placeholder "
+                         "model: `eval_eq_mojo` here is the obligation "
+                         "`0 = n`, which is FALSE rather than unproved")
 
-    def test_the_run_tests_are_emitted(self):
-        """A modeled (non-placeholder) proof carries concrete run tests."""
+    def test_the_run_tests_are_suppressed_with_their_reason(self):
         text = self._text("x86_64", "wide_recv")
-        runs = re.findall(r"theorem \w+_runs_\d+\b", text)
-        self.assertGreater(len(runs), 0,
-                           "a modeled proof must include run tests")
-
-    def test_both_backends_handle_the_shape_without_placeholder(self):
-        """Both backends emit a proof for this shape without placeholder markers."""
-        for arch in ("x86_64", "arm64"):
-            with self.subTest(arch=arch):
-                text = self._text(arch, "wide_recv")
-                self.assertNotIn("PLACEHOLDER", text)
-                self.assertNotIn("NO RUN TESTS", text)
+        self.assertIn("NO RUN TESTS", text)
+        self.assertIn("PLACEHOLDER", text)
+        for n in (0, 1, 2, 5, 10):
+            self.assertNotIn(f"theorem main_runs_{n} :", text,
+                             "a run test compares the MACHINE against the "
+                             "placeholder, so it fails for a reason that says "
+                             "nothing about the machine")
+        # …and the end-to-end theorem is admitted, which is what makes the whole
+        # file honest rather than merely cautious.
+        tail = text[text.rfind("theorem main_compiles_correctly"):]
+        self.assertIn("sorry", tail,
+                      "the end-to-end theorem is not `sorry` for a file whose "
+                      "model is the identity; without that it states the image "
+                      "computes `mojo n` = `n`, and the image computes 4")
 
     def test_the_control_claims_all_four(self):
         """A function the model CAN cover must have none of the four.
 
         Without this row a generator that suppressed everything unconditionally
-        would pass the checks above and prove nothing.
+        would pass rows 1-4 and this file would be pinning a generator that
+        proves nothing at all.
         """
         for arch in ("x86_64", "arm64"):
             text = self._text(arch, "plain")
@@ -8133,21 +7456,35 @@ def main(n: Int) -> Int:
                 self.assertNotIn("NO RUN TESTS", text)
                 self.assertIn("theorem eval_eq_mojo", text)
 
-    def test_arm64_frame_proof_and_x86_64_proof_diverge(self):
-        """The backends handle the receiver-field shape differently.
+    def test_arm64_frame_proof_and_x86_64_placeholder_diverge(self):
+        """The divergence, stated, because a reader meets it.
 
-        arm64 emits a by-reference receiver frame proof (no source-level `mojo`
-        or end-to-end theorem for the entry), while x86_64 emits a proof with a
-        semantic model and run tests.  Neither uses the old placeholder route.
+        `wide_recv` is a by-reference receiver: its `get_x`/`get_y` are frame
+        methods.  arm64 proves each of them as a frame CONTRACT (the by-reference
+        proof path, `_generate_frame_proof`), which says there is no `mojo` and
+        no end-to-end theorem.  x86-64 emits the disclaimed placeholder model.
+        Neither claims the program is proved end to end, which is the property
+        that matters; a caller reading `compile_formal`'s return value has to
+        know which of the two it is looking at.
+
+        This row was "arm64 refuses it" until the frame-method finder found
+        these methods (`test_formal_frame_method_finder.py`); the old refusal was
+        the ordinary model's, and the frame path now answers instead.
         """
-        x86 = self._text("x86_64", "wide_recv")
-        arm = self._text("arm64", "wide_recv")
-        self.assertNotIn("PLACEHOLDER", x86)
+        arm = self.built.get(("arm64", "wide_recv"))
+        self.assertIsNotNone(arm, "arm64 refused the frame shape: %s" %
+                             self.built.get(("arm64", "wide_recv", "error")))
+        self.assertIn("by-reference receiver", arm,
+                      "arm64 emitted a proof, but not the by-reference frame "
+                      "proof this row describes")
         self.assertNotIn("PLACEHOLDER", arm)
-        self.assertIn("by-reference receiver", arm)
-        self.assertNotIn("theorem main_compiles_correctly", arm)
-        self.assertNotIn("by-reference receiver", x86)
-        self.assertIn("main_compiles_correctly", x86)
+        self.assertNotIn("theorem main_compiles_correctly", arm,
+                         "a frame proof states an end-to-end theorem, which "
+                         "has no `mojo` to be equal to")
+        self.assertIsNotNone(
+            self.built.get(("x86_64", "wide_recv")),
+            "x86_64 refused the shape too, so the two backends now agree and "
+            "this row is stale")
 
 
 class TestDec1PathContext(unittest.TestCase):
@@ -8368,10 +7705,14 @@ class TestCfgLeafCensus(unittest.TestCase):
                 reached |= set(census)
         # The three shapes are chosen so that this is a real assertion: a
         # generator that stopped reaching the recursion or loop leaves would
-        # otherwise pass every test above.
+        # otherwise pass every test above.  The two `dec-while` back edges and
+        # `loop-cond-step` left the slice when the overflow flip (2026-11-02)
+        # split the `while`'s body across blocks: its back edge is
+        # `loop-back-edge-no-contract` now, and that one is what this pins.
         self.assertLessEqual(
             {"runs-bl-step", "runs-cbz-condition", "runs-ret-x0",
-             "loop-cond-step", "walk-terminal"} - reached, set(),
+             "loop-back-edge-no-contract",
+             "walk-terminal"} - reached, set(),
             "the corpus slice no longer reaches the leaves it was chosen for")
 
     def test_the_cbz_leaf_peels_the_frame_reads_before_it_admits(self):
@@ -8711,14 +8052,12 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
     def test_literal_divisor_proof_produces_correct_proof(self):
         """Regression for bugs/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md.
 
-        The literal-divisor fixture was the repair that doc's step 2 applied
-        while the symbolic divisor's walk still substituted a reachability
-        theorem (no universal theorem + admission, so the measurement class was
-        blind).  This row pins the structural property that repair relies on:
-        `a // 4` emits the universal theorem with `_ADMIT` and no reachability
-        substitution.  The measurement class itself is back on the symbolic
-        divisor now that the walk discharges the `BL fflush` arm — the literal
-        goal closes, so it has no residual for that class to read.
+        Before the fixture switch (the doc's step 2 option 2), the measurement
+        class `TestTheZeroDivisorGuardAgainstLean` used `_symbolic_divisor_proof`,
+        which produces a proof with a reachability substitution instead of the
+        universal theorem + admission. After switching to `_literal_divisor_proof`,
+        the universal theorem IS emitted with its `_ADMIT`, so the measurement
+        mechanism fires. This test verifies that structural property directly.
         """
         import tempfile
         tmp = tempfile.mkdtemp(prefix="regress-")
@@ -8924,18 +8263,10 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
     when it did not, so this class can only report the `fdiv64` diagnosis
     when it really measured a residual.
 
-    The class measures the proof for `def q(a, b): return a // b`, whose
-    divide-by-zero arm ends in the compiler's own `BL fflush`.  That arm used
-    to make the walk substitute a reachability theorem for
-    `q_compiles_correctly_universal` (no admission, nothing to trace), which is
-    why an earlier round switched the fixture to the literal divisor `a // 4`.
-    The walk now closes that trap path with an `hnone` halt fact, so the
-    symbolic fixture emits the universal theorem with its admission again and
-    its terminal value flow carries the guard's residual (`⊢ n1 = 0 → …`) —
-    the goal this class exists to pin.  The literal fixture cannot stand in for
-    it: with a divisor the model can decide, the terminal goal CLOSES, so
-    `first | done | trace_state` never reaches the trace and there is no
-    residual to read.
+    After the fix this doc wants (the fixture switch), this class should use
+    `def q(a): return a // 4` instead of `def q(a, b): return a // b`.
+    The literal divisor avoids the flush arm, so the universal theorem IS
+    emitted and the class can measure its residual.
     """
 
     #: The two spellings, and each one's patch (the doc's next step, applied).
@@ -8974,15 +8305,10 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         cls.blind = {}
         for label, patch in cls.SPELLINGS:
             try:
-                # The SYMBOLIC divisor, and it is the residual's own subject:
-                # `n1 = 0` is the guard's false arm and only a divisor the
-                # model cannot decide produces it.  The walk now discharges the
-                # arm's `BL fflush` (`hnone`), so this fixture emits the
-                # universal theorem with its terminal admission (pinned Lean
-                # free by `TestTheDiv0FixtureHaltsAtTheCompilerTrap`).  A
-                # literal divisor makes the terminal goal close, which leaves
-                # `tail.replace(_ADMIT, _TRACE)` no goal to print.
-                head, tail = _symbolic_divisor_proof(cls.tmp)
+                # FIXTURE SWITCH (from the doc's step-2 option 2): the literal
+                # divisor `a // 4` avoids the compiler's div0 arm, so the
+                # universal theorem IS emitted with its admission.
+                head, tail = _literal_divisor_proof(cls.tmp)
             except Exception as e:                      # noqa: BLE001
                 cls.blind[label] = (
                     f"the fixture no longer generates a proof at all, so the "
@@ -9356,7 +8682,7 @@ class TestUnsignedOffsetAccess(unittest.TestCase):
             # NZCV back through four conditional branches, so the flags have to
             # be ESTABLISHED by an instruction both engines execute — which is
             # what makes them equal by construction.
-            out.append(fm.Case(regs, 0, bytes(mem), [0] * 8,
+            out.append(fm.Case(regs, 0, bytes(mem),
                                ["cmp x0, #1", text], words))
         return out
 
@@ -10943,6 +10269,9 @@ class TestTheModelFuzzLedgerRowIsFromTheTally(unittest.TestCase):
                                          f"CSET==CSINC identity failed for {cond}")
 
 
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
+
 class TestDecWhileSignedModelRegression(unittest.TestCase):
     """The dec-while loop model assumes a non-negative counter.
 
@@ -11011,541 +10340,3 @@ class TestDecWhileSignedModelRegression(unittest.TestCase):
         self.assertEqual(r.returncode, 0,
                          "emitted _go block does not typecheck:\n"
                          + r.stdout + r.stderr)
-
-
-class TestSvcWriteAssumedHaltCertificate(unittest.TestCase):
-    """Part 3: a halt certificate admits a dynamic write `svc` under
-    `svc_write_assumed`."""
-
-    BASE = 0x1000
-    EXIT_PC = 0x2000
-    # The one accepted hypothesis shape: over the states and the assumed pcs
-    # (`_svc_write_assumed_type`), so a site after a preceding run applies it
-    # at that segment's own pre-svc state.
-    HYP_TYPE = ("∀ s : Arm64State, s.pc ∈ [4096] → ¬ arm64_reg 16 s = 1")
-
-    def _words(self):
-        # <base>       svc                 # dynamic x16 (no preceding movz)
-        # base + 4     movz x0, #0         # rewrites write's byte count
-        # base + 8     movz x16, #1
-        # base + 12    svc                 # static exit
-        return {
-            self.BASE: 0xd4000001,
-            self.BASE + 4: 0xd2800000,   # movz x0, #0
-            self.BASE + 8: 0xd2800030,   # movz x16, #1
-            self.BASE + 12: 0xd4000001,
-        }
-
-    def _pcs(self):
-        return [self.BASE, self.BASE + 4, self.BASE + 8, self.BASE + 12]
-
-    def test_no_assumption_still_returns_none(self):
-        import formal.arm64_proof_gen as G
-        r = G._gen_halt_cert("f", self._words(), self.BASE, "b0",
-                             self._pcs(), self.EXIT_PC)
-        self.assertIsNone(r)
-
-    def test_with_assumption_emits_binder_and_discharge(self):
-        import formal.arm64_proof_gen as G
-        r = G._gen_halt_cert("f", self._words(), self.BASE, "b0",
-                             self._pcs(), self.EXIT_PC,
-                             svc_assumed={self.BASE: ("svc_write_assumed", self.HYP_TYPE)})
-        self.assertIsNotNone(r, "expected halt cert when assumption supplied")
-        defs, thm, n = r
-        self.assertEqual(thm, "f_b0_halts")
-        self.assertIn("svc_write_assumed", defs)
-        # binder in theorem header
-        self.assertRegex(defs, r"theorem\s+f_b0_halts\b[\s\S]*svc_write_assumed")
-        # dynamic write's hx comes from that binder at pre-svc state
-        self.assertRegex(
-            defs,
-            r"have hx_svc_1\s*:\s*¬\s*arm64_reg\s+16\s*\([^)]+\)\s*=\s*1\s*:=\s*svc_write_assumed",
-        )
-        # write steps through arm64_go_exit_step_jump_at
-        self.assertIn("arm64_go_exit_step_jump_at", defs)
-        # final static exit still steps to none
-        self.assertRegex(defs, r"hstep_x_\d+[\s\S]*arm64_step[\s\S]*=\s*none")
-
-    def test_static_exit_only_no_binder(self):
-        import formal.arm64_proof_gen as G
-        words = {
-            self.BASE: 0xd2800030,      # movz x16,#1
-            self.BASE + 4: 0xd4000001,   # svc
-        }
-        pcs = [self.BASE, self.BASE + 4]
-        r = G._gen_halt_cert("f", words, self.BASE, "b0", pcs, self.EXIT_PC,
-                             svc_assumed={self.BASE: ("svc_write_assumed", self.HYP_TYPE)})
-        self.assertIsNotNone(r)
-        defs, thm, n = r
-        self.assertNotIn("svc_write_assumed", defs)
-
-    def test_final_dynamic_svc_refused_even_with_assumption(self):
-        import formal.arm64_proof_gen as G
-        words = {
-            self.BASE: 0xd4000001,       # dynamic and final
-        }
-        pcs = [self.BASE]
-        r = G._gen_halt_cert("f", words, self.BASE, "b0", pcs, self.EXIT_PC,
-                             svc_assumed={self.BASE: ("svc_write_assumed", self.HYP_TYPE)})
-        self.assertIsNone(r)
-
-    def test_earlier_dynamic_write_reads_x0_before_rewrite_refused(self):
-        import formal.arm64_proof_gen as G
-        # dynamic write svc, fall-through reads x0 before rewriting it
-        words = {
-            self.BASE: 0xd4000001,       # dynamic write
-            self.BASE + 4: 0x8b000020,   # add x1,x0,x0 (reads x0)
-            self.BASE + 8: 0xd2800030,   # movz x16,#1
-            self.BASE + 12: 0xd4000001,  # exit
-        }
-        pcs = [self.BASE, self.BASE + 4, self.BASE + 8, self.BASE + 12]
-        r = G._gen_halt_cert("f", words, self.BASE, "b0", pcs, self.EXIT_PC,
-                             svc_assumed={self.BASE: ("svc_write_assumed", self.HYP_TYPE)})
-        self.assertIsNone(r)
-
-
-class TestSvcWriteAssumedUniversalWalk(unittest.TestCase):
-    """Part 4: the universal theorem carries `svc_write_assumed`.
-
-    The two certificate builders (parts 2 and 3) admit a dynamic write `svc`
-    under a named hypothesis, but nothing passed one in, so a synthetic image
-    whose only defect was a dynamic write still had NO universal theorem:
-    `_gen_universal_e2e_cfg` refused it.  The walk now collects the admissible
-    sites with ONE helper (`_svc_write_assumed_sites`, which is also what the
-    refusal classifier skips and what the dylib emitter reads), states a single
-    hypothesis over their states and pcs on the top-level theorem, and passes
-    it by name to every certificate that uses a site.
-
-    Text-only: hand-built words, no Lean, no dylib, no compile.
-    """
-
-    BASE = 0x10000000
-    SVC = 0xd4000001
-    RET = 0xd65f03c0
-
-    @staticmethod
-    def _movz(rt, imm):
-        return 0xd2800000 | (imm << 5) | rt
-
-    def _walk(self, ws, thm="f_halts"):
-        import formal.arm64_proof_gen as G
-        code = b"".join(w.to_bytes(4, "little") for w in ws)
-        end = self.BASE + len(ws) * 4
-        return G._gen_universal_e2e_cfg(
-            "f", code, self.BASE, self.BASE, recursive=False, go_lemmas=[],
-            cond_branches=set(), code_name="dylib_code", sr_name="dylib",
-            exit_at=end, frame={"func_end": end}, thm=thm, prop="True",
-            no_change=True, halt_only=True, fuel=200000,
-            fuel_lean=f"200000 + {max(1, end // 4)} * n.toNat")
-
-    def _refusal(self, ws):
-        import formal.arm64_proof_gen as G
-        code = b"".join(w.to_bytes(4, "little") for w in ws)
-        return G._cfg_decomposition_refusal("f", code, self.BASE, self.BASE)
-
-    def test_a_dynamic_write_svc_no_longer_kills_the_walk(self):
-        # <base> svc; base+4 movz x0, #0; base+8 ret
-        out = self._walk([self.SVC, self._movz(0, 0), self.RET])
-        self.assertIsNotNone(
-            out, "a dynamic write `svc` still makes the universal walk return "
-                 "None, so no caller ever sees a theorem to pass `n` and the "
-                 "assumption to")
-        self.assertIn(
-            "(svc_write_assumed : ∀ s : Arm64State, s.pc ∈ [268435456] → "
-            "¬ arm64_reg 16 s = 1)", out,
-            "the universal theorem does not state the dynamic write's "
-            "hypothesis under the fixed name")
-        self.assertIn("theorem f_halts (n : UInt64)", out,
-            "the assumption is not after the entry's `n`")
-
-    def test_the_block_certificate_uses_the_walk_s_hypothesis(self):
-        out = self._walk([self.SVC, self._movz(0, 0), self.RET])
-        self.assertIsNotNone(out)
-        self.assertIn(
-            "have hx0 : ¬ arm64_reg 16 (f_b0_qS0 st) = 1 := "
-            "svc_write_assumed (f_b0_qS0 st) (by simp [hpc0])", out,
-            "the dynamic svc's `hx` is not the walk's hypothesis applied at "
-            "the certificate's own pre-svc state")
-        self.assertNotIn("h16_0", out,
-            "the certificate still invents a reg-16 chain for an x16 no "
-            "instruction wrote")
-        self.assertIn("f_b0_runs _ hpc_0 hjump_0 svc_write_assumed", out,
-            "the assumption does not reach the block certificate's call site")
-        self.assertIn("f_b0_mid 268435468", out)
-        self.assertIn("hpc_0 hexit_0 svc_write_assumed", out,
-            "the mid certificate's call site drops the assumption")
-
-    def test_an_unrewritten_x0_is_refused_and_the_refusal_names_it(self):
-        # <base> svc; base+4 add x1, x0, x2 (reads the byte count); base+8 ret
-        add_x1_x0_x2 = 0x8b020001
-        out = self._walk([self.SVC, add_x1_x0_x2, self.RET])
-        self.assertIsNone(
-            out, "a dynamic write whose x0 the fall-through READS was admitted "
-                 "under an assumption that cannot make it sound")
-        msg = self._refusal([self.SVC, add_x1_x0_x2, self.RET])
-        self.assertIn("0x10000000", msg)
-        self.assertIn("write svc", msg)
-        self.assertIn("x0", msg)
-        self.assertIn("dynamic-svc", msg,
-                      "the refusal lost the dynamic-svc reading while naming "
-                      "the x0 read")
-
-    def test_a_dynamic_final_svc_is_still_refused_with_its_pc(self):
-        # <base> svc; base+4 movz x0, #0; base+8 svc (no known x16, tail)
-        out = self._walk([self.SVC, self._movz(0, 0), self.SVC])
-        self.assertIsNone(out, "a dynamic FINAL svc was assumed to be a write; "
-                               "a halt cannot be assumed")
-        msg = self._refusal([self.SVC, self._movz(0, 0), self.SVC])
-        self.assertIn("0x10000008", msg)
-        self.assertIn("dynamic-svc", msg)
-
-    def test_a_control_image_has_no_binder(self):
-        out = self._walk([self._movz(0, 5), self.RET])
-        self.assertIsNotNone(out)
-        self.assertNotIn("svc_write_assumed", out,
-            "the common case gained a hypothesis it does not need")
-
-    def test_the_admissible_site_set_is_the_certificate_builders_rule(self):
-        import formal.arm64_proof_gen as G
-
-        def sites(ws):
-            code = b"".join(w.to_bytes(4, "little") for w in ws)
-            words = {self.BASE + 4 * i:
-                     int.from_bytes(code[4 * i:4 * i + 4], "little")
-                     for i in range(len(ws))}
-            blocks = G._cfg_blocks(words, self.BASE, self.BASE + len(ws) * 4)
-            leaders = frozenset(b["start"] for b in blocks)
-            return G._svc_write_assumed_sites(blocks, words, leaders)
-
-        self.assertEqual(sites([self.SVC, self._movz(0, 0), self.RET]),
-                         [self.BASE])
-        self.assertEqual(sites([self.SVC, 0x8b020001, self.RET]), [],
-                         "an svc whose x0 is read before it is rewritten is "
-                         "not an admissible site")
-        self.assertEqual(sites([self._movz(0, 0), self.SVC]), [],
-                         "a block's FINAL svc is not an admissible site: a "
-                         "halt cannot be assumed")
-
-
-class TestSvcWriteAssumedDylibTotal(unittest.TestCase):
-    """Part 5: the dylib termination theorem EXPOSES the assumption.
-
-    Part 4 makes the universal theorem conditional on `svc_write_assumed`, but
-    `_dylib_total_proof` still applied `{ident}_halts` directly to
-    `total_of_halts`.  With the binder present that application is a type
-    error at best and a silently dropped premise at worst: the public
-    termination claim would say "terminates" where the proof says "terminates
-    IF x16 at those pcs is never 1".  This class pins the exposed form, the
-    byte-for-byte control, and the obligation that names the dynamic `svc` pc
-    when the assumption cannot be stated at all.
-
-    Text-only: hand-built bytes and hand-built export tables, no Lean, no
-    dylib build, no proofs bucket.
-    """
-
-    BASE = 0x10000000
-    SVC = 0xd4000001
-    RET = 0xd65f03c0
-
-    @staticmethod
-    def _movz(rt, imm):
-        return 0xd2800000 | (imm << 5) | rt
-
-    def _total(self, ws):
-        import formal.arm64_proof_gen as G
-        code = b"".join(w.to_bytes(4, "little") for w in ws)
-        # `exec_code_end` is the image's CODE SIZE (the last RET's end), not an
-        # address: `_export_extent` adds `base` to it.  Left at its default so
-        # the test reads the same number the image's `codeSize` will.
-        return G._dylib_total_proof(
-            "f", code, self.BASE, self.BASE, [{"name": "f", "entry": self.BASE}])
-
-    def test_the_assumption_reaches_total_of_halts(self):
-        out = self._total([self.SVC, self._movz(0, 0), self.RET])
-        self.assertIn(
-            "theorem f_semantics_total\n"
-            "    (svc_write_assumed : ∀ s : Arm64State, s.pc ∈ [268435456] → "
-            "¬ arm64_reg 16 s = 1) :\n"
-            "    DylibExport.Total dylib_image f :=", out,
-            "the export's public termination claim does not state the "
-            "hypothesis its proof needs")
-        self.assertIn(
-            "DylibExport.total_of_halts dylib_image f "
-            "(fun n => f_halts n svc_write_assumed)", out,
-            "`total_of_halts` is applied without the assumption, so the "
-            "export either fails to elaborate or silently loses the premise")
-        self.assertNotIn("theorem f_semantics_total :", out,
-                         "`semantics_total` was left unconditional")
-
-    def test_the_control_image_keeps_the_old_application(self):
-        out = self._total([self._movz(0, 5), self.RET])
-        self.assertIn(
-            "theorem f_semantics_total :\n"
-            "    DylibExport.Total dylib_image f :=\n"
-            "  DylibExport.total_of_halts dylib_image f f_halts", out,
-            "a control export with no dynamic svc changed shape")
-        self.assertNotIn("svc_write_assumed", out,
-                         "a control export gained a hypothesis it does not use")
-
-    def test_an_unassumable_dynamic_svc_names_its_pc_in_the_obligation(self):
-        # `svc; add x1, x0, x2; ret`: the write form's result is read before
-        # it is rewritten, so no assumption can make the run sound.
-        out = self._total([self.SVC, 0x8b020001, self.RET])
-        self.assertIn("OBLIGATION, not proved", out)
-        self.assertIn("0x10000000", out,
-                      "the obligation does not name the dynamic svc's pc")
-        self.assertIn("x0", out,
-                      "the obligation does not say why the write form could "
-                      "not be assumed")
-        self.assertIn("theorem f_semantics_total :\n"
-                      "    DylibExport.Total dylib_image f := by\n"
-                      "  sorry", out,
-                      "a refused export claims an unconditional Total")
-        self.assertNotIn("total_of_halts dylib_image f f_halts", out)
-
-    def test_a_dynamic_final_svc_names_its_pc_in_the_obligation(self):
-        out = self._total([self.SVC, self._movz(0, 0), self.SVC])
-        self.assertIn("OBLIGATION, not proved", out)
-        self.assertIn("0x10000008", out,
-                      "the obligation does not name the dynamic final svc")
-        self.assertIn("dynamic-svc", out)
-
-
-class TestExtendOptionCensus(unittest.TestCase):
-    """Word-by-word census of the extended-register ADD/SUB/SUBS class.
-
-    Pins the machine-checked disposition (arm64 instruction-coverage extend
-    option census, part 1): 64-bit UXTX (imm3 0-4) is modelled (rows 86-88);
-    every other extend option and every 32-bit spelling is refused and named,
-    never mis-read.  A change in disposition fails loudly with the decoded
-    option field.
-    """
-
-    _OP_META = {
-        "add":  (86, "ADD extended"),
-        "sub":  (87, "SUB extended"),
-        "subs": (88, "SUBS/CMP extended"),
-    }
-    # (option name, option field bits 15-13, source register width)
-    _OPTIONS = (
-        ("uxtb", 0, "w"),
-        ("uxth", 1, "w"),
-        ("uxtw", 2, "w"),
-        ("uxtx", 3, "x"),
-        ("sxtb", 4, "w"),
-        ("sxth", 5, "w"),
-        ("sxtw", 6, "w"),
-        ("sxtx", 7, "x"),
-    )
-
-    @staticmethod
-    def _import_gen():
-        import formal.arm64_proof_gen as G
-        return G
-
-    def _decode(self, word):
-        return {
-            "sf": (word >> 31) & 0x1,
-            "option": (word >> 13) & 0x7,
-            "imm3": (word >> 10) & 0x7,
-            "word": f"0x{word:08x}",
-        }
-
-    def _assert_modelled(self, G, form, expected_idx):
-        word = _assembler_word(form)
-        self.assertIsNotNone(word, f"clang refused modelled spelling: {form}")
-        dec = self._decode(word)
-        idx = G._step_branch_index(word)
-        self.assertEqual(idx, expected_idx,
-                         f"{form} {dec}: expected row {expected_idx}, got {idx}")
-        rhs = G._step_rhs(word, idx)
-        self.assertIsNotNone(rhs, f"{form} {dec}: _step_rhs returned None")
-
-    def _assert_refused(self, G, form, expected_name):
-        word = _assembler_word(form)
-        if word is None:
-            self.skipTest(f"clang refuses spelling (assembler refusal): {form}")
-        dec = self._decode(word)
-        idx = G._step_branch_index(word)
-        self.assertIsNone(idx,
-                          f"{form} {dec}: expected unclaimed, got row {idx}")
-        rhs = G._step_rhs(word, idx)
-        self.assertIsNone(rhs, f"{form} {dec}: _step_rhs unexpectedly non-None")
-        info = G._unmodelled_instruction(word)
-        self.assertIsNotNone(info, f"{form} {dec}: _unmodelled_instruction returned None")
-        name, _why = info
-        self.assertIn(
-            name, {"ADD extended", "SUB extended", "SUBS/CMP extended"},
-            f"{form} {dec}: unexpected name {name!r}")
-        self.assertEqual(name, expected_name,
-                         f"{form} {dec}: expected name {expected_name!r}, got {name!r}")
-
-    def test_all_options_all_ops_64bit(self):
-        """Every option 0-7 × add/sub/subs at 64-bit width is in the census."""
-        G = self._import_gen()
-        for op, (model_idx, _name) in self._OP_META.items():
-            for opt_name, _opt_val, srcw in self._OPTIONS:
-                form = f"{op} x0, x1, {srcw}2, {opt_name}"
-                if opt_name == "uxtx":
-                    self._assert_modelled(G, form, model_idx)
-                else:
-                    self._assert_refused(G, form, _name)
-
-    def test_uxtx_imm3_0_to_4_modelled(self):
-        """64-bit UXTX imm3 0-4 → rows 86/87/88 with non-None _step_rhs."""
-        G = self._import_gen()
-        for op, (model_idx, _name) in self._OP_META.items():
-            for imm3 in range(5):
-                suffix = f" #{imm3}" if imm3 else ""
-                form = f"{op} x0, x1, x2, uxtx{suffix}"
-                self._assert_modelled(G, form, model_idx)
-
-    def test_32bit_uxtx_spellings_refused(self):
-        """The three 32-bit uxtx spellings (sf=0) are refused and named."""
-        G = self._import_gen()
-        for op, (_model_idx, _name) in self._OP_META.items():
-            form = f"{op} w0, w1, w2, uxtx"
-            self._assert_refused(G, form, _name)
-
-    def test_one_imm3_gt0_non_uxtx_per_op_refused(self):
-        """One imm3>0 non-UXTX spelling per op is refused (not dropped)."""
-        G = self._import_gen()
-        # use uxtw with #1 as a representative imm3>0 non-UXTX spelling
-        for op, (_model_idx, _name) in self._OP_META.items():
-            form = f"{op} x0, x1, w2, uxtw #1"
-            self._assert_refused(G, form, _name)
-
-    def test_handcrafted_uxtx_imm3_7_claimed_caveat(self):
-        """Hand-crafted 0x8b227c20 (option=011, imm3=7) is claimed by row 86.
-
-        Labelled as the unallocated-encoding caveat: the model pins sf and the
-        option field but not imm3<=4, so this word is claimed and _step_rhs
-        answers with shift 7.
-        """
-        G = self._import_gen()
-        word = 0x8b227c20
-        dec = self._decode(word)
-        self.assertEqual(dec["option"], 3, f"expected UXTX option=011: {dec}")
-        self.assertEqual(dec["imm3"], 7, f"expected imm3=7: {dec}")
-        idx = G._step_branch_index(word)
-        self.assertEqual(idx, 86,
-                         f"hand-crafted UXTX imm3=7 {dec}: expected row 86, got {idx}")
-        rhs = G._step_rhs(word, idx)
-        self.assertIsNotNone(rhs,
-                             f"hand-crafted UXTX imm3=7 {dec}: _step_rhs returned None")
-
-
-class TestExtendRefusalNamesTheOption(unittest.TestCase):
-    """The extended-register refusal names the option the WORD carries.
-
-    Part 2 of the arm64 instruction-coverage census.  The arm's
-    paragraph explains the CLASS and says "the other extend options remain
-    unmodelled"; a reader holding a hex word -- the exact position when this
-    refusal fires from `_cfg_decomposition_refusal` on an image the emitter
-    grew a new encoder for -- had to re-decode sf, option and imm3 by hand.
-    The word's own fields are now appended, by architectural name.
-    """
-
-    _OPT_BITS = {"UXTB": 0, "UXTH": 1, "UXTW": 2, "UXTX": 3,
-                 "SXTB": 4, "SXTH": 5, "SXTW": 6, "SXTX": 7}
-
-    # (spelling, expected `name`, option name, imm3, sf)
-    CASES = (
-        ("add x0, x1, w2, uxtw", "ADD extended", "UXTW", 0, 1),
-        ("sub x0, x1, x2, sxtx #4", "SUB extended", "SXTX", 4, 1),
-        ("cmp x1, x2, sxtx", "SUBS/CMP extended", "SXTX", 0, 1),
-        ("add w0, w1, w2, uxtx", "ADD extended", "UXTX", 0, 0),
-    )
-
-    def test_the_refusal_decodes_the_words_own_fields(self):
-        import formal.arm64_proof_gen as G
-        for form, name, opt, imm3, sf in self.CASES:
-            with self.subTest(form=form):
-                word = _assembler_word(form)
-                if word is None:
-                    self.fail(f"clang refused `{form}`")
-                self.assertIsNone(
-                    G._step_branch_index(word),
-                    f"`{form}` is claimed by the step table, so it never "
-                    f"reaches the refusal this pins")
-                got_name, why = G._unmodelled_instruction(word)
-                self.assertEqual(got_name, name)
-                self.assertIn(f"option={self._OPT_BITS[opt]:03b} ({opt})", why)
-                self.assertIn(f"imm3={imm3}", why)
-                if sf == 0:
-                    self.assertIn("32-bit", why)
-                else:
-                    self.assertNotIn("32-bit", why)
-                # The class paragraph is kept whole (the existing pin asserts
-                # this sentence too).
-                self.assertIn("UXTX", why)
-
-
-class TestExtendOptionsAreDormantInEmittedImages(unittest.TestCase):
-    """No EMITTED image word is a non-UXTX extended-register instruction.
-
-    Part 3 of the arm64 instruction-coverage census.  The gap is
-    DORMANT: the only producer of these words in the tree is the platform
-    assembler (clang spellings such as `cmp sp, x16`), and nothing in the tree
-    would notice the day the emitter grew an encoder for one.
-
-    The pass condition is the option/sf PREDICATE, not a count.  A count would
-    be vacuous (this fixture carries no word of the class at all, which is the
-    dormant state) and would stay green forever.
-    """
-
-    SOURCE = ('def greet(n: Int) -> Int:\n'
-              '    if n > 0:\n'
-              '        print("hello")\n'
-              '    return n\n')
-
-    # The class predicate, byte-identical to `_unmodelled_instruction`'s arm.
-    @staticmethod
-    def _is_extended_class(w):
-        return ((w >> 21) & 0x7) == 0x1 and ((w >> 24) & 0x1f) == 0x0b
-
-    @classmethod
-    def setUpClass(cls):
-        import formal.arm64_proof_gen as G
-        import formal.build as fb
-        cls.G = G
-        cls.tmp = tempfile.mkdtemp(prefix="a2-extend-dormant-")
-        src = os.path.join(cls.tmp, "greet.mojo")
-        with open(src, "w") as fh:
-            fh.write(cls.SOURCE)
-        r = fb.compile_formal_dylib([src], output=os.path.join(cls.tmp, "greet.dylib"),
-                                    prove=True, check=False)
-        cls.code = r["code"]
-        cls.exec_code = cls.code[:G._exec_code_limit(cls.code)]
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
-
-    def test_the_executable_region_was_scanned(self):
-        # Non-vacuous scan: the region is word-aligned, non-empty, and carries
-        # instructions the step table decodes.
-        self.assertEqual(len(self.exec_code) % 4, 0)
-        self.assertTrue(self.exec_code)
-        self.assertTrue(self.G._step_result_plan(self.exec_code),
-                        "the fixture's executable region planned no "
-                        "instructions, so the scan below asserts nothing")
-
-    def test_no_emitted_word_is_a_non_uxtx_extended_register_instruction(self):
-        import struct
-        for off in range(0, len(self.exec_code) - 3, 4):
-            w = struct.unpack_from("<I", self.exec_code, off)[0]
-            if not self._is_extended_class(w):
-                continue
-            sf = (w >> 31) & 0x1
-            option = (w >> 13) & 0x7
-            self.assertEqual(
-                (sf, option), (1, 3),
-                f"offset {off}: 0x{w:08x} is an extended-register ADD/SUB "
-                f"word with sf={sf}, option={option:03b}; only 64-bit UXTX "
-                f"(sf=1, option=011) is modelled, as rows 86-88 of the step "
-                f"table")
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)

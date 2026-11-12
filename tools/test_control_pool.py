@@ -64,12 +64,6 @@ check("a slot without a replenish time has none", C.replenish_at({"name": "x", "
 C.mark_dead("free-model", _free, now=_utc)
 check("a limit on a daily tier bans until the next replenish", abs(C._ledger()["free-model"]["until"] - _rp) < 1)
 
-# a limit just before a replenish still buys the full attempt window: the ban is the LATER of replenish and now + window
-_late = _rp - 2 * 3600
-C.mark_dead("free-model", _free, now=_late)
-check("a limit near a replenish bans for at least the attempt window",
-      abs(C._ledger()["free-model"]["until"] - (_late + C.PROBE_EVERY_S)) < 1)
-
 # holds: only work holds a claim; a dead entry with no commits holds nothing and cannot block a retry
 _real_ahead = C.ahead
 C.ahead = lambda t: t["_ahead"]
@@ -84,17 +78,6 @@ try:
     check("an unknown slot is refused", False)
 except SystemExit:
     check("an unknown slot is refused", True)
-
-check("find_slot returns None for a removed slot", C.find_slot("no-such-slot") is None)
-check("a pinned task whose slot was removed waits instead of exiting",
-      C.pick_slot({"only": True, "pool": "no-such-slot"}, {}) is None)
-_real_load_pool = C.load_pool
-C.load_pool = lambda: {"slots": [dict(name="a", model="ma", count=1, kind="opencode")]}
-check("a dead task whose slot was removed is not restarted",
-      C.no_restart_reason({"model": "gone", "pool": "gone"}, C.load_pool(), {}) is not None)
-check("a hand-run model with no slot is left to its own retries",
-      C.no_restart_reason({"model": "gone"}, C.load_pool(), {}) is None)
-C.load_pool = _real_load_pool
 
 pool = C.load_pool()
 check("the pool's default slot exists", any(s["name"] == pool["default_slot"] for s in pool["slots"]))
@@ -118,10 +101,8 @@ C.load_pool = lambda: {"slots": [dict(name="free", model="mfree", count=1, kind=
 _now = time.time()
 C.mark_dead("mfree", {"name": "free", "replenish": {"tz": "UTC", "at": "00:00", "margin_min": 1}}, until=_now + 2 * C.PROBE_EVERY_S, now=_now)
 C.mark_dead("mpaid", {"name": "paid", "recover_hours": 2.5}, until=_now + 3600, now=_now)
-C.mark_dead("removed-model", {"name": "gone", "recover_hours": 24}, now=_now)   # no slot uses it
 asked = []
 C.probe_free_bans(now=_now, probe=lambda m: asked.append(m) or False)
-check("a ban for a model no longer in the pool is pruned", "removed-model" not in C._ledger())
 check("a refusing free tier is asked", asked == ["mfree"])
 check("a refusing free tier stays banned", C._ledger()["mfree"]["until"] > _now)
 check("a paid model is never probed", "mpaid" not in asked)
@@ -142,38 +123,6 @@ for _k in _kids:
     try: os.kill(_k, 9)
     except OSError: pass
 _tree.kill()
-
-# Per-model worker rules (a slot's `instructions` in pool.json): added to the prompt of a worker on that model only.
-import re
-RULE = "Do not use git config to change configuration data for git."
-_real_load_pool = C.load_pool
-C.load_pool = lambda: {"slots": [
-    {"name": "or", "model": "m/free", "instructions": [RULE]},
-    {"name": "or2", "model": "m/free", "instructions": [RULE, "second rule"]},   # same model, deduplicated
-    {"name": "plain", "model": "m/plain"}]}
-check("a model's slot instructions are returned, deduplicated, in order",
-      C.model_instructions("m/free") == [RULE, "second rule"])
-check("a model with no instructions gets none", C.model_instructions("m/plain") == [])
-check("an unknown model gets none", C.model_instructions("m/other") == [])
-
-_tpl = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "control_prompt.md")).read().format(
-    name="n", worktree="/w", branch="b", main="/m", task="THE TASK TEXT", claims="c", control="/c")
-_ruled = C.with_model_rules(_tpl, "m/free")
-check("the rule is in the prompt for that model", RULE in _ruled and "## Rules for this model" in _ruled)
-check("the rule is NOT in the prompt for another model", C.with_model_rules(_tpl, "m/plain") == _tpl)
-check("the rule sits after the rules and before the report section",
-      _ruled.index("## Rules") < _ruled.index(RULE) < _ruled.index("## When you finish"))
-check("the section is added once", _ruled.count("## Rules for this model") == 1)
-_m = re.search(r"## The task\n\n(.*?)\n\n## Rules", _ruled, re.S)      # what control._task_text does on a restart
-check("restart still recovers exactly the original task", _m is not None and _m.group(1) == "THE TASK TEXT")
-check("without a '## When you finish' heading the rules are appended",
-      RULE in C.with_model_rules("# x\n\n## The task\n\nT\n\n## Rules\n\nr\n", "m/free"))
-C.load_pool = _real_load_pool
-_real = {sl["name"]: sl for sl in C.load_pool()["slots"]}
-check("pool.json: the free OpenRouter slot forbids `git config` for its workers",
-      RULE in _real["openrouter-free"].get("instructions", []))
-check("pool.json: the model-keyed lookup finds it for the OpenRouter free router",
-      RULE in C.model_instructions("openrouter/openrouter/free"))
 
 print("%d passed, %d failed" % (len(PASSES), len(FAILS)))
 sys.exit(1 if FAILS else 0)

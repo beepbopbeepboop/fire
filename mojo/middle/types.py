@@ -28,8 +28,6 @@ import ast_rewriter
 import mlir
 import regex_compile
 from generated_dispatch import _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT, _BIN_OPS as _GD_BIN_OPS, _CMP_OPS as _GD_CMP_OPS, _STMT_DISPATCH, _EXPR_DISPATCH
-import mojo.middle.simd_width as _simd_width
-import mojo.middle.float8_dtype as _float8_dtype
 
 def _debug_note(where: str, detail: object='') -> None:
     """Report a deliberately-swallowed error on stdout when MOJO_DEBUG is set.
@@ -1302,99 +1300,6 @@ def _body_builds_struct_tuple(body) -> bool:
     return False
 
 
-# Dtype spellings for float SIMD annotations -> scalar C type. The one table
-# for this mapping: `_mojo_type` below, `emit_calls._float_dtype_arg_ctype`
-# and the `Scalar[X]` / `SIMD[X, 1]` arm of `infra_infer._resolve_type` (reached
-# as `GimpleGen._resolve_type`) all read it, so there is no second table.
-_SIMD_FLOAT_DTYPE_CTYPE = {
-    'DType.float32': 'float',
-    'Float32': 'float',
-    'float32': 'float',
-    'DType.float64': 'double',
-    'Float64': 'double',
-    'float64': 'double',
-}
-
-
-def _dtype_token_ctype(tok):
-    """Scalar C type for a dtype TOKEN, or None when the token names no dtype
-    this resolver knows.
-
-    One resolver for every spelling a dtype can reach these lookups in: a
-    `('DType', 'float32')` TUPLE, the REPR of that tuple as a string
-    (`gen._comptime_vals` stores `comptime dt = DType.float32` as
-    `"('DType', 'float32')"`), a `DType.float32` / `dtype.float32` / leading-dot
-    spelling, or a bare `float32` / `Float32` / `f32` / `f64`.  Reads the one
-    table `_SIMD_FLOAT_DTYPE_CTYPE`, so the annotation resolver
-    (`infra_infer._resolve_type`) and the constructor lowerer
-    (`emit_calls`' `SIMD`/`Scalar` arm) cannot drift apart.
-
-    A float8 dtype the compiler has no rule for (`mojo.middle.float8_dtype`'s
-    family) answers that module's private C type, not None: the annotation
-    must not be erased to an integer, because that is what let a conversion
-    out of the dtype and an operation with it compute silently. The refusals
-    themselves are in `_safe_coerce_emit`/`_lower_binary_tail`.
-    """
-    if tok is None:
-        return None
-    if isinstance(tok, (list, tuple)) and len(tok) == 2:
-        if tok[0] in ('.', 'DType', 'dtype'):
-            tok = tok[1]
-        else:
-            return None
-    s = str(tok).strip()
-    if not s:
-        return None
-    _f8 = _float8_dtype.float8_spelling(s)
-    if _f8 is not None:
-        return _float8_dtype.float8_ctype(_f8)
-    if s.startswith('DType.'):
-        s = s[len('DType.'):]
-    elif s.startswith('dtype.'):
-        s = s[len('dtype.'):]
-    if s.startswith('.'):
-        s = s[1:]
-    m = re.match(r"^\(\s*'([^']*)'\s*,\s*'([^']*)'\s*\)$", s)
-    if m and m.group(1) in ('.', 'DType', 'dtype'):
-        s = m.group(2)
-    sl = s.lower()
-    if sl == 'f32':
-        sl = 'float32'
-    elif sl == 'f64':
-        sl = 'float64'
-    return _SIMD_FLOAT_DTYPE_CTYPE.get(sl) or _SIMD_INT_DTYPE_CTYPE.get(sl)
-
-
-# Integer dtypes, one table with the float one. A `Scalar[DType.uint32]` is a 32-bit
-# unsigned word, not the 64-bit word every unknown `Scalar` erased to.
-_SIMD_INT_DTYPE_CTYPE = {
-    'int8': 'int8_t', 'uint8': 'uint8_t',
-    'int16': 'int16_t', 'uint16': 'uint16_t',
-    'int32': 'int32_t', 'uint32': 'uint32_t',
-    'int64': 'int64_t', 'uint64': 'uint64_t',
-}
-
-
-def _simd_float_dtype_ctype(inner: str) -> str | None:
-    """For a `SIMD[<dtype>, N]` bracket, return the scalar C type of
-    `<dtype>` when it is a float dtype spelling, else None (integer or
-    unresolvable -> caller keeps the conservative `int64_t` fallback)."""
-    parts = _split_top_level_commas(inner)
-    if not parts:
-        return None
-    dt = _SIMD_FLOAT_DTYPE_CTYPE.get(parts[0].strip())
-    if dt is not None:
-        return dt
-    # An INTEGER dtype is a scalar only at width 1 (`Scalar[X]`, `SIMD[X, 1]`). A wider
-    # integer SIMD is a vector and keeps the word fallback; the float arm above is
-    # unchanged (it has always erased any width to its scalar).
-    if len(parts) == 1 or parts[1].strip() == '1':
-        dt = _dtype_token_ctype(parts[0].strip())
-        if dt is not None and dt in _SIMD_INT_DTYPE_CTYPE.values():
-            return dt
-    return _float8_dtype.float8_ctype(parts[0].strip())
-
-
 def _mojo_type(ann: str | type | None) -> str:
     if not ann:
         return 'int64_t'
@@ -1425,23 +1330,23 @@ def _mojo_type(ann: str | type | None) -> str:
     if '[' in ann:
         base, rest = ann.split('[', 1)
         inner = rest.rstrip(']').strip()
-        if base == 'Scalar':
-            # `Scalar[X]` is a scalar of dtype X: the same C type the annotation resolver
-            # gives it, so a pointer to it and a parameter of it agree.
-            _sdt = _dtype_token_ctype(_split_top_level_commas(inner)[0].strip())
-            if _sdt is not None:
-                return _sdt
         if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
             elem = _mojo_type(_split_top_level_commas(inner)[0].strip())
             return f'{elem} *'
-        if base in ('List', 'list', 'InlineArray', 'Array', 'FixedSizeArray'):
-            # `List[T]`/`list[T]`, `InlineArray[T, N]`, `Array[T, N]` and
-            # `FixedSizeArray[T, N]` — Mojo's fixed-size arrays — are LISTs
-            # at this representation level: one `MojoList *` with an element
-            # type, no separate fixed-size struct. `FixedSizeArray` used to be
-            # missing here, so its annotation erased to `int64_t` and a
-            # parameter declared `int64_t a` (then cast to `MojoList *` at
-            # the call).
+        if base in ('List', 'list', 'InlineArray', 'Array'):
+            # `Array[T, N]` — Mojo's fixed-size array — is a LIST at this
+            # representation level, exactly like `List[T]`: one `MojoList *`
+            # with an element type, no separate fixed-size struct. It was
+            # missing here, so the annotation erased to `int64_t` and every
+            # use lost its static container type. The visible damage was a
+            # `for x in xs:` over an `Array[Int, N]`, where an untyped
+            # iterable emits the runtime dict-or-list dispatch and the DICT
+            # arm declares the loop variable `char *` (it is a key); the
+            # later `var val = <a double>` in the same function then assigned
+            # a double to that `char *` — "cannot convert to a pointer type"
+            # in the stdlib's test_math.mojo. Also in
+            # `_IMPORTED_STRUCT_SKIP_BASENAMES`, i.e. already agreed not to
+            # be an ordinary imported struct.
             return 'MojoList *'
         if base in ('Dict', 'dict'):
             return 'MojoDict *'
@@ -1477,109 +1382,13 @@ def _mojo_type(ann: str | type | None) -> str:
             return 'Span *'
         if base == 'Optional':
             return _mojo_type(_split_top_level_commas(inner)[0].strip())
-        if base == 'SIMD':
-            # `SIMD[<float dtype>, N]` (any N) is scalar-erased to the C type
-            # of the dtype. Integer and unresolvable dtypes fall through to
-            # the `int64_t` box, exactly as before. `Scalar[...]` resolves in
-            # `infra_infer._resolve_type`, not here.
-            #
-            # The lane count is validated here as well as at the constructor
-            # (`emit_calls._lower_call`): an ANNOTATION is the other spelling
-            # that builds a `SIMD[dtype, width]` type, so `var x:
-            # SIMD[DType.float32, 3]` must be rejected even when no
-            # constructor call is lowered. A symbolic width is not decided.
-            _parts = _split_top_level_commas(inner)
-            if len(_parts) >= 2:
-                _w = _simd_width.concrete_width(_parts[1])
-                if _w is not None:
-                    _simd_width.reject_invalid_width(_w, _parts[0])
-            dt = _simd_float_dtype_ctype(inner)
-            if dt is not None:
-                return dt
-        if base in ('Literal', 'typing.Literal'):
-            # `Literal["a", "b"]` (typing.Literal over string literals):
-            # the value IS one of the spelled-out constants, so the slot
-            # holds a str exactly as a plain `str` annotation would.
-            # Measured (CPython Tools/cases_generator/parsing.py, `kind:
-            # Literal["inst", "op"]` on the InstHeader/InstDef dataclasses):
-            # the annotation fell through to the `ann = base` tail and
-            # `_TYPE_MAP`'s int64_t default, so the struct declared
-            # `int64_t kind` while the constructor stored the token-text
-            # pointer and every read compared the boxed word against a
-            # string. All string-literal elements -> the str type; any
-            # other element keeps the old int64_t fallback (early return
-            # either way: `Literal` is in no other branch's table).
-            _lit_elems = []
-            for _le in _split_top_level_commas(inner):
-                _le = _le.strip()
-                if _le:
-                    _lit_elems.append(_le)
-            if _lit_elems:
-                _all_str = True
-                for _le in _lit_elems:
-                    if (len(_le) < 2 or _le[0] != _le[-1]
-                            or (_le[0] != '"' and _le[0] != "'")):
-                        _all_str = False
-                        break
-                if _all_str:
-                    return 'char *'
-            return 'int64_t'
         ann = base
     if isinstance(ann, str) and len(ann) > 1 and (ann[0] == '*') and (ann[1] != '*'):
         inner = ann[1:].strip()
         if inner in _TYPE_MAP:
             return f'{_TYPE_MAP[inner]} *'
-    # A float8 dtype the compiler has no conversion/arithmetic rule for is a
-    # real scalar type for the resolver (see mojo.middle.float8_dtype); it
-    # lowers to that module's private C type rather than the int64_t default,
-    # so the annotation is not silently erased to an integer.
-    _f8 = _float8_dtype.float8_ctype(ann)
-    if _f8 is not None:
-        return _f8
     t = _TYPE_MAP.get(ann)
     return t if t is not None else 'int64_t'
-
-# The string-wrapper annotations whose BARE spelling is a real C string
-# parameter. Bracketed forms (`StringSlice[_]`, `Span[...]`) are NOT in this
-# set: those are the fat-pointer `Span *` (see _mojo_type's Span branch).
-_BARE_STRING_PARAM_ANNS = frozenset(
-    {'StaticString', 'StringLiteral', 'StringRef', 'StringSlice'})
-
-
-def is_bare_string_param_annotation(ann) -> bool:
-    """True for the BARE compile-time string annotations (`StringSlice`, not
-    `StringSlice[_]`), whose parameter C type is a real `char *` — see
-    `param_annotation_ctype`."""
-    return isinstance(ann, str) and ann in _BARE_STRING_PARAM_ANNS
-
-
-def param_annotation_ctype(ann) -> str:
-    """The C type a PARAMETER annotated `ann` has, from the annotation alone.
-
-    This is the stateless half of the parameter rule `funcs_shared.
-    _param_ctype` applies, stated ONCE so the export scanners (module_loader's
-    text scan and reflect.py's signature emitter) cannot drift from it:
-    a bare compile-time string type is a NUL-terminated `char *` (the general
-    resolver boxes it as an opaque int64_t handle), everything else is
-    `_mojo_type`'s answer.
-
-    It exists because those two scanners used to box `StringSlice` (bare AND
-    bracketed) to `int64_t *` so an extern could name it without a `Span`
-    typedef. Every generated translation unit now carries
-    `typedef struct Span Span;` in its prelude, and the box was silently a
-    DIFFERENT C type from the one the defining module emitted — so the
-    importer hashed a different `overload_suffix_for` and called a
-    `_std_*_<hex>` symbol that does not exist (the stdlib-dylib
-    undefined-reference red). Returns a parameter type only: a `StringSlice`
-    RETURN is still `_mojo_type`'s boxed int64_t, exactly as the codegen's
-    return-type path resolves it.
-
-    Callers that have a GimpleGen must still use `_param_ctype` — it also
-    applies inferred types, literal defaults and parameter convs; this is the
-    annotation rule for the scanners, which have no gen."""
-    if isinstance(ann, str) and ann in _BARE_STRING_PARAM_ANNS:
-        return 'char *'
-    return _mojo_type(ann)
 
 def _result_type(t1: str, t2: str) -> str:
     return TypeLattice.join(t1, t2)
@@ -1930,7 +1739,7 @@ def presence_set_emit(gen, sdef, member, obj_c, op) -> None:
     cur = gen._new_temp('uint64_t')
     gen._emit(f"  {cur} = {obj_c}{op}{PRESENCE_WORD}[{bit[0]}];")
     nxt = gen._new_temp('uint64_t')
-    gen._binop_into(nxt, f"{cur}", '|', f"{1 << bit[1]}ULL")
+    gen._emit(f"  {nxt} = {cur} | {1 << bit[1]}ULL;")
     gen._emit(f"  {obj_c}{op}{PRESENCE_WORD}[{bit[0]}] = {nxt};")
 
 
@@ -1947,13 +1756,13 @@ def presence_check_emit(gen, sdef, member, obj_c, op, class_name) -> None:
     cur = gen._new_temp('uint64_t')
     gen._emit(f"  {cur} = {obj_c}{op}{PRESENCE_WORD}[{bit[0]}];")
     got = gen._new_temp('uint64_t')
-    gen._binop_into(got, f"{cur}", '&', f"{1 << bit[1]}ULL")
+    gen._emit(f"  {got} = {cur} & {1 << bit[1]}ULL;")
     msg = f"'{class_name}' object has no attribute '{member}'"
     # GIMPLE has no `if (c) call();` statement form, so the raise sits in its
     # own basic block (the same goto shape `_lower_IfExpr` uses).
     bb_raise = gen._new_bb()
     bb_ok = gen._new_bb()
-    gen._cond_goto(f"{got} == 0ULL", bb_raise, bb_ok)
+    gen._emit(f"  if ({got} == 0ULL) goto {bb_raise}; else goto {bb_ok};")
     gen._emit_label(bb_raise)
     gen._emit_call('void', '', 'mojo_raise_attribute_error',
                    [('char *', gen._intern_string(msg))])
@@ -2866,55 +2675,6 @@ def callable_ctype(params, ret='int64_t', ret_ctype=None, param_ctypes=None):
     return f'std::function<{_c_type_to_cpp(_as_str(ret))}({ps})>'
 
 
-def c_client_callable_ctype(ct):
-    """Map a C++-only callable value type to the C runtime word type.
-
-    A callable is boxed as an `int64_t` word in the C runtime
-    (`mojo_dyn_call((int64_t)(intptr_t)(callee), ...)`); `std::function<...>`
-    is only expressible in cpp coroutine units, where the callable is
-    actually invoked through C++ syntax. Imported-function signatures and
-    arg temporaries emitted into a C translation unit (the link-mode client,
-    extern prototypes) must therefore spell the slot as `int64_t`. Idempotent
-    and safe for any non-callable ctype."""
-    if isinstance(ct, str) and ct.startswith('std::function<'):
-        return 'int64_t'
-    return ct
-
-
-def c_client_sanitize_signature_text(sig: str) -> str:
-    """Replace `std::function<...>` parameter/return types in a C signature
-    string with the runtime's boxed word type (`int64_t`).
-
-    Used at the C-emission boundary for extern/prototype text that may have
-    been derived from a cpp-typed callable slot. A simple non-nested scan is
-    sufficient for the `std::function<R(P...)>` shapes this compiler emits.
-    """
-    if not isinstance(sig, str) or 'std::function<' not in sig:
-        return sig
-    out = []
-    i = 0
-    needle = 'std::function<'
-    n = len(sig)
-    while i < n:
-        j = sig.find(needle, i)
-        if j < 0:
-            out.append(sig[i:])
-            break
-        out.append(sig[i:j])
-        # consume balanced <...> of std::function (no nested templates in our shapes)
-        k = j + len(needle)
-        depth = 1
-        while k < n and depth > 0:
-            if sig[k] == '<':
-                depth += 1
-            elif sig[k] == '>':
-                depth -= 1
-            k += 1
-        out.append('int64_t')
-        i = k
-    return ''.join(out)
-
-
 _CPP_CALLABLE_CTYPE = callable_ctype([], 'int64_t')
 _CPP_CALLABLE_CTYPE_1ARG = callable_ctype(['int64_t'], 'int64_t')
 # The `*args` / `**kwargs` family. C++ cannot subscript a native variadic
@@ -2941,21 +2701,9 @@ _FOREIGN_CALLABLES = {
     'csv.reader': _CPP_CALLABLE_CTYPE,
     'make_reader': _CPP_CALLABLE_CTYPE,
     '_get_reader_list': _CPP_CALLABLE_CTYPE,
-    'os.walk': _CPP_CALLABLE_CTYPE,
-    'glob.glob': _CPP_CALLABLE_CTYPE,
-    'glob.iglob': _CPP_CALLABLE_CTYPE,
-    # Builtin open: modeled as a file-handle-producing callable for
-    # callable-valued parameters and context-manager lowering in compiled
-    # generator bodies (the tables.py `read_table` `with open(...)` fix).
-    'open': _CPP_CALLABLE_CTYPE,
 }
 _FOREIGN_CALLABLE_ITER_ELEM = {
     'csv.reader': 'MojoList *',
-    # os.walk / glob.* yield elements as runtime words/containers; generic
-    # iteration over the result is correct without a specific scalar element ctype.
-    'os.walk': 'int64_t',
-    'glob.glob': 'int64_t',
-    'glob.iglob': 'int64_t',
 }
 
 

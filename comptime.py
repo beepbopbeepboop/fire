@@ -27,22 +27,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME = os.path.join(HERE, 'runtime')
 _OBJ_FLAGS = ('-fgimple', '-fPIC', f'-I{RUNTIME}')
 
-def _ctypes_table() -> dict:
-    """C type → ctypes, for marshaling comptime args/results across the dlopen
-    call. A FUNCTION, not a module-level dict: this module is in the self-host
-    closure, where `ctypes` is not a real Python module, and building the table at
-    import raised `AttributeError: c_int` before the compiled compiler ran a
-    single statement. Only the dlopen path (never taken by the compiled compiler)
-    needs it."""
-    return {
-        'int': ctypes.c_int, 'int8_t': ctypes.c_int8, 'int16_t': ctypes.c_int16,
-        'int32_t': ctypes.c_int32, 'int64_t': ctypes.c_int64,
-        'uint8_t': ctypes.c_uint8, 'uint16_t': ctypes.c_uint16,
-        'uint32_t': ctypes.c_uint32, 'uint64_t': ctypes.c_uint64,
-        'unsigned int': ctypes.c_uint, '_Bool': ctypes.c_bool,
-        'float': ctypes.c_float, 'double': ctypes.c_double,
-        'char *': ctypes.c_char_p, 'void': None,
-    }
+# C type → ctypes, for marshaling comptime args/results across the dlopen call.
+_CTYPES = {
+    'int': ctypes.c_int, 'int8_t': ctypes.c_int8, 'int16_t': ctypes.c_int16,
+    'int32_t': ctypes.c_int32, 'int64_t': ctypes.c_int64,
+    'uint8_t': ctypes.c_uint8, 'uint16_t': ctypes.c_uint16,
+    'uint32_t': ctypes.c_uint32, 'uint64_t': ctypes.c_uint64,
+    'unsigned int': ctypes.c_uint, '_Bool': ctypes.c_bool,
+    'float': ctypes.c_float, 'double': ctypes.c_double,
+    'char *': ctypes.c_char_p, 'void': None,
+}
 
 
 def _comptime_sig_ret(src: str, fn_name: str) -> str:
@@ -103,7 +97,7 @@ def evaluate(src: str, fn_name: str, args, gcc: str = None):
     # rather than KeyError-crashing on a container/pointer param (review finding #6).
     argtypes = []
     for p in params:
-        ct = _ctypes_table().get(p)
+        ct = _CTYPES.get(p)
         if ct is None:
             raise ValueError(f"comptime: unmarshalable parameter type {p!r} "
                              f"for {fn_name!r}; not a compile-time-callable signature")
@@ -112,5 +106,5 @@ def evaluate(src: str, fn_name: str, args, gcc: str = None):
     lib = ctypes.CDLL(dylib)
     fn = getattr(lib, fn_name)
     fn.argtypes = argtypes
-    fn.restype = _ctypes_table().get(ret, ctypes.c_int64)
+    fn.restype = _CTYPES.get(ret, ctypes.c_int64)
     return fn(*args)

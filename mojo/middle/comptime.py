@@ -35,27 +35,12 @@ The rule the two backends share, stated once:
 only from comptime contexts, so an ordinary read of a `comptime` name fell
 through to the unknown-identifier placeholder and silently emitted `0`. Both
 backends resolve the name in their generic identifier path for that reason.
-
-4. `Alias[args]` over a GENERIC `comptime Alias[params]: T = <rhs>` binds
-   `params` to `args` and folds `<rhs>` at the APPLICATION (see
-   `_eval_alias_application`). Such an alias has no value of its own — its
-   RHS names its parameters — so recording only a folded value left it an
-   undeclared name, and a `comptime if` over it took rule 2's runtime branch
-   on that name's zero placeholder (a NULL boxed-list read for
-   `std.traits.IsTriviallyDeinitable[T]`). The declaration is kept in the
-   binding table (a `ComptimeVarStmt` with `comptime_params`) by both the
-   importing walk and the module prefold.
 """
 
 
 import sys
-import platform
 
 import fire_compiler as _fc
-from mojo.middle.builtin_types import (
-    TRIVIAL_REGISTER_PASSABLE_TRAITS,
-    TRIVIAL_REGISTER_PASSABLE_TYPES,
-)
 
 # The AST node classes are imported by name (the way every other module in
 # mojo/middle/ does it) rather than off a namespace, so `isinstance` checks
@@ -77,42 +62,11 @@ DottedLiteral = getattr(_fc, 'DottedLiteral', None)
 SubscriptExpr = getattr(_fc, 'SubscriptExpr', None)
 SliceExpr = getattr(_fc, 'SliceExpr', None)
 Comprehension = getattr(_fc, 'Comprehension', None)
-ComptimeVarStmt = _fc.ComptimeVarStmt
-# Static ComptimeVarStmt view of a boxed handle, for the same reason
-# fire_compiler._as_comptimevar_node exists: a field read straight off a
-# boxed value lowers to runtime dispatch, which does not reliably carry this
-# struct (it turned `s.target` into the pointer's decimal address elsewhere).
-_as_comptimevar_node = _fc._as_comptimevar_node
 
 # Most elements a folded list comprehension may produce. Past this the value is
 # not folded (None), so the comptime-for it feeds falls back to the runtime
 # loop, which is the right answer for a comprehension that large anyway.
 COMPREHENSION_FOLD_CAP = 4096
-
-# Marker key in the binding table that an in-progress generic-alias expansion
-# inserts, so a self-referential alias body cannot re-enter forever. A NUL
-# prefix cannot collide with a source identifier or any other binding key.
-_ALIAS_EXPANDING_PREFIX = '\x00comptime-alias:'
-
-
-def _is_dtype_value(v) -> bool:
-    """A value that is a DType: a bound `DType.x` / `dtype.x` spelling, or the
-    `('DType', x)` marker. A bare `('.', x)` is an ENUM variant reference in
-    general and only a DType when the other operand is one."""
-    if isinstance(v, str):
-        return v.startswith('DType.') or v.startswith('dtype.')
-    return isinstance(v, tuple) and len(v) == 2 and v[0] in ('DType', 'dtype')
-
-
-def _dtype_operand_name(v):
-    """The lowercase DType name a comparison operand denotes, or None. Accepts
-    the bound DType spellings and the dot-relative `('.', x)` marker, so
-    `dtype == .float32` and `dtype == DType.float32` decide the same way."""
-    if _is_dtype_value(v):
-        return _dtype_name_from_value(v)
-    if isinstance(v, tuple) and len(v) == 2 and v[0] == '.' and isinstance(v[1], str):
-        return v[1].lower()
-    return None
 
 
 def compare_op(op: str, left, right):
@@ -128,23 +82,6 @@ def compare_op(op: str, left, right):
     closure-lowering doesn't support several small same-scope lambdas bound
     into one dict literal). Returns None for an unrecognized op, distinct
     from a real False."""
-    # DType operands compare by NAME. A bound `dtype` is `DType.float32` (or
-    # the `('DType', x)` marker) while a dot-relative `.float32` is the
-    # `('.', x)` marker; plain equality of the two spellings is always False,
-    # which folded `dtype == .float32` to a false branch. Only when both sides
-    # resolve to a dtype this evaluator KNOWS is the answer decided; an
-    # unknown spelling keeps the ordinary fold below rather than becoming a
-    # false one.
-    if op in ('==', '!=') and (_is_dtype_value(left) or _is_dtype_value(right)):
-        _ln, _rn = _dtype_operand_name(left), _dtype_operand_name(right)
-        if _ln in _KNOWN_DTYPE_NAMES and _rn in _KNOWN_DTYPE_NAMES:
-            return (_ln == _rn) if op == '==' else (_ln != _rn)
-    if op in ('in', 'not in') and _is_dtype_value(left) and isinstance(right, (tuple, list)):
-        _ln = _dtype_operand_name(left)
-        _names = [_dtype_operand_name(x) for x in right]
-        if (_ln in _KNOWN_DTYPE_NAMES
-                and all(_n in _KNOWN_DTYPE_NAMES for _n in _names)):
-            return (_ln in _names) if op == 'in' else (_ln not in _names)
     if op == '==':  return left == right
     if op == '!=':  return left != right
     if op == '<':   return left < right
@@ -276,8 +213,7 @@ _DTYPE_INTEGRAL = {
     'index',
 }
 _DTYPE_FLOATING = {
-    'float4_e2m1fn', 'float8_e3m4', 'float8_e4m3', 'float8_e4m3fn',
-    'float8_e4m3fnuz', 'float8_e4m3b11fnuz',
+    'float8_e3m4', 'float8_e4m3', 'float8_e4m3fn', 'float8_e4m3fnuz',
     'float8_e5m2', 'float8_e5m2fnuz', 'float8_e8m0fnu',
     'bfloat16', 'float16', 'float32', 'float64',
 }
@@ -289,42 +225,6 @@ _DTYPE_UNSIGNED_INT = {
     'uint', 'uint8', 'uint16', 'uint32', 'uint64', 'uint128', 'uint256',
 }
 _DTYPE_BOOL = {'bool', 'boolean'}
-
-#: Scalar TYPE spellings that name a DType when they appear where a DType VALUE
-#: is expected.  A generic whose parameter is declared `dtype: DType` is
-#: instantiated either with a DType value (`DType.float32`) or with the scalar
-#: type that value denotes (`Float32`), and monomorphization substitutes the
-#: argument TEXTUALLY, so the instantiated body contains `Float32.is_floating_point()`
-#: and `Float32 == .float32`.  Without this table those stay unfoldable, the
-#: `comptime if` is emitted as a RUNTIME branch with both arms, and an arm that
-#: is only type-correct for the dtype it was written for (the float8 bit-tests
-#: in std/utils/numerics.mojo calling `to_bits()` on the now-scalar `float`
-#: parameter) reaches gcc.  Mapping the spelling back to the dtype value is what
-#: lets the branch be decided and the inapplicable arm pruned.
-_DTYPE_TYPE_NAMES = {
-    'Bool': 'bool', 'Boolean': 'bool',
-    'Int': 'int', 'Int8': 'int8', 'Int16': 'int16', 'Int32': 'int32',
-    'Int64': 'int64', 'Int128': 'int128', 'Int256': 'int256',
-    'UInt': 'uint', 'UInt8': 'uint8', 'UInt16': 'uint16',
-    'UInt32': 'uint32', 'UInt64': 'uint64', 'UInt128': 'uint128',
-    'UInt256': 'uint256', 'Index': 'index',
-    'Float16': 'float16', 'Float32': 'float32', 'Float64': 'float64',
-    'BFloat16': 'bfloat16', 'Float4_E2M1FN': 'float4_e2m1fn',
-    'Float8_E3M4': 'float8_e3m4', 'Float8_E4M3': 'float8_e4m3',
-    'Float8_E4M3FN': 'float8_e4m3fn',
-    'Float8_E4M3FNUZ': 'float8_e4m3fnuz',
-    'Float8_E4M3B11FNUZ': 'float8_e4m3b11fnuz',
-    'Float8_E5M2': 'float8_e5m2',
-    'Float8_E5M2FNUZ': 'float8_e5m2fnuz',
-    'Float8_E8M0FNU': 'float8_e8m0fnu',
-}
-
-#: The dtype names this evaluator knows how to compare.  Equality of two DType
-#: values is by NAME (`Float32` and `DType.float32` and `.float32` are one
-#: dtype), so a value is only compared this way when both sides resolve to one
-#: of these; an unknown spelling keeps the old "not foldable" answer rather
-#: than becoming a false one.
-_KNOWN_DTYPE_NAMES = _DTYPE_INTEGRAL | _DTYPE_FLOATING | _DTYPE_BOOL
 
 
 def _dtype_name_from_value(v):
@@ -345,75 +245,8 @@ def _dtype_name_from_value(v):
     return None
 
 
-def _dtype_spelling_name(text) -> str | None:
-    """The lowercase dtype name a concrete SPELLING denotes, or None.
-
-    A `dtype: DType` bracket parameter is instantiated with any of
-    `DType.float32`, `.float32` and `Float32`; a caller that holds only the
-    substituted TEXT (the where-clause checker, which is handed
-    `{param: rendered_arg}`) cannot tell those apart without this, and a
-    spelling it does not recognize must stay unrecognized rather than become
-    a wrong `False`."""
-    s = str(text).strip()
-    if s.startswith('DType.'):
-        s = s[len('DType.'):]
-    elif s.startswith('dtype.'):
-        s = s[len('dtype.'):]
-    elif s.startswith('.'):
-        s = s[1:]
-    s = _DTYPE_TYPE_NAMES.get(s, s).lower()
-    return s or None
-
-
-def _chained_dot_predicate(func_node):
-    """`(dtype_spelling, method)` for a chained dot-relative call, else None.
-
-    The parser stores a chained dot-relative reference as ONE `DottedLiteral`
-    whose `path` is the WHOLE chain -- `.float64.is_unsigned` arrives as
-    `path='float64.is_unsigned'`, not as `MemberExpr(DottedLiteral('float64'),
-    'is_unsigned')`. So every consumer that wants to test a DType predicate has
-    to split the chain itself; the split lives here once.
-
-    `('.float64', 'is_unsigned')` is returned for that node. A path with no dot,
-    or an empty head/method, is not a predicate call and answers None. Resolved
-    by class NAME so this module needs no new import from the self-hosted
-    parser (same reason `_const_foldable` guards its own DottedLiteral use).
-    """
-    if type(func_node).__name__ != 'DottedLiteral':
-        return None
-    p = getattr(func_node, 'path', None)
-    if not isinstance(p, str) or '.' not in p:
-        return None
-    head, method = p.rsplit('.', 1)
-    if not head or not method:
-        return None
-    return '.' + head, method
-
-
-def dtype_predicate_for_spelling(text, method: str) -> bool | None:
-    """Evaluate a DType predicate for a concrete spelling of a dtype.
-
-    `dtype_predicate_for_spelling('.float32', 'is_floating_point')` is True,
-    exactly as it is for `DType.float32` and `Float32`: all three are the same
-    dtype, and monomorphization substitutes whichever spelling the call site
-    wrote. Returns None when the spelling is not a dtype this folder knows, so
-    a caller keeps its own conservative answer instead of reading "not a
-    known dtype" as "not floating"."""
-    name = _dtype_spelling_name(text)
-    if name is None or name not in _KNOWN_DTYPE_NAMES:
-        return None
-    return _eval_dtype_predicate(name, method)
-
-
 def _resolve_dtype_name(node, bindings, platform=None):
     """Resolve `node` to a DType name string, or None."""
-    # A scalar TYPE spelling used as a dtype value: `Float32` (see
-    # _DTYPE_TYPE_NAMES — this is the spelling monomorphization substitutes for
-    # a `dtype: DType` parameter).
-    if isinstance(node, IdentExpr):
-        _tn = _DTYPE_TYPE_NAMES.get(node.name)
-        if _tn is not None:
-            return _tn
     # DType.int32 / dtype.int32
     if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
             and node.obj.name in ('DType', 'dtype')):
@@ -426,32 +259,31 @@ def _resolve_dtype_name(node, bindings, platform=None):
     return _dtype_name_from_value(v)
 
 
-def _comprehension_iterable_values(iterable, bindings: dict, platform, conforms_to_pred=None):
+def _comprehension_iterable_values(iterable, bindings: dict, platform):
     """The element values a comprehension generator iterates, or None.
 
     `range(...)` expands through resolve_for_iterable (the same bounds the
     unroller uses); anything else must fold to a list/tuple/str value."""
-    items = resolve_for_iterable(iterable, bindings, {}, COMPREHENSION_FOLD_CAP,
-                                 conforms_to_pred=conforms_to_pred)
+    items = resolve_for_iterable(iterable, bindings, {}, COMPREHENSION_FOLD_CAP)
     if items is None:
-        whole = eval_const(iterable, bindings, platform, conforms_to_pred)
+        whole = eval_const(iterable, bindings, platform)
         if isinstance(whole, (list, tuple, str)):
             return list(whole)
         return None
     vals = []
     for item in items:
-        v = eval_const(item, bindings, platform, conforms_to_pred)
+        v = eval_const(item, bindings, platform)
         if v is None:
             return None
         vals.append(v)
     return vals
 
 
-def _comprehension_run(node, generators: list, env: dict, out: list, platform, conforms_to_pred=None):
+def _comprehension_run(node, generators: list, env: dict, out: list, platform):
     """Depth-first walk of a comprehension's generators, appending each
     element's value to `out`. False when any part is not foldable."""
     if not generators:
-        v = eval_const(node.element, env, platform, conforms_to_pred)
+        v = eval_const(node.element, env, platform)
         if v is None:
             return False
         if len(out) >= COMPREHENSION_FOLD_CAP:
@@ -461,7 +293,7 @@ def _comprehension_run(node, generators: list, env: dict, out: list, platform, c
     gen = generators[0]
     if not isinstance(gen.target, str):
         return False
-    values = _comprehension_iterable_values(gen.iterable, env, platform, conforms_to_pred)
+    values = _comprehension_iterable_values(gen.iterable, env, platform)
     if values is None:
         return False
     for item in values:
@@ -469,7 +301,7 @@ def _comprehension_run(node, generators: list, env: dict, out: list, platform, c
         sub[gen.target] = item
         keep = True
         for cond in (gen.conditions or []):
-            c = eval_const_bool(cond, sub, platform=platform, conforms_to_pred=conforms_to_pred)
+            c = eval_const_bool(cond, sub, platform=platform)
             if c is None:
                 return False
             if not c:
@@ -477,12 +309,12 @@ def _comprehension_run(node, generators: list, env: dict, out: list, platform, c
                 break
         if not keep:
             continue
-        if not _comprehension_run(node, generators[1:], sub, out, platform, conforms_to_pred):
+        if not _comprehension_run(node, generators[1:], sub, out, platform):
             return False
     return True
 
 
-def _fold_comprehension(node, bindings: dict, platform, conforms_to_pred=None):
+def _fold_comprehension(node, bindings: dict, platform):
     """Fold a LIST comprehension (`[i * 2 for i in range(3)]`) to a Python list
     of its element values, or None. Set/dict comprehensions are not folded.
 
@@ -494,18 +326,18 @@ def _fold_comprehension(node, bindings: dict, platform, conforms_to_pred=None):
         return None
     out = []
     if not _comprehension_run(node, list(node.generators or []),
-                              dict(bindings), out, platform, conforms_to_pred):
+                              dict(bindings), out, platform):
         return None
     return out
 
 
-def _eval_subscript(node, bindings: dict, platform=None, conforms_to_pred=None):
+def _eval_subscript(node, bindings: dict, platform=None):
     """Fold subscript/slice on a comptime-known value, or None."""
     if SubscriptExpr is not None and isinstance(node, SubscriptExpr):
-        base = eval_const(node.obj, bindings, platform, conforms_to_pred)
+        base = eval_const(node.obj, bindings, platform)
         if base is None:
             return None
-        idx = eval_const(node.index, bindings, platform, conforms_to_pred)
+        idx = eval_const(node.index, bindings, platform)
         if idx is None:
             return None
         try:
@@ -513,20 +345,20 @@ def _eval_subscript(node, bindings: dict, platform=None, conforms_to_pred=None):
         except Exception:
             return None
     if SliceExpr is not None and isinstance(node, SliceExpr):
-        base = eval_const(node.obj, bindings, platform, conforms_to_pred)
+        base = eval_const(node.obj, bindings, platform)
         if base is None:
             return None
         start = stop = step = None
         if getattr(node, 'start', None) is not None:
-            start = eval_const(node.start, bindings, platform, conforms_to_pred)
+            start = eval_const(node.start, bindings, platform)
             if start is None:
                 return None
         if getattr(node, 'stop', None) is not None:
-            stop = eval_const(node.stop, bindings, platform, conforms_to_pred)
+            stop = eval_const(node.stop, bindings, platform)
             if stop is None:
                 return None
         if getattr(node, 'step', None) is not None:
-            step = eval_const(node.step, bindings, platform, conforms_to_pred)
+            step = eval_const(node.step, bindings, platform)
             if step is None:
                 return None
         try:
@@ -562,368 +394,7 @@ def _eval_dtype_predicate(dtype_name, method):
     return None
 
 
-
-def _conforms_to_name(node):
-    if node is None:
-        return None
-    if isinstance(node, IdentExpr):
-        return node.name
-    if isinstance(node, MemberExpr):
-        m = getattr(node, 'member', None)
-        if isinstance(m, str):
-            return m
-        return _conforms_to_name(m)
-    if DottedLiteral is not None and isinstance(node, DottedLiteral):
-        n = getattr(node, 'name', None)
-        if isinstance(n, str):
-            return n
-        p = getattr(node, 'path', None)
-        if isinstance(p, str) and p:
-            return p.split('.')[-1]
-        return None
-    if SubscriptExpr is not None and isinstance(node, SubscriptExpr):
-        return _conforms_to_name(getattr(node, 'obj', None))
-    if TupleExpr is not None and isinstance(node, TupleExpr):
-        elems = getattr(node, 'elements', None) or []
-        if len(elems) == 1:
-            return _conforms_to_name(elems[0])
-        return None
-    n = getattr(node, 'name', None)
-    if isinstance(n, str):
-        return n
-    return None
-
-
-def _conforms_to_bases(struct_name, bases_map, _memo=None):
-    if _memo is None:
-        _memo = {}
-    if struct_name in _memo:
-        return _memo[struct_name]
-    _memo[struct_name] = set()
-    out = set()
-    for b in (bases_map.get(struct_name) or []):
-        bname = b if isinstance(b, str) else _conforms_to_name(b)
-        if not bname:
-            continue
-        out.add(bname)
-        out.update(_conforms_to_bases(bname, bases_map, _memo))
-    _memo[struct_name] = out
-    return out
-
-
-# Traits the language derives for a struct from its fields, so their absence
-# from a DECLARED-bases map is not evidence against conformance.
-_AUTO_DERIVED_TRAITS = frozenset({'Copyable', 'Movable'})
-
-
-def conforms_to(struct_name, trait_name, bases_map):
-    """Whether STRUCT_NAME conforms to TRAIT_NAME, from the DECLARED bases map
-    (`{decl: [base, ...]}`): True/False when the map decides it, None when it
-    cannot. `_conforms_to_bases` is transitive.
-
-    `Copyable` and `Movable` are derived by the language for a struct whose
-    fields all support them, so a struct that does not LIST `Copyable` still
-    conforms: the map records declarations, not derivations. Proving a negative
-    from the empty list made a plain struct element satisfy neither — that is
-    how `LinkedList[CopyCountedStruct]()`'s
-    `comptime assert conforms_to(Self.ElementType, Copyable)` in the stdlib
-    failed to compile (2026-11-12), while the same struct is copied freely
-    everywhere else in this C backend. For a name the map does not know we
-    still answer None: nothing is known about it at all."""
-    if not isinstance(struct_name, str) or not isinstance(trait_name, str):
-        return None
-    # A BUILTIN SCALAR has no source-level struct declaration for the map to
-    # read, but the language's answer is not unknown: the compiler synthesizes
-    # `TrivialRegisterPassable` for these types, and that trait derives
-    # `Deinitable`, `ImplicitlyCopyable -> Copyable -> Movable` and
-    # `RegisterPassable` (std/builtin/value.mojo). This is what lets
-    # `IsTriviallyDeinitable[Int]` — a `conforms_to(T, ...) or (...)` alias —
-    # fold at an instantiation with `T = Int` instead of staying CONST_UNKNOWN
-    # and becoming a runtime branch on a zero word (the imported-generic-alias
-    # miscompile: a NULL boxed-list read for `IsTriviallyDeinitable[T]`). Any
-    # OTHER trait is still an honest None: nothing here says a scalar does not
-    # conform.
-    if struct_name in TRIVIAL_REGISTER_PASSABLE_TYPES:
-        if trait_name in TRIVIAL_REGISTER_PASSABLE_TRAITS:
-            return True
-        return None
-    if not bases_map:
-        return None
-    if struct_name not in bases_map:
-        return None
-    if trait_name in _AUTO_DERIVED_TRAITS:
-        return True
-    if trait_name not in bases_map:
-        known = False
-        for bs in bases_map.values():
-            for b in (bs or []):
-                bname = b if isinstance(b, str) else _conforms_to_name(b)
-                if bname == trait_name:
-                    known = True
-                    break
-            if known:
-                break
-        if not known:
-            return None
-    return trait_name in _conforms_to_bases(struct_name, bases_map)
-
-
-_STDLIB_TRAIT_INDEX = None
-
-
-def _stdlib_trait_index():
-    """`{trait name: (qualified name, [base, ...])}` for every trait the stdlib
-    declares, read from the stdlib sources once per process.
-
-    A name declared by more than one stdlib file maps to None: the bare name
-    does not then identify one trait, so nothing may be concluded from it.
-    The qualified name is the defining file's path under the stdlib root with
-    `/` read as `::` and the `.mojo` suffix dropped, which is the spelling the
-    real compiler prints (`std/format/__init__.mojo` -> `std::format::__init__`).
-    """
-    global _STDLIB_TRAIT_INDEX
-    if _STDLIB_TRAIT_INDEX is not None:
-        return _STDLIB_TRAIT_INDEX
-    import os
-    import re
-    from module_loader import STDLIB_PATH
-    index = {}
-    header = re.compile(r'^trait\s+([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*(?:\(([^)]*)\))?\s*:',
-                        re.MULTILINE)
-    root = os.path.join(STDLIB_PATH, 'std')
-    for dirpath, _dirs, files in os.walk(root):
-        for fn in files:
-            if not fn.endswith('.mojo'):
-                continue
-            path = os.path.join(dirpath, fn)
-            try:
-                with open(path, encoding='utf-8', errors='replace') as f:
-                    text = f.read()
-            except OSError:
-                continue
-            rel = os.path.relpath(path, STDLIB_PATH)[:-len('.mojo')]
-            qual = rel.replace(os.sep, '::')
-            for m in header.finditer(text):
-                name = m.group(1)
-                bases = []
-                for part in (m.group(2) or '').split(','):
-                    part = part.split('[')[0].split('.')[-1].strip()
-                    if part and re.match(r'^[A-Za-z_]\w*$', part):
-                        bases.append(part)
-                if name in index:
-                    index[name] = None
-                else:
-                    index[name] = (qual + '::' + name, bases)
-    _STDLIB_TRAIT_INDEX = index
-    return index
-
-
-def conforms_to_closed(struct_name, trait_name, bases_map, module_name):
-    """Whether STRUCT_NAME conforms to TRAIT_NAME, deciding every case the
-    closed world allows: returns `(verdict, trait_qualified_name)` where
-    verdict is True, False, or None (undecidable).
-
-    `conforms_to` answers None for any trait the module's own declarations
-    do not mention, so a struct that never declared a stdlib trait (`Writable`
-    on a struct whose bases are `(ImplicitlyCopyable)`) was accepted as
-    conforming. Here the struct's transitive bases are walked through the
-    module's declarations and then the stdlib's trait declarations. The answer
-    is False only when every base reached is itself known, so the walk is
-    complete; a single base it cannot resolve (an unknown name, or a bare name
-    the stdlib declares twice) makes the verdict None.
-
-    `Copyable` and `Movable` are derived by the language and keep
-    `conforms_to`'s True answer.
-    """
-    if not isinstance(struct_name, str) or not isinstance(trait_name, str) or not bases_map:
-        return None, None
-    if struct_name not in bases_map:
-        return None, None
-    if trait_name in bases_map:
-        trait_q = f'{module_name}::{trait_name}' if module_name else trait_name
-    else:
-        index = _stdlib_trait_index()
-        entry = index.get(trait_name)
-        trait_q = entry[0] if entry else trait_name
-    if trait_name in _AUTO_DERIVED_TRAITS:
-        return True, trait_q
-    index = _stdlib_trait_index()
-    seen = set()
-    todo = [struct_name]
-    complete = True
-    while todo:
-        name = todo.pop()
-        if name in seen:
-            continue
-        seen.add(name)
-        if name in bases_map:
-            bases = [b if isinstance(b, str) else _conforms_to_name(b)
-                     for b in (bases_map.get(name) or [])]
-        elif name in index and index[name] is not None:
-            bases = index[name][1]
-        else:
-            complete = False
-            continue
-        for b in bases:
-            if not b:
-                continue
-            if b == trait_name:
-                return True, trait_q
-            todo.append(b)
-    if not complete:
-        return None, trait_q
-    return False, trait_q
-
-
-def _conforms_to_operand_name(node, bindings):
-    """`_conforms_to_name`, with a bound TYPE spelling resolved first.
-
-    A generic comptime alias's body asks about its own bracket parameter
-    (`conforms_to(T, TrivialRegisterPassable)`), and the application site binds
-    `T` to the argument's spelling (`Int`). Without this the question is asked
-    about the NAME `T`, which no struct declaration answers, so the alias could
-    never fold even when its argument's conformance is known. Only a STRING
-    binding is a spelling; a bound value (an int/float/bool) leaves the answer
-    to `_conforms_to_name`, exactly as before.
-    """
-    if bindings and isinstance(node, IdentExpr):
-        _b = bindings.get(node.name)
-        if isinstance(_b, str):
-            return _b
-    return _conforms_to_name(node)
-
-
-def _fold_conforms_to_call(node, conforms_to_pred, bindings=None):
-    if conforms_to_pred is None:
-        return None
-    if not isinstance(node, CallExpr) or not isinstance(node.func, IdentExpr):
-        return None
-    if node.func.name != 'conforms_to':
-        return None
-    if getattr(node, 'kwargs', None):
-        return None
-    args = getattr(node, 'args', None) or []
-    if len(args) != 2:
-        return None
-    tname = _conforms_to_operand_name(args[0], bindings)
-    trname = _conforms_to_operand_name(args[1], bindings)
-    if tname is None or trname is None:
-        return None
-    try:
-        return conforms_to_pred(tname, trname)
-    except Exception:
-        return None
-
-
-def _comptime_alias_template(bindings, obj):
-    """The generic `comptime` alias declaration `obj` names, or None.
-
-    A GENERIC comptime alias (`comptime IsTriviallyDeinitable[T: AnyType]:
-    Bool = conforms_to(T, ...)`) has no value of its own: its RHS names its
-    bracket parameters. The binding table holds the alias's own
-    ComptimeVarStmt instead of a value (see `_gmi_prefold_toplevel_comptime`
-    and the gimple importer's `from X import NAME` walk), so an APPLICATION
-    (`IsTriviallyDeinitable[Int]`) can bind those parameters and fold the
-    body. Only a node WITH parameters is an application target; a name that
-    binds a real value is not.
-    """
-    if not bindings or not isinstance(obj, IdentExpr):
-        return None
-    _b = bindings.get(obj.name)
-    if isinstance(_b, ComptimeVarStmt):
-        _av = _as_comptimevar_node(_b)
-        if _av.comptime_params:
-            return _av
-    return None
-
-
-def _alias_type_spelling(node):
-    """The TYPE SPELLING a bracket argument denotes (`Int`, `List[Int]`), or
-    None. See `_alias_arg_value` for why a type argument must be spelled."""
-    if isinstance(node, IdentExpr):
-        return node.name
-    if isinstance(node, MemberExpr):
-        _o = _alias_type_spelling(node.obj)
-        if isinstance(_o, str) and isinstance(node.member, str):
-            return _o + '.' + node.member
-        return None
-    if SubscriptExpr is not None and isinstance(node, SubscriptExpr):
-        _base = _alias_type_spelling(node.obj)
-        if _base is None:
-            return None
-        _idx = node.index
-        if TupleExpr is not None and isinstance(_idx, TupleExpr):
-            _elems = _idx.elements or []
-        else:
-            _elems = [_idx]
-        _parts = []
-        for _e in _elems:
-            _s = _alias_type_spelling(_e)
-            if _s is None:
-                _v = eval_const(_e, {}, None)
-                if isinstance(_v, bool) or isinstance(_v, int):
-                    _s = str(_v)
-                elif isinstance(_v, str):
-                    _s = _v
-            if _s is None:
-                return None
-            _parts.append(_s)
-        return _base + '[' + ', '.join(_parts) + ']'
-    return None
-
-
-def _alias_arg_value(node, bindings, platform, conforms_to_pred):
-    """The value an alias application's bracket argument binds.
-
-    A VALUE argument (`Alias[3]`, or a bound comptime constant) folds
-    normally. A TYPE argument must bind its SPELLING: `Int` folds to the
-    `('DType', 'int')` marker, which carries no type name a conformance
-    question can consume, so `conforms_to(T, Trait)` in the alias body would
-    never see `Int`."""
-    v = eval_const(node, bindings, platform, conforms_to_pred)
-    if isinstance(v, bool) or isinstance(v, int) or isinstance(v, float):
-        return v
-    if isinstance(v, str):
-        return v
-    return _alias_type_spelling(node)
-
-
-def _eval_alias_application(node, tmpl, bindings, platform, conforms_to_pred):
-    """Evaluate `Alias[args]` against the alias declaration `tmpl`: bind its
-    bracket parameters to the application's arguments and fold its body, or
-    None when the body still cannot be decided (an unknown conformance, a
-    nested uninstantiated type, ...).
-
-    A self-referential body (`comptime A[T] = A[T]`) would otherwise re-enter
-    forever; an in-progress marker in the cloned binding table stops it (no
-    real identifier can be spelled with the NUL prefix)."""
-    if isinstance(node.obj, IdentExpr):
-        _mark = _ALIAS_EXPANDING_PREFIX + node.obj.name
-        if bindings and _mark in bindings:
-            return None
-    _params = tmpl.comptime_params or []
-    _body = tmpl.value
-    if _body is None:
-        return None
-    _idx = node.index
-    if TupleExpr is not None and isinstance(_idx, TupleExpr):
-        _args = _idx.elements or []
-    else:
-        _args = [_idx]
-    if len(_args) != len(_params):
-        return None
-    _bound = dict(bindings)
-    if isinstance(node.obj, IdentExpr):
-        _bound[_ALIAS_EXPANDING_PREFIX + node.obj.name] = True
-    for _i, _p in enumerate(_params):
-        _av = _alias_arg_value(_args[_i], bindings, platform, conforms_to_pred)
-        if _av is None:
-            return None
-        _bound[_p] = _av
-    return eval_const(_body, _bound, platform, conforms_to_pred)
-
-
-def _eval_interpolated_string(node, bindings: dict, platform=None, conforms_to_pred=None):
+def _eval_interpolated_string(node, bindings: dict, platform=None):
     """Evaluate an interpolated (f/t) string literal into a plain string, or
     None if any interpolation expression cannot be comptime-folded. Used for
     compile-time diagnostic messages (comptime assert / constrained)."""
@@ -951,7 +422,7 @@ def _eval_interpolated_string(node, bindings: dict, platform=None, conforms_to_p
                     expr_node = Parser(py_tokenize(expr_src))._parse_expr(0)
                 except Exception:
                     return None
-                v = eval_const(expr_node, bindings, platform, conforms_to_pred)
+                v = eval_const(expr_node, bindings, platform)
                 if v is None:
                     return None
                 if isinstance(v, bool):
@@ -965,73 +436,7 @@ def _eval_interpolated_string(node, bindings: dict, platform=None, conforms_to_p
         return None
 
 
-
-_HOST_IS_MACOS = (sys.platform == 'darwin')
-_HOST_IS_LINUX = sys.platform.startswith('linux')
-_HOST_MACHINE = (platform.machine() or '').lower() if 'platform' in globals() and platform is not None else __import__('platform').machine().lower()
-_HOST_IS_X86 = _HOST_MACHINE in ('x86_64', 'amd64', 'x86')
-_HOST_IS_ARM = _HOST_MACHINE in ('arm64', 'aarch64', 'armv8')
-_HOST_IS_32BIT = sys.maxsize <= 2**32
-
-
-def _eval_compilation_target_pred(node):
-    """Fold a zero-arg `CompilationTarget.<predicate>()` to a host bool/int,
-    or None. Only predicates that are compile-time constants for THIS host
-    build fold; anything else stays unknown so a runtime branch is kept."""
-    if not (isinstance(node, CallExpr) and isinstance(node.func, MemberExpr)
-            and not node.args and not node.kwargs):
-        return None
-    obj = node.func.obj
-    # `CompilationTarget.is_macos()` (name) or `sys.CompilationTarget...` not
-    # needed here; the stdlib spells it as a bare name.
-    if not (isinstance(obj, IdentExpr) and obj.name == 'CompilationTarget'):
-        return None
-    m = node.func.member
-    # OS
-    if m == 'is_macos':
-        return _HOST_IS_MACOS
-    if m == 'is_linux':
-        return _HOST_IS_LINUX
-    # Arch
-    if m == 'is_x86':
-        return _HOST_IS_X86
-    if m == 'is_x86_64' or m == 'is_amd64':
-        return _HOST_IS_X86 and not _HOST_IS_32BIT
-    if m == 'is_arm':
-        return _HOST_IS_ARM
-    if m == 'is_aarch64':
-        return _HOST_IS_ARM and not _HOST_IS_32BIT
-    if m in ('is_apple_silicon', 'is_apple_m'):
-        return _HOST_IS_MACOS and _HOST_IS_ARM
-    # ISA features (host)
-    if m == 'has_neon':
-        return _HOST_IS_ARM
-    if m in ('has_neon_int8_dotprod', 'has_neon_int8_matmul'):
-        # Conservative on generic ARM; Apple Silicon has these but detecting
-        # portably is non-trivial. Leave unknown rather than guess wrong?
-        # has_neon is the common gate used in path.mojo; keep others unknown.
-        return None
-    if m == 'has_sse4':
-        return _HOST_IS_X86
-    if m == 'has_avx':
-        # Not guaranteed on all x86_64 hosts; fold false only when clearly
-        # not x86. On x86 keep unknown unless we know - safer to not fold
-        # than fold wrong. But for macOS arm64 host this is false.
-        return False if not _HOST_IS_X86 else None
-    if m in ('has_avx2', 'has_avx512f', 'has_fma', 'has_vnni', 'has_intel_amx'):
-        return False if not _HOST_IS_X86 else None
-    if m == 'is_32bit':
-        return _HOST_IS_32BIT
-    if m == 'is_64bit':
-        return not _HOST_IS_32BIT
-    if m == 'is_little_endian':
-        return sys.byteorder == 'little'
-    if m == 'is_big_endian':
-        return sys.byteorder == 'big'
-    return None
-
-
-def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None):
+def eval_const(node, bindings: dict, platform: str = None):
     """Evaluate `node` as any compile-time constant (int, bool, or str) — or
     None if it isn't foldable.
 
@@ -1065,36 +470,19 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
     if isinstance(node, FloatLiteral): return node.value
     if isinstance(node, StringLiteral):
         if getattr(node, 'is_interpolated', False):
-            v = _eval_interpolated_string(node, bindings, platform, conforms_to_pred)
+            v = _eval_interpolated_string(node, bindings, platform)
             return v if v is not None else node.value
         return node.value
-    _ct = _fold_conforms_to_call(node, conforms_to_pred, bindings)
-    if _ct is not None:
-        return bool(_ct)
     if DottedLiteral is not None and isinstance(node, DottedLiteral):
-        # A dot-relative value (`.float32`, `.Some`) folds to a marker for
-        # enum/DType values. The node's field is `path`
-        # (fire_compiler.DottedLiteral: `.float32` -> path='float32'); it has no
-        # `.name`, and reading that orphan field raised AttributeError, which the
-        # guard turned into "not foldable" — while `_const_foldable` called the
-        # same node foldable, which reads as CONST_FALSE, not CONST_UNKNOWN.
-        # That made `DType.float32 == .float32` fold FALSE and prune the arm
-        # that was true. `path` is REQUIRED to be a non-empty string here: a
-        # dot value whose spelling cannot be read is not foldable, and saying
-        # so keeps it consistent with `_const_foldable`.
+        # .name - for enum/DType values, return a marker
         try:
-            _dpath = getattr(node, 'path', None)
-            if _dpath is None:
-                _dpath = getattr(node, 'name')
+            return ('.', getattr(node, 'name'))
         except Exception:
             return None
-        if not isinstance(_dpath, str) or not _dpath:
-            return None
-        return ('.', _dpath)
     if TupleExpr is not None and isinstance(node, TupleExpr):
         res = []
         for e in getattr(node, 'elements', []) or []:
-            v = eval_const(e, bindings, platform, conforms_to_pred)
+            v = eval_const(e, bindings, platform)
             if v is None:
                 return None
             res.append(v)
@@ -1102,20 +490,20 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
     if ListExpr is not None and isinstance(node, ListExpr):
         res = []
         for e in getattr(node, 'elements', []) or []:
-            v = eval_const(e, bindings, platform, conforms_to_pred)
+            v = eval_const(e, bindings, platform)
             if v is None:
                 return None
             res.append(v)
         return res
     if Comprehension is not None and isinstance(node, Comprehension):
-        return _fold_comprehension(node, bindings, platform, conforms_to_pred)
+        return _fold_comprehension(node, bindings, platform)
     if DictExpr is not None and isinstance(node, DictExpr):
         res = {}
         for pair in getattr(node, 'pairs', []) or []:
             if not isinstance(pair, (tuple, list)) or len(pair) != 2:
                 return None
-            k = eval_const(pair[0], bindings, platform, conforms_to_pred)
-            v = eval_const(pair[1], bindings, platform, conforms_to_pred)
+            k = eval_const(pair[0], bindings, platform)
+            v = eval_const(pair[1], bindings, platform)
             if k is None or v is None:
                 return None
             try:
@@ -1157,7 +545,7 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
             and len(node.args) == 1 and not node.kwargs
             and node.func.name in ('String', 'StringSlice', 'StaticString',
                                    'StringSpan')):
-        v = eval_const(node.args[0], bindings, platform, conforms_to_pred)
+        v = eval_const(node.args[0], bindings, platform)
         if node.func.name == 'String' and isinstance(v, (int, bool)) and not isinstance(v, str):
             return str(v)
         return v
@@ -1177,18 +565,18 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
             and len(node.args) == 1 and not node.kwargs):
         _cfn = node.func.name
         if _cfn == 'len':
-            _lv = eval_const(node.args[0], bindings, platform, conforms_to_pred)
+            _lv = eval_const(node.args[0], bindings, platform)
             if isinstance(_lv, (list, tuple, str, dict)):
                 return len(_lv)
             return None
         if _cfn == 'ord':
-            _ov = eval_const(node.args[0], bindings, platform, conforms_to_pred)
+            _ov = eval_const(node.args[0], bindings, platform)
             if isinstance(_ov, str) and len(_ov) == 1:
                 return ord(_ov)
             return None
         _bits = _SCALAR_CTOR_BITS.get(_cfn)
         if _bits is not None:
-            _iv = eval_const(node.args[0], bindings, platform, conforms_to_pred)
+            _iv = eval_const(node.args[0], bindings, platform)
             if isinstance(_iv, int) and not isinstance(_iv, (bool, str)):
                 _w = _iv & ((1 << _bits[0]) - 1)
                 if _bits[1] and _w >= (1 << (_bits[0] - 1)):
@@ -1196,22 +584,7 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
                 return _w
             return None
     if isinstance(node, IdentExpr):
-        if node.name in bindings:
-            _bv = bindings.get(node.name)
-            # A generic comptime alias is a TEMPLATE, not a value: an
-            # application is what names one (`Alias[Int]`, handled below).
-            # Returning the declaration here would read as a folded constant.
-            if isinstance(_bv, ComptimeVarStmt):
-                return None
-            return _bv
-        # A scalar type spelling in a DType position is that dtype's value
-        # (`Float32` == `DType.float32` == `.float32`).  Only used where a
-        # compile-time VALUE is being folded, so an ordinary type name used as
-        # a type (annotations, constructors) never reaches here.
-        _tn = _DTYPE_TYPE_NAMES.get(node.name)
-        if _tn is not None:
-            return ('DType', _tn)
-        return None
+        return bindings.get(node.name)
     # `DType.int32` / `dtype.int32` — a compile-time DType value.
     if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
             and node.obj.name in ('DType', 'dtype')):
@@ -1228,16 +601,6 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
             _dv = _eval_dtype_predicate(_dn, _dm)
             if _dv is not None:
                 return _dv
-    # The same predicate reached through a chained dot-value: `.float64.is_unsigned()`.
-    # Without this the condition reads CONST_UNKNOWN, BOTH arms are emitted, and
-    # `max_finite[.float64]` put `~Scalar[.float64](0)` -- a bit-complement on a
-    # float dtype -- into the C, where GCC rejects it.
-    if isinstance(node, CallExpr) and not node.args and not node.kwargs:
-        _ch = _chained_dot_predicate(node.func)
-        if _ch is not None:
-            _dv = dtype_predicate_for_spelling(_ch[0], _ch[1])
-            if _dv is not None:
-                return bool(_dv)
     # Dict/list method calls on comptime-known values
     if isinstance(node, CallExpr) and isinstance(node.func, MemberExpr) and not node.kwargs:
         _obj = node.func.obj
@@ -1272,42 +635,19 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
     # access or slicing). Required so `comptime assert a[i] == ...` and similar
     # conditions over comptime collections produce compile-time diagnostics
     # (comptime collection ops beyond len()).
-    #
-    # An APPLICATION of a generic comptime alias (`IsTriviallyDeinitable[Int]`)
-    # is a subscript too, but its base is a TEMPLATE rather than a value, so it
-    # is decided by substituting the bracket arguments into the alias body
-    # before the collection-subscript fold can decline it.
-    if SubscriptExpr is not None and isinstance(node, SubscriptExpr):
-        _tmpl = _comptime_alias_template(bindings, node.obj)
-        if _tmpl is not None:
-            return _eval_alias_application(node, _tmpl, bindings, platform,
-                                           conforms_to_pred)
-    _sv = _eval_subscript(node, bindings, platform, conforms_to_pred)
+    _sv = _eval_subscript(node, bindings, platform)
     if _sv is not None:
         return _sv
     if isinstance(node, UnaryOp) and node.op in FOLD_UNARY_OPS:
-        v = eval_const(node.operand, bindings, platform, conforms_to_pred)
+        v = eval_const(node.operand, bindings, platform)
         return fold_unary_sign(node.op, v) if isinstance(v, (int, bool)) \
             and not isinstance(v, str) else None
     if isinstance(node, UnaryOp) and node.op == 'not':
-        v = eval_const(node.operand, bindings, platform, conforms_to_pred)
+        v = eval_const(node.operand, bindings, platform)
         return not v if isinstance(v, (bool, int)) else None
     if isinstance(node, BinaryOp):
         op = node.op
-        # DType equality is identity of the dtype, not identity of the marker's
-        # spelling: `Float32`, `DType.float32` and `.float32` all denote one
-        # dtype, but eval_const's markers carry different tags for them
-        # (('DType', name) / ('.', name)), so the generic tuple comparison below
-        # would answer False for two equal dtypes. Compare the resolved dtype
-        # names first; an unknown spelling falls through to the ordinary fold.
-        if op in ('==', '!='):
-            _ldn = _resolve_dtype_name(node.left, bindings, platform)
-            _rdn = _resolve_dtype_name(node.right, bindings, platform)
-            if (_ldn in _KNOWN_DTYPE_NAMES
-                    and _rdn in _KNOWN_DTYPE_NAMES):
-                _eq = _ldn == _rdn
-                return _eq if op == '==' else not _eq
-        l = eval_const(node.left, bindings, platform, conforms_to_pred)
+        l = eval_const(node.left, bindings, platform)
         # Short-circuit `and`/`or`: a provably-false left of `and` (or
         # provably-true left of `or`) determines the result even when the
         # right side cannot be folded. This is required for compile-time
@@ -1318,24 +658,19 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
                 return None
             if not l:
                 return l
-            r = eval_const(node.right, bindings, platform, conforms_to_pred)
+            r = eval_const(node.right, bindings, platform)
             return r
         if op == 'or':
             if l is None:
                 return None
             if l:
                 return l
-            r = eval_const(node.right, bindings, platform, conforms_to_pred)
+            r = eval_const(node.right, bindings, platform)
             return r
         if op == 'in':
-            r = eval_const(node.right, bindings, platform, conforms_to_pred)
+            r = eval_const(node.right, bindings, platform)
             if l is None or r is None:
                 return None
-            if _is_dtype_value(l) and isinstance(r, (list, tuple)):
-                # `dtype in (.float32, .float64)`: membership by DType name
-                # (see compare_op), not the raw tuple test a bound DType never
-                # satisfies against its dot-relative members.
-                return compare_op('in', l, r)
             try:
                 if isinstance(r, (list, tuple, set)):
                     return l in r
@@ -1351,7 +686,7 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
             if res is None:
                 return None
             return not res
-        r = eval_const(node.right, bindings, platform, conforms_to_pred)
+        r = eval_const(node.right, bindings, platform)
         if l is None or r is None: return None
         # `eval_const` yields an int or a str depending on the expression, and
         # a statically compiled backend types a local from its uses: one
@@ -1421,21 +756,10 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
                 return sys.byteorder
             except AttributeError:
                 return None
-    # `CompilationTarget.<predicate>()` is a compile-time constant for the
-    # host this compiler is building for, the same way `sys.platform` is: a
-    # `comptime if CompilationTarget.is_macos(): ... elif
-    # CompilationTarget.has_neon(): ...` chain must keep only the branch the
-    # host can take, because every other branch names target-specific
-    # definitions that do not exist on this host and cannot be linked. See
-    # CODEGEN_stdlib_dylib_lazy_undefined_refs-part4: the fold was missing,
-    # so the lowering emitted a call (and an extern) into every arm.
-    _ctv = _eval_compilation_target_pred(node)
-    if _ctv is not None:
-        return _ctv
     return None
 
 
-def eval_const_int(node, bindings: dict, call_hook=None, conforms_to_pred=None):
+def eval_const_int(node, bindings: dict, call_hook=None):
     """Evaluate `node` as a compile-time int, or None.
 
     `call_hook(name, args) -> int | None` is the one backend-specific case —
@@ -1451,22 +775,22 @@ def eval_const_int(node, bindings: dict, call_hook=None, conforms_to_pred=None):
             return int(v)
         return None
     if isinstance(node, UnaryOp) and node.op in FOLD_UNARY_OPS:
-        v = eval_const_int(node.operand, bindings, call_hook, conforms_to_pred)
+        v = eval_const_int(node.operand, bindings, call_hook)
         return None if v is None else fold_unary_sign(node.op, v)
     if isinstance(node, BinaryOp):
         op = node.op
-        l = eval_const_int(node.left, bindings, call_hook, conforms_to_pred)
+        l = eval_const_int(node.left, bindings, call_hook)
         # Short-circuit and/or: required for comptime diagnostics and to
         # match eval_const's semantics (False and <unknown> is provably false).
         if op == 'and':
             if l is None: return None
             if not l: return l
-            return eval_const_int(node.right, bindings, call_hook, conforms_to_pred)
+            return eval_const_int(node.right, bindings, call_hook)
         if op == 'or':
             if l is None: return None
             if l: return l
-            return eval_const_int(node.right, bindings, call_hook, conforms_to_pred)
-        r = eval_const_int(node.right, bindings, call_hook, conforms_to_pred)
+            return eval_const_int(node.right, bindings, call_hook)
+        r = eval_const_int(node.right, bindings, call_hook)
         if l is None or r is None: return None
         if op == '+': return l + r
         if op == '-': return l - r
@@ -1485,10 +809,10 @@ def eval_const_int(node, bindings: dict, call_hook=None, conforms_to_pred=None):
         # Same short-circuit chained-comparison semantics as
         # myinterpreter.py's eval_CompareChain / _lower_compare_chain, just
         # over compile-time constants instead of runtime values.
-        left = eval_const_int(node.operands[0], bindings, call_hook, conforms_to_pred)
+        left = eval_const_int(node.operands[0], bindings, call_hook)
         if left is None: return None
         for op, operand in zip(node.ops, node.operands[1:]):
-            right = eval_const_int(operand, bindings, call_hook, conforms_to_pred)
+            right = eval_const_int(operand, bindings, call_hook)
             if right is None: return None
             link = compare_op(op, left, right)
             if link is None: return None
@@ -1511,32 +835,22 @@ def eval_const_int(node, bindings: dict, call_hook=None, conforms_to_pred=None):
         if isinstance(_sv, (int, bool)) and not isinstance(_sv, str):
             return int(_sv)
         return None
-    _ctv = _eval_compilation_target_pred(node)
-    if _ctv is not None:
-        return int(_ctv)
     if call_hook is not None and isinstance(node, CallExpr) and isinstance(
             node.func, IdentExpr):
-        argvals = [eval_const_int(a, bindings, call_hook, conforms_to_pred) for a in node.args]
-        # A zero-arg call reaches the hook: `argvals` is an empty list, and
-        # the old `argvals and ...` gate read that as "cannot answer" even
-        # though every (zero) argument folded. That left the stdlib's
-        # zero-arg target queries (`is_nvidia_gpu()`, ...) permanently
-        # CONST_UNKNOWN, so a `comptime if` over them emitted every arm, the
-        # GPU ones included, as live code on a CPU build. `all([])` is True:
-        # there is nothing left to fold.
-        if all(v is not None for v in argvals):
+        argvals = [eval_const_int(a, bindings, call_hook) for a in node.args]
+        if argvals and all(v is not None for v in argvals):
             return call_hook(node.func.name, argvals)
     return None
 
 
-def eval_const_bool(node, bindings: dict, call_hook=None, platform: str = None, conforms_to_pred=None):
+def eval_const_bool(node, bindings: dict, call_hook=None, platform: str = None):
     """Evaluate `node` as a compile-time bool, or None."""
-    v = eval_const(node, bindings, platform, conforms_to_pred)
+    v = eval_const(node, bindings, platform)
     if isinstance(v, (bool, int)):
         return bool(v)
     # Fallback: eval_const_int also folds what eval_const does not (calls,
     # via the hook).
-    result = eval_const_int(node, bindings, call_hook, conforms_to_pred)
+    result = eval_const_int(node, bindings, call_hook)
     return bool(result) if isinstance(result, (bool, int)) else None
 
 
@@ -1553,7 +867,7 @@ CONST_FALSE = 0
 CONST_UNKNOWN = -1
 
 
-def _const_foldable(node, bindings: dict, call_hook=None, conforms_to_pred=None) -> bool:
+def _const_foldable(node, bindings: dict, call_hook=None) -> bool:
     """Is `node` a compile-time constant at all? Decided from the SHAPE of
     the expression and the names bound, never from a folded value, so the
     answer survives the compiled value model (see CONST_UNKNOWN). Mirrors
@@ -1566,35 +880,25 @@ def _const_foldable(node, bindings: dict, call_hook=None, conforms_to_pred=None)
         return True
     if TupleExpr is not None and isinstance(node, TupleExpr):
         for e in getattr(node, 'elements', []) or []:
-            if not _const_foldable(e, bindings, call_hook, conforms_to_pred):
+            if not _const_foldable(e, bindings, call_hook):
                 return False
         return True
     if ListExpr is not None and isinstance(node, ListExpr):
         for e in getattr(node, 'elements', []) or []:
-            if not _const_foldable(e, bindings, call_hook, conforms_to_pred):
+            if not _const_foldable(e, bindings, call_hook):
                 return False
         return True
     if DictExpr is not None and isinstance(node, DictExpr):
         for pair in getattr(node, 'pairs', []) or []:
             if not isinstance(pair, (tuple, list)) or len(pair) != 2:
                 return False
-            if not _const_foldable(pair[0], bindings, call_hook, conforms_to_pred):
+            if not _const_foldable(pair[0], bindings, call_hook):
                 return False
-            if not _const_foldable(pair[1], bindings, call_hook, conforms_to_pred):
+            if not _const_foldable(pair[1], bindings, call_hook):
                 return False
         return True
-    _ct = _fold_conforms_to_call(node, conforms_to_pred, bindings)
-    if _ct is not None:
-        return True
-    if (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
-            and node.func.name == 'conforms_to'):
-        return False
     if isinstance(node, IdentExpr):
-        if node.name in bindings:
-            # A generic alias template is foldable only through an
-            # APPLICATION (`Alias[Int]`), not as a bare name.
-            return _comptime_alias_template(bindings, node) is None
-        return node.name in _DTYPE_TYPE_NAMES
+        return node.name in bindings
     # `DType.int32` / `dtype.int32`
     if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
             and node.obj.name in ('DType', 'dtype')):
@@ -1608,13 +912,6 @@ def _const_foldable(node, bindings: dict, call_hook=None, conforms_to_pred=None)
         _dn = _resolve_dtype_name(node.func.obj, bindings)
         if _dn is not None and _eval_dtype_predicate(_dn, node.func.member) is not None:
             return True
-    # The chained dot-value spelling of the same predicate (see
-    # `_chained_dot_predicate`). Shape-only, like the branch above: a path this
-    # folder cannot resolve stays CONST_UNKNOWN rather than reading as false.
-    if isinstance(node, CallExpr) and not node.args and not node.kwargs:
-        _ch = _chained_dot_predicate(node.func)
-        if _ch is not None and dtype_predicate_for_spelling(*_ch) is not None:
-            return True
     if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
             and node.obj.name == 'sys' and node.member == 'platform'):
         return True
@@ -1625,9 +922,6 @@ def _const_foldable(node, bindings: dict, call_hook=None, conforms_to_pred=None)
         # exposes no byteorder, the fold declines, and a shape-only "yes"
         # would then read as CONST_FALSE and drop the live branch.
         return eval_const(node, bindings) is not None
-    # CompilationTarget host predicates fold to constants for this host.
-    if _eval_compilation_target_pred(node) is not None:
-        return True
     # String/ord/len/scalar constructors and other 1-arg ident calls eval_const folds.
     if (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
             and len(node.args) == 1 and not node.kwargs
@@ -1658,85 +952,56 @@ def _const_foldable(node, bindings: dict, call_hook=None, conforms_to_pred=None)
     if SubscriptExpr is not None and isinstance(node, SubscriptExpr):
         if getattr(node, 'attrs', None):
             return False
-        # A generic comptime alias application is foldable exactly when its
-        # substituted BODY folds. Deciding this by shape alone would let a
-        # body that still cannot be decided (`downcast[T, Trait].member` for
-        # an unknown T) read as CONST_FALSE, silently pruning the true arm —
-        # the failure mode this whole path exists to avoid.
-        _tmpl = _comptime_alias_template(bindings, node.obj)
-        if _tmpl is not None:
-            return _eval_alias_application(node, _tmpl, bindings, None,
-                                           conforms_to_pred) is not None
-        return (_const_foldable(node.obj, bindings, call_hook, conforms_to_pred)
-                and _const_foldable(node.index, bindings, call_hook, conforms_to_pred))
+        return (_const_foldable(node.obj, bindings, call_hook)
+                and _const_foldable(node.index, bindings, call_hook))
     if SliceExpr is not None and isinstance(node, SliceExpr):
-        if not _const_foldable(node.obj, bindings, call_hook, conforms_to_pred):
+        if not _const_foldable(node.obj, bindings, call_hook):
             return False
         for _part in (getattr(node, 'start', None),
                       getattr(node, 'stop', None),
                       getattr(node, 'step', None)):
-            if _part is not None and not _const_foldable(_part, bindings, call_hook, conforms_to_pred):
+            if _part is not None and not _const_foldable(_part, bindings, call_hook):
                 return False
         return True
     if isinstance(node, UnaryOp) and (node.op in FOLD_UNARY_OPS or node.op == 'not'):
-        return _const_foldable(node.operand, bindings, call_hook, conforms_to_pred)
+        return _const_foldable(node.operand, bindings, call_hook)
     if isinstance(node, BinaryOp):
         op = node.op
         if op == 'and':
-            if not _const_foldable(node.left, bindings, call_hook, conforms_to_pred):
+            if not _const_foldable(node.left, bindings, call_hook):
                 return False
             try:
-                lv = eval_const(node.left, bindings, None, conforms_to_pred)
+                lv = eval_const(node.left, bindings)
             except Exception:
                 lv = None
-            if lv is None and call_hook is not None:
-                # `eval_const` carries no hook: a call only the backend's
-                # hook can fold (a zero-arg target query, `is_amd_gpu()`)
-                # reads as not-false here, and the whole `and` would then
-                # demand its right side be foldable to prune an arm the
-                # hook has already decided dead. Ask the hook the same
-                # question; a falsy answer settles the condition.
-                try:
-                    lv = eval_const_int(node.left, bindings, call_hook,
-                                        conforms_to_pred)
-                except Exception:
-                    lv = None
             if lv is not None and not lv:
                 return True
-            return _const_foldable(node.right, bindings, call_hook, conforms_to_pred)
+            return _const_foldable(node.right, bindings, call_hook)
         if op == 'or':
-            if not _const_foldable(node.left, bindings, call_hook, conforms_to_pred):
+            if not _const_foldable(node.left, bindings, call_hook):
                 return False
             try:
-                lv = eval_const(node.left, bindings, None, conforms_to_pred)
+                lv = eval_const(node.left, bindings)
             except Exception:
                 lv = None
-            if lv is None and call_hook is not None:
-                # Mirror of the `and` case: a hook-foldable truthy left
-                # settles the whole condition.
-                try:
-                    lv = eval_const_int(node.left, bindings, call_hook,
-                                        conforms_to_pred)
-                except Exception:
-                    lv = None
             if lv is not None and lv:
                 return True
-            return _const_foldable(node.right, bindings, call_hook, conforms_to_pred)
-        return (_const_foldable(node.left, bindings, call_hook, conforms_to_pred)
-                and _const_foldable(node.right, bindings, call_hook, conforms_to_pred))
+            return _const_foldable(node.right, bindings, call_hook)
+        return (_const_foldable(node.left, bindings, call_hook)
+                and _const_foldable(node.right, bindings, call_hook))
     if isinstance(node, CompareChain):
         for _operand in node.operands:
-            if not _const_foldable(_operand, bindings, call_hook, conforms_to_pred):
+            if not _const_foldable(_operand, bindings, call_hook):
                 return False
         return True
     if (call_hook is not None and isinstance(node, CallExpr)
             and isinstance(node.func, IdentExpr)):
-        return eval_const_int(node, bindings, call_hook, conforms_to_pred) is not None
+        return eval_const_int(node, bindings, call_hook) is not None
     return False
 
 
 def eval_const_bool_state(node, bindings: dict, call_hook=None,
-                          platform: str = None, conforms_to_pred=None) -> int:
+                          platform: str = None) -> int:
     """`eval_const_bool` as CONST_TRUE / CONST_FALSE / CONST_UNKNOWN.
 
     Foldability comes first and from the expression's shape
@@ -1744,9 +1009,9 @@ def eval_const_bool_state(node, bindings: dict, call_hook=None,
     shape whose fold still fails (`1 // 0`) answers false rather than
     unknown -- the one place the two spellings differ, and a condition that
     divides by zero at compile time has no meaningful branch either way."""
-    if not _const_foldable(node, bindings, call_hook, conforms_to_pred):
+    if not _const_foldable(node, bindings, call_hook):
         return CONST_UNKNOWN
-    if eval_const_bool(node, bindings, call_hook, platform, conforms_to_pred):
+    if eval_const_bool(node, bindings, call_hook, platform):
         return CONST_TRUE
     return CONST_FALSE
 
@@ -1868,7 +1133,7 @@ def specialization_args(call, ct_params: list) -> list:
 
 
 def eval_const_call(node, bindings: dict, call_hook=None,
-                    platform: str = None, conforms_to_pred=None):
+                    platform: str = None):
     """Fold a bare call by RUNNING it through `call_hook`, or None.
 
     This is the seam a backend plugs its compile-time evaluator into: the
@@ -1892,9 +1157,9 @@ def eval_const_call(node, bindings: dict, call_hook=None,
         # has no IdentExpr case — that is the gimple path's behaviour, kept
         # exactly as it is — so it cannot see `comptime a = square(6)` being
         # passed straight into `comptime b = add(a, 1)`.
-        v = eval_const(a, bindings, platform, conforms_to_pred)
+        v = eval_const(a, bindings, platform)
         if not isinstance(v, (int, bool)) or isinstance(v, str):
-            v = eval_const_int(a, bindings, call_hook, conforms_to_pred)
+            v = eval_const_int(a, bindings, call_hook)
         if v is None:
             return None          # one unfolded argument ⇒ no constant
         args.append(int(v))
@@ -1902,7 +1167,7 @@ def eval_const_call(node, bindings: dict, call_hook=None,
 
 
 def resolve_var(stmt, bindings: dict, call_hook=None,
-                platform: str = None, conforms_to_pred=None):
+                platform: str = None):
     """What a `comptime NAME = value` statement binds, or None if it cannot.
 
     Returns ('value', v) for a scalar that folded, or ('list', ast) for a
@@ -1911,11 +1176,11 @@ def resolve_var(stmt, bindings: dict, call_hook=None,
     unroll over it. None means "not a compile-time constant", which a backend
     must report rather than quietly turn into a runtime variable: that would
     give the program different behaviour than the source declares."""
-    val = eval_const(stmt.value, bindings, platform, conforms_to_pred)
+    val = eval_const(stmt.value, bindings, platform)
     if val is None:
         # A call is the one shape `eval_const` cannot fold on its own; the
         # backend's hook runs it (see formal/comptime_runner.py).
-        val = eval_const_call(stmt.value, bindings, call_hook, platform, conforms_to_pred)
+        val = eval_const_call(stmt.value, bindings, call_hook, platform)
     if val is not None:
         return ('value', val)
     if isinstance(stmt.value, (_fc.ListExpr, _fc.TupleExpr)):
@@ -1924,27 +1189,27 @@ def resolve_var(stmt, bindings: dict, call_hook=None,
 
 
 def resolve_if(stmt, bindings: dict, platform: str = None,
-               call_hook=None, conforms_to_pred=None):
+               call_hook=None):
     """Which `comptime if` branch is taken, or None if it is not knowable.
 
     'then' / ('elif', i) / 'else' mean "emit only that branch"; None means the
     condition is not statically known and the backend must emit a runtime
     branch — same observable behaviour, no silent miscompile."""
     val = eval_const_bool_state(stmt.condition, bindings, call_hook,
-                                platform=platform, conforms_to_pred=conforms_to_pred)
+                                platform=platform)
     if val == CONST_TRUE:
         return 'then'
     if val == CONST_FALSE:
         for i, (cond, _body) in enumerate(getattr(stmt, 'elifs', None) or []):
             if eval_const_bool_state(cond, bindings, call_hook,
-                                     platform=platform, conforms_to_pred=conforms_to_pred) == CONST_TRUE:
+                                     platform=platform) == CONST_TRUE:
                 return ('elif', i)
         return 'else'
     return None
 
 
 def resolve_for_iterable(iterable, bindings: dict, list_asts: dict,
-                         unroll_cap: int, call_hook=None, conforms_to_pred=None):
+                         unroll_cap: int, call_hook=None):
     """The element expressions a `comptime for` iterates, or None.
 
     Two forms fold: `range(...)`, expanded with the same bounds as the
@@ -1976,7 +1241,7 @@ def resolve_for_iterable(iterable, bindings: dict, list_asts: dict,
         return None
     vals = []
     for a in rargs:
-        v = eval_const_int(a, bindings, call_hook, conforms_to_pred)
+        v = eval_const_int(a, bindings, call_hook)
         if v is None:
             return None
         vals.append(v)

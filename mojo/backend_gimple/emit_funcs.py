@@ -58,8 +58,8 @@ import mojo.backend_gimple.emit_infra as ginf
 from mojo.middle.funcs_shared import *  # noqa: F401,F403
 from mojo.middle.funcs_shared import (
     _SELFHOST_EXTRA_FIELD_CACHE, _as_dict, _as_funcdef_node, _as_str, _as_structdef_node, _find_generic_source,
-    _find_imported_struct, _find_symbol_home_module, _from_import_name_is_submodule, _resolved_export_entry, _imported_field_ctype, _local_sibling_module_exports, _module_attr_module, _note_struct_attr_alias, _note_struct_import_alias, _note_vararg_trailing_param_types, _pair_key,
-    _home_signature_ctypes, _param_ctype, _parsed_import, _reexported_defining_qualifier, _resolve_import_module_qualifier, _resolve_reexported_closure_func, _resolve_test_relative_module, _ris_base,
+    _find_imported_struct, _find_symbol_home_module, _from_import_name_is_submodule, _resolved_export_entry, _imported_field_ctype, _local_sibling_module_exports, _note_struct_attr_alias, _note_struct_import_alias, _note_vararg_trailing_param_types, _pair_key,
+    _param_ctype, _parsed_import, _resolve_import_module_qualifier, _resolve_reexported_closure_func, _resolve_test_relative_module, _ris_base,
     _ris_collect, _scan_from_imports_flat, _selfhost_begin_compile, _selfhost_extracted_fn_index, _selfhost_files_key, _selfhost_gen_self_param_ctype, _selfhost_parsed_source, _sgfs_resolve_ann, _signature_ctypes,
     _struct_method_overload_ids, _struct_method_qualifier
 )
@@ -142,7 +142,7 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
         env_var  = f"_env_{node.name}"
         alloc_fn = f"_alloc_{ci.env_struct}"
         gen._declare_var(env_var, f"{ci.env_struct} *")
-        gen._rt_into(env_var, alloc_fn, [])
+        gen._emit(f"  {env_var} = {alloc_fn} ();")
         for vname, vtype in ci.captures:
             # The FIELD's type, once, for every branch below — a by-reference
             # capture (`ci.mut_names`) is stored as a pointer to the owner's
@@ -439,10 +439,10 @@ def _gen_stmt_FromImportStmt(gen, node):
                 # two-step GIMPLE-safe sequence _lower_IdentExpr's global-read
                 # branch and the submod.GLOBAL branch both emit).
                 raw_ptr = gen._new_val(_gv_decl, f'{_gv_field}')
-                vp = gen._cast('void *', raw_ptr)
-                gen._cast_into(f"{gen._cname(symbol_name)}", 'int64_t', vp)
+                vp = gen._new_val('void *', f'(void *){raw_ptr}')
+                gen._emit(f"  {gen._cname(symbol_name)} = (int64_t){vp};")
             else:
-                gen._copy(f"{gen._cname(symbol_name)}", _gv_field)
+                gen._emit(f"  {gen._cname(symbol_name)} = {_gv_field};")
             continue
         # BUG-2026-021: resolve the name for real when the module is
         # resolvable — a function-scoped `from sibling import f` used to fall
@@ -522,14 +522,11 @@ def _gen_stmt_FromImportStmt(gen, node):
         if isinstance(_fi_info, dict) and _fi_info.get('signature'):
             if not (isinstance(gen.imported_symbols.get(symbol_name), dict)
                     and 'signature' in gen.imported_symbols[symbol_name]):
-                # The signature stays under the DEFINING name, exactly as
-                # the module-scope path (`_register_sym`) stores it: it
-                # describes the defining function, and the local alias is
-                # only a binding. The import-extern block renames the
-                # original identifier to the C symbol (`original_name` ->
-                # `csym` below); renaming it to the alias here made that
-                # rename a no-op and left the extern under the alias name.
                 _fi_sig = _fi_info['signature']
+                if symbol_name != name:
+                    import re as _re_fi
+                    _fi_sig = _re_fi.sub(r'\b' + _re_fi.escape(name) + r'\b',
+                                         symbol_name, _fi_sig, count=1)
                 gen.imported_symbols[symbol_name] = {
                     # `_fi_eff_mod`, not `node.module`: when the name only
                     # REACHES this module through a re-export, every reader
@@ -622,10 +619,8 @@ def _gen_stmt_FromImportStmt(gen, node):
                 _fi_pts = None
                 try:
                     for _fs in (gen._parsed_import(_fi_eff_mod)[2] or []):
-                        if (isinstance(_fs, gimple_ctypes.FunctionDef)
-                                and _fs.name == name
-                                and not (getattr(_fs, 'comptime_params', None) or [])):
-                            _fi_pts = gen._home_signature_ctypes(_fi_eff_mod, _fs)
+                        if isinstance(_fs, gimple_ctypes.FunctionDef) and _fs.name == name:
+                            _fi_pts = gen._signature_ctypes(_fs.params, _fs)
                             break
                 except Exception:
                     _fi_pts = None
@@ -638,24 +633,12 @@ def _gen_stmt_FromImportStmt(gen, node):
                         ]
                 if _fi_pts:
                     gen._imported_home_param_types[_pair_key(_fi_home, symbol_name)] = list(_fi_pts)
-            if symbol_name != name:
-                # The C symbol every call site under this alias is emitted
-                # with, resolved HERE, inside the function-body scope whose
-                # `record_flat=False` home binding `_func_csym` reads. The
-                # module-level import-extern preamble runs after that scope
-                # is popped, so resolving it there drops the qualifier and
-                # declares the bare name (a second, independent mismatch
-                # with the call site). The preamble reads this instead.
-                gen.imported_symbols[symbol_name]['csym'] = _as_str(
-                    gen._func_csym(symbol_name))
             # Param defaults too — same gap as the top-level loop had
             # before its own BUG-2026-020 fix.
             try:
                 _fi_fn = None
                 for _fs in (gen._parsed_import(_fi_eff_mod)[2] or []):
-                    if (isinstance(_fs, gimple_ctypes.FunctionDef)
-                            and _fs.name == name
-                            and not (getattr(_fs, 'comptime_params', None) or [])):
+                    if isinstance(_fs, gimple_ctypes.FunctionDef) and _fs.name == name:
                         _fi_fn = _fs
                         break
                 _pd = getattr(_fi_fn, 'param_defaults', None) or {} if _fi_fn else {}
@@ -720,22 +703,8 @@ def _gen_stmt_FromImportStmt(gen, node):
         # consults, and `Alias(...)` inside the function built the generic
         # opaque-constructor fallback. Same shared writer, so the two
         # scopes cannot disagree about what the alias names.
-        #
-        # When the writer confirms the aliased name IS a class, stop here:
-        # the module-scope twin deliberately never puts a class binding in
-        # `imported_symbols` ("a function I can emit an extern for"), and
-        # falling through to the bare no-signature tail below did exactly
-        # that — the extern pass emitted a weak `int64_t Alias (...)`
-        # "unavailable in compiled mode" stub and every value read of the
-        # alias bound to it (`g = Alias` printed `<function Alias at ...>`).
-        # The alias's identity lives in `_struct_import_aliases`, which the
-        # constructor dispatch and the IdentExpr class-value lowering both
-        # consult. First-writer-wins is preserved by the shared writer.
-        _is_class_alias = None
         if not getattr(node, 'wildcard', False):
-            _is_class_alias = gen._note_struct_import_alias(node.module, symbol_name, name)
-        if _is_class_alias is not None:
-            continue
+            gen._note_struct_import_alias(node.module, symbol_name, name)
         # Use known signature if available. Default to 'int64_t' (NOT
         # 'int') for unknown symbols — this must match the fallback
         # return type every other unknown-callee path in this file
@@ -808,13 +777,13 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
             bb_merge = gen._new_bb()
             bb_true = gen._new_bb()
             bb_false = bb_merge
-            gen._cond_goto(f"{cond_v_bool}", bb_true, f"{bb_false}")
+            gen._emit(f"  if ({cond_v_bool}) goto {bb_true}; else goto {bb_false};")
             gen._emit_label(bb_true)
             _bscope = ginf._open_block_scope(gen)
             for s in node.then_body:
                 gen.gen_stmt(s)
             ginf._close_block_scope(gen, _bscope)
-            gen._goto(bb_merge)
+            gen._emit(f"  goto {bb_merge};")
             gen._emit_label(bb_merge)
             if getattr(node, 'else_body', None):
                 for s in node.else_body:
@@ -846,7 +815,7 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
             # Unknown at compile time: emit as runtime branch
             _, cv = gen.lower_expr(elif_cond)
             bb_t = gen._new_bb(); bb_m = gen._new_bb()
-            gen._cond_goto(cv, bb_t, bb_m)
+            gen._emit(f"  if ({cv}) goto {bb_t}; else goto {bb_m};")
             gen._emit_label(bb_t)
             gen._comptime_runtime_depth = getattr(gen, '_comptime_runtime_depth', 0) + 1
             try:
@@ -856,7 +825,7 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
                 gen._close_block_scope(_bscope)
             finally:
                 gen._comptime_runtime_depth -= 1
-            gen._goto(bb_m)
+            gen._emit(f"  goto {bb_m};")
             gen._emit_label(bb_m)
             return
         if node.else_body:
@@ -878,13 +847,13 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
         else:
             bb_false = bb_merge
         bb_true = gen._new_bb()
-        gen._cond_goto(cond_v, bb_true, f"{bb_false}")
+        gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
         gen._emit_label(bb_true)
         _bscope = gen._open_block_scope()
         for s in node.then_body:
             gen.gen_stmt(s)
         gen._close_block_scope(_bscope)
-        gen._goto(bb_merge)
+        gen._emit(f"  goto {bb_merge};")
         # elif chains
         for _elif_idx, (elif_cond, elif_body) in enumerate(elifs):
             gen._emit_label(bb_false)
@@ -895,20 +864,20 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
                 bb_false = gen._new_bb()
             else:
                 bb_false = bb_merge
-            gen._cond_goto(f"{elif_cv}", bb_elif_true, f"{bb_false}")
+            gen._emit(f"  if ({elif_cv}) goto {bb_elif_true}; else goto {bb_false};")
             gen._emit_label(bb_elif_true)
             _bscope = gen._open_block_scope()
             for _elif_stmt in elif_body:
                 gen.gen_stmt(_elif_stmt)
             gen._close_block_scope(_bscope)
-            gen._goto(bb_merge)
+            gen._emit(f"  goto {bb_merge};")
         if has_else:
             gen._emit_label(bb_false)
             _bscope = gen._open_block_scope()
             for s in node.else_body:
                 gen.gen_stmt(s)
             gen._close_block_scope(_bscope)
-            gen._goto(bb_merge)
+            gen._emit(f"  goto {bb_merge};")
         gen._emit_label(bb_merge)
     finally:
         gen._comptime_runtime_depth -= 1
@@ -939,46 +908,6 @@ def _gen_stmt_ComptimeVarStmt(gen, node):
             gen._comptime_str_names.add(_ct_target)
         gen._comptime_vals[_ct_target] = val
     else:
-        # A comptime binding of an UNDER-SUPPLIED bracket specialization is a
-        # program error, not an unfoldable constant. `comptime f = param_fn[2]`
-        # for `def param_fn[x: Int, y: Int]` leaves `y` unbound: this path
-        # folded it to None, recorded nothing, and `f()` later fell to the
-        # weak-stub path (`f: unavailable in compiled mode`, then 0) -- a
-        # silent wrong answer. The CALL form `param_fn[2](1)` already
-        # diagnoses (emit_resolve's `unbound_type_parameter` guard); this is
-        # the same rule for the binding form, using the same helper.
-        _rhs0 = _ct_node.value
-        if isinstance(_rhs0, SubscriptExpr):
-            _b0 = getattr(getattr(_rhs0, 'obj', None), 'name', '')
-            _b0 = _as_str(_b0) if _b0 is not None else ''
-            _ix0 = getattr(_rhs0, 'index', None)
-            _els0 = (_ix0.elements if isinstance(_ix0, TupleExpr) else [_ix0])
-            _cfn0 = getattr(gen, '_current_filename', '') or ''
-            try:
-                _targs0 = [gen._type_expr_to_ann(e) for e in _els0]
-            except Exception:
-                _targs0 = None
-            if _b0 and _targs0 and _cfn0:
-                try:
-                    import elaborate as _elab0
-                    _tmpl0 = _elab0.extract_fn_source(
-                        gen._generic_source_text(_cfn0), _b0)
-                    _unb0 = (_elab0.unbound_type_parameter(_tmpl0, _targs0)
-                             if _tmpl0 else None)
-                    if (_unb0 and not _elab0.unbound_param_is_inferable(
-                            _tmpl0, _unb0)):
-                        _cln0 = getattr(_ct_node, 'line', 0) or 0
-                        _clc0 = getattr(_ct_node, 'col', 0) or 0
-                        _cat0 = (f'{_cfn0}:{_cln0}:{_clc0}: ' if _cfn0
-                                 else f'{_cln0}:{_clc0}: ')
-                        raise RuntimeError(
-                            f"{_cat0}error: failed to infer parameter "
-                            f"'{_unb0}', specify the parameter or use '_' or "
-                            f"'...' to unbind the parameter explicitly")
-                except RuntimeError:
-                    raise
-                except Exception:
-                    pass
         # Handle type aliases like `comptime socklen_t = c_uint` where
         # c_uint is itself a comptime alias to UInt32 (a scalar type).
         rhs = _ct_node.value
@@ -2229,19 +2158,7 @@ def overload_suffix_for(c_param_types) -> str:
     # own codegen. 6 hex digits emitted via `chr()` (compiled char*
     # subscription yields the byte value, not a 1-char string, so a
     # hex-alphabet index would not work).
-    # An importer's parameter list can carry `struct Name *` for a struct
-    # private to the defining module (see `_effective_param_types_hash`: the
-    # importer has no `Name` typedef, so the tag spells it), where the
-    # definer's own list says `Name *`. Hash the definer's spelling so both
-    # sides name one symbol. Plain slicing, no regex: this runs in the
-    # self-hosted compiler.
-    _norm = []
-    for _cpt in c_param_types:
-        _t = _as_str(_cpt)
-        if _t[:7] == 'struct ':
-            _t = _t[7:]
-        _norm.append(_t)
-    _s = ','.join(_norm)
+    _s = ','.join(c_param_types)
     _h = 0
     _i = 0
     _sn = len(_s)
@@ -2287,37 +2204,6 @@ def dup_def_signature_key(fn) -> tuple:
         has_dflt = bool((getattr(fn, 'param_has_default', None) or {}).get(pname.lstrip('*')))
         key.append((star, ptype, has_dflt))
     return (tuple(key), tuple(getattr(fn, 'comptime_params', None) or ()))
-
-
-def _def_param_ctypes(gen, node) -> list:
-    """The parameter ctypes a DEFINITION of `node` emits and hashes.
-
-    Same spelling as `_effective_param_types`'s successful answer
-    (`c_client_callable_ctype` over `_signature_ctypes`), so a definition and
-    every call site that resolves to it hash the identical suffix. Computed
-    from THIS NODE, never from the bare name: a module may define several
-    overloads of one name, and each has its own symbol."""
-    return [gimple_ctypes.c_client_callable_ctype(t)
-            for t in gen._signature_ctypes(node.params, node)]
-
-
-def _def_is_canonical(gen, node) -> bool:
-    """Whether `node` is the FIRST definition of its name in this unit.
-
-    The name-keyed registries (`_local_def_param_types`, the shared
-    `_home_def_param_types` store, `func_param_types`) can hold one answer per
-    bare name. For a single-definition name that answer is this node's. For an
-    overload set the first declared overload is the canonical one: it is what
-    a caller that cannot type-dispatch records at import time
-    (`module_shared`'s and `_gen_stmt_FromImportStmt`'s snapshot loops both
-    take the first NON-GENERIC declaration), so publishing anything else
-    under the bare name would make the two halves of the cross-module symbol
-    disagree."""
-    over = getattr(gen, '_local_def_overloads', None) or {}
-    lst = over.get(node.name)
-    if not lst:
-        return True
-    return lst[0] is node
 
 
 def _local_def_pts(gen, bare_name: str) -> list | None:
@@ -2445,18 +2331,10 @@ def _record_home_def_pts(gen, bare_name: str, pts: list) -> None:
         store[key] = list(pts)
 
 
-def _commit_home_def_pts(gen, node) -> list:
+def _commit_home_def_pts(gen, node) -> None:
     """Commit the EMITTING compilation's own signature into the shared
     `_home_def_param_types` store — the authoritative twin of
     `_record_home_def_pts` (a first-wins guess until this commit).
-
-    Returns the node's own signature list (possibly empty) in EVERY branch
-    — the caller (gen_func) uses it to pick THIS definition's suffix for an
-    overload set, so the annotation is `list`, not `None`: a `-> None` here
-    makes the self-hosted bootstrap type the call's result `void` and
-    declare `_def_pts` void (`bootstrap-stage2-cc`: `variable or field
-    '_def_pts' declared void` + `invalid use of void expression` in
-    gen_func's symbol mirror).
 
     Called from gen_func BEFORE `safe = gen._func_csym(node.name)` builds
     the emitted definition's symbol, with the function node, and commits
@@ -2487,25 +2365,17 @@ def _commit_home_def_pts(gen, node) -> list:
     call). See `_record_home_def_pts`'s docstring for the companion
     failure (a later NON-EMITTING re-compile clobbering the emitted
     value) that rules out blanket last-wins."""
-    sig = _def_param_ctypes(gen, node)
+    sig = gen._signature_ctypes(node.params, node)
     if not sig:
-        return sig
+        return
     store = getattr(gen, '_home_def_param_types', None)
     if store is None:
-        return sig
-    # An overload set has no single bare-name signature. Only the canonical
-    # (first-declared) overload may own the name-keyed entries; the others are
-    # emitted under symbols built from their own `sig` (returned to gen_func
-    # either way), and a caller that cannot type-dispatch names the canonical
-    # one because that is the signature its import snapshot records.
-    if not _def_is_canonical(gen, node):
-        return sig
+        return
     local = getattr(gen, '_local_def_param_types', None)
     if local is not None and node.name in local:
         local[node.name] = list(sig)
     key = _pair_key(_func_qualifier(gen, node.name), node.name)
     store[key] = list(sig)
-    return sig
 
 
 def _record_home_def_return_type(gen, stmt, bare_name: str, ctype: str) -> None:
@@ -2539,11 +2409,6 @@ def _record_home_def_return_type(gen, stmt, bare_name: str, ctype: str) -> None:
     if store is None or not ctype:
         return
     if id(stmt) not in getattr(gen, '_local_top_level_func_stmt_ids', ()):
-        return
-    # Overload sets: see `_commit_home_def_pts`. The bare-name key can hold
-    # only the canonical overload's answer; the others publish their own
-    # return type under their own symbol at the definition (gen_func).
-    if not _def_is_canonical(gen, stmt):
         return
     # Never raises for a name this unit defines: `_func_qualifier`'s tier-1
     # check (`bare_name in _local_top_level_func_names`) answers from the
@@ -2579,7 +2444,7 @@ def _home_def_return_type(gen, qualifier: str, bare_name: str):
     return store.get(_pair_key(qualifier, bare_name))
 
 
-def _imported_def_pts(gen, bare_name: str) -> list | None:
+def _imported_def_pts(gen, bare_name: str, definer_only: bool = False) -> list | None:
     """BUG-2026-024 helper: the parameter ctypes recorded for `bare_name` by
     its HOME module at FromImportStmt registration time
     (_imported_home_param_types, keyed (sanitized_home_qualifier, name)),
@@ -2598,15 +2463,10 @@ def _imported_def_pts(gen, bare_name: str) -> list | None:
     vs mod.computer.network.get_energy -> call sites emitted
     computer_case_get_energy_77b31a against definition ..._0ed997).
 
-    Both tiers below are read for every caller. The import-extern block used
-    to pass `definer_only=True` so an extern could only be re-typed from a
-    definition really in the translation unit, but that left it with
-    `module_loader`'s text-scan arity whenever the definition belonged to
-    ANOTHER unit (the ordinary single-module compile): the scan drops
-    unannotated parameters, so the extern declared fewer arguments than the
-    call sites — whose mangled suffix comes from `_effective_param_types` —
-    passed. It now reads the same list the name was hashed from, which is
-    what both tiers exist to supply.
+    `definer_only=True` skips the importer's own snapshot tier, so a hit means
+    a unit that DEFINES the name committed this signature (module_gen's extern
+    block uses it: an extern may only be re-typed from a definition that is
+    really in the translation unit).
 
     Never raises: an _AMBIGUOUS_FUNC_HOME entry resolves to None here so
     the caller falls through to the shared-slot tier; the authoritative
@@ -2665,307 +2525,36 @@ def _imported_def_pts(gen, bare_name: str) -> list | None:
         shared_home = getattr(gen, '_imported_func_home', None)
         if shared_home and bare_name in shared_home:
             candidate_quals.append(shared_home[bare_name])
-    if not candidate_quals:
-        # Last-resort candidate: the symbol's OWN import entry, the exact
-        # mirror of _func_qualifier's tier 4 (same guards: a 'signature' is
-        # present, `return_type` is not `unknown`, the module is real). A
-        # FUNCTION-BODY import binds its home only in the enclosing function's
-        # scope frame (record_flat=False, _gen_stmt_FromImportStmt's body
-        # pass), and gen_module's import-extern preamble runs after that frame
-        # is popped, so every tier above misses in the preamble while
-        # _func_qualifier STILL answers the name half from the entry — the
-        # param half then hashes the empty list and the extern goes out
-        # UNSUFFIXED next to the call site's suffixed symbol:
-        #   module_loader.py: implicit declaration of function
-        #   'mojo_middle_types_param_annotation_ctype_9f63a2' ...
-        #   conflicting types ... have 'char *(int64_t)'
-        # (bootstrap-stage2-cc). The one-half answer the entry carries is also
-        # what the call site hashed while the frame was live, so reading it
-        # here keeps name and params on one binding. The store keys below are
-        # (sanitized home module, name), so a same-bare-name entry from a
-        # different module (a reflected struct or global) cannot hit.
-        _imp_entry = _as_dict(
-            _as_dict(getattr(gen, 'imported_symbols', None)).get(bare_name))
-        if (_imp_entry and _as_str(_imp_entry.get('signature'))
-                and _imp_entry.get('return_type') != 'unknown'):
-            _entry_mod = _as_str(_imp_entry.get('module'))
-            if _entry_mod and _entry_mod != 'unknown':
-                candidate_quals.append(_entry_mod)
     for q in candidate_quals:
         _sq = _sanitize(q)
         if _def_store:
             pts = _def_store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts
-        if store:
+        if store and not definer_only:
             pts = store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts
     return None
 
 
-def _opaque_struct_tags(gen, pts):
-    """PTS with each `struct N *` (the tag spelling of a struct private to an
-    imported function's home module, see `_effective_param_types_hash`)
-    replaced by what THIS unit can name: `N *` when the unit really knows the
-    struct, else the opaque `int64_t` word every unknown struct is boxed as.
-    Anything else is returned unchanged, and None stays None."""
-    if not pts:
-        return pts
-    _known = getattr(gen, 'struct_field_types', None)
-    _out = []
-    for _p in pts:
-        _s = _as_str(_p)
-        if _s[:7] == 'struct ' and _s[-2:] == ' *':
-            _base = _s[7:-2].strip()
-            if _known and _base in _known:
-                _out.append(_base + ' *')
-            else:
-                _out.append('int64_t')
-        else:
-            _out.append(_p)
-    return _out
-
-
-def _imported_src_def_pts(gen, bare_name: str) -> list | None:
-    """Parameter ctypes from the DEFINING module's own source, for an imported
-    name whose textual import signature was unusable.
-
-    `module_loader`'s text scan produces ONE signature per name; a module that
-    declares the name more than once gets the unhelpful `(...)` variadic form
-    (`imported_symbols['_free']['signature'] == 'int64_t _free (...)'`). That
-    left `func_param_types[bare]` with the '...' packing sentinel, so
-    `overload_suffix_for` returned '' and every caller named the bare,
-    null-argument symbol while the definition emitted `..._9f63a2` — the
-    `(void)` extern class of the stdlib-dylib lazy-undefined-refs bug fixed
-    on 2026-11-15 (two same-name free functions in one module).
-
-    The answer is the FIRST NON-GENERIC declaration of `name` in the defining
-    module — exactly the overload the definition pass emits as canonical
-    (`_def_is_canonical`) and the import-time snapshot records when it can
-    (`module_shared`). Both halves therefore hash the same suffix.
-
-    The declaration's parameter list is resolved with
-    `_home_signature_ctypes` — the defining unit's own resolver — so a
-    parameter typed with a struct private to the home module hashes as
-    the definer spells it (part 7's class), not as the importer's
-    `int64_t` word.
-
-    Memoized per gen in `_imported_src_param_types`, keyed by
-    (defining module, bare name): every `_func_csym` call for the name asks,
-    and re-parsing a module per call site is the thing this cache exists to
-    avoid. Returns None when the module or the declaration cannot be found,
-    leaving the previous fallbacks untouched."""
-    mod0 = _as_dict(_as_dict(getattr(gen, 'imported_symbols', None)).get(bare_name))
-    mod = _as_str(_as_dict(mod0).get('module')) if mod0 else ''
-    if not mod or mod == 'unknown':
-        return None
-    memo = getattr(gen, '_imported_src_param_types', None)
-    if memo is None:
-        memo = {}
-        gen._imported_src_param_types = memo
-    _key = _as_str(mod) + '::' + _as_str(bare_name)
-    if _key in memo:
-        return memo[_key]
-    src_name = _as_str(_as_dict(mod0).get('original_name')) or bare_name
-    home = mod
-    try:
-        found = _find_symbol_home_module(gen, mod, src_name, 'fn')
-        if found:
-            home = found
-    except Exception:
-        pass
-    pts = None
-    try:
-        _pi = _parsed_import(gen, home)
-        _src = _as_str(_pi[1]) if _pi else ''
-        # ONLY an overloaded name needs this: with one declaration the
-        # text-scan signature is already the defining unit's, and overriding it
-        # from here would change the ctype of perfectly good single-definition
-        # imports (e.g. `std/collections/string/_unicode.mojo`'s
-        # `StringSlice[_]` parameters, whose bracket lowering is `Span *` in
-        # the definer but whose scanned/consumer form is `char *` — part 6's
-        # own open problem, not this one's).
-        if _src and (len(gimple_ctypes.source_decl_ends(
-                _src, ['fn', 'def'], src_name, '('))
-                     + len(gimple_ctypes.source_decl_ends(
-                         _src, ['fn', 'def'], src_name, '['))) > 1:
-            for _fs in (_pi[2] or []):
-                if (isinstance(_fs, gimple_ctypes.FunctionDef)
-                        and _as_str(_fs.name) == src_name
-                        and not (getattr(_fs, 'comptime_params', None) or [])):
-                    # The DEFINING unit's own resolver: a parameter
-                    # typed with a struct private to `home` is `struct
-                    # N *` there (part 7's tier 2b hashes it as the
-                    # definer's `N *`); the raw importer resolver would
-                    # fall to `int64_t` and hash a suffix the definer
-                    # never emits.
-                    pts = gen._home_signature_ctypes(home, _fs)
-                    break
-    except Exception:
-        pts = None
-    memo[_key] = pts
-    return pts
-
-
 def _effective_param_types(gen, bare_name: str) -> list | None:
     """The parameter ctypes a reference to `bare_name` in THIS compile unit
-    must honor when it CALLS it (argument coercion, the mangled-key mirror,
-    the extern's re-typing): `_effective_param_types_hash` with a struct private
-    to the home module spelled as this unit can name it (an opaque word unless
-    the unit knows the struct). `_overload_suffix` hashes the unfiltered list."""
-    return _opaque_struct_tags(gen, _effective_param_types_hash(gen, bare_name))
-
-
-def _effective_param_types_hash(gen, bare_name: str) -> list | None:
-    """The parameter ctypes a reference to `bare_name` in THIS compile unit
-    must honor — the single source of truth for the mangled free-function
-    symbol: `_overload_suffix` hashes this list. A parameter typed with a
-    struct private to the DEFINING module is `struct N *` here (its tag form;
-    `overload_suffix_for` hashes it as the definer's `N *`), which is why
-    callers that coerce arguments use `_effective_param_types`, not this.
-    Tier order:
+    must honor — the single source of truth for BOTH halves of a mangled
+    free-function symbol: `_overload_suffix` hashes this list, and
+    _func_csym's mangled-key mirror feeds it to _emit_call's argument
+    coercion. Tier order:
     1. _local_def_pts — this unit defines the name (BUG-2026-019).
     2. _imported_def_pts — an imported name's home-module signature,
        recorded at FromImportStmt registration (BUG-2026-024).
-    2b. _imported_private_struct_pts — the same home signature, asked for
-       directly, when it names a struct private to the home module.
-    2c. _imported_src_def_pts — the defining module's own first non-generic
-       declaration, for a name whose textual import signature is the
-       unhelpful `(...)` form (two or more declarations).
     3. shared func_param_types[bare] — legacy fallback; permanently
        oscillates when same-named siblings exist, so tiers 1/2 exist."""
     pts = _local_def_pts(gen, bare_name)
     if pts is None:
         pts = _imported_def_pts(gen, bare_name)
     if pts is None:
-        # A parameter typed with a struct private to the home module hashes as
-        # the definer's `N *`. The text scan boxes the unknown name to
-        # `int64_t`, and the extern's own registration stores THAT in
-        # `func_param_types` just before it asks for the mangled name, so this
-        # must outrank the shared slot (tier 2 is not recorded yet then).
-        pts = _imported_private_struct_pts(gen, bare_name)
-    if pts is None:
-        # The defining module's own first declaration, for a name whose
-        # textual import signature was unusable (two overloads -> `(...)`).
-        pts = _imported_src_def_pts(gen, bare_name)
-    if pts is None:
         pts = gen.func_param_types.get(bare_name)
-    if pts is None:
-        pts = _import_entry_param_types(gen, bare_name)
-    if pts:
-        pts = [gimple_ctypes.c_client_callable_ctype(p) for p in pts]
     return pts
-
-
-def _home_private_struct_pts(gen, info) -> list | None:
-    """`_home_signature_ctypes` of the one FunctionDef an import entry names, but
-    ONLY when it names a struct private to the home module (some element is
-    `struct N *`); else None, so every other import keeps its scanned types.
-
-    `info` is an `imported_symbols` entry: `module` is where the function is
-    defined and `original_name` its name there. None when the module does not
-    parse, the name is not defined exactly once (overloads share a name and the
-    extern is variadic), or the entry is a re-export (the FunctionDef is not in
-    that file)."""
-    _mod = _as_str(info.get('module'))
-    _name = _as_str(info.get('original_name'))
-    if not _mod or not _name:
-        return None
-    _stmts = gen._parsed_import(_mod)[2] or []
-    _found = None
-    _n = 0
-    for _fs in _stmts:
-        if isinstance(_fs, gimple_ctypes.FunctionDef) and _fs.name == _name:
-            _found = _fs
-            _n = _n + 1
-    if _n != 1:
-        return None
-    # A generic template is elaborated per call, never named by an extern's
-    # overload hash, so the definer's list does not apply to it.
-    if getattr(_found, 'comptime_params', None):
-        return None
-    _pts = gen._home_signature_ctypes(_mod, _found)
-    # A struct private to the home module is spelled two ways in the home unit's own
-    # signature: the tag form `struct N *`, and the bare `N *` for a struct the module
-    # defines (`_GraphemeBreakState *`, `_RandomState *`). The importer does not know
-    # either, so both take the definer's list.
-    _home_structs = set()
-    _generic_structs = set()
-    for _hs in _stmts:
-        if isinstance(_hs, gimple_ctypes.StructDef):
-            if _hs.bracket_params:
-                _generic_structs.add(_as_str(_hs.name))
-            else:
-                _home_structs.add(_as_str(_hs.name))
-    _named = False
-    for _p in _pts:
-        _ps = _as_str(_p)
-        _base = _ps[7:] if _ps[:7] == 'struct ' else _ps
-        if _base.endswith(' *'):
-            _base = _base[:-2].strip()
-        if _base in _generic_structs:
-            return None
-        if _ps[:7] == 'struct ' or _base in _home_structs:
-            _named = True
-    return _pts if _named else None
-
-
-def _imported_private_struct_pts(gen, bare_name: str) -> list | None:
-    """`_home_private_struct_pts` for the import entry named BARE_NAME, memoized
-    per generator (every reference to the name asks, and the home module's
-    statements are scanned each time otherwise). The cache holds `[]` for
-    "no home-private struct" so the typed field never holds None."""
-    _info = _as_dict(_as_dict(getattr(gen, 'imported_symbols', None)).get(bare_name))
-    if not _info or not _as_str(_info.get('signature')):
-        return None
-    _kmod = _as_str(_info.get('module'))
-    _kname = _as_str(_info.get('original_name'))
-    if not _kmod or not _kname:
-        return None
-    _key = _kmod + '\x00' + _kname
-    _cache = gen._private_struct_pts_cache
-    if _key in _cache:
-        _hit = _cache[_key]
-        return _hit if _hit else None
-    _pts = _home_private_struct_pts(gen, _info)
-    _cache[_key] = list(_pts) if _pts else []
-    return _pts
-
-
-def _import_entry_param_types(gen, bare_name: str) -> list | None:
-    """Bare c parameter types read out of the symbol's OWN import entry.
-
-    The designated tiers above are all populated by registration passes that
-    run after gen_module's early `/* from <mod> */` extern block, so on that
-    first pass they are empty and `_overload_suffix` hashed the empty list —
-    the extern went out as `extern char * mojo_middle_types__mojo_type
-    (char * ann)` (right qualifier, NO suffix) while every call site,
-    resolved later, emitted `mojo_middle_types__mojo_type_d719e0`. Two spellings
-    of one function: gcc reports the call as an implicit declaration, then
-    "conflicting types" against the real prototype.
-
-    `imported_symbols[name]['c_parameters']` is the one store that IS filled by
-    then, but it keeps the parameter NAMES (`['char * ann']`) while the
-    overload hash is defined over the BARE types (`['char *']` -> `_d719e0`).
-    Strip the trailing identifier and the hash matches the defining module's
-    own compile. Guarded on a `'signature'` being present so a module ALIAS
-    entry (`{module, return_type: 'unknown'}`) can never be hashed as a
-    function.
-    """
-    _info = _as_dict(_as_dict(getattr(gen, 'imported_symbols', None)).get(bare_name))
-    if not _info or not _as_str(_info.get('signature')):
-        return None
-    _cps = _info.get('c_parameters')
-    if not isinstance(_cps, list) or not _cps:
-        return None
-    _out = []
-    for _cp in _cps:
-        _s = _as_str(_cp)
-        if not _s:
-            continue
-        _out.append(re.sub(r'\s+[A-Za-z_][A-Za-z0-9_]*$', '', _s))
-    return _out or None
 
 
 def _overload_suffix(gen, bare_name: str) -> str:
@@ -2982,7 +2571,7 @@ def _overload_suffix(gen, bare_name: str) -> str:
     # extern ("expected 'TuffBricks *' but argument is of type 'Tuff *'").
     # The qualifier tier already disambiguates the NAME; this gives the
     # SUFFIX the same per-module truth.
-    return gen.overload_suffix_for(_effective_param_types_hash(gen, bare_name))
+    return gen.overload_suffix_for(_effective_param_types(gen, bare_name))
 
 
 def _note_own_func_home(gen, bare_name: str, module_name: str,
@@ -3077,6 +2666,31 @@ def _note_own_func_home(gen, bare_name: str, module_name: str,
         home[bare_name] = gimple_codegen._AMBIGUOUS_FUNC_HOME
 
 
+def _find_decl_location(gen, module: str, name: str):
+    """Best-effort `(path, line, col)` of `name`'s top-level declaration in
+    `module`'s source, for an ambiguity note. None when the module or the
+    declaration cannot be located."""
+    import os as _os
+    try:
+        _p = gen._submodule_source_path(module)
+    except Exception:
+        _p = None
+    if not _p:
+        return None
+    try:
+        with open(_p, 'r') as _f:
+            _lines = _f.readlines()
+    except Exception:
+        return None
+    import re as _re
+    _pat = _re.compile(r'^\s*(?:def|fn|struct|trait|enum|alias|comptime|var|let)\s+'
+                       + _re.escape(name) + r'\b')
+    for _i, _ln in enumerate(_lines, 1):
+        if _pat.match(_ln):
+            return (_p, _i, 1)
+    return None
+
+
 def _push_import_scope(gen) -> dict:
     """Push a fresh lexical-scope import-binding map onto
     _import_scope_stack (see its docstring) and return it — used at the
@@ -3120,53 +2734,7 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict,
     to a different module, the unbound reference is ambiguous and is
     refused rather than silently resolved to either one."""
     for stmt in node_list:
-        if isinstance(stmt, gimple_ctypes.ImportStmt):
-            # A plain `import M as A` binds a MODULE NAMESPACE in this
-            # lexical scope, not a symbol: record it exactly as
-            # `_gen_stmt_ImportStmt` will when the body is emitted (module
-            # alias set + a `{module, return_type: 'unknown'}` entry), and
-            # record the name -> qualifier binding in the scope frame the
-            # same way the `FromImportStmt` branch below does. Without the
-            # frame entry, a lifted closure (`_gen_lifted_closure_body`
-            # seeds its scope from `_func_import_frames`, and the
-            # whole-module pre-scan fills that BEFORE any body is emitted)
-            # cannot see an alias its enclosing function binds, so
-            # `A.member(...)` inside the closure lowers on an unknown
-            # name: a placeholder receiver plus a bare/stubbed callee
-            # instead of the qualified symbol. Without the alias-set entry
-            # the module-marker branches (`_lower_MemberExpr`,
-            # `_lower_IdentExpr`, the module-qualified call paths) never
-            # recognize it as a namespace at all.
-            #
-            # `__impmod__` marks the binding as a plain-import alias so the
-            # `FromImportStmt` ambiguity check below does not treat a later
-            # `from Y import A` (a legal Python shadow, not an ambiguous
-            # same-name import) as an error.
-            for _im_mod_raw, _im_alias_raw in gimple_ctypes._import_targets(stmt):
-                _im_mod = gimple_ctypes._as_str(_im_mod_raw)
-                _im_alias = gimple_ctypes._as_str(_im_alias_raw)
-                # `import a.b` (no alias) binds the top-level package name
-                # `a` — same rule as `_gen_stmt_ImportStmt`.
-                if _im_alias:
-                    _im_local = _im_alias
-                elif '.' in _im_mod:
-                    _im_local = _im_mod[:_im_mod.index('.')]
-                else:
-                    _im_local = _im_mod
-                if not _im_local:
-                    continue
-                _im_q = gen._resolve_import_module_qualifier(_im_mod)
-                if not _im_q:
-                    continue
-                scope[_im_local] = _im_q
-                scope['__mod__' + _im_local] = _im_mod
-                scope['__impmod__' + _im_local] = _im_mod
-                gen._module_alias_names.add(_im_local)
-                gen.imported_symbols[_im_local] = {
-                    'module': _im_mod,
-                    'return_type': 'unknown',
-                }
-        elif isinstance(stmt, gimple_ctypes.FromImportStmt) and not getattr(stmt, 'wildcard', False):
+        if isinstance(stmt, gimple_ctypes.FromImportStmt) and not getattr(stmt, 'wildcard', False):
             for _fip3 in (getattr(stmt, 'name_alias_strs', None) or []):
                 nm = gimple_ctypes._fi_name(_fip3)
                 alias = gimple_ctypes._fi_alias(_fip3)
@@ -3194,8 +2762,7 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict,
                     continue
                 _local_nm = alias if alias else nm
                 _prev_q = scope.get(_local_nm)
-                if (_prev_q is not None and _prev_q != q
-                        and ('__impmod__' + _local_nm) not in scope):
+                if _prev_q is not None and _prev_q != q:
                     # The same name imported from two different modules into
                     # one function scope is ambiguous (modular's
                     # import_fn_scope_ambiguous.mojo). A re-import from the
@@ -3203,13 +2770,30 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict,
                     # pre-scan, so the diagnostic points at the SECOND import
                     # (the body pass runs after this map is already filled and
                     # would otherwise flag the first one).
-                    # The message and its notes come from the one shared
-                    # formatter (mojo/middle/import_ambiguity.py), the same one
-                    # the module-scope check uses.
-                    from mojo.middle.import_ambiguity import ambiguous_import_error
-                    raise RuntimeError(ambiguous_import_error(
-                        gen, _local_nm, scope.get('__mod__' + _local_nm), stmt.module,
-                        getattr(stmt, 'line', 0) or 0))
+                    _iln = getattr(stmt, 'line', 0) or 0
+                    _ilc = getattr(stmt, 'col', 0) or 0
+                    _ifn = getattr(gen, '_current_filename', '') or ''
+                    _iat = f'{_ifn}:{_iln}:{_ilc}: ' if _ifn else f'{_iln}:{_ilc}: '
+                    # Notes naming where each module declares the name, as
+                    # modular does (`note: 'X' declared here` / `also declared
+                    # here`). Best-effort: resolve each module to a source
+                    # file and find the declaration line.
+                    _prev_mod = scope.get('__mod__' + _local_nm)
+                    _decls = []
+                    for _mod in (_prev_mod, stmt.module):
+                        if not _mod:
+                            continue
+                        _d = _find_decl_location(gen, _mod, _local_nm)
+                        if _d:
+                            _decls.append(_d)
+                    _note_txt = ''
+                    if len(_decls) == 2:
+                        _note_txt = (f"\n{_decls[0][0]}:{_decls[0][1]}:{_decls[0][2]}: "
+                                     f"note: '{_local_nm}' declared here")
+                        _note_txt += (f"\n{_decls[1][0]}:{_decls[1][1]}:{_decls[1][2]}: "
+                                      f"note: '{_local_nm}' also declared here")
+                    raise RuntimeError(
+                        f"{_iat}error: import of '{_local_nm}' is ambiguous{_note_txt}")
                 scope[_local_nm] = q
                 scope['__mod__' + _local_nm] = stmt.module
                 _lex = getattr(gen, '_lexical_func_import_homes', None)
@@ -3395,22 +2979,6 @@ def _func_qualifier(gen, bare_name: str) -> str:
         # to layer on the per-compile `_inline_module_qualifiers` remap,
         # which needs a `gen`.
         from mojo.middle.module_shared import module_qualifier
-        # An EMPTY module name means "no module" (the root compile's own
-        # `GimpleGen` is built without one), so it must sanitize to no
-        # qualifier. Without this guard the remap below answered for it:
-        # `_inline_module_qualifiers` is keyed by the SANITIZED module of
-        # every inlined file AND by `module.lstrip('.')...` for relative
-        # imports (`funcs_shared.py:1276`), so a `from . import x` writes
-        # the key `''` — and the last such writer in a whole-closure build
-        # was `mojo.middle`, making `_sanitize_qualifier('')` return
-        # `mojo_middle`. Every function the ROOT module defined then got a
-        # spurious `mojo_middle_` prefix while its importers' call sites
-        # (resolved through their own non-empty module) stayed bare:
-        # fire.py's `build_executable` was emitted as
-        # `mojo_middle_build_executable_d8f39a` against call sites emitting
-        # `build_executable_d8f39a` — undefined symbol at link.
-        if not q:
-            return ''
         key = module_qualifier(q)
         resolved = gen._inline_module_qualifiers.get(key, key)
         return module_qualifier(resolved)
@@ -3488,32 +3056,6 @@ def _func_qualifier(gen, bare_name: str) -> str:
                 if _sanitize_qualifier(_lq) != _cand:
                     raise RuntimeError(_ambiguous_func_import_error(bare_name))
         return _cand
-    # Tier 4 — the symbol's OWN import entry. Every writer that records a
-    # genuine imported function (`_register_sym`, `_gen_stmt_FromImportStmt`'s
-    # body pass, the re-export resolver) stores the DEFINING module in
-    # `imported_symbols[name]['module']`, and `_func_csym` needs that module
-    # to build the same mangled symbol the defining module's own compile
-    # emitted. Tiers 1-3 are all populated by the import scan, which runs
-    # AFTER gen_module's early `/* from <mod> */` extern block — so on that
-    # first pass every tier misses and this name used to come back
-    # unqualified. The extern was then emitted as `extern char * _mojo_type
-    # (...)` while the call sites, resolved later, emitted
-    # `mojo_middle_types__mojo_type_d719e0` — "implicit declaration of
-    # function ... did you mean ..." plus a conflicting weak
-    # `int64_t _mojo_type (...)` "unavailable in compiled mode" stub from the
-    # call sites that still saw the bare name.
-    #
-    # Guarded on a `'signature'` being present (and `return_type` not
-    # `unknown`) so a module ALIAS entry — `{module, return_type: 'unknown'}`,
-    # written by `_gen_stmt_ImportStmt`/the submodule-alias path — can never
-    # be mistaken for a function and inherit a bogus qualifier.
-    _imp4 = getattr(gen, 'imported_symbols', None)
-    if _imp4 and bare_name in _imp4:
-        _info4 = _as_dict(_imp4[bare_name])
-        if _as_str(_info4.get('signature')) and _info4.get('return_type') != 'unknown':
-            _mod4 = _as_str(_info4.get('module'))
-            if _mod4 and _mod4 != 'unknown':
-                return _sanitize_qualifier(_mod4)
     return ''
 
 
@@ -3602,60 +3144,14 @@ def _func_mangleable(gen, name: str) -> bool:
         return True
     if name in gen._LIBC_DECLARED:
         return False
-    # An imported Mojo function whose home unit really defines it, even when
-    # `imported_symbols` carries NO `signature`: the text scan cannot produce
-    # one when the home source declares the name more than once (two
-    # overloads), so the old test below called such a name UNMANGLED and every
-    # reference was the bare, suffix-less symbol (the `(void)` extern
-    # fallback this part's evidence shows for `std_bit_mask_splat`,
-    # `std_memory_memory__free`, `std_memory_memory_unsafe_memset_zero`).
-    # `_imported_def_pts` answers from the home module's own first non-generic
-    # declaration — the same one this unit's definition pass emits as its
-    # canonical overload — so the suffix now agrees with a definition that
-    # exists.
-    if _imported_def_pts(gen, name) is not None:
-        return True
-    if _imported_src_def_pts(gen, name) is not None:
-        return True
     info = gen.imported_symbols.get(name)
     return bool(info and 'signature' in info and info.get('kind') != 3)
 
 
-def _func_csym(gen, bare_name: str, def_pts: list | None = None) -> str:
-    """The C symbol codegen gives a free function, recorded on `gen` so the
-    export table can name the symbol the object actually defines.
-
-    Every definition and call site asks this function for the name, so the
-    record is the authoritative answer for each bare name in this module; see
-    `_func_csym_impl` for how the name is built."""
-    if def_pts is None:
-        # An imported name whose home signature names a struct private to the
-        # defining module was recorded with the definer's list when its import
-        # entry was processed; every later name for it hashes that list.
-        _hp = getattr(gen, '_home_private_pts_by_name', None)
-        if _hp and bare_name in _hp:
-            def_pts = _hp[bare_name]
-    sym = _func_csym_impl(gen, bare_name, def_pts)
-    rec = getattr(gen, '_func_csym_record', None)
-    if rec is None:
-        rec = {}
-        gen._func_csym_record = rec
-    rec.setdefault(bare_name, set()).add(sym)
-    return sym
-
-
-def _func_csym_impl(gen, bare_name: str, def_pts: list | None = None) -> str:
+def _func_csym(gen, bare_name: str) -> str:
     """The C symbol for a free function: _safe_name + overload suffix when the
     function is a user/imported Mojo function eligible for mangling. Used at the
-    definition, every forward declaration, and every call site so they agree.
-
-    `def_pts` is the DEFINITION-side parameter ctype list (`_def_param_ctypes`)
-    when this call is emitting a specific top-level FunctionDef. It exists for
-    overloads: a module may define several same-named free functions, and each
-    definition's suffix must hash ITS OWN signature rather than the one
-    name-keyed registry slot. Call sites leave it None and resolve through the
-    import/local tiers (`_overload_suffix`), or pick a concrete overload node
-    and pass that node's ctypes (emit_calls._local_overload_call_symbol)."""
+    definition, every forward declaration, and every call site so they agree."""
     # `from X import real_name as bare_name`: the DEFINING module compiled
     # `real_name` under ITS OWN bare (unaliased) name — an alias is purely a
     # local binding in the IMPORTING module, so this call site's mangled
@@ -3687,11 +3183,7 @@ def _func_csym_impl(gen, bare_name: str, def_pts: list | None = None) -> str:
         qualified_base = qualifier + '_' + base
     else:
         qualified_base = base
-    if def_pts is not None:
-        _suffix = _as_str(gen.overload_suffix_for(def_pts))
-    else:
-        _suffix = _as_str(gen._overload_suffix(bare_name))
-    mangled = qualified_base + _suffix
+    mangled = qualified_base + _as_str(gen._overload_suffix(bare_name))
     # Mirror the param/return types under the mangled key so _emit_call's
     # argument coercion and return typing (keyed by the emitted name) still
     # work — func_param_types/func_return_types are keyed by the bare name.
@@ -3741,7 +3233,7 @@ def _func_csym_impl(gen, bare_name: str, def_pts: list | None = None) -> str:
         # between the two halves emits call symbols whose suffix says one
         # module while the casts say another (the `(ComputerNetwork *)c`
         # argument at test_computer_mod.mojo's get_energy(c) call sites).
-        _eff_pts = def_pts if def_pts is not None else _effective_param_types(gen, bare_name)
+        _eff_pts = _effective_param_types(gen, bare_name)
         if _eff_pts is not None:
             gen.func_param_types[mangled] = _eff_pts
         # The RETURN-type twin of `_effective_param_types` above, and the same
@@ -3761,18 +3253,6 @@ def _func_csym_impl(gen, bare_name: str, def_pts: list | None = None) -> str:
         # Fallback stays the bare slot, so a name with no per-definition entry
         # (no unit in the closure defines it here — a dylib in link mode, whose
         # return type comes from `imported_symbols`) behaves exactly as before.
-        #
-        # A name this module defines SEVERAL times (an overload set) has no
-        # single return type to mirror: the bare slot holds one overload's
-        # answer, and writing it here put `void` (from `dummy() -> None`)
-        # under the symbol of `dummy(x0, ..., x9) -> Float32` every time the
-        # bare name was looked up, so that overload's prototype contradicted
-        # its definition. Each overload's symbol gets its return type from
-        # its own definition (`gen_func`) and from the call that resolved it
-        # (`_local_overload_call_symbol`); nothing is mirrored for the set.
-        _ov_set = (getattr(gen, '_local_def_overloads', None) or {}).get(bare_name)
-        if _ov_set and len(_ov_set) >= 2:
-            return mangled
         _eff_ret = _home_def_return_type(gen, qualifier, bare_name)
         if _eff_ret is None:
             _eff_ret = gen.func_return_types.get(bare_name)
@@ -3824,7 +3304,7 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
         _pbase = _pa.split('[', 1)[0].strip()
         if _pbase in ('Tuple', 'tuple') and '[' in _pa:
             gen._ensure_tuple_struct(_pa)
-        if _pbase not in ('list', 'List', 'set', 'Set', 'frozenset', 'dict', 'Dict', 'Span', 'Array', 'FixedSizeArray') or '[' not in _pa:
+        if _pbase not in ('list', 'List', 'set', 'Set', 'frozenset', 'dict', 'Dict', 'Span') or '[' not in _pa:
             continue
         _pin = gimple_ctypes._split_top_level_commas(
             _pa[_pa.index('[') + 1:_pa.rindex(']')].strip())
@@ -3851,11 +3331,7 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
         # char* (the `_mojo_at_int64_t` / `*` errors in python.mojo's
         # Python.dict(tuples: Span[Tuple[...], _]) body, which only became
         # visible once that overload's signature was correct).
-        # `Array[T, N]` and `FixedSizeArray[T, N]` carry the count SECOND, so
-        # they take their element from the first bracket argument too. Without
-        # this their two-arg bracket fails the `len(_pin) != 1` gate below and
-        # the parameter's element type was never seeded.
-        if _pbase in ('Span', 'Array', 'FixedSizeArray'):
+        if _pbase == 'Span':
             if not _pin or not _pin[0].strip():
                 continue
             _pin = [_pin[0]]
@@ -3883,16 +3359,6 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
                 gen._nested_elem_types.setdefault(bare, _sc)
         else:
             _ec = _annotated_elem_ctype(gen, _eann)
-            if _ec == 'float':
-                # `Float32` elements of a container are stored as C `double`
-                # (the Array/FixedSizeArray constructor arm does the same:
-                # `MojoList`'s float elements are doubles — emit_calls.py
-                # `_elem_ct == 'float' -> 'double'`). Without this a
-                # param-seeded element stayed `float`, so `a[0]` read
-                # `mojo_list_get_float` and `Span(a)` read `_mojo_at_float`,
-                # while the same value built by a constructor read
-                # `mojo_list_get_double`/`_mojo_at_double`.
-                _ec = 'double'
             if _ec and _ec != 'int64_t':
                 gen._elem_types.setdefault(bare, _ec)
 
@@ -3977,7 +3443,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # Set module context for global field access
     gen._current_module_ctx = gen.module_name if len(gen.module_name) > 0 else "root"
     gen.current_func_name = node.name
-    gen._current_func_node = node    # A module-level function is not a method: clear the struct a previous
+    # A module-level function is not a method: clear the struct a previous
     # METHOD body left behind (the method path sets it and never resets it).
     # A stale name made a local called `cls` here take the classmethod arm of
     # `_lower_MemberExpr`, lowering `cls.methods` to a dynamic
@@ -4057,32 +3523,6 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             gen._elem_types[_pe_bare] = e
             if ne:
                 gen._nested_elem_types[_pe_bare] = ne
-    # The CONTAINER-KIND half of that contract, and the reason it has to be
-    # seeded here rather than left to `param_binding_ctype`: a stack-switch
-    # generator body receives every source parameter as an `int64_t` ABI word
-    # (`var p = __mojo_gen_arg(...)`), so the declared C type of a container
-    # parameter is ALWAYS the box. `param_binding_ctype` can rewrite an
-    # ordinary function's declaration and declaration+definition agree; a
-    # generator body's declaration is fixed by the ABI and cannot.
-    #
-    # ONLY `MojoDict *` is seeded, deliberately. A dict's KIND is what makes
-    # `sorted(d)` sort string keys and `d[k]` a dict read at all; without it
-    # both fell to the int64_t path (the doc's `texts[p]` lowered as
-    # `mojo_list_get_int((MojoList *)texts, ...)`). A LIST's kind, by
-    # contrast, is not seeded: its element type already rides in
-    # `_elem_types` (the contract above), and forcing `_actual_types` to
-    # `MojoList *` changed the `enumerate` lowering from the kind-aware boxed
-    # read to `mojo_list_get_int`, so a float list param printed its raw IEEE
-    # bits (`generator_enumerate_float_element_*`). `_lower_builtin_sorted`
-    # takes the element type directly instead (see its own note).
-    # `_reset_func` has just emptied `_actual_types`, so each entry here is
-    # this function's own evidence.
-    _pct: dict = getattr(gen, '_param_container_types', {}).get(node.name, {})
-    for _pct_key in _pct:
-        _pct_bare = _as_str(_pct_key)
-        _pct_t = _as_str(_pct[_pct_bare])
-        if _pct_t == 'MojoDict *':
-            gen._actual_types[_pct_bare] = _pct_t
     # ...and the dict-VALUE half of the same contract, for the same reason and
     # beside it. A dict parameter has no binding site inside the callee, so
     # without this every `d[k]` / `d.items()` in the body fell to the
@@ -4159,8 +3599,6 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             ret_type = 'int64_t'
 
     gen.func_ret_type = ret_type
-    gen.current_func_ret_ann = (
-        node.return_type if isinstance(node.return_type, str) else '')
     # Sync so forward declarations (Phase 2b) match Phase 2a inference
     gen.func_return_types[node.name] = ret_type
     # ...and so does every CALL SITE of this definition, which reaches this
@@ -4219,11 +3657,6 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             ctype = 'MojoList *'
         else:
             ctype = gen._param_ctype(pname, ptype, node)
-        # A callable-valued parameter is typed `std::function<...>` for C++
-        # coroutine units, but a C-emitted function spells it as the runtime's
-        # boxed word. `emit_funcs` writes C/GIMPLE output, so keep the C form
-        # in the signature, stored param types and the body's var type.
-        ctype = gimple_ctypes.c_client_callable_ctype(ctype)
         safe_bare = gen._param_safe_name(bare)
         gen.var_types[bare] = ctype
         if safe_bare != bare:
@@ -4260,46 +3693,23 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
             _api24 = gen._generator_api.get(_gf)
             if _api24 is not None:
                 gen._generator_var_api[gen._cname(_pb)] = _api24
-                # A parameter crossed a call boundary: the caller holds the
-                # value and may drain it again after this body returns, so
-                # a drain here must not destroy it (see
-                # _generator_value_owned).
-                gen._generator_value_owned[gen._cname(_pb)] = False
 
     params_str = ', '.join(param_strs) if param_strs else 'void'
     # Record that this function takes varargs so call sites can pack args
     if has_varargs:
-        gen.func_param_types[node.name] = [
-            gimple_ctypes.c_client_callable_ctype(t)
-            for t in gen._signature_ctypes(node.params, node)
-        ]
+        gen.func_param_types[node.name] = gen._signature_ctypes(node.params, node)
         gen._note_vararg_trailing_param_types(node)
     # The emit is the authority for the shared signature store: commit the
     # exact param types this definition's symbol/prototype were built from,
     # BEFORE the symbol is resolved, so the def's own suffix (tier 1) and
     # every importer's tier-2 hash agree by construction (see
-    # _commit_home_def_pts). The returned list is THIS node's signature, and
-    # it — not the name-keyed registry — picks this definition's suffix, so
-    # two same-named free functions get two distinct symbols.
-    _def_pts = _commit_home_def_pts(gen, node)
-    _def_sym_map = getattr(gen, '_def_sym_by_id', None) or {}
-    safe = _as_str(_def_sym_map.get(id(node), '')) or gen._func_csym(node.name, _def_pts)
-    # A disambiguated symbol (two source overloads that erase to the same C
-    # signature get `_<n>` appended by gen_module so both bodies can exist)
-    # was not the name `_func_csym` mirrored this definition's types under.
-    # Mirror them here so a call that names the disambiguated symbol coerces
-    # and types exactly as this definition emits.
-    if _def_pts is not None:
-        gen.func_param_types[safe] = _def_pts
-    # The definition's own return type, under its own emitted symbol. The
-    # bare-name entry below is last-overload-wins for an overload set; a call
-    # site that resolved a specific overload reads this symbol-keyed entry
-    # first (`_lower_named_call`'s `func_return_types.get(fname, ...)`).
-    gen.func_return_types[safe] = ret_type
+    # _commit_home_def_pts).
+    _commit_home_def_pts(gen, node)
+    safe = gen._func_csym(node.name)
 
     # For main (in main module only), call class-attr initializer first
     if node.name == 'main' and gen.emit_struct_defs:
-        gen._rt_void('_mojo_classattr_init', [])
+        gen._emit('  _mojo_classattr_init ();')
 
     gen._seed_mut_captured_local_types(node.name)
     gen._seed_addressed_locals(node.body)
@@ -4364,7 +3774,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         _n_body_lines = len(gen.body_lines)
         _last_body_line = gen.body_lines[_n_body_lines - 1] if _n_body_lines > 0 else ''
         if not _last_body_line.strip().startswith('return'):
-            gen._ret('0')
+            gen._emit('  return 0;')
 
     # For main function in root module, rename to _gimple_main and create wrapper
     # For main function in library module, rename to _{module}_main to avoid collision
@@ -4460,8 +3870,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         lines.append(f"#if USE_PYTHON")
         lines.append(f"  Py_Finalize ();")
         lines.append(f"#endif")
-        # `main` returns a C `int`; `result` has the Mojo `main`'s own type.
-        lines.append(f"  return (int)result;")
+        lines.append(f"  return result;")
         lines.append(f"}}")
 
     gen._pop_import_scope()
@@ -4480,22 +3889,16 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
     else:
         fn_name = gimple_ctypes._module_toplevel_name(gen.module_name)
     gen.current_func_name = fn_name
-    gen._current_func_node = None
-    gen._current_struct_name = ""   # top-level code is outside any method body    gen.func_ret_type = 'void'
-    gen.current_func_ret_ann = ''
+    gen._current_struct_name = ""   # top-level code is outside any method body
+    gen.func_ret_type = 'void'
     gen.func_return_types[fn_name] = 'void'
 
     # Generate code for each top-level statement
     gen._in_toplevel_gen = True
-    gen._toplevel_bound_globals = []
     gen._frame_enter_module()
     try:
         for stmt in toplevel_stmts:
             gen.gen_stmt(stmt)
-            # AFTER the statement is lowered: a `globals()` inside this
-            # statement must see only the names bound by earlier ones (see
-            # `emit_infra.lower_module_globals_read`).
-            ginf.note_toplevel_bindings(gen, stmt)
     finally:
         gen._in_toplevel_gen = False
     gen._frame_leave()
@@ -4948,23 +4351,6 @@ def _register_imported_structs(gen, stmts: list) -> None:
     the many imported structs a module merely passes through untouched."""
     if gen.do_imports or not getattr(gen, '_current_filename', None):
         return
-    # A struct an imported function RETURNS is a value this module may dereference
-    # or call methods on (`get()[].seed(...)`), which the parameter/constructor scan
-    # below never sees. Register each such home struct by name, as the scan would.
-    for _st in stmts or []:
-        if type(_st).__name__ != 'FromImportStmt' or _st.wildcard:
-            continue
-        _imod = str(_st.module)
-        _hstmts = gen._parsed_import(_imod)[2] or []
-        for _name, _alias in (_st.names or []):
-            _hfs = [h for h in _hstmts if type(h).__name__ == 'FunctionDef'
-                    and str(h.name) == str(_name) and not getattr(h, 'comptime_params', None)]
-            if len(_hfs) != 1 or not isinstance(_hfs[0].return_type, str):
-                continue
-            _rt = str(_hfs[0].return_type).strip()
-            if any(type(h).__name__ == 'StructDef' and str(h.name) == _rt
-                   and not getattr(h, 'bracket_params', None) for h in _hstmts):
-                gen._materialize_imported_struct(_imod, _rt, _rt)
     try:
         src = open(gen._current_filename).read()
     except Exception:
@@ -5403,9 +4789,9 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # Key by overload so overloaded methods don't share closure state (each
     # overload's lifted closures + capture env are distinct).
     gen.current_func_name = f"{struct_name}_{node.name}{overload_id}"
-    gen._current_func_node = node
     gimple_exprtypes.record_bool_params(gen, node)
     gen._current_struct_name = struct_name  # for Self() constructor call lowering
+
     # Seed param types for pre-pass inference
     for i, (pname, ptype) in enumerate(node.params):
         # Strip Mojo parameter modifiers (inout, borrowed, etc.)
@@ -5509,8 +4895,6 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
             ret_type = 'void'
 
     gen.func_ret_type = ret_type
-    gen.current_func_ret_ann = (
-        node.return_type if isinstance(node.return_type, str) else '')
     # Sync so forward declarations (Phase 2b) match Phase 2a inference.
     # Store BOTH the base name (for single-overload lookups) and the
     # per-overload keyed name (so multi-overload methods don't clobber each other).
@@ -5546,10 +4930,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     if has_varargs:
         # Keep self + any fixed params before *args, then pack the rest; e.g.
         # __call__(self, interpreter, *args) must keep `interpreter`.
-        gen.func_param_types[method_full_name] = [
-            gimple_ctypes.c_client_callable_ctype(t)
-            for t in gen._signature_ctypes(node.params, node, struct_name)
-        ]
+        gen.func_param_types[method_full_name] = gen._signature_ctypes(node.params, node, struct_name)
     # Prefer THIS overload's own suffixed entry (registered in Pass 2b-bis,
     # gimple_codegen.py's per-struct-method overload-candidate pass) over
     # the bare/unsuffixed key. A later pre-pass (~line 10907, "CRITICAL:
@@ -5604,10 +4985,6 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
                     ctype = gen._resolve_type(ptype)
             else:
                 ctype = gen._param_ctype(pname, ptype, node)
-        # A callable-valued parameter is typed `std::function<...>` for C++
-        # coroutine units, but a C-emitted method spells it as the runtime's
-        # boxed word.
-        ctype = gimple_ctypes.c_client_callable_ctype(ctype)
         gen.var_types[bare] = ctype
         # Register in _actual_types so _get_actual_type resolves the real
         # type for for-loop iterables and other dispatch paths. Must happen

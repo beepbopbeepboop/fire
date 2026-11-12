@@ -20,16 +20,8 @@ import math
 import collections
 import builtins
 import threading
-from dataclasses import dataclass, Field, MISSING
+from dataclasses import dataclass
 import fire_compiler as N
-from mojo.middle.simd_width import is_valid_width as _simd_width_is_valid
-from mojo.middle.float8_dtype import FLOAT8_TYPE_NAMES as _FLOAT8_DTYPE_NAMES
-from mojo.middle.float8_dtype import SCALAR_TYPE_SPELLINGS as _SCALAR_DTYPE_SPELLINGS
-from mojo.middle.float8_dtype import conversion_message as _float8_conversion_message
-from mojo.middle.float8_dtype import operation_message as _float8_operation_message
-from mojo.middle.float8_dtype import round_float8 as _float8_round
-from mojo.middle.float8_dtype import has_arithmetic as _float8_has_arithmetic
-from mojo.middle.float8_dtype import has_float_conversion as _float8_has_conversion
 
 # Operators handled by Interpreter._apply_compare_op — both eval_BinaryOp
 # (a single comparison, e.g. plain `a < b`) and eval_CompareChain (Python
@@ -63,79 +55,6 @@ _GENEXP_ITER_NAME = '__mojo_genexp_iter__'
 # `types.new_class` path) still gets the decorator applied for real; see the
 # `isinstance(bound, MojoClass)` guard in `_apply_function_decorators`.
 _DATACLASS_DECORATORS = frozenset({'dataclass', 'dataclasses.dataclass'})
-
-# id(MojoFunction) -> (filename, line) of its `def`, recorded by
-# execute_FunctionDef. Kept in a module table (not a field on MojoFunction)
-# because the self-hosted compiler hardcodes that class's field table. Read
-# only to render the `note: candidate not viable` lines of an overload failure.
-_FUNC_DEF_LOCS = {}
-
-# id(MojoFunction) -> its FunctionDef, for the ones declaring a `where` clause;
-# checked at call time by check_where_clause. `_CALL_SITE[0]` is the CallExpr
-# being invoked, set by eval_CallExpr just before the call so a violation can
-# name its call site (the callee only sees evaluated arguments).
-_FUNC_WHERE = {}
-_CALL_SITE = [None]
-
-
-class _ConstraintViolation(RuntimeError):
-    """A call whose `where` clause evaluated to False for its bound
-    comptime parameters. May carry a `mojo_record` (see mojo_diagnostic)."""
-
-
-class _UnboundComptimeParameter(TypeError):
-    """A bracket supplied too FEW comptime parameters: one it omitted is
-    declared without a default, so `_invoke` would bind it to None and the body
-    would run on a value that is not there (the reported symptom:
-    `unsupported operand type(s) for +: 'int' and 'NoneType'`).
-
-    Deliberately carries NO fields. The callee and the parameter name travel
-    through `_UNBOUND_FUNC`/`_UNBOUND_PARAM` instead: this file self-hosts, and
-    the self-hosted compiler types an `except X as e:` binding as a known
-    struct pointer or a plain message string, so an exception's own attributes
-    are not a shape it can read back (same reason `MojoRaisedException` is
-    fieldless). The subscript site reads those slots back and renders the
-    modular compiler's `failed to infer parameter 'y' of 'f'` diagnostic (via
-    `_unbound_comptime_record` / `mojo_diagnostic`) instead of a traceback. A
-    TypeError subclass because an under-supplied specialization is a program
-    error, and because that is what the interpreter's other bracket refusals
-    are."""
-
-
-# What the `_UnboundComptimeParameter` now being raised is about, set by
-# `_raise_unbound_comptime_error` and consumed by the subscript site that
-# renders the diagnostic (`Interpreter._raise_unbound_comptime`). Module slots,
-# like `_CALL_SITE`, not fields on the exception — see the class docstring.
-_UNBOUND_FUNC = [None]
-_UNBOUND_PARAM = ['']
-
-
-def _raise_unbound_comptime_error(func, param: str):
-    """Record the callee/parameter and raise `_UnboundComptimeParameter` with
-    the canonical message. The caller that owns the subscript turns it into a
-    bracket-located diagnostic record."""
-    _UNBOUND_FUNC[0] = func
-    _UNBOUND_PARAM[0] = param
-    raise _UnboundComptimeParameter(
-        f"failed to infer parameter '{param}' of "
-        f"'{getattr(func, 'name', '')}'")
-
-
-def _unwrap_dataclass_field(value):
-    """The default a declared field takes, given the value its initializer
-    evaluated to. `field(default=...)` and `field(default_factory=...)` are
-    calls that return a `dataclasses.Field`; the constructor binds the
-    wrapped default (or the factory's result), never the Field object.
-    Any other value passes through unchanged. A Field with neither a
-    `default` nor a `default_factory` is a required field with no default,
-    which binds None, as a bare `x: int` does."""
-    if not isinstance(value, Field):
-        return value
-    if value.default is not MISSING:
-        return value.default
-    if value.default_factory is not MISSING:
-        return value.default_factory()
-    return None
 
 
 def _decorator_dotted_name(node):
@@ -857,1453 +776,6 @@ def import_error_suggestion(mod_name, name_from):
     return f". Did you mean: '{suggestion}' ({suggestion!a})?"
 
 
-def name_error_candidate(name, candidates, self_obj):
-    """The single name CPython 3.15's NameError suggestion would offer for
-    `name`, or None. Shared by the CPython-rendered suffix
-    (name_error_suggestion) and the Mojo-rendered diagnostic
-    (mojo_diagnostic_text), so both pick the same candidate: the NFKC
-    normalisation match, then the `self.<name>` refinement, then the shared
-    distance match over `candidates`."""
-    if not isinstance(name, str) or candidates is None:
-        return None
-    d = [x for x in candidates if isinstance(x, str)]
-    name_n, not_normalized = _suggestion_normalize(name)
-    if not_normalized and name_n in d:
-        return name_n
-    if self_obj is not None:
-        try:
-            if hasattr(self_obj, name_n):
-                return f"self.{name_n}"
-        except Exception:
-            pass
-    return _suggestion_after_pool(d, name_n, not_normalized)
-
-
-def _expr_start(e):
-    """(line, col) of the leftmost token of an expression."""
-    while True:
-        if hasattr(e, 'left'):
-            e = e.left
-        elif hasattr(e, 'func'):
-            e = e.func
-        elif hasattr(e, 'obj') and (hasattr(e, 'member') or hasattr(e, 'index')):
-            e = e.obj
-        else:
-            break
-    return getattr(e, 'line', 0), getattr(e, 'col', 0)
-
-
-def _constraint_text(e, subst=None):
-    """The modular compiler's spelling of a constraint expression
-    (`(n > Int(0))`), or None for a shape not verified against it."""
-    if hasattr(e, 'left') and hasattr(e, 'right') and hasattr(e, 'op'):
-        l = _constraint_text(e.left, subst)
-        r = _constraint_text(e.right, subst)
-        if l is None or r is None:
-            return None
-        return f"({l} {e.op} {r})"
-    if hasattr(e, 'func') and hasattr(e, 'args') and not getattr(e, 'kwargs', None):
-        fn = e.func.name if hasattr(e.func, 'name') else getattr(e.func, 'member', None)
-        parts = [_constraint_text(a, subst) for a in e.args]
-        if fn is None or any(p is None for p in parts):
-            return None
-        return f"{fn}({', '.join(parts)})"
-    if (hasattr(e, 'obj') and hasattr(e, 'member') and hasattr(e.obj, 'name')
-            and e.obj.name == 'Self'):
-        return e.member          # `Self.T` is spelled `T`
-    if hasattr(e, 'name') and not hasattr(e, 'args'):
-        if subst and e.name in subst:
-            return '$' + str(subst.index(e.name))
-        return e.name
-    if hasattr(e, 'value') and hasattr(e, 'raw') and isinstance(e.value, int):
-        return f"Int({e.value})"
-    return None
-
-
-def where_violation_record(filename, node, loc, cond, site, bare=False):
-    """(message, record) for a call at `site` (a CallExpr) of function `node`
-    (declared at `loc` = (file, line)) whose where-condition `cond` is False.
-    The record is None when the call site or the constraint cannot be rendered
-    the way the modular compiler does (the message alone is still an error)."""
-    msg = f"invalid call to '{node.name}': violated constraint"
-    if bare:
-        # `comptime x = f[0, 1]`: no call, so the message carries no callee.
-        msg = 'violated constraint'
-    text = _constraint_text(cond)
-    if site is None or text is None or loc is None or not hasattr(site, 'func'):
-        return msg, None
-    cl, cc = _callee_start(site.func)
-    if cl != site.line or cc < 1:
-        return msg, None
-    wl, wc = _expr_start(cond)
-    # Caret placement, measured against `tools/mojo build`: a plain name puts
-    # the caret on its first character; a member callee (`pk.f[0]()`) puts it
-    # on the last `.` with `~` under everything before it.
-    callee = site.func
-    while hasattr(callee, 'index') and hasattr(callee, 'obj'):
-        callee = callee.obj
-    caret = cc
-    tilde_from = 0
-    after = 0
-    if hasattr(callee, 'member') and getattr(callee, 'col', 0) > cc:
-        caret = callee.col
-        if not bare:
-            tilde_from = cc
-            after = len(callee.member)
-    elif hasattr(callee, 'name') and not bare:
-        after = len(callee.name) - 1     # `^~~~` over the whole name
-    cond_note = _note(file=loc[0], line=wl, col=wc, name='', message=f"constraint declared here evaluated to False, expected '{text}'")
-    if loc[0] in _SYNTHETIC_FILES:
-        # No source: the note shows the constraint with its parameters spelled
-        # by position.
-        cond_note.synth = _constraint_text(cond, list(node.comptime_params))
-    return msg, _rec(file=filename, line=site.line, caret=caret, tilde_from=tilde_from, after=after, message=msg, notes=[
-            cond_note,
-            _note(file=loc[0], line=loc[1], name=node.name, message='function declared here')])
-
-
-def check_where_clause(interp, func, node, scope):
-    """Raise _ConstraintViolation when `node`'s `where` clause evaluates to
-    False for the comptime parameters now bound in `scope`. A clause this
-    interpreter cannot evaluate (an unbound parameter, a message tuple, an
-    expression that raises) is not a proven violation and is left alone."""
-    clause = node.where_clause
-    conds = clause if isinstance(clause, list) else [clause]
-    for p in node.comptime_params:
-        if p not in scope.vars or scope.vars[p] is None:
-            return
-    for cond in conds:
-        if hasattr(cond, 'elements'):
-            continue
-        old = interp.scope
-        interp.scope = scope
-        try:
-            ok = interp.eval_expr(cond)
-        except Exception:
-            ok = True
-        finally:
-            interp.scope = old
-        if ok is not False:
-            continue
-        msg, rec = where_violation_record(interp.filename, node,
-                                          _FUNC_DEF_LOCS.get(id(func)), cond,
-                                          _CALL_SITE[0])
-        err = _ConstraintViolation(msg)
-        if rec is not None:
-            setattr(err, 'mojo_record', rec)
-        raise err
-
-
-def _is_required_method(m):
-    """A trait method with no default implementation: its body is just `...`
-    (docstrings aside)."""
-    seen_ellipsis = False
-    for st in m.body:
-        v = getattr(st, 'value', None)
-        if isinstance(v, N.EllipsisLiteral):
-            seen_ellipsis = True
-        elif not (isinstance(v, N.StringLiteral)):
-            return False
-    return seen_ellipsis
-
-
-def _trait_closure(name, scope, out, seen):
-    """`name`'s trait and its bases, bases first, each once, as trait entries
-    (`_static_traits`); a name that `scope` does not resolve is skipped."""
-    base = name.split('[')[0].strip()
-    ent = scope.get(base)
-    if ent is None:
-        # The parser keeps only the last component of a qualified base
-        # (`pk.T` -> `T`), so an imported trait is found by that suffix.
-        cands = {}
-        for k, v in scope.items():
-            if k.endswith('.' + base):
-                cands[id(v)] = v
-        if len(cands) == 1:
-            ent = list(cands.values())[0]
-    if ent is None or id(ent) in seen:
-        return
-    seen.add(id(ent))
-    for b in ent['def'].bases:
-        _trait_closure(b, ent['scope'], out, seen)
-    out.append(ent)
-
-
-_STATIC_MODULES = {}
-
-
-# Packages that exist only as a precompiled `<pkg>.mojoc` (the source deleted):
-# path -> source text the artifact carried, and the set of such paths. A
-# diagnostic that points into one renders a synthetic signature instead of a
-# source line, as the modular compiler does.
-_VIRTUAL_SOURCES = {}
-_SYNTHETIC_FILES = set()
-
-
-def _read_text(path):
-    if path in _VIRTUAL_SOURCES:
-        return _VIRTUAL_SOURCES[path]
-    with open(path, encoding='utf-8') as fh:
-        return fh.read()
-
-
-def _static_module_file(module, from_file):
-    """Path of the .mojo file or package `module` names, looked up beside the
-    importing file; None when it is not there (a stdlib or unknown module).
-    When only a `<pkg>.mojoc` is there, the path is a virtual one whose text is
-    the source the artifact embedded."""
-    base = os.path.dirname(os.path.abspath(from_file)) if from_file else os.getcwd()
-    parts = module.split('.')
-    rel = os.path.join(*parts)
-    for cand in (os.path.join(base, rel + '.mojo'),
-                 os.path.join(base, rel, '__init__.mojo')):
-        if os.path.isfile(cand):
-            return cand
-    art = os.path.join(base, parts[0] + '.mojoc')
-    if os.path.isfile(art):
-        try:
-            import json
-            with open(art, encoding='utf-8') as fh:
-                data = json.load(fh)
-            key = '__init__.mojo' if len(parts) == 1 else '/'.join(parts[1:]) + '.mojo'
-            text = (data.get('sources') or {}).get(key)
-            if text is not None:
-                vpath = os.path.join(base, parts[0], key)
-                _VIRTUAL_SOURCES[vpath] = text
-                _SYNTHETIC_FILES.add(vpath)
-                return vpath
-        except (OSError, ValueError):
-            pass
-    return None
-
-
-def _static_traits(stmts, filename, source, depth):
-    """The trait entries visible in a module: the traits it defines plus those
-    it imports from modules found beside it (`import pk` -> `pk.T`; `import
-    pk as q` -> `q.T`; `from pk import T [as U]` -> `T`/`U`). An entry is
-    {'def': TraitDef, 'file', 'src', 'scope'}, where `scope` is the scope of
-    the module the trait is DEFINED in (its own bases resolve there)."""
-    scope = {}
-    for st in stmts:
-        if isinstance(st, N.TraitDef):
-            scope[st.name] = {'def': st, 'file': filename, 'src': source, 'scope': scope}
-    if depth >= 4:
-        return scope
-    for st in stmts:
-        mod = None
-        if isinstance(st, (N.ImportStmt, N.FromImportStmt)):
-            path = _static_module_file(st.module, filename)
-            if path is None:
-                continue
-            mod = _static_load_module(path, depth + 1)
-        if mod is None:
-            continue
-        if isinstance(st, N.ImportStmt):
-            prefix = st.alias if st.alias else st.module
-            for k, ent in mod.items():
-                if ent['file'] == _static_module_file(st.module, filename):
-                    scope[prefix + '.' + k] = ent
-        else:
-            for (nm, al) in st.names:
-                if nm in mod:
-                    scope[al if al else nm] = mod[nm]
-    return scope
-
-
-def _static_load_module(path, depth):
-    key = os.path.abspath(path)
-    if key in _STATIC_MODULES:
-        return _STATIC_MODULES[key]
-    _STATIC_MODULES[key] = {}
-    try:
-        text = _read_text(path)
-        stmts = N.Parser(N.py_tokenize(text)).with_filename(path).parse_module()
-        scope = _static_traits(stmts, path, text, depth)
-    except Exception:
-        scope = {}
-    _STATIC_MODULES[key] = scope
-    return scope
-
-
-def _trait_member_line(source, trait, member):
-    """(line, col) of `comptime <member>` inside trait `trait` (1-based), found
-    in the source text: the AST keeps trait comptime members as bare tuples
-    with no position. None when the text cannot be found."""
-    lines = source.splitlines() if source else []
-    pat = re.compile(r'^(\s*)comptime\s+' + re.escape(member) + r'\b')
-    for n in range(trait.line, len(lines)):
-        m = pat.match(lines[n])
-        if m:
-            return n + 1, len(m.group(1)) + 1
-        if n > trait.line and lines[n].strip() and not lines[n][0].isspace():
-            break
-    return None
-
-
-class _StaticOverloadSet:
-    """Just enough of MojoOverloadSet for overload_diagnostic_record."""
-    def __init__(self, name, candidates):
-        self.name = name
-        self.candidates = candidates
-
-
-_STATIC_FUNCS = {}
-
-
-def _ast_nodes(root):
-    """Every AST node under `root` (lists, tuples and dicts of nodes included),
-    in no particular order."""
-    stack = [root]
-    while stack:
-        x = stack.pop()
-        yield x
-        d = getattr(x, '__dict__', None)
-        if d is None:
-            continue
-        for v in d.values():
-            items = v.values() if isinstance(v, dict) else v if isinstance(v, (list, tuple)) else [v]
-            for y in items:
-                if isinstance(y, (list, tuple)):
-                    stack.extend(z for z in y if hasattr(z, '__dict__') and not isinstance(z, type))
-                elif hasattr(y, '__dict__') and not isinstance(y, type):
-                    stack.append(y)
-
-
-def _static_funcs_of_file(path):
-    """{name: [FunctionDef]} of the top-level functions of a module file."""
-    key = os.path.abspath(path)
-    if key not in _STATIC_FUNCS:
-        _STATIC_FUNCS[key] = {}
-        try:
-            text = _read_text(path)
-            stmts = N.Parser(N.py_tokenize(text)).with_filename(path).parse_module()
-            _STATIC_FUNCS[key] = _top_level_functions(stmts)
-        except Exception:
-            _STATIC_FUNCS[key] = {}
-    return _STATIC_FUNCS[key]
-
-
-def _top_level_functions(stmts):
-    out = {}
-    for st in stmts:
-        if isinstance(st, N.FunctionDef):
-            out.setdefault(st.name, []).append(st)
-    return out
-
-
-def _static_const(e, env):
-    """Integer value of a constraint operand (int literals, bound names,
-    + - *), or None when not provable."""
-    if isinstance(e, N.IntLiteral):
-        return e.value
-    if isinstance(e, N.IdentExpr):
-        return env.get(e.name)
-    if isinstance(e, N.BinaryOp) and e.op in ('+', '-', '*'):
-        a = _static_const(e.left, env)
-        b = _static_const(e.right, env)
-        if a is None or b is None:
-            return None
-        return a + b if e.op == '+' else a - b if e.op == '-' else a * b
-    return None
-
-
-def _static_cond_false(cond, env):
-    """True only when `cond` is a comparison of provable integers that is
-    False."""
-    if not (isinstance(cond, N.BinaryOp)
-            and cond.op in ('>', '<', '>=', '<=', '==', '!=')):
-        return False
-    a = _static_const(cond.left, env)
-    b = _static_const(cond.right, env)
-    if a is None or b is None:
-        return False
-    ok = (a > b if cond.op == '>' else a < b if cond.op == '<' else
-          a >= b if cond.op == '>=' else a <= b if cond.op == '<=' else
-          a == b if cond.op == '==' else a != b)
-    return not ok
-
-
-_STATIC_SCOPES = {}
-
-
-def _scope_from_stmts(stmts, filename):
-    """Names a module can call: its own top-level functions, modules it
-    imports (`import m [as q]` -> q.f), and `from m import f [as g]`."""
-    sc = {'local': _top_level_functions(stmts), 'mods': {}, 'froms': {},
-          'structs': {st.name: st for st in stmts if isinstance(st, N.StructDef)}}
-    for st in stmts:
-        if isinstance(st, N.ImportStmt):
-            path = _static_module_file(st.module, filename)
-            if path is not None:
-                sc['mods'][st.alias if st.alias else st.module] = path
-        elif isinstance(st, N.FromImportStmt):
-            path = _static_module_file(st.module, filename)
-            if path is not None:
-                for (nm, al) in st.names:
-                    sc['froms'][al if al else nm] = (path, nm)
-    return sc
-
-
-def _scope_of_file(path):
-    key = os.path.abspath(path)
-    if key not in _STATIC_SCOPES:
-        _STATIC_SCOPES[key] = {'local': {}, 'mods': {}, 'froms': {}, 'structs': {}}
-        try:
-            text = _read_text(path)
-            stmts = N.Parser(N.py_tokenize(text)).with_filename(path).parse_module()
-            _STATIC_SCOPES[key] = _scope_from_stmts(stmts, path)
-        except Exception:
-            pass
-    return _STATIC_SCOPES[key]
-
-
-def _resolve_callee(callee, sc, filename, bound):
-    """([FunctionDef], declaring file) a plain `f` or `pkg.f` callee names, or
-    (None, None). `bound` are names a local binding could shadow."""
-    if isinstance(callee, N.IdentExpr):
-        nm = callee.name
-        if nm in bound:
-            return None, None
-        if nm in sc['local'] and nm not in sc['froms']:
-            return sc['local'][nm], filename
-        if nm in sc['froms'] and nm not in sc['local']:
-            path = sc['froms'][nm][0]
-            return _static_funcs_of_file(path).get(sc['froms'][nm][1]), path
-    elif (isinstance(callee, N.MemberExpr) and isinstance(callee.obj, N.IdentExpr)
-            and callee.obj.name in sc['mods'] and callee.obj.name not in bound
-            and callee.obj.name not in sc['local']):
-        path = sc['mods'][callee.obj.name]
-        return _static_funcs_of_file(path).get(callee.member), path
-    return None, None
-
-
-def _is_builtin_predicate(fn):
-    """`@always_inline("builtin")`: the compiler can fold calls to it."""
-    for d in fn.decorators:
-        if (isinstance(d, N.CallExpr) and isinstance(d.func, N.IdentExpr)
-                and d.func.name == 'always_inline'):
-            for a in d.args:
-                if isinstance(a, N.StringLiteral) and a.value == 'builtin':
-                    return True
-    return False
-
-
-def _static_cmp(cond, env):
-    """True/False for a comparison of provable integers, else None."""
-    if not (isinstance(cond, N.BinaryOp)
-            and cond.op in ('>', '<', '>=', '<=', '==', '!=')):
-        return None
-    a = _static_const(cond.left, env)
-    b = _static_const(cond.right, env)
-    if a is None or b is None:
-        return None
-    return (a > b if cond.op == '>' else a < b if cond.op == '<' else
-            a >= b if cond.op == '>=' else a <= b if cond.op == '<=' else
-            a == b if cond.op == '==' else a != b)
-
-
-def _resolve_struct(callee, sc, filename, bound):
-    """(StructDef, declaring file) a plain `S` or `pkg.S` callee names."""
-    if isinstance(callee, N.IdentExpr):
-        if callee.name in bound or callee.name in sc['local']:
-            return None, None
-        if callee.name in sc['structs']:
-            return sc['structs'][callee.name], filename
-    elif (isinstance(callee, N.MemberExpr) and isinstance(callee.obj, N.IdentExpr)
-            and callee.obj.name in sc['mods'] and callee.obj.name not in bound):
-        path = sc['mods'][callee.obj.name]
-        st = _scope_of_file(path)['structs'].get(callee.member)
-        if st is not None:
-            return st, path
-    return None, None
-
-
-def _bracket_arg_kinds(source, call_func):
-    """For `S[1, c=9]` (the SubscriptExpr `call_func`): the list of
-    (is_keyword, keyword_name). The parser drops the `c=` of a keyword
-    bracket argument, so this is read back from the source line."""
-    lines = source.splitlines() if source else []
-    sub = call_func
-    tail = sub.obj
-    if hasattr(tail, 'member'):
-        l, c = tail.line, tail.col + 1 + len(tail.member)
-    else:
-        l, c = tail.line, tail.col + len(tail.name)
-    if l < 1 or l > len(lines):
-        return None
-    text = lines[l - 1][c - 1:]
-    if not text.startswith('['):
-        return None
-    depth, i, cur, parts = 0, 0, '', []
-    for i, ch in enumerate(text):
-        if ch in '[(':
-            depth += 1
-            if depth == 1:
-                continue
-        elif ch in '])':
-            depth -= 1
-            if depth == 0:
-                break
-        elif ch == ',' and depth == 1:
-            parts.append(cur)
-            cur = ''
-            continue
-        cur += ch
-    else:
-        return None
-    parts.append(cur)
-    out = []
-    for part in parts:
-        m = re.match(r'^\s*([A-Za-z_]\w*)\s*=(?!=)', part)
-        out.append((True, m.group(1)) if m else (False, None))
-    return out
-
-
-def _comptime_default_names(func):
-    """The declared comptime parameters of `func` that have a default, and may
-    therefore be omitted from the bracket. Both default sources `_invoke`
-    consults are read here — `comptime_param_defaults` (the bracket's own
-    `def f[T, y=0]`) and the `_pd` entries (a runtime parameter must never
-    shadow one, but `_invoke` looks there too) — so there is one answer to
-    "may this parameter be omitted?"."""
-    names = set((getattr(func, 'comptime_param_defaults', None) or {}).keys())
-    for name, _value in getattr(func, '_pd', None) or []:
-        names.add(name)
-    return names
-
-
-def _unbound_comptime_param(func, bound_names):
-    """The first declared comptime parameter of `func` that `bound_names` does
-    not bind and that declares no default, or None when every one is either
-    supplied or defaulted. The bracket is the only place such a parameter's
-    value can come from, so omitting it is an error at the bracket — `_invoke`
-    binding it to None is what made the body run on a value that is not
-    there (`int + None`)."""
-    defaults = _comptime_default_names(func)
-    for name in getattr(func, 'comptime_params', None) or []:
-        if name not in bound_names and name not in defaults:
-            return name
-    return None
-
-
-def _bracket_caret(node):
-    """(line, col) of the `[` in the SubscriptExpr `node`, from the callee's
-    own position. Neither bracket spelling records the bracket: the keyword
-    branch copies the CALLEE's position onto the node, and the positional
-    branch leaves the dataclass defaults (`0:0`). The bracket is the token
-    just past the callee, which for `f` is `col + len(name)` and for `p.f` is
-    past the `.member` (`MemberExpr.col` is the dot)."""
-    obj = getattr(node, 'obj', None)
-    line = getattr(obj, 'line', 0) or getattr(node, 'line', 0)
-    col = getattr(obj, 'col', 0)
-    if col > 0 and hasattr(obj, 'member'):
-        col = col + 1 + len(obj.member)
-    elif col > 0 and hasattr(obj, 'name'):
-        col = col + len(obj.name)
-    else:
-        return 0, 0
-    return (line, col) if line > 0 else (0, 0)
-
-
-def _unbound_comptime_record(filename, node, func, param):
-    """The modular-format record for an `_UnboundComptimeParameter`:
-    `failed to infer parameter 'y' of 'f'`, caret on the bracket that omitted
-    it, and a note at the declaration when its location is known. None when
-    the bracket has no usable position; the caller then keeps the plain
-    TypeError."""
-    bl, bc = _bracket_caret(node)
-    cl, cc = _callee_start(getattr(node, 'obj', node))
-    if bl < 1 or bc < 1:
-        bl, bc = cl, cc
-    if bl < 1 or bc < 1:
-        return None
-    notes = []
-    loc = _FUNC_DEF_LOCS.get(id(func))
-    if loc is not None and loc[1] > 0:
-        notes.append(_note(file=loc[0], line=loc[1], name=func.name,
-                           message='function declared here'))
-    return _rec(file=filename, line=bl, caret=bc,
-                tilde_from=cc if cl == bl and 0 < cc < bc else 0,
-                message=f"failed to infer parameter '{param}' of "
-                        f"'{func.name}'",
-                notes=notes)
-
-
-def _fieldwise_init_record(filename, source, n, sub, st, sfile):
-    """`S[...]()` of a field-less `@fieldwise_init` struct whose bracket
-    parameters are not all bound: `no matching function in initialization`,
-    with the two synthesized constructors as candidates (the move constructor,
-    which wants its `move` argument, and the default one, which cannot infer the
-    first unbound bracket parameter), then the struct. Zero-argument calls only
-    (measured against `tools/mojo build -I`)."""
-    if n.args or n.kwargs or st.decorators != ['fieldwise_init'] or st.methods and any(
-            not getattr(m, 'line', 0) == 0 for m in st.methods):
-        return None
-    bparams = list(getattr(st, 'bracket_param_info', []))
-    real_fields = [f for f in st.fields if f.name not in {b[0] for b in bparams}]
-    if real_fields or not bparams:
-        return None
-    kinds = _bracket_arg_kinds(source, sub)
-    if kinds is None:
-        return None
-    positional = [k for k in kinds if not k[0]]
-    given = {b[0] for b in bparams[:len(positional)]}
-    given |= {k[1] for k in kinds if k[0]}
-    unbound = [b[0] for b in bparams if b[0] not in given and b[2] is None]
-    if not unbound:
-        return None
-    cl, cc = _callee_start(sub)
-    if cl != n.line or cc < 1 or n.col <= cc:
-        return None
-    return _rec(file=filename, line=n.line, caret=n.col, tilde_from=cc, after=1, message='no matching function in initialization', notes=[
-            _note(file=sfile, line=st.line + 1 if st.decorators else st.line, col=1, name='', text='def __init__(out self, *, deinit move: Self)    # note - generated function', message="candidate not viable: missing required argument: 'move'"),
-            _note(file=sfile, line=st.line + 1 if st.decorators else st.line, col=1, name='', text='def __init__(out self)    # note - generated function', message=f"candidate not viable: failed to infer parameter '{unbound[0]}' "
-                        f"of parent struct '{st.name}'"),
-            _note(file=sfile, line=st.line, name=st.name, message=' struct declared here')])
-
-
-def _predicate_call_record(filename, c, cfile, cond, env, site, bare):
-    """Record for a where clause that CALLS a function with provable integer
-    arguments, or None. A predicate that is not `@always_inline("builtin")`
-    cannot be folded: `lacking evidence to prove correctness`. A builtin one is
-    evaluated from its `return <comparison>` body and, when False, is the usual
-    `violated constraint`."""
-    if not (isinstance(cond, N.CallExpr)
-            and isinstance(cond.func, (N.IdentExpr, N.MemberExpr))):
-        return None
-    vals = []
-    for a in cond.args:
-        v = _static_const(a, env)
-        if v is None:
-            return None
-        vals.append(v)
-    sc = _scope_from_stmts_cached(cfile)
-    preds, pfile = _resolve_callee(cond.func, sc, cfile, set())
-    if not preds or len(preds) != 1:
-        return None
-    pred = preds[0]
-    pname = pred.name
-    if _is_builtin_predicate(pred):
-        if len(pred.body) != 1 or not isinstance(pred.body[0], N.ReturnStmt):
-            return None
-        penv = {}
-        names = [str(p[0] if isinstance(p, tuple) else p) for p in pred.params]
-        if len(names) != len(vals):
-            return None
-        for nm, v in zip(names, vals):
-            penv[nm] = v
-        if _static_cmp(pred.body[0].value, penv) is not False:
-            return None
-        return where_violation_record(filename, c, (cfile, c.line), cond, site, bare)[1]
-    # Not foldable: lacking evidence.
-    if bare or site is None or not hasattr(site, 'func'):
-        return None
-    cl, cc = _callee_start(site.func)
-    if cl != site.line or cc < 1:
-        return None
-    callee = site.func
-    while hasattr(callee, 'index') and hasattr(callee, 'obj'):
-        callee = callee.obj
-    caret, tilde_from, after, call_note_col = cc, 0, 0, cc
-    if hasattr(callee, 'member') and getattr(callee, 'col', 0) > cc:
-        caret, tilde_from, after = callee.col, cc, len(callee.member)
-        call_note_col = callee.col
-    elif hasattr(callee, 'name'):
-        after = len(callee.name) - 1
-    wl, wc = _expr_start(cond)
-    shown = ', '.join(f"Int({v})" for v in vals)
-    return _rec(file=filename, line=site.line, caret=caret, tilde_from=tilde_from, after=after, message=f"invalid call to '{c.name}': lacking evidence to prove correctness", notes=[
-            _note(file=cfile, line=c.line, name=c.name, message='cannot prove constraint for candidate'),
-            _note(file=cfile, line=wl, col=wc, name='', nosnippet=cfile in _SYNTHETIC_FILES, message=f"constraint declared here needs evidence for '{pname}({shown})'"),
-            _note(file=pfile, line=pred.line, name=pname, message='cannot evaluate call to non-builtin function declared here'),
-            _note(file=filename, line=site.line, col=call_note_col, name='', message='provide evidence for the constraint here to aid in candidate selection')])
-
-
-def _scope_from_stmts_cached(path):
-    return _scope_of_file(path)
-
-
-def _static_call_records(stmts, filename, source=''):
-    """Records for calls the module's own text proves wrong, so they are
-    reported before anything runs and together with the declaration errors, in
-    source order, as the modular compiler does:
-
-    * a call no overload of a same-module or imported-package function can
-      take (the shapes `overload_rejection` has verified);
-    * a bracketed `f[1, 2]()` (or `comptime x = f[1, 2]`) whose `where` clause
-      is provably False for its integer-literal arguments, or calls a
-      predicate (`where p(x)`): foldable (`@always_inline("builtin")`) ones
-      are evaluated, others are `lacking evidence to prove correctness`.
-
-    Deliberately narrow: only a plain or `pkg.`-qualified callee that no local
-    binding in the enclosing function can shadow, candidates without
-    decorators, no `*`/`**` arguments."""
-    sc = _scope_from_stmts(stmts, filename)
-    out = []
-    for top in stmts:
-        if not isinstance(top, N.FunctionDef):
-            continue
-        bound = set()
-        for p in top.params:
-            bound.add(str(p[0] if isinstance(p, tuple) else p).lstrip('*'))
-        nodes = list(_ast_nodes(top))
-        for n in nodes:
-            if isinstance(n, N.FunctionDef):
-                bound.add(n.name)
-                for p in n.params:
-                    bound.add(str(p[0] if isinstance(p, tuple) else p).lstrip('*'))
-            elif isinstance(n, N.VarDecl):
-                bound.add(n.name)
-            elif isinstance(n, N.ComptimeVarStmt):
-                bound.add(n.target)
-            tgt = getattr(n, 'target', None)
-            if isinstance(tgt, N.IdentExpr):
-                bound.add(tgt.name)
-        for n in nodes:
-            bare = False
-            if isinstance(n, N.CallExpr):
-                callee = n.func
-            elif isinstance(n, N.ComptimeVarStmt) and isinstance(n.value, N.SubscriptExpr):
-                # `comptime x = f[0, 1]`: instantiates f, so its where clause
-                # is checked, but there is no call.
-                bare = True
-                callee = n.value
-                n = types.SimpleNamespace(func=callee, args=[], kwargs=[],
-                                          line=_callee_start(callee)[0], col=0)
-            else:
-                continue
-            sub = None
-            if isinstance(callee, N.SubscriptExpr):
-                sub = callee
-                callee = callee.obj
-            if sub is not None and not bare:
-                sdef, sfile = _resolve_struct(callee, sc, filename, bound)
-                if sdef is not None:
-                    rec = _fieldwise_init_record(filename, source, n, sub, sdef, sfile)
-                    if rec is not None:
-                        out.append(((n.line, rec.caret), rec))
-                    continue
-            cands, cfile = _resolve_callee(callee, sc, filename, bound)
-            if not cands or any(c.decorators for c in cands):
-                continue
-            name = cands[0].name
-            starred = False
-            for a in n.args:
-                if isinstance(a, N.UnaryOp) and a.op in ('*', '**'):
-                    starred = True
-            if starred:
-                continue
-            if sub is None and len(cands) >= 2 and not bare:
-                specs = []
-                for c in cands:
-                    specs.append((c,) + tuple(Interpreter._classify_params(c)))
-                    _FUNC_DEF_LOCS[id(c)] = (cfile, c.line)
-                kw = {}
-                for (k, _v) in (n.kwargs or []):
-                    kw[k] = None
-                rec = overload_diagnostic_record(_StaticOverloadSet(name, specs), n,
-                                                 n.args, kw, filename)
-                for c in cands:
-                    _FUNC_DEF_LOCS.pop(id(c), None)
-                if rec is not None:
-                    out.append(((n.line, rec.caret), rec))
-            elif sub is not None and len(cands) == 1 and cands[0].where_clause is not None:
-                c = cands[0]
-                idx = sub.index
-                elems = idx.elements if hasattr(idx, 'elements') else [idx]
-                if (len(elems) != len(c.comptime_params)
-                        or not all(isinstance(e, N.IntLiteral) for e in elems)):
-                    continue
-                env = {}
-                for pn, e in zip(c.comptime_params, elems):
-                    env[pn] = e.value
-                clause = c.where_clause
-                for cond in (clause if isinstance(clause, list) else [clause]):
-                    rec = None
-                    if _static_cond_false(cond, env):
-                        rec = where_violation_record(filename, c, (cfile, c.line),
-                                                     cond, n, bare)[1]
-                    else:
-                        rec = _predicate_call_record(filename, c, cfile, cond, env, n, bare)
-                    if rec is not None:
-                        out.append(((n.line, rec.caret), rec))
-                        break
-    return out
-
-
-def _static_conversion_records(stmts, filename, source):
-    """Warnings for `var x: T = 12` / `_: T = 12` where T is a struct of this
-    module or of an imported package whose `__init__(out self, value: Int)` is
-    `@implicit(deprecated=True)`: the integer literal is implicitly converted.
-    Literal initializers only (the shapes measured against `tools/mojo build`):
-
-        warning: deprecated implicit conversion from 'IntLiteral[12]' to 'T'
-        note: call 'T(...)' explicitly      (with the fix-it line `T(  )`)
-        note: implicit constructor for 'T' declared here"""
-    sc = _scope_from_stmts(stmts, filename)
-    out = []
-    lines = source.splitlines() if source else []
-    for top in stmts:
-        if not isinstance(top, N.FunctionDef):
-            continue
-        for n in _ast_nodes(top):
-            if not (isinstance(n, (N.AssignStmt, N.VarDecl))
-                    and isinstance(getattr(n, 'type_ann', None), str)
-                    and isinstance(getattr(n, 'value', None), N.IntLiteral)):
-                continue
-            ann = n.type_ann.strip()
-            if '.' in ann:
-                mod, _, nm = ann.rpartition('.')
-                if mod not in sc['mods']:
-                    continue
-                sdef = _scope_of_file(sc['mods'][mod])['structs'].get(nm)
-                sfile = sc['mods'][mod]
-            else:
-                nm = ann
-                sdef = sc['structs'].get(nm)
-                sfile = filename
-            if sdef is None:
-                continue
-            init = None
-            for m in sdef.methods:
-                if m.name == '__init__' and m.line and any(
-                        (isinstance(d, N.CallExpr) and isinstance(d.func, N.IdentExpr)
-                         and d.func.name == 'implicit') for d in m.decorators):
-                    init = m
-            if init is None or len(init.params) != 2:
-                continue
-            lit = n.value
-            if lit.line < 1 or lit.line > len(lines):
-                continue
-            raw = lit.raw if getattr(lit, 'raw', None) else str(lit.value)
-            pad = ' ' * (lit.col - 1)
-            out.append(((lit.line, lit.col), _rec(kind='warning', file=filename, line=lit.line, caret=lit.col, tilde_from=0, after=len(raw) - 1, message=f"deprecated implicit conversion from 'IntLiteral[{lit.value}]' to '{nm}'", notes=[
-                    _note(file=filename, line=lit.line, col=lit.col, name='', after=len(raw) - 1, fixit=f"{nm}({' ' * (len(raw) - 2 if len(raw) >= 2 else 1)})", message=f"call '{nm}(...)' explicitly"),
-                    _note(file=sfile, line=init.line, name='__init__', message=f"implicit constructor for '{nm}' declared here")])))
-    return out
-
-
-_TRAIT_PARENTS = {'ImplicitlyCopyable': ['Copyable'], 'Copyable': ['Movable']}
-
-
-def _trait_implied(names):
-    """`names` plus every trait they imply (ImplicitlyCopyable -> Copyable ->
-    Movable)."""
-    out = set()
-    stack = list(names)
-    while stack:
-        t = stack.pop()
-        if t in out:
-            continue
-        out.add(t)
-        stack.extend(_TRAIT_PARENTS.get(t, []))
-    return out
-
-
-def _candidate_selection_record(st, filename, order):
-    """A required trait method implemented by several `where conforms_to(Self.T,
-    X)` overloads, where exactly one is provably valid (from the bracket
-    parameter's bound and the trait base's own `where conforms_to(T, X)`) and
-    exactly one needs evidence that is not there: the real compiler cannot pick
-    the valid one until the other is disproved, so the struct does not
-    implement the trait (`ambiguous reference to 'm': lacking evidence to select
-    candidate`). Other candidate mixes are not measured and report nothing."""
-    evidence = set()
-    for (_n, ptype, _d) in getattr(st, 'bracket_param_info', []):
-        evidence |= _trait_implied([ptype])
-    for (_b, wtext) in getattr(st, 'base_constraints', []):
-        for mm in re.finditer(r'conforms_to\(\s*\w+\s*,\s*(\w+)\s*\)', wtext or ''):
-            evidence |= _trait_implied([mm.group(1)])
-    for ent in order:
-        for tm in ent['def'].methods:
-            if not _is_required_method(tm):
-                continue
-            cands = [m for m in st.methods if m.name == tm.name]
-            if len(cands) < 2:
-                continue
-            kinds = []
-            for m in cands:
-                w = m.where_clause
-                if not (isinstance(w, N.CallExpr) and isinstance(w.func, N.IdentExpr)
-                        and w.func.name == 'conforms_to' and len(w.args) == 2
-                        and isinstance(w.args[1], N.IdentExpr)):
-                    kinds = None
-                    break
-                kinds.append('valid' if w.args[1].name in evidence else 'unknown')
-            if kinds is None or kinds.count('valid') != 1 or kinds.count('unknown') != 1:
-                continue
-            notes = [_note(file=ent['file'], line=tm.line, name=tm.name, nosnippet=ent['file'] in _SYNTHETIC_FILES, message=f"ambiguous reference to '{tm.name}': lacking evidence to select candidate")]
-            for m, k in zip(cands, kinds):
-                if k == 'unknown':
-                    wl, wc = _expr_start(m.where_clause)
-                    notes.append(_note(file=filename, line=m.line, name=m.name, message='cannot prove constraint for candidate'))
-                    notes.append(_note(file=filename, line=wl, col=wc, name='', message="constraint declared here needs evidence for '"
-                                             + _constraint_text(m.where_clause) + "'"))
-                else:
-                    notes.append(_note(file=filename, line=m.line, name=m.name, message='candidate is valid but cannot be selected until '
-                                             'other candidates are disproved'))
-            notes.append(_note(file=filename, line=st.line, name=st.name, message='provide evidence for or against the constraints here '
-                                     'to aid in candidate selection'))
-            notes.append(_note(file=ent['file'], line=tm.line, name=tm.name, message='required by trait method here'))
-            notes.append(_note(file=ent['file'], line=ent['def'].line, name=ent['def'].name, message=f"trait '{ent['def'].name}' declared here"))
-            shown = st.name
-            if getattr(st, 'bracket_param_info', None):
-                shown += '[' + ', '.join(b[0] for b in st.bracket_param_info) + ']'
-            return (f"'{shown}' does not implement all requirements for "
-                    f"'{ent['def'].name}'", notes)
-    return None
-
-
-def static_module_diagnostics(stmts, filename, source, werror=False):
-    """Diagnostics found by looking at the module's declarations alone, before
-    anything runs -- the modular compiler reports these statically and reports
-    every one, in source order. Returns (text, number of errors); text is None
-    when there is nothing to say. Warnings (a deprecated implicit conversion)
-    are in the text but do not count as errors, so the program still runs.
-
-    For a struct that names traits (defined in this module or in a module
-    found beside it) as bases, in the order the real compiler stops at
-    (measured against `tools/mojo build`; a struct gets the errors of the FIRST
-    phase that finds any):
-
-    1. a bracket parameter of the struct that a DEFAULT trait method also
-       declares: `name conflict between parameter 'a' in the default trait
-       method and a parameter in the struct`;
-    2. a method with default implementations in two traits of the closure that
-       the struct does not implement: `trait method requirement 'm' has
-       conflicting default implementations in 'A' and 'B'; you must implement
-       it manually`;
-    3. unmet requirements, one error per trait (bases first): `'S' does not
-       implement all requirements for 'T'` with a note per missing required
-       function and per missing/mistyped required `comptime` member (in the
-       trait's declaration order), then `trait 'T' declared here`."""
-    scope = _static_traits(stmts, filename, source, 0)
-    records = []
-
-    def record(st, msg, notes):
-        records.append(((1, st.line, 0), _rec(file=filename, line=st.line, caret=0, tilde_from=0, name=st.name, message=msg, notes=notes)))
-
-    for st in stmts:
-        if not isinstance(st, N.StructDef):
-            continue
-        order = []
-        seen = set()
-        for b in st.bases:
-            _trait_closure(b, scope, order, seen)
-        if not order:
-            continue
-        own = {m.name for m in st.methods}
-
-        # 1. parameter name conflicts with a default trait method
-        found = False
-        for ent in order:
-            for m in ent['def'].methods:
-                if _is_required_method(m):
-                    continue
-                for pname in m.comptime_params:
-                    if pname in getattr(st, 'bracket_params', []):
-                        found = True
-                        record(st, f"name conflict between parameter '{pname}' in the "
-                                   f"default trait method and a parameter in the struct",
-                               [_note(file=ent['file'], line=m.line, name=m.name, message='trait method declared here')])
-        if found:
-            continue
-
-        # 2. the same default method in two traits, not implemented here
-        defaults = {}
-        for ent in order:
-            for m in ent['def'].methods:
-                if not _is_required_method(m):
-                    defaults.setdefault(m.name, []).append((ent, m))
-        for mname, defs in defaults.items():
-            if len(defs) >= 2 and mname not in own:
-                found = True
-                (e1, m1), (e2, m2) = defs[0], defs[1]
-                t1, t2 = e1['def'].name, e2['def'].name
-                record(st, f"trait method requirement '{mname}' has conflicting default "
-                           f"implementations in '{t1}' and '{t2}'; you must implement it "
-                           f"manually",
-                       [_note(file=e1['file'], line=m1.line, name=mname, message=f"original default implementation from trait '{t1}' here"),
-                        _note(file=e2['file'], line=m2.line, name=mname, message=f"conflicting implementation from trait '{t2}' here")])
-        if found:
-            continue
-
-        # 3. unmet requirements
-        have = set(own)
-        for ent in order:
-            for m in ent['def'].methods:
-                if not _is_required_method(m):
-                    have.add(m.name)
-        for ent in order:
-            tr = ent['def']
-            tn = tr.name
-            tsrc = ent['src'].splitlines() if ent['src'] else []
-            items = []   # (line, note)
-            for m in tr.methods:
-                if _is_required_method(m) and m.name not in have:
-                    items.append((m.line, _note(file=ent['file'], line=m.line, name=m.name, message=f"required function '{m.name}' is not implemented")))
-            for (mn, mt, _w) in getattr(tr, 'comptime_members', []):
-                pos = _trait_member_line(ent['src'], tr, mn)
-                if pos is None:
-                    continue
-                if '=' in tsrc[pos[0] - 1]:
-                    continue    # the trait supplies a default
-                have_t = st.comptime_member_types.get(mn)
-                if mn not in st.comptime_aliases and have_t is None:
-                    msg = f"required member '{mn}' is not specified"
-                elif have_t and have_t != mt:   # an unannotated alias has no type to compare
-                    msg = (f"comptime member '{mn}' type '{have_t}' does not conform "
-                           f"to trait's required type '{mt}'")
-                else:
-                    continue
-                items.append((pos[0], _note(file=ent['file'], line=pos[0], col=pos[1], name='', synth=mn, message=msg)))
-            if not items:
-                continue
-            items.sort(key=lambda it: it[0])
-            notes = [it[1] for it in items]
-            notes.append(_note(file=ent['file'], line=tr.line, name=tn, message=f"trait '{tn}' declared here"))
-            record(st, f"'{st.name}' does not implement all requirements for '{tn}'", notes)
-            found = True
-        if found:
-            continue
-
-        # 4. candidate selection between conditional overloads
-        sel = _candidate_selection_record(st, filename, order)
-        if sel is not None:
-            record(st, sel[0], sel[1])
-    # Function bodies are checked before struct declarations (measured: a
-    # struct above `main` is still reported after main's call errors).
-    for key, rec in (_static_call_records(stmts, filename, source)
-                     + _static_conversion_records(stmts, filename, source)):
-        records.append(((0,) + tuple(key), rec))
-    if not records:
-        return None, 0
-    if werror:
-        for r in records:
-            r[1].kind = 'error'
-    records.sort(key=lambda r: r[0])
-    errors = sum(1 for r in records if r[1].kind == 'error')
-    return '\n'.join(_render_record_text(r[1], filename, source) for r in records), errors
-
-
-def _callee_start(func):
-    """(line, col) of the leftmost token of a call's callee expression:
-    `a.b.f` starts at `a`, whereas a MemberExpr's own col is its last dot."""
-    while hasattr(func, 'obj') and (hasattr(func, 'member') or hasattr(func, 'index')):
-        func = func.obj
-    return getattr(func, 'line', 0), getattr(func, 'col', 0)
-
-
-def overload_rejection(spec, args, kwargs):
-    """Why one overload candidate cannot take this call, in the modular
-    compiler's wording, or None when this resolver cannot name a reason it
-    has verified against `tools/mojo` (only the two shapes below have been).
-    `spec` is the (func, required, optional, kwonly, has_var_kwargs) tuple."""
-    required = spec[1]
-    optional = spec[2]
-    n = len(args)
-    if n > len(required) + len(optional):
-        return 'unexpected argument'
-    for name in required[n:]:
-        if name not in kwargs:
-            return f"missing required argument: '{name}'"
-    return None
-
-
-def overload_diagnostic_record(oset, call, args, kwargs, filename):
-    """The structured modular diagnostic for a call no overload accepts:
-
-        error: no matching function in call to 'f'
-        note: candidate not viable: <reason>      (one per candidate, with
-                                                   the candidate's `def` line)
-
-    Returns a dict for `mojo_diagnostic`, or None when any candidate's reason
-    or location is not known, or the reasons differ in kind (the caret
-    position for a mixed set has not been measured): the caller then keeps
-    the plain one-line error rather than print a guess. Caret placement,
-    measured against `tools/mojo build`: all reasons "missing required
-    argument" -> caret on the `(`, `~` under the callee; all "unexpected
-    argument" -> caret on the callee's first character."""
-    reasons = []
-    for spec in oset.candidates:
-        reason = overload_rejection(spec, args, kwargs)
-        loc = _FUNC_DEF_LOCS.get(id(spec[0]))
-        if reason is None or loc is None:
-            return None
-        reasons.append((reason, loc))
-    if not reasons:
-        return None
-    missing = reasons[0][0].startswith('missing required argument')
-    for r in reasons:
-        if r[0].startswith('missing required argument') != missing:
-            return None
-    cl, cc = _callee_start(call.func)
-    if cl != call.line or cc < 1 or call.col < cc:
-        return None
-    notes = []
-    for r in reasons:
-        notes.append(_note(file=r[1][0], line=r[1][1], name=oset.name, message='candidate not viable: ' + r[0]))
-    rec = _rec(file=filename, line=call.line, caret=call.col if missing else cc, tilde_from=cc if missing else 0, message=f"no matching function in call to '{oset.name}'", notes=notes)
-    if not missing:
-        tail0 = call.func
-        while hasattr(tail0, 'index') and hasattr(tail0, 'obj'):
-            tail0 = tail0.obj
-        if hasattr(tail0, 'name'):
-            rec.after = len(tail0.name) - 1
-        # "unexpected argument": when every candidate runs out of parameters at
-        # the SAME argument, the caret is on that argument and the callee's name
-        # is underlined; otherwise it is on the callee's first character.
-        firsts = set()
-        for spec in oset.candidates:
-            firsts.add(len(spec[1]) + len(spec[2]))
-        if len(firsts) == 1:
-            k = list(firsts)[0]
-            if k < len(call.args):
-                al, ac = _expr_start(call.args[k])
-                tail = call.func
-                while hasattr(tail, 'index') and hasattr(tail, 'obj'):
-                    tail = tail.obj
-                end = cc + len(tail.name) - 1 if hasattr(tail, 'name') else (
-                    tail.col + len(tail.member) if hasattr(tail, 'member') else cc)
-                if al == call.line and ac > end:
-                    rec.caret = ac
-                    rec.tilde_from = cc
-                    rec.tilde_to = end
-    return rec
-
-
-def _record_source_line(rec_file, line, filename, source):
-    """The text of `line` in `rec_file`: `source` when it is the file being
-    run, else read from disk; None when unavailable."""
-    if rec_file == filename and source is not None:
-        lines = source.splitlines()
-    else:
-        try:
-            lines = _read_text(rec_file).splitlines()
-        except (OSError, TypeError, ValueError):
-            return None
-    if 1 <= line <= len(lines):
-        return lines[line - 1]
-    return None
-
-
-_VIRTUAL_STMTS = {}
-
-
-def _int_default_text(e):
-    if isinstance(e, N.IntLiteral):
-        return f"Int({e.value})"
-    return None
-
-
-def _synthetic_text(path, line, name):
-    """The signature the modular compiler prints for a declaration of a
-    precompiled package (`def f[n: Int]() where (n > Int(0))`, `struct S[a:
-    Int, /, c: Int = Int(9)]`, `trait T`, `def __init__(out self, value: Int)`):
-    the declaration named `name` at (or just under the decorators of) `line`,
-    rendered from the AST of the source the artifact embedded."""
-    if path not in _VIRTUAL_STMTS:
-        try:
-            _VIRTUAL_STMTS[path] = N.Parser(N.py_tokenize(
-                _VIRTUAL_SOURCES[path])).with_filename(path).parse_module()
-        except Exception:
-            _VIRTUAL_STMTS[path] = []
-    decls = []
-    for st in _VIRTUAL_STMTS[path]:
-        decls.append(st)
-        if isinstance(st, (N.StructDef, N.TraitDef)):
-            decls.extend(getattr(st, 'methods', []))
-    node = None
-    for d in decls:
-        if getattr(d, 'name', None) != name:
-            continue
-        span = len(getattr(d, 'decorators', []) or [])
-        if d.line <= line <= d.line + span:
-            node = d
-            break
-    if node is None:
-        return None
-    if isinstance(node, N.TraitDef):
-        return f"trait {name}"
-    if isinstance(node, N.StructDef):
-        lines = _VIRTUAL_SOURCES[path].splitlines()
-        for k in range(node.line - 1, min(node.line + 6, len(lines))):
-            m = re.match(r'^\s*struct\s+' + re.escape(name) + r'(\[.*\])?', lines[k])
-            if m:
-                br = m.group(1) or ''
-                br = re.sub(r'=\s*(-?\d+)\b', lambda mm: '= Int(' + mm.group(1) + ')', br)
-                return f"struct {name}{br}"
-        return f"struct {name}"
-    # FunctionDef
-    brackets = ''
-    if node.comptime_params:
-        parts = []
-        anns = getattr(node, 'comptime_param_annotations', {}) or {}
-        defs = getattr(node, 'comptime_param_defaults', {}) or {}
-        for pn in node.comptime_params:
-            t = pn + (f": {anns[pn]}" if anns.get(pn) else '')
-            d = _int_default_text(defs.get(pn)) if pn in defs else None
-            if d is not None:
-                t += f" = {d}"
-            parts.append(t)
-        brackets = '[' + ', '.join(parts) + ']'
-    params = []
-    convs = getattr(node, 'param_convs', {}) or {}
-    for p in node.params:
-        pn, ann = (p[0], p[1]) if isinstance(p, tuple) else (str(p), None)
-        c = convs.get(pn)
-        params.append((c + ' ' if c and c not in ('read', 'imm') else '') + pn
-                      + (f": {ann}" if ann else ''))
-    ret = f" -> {node.return_type}" if getattr(node, 'return_type', None) else ''
-    where = ''
-    if getattr(node, 'where_clause', None) is not None and not isinstance(node.where_clause, list):
-        t = _constraint_text(node.where_clause)
-        if t is not None:
-            where = f" where {t}"
-    return f"def {name}{brackets}({', '.join(params)}){ret}{where}"
-
-
-class _Diag:
-    """One entry of a diagnostic record: the main `error:`/`warning:` (kind
-    'error'/'warning') or one of its `note:`s (kind 'note'), the same shape for
-    both so the renderer reads every entry alike.
-
-    A CLASS with typed attributes, not a dict: the self-hosted compiler types a
-    dict's per-key values from the literal that builds it, so a key added later
-    or present in only some records read back as the wrong kind (`rec['tilde_to']`
-    was a `char *` read where an int was meant: GCC `assignment to 'char *' from
-    'long int'`). `name`/`text`/`synth`/`fixit` use '' for "none"."""
-    kind: str
-    file: str
-    line: int
-    message: str
-    name: str
-    caret: int
-    col: int
-    text: str
-    synth: str
-    nosnippet: bool
-    tilde_from: int
-    tilde_to: int
-    after: int
-    fixit: str
-    notes: list
-
-    def __init__(self, kind: str, file: str, line: int, message: str,
-                 name: str, caret: int, col: int, text: str, synth: str,
-                 nosnippet: bool, tilde_from: int, tilde_to: int, after: int,
-                 fixit: str, notes: list) -> None:
-        self.kind = kind
-        self.file = file
-        self.line = line
-        self.message = message
-        self.name = name
-        self.caret = caret
-        self.col = col
-        self.text = text
-        self.synth = synth
-        self.nosnippet = nosnippet
-        self.tilde_from = tilde_from
-        self.tilde_to = tilde_to
-        self.after = after
-        self.fixit = fixit
-        self.notes = notes
-
-
-def _note(file: str, line: int, message: str, name: str = '', col: int = 0,
-          text: str = '', synth: str = '', nosnippet: bool = False,
-          after: int = 0, fixit: str = '') -> _Diag:
-    """One `note:` of a diagnostic record."""
-    return _Diag('note', file, line, message, name, 0, col, text, synth,
-                 nosnippet, 0, 0, after, fixit, [])
-
-
-def _rec(file: str, line: int, caret: int, message: str, notes: list,
-         name: str = '', kind: str = 'error', tilde_from: int = 0,
-         tilde_to: int = 0, after: int = 0) -> _Diag:
-    """The main entry of a diagnostic record."""
-    return _Diag(kind, file, line, message, name, caret, 0, '', '', False,
-                 tilde_from, tilde_to, after, '', notes)
-
-
-def _repeat_char(ch: str, n: int) -> str:
-    """`ch` repeated `n` times (empty for a non-positive count). Callers pass
-    counts read out of a record dict, which the self-hosted compiler holds as
-    boxed words; taking them through this typed `n` is what lets the repeat
-    lower (an inline `'~' * <word>` was `char * * char *` in the self-host
-    build). Built by appending, not `ch * n`, for the same reason."""
-    count: int = n
-    out: str = ''
-    while count > 0:
-        out = out + ch
-        count = count - 1
-    return out
-
-
-def _render_record_text(rec: _Diag, filename: str, source: str) -> str:
-    """Text rendering of a diagnostic record, in `mojo build`'s shape:
-    `file:line:col: error: msg`, the source line, then a marker line (`~` from
-    tilde_from up to the caret, `^` at the caret column, `~` for `after` more
-    columns). Notes follow; one in a file with no source (a precompiled package)
-    shows a synthetic signature instead (see `_synthetic_text`)."""
-    out = []
-    entries = [rec] + rec.notes
-    for idx in range(len(entries)):
-        e = entries[idx]
-        kind = e.kind
-        f = e.file
-        line = e.line
-        message = e.message
-        name = e.name
-        caret = e.caret if idx == 0 else e.col
-        tilde_from = e.tilde_from
-        text = _record_source_line(f, line, filename, source)
-        have_text = text is not None
-        if e.text != '':
-            # A compiler-generated declaration has no source: the note shows a
-            # synthesized signature instead of the file's line.
-            text = e.text
-            have_text = True
-        if name != '' and have_text:
-            pat = re.compile(r'\b(?:def|fn|struct|trait)\s+(' + re.escape(name) + r')\b')
-            m = pat.search(text)
-            if m is None:
-                # The recorded line is a DECORATOR line (`@fieldwise_init`):
-                # the declaration is on one of the next few lines.
-                for k in range(1, 6):
-                    t2 = _record_source_line(f, line + k, filename, source)
-                    if t2 is None:
-                        break
-                    m2 = pat.search(t2)
-                    if m2 is not None:
-                        line = line + k
-                        text = t2
-                        m = m2
-                        break
-            caret = m.start(1) + 1 if m else 0
-        syn = f in _SYNTHETIC_FILES
-        if syn and idx > 0:
-            # A package with no source: `file:line:1`, the declaration's
-            # synthetic signature (or a compiler-generated one) and a caret in
-            # column 1; a few notes carry no snippet at all.
-            caret = 1
-            if e.nosnippet:
-                out.append(f"{f}:{line}: {kind}: {message}")
-                continue
-            if e.text != '':
-                text = e.text
-                have_text = True
-            elif e.synth != '':
-                text = e.synth
-                have_text = True
-            elif name != '':
-                st = _synthetic_text(f, line, name)
-                have_text = st is not None
-                text = st if st is not None else ''
-            else:
-                have_text = False
-            if have_text and e.text == '' and not text.startswith('('):
-                text = text + '    # note - synthetic signature'
-        if caret < 1:
-            caret = 1
-        if f != rec.file and source is not None and not syn:
-            # A candidate declared in another file is introduced by the
-            # importing statement: `Imported from <this file>:<line>:`.
-            base = os.path.basename(f)
-            mod = os.path.basename(os.path.dirname(f)) if base == '__init__.mojo' \
-                else os.path.splitext(base)[0]
-            pat = re.compile(r'^\s*(?:import\s+' + re.escape(mod) + r'\b|from\s+'
-                             + re.escape(mod) + r'\b)')
-            for i, src_line in enumerate(source.splitlines()):
-                if pat.match(src_line):
-                    out.append(f"Imported from {rec.file}:{i + 1}:")
-                    break
-        out.append(f"{f}:{line}:{caret}: {kind}: {message}")
-        if have_text:
-            out.append(text)
-            pad = ''.join('\t' if ch == '\t' else ' ' for ch in text[:caret - 1])
-            if tilde_from > 0 and idx == 0 and e.tilde_to > 0:
-                marks = ''.join('\t' if ch == '\t' else ' ' for ch in text[:tilde_from - 1])
-                out.append(marks + _repeat_char('~', e.tilde_to - tilde_from + 1)
-                           + _repeat_char(' ', caret - e.tilde_to - 1) + '^')
-            elif tilde_from > 0:
-                marks = ''.join('\t' if ch == '\t' else ' ' for ch in text[:tilde_from - 1])
-                out.append(marks + _repeat_char('~', caret - tilde_from) + '^'
-                           + _repeat_char('~', e.after))
-            else:
-                out.append(pad + '^' + _repeat_char('~', e.after))
-                if e.fixit != '':
-                    out.append(pad + e.fixit)
-    return '\n'.join(out)
-
-
-def mojo_diagnostic(exc, filename, source, fmt='text'):
-    """The modular-format rendering of an unknown-declaration error, or None
-    when `exc` carries no Mojo source location (an error raised from a
-    synthetic node, or one that never reached eval_IdentExpr). `fmt` is
-    'text' (the default) or 'json' (`--diagnostic-format json`).
-
-    One record is built here (the position, the source line, the message and
-    the suggestion) and rendered two ways, matching the modular compiler's
-    output for the same file:
-
-    text, `mojo build`'s shape:
-
-        <file>:<line>:<col>: error: use of unknown declaration '<name>'
-            <the source line, verbatim>
-            <spaces to the column>^~~~ (one ~ per further character of name)
-
-    with a suggestion the head gains `; did you mean '<s>'?` and the
-    suggestion is printed on its own line under the caret, at the column.
-
-    json, one object per record with sorted keys and 0-based columns in
-    `location` and `ranges`, 1-based line/column in `fixIts` (the suggestion
-    replaces the identifier). The driver's closing `failed to parse` record
-    is part of that stream, so it is emitted here too."""
-    rec = getattr(exc, 'mojo_record', None)
-    if rec is not None and fmt != 'json' and filename:
-        return _render_record_text(rec, filename, source)
-    loc = getattr(exc, 'mojo_loc', None)
-    name = getattr(exc, 'name', None)
-    if loc is None or not isinstance(name, str) or not filename or source is None:
-        return None
-    line, col, width = loc
-    lines = source.splitlines()
-    if line < 1 or line > len(lines) or col < 1:
-        return None
-    text = lines[line - 1]
-    suggestion = name_error_candidate(name, getattr(exc, 'candidates', None),
-                                      getattr(exc, 'self_obj', None))
-    if suggestion is not None and not suggestion.isascii():
-        suggestion = None
-    message = f"use of unknown declaration '{name}'"
-    if suggestion is not None:
-        message += f"; did you mean '{suggestion}'?"
-    if fmt == 'json':
-        import json
-        diagnostic = {
-            'file': filename,
-            'fixIts': [] if suggestion is None else [{
-                'start': {'line': line, 'column': col},
-                'end': {'line': line, 'column': col + width},
-                'text': suggestion}],
-            'location': {'line': line, 'column': col - 1},
-            'ranges': [{'start': col - 1, 'end': col - 1 + width}],
-            'text': text}
-        records = [{'diagnostic': diagnostic, 'kind': 'error', 'message': message},
-                   {'kind': 'error',
-                    'message': 'failed to parse the provided Mojo source module'}]
-        return '\n'.join(json.dumps(r, sort_keys=True, separators=(',', ':'),
-                                     ensure_ascii=False)
-                         for r in records)
-    out = [f"{filename}:{line}:{col}: error: {message}", text]
-    pad = ''.join('\t' if ch == '\t' else ' ' for ch in text[:col - 1])
-    out.append(pad + '^' + '~' * max(width - 1, 0))
-    if suggestion is not None:
-        out.append(' ' * (col - 1) + suggestion)
-    return '\n'.join(out)
-
-
 def name_error_suggestion(name, candidates, self_obj):
     """CPython 3.15's print-time NameError suggestion, as the suffix to
     append to the message: '' when there is nothing to add. CPython reads
@@ -2325,7 +797,20 @@ def name_error_suggestion(name, candidates, self_obj):
     '<name>'?` when there is none."""
     if not isinstance(name, str) or candidates is None:
         return ''
-    suggestion = name_error_candidate(name, candidates, self_obj)
+    d = [x for x in candidates if isinstance(x, str)]
+    name_n, not_normalized = _suggestion_normalize(name)
+    suggestion = None
+    if not_normalized and name_n in d:
+        suggestion = name_n
+    else:
+        if self_obj is not None:
+            try:
+                if hasattr(self_obj, name_n):
+                    suggestion = f"self.{name_n}"
+            except Exception:
+                pass
+        if suggestion is None:
+            suggestion = _suggestion_after_pool(d, name_n, not_normalized)
     if suggestion is None:
         if name in _STDLIB_MODULE_NAMES:
             return f". Did you forget to import '{name}'?"
@@ -2381,11 +866,8 @@ def error_suggestion_suffix(e):
 
 class ReturnValue(Exception):
     """Exception used to implement return statements."""
-    def __init__(self, value=None, node=None):
+    def __init__(self, value=None):
         self.value = value
-        # The ReturnStmt, kept so a return type's conversion diagnostic can
-        # point at the statement (`_invoke`'s declared return type).
-        self.node = node
 
 
 class BreakException(Exception):
@@ -2583,15 +1065,6 @@ class Scope:
     def __init__(self, parent=None):
         self.parent = parent
         self.vars = {}
-        # Declared type annotations (`var x: Float32`, `def f(x: Float32)`)
-        # for this scope's bindings, name -> annotation text. Only the
-        # unimplemented float8 refusals read it (see
-        # Interpreter._declared_conversion): an assignment to an already
-        # declared name is a conversion to its declared type, the same one a
-        # `var` initialiser performs, and a dynamically typed engine cannot
-        # know the type without recording it here. A name with no annotation
-        # is simply absent.
-        self.declared_types = {}
         # Names this scope's function declared `nonlocal`. A declaration
         # changes no value, so it belongs on the scope rather than in a
         # side table: a plain `x = ...` in a nested function is LOCAL by
@@ -2606,16 +1079,6 @@ class Scope:
 
     def is_nonlocal(self, name: str) -> bool:
         return name in self.nonlocals
-
-    def declared_type(self, name: str):
-        """The declared type annotation recorded for `name` by the nearest
-        scope that binds it, or None when no such declaration was recorded
-        (an unannotated `var`/parameter, an import, a builtin)."""
-        if name in self.vars:
-            return self.declared_types.get(name)
-        if self.parent:
-            return self.parent.declared_type(name)
-        return None
 
     def define(self, name: str, value):
         self.vars[name] = value
@@ -2725,7 +1188,7 @@ class MojoFunction:
     """Represents a function defined in Mojo code."""
     def __init__(self, name, params, body, closure_scope, comptime_params=None, param_defaults=None,
                  is_generator=False, is_async=False, interpreter=None,
-                 comptime_param_defaults=None, param_types=None, return_type=None):
+                 comptime_param_defaults=None):
         self.name = name
         self.params = params
         self.body = body
@@ -2749,16 +1212,6 @@ class MojoFunction:
         # default's offset. Read in `_invoke` below, next to the `_pd` read,
         # so there is exactly one place a declared default is applied.
         self.comptime_param_defaults = comptime_param_defaults or {}
-        # Declared RUNTIME parameter annotations (`def f(x: Float32)`), name ->
-        # annotation text, and the declared `-> T` return annotation. Both are
-        # conversion sites: a parameter binding and a returned value convert
-        # to the DECLARED type exactly like a `var` initialiser does, which is
-        # where the unimplemented float8 dtypes are refused (see
-        # _coerce_to_declared_type and test_regress_gpu_offload_validation_
-        # modular_part8.py). Only the float8 refusal reads them, so a function
-        # with no annotation is untouched (`{}` / None).
-        self.param_types = param_types or {}
-        self.return_type = return_type
         if param_defaults:
             self._pd = param_defaults
         # Milestone 2 of INTERP_generator_yield_entirely_unimplemented:
@@ -2828,21 +1281,6 @@ class MojoFunction:
         how many comptime parameters it declares, because "too many" is a
         different mistake from "too few" and the caller can only fix it if it
         is told which.
-
-        **A parameter the bracket omits and the declaration does not default is
-        refused too, and it used to bind `None`.** `_invoke` binds every
-        still-unbound comptime parameter to `None`, which is right for one that
-        a later pass will infer from the call's argument types but wrong for one
-        the bracket was supposed to supply: `param_fn[2](1)` on
-        `def param_fn[x: Int, y: Int](a)` ran the body with `y = None` and died
-        with `unsupported operand type(s) for +: 'int' and 'NoneType'`, an
-        interpreter traceback one call away from the mistake. The canonical
-        case (`compile_offload_unbound_param_error.mojo`) wants
-        `failed to infer parameter 'y' of 'param_fn'`, so that is what
-        `_UnboundComptimeParameter` carries to `eval_SubscriptExpr`, which
-        renders it as a diagnostic record at the bracket. A call with no
-        bracket at all does not pass through here and keeps `_invoke`'s
-        inference-friendly `None`.
         """
         values = item if isinstance(item, tuple) else (item,)
         declared = len(self.comptime_params)
@@ -2855,9 +1293,6 @@ class MojoFunction:
                 f"argument(s) but {self.name} declares {declared} comptime "
                 f"parameter(s): {names}")
         bindings = dict(zip(self.comptime_params, values))
-        unbound = _unbound_comptime_param(self, bindings)
-        if unbound is not None:
-            _raise_unbound_comptime_error(self, unbound)
         return _MojoBoundComptimeFunction(self, bindings)
 
     def _invoke(self, interpreter, comptime_bindings, args, kwargs):
@@ -2892,10 +1327,6 @@ class MojoFunction:
                     _found = True
                 if not _found and cp_name not in func_scope.vars:
                     func_scope.define(cp_name, None)
-
-        _wnode = _FUNC_WHERE.get(id(self))
-        if _wnode is not None:
-            check_where_clause(interpreter, self, _wnode, func_scope)
 
         # Bind parameters to arguments.
         #
@@ -2980,28 +1411,6 @@ class MojoFunction:
                     _rest_kw[_kk] = kwargs[_kk]
             func_scope.define(_var_kw_name, _rest_kw)
 
-        # A parameter binding converts to the DECLARED parameter type, exactly
-        # like a `var` initialiser (see _coerce_to_declared_type). Only an
-        # unimplemented float8 dtype changes here, in either direction: a
-        # float8 argument passed to a parameter of another scalar dtype is the
-        # conversion Modular refuses ("conversion from 'f8e3m4' to 'f32' is
-        # not implemented"), and an argument passed to a parameter DECLARED as
-        # a float8 dtype becomes a value of that dtype, so a later operation on
-        # it is refused rather than computed. A parameter whose annotation
-        # names no scalar this engine knows (`T`, `Self`, a struct) is left
-        # untouched — there is no conversion to refuse. The compiled path
-        # refuses both at `_safe_coerce_emit`'s call-argument arm; this is the
-        # interpreter half of that parity.
-        if self.param_types:
-            _bind_node = _CALL_SITE[0]
-            for _pt_name in self.param_types:
-                _pt_ann = self.param_types[_pt_name]
-                func_scope.declared_types[_pt_name] = _pt_ann
-                if not func_scope.has(_pt_name):
-                    continue
-                func_scope.define(_pt_name, interpreter._declared_conversion(
-                    func_scope.get(_pt_name), _pt_ann, _bind_node))
-
         if self.is_generator and self.is_async:
             # `async def f(): yield x` — a real async generator. Python's
             # actual protocol for these (`__aiter__`/`__anext__`, driven by
@@ -3060,18 +1469,6 @@ class MojoFunction:
                 result = None
             except ReturnValue as ret:
                 result = ret.value
-                # A returned value converts to the DECLARED return type, the
-                # same conversion site a `var` initialiser is (see
-                # _declared_conversion): a float8 value returned as another
-                # scalar dtype is refused, and a numeric value returned as a
-                # float8 dtype is held as one so a later use is refused. The
-                # compiled path refuses both at _safe_coerce_emit's return
-                # slot; this is the interpreter half.
-                if (isinstance(result, _MojoFloat8Value)
-                        or (isinstance(self.return_type, str)
-                            and self.return_type in _FLOAT8_TYPE_NAMES)):
-                    result = interpreter._declared_conversion(
-                        result, self.return_type, getattr(ret, 'node', None))
             finally:
                 interpreter.scope = old_scope
 
@@ -4058,38 +2455,8 @@ class BoundMethod:
         finally:
             self.interpreter.scope = old_scope
 
-    def __getitem__(self, item):
-        """`obj.method[...]` at a call site: bind the bracket items to the
-        declared comptime parameters BY POSITION, the way
-        `MojoFunction.__getitem__` does for a free function, and answer a
-        receiver-bound callable that still takes the call-time arguments.
-
-        The receiver's declared parameters live on `self.bound_func`
-        (`comptime_params` / `comptime_param_defaults` / `_pd`), as the
-        keyword-bracket path (`_bind_bracket_comptime`) reads them. A
-        bracket item with no parameter to bind it is refused, and an omitted
-        parameter with no default is refused through the same helpers the
-        free-function path uses, so the subscript site renders the one
-        `failed to infer parameter ...` diagnostic. The bound value keeps
-        the receiver (`_MojoBoundComptimeReceiver`), as the keyword spelling
-        already does."""
-        decl = self.bound_func
-        values = item if isinstance(item, tuple) else (item,)
-        declared = len(getattr(decl, 'comptime_params', None) or [])
-        if len(values) > declared:
-            names = ', '.join(getattr(decl, 'comptime_params', None) or [])
-            if not names:
-                names = 'none'
-            raise TypeError(
-                f"{getattr(decl, 'name', '')}[...] supplies {len(values)} "
-                f"specialization argument(s) but "
-                f"{getattr(decl, 'name', '')} declares {declared} comptime "
-                f"parameter(s): {names}")
-        bindings = dict(zip(getattr(decl, 'comptime_params', None) or [], values))
-        unbound = _unbound_comptime_param(decl, bindings)
-        if unbound is not None:
-            _raise_unbound_comptime_error(decl, unbound)
-        return _MojoBoundComptimeReceiver(self, bindings)
+    def __getitem__(self, key):
+        return self
 
 
 class _MojoBoundComptimeReceiver:
@@ -4323,8 +2690,7 @@ class MojoClass:
                         setattr(instance, f.name, container_default)
                         continue
                 value = self.interpreter.eval_expr(f.value) if f.value is not None else None
-                value = _unwrap_dataclass_field(value)
-                value = self.interpreter._coerce_to_declared_type(value, getattr(f, 'type_ann', None), f)
+                value = self.interpreter._coerce_to_declared_type(value, getattr(f, 'type_ann', None))
                 setattr(instance, f.name, value)
             elif self.interpreter._is_instance(f, 'AssignStmt'):
                 # AssignStmt has a single `.target`, not a `.targets` list
@@ -4332,13 +2698,10 @@ class MojoClass:
                 # raised "'AssignStmt' object has no attribute 'targets'"
                 # on any instantiation of a class with a bare `NAME = value`
                 # class-body attribute (e.g. `class Foo: count = 0`).
-                # `name: Type = field(default=...)` lands here (an AssignStmt
-                # carrying `type_ann`, not a VarDecl), so the dataclass Field
-                # unwrap applies to it too.
                 value = self.interpreter.eval_expr(f.value) if f.value is not None else None
                 target = f.target
                 if self.interpreter._is_instance(target, 'IdentExpr'):
-                    setattr(instance, target.name, _unwrap_dataclass_field(value))
+                    setattr(instance, target.name, value)
         init = self.methods.get('__init__')
         if init is not None:
             interp = self.interpreter
@@ -4357,23 +2720,15 @@ class MojoClass:
             # and real Mojo). Previously the interpreter ignored the args,
             # leaving every field None ("unsupported operand +: None + None").
             field_names = []
-            field_anns = []
-            field_nodes = []
             for f in self.fields:
                 if self.interpreter._is_instance(f, 'VarDecl'):
                     field_names.append(f.name)
-                    field_anns.append(getattr(f, 'type_ann', None))
-                    field_nodes.append(f)
                 elif self.interpreter._is_instance(f, 'AssignStmt') \
                         and self.interpreter._is_instance(f.target, 'IdentExpr'):
                     field_names.append(f.target.name)
-                    field_anns.append(getattr(f, 'type_ann', None))
-                    field_nodes.append(f.target)
             for i, a in enumerate(args):
                 if i < len(field_names):
                     fname = field_names[i]
-                    a = self.interpreter._declared_conversion(
-                        a, field_anns[i], field_nodes[i])
                     setattr(instance, fname, a)
         return instance
 
@@ -4616,43 +2971,10 @@ class _MojoListType:
             return list(kwargs['copy'])
         if 'capacity' in kwargs or 'unsafe_uninit_length' in kwargs:
             return []
-        if 'length' in kwargs:
-            # `List(length=, fill=)` is a synthetic `[fill] * length` and
-            # `List(length=, fill_with=<callable>)` fills slot i with
-            # `fill_with(i)`: the same synthetic-comprehension reading the
-            # compiled path gives it (`_lower_bare_list_ctor` in
-            # emit_calls.py). A `fill` is evaluated ONCE by the caller and
-            # copied into every slot, never re-evaluated; a `fill_with` is a
-            # value call per slot, and a MojoFunction answers one like any
-            # other call (`MojoFunction.__call__` resolves its own
-            # interpreter). A `length=` with no filler (`capacity=` beside
-            # it, a misspelt one) builds nothing: an empty list, matching
-            # the compiled path's `mojo_list_new ()` fallback.
-            length = kwargs['length']
-            if 'fill' in kwargs:
-                fill = kwargs['fill']
-                return [fill] * length
-            if 'fill_with' in kwargs:
-                fill_with = kwargs['fill_with']
-                return [fill_with(i) for i in range(length)]
-            return []
-        if len(args) == 1 and isinstance(args[0], (list, tuple, set,
-                                                   frozenset, dict, range,
-                                                   str, bytes)):
-            # `List(<iterable>)` is a COPY in the container's iteration
-            # order, exactly as `list(<iterable>)` is — one walk, the same
-            # one the compiled path reuses in `_lower_bare_list_ctor`
-            # (emit_calls.py). Before this arm existed the sole iterable
-            # was wrapped as ONE element: `List([1, 2])` answered
-            # `[[1, 2]]` and the two engines disagreed on it
-            # (bug:INTERP_list_ctor_wraps_its_iterable).
-            return list(args[0])
         # `List(1, 2, 3, __list_literal__=NoneType())` - real Mojo's
         # list-literal-desugaring init; drop the marker kwarg, keep the
         # positional values as the initial contents. Plain `List[Int]()`
-        # (no positional args) falls through the same path to `[]`, and a
-        # lone NON-iterable (`List(5)`) is wrapped as one element, as it
-        # always was.
+        # (no positional args) falls through the same path to `[]`.
         return list(args)
 
     def alloc(self, count, *args, **kwargs):
@@ -5025,18 +3347,12 @@ class _MojoScalarType:
     int/float already behave like the value side of these types; this only
     carries the `.size_bytes` metadata that `size_of[T]()`/`align_of[T]()`/
     `bit_width_of[T]()` read off the type itself."""
-    def __init__(self, name, size_bytes, is_float=False, spelling=None):
+    def __init__(self, name, size_bytes, is_float=False):
         self.name = name
         self.size_bytes = size_bytes
         self._is_float = is_float
-        self._spelling = spelling
 
     def __call__(self, x=0):
-        if self._spelling is not None:
-            # A value of an unimplemented float8 dtype carries its spelling,
-            # so a later use of it is refused (see _MojoFloat8Value) instead
-            # of silently computing on a dtype with no rule behind it.
-            return _MojoFloat8Value(self._spelling, x)
         return float(x) if self._is_float else int(x)
 
     def __repr__(self):
@@ -5062,93 +3378,6 @@ class _MojoScalarType:
 
     def is_double_float(self):
         return self.name == 'Float64'
-
-
-# The float8 scalar family, one byte each: the names exist in the type table
-# (a `Float8_e3m4` annotation resolves and `size_of[DType.float8_e3m4]()`
-# answers 1) but this interpreter has no conversion or arithmetic rule for
-# the dtype — a coercion from a value of one to any other declared type, and
-# a binary operation with one, are refused with Modular's own diagnostic
-# instead of silently computing on a type with no rule behind it (the float8
-# dtype legality fix for `op_with_unsupported_type_error.mojo`, host half;
-# pinned by test_regress_gpu_offload_validation_modular_part8.py). The family
-# and its lowered spellings are `mojo.middle.float8_dtype`'s one table, read
-# by the compiled path's resolver and refusals too — not a second copy here;
-# formal/model/types.py's NARROW_FLOAT_TYPE_NAMES is the formal path's.
-_FLOAT8_TYPE_NAMES = _FLOAT8_DTYPE_NAMES
-
-# The lowered spellings of the scalar types in the type table, the IR names
-# Modular's diagnostics word the types in (`conversion from 'f8e3m4' to 'f32'
-# is not implemented`); a declared type outside the table falls back to its
-# raw spelling at the refusal site.
-_SCALAR_TYPE_SPELLINGS = _SCALAR_DTYPE_SPELLINGS
-
-
-class _MojoFloat8Value(float):
-    """A value of an unimplemented float8 dtype: a plain float carrying its
-    dtype's lowered spelling (`f8e3m4`, ...). The dtype is in the type table
-    (its name resolves, `size_of` answers one byte) but there is no
-    conversion or arithmetic rule for it here, so a coercion to a different
-    declared type and a binary operation with one are refused with Modular's
-    diagnostic instead of silently computing (see _FLOAT8_TYPE_NAMES). A
-    float subclass so the value plumbing that is dynamic in this interpreter
-    (`float` checks, `print`) still behaves numerically on an untouched
-    value, the way _AutoStubValue subclasses int. `float.__new__` is called
-    directly rather than via super(): the self-hosting compiler compiles
-    this file and has no super() (see MojoError)."""
-    def __new__(cls, spelling, value=0.0):
-        # Every float8 value is its format's nearest value (ties to even): the
-        # format is the one place the rounding rule is read from.
-        instance = float.__new__(cls, _float8_round(float(value), spelling))
-        instance.spelling = spelling
-        return instance
-
-
-def _float8_operand_spelling(left, right):
-    """The lowered spelling of the first float8 operand in a pair of
-    already-evaluated operands, or None when neither is one (see
-    _MojoFloat8Value)."""
-    if isinstance(left, _MojoFloat8Value):
-        return _float8_spelling_of(left)
-    if isinstance(right, _MojoFloat8Value):
-        return _float8_spelling_of(right)
-    return None
-
-
-def _float8_spelling_of(value):
-    """The lowered dtype spelling a float8 value carries (its box's kind,
-    compiled; its attribute, interpreted)."""
-    return value.spelling
-
-
-_F8_PASS = object()
-
-
-def _float8_binary(interp, node, op, left, right):
-    """A binary operation with a float8 operand, under the rules Modular's own
-    compiler enforces (mojo.middle.float8_dtype): comparisons are allowed on
-    every format; `+ - * /` are allowed on every format except e3m4; the result
-    is rounded to the operand's format. Returns the result, or _F8_PASS when no
-    float8 operand is involved (the caller computes as usual)."""
-    sp = _float8_operand_spelling(left, right)
-    if sp is None or op in ('==', '!=', '<', '<=', '>', '>=', 'is', 'is not'):
-        return _F8_PASS
-    if op in ('+', '-', '*', '/') and _float8_has_arithmetic(sp):
-        a, b = float(left), float(right)
-        if op == '+':
-            r = a + b
-        elif op == '-':
-            r = a - b
-        elif op == '*':
-            r = a * b
-        elif b != 0.0:
-            r = a / b
-        elif a != a or a == 0.0:
-            r = float('nan')
-        else:
-            r = math.copysign(float('inf'), a) * math.copysign(1.0, b)
-        return _MojoFloat8Value(sp, r)
-    interp._refuse_unsupported_float8(node, _float8_operation_message(sp))
 
 
 class _MojoTypeInfoCall:
@@ -5549,28 +3778,12 @@ class _MojoSIMDCtor:
         return _MojoSIMD(self.dtype, self.width, values)
 
 
-def _mojo_simd_width_is_valid(width):
-    """Return True if `width` is an acceptable SIMD lane count.
-
-    Mojo's SIMD vector length must be a power of two in [1, 2**15]. Non-int
-    widths (e.g. symbolic/comptime parameters not yet folded here) are not
-    rejected by this cheap interpreter-side guard. The rule itself lives in
-    `mojo.middle.simd_width`, shared with the compiled path's guard.
-    """
-    return _simd_width_is_valid(width)
-
-
 class _MojoSIMDType:
     """`SIMD[DType.float32, 4](0.0, 1.5, -42.5, -12.7)` — subscript with
     (dtype, width), call with `width` scalar values (or a single value,
     broadcast to fill every lane)."""
     def __getitem__(self, item):
         dtype, width = item
-        if not _mojo_simd_width_is_valid(width):
-            raise ValueError(
-                "SIMD vector length must be a power of two between 1 and "
-                f"2^15, found {width!r}"
-            )
         return _MojoSIMDCtor(dtype, width)
 
 
@@ -5835,32 +4048,6 @@ class _MojoTestSuiteFnAccessor:
         interpreter = self.interpreter
         run = self.run
         return _MojoTestSuiteFnCall(func, interpreter, run)
-
-
-class _MojoCompileInfoRequest:
-    """Callable result of `compile_info[...]` — stands in for a compile request."""
-    def __call__(self, *args, **kwargs):
-        return 0
-
-    def __bool__(self):
-        return True
-
-
-class _MojoCompileInfo:
-    """`std.compile.compile_info` shim.
-
-    Subscript syntax is validated in Interpreter.eval_SubscriptExpr (it must
-    inspect the bracket's AST, not the evaluated kernel value). __getitem__ is a
-    fallback that should not be reached for normal interpreter subscript eval.
-    """
-    def __init__(self, interpreter):
-        self.interpreter = interpreter
-
-    def __getitem__(self, item):
-        return _MojoCompileInfoRequest()
-
-    def __call__(self, *args, **kwargs):
-        return _MojoCompileInfoRequest()
 
 
 def _mojo_unary_math(fn):
@@ -6462,13 +4649,6 @@ class Interpreter:
             cache[module_name] = namespace
             return namespace
 
-        if module_name in ('std.compile',):
-            if module_name in cache:
-                return cache[module_name]
-            namespace = types.SimpleNamespace(compile_info=_MojoCompileInfo(self))
-            cache[module_name] = namespace
-            return namespace
-
         if module_name in ('std.sys', 'std.sys.arg', 'std.sys.info'):
             if module_name in cache:
                 return cache[module_name]
@@ -6902,16 +5082,6 @@ class Interpreter:
         float32 = _MojoScalarType('Float32', 4, is_float=True)
         float64 = _MojoScalarType('Float64', 8, is_float=True)
         bfloat16 = _MojoScalarType('BFloat16', 2, is_float=True)
-        # The float8 family: one byte, a float, and no conversion or
-        # arithmetic rule in this interpreter — a value of one carries its
-        # lowered spelling and a use of it is refused (see
-        # _FLOAT8_TYPE_NAMES / _MojoFloat8Value).
-        float8 = {}
-        for _f8_name in _FLOAT8_TYPE_NAMES:
-            _f8_type = _MojoScalarType(_f8_name, 1, is_float=True,
-                                       spelling=_SCALAR_TYPE_SPELLINGS[_f8_name])
-            float8[_f8_name] = _f8_type
-            self.scope.define(_f8_name, _f8_type)
         self.scope.define('Int8', int8)
         self.scope.define('Int16', int16)
         self.scope.define('Int32', int32)
@@ -6924,17 +5094,12 @@ class Interpreter:
         self.scope.define('Float32', float32)
         self.scope.define('Float64', float64)
         self.scope.define('BFloat16', bfloat16)
-        dtype = types.SimpleNamespace(
+        self.scope.define('DType', types.SimpleNamespace(
             int8=int8, int16=int16, int32=int32, int64=int64, index=int64, int=int64,
             uint8=uint8, uint16=uint16, uint32=uint32, uint64=uint64,
             float16=float16, float32=float32, float64=float64, bfloat16=bfloat16,
             bool=_MojoScalarType('Bool', 1),
-        )
-        # Expose the float8 family on `DType` (`DType.float8_e3m4`) the way
-        # the other scalars are; the attribute is the lowercase type name.
-        for _f8_name, _f8_type in float8.items():
-            setattr(dtype, _f8_name.lower(), _f8_type)
-        self.scope.define('DType', dtype)
+        ))
         self.scope.define('size_of', _MojoTypeInfoFn(_mojo_size_of))
         self.scope.define('align_of', _MojoTypeInfoFn(_mojo_size_of))
         self.scope.define('bit_width_of', _MojoTypeInfoFn(_mojo_bit_width_of))
@@ -7104,31 +5269,6 @@ class Interpreter:
         return params
 
     @staticmethod
-    def _extract_param_types(node):
-        """The declared type annotation of each named parameter (`def f(x:
-        Float32)`), name -> annotation, stars stripped like `_extract_param_names`
-        so the two agree about a `*args`/`**kwargs` parameter's name. A
-        parameter with no annotation, and every non-tuple param shape this
-        parser no longer emits, is simply absent — `MojoFunction._invoke` reads
-        only what is here, so an absent entry is "no declared type", not a
-        default type."""
-        types = {}
-        if not hasattr(node, 'params') or not node.params:
-            return types
-        for p in node.params:
-            if not isinstance(p, tuple) or len(p) < 2:
-                continue
-            if not isinstance(p[1], str) or not p[1]:
-                continue
-            name = p[0]
-            if not isinstance(name, str) or not name:
-                continue
-            name = name.lstrip('*')
-            if name:
-                types[name] = p[1]
-        return types
-
-    @staticmethod
     def _classify_params(node):
         """Classify a FunctionDef's parameters for overload-signature
         matching: (required positional names, optional/defaulted positional
@@ -7197,13 +5337,8 @@ class Interpreter:
         func = MojoFunction(node.name, params, node.body, self.scope, comptime_params, param_defaults=_pdv,
                              is_generator=getattr(node, 'is_generator', False),
                              is_async=getattr(node, 'is_async', False), interpreter=self,
-                             comptime_param_defaults=_cpd,
-                             param_types=self._extract_param_types(node),
-                             return_type=getattr(node, 'return_type', None))
+                             comptime_param_defaults=_cpd)
         spec = self._classify_params(node)
-        _FUNC_DEF_LOCS[id(func)] = (self.filename, getattr(node, 'line', 0))
-        if getattr(node, 'where_clause', None) is not None:
-            _FUNC_WHERE[id(func)] = node
         bound = self._register_function(self.scope.vars, node.name, func, spec)
         # The rebinding a decorator IS: the decorated value replaces the
         # function in the module scope under its own name. Written through
@@ -7378,9 +5513,7 @@ class Interpreter:
             method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
                                        is_generator=getattr(m, 'is_generator', False),
                                        is_async=getattr(m, 'is_async', False), interpreter=self,
-                                       comptime_param_defaults=_cpd,
-                                       param_types=self._extract_param_types(m),
-                                       return_type=getattr(m, 'return_type', None))
+                                       comptime_param_defaults=_cpd)
             spec = self._classify_params(m)
             if m.name in from_base:
                 from_base.discard(m.name)
@@ -7525,9 +5658,7 @@ class Interpreter:
                 method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
                                            is_generator=getattr(m, 'is_generator', False),
                                            is_async=getattr(m, 'is_async', False), interpreter=self,
-                                           comptime_param_defaults=_cpd,
-                                           param_types=self._extract_param_types(m),
-                                           return_type=getattr(m, 'return_type', None))
+                                           comptime_param_defaults=_cpd)
                 spec = self._classify_params(m)
                 self._register_function(methods, m.name, method_func, spec)
         cls = MojoClass(node.name, [], methods, self)
@@ -7929,73 +6060,11 @@ class Interpreter:
             return None
         return ctor()
 
-    def _refuse_unsupported_float8(self, node, message):
-        """Refuse a use of an unimplemented float8 dtype (see
-        _FLOAT8_TYPE_NAMES) with a modular-format diagnostic: a RuntimeError
-        carrying a `mojo_record` (see mojo_diagnostic), so `fire.py run`
-        prints `file:line:col: error: <message>` and exits non-zero with no
-        Python traceback."""
-        err = RuntimeError(message)
-        line, col = self._expr_loc(node)
-        setattr(err, 'mojo_record', _rec(self.filename, line, col, message, []))
-        raise err
-
-    def _expr_loc(self, node):
-        """The (line, col) to diagnose a runtime error at `node`: the node's
-        own position when the parser recorded one, else the first operand's
-        — the parser leaves internal operator nodes (a BinaryOp, a
-        CompareChain) at 0,0 while their operands carry the real position,
-        and a diagnostic at 0,0 has no source line to point at."""
-        line = getattr(node, 'line', 0) if node is not None else 0
-        col = getattr(node, 'col', 0) if node is not None else 0
-        if line or col:
-            return line, col
-        for attr in ('left', 'right', 'target', 'value', 'operand'):
-            child = getattr(node, attr, None) if node is not None else None
-            if child is None:
-                continue
-            child_line = getattr(child, 'line', 0)
-            if child_line:
-                return child_line, getattr(child, 'col', 0)
-        operands = getattr(node, 'operands', None) if node is not None else None
-        if operands:
-            first = operands[0]
-            return getattr(first, 'line', 0), getattr(first, 'col', 0)
-        return line, col
-
-    def _coerce_to_declared_type(self, value, type_ann, node=None):
+    def _coerce_to_declared_type(self, value, type_ann):
         """Coerce a var's initializer to its declared scalar type, mirroring
         real Mojo's implicit-constructor conversion (e.g. `var x: Int = 84 / 2`
-        truncates the Float64 division result to an Int, it doesn't stay a float).
-
-        An unimplemented float8 dtype (see _FLOAT8_TYPE_NAMES) is refused
-        rather than coerced: a value of one coerced to any other declared
-        type is the conversion Modular reports as not implemented (raised
-        with `node`'s location for a modular-format diagnostic), and a
-        declared float8 takes a value of the declared dtype — its zero when
-        there is no initializer, a copy when the value is already of the same
-        dtype, a fresh value otherwise."""
+        truncates the Float64 division result to an Int, it doesn't stay a float)."""
         if not isinstance(type_ann, str):
-            return value
-        if isinstance(value, _MojoFloat8Value):
-            src_sp = _float8_spelling_of(value)
-            if type_ann in _FLOAT8_TYPE_NAMES:
-                # float8 -> float8: rounds to the target format (a same-format
-                # value is returned unchanged by the constructor's rounding).
-                return _MojoFloat8Value(_SCALAR_TYPE_SPELLINGS[type_ann], float(value))
-            target_sp = _SCALAR_TYPE_SPELLINGS.get(type_ann, type_ann)
-            if not _float8_has_conversion(src_sp, target_sp):
-                self._refuse_unsupported_float8(
-                    node, _float8_conversion_message(src_sp, target_sp))
-            if isinstance(type_ann, str) and type_ann.startswith(('Int', 'UInt')):
-                return int(value)
-            return float(value)
-        if type_ann in _FLOAT8_TYPE_NAMES:
-            if value is None:
-                return _MojoFloat8Value(_SCALAR_TYPE_SPELLINGS[type_ann], 0.0)
-            if isinstance(value, (int, float)):
-                return _MojoFloat8Value(_SCALAR_TYPE_SPELLINGS[type_ann],
-                                        float(value))
             return value
         if value is None:
             # A declared scalar with no initializer (`var x: Int`, or a struct
@@ -8019,51 +6088,6 @@ class Interpreter:
             return bool(value)
         return value
 
-    def _declared_conversion(self, value, type_ann, node=None):
-        """Apply the DECLARED-type conversion of an unimplemented float8 dtype
-        at a site whose conversion this engine deliberately does not model
-        generally (a parameter binding, a return slot, an assignment to a
-        declared name, a field store).
-
-        A `var` initialiser goes through `_coerce_to_declared_type` directly;
-        those sites already have the declaration in hand. These sites are
-        dynamically typed here (a plain Python rebinding has no declared type,
-        and a parameter list is a list of names), so only the float8 family is
-        converted/refused — the one family with a legality rule to enforce —
-        and every other value is returned exactly as it was, keeping this
-        engine's existing coercion behaviour. `type_ann` naming no scalar the
-        table knows (`T`, `Self`, a struct) is likewise untouched: there is no
-        conversion rule to refuse.
-        """
-        if not isinstance(type_ann, str):
-            return value
-        if not (isinstance(value, _MojoFloat8Value) or type_ann in _FLOAT8_TYPE_NAMES):
-            return value
-        if (isinstance(value, _MojoFloat8Value)
-                and type_ann not in _FLOAT8_TYPE_NAMES
-                and _SCALAR_TYPE_SPELLINGS.get(type_ann) is None):
-            return value
-        return self._coerce_to_declared_type(value, type_ann, node)
-
-    def _field_declared_type(self, obj, name):
-        """The declared type annotation of `obj`'s struct/class field `name`,
-        or None when `obj` is not a Mojo instance or the field has none.
-
-        A field store (`self.x = value`) converts to the field's declared type
-        in the compiled path (`_safe_coerce_emit`'s struct-field arm); the
-        interpreter sets the attribute directly, so the declaration has to be
-        read back from the class's field list to see the same conversion."""
-        if not isinstance(obj, MojoInstance):
-            return None
-        for f in obj._mojo_class.fields:
-            if self._is_instance(f, 'VarDecl') and f.name == name:
-                return getattr(f, 'type_ann', None)
-            if (self._is_instance(f, 'AssignStmt')
-                    and self._is_instance(f.target, 'IdentExpr')
-                    and f.target.name == name):
-                return getattr(f, 'type_ann', None)
-        return None
-
     def execute_VarDecl(self, node):
         """Execute variable declaration."""
         if node.value is None and ',' not in node.name:
@@ -8075,8 +6099,6 @@ class Interpreter:
             # its own path below, where one value feeds both names.
             container_default = self._container_field_default(getattr(node, 'type_ann', None))
             if container_default is not None:
-                if isinstance(getattr(node, 'type_ann', None), str):
-                    self.scope.declared_types[node.name] = node.type_ann
                 self.scope.define(node.name, container_default)
                 return container_default
         value = self.eval_expr(node.value)
@@ -8090,9 +6112,7 @@ class Interpreter:
             for name, v in zip(names, values):
                 self.scope.define(name, v)
             return value
-        value = self._coerce_to_declared_type(value, getattr(node, 'type_ann', None), node)
-        if isinstance(getattr(node, 'type_ann', None), str):
-            self.scope.declared_types[node.name] = node.type_ann
+        value = self._coerce_to_declared_type(value, getattr(node, 'type_ann', None))
         self.scope.define(node.name, value)
         return value
 
@@ -8108,12 +6128,7 @@ class Interpreter:
         """Compute the new value for `target OP= value` given already-
         evaluated `current`/`rhs`. Factored out of execute_AugAssignStmt as
         its own named step for clarity."""
-        # `a += 1` is a binary operation: a float8 operand is refused with
-        # Modular's diagnostic (see _apply_binary_op).
         op = node.op[:-1]  # Remove '=' from the operator (e.g., '+=' -> '+')
-        f8 = _float8_binary(self, node, op, current, rhs)
-        if f8 is not _F8_PASS:
-            return f8
         if op == '+':
             return current + rhs
         elif op == '-':
@@ -8166,9 +6181,6 @@ class Interpreter:
         it updates that local in place, identical to `define`'s prior
         behavior for anyone not intending nonlocal effects."""
         if self._is_instance(target, 'IdentExpr'):
-            _decl_ann = self.scope.declared_type(target.name)
-            if _decl_ann is not None:
-                value = self._declared_conversion(value, _decl_ann, target)
             # Check if this is a global variable
             global_vars = getattr(self, 'global_vars', set())
             if target.name in global_vars:
@@ -8189,8 +6201,6 @@ class Interpreter:
                 self.scope.define(target.name, value)
         elif self._is_instance(target, 'MemberExpr'):
             obj = self.eval_expr(target.obj)
-            value = self._declared_conversion(
-                value, self._field_declared_type(obj, target.member), target)
             setattr(obj, target.member, value)
         elif self._is_instance(target, 'SubscriptExpr'):
             obj = self.eval_expr(target.obj)
@@ -8251,7 +6261,7 @@ class Interpreter:
     def execute_ReturnStmt(self, node):
         """Execute return statement."""
         value = self.eval_expr(node.value) if hasattr(node, 'value') and node.value is not None else None
-        raise ReturnValue(value, node)
+        raise ReturnValue(value)
 
     def execute_IfStmt(self, node):
         """Execute if statement."""
@@ -9397,15 +7407,9 @@ class Interpreter:
             # scope.get raises through _tag_name_error (name/candidates/
             # self_obj), and this new exception must carry the same fields
             # for CPython 3.15's print-time NameError suggestion.
-            exc = _tag_name_error(
+            raise _tag_name_error(
                 NameError(f"{self._loc(expr)}name '{expr.name}' is not defined"),
                 self.scope, expr.name)
-            # The source span for the modular-format top-level diagnostic
-            # (mojo_diagnostic_text). Synthetic IdentExprs carry no position
-            # and keep the plain message.
-            if expr.line > 0 and expr.col > 0:
-                setattr(exc, 'mojo_loc', (expr.line, expr.col, len(expr.name)))
-            raise exc
 
     def _resolve_Self(self, expr):
         """Resolve Self to the current struct type (when inside a struct method)."""
@@ -9822,17 +7826,11 @@ class Interpreter:
         right = self.eval_expr(expr.right)
         return self._apply_binary_op(expr, op, left, right)
 
-    def _apply_binary_op(self, expr, op, left, right) -> object:
+    def _apply_binary_op(self, expr, op, left, right):
         """Compute a binary operator's result from already-evaluated
         operands (everything except the short-circuiting 'and'/'or'/'as',
         handled directly in eval_BinaryOp before operands are evaluated).
         Factored out of eval_BinaryOp as its own named step for clarity."""
-        # A float8 operand has no arithmetic rule in this interpreter:
-        # refuse with Modular's diagnostic (see _FLOAT8_TYPE_NAMES) instead
-        # of computing silently on a dtype with no rule behind it.
-        f8 = _float8_binary(self, expr, op, left, right)
-        if f8 is not _F8_PASS:
-            return f8
         if op in ('&', '|', '^', '-'):
             left, right = self._resolve_ambiguous_empty_braces(left, right)
         if op == '+':
@@ -9913,7 +7911,6 @@ class Interpreter:
         left = self.eval_expr(expr.operands[0])
         for op, operand_expr in zip(expr.ops, expr.operands[1:]):
             right = self.eval_expr(operand_expr)
-            # A float8 comparison is allowed on every format (see _float8_binary).
             if not self._apply_compare_op(op, left, right):
                 return False
             left = right
@@ -9937,19 +7934,6 @@ class Interpreter:
         else:
             raise NotImplementedError(f"{self._loc(expr)}Unary operator {op} not implemented")
 
-    def _eval_constrained_call(self, expr, cond_node, msg_node=None):
-        """Compile-time-style `constrained` check, evaluated at call time.
-
-        A provably-false condition raises `constraint failed: <msg>` (or
-        `constraint failed` with no message); a true condition is a no-op. The
-        message is only evaluated on failure, and an error in the condition
-        propagates rather than being read as false."""
-        if self.eval_expr(cond_node):
-            return None
-        msg = self.eval_expr(msg_node) if msg_node is not None else None
-        text = 'constraint failed' if msg is None else f'constraint failed: {msg}'
-        raise RuntimeError(f"{self._loc(expr)}{text}")
-
     def _eval_constrained_bracket(self, expr):
         """`constrained[cond, msg]()` — the bracket form of Mojo's builtin.
 
@@ -9958,7 +7942,9 @@ class Interpreter:
         no compile-time pass, so it checks the condition when the call runs:
         false raises `constraint failed: <msg>` (or `constraint failed` with no
         message), true is a no-op. A name the user has bound themselves is a
-        real callee and is not intercepted."""
+        real callee and is not intercepted. The message is only evaluated on
+        failure, and an error in the condition propagates rather than being
+        read as false."""
         idx = expr.func.index
         if isinstance(idx, (N.TupleExpr, N.ListExpr)):
             elems = list(getattr(idx, 'elements', None) or [])
@@ -9966,8 +7952,11 @@ class Interpreter:
             elems = [idx]
         if not elems:
             raise TypeError(f"{self._loc(expr)}constrained[] needs a condition")
-        msg_node = elems[1] if len(elems) > 1 else None
-        return self._eval_constrained_call(expr, elems[0], msg_node)
+        if self.eval_expr(elems[0]):
+            return None
+        msg = self.eval_expr(elems[1]) if len(elems) > 1 else None
+        text = 'constraint failed' if msg is None else f'constraint failed: {msg}'
+        raise RuntimeError(f"{self._loc(expr)}{text}")
 
     def eval_CallExpr(self, expr):
         """Evaluate function call."""
@@ -9977,12 +7966,6 @@ class Interpreter:
                 and func_node.obj.name == 'constrained'
                 and not self.scope.has('constrained')):
             return self._eval_constrained_bracket(expr)
-        if (isinstance(func_node, N.IdentExpr)
-                and func_node.name == 'constrained'
-                and len(getattr(expr, 'args', None) or []) >= 1
-                and not self.scope.has('constrained')):
-            msg_node = expr.args[1] if len(expr.args) > 1 else None
-            return self._eval_constrained_call(expr, expr.args[0], msg_node)
         func = self.eval_expr(expr.func)
         # Call-site unpacking: `g(*args)` / `g(**opts)`. fire_compiler.py's
         # LPAREN arg-list parser lets `_parse_unary` wrap a starred argument
@@ -10012,17 +7995,11 @@ class Interpreter:
         if getattr(expr, 'kwargs', None):
             kwargs = {k: self.eval_expr(v) for k, v in expr.kwargs}
 
-        _CALL_SITE[0] = expr
         if isinstance(func, MojoOverloadSet):
             try:
                 return self.invoke(func, *args, **kwargs)
             except _NoOverloadMatch as e:
-                err = TypeError(f"{self._loc(expr)}{e}")
-                if not str(e).startswith('AMBIGUOUS'):
-                    rec = overload_diagnostic_record(func, expr, args, kwargs, self.filename)
-                    if rec is not None:
-                        setattr(err, 'mojo_record', rec)
-                raise err
+                raise TypeError(f"{self._loc(expr)}{e}")
         return self.invoke(func, *args, **kwargs)
 
     def invoke(self, func, *args, **kwargs):
@@ -10055,7 +8032,7 @@ class Interpreter:
         obj = self.eval_expr(expr.obj)
         return self._eval_member_of(expr, obj)
 
-    def _eval_member_of(self, expr: N.MemberExpr, obj) -> object:
+    def _eval_member_of(self, expr, obj):
         """Resolve `expr.member` against an already-evaluated `obj`.
         Factored out of eval_MemberExpr as its own named step."""
         if isinstance(obj, MojoInstance):
@@ -10092,13 +8069,6 @@ class Interpreter:
     def eval_SubscriptExpr(self, expr):
         """Evaluate subscript access."""
         obj = self.eval_expr(expr.obj)
-        # `std.compile.compile_info[...]`: validate the kernel argument's
-        # syntax (it must be a bare identifier naming a module-level def)
-        # before evaluating it — a computed kernel like `get_fn[False]()`
-        # evaluates to the same function value as `scale`, so a value-level
-        # check cannot distinguish them.
-        if isinstance(obj, _MojoCompileInfo):
-            return self._eval_compile_info_subscript(expr)
         # A KEYWORD bracket (`f[T=Int, y=5]`, `platform_map[T=Int, "O_APPEND",
         # linux=0x400]()`) keeps its elements in `attrs` as (name, value)
         # pairs and leaves `index` as the empty-subscript placeholder
@@ -10113,10 +8083,7 @@ class Interpreter:
         # uses for the compiled path, so both engines answer alike.
         _attrs = getattr(expr, 'attrs', None)
         if _attrs:
-            try:
-                _bound = self._bind_bracket_comptime(obj, _attrs)
-            except _UnboundComptimeParameter as exc:
-                self._raise_unbound_comptime(expr, exc)
+            _bound = self._bind_bracket_comptime(obj, _attrs, expr)
             if _bound is not None:
                 return _bound
         idx = self.eval_expr(expr.index)
@@ -10124,99 +8091,9 @@ class Interpreter:
             if hasattr(obj, '__call__'):
                 return obj
             raise TypeError(f"{type(obj).__name__} object is not subscriptable")
-        try:
-            return obj[idx]
-        except _UnboundComptimeParameter as exc:
-            self._raise_unbound_comptime(expr, exc)
+        return obj[idx]
 
-    def _raise_unbound_comptime(self, node, exc):
-        """Attach the bracket-located diagnostic record to `exc` and re-raise
-        it. Both bracket spellings (`f[2]`'s positional tuple and
-        `f[T=Int]`'s keyword attrs) land here, so the caret and the message
-        are chosen once (see `_unbound_comptime_record`). When the bracket
-        has no usable source position the plain TypeError is kept.
-
-        The callee and parameter are read from `_UNBOUND_FUNC`/`_UNBOUND_PARAM`
-        rather than off `exc` (a fieldless exception; see its docstring)."""
-        func = _UNBOUND_FUNC[0]
-        param = _UNBOUND_PARAM[0]
-        _UNBOUND_FUNC[0] = None
-        _UNBOUND_PARAM[0] = ''
-        rec = _unbound_comptime_record(self.filename, node, func, param)
-        if rec is not None:
-            setattr(exc, 'mojo_record', rec)
-        raise exc
-
-    def _compile_info_kernel_arg_ast(self, expr):
-        """Return the AST node of compile_info's kernel argument (first arg)."""
-        attrs = getattr(expr, 'attrs', None)
-        if attrs:
-            for nm, val in attrs:
-                if nm is None:
-                    return val
-            # all keyword args: first is kernel
-            return attrs[0][1]
-        idx = getattr(expr, 'index', None)
-        if idx is None:
-            return None
-        # Mixed/positional brackets may parse as TupleExpr in index.
-        if type(idx).__name__ == 'TupleExpr':
-            elems = getattr(idx, 'elements', None) or []
-            if elems:
-                return elems[0]
-        return idx
-
-    def _compile_info_refused_name(self, kernel_ast):
-        """Best-effort symbol name for a refused compile_info kernel."""
-        # Prefer the evaluated result's name (e.g. get_fn[False]() -> scale).
-        try:
-            val = self.eval_expr(kernel_ast)
-            name = getattr(val, '__name__', None) or getattr(val, 'name', None)
-            if name:
-                return name
-        except Exception:
-            pass
-        # Fall back to the most relevant identifier mentioned in the AST.
-        stack = [kernel_ast]
-        ident = None
-        while stack:
-            node = stack.pop()
-            if node is None:
-                continue
-            if type(node).__name__ == 'IdentExpr':
-                ident = getattr(node, 'name', ident)
-                continue
-            if type(node).__name__ == 'MemberExpr':
-                ident = getattr(node, 'member', ident)
-                stack.append(getattr(node, 'obj', None))
-                continue
-            for attr in ('func', 'obj', 'value', 'left', 'right', 'index'):
-                if hasattr(node, attr):
-                    stack.append(getattr(node, attr))
-            for attr in ('args', 'elements', 'keys', 'values'):
-                if hasattr(node, attr):
-                    v = getattr(node, attr)
-                    if isinstance(v, list):
-                        stack.extend(v)
-        return ident or '<unknown>'
-
-    def _eval_compile_info_subscript(self, expr):
-        kernel_ast = self._compile_info_kernel_arg_ast(expr)
-        ok = False
-        if kernel_ast is not None and type(kernel_ast).__name__ == 'IdentExpr':
-            name = getattr(kernel_ast, 'name', None)
-            if name:
-                val = self.scope.get(name)
-                if isinstance(val, MojoFunction):
-                    ok = True
-        if ok:
-            return _MojoCompileInfoRequest()
-        sym = self._compile_info_refused_name(kernel_ast)
-        loc = self._loc(expr)
-        print(f"{loc}error: cannot slice out exported symbol '{sym}'", file=sys.stderr)
-        raise SystemExit(1)
-
-    def _bind_bracket_comptime(self, obj, attrs):
+    def _bind_bracket_comptime(self, obj, attrs, node):
         """`f[...]` with keyword-bracket `attrs`: bind `obj`'s declared
         comptime parameters and return the callable, or None when `obj` has
         no comptime parameter list to bind (the caller then keeps its own
@@ -10236,9 +8113,8 @@ class Interpreter:
         `operation`.
 
         A parameter with neither a supplied value nor a declared default is
-        an `_UnboundComptimeParameter` naming it, not a silent None: the
-        bracket is the ONLY place its value can come from, and the subscript
-        site renders the modular `failed to infer parameter ...` diagnostic.
+        an honest TypeError naming it, not a silent None: the bracket is
+        the ONLY place its value can come from.
 
         `obj` is the callee VALUE, so it is also a method receiver
         (`obj.body[f_key=show_k]()`); its declared parameters live on
@@ -10259,7 +8135,7 @@ class Interpreter:
                 poss.append(pair[1])
             else:
                 kws[nm] = pair[1]
-        defaults = _comptime_default_names(decl)
+        dflts = getattr(decl, 'comptime_param_defaults', None) or {}
         bindings = {}
         pos_i = 0
         for cp in cps:
@@ -10271,8 +8147,10 @@ class Interpreter:
                 pos_i += 1
             if given is not None:
                 bindings[cp] = self.eval_expr(given)
-            elif cp not in defaults:
-                _raise_unbound_comptime_error(decl, cp)
+            elif cp not in dflts:
+                raise TypeError(
+                    f"{self._loc(node)}comptime parameter '{cp}' is neither "
+                    f"given in the bracket nor has a default")
         if decl is not obj:
             return _MojoBoundComptimeReceiver(obj, bindings)
         return _MojoBoundComptimeFunction(obj, bindings)

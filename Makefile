@@ -15,7 +15,7 @@
         check-stdlib-jit check-ab-native check-native-dumpfull \
         check-formal check-formal-dylib check-formal-run check-formal-x86 \
         check-formal-x86-model check-formal-x86-endtoend check-formal-imports \
-        check-formal-sweep check-orchestrator check-suite check-list check-plan \
+        check-formal-sweep check-suite check-list check-plan \
         wholeprogram-help \
         clean clean-bootstrap stdlib bootstrap preflight suite-help \
         stage1 stage2 stage3 verify validate-all dump-all-stage1 \
@@ -249,12 +249,6 @@ check-list:
 check:
 	@$(SUITE) $(SUITE_J) check
 
-# The orchestrator's own tests (swarm/registry/reclass/landing). Not part of
-# `check`: they exercise git-facing fleet passes, and the everyday loop must
-# not spawn git or need a git binary at all.
-check-orchestrator:
-	@$(SUITE) $(SUITE_J) orchestrator
-
 gate:
 	@$(SUITE) $(SUITE_J) gate
 
@@ -448,7 +442,7 @@ stage1/fire.ci:
 stage2/mojo: stage1/fire.ci $(RUNTIME_SRC) $(RUNTIME_HDR) $(CORO_RUNTIME_SRC)
 	@mkdir -p stage2
 	@echo "=== Compiling stage2/mojo from stage1/fire.ci ==="
-	$(call memslot,stage2/mojo,small) $(BOOTSTRAP_CC) $(BOOTSTRAP_OPT) -fgimple -ftrivial-auto-var-init=zero -I runtime \
+	$(call memslot,stage2/mojo,tiny) $(BOOTSTRAP_CC) $(BOOTSTRAP_OPT) -fgimple -ftrivial-auto-var-init=zero -I runtime \
 	    $(BIG_STACK_LDFLAGS) \
 	    -o stage2/mojo \
 	    -x c stage1/fire.ci \

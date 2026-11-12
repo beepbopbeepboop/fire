@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Which emitted instruction forms are actually CHECKED, on both backends.
 
-the arm64 instruction-coverage survey is a survey with a number in it, and
+`bugs/FORMAL_arm64_instruction_coverage.md` is a survey with a number in it, and
 the number answers one question: *what can this backend not emit?* This tool
 answers the other four, for every instruction form the code generators CAN emit:
 
@@ -548,13 +548,9 @@ HARNESS_LIMITS = {
                          "fault). `arm64_step` has an arm for each",
     "encode_ldp_sp_post": "as `encode_stp_sp_pre`: an SP write-back moves the "
                           "window",
-    # The scalar-double FP class is NOT a harness limit any more: the harness
-    # installs and dumps D0-D7 as well as X0-X30, NZCV and memory, and the
-    # `fp` mix in `tools/formal_model_fuzz.py` draws all ten of its forms.
-    # Building that mix found one real model bug in the class —
-    # `IEEE754.fcmp_nzcv` answered unordered/less/greater in PSTATE's flag
-    # bit order rather than the model's own `nzcv` layout — and the fix
-    # landed with it.
+    # The IEEE-754 forms are BOTH kinds at once and are listed under BACKLOG
+    # for the model half; the harness half is this: it installs and dumps
+    # X0-X30, NZCV and memory, and has no V register file at all.
     "encode_leave": "`x86_step` steps it and `as` checks it; the fuzzer's "
                     "harness cannot run it because `leave` reads the frame "
                     "pointer, which the harness does not install",
@@ -583,24 +579,6 @@ HARNESS_LIMITS = {
 #: the test checks, which is what makes a fixed gap delete its entry rather
 #: than leave a stale "known problem" behind.
 BACKLOG = {
-    # ── arm64: the scalar-double FP class was here until 2026-11-17 ───────
-    #
-    # `encode_fadd_dd_dn_dm`, `encode_fsub_dd_dn_dm`, `encode_fmul_dd_dn_dm`,
-    # `encode_fdiv_dd_dn_dm`, `encode_fneg_dd_dn`, `encode_fcmp_dn_dm`,
-    # `encode_fmov_gpr_to_v`, `encode_fmov_v_to_gpr`, `encode_scvtf_dn_xn` and
-    # `encode_fcvtzs_xn_dn` — the ten scalar-double rows of the class — each
-    # had a model arm (the class landed with aca4f2bbf) and an `as` check,
-    # but the fuzz column read `no` because the harness had no V register
-    # file: it installed and
-    # dumped X0-X30, NZCV and memory and no case could have run one of the
-    # forms. The harness now installs and dumps D0-D7 and its `fp` mix
-    # (`tools/formal_model_fuzz.py`'s `gen_fp`) draws all ten forms, so every
-    # row reads `yes yes yes` and the entries came out rather than outliving
-    # the gap they exempted. The same pass fixed `IEEE754.fcmp_nzcv`, whose
-    # unordered/less/greater constants were in PSTATE's flag bit order rather
-    # than the model's `nzcv` layout (N=0x1, Z=0x2, C=0x4, V=0x8) — a model
-    # bug the new mix would have reported as a WRONG on every flag-reading
-    # case it drew.
     # ── arm64: emitted, and `arm64_step` has no arm for it ────────────────
     #
     # `encode_smulh_xd_xn_xm` WAS here until 2026-10-05 and is not any more:

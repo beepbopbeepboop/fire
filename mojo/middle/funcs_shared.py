@@ -520,16 +520,8 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
     # param then slices an int64_t and lowers to int64_t, and passing it to
     # a String-taking ctor is a `makes pointer from integer` error. Mirror
     # _imported_field_ctype's handling (std/pathlib/path.mojo:90).
-    #
-    # The rule itself lives in `param_annotation_ctype` (mojo/middle/types.py)
-    # because module_loader.py's export text scan and reflect.py's signature
-    # emitter need the SAME annotation -> parameter-ctype answer, and their
-    # own copies had boxed `StringSlice[_]` to `int64_t *` — a different C
-    # type from the definition's `Span *`, hence a different overload suffix,
-    # hence a call to a `_std_*_<hex>` symbol nothing defines (the
-    # stdlib-dylib red). One statement of the rule, three readers.
-    if is_bare_string_param_annotation(ptype):
-        ctype = param_annotation_ctype(ptype)
+    if ptype in ('StaticString', 'StringLiteral', 'StringRef', 'StringSlice'):
+        ctype = 'char *'
     if ctype == 'void':
         # _mojo_type('None') correctly maps NoneType -> void for RETURN
         # types, but a named PARAMETER can never be typed void in a
@@ -899,8 +891,7 @@ def register_imported_symbol(gen, name: str, info: dict,
 
 def _module_defines_symbol(gen, module: str, name: str, kind: str) -> bool:
     """Does `module`'s OWN top-level source define `name`? `kind` is
-    'struct' (a StructDef), 'fn' (a top-level FunctionDef), or 'comptime'
-    (a top-level `comptime NAME ...` alias).
+    'struct' (a StructDef) or 'fn' (a top-level FunctionDef).
 
     Top-level only by construction: `_parsed_import`'s statement list is
     the module's own body, so a METHOD that happens to share the name (a
@@ -910,11 +901,6 @@ def _module_defines_symbol(gen, module: str, name: str, kind: str) -> bool:
         return gen._find_imported_struct(module, name) is not None
     _p, _s, _stmts = gen._parsed_import(module)
     for _st in (_stmts or []):
-        if kind == 'comptime':
-            if (isinstance(_st, gimple_ctypes.ComptimeVarStmt)
-                    and _st.target == name):
-                return True
-            continue
         if isinstance(_st, gimple_ctypes.FunctionDef) and _st.name == name:
             return True
     return False
@@ -924,8 +910,7 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
     """The module ref whose own source DIRECTLY defines top-level `name`,
     starting from `module` and following its `from X import name` statements
     transitively (re-export chains). None if no reachable module defines it
-    — an honest "not found", never a guess. `kind` is 'fn', 'struct' or
-    'comptime'.
+    — an honest "not found", never a guess. `kind` is 'fn' or 'struct'.
 
     `want_abs` selects the ABSOLUTIZED spelling of the same answer (`.sub`
     -> `p.sub`) instead of the one as written (`.sub`), for the callers
@@ -1004,21 +989,8 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
     if not stmts:
         return None
     for st in stmts:
-        if not isinstance(st, gimple_ctypes.FromImportStmt):
-            continue
-        if getattr(st, 'wildcard', False):
-            # `from X import *` re-exports every public name of X into this
-            # module's namespace without listing them, so the defining home of
-            # `name` is wherever X (or X's own re-export chain) defines it.
-            # Recurse with `name` unchanged — a star import never renames —
-            # and keep the cycle/depth guards the walk already has.
-            sub = gen._abs_module(st.module, module) if st.module.startswith('.') else st.module
-            r = _find_symbol_home_module(gen, sub, name, kind, depth + 1,
-                                         want_abs=want_abs)
-            if r:
-                _raw = r if want_abs else (st.module if st.module.startswith('.') else r)
-                cache[key] = _raw
-                return _raw
+        if not (isinstance(st, gimple_ctypes.FromImportStmt)
+                and not getattr(st, 'wildcard', False)):
             continue
         for _fip6 in (getattr(st, 'name_alias_strs', None) or []):
             nm = gimple_ctypes._fi_name(_fip6)
@@ -1042,177 +1014,6 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
                 cache[key] = _raw
                 return _raw
     return None
-
-def _module_attr_module(gen, module: str, attr: str):
-    """The MODULE ref that `module`'s own namespace binds `attr` to, or
-    None when `attr` is not a module binding of `module`.
-
-    `a.b.f(...)` is real Python for "the module object `a` exposes as its
-    attribute `b`, then its function `f`" — `import pkg.sub as s` in one
-    module makes `s.f()` valid from every module that can reach that one
-    through `import pkg.mod`. Only the TWO spellings Python itself provides
-    are answered: a plain import (`import M [as N]`) and a module brought
-    in by `from ... import N` (a submodule file, never a function of the
-    same name — that is checked against the filesystem, because
-    `from M import helper` binds a FUNCTION and `M.helper.attr` is not a
-    module attribute).
-
-    Why this is not folded into `_find_symbol_home_module`: that walk
-    answers "which module DEFINES this function/struct name" through
-    `from X import name` re-exports, keyed on the symbol's own bare name.
-    This one answers "which MODULE OBJECT does this module's namespace
-    hold", keyed on an ATTRIBUTE of a module, and its caller re-dispatches
-    a `<module>.<function>` call rather than mangling a symbol.
-
-    The self-host closure's `gimple_codegen.gimple_gen_coro.lower(...)` /
-    `.register(...)` (`mojo/backend_gimple/emit_resolve.py`) are this
-    shape: `gimple_codegen.py` does `import mojo.middle.coro as
-    gimple_gen_coro`, so the outer module's attribute is a module, not a
-    sibling module of the caller and not a file named
-    `gimple_codegen/gimple_gen_coro.py`. Without this the call fell
-    through every module-qualified branch to the generic scalar-receiver
-    dispatch, which emitted `string_lower(...)` for `lower` and an
-    `int64_t.register() stubbed` word for `register` — an exit-0 silent
-    wrong answer, and the weak `lower`/`mojo_register` stubs in the
-    `--dump-full` closure.
-    """
-    if not module or not attr:
-        return None
-    _path, _src, stmts = gen._parsed_import(module)
-    if not stmts:
-        return None
-    for _st in stmts:
-        if isinstance(_st, gimple_ctypes.ImportStmt):
-            for _m, _a in gimple_ctypes._import_targets(_st):
-                _mod = _as_str(_m)
-                _alias = _as_str(_a)
-                # `import a.b` binds `a` (the package the submodule hangs
-                # off), while an aliased import binds the alias to the
-                # WHOLE dotted target. Same rule `_gen_stmt_ImportStmt`
-                # uses for the local name.
-                if _alias:
-                    _local = _alias
-                    _target = _mod
-                else:
-                    # `import a.b` binds `a` (the package the submodule
-                    # hangs off). Built by per-character concatenation,
-                    # NOT `_mod[:_i]` slicing: a sliced string hashes
-                    # wrongly as a dict key on the self-hosted path (see
-                    # `_fi_name`'s docstring in mojo/middle/types.py), and
-                    # `_local` is compared with the caller's attribute and
-                    # the target goes straight into `_module_alias_names`.
-                    _i = _mod.find('.')
-                    if _i >= 0:
-                        _local = ''
-                        for _ci in range(_i):
-                            _local += _mod[_ci]
-                    else:
-                        _local = _mod
-                    _target = _local
-                if _local == attr and _target:
-                    return _target
-        elif isinstance(_st, gimple_ctypes.FromImportStmt):
-            if getattr(_st, 'wildcard', False):
-                continue
-            for _fip in (getattr(_st, 'name_alias_strs', None) or []):
-                _nm = gimple_ctypes._fi_name(_fip)
-                _al = gimple_ctypes._fi_alias(_fip)
-                if (_al or _nm) != attr:
-                    continue
-                _joined = gimple_ctypes._join_import_member(
-                    _as_str(_st.module), _nm)
-                _ref = (gen._abs_module(_joined, module)
-                        if _joined.startswith('.') else _joined)
-                if _module_ref_is_source(gen, _ref, _path):
-                    return _ref
-    return None
-
-def _module_ref_is_source(gen, ref: str, base_path: str) -> bool:
-    """Does `ref` name a real module FILE reachable from the module whose
-    source is `base_path`? Used to tell a `from PKG import name` that binds
-    a SUBMODULE from one that binds an ordinary function/constant of the
-    same name: only the former makes `PKG.name.attr` a module attribute
-    read."""
-    if not ref:
-        return False
-    try:
-        import imports as _imp
-        if _imp.resolve_source(ref):
-            return True
-    except Exception:
-        pass
-    try:
-        if gen._submodule_source_path(ref):
-            return True
-    except Exception:
-        pass
-    # A RELATIVE from-import is resolved against the module that wrote it,
-    # whose directory is the only correct place to look: the current
-    # file's directory is a different package whenever the caller is not
-    # the base module itself. `_abs_module` already turned `.sub` into
-    # `pkg.sub`; its leaf file lives beside the declaring module's file
-    # (`pkg/` for both `pkg/__init__.py` and `pkg/hub.py`).
-    _parts = ref.split('.') if ref else []
-    _leaf = _parts[len(_parts) - 1] if _parts else ''
-    _dir = os.path.dirname(base_path or '')
-    if _dir and _leaf:
-        for _cand in (os.path.join(_dir, _leaf + '.py'),
-                      os.path.join(_dir, _leaf, '__init__.py'),
-                      os.path.join(_dir, _leaf + '.mojo'),
-                      os.path.join(_dir, _leaf, '__init__.mojo')):
-            if os.path.isfile(_cand):
-                return True
-    return False
-
-def _reexported_defining_qualifier(gen, module: str, name: str,
-                                   kind: str = 'fn') -> str:
-    """The C module qualifier of the module that DEFINES `name`, for a
-    `from <module> import <name>` binding whose named module does not
-    define it itself (a package `__init__.mojo` that only re-exports it:
-    `from .memory import unsafe_memset_zero`). `''` means "the named
-    module IS the defining module, or nothing reachable defines it" — the
-    caller keeps its own spelling of the named module in that case,
-    because which spelling is right depends on the pipeline (a dylib's
-    export table is path-derived, an inline compile is keyed by the import
-    string; see `_find_symbol_home_module`'s docstring).
-
-    The whole point is that the qualifier half of a mangled symbol must
-    name the module the DEFINITION was compiled under. Deriving it from
-    the path of the re-exporting `__init__` emitted
-    `std_memory___init___unsafe_memset_zero` (extern, `#ifndef` guard and
-    call) against a definition emitted as
-    `std_memory_memory_unsafe_memset_zero`: an undefined reference a
-    client only trips over when it reaches the call. The re-export walk
-    itself is `_find_symbol_home_module` (memoized, cycle-guarded,
-    generic); this helper is the path half both import-registration
-    passes need, so one binding cannot be spelled two ways by them.
-
-    The defining module's PATH is what `module_name_for_path` is applied
-    to, and the walker's absolutized spelling is what is opened: its
-    as-written answer for a relative hop (`.memory`) is relative to the
-    REEXPORTING package, so opening it against this importing file would
-    read a different module. An unresolvable home keeps the walker's own
-    canonical dot-stripped spelling, the same fallback
-    `_collect_body_import_bindings` uses.
-    """
-    home = _find_symbol_home_module(gen, module, name, kind)
-    if not home or home == module:
-        return ''
-    ref = (_find_symbol_home_module(gen, module, name, kind, want_abs=True)
-           or home)
-    try:
-        path = gen._submodule_source_path(ref)
-    except Exception:
-        path = None
-    if path:
-        try:
-            import module_loader as _mlmod
-            qual = _mlmod.module_name_for_path(path)
-        except Exception:
-            qual = None
-        if qual:
-            return qual
-    return home.lstrip('.').replace('.', '_').replace('-', '_')
 
 def _note_struct_attr_alias(gen, module: str, alias: str, member: str) -> str | None:
     """Record `alias -> member` in `gen._struct_import_aliases` when
@@ -1350,39 +1151,6 @@ def _resolve_test_relative_module(gen, module: str) -> str | None:
         d = parent
     return None
 
-def _home_signature_ctypes(gen, module: str, fs) -> list:
-    """`_signature_ctypes` of an IMPORTED function's own FunctionDef `fs`
-    (defined in `module`), as the DEFINING unit would type it.
-
-    The importer's resolver knows only the structs it has itself registered, so
-    a parameter typed with a struct PRIVATE to `module` (never imported here:
-    `benchmark._run_impl(opts: _RunOptions)`) falls to the `int64_t` word. The
-    definition emits `_RunOptions *`, and the overload suffix is a hash of that
-    list, so the caller named a symbol (`..._run_impl_<hash of int64_t>`) the
-    definer never defines. A parameter whose annotation names a `struct`
-    declared in the home module's own source is therefore `struct Name *` here
-    (the tag spelling of the definer's `Name *`; `overload_suffix_for` hashes
-    them alike, and an importer has no `Name` typedef to spell).
-    """
-    pts = gen._signature_ctypes(fs.params, fs)
-    params = fs.params or []
-    if len(pts) != len(params):
-        return pts
-    structs = set()
-    for _hs in (gen._parsed_import(module)[2] or []):
-        if isinstance(_hs, StructDef) and _hs.name:
-            structs.add(_as_str(_hs.name))
-    if not structs:
-        return pts
-    out = list(pts)
-    for _i, (_pn, _pt) in enumerate(params):
-        if out[_i] == 'int64_t' and isinstance(_pt, str):
-            _base = _pt.split('[', 1)[0].strip()
-            if _base in structs:
-                out[_i] = 'struct ' + _base + ' *'
-    return out
-
-
 def _parsed_import(gen, module: str):
     """(path, source_text, stmts) for an imported module, parsed once and
     cached. (None, '', None) on failure."""
@@ -1452,12 +1220,8 @@ def _parsed_import(gen, module: str):
             if not path:
                 path = gen._submodule_source_path(module)
             src = open(path).read() if path else ''
-            _pst = ast_rewriter.rewrite(Parser(py_tokenize(src)).parse_module()) if src else None
-            if _pst is not None:
-                # A pointer-typed `out` result is a pointer return (see middle/out_result).
-                from mojo.middle.out_result import lower_pointer_out_results
-                lower_pointer_out_results(_pst)
-            cache[module] = (path, src, _pst)
+            cache[module] = (path, src,
+                             ast_rewriter.rewrite(Parser(py_tokenize(src)).parse_module()) if src else None)
         except Exception:
             gimple_ctypes._debug_note('cannot resolve/parse module', module)
             cache[module] = (None, '', None)
@@ -2090,14 +1854,7 @@ def _scan_from_imports_flat(src: str) -> list:
     [mod0, names0, mod1, names1, ...] — a flat list (not a list of
     2-tuples, not a tuple return) so the self-hosted backend can iterate
     it by index without boxing. A parenthesised, multi-line import list
-    (`from X import (\n a,\n b,\n)`) is joined into one names string.
-
-    The matching `)` of a parenthesised list is found by a depth-counted
-    scan that skips `#` comments and quoted string literals, so a `)` inside
-    either (e.g. a TODO/JIRA id in a comment) cannot truncate the list — the
-    same hazard `elaborate._bracket_depth_by_line` documents and solves for
-    source text.
-    """
+    (`from X import (\n a,\n b,\n)`) is joined into one names string."""
     out: list = []
     lines = src.split('\n')
     _i = 0
@@ -2114,76 +1871,13 @@ def _scan_from_imports_flat(src: str) -> list:
         _mod = _rest[:_p].strip()
         _names = _rest[_p + 7:].lstrip()
         if _names.startswith('('):
-            depth = 1
-            _in_str = None  # None, or '"', "'", '"""', "'''", '`'
-            _collected = []
-            _done = False
-            _first = True
-            _seg = _names[1:]
-            while not _done:
-                if _first:
-                    _s = _seg
-                    _first = False
-                else:
-                    if _i >= _n:
-                        break
-                    _s = lines[_i]
-                    _i += 1
-                _j = 0
-                _sn = len(_s)
-                while _j < _sn and not _done:
-                    _c = _s[_j]
-                    if _in_str:
-                        if _in_str in ('"""', "'''"):
-                            if _s.startswith(_in_str, _j):
-                                _collected.append(_in_str)
-                                _j += 3
-                                _in_str = None
-                                continue
-                        else:
-                            if _c == '\\' and _in_str != '`':
-                                _collected.append(_c)
-                                if _j + 1 < _sn:
-                                    _collected.append(_s[_j + 1])
-                                    _j += 2
-                                else:
-                                    _j += 1
-                                continue
-                            if _c == _in_str:
-                                _in_str = None
-                        _collected.append(_c)
-                        _j += 1
-                        continue
-                    if _c == '#':
-                        break
-                    if _s.startswith('"""', _j) or _s.startswith("'''", _j):
-                        _in_str = _s[_j:_j + 3]
-                        _collected.append(_in_str)
-                        _j += 3
-                        continue
-                    if _c in ('"', "'", '`'):
-                        _in_str = _c
-                        _collected.append(_c)
-                        _j += 1
-                        continue
-                    if _c in '([{':
-                        depth += 1
-                        _collected.append(_c)
-                        _j += 1
-                        continue
-                    if _c in ')]}':
-                        depth -= 1
-                        if depth == 0:
-                            _done = True
-                            break
-                        _collected.append(_c)
-                        _j += 1
-                        continue
-                    _collected.append(_c)
-                    _j += 1
-                if not _done and _in_str is not None and _in_str not in ('"""', "'''"):
-                    _in_str = None
-            _names = ''.join(_collected)
+            _names = _names[1:]
+            while (')' not in _names) and (_i < _n):
+                _names = _names + ' ' + lines[_i].strip()
+                _i += 1
+            _cut = _names.find(')')
+            if _cut >= 0:
+                _names = _names[:_cut]
         out.append(_mod)
         out.append(_names)
     return out
