@@ -68,20 +68,19 @@ anywhere else), these rules override any instinct to move on quickly:
   different angle, accept it as a real feature project, or hand it to a
   more capable model). Do not manufacture a stopping point at a fixed
   effort level.
-- **Batch bugs specifically to amortize the quality gate below**, not to
-  cap total effort. The full gate (steps 0-4) is the expensive part in
-  TOKEN terms (not wall-clock/CPU, which is free to spend) — running it
+- **Batch bugs specifically to amortize the verification below**, not to
+  cap total effort. The verification (stdlib compile + quick tests, see
+  `## The quality gate`) is the expensive part in TOKEN terms — running it
   after every single small fix wastes tokens re-deriving the same green
-  result. Group related fixes and run the full gate once per group and
-  once at the end, per the batching guidance already in that section.
-- **No mid-batch check-ins and no mid-batch gate runs.** While working
-  through a batch, do not stop to summarize progress, ask "should I keep
-  going?", or run any gate step (make check, compile_stdlib.py, bootstrap,
-  etc.) as a status check between fixes. Land the whole batch of intended
-  work first; run the full gate exactly once, at the end, covering
-  everything accumulated. Explicitly requested by the user 2026-09-13 —
-  interim gate runs and interim check-ins were seen as wasted tokens/time
-  when the intent was always to gate once at the end anyway.
+  result. Group related fixes and verify once per group and once at the end.
+- **No mid-batch check-ins and no mid-batch verification runs.** While
+  working through a batch, do not stop to summarize progress, ask "should I
+  keep going?", or run any verification step (stdlib compile, quick tests)
+  as a status check between fixes. Land the whole batch of intended work
+  first; verify exactly once, at the end, covering everything accumulated.
+  Explicitly requested by the user 2026-09-13 — interim runs and interim
+  check-ins were seen as wasted tokens/time when the intent was always to
+  verify once at the end anyway.
 
 ## Process safety — agents do not kill processes; the OWNER may authorise it
 The user's machine runs many other worktrees and lanes at the same time.
@@ -276,7 +275,27 @@ different jobs:
   of bootstrap's ~32 minutes is the three whole-closure dumps plus the
   `gcc -O0` compile between them. Per-file caching would buy nothing.
 
-## The quality gate — one command: `make gate`
+## Verification policy — stdlib compile and quick tests only
+
+**The full `make gate` is not run by agents.** It is the owner's call, and
+it is not a precondition for finishing a change. The required verification
+for any change is:
+
+1. **Stdlib compile** — `compile_stdlib.py` and `build_stdlib_dylib.py`
+   (the `stdlib-syntax` and `stdlib-dylib` steps). Apply the two verdict
+   checks below: the `skip <module>:` count must not increase, and the
+   `FAILED: N (E expected, U unexpected)` `U` must not increase.
+2. **Quick tests** — the targeted test files for what changed (for example
+   the `test_gimple.py` cases that cover the touched code path), run
+   individually or through `make check` if that is the smaller set. Report
+   what ran and what passed or failed.
+
+Do not run `make gate`, `make bootstrap`, `make native`, or the full
+`make check` as a closing step. If a change needs one of those, say so in
+the final message and let the owner decide.
+
+The rest of this section describes the gate as the owner runs it. It is
+reference material, not a checklist for agents.
 
     make gate          # THE gate. == python3 tools/suite.py gate
     make check         # a strict SUBSET of gate (see below) — for the
@@ -299,11 +318,11 @@ run `gate` once, at the end, over everything that has accumulated.
 
 Anything touching `fire_compiler.py` (the shared parser/AST),
 `gimple_codegen.py`, `module_loader.py`, `mojo/backend_gimple/*` or
-`mojo/middle/*` — including subagent work — owes a full `make gate`. This is
-not "extra"; it is the definition of done for that class of change. A change
-passing `test_gimple.py`/`test_module_cache.py`/`selfhost` alone is NOT
-sufficient evidence the compiled path is unaffected, and the reason is
-structural rather than a matter of testing harder:
+`mojo/middle/*` — including subagent work — owes stdlib compile and the
+targeted quick tests (see `## Verification policy`). The full `make gate`
+is the owner's to run; agents do not run it. Quick tests alone do not cover
+the compiled path, and the reasons below are why the stdlib compile step is
+required and why the owner may still want the full gate before shipping:
 
 - `gimple_codegen.py`'s lowering of an AST node shape is a separate,
   independently-maintained implementation from `myinterpreter.py`'s
