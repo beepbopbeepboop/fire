@@ -807,6 +807,8 @@ def _reset_func(gen, body: list = None, params: list = None,
     # `_mixed_container_locals`, computed lazily by `mixed_scalar_locals`
     # and reset per function for the same reason.
     gen._mixed_scalar_locals = None
+    # The container/scalar twin: `mixed_value_locals`, reset for the same reason.
+    gen._mixed_value_locals = None
     # Lazily filled by `emit_exprs.none_bound_locals`: the locals some binding
     # in this function sets to the literal `None`. Per function, because local
     # names recycle.
@@ -967,6 +969,7 @@ class FuncState:
         self.fs_bm_tainted_locals: set = set()
         self.fs_mixed_container_locals: object = None
         self.fs_mixed_scalar_locals: object = None
+        self.fs_mixed_value_locals: object = None
         self.fs_pybox_double_vars: object = None
         self.fs_pybox_vars: object = None
         self.fs_tagged_opt_read: object = None
@@ -1075,6 +1078,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_bm_tainted_locals = gen._bm_tainted_locals
     st.fs_mixed_container_locals = gen._mixed_container_locals
     st.fs_mixed_scalar_locals = gen._mixed_scalar_locals
+    st.fs_mixed_value_locals = gen._mixed_value_locals
     st.fs_pybox_double_vars = gen._pybox_double_vars
     st.fs_pybox_vars = gen._pybox_vars
     st.fs_tagged_opt_read = gen._tagged_opt_read
@@ -1193,6 +1197,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._bm_tainted_locals = st.fs_bm_tainted_locals
     gen._mixed_container_locals = st.fs_mixed_container_locals
     gen._mixed_scalar_locals = st.fs_mixed_scalar_locals
+    gen._mixed_value_locals = st.fs_mixed_value_locals
     gen._pybox_double_vars = st.fs_pybox_double_vars
     gen._pybox_vars = st.fs_pybox_vars
     gen._tagged_opt_read = st.fs_tagged_opt_read
@@ -3903,6 +3908,55 @@ def tagged_recv_name(gen, name) -> bool:
                for v in values)
 
 
+def _walk_func_stmts(stmts, visit):
+    """Call `visit` on every statement of a function body, nested bodies
+    included, never descending into a nested `def` (its locals are its own)."""
+    if not stmts:
+        return
+    for s in stmts:
+        if isinstance(s, gimple_ctypes.FunctionDef):
+            continue
+        visit(s)
+        for attr in ('then_body', 'else_body', 'body', 'finalbody'):
+            _walk_func_stmts(getattr(s, attr, None), visit)
+        for _c, eb in (getattr(s, 'elifs', None) or ()):
+            _walk_func_stmts(eb, visit)
+        for h in (getattr(s, 'handlers', None) or ()):
+            _walk_func_stmts(getattr(h, 'body', None), visit)
+
+
+def _scalar_mixed_prescan(gen, body) -> tuple:
+    """The one pre-scan `mixed_scalar_locals` and `mixed_value_locals` share:
+    `(dict_val_types, annotated)` for the function `body`.
+
+    `dict_val_types` maps each `name = {...}` dict literal to its value's
+    C type, so a SUBSCRIPT read of it is classified before the literal is
+    lowered (`_quick_type` cannot answer that yet); a name bound to two
+    different value types is `'mixed'`. `annotated` is every name declared
+    with a type annotation -- a deliberate single type, never a mixed name."""
+    dict_val_types: dict = {}
+    annotated: set = set()
+
+    def visit(s):
+        if isinstance(s, gimple_ctypes.AssignStmt) \
+                and isinstance(s.target, gimple_ctypes.IdentExpr) \
+                and isinstance(s.value, gimple_ctypes.DictExpr):
+            _name = _as_str(s.target.name)
+            _dv = gimple_exprtypes.dict_literal_val_ctype(gen, s.value.pairs)
+            _prev = dict_val_types.get(_name)
+            if _prev is None:
+                dict_val_types[_name] = _dv
+            elif _prev != _dv:
+                dict_val_types[_name] = 'mixed'
+        elif isinstance(s, gimple_ctypes.VarDecl):
+            if getattr(s, 'type_ann', None) is not None \
+                    and isinstance(s.name, str):
+                annotated.add(_as_str(s.name))
+
+    _walk_func_stmts(body, visit)
+    return dict_val_types, annotated
+
+
 def mixed_container_locals(gen) -> set:
     """The names in THIS function's body that are assigned values of more
     than one distinct container kind (`MojoDict *` / `MojoList *` /
@@ -4061,43 +4115,7 @@ def mixed_scalar_locals(gen) -> set:
     if cached is not None:
         return cached
     body = gen._cur_func_body
-    dict_val_types: dict = {}
-    annotated: set = set()
-
-    def walk_bodies(stmts, visit):
-        if not stmts:
-            return
-        for s in stmts:
-            if isinstance(s, gimple_ctypes.FunctionDef):
-                continue
-            visit(s)
-            for attr in ('then_body', 'else_body', 'body', 'finalbody'):
-                walk_bodies(getattr(s, attr, None), visit)
-            for _c, eb in (getattr(s, 'elifs', None) or ()):
-                walk_bodies(eb, visit)
-            for h in (getattr(s, 'handlers', None) or ()):
-                walk_bodies(getattr(h, 'body', None), visit)
-
-    def note_dict(s):
-        if isinstance(s, gimple_ctypes.AssignStmt) \
-                and isinstance(s.target, gimple_ctypes.IdentExpr) \
-                and isinstance(s.value, gimple_ctypes.DictExpr):
-            _name = _as_str(s.target.name)
-            _dv = gimple_exprtypes.dict_literal_val_ctype(gen, s.value.pairs)
-            _prev = dict_val_types.get(_name)
-            if _prev is None:
-                dict_val_types[_name] = _dv
-            elif _prev != _dv:
-                dict_val_types[_name] = 'mixed'
-        elif isinstance(s, gimple_ctypes.VarDecl):
-            # An ANNOTATED local is declared as that one type on purpose; it
-            # is not a mixed-kind name, and boxing a later store would put an
-            # int64_t word into a `char *` slot.
-            if getattr(s, 'type_ann', None) is not None \
-                    and isinstance(s.name, str):
-                annotated.add(_as_str(s.name))
-
-    walk_bodies(body, note_dict)
+    dict_val_types, annotated = _scalar_mixed_prescan(gen, body)
 
     kinds: dict = {}
 
@@ -4134,7 +4152,7 @@ def mixed_scalar_locals(gen) -> set:
                     and getattr(s, 'type_ann', None) is None):
                 note(s.name, s.value)
 
-    walk_bodies(body, visit)
+    _walk_func_stmts(body, visit)
 
     mixed = set()
     for _n, _ks in kinds.items():
@@ -4144,16 +4162,91 @@ def mixed_scalar_locals(gen) -> set:
     return mixed
 
 
+def mixed_value_locals(gen) -> set:
+    """The names in THIS function's body bound to a CONTAINER and to a
+    provable SCALAR (`int` / `double` / `str` / `bool`), computed once per
+    function and cached.
+
+    The container/scalar twin of `mixed_scalar_locals`, and the case that
+    neither of the two existing sets covers: `mixed_container_locals` sees
+    only container-vs-container, `mixed_scalar_locals` only scalar-vs-scalar.
+    `x = [1, 2]; x = 3` has no single C type, and `resolve_shared`'s
+    `_multi_kind_locals` already declares it `int64_t`, but nothing made the
+    STORES box by kind or the READS dispatch on the runtime kind, so `print(x)`
+    read the stale `MojoList *` after the `x = 3` ran (a SIGSEGV for a program
+    CPython runs cleanly).
+
+    A name in this set is a box-holding local (`mixed_box_name`): a container
+    store is its bare pointer word, an int store its bare int, and a float,
+    str or bool store is boxed by kind, so every consumer -- `print`, `str`,
+    `len`, truthiness -- reads the word by kind through the runtime
+    dispatchers (`mojo_cstr_or_int_str`, `mojo_len_word`, `mojo_truthy_word`),
+    which already recognise every kind this set can hold.
+
+    An ANNOTATED local is declared as its one type on purpose and is not a
+    mixed-kind name (the same exclusion `mixed_scalar_locals` makes). A
+    binding whose value is not provably a container or a scalar (None, a
+    struct pointer, an unresolved call) contributes no kind, so it cannot
+    turn an ordinary container local into a box by itself."""
+    cached = getattr(gen, '_mixed_value_locals', None)
+    if cached is not None:
+        return cached
+    body = gen._cur_func_body
+    dict_val_types, annotated = _scalar_mixed_prescan(gen, body)
+
+    kinds: dict = {}
+
+    def note(name, value):
+        _nm = _as_str(name)
+        _ks = kinds.setdefault(_nm, set())
+        try:
+            _qt = _as_str(gen._quick_type(value))
+        except Exception:
+            _qt = ''
+        if _qt in gimple_ctypes._CONTAINER_KIND_TYPES:
+            _ks.add('container')
+        if _mixed_scalar_binding_kind(gen, value, dict_val_types) is not None:
+            _ks.add('scalar')
+
+    def visit(s):
+        if isinstance(s, gimple_ctypes.AssignStmt):
+            if isinstance(s.target, gimple_ctypes.IdentExpr):
+                note(s.target.name, s.value)
+            elif (isinstance(s.target, gimple_ctypes.TupleExpr)
+                    and isinstance(s.value, gimple_ctypes.TupleExpr)
+                    and len(s.value.elements) == len(s.target.elements)):
+                for _i in range(len(s.target.elements)):
+                    _t = s.target.elements[_i]
+                    if isinstance(_t, gimple_ctypes.IdentExpr):
+                        note(_t.name, s.value.elements[_i])
+        elif isinstance(s, gimple_ctypes.VarDecl):
+            if (isinstance(s.name, str) and ',' not in s.name
+                    and s.value is not None
+                    and getattr(s, 'type_ann', None) is None):
+                note(s.name, s.value)
+
+    _walk_func_stmts(body, visit)
+
+    mixed = set()
+    for _n, _ks in kinds.items():
+        if _ks == {'container', 'scalar'} and _n not in annotated:
+            mixed.add(_n)
+    gen._mixed_value_locals = mixed
+    return mixed
+
+
 def mixed_box_name(gen, name) -> bool:
     """True iff `name` is a BOX-HOLDING local of this function: declared as the
     `int64_t` box, every store into it a box of its own kind, every read by
-    kind. Two sources agree on that representation and this is their one
+    kind. Three sources agree on that representation and this is their one
     answer: a name bound to more than one scalar kind (`mixed_scalar_locals`),
-    and a name bound to a tagged generator word beside plain values
+    a name bound to a container beside a scalar (`mixed_value_locals`), and a
+    name bound to a tagged generator word beside plain values
     (`tagged_mixed_name`). The store arms, the declaration and the `var`
-    initializer all ask this, never the two predicates separately."""
+    initializer all ask this, never the predicates separately."""
     _n = _as_str(name)
-    return _n in mixed_scalar_locals(gen) or tagged_mixed_name(gen, _n)
+    return (_n in mixed_scalar_locals(gen) or _n in mixed_value_locals(gen)
+            or tagged_mixed_name(gen, _n))
 
 
 def box_mixed_store(gen, value_node, vtype: str, v: str, name) -> tuple:
@@ -4171,6 +4264,14 @@ def box_mixed_store(gen, value_node, vtype: str, v: str, name) -> tuple:
     keeps its own type and the caller's refusal decides it."""
     if gen.var_types.get(_as_str(name), 'int64_t') != 'int64_t':
         return v, vtype
+    if vtype in gimple_ctypes._CONTAINER_KIND_TYPES:
+        # A container is its own word, not a boxed value: the box has no kind
+        # byte for it, and the runtime recognises a container by its registry
+        # membership (`mojo_cstr_or_int_str`, `mojo_len_word`,
+        # `mojo_truthy_word`), which is how a container's identity is read
+        # everywhere else. Only a container stored into a `mixed_value_locals`
+        # name reaches here.
+        return gen._to_int64(vtype, v), 'int64_t'
     if vtype == 'double':
         return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', v)]), 'int64_t'
     if vtype == 'char *':
@@ -5491,6 +5592,14 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
             and gimple_exprtypes.is_python_bool_expr(gen, enode):
         return gen._call_expr('char *', 'mojo_bool_to_str',
                               [('int', gen._new_val('int', f'(int){ev}'))])
+    # A container/scalar name (`mixed_value_locals`) is a box-holding word
+    # whose kind changes with each store: the static `_actual_types` retyping
+    # below would read the bare int of the LAST store through the container
+    # recorded by an EARLIER one. Ask the runtime by kind, as `print` does.
+    if enode is not None and et in ('int', 'int64_t') \
+            and isinstance(enode, gimple_ctypes.IdentExpr) \
+            and _as_str(enode.name) in mixed_value_locals(gen):
+        return _repr_boxed_container(gen, ev)
     # A `d[k]` read whose value type was unknown at compile time: stringify
     # by the slot's runtime kind rather than the raw int64_t word.
     _dsr = getattr(gen, '_dict_slot_reads', {})
@@ -7158,7 +7267,9 @@ def _repr_boxed_container(gen, value: str):
     gen._emit(f'  {_res} = {_sp2};')
     gen._emit(f'  goto {bb_after};')
     gen._emit_label(bb_not_str)
-    gen._emit(f'  {_res} = mojo_str_from_int ({_it64});')
+    # Every other word: a float/bool/None box renders by its own kind, a bare
+    # integer as its decimal (mojo_repr_boxed answers both).
+    gen._emit(f'  {_res} = mojo_repr_boxed ({_it64});')
     gen._emit_label(bb_after)
     return _res
 

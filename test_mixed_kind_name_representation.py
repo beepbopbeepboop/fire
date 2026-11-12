@@ -164,6 +164,106 @@ def main():
     show("s")
 main()
 ''',
+    # A name rebound between a CONTAINER and a scalar (`mixed_value_locals`):
+    # the container store is its own word, the int store its bare int, and
+    # every read asks the runtime by the word's kind. The stale static kind
+    # of the last container store used to win (SIGSEGV, or a list header read
+    # out of an int, or raw heap bytes printed at exit 0).
+    "list_then_int_print": '''
+def main():
+    x = [1, 2]
+    print(x)
+    x = 3
+    print(x)
+main()
+''',
+    "str_then_list_print": '''
+def main():
+    x = "s"
+    print(x)
+    x = [1, 2]
+    print(x)
+main()
+''',
+    "list_then_int_len": '''
+def main():
+    x = [1, 2]
+    print(len(x))
+    x = 5
+    print(len(x))
+main()
+''',
+    "int_then_list_len": '''
+def main():
+    x = 5
+    print(len(x))
+    x = [1, 2]
+    print(len(x))
+main()
+''',
+    "list_then_int_str": '''
+def main():
+    x = [1, 2]
+    print(str(x))
+    x = 5
+    print(str(x))
+main()
+''',
+    "empty_list_then_int_bool": '''
+def main():
+    x = []
+    print(bool(x))
+    x = 0
+    print(bool(x))
+main()
+''',
+    # The other consumers of a container/scalar name: iteration and subscript
+    # read the container of the LAST store, and truthiness asks the runtime.
+    "list_then_int_then_list_iter": '''
+def main():
+    x = [1, 2]
+    x = 3
+    x = [4, 5]
+    for i in x:
+        print(i)
+main()
+''',
+    "list_then_list_subscript": '''
+def main():
+    x = [1, 2]
+    print(x[0])
+    x = [7]
+    print(x[0])
+main()
+''',
+    "container_then_zero_truthiness": '''
+def main():
+    x = []
+    x = 0
+    if x:
+        print("t")
+    else:
+        print("f")
+    x = [1]
+    if x:
+        print("t")
+main()
+''',
+    # The scalar stores a container name can also hold: a float and a str are
+    # boxed by kind, a bool keeps True/False.
+    "list_then_float_and_str_and_bool": '''
+def main():
+    x = [1, 2]
+    x = 1.5
+    print(x)
+    x = "t"
+    print(x)
+    x = True
+    print(x)
+    x = [3]
+    print(x)
+main()
+''',
 }
 
 # Programs CPython cannot run (`var` is Mojo syntax): name -> expected stdout.
