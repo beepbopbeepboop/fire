@@ -1638,6 +1638,7 @@ def _gen_stmt_AssignStmt(gen, node):
         # store that brings the second kind. A box-holding name is the
         # exception: it is the int64_t box, and stores are boxed by kind.
         if vtype in ('double', 'char *') and not _mixed_box:
+
             _sk_key = (_as_str(gen.current_func_name), _as_str(tname))
             _sk_prev = gen._stored_kinds.get(_sk_key)
             if _sk_prev is not None and _sk_prev != vtype:
