@@ -1,13 +1,6 @@
 # DIAGNOSTICS: a provably false `comptime assert` in a called generic function compiles
 
-Status: RESOLVED FOR THE BUILD, OPEN FOR THE IN-PROCESS API. Filed 2026-11-11 on master.
-
-Corrected diagnosis (2026-11-11, after the fix): the real build (`fire.py build`) ALREADY refuses a called generic with a provably false assert or constrained: `comptime assertion failed: nope` and `constraint failed: nope`, both matching the tests. The gap was in the in-process `compile_to_gimple` path, which does not instantiate a generic. The two tests now check the diagnostic through the real build (`diagnostic_build.py`), and the suite markers are removed.
-
-Still open, and WORSE than a missing diagnostic: `compile_to_gimple` (do_imports True or False) does not instantiate a generic function, so a call `f[1]()` lowers to a zero stub, `_t1 = (int64_t)0; /* indirect call via SubscriptExpr */` (`mojo/backend_gimple/emit_calls.py`, the catch-all at the end of `_lower_call`). Measured: `def f[x: Int]() -> Int: return x + 1` with `print(f[1]())` prints `0` in-process, and `fire.py build` on the same program prints `2`. So the in-process API gives a silently wrong answer for a called generic.
-
-Why it is not fixed by a one-line refusal: the stub is deliberate. The comment at the catch-all says rejecting these cases "left six modules red", and the stdlib compile depends on the stub for generic-struct and imported bases. A refusal has to be narrowed to a generic FUNCTION defined in the same module, which needs the set of such functions plumbed into the generator (it is not there today: `func_return_types` holds only elaborated signatures). The next step is that plumbing, the narrow refusal, and then `compile_stdlib.py` to confirm no stdlib module depended on the stub.
- Measured with the real compiler (`tools/mojo build`) and ours (`compile_to_gimple`).
+Status: OPEN. Filed 2026-11-11 on master. Measured with the real compiler (`tools/mojo build`) and ours (`compile_to_gimple`).
 
 ## Symptom
 

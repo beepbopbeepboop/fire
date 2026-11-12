@@ -1,3 +1,4 @@
+SPLIT: SUITE_gimplerunner-part3-part1, SUITE_gimplerunner-part3-part2
 # SUITE_gimplerunner: part 3 - Test expectation mismatches
 
 ## Problem
