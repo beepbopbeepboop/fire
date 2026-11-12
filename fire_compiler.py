@@ -4706,8 +4706,8 @@ class Parser:
 
     def _check_out_self_declaration(self, name, fn_name_tok, params, param_convs, toks):
         """Refuse an `out self` receiver on a method that is not a constructor,
-        the shapes the real compiler refuses at the declaration (measured
-        2026-11-11; see bugs/TEST_out_self_with_return_type_fixtures_are_invalid_mojo.md):
+        the shapes the real compiler refuses at the declaration (measured with
+        `tools/mojo build` on 2026-11-11):
 
         * `out self` with no other parameter: `self argument must be present
           in instance method`, at the function name;
