@@ -32,7 +32,7 @@ from mojo.middle.solvers import *  # noqa: F401,F403
 from mojo.middle.types import (  # underscore names: `import *` won't carry these
     _struct_value_codes, _struct_slot_kinds, _struct_elem_ctype,
     _SCALAR_FLOAT_TYPES, _LIBM_FN_RETVALS, _BUILTIN_RET_CTYPES,
-    _body_builds_struct_tuple,
+    _body_builds_struct_tuple, _BUILTIN_SCALAR_RET_CTYPES,
 )
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.comptime as comptime_eval
@@ -277,6 +277,15 @@ def _quick_type(gen, node) -> str:
         # agree by construction.
         if node.name in getattr(gen, '_own_global_var_types', {}):
             return _as_str(gen._own_global_var_types[node.name])
+        # A bare name this module IMPORTS as a module-scope global (BUG-2026-009)
+        # is read through the defining module's accessor, whose declared C
+        # return type is the answer `_lower_IdentExpr` itself uses for the read
+        # (emit_exprs' imported-global arm). Answering int64_t here typed a
+        # `var fl = F` class attribute as a box, so a float global came out as
+        # its truncated integer.
+        _imp_acc = getattr(gen, '_imported_global_accessors', {}).get(node.name)
+        if _imp_acc is not None:
+            return _as_str(_imp_acc[0])
         return 'int64_t'
     if (isinstance(node, gimple_ctypes.SubscriptExpr)
             and (isinstance(node.obj, gimple_ctypes.IdentExpr)
@@ -430,7 +439,7 @@ def _quick_type(gen, node) -> str:
         # was right, the declaration was not).
         #
         _BUILTIN_CTORS = _BUILTIN_RET_CTYPES
-        # Same `_locally_binds_name` gate as `_BUILTIN_SCALARS` just
+        # Same `_locally_binds_name` gate as `_BUILTIN_SCALAR_RET_CTYPES` just
         # below — `set`/`dict`/`list` are ordinary identifiers a module
         # could shadow with its own top-level def/import.
         if fname in _BUILTIN_CTORS and not gen._locally_binds_name(fname):
@@ -438,26 +447,6 @@ def _quick_type(gen, node) -> str:
         # Scalar builtins, matching the lowering (float()->double, etc.). Without
         # these, [float(i), ...] infers an int element type and nested float
         # lists silently read/return as int.
-        _BUILTIN_SCALARS = {'float': 'double', 'int': 'int64_t', 'str': 'char *',
-                            'len': 'int64_t', 'ord': 'int64_t', 'chr': 'char *',
-                            'bool': '_Bool', 'repr': 'char *',
-                            # isinstance()/all()/any() always return a plain
-                            # Python bool regardless of their arguments' types
-                            # (same "no argument-type inspection needed"
-                            # reasoning as len/ord above) — without this,
-                            # `return isinstance(...)`/`return all(...)`/
-                            # `return any(...)` fell through to the int64_t
-                            # default below. Real emission (_lower_builtin_
-                            # isinstance/_lower_builtin_all_any) actually
-                            # produces a C `int`, but declaring the more
-                            # precise `_Bool` here still matches every other
-                            # boolean-producing case above (BinaryOp compare/
-                            # 'in', CompareChain, UnaryOp 'not', BoolLiteral)
-                            # and avoids joining as an opaque int64_t/pointer
-                            # against a sibling return path of a real pointer
-                            # type (see bugs/hard/CODEGEN_comprehension_
-                            # return_type_defaults_int64.md's follow-up note).
-                            'isinstance': '_Bool', 'all': '_Bool', 'any': '_Bool'}
         # `abs(x)` returns x's own type, so it cannot sit in that table
         # (which answers without looking at arguments) — it is answered
         # here, where the argument is available. Without it the estimator
@@ -489,8 +478,8 @@ def _quick_type(gen, node) -> str:
         # Mirrors the `open` builtin-shadowing gate at this class's
         # `_lower_builtin_all_any` call site — same `_locally_binds_name`
         # mechanism, see its docstring.
-        if fname in _BUILTIN_SCALARS and not gen._locally_binds_name(fname):
-            return _BUILTIN_SCALARS[fname]
+        if fname in _BUILTIN_SCALAR_RET_CTYPES and not gen._locally_binds_name(fname):
+            return _BUILTIN_SCALAR_RET_CTYPES[fname]
         # `struct_field_types` is keyed by the struct's own bare name as
         # written in its DEFINING module, so a `from M import Class as
         # Alias` call site misses it and falls through to the int64_t
@@ -1653,6 +1642,12 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
     # is tracked through `_quick_type`'s shape, not just direct literals, so
     # `q = n + 0` (n a real int parameter) boxes too.
     confident_scalars: set = set()
+    # Names bound by an UNPACK of a single iterable (whose per-element C type
+    # this scan does not know, so each target gets the int64_t storage
+    # default below). They are not evidence of a scalar at a call site: the
+    # element may be a container (`coro.py`'s `real_params`). Recorded for
+    # `module_gen`'s container-vs-scalar refusal.
+    unpacked_locals: set = set()
 
     # This pre-pass runs before self.var_types is populated for this
     # function, so _quick_type(IdentExpr(param_name)) falls through to its
@@ -1726,6 +1721,10 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
                             and isinstance(_cv.func, gimple_ctypes.MemberExpr)
                             and _cv.func.member == '_decode_str_literal_text')
                         elem_types = [('char *' if _is_decode else 'int64_t')] * len(targets)
+                        if not _is_decode:
+                            for _tu in targets:
+                                if isinstance(_tu, gimple_ctypes.IdentExpr):
+                                    unpacked_locals.add(_as_str(_tu.name))
                 else:
                     targets = [_as_node.target]
                     elem_types = [_local_value_type(gen, _as_node.value)]
@@ -1968,6 +1967,14 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
         if len(_kinds) > 1 or _float_conflict or _int_conflict:
             conflicting.add(_as_str(vname))
     gen._multi_kind_locals[_as_str(getattr(func, 'name', ''))] = conflicting
+    # The unpack targets, per function, for the container-vs-scalar contract:
+    # an `int64_t` target of a multi-value unpack is the storage DEFAULT, not
+    # proof of a number (a tuple element may be a list).
+    _tul = getattr(gen, '_tuple_unpack_locals', None)
+    if _tul is None:
+        gen._tuple_unpack_locals = {}
+        _tul = gen._tuple_unpack_locals
+    _tul[_as_str(getattr(func, 'name', ''))] = unpacked_locals
     # A conflicting name has no single C type, so its inferred type is the
     # BOX (`int64_t`), not whatever the pointer-wins lattice join answered.
     # For two container kinds the join already lands on `int64_t`; for a
@@ -2260,11 +2267,32 @@ def _type_expr_to_ann(gen, node) -> str:
         return f"{gen._type_expr_to_ann(node.obj)}.{node.member}"
     if isinstance(node, gimple_ctypes.IntLiteral):
         return str(node.value)
+    if isinstance(node, gimple_ctypes.FloatLiteral):
+        return _float_type_arg_text(node.value)
     if isinstance(node, gimple_ctypes.BoolLiteral):
         return 'True' if node.value else 'False'
     if isinstance(node, gimple_ctypes.UnaryOp) and node.op == '-' and isinstance(node.operand, gimple_ctypes.IntLiteral):
         return str(-node.operand.value)
+    if isinstance(node, gimple_ctypes.UnaryOp) and node.op == '-' and isinstance(node.operand, gimple_ctypes.FloatLiteral):
+        _text = _float_type_arg_text(node.operand.value)
+        return '-' + _text if _text else ''
     return ''
+
+def _float_type_arg_text(value) -> str:
+    """A float literal's rendering as a comptime bracket argument, or '' when
+    it has none (a non-finite value such as `1e999`, which is not a literal a
+    type argument can spell, so the call stays unbound). Python's repr drops
+    the decimal point from an exponent form (`1e+16`), which the elaborator
+    would not read back as a float (`where`-bindings match
+    `-?\\d+\\.\\d+([eE][-+]?\\d+)?`), so the point is always written: `1.0e+16`."""
+    value = float(value)
+    if value != value or value in (float('inf'), float('-inf')):
+        return ''
+    text = repr(value)
+    if '.' in text:
+        return text
+    mantissa, sep, exponent = text.partition('e')
+    return f"{mantissa}.0{sep}{exponent}"
 
 def _refine_generic_return_type(gen, info: dict, module_src: str, g: str,
                                  mangled_type_args: list, arg_count: int,

@@ -1,31 +1,53 @@
+#!/usr/bin/env python3
+"""Read-site regressions for a name bound to a tagged generator word AND to a
+value of another C type (the box of step 2 of docs/tagged_generator_mixed_type-plan.md).
+
+Each case is a Mojo program whose loop variable is stored into a mixed name and
+then read by an operation the step 2 parts did not cover. The program is built
+through the real CLI (`fire.py build`, the path users run, which links the
+generator runtime itself) and its stdout must equal CPython's on the same text.
+
+Usage:  python3 test_tagged_mixed_readsites.py <case>   (one case)
+        python3 test_tagged_mixed_readsites.py          (every case)
+
+Exit 0 when every selected case matches CPython, 1 otherwise.
+"""
 import os
 import subprocess
 import sys
 import tempfile
 
-def run_cpython(src):
-    r = subprocess.run([sys.executable, '-c', src], capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(f'CPython failed: {r.stderr}')
-    return r.stdout
+ROOT = os.path.dirname(os.path.abspath(__file__))
+FIRE = os.path.join(ROOT, 'fire.py')
+TIMEOUT_S = 600
 
-def build_and_run(src, workdir):
-    path = os.path.join(workdir, 'case.mojo')
-    out = os.path.join(workdir, 'case_bin')
-    with open(path, 'w') as f:
-        f.write(src)
-    r = subprocess.run([sys.executable, 'tools/memslot.py', '--gb', '8', '--label', 'tagged-mixed-readsites',
-                        '--', sys.executable, 'fire.py', 'build', path, '-o', out],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(f'build failed:\n{r.stdout}\n{r.stderr}')
-    r = subprocess.run([out], capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(f'run failed rc={r.returncode}:\n{r.stdout}\n{r.stderr}')
-    return r.stdout
-
-def str_box_binops():
-    src = r'''
+# Case name -> (doc that owns it, program). The doc is the part that must make
+# the case pass; the program is the same text for Mojo and CPython.
+CASES = {
+    # Part 1: the builtin casts int() and float() on a double box. int(x) printed
+    # the raw double; float(x) + 1.0 read the box pointer's bits as a double.
+    # Fixed: int/float of a tagged double box must unbox by kind.
+    'double_box_casts': (
+        'fixed: tagged double-box int()/float() casts',
+        """\
+def g():
+    yield 1
+    yield 2.5
+    yield 3
+def main():
+    x = 0.5
+    for v in g():
+        x = v
+        print(int(x))
+        print(float(x) + 1.0)
+main()
+""",
+    ),
+    # Part 2: binary operators whose operands are a str box. x * 2 printed a
+    # pointer-sized integer; x + x (box + box) did the same.
+    'str_box_binops': (
+        'fixed: tagged str-box * and + operands',
+        """\
 def g():
     yield 1
     yield "a"
@@ -37,23 +59,64 @@ def main():
         print(x * 2)
         print(x + x)
 main()
-'''
-    expected = run_cpython(src)
-    with tempfile.TemporaryDirectory(dir='.tmp') as d:
-        got = build_and_run(src, d)
-    if got != expected:
-        print('EXPECTED:', repr(expected))
-        print('GOT:     ', repr(got))
-        raise SystemExit(1)
-    print('ok')
-
-CASES = {
-    'str_box_binops': str_box_binops,
+""",
+    ),
 }
 
+
+def _cpython_stdout(src: str, wd: str) -> str:
+    p = os.path.join(wd, 'ref.py')
+    with open(p, 'w') as f:
+        f.write(src)
+    r = subprocess.run([sys.executable, p], capture_output=True, text=True,
+                       timeout=TIMEOUT_S)
+    if r.returncode != 0:
+        raise RuntimeError(f"the CPython reference program failed: {r.stderr}")
+    return r.stdout
+
+
+def _compiled_stdout(src: str, wd: str) -> str:
+    # fire.py must run as a script from ROOT (it imports build_config from its
+    # own directory), so the source and exe live in the scratch dir and only
+    # the fire.py path is absolute.
+    mojo = os.path.join(wd, 'prog.mojo')
+    exe = os.path.join(wd, 'prog.exe')
+    with open(mojo, 'w') as f:
+        f.write(src)
+    b = subprocess.run([sys.executable, FIRE, 'build', mojo, '-o', exe],
+                       capture_output=True, text=True, timeout=TIMEOUT_S, cwd=wd)
+    if b.returncode != 0:
+        raise RuntimeError(f"fire.py build failed:\n{b.stdout}{b.stderr}")
+    r = subprocess.run([exe], capture_output=True, text=True, timeout=TIMEOUT_S)
+    return r.stdout
+
+
+def run_case(name: str) -> bool:
+    doc, src = CASES[name]
+    wd = tempfile.mkdtemp(prefix=f'readsite_{name}_')
+    try:
+        want = _cpython_stdout(src, wd)
+        got = _compiled_stdout(src, wd)
+    except Exception as e:
+        print(f"FAIL  {name} ({doc}): {e}")
+        return False
+    if got == want:
+        print(f"PASS  {name}")
+        return True
+    print(f"FAIL  {name} ({doc}): CPython {want!r}, compiled {got!r}")
+    return False
+
+
+def main(argv):
+    names = argv[1:] or list(CASES)
+    unknown = [n for n in names if n not in CASES]
+    if unknown:
+        print(f"unknown case(s): {', '.join(unknown)}; known: {', '.join(CASES)}")
+        return 2
+    results = [run_case(n) for n in names]
+    print(f"\n{sum(results)} passed, {len(results) - sum(results)} failed")
+    return 0 if all(results) else 1
+
+
 if __name__ == '__main__':
-    if len(sys.argv) != 2 or sys.argv[1] not in CASES:
-        print(f'usage: {sys.argv[0]} <case>', file=sys.stderr)
-        print('cases:', ', '.join(CASES), file=sys.stderr)
-        raise SystemExit(2)
-    CASES[sys.argv[1]]()
+    sys.exit(main(sys.argv))

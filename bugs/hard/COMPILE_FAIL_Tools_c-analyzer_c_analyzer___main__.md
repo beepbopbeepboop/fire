@@ -1,4 +1,4 @@
-SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part1, COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part2, COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part3, COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4
+SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4 (part1 fixed: 2026-11-12, `yield '\t'.join(columns)` value slot / str.join arg scan; part2 fixed: nested generator yield-from handle-local delegation; part3 fixed: 2026-11-12, escaping generator with empty-string first yield keeps string value slot)
 
 ## Status 2026-11-05 — repro run on this tree (next step)
 

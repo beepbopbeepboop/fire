@@ -11,8 +11,11 @@ easy
 ## Prerequisites / depends on
 `bugs/mid/DIAGNOSTICS_align_decorator-part1.md` and
 `bugs/mid/DIAGNOSTICS_align_decorator-part2.md` (parsing/storage and
-power-of-two validation with diagnostics propagated at instantiation). This
-part must reuse parts 1/2's validator rather than add a third one.
+power-of-two validation with diagnostics propagated at instantiation). Part 1's
+value rule is already implemented: `fire_compiler.py::_validate_align_decorators`
+validates a constant `@align(...)` argument at parse time (regression test
+`test_align_decorator_literal_diagnostic.py`). This part must reuse
+parts 1/2's validator rather than add a third one.
 
 ## Goal
 Add support for evaluating a comptime function call in `@align(...)` (so the
@@ -97,3 +100,9 @@ able to fold it without a call hook; this part supplies that capability.
 
 ## Status
 - **Open (replan/merge).**
+- **2026-11-12 (merge with the part-1 fix):** part 1's shared value rule
+  landed with the branch side of the merge (`_validate_align_decorators` in
+  `fire_compiler.py`; its part-1 doc was removed with the fix). The
+  constant-literal regression `test_align_decorator_literal_diagnostic.py`
+  landed with it; this part's parametric/call integration test
+  `test_align_decorator_diagnostic.py` is a separate file and is still to add.

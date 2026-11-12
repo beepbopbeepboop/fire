@@ -1854,7 +1854,8 @@ test('interp-tokenizer-oracle', [PY, 'test_myinterpreter_validation.py'],
      mem='tiny', cache=True,
      extra=['test_myinterpreter_validation.py', 'fire_compiler.py',
             'myinterpreter.py', 'formal/examples'],
-     desc='the interpreter\'s tokenizer vs the imported one, over 67 texts')
+     desc='the interpreter\'s tokenizer vs the imported one, over the corpus '
+          'of snippets and whole files')
 test('metalgpu', [PY, 'test_metal_codegen.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_metal_codegen.py',
                              'mojo/middle/metal_ops.py',
@@ -1978,12 +1979,14 @@ test('nonlocal', [PY, 'test_nonlocal.py'], cache=True, mem='tiny',
 # not `'mem'`: they invoke gcc directly on a snippet-sized translation unit,
 # the same `small`-workload shape `test_gimple.py` is, and a cap on a job
 # that never loads the whole closure buys nothing (see the MEMCLASS note).
-# `gimplerunner` is red on the tree (2026-11-11): 21 of 604 cases fail, a mix of wrong output,
-# RSS over the 40 MB limit, compile-time refusals, and one CPython-side mismatch. The 21 are listed
-# in bugs/hard/SUITE_gimplerunner_21_failing.md. The count in the marker is checked against the run,
+# `gimplerunner` is red on the tree (2026-11-11): 20 cases fail, a mix of wrong output,
+# RSS over the 40 MB limit, compile-time refusals, and one CPython-side mismatch. The 20 are listed
+# in bugs/hard/SUITE_gimplerunner_21_failing.md; the 21st, `gimple_nested_class_var_attr_from_str_param`,
+# was fixed 2026-11-11 by not minting a visible struct field for a per-execution class attribute
+# (bug:CODEGEN_nested_class_var_attr_untyped_field). The count in the marker is checked against the run,
 # so a case that starts or stops failing makes this marker disagree and the gate says so.
 test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True, mem='tiny',
-     expect='21 failing: see bugs/hard/SUITE_gimplerunner_21_failing.md (wrong output, RSS over limit, compile refusals)',
+     expect='20 failing: see bugs/hard/SUITE_gimplerunner_21_failing.md (wrong output, RSS over limit, compile refusals)',
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
@@ -2499,7 +2502,8 @@ test('stdlib-tests', [PY, 'test_stdlib.py'], mem='program',
 # moment a recorded peak stops fitting its class).
 test('stdlib-dylib', [PY, 'tools/stdlib_dylib_ratchet.py'],
      mem='tiny', excl=True, timeout=3600,
-     desc='from-scratch stdlib dylib; reports modules that fell back to source')
+     desc='from-scratch stdlib dylib; reports modules that fell back to source',
+     disabled='bugs/gate-stdlib-dylib.md')
 test('runtimedylib', [PY, 'test_runtime_dylib.py'],
      deps=['preflight'], mem='tiny',
      desc='the runtime dylib: export table, per-arch link, cross-arch checks')
@@ -2880,10 +2884,10 @@ test('formal-eh-tables', [PY, 'test_formal_eh_tables.py'],
 test('formal-dylib', [PY, 'test_formal_dylib.py'],
      deps=['preflight', 'prooflib'],
      mem='tiny',
-     expect='6 failing: two wrong-spec teeth checks (a wrong spec is accepted, since the overflow traps, '
-            'bugs/FORMAL_wrong_spec_accepted_since_overflow_traps.md) and four contract checks on branchy exports '
-            '(an exit svc steps to none, so their contracts are guarded obligations, '
-            'bugs/FORMAL_svc_exit_handling_incomplete.md)',
+     expect='4 failing: three hole-count checks on the overflow-trapping exports, whose termination '
+            'obligations an exit svc keeps named (bugs/mid/FORMAL_svc_exit_handling_incomplete.md), and the '
+            'branching export whose termination the test expects proved but which stays named '
+            '(bugs/FORMAL_dylib_branchy_termination_walk_named.md)',
      desc='formal dylib emission, Mach-O re-read, dlopen, prove')
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'], mem='tiny',
@@ -4176,7 +4180,8 @@ test('python315-sentinel', [PY, 'test_python315_sentinel.py'], mem='tiny',
 test('qualified-member-no-leak', [PY, 'test_qualified_member_no_leak.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('reg-formal-ast-bridge-two-arg', [PY, 'test_reg_formal_ast_bridge_two_arg.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)')
+     desc='registered by the estate audit (every test file runs)',
+     disabled='bugs/gate-reg-formal-ast-bridge-two-arg.md')
 test('selfhost-debug-flag', [PY, 'test_selfhost_debug_flag.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('sys-utf8-default-encoding', [PY, 'test_sys_utf8_default_encoding.py'], mem='tiny',
@@ -4336,6 +4341,11 @@ BUCKETS = {
               # that is a word rather than an absence — both are programs that
               # build, run and answer wrongly.
               'formal-shlex', 'formal-optional',
+              # …and the four the bucket census named (TEST_formal_tests_registered_in_no_bucket, 2026-11-12):
+              # registered by 0bf96e814, c7f641b19 and 4f0755020 and in no bucket, so no run executed them. Each
+              # measured alone at about 1 s, 0.0x GB, `preflight` only: NONE runs Lean, so they belong here.
+              'formal-try-model', 'formal-eh-tables',
+              'formal-once-bound-strings', 'formal-str-trim-runtime',
               # …and the third file the estate check named (2026-10-04, on the
               # merge of the formal20 batch), measured at 0.08 s and 0.03 GB —
               # the cheapest thing registered in this bucket by an order of

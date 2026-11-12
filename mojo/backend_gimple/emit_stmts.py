@@ -107,6 +107,14 @@ def gen_stmt(gen, node):
     if (gen._frame_func and hasattr(node, 'line') and node.line and node.line > 0
             and gen.current_func_name == gen._frame_func):
         gen._void_call('mojo_frame_set_line', [('int64_t', gen._new_val('int64_t', f'(int64_t){int(node.line)}'))])
+    # Every physical line this statement emits -- its own lines, its compound
+    # header's, and the lines of any synthetic lowering -- is stamped with this
+    # statement's directive by `emit_infra._emit_raw`, so GCC numbers it from
+    # the statement's own source line. A statement with no line (a synthetic
+    # node) inherits its enclosing statement's directive. Restored on exit, so
+    # a nested statement's lines are stamped with the nested line and the
+    # enclosing statement's remaining lines with its own again.
+    _outer_line_directive = getattr(gen, '_stmt_line_directive', None)
     if hasattr(node, 'line') and node.line and node.line > 0:
         # `_line_src_file` overrides `_current_filename` for the duration of
         # one enclosing unit (a base class's method body re-emitted as a
@@ -125,38 +133,8 @@ def gen_stmt(gen, node):
         # inlined.md, which is a different mechanism and does not own this.)
         filename = '' + (getattr(gen, '_line_src_file', '')
                          or getattr(gen, '_current_filename', ''))
-        emitted_pairs = getattr(gen, '_emitted_line_pairs', set())
-
-        # Create unique key for this (filename, line) combination
-        pair_key = (filename, node.line)
-
-        # Emit #line only if we haven't emitted this exact pair before
-        if pair_key not in emitted_pairs:
-            if filename:
-                gen._emit(f"#line {node.line} \"{filename}\"")
-            else:
-                gen._emit(f"#line {node.line}")
-            emitted_pairs.add(pair_key)
-            gen._emitted_line_pairs = emitted_pairs
-
-    # A single Mojo statement (e.g. an assignment whose RHS is a call)
-    # commonly lowers to SEVERAL physical C lines (one per temp var), but
-    # the #line directive above is only emitted once, before the first of
-    # them. GCC's own line-counting for a -fgimple diagnostic increments
-    # per PHYSICAL line since the last #line directive, not per logical
-    # Mojo statement — so an error on e.g. the 3rd physical line of a
-    # one-statement expansion gets reported 2 lines past the statement's
-    # real source line (see BUG-2026-016: a bad field assignment reported
-    # 2 lines below the assignment itself). Re-stamping every physical
-    # line of a LEAF statement's own expansion with the same #line
-    # directive eliminates that drift, since GCC resets its count at
-    # every directive. Restricted to leaf statement kinds — a compound
-    # statement (if/while/for/try/with/...) recurses into gen_stmt for
-    # its own nested body, which already got its own correct #line calls;
-    # blindly re-stamping its ENTIRE emitted range here would instead
-    # overwrite those nested statements' correct line numbers with the
-    # outer compound statement's line.
-    body_start = len(gen.body_lines) if node_kind not in gen._COMPOUND_STMT_KINDS else None
+        gen._stmt_line_directive = (f"#line {node.line} \"{filename}\"" if filename
+                                    else f"#line {node.line}")
 
     # Static dispatch: an explicit isinstance chain (one branch per
     # statement kind), NOT getattr(self, name)(node) on _STMT_DISPATCH.
@@ -243,17 +221,7 @@ def gen_stmt(gen, node):
         gimple_ctypes._debug_note('unknown statement dropped', node_kind)
         gen._emit(f"  /* TODO: {node_kind} */")
 
-    if (body_start is not None and hasattr(node, 'line') and node.line and node.line > 0
-            and len(gen.body_lines) - body_start > 1):
-        filename = (getattr(gen, '_line_src_file', '')
-                    or getattr(gen, '_current_filename', ''))
-        directive = f"#line {node.line} \"{filename}\"" if filename else f"#line {node.line}"
-        # Skip the very first emitted line (already directly preceded by
-        # the directive above); re-stamp every one after it, from the end
-        # backwards so earlier insertions don't shift later indices.
-        for i in range(len(gen.body_lines) - 1, body_start, -1):
-            if gen.body_lines[i] != directive and not gen.body_lines[i].lstrip().startswith('#line '):
-                gen.body_lines.insert(i, directive)
+    gen._stmt_line_directive = _outer_line_directive
 
 
 
@@ -564,6 +532,14 @@ def _gen_stmt_VarDecl(gen, node):
         gen._layout_hint = layout
     if node.value is not None:
         vtype, v = gen.lower_expr(node.value)
+        # A `var`-declared name bound to more than one scalar kind in this
+        # function is the int64_t box, exactly as its plain-assignment twin
+        # (`ginf.mixed_scalar_locals`): box the initializer by its kind.
+        _mixed_box = (node.type_ann is None and isinstance(node.name, str)
+                      and ',' not in node.name
+                      and ginf.mixed_box_name(gen, node.name))
+        if _mixed_box:
+            v, vtype = ginf.box_mixed_store(gen, node.value, vtype, v, node.name)
         # Type inference: if no annotation, use the value's type instead of 'int'
         if node.type_ann is None:
             ctype = vtype
@@ -585,6 +561,15 @@ def _gen_stmt_VarDecl(gen, node):
         # Use the actual declared type (may differ if variable was already declared
         # in an earlier branch with a different inferred type)
         actual_dst = gen.var_types.get(node.name, ctype)
+        if _mixed_box:
+            # Register the box-holding local so every consumer reads it by
+            # kind (print/str/repr, `==`, arithmetic, `len`); see
+            # `ginf.mixed_scalar_locals`. The DECLARATION is `int64_t` because
+            # `_mixed`/`_inferred_var_types` above chose the box.
+            _vn = gen._cname(node.name)
+            gen._boxed_vals.add(_vn)
+            gen._tagged_word_vals.add(_vn)
+            gen._dyn_word_locals.add(node.name)
         # A module-level `var name = value`/`var name: T = value` (this
         # module's OWN top-level statement, or a nested `global name`
         # declaration) writes to the module-globals STRUCT FIELD, whose
@@ -1129,6 +1114,31 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str,
     # knows the NAME, which is what `_note_global_callable_store` is keyed on.
     ginf._note_global_callable_store(gen, tname, v)
     _note_global_generator_store(gen, tname, vtype, v)
+    _note_global_slot_kinds(gen, tname, v)
+
+
+def _note_global_slot_kinds(gen, tname: str, v: str) -> None:
+    """Remember the element kinds of a value stored into a module global, keyed by
+    the GLOBAL'S name. A global read mints a fresh temp, so the per-value tables
+    (`_maybe_kinds_vals`, `_elem_types`, `_struct_slot_kinds`) that the
+    subscript and loop lowerings consult are gone by then. Without this a
+    mixed list held in a global read its doubles' bits as ints (`b = a[:]` at
+    module scope printed `4612811918334230528`). The record is the last store's;
+    a read compiled before any store has no record, as before.
+    """
+    if not hasattr(gen, '_global_slot_info'):
+        gen._global_slot_info = {}
+    info = {}
+    if v in gen._maybe_kinds_vals:
+        info['mk'] = True
+    if v in gen._elem_types:
+        info['et'] = gen._elem_types[v]
+    if v in gen._struct_slot_kinds:
+        info['sk'] = gen._struct_slot_kinds[v]
+    if info:
+        gen._global_slot_info[tname] = info
+    else:
+        gen._global_slot_info.pop(tname, None)
 
 
 def _note_global_generator_store(gen, tname: str, vtype: str, v: str) -> None:
@@ -1477,6 +1487,12 @@ def _gen_stmt_AssignStmt(gen, node):
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name
+        # A box-holding name (`ginf.mixed_box_name`): bound to more than one
+        # scalar kind, or to a tagged generator word beside plain values. It
+        # has no single C type, so it is the `int64_t` box and every store
+        # into it is boxed by kind (`ginf.box_mixed_store`). Asked for every
+        # simple-name store (cheap: the per-function walks are cached).
+        _mixed_box = ginf.mixed_box_name(gen, tname)
         # Propagate `d[k]` slot-read tracking to the assigned local name so
         # later reads/prints of the name can recover the slot's runtime kind.
         _dsr = getattr(gen, '_dict_slot_reads', None)
@@ -1610,44 +1626,61 @@ def _gen_stmt_AssignStmt(gen, node):
         # MIXED_NAME_NON_INT64_REFUSAL. Refused here, before any store is
         # emitted, rather than unwrapping the box into a str/float slot.
         _tagged_bind = (v in getattr(gen, '_tagged_word_vals', ()) or _for_copy)
-        # A tagged value stored into a slot already declared non-int64 stays
-        # refused (internal-error guard; mixed tagged names are declared
-        # int64_t once boxed). A non-int64 store into a mixed tagged name is
-        # refused except for a scalar float, which is boxed as kind-'d' here
-        # (part 2 of step 2); str remains refused (part 3).
-        if _tagged_bind and ginf.is_non_int_c_type(gen.var_types.get(tname)):
-            raise RuntimeError(
-                f"{tname!r}: {ginf.MIXED_NAME_NON_INT64_REFUSAL}")
-        if (ginf.is_non_int_c_type(vtype)
-                and ginf.tagged_mixed_name(gen, _as_str(tname))):
-            if vtype == 'double':
-                v = gen._call_expr('int64_t', 'mojo_box_from_double',
-                                   [('double', v)])
-                vtype = 'int64_t'
-                _keep_tagged_box = True
-            else:
-                raise RuntimeError(
-                    f"{tname!r}: {ginf.MIXED_NAME_NON_INT64_REFUSAL}")
-        # A float and a str stored into the same name of one function (`val = d["key"]` on a float dict, then
-        # `val = "text"`): no representation holds both kinds, and the second store would cast a double to a pointer,
-        # which gcc rejects ("cannot convert to a pointer type"). Refuse the function, with the same reason, at the
-        # store that brings the second kind. The codegen types a name from its bindings as it goes, so the kinds
-        # already stored into the name are the record.
-        if vtype in ('double', 'char *'):
+        # A float/str/bool/int store into a box-holding name is boxed by its
+        # kind here, BEFORE any refusal below reads the value's C type, so it
+        # is carried by the box rather than refused. A container stored into a
+        # tagged-mixed name is refused (the tagged box has no container kind);
+        # remember the original type across boxing so that refusal still fires.
+        # A float and a str stored into the same name of one function
+        # (`val = d["key"]` on a float dict, then `val = "text"`): no
+        # representation holds both kinds, and the second store would cast a
+        # double to a pointer, which gcc rejects. Refuse the function at the
+        # store that brings the second kind. A box-holding name is the
+        # exception: it is the int64_t box, and stores are boxed by kind.
+        if vtype in ('double', 'char *') and not _mixed_box:
+
             _sk_key = (_as_str(gen.current_func_name), _as_str(tname))
             _sk_prev = gen._stored_kinds.get(_sk_key)
             if _sk_prev is not None and _sk_prev != vtype:
-                raise RuntimeError(f"{tname!r}: {ginf.MIXED_NAME_NON_INT64_REFUSAL}")
+                raise RuntimeError(
+                    f"{tname!r}: {ginf.mixed_name_non_int64_refusal(vtype)}")
             gen._stored_kinds[_sk_key] = vtype
-        if (not _keep_tagged_box and vtype == 'int64_t'
-                and gen.var_types.get(tname, 'int64_t') == 'int64_t'
-                and ginf.tagged_mixed_name(gen, _as_str(tname))):
-            if (v not in getattr(gen, '_boxed_vals', ())
-                    and v not in getattr(gen, '_tagged_word_vals', ())):
-                _mb = gen._new_temp('int64_t')
-                gen._emit(f'  {_mb} = mojo_box_int ({v});')
-                v = _mb
-            _keep_tagged_box = True
+        _orig_vtype = vtype
+        _decl_t_before = gen.var_types.get(tname)
+        if _mixed_box and not _keep_tagged_box:
+            v, vtype = ginf.box_mixed_store(gen, node.value, vtype, v, tname)
+            if gen.var_types.get(_as_str(tname), 'int64_t') == 'int64_t':
+                _keep_tagged_box = True
+        # A tagged generator word cannot also hold a container/pointer value
+        # (the box has no container constructor/kind). Name the binding, the
+        # conflicting C type, and which side was the tagged word vs container,
+        # while keeping the substring "cannot also hold a value of another C
+        # type" that test_dict_slot_read_regression.py Test 2 asserts.
+        _tagged_mixed = ginf.tagged_mixed_name(gen, tname)
+        # Container/struct pointers (other than str `char *`) cannot be carried
+        # by the tagged box. Floats and strs are boxed above and are allowed.
+        _unboxable_ptr = (
+            _decl_t_before is not None
+            and str(_decl_t_before).endswith(' *')
+            and _decl_t_before not in ('char *', 'const char *'))
+        _unboxable_store = (
+            _orig_vtype is not None
+            and str(_orig_vtype).endswith(' *')
+            and _orig_vtype not in ('char *', 'const char *'))
+        if _tagged_bind and _unboxable_ptr:
+            raise RuntimeError(
+                f"{tname!r}: a name bound to a container or pointer value "
+                f"(container value of C type '{_decl_t_before}') elsewhere in "
+                f"this function and also to a tagged generator word here "
+                f"cannot also hold a value of another C type; no "
+                f"representation holds both; refused")
+        if _unboxable_store and _tagged_mixed:
+            raise RuntimeError(
+                f"{tname!r}: a name bound to a tagged generator word elsewhere "
+                f"in this function and also to a container or pointer value "
+                f"(container value of C type '{_orig_vtype}') here cannot also "
+                f"hold a value of another C type; no representation holds "
+                f"both; refused")
         if (not _keep_tagged_box and _copy_src is not None
                 and ginf.tagged_next_bind_name(gen, _as_str(tname))):
             # The local is registered as a box by every store (the static
@@ -1789,9 +1822,15 @@ def _gen_stmt_AssignStmt(gen, node):
             # trusted for. Real: `gen_module_impl`'s `_lens` is a dict at
             # line 1257 and a set at line 6114, and the self-host closure
             # could not be generated until this existed.
-            _mixed = tname in ginf.mixed_container_locals(gen)
-            _tagged_mixed = ginf.tagged_mixed_name(gen, _as_str(tname))
-            if _mixed or _tagged_mixed:
+            # A box-holding name is declared int64_t whatever the pre-pass
+            # joined its bindings to: a container-mixed name, or a name bound
+            # to a scalar of more than one kind or to a tagged generator word
+            # beside plain values (`ginf.mixed_box_name`). Without the last
+            # half the pre-pass's `double` hint declared `x` a double at its
+            # first store, and the tagged copy inside the loop was refused.
+            _mixed = (tname in ginf.mixed_container_locals(gen)
+                      or ginf.mixed_box_name(gen, tname))
+            if _mixed:
                 ctype = 'int64_t'
             else:
                 # Check for inferred variable type (from analysis of all assignments)
@@ -1903,7 +1942,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # value='_tN' dest='args'`. See
             # bugs/INTERFACE_REQUEST_1_to_middle_infra_infer.md.
             _pin_to_ground_truth = (tname not in ginf.multi_kind_locals(gen)
-                                    and not _mixed and not _tagged_mixed)
+                                    and not _mixed)
             # 'int' (bare) is the hallucination marker — no real answer. If the
             # value is actually a container pointer (e.g. a dict read whose value
             # type is a dict/list/set), trust ground truth so a later
@@ -4626,7 +4665,16 @@ def _gen_stmt_MatchStmt(gen, node):
             # `.NAME` against a struct-typed subject resolves against that type
             # here, before the formal model's refusal below, which has no type.
             if isinstance(pattern, gimple_ctypes.DottedLiteral):
-                pattern = _resolve_dotted_case_pattern(gen, subj_type, pattern) or pattern
+                _resolved = _resolve_dotted_case_pattern(gen, subj_type, pattern)
+                if _resolved is None:
+                    # Unresolved `.NAME` (no struct alias, or no `__eq__` to make
+                    # the arm a comparison): lowering it as a value would compare
+                    # the subject with nothing, so it is refused by name.
+                    raise formal_model.CodegenError(formal_model.match_pattern_refusal(
+                        'enum pattern', formal_model.spelled(pattern),
+                        getattr(gen, 'function_name', '<module>'),
+                        getattr(pattern, 'line', 0) or getattr(match_case, 'line', 0) or 0))
+                pattern = _resolved
             # Ask the formal model whether this pattern is allowed here.
             _bound = set(getattr(gen, 'var_types', set()) or ())
             _bound |= set(getattr(gen, '_global_var_types', {}).keys())
@@ -6404,10 +6452,12 @@ def _gen_stmt_TryStmt(gen, node):
     gen._flow_none_state = _merged
 
 
-def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs):
+def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs, _on_exc=False):
     """Emit every `with`-item's teardown (`__exit__` call, generator
     resume/destroy, or a placeholder comment), in REVERSE index order —
-    last acquired, first released.
+    last acquired, first released. On the exception path (_on_exc), a
+    generic generator-context-manager handle uses the exception-aware
+    runtime exit so cleanup semantics are preserved.
 
     HOISTED out of `_gen_stmt_WithStmt` (was a nested closure reading the
     enclosing function's `_ctx_ts`/`_ctx_vs`/`_ctx_sns`/`_gctx_bases`/
@@ -6464,15 +6514,47 @@ def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs):
             _gval = _as_str(_gval)
             # Generator context manager: the final resume() runs the
             # body from its bare yield to co_return (= __exit__), then
-            # the coroutine frame is destroyed. resume()'s _Bool
-            # result (False == already done) is intentionally
-            # discarded — real Python's __exit__ return value only
-            # suppresses exceptions, and this normal-path emission
-            # runs after an unexceptional body.
-            done_t = gen._new_temp('_Bool')
-            gen._emit(f"  {done_t} = {_gbase}_resume ({_gval});")
-            gen._emit_call('void', '', f"{_gbase}_destroy",
-                           [('MojoGenerator *', _gval)])
+            # the coroutine frame is destroyed. On exception path, throw the
+            # pending exception into the generator (contextmanager protocol).
+            if _gbase == '__mojo_gen_cm':
+                _hw = gen._new_temp('int64_t')
+                gen._safe_coerce_emit('MojoGenerator *', 'int64_t', _gval, _hw)
+                _exit_fn = 'mojo_gen_cm_exit_exc' if _on_exc else 'mojo_gen_cm_exit_normal'
+                gen._emit_call('void', '', _exit_fn, [('int64_t', _hw)])
+            elif _on_exc:
+                _hw = gen._new_temp('int64_t')
+                gen._safe_coerce_emit('MojoGenerator *', 'int64_t', _gval, _hw)
+                if _gbase.startswith('__mgco_'):
+                    # Stack-switch generator: use runtime throw API.
+                    _et = gen._call_expr('int64_t', 'mojo_exc_type_get', [])
+                    _em = gen._call_expr('char *', 'mojo_exc_msg_get', [])
+                    _eo = gen._call_expr('void *', 'mojo_exc_obj_get', [])
+                    _emw = gen._new_temp('int64_t')
+                    gen._safe_coerce_emit('char *', 'int64_t', _em, _emw)
+                    _eow = gen._new_temp('int64_t')
+                    gen._safe_coerce_emit('void *', 'int64_t', _eo, _eow)
+                    gen._emit_call('void', '', 'mojo_exc_pending_set', [('int', '0')])
+                    gen._emit_call('int64_t', '', '__mojo_gen_throw',
+                                   [('int64_t', _hw), ('int64_t', _et),
+                                    ('int64_t', _emw), ('int64_t', _eow)])
+                else:
+                    # C++20 compiled generator: arm throw state, then resume.
+                    _et = gen._call_expr('int64_t', 'mojo_exc_type_get', [])
+                    _em = gen._call_expr('char *', 'mojo_exc_msg_get', [])
+                    _eo = gen._call_expr('void *', 'mojo_exc_obj_get', [])
+                    gen._emit_call('void', '', 'mojo_gen_throw_set',
+                                   [('int64_t', _hw), ('int64_t', _et),
+                                    ('char *', _em), ('void *', _eo)])
+                    gen._emit_call('void', '', 'mojo_exc_pending_set', [('int', '0')])
+                    done_t = gen._new_temp('_Bool')
+                    gen._emit(f"  {done_t} = {_gbase}_resume ({_gval});")
+                gen._emit_call('void', '', f"{_gbase}_destroy",
+                               [('MojoGenerator *', _gval)])
+            else:
+                done_t = gen._new_temp('_Bool')
+                gen._emit(f"  {done_t} = {_gbase}_resume ({_gval});")
+                gen._emit_call('void', '', f"{_gbase}_destroy",
+                               [('MojoGenerator *', _gval)])
             continue
         exit_fn = gen._struct_method_csym(sn, '__exit__', '')
         if exit_fn in gen.func_return_types or f"{sn}___exit__" in gen.func_return_types:
@@ -6585,6 +6667,30 @@ def _gen_stmt_WithStmt(gen, node):
                     gen._declare_var(alias, 'int64_t')
                 gen._safe_coerce_emit('int64_t', gen.var_types[alias], val_t, alias)
             _gctx_bases.append(base)
+            _gctx_vs.append(ctx_v)
+            _ctx_ts.append(ctx_t)
+            _ctx_vs.append(ctx_v)
+            _ctx_sns.append(None)
+            continue
+        # A MojoGenerator* used as a context manager but not statically tracked
+        # in _generator_var_api (e.g. stored in a container and retrieved). If
+        # it is a registered generator handle, drive it via the runtime's
+        # generic generator-context-manager helpers.
+        if ctx_t == 'MojoGenerator *' and gen_api is None:
+            _hw = gen._new_temp('int64_t')
+            gen._safe_coerce_emit('MojoGenerator *', 'int64_t', ctx_v, _hw)
+            if item.alias is not None:
+                alias = _with_item_alias_name(item.alias)
+                val_t = gen._call_expr('int64_t', 'mojo_gen_cm_enter',
+                                       [('int64_t', _hw)])
+                if alias not in gen.var_types:
+                    gen._declare_var(alias, 'int64_t')
+                gen._safe_coerce_emit('int64_t', gen.var_types[alias], val_t, alias)
+            else:
+                gen._emit_call('int64_t', '', 'mojo_gen_cm_enter', [('int64_t', _hw)])
+            # Mark as generic generator-cm: use special sentinel base so
+            # _with_emit_exits can emit runtime-driven exit.
+            _gctx_bases.append('__mojo_gen_cm')
             _gctx_vs.append(ctx_v)
             _ctx_ts.append(ctx_t)
             _ctx_vs.append(ctx_v)
@@ -6898,11 +7004,23 @@ def _gen_stmt_WithStmt(gen, node):
 
         gen._emit_label(bb_exc)
         gen._emit("  mojo_exc_pop ();")
-        _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs)
+        _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs, True)
+        # A context manager may suppress the exception (e.g. a
+        # @contextlib.contextmanager generator that catches and does not
+        # re-raise). Propagate only if an exception is still pending after
+        # exits.
+        _pend = gen._call_expr('int', 'mojo_exc_pending_get', [])
+        _has_pend = gen._new_temp('_Bool')
+        gen._emit(f"  {_has_pend} = {_pend} != 0;")
+        _bb_reraise = gen._new_bb()
+        _bb_supp = gen._new_bb()
+        gen._emit(f"  if ({_has_pend}) goto {_bb_reraise}; else goto {_bb_supp};")
+        gen._emit_label(_bb_reraise)
         gen._emit("  mojo_raise ();")
-        # Only emit goto if the exception handler didn't end with a return
         if not gen._last_was_terminal:
             gen._emit(f"  goto {bb_after};")
+        gen._emit_label(_bb_supp)
+        gen._emit(f"  goto {bb_after};")
 
         gen._emit_label(bb_after)
     else:

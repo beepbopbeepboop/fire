@@ -3766,6 +3766,297 @@ class TestStepLemmasCoverTheExecutableRegionOnly(unittest.TestCase):
                 self.assertFalse(self.G._is_trap_bl(b, words, traps))
 
 
+class TestOverflowGuardNormalPath(unittest.TestCase):
+    """`_overflow_normal_path` reads the no-trap path of an overflow-guarded export.
+
+    The fixture is the SHAPE `20d8bdba1` emits for `n * 3` on arm64, with the
+    arithmetic replaced by NOPs (the reader decides on branches and traps only):
+
+        0x00..0x34  straight-line prefix (the multiply and its overflow test)
+        0x38        CBNZ x2 -> 0x40   the overflow guard; taken = trap
+        0x3c        B    -> 0x54      the normal path jumps over the trap
+        0x40..0x50  trap: movz x16,#4; svc (write); movz x16,#1; svc (exit)
+        0x54..0x58  normal tail: NOP; RET
+
+    On the normal path the guard is NOT taken, so the executed instructions are
+    0x00..0x3c, then 0x54, 0x58, with exactly one guard at 0x38 whose trap is 0x40.
+    """
+    NOP = 0xd503201f
+    RET = 0xd65f03c0
+    SVC = 0xd4000001
+
+    @staticmethod
+    def _movz_x16(imm):
+        return 0xd2800010 | (imm << 5)
+
+    @staticmethod
+    def _cbnz_x2(pc, target):
+        return 0xb5000000 | (((target - pc) // 4) << 5) | 2
+
+    @staticmethod
+    def _b(pc, target):
+        return 0x14000000 | (((target - pc) // 4) & 0x3ffffff)
+
+    def _image(self, *, guard_target=0x40, trap_svc=True):
+        import formal.arm64_proof_gen as G
+        words = {}
+        for pc in range(0x00, 0x38, 4):
+            words[pc] = self.NOP
+        words[0x38] = self._cbnz_x2(0x38, guard_target)
+        words[0x3c] = self._b(0x3c, 0x54)
+        words[0x40] = self.NOP
+        words[0x44] = self._movz_x16(4)
+        words[0x48] = self.SVC
+        words[0x4c] = self._movz_x16(1)
+        words[0x50] = self.SVC if trap_svc else self.NOP
+        words[0x54] = self.NOP
+        words[0x58] = self.RET
+        return G, words
+
+    def test_the_normal_path_of_an_overflow_guard_is_the_fall_through(self):
+        G, words = self._image()
+        got = G._overflow_normal_path(words, 0x00, 0x5c)
+        self.assertIsNotNone(
+            got, "the overflow-guarded export's normal path was refused, so "
+                 "its contract still cannot be emitted")
+        pcs, guards = got
+        self.assertEqual(
+            pcs, list(range(0x00, 0x40, 4)) + [0x54, 0x58],
+            "the normal path must run the prefix, the guard's fall-through, "
+            "the jump over the trap, and the tail -- and never the trap")
+        self.assertEqual(guards, [(0x38, 0x40)],
+                         "the guard must name its branch and its trap")
+
+    def test_a_branch_into_a_non_trap_is_refused(self):
+        # The same shape, but the "guard" jumps to an ordinary block: that is
+        # a real branch, not an overflow check, and the reader must say so.
+        G, words = self._image(guard_target=0x54)
+        self.assertIsNone(G._overflow_normal_path(words, 0x00, 0x5c))
+
+    def test_a_target_that_does_not_end_the_run_is_not_a_trap(self):
+        # Without the exit svc the "trap" falls into the tail and returns, so
+        # it is an ordinary block, the guard is a real branch, and it is refused.
+        G, words = self._image(trap_svc=False)
+        self.assertIsNone(G._overflow_normal_path(words, 0x00, 0x5c))
+
+
+class TestGuardedContractEmission(unittest.TestCase):
+    """`_dylib_contract_proof` emits a PROVED guarded contract for an overflow-guarded
+    export, and refuses the shapes it cannot prove.
+
+    The fixture is `TestOverflowGuardNormalPath`'s shape at base 0: a 14-instruction
+    prefix, a guard at 0x38 whose TAKEN edge is the exit-svc trap at 0x40, a `B` over
+    the trap, then the normal tail ending in `RET`.  The guard's gate is a condition on
+    the ENTRY state (`gcond`), so the contract is the guarded one.  Fast: no Lean run.
+    """
+    ADD0 = 0x91000000                  # add x0, x0, #0 (the executed path)
+    RET = 0xd65f03c0
+    SVC = 0xd4000001
+
+    @staticmethod
+    def _movz_x16(imm):
+        return 0xd2800010 | (imm << 5)
+
+    def _code(self, guard_word, trap=True):
+        words = {}
+        for pc in range(0x00, 0x38, 4):
+            words[pc] = self.ADD0          # executed: the model must decode it
+        words[0x38] = guard_word
+        words[0x3c] = 0x14000000 | (((0x54 - 0x3c) // 4) & 0x3ffffff)
+        words[0x40] = 0xd503201f
+        words[0x44] = self._movz_x16(4)
+        words[0x48] = self.SVC
+        words[0x4c] = self._movz_x16(1)
+        words[0x50] = self.SVC if trap else 0xd503201f
+        words[0x54] = self.ADD0
+        words[0x58] = self.RET
+        return b"".join(words[pc].to_bytes(4, "little") for pc in range(0x00, 0x5c, 4))
+
+    @staticmethod
+    def _cbnz_x2(pc, target):
+        return 0xb5000000 | (((target - pc) // 4) << 5) | 2
+
+    @staticmethod
+    def _bcond(pc, target, cond):
+        return 0x54000000 | ((((target - pc) // 4) & 0x7ffff) << 5) | cond
+
+    def _emit(self, code):
+        import formal.arm64_proof_gen as G
+        return G._dylib_contract_proof("guarded_probe", 0x0, 0x0, code,
+                                       "(fun n => n)", 0x5c)
+
+    def test_a_cbnz_guard_emits_a_proved_guarded_contract(self):
+        out = self._emit(self._code(self._cbnz_x2(0x38, 0x40)))
+        self.assertTrue(out, "the guarded export's contract was refused")
+        self.assertIn("abbrev gcond", out)
+        self.assertIn("¬ (arm64_reg 2 (S14 s) ≠ 0)", out,
+                      "the gate must be the CBNZ's own not-taken condition, on the "
+                      "prefix chain at the guard")
+        self.assertIn("Contracts.agrees_of_body_under dylib_image guarded_probe gcond bodyI",
+                      out)
+        self.assertNotIn("sorry", out, "the emitted contract must carry no sorry")
+
+    def test_a_bcond_guard_gates_on_the_flags(self):
+        # `b.vs` (cond 6) on the overflow flag: the gate is `¬ arm64_matches_condition`.
+        out = self._emit(self._code(self._bcond(0x38, 0x40, 6)))
+        self.assertTrue(out, "a B.cond overflow guard was refused")
+        self.assertIn("¬ (arm64_matches_condition 6 (S14 s).nzcv = true)", out)
+
+    def test_a_guard_whose_taken_edge_is_not_a_trap_emits_nothing(self):
+        out = self._emit(self._code(self._cbnz_x2(0x38, 0x54), trap=True))
+        self.assertEqual(out, "", "a real branch was given a contract")
+
+    def test_a_cbz_guard_is_refused_because_its_gate_is_not_proved(self):
+        # CBZ falls through when the register is NONZERO, which is not the gate the
+        # emitter builds (and no `cbz_not_taken` lemma exists), so it is refused.
+        cbz = 0xb4000000 | (((0x40 - 0x38) // 4) << 5) | 2
+        self.assertEqual(self._emit(self._code(cbz)), "")
+
+
+class TestCbnzNotTakenLemma(unittest.TestCase):
+    """`cbnz_not_taken` (lib/ProofLibSteps8.lean): a CBNZ whose register is zero
+    falls through and changes nothing else.  The overflow guard's normal path
+    needs exactly this fact, so it is checked through Lean, not by reading it.
+
+    Before the lemma existed the probe below is `unknown identifier`; after, it
+    checks with no `sorry`.  Skipped when Lean or the library is not built."""
+
+    def test_the_not_taken_case_checks_with_no_sorry(self):
+        if not _lean() or not os.path.isfile(
+                os.path.join(HERE, "lib", "ProofLibSteps8.olean")):
+            self.skipTest("Lean library not built")
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as tmp:
+            p = os.path.join(tmp, "cbnz_probe.lean")
+            with open(p, "w") as f:
+                f.write(
+                    "import ProofLibSteps8\n\n"
+                    "theorem cbnz_probe (s : Arm64State) (code : Nat → UInt8)\n"
+                    "    (pc : Nat) (w : UInt32) (hpc : s.pc = pc)\n"
+                    "    (hread : arm64_read_insn code pc = w)\n"
+                    "    (h : (w &&& 0xff000000) = 0xb5000000)\n"
+                    "    (hz : arm64_reg ((w &&& 0x1f).toNat) s = 0) :\n"
+                    "    arm64_step s code = some { s with pc := s.pc + 4 } :=\n"
+                    "  cbnz_not_taken s code pc w hpc hread h hz\n")
+            ok, detail, n = _check_proof(p)
+            self.assertTrue(ok, detail[-400:])
+            self.assertEqual(n, 0, "the probe uses a sorry somewhere: " + detail[-400:])
+
+
+class TestGuardedExportBody(unittest.TestCase):
+    """`Contracts.ExportBodyUnder` / `agrees_of_body_under`: the guarded export layer.
+
+    An export whose body carries an overflow guard is straight-line only on the
+    inputs where the guard `g` holds, so its contract is the GUARDED obligation
+    `Refine.export_result_spec_under (fun n => g (startState n))`.  The unguarded
+    `ExportBody` cannot carry a guard, which is why the wrong-spec teeth test is
+    still an admitted `sorry`.  This probe is the layer the emitter will target:
+    given a guarded body and the machine's agreement on `g`-inputs, the guarded
+    obligation follows, with no `sorry`.  Before the layer exists the probe is
+    `unknown identifier`.  Skipped when Lean or the library is not built."""
+
+    def test_the_guarded_body_discharges_the_guarded_obligation(self):
+        if not _lean() or not os.path.isfile(
+                os.path.join(HERE, "lib", "ProofLib.olean")):
+            self.skipTest("Lean library not built")
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as tmp:
+            p = os.path.join(tmp, "guarded_body_probe.lean")
+            with open(p, "w") as f:
+                f.write(
+                    "import Contracts\n\n"
+                    "theorem guarded_body_probe (image : DylibImage)\n"
+                    "    (export_ : DylibExport) (g : Arm64State → Prop)\n"
+                    "    (b : Contracts.ExportBodyUnder image export_ g)\n"
+                    "    (spec : UInt64 → UInt64)\n"
+                    "    (hfuel : b.block.pcs.length + 1 ≤ DylibExport.exportFuel image 0)\n"
+                    "    (hreg : ∀ n, g (Contracts.startState image export_ n) →\n"
+                    "      arm64_reg 0 (b.block.step (Contracts.startState image export_ n))"
+                    " = spec n) :\n"
+                    "    Refine.export_result_spec_under\n"
+                    "      (fun n => g (Contracts.startState image export_ n))\n"
+                    "      image export_ spec :=\n"
+                    "  Contracts.agrees_of_body_under image export_ g b spec hfuel hreg\n")
+            ok, detail, n = _check_proof(p)
+            self.assertTrue(ok, detail[-400:])
+            self.assertEqual(n, 0, "the probe uses a sorry somewhere: " + detail[-400:])
+
+
+class TestGuardedValueIdentity(unittest.TestCase):
+    """The value of `triple`'s normal path is `n * 3`, Lean-checked on the REAL image.
+
+    `_overflow_normal_path` gives the executed instructions of `n * 3`'s export
+    (the overflow guard's fall-through is one of them, so the guard is resolved as
+    NOT taken).  The step effects are the generator's own `_step_rhs` bodies, composed
+    `T_{i+1} s = body_i (T_i s)` with the guard's `some` replaced by its fall-through.
+    `simp` alone closes `arm64_reg 0 (T_N (start n)) = n * 3`: the stack round trip
+    is decided by the library's read-after-write lemmas on ground addresses, so no
+    `bv_decide` is needed for the value.  That is the measurement the overflow-guard
+    doc's round-5 plan waited on; the emitter is not wired yet.
+    """
+
+    def test_triple_normal_path_value_checks_with_no_sorry(self):
+        if not _lean() or not os.path.isfile(
+                os.path.join(HERE, "lib", "ProofLib.olean")):
+            self.skipTest("Lean library not built")
+        from formal.arm64_proof_gen import (
+            _step_branch_index, _step_rhs, _overflow_normal_path,
+            _VALUE_SIMP, generate_dylib_proof)
+        from formal.build import compile_formal_dylib
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as tmp:
+            src = os.path.join(tmp, "teeth.mojo")
+            with open(src, "w") as f:
+                f.write("def triple(n):\n  return n * 3\n")
+            built = compile_formal_dylib([src], output=os.path.join(tmp, "t.dylib"),
+                                         prove=False)
+            code = built["code"]
+            export = built["exports"][0]
+            entry = export["entry"]
+            base = built["info"]["base_addr"]
+            words = {base + 4 * i: int.from_bytes(code[4 * i:4 * i + 4], "little")
+                     for i in range(len(code) // 4)}
+            pcs, guards = _overflow_normal_path(words, entry, base + len(code))
+            self.assertEqual(len(guards), 1, "the fixture has one overflow guard")
+            guard_pc = guards[0][0]
+            bodies = []
+            for pc in pcs:
+                w = words[pc]
+                rhs = _step_rhs(w, _step_branch_index(w))
+                if pc == guard_pc:
+                    rhs = "some { s with pc := s.pc + 4 }"
+                bodies.append(rhs[len("some "):] if rhs.startswith("some ") else rhs)
+            # The generator's own preamble (code, per-instruction lemmas, image),
+            # cut before the first obligation, which is a sorry by design.
+            pre = generate_dylib_proof(code, built["info"], built["exports"],
+                                       {"triple": "(fun n => (n * (3 : UInt64)))"})
+            cut = pre.index("/-- OBLIGATION, not proved: this export's run terminates")
+            n = len(bodies)
+            out = [pre[:cut],
+                   "\ndef start (n : UInt64) : Arm64State :=\n"
+                   "  Contracts.startState dylib_image dylib_export_0_triple n\n",
+                   "def T0 (s : Arm64State) : Arm64State := s\n"]
+            for i, b in enumerate(bodies):
+                out.append(f"def T{i + 1} (s : Arm64State) : Arm64State :=\n"
+                           f"  (fun s => {b}) (T{i} s)\n")
+            unfold = ", ".join(
+                [f"T{k}" for k in range(n, -1, -1)]
+                + ["start", "Contracts.startState", "Arm64State.init", "arm64_reg",
+                   "arm64_set_reg", "dylib_image", "dylib_export_0_triple", _VALUE_SIMP])
+            out.append(
+                f"theorem value_identity (n : UInt64) :\n"
+                f"    arm64_reg 0 (T{n} (start n)) = n * 3 := by\n"
+                f"  simp +decide only [{unfold}]\n"
+                f"  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, "
+                f"mem_read_two_writes_same, mem_read_two_writes_adjacent, "
+                f"mem_read_two_writes]\n")
+            p = os.path.join(tmp, "value_probe.lean")
+            with open(p, "w") as f:
+                f.write("".join(out))
+            res = _check_proof(p)
+            self.assertIsNotNone(res)
+            ok, detail, nsorry = res
+            self.assertTrue(ok, detail[-600:])
+            self.assertEqual(nsorry, 0, "the probe uses a sorry: " + detail[-400:])
+
+
 class TestCallProofs(unittest.TestCase):
     """Compile the programs and read what came out."""
 

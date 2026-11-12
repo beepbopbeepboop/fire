@@ -60,12 +60,17 @@ main()
         print(f"  FAIL: Compilation raised exception: {e}")
         return 1
 
-    # Test 2: Dict slot read followed by rebind to float
+    # Test 2: Dict slot read followed by rebind to float, then a string.
+    # A float and a str in ONE name are carried by the int64_t box
+    # (`ginf.mixed_scalar_locals`): each store keeps its own kind, so the
+    # program compiles and prints the CPython answer instead of being refused.
     src2 = '''
 def test():
     d = {"key": 1.5}
     val = d["key"]  # dict slot read
+    print(val)
     val = "text"    # rebind to string
+    print(val)
     return val
 
 def main():
@@ -73,19 +78,21 @@ def main():
 main()
 '''
 
-    # A float and a str in ONE name have no representation (the box carries only int kinds). The compiler refuses the
-    # program with the mixed-name reason, rather than emitting a double-to-pointer cast gcc rejects.
-    print("\nTest 2: float dict read then rebind to string: refused with the mixed-name reason")
+    print("\nTest 2: float dict read then rebind to string: CPython answer")
     try:
-        run(src2)
-        print("  FAIL: compiled, but a float and a str share one name")
-        return 1
-    except RuntimeError as e:
-        if "cannot also hold a value of another C type" in str(e):
-            print("  PASS: refused with the mixed-name reason")
-        else:
-            print(f"  FAIL: refused for another reason: {str(e)[:200]}")
+        stdout, stderr, returncode = run(src2)
+        print(f"  Program output: {stdout.strip()!r}")
+        if returncode != 0:
+            print(f"  FAIL: program exited {returncode}: {stderr[:200]}")
             return 1
+        if stdout == "1.5\ntext\n":
+            print("  PASS: float and str in one name print the CPython answer")
+        else:
+            print(f"  FAIL: expected '1.5\\ntext\\n', got {stdout!r}")
+            return 1
+    except Exception as e:
+        print(f"  FAIL: Compilation raised exception: {e}")
+        return 1
 
     # Test 3: Dict slot read stored in a list
     src3 = '''
@@ -134,6 +141,42 @@ main()
         if stderr and "refused" in stderr.lower():
             print(f"  FAIL: Refusal detected in stderr: {stderr[:200]}")
             return 1
+    except Exception as e:
+        print(f"  FAIL: Compilation raised exception: {e}")
+        return 1
+
+    # Test 5: Dict slot read, then the same name rebound to a container and
+    # to an int. This is the ast_rewriter / coro shape (`k = d[...]` beside
+    # `k = (...)` or `k = [...]`). The name is a container-beside-scalar box
+    # (`mixed_value_locals`): a container store is its bare word, so it must
+    # compile and print the CPython answer. Only a name bound to a TAGGED
+    # generator word may refuse a container store.
+    src5 = '''
+def test():
+    d = {"key": 3}
+    x = d["key"]  # dict slot read
+    print(x)
+    x = [1, 2]    # rebind to a container
+    print(len(x))
+    x = 7         # and back to a scalar
+    print(x)
+    return x
+
+def main():
+    test()
+main()
+'''
+
+    print("\nTest 5: Dict slot read then rebind to a container, then an int")
+    try:
+        stdout, stderr, returncode = run(src5)
+        if stderr and "refused" in stderr.lower():
+            print(f"  FAIL: Refusal detected in stderr: {stderr[:200]}")
+            return 1
+        if returncode != 0 or stdout != "3\n2\n7\n":
+            print(f"  FAIL: wrong output (returncode={returncode}): {stdout!r}")
+            return 1
+        print("  PASS: compiled without refusal and printed the CPython answer")
     except Exception as e:
         print(f"  FAIL: Compilation raised exception: {e}")
         return 1

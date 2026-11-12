@@ -37,6 +37,52 @@ _COMPARE_OPS = {'==', '!=', '<', '>', '<=', '>=', 'in', 'not in', 'is', 'is not'
 _GENEXP_ITER_NAME = '__mojo_genexp_iter__'
 
 
+# `@dataclass` / `@dataclasses.dataclass` is a COMPILE-TIME TRANSFORM, not a
+# runtime wrapper — the same argument `formal/dataclass_transform.py` records
+# for the compiled backends. CPython's `dataclasses.dataclass` rewrites a REAL
+# Python class: it reads the class's `__qualname__`, `__module__`, `__mro__`
+# and `__annotations__` and generates `__init__`/`__eq__`/`__repr__` methods.
+# This interpreter's classes are `MojoClass` objects, not Python classes, so
+# handing one to the real decorator raised on its first `__qualname__` read —
+# and executing `fire_compiler.py`, whose 65 AST dataclasses are decorated this
+# way, died at class-definition time (`interp-tokenizer-oracle` never reached
+# `py_tokenize` at all).
+#
+# Its ONE observable half on a struct — construct by filling the declared
+# fields in declaration order with their defaults — is what
+# `MojoClass.__call__` already does, so applying it would be a no-op even if it
+# succeeded. A class that really IS a Python class (execute_StructDef's
+# `types.new_class` path) still gets the decorator applied for real; see the
+# `isinstance(bound, MojoClass)` guard in `_apply_function_decorators`.
+_DATACLASS_DECORATORS = frozenset({'dataclass', 'dataclasses.dataclass'})
+
+
+def _decorator_dotted_name(node):
+    """The dotted SOURCE spelling of a decorator node (`dataclass`,
+    `dataclasses.dataclass`), or None for a shape this cannot spell.
+
+    A bare decorator is stored as a plain string; one with an argument list is
+    a `CallExpr` whose `func` is that dotted name's nested
+    `IdentExpr`/`MemberExpr` (fire_compiler's `_dotted_name_expr`), and a
+    `@spec(...)` is a `DecoratorArgs` that keeps the dotted name itself.
+    Needed because matching only the bare string misses every dotted or
+    parameterised spelling of a compile-time decorator."""
+    if isinstance(node, str):
+        return node
+    if isinstance(node, N.DecoratorArgs):
+        return node.name
+    if isinstance(node, N.CallExpr):
+        return _decorator_dotted_name(node.func)
+    if isinstance(node, N.IdentExpr):
+        return node.name
+    if isinstance(node, N.MemberExpr):
+        base = _decorator_dotted_name(node.obj)
+        if base is None:
+            return None
+        return base + '.' + node.member
+    return None
+
+
 # ---------------------------------------------------------------------------
 # CPython 3.15 "improved error messages" (What's New in 3.15): an UNCAUGHT
 # AttributeError is printed with a suggestion computed at PRINT time from two
@@ -5345,6 +5391,12 @@ class Interpreter:
         """
         decs = getattr(node, 'decorators', None) or []
         for d in reversed(decs):
+            # A dataclass transform applied to one of THIS interpreter's
+            # classes (see _DATACLASS_DECORATORS): skip it rather than hand a
+            # MojoClass to CPython's dataclasses, which cannot process one.
+            if isinstance(bound, MojoClass) \
+                    and _decorator_dotted_name(d) in _DATACLASS_DECORATORS:
+                continue
             if isinstance(d, str):
                 if d in self._COMPILE_TIME_DECORATORS:
                     continue
@@ -5651,11 +5703,21 @@ class Interpreter:
         # argv instead of the isolated one and take the same branch forever.
         if module == 'sys' or module.split('.')[0] == 'sys':
             return self._sys_proxy
-        # `types.LazyImportType` must name OUR proxy class: lazy imports of
-        # `.mojo` sibling modules resolve through this interpreter, so the
-        # host's native lazy-import type would describe the wrong objects.
-        if module == 'types':
-            return _TYPES_PROXY
+        # A name with no dot in it resolves exactly as `from module import
+        # ...` does — the same sys/types proxies, the same sibling `.mojo`
+        # preference, the same real-importlib fallback, the same
+        # ModuleNotFoundError propagation (see `_resolve_from_import_module`
+        # for all three). Delegating rather than repeating that chain is not
+        # only DRY: it gives the two methods the SAME return type, which
+        # matters because `_LazyImportTarget.load` binds them to one slot.
+        # Returning `_TYPES_PROXY` (`_TypesProxy *`) beside `mod`
+        # (`_MojoModuleObject *`) made the join of this method's returns
+        # order-dependent — two distinct pointers join to the box, a pointer
+        # and the box join to the pointer — so the inferred type, and with it
+        # the C type every caller's temp is declared with, differed between
+        # inference passes while the emitted prototype kept the first one.
+        if alias or '.' not in module:
+            return self._resolve_from_import_module(module)
         # Prefer a sibling .mojo file/package over a same-named *real*
         # Python module — otherwise a coincidentally-named .py file
         # anywhere on sys.path (including this very project's own helper
@@ -5667,8 +5729,6 @@ class Interpreter:
         # name collision with an installed/local Python module.
         mod = self._load_mojo_sibling_module(module)
         if mod is not None:
-            if alias or '.' not in module:
-                return mod
             # `import a.b` binds the top-level name `a`; _bind_dotted_import
             # builds the intermediate namespace chain (and replaces any lazy
             # placeholder under that name rather than trying to reify it).
@@ -5693,8 +5753,6 @@ class Interpreter:
         # above, so by the time we reach the real importlib call, a
         # ModuleNotFoundError here always means a genuinely missing module.
         imported = importlib.import_module(module)
-        if alias or '.' not in module:
-            return imported
         # `import a.b` binds the top-level package name `a`.
         return importlib.import_module(module.split('.')[0])
 

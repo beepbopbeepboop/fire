@@ -1255,6 +1255,28 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
                 # (importers read imported modules' signatures from it; without
                 # it every cross-module call got an int64_t prototype).
                 gen._module_stmts[module_name] = stmts
+                # Pre-register functions from self-host sibling modules before
+                # lowering dependent call sites (fixes cycles between siblings).
+                try:
+                    from fire_compiler import FunctionDef
+                    _SH_PREFIXES = ('mojo.', 'gimple_', 'ast_rewriter', 'mlir', 'regex_compile',
+                                    'module_loader', 'ownership_destruct', 'fire_compiler',
+                                    'determinism_trace', 'imports', 'elaborate', 'monomorphize',
+                                    'comptime', 'cas', 'build_stdlib_dylib', 'driver')
+                    _is_sh = False
+                    for _pref in _SH_PREFIXES:
+                        if module_name.startswith(_pref):
+                            _is_sh = True
+                            break
+                    if _is_sh and hasattr(gen, '_imported_func_home'):
+                        for _ms in (stmts or []):
+                            if isinstance(_ms, FunctionDef):
+                                try:
+                                    gen._imported_func_home.setdefault(_ms.name, module_name)
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
                 # Incrementally extend the flat, pre-deduped mirror (see
                 # the `_walk_ast` re-scan bug
                 # Phase 1) — O(this module's own stmt count), done once
@@ -2187,6 +2209,46 @@ def _new_val(gen, ctype: str, rhs: str) -> str:
     return t
 
 
+def _select_val(gen, ctype: str, cond_ctype: str, cond_val: str, then_val, else_val) -> str:
+    """Branch-based `cond ? then : else`, producing a fresh temp of `ctype`.
+
+    A `?:` expression is not a legal GIMPLE r-value when either arm is a
+    call, and a parenthesized conditional is not a legal operand at all —
+    gcc `-fgimple` rejects `t = (c ? call (x) : lit)` with "expected
+    expression before '(' token" and `t = c ? call (x) : lit` with
+    "invalid operands in ternary operation" (both measured with
+    gcc-mp-15). So a select whose arms are not already plain variable
+    operands must be emitted as the same three-block shape
+    `_lower_TernaryExpr` uses: `if (cond) goto bb_then; else goto
+    bb_else;`, one arm per block, result merged after.
+
+    `then_val`/`else_val` are either GIMPLE values of `ctype` (strings) or
+    zero-argument callables called INSIDE their branch to produce one. The
+    callable form is what keeps a side effect (a user `__str__`/`__repr__`
+    call, say) lazy: `gen._call_expr` emits immediately, so a value passed
+    in ahead of time would already have run unconditionally — the branch
+    would guard nothing. A value that is already computed is selected
+    either way; a call is only emitted in its own block.
+    """
+    ctype = _as_str(ctype)
+    result = gen._new_temp(ctype)
+    cond = gen._ensure_bool_cond(cond_ctype, cond_val)
+    bb_then = gen._new_bb()
+    bb_else = gen._new_bb()
+    bb_merge = gen._new_bb()
+    gen._emit(f"  if ({cond}) goto {bb_then}; else goto {bb_else};")
+    gen._emit_label(bb_then)
+    tv = then_val() if callable(then_val) else then_val
+    gen._safe_coerce_emit(ctype, ctype, tv, result)
+    gen._emit(f"  goto {bb_merge};")
+    gen._emit_label(bb_else)
+    ev = else_val() if callable(else_val) else else_val
+    gen._safe_coerce_emit(ctype, ctype, ev, result)
+    gen._emit(f"  goto {bb_merge};")
+    gen._emit_label(bb_merge)
+    return result
+
+
 def _inc_val(gen, base: str) -> str:
     """`base + 1` as its own int64_t temp — the ONE way to spell a
     one-step advance in generated GIMPLE.
@@ -3040,7 +3102,7 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     for _kn, _kexpr in (getattr(node, 'kwargs', None) or []):
         arg_pairs.append(gen.lower_expr(_kexpr))
     try:
-        module_src = open(source).read()
+        module_src = gen._generic_source_text(source)
         import elaborate
         el = elaborate.Elaborator()
         # A generic being elaborated here MAY contain a nested async/
@@ -3436,7 +3498,7 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
     if not all(gimple_exprtypes._is_concrete_type_arg(ta) for ta in type_args):
         return None
     try:
-        module_src = open(source).read()
+        module_src = gen._generic_source_text(source)
         import elaborate
         info = elaborate.Elaborator().elaborate_generic_struct(module_src, base_name, type_args)
     except Exception as e:
@@ -3490,9 +3552,7 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
         # fall-through above exists for.
         import elaborate as _elab_mod
         if isinstance(e, _elab_mod.WhereConformanceError):
-            raise RuntimeError(
-                f"error: invalid instantiation of '{base_name}': violated constraint\n"
-                f"note: {type(e).__name__}: {e}")
+            raise _elab_mod.where_violation_error('instantiation', base_name, e)
         gen._generic_struct_elaboration_failures.append(
             f"{base_name}[{', '.join(type_args)}] from {source}: "
             f"{type(e).__name__}: {e}")
@@ -3519,7 +3579,7 @@ def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
             return None
         source = gen._imported_generic_structs.get(g)
         try:
-            module_src = open(source).read()
+            module_src = gen._generic_source_text(source)
             import elaborate
             info = elaborate.Elaborator().elaborate_generic_struct_inferred(
                 module_src, g, [ct for ct, _ in

@@ -311,6 +311,7 @@ def cmd_spawn(a):
         # every refill cycle on `fatal: a branch named ... already exists`).
         branch = free_branch(a.name)
         git("worktree", "add", "-b", branch, wt, a.base)
+        retire_base(a.base)               # a continuation now carries the predecessor's commits: its name can go
         os.makedirs(os.path.join(wt, ".tmp"), exist_ok=True)
         prompt = open(os.path.join(MAIN, "tools", "control_prompt.md")).read().format(
             name=a.name, worktree=wt, branch=branch, main=MAIN, task=task.strip(),
@@ -340,7 +341,8 @@ def cmd_spawn(a):
                              model=a.model, pool=a.pool if sl else None, kind=kind, pid=p.pid,
                              started=time.strftime("%F %T"),
                              base=a.base, files=a.file, task=task, cls=getattr(a, "cls", None),   # what `bounce` needs to put it back on the queue
-                             state="running", summary=task.strip().splitlines()[0][:200])
+                             state="running", summary=task.strip().splitlines()[0][:200],
+                             **(getattr(a, "meta", None) or {}))   # chain depths ride along (merge_depth, proof_depth)
     fleet_ledger.record_spawn(ctl_dir(), a.name, p.pid, wt, cmd)     # the only processes the fleet may ever signal
     print("spawned %s: %s (pid %d), log %s/work.log" % (a.name, wt, p.pid, wt))
 
@@ -374,16 +376,26 @@ def sh(s):
 
 def unmerged_branches():
     """Branches under refs/heads/ with commits that are NOT in master, in ONE git call (a per-task
-    `rev-list` over hundreds of tasks is what made status take minutes)."""
-    out = subprocess.run(["git", "for-each-ref", "--no-merged", "master", "--format=%(refname:short)", "refs/heads/"],
-                         capture_output=True, text=True, cwd=MAIN).stdout
-    return set(out.split())
+    `rev-list` over hundreds of tasks is what made status take minutes). Returns None when the merge
+    check can't be read (e.g., master unresolvable in the worktree context) so callers never prune
+    on an unreadable merge state."""
+    r = subprocess.run(["git", "for-each-ref", "--no-merged", "master", "--format=%(refname:short)", "refs/heads/"],
+                       capture_output=True, text=True, cwd=MAIN)
+    if r.returncode != 0:
+        return None
+    return set(r.stdout.split())
 
 
 def done_and_gone(t, unmerged):
     """A finished task with nothing left to look at: terminal state, no worktree directory, and no commits
     outside master (its branch is merged or deleted). Such an entry holds no claim (terminal claims are
-    ignored), no process and no work, so `status` hides it and `prune` may drop it."""
+    ignored), no process and no work, so `status` hides it and `prune` may drop it. Returns False when
+    `unmerged` is None (the merge check can't be read), so callers never prune on an unreadable merge
+    state."""
+    if unmerged is None:
+        # The merge check couldn't be read (e.g., master unresolvable in the worktree context).
+        # Don't prune - we can't be sure which branches are merged.
+        return False
     return (t.get("state") in TERMINAL and not os.path.isdir(t["worktree"])
             and t.get("branch") not in unmerged)
 
@@ -406,7 +418,7 @@ def cmd_status(a):
                 lines = [l for l in f.read().splitlines() if l.strip()]
             last = lines[-1][:90] if lines else ""
         v = verdict(t)
-        n_ahead = ahead(t) if t.get("branch") in unmerged else 0
+        n_ahead = ahead(t) if (unmerged is not None and t.get("branch") in unmerged) else 0
         return st, v, n_ahead, dirty, last
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=16) as ex:
@@ -425,6 +437,8 @@ def cmd_prune(a):
     Never touches a task that is running, has a worktree, has commits outside master, or is in a
     non-terminal state."""
     unmerged = unmerged_branches()
+    if unmerged is None:
+        print("prune: merge check unreadable (master does not resolve in %s); keeping every entry" % MAIN)
     with registry() as tasks:
         gone = [n for n, t in tasks.items() if done_and_gone(t, unmerged) and state_of(t) != "running"]
         if not a.dry_run:
@@ -505,6 +519,8 @@ def cmd_mark(a):
                      % (a.name, tasks[a.name]["branch"], ahead(tasks[a.name])))
         tasks[a.name]["state"] = a.state
     print("%s -> %s" % (a.name, a.state))
+    if a.state in TERMINAL:
+        retire_task(a.name)               # the end of a task cleans up after itself; `cleanup` is only the safety net
 
 
 def cmd_log(a):
@@ -532,14 +548,31 @@ def qdir():
     return d
 
 
+def free_task_name(name, limit=60):
+    """NAME cut to LIMIT characters, then made unique against the registry AND the queue. Truncating before the check
+    is the point: two different long names cut to the same 40/60 characters collided on the cut form, which the
+    old `name in load()` check on the uncut name never saw, and the second enqueue overwrote the first's queue file
+    (or its spawn hit `task ... already exists`). The suffix is a counter, so it is stable and cannot repeat."""
+    name = name[:limit].rstrip("-")
+    taken = set(load()) | {f[:-5] for f in os.listdir(qdir()) if f.endswith(".json")}
+    cand, k = name, 1
+    while cand in taken:
+        k += 1
+        suffix = "-%d" % k
+        cand = name[:limit - len(suffix)].rstrip("-") + suffix
+    return cand
+
+
 def cmd_enqueue(a):
     """Queue a task. `refill` starts it when a worker slot is free and every task named in --needs is
     integrated (so work that depends on an unlanded round can be queued now and starts itself)."""
     task = a.task if a.task is not None else open(a.task_file).read()
+    if os.path.exists(os.path.join(qdir(), a.name + ".json")):
+        sys.exit("task %s is already queued; a second enqueue would overwrite it (use free_task_name)" % a.name)
     # a task queued without --pool runs on whichever slot is free first (see refill); --pool only prefers one
     item = dict(name=a.name, claims=a.claim, base=a.base, task=task, files=a.file, needs=a.needs or [],
                 added=time.time(), pool=getattr(a, "pool", None), only=bool(getattr(a, "only", False)),
-                cls=getattr(a, "cls", None))
+                cls=getattr(a, "cls", None), meta=getattr(a, "meta", None) or {})
     json.dump(item, open(os.path.join(qdir(), a.name + ".json"), "w"), indent=1)
     print("queued %s (needs: %s)" % (a.name, ", ".join(item["needs"]) or "nothing"))
 
@@ -781,15 +814,230 @@ def auth_failed(t):
     return bool(AUTH_ERR.search(tail))
 
 
+FINISHING_PREFIXES = ("fix-merge-", "fix-red-", "fix-proof-", "fix-orch-")   # tasks that carry finished work to master
+def refill_key(item):
+    """Queue order for refill: tasks that finish done work first, then oldest first."""
+    return (0 if item["name"].startswith(FINISHING_PREFIXES) else 1, item["added"])
+
+
+ORCH_POOL = "sonnet-orch"       # the slot reserved for orchestration reviews (tools/pool.json): Sonnet, class "orch", which no doc has
+MAX_CAP_REVIEWS = 3              # a task whose cap fires this many times stays capped: the review did not cure it
+DEPTH_KEYS = {"merge_depth": ("fix-merge-", "fix-red-"), "proof_depth": ("fix-proof-",)}
+
+
+def fixer_depth(name, t, key):
+    """How deep NAME is in its chain of fixers (key `merge_depth`) or reviewers (`proof_depth`). A recorded depth wins:
+    it travels with the task (queue item `meta` -> registry) and is reset to 0 by an orchestration review's FORWARD or
+    FIXED. Counting prefixes in the NAME, as this used to, cannot be reset: the name only ever grows."""
+    if key in (t or {}):
+        return t[key]
+    return sum(name.count(p) for p in DEPTH_KEYS[key])
+
+
+def depth_meta(t, key, name):
+    """The `meta` a fixer/reviewer queued from task NAME carries: both depths, with KEY one deeper."""
+    m = {k: fixer_depth(name, t, k) for k in DEPTH_KEYS}
+    m[key] += 1
+    return m
+
+
+def _cap_slug(name):
+    core = re.sub(r"^((fix-merge-|fix-red-|fix-proof-|fix-orch-)+)", "", name)
+    return re.sub(r"[^a-z0-9]+", "-", core.lower()).strip("-")[:40] or "task"
+
+
+def _chain_evidence(name, t):
+    """What an orchestration reviewer needs to judge a chain: its tasks, the branch's commits, the swarm log lines."""
+    slug = _cap_slug(name)
+    rows = []
+    for n, x in sorted(load().items(), key=lambda kv: kv[1].get("started", "")):
+        if slug[:24] and slug[:24] in re.sub(r"[^a-z0-9]+", "-", n.lower()):
+            rows.append("  %-62s %-17s %3d ahead  started %s" % (n[:62], state_of(x), ahead(x), x.get("started", "?")))
+    commits = git("log", "--format=%h %ad %s", "--date=format:%m-%d %H:%M", "master.." + t["branch"], check=False).splitlines()
+    lines = []
+    for lf in ("swarm.out", "swarm.out.2026-11-12"):
+        lp = os.path.join(ctl_dir(), lf)
+        if os.path.exists(lp):
+            lines += [l for l in open(lp, errors="replace").read().splitlines() if slug[:24] in re.sub(r"[^a-z0-9]+", "-", l.lower())]
+    return ("Tasks in this chain (oldest first):\n%s\n\nCommits on %s that master lacks (%d):\n%s\n\n"
+            "Lines about it in .git/control/swarm.out (%d, last 25 shown):\n%s\n"
+            % ("\n".join(rows[-25:]) or "  (none found)", t["branch"], len(commits),
+               "\n".join("  " + c[:150] for c in commits[:20]) or "  (none)", len(lines),
+               "\n".join("  " + l[:200] for l in lines[-25:]) or "  (none)"))
+
+
+ORCH_REVIEW_TASK = """You are an ORCHESTRATION REVIEWER. A chain of automated tasks hit a depth cap, and the cap fired instead of the
+work finishing. Your job is to find out WHY, and decide whether the cap was right. Read %(doc)s (the evidence), the swarm log
+(.git/control/swarm.out), tools/swarm.py, tools/integrate.py and tools/control.py, and doc/ORCHESTRATION.html (what the
+flow is meant to do). You start on master.
+
+Capped task: %(name)s (branch %(branch)s). Cap: %(kind)s. Why it fired: %(why)s
+
+Decide EXACTLY ONE:
+
+FORWARD  The chain is making real progress and the orchestration is behaving as designed: each round resolves real work, any
+         conflicts come from master moving while rounds run, nothing loops on itself. The cap was simply too tight for this
+         chain. The cap will be reset and the chain may continue. Say what shows the progress (commits, conflicts resolved,
+         tests passing).
+FIXED    The chain is looping because of a DEFECT IN THE ORCHESTRATION (a rule that cannot be satisfied, a task handed back
+         over and over, state not cleaned up, a parse that rejects good input). Fix the defect in tools/*.py, with a test
+         (tools/test_*.py) that fails without the fix; run it and the neighbouring tools/test_*.py, wrapped in
+         `python3 tools/memslot.py --gb 8 --label t --`. Commit it: it lands through the normal landing, and only then is
+         the cap reset, so the fixed code is what handles the chain. Name the defect and the commit.
+STOP     Neither: the chain is not progressing AND the orchestration is sound (the branch really cannot be merged, or it
+         needs a design decision). Say exactly what is needed. The cap stays.
+
+Rules: you are a light worker (no gate, no self-host build, never git stash). Edit only tools/ and docs; do not touch the
+capped branch. Do NOT delete %(doc)s: the orchestrator removes it when it applies your verdict. Finish with the REPORT block,
+the line `ORCH-VERDICT: FORWARD`, `ORCH-VERDICT: FIXED` or `ORCH-VERDICT: STOP` (exactly one, on its own line), and
+CONTROL-STATUS: DONE."""
+
+
+def enqueue_orch_review(name, kind, why):
+    """A depth cap fired on task NAME: queue a Sonnet reviewer (slot ORCH_POOL, pinned) instead of just giving up. The
+    reviewer decides FORWARD (reset the cap, the chain continues), FIXED (it fixed the orchestration: reset once that has
+    landed) or STOP (stay capped); the verdict is read by swarm.apply_orch_reviews. The work needs a doc to exist (sync
+    drops a queued task whose claims name none), so the evidence is written as bugs/ORCH_REVIEW_<slug>.md, which the
+    swarm's skip list keeps out of the ordinary feed. Returns True when a review was queued."""
+    import argparse as _ap
+    t = load().get(name)
+    prev = ((t or {}).get("cap_review") or {}).get("n", 0)
+    if not t or prev >= MAX_CAP_REVIEWS:
+        print("orchestration review: %s hit the cap %d time(s) already; it stays capped" % (name, prev), flush=True)
+        return False
+    slug = _cap_slug(name)
+    base = "ORCH_REVIEW_%s" % slug
+    doc = os.path.join(MAIN, "bugs", base + ".md")
+    task = ORCH_REVIEW_TASK % dict(doc="bugs/%s.md" % base, name=name, branch=t["branch"], kind=kind, why=why)
+    with open(doc, "w") as f:
+        f.write("# Orchestration review: %s hit the %s cap\n\n%s\n\n## Evidence\n\n%s\n"
+                % (name, kind, task, _chain_evidence(name, t)))
+    rname = free_task_name("fix-orch-" + slug)
+    cmd_enqueue(_ap.Namespace(name=rname, claim=["bug:" + base], task=task, task_file=None, file=[], base="master",
+                              needs=[], model=None, cls=None, pool=ORCH_POOL, only=True))
+    with registry() as reg:
+        reg[name]["cap_review"] = {"reviewer": rname, "kind": kind, "doc": doc, "n": prev + 1}
+    print("orchestration review: %s hit the %s cap; queued %s (Sonnet) to decide FORWARD, FIXED or STOP" % (name, kind, rname),
+          flush=True)
+    return True
+
+
+ORCH_VERDICT = re.compile(r"^ORCH-VERDICT:[ \t]*(FORWARD|FIXED|STOP)\b", re.M)
+
+
+def orch_verdict(t):
+    """The reviewer's verdict (FORWARD, FIXED or STOP), read from the end of its worker log; None if it gave none."""
+    try:
+        txt = open(os.path.join(t["worktree"], "work.log"), errors="replace").read()
+    except OSError:
+        return None
+    m = ORCH_VERDICT.findall(txt)
+    return m[-1] if m else None
+
+
+def reset_cap(name, verdict):
+    """FORWARD or FIXED: the capped task may be handed to fixers again, from depth 0, and its review doc goes."""
+    with registry() as reg:
+        t = reg[name]
+        t.pop("merge_capped", None)
+        t.pop("fixer", None)
+        t["merge_depth"] = 0
+        t["proof_depth"] = 0
+        cr = t.setdefault("cap_review", {})
+        cr["verdict"], cr["applied"] = verdict, time.strftime("%F %T")
+        doc = cr.get("doc")
+    if doc and os.path.exists(doc):
+        os.remove(doc)
+
+
+CONTROLLER_FILES = {"TASK.md", "work.log", "exitcode", "REPORT.md"}   # written into a worker's tree by the controller, or (REPORT.md) the worker's closing report, left untracked
+
+
+def tree_extras(wt):
+    """The entries `git status` shows in worker tree WT that are NOT the controller's own files (TASK.md, work.log,
+    exitcode, .tmp/). A finished tree whose only changes are those holds nothing of the worker's: older branches
+    still track TASK.md (untracked since 9855b224e), so the controller's own rewrite of it made 58 finished trees
+    look dirty for ever and cleanup could never remove them."""
+    st = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"],
+                        capture_output=True, text=True, cwd=wt).stdout
+    return [l[3:] for l in st.splitlines() if l[3:] not in CONTROLLER_FILES and not l[3:].startswith(".tmp/")]
+
+
+def retire_landed(name):
+    """The last step of a landing: its tree and branch go with it, in the same operation, so nothing waits for a later
+    cleanup pass. Runs only for a task whose every commit is on master (`ahead == 0`), whose worker is not alive, and
+    whose tree holds nothing but the controller's own files; anything else is KEPT and reported (never forced).
+    Removes the worktree, deletes the now-merged branch (`-d`, which refuses an unmerged one) and drops the registry
+    entry. Returns True when the tree and branch are gone."""
+    t = load().get(name)
+    if not t or ahead(t) > 0:
+        return False
+    if alive(t.get("pid")) and state_of(t) == "running":
+        print("retire %s: its worker is still running; kept" % name)
+        return False
+    wt = t["worktree"]
+    if os.path.isdir(wt):
+        extra = tree_extras(wt)
+        if extra:
+            print("retire %s: %d uncommitted file(s) in %s (%s); kept" % (name, len(extra), wt, extra[0]))
+            return False
+        r = subprocess.run(["git", "worktree", "remove", "--force", wt], capture_output=True, text=True, cwd=MAIN)
+        if r.returncode != 0:
+            print("retire %s: %s; kept" % (name, r.stderr.strip()[:100]))
+            return False
+    subprocess.run(["git", "worktree", "prune"], cwd=MAIN)
+    subprocess.run(["git", "branch", "-d", t["branch"]], capture_output=True, cwd=MAIN)
+    with registry() as reg:
+        reg.pop(name, None)
+    return True
+
+
+def retire_task(name):
+    """What a task's end owes: called when it reaches a terminal state, so the normal path leaves nothing behind.
+      - every commit on master (landed, or never committed): retire_landed: tree, branch and registry entry go.
+      - unlanded commits, HELD (a gate-red culprit): its tip is saved under refs/archive/<name>, then tree, branch and
+        entry go. Nothing will land it; the archive keeps it recoverable.
+      - unlanded commits, not held (abandoned because a continuation takes over): only the clean tree goes. The
+        branch is the continuation's base; retire_base deletes the name once the successor is cut from it.
+    A tree with anything of the worker's in it is never touched. Returns True when anything was retired."""
+    t = load().get(name)
+    if not t or state_of(t) not in TERMINAL:
+        return False
+    if ahead(t) == 0:
+        return retire_landed(name)
+    wt = t["worktree"]
+    if os.path.isdir(wt):
+        if tree_extras(wt):
+            return False
+        if subprocess.run(["git", "worktree", "remove", "--force", wt], capture_output=True, cwd=MAIN).returncode != 0:
+            return False
+        subprocess.run(["git", "worktree", "prune"], cwd=MAIN)
+    if t.get("hold"):
+        sha = git("rev-parse", t["branch"], check=False)
+        if sha and subprocess.run(["git", "update-ref", ARCHIVE_REF + t["branch"], sha], cwd=MAIN).returncode == 0:
+            subprocess.run(["git", "branch", "-D", t["branch"]], capture_output=True, cwd=MAIN)
+            with registry() as reg:
+                reg.pop(name, None)
+    return True
+
+
+def retire_base(base):
+    """A continuation was just cut from branch BASE: its commits now live on the successor's branch (same tip), so the
+    predecessor's name is deleted when its task is terminal and has no tree. Never deletes a branch whose task is alive."""
+    if not base.startswith("work/"):
+        return
+    owner = next((t for t in load().values() if t.get("branch") == base), None)
+    if owner is not None and (state_of(owner) not in TERMINAL or os.path.isdir(owner["worktree"])):
+        return
+    subprocess.run(["git", "branch", "-D", base], capture_output=True, cwd=MAIN)
+
+
 def bounce(name, t):
     """Take a dead-on-arrival task back to the QUEUE, leaving no trace: drop its worktree and branch (only after proving
     nothing in it is the worker's: no commits, and nothing beyond the files spawn itself wrote) and re-enqueue it under
     the same name, so the claim, the doc list and the formal%d counter are unchanged. Returns False if it kept the tree."""
     wt = t["worktree"]
-    mine = {"TASK.md", "work.log", "exitcode", ".tmp/"}
-    st = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], capture_output=True, text=True, cwd=wt).stdout
-    extra = [l[3:] for l in st.splitlines() if not (l[3:] in mine or l[3:].startswith(".tmp/"))]
-    if extra:
+    if tree_extras(wt):
         return False
     if t.get("pool") and limit_hit(t):
         mark_dead(t["model"], pool_slot(t["pool"]), limit_reset(t))   # the ban ends at the printed reset, else the recovery time
@@ -798,6 +1046,7 @@ def bounce(name, t):
     with registry() as reg:
         reg.pop(name, None)
     item = dict(name=name, claims=t["claims"], base=t.get("base") or "master", task=t.get("task") or _task_text(t),
+                meta={k: t[k] for k in DEPTH_KEYS if k in t},
                 files=t.get("files", []), needs=[], added=time.time(), model=t.get("model"), pool=t.get("pool"),
                 cls=t.get("cls"))
     json.dump(item, open(os.path.join(qdir(), name + ".json"), "w"), indent=1)
@@ -843,6 +1092,10 @@ def pick_slot(item, busy):
     if item.get("only"):                       # pinned: its slot or nothing
         return pool_slot(item["pool"]) if item.get("pool") and slot_free(pool_slot(item["pool"]), busy) else None
     slots = load_pool()["slots"]
+    # A slot whose class is not a work class (`orch`, the reserved Sonnet slot for orchestration reviews) takes only
+    # tasks PINNED to it (`only`, above). Without this an UNCLASSED task (the verifier's fix-gate-*) overflowed into it
+    # whenever the ordinary slots were full or banned, and ran on paid Sonnet (2026-11-12).
+    slots = [x for x in slots if slot_class(x) in CLASSES]
     if item.get("cls"):                        # a classed task stays in its class: its slots or nothing
         slots = [x for x in slots if accepts(x, item["cls"])]
     pref = item.get("pool")
@@ -898,7 +1151,10 @@ def cmd_refill(a):
     live = sum(busy.values())
     if a.target is None:
         a.target = max(pool_total(), live)
-    items = sorted(items_all, key=lambda i: i["added"])
+    # Work that FINISHES something already done goes first: a merge fixer, a proof reviewer or an orchestration reviewer
+    # holds a finished branch and its claim, and every pass that starts a fresh doc instead leaves that branch waiting
+    # (2026-11-12: 14 proof reviewers sat behind fresh docs while 9 finished branches waited). Then oldest first.
+    items = sorted(items_all, key=refill_key)
     started = 0
     items = [i for i in items if i["name"].startswith(tuple(a.prefix.split(",")))]
     # The FORMAL lane is the owner's: its Qwen runs formal* tasks by hand, and the swarm never starts one, on any slot
@@ -935,7 +1191,8 @@ def cmd_refill(a):
         # were skipped on every pass as "already exists"); the task starts under a fresh name instead
         name = it["name"] if it["name"] not in tasks else "%s-%d" % (it["name"][:50], int(time.time() * 1000) % 1000000)
         ns = argparse.Namespace(name=name, claim=it["claims"], task=it["task"], task_file=None,
-                                file=it["files"], base=it["base"], model=None, pool=sl["name"], cls=it.get("cls"))
+                                file=it["files"], base=it["base"], model=None, pool=sl["name"], cls=it.get("cls"),
+                                meta=it.get("meta"))
         try:
             cmd_spawn(ns)
         except SystemExit as e:
@@ -954,7 +1211,7 @@ def cmd_gate(a):
     """gate list | gate off PATTERN --reason R --doc bugs/<name> --worker NAME | gate on PATTERN"""
     cfg = gates_cfg()
     if a.action == "list":
-        print("landing:", ", ".join(cfg["landing"]), "| full every", cfg["full_every_minutes"], "min")
+        print("landing:", ", ".join(cfg["landing"]), "| full gate: whenever a landing since the last run touches something a gate reads")
         for pat, e in cfg.get("off", {}).items():
             print("OFF  %-40s %s  (doc %s, worker %s, since %s)" % (pat, e["reason"], e["doc"], e["worker"], e["since"]))
         return
@@ -1175,6 +1432,89 @@ def _claimed_by_outside(path):
     return False
 
 
+ARCHIVE_REF = "refs/archive/"
+BRANCH_MIN_AGE_S = 24 * 3600     # a branch younger than this is never touched: something may be about to look at it
+
+
+def classify_retirable_branches():
+    """(tips, subsumed, dead) for the `work/*` branches nothing will ever land (see prune_work_branches for the rules).
+    A branch checked out in a worktree is still CLASSIFIED: its tree is what has to go first, and cleanup removes that
+    tree (clean ones only, with every liveness check) before the branch is deleted."""
+    reg = load()
+    byb = {t.get("branch"): t for t in reg.values()}
+    rows = subprocess.run(["git", "for-each-ref", "--no-merged", "master",
+                           "--format=%(refname:short) %(objectname) %(committerdate:unix)", "refs/heads/work/"],
+                          capture_output=True, text=True, cwd=MAIN).stdout.splitlines()
+    tips = {}
+    for r in rows:
+        name, sha, when = r.split()
+        tips[name] = (sha, int(when))
+    if not tips:
+        return tips, [], []
+    qtext = ""
+    for f in os.listdir(qdir()):
+        if f.endswith(".json"):
+            qtext += open(os.path.join(qdir(), f), errors="replace").read()
+    now = time.time()
+    ok = {n for n, (sha, when) in tips.items()
+          if now - when >= BRANCH_MIN_AGE_S and n not in qtext
+          and (byb.get(n) or {}).get("state") != "running"}
+    # one call: the tips no other tip contains. A tip not in it is reachable from another branch.
+    ind = subprocess.run(["git", "merge-base", "--independent"] + sorted({sha for sha, _ in tips.values()}),
+                         capture_output=True, text=True, cwd=MAIN)
+    if ind.returncode != 0:
+        return tips, [], []
+    independent = set(ind.stdout.split())
+    keeper = {}                                  # equal tips share a commit: exactly one name must stay
+    for n in sorted(tips):
+        sha = tips[n][0]
+        if n not in ok:                          # a protected name is the keeper for its commit
+            keeper[sha] = n
+        else:
+            keeper.setdefault(sha, n)
+    subsumed = [n for n in sorted(ok) if tips[n][0] not in independent or keeper[tips[n][0]] != n]
+    dead = []
+    for n in sorted(ok - set(subsumed)):
+        t = byb.get(n)
+        if t is None or (t.get("state") in TERMINAL and t.get("hold")):
+            dead.append(n)
+    return tips, subsumed, dead
+
+
+def prune_work_branches(dry_run=False):
+    """Retire the `work/*` branches nothing will ever land, so the branch list stays the size of the live work.
+
+    cleanup's `branch -d` only reaches branches already in master. The rest piled up (1,350+ on 2026-11-12): every
+    retry, continuation, merge-fix and gate-fix gets a NEW branch, and a task that ends abandoned/superseded leaves
+    its commits unmerged for ever. Two lossless rules, in order:
+
+      1. SUBSUMED: the tip is an ancestor of another unmerged work/* tip (a continuation was cut from it, a fixer
+         built on it). Every commit stays reachable from that branch, so the name is deleted outright.
+      2. DEAD: the task is terminal (integrated/abandoned/superseded) AND held, or there is no task at all (the
+         registry forgot it, so nothing can ever land it). Its tip is saved under refs/archive/<name> (invisible to
+         `git branch`, immune to gc) and the branch deleted. Recover with `git branch <name> refs/archive/<name>`.
+
+    Never touched: a branch checked out in any worktree (cleanup removes a clean, idle tree first), one younger than
+    BRANCH_MIN_AGE_S, a task that is running or finished-and-waiting (it may yet land), an abandoned task NOT held
+    (`continue` cuts its successor from it), or a branch named by a queued task. Returns (subsumed, archived) counts."""
+    tips, subsumed, dead = classify_retirable_branches()
+    out = subprocess.run(["git", "worktree", "list", "--porcelain"], capture_output=True, text=True, cwd=MAIN).stdout
+    busy = {l[len("branch refs/heads/"):] for l in out.splitlines() if l.startswith("branch refs/heads/")}
+    subsumed = [n for n in subsumed if n not in busy]
+    dead = [n for n in dead if n not in busy]
+    if dry_run:
+        print("would delete %d subsumed and archive %d dead work/* branches" % (len(subsumed), len(dead)))
+        return len(subsumed), len(dead)
+    for i in range(0, len(subsumed), 100):
+        subprocess.run(["git", "branch", "-D"] + subsumed[i:i + 100], capture_output=True, cwd=MAIN)
+    for n in dead:
+        r = subprocess.run(["git", "update-ref", ARCHIVE_REF + n, tips[n][0]], capture_output=True, cwd=MAIN)
+        if r.returncode == 0:                    # delete only once the archive ref is in place
+            subprocess.run(["git", "branch", "-D", n], capture_output=True, cwd=MAIN)
+    print("deleted %d subsumed work/* branches; archived %d dead ones under %s" % (len(subsumed), len(dead), ARCHIVE_REF))
+    return len(subsumed), len(dead)
+
+
 def cmd_cleanup(a):
     """Remove the worktrees we created and no longer use: a `work-*` tree whose HEAD is already an ancestor of
     master, with a clean tree (no modified or untracked-and-not-ignored files), and no live worker.
@@ -1195,6 +1535,12 @@ def cmd_cleanup(a):
             cur = {"path": l[9:]}; wt.append(cur)
         elif l.startswith("HEAD "):
             cur["head"] = l[5:]
+        elif l.startswith("branch refs/heads/"):
+            cur["branch"] = l[len("branch refs/heads/"):]
+    retire = set()
+    if a.branches:
+        _t, _s, _d = classify_retirable_branches()
+        retire = set(_s) | set(_d)             # work nothing will land: its clean, idle tree may go too
     try:
         dirs = live_session_dirs()
     except (RuntimeError, OSError, ValueError) as e:
@@ -1219,15 +1565,15 @@ def cmd_cleanup(a):
             kept.append((p, "live process in tree")); continue
         if _claimed_by_outside(p):
             kept.append((p, "claimed by an outside session")); continue
-        if subprocess.run(["git", "merge-base", "--is-ancestor", w["head"], "master"], cwd=MAIN).returncode != 0:
+        if (w.get("branch") not in retire
+                and subprocess.run(["git", "merge-base", "--is-ancestor", w["head"], "master"], cwd=MAIN).returncode != 0):
             kept.append((p, "unmerged")); continue
         cands.append(p)
 
     # `git status` over a worker tree with a build/ in it is the slow step (~0.1-1 s each, 1900+ trees on
     # 2026-10-23 made the sequential loop outlast a 2-minute command timeout), and it is I/O bound, so fan it out.
     def is_dirty(p):
-        return bool(subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True,
-                                   cwd=p).stdout.strip())
+        return bool(tree_extras(p))             # the controller's own files (TASK.md, work.log, ...) are not dirt
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=a.jobs) as ex:
         dirty = list(ex.map(is_dirty, cands))
@@ -1253,7 +1599,7 @@ def cmd_cleanup(a):
     for p in safe:
         if a.dry_run:
             print("would remove", p); continue
-        r = subprocess.run(["git", "worktree", "remove", p], capture_output=True, text=True, cwd=MAIN)
+        r = subprocess.run(["git", "worktree", "remove", "--force", p], capture_output=True, text=True, cwd=MAIN)  # only controller files can differ: is_dirty said so
         if r.returncode == 0: done += 1
         else: print("kept", p, r.stderr.strip()[:100])
     subprocess.run(["git", "worktree", "prune"], cwd=MAIN)
@@ -1277,6 +1623,7 @@ def cmd_cleanup(a):
             for i in range(0, len(gone), 200):
                 subprocess.run(["git", "branch", "-d"] + gone[i:i + 200], capture_output=True, cwd=MAIN)
             print("deleted %d merged work/* branches" % len(gone))
+        prune_work_branches(a.dry_run)
     if a.prune:
         cmd_prune(a)
 
