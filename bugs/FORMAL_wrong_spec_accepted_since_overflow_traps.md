@@ -118,6 +118,46 @@ image is rejected") PASS, with the CONTROL (right spec) still accepted. Then del
 - The pin in `test_formal_dylib.py` (~756-764) that `triple`'s termination is NOT proved must still hold.
 - Run only `test_formal_dylib.py` under `tools/memslot.py --gb 8`. Do not run `make check`/`gate`.
 
+### The guard, decoded (2026-11-12, measured)
+
+`compile_formal_dylib(['teeth.mojo'], prove=False)` on `def triple(n): return n * 3` gives a 136-byte image; `triple` is its
+first 0x88 bytes (entry offset 0). The words, decoded by hand from the raw image (llvm-objdump here will not take a raw
+binary blob, so this was done by reading the encodings):
+
+| off | word | instruction | role |
+|---|---|---|---|
+| 0x00-0x24 | | `stp x29,x30`; `mov x29,sp`; `stp x19,x20`; `mov x19,x0`; `sub sp,#0x20`; spill x0; `mov w0,#3`; `mov x1,x0`; reload x0,x2 | prologue; x0 = n, x1 = 3 |
+| 0x28 | `9b417c02` | `smulh x2, x0, x1` | high 64 bits of the signed 128-bit product |
+| 0x2c | `9b017c00` | `mul x0, x0, x1` | the result (low 64 bits) |
+| 0x30 | `937ffc01` | `asr x1, x0, #63` | sign-fill of the low product |
+| 0x34 | `ca010042` | `eor x2, x2, x1` | x2 = smulh XOR asr63(low) |
+| 0x38 | `b5000042` | `cbnz x2, 0x40` | **the trap branch**: x2 != 0 means signed overflow |
+| 0x3c | `1400000f` | `b 0x78` | **an interior unconditional jump** over the trap block, to `ok:` |
+| 0x40-0x74 | | trap block: `adrp`/`add` the message, `movz` fd/len/`x16=4`, `svc`; `movz w0,#0`; `bl`; `sxtw`; `movz w0,#1`; `movz x16,#1`; `svc` | `_trap_terminating` shape |
+| 0x78-0x84 | | `add sp,#0x20`; `ldp x19,x20`; `ldp x29,x30`; `ret` | `ok:` tail; x0 is the product |
+
+So the normal path is `0x00..0x38` (fall through the not-taken `cbnz`), then the `b 0x78`, then `0x78..0x84`. Two facts
+the next round needs:
+
+1. **Two interior branches, not one.** The `cbnz` at 0x38 and the `b` at 0x3c are both interior. Step 2 of the plan must
+   accept the `b` as a jump to the `ok:` block (the normal path continues there), not only the `cbnz` as a not-taken
+   condition. A body whose only interior branches are the overflow `cbnz` and a jump into the same normal tail is the
+   shape to accept; any other interior branch is still refused.
+2. **The concrete guard is `pre`.** The not-taken condition at the `cbnz` is `x2 = 0`, i.e. with `n` the input and
+   `k = 3`:
+
+       pre n := (smulh n 3) ^^^ (asr63 (n * 3)) = 0
+
+   where `smulh` is the high 64 bits of the signed 128-bit product and `asr63 p` is `0` or `0xFFFF_FFFF_FFFF_FFFF`
+   by the sign of `p`. This is exactly "`n * 3` does not overflow as a signed 64-bit value", so `pre` is satisfiable on
+   the counterexample (`n = 1`, `pre 1` holds, and `1 * 5 ≠ 1 * 3`), which is what the teeth test needs.
+
+   The expression is a `def`, built from `n`, not `opaque`. The generator derives it from the `cbnz`'s operand chain
+   (`smulh`/`asr`/`eor` at 0x28-0x34) and the multiplier, so the next round can emit it without re-decoding.
+
+**Not verified in this round:** the Lean side (`arm64_step`'s `smulh`/`asr`/`eor`/`cbnz` arms and whether `bv_decide`
+closes the composed block under `pre`). Those are the next round's first measurement. Only the decode above is measured.
+
 ### Known hazards from reading the code
 
 - Using `opaque` for `pre` makes every obligation vacuous-looking and un-refutable. That is the failure this doc exists to
