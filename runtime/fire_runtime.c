@@ -3036,21 +3036,9 @@ int64_t mojo_dyn_call(int64_t fn, MojoList *args, MojoDict *kw)
         for (int64_t i = 0; i < n; i++) v[i] = mojo_list_get_int(args, i);
         return _mojo_vararg_invoke((MojoVarargFn *)fp, v, n, kw);
     }
-    /* A plain function pointer has no name-based parameter binding, but a
-     * dynamic call may still carry keyword arguments in call order (e.g. a
-     * call through a callable-valued parameter). Append their values after
-     * the positional arguments so they bind positionally. */
-    MojoList *_merged_args = NULL;
     if (kw && mojo_dict_len(kw) > 0) {
-        _merged_args = mojo_list_new();
-        for (int64_t i = 0; i < n; i++) mojo_list_append_int(_merged_args, mojo_list_get_int(args, i));
-        MojoList *_kws = mojo_dict_keys(kw);
-        for (int64_t i = 0; i < mojo_list_len(_kws); i++) {
-            char *_k = mojo_list_get_str(_kws, i);
-            mojo_list_append_int(_merged_args, mojo_dict_get_int(kw, _k));
-        }
-        args = _merged_args;
-        n = mojo_list_len(args);
+        mojo_raise_type_error((char *)"got an unexpected keyword argument");
+        return 0;
     }
     int64_t a[5] = {0, 0, 0, 0, 0};
     if (n > 5) n = 5;
@@ -7927,15 +7915,6 @@ static _DictSlot *_dict_lookup_bytes(MojoDict *d, MojoBytes *key)
     return sl;
 }
 
-/* The bytes-key twin of mojo_dict_set_other_struct_repr: a second struct type
- * under a bytes key, with its own repr kept on the slot. */
-void mojo_dict_set_bytes_other_struct_repr(MojoDict *d, MojoBytes *key, void *obj, void *fn)
-{
-    mojo_dict_set_bytes_other_struct(d, key, obj);
-    _DictSlot *sl = _dict_lookup_bytes(d, key);
-    if (sl && sl->key) sl->repr = fn;
-}
-
 int64_t mojo_dict_get_bytes_int(MojoDict *d, MojoBytes *key)
 {
     _DictSlot *sl = _dict_lookup_bytes(d, key);
@@ -11970,49 +11949,16 @@ int64_t mojo_getitem_word(int64_t w, int64_t i)
 }
 
 /* `a + b` where both are words of unknown kind: two strings concatenate, both
- * lists concatenate via mojo_list_concat, double boxes add as a double,
- * otherwise adds as integers (the word is its own value). */
+ * lists concatenate via mojo_list_concat, otherwise adds as integers (the word
+ * is its own value). */
 int64_t mojo_add_words(int64_t a, int64_t b)
 {
     if (mojo_boxed_is_str(a) && mojo_boxed_is_str(b))
-        return (int64_t)(intptr_t)mojo_str_cat((char *)(intptr_t)mojo_unbox_plain(a),
-                                               (char *)(intptr_t)mojo_unbox_plain(b));
+        return (int64_t)(intptr_t)mojo_str_cat((char *)(intptr_t)a, (char *)(intptr_t)b);
     if (mojo_is_registered_list(a) && mojo_is_registered_list(b))
         return (int64_t)(intptr_t)mojo_list_concat((MojoList *)(intptr_t)a,
                                                   (MojoList *)(intptr_t)b);
-    {
-        int da = mojo_is_boxed(a) && ((MojoBox *)(intptr_t)a)->kind == 'd';
-        int db = mojo_is_boxed(b) && ((MojoBox *)(intptr_t)b)->kind == 'd';
-        if (da || db) {
-            double av = da ? mojo_box_double(a) : (double)mojo_box_int(a);
-            double bv = db ? mojo_box_double(b) : (double)mojo_box_int(b);
-            return mojo_box_from_double(av + bv);
-        }
-    }
-    return mojo_box_int(a) + mojo_box_int(b);
-}
-
-/* `a * b` where one side is a word of unknown kind that may be a string (a
- * kind-'p' str box or a string pointer), a double box, or an integer: string
- * repetition when a side is a string, a boxed double product when a side is a
- * double box, otherwise integer multiplication of the words' integer values.
- * Used by tagged mixed-generator values whose kind is a runtime fact. */
-int64_t mojo_mul_word(int64_t a, int64_t b)
-{
-    if (mojo_boxed_is_str(a))
-        return (int64_t)(intptr_t)mojo_cstr_repeat((char *)(intptr_t)mojo_unbox_plain(a), mojo_box_int(b));
-    if (mojo_boxed_is_str(b))
-        return (int64_t)(intptr_t)mojo_cstr_repeat((char *)(intptr_t)mojo_unbox_plain(b), mojo_box_int(a));
-    {
-        int da = mojo_is_boxed(a) && ((MojoBox *)(intptr_t)a)->kind == 'd';
-        int db = mojo_is_boxed(b) && ((MojoBox *)(intptr_t)b)->kind == 'd';
-        if (da || db) {
-            double av = da ? mojo_box_double(a) : (double)mojo_box_int(a);
-            double bv = db ? mojo_box_double(b) : (double)mojo_box_int(b);
-            return mojo_box_from_double(av * bv);
-        }
-    }
-    return mojo_box_int(a) * mojo_box_int(b);
+    return a + b;
 }
 
 MojoList *mojo_iter_boxed_list(int64_t v)
@@ -18104,4 +18050,70 @@ int64_t mojo_next_word(int64_t w, int has_default, int64_t dflt)
     case 2: return mojo_box_from_double(((double (*)(void *))sg->value)(h));
     default: return ((int64_t (*)(void *))sg->value)(h);
     }
+}
+
+/* ── csv.reader (tabled foreign callable) ────────────────────────────── */
+static int64_t _csv_reader_impl(int64_t lines_word, MojoDict *kw)
+{
+    char delim = ',';
+    if (kw && mojo_dict_contains(kw, (char *)"delimiter")) {
+        int64_t dv = mojo_dict_get_int(kw, (char *)"delimiter");
+        char *s = 0;
+        if (mojo_word_is_text(dv)) s = (char *)(intptr_t)mojo_str_box_word(dv);
+        else if (mojo_boxed_is_str(dv)) s = (char *)(intptr_t)dv;
+        else if ((intptr_t)dv > 4096) s = (char *)(intptr_t)dv;
+        if (s && s[0]) delim = s[0];
+    }
+    MojoList *rows = mojo_list_new();
+    MojoList *lines = 0;
+    if (mojo_is_registered_list(lines_word)) {
+        lines = (MojoList *)(intptr_t)lines_word;
+    } else {
+        lines = mojo_iter_word(lines_word);
+    }
+    if (!lines) return (int64_t)(intptr_t)rows;
+    int64_t n = mojo_list_len(lines);
+    for (int64_t i = 0; i < n; i++) {
+        int64_t lw = mojo_list_get_boxed(lines, i);
+        char *line = 0;
+        if (mojo_word_is_text(lw)) line = (char *)(intptr_t)mojo_str_box_word(lw);
+        else if (mojo_boxed_is_str(lw)) line = (char *)(intptr_t)lw;
+        else line = (char *)(intptr_t)lw;
+        if (!line) line = (char *)"";
+        size_t len = strlen(line);
+        char *tmp = (char *)malloc(len + 1);
+        if (!tmp) continue;
+        memcpy(tmp, line, len + 1);
+        while (len > 0 && (tmp[len-1] == '\n' || tmp[len-1] == '\r')) tmp[--len] = 0;
+        MojoList *row = mojo_list_new();
+        char *p = tmp;
+        for (;;) {
+            char *q = strchr(p, delim);
+            if (!q) {
+                mojo_list_append_str(row, strdup(p));
+                break;
+            }
+            *q = 0;
+            mojo_list_append_str(row, strdup(p));
+            p = q + 1;
+        }
+        mojo_list_append_int(rows, (int64_t)(intptr_t)row);
+        free(tmp);
+    }
+    return (int64_t)(intptr_t)rows;
+}
+int64_t mojo_csv_reader_vf(int64_t lines_word, MojoList *packed, MojoDict *kw)
+{
+    (void)packed;
+    return _csv_reader_impl(lines_word, kw);
+}
+
+static MojoVarargFn *_csv_reader_vfn = 0;
+void *mojo_csv_reader_w = 0;
+__attribute__((constructor)) static void _mojo_csv_reader_init(void)
+{
+    if (!_csv_reader_vfn) {
+        _csv_reader_vfn = mojo_vararg_fn_new((void *)mojo_csv_reader_vf, 0, 1, 1, 0);
+    }
+    mojo_csv_reader_w = (void *)_csv_reader_vfn;
 }

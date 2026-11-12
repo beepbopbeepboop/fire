@@ -3,7 +3,10 @@
 Part 4 of 4 of `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md`
 (SPLIT 2026-11-11). This part is the C-side import-floor refusal of
 `c_parser/info.py` in `c_parser/parser/__init__.py`'s full import chain.
-The sibling parts: part 1 (the companion's tuple-target family; fixed 2026-11-12, its doc deleted) and part 2 (the companion's dict-store slot; fixed 2026-11-12, its doc deleted) — the companion `.cpp` work, independent of this one — and part 3 (the `.iterutil` import-floor refusal, the other half of this floor).
+The sibling parts: part 1 (`bugs/mid/…-part1.md`, the companion's tuple-target
+family) and part 2 (`bugs/…-part2.md`, the companion's dict-store slot) — the
+companion `.cpp` work, independent of this one — and part 3
+(`bugs/…-part3.md`, the `.iterutil` refusal, the other half of this floor).
 
 ## Summary
 

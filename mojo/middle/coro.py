@@ -164,14 +164,10 @@ def pinned(mode: str):
 
 # ── eligibility ─────────────────────────────────────────────────────────
 
-def _walk(node, stop_at_defs=False):
+def _walk(node):
     """Return node and every AST descendant (attributes + list attributes),
     as a list, in the same pre-order sequence a recursive `yield`/`yield
     from` walk would produce.
-
-    `stop_at_defs=True` walks one SCOPE: a nested `FunctionDef` below `node`
-    is returned (so a caller can recurse into it as its own scope) but its
-    body is not descended into. `node` itself is always descended into.
 
     Deliberately NOT a generator (it used to be): a `yield`/`yield from`
     function compiles to a REAL stack-switching coroutine in this
@@ -198,8 +194,6 @@ def _walk(node, stop_at_defs=False):
     while stack:
         cur = stack.pop()
         result.append(cur)
-        if stop_at_defs and cur is not node and isinstance(cur, N.FunctionDef):
-            continue
         d = getattr(cur, '__dict__', None)
         if not d:
             continue
@@ -370,47 +364,6 @@ def _pointer_return_kind(name: str):
         r = 'w' if 'w' in kinds or len(kinds) > 1 else 'p'
     _PTR_RET_KINDS[name] = r
     return r
-
-
-_GEN_SLOT_KINDS: dict = {}
-
-
-def _generator_slot_kinds(name: str):
-    """The per-slot kinds of the tuples a same-module generator yields, as a list
-    of env kind codes ('i' int, 'd' double, 'p' str, None unknown), or None when
-    it yields no tuple or its tuple shapes disagree.
-
-    A `for a, b in gen(...)` loop binds `a` and `b` from these (see the
-    tuple-target branch of `_static_env`), so a string slot the loop reads is
-    known to be a string when the loop body yields it on. Memoised per module,
-    the same way `_pointer_return_kind` is; a recursive generator reads the
-    unknown answer it set first, so the recursion stops there.
-    """
-    if name in _GEN_SLOT_KINDS:
-        return _GEN_SLOT_KINDS[name]
-    _GEN_SLOT_KINDS[name] = None
-    fd = None
-    for st in _MODULE_STMTS:
-        if isinstance(st, N.FunctionDef) and st.name == name \
-                and getattr(st, 'is_generator', False):
-            fd = st
-    if fd is None:
-        return None
-    env = _static_env(fd)
-    slots = None
-    for n in _walk(fd):
-        if not (isinstance(n, N.YieldExpr) and isinstance(n.value, N.TupleExpr)):
-            continue
-        ks = [_yield_kind(e, env) for e in n.value.elements]
-        if slots is None:
-            slots = ks
-        elif len(slots) == len(ks):
-            slots = [a if a == b else None for a, b in zip(slots, ks)]
-        else:
-            slots = None
-            break
-    _GEN_SLOT_KINDS[name] = slots
-    return slots
 
 
 def _callee_return_kind(expr, env: dict | None = None) -> str | None:
@@ -881,25 +834,6 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             continue
         env[tnames[0]] = 'i'
         env[tnames[1]] = elem
-    # `for a, b in gen(...):` where `gen` is a same-module tuple-yielding
-    # generator: each target takes its slot's kind (see _generator_slot_kinds),
-    # so a string slot is a 'p' name and a yield that re-yields it boxes it as a
-    # string. Unbound names only, the same rule as the enumerate case above.
-    for n in _fn_nodes:
-        if not isinstance(n, N.ForStmt):
-            continue
-        it = n.iterable
-        if not (isinstance(it, N.CallExpr) and isinstance(it.func, N.IdentExpr)):
-            continue
-        tnames = for_target_names(n.target)
-        if len(tnames) < 2 or any(t in env for t in tnames):
-            continue
-        slots = _generator_slot_kinds(it.func.name)
-        if not slots or len(slots) != len(tnames):
-            continue
-        for tn, k in zip(tnames, slots):
-            if k is not None:
-                env[tn] = k
     if struct_def is not None:
         for f in getattr(struct_def, 'fields', []):
             if isinstance(f, N.VarDecl):
@@ -4622,21 +4556,6 @@ def generator_base_name(fn_name, module_qualifier_str: str) -> str:
     return f'__mgco_{_cm_as_str(fn_name)}'
 
 
-def _attribute_to_def(prologue: list, fn) -> list:
-    """Attribute a synthesized generator-body prologue to the generator's `def`.
-
-    The `var p = __mojo_gen_arg(__c, i)` statements are built here, so they
-    have no source line of their own. gen_stmt stamps every C line it emits
-    with its statement's `#line`, and a line-less statement emits none, which
-    left the first lines of every `__mgco_<name>_body` numbered from whatever
-    directive preceded the function. They take the generator's own line.
-    """
-    for stmt in prologue:
-        stmt.line = fn.line
-        stmt.col = fn.col
-    return prologue
-
-
 def _async_method_setup(fn, base, struct_name):
     """Shared prologue/param plumbing for a plain `async def` and an async
     generator, top-level OR a struct method. For a method: arg 0 is the
@@ -4665,7 +4584,6 @@ def _async_method_setup(fn, base, struct_name):
             prologue.append(N.VarDecl(name=_local_param_name(pname), type_ann=pann, value=val))
         else:
             prologue.append(N.VarDecl(name=_local_param_name(pname), type_ann=None, value=slot))
-    _attribute_to_def(prologue, fn)
     body_params = [(_CVAR, 'Int')]
     if is_method:
         body_params.append(('self', struct_name))
@@ -5283,18 +5201,7 @@ def _rewrite_expr(node, cvar: str, kind: str, env=None):
                     # consumer reads None back and `== None` holds.
                     els.append(_call('mojo_box_none', []))
                 else:
-                    # A string or double slot is boxed by its kind, so the tuple
-                    # records it (mojo_list_append_word reads the box's kind). A raw
-                    # pointer or raw double bits were recorded as an int, and a
-                    # consumer printed a string as its address.
-                    _t = _box_tag(e, env)
-                    _rev = _rewrite_expr(e, cvar, kind, env)
-                    if _t == 1:
-                        els.append(_call('mojo_box_from_str', [_rev]))
-                    elif _t == 2:
-                        els.append(_call('mojo_box_from_double', [_rev]))
-                    else:
-                        els.append(_rev)
+                    els.append(_rewrite_expr(e, cvar, kind, env))
             boxed = _call(f'__mojo_tuple_box_{len(els)}', els)
             return _call('__mojo_coro_yield_i', [_c_ident(cvar), boxed])
         val = (_rewrite_expr(node.value, cvar, kind, env) if node.value is not None
@@ -5590,110 +5497,6 @@ def _merge_list_holes(kinds: set) -> set:
     return out
 
 
-def _add_target_names(t, names: set) -> None:
-    """Collect the names a binding target assigns (`x`, `a, (b, c)`)."""
-    if isinstance(t, str):
-        names.add(t)
-    elif isinstance(t, N.IdentExpr):
-        names.add(t.name)
-    elif isinstance(t, N.TupleExpr):
-        for e in t.elements:
-            _add_target_names(e, names)
-
-
-def _scope_bound_names(fn: N.FunctionDef) -> set:
-    """Every name `fn`'s own scope binds: its parameters, and every target of
-    an assignment, `for`, `with ... as`, `except ... as`, walrus, comprehension
-    or nested `def` in its body. A superset is the safe direction: a name
-    wrongly counted as bound loses its outer kind, which is a hole (a refusal),
-    never a wrong kind. (Imports inside a nested def are not counted.)"""
-    names: set = set()
-    for pp in getattr(fn, 'params', []):
-        names.add(pp[0] if isinstance(pp, (tuple, list)) else pp)
-    for n in _walk(fn):
-        if n is fn:
-            continue
-        if isinstance(n, N.FunctionDef):
-            names.add(n.name)
-        elif isinstance(n, N.VarDecl):
-            names.add(n.name)
-        elif isinstance(n, N.WalrusExpr):
-            names.add(n.name)
-        elif isinstance(n, N.ExceptHandler) and n.name:
-            names.add(n.name)
-        elif isinstance(n, N.WithItem) and n.alias is not None:
-            _add_target_names(n.alias, names)
-        elif isinstance(n, N.MultiAssignStmt):
-            for t in n.targets:
-                _add_target_names(t, names)
-        if hasattr(n, 'target') and not isinstance(n, N.FunctionDef):
-            _add_target_names(n.target, names)
-    return names
-
-
-def _nested_scope_env(parent_env: dict, fn: N.FunctionDef, sdef=None) -> dict:
-    """The env for the body of a nested def `fn`: the enclosing scope's env
-    (its captured names keep their kinds), minus every name `fn` rebinds,
-    overlaid with `fn`'s own `_static_env` (its params' call-site kinds and
-    its own annotated/literal locals). A name `fn` rebinds with no kind of
-    its own is therefore absent, not the outer scope's kind."""
-    bound = _scope_bound_names(fn)
-    env = {k: v for k, v in parent_env.items() if k not in bound}
-    env.update(_static_env(fn, sdef))
-    return env
-
-
-def _nested_plain_defs_for_scan(stmts: list) -> list:
-    """The nested ORDINARY defs (not generators, not async) whose call sites
-    the call-site scan may record, by bare name. A nested def is registered
-    only when its name can be told apart by that name alone:
-
-      * it is the ONLY def of that name in the module (the call-site tables
-        are keyed by bare name, so two defs sharing one would merge their
-        evidence);
-      * the name is never used as a VALUE (`return inner`, `g = inner`) and
-        never as a member (`obj.inner`), since a call through any other
-        spelling is not an observation this scan can see -- a value that
-        escapes and is called later would otherwise be ignored and its
-        param typed from the direct calls alone.
-    """
-    all_defs: list = []
-    top_ids: set = set()
-    call_funcs: set = set()
-    for s in stmts:
-        if isinstance(s, N.FunctionDef):
-            top_ids.add(id(s))
-        elif isinstance(s, N.StructDef):
-            for m in s.methods:
-                if isinstance(m, N.FunctionDef):
-                    top_ids.add(id(m))
-        for n in _walk(s):
-            if isinstance(n, N.FunctionDef):
-                all_defs.append(n)
-            elif isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr):
-                call_funcs.add(id(n.func))
-    counts: dict = {}
-    for d in all_defs:
-        counts[d.name] = counts.get(d.name, 0) + 1
-    used_otherwise: set = set()
-    for s in stmts:
-        for n in _walk(s):
-            if isinstance(n, N.IdentExpr):
-                if id(n) not in call_funcs:
-                    used_otherwise.add(n.name)
-            elif isinstance(n, N.MemberExpr):
-                used_otherwise.add(n.member)
-    out: list = []
-    for d in all_defs:
-        if id(d) in top_ids or getattr(d, 'is_generator', False) \
-                or getattr(d, 'is_async', False):
-            continue
-        if counts.get(d.name, 0) != 1 or d.name in used_otherwise:
-            continue
-        out.append(d)
-    return out
-
-
 def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
                                module_name: str | None = None) -> None:
     """Populate `_CALLSITE_PARAM_KINDS` (generators / async defs),
@@ -5756,11 +5559,6 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
                     _record(m, drop_self=_drop)
                 else:
                     _record_plain(m, drop_self=_drop)
-    # Nested ordinary defs whose name is unambiguous and only ever called:
-    # `def outer(...): def inner(fn): return walk(fn)` needs `inner`'s own
-    # call sites recorded, or `fn` -- and so `walk`'s slot -- is a hole.
-    for _nd in _nested_plain_defs_for_scan(stmts):
-        _record_plain(_nd, drop_self=False)
     if not gen_params and not plain_params:
         return
 
@@ -5971,40 +5769,6 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
                  (fn.member if isinstance(fn, N.MemberExpr) else None))
         return gname in gen_names or gname in plain_names
 
-    def _scan_scope(fn, sdef, parent_env, visit, closure):
-        """Visit each call in `fn`'s OWN scope with that scope's env, then
-        recurse into each def nested directly in it with the nested def's own
-        env (`_nested_scope_env`). `parent_env` is None for a top-level
-        function or method, whose env is its own `_static_env`.
-
-        Before this, `_walk(fn)` descended into nested defs too, so a call in
-        `inner`'s body was typed with `outer`'s env: `inner`'s own parameter,
-        which holds the value, was unknown there, and the call was a hole."""
-        calls: list = []
-        nested: list = []
-        for n in _walk(fn, True):
-            if n is fn:
-                continue
-            if isinstance(n, N.FunctionDef):
-                nested.append(n)
-            elif isinstance(n, N.CallExpr) and _wants_call(closure, n):
-                calls.append(n)
-        if not calls and not nested:
-            return
-        if parent_env is None:
-            env = _static_env(fn, sdef)
-        else:
-            env = _nested_scope_env(parent_env, fn, sdef)
-        for c in calls:
-            visit(c, env)
-        for d in nested:
-            # `_list_narrowed_recursive_args` is per generator, not per nested
-            # def: a nested def's calls are narrowed by nothing.
-            _saved = _narrowed_args[0]
-            _narrowed_args[0] = set()
-            _scan_scope(d, sdef, env, visit, closure)
-            _narrowed_args[0] = _saved
-
     def _from_bound_names(src):
         names: dict = {}
         if module_name is None:
@@ -6077,7 +5841,14 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
                 # from a helper lost its element type in the self-hosted build
                 # (the loop variable became a boxed word and `node.func` read
                 # garbage -- every program with a `def` crashed the binary).
-                _scan_scope(fn, sdef, None, visit, closure)
+                cenv = None
+                have_env = False
+                for n in _walk(fn):
+                    if isinstance(n, N.CallExpr) and _wants_call(closure, n):
+                        if not have_env:
+                            cenv = _static_env(fn, sdef)
+                            have_env = True
+                        visit(n, cenv)
             # module-level calls (rare, e.g. a bare generator call in a stmt).
             # Their caller env is the module's own single-literal bindings, so
             # an identifier argument (`walk(s)` with `s = "r"`) is typed the way
@@ -6191,48 +5962,25 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
     # been seen yet. One pass therefore leaves the synthesized generator's
     # only argument a hole, which under the rule above is a refusal.
     #
-    # ITERATED to a fixpoint, not a fixed two: each pass reads the registries
-    # the previous classification left, so every link of a call chain adds one
-    # pass -- `main -> outer(body) -> inner(fn) -> walk(fn)` needs three, since
-    # `outer`'s param is learned from `main`, `inner`'s from `outer`'s, and
-    # `walk`'s from `inner`'s. A later pass can also SHRINK a registry entry
-    # (new evidence disagreeing with what an earlier pass resolved turns that
-    # param into a conflict), so the iteration is not monotone; it therefore
-    # stops only when a pass reproduces the previous one exactly, and is capped.
-    # Hitting the cap is not trusted: every unannotated generator param is
-    # recorded as a conflict instead, so a yielded one is refused, the safe
-    # direction. A stable pass is the only answer that is used as is.
-    _CALLSITE_MAX_PASSES = 6
-    _prev_tables = None
-    _converged = False
-    for _pass in range(_CALLSITE_MAX_PASSES):
-        _one_pass()
-        _classify()
-        # the return-kind memos were computed against the kinds known BEFORE
-        # this classification; recompute them against what it resolved
-        _PTR_RET_KINDS.clear()
-        _LIST_RET_KINDS.clear()
-        _tables = (
-            {k: dict(v) for k, v in _CALLSITE_PARAM_KINDS.items()},
-            {k: set(v) for k, v in _CALLSITE_PARAM_CONFLICTS.items()},
-            {k: dict(v) for k, v in _PLAIN_CALLSITE_PARAM_KINDS.items()},
-        )
-        if _prev_tables is not None and _tables == _prev_tables:
-            _converged = True
-            break
-        _prev_tables = _tables
-    if not _converged:
-        _CALLSITE_PARAM_KINDS.clear()
-        _PLAIN_CALLSITE_PARAM_KINDS.clear()
-        _CALLSITE_PARAM_CONFLICTS.clear()
-        for _gname, _params in gen_params.items():
-            _unann = {_pn for _pn, _pa in _params if _unannotated(_pa)}
-            if _unann:
-                _CALLSITE_PARAM_CONFLICTS[_gname] = _unann
-        _GEN_VALUE_KINDS.clear()
-        _GEN_RESOLVING.clear()
-        _PTR_RET_KINDS.clear()
-        _LIST_RET_KINDS.clear()
+    # Two, and not "until stable": a later pass can also SHRINK a registry
+    # entry (new evidence that disagrees with what an earlier pass resolved
+    # turns that param into a conflict instead), so the iteration is not
+    # monotone and a `while changed` loop has no termination argument. What a
+    # third pass would add is a call chain three deep -- an ordinary function
+    # whose param types come only from a generator's param types, which come
+    # only from another ordinary function's -- and the residue of stopping at
+    # two is a HOLE, i.e. an honest refusal, never a miscompile. That is the
+    # direction to be wrong in.
+    _one_pass()
+    _classify()
+    # the return-kind memos were computed against the kinds known BEFORE this
+    # classification; recompute them against what it resolved
+    _PTR_RET_KINDS.clear()
+    _LIST_RET_KINDS.clear()
+    _one_pass()
+    _classify()
+    _PTR_RET_KINDS.clear()
+    _LIST_RET_KINDS.clear()
 
 
 # Names of this module's top-level functions referenced as VALUES (an
@@ -8553,7 +8301,6 @@ def _lower_one(fn: N.FunctionDef, meta: list,
                                       value=_call(ARG_SHIM, [_c_ident(_CVAR),
                                                              N.IntLiteral(value=arg_base + i)])))
 
-    _attribute_to_def(prologue, fn)
     new_body = prologue + _rewrite_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR, kind, env)
     body_params = [(_CVAR, 'Int')]
     if has_self:
@@ -8936,8 +8683,6 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('mojo_box_from_double', 'int64_t')
     gen.func_param_types.setdefault('mojo_box_from_bool', ['int64_t'])
     gen.func_return_types.setdefault('mojo_box_from_bool', 'int64_t')
-    gen.func_param_types.setdefault('mojo_box_from_str', ['char *'])
-    gen.func_return_types.setdefault('mojo_box_from_str', 'int64_t')
     gen.func_param_types.setdefault('mojo_box_none', [])
     gen.func_return_types.setdefault('mojo_box_none', 'int64_t')
     gen.func_param_types.setdefault(_BOX_NEW, ['int64_t'])

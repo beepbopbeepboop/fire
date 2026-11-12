@@ -594,8 +594,7 @@ def _gen_stmt_FromImportStmt(gen, node):
                                 .replace('-', '_'))
                 else:
                     _fi_home = _fi_qual
-                gen._note_own_func_home(symbol_name, _fi_home,
-                                        record_flat=False)
+                gen._note_own_func_home(symbol_name, _fi_home)
                 # BUG-2026-024: record the home module's own parameter
                 # ctypes for THIS binding, exactly like the top-level
                 # Process-imports loop's snapshot beside its
@@ -692,8 +691,7 @@ def _gen_stmt_FromImportStmt(gen, node):
                 gen.func_param_types.setdefault(name, list(_rx_pts))
                 if _rx_home:
                     gen._note_own_func_home(
-                        name, _rx_home.replace('.', '_').replace('-', '_'),
-                        record_flat=False)
+                        name, _rx_home.replace('.', '_').replace('-', '_'))
                 continue
         # A function-scoped `from M import Class as Alias` is the same shape
         # the module-scope path records (see `_register_sym` in
@@ -2575,8 +2573,7 @@ def _overload_suffix(gen, bare_name: str) -> str:
 
 
 def _note_own_func_home(gen, bare_name: str, module_name: str,
-                        record_scope: bool = True,
-                        record_flat: bool = True) -> None:
+                        record_scope: bool = True) -> None:
     """Register bare_name's home module into THIS instance's own
     _own_imported_func_home (see its own comment) — or, if bare_name is
     already registered to a DIFFERENT module within this SAME compile
@@ -2595,19 +2592,6 @@ def _note_own_func_home(gen, bare_name: str, module_name: str,
     populated by _gen_stmt_FromImportStmt when the body is generated)
     pass record_scope=False so they never pollute a module scope they
     don't lexically belong to.
-
-    `record_flat=False` is for a FUNCTION-BODY-scoped import
-    (`_gen_stmt_FromImportStmt`): that binding is lexical — its frame in
-    `_import_scope_stack` is the authoritative answer for every reference
-    inside the body — and the flat map is module-scope state. Writing the
-    body binding there too made it visible to functions that lexically
-    cannot see it at all (`_func_qualifier`'s tier 2 is consulted by every
-    function), silently resolving an unbound sibling reference to the
-    module some OTHER function happened to import
-    (IMPORT_ambiguous_sibling_function). The binding still lands in
-    `_lexical_func_import_homes` (see that registry), which is what lets
-    the resolver tell a genuinely unbound reference apart from one that a
-    different lexical scope binds elsewhere.
 
     This genuine same-instance conflict is narrower than it looks: it
     can only fire when ONE gen_module call's own transitive import
@@ -2656,8 +2640,6 @@ def _note_own_func_home(gen, bare_name: str, module_name: str,
         # `from Y import alloc` in std/memory/__init__.mojo bind `alloc`
         # to the SECOND module for every reference after it.
         scopes[-1][bare_name] = module_name
-    if not record_flat:
-        return
     home = gen._own_imported_func_home
     cur = home.get(bare_name)
     if cur is None:
@@ -2709,8 +2691,7 @@ def _pop_import_scope(gen) -> None:
 
 
 
-def _collect_body_import_bindings(gen, node_list: list, scope: dict,
-                                  nested_defs: list | None = None) -> None:
+def _collect_body_import_bindings(gen, node_list: list, scope: dict) -> None:
     """Record every `from X import ...` in a function body into `scope`
     (the lexical scope of that body), so a bare-name reference anywhere in
     the body resolves to the module its lexically-closest import statement
@@ -2718,21 +2699,7 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict,
     no block scoping) but does NOT cross FunctionDef/LambdaExpr boundaries
     — a nested def's imports belong to that nested def's OWN scope, which
     is compiled by its own gen entry point (_gen_lifted_closure /
-    _gen_struct_method) and populated by its own call to this method.
-
-    `nested_defs` (optional, used only by the whole-module pre-scan) is
-    appended every IMMEDIATE nested FunctionDef this body contains —
-    control-flow bodies are descended into, a nested def's own body is
-    not — so the pre-scan can recurse into each nested scope under the
-    lifted name its body will actually be emitted under.
-
-    Every binding recorded here is also appended to
-    `gen._lexical_func_import_homes` (name -> module spellings seen in
-    any lexical body of this compile unit). `_func_qualifier` consults it
-    when a reference is bound by NO lexical scope and only the shared
-    sibling registry can answer: if some other body binds the same name
-    to a different module, the unbound reference is ambiguous and is
-    refused rather than silently resolved to either one."""
+    _gen_struct_method) and populated by its own call to this method."""
     for stmt in node_list:
         if isinstance(stmt, gimple_ctypes.FromImportStmt) and not getattr(stmt, 'wildcard', False):
             for _fip3 in (getattr(stmt, 'name_alias_strs', None) or []):
@@ -2796,93 +2763,25 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict,
                         f"{_iat}error: import of '{_local_nm}' is ambiguous{_note_txt}")
                 scope[_local_nm] = q
                 scope['__mod__' + _local_nm] = stmt.module
-                _lex = getattr(gen, '_lexical_func_import_homes', None)
-                if _lex is not None:
-                    _prev_lex = _lex.get(_local_nm)
-                    if _prev_lex is None:
-                        _lex[_local_nm] = q
-                    else:
-                        _lex[_local_nm] = _prev_lex + '|' + q
-        elif isinstance(stmt, gimple_ctypes.FunctionDef):
-            if nested_defs is not None:
-                nested_defs.append(stmt)
         elif isinstance(stmt, gimple_ctypes.IfStmt):
-            gen._collect_body_import_bindings(stmt.then_body, scope, nested_defs)
+            gen._collect_body_import_bindings(stmt.then_body, scope)
             for _, eb in stmt.elifs:
-                gen._collect_body_import_bindings(eb, scope, nested_defs)
+                gen._collect_body_import_bindings(eb, scope)
             if stmt.else_body:
-                gen._collect_body_import_bindings(stmt.else_body, scope, nested_defs)
+                gen._collect_body_import_bindings(stmt.else_body, scope)
         elif isinstance(stmt, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt, gimple_ctypes.WithStmt)):
-            gen._collect_body_import_bindings(stmt.body, scope, nested_defs)
+            gen._collect_body_import_bindings(stmt.body, scope)
             if getattr(stmt, 'else_body', None):
-                gen._collect_body_import_bindings(stmt.else_body, scope, nested_defs)
+                gen._collect_body_import_bindings(stmt.else_body, scope)
         elif isinstance(stmt, gimple_ctypes.TryStmt):
-            gen._collect_body_import_bindings(stmt.body, scope, nested_defs)
+            gen._collect_body_import_bindings(stmt.body, scope)
             for h in stmt.handlers:
                 gen._collect_body_import_bindings(
-                    getattr(h, 'body', None) or [], scope, nested_defs)
+                    getattr(h, 'body', None) or [], scope)
             if getattr(stmt, 'else_body', None):
-                gen._collect_body_import_bindings(stmt.else_body, scope, nested_defs)
+                gen._collect_body_import_bindings(stmt.else_body, scope)
             if getattr(stmt, 'finally_body', None):
-                gen._collect_body_import_bindings(stmt.finally_body, scope, nested_defs)
-
-
-def _prescan_func_import_frames(gen, body: list, owner_name: str) -> None:
-    """Record `body`'s lexical import bindings under `owner_name` before
-    any function body is emitted, recursing into every immediate nested
-    `def` under the lifted name its body will be emitted under
-    (`<owner>_<inner>`, the `closure_lifted_name` rule).
-
-    Two readers need this to be a PRE-pass rather than whatever each body
-    happened to register when its turn came:
-
-    * `_gen_lifted_closure_body` seeds a lifted closure's scope frame from
-      its enclosing function's frame. Closures are emitted depth-first,
-      BEFORE the enclosing function's body, so the frame would not exist
-      yet if it were only recorded during that body's own compile.
-    * `_func_qualifier`'s unbound-reference check must see every lexical
-      binding in the unit regardless of source order: a reference is
-      ambiguous because SOME other body binds the name differently, and
-      "some other body" may be emitted after the reference.
-
-    Owner names match what `_gen_lifted_closure` receives: a top-level
-    function's or method's own name, then each nested def's lifted name
-    (parent_lifted + '_' + inner.name)."""
-    frame: dict = {}
-    nested: list = []
-    gen._collect_body_import_bindings(body, frame, nested)
-    # Merge rather than replace: two REDEFINED top-level defs (or a method
-    # overridden in the same StructDef) share one owner name, and the
-    # last-def-wins binding must not erase the first definition's imports —
-    # every reference is resolved against the union, with the later def's
-    # own binding winning where both name the same bare name.
-    _prev_frame = _as_dict(gen._func_import_frames.get(owner_name))
-    if _prev_frame is None:
-        gen._func_import_frames[owner_name] = frame
-    else:
-        _prev_frame = _as_dict(_prev_frame)
-        for _fm_nm in frame:
-            _prev_frame[_fm_nm] = frame[_fm_nm]
-    for child in nested:
-        _prescan_func_import_frames(
-            gen, getattr(child, 'body', None) or [],
-            owner_name + '_' + _as_str(child.name))
-
-
-def _ambiguous_func_import_error(bare_name: str) -> str:
-    """The one ambiguity diagnostic for a free-function reference this
-    program's imports do not select. Shared by both refusal sites in
-    `_func_qualifier` (the flat own map's `_AMBIGUOUS_FUNC_HOME` sentinel
-    and the unbound tier-3 reference whose lexical siblings disagree) so
-    the two cannot drift and a caller can match one prefix.
-
-    Same wording as modular's own `error: import of 'X' is ambiguous`, with
-    the scope explanation fire has to add: neither `from ... import` in
-    scope selects one."""
-    return (f"error: import of '{bare_name}' is ambiguous: this program "
-            f"transitively imports two different sibling modules that "
-            f"both define a free function named '{bare_name}', and no "
-            f"enclosing `from ... import {bare_name}` in scope selects one")
+                gen._collect_body_import_bindings(stmt.finally_body, scope)
 
 
 def _func_qualifier(gen, bare_name: str) -> str:
@@ -3023,39 +2922,22 @@ def _func_qualifier(gen, bare_name: str) -> str:
     own_home = getattr(gen, '_own_imported_func_home', None)
     if own_home and bare_name in own_home:
         qualifier = own_home[bare_name]
-        # _AMBIGUOUS_FUNC_HOME: this program transitively imports two
-        # different sibling modules that each define `bare_name`, and the
-        # lexical scope resolver above found no enclosing `from ... import`
-        # that binds it. The reference cannot mean either module, so refuse.
-        # Falling through to the shared whole-program registry (Tier 4)
-        # here is a silent miscompile: it resolves the name to whichever
-        # sibling registered last (IMPORT_ambiguous_sibling_function).
-        # Callers that only ESTIMATE a type catch this via
-        # _func_home_qualifier and treat it as "no answer".
-        if qualifier == gimple_codegen._AMBIGUOUS_FUNC_HOME:
-            raise RuntimeError(_ambiguous_func_import_error(bare_name))
-        return _sanitize_qualifier(qualifier)
-    # Tier 3 (whole-program shared registry) is the only answer left. For an
-    # UNBOUND reference that is not safe to use blindly: the shared map is
-    # first-claim/first-wins, so when this unit's own lexical imports bind the
-    # SAME bare name to a DIFFERENT sibling module somewhere else, the
-    # reference is ambiguous and must be refused — never resolved to whichever
-    # of the two happened to claim tier 3. A binding in some other function's
-    # scope is invisible to THIS reference (that is the leak
-    # `_note_own_func_home`'s `record_flat=False` closes), but it is exactly
-    # the evidence that two different siblings' same-named functions are live
-    # in this program. When no lexical body binds the name at all, the shared
-    # answer stands: tier 3 is also the deliberate fallback for
-    # synthesized/transitive references.
+        # If bare_name is marked _AMBIGUOUS_FUNC_HOME (two same-named imports
+        # from different sibling modules, each lexically nested in a different
+        # scope), don't refuse outright: the lexical scope resolver above
+        # (Tier 2) already had first crack at this reference and found no
+        # enclosing import that binds bare_name, so the only remaining option
+        # short of erroring is to let the caller fall through to the shared
+        # whole-program registry (Tier 4). That mirrors _imported_def_pts's
+        # `definer_only` contract (an _AMBIGUOUS entry means "no answer", not
+        # a wrong answer) and keeps every tier in this file symmetric: no
+        # stale RuntimeError that contradicts the other three call sites
+        # which already treat the sentinel as a fall-through.
+        if qualifier != gimple_codegen._AMBIGUOUS_FUNC_HOME:
+            return _sanitize_qualifier(qualifier)
     home = getattr(gen, '_imported_func_home', None)
     if home and bare_name in home:
-        _cand = _sanitize_qualifier(home[bare_name])
-        _lex_homes = getattr(gen, '_lexical_func_import_homes', None)
-        if _lex_homes and bare_name in _lex_homes:
-            for _lq in _as_str(_lex_homes[bare_name]).split('|'):
-                if _sanitize_qualifier(_lq) != _cand:
-                    raise RuntimeError(_ambiguous_func_import_error(bare_name))
-        return _cand
+        return _sanitize_qualifier(home[bare_name])
     return ''
 
 
