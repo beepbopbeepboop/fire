@@ -1561,7 +1561,6 @@ void mojo_list_inherit_kinds(MojoList *dst, MojoList *src)
     else if (k) mojo_list_set_elem_repr(dst, NULL);
 }
 
-
 /* ── The per-list ELEMENT REPR ────────────────────────────────────────────
    `mojo_list_set_elem_repr` records how to render one element of this list;
    `mojo_list_repr_elem` is what a repr walker asks per slot and gets NULL from
@@ -4565,70 +4564,10 @@ int mojo_bytes_endswith(MojoBytes *b, MojoBytes *p)
     return mojo_bytes_endswith_from(b, p, 0, MOJO_SLICE_STOP_OMITTED);
 }
 
-/* The lenient decoder for `errors="replace"` / `"ignore"` on the ascii and
- * utf-8 codecs. Strict decoding stays with mojo_bytes_decode (its messages are
- * the strict ones). A malformed run is one error, as CPython counts it: for
- * UTF-8 the MAXIMAL SUBPART -- the start byte plus the continuation bytes that
- * are still a valid prefix (second-byte ranges per the standard: E0 A0..BF,
- * ED 80..9F, F0 90..BF, F4 80..8F) -- and a start byte with no valid sequence
- * is one error of length 1. `replace` writes U+FFFD once per error, `ignore`
- * writes nothing. For ascii every byte >= 0x80 is its own error. */
-static char *_mojo_decode_lenient(const unsigned char *d, int64_t n, int ascii_only, int replace)
-{
-    char *s = malloc((size_t)n * 3 + 1);
-    size_t k = 0;
-    int64_t i = 0;
-    while (i < n) {
-        unsigned c = d[i];
-        if (c < 0x80) { s[k++] = (char)c; i++; continue; }
-        if (ascii_only) goto bad_one;
-        {
-            int extra;
-            unsigned lo = 0x80, hi = 0xBF;
-            if (c >= 0xC2 && c <= 0xDF) extra = 1;
-            else if (c >= 0xE0 && c <= 0xEF) {
-                extra = 2;
-                if (c == 0xE0) lo = 0xA0;
-                if (c == 0xED) hi = 0x9F;
-            } else if (c >= 0xF0 && c <= 0xF4) {
-                extra = 3;
-                if (c == 0xF0) lo = 0x90;
-                if (c == 0xF4) hi = 0x8F;
-            } else goto bad_one;
-            int64_t j = i + 1;
-            int ok = 1;
-            for (int m = 0; m < extra; m++, j++) {
-                if (j >= n) { ok = 0; break; }
-                unsigned ch = d[j];
-                unsigned l = m == 0 ? lo : 0x80, h = m == 0 ? hi : 0xBF;
-                if (ch < l || ch > h) { ok = 0; break; }
-            }
-            if (ok) {
-                for (int64_t q = i; q < j; q++) s[k++] = (char)d[q];
-                i = j;
-                continue;
-            }
-            /* The maximal subpart: bytes i .. j-1 are one error. */
-            if (replace) { s[k++] = (char)0xEF; s[k++] = (char)0xBF; s[k++] = (char)0xBD; }
-            i = j;
-            continue;
-        }
-    bad_one:
-        if (replace) { s[k++] = (char)0xEF; s[k++] = (char)0xBF; s[k++] = (char)0xBD; }
-        i++;
-    }
-    s[k] = 0;
-    return s;
-}
-
 char *mojo_bytes_decode(MojoBytes *b, char *encoding, char *errors)
 {
     MojoCodec codec = mojo_codec_lookup(encoding);
     int64_t n = b ? b->len : 0;
-    if (errors && (strcmp(errors, "replace") == 0 || strcmp(errors, "ignore") == 0)
-            && (codec == MOJO_CODEC_ASCII || codec == MOJO_CODEC_UTF8))
-        return _mojo_decode_lenient(b ? b->data : NULL, n, codec == MOJO_CODEC_ASCII,
-                                    strcmp(errors, "replace") == 0);
     if (codec == MOJO_CODEC_ASCII) {
         for (int64_t i = 0; i < n; i++) {
             if (b->data[i] >= 0x80) {
@@ -6398,45 +6337,32 @@ int64_t mojo_str_find(char *s, char *needle) {
  * == 2), and an inverted or out-of-range window is a miss rather than the
  * empty-slice answer. Mirrors mojo_bytes_rfind_from, which is the same
  * search over a length-tagged buffer. */
-/* Python's str.find / str.rfind over a window: start and stop are CODEPOINT
- * indices with slice semantics (negative counts from the end and is clamped,
- * an omitted stop is the end). A start past the end, or a stop before the
- * window's start, is no window: -1. An empty needle matches at the window's
- * start for find and at its end for rfind, and answers that index. Returns the
- * codepoint index of the first (or last) match wholly inside the window.
- *
- * mojo_str_find_from / mojo_str_rfind_from used to convert the raw start and
- * stop straight to byte offsets: a negative bound fell through the conversion
- * and the search ran over the wrong span, so `"abcabc".find("b", -2, -1)` read
- * -1 where CPython reads 4 (gimple_str_window_matches_cpython). */
-static int64_t _mojo_str_find_window(char *s, char *needle, int64_t start, int64_t stop, int reverse)
-{
+int64_t mojo_str_rfind_from(char *s, char *needle, int64_t start, int64_t stop) {
     if ((intptr_t)s < 65536 || (intptr_t)needle < 65536) return -1;
-    int64_t len = mojo_str_codepoint_len(s);
-    int64_t lo = start;
-    int64_t hi = (stop == MOJO_SLICE_STOP_OMITTED) ? len : stop;
-    if (lo < 0) { lo += len; if (lo < 0) lo = 0; }
-    if (hi < 0) { hi += len; if (hi < 0) hi = 0; }
-    if (hi > len) hi = len;
-    if (lo > len || hi < lo) return -1;
-    int64_t blen = (int64_t)strlen(s);
-    int64_t blo = lo >= len ? blen : mojo_utf8_codepoint_to_byte_offset(s, lo);
-    int64_t bhi = hi >= len ? blen : mojo_utf8_codepoint_to_byte_offset(s, hi);
-    int64_t nlen = (int64_t)strlen(needle);
-    if (nlen == 0) return reverse ? hi : lo;
-    if (bhi - blo < nlen) return -1;
-    if (reverse) {
-        for (int64_t i = bhi - nlen; i >= blo; i--)
-            if (memcmp(s + i, needle, (size_t)nlen) == 0) return mojo_utf8_codepoint_index(s, i);
+    if (!s || !needle) return -1;
+    int64_t byte_start = mojo_utf8_codepoint_to_byte_offset(s, start);
+    int64_t byte_stop;
+    if (stop == MOJO_SLICE_STOP_OMITTED) {
+        byte_stop = (int64_t)strlen(s);
     } else {
-        for (int64_t i = blo; i + nlen <= bhi; i++)
-            if (memcmp(s + i, needle, (size_t)nlen) == 0) return mojo_utf8_codepoint_index(s, i);
+        byte_stop = mojo_utf8_codepoint_to_byte_offset(s, stop);
+    }
+    if (byte_stop < byte_start) return -1;
+    int64_t nlen = (int64_t)strlen(needle);
+    if (nlen == 0) {
+        /* empty needle matches at end of window in codepoints */
+        /* return stop in codepoints */
+        if (stop == MOJO_SLICE_STOP_OMITTED) {
+            return mojo_str_codepoint_len(s);
+        }
+        return stop;
+    }
+    for (int64_t i = byte_stop - nlen; i >= byte_start; i--) {
+        if (memcmp(s + i, needle, (size_t)nlen) == 0) {
+            return mojo_utf8_codepoint_index(s, i);
+        }
     }
     return -1;
-}
-
-int64_t mojo_str_rfind_from(char *s, char *needle, int64_t start, int64_t stop) {
-    return _mojo_str_find_window(s, needle, start, stop, 1);
 }
 
 /* str.rfind(needle): index of the LAST occurrence of needle in s, or -1.
@@ -6452,7 +6378,27 @@ int64_t mojo_str_rfind(char *s, char *needle) {
  * 2) == 2 but "ab".find("", 3) == -1). On a hit the returned index is absolute
  * (relative to `s`, not to `s + start`). */
 int64_t mojo_str_find_from(char *s, char *needle, int64_t start, int64_t stop) {
-    return _mojo_str_find_window(s, needle, start, stop, 0);
+    if ((intptr_t)s < 65536 || (intptr_t)needle < 65536) return -1;
+    if (!s || !needle) return -1;
+    /* start/stop are in codepoint units now */
+    int64_t byte_start = mojo_utf8_codepoint_to_byte_offset(s, start);
+    int64_t byte_stop;
+    if (stop == MOJO_SLICE_STOP_OMITTED) {
+        byte_stop = (int64_t)strlen(s);
+    } else {
+        /* stop is exclusive end in codepoints? Or we need to search within range */
+        byte_stop = mojo_utf8_codepoint_to_byte_offset(s, stop);
+    }
+    int64_t slen = (int64_t)strlen(s);
+    if (byte_start > slen || byte_stop < byte_start) return -1;
+    int64_t nlen = (int64_t)strlen(needle);
+    if (nlen == 0) return start;
+    for (int64_t i = byte_start; i + nlen <= byte_stop; i++) {
+        if (memcmp(s + i, needle, (size_t)nlen) == 0) {
+            return mojo_utf8_codepoint_index(s, i);
+        }
+    }
+    return -1;
 }
 
 /* Deliberately NOT named mojo_getenv: `getenv` is in _FORCE_RENAME_RESERVED
@@ -14699,33 +14645,11 @@ void mojo_cstr_or_int_release(int64_t orig, char *s) {
      it is the SAME predicate mojo_cstr_or_int_str chose the branch with: a
      registered list is the only value that produces this kind of string, so
      the two cannot disagree about which allocation `s` is. */
-    /* A regex match's repr (`mojo_re_match_repr`) is an ordinary malloc of its
-     * own size, not a pool block: pooling it would hand a block that may be
-     * larger than _INT_STR_BLOCK out as an Int key's scratch. Freed outright,
-     * like the other two non-integer spellings. */
-    if (mojo_is_registered_list(orig) || mojo_is_registered_bytes(orig)
-            || mojo_is_re_match(orig)) { free(s); return; }
+    if (mojo_is_registered_list(orig) || mojo_is_registered_bytes(orig)) { free(s); return; }
     /* `s` is the decimal `mojo_cstr_or_int_str` made through mojo_str_from_int,
      * i.e. a block from `_int_str_block`: back to the pool it came from. */
     *(char **)s = _int_str_pool;
     _int_str_pool = s;
-}
-
-/* `str(v)` for a word the codegen treats as an Int (the int arm of
- * `_stringify_value`): the spelling `mojo_cstr_or_int_str` gives, as a FRESH
- * heap string the caller owns outright. The conversion's own result is
- * borrowed (a str word), transient (a pool block) or a heap string of its own
- * (a box, a container repr); it is copied here and released through its own
- * protocol, so the copy is always the caller's to free. The codegen registers
- * the result as fresh, which lets `len`, `+` and an f-string cat free it after
- * its one use. Before this, `len(String(i))` and `"n=" + String(i)` never
- * freed the conversion: ~32 B per iteration, measured over 100k and 400k. */
-char *mojo_str_word_fresh(int64_t v)
-{
-    char *s = mojo_cstr_or_int_str(v);
-    char *d = strdup(s);
-    mojo_cstr_or_int_release(v, s);
-    return d;
 }
 
 /* The dict-STORE twin of `mojo_cstr_or_int_release`: the SAME ownership
