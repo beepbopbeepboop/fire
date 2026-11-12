@@ -2361,6 +2361,15 @@ def _src_loc(src: str, pos: int, filename: str = "") -> str:
     return f"{line}:{col}: "
 
 
+def _warn_fn_keyword(filename, tok) -> None:
+    """Stage 1 of the `fn` removal (bugs/DIAGNOSTICS_fn_keyword_is_accepted_should_warn_then_refuse.md):
+    a `fn` DEFINITION is still accepted, and it draws the real compiler's
+    message at the keyword. An identifier named `fn` is not a definition and is
+    not reported: CPython code uses it as a name, and the parser accepts that."""
+    loc = f"{filename}:{tok.line}:{tok.col}: " if filename else f"{tok.line}:{tok.col}: "
+    print(f"{loc}warning: 'fn' has been removed; use 'def' instead", file=sys.stderr)
+
+
 def py_tokenize(src: str) -> list[Token]:
     """Tokenize with layout rules derived from the .md spec:
         - Indentation (4 spaces) → INDENT/DEDENT
@@ -8710,6 +8719,8 @@ class Parser:
         if t.kind == "NAME" and t.value in ("async", "__async"):
             nxt = self._peek(1)
             if nxt.kind == "KW" and nxt.value in ("def", "fn"):
+                if nxt.value == "fn":
+                    _warn_fn_keyword(self._filename, nxt)
                 self._advance()  # consume 'async'/'__async'
                 self._advance()  # consume 'def'/'fn'
                 return self._parse_funcdef([], is_async=True)
@@ -8790,6 +8801,7 @@ class Parser:
                     if not looks_like_funcdef:
                         pass  # fall through to expression statement
                     else:
+                        _warn_fn_keyword(self._filename, t)
                         self._advance(); return self._parse_funcdef([])
                 else:
                     self._advance(); return self._parse_funcdef([])
@@ -9000,6 +9012,8 @@ class Parser:
                 self._advance()
                 kw = self._peek()
             if kw.kind == "KW" and kw.value in ("def", "fn"):
+                if kw.value == "fn":
+                    _warn_fn_keyword(self._filename, kw)
                 self._advance()
                 return self._parse_funcdef(decs, is_async=is_async)
             # Field-level decorators (e.g. @__allow_legacy_any_origin_fields)

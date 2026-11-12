@@ -1,6 +1,8 @@
 # DIAGNOSTICS: the removed `fn` keyword is accepted; warn now, refuse once the hits are gone
 
-Status: OPEN, planned work. Filed 2026-11-11 on master. Nothing here is implemented yet.
+Status: STAGE 1 LANDED (warning). STAGE 2 (refusal) OPEN, waiting on the hit list.
+
+Stage 1: `fire_compiler.py`'s `_warn_fn_keyword` prints `warning: 'fn' has been removed; use 'def' instead` at the keyword of a `fn` DEFINITION (statement, decorated, async). An identifier `fn` is not reported. Pinned by `test_out_param_return_type_diagnostic.py`. The hit list is what the warning turns up in test runs; it is not collected yet.
 
 ## What the real compiler does (measured, `tools/mojo build`, 2026-11-11)
 
