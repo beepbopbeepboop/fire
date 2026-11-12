@@ -342,8 +342,29 @@ def test_constrained_in_comptime_for_str_alias_true():
         '        constrained[c == "a" or c == "b", "ok"]()\n')
 
 
+def test_constrained_in_comptime_for_list_comprehension_fails():
+    try:
+        _compile('fn f():\n'
+                 '    comptime vals = [i * 2 for i in range(3)]\n'
+                 '    comptime for v in vals:\n'
+                 '        constrained[v != 4, "bad"]()\n')
+    except RuntimeError as e:
+        assert 'constraint failed: bad' in str(e), e
+        return
+    raise AssertionError('comprehension element 4 did not fail constrained')
+
+
+def test_constrained_in_comptime_for_list_comprehension_true():
+    _compile('fn f():\n'
+             '    comptime vals = [i * 2 for i in range(3)]\n'
+             '    comptime for v in vals:\n'
+             '        constrained[v != 5, "ok"]()\n')
+
+
 if __name__ == '__main__':
     test_constrained_bracket_false_fails()
+    test_constrained_in_comptime_for_list_comprehension_fails()
+    test_constrained_in_comptime_for_list_comprehension_true()
     test_constrained_bracket_false_no_msg()
     test_constrained_bracket_true_passes()
     test_constrained_comparison_fails()

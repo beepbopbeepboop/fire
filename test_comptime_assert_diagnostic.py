@@ -580,8 +580,62 @@ def test_blank_line_between_string_literals_is_not_merged():
     assert [type(s).__name__ for s in body] == ['AssignStmt', 'ExprStmt'], body
 
 
+def test_comptime_assert_in_comptime_for_list_comprehension():
+    try:
+        _compile('fn f():\n'
+                 '    comptime vals = [i * 2 for i in range(3)]\n'
+                 '    comptime for v in vals:\n'
+                 '        comptime assert v != 4, "bad"\n')
+    except RuntimeError as e:
+        assert 'comptime assertion failed: bad' in str(e), e
+        return
+    raise AssertionError('comprehension element 4 did not fail the comptime assert')
+
+
+def test_comptime_assert_in_comptime_for_list_comprehension_true():
+    _compile('fn f():\n'
+             '    comptime vals = [i * 2 for i in range(3)]\n'
+             '    comptime for v in vals:\n'
+             '        comptime assert v != 5, "ok"\n')
+
+
+def test_comptime_assert_in_comptime_for_comprehension_filter():
+    try:
+        _compile('fn f():\n'
+                 '    comptime vals = [i for i in range(5) if i > 2]\n'
+                 '    comptime for v in vals:\n'
+                 '        comptime assert v != 4, "bad"\n')
+    except RuntimeError as e:
+        assert 'comptime assertion failed: bad' in str(e), e
+        return
+    raise AssertionError('filtered comprehension element 4 did not fail')
+
+
+def test_comptime_assert_in_comptime_for_direct_comprehension():
+    try:
+        _compile('fn f():\n'
+                 '    comptime for v in [i * 2 for i in range(3)]:\n'
+                 '        comptime assert v != 4, "bad"\n')
+    except RuntimeError as e:
+        assert 'comptime assertion failed: bad' in str(e), e
+        return
+    raise AssertionError('direct comprehension element 4 did not fail')
+
+
+def test_comptime_assert_comprehension_over_unknown_stays_unfolded():
+    # A comprehension over a runtime value must not fold: it compiles as before.
+    _compile('fn g(values: List[Int]):\n'
+             '    comptime for v in [x * 2 for x in values]:\n'
+             '        comptime assert v != 4, "bad"\n')
+
+
 if __name__ == '__main__':
     test_comptime_assert_false_fails()
+    test_comptime_assert_in_comptime_for_list_comprehension()
+    test_comptime_assert_in_comptime_for_list_comprehension_true()
+    test_comptime_assert_in_comptime_for_comprehension_filter()
+    test_comptime_assert_in_comptime_for_direct_comprehension()
+    test_comptime_assert_comprehension_over_unknown_stays_unfolded()
     test_comptime_assert_adjacent_literal_message()
     test_comptime_assert_adjacent_literal_message_integration_shape()
     test_blank_line_between_string_literals_is_not_merged()
