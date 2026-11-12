@@ -1,0 +1,42 @@
+direct CODEGEN rows: 88; distinct normalised causes: 46
+1	bootstrap_test_classes.mojo	build: create_point returns a frame address, and the returned-frame convention needs a caller to reserve a block and pass its address — and create_point is this
+2	formal/build.py	build: parse error: /Users/mrs/net/chatgpt/claude/mojo-reference2/formal/build.py:19162:19: Unexpected COLON(':')
+3	formal/hostmods/subprocess.mojo	build: run returns a frame address, so it needs one hidden word for the caller's block — and it already takes 14 arguments, which is this path's whole argument 
+4	formal/x86_64_decode.py	build: decode_one returns a frame address on one path and falls off the end of its body on another, so a caller that reserved a block for the result would read 
+5	runtime/stdlib_wrapper.mojo	build: main: `now` is called, and it is imported from `time`, so the call has to bind a symbol `time` exports. **`time` declares no function or struct named `no
+6	t1.mojo	build: sys.exit(): `sys` is a linked module but it exports no `exit`, so the call has no symbol to bind. What it does export: api_version, byteorder, flush_outp
+7	test_arm64_encoders.py	build: parse error: /Users/mrs/net/chatgpt/claude/mojo-reference2/test_arm64_encoders.py:933:0: Expected RPAREN got EOF('')
+8	test_char_star_local_regress.py	build: print() cannot tell whether SubscriptExpr is a string or a number on the formal arm64 path, and guessing would print an address as if it were text (or a 
+9	test_dict_literal_container_key_pin.py	build: d['a'] is a subscript whose index is a tuple. A value here is one 64-bit word and a list is a flat blob of words, so a tuple index has no representation 
+10	test_exception_object_attributes_regression.py	build: f.read() is a method call on a value, and this backend lowers only add, append, clear, close, write (on a file descriptor) and the string methods count, 
+11	test_formal_globals.py	build: parse error: /Users/mrs/net/chatgpt/claude/mojo-reference2/test_formal_globals.py:2332:0: Expected RPAREN got EOF('')
+12	test_formal_hostmods_conformance.py	build: parse error: /Users/mrs/net/chatgpt/claude/mojo-reference2/test_formal_hostmods_conformance.py:1256:28: Expected ASSIGN got COLON(':')
+13	test_formal_interop.py	build: parse error: /Users/mrs/net/chatgpt/claude/mojo-reference2/test_formal_interop.py:577:46: Expected ASSIGN got COLON(':')
+14	test_formal_os_backing.py	build: parse error: /Users/mrs/net/chatgpt/claude/mojo-reference2/test_formal_os_backing.py:2071:15: Expected ASSIGN got COLON(':')
+15	test_formal_shlex.py	build: parse error: /Users/mrs/net/chatgpt/claude/mojo-reference2/test_formal_shlex.py:580:13: Expected ASSIGN got COLON(':')
+16	test_formal_str_methods.py	build: parse error: /Users/mrs/net/chatgpt/claude/mojo-reference2/test_formal_str_methods.py:674:27: Expected ASSIGN got COLON(':')
+17	test_llm/dumb_gemm.mojo	build: [FloatLiteral] * m * k is a REPETITION, and this path can only lower one whose count it can read while emitting: the result is len(xs) x n element slots 
+18	test_pin_FORMAL_declared_parameter.py	build: test_pin_declared_param_fix_present: 'os' has no home: the module-level symbol table is empty for this unit, and the reading function declares no local o
+19	test_regress_callable_ctype_param.py	build: test_callable_ctype_parameterized: 'types' is imported from `mojo.middle`, and it is a module-level name of another module. This path compiles an import 
+20	test_regress_gencodec_pinned.py	build: test_gencodec_compile_exits_0: sys.path reads 'path' out of the imported module `sys`, and a module is not a value this path can place: there is no regis
+21	test_regress_split_coro.py	build: __module_body__: sys.path reads 'path' out of the imported module `sys`, and a module is not a value this path can place: there is no register, frame slo
+22	test_regress_stale_budget_literal_fix.py	build: test_gimple_uses_shared_constants_at_named_sites: 'os' has no home: the module-level symbol table is empty for this unit, and the reading function declar
+23	test_relaxed_imports.mojo	build: '+' on two strings is refused on this path. A string here is a bare `char *`, so `+` is integer arithmetic on two addresses, and what it produced was mea
+24	tmpe7tqx39y.mojo	build: main: os.O_RDWR reads 'O_RDWR' out of the imported module `os`, and a module is not a value this path can place: there is no register, frame slot or `__D
+25	tools/test_swarm_class_refresh.py	build: parse error: /Users/mrs/net/chatgpt/claude/mojo-reference2/tools/test_swarm_class_refresh.py:106:61: Unexpected COLON(':')
+26	unescape_c.py	build: __module_body__: sys.stdin reads 'stdin' out of the imported module `sys`, and a module is not a value this path can place: there is no register, frame s
+27	../new-modular/Mojo/stdlib/std/algorithm/backend/tile.mojo	build: tile: 'tile_size_list' has no home: this module declares no module-level name by that spelling, and the reading function declares no local or parameter b
+28	../new-modular/Mojo/stdlib/std/benchmark/compiler.mojo	build: inlined_assembly['', NoneType, 'r,~{memory}', True] is a subscript whose index is a tuple. A value here is one 64-bit word and a list is a flat blob of w
+29	../new-modular/Mojo/stdlib/std/benchmark/quick_bench.mojo	build: QuickBench.run: `keep` is called, and it is imported from `.compiler`, so the call has to bind a symbol `.compiler` exports. That module does not export 
+30	../new-modular/Mojo/stdlib/std/builtin/builtin_slice.mojo	build: Slice.write_to: `FormatStruct` is called, and it is imported from `std.format._utils`, so the call has to bind a symbol `std.format._utils` exports. That
+31	../new-modular/Mojo/stdlib/std/builtin/_format_float.mojo	build: _write_float: `isnan` is called, and it is imported from `std.utils.numerics`, so the call has to bind a symbol `std.utils.numerics` exports. That module
+32	../new-modular/Mojo/stdlib/std/builtin/len.mojo	build: a `...` stands where this path needs instructions to emit, and there are none: a formal image is a compiled program, so every function it lowers must hav
+33	../new-modular/Mojo/stdlib/std/builtin/none.mojo	build: writer.write_string() is a method on a Writer — a multi-field struct, so on this path the receiver is the ADDRESS of a frame of 8-byte slots, not a file 
+34	../new-modular/Mojo/stdlib/std/builtin/type_aliases.mojo	build: the module-level comptime binding 'Never' is initialized from an MLIR type template: __mlir_type.`!kgen.never` names an MLIR TYPE, not a value: the templ
+35	../new-modular/Mojo/stdlib/std/format/repr.mojo	build: value.write_repr_to() is a method call on a value, and this backend lowers only add, append, clear, close, write (on a file descriptor) and the string me
+36	../new-modular/Mojo/stdlib/std/memory/alloc.mojo	build: ThinAllocation_1_T_1_T.write_to: `FormatStruct` is called, and it is imported from `std.format._utils`, so the call has to bind a symbol `std.format._uti
+37	../new-modular/Mojo/stdlib/std/origin/__init__.mojo	build: the module-level comptime binding 'AnyOrigin' is initialized from an MLIR attribute template: __mlir_attr[`#lit.any.origin : !lit.origin<`, +mut._mlir_va
+38	../new-modular/Mojo/stdlib/std/os/path/path.mojo	build: getsize: `stat` is called, and it is imported from `..fstat`, so the call has to bind a symbol `..fstat` exports. That module does not export it, and the
+39	../new-modular/Mojo/stdlib/std/random/_rng.mojo	build: _PhiloxWrapper.__init__: `PhiloxRandom` is called, and it is imported from `.philox`, so the call has to bind a symbol `.philox` exports. **`.philox` dec
+40	../new-modular/Mojo/stdlib/std/sys/arg.mojo	build: Span[StaticString, ImmStaticOrigin] is a compile-time explicit-parameter list on a generic, not a subscript: the brackets name types and comptime values,
+41	../new-modular/Mojo/stdlib/std/utils/_serialize.mojo	build: _serialize_elements[serialize_fn, True] is a compile-time explicit-parameter list on a generic, not a subscript: the brackets name types and comptime val

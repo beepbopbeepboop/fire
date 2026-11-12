@@ -1415,6 +1415,79 @@ def test_module_scoped_cross_module_ctor_arg_through_a_param() -> bool:
     return ok
 
 
+def test_inlined_module_method_declarations_agree_after_cleanup() -> bool:
+    """Root-cause pin for the 2026-11-08 `make check` linkmode job failure
+    (35 passed, 23 failed; its bug doc is deleted by this fix): the
+    per-module AST-lifetime cleanup at the END of gen_module_impl used to
+    .clear() its accumulators IN PLACE, and it runs for the throwaway
+    temp_gen of every inlined (link-mode) module — whose `_cur_func_body`
+    is a direct reference to the LAST lowered function's body list in the
+    parsed module AST, i.e. one of the very list objects the ROOT's
+    `imported_stmts` holds in the same translation unit. The in-place
+    clear therefore emptied that body inside the root's AST mid-compile;
+    the root's later inference read the empty body and re-inferred the
+    unannotated `label` method as void, emitting a second prototype
+    `void insp_Parameter_label(Parameter *)` against the inlined
+    section's correct `char *` definition — a hard gcc "conflicting
+    types" error. (The sibling cases above pin the same wipe through its
+    other symptoms — a silently mistyped value, a mistyped constructor
+    field — this one pins the mechanism itself.) The cleanup must detach
+    this gen's references, never mutate shared state, so after a
+    link-mode compile:
+
+      * the root's own `func_return_types` carries the return type inferred
+        from the INTACT body (`char *`, not `void`), and
+      * every declaration of the inlined method's symbol in the root's
+        translation unit agrees with the definition's type — no
+        `void`/`int64_t`/… redeclaration of a `char *` function.
+
+    White-box on the generated C via `_run_pipeline` (no gcc, no binary):
+    the C-text assertion catches the conflicting declaration on a toolchain
+    lenient enough to link it, and the runtime-value side of this shape is
+    already pinned by the sibling build-and-run cases above."""
+    pkg = {
+        'insp.py': _LABEL_PY,
+        'f8.py': (
+            'import insp\n'
+            '\n'
+            'def show(p):\n'
+            '    return p.label()\n'
+            '\n'
+            'def main():\n'
+            '    print(show(insp.Parameter(\'v\', 7)))\n'
+            '\n'
+            'main()\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        for rel, src in pkg.items():
+            with open(os.path.join(td, rel), 'w') as f:
+                f.write(src)
+        entry = os.path.join(td, 'f8.py')
+        with open(entry) as f:
+            entry_src = f.read()
+        cwd = os.getcwd()
+        os.chdir(td)
+        try:
+            import gimple_codegen
+            code, gen = gimple_codegen._run_pipeline(
+                entry_src, filename=entry, link_mode=True)
+        finally:
+            os.chdir(cwd)
+    _frt = getattr(gen, 'func_return_types', None)
+    inferred = _frt.get('Parameter_label') if isinstance(_frt, dict) else None
+    conflicting = re.findall(
+        r'(?m)^\s*(void|int64_t|int|double|_Bool)\s+insp_Parameter_label\s*\(',
+        code)
+    correct = re.findall(r'char\s*\*\s*insp_Parameter_label\s*\(', code)
+    ok = (inferred == 'char *' and not conflicting and bool(correct))
+    if not ok:
+        print(f"  ✗ inlined_module_method_declarations_agree_after_cleanup: "
+              f"inferred={inferred!r} conflicting={conflicting} "
+              f"char_star_decls={len(correct)}")
+    return ok
+
+
 def test_dotted_sibling_import_qualifier_agrees() -> bool:
     """`from p.sub import tri` — a DOTTED module name — at MODULE scope, and
     again from inside a function. The mangled symbol's two halves come from
@@ -2520,6 +2593,7 @@ CASES = [
     test_str_var_arg_not_shadowed_by_nested_def_literal,
     test_module_scoped_cross_module_struct_ctor_both_import_spellings,
     test_module_scoped_cross_module_ctor_arg_through_a_param,
+    test_inlined_module_method_declarations_agree_after_cleanup,
     test_dotted_sibling_import_qualifier_agrees,
     test_builtin_open_is_not_ambiguous_from_transitive_siblings,
     test_unannotated_param_with_disagreeing_call_sites,

@@ -4031,7 +4031,7 @@ def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,
             f"measured and settled in bugs/FORMAL_known_limits.md 1.1; a module "
             f"that needs to publish mutable state rather than functions is a "
             f"different gap, written down in "
-            f"FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)")
+            f"FORMAL_module_state_no_storage.md (deleted; fixed by cross-module accessors for writable globals)")
     refusal = dylib_value_member_refusal(name, module, leaf, by_module,
                                          forwarded)
     if refusal:
@@ -4061,7 +4061,7 @@ def dylib_value_member_refusal(name: str, module: str, leaf: str,
     The discriminator is the PARENT's own table: `attr` is an export of the
     module one link up (`environ` is a function of `os`), and a function is a
     value, not a library. So `mod.attr.member(...)` is a call through a value,
-    which is the shape `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted)` §(2) is about, and the
+    which is the shape `FORMAL_module_state_no_storage.md (deleted)` §(2) is about, and the
     sentence says that rather than the linker.
 
     **THE REPAIR IS NAMED, and it is read off the same table.** A module that
@@ -4106,7 +4106,7 @@ def dylib_value_member_refusal(name: str, module: str, leaf: str,
             f"it to bind. A dylib publishes functions, not the objects they "
             f"are called on, so an operation on a value a module hands back "
             f"cannot be spelled as a member of it; {repair}. "
-            f"FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals) §(2) records why a value "
+            f"FORMAL_module_state_no_storage.md (deleted; fixed by cross-module accessors for writable globals) §(2) records why a value "
             f"cannot cross a dylib boundary at all")
 
 
@@ -4191,7 +4191,7 @@ def imported_function_as_a_value_refusal(name: str, mod: str, fn_name: str,
             f"dylib publishes functions, not the objects they are called on, so "
             f"an operation on a value a module hands back cannot be spelled as a "
             f"member of it; {repair}. "
-            f"FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals) §(2) records why a value "
+            f"FORMAL_module_state_no_storage.md (deleted; fixed by cross-module accessors for writable globals) §(2) records why a value "
             f"cannot cross a dylib boundary at all")
 
 
@@ -4312,7 +4312,7 @@ def _module_is_linked(by_module: dict, forwarded: dict, module: str) -> bool:
 #
 # A dylib cannot export a VARIABLE: there is nowhere for one to live, because
 # every value a formal program can name lives in a function's own stack scratch
-# (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`). But a module-level name the build
+# (`FORMAL_module_state_no_storage.md (deleted; fixed by cross-module accessors for writable globals)`). But a module-level name the build
 # FOLDED to a literal needs no storage, for the reason the in-unit substitution
 # already relies on: the module-level sequence is its only writer, and a
 # function that writes the name writes a LOCAL of the same name, which shadows

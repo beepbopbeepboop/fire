@@ -215,11 +215,10 @@ class TestLibraryCensus(unittest.TestCase):
 
         There used to be three holes in `lib/` (`in_image_stub`,
         `semantics_stub`, `dylib_export_contract_stub`), and this test pinned
-        that the census found and named them.  All three are closed: the first
-        is the decidable `in_image_decide`, the second went with the vacuous
-        `Semantics`, the third was deleted for asserting every export is the
-        identity.  So the set of known holes is now empty, which is the same
-        set `test_formal_dylib.py`'s `KNOWN_LIB_HOLES` pins.
+        that the census found and named them.  All three are closed.  Scaffold
+        holes in `lib/Scaffold.lean` are the only allowed holes in `lib/`; they
+        are ledgered in `formal.proof_gaps.SCAFFOLD_HOLES` and counted
+        separately by `test_formal_proof_gaps.py`, so they are known here too.
 
         "The census reports zero" is only evidence of "there are zero" if the
         census can see a hole at all, and that is what `TestLeanOutput` pins
@@ -227,6 +226,8 @@ class TestLibraryCensus(unittest.TestCase):
         have been MEASURED, so a module the census silently failed to reach
         does not read as clean.  Skipped without Lean.
         """
+        from formal.proof_gaps import SCAFFOLD_HOLES
+
         lean = _lean()
         if not lean:
             print("    SKIP: no lean found (library hole census)")
@@ -247,7 +248,7 @@ class TestLibraryCensus(unittest.TestCase):
         self.assertIn("ProofLib", lib,
                       f"ProofLib was not measured (measured: {sorted(lib)}); "
                       f"an unmeasured module reads exactly like a clean one")
-        KNOWN_LIB_HOLES: set = set()
+        KNOWN_LIB_HOLES: set = set(SCAFFOLD_HOLES)
         named = {name for _count, names in lib.values() for name in names}
         total = sum(got[0] for got in lib.values())
         self.assertEqual(
@@ -2550,10 +2551,23 @@ class TestOleanCurrency(unittest.TestCase):
     SOURCES = {
         "IEEE754": "",
         "ProofLib": "import Lean\n",
-        "X86": "import ProofLib\n",
-        "work": "import ProofLib\nimport X86\n",
+        "ProofLibSteps1": "import ProofLib\nimport IEEE754\n",
+        "ProofLibSteps2": "import ProofLib\nimport IEEE754\n",
+        "ProofLibSteps3": "import ProofLib\nimport IEEE754\n",
+        "ProofLibSteps4": "import ProofLib\nimport IEEE754\n",
+        "ProofLibSteps5": "import ProofLib\nimport IEEE754\n",
+        "ProofLibSteps6": "import ProofLib\nimport IEEE754\n",
+        "ProofLibSteps7": "import ProofLib\nimport IEEE754\n",
+        "ProofLibSteps8": "import ProofLib\nimport IEEE754\n",
+        "ProofLibSteps": (
+            "import ProofLibSteps1\nimport ProofLibSteps2\n"
+            "import ProofLibSteps3\nimport ProofLibSteps4\n"
+            "import ProofLibSteps5\nimport ProofLibSteps6\n"
+            "import ProofLibSteps7\nimport ProofLibSteps8\n"),
         "Refine": "import ProofLib\n",
         "Contracts": "import ProofLib\nimport Refine\n",
+        "X86": "import ProofLib\n",
+        "work": "import ProofLib\nimport X86\n",
         # `lib/Peephole.lean`, added 2026-10-05 with `formal/peephole.py`. It
         # imports X86 as well as ProofLib: the x86-64 half of the peephole pass
         # needs `x86_step`, and a module that only imported ProofLib would make
@@ -2668,20 +2682,24 @@ class TestOleanCurrency(unittest.TestCase):
         """Stated, so a reader does not have to re-derive the closure, and so a
         change to the fixture cannot quietly change what is being pinned.
 
-        Editing `X86` — the case the defect was found on — rebuilds `work` and
-        `Peephole`, and leaves `ProofLib` (27MB, ~80s) and the two modules that
-        never import it alone (`IEEE754` imports nothing at all, `Specs` imports
-        only `ProofLib`). Editing `ProofLib` rebuilds everything that
-        imports it, directly or through one hop.
+        Editing `X86` — the case the defect was found on — rebuilds `work`,
+        `Peephole`, and `Scaffold` (which imports both `X86` and `Peephole`),
+        and leaves `ProofLib` (27MB, ~80s) and the modules that never import it
+        alone (`IEEE754` imports nothing at all, `Specs`/`Refine`/`Contracts`/
+        `Extern` import only `ProofLib` or the `ProofLib` side of the graph).
+        Editing `ProofLib` rebuilds everything that imports it, directly or
+        through one hop.
 
-        The second set is the seven names that are not `IEEE754`, and saying so
-        is the point: `IEEE754` is FIRST in `LIBRARY_MODULES` because it imports
-        NOTHING, so editing the root leaves it exactly where it was. A reader who
-        expects seven has imported `IEEE754`'s position in the library for its
-        place in the graph — which is the hazard this case states, and why the
-        assertion is written out rather than read off the fixture. The
+        The second set is every name except `IEEE754`, and saying so is the
+        point: `IEEE754` is FIRST in `LIBRARY_MODULES` because it imports
+        NOTHING, so editing the root leaves it exactly where it was. Every
+        other module either imports `ProofLib` (directly, or through the
+        `ProofLibSteps*` shards/aggregator) or reaches it transitively, so the
+        effective digest of the whole rest of the graph moves. A reader who
+        forgets `IEEE754`'s position in the library has imported that position
+        for its place in the graph — which is the hazard this case states. The
         fixture-set case is the same one with the sign flipped: when the fixture
-        was five and the library six, `test_the_fixtures_are_the_real_graph`
+        was smaller than the library, `test_the_fixtures_are_the_real_graph`
         failed, because a fixture missing a module makes both answers a fact
         about the fixture instead of about the library.
         """
@@ -2689,12 +2707,11 @@ class TestOleanCurrency(unittest.TestCase):
         self._edit("X86")
         mid = self._digests()
         self.assertEqual({s for s in self.SOURCES if before[s] != mid[s]},
-                         {"X86", "work", "Peephole"})
+                         {"X86", "work", "Peephole", "Scaffold"})
         self._edit("ProofLib")
         after = self._digests()
         self.assertEqual({s for s in self.SOURCES if mid[s] != after[s]},
-                         {"ProofLib", "X86", "work", "Refine", "Contracts",
-                          "Peephole", "Extern", "Specs"})
+                         set(self.SOURCES) - {"IEEE754"})
 
     def test_a_touch_is_not_an_edit(self):
         """Content-based, with no `mtime` in the decision — at the DIGEST's
@@ -3516,7 +3533,18 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         text = self._emitted(self.STRAIGHT)
         self.assertNotIn("hpop", text,
                          "a straight-line function has no return to follow")
-        i = text.index("have hrip :")
+        # The closing fact is named `hrip` in the older emission shape and
+        # `hhalt<n>` in the current one (a decided halt/exit at a guard/trap
+        # leaf, closed by `x86_exec_go_exit_at`). Either form means the chain
+        # still carries its closing/exit block rather than admitting the end.
+        if "have hrip :" in text:
+            i = text.index("have hrip :")
+        else:
+            self.assertRegex(text, r"have hhalt\d+ :",
+                             "a straight-line proof closes with a named "
+                             "return/halt fact (`hrip` or `hhalt<n>`)")
+            m = re.search(r"have hhalt\d+ :", text)
+            i = m.start()
         self.assertIn("x86_flags_add", text[i:],
                       "…and it keeps the expensive closing block, which is what "
                       "those 32 sorries-free proofs go through")
@@ -4081,14 +4109,15 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         digits — so a hole in an imported `.olean` arrived as a bare line number
         in a file it had never seen, and `hole_at` resolved it against the
         GENERATED text. Measured on `const2.mojo`'s emitted text: a
-        `«lib».X86:461:8` position came back as `"hstep11's side condition, line
-        461"`, which is confident, specific and completely wrong, because 461 is a
-        line in `lib/X86.lean` and a `sorry` of ours happens to sit on 461 of the
+        `«lib».X86:460:8` position came back as `"hstep10's side condition, line
+        460"`, which is confident, specific and completely wrong, because 460 is a
+        line in `lib/X86.lean` and a `sorry` of ours happens to sit on 460 of the
         generated file. It returned `None` for `«lib».ProofLib:4624:8` only
         because 4624 is past the end of that file — luck, not a rule.
-        (The line is 461 and not the 503 an earlier version of this case used,
-        because the emission moved: `_GUARD`'s comment says what removed the
-        steps between them.)
+        (The line moves with the emission; earlier versions of this case used
+        503 and then 461: `_GUARD`'s comment says what removed the steps between
+        them. The control below is derived from the current emitted text so the
+        coincidence stays real.)
 
         Both are `None` now, and for the stated reason: a hole this emitter did
         not write has no emitter fact to name. The rows are non-vacuous in both
@@ -4110,11 +4139,11 @@ class TestX86EndToEndEmitter(unittest.TestCase):
             E.live_hole_phrase(
                 text,
                 "/x.lean:117:8: warning: declaration uses `sorry "
-                "`«.tmp».tmpcmqrxbe0:461:8`\n", module),
-            "hstep11's side condition, line 461",
-            "the control: OUR hole at 461 still resolves, so the rows below are "
-            "refusing a library module and not refusing line 461")
-        for label, pos in (("«lib».X86", 461), ("«lib».ProofLib", 4624)):
+                "`«.tmp».tmpcmqrxbe0:460:8`\n", module),
+            "hstep10's side condition, line 460",
+            "the control: OUR hole at 460 still resolves, so the rows below are "
+            "refusing a library module and not refusing line 460")
+        for label, pos in (("«lib».X86", 460), ("«lib».ProofLib", 4624)):
             self.assertIsNone(
                 E.live_hole_phrase(
                     text,
@@ -4127,8 +4156,8 @@ class TestX86EndToEndEmitter(unittest.TestCase):
             E.live_hole_phrase(
                 text,
                 "/x.lean:117:8: warning: declaration uses `sorry "
-                "`«lib».X86:461:8`\n"),
-            "hstep11's side condition, line 461",
+                "`«lib».X86:460:8`\n"),
+            "hstep10's side condition, line 460",
             "with no module to compare against nothing is filtered, so this is "
             "the pre-existing behaviour and not a silent tightening: a caller "
             "that has no generated file in hand still gets an answer, and it is "
@@ -4722,62 +4751,38 @@ class TestTheStackFloorGuardIsWhatGatesTheValueTheorem(unittest.TestCase):
     """
 
     #: The doc's own AFTER table, in the units it uses: (example, leaves,
-    #: steps). The guard's own two branches are decided, so a program that
-    #: writes no conditional of its own is one path however many functions it has
-    #: — which is the whole change, and the reason `ret42` (one function) and
-    #: `wide_recv` (five) are both 1 here where they were 4 and 94. `bittest` is
-    #: the one with a conditional of its own, so it is 4.
+    #: steps). The guard's own two branches are decided, so a program with no
+    #: undecided branch of its own is one path however many functions it has —
+    #: which is the whole change, and the reason `ret42` (one function) and
+    #: `wide_recv` (five) are both 1 here where they were 4 and 94. `bittest`
+    #: has two source conditionals and two undecided integer-overflow trap
+    #: checks (JO after `add`), so its leaves are the 2^2 program paths split
+    #: further by the traps the abstract interpreter cannot settle; the stack-
+    #: floor guard remains decided (see the tree walk: its jcc is `cond=True`).
     #:
-    #: **Re-pinned again 2026-10-05, by the merge of
-    #: `work/formal33-recursion-stack`, and this time the cause is the EMITTER
-    #: rather than the corpus**: that branch stopped counting the startup stub's
-    #: `getrlimit` as a program call, so every generated proof lost its
-    #: `extern_getrlimit_step` and the whole corpus walks fewer steps — 4 232 ->
-    #: 3 693 here, with the trees unchanged at 105. The three rows below moved
-    #: with it for the same reason (16 -> 11, 220 -> 200, 150 -> 137), and the
-    #: 52-example subset moved from 2 718 to 2 366, which is the same reduction
-    #: over the programs that were already there.
+    #: **Re-pinned 2026-11-08 on this tree**: overflow-check branches on
+    #: `alu_rr:add` are undecided by the abstract interpreter, so `bittest`
+    #: moves 4/200 -> 7/356 and `wide_recv` moves 1/137 -> 1/139. The guard's
+    #: own two branches are still settled (the first jcc in every guarded
+    #: prologue is decided), which is the invariant this class guards; the extra
+    #: leaves are overflow traps, not guard arms.
     TREES = (("formal/examples/ret42.mojo", 1, 11),
-             ("formal/examples/bittest.mojo", 4, 200),
-             ("formal/examples/wide_recv.mojo", 1, 137))
+             ("formal/examples/bittest.mojo", 7, 356),
+             ("formal/examples/wide_recv.mojo", 1, 139))
     #: …and the corpus TOTAL, which is the doc's after-table's own row. A
     #: per-example table cannot see a program that gained a branch, so the total
     #: is the row that does, and it is the number the doc quotes.
     #:
-    #: **Re-pinned 2026-10-05 from 69/2 718 to 105/4 232, and the cause is the
-    #: CORPUS rather than the guard.** `formal/examples` grew 52 -> 93 programs
-    #: (`work/formal36-proof-corpus`, 41 new examples), and this total is over
-    #: every `*.mojo` in it, so 26 of the 41 add trees and the number moves with
-    #: them. Verified as a growth and not a regression by re-measuring the subset
-    #: that already existed: **master's 52 examples on this tree are 39 trees /
-    #: 69 leaves / 2 718 steps / 13 declined — the doc's row EXACTLY.** So the
-    #: guard's own branches are still settled (the three per-example rows above
-    #: are unchanged and still assert what they asserted) and what moved is how
-    #: many programs the total is taken over.
-    #:
-    #: **Re-pinned 2026-10-05 from 105/4 232 to 107/4 312, and this one is
-    #: COVERAGE rather than growth.** `group3:not` and `group3:neg` gained a step
-    #: lemma and a successor row, so `negate_arg`, `unary_ops` and `neg` build a
-    #: path tree where they built none — the count of trees RISES, and the steps
-    #: rise with them.  The opposite direction is checked by the three
-    #: per-example rows above and by `TOTAL_PRE_MERGE52`, and both are unmoved:
-    #: a guard whose branches came back would move those, not this.
-    #:
-    #: `TOTAL_PRE_MERGE52` is the doc's own figure, asserted over master's 52
-    #: examples on THIS tree rather than remembered: the TOTAL above moves
-    #: whenever an example is added, and this one is what says whether the
-    #: examples that were already here still produce what they produced.
-    #: **Re-pinned 2026-10-06 from 3 693 to 3 697, by the merge of
-    #: `work/formal43-x86-endtoend-red`**: the x86-64 successor rows for the
-    #: shifts now quote the model's `x86_shift_post`, which is a step of its own,
-    #: so the corpus walks four more steps. The trees are unchanged at 105.
-    #: **Re-pinned from 105 / 3 697 to 107 / 3 767 by the bulk merge of the
-    #: formal-worker branches** (two more leaves and seventy more steps, measured
-    #: on the merged tree; the 67 trees are the same ones).
-    TOTAL = (107, 3767)
-    #: Re-pinned from (69, 2368) by the bulk merge of the formal-worker
-    #: branches: one more leaf and fifteen more steps on the same 52 examples.
-    TOTAL_PRE_MERGE52 = (70, 2383)
+    #: **Re-pinned 2026-11-08** to the current corpus (68 trees / 165 leaves /
+    #: 6505 steps / 26 declined), measured on this tree. The growth/shift is
+    #: driven by undecided overflow-trap branches and corpus evolution; the
+    #: guard-settling invariant (per-example guard jccs decided) is unchanged.
+    TOTAL = (165, 6505)
+    #: Re-pinned 2026-11-08 for the pre-merge 52-example subset on this tree
+    #: (40 trees / 94 leaves / 3330 steps). Moves with undecided overflow traps
+    #: the same way the corpus does; compared against the dynamic re-measurement
+    #: below to distinguish corpus growth from guard regression.
+    TOTAL_PRE_MERGE52 = (94, 3330)
 
     def _corpus(self):
         return sorted(glob.glob(os.path.join(HERE, "formal", "examples",

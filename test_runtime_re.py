@@ -91,6 +91,7 @@ def main():
     print(q.split("a, b,c"))
     print(magic.sub(r'[\1]', "a*b?c"))
     print([x.group() for x in re.compile(r'\d+').finditer("a1b22c333")])
+    print([m.group(1) for m in re.compile(r'(.)\1').finditer("aabbcdde")])
     named = re.compile(r'(?P<k>\w+)=(?P<v>\w+)').match("key=val")
     print(named.group('k'), named.group('v'))
     print(re.compile(r'(?s:a.*)\z').match("a\nb") is not None)

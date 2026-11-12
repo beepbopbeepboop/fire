@@ -20,9 +20,9 @@ own stack scratch (`formal/model/builtins.py`, "What a value is") — so `getite
 `countOf` and `indexOf` want a sequence this path cannot name, and
 `itemgetter`, `attrgetter`, `methodcaller` and `call` want a first-class callable,
 which is REFUSED on this path whatever it is passed to (measured on both shapes,
-in `formal/hostmods/contextlib.mojo` and in
-`bugs/hard/COMPILE_FAIL_decorator_application_dropped.md`'s neighbourhood). Every one
-of those is named under "WHAT IS NOT HERE".
+in `formal/hostmods/contextlib.mojo` and in the neighbourhood where decorators
+are dropped by both backends). Every one of those is named under "WHAT IS NOT
+HERE".
 
 **SO EVERY ANSWER HERE IS WORD ARITHMETIC AND WRAPS.** That is not a shortcut and
 it is not an approximation of CPython's arbitrary-precision `int`; it is what the

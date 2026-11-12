@@ -100,21 +100,21 @@ opencode run --model opencode-go/deepseek-v4.1-flash "reply with the single word
 <p class="warn">The OLD form <code>opencode --model M run --dir D</code> now prints a usage screen and exits. If you probe models and see nothing, you are
 probably using the old form. The background service is <code>opencode serve --service</code>; <code>opencode service status|restart</code> manages it.</p>
 <h3>Pool and models (tools/pool.json is the source of truth)</h3>
-<p>A <b>slot</b> is one named model with a fixed worker count, a work class, and a recovery rule. The slots below are what <code>tools/pool.json</code> says on 2026-11-02. The pool total (the sum of the counts) is the swarm's default target. Models that are not in <code>pool.json</code> are not started by the swarm, so the older model notes (space-bunny, big-pickle, Qwen as a merger, the DeepSeek-only rule) are gone from this table. Change the pool by editing that file; <code>control.py</code> reads it on every call.</p>
+<p>A <b>slot</b> is one named model with a fixed worker count, a work class, and a recovery rule. The slots below are what <code>tools/pool.json</code> says on 2026-11-10 (pool total 5). The pool total (the sum of the counts) is the swarm's default target. Models that are not in <code>pool.json</code> are not started by the swarm, so the older model notes (space-bunny, big-pickle, Qwen as a merger, the DeepSeek-only rule) are gone from this table. Change the pool by editing that file; <code>control.py</code> reads it on every call.</p>
 <table>
 <tr><th>Slot</th><th>Model</th><th>Count</th><th>Class</th><th>Recovery and notes</th></tr>
-<tr><td><code>iceman</code></td><td><code>opencode-go/iceman-contributor-free</code></td><td>20</td><td>mid</td><td>The bulk of the pool. Recovers 2.5 h after a usage limit.</td></tr>
+<tr><td><code>iceman</code></td><td><code>opencode-go/iceman-contributor-free</code></td><td>1</td><td>mid</td><td>The contributor variant of Iceman (not the plain free one). Recovers 2.5 h after a usage limit; also takes easy docs.</td></tr>
 <tr><td><code>opencode-paid</code></td><td><code>opencode-go/deepseek-v4.1-flash</code></td><td>1</td><td>easy</td><td>Paid Go plan. Recovers 2.5 h after a limit; a second limit within a day bans it 15 days (<code>long_recover_days</code>).</td></tr>
 <tr><td><code>openrouter-free</code></td><td><code>openrouter/openrouter/free</code></td><td>1</td><td>easy</td><td>Free tier with a daily replenish (00:00 UTC, 1 min margin). A limit bans it 24 h.</td></tr>
 <tr><td><code>opencode-free</code></td><td><code>opencode/deepseek-v4.1-flash-free</code></td><td>1</td><td>easy</td><td>Free tier with the same daily replenish. A limit bans it 2.5 h.</td></tr>
 <tr><td><code>qwen-local</code></td><td><code>omlx/Qwen3.8-27B-oQ4e-mtp</code></td><td>1</td><td>easy</td><td>Local server at <code>http://127.0.0.1:8000</code>; slow. Has exited early with "oMLX memory guard abort".</td></tr>
-<tr><td><code>haiku</code></td><td><code>claude-haiku-5-5</code></td><td>2</td><td>easy</td><td><code>kind: claude</code>. Recovers 4.23 h after a limit.</td></tr>
+<tr><td><code>haiku</code></td><td><code>claude-haiku-5-5</code></td><td>0</td><td>easy</td><td><code>kind: claude</code>. Recovers 4.23 h after a limit.</td></tr>
 <tr><td><code>sonnet</code></td><td><code>claude-sonnet-5-5</code></td><td>0</td><td>mid</td><td>Defined, not running (count 0).</td></tr>
 <tr><td><code>opus</code></td><td><code>claude-opus-5-5</code></td><td>0</td><td>hard</td><td>Defined, not running (count 0).</td></tr>
 <tr><td><code>llama-work</code></td><td><code>llama-local/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS</code></td><td>0</td><td>easy</td><td>Defined, not running (count 0).</td></tr>
 </table>
 <p><b>The two DeepSeek slots are different models.</b> <code>opencode-free</code> runs the <b>free</b> DeepSeek model, <code>opencode/deepseek-v4.1-flash-free</code>. <code>opencode-paid</code> runs the <b>paid</b> DeepSeek model, <code>opencode-go/deepseek-v4.1-flash</code>. The model ids differ, so limits, bans and the ledger (<code>dead_models.json</code>, keyed by model id) apply to each separately. Do not treat one as a fallback for the other.</p>
-<p><b>Classes.</b> A doc's class is the directory it sits in: <code>easy</code> = <code>bugs/*.md</code>, <code>mid</code> = <code>bugs/mid/</code>, <code>hard</code> = <code>bugs/hard/</code>. Every doc starts easy; a doc that gets <code>escalate_after</code> (2) no-commit attempts moves up one class. Each class has its own queue, sized to the count of its live slots.</p>
+<p><b>Classes.</b> A doc's class is the directory it sits in: <code>easy</code> = <code>bugs/*.md</code>, <code>mid</code> = <code>bugs/mid/</code>, <code>hard</code> = <code>bugs/hard/</code>. Every doc starts easy; a doc that gets <code>escalate_after</code> (2) no-commit attempts moves up one class. A class decides which slots may run a doc (a slot's <code>class</code>, plus its <code>also</code> list); it does not limit how many docs are queued. The feeder fills free slots, not classes: a doc is queued whenever some slot that accepts its class has room.</p>
 <p><b>Limits.</b> A usage limit bans that model for its slot's <code>recover_hours</code> (ledger: <code>.git/control/dead_models.json</code>). A second limit within a day uses <code>long_recover_days</code> where the slot has one. Banned daily free tiers are asked one word at most every 12 h (<code>control.py probe-free</code>, which the swarm runs each pass). A task prefers the slot it was queued for and takes the first free, unbanned slot of its class otherwise.</p>
 <p>To pick a model for one restarted worker: <code>restart NAME --model M</code>. A bare model outside the pool, for hand-run experiments only: <code>spawn --model M</code>.</p>
 <h3>Other tools in use</h3>
@@ -154,7 +154,36 @@ worker <i>exited</i>, not when its branch had landed on master. Branches then sa
 Measured over the registry: 750 distinct bug docs dispatched across 758 dispatches; 522 fixed, of which 341 in one dispatch and 181 needed two or more; 1,214 dispatches spent on 522 fixed docs.
 The merge logs show "master-side parallel form" and "fifth parallel set-algebra implementation". <b>Fix (commit d20d1466):</b> <code>formal_feed.release_finished</code> now keeps the claims of
 an exited task whose branch still has commits master lacks (<code>git rev-list --count master..BRANCH</code> &gt; 0).</div>
-<p>Consequence you must manage: when many finished branches are unmerged, queued tasks that name the same docs are skipped ("claim ... conflicts with ... held by task X") and the fleet starves.
+<p>State transitions. A task moves through these states; only the transitions listed are valid. DONE to DONE is NOT a valid transition: once a task reports DONE (and its branch is landed or its doc is deleted), it cannot be re-dispatched as DONE again. The DONE ratchet enforces this by skipping any doc already deleted on any branch.</p>
+<table>
+<tr><th>From</th><th>To</th><th>Trigger</th></tr>
+<tr><td>queued</td><td>running</td><td>spawn / refill starts the worker</td></tr>
+<tr><td>running</td><td>exited-ok</td><td>worker exits 0 after CONTROL-STATUS: DONE</td></tr>
+<tr><td>running</td><td>exited-err</td><td>worker exits nonzero, is killed, or says PARTIAL / BLOCKED</td></tr>
+<tr><td>exited-ok</td><td>integrated</td><td>branch lands on master (rev-list master..BRANCH == 0)</td></tr>
+<tr><td>exited-ok</td><td>integration-failed</td><td>the landing gate is red</td></tr>
+<tr><td>exited-ok</td><td>superseded</td><td>its branch conflicts at merge: a merge-fixer task takes over (enqueue_merge_fix)</td></tr>
+<tr><td>exited-ok</td><td>superseded</td><td>restart — only when the task is genuinely dead: no exitcode file, slot free, model not banned</td></tr>
+<tr><td>exited-ok</td><td>abandoned</td><td>retire_dead (finished, no commits) or continue_partial (a continuation is queued)</td></tr>
+<tr><td>exited-err</td><td>superseded</td><td>restart from the failed attempt (same guards)</td></tr>
+<tr><td>exited-err</td><td>abandoned</td><td>retire_dead: no commits and nothing pursuing it</td></tr>
+<tr><td>integration-failed</td><td>superseded</td><td>enqueue_red_fix: a red-fix task continues from the branch</td></tr>
+<tr><td>integration-failed</td><td>integrated</td><td>a later landing of that branch is green</td></tr>
+<tr><td>integrated</td><td>(terminal)</td><td>claims released; doc deleted; no re-dispatch</td></tr>
+<tr><td>superseded</td><td>(terminal for the old task)</td><td>the new task holds the claims</td></tr>
+<tr><td>abandoned</td><td>(terminal)</td><td>claims released</td></tr>
+</table>
+<p class="warn"><b>Never.</b> A task that wrote an <code>exitcode</code> file has finished: <code>state_of</code> already reports
+<code>exited-ok</code>/<code>exited-err</code> for it, so restarting it supersedes finished work (2026-11-10: <code>r329</code> said
+DONE, exited 0, and <code>sync --restart-dead</code> restarted it anyway, superseding a finished task). A dead worker is
+never restarted into a slot that is disabled (<code>count 0</code>) or already at its count, or into a banned model —
+those can only fail again, which is what pinned one doc to an expired haiku OAuth session for 335 rounds. And a chain is
+never restarted past <code>MAX_RESTARTS</code> (10): over budget the task is abandoned, its claim is released, and the doc
+is re-fed (a fresh worker, possibly a different model). An authentication failure is a model failure, not a worker
+failure: it bans the model instead of restarting the worker.</p>
+<p class="warn">A task in integrated or superseded or abandoned never transitions back to running or exited-ok. Re-dispatching the same bug doc creates a new task with a new name, and only if the doc still exists and is not ratcheted.</p>
+<div class="note"><b>DONE ratchet (2026-11-09):</b> a doc that any branch has already deleted is treated as resolved and is never re-dispatched, even while master still lists it and even if its claim was released. It is enforced in three places: the swarm's feed (<code>tools/swarm.py</code>), the formal feeder (<code>tools/formal_feed.py</code>), and <code>control.py sync --restart-dead</code> (which supersedes a dead task whose docs are all gone instead of restarting it). This is what stops the loop where a fixed bug is re-fixed forever.</div>
+<div class="note"><b>The ratchet's premise must hold (2026-11-10):</b> "deleted on a branch" only means fixed if that branch reaches master. A DONE task with commits is now landable in <code>superseded</code>/<code>abandoned</code> state too (it is finished work; a restart does not unsolve the bug), so the branch the ratchet relies on actually lands. Before this, 1030 fixed branches were stranded — the doc stayed on master, the ratchet skipped it, and no worker ever touched it. <code>land()</code> takes <code>LAND_BATCH</code> (8) per pass so the drain is gradual.</div>
 The cure is to <b>land the finished branches</b> (§7), not to release claims by hand. Hand-marking <code>integrated</code> is only right after you have verified the branch is on master (or truly worthless).</p>
 <p>Before dispatching new work on a topic, also search for overlap the claim system cannot see (different docs, same subject):
 <code>git branch --no-merged master | grep work/</code>, <code>git log master --oneline -S&lt;identifier&gt;</code>, <code>git cherry master BRANCH</code>.</p>
@@ -162,14 +191,15 @@ The cure is to <b>land the finished branches</b> (§7), not to release claims by
 <h2 id="keepfull">5. The swarm (feeder and landing loop)</h2>
 <p><code>tools/swarm.py</code> is the one long-lived loop. It replaced the old keep-full script (<code>keepfull.sh</code>, which is no longer started: its last log line is 2026-11-02 12:07 and it still names one model). Start it from the main checkout, detached, with the right interpreter:</p>
 <pre><code>cd /Users/mrs/net/chatgpt/claude/mojo-reference
-nohup /opt/local/bin/python3 tools/swarm.py --interval 120 > .git/control/swarm.out 2>&1 &
+nohup /opt/local/bin/python3 tools/swarm.py &amp;
 # who holds it (proved by the flock, not by a name match):  python3 tools/swarm.py --who
 # stop the pid --who prints (it verifies the command line first):  kill -TERM <pid>
-# state: .git/control/swarm.json   pid record and lock: .git/control/swarm.pid   --target defaults to the pool total</code></pre>
+# state: .git/control/swarm.json   pid record and lock: .git/control/swarm.pid
+# --interval 120, --target (pool total) and --log-file (.git/control/swarm.out) are the defaults</code></pre>
 <p>One pass, every <code>--interval</code> seconds:</p>
 <ol>
 <li><b>Class moves and reap.</b> A doc due a class move moves once nothing unlanded touches it and no live opencode session is working on it. <code>control.py reap</code> stops the recorded process groups of finished workers, and nothing else.</li>
-<li><b>Feed.</b> Each class gets enough queued tasks to keep its slots busy (running + 1). Candidates are the pool's <code>feed</code> globs in pool order, minus the pool's <code>skip</code> prefixes (<code>FORMAL_</code>, <code>OPEN_WORK</code>, <code>README</code>), minus any doc a live task, queued task or external claim holds, and minus any doc with a line <code>STOP: &lt;reason&gt;</code> in its body (the reason is logged each pass). A re-feed logs what its previous attempt produced.</li>
+<li><b>Feed.</b> Enqueue queued tasks until every free slot has work (one per free slot, plus one buffer), drawn from the pool's <code>feed</code> globs in pool order, minus the pool's <code>skip</code> prefixes (<code>FORMAL_</code>, <code>OPEN_WORK</code>, <code>README</code>), minus any doc a live task, queued task or external claim holds, minus any doc with a line <code>STOP: &lt;reason&gt;</code> in its body (the reason is logged each pass), and minus any doc already deleted on some branch (the DONE ratchet, §4). A doc's class only decides which slots may run it. A re-feed logs what its previous attempt produced.</li>
 <li><b>Continue and retire.</b> Partial work is continued; a dead-on-arrival attempt is retired.</li>
 <li><b>Refill.</b> <code>control.py refill --target N --prefix bug-,fix-</code>; a finished worker frees its slot at once.</li>
 <li><b>Land.</b> Finished <code>bug-*</code>/<code>fix-*</code> branches are merged by <code>tools/integrate.py --stdlib</code> (the stdlib compile is the gate). A conflicting branch goes to a merge-fixer task. After a landing, <code>tools/verify_landed.py</code> runs in the background on master: the full gate, at most once per <code>full_every_minutes</code>; each red job becomes a <code>fix-gate-&lt;job&gt;</code> task. Landed trees are removed by <code>control.py cleanup</code>.</li>

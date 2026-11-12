@@ -28,10 +28,9 @@ holds — `test_formal_admitted.py` records `glob: 0` and
 THE ANSWER IS A BLOB, AND THAT IS THE SAME DECISION `os.listdir` MADE
 --------------------------------------------------------------------
 CPython's `glob` returns a `list` of strings. A list's length has to be known
-when it is built on this path (`bugs/FORMAL_listdir_no_run_time_sequence.md`
-items 2 and 3), and `**` under `recursive` makes the length unknowable before the
-tree has been walked — which is why the (now deleted) `glob`/`copy`/`collections`
-measurement record concluded that a real `glob` was blocked on a capability rather
+when it is built on this path, and `**` under `recursive` makes the length
+unknowable before the tree has been walked — which is why an earlier
+measurement concluded that a real `glob` was blocked on a capability rather
 than on a module. **That conclusion was half wrong and the half that was wrong
 was the interesting one:** `os.listdir` already answers a run-time-length
 container, because `malloc` takes a run-time size and its memory outlives the
@@ -554,9 +553,7 @@ def _glob_in_dir(dirname, basename, mode, dironly, include_hidden) -> Pointer[In
 
     CPython picks a function object (`glob_in_dir = _glob2` / `_glob1` /
     `_glob0`) and a value on this path is one 64-bit word, so there is no word
-    that denotes a function to put in it
-    (`bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`). The
-    choice is therefore an integer,
+    that denotes a function to put in it. The choice is therefore an integer,
     and it is the same choice at the same point in the same order.
     """
     if mode == 0:
@@ -617,11 +614,10 @@ def _iglob_mode(bn, recursive) -> int:
     2 for `_glob2` (`**` under `recursive`).
 
     CPython picks a function OBJECT and a value on this path is one 64-bit word,
-    so there is no word that denotes a function to put in it
-    (`bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`). The
-    choice is therefore an integer, and it is the same choice at the same point
-    in the same order — which is why it is a function rather than three copies
-    of the test at each of the two twins.
+    so there is no word that denotes a function to put in it. The choice is
+    therefore an integer, and it is the same choice at the same point in the
+    same order — which is why it is a function rather than three copies of the
+    test at each of the two twins.
     """
     if has_magic(bn) == 0:
         return 0

@@ -362,7 +362,7 @@ ROWS = [
     # question, which is what makes it usable as a pattern here. (A dotted name
     # rooted at an IMPORTED module is not: `case os.sep:` reaches
     # `os.sep`, a module value, and this path has nowhere to keep one —
-    # `FORMAL_module_state_no_storage.md (deleted) (deleted)`. That is a refusal about module
+    # `FORMAL_module_state_no_storage.md (deleted)`. That is a refusal about module
     # state and not about `match`, so it is not a row here.)
     # CPython equivalent: the same program with `class Q` and `q.b` — the same
     # answer, `b`, because a dotted pattern is a value pattern in both.

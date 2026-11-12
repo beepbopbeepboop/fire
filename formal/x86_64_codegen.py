@@ -5316,116 +5316,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         messages quote. `flush=` is answered there too."""
         return M.print_kwargs(e, "x86_64")
 
-    def _emit_str(self, e) -> None:
-        args = list(e.args or [])
-        if len(args) != 1 or e.kwargs:
-            raise CodegenError("str() takes exactly one argument on this path")
-        operand = args[0]
-        kind = self._expr_str_kind(operand)
-        from formal import model as M
-        if M.string_operand_is_string(kind):
-            self._emit_expr(operand)
-            return
-        # Special case for int literals
-        if isinstance(operand, F.IntLiteral):
-            # Convert int to string manually
-            val = operand.value
-            # For simple cases, use a small buffer
-            self.asm.emit(encode_sub_r64_imm32(Reg.RSP, 64))
-            # Build string representation
-            if val == 0:
-                s = "0"
-            elif val > 0:
-                s = str(val)
-            else:
-                s = str(val)
-            self.asm.emit(encode_lea_r64_rm64(Reg.RDI, Reg.RSP, 0))
-            # Copy string
-            # For simplicity, just use sprintf with the format
-            fmt = "%d" if abs(val) < 2**31 and False else "%ld"  # use simple approach
-            # Easier: just store the string literal address and copy
-            # Or use sprintf differently
-            try:
-                self.asm.emit(encode_lea_r64_rm64(Reg.RDI, Reg.RSP, 0))
-                self._emit_expr(F.StringLiteral("%ld"))
-                self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))
-                self._emit_expr(operand)
-                self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))
-                self.asm.emit(encode_mov_r64_imm32(Reg.RAX, 0))
-                self._emit_extern_call("sprintf")
-                self.asm.emit(encode_lea_r64_rm64(Reg.RAX, Reg.RSP, 0))
-                self.asm.emit(encode_add_r64_imm32(Reg.RSP, 64))
-                return
-            except Exception:
-                pass
-        if M.is_number_kind(kind) or kind == getattr(M, 'INT_KIND', None) or getattr(M, 'BOOL_KIND', None) == kind or kind == getattr(M, 'FLOAT_KIND', None):
-            # Try to use print logic
-            try:
-                frags, operands2 = self._print_call([operand])
-                if len(frags) == 1 and '%' in frags[0] and operands2:
-                    fmt = frags[0]
-                    # Try using print mechanism style
-                    self.asm.emit(encode_sub_r64_imm32(Reg.RSP, 512))
-                    self.asm.emit(encode_lea_r64_rm64(Reg.RDI, Reg.RSP, 0))
-                    self._emit_expr(F.StringLiteral(fmt))
-                    self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))
-                    self._emit_expr(operands2[0])
-                    self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))
-                    self.asm.emit(encode_mov_r64_imm32(Reg.RAX, 0))
-                    self._emit_extern_call("sprintf")
-                    self.asm.emit(encode_lea_r64_rm64(Reg.RAX, Reg.RSP, 0))
-                    self.asm.emit(encode_add_r64_imm32(Reg.RSP, 512))
-                    return
-            except Exception:
-                pass
-            # Fallback: just pass through
-            self._emit_expr(operand)
-            return
-        raise CodegenError(f"str() of {type(operand).__name__} is not supported on this path")
-
-    def _emit_repr(self, e) -> None:
-        args = list(e.args or [])
-        if len(args) != 1 or e.kwargs:
-            raise CodegenError("repr() takes exactly one argument on this path")
-        operand = args[0]
-        kind = self._expr_str_kind(operand)
-        from formal import model as M
-        if M.string_operand_is_string(kind):
-            self.asm.emit(encode_sub_r64_imm32(Reg.RSP, 536))
-            self.asm.emit(encode_lea_r64_rm64(Reg.RDI, Reg.RSP, 0))
-            self._emit_expr(F.StringLiteral("'%s'"))
-            self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))
-            self._emit_expr(operand)
-            self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))
-            self.asm.emit(encode_mov_r64_imm32(Reg.RAX, 0))
-            self._emit_extern_call("sprintf")
-            self.asm.emit(encode_lea_r64_rm64(Reg.RAX, Reg.RSP, 0))
-            self.asm.emit(encode_add_r64_imm32(Reg.RSP, 536))
-            return
-        if isinstance(operand, F.IntLiteral):
-            self._emit_expr(operand)
-            return
-        if M.is_number_kind(kind) or kind == getattr(M, 'INT_KIND', None) or getattr(M, 'BOOL_KIND', None) == kind or kind == getattr(M, 'FLOAT_KIND', None):
-            try:
-                frags, operands2 = self._print_call([operand])
-                if len(frags) == 1 and operands2:
-                    fmt = frags[0]
-                    self.asm.emit(encode_sub_r64_imm32(Reg.RSP, 512))
-                    self.asm.emit(encode_lea_r64_rm64(Reg.RDI, Reg.RSP, 0))
-                    self._emit_expr(F.StringLiteral(fmt))
-                    self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))
-                    self._emit_expr(operands2[0])
-                    self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))
-                    self.asm.emit(encode_mov_r64_imm32(Reg.RAX, 0))
-                    self._emit_extern_call("sprintf")
-                    self.asm.emit(encode_lea_r64_rm64(Reg.RAX, Reg.RSP, 0))
-                    self.asm.emit(encode_add_r64_imm32(Reg.RSP, 512))
-                    return
-            except Exception:
-                pass
-            raise CodegenError("repr() of numbers not yet implemented on x86_64")
-        raise CodegenError(f"repr() of {type(operand).__name__} is not supported on this path")
-
     def _emit_print(self, e) -> None:
         """`print(...)` — a real call to the C library's `printf`.
 
@@ -13557,6 +13447,17 @@ ctor_field_value=self._ctor_field_value_for(name),
         # list. `M` is the model import under the same name as on arm64 — the
         # two files are the same function in two architectures, and a dispatch
         # that can only be read on one of them is a dispatch that will drift.
+        # `str(<integer literal>)` / `repr(<integer literal>)` is a build-time
+        # constant: the literal's decimal text, interned like any string
+        # literal. No buffer, no pointer arithmetic, same on both architectures.
+        # (`str(n)` of a RUN-TIME integer stays refused: formatting needs a
+        # buffer that outlives the call, which this path does not have.)
+        if not is_extern_call and name in ("str", "repr") \
+                and len(e.args) == 1 and not e.kwargs:
+            _lit = M.integer_literal_text(e.args[0])
+            if _lit is not None:
+                self._emit_expr(F.StringLiteral(_lit))
+                return
         if not is_extern_call and M.emitter_lowers(name):
             if name == "len":
                 self._emit_len(e)
@@ -13564,12 +13465,18 @@ ctor_field_value=self._ctor_field_value_for(name),
             if name == "print":
                 self._emit_print(e)
                 return
-            if name == "str":
-                self._emit_str(e)
-                return
-            if name == "repr":
-                self._emit_repr(e)
-                return
+            # `str` is deliberately NOT lowered here (as on arm64): the lowering
+            # this arm used to call copied an integer into a stack buffer and
+            # returned its address after releasing the buffer, or passed the
+            # integer through as a pointer, so `printf("[%s]", str(n))` built and
+            # died of SIGSEGV. `str(...)` goes to the type-constructor path, whose
+            # shared `model.string_conversion_refusal` refuses it on both
+            # architectures.
+            # `repr` is deliberately NOT lowered here (as on arm64): the lowering
+            # this arm used to call passed an integer literal through as the
+            # "string" (`printf("%s", repr(42))` built and died of SIGSEGV) and
+            # formatted text into a stack buffer whose address it returned after
+            # releasing it, and a long string overflowed the buffer.
             if name in ("ord", "chr", "hash"):
                 self._emit_text_builtin(e, name)
                 return
@@ -13630,6 +13537,12 @@ ctor_field_value=self._ctor_field_value_for(name),
                             pass
                         return None
                     folded = M.printf_fold_text_widths(name, fmt_text_f, vargs, _text_of_arg)
+                    if folded is None:
+                        # Step 13d: text the build cannot see, in an image that holds non-ASCII
+                        # text, becomes the star form with widths computed in characters.
+                        folded = M.printf_runtime_rewrites(
+                            name, fmt_text_f, vargs, _text_of_arg,
+                            lambda a: self._is_string_subscript(a.obj))
                     if folded is not None:
                         new_fmt, new_vargs = folded
                         new_args = list(e.args)

@@ -1,6 +1,6 @@
 # Plan: summarize_stats typed callable slots
 
-Source bug: bugs/hard/COMPILE_FAIL_Tools_scripts_summarize_stats.md
+Source bug (deleted doc): compile failure in Tools/scripts/summarize_stats (COMPILE_FAIL_Tools_scripts_summarize_stats)
 
 ## Decomposition
 

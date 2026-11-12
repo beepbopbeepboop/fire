@@ -76,7 +76,7 @@ def walk_stride(is_dict: bool, elem_stride: int = ELEM_STRIDE) -> int:
     COUNT of the result was right, because three PAIRS and three WORDS are the
     same number, so a measurement that looked only at `len` agreed with CPython
     on the buggy programs.  The finding and its four sites are
-    `bugs/FORMAL_fuzz_ledger.md` §3.10.  So this docstring enumerating its
+    the FORMAL fuzz ledger §3.10 (deleted bug doc).  So this docstring enumerating its
     consumers is load-bearing rather than decorative: a consumer not named here
     is a consumer that will not be audited.
     """
@@ -2960,8 +2960,8 @@ def external_call_return_kind(text):
         rest of the runtime's void entry points).
 
     **What "at a C boundary" is doing in that list, and why it is not a claim
-    about `Optional`.** `bugs/FORMAL_stdlib_optional_needs_a_representation.md`
-    measures `Optional[Pointer[T]]` as one word whose payload is the address and
+    about `Optional`.** The deleted FORMAL stdlib-Optional-representation doc
+    measured `Optional[Pointer[T]]` as one word whose payload is the address and
     whose TAG lives a second frame away, so `if not ptr:` cannot be answered from
     the word: `Some(null)` and `None` are two Mojo values of one word. That is a
     fact about an `Optional` a MOJO function built, and it is why `Optional` is
@@ -4056,9 +4056,9 @@ def division_needs_zero_guard(denominator) -> bool:
     not. `formal/examples/floordiv.mojo` and `udivmod.mojo` were red in
     `test_formal.py` for exactly this and for nothing about a floor correction.
 
-    So the fix available without the `lib/ProofLib.lean` change
-    `bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`
-    asks for is to stop emitting a guard that cannot fire: for `// 7` there is
+    So the fix available without the `lib/ProofLib.lean` change asked for by
+    the deleted FORMAL doc on discharging a call on a conditional path is to
+    stop emitting a guard that cannot fire: for `// 7` there is
     no zero to trap, and the `bl fflush` that made the theorem unprovable goes
     with it. **What this does NOT do is fix a two-call program whose calls are
     real** — that document's own precondition, unchanged, and it is a library
@@ -4524,7 +4524,7 @@ def shift_overflow_refusal(op: str, amount, base=None,
         which does not saturate and still overflows, so the immediate form's
         `0..63` range test is not a safety test and cannot be made into one.
         Decided only when the base folds; a variable base is the subject of
-        `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
+        the known limit that integer overflow at run time is still untrapped (deleted FORMAL doc).
 
     `None` in any argument means "the build does not know", and every such case
     returns None rather than guessing: a refusal that fires on half a fact is a
@@ -4622,8 +4622,8 @@ def power_overflow_refusal(base, exponent, operands=None) -> str | None:
     Asked only when the build KNOWS both operands, because without them there
     is no question to refuse: `b ** n` overflows for some `b` and not for
     others, and a build that cannot say which has no answer to give. So the
-    foldable case is refused precisely, and the variable case is what
-    `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md` is about.
+    foldable case is refused precisely, and the variable case is the known limit
+    that integer overflow at run time is still untrapped (deleted FORMAL doc).
 
     `None` means "answerable": a non-negative exponent whose exact value fits,
     or the `0 ** 0` / `1 ** anything` shapes that never overflow.

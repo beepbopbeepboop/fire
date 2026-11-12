@@ -33,9 +33,8 @@ the first because it is the one a program READS.
     edited to use. `formal/hostmods/ast.mojo` says the opposite about its own
     literals — that they "are NOT importable from it" — and that is still true
     of a module that does not also declare a public function: a dylib with
-    nothing but constants cannot be linked at all
-    (`bugs/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`), and
-    `strsignal` below is what makes this one linkable.
+    nothing but constants cannot be linked at all, and `strsignal` below is what
+    makes this one linkable.
   * `strsignal(sig)` is the C library's own `strsignal(3)`, called through the
     same extern-call path `formal/hostmods/sys.mojo` documents for `exit`. It is
     not a table of 31 strings, which is the shape that would have rotted: this

@@ -83,13 +83,15 @@ class Guard(unittest.TestCase):
         self.assertFalse(C2.accepts(easy, "mid"))
 
     def test_busy_counts_a_task_in_its_own_class_not_its_slot(self):
+        # a running task counts only while its process is alive (the dead-pid rule), so give them this process's pid
         tasks = {
-            "f1": {"state": "running", "cls": "easy", "pool": "iceman"},   # a formal doc on iceman: easy load
-            "m1": {"state": "running", "cls": "mid", "pool": "iceman"},
+            "f1": {"state": "running", "cls": "easy", "pool": "iceman", "pid": os.getpid()},  # formal on iceman: easy
+            "m1": {"state": "running", "cls": "mid", "pool": "iceman", "pid": os.getpid()},
         }
         pool = {"slots": [{"name": "iceman", "class": "mid", "also": ["easy"], "count": 20}]}
         with mock.patch.object(C, "load", return_value=tasks), mock.patch.object(C, "load_pool", return_value=pool), \
-             mock.patch.object(C, "state_of", side_effect=lambda t: t["state"]):
+             mock.patch.object(C, "state_of", side_effect=lambda t: t["state"]), \
+             mock.patch.object(C, "live_names", return_value=frozenset()):
             self.assertEqual(S.busy_by_class(), {"easy": 1, "mid": 1, "hard": 0})
 
 
