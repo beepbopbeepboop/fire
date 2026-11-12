@@ -51,6 +51,35 @@ def test_two_states_for_a_claim():
     in_tree(body)
 
 
+def test_gate_doc_never_names_a_path_and_holds_first():
+    def body(tmp):
+        reg = {"fix-x": {"branch": "work/x", "state": "exited-ok", "claims": ["bug:x"]}}
+        real = C.registry
+        C.registry = fake_registry(reg)
+        try:
+            paths = I.gate_doc("fix-x", reg["fix-x"], ["stdlib-syntax", "std/builtin/bool.mojo"],
+                               ["std/builtin/bool.mojo"])
+            check("a failing FILE is not a job: no doc is named after a path",
+                  [os.path.basename(p) for p in paths] == ["gate-stdlib-syntax.md"])
+            check("the failing file is listed in the doc body", "std/builtin/bool.mojo" in open(paths[0]).read())
+        finally:
+            C.registry = real
+    in_tree(body)
+
+
+def test_failed_job_names_stops_at_the_section_end():
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
+        f.write("FAILED:\n  stdlib-syntax  (36s)\n      NEW: no bug doc tracks this job\n"
+                "time: wall 0:36 | work 0:36 across 1 job(s) (0 replayed from cache)\n"
+                "suite: 0 passed, 1 failed (1 tests)\n")
+    try:
+        check("only the indented job line is a failing job (not `time`)",
+              I.failed_job_names(f.name) == ["stdlib-syntax"])
+    finally:
+        os.unlink(f.name)
+
+
 def test_red_gate_writes_one_doc_per_job():
     def body(tmp):
         reg = {"fix-x": {"branch": "work/x", "state": "exited-ok", "claims": ["bug:x"]}}
@@ -99,6 +128,8 @@ def test_restart_refuses_a_task_with_no_doc():
 if __name__ == "__main__":
     test_two_states_for_a_claim()
     test_red_gate_writes_one_doc_per_job()
+    test_gate_doc_never_names_a_path_and_holds_first()
+    test_failed_job_names_stops_at_the_section_end()
     test_restart_refuses_a_task_with_no_doc()
     print("%d failure(s)" % len(FAILED))
     sys.exit(1 if FAILED else 0)

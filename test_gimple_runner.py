@@ -5080,9 +5080,9 @@ print(type(b) == bytes, len(b) == 3, b == b'abc')
 s = "é"
 print(s.encode("ascii", "replace"))
 print(s.encode("ascii", "ignore"))
-print(b"\xff".decode("ascii", "replace"))
+print(b"\\xff".decode("ascii", "replace"))
 try:
-    b"\xff\xfe".decode("utf-8")
+    b"\\xff\\xfe".decode("utf-8")
 except UnicodeDecodeError:
     print("utf-8 decode refused malformed")
 """)
@@ -6829,6 +6829,40 @@ def main() raises:
         print("caught")
     print("done")
 """, "enter a\nbody a\nexit a\ncaught\ndone\n")
+
+    # scriptutil traceback_cm shape (part 2, no plain-assignment capture dep):
+    # nested @contextlib.contextmanager generator, single yield, try/except/finally
+    # around yield, reads an enclosing var local (capturable), instantiated and
+    # used as a context manager. Normal and exception paths exercise the
+    # contextmanager protocol: on body exception the generator receives it at
+    # the yield point (so finally/cleanup runs); re-raise propagates out.
+    test_gimple_stdout("gimple_contextmanager_nested_generator_captures_var_and_handles_exceptions",
+                       """\
+import contextlib
+
+def run(mode):
+    var show = "show"
+    @contextlib.contextmanager
+    def cm():
+        try:
+            yield 7
+        finally:
+            print("fin-" + show)
+
+    m = cm()
+    try:
+        with m as v:
+            print("body-" + str(v))
+            if mode == "boom":
+                raise ValueError("x")
+    except ValueError:
+        print("caught")
+
+def main():
+    run("ok")
+    print("---")
+    run("boom")
+""", "body-7\nfin-show\n---\nbody-7\nfin-show\ncaught\n")
 
     # Rebuilding a string from its characters must still be right now that the
     # character strings are shared and never freed: `out + ch` frees its own
@@ -13538,6 +13572,138 @@ main()
 
     test_cross_module_ctor_scalar_field_type()
 
+    # Cross-module half (commit 68802e723 fixed the module-local half): a MODULE-scope class attribute whose value names a global the
+    # module IMPORTS (`from m import S`) was never stored. The module-local
+    # store (`_module_class_attr_global_stores`) gated on this module's own
+    # globals only, so C().name read 0 (int) / None (str) while CPython prints
+    # `x`. The imported global is a `var` in a .mojo sibling (module_loader
+    # exports only `var` globals), read through its defining module's accessor.
+    def test_module_class_attr_from_imported_global():
+        global _PASS, _FAIL, _TIMEOUT
+        name = "module_class_attr_from_imported_global"
+        defn = 'var S = "x"\nvar N = 7\n'
+        use = ("from xmodclsattr_defn import S, N\n"
+               "\n"
+               "class C():\n"
+               "    var name = S\n"
+               "    val = N + 1\n"
+               "\n"
+               "def main():\n"
+               "    print(C().name)\n"
+               "    print(C().val)\n"
+               "\n"
+               "main()\n")
+        try:
+            out = _compile_two_files_do_imports_and_run(
+                'xmodclsattr_defn.mojo', defn, 'xmodclsattr_use.mojo', use)
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        if out == "x\n8\n":
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected 'x\\n8\\n', got {out!r}")
+            _FAIL += 1
+
+    test_module_class_attr_from_imported_global()
+
+    # A FLOAT module-scope `var` imported by name. The defining module declared
+    # its global `int` (the VarDecl pre-scan's catch-all arm had no FloatLiteral
+    # row) and its initializer `0` (`_extract_init_expr` had no float row), so
+    # the accessor came out `int64_t` against the importer's `extern double`:
+    # "conflicting types for '<mod>__mojo_global_get_F'", and the value read
+    # back as 0 even when the types agreed. Both the bare read and a class
+    # attribute initialised from the import must print the float.
+    def test_imported_float_global():
+        global _PASS, _FAIL, _TIMEOUT
+        name = "imported_float_global"
+        defn = 'var F = 2.5\n'
+        use = ("from xmodattr_defn import F\n"
+               "\n"
+               "class C():\n"
+               "    var fl = F\n"
+               "\n"
+               "def main():\n"
+               "    print(F)\n"
+               "    print(C().fl)\n"
+               "\n"
+               "main()\n")
+        try:
+            out = _compile_two_files_do_imports_and_run(
+                'xmodattr_defn.mojo', defn, 'xmodattr_use.mojo', use)
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        if out == "2.5\n2.5\n":
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected '2.5\\n2.5\\n', got {out!r}")
+            _FAIL += 1
+
+    test_imported_float_global()
+
+    # The same defect from the definer side, no import involved: a module-scope
+    # `var F = g()` whose callee returns a float. Every RHS-to-type arm answered
+    # `int64_t` for it (the call arms only let pointers through), so the global
+    # was a box and `print(F)` read the double's bit pattern as an integer.
+    def test_float_global_from_call_same_module():
+        global _PASS, _FAIL, _TIMEOUT
+        name = "float_global_from_call_same_module"
+        src = ("def g():\n"
+               "    return 2.5\n"
+               "\n"
+               "var F = g()\n"
+               "\n"
+               "def main():\n"
+               "    print(F)\n"
+               "\n"
+               "main()\n")
+        try:
+            with tempfile.TemporaryDirectory() as wd:
+                entry = os.path.join(wd, 'floatcall_same.mojo')
+                open(entry, 'w').write(src)
+                from gimple_codegen import compile_to_gimple
+                c_code = compile_to_gimple(src, do_imports=False, filename=entry)
+                c_file = os.path.join(wd, 'floatcall_same.c')
+                exe_file = os.path.join(wd, 'floatcall_same.exe')
+                open(c_file, 'w').write(c_code)
+                runtime_dir = os.path.join(HERE, 'runtime')
+                result = subprocess.run(
+                    [find_gcc(), '-fgimple', f'-I{runtime_dir}', '-o', exe_file,
+                     c_file, os.path.join(runtime_dir, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+                if result.returncode != 0:
+                    raise RuntimeError(f"gcc -fgimple failed: {result.stderr[:300]}")
+                out = run_executable_stdout(exe_file)
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        if out == "2.5\n":
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected '2.5\\n', got {out!r}")
+            _FAIL += 1
+
+    test_float_global_from_call_same_module()
+
     # The `sizeof`/`fnaddr` accessor helpers are file-scope `static`s, and every
     # module's parts land in ONE translation unit, so the sets that decide
     # whether one has already been DEFINED must be shared into every
@@ -14998,6 +15164,9 @@ def main():
                   test_nested_class_var_attr_method_read_regression,
                   test_nested_class_var_attr_rebind_after_construction_regression,
                   test_nested_class_var_attr_instance_write_shadows_regression,
+                  test_module_class_attr_from_module_global_regression,
+                  test_module_class_attr_bare_and_int_from_module_global_regression,
+                  test_module_class_attr_expr_over_module_globals_regression,
                   test_nested_class_attr_expr_over_str_param_regression,
                   test_instance_write_shadows_class_attr_regression,
                   test_nested_class_attr_rebind_after_construction_regression,
@@ -15379,6 +15548,88 @@ def f(v: int):
 def main():
     print(f(4))
 """, "9\n")
+
+
+def test_module_class_attr_from_module_global_regression():
+    """Regression (module-scope class attribute reading a module global, commit 68802e723):
+    a MODULE-scope class attribute whose value names a module global is never
+    stored. `gen_module` seeds `_classattr_<C>__<attr>` only from literal
+    values, the global was typed `int64_t` for a `char *` source, and nothing
+    stored `C.name = S` afterwards, so `C().name` read back 0 (int) or None
+    (str) while CPython prints `x`. The class body runs at the class statement,
+    so the store belongs there in the module's top-level body, after `S` is
+    assigned, typed from `S`'s own global."""
+    test_gimple_stdout("gimple_module_class_attr_from_module_global", """\
+S = "x"
+
+class C():
+    var name = S
+
+def main():
+    print(C().name)
+""", "x\n")
+
+
+def test_module_class_attr_bare_and_int_from_module_global_regression():
+    """Companion: the bare spelling and an integer global, which before the
+    fix read 0 for the str and the int alike."""
+    test_gimple_stdout("gimple_module_class_attr_bare_and_int_from_module_global", """\
+S = "x"
+N = 7
+
+class C():
+    name = S
+    val = N
+
+def main():
+    print(C().name)
+    print(C().val)
+""", "x\n7\n")
+
+
+def test_module_class_attr_expr_over_module_globals_regression():
+    """The harder half of the same bug: the value is an EXPRESSION over this
+    module's globals (`S + "!"`, `N + 1`), not a bare name. Its type is the
+    `_quick_type` estimate over the module's own global overlay, and the store
+    is the same top-level `C.attr = <value>` statement."""
+    test_gimple_stdout("gimple_module_class_attr_expr_over_module_globals", """\
+S = "x"
+N = 7
+
+class C():
+    var name = S + "!"
+    val = N + 1
+
+def main():
+    print(C().name)
+    print(C().val)
+""", "x!\n8\n")
+
+
+def test_module_class_attr_call_value_regression():
+    """A module-scope class attribute whose value is a CALL (`f()` of a module
+    function with a declared `String` return, `len(S)` of a builtin) was never
+    stored: `_module_class_attr_global_ctype` returned None for any free name
+    that was not a global, so `C().name` read 0 and `C().n` read 0 while CPython
+    prints `q` and `1`. The store belongs at the class statement, typed from the
+    callee's declared return (bugs/CODEGEN_module_scope_class_attr_call_value_
+    unstored.md)."""
+    test_gimple_stdout("gimple_module_class_attr_call_value", """\
+S = "x"
+
+def f() -> String:
+    return "q"
+
+class C():
+    var name = f()
+    var n = len(S)
+
+def main():
+    print(C().name)
+    print(C().n)
+
+main()
+""", "q\n1\n")
 
 
 def test_nested_class_attr_expr_over_str_param_regression():

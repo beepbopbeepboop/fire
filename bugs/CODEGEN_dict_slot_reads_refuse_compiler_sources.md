@@ -64,8 +64,8 @@ Check it against the fire.ci build, not only this probe.
   It is an eager list-returning function now, so the compiler's own module
   compiles through the ordinary path (pinned by
   `test_selfhost.py::coro_module_compiles_to_c`). The remaining open item is
-  the CODE SHAPE for arbitrary user code, not this build; see
-  `CODEGEN_coro_nested_recursive_generator_getattr.md`.
+  the CODE SHAPE for arbitrary user code, not this build (the dynamic-`getattr`
+  refusal that blocked it is fixed in 37c877f7c).
 - FIXED: a float and a str stored into one name (regression test case 2). The
   name is the `int64_t` box (`emit_infra.mixed_scalar_locals`), so the program
   compiles and prints the CPython answer; `test_dict_slot_read_regression.py`
