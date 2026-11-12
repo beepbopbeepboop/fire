@@ -1657,6 +1657,11 @@ NONE_YIELD_CPP_REFUSAL = ("a None yield (bare `yield` / `yield None`) has no val
                           "slot the C++ coroutine path can carry (it would print 0); refused")
 
 
+def _is_none_slot(e) -> bool:
+    """A tuple element that is the literal None (the parser spells it as an IdentExpr)."""
+    return isinstance(e, N.NoneLiteral) or (isinstance(e, N.IdentExpr) and e.name == 'None')
+
+
 def _is_none_yield(y) -> bool:
     """A bare `yield` or an explicit `yield None` -- the yield whose value is
     None. Its slot kind in `kinds` is the int64_t fallback (`'i'`), so it
@@ -5099,6 +5104,11 @@ def _rewrite_expr(node, cvar: str, kind: str, env=None):
             for e in node.value.elements:
                 if isinstance(e, N.TupleExpr):
                     els.append(_tagged_nested_box(e, cvar, kind, env))
+                elif _is_none_slot(e):
+                    # A None slot is boxed, not stored as 0: the tuple's list
+                    # records the slot as kind 'n' (mojo_list_append_word), so a
+                    # consumer reads None back and `== None` holds.
+                    els.append(_call('mojo_box_none', []))
                 else:
                     els.append(_rewrite_expr(e, cvar, kind, env))
             boxed = _call(f'__mojo_tuple_box_{len(els)}', els)

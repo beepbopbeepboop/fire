@@ -5378,6 +5378,22 @@ def main():
 main()
 """
     test_generator_matches_cpython("tagged_for_target_copy_into_str", _mixed_str, _mixed_str)
+    # A tuple-yielding generator with a None slot: the None is a box (kind 'n') in
+    # the yielded tuple, the tuple-unpacked names are tagged words, so `== None`,
+    # `print`, and arithmetic on the int slot all agree with CPython.
+    _tuple_none = """\
+def g():
+    yield 1, 10
+    yield None, 20
+    yield 2, 30
+def main():
+    for a, b in g():
+        print(a)
+        print(a == None)
+        print(b + 1)
+main()
+"""
+    test_generator_matches_cpython("tagged_tuple_slot_none", _tuple_none, _tuple_none)
     test_generator_matches_cpython("tagged_for_target_plain_str_store_after_copy",
                                    _mixed_str_after, _mixed_str_after)
     test_generator_matches_cpython("tagged_for_target_copy_into_float", _mixed_float, _mixed_float)
