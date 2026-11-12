@@ -143,6 +143,25 @@ def drop_queued_busy():
             log("dropped queued %s: %s is held by a live session" % (item.get("name", f), ", ".join(clash)))
 
 
+def drop_queued_unserved(unserved):
+    """A queued task whose class no slot serves can never start, and its claim keeps the doc from the only thing that
+    can move it: the replan skips a doc whose claim a queued task holds. 2026-11-12: `bug-hard-suite-gimplerunner-part2`
+    waited for a `hard` slot that does not exist, and `SUITE_gimplerunner-part2` was never decomposed. The queue entry
+    is dropped (the feed or the replan re-queues the doc at a class that can run it). Returns how many were dropped."""
+    n = 0
+    for f in os.listdir(C.qdir()):
+        if not f.endswith(".json"):
+            continue
+        path = os.path.join(C.qdir(), f)
+        item = json.load(open(path))
+        if item.get("cls") in unserved:
+            os.remove(path)
+            log("dropped queued %s: its class %s has no slot, so it could never start (its doc is replanned instead)"
+                % (item.get("name", f), item["cls"]))
+            n += 1
+    return n
+
+
 def busy_by_class():
     """Running workers per task class: a task counts in its own class (its `cls`), whichever slot it runs on, so a
     slot that also takes another class does not hide that class's load. Stale registry entries (a dead pid still
@@ -365,6 +384,8 @@ def block_reason(doc, st, pool, busy, held):
         return "STOP line in the doc: %s" % stop
     split = split_reason(doc)
     if split:
+        if split_all_landed(doc):
+            return "SPLIT: every part has landed (%s); the parent needs a final verify and delete, not a replan" % split
         return "SPLIT: decomposed into parts that carry the work (%s)" % split
     if not any(C.accepts(sl, cls) and C.slot_free(sl, busy) for sl in pool["slots"]):
         return "no free %s slot (%s)" % (cls, ", ".join(
@@ -440,25 +461,50 @@ def refill(target):
 SPLIT = marker("SPLIT")   # a doc decomposed into parts by a replan
 
 
-def part_exists(part):
-    """Whether a `SPLIT:` entry names a bug doc that is on disk, in whatever class directory it was filed.
-
-    The entry may be a bare name, `bugs/mid/<name>.md`, or `<name>.md`; the class directory is not
-    trusted, because a part may be filed at any servable class."""
+def part_stem(part):
+    """A `SPLIT:` entry (a bare name, `bugs/mid/<name>.md` or `<name>.md`) as the doc's bare name."""
     stem = part.strip()
     stem = re.sub(r"^bugs/", "", stem)
     stem = re.sub(r"^(easy|mid|hard)/", "", stem)
-    stem = re.sub(r"\.md$", "", stem)
-    return bool(glob.glob(os.path.join(C.MAIN, "bugs", "**", stem + ".md"), recursive=True))
+    return re.sub(r"\.md$", "", stem)
+
+
+def split_parts(line, own=None):
+    """The part names in a `SPLIT:` line's value. Workers annotate the line (`part1 landed: the where-clause text`,
+    `(fixed, deleted 2026-11-12)`), and the commas inside a note were read as part names, so a good split looked like
+    five missing parts and the doc was replanned again (2026-11-12, eight docs). So: parenthesised notes are dropped,
+    and an entry counts only if it is shaped like a doc name (no spaces); the doc's own name, which one worker listed
+    among its parts, is not a part of itself."""
+    line = re.sub(r"\([^)]*\)", " ", line)
+    names = []
+    for tok in line.split(","):
+        tok = tok.strip().strip("`*_ ").rstrip(".")
+        if re.fullmatch(r"[\w./-]+", tok) and part_stem(tok) != own:
+            names.append(tok)
+    return names
+
+
+def part_state(part):
+    """`exists` (a doc on disk, in whatever class directory it was filed), `landed` (no doc, but a branch deleted it:
+    a part's doc is deleted by the fix that closes it, so this is a part's NORMAL end) or `missing` (never filed)."""
+    stem = part_stem(part)
+    if glob.glob(os.path.join(C.MAIN, "bugs", "**", stem + ".md"), recursive=True):
+        return "exists"
+    return "landed" if deleted_on_a_branch(stem) else "missing"
+
+
+def part_exists(part):
+    return part_state(part) == "exists"
 
 
 def split_reason(doc):
     """The parts listed in the doc's `SPLIT:` line, or None. A SPLIT doc's parts carry the work, so
     the feeder leaves the original alone (it stays at its class — the ladder is one-way).
 
-    Only a split whose parts all exist counts. A `SPLIT:` line naming a part that is not on disk is
-    an orphan: the original would stay parked forever with nothing working it. Returning None lets the
-    replan queue again, which re-decomposes the doc (2026-11-11)."""
+    Only a split whose parts all exist or have LANDED counts. A part that was never filed is an orphan: the original
+    would stay parked forever with nothing working it, so None lets the replan queue again (2026-11-11). A part whose
+    doc is gone because its fix landed is not an orphan: treating it as one re-decomposed a parent whose parts were
+    partly done, every time a part closed (2026-11-12)."""
     try:
         with open(os.path.join(C.MAIN, doc_path(doc)), encoding="utf-8") as f:
             m = SPLIT.search(f.read())
@@ -466,10 +512,20 @@ def split_reason(doc):
         return None
     if not m:
         return None
-    parts = [p for p in m.group(1).split(",") if p.strip()]
-    if not parts or not all(part_exists(p) for p in parts):
+    parts = split_parts(m.group(1), own=os.path.basename(doc))
+    if not parts or any(part_state(p) == "missing" for p in parts):
         return None
     return m.group(1)
+
+
+def split_all_landed(doc):
+    """True when the doc is SPLIT and every part has landed: nothing is left in the parts, so the parent needs a final
+    verify and a delete by a person (or a worker told to), not another replan."""
+    reason = split_reason(doc)
+    if not reason:
+        return False
+    parts = split_parts(reason, own=os.path.basename(doc))
+    return bool(parts) and not any(part_state(p) == "exists" for p in parts)
 
 
 def unserved_classes(pool=None, *, warn_only=False):
@@ -530,6 +586,7 @@ def replan_unserved():
     if not unserved:
         return 0
     servable = [c for c in C.CLASSES if c not in unserved]
+    drop_queued_unserved(unserved)
     made = 0
     for cls, slots in sorted(unserved.items()):
         for path in sorted(glob.glob(os.path.join(C.MAIN, "bugs", cls, "*.md"))):

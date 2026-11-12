@@ -82,6 +82,35 @@ class Split(unittest.TestCase):
         self.assertIsNone(S.STOP.search("we should STOP: now"))
         self.assertEqual(S.STOP.search("## STOP: needs the owner").group(1), "needs the owner")
 
+    def test_notes_in_the_line_are_not_part_names(self):
+        # 2026-11-12: `(part1 landed: the where-clause text, wording)` made fragments look like missing parts
+        self.write("hard/N.md", "SPLIT: N-part1 (fixed, deleted 2026-11-12), N-part2, N-part3 (part 3: a note, with commas)\n")
+        self.write("mid/N-part2.md", "# p2\n"); self.write("mid/N-part3.md", "# p3\n")
+        with mock.patch.object(C, "MAIN", self.tmp), mock.patch.object(S, "deleted_on_a_branch", lambda b: b == "N-part1"):
+            self.assertEqual(S.split_parts("N-part1 (fixed, deleted 2026-11-12), N-part2, N-part3 (a, b)"),
+                             ["N-part1", "N-part2", "N-part3"])
+            self.assertIsNotNone(S.split_reason("hard/N"))
+
+    def test_a_part_that_landed_is_not_an_orphan(self):
+        # a part's doc is deleted by the fix that closes it: that must not make the parent look orphaned
+        self.write("hard/L.md", "SPLIT: L-part1, L-part2\n"); self.write("mid/L-part2.md", "# p2\n")
+        with mock.patch.object(C, "MAIN", self.tmp), mock.patch.object(S, "deleted_on_a_branch", lambda b: b == "L-part1"):
+            self.assertEqual(S.split_reason("hard/L"), "L-part1, L-part2")
+            self.assertFalse(S.split_all_landed("hard/L"))
+        with mock.patch.object(C, "MAIN", self.tmp), mock.patch.object(S, "deleted_on_a_branch", lambda b: False):
+            self.assertIsNone(S.split_reason("hard/L"), "a part never filed IS an orphan")
+
+    def test_all_parts_landed_says_so_instead_of_replanning(self):
+        self.write("hard/D.md", "SPLIT: D-part1, D-part2\n")
+        with mock.patch.object(C, "MAIN", self.tmp), mock.patch.object(S, "deleted_on_a_branch", lambda b: True):
+            self.assertTrue(S.split_all_landed("hard/D"))
+            self.assertIn("every part has landed", S.block_reason("hard/D", S.load_state(), {"slots": [], "skip": []}, {}, set()))
+
+    def test_a_doc_listing_itself_among_its_parts_is_not_its_own_orphan(self):
+        self.write("hard/Self.md", "SPLIT: Self-part1, Self\n"); self.write("mid/Self-part1.md", "# p\n")
+        with mock.patch.object(C, "MAIN", self.tmp):
+            self.assertIsNotNone(S.split_reason("hard/Self"))
+
     def test_a_doc_without_the_line_has_no_split(self):
         self.write("hard/Y.md", "# Y\nno split here\n")
         with mock.patch.object(C, "MAIN", self.tmp):
@@ -143,6 +172,18 @@ class QueuedClass(unittest.TestCase):
                 "claims": ["bug:DIAGNOSTICS_align_decorator"], "cls": "easy"}
         self.assertEqual(C.doc_class_now(item), "easy",
                          "a replan runs at the class with a slot, not the doc's unserved class")
+
+
+class QueuedUnserved(unittest.TestCase):
+    def test_a_queued_task_for_an_unserved_class_is_dropped_so_the_doc_can_be_replanned(self):
+        tmp = tempfile.mkdtemp()
+        q = os.path.join(tmp, "queue"); os.makedirs(q)
+        for name, cls in (("hard-one", "hard"), ("mid-one", "mid")):
+            with open(os.path.join(q, name + ".json"), "w") as f:
+                json.dump({"name": name, "cls": cls, "claims": ["bug:" + name]}, f)
+        with mock.patch.object(C, "qdir", lambda: q):
+            self.assertEqual(S.drop_queued_unserved({"hard": ["opus"]}), 1)
+        self.assertEqual(sorted(os.listdir(q)), ["mid-one.json"], "only the unserved class's entry goes")
 
 
 if __name__ == "__main__":
