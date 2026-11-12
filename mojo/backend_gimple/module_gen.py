@@ -6149,6 +6149,20 @@ def gen_module_impl(self, stmts: list):
             # '_comptime_rhs_failures'` / `'_struct_param_names'`.
             '_comptime_rhs_failures': 'MojoList *',
             '_struct_param_names': 'MojoList *',
+            # `Parser._lazy_import_blockers` (PEP 810 lazy imports): the stack
+            # `parse_funcdef`/`parse_struct`/`parse_trait`/`parse_try` push the
+            # enclosing scope onto and `parse_lazy_import` reads the innermost
+            # entry. Added by master's lazy-import work; the dataclass field
+            # landed without this row, so the self-hosted `Parser` struct
+            # omitted it and gcc rejected every access with
+            # `'Parser' has no member named '_lazy_import_blockers'`.
+            '_lazy_import_blockers': 'MojoList *',
+            # `_last_bracket_variadics`: the `*Name: Type` variadic bracket
+            # parameters of the last bracket list parsed. The dataclass
+            # declaration was added alongside this row — the hardcoded layout
+            # is not derived from the dataclass, so a field the parser writes
+            # and `_parse_funcdef` reads needs BOTH.
+            '_last_bracket_variadics': 'MojoList *',
             # NOT `_CONV_KWS`: that is a CLASS-level constant
             # (`Parser._CONV_KWS = {...}`, fire_compiler.py), not an instance
             # field. Listing it here made `self._CONV_KWS` read this
@@ -6329,6 +6343,10 @@ def gen_module_impl(self, stmts: list):
         # is — it is a real Python bool on the dataclass.
         'captures': 'MojoList *',
         'has_capture_list': '_Bool',
+        # `*Name: Type` variadic bracket parameters, filled from
+        # `Parser._last_bracket_variadics` by `_parse_funcdef` and read by
+        # `_check_variadic_element_types`.
+        'variadic_bracket_params': 'MojoList *',
         'where_clause': 'int64_t',
         'where_else': 'int64_t',
         'line': 'int64_t',
@@ -6407,6 +6425,8 @@ def gen_module_impl(self, stmts: list):
         'extra': 'MojoList *',
         'line': 'int64_t',
         'col': 'int64_t',
+        # `lazy import ...` (PEP 810) — see ImportStmt.lazy in fire_compiler.py.
+        'lazy': '_Bool',
         'decorators': 'MojoList *',
     }
     self.struct_field_types['FromImportStmt'] = {
@@ -6415,6 +6435,8 @@ def gen_module_impl(self, stmts: list):
         'wildcard': '_Bool',
         'line': 'int64_t',
         'col': 'int64_t',
+        # `lazy from ... import ...` (PEP 810) — see FromImportStmt.lazy.
+        'lazy': '_Bool',
         'name_alias_strs': 'MojoList *',
         'decorators': 'MojoList *',
     }
@@ -6646,6 +6668,12 @@ def gen_module_impl(self, stmts: list):
         'bracket_params': 'MojoList *',
         'type_param_names': 'MojoList *',
         'keywords': 'MojoList *',
+        # `where_clause` is the same shape as FunctionDef's (None / one
+        # expression / a list) and takes the same boxed word;
+        # `bracket_types` is the (name, annotation source) pairs of the
+        # bracket parameter list.
+        'where_clause': 'int64_t',
+        'bracket_types': 'MojoList *',
     }
     self.struct_field_types['TraitDef'] = {
         'name': 'char *', 'methods': 'MojoList *', 'decorators': 'MojoList *',
