@@ -2200,6 +2200,15 @@ def _emit(gen, line: str):
 
 
 def _emit_raw(gen, line: str):
+    # GCC numbers a `-fgimple` diagnostic from the last `#line` directive,
+    # counting physical lines. So every statement line gets its own directive
+    # directly above it (gen_stmt sets `_stmt_line_directive` to the innermost
+    # statement's); a statement that lowers to many lines is no longer
+    # attributed to its first line plus a count. Directives, preprocessor
+    # lines and blanks are not statement lines and are not stamped.
+    _d = getattr(gen, '_stmt_line_directive', None)
+    if _d and line.strip() and not line.lstrip().startswith('#'):
+        gen.body_lines.append(_d)
     gen.body_lines.append(line)
     # Track values produced by a runtime call that always returns a brand-new
     # container (see `_FRESH_CONTAINER_RETURNS`). A consumer that receives
