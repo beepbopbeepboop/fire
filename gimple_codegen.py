@@ -2829,7 +2829,7 @@ class GimpleGen:
         self._scope_live_depth: list = []
         self._scope_live_fn: list = []
         self._current_filename: str = ""  # filename for #line directives
-        self._stmt_line_directive: str | None = None  # `#line` for the innermost statement being emitted (see emit_stmts.gen_stmt)
+        self._emitted_line_pairs: set[tuple[str, int]] = set()  # (filename, line) pairs already emitted
         # external_call["name", Ret](args) targets → (ret_ctype, [arg_ctypes]); first use wins.
         # Shared across imported modules so the root preamble can emit one extern proto each.
         self._external_protos: dict[str, tuple[str, list[str]]] = {}
@@ -3607,7 +3607,6 @@ class GimpleGen:
         'mojo_cstr_or_int_str':  ('char *',    ['int64_t']),
         'mojo_int_str_transient': ('char *',   ['int64_t']),
         'mojo_cstr_or_int_release': ('void',   ['int64_t', 'char *']),
-        'mojo_str_word_fresh':   ('char *',    ['int64_t']),
         'mojo_dict_new':         ('MojoDict *', []),
         'mojo_dict_set_str': ('void',      ['MojoDict *', 'char *', 'char *']),
         'mojo_dict_set_int': ('void',      ['MojoDict *', 'char *', 'int64_t']),
@@ -4305,6 +4304,15 @@ class GimpleGen:
 
     # ── Statement generation ───────────────────────────────────────────────
 
+    # Statement kinds whose handler recurses into gen_stmt for a nested body
+    # (their own nested statements already get their own correct #line via
+    # that recursive call) — excluded from the re-stamping below, which would
+    # otherwise overwrite a nested statement's correct line with the outer
+    # compound statement's line.
+    _COMPOUND_STMT_KINDS = frozenset((
+        'IfStmt', 'WhileStmt', 'ForStmt', 'TryStmt', 'WithStmt',
+        'FunctionDef', 'ComptimeIfStmt', 'ComptimeForStmt', 'MatchStmt',
+    ))
 
     # ── Statement handlers (one per AST node type) ────────────────────────
 

@@ -3021,7 +3021,8 @@ def write_bytes(s: Span) -> Int:
     return external_call["write", Int64](1, s.unsafe_ptr(), len(s))
 """), 'mlir_write_bytes_bottom')
 
-    # 153b. GATE regression (bugs/gate-stdlib-syntax.md): a `__mlir_op` binary
+    # 153b. GATE regression (stdlib-syntax red on std/builtin/bool.mojo once the
+    #       GIMPLE tag was pinned; fixed in f4a7ee488): a `__mlir_op` binary
     #       op over _Bool operands must report the OPERANDS' type, not a
     #       blanket int64_t. Before the fix the result temp was declared
     #       int64_t and assigned `_t1 & _t2` (both _Bool) — legal in an
