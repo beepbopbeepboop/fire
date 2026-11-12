@@ -2463,8 +2463,13 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # kind (see `_dyn_word_locals`): `for pname in d[k]:` over a dict
         # value built from unpacked names has to stringify `pname` by asking
         # the runtime, or `key + '::' + pname` renders its address.
+        # Not for a str-keyed `.items()` pair: its element is a MojoList * the
+        # pair branch records (see `_pair_str_keyed`), so asking the runtime what
+        # the word is would print the pair's address.
+        _pair_target = (not is_tuple and it_val in gen._dict_items_val_elems
+                        and it_val not in gen._dict_items_int_keys)
         if ((not elem or elem == 'int64_t')
-                and gen.var_types.get(var) == 'int64_t'):
+                and gen.var_types.get(var) == 'int64_t' and not _pair_target):
             gen._dyn_word_locals.add(_as_str(var))
             if shadow_name:
                 gen._dyn_word_locals.add(_as_str(shadow_name))
@@ -2633,6 +2638,14 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         _mkv = (it_val in getattr(gen, '_maybe_kinds_vals', ())
                 or list_ptr in getattr(gen, '_maybe_kinds_vals', ())
                 or _unknown_elem)
+        # A STR-KEYED `.items()` list is a list of (key, value) PAIRS, each a
+        # MojoList *: its element is known to be a pair, so the single-name
+        # target is that pointer and not a box of unknown kind. The pair branch
+        # below records it as a MojoList * (see `_pair_str_keyed`); a boxed
+        # target here made `print(v)` print the pair's address as an integer.
+        if (not is_tuple and it_val in gen._dict_items_val_elems
+                and it_val not in gen._dict_items_int_keys):
+            _mkv = False
         if _mkv:
             elem64 = gen._new_val('int64_t',
                                   f"mojo_list_get_boxed ({list_ptr}, {idx_t})")
@@ -3773,9 +3786,12 @@ def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
     # _gen_struct_method's identical handling just above -- a lifted
     # closure whose OWN body emitted a real setjmp must not be tagged
     # `__GIMPLE` either, for the same reason.
+    # Tag in declaration-specifier position (before the return type), for
+    # the same reason as emit_funcs' method header: after a pointer return
+    # the tag is ignored by gcc -fgimple.
     _sig_kw = '' if gen._func_used_setjmp else '__GIMPLE '
     lines = [
-        f"{ret_type} {_sig_kw}{ci.lifted_name} ({params_str})",
+        f"{_sig_kw}{ret_type} {ci.lifted_name} ({params_str})",
         "{",
         *gen.decls,
         *gen.body_lines,

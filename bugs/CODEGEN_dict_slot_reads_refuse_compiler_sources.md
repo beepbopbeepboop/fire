@@ -59,13 +59,26 @@ Check it against the fire.ci build, not only this probe.
 
 ## Status (2026-11-12)
 
+- LANDED (2026-11-12, latest): the container refusal was too wide. `_gen_stmt_AssignStmt`
+  (`emit_stmts.py`) refused a container store whenever the name was a box-holding local
+  (`_mixed_box`), and since eb2a7e330b that includes a container-beside-scalar name
+  (`mixed_value_locals`), which is supposed to carry a container as its bare word. The
+  refusal now fires only for a name bound to a TAGGED generator word (`_tagged_mixed`), which is
+  what its message says. Measured: `ast_rewriter.py`, `module_shared.py` and `coro.py` each
+  compile in isolation (`compile_module_to_c`, `linkable=False`) with this change; before it,
+  `ast_rewriter.py` (`'fval'`) and `coro.py` (`'k'`) were refused. `test_mixed_kind_name_representation.py`
+  goes 11/20 -> 20/20. `test_dict_slot_read_regression.py` gains Test 5 (a dict read rebound to a
+  container, then an int), which fails with the old condition and passes with the new one.
+- STILL OPEN (heavy, integrator): the fire.ci self-host build is not run. Done-when is not met until
+  it is green; the doc stays until then.
+
 - `mojo/middle/coro.py` COMPILES: its last blocker was the nested recursive
   generator `_walk_lists`, whose dynamic `getattr` the C++ companion refuses.
   It is an eager list-returning function now, so the compiler's own module
   compiles through the ordinary path (pinned by
   `test_selfhost.py::coro_module_compiles_to_c`). The remaining open item is
-  the CODE SHAPE for arbitrary user code, not this build; see
-  `CODEGEN_coro_nested_recursive_generator_getattr.md`.
+  the CODE SHAPE for arbitrary user code, not this build (the dynamic-`getattr`
+  refusal that blocked it is fixed in 37c877f7c).
 - FIXED: a float and a str stored into one name (regression test case 2). The
   name is the `int64_t` box (`emit_infra.mixed_scalar_locals`), so the program
   compiles and prints the CPython answer; `test_dict_slot_read_regression.py`

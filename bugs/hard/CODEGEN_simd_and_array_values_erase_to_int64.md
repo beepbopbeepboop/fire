@@ -1,4 +1,4 @@
-SPLIT: CODEGEN_simd_and_array_values_erase_to_int64-part1, CODEGEN_simd_and_array_values_erase_to_int64-part3, CODEGEN_simd_and_array_values_erase_to_int64-part4, CODEGEN_simd_and_array_values_erase_to_int64-part5
+SPLIT: part1 landed (Array/FixedSizeArray ctor tracked), part2 landed in this branch (Span over Array inherits element type), CODEGEN_simd_and_array_values_erase_to_int64-part3, CODEGEN_simd_and_array_values_erase_to_int64-part4, CODEGEN_simd_and_array_values_erase_to_int64-part5
 
 # CODEGEN: SIMD values and `Array`/`Span` elements erase to `int64_t`, so their real type is unknown
 
@@ -94,13 +94,12 @@ from the annotation it is written with.
 
 ## Exact next step
 
-Start with (1): in `mojo/backend_gimple/emit_calls.py::_lower_call`'s
-"Generic container constructors" arm, add an `Array`/`FixedSizeArray` branch
-that builds `mojo_list_new()` (or the array runtime the stdlib dylib already
-uses) and records `gen._elem_types[t]` from the bracket's first type argument
-via `_annotation_container_elem_type(gen, 'Array[%s]' % ann, 'MojoList *')`.
-Then re-run the probe above and confirm the emitted C reads
-`mojo_list_get_double` for `Array[Float32, 4]` (or get_float once (3) lands),
-and re-run the two tests named in "Landed". Byte-identical generated C is NOT
-expected here (this is a real representation change), so gate it with the
-`test/math` files plus `test_codegen_local_bindings_cache.py`.
+(1) landed in this worktree: `_lower_call`'s generic container constructors arm
+now handles `Array`/`FixedSizeArray`, builds `mojo_list_new()`, records
+`gen._elem_types[t]` from the bracket's first type argument, and initializes
+`N` elements from `fill=` when statically known. The probe emits a tracked
+`MojoList *` and no longer reads elements via `mojo_list_get_int`. Start with
+part 2 (`Span(<tracked container>)` inherits the element type), per
+`CODEGEN_simd_and_array_values_erase_to_int64-part2.md`. Byte-identical
+generated C is NOT expected for these representation changes; gate follow-ups
+with the `test/math` files plus `test_codegen_local_bindings_cache.py`.

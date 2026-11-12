@@ -9,6 +9,9 @@ whole-module substring check passes whether or not the part is fixed.
 
 Run one part:      python3 test_codegen_erased_container_values.py part1
 Run every part:    python3 test_codegen_erased_container_values.py
+Run a nested part: python3 test_codegen_erased_container_values.py part4_part1
+                   (the argument is the prefix after `test_`, so a replan's
+                   sub-part tests run under their own prefix)
 
 A `test_partN_*` function is RED until part N lands. The `*_unchanged`
 functions pin behaviour that must not regress and are GREEN today.
@@ -37,6 +40,18 @@ def _body(c, fn):
     return m.group(0)
 
 
+def _defn(c, prefix):
+    """The text of the generated definition of the function whose C name
+    starts with `prefix`, and nothing else. The mangled suffix after the
+    name hashes the parameter types, so it changes with the fix and cannot
+    be pinned. The parameter list is matched on one line without a `;`, so
+    the forward declaration (which ends `;`) can never be the anchor."""
+    m = re.search(r'\n[^\n]*\b' + re.escape(prefix) + r'\w* \([^\n;]*\)\s*\n\{.*?\n\}',
+                  c, re.S)
+    assert m is not None, 'no generated definition of %s*' % prefix
+    return m.group(0)
+
+
 ARRAY_SRC = 'def f():\n    var a = Array[Float32, 4](fill=0.0)\n    print(a[0])\n'
 SPAN_SRC = ('def f():\n    var a = Array[Float32, 4](fill=0.0)\n'
             '    var s = Span(a)\n    print(s[0])\n')
@@ -50,6 +65,21 @@ SIMD_ARG_SRC = (
     '    var v = SIMD[DType.float32, 2](1.0)\n'
     '    var r = id_simd(v)\n'
     '    return r\n'
+)
+# No SIMD constructor in this source: every type comes from a PARAMETER or
+# RETURN annotation, so the part4-part1 result is independent of part 3
+# (the constructor, which another worker carries).
+SIMD_SIG_SRC = (
+    'def id_simd(x: SIMD[DType.float32, 2]) -> SIMD[DType.float32, 2]:\n'
+    '    return x\n'
+    '\n'
+    'def use_it(x: SIMD[DType.float32, 2]):\n'
+    '    var r = id_simd(x)\n'
+    '    return r\n'
+)
+SIMD_INT_SIG_SRC = (
+    'def gi(x: SIMD[DType.int32, 2]) -> SIMD[DType.int32, 2]:\n'
+    '    return x\n'
 )
 
 
@@ -87,6 +117,30 @@ def test_part4_float_simd_survives_call_and_return():
     body = _body(_compile(SIMD_ARG_SRC, 'simd_arg'), 'simd_arg_f')
     assert 'indirect call via SubscriptExpr' not in body, body
     assert 'int64_t r;' not in body, body
+
+
+# part4-part1 (replan of part4, see bugs/mid/CODEGEN_simd_and_array_values_
+# erase_to_int64-part4-part1.md): a SIMD[<float dtype>, N] parameter and
+# return keep the scalar C type, and the call-result local inherits it.
+def test_part4_part1_simd_param_return_keep_ctype():
+    c = _compile(SIMD_SIG_SRC, 'simd_sig')
+    assert 'indirect call via SubscriptExpr' not in c, c
+    idbody = _defn(c, 'simd_sig_id_simd')
+    idsig = idbody.splitlines()[1].strip()
+    assert idsig.startswith('float ') and idsig.endswith('(float x)'), idbody
+    assert re.search(r'^float \S+ \(float\);', c, re.M), c
+    ubody = _defn(c, 'simd_sig_use_it')
+    assert 'int64_t r;' not in ubody, ubody
+    assert 'float r;' in ubody, ubody
+
+
+def test_part4_part1_int_simd_unchanged():
+    # The float-dtype arm must dispatch on a FLOAT dtype: an integer SIMD
+    # spelling keeps its current int64_t lowering.
+    c = _compile(SIMD_INT_SIG_SRC, 'simd_sig')
+    idbody = _defn(c, 'simd_sig_gi')
+    idsig = idbody.splitlines()[1].strip()
+    assert idsig.startswith('int64_t ') and idsig.endswith('(int64_t x)'), idbody
 
 
 # part5: Scalar[X] / SIMD[X, 1] resolve to the scalar C type of X.

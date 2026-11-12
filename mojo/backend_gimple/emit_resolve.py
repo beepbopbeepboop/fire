@@ -1255,6 +1255,28 @@ def _compile_imported_module(gen, module_name: str, loc=None) -> tuple:
                 # (importers read imported modules' signatures from it; without
                 # it every cross-module call got an int64_t prototype).
                 gen._module_stmts[module_name] = stmts
+                # Pre-register functions from self-host sibling modules before
+                # lowering dependent call sites (fixes cycles between siblings).
+                try:
+                    from fire_compiler import FunctionDef
+                    _SH_PREFIXES = ('mojo.', 'gimple_', 'ast_rewriter', 'mlir', 'regex_compile',
+                                    'module_loader', 'ownership_destruct', 'fire_compiler',
+                                    'determinism_trace', 'imports', 'elaborate', 'monomorphize',
+                                    'comptime', 'cas', 'build_stdlib_dylib', 'driver')
+                    _is_sh = False
+                    for _pref in _SH_PREFIXES:
+                        if module_name.startswith(_pref):
+                            _is_sh = True
+                            break
+                    if _is_sh and hasattr(gen, '_imported_func_home'):
+                        for _ms in (stmts or []):
+                            if isinstance(_ms, FunctionDef):
+                                try:
+                                    gen._imported_func_home.setdefault(_ms.name, module_name)
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
                 # Incrementally extend the flat, pre-deduped mirror (see
                 # the `_walk_ast` re-scan bug
                 # Phase 1) — O(this module's own stmt count), done once
@@ -3080,7 +3102,7 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     for _kn, _kexpr in (getattr(node, 'kwargs', None) or []):
         arg_pairs.append(gen.lower_expr(_kexpr))
     try:
-        module_src = open(source).read()
+        module_src = gen._generic_source_text(source)
         import elaborate
         el = elaborate.Elaborator()
         # A generic being elaborated here MAY contain a nested async/
@@ -3476,7 +3498,7 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
     if not all(gimple_exprtypes._is_concrete_type_arg(ta) for ta in type_args):
         return None
     try:
-        module_src = open(source).read()
+        module_src = gen._generic_source_text(source)
         import elaborate
         info = elaborate.Elaborator().elaborate_generic_struct(module_src, base_name, type_args)
     except Exception as e:
@@ -3530,9 +3552,7 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
         # fall-through above exists for.
         import elaborate as _elab_mod
         if isinstance(e, _elab_mod.WhereConformanceError):
-            raise RuntimeError(
-                f"error: invalid instantiation of '{base_name}': violated constraint\n"
-                f"note: {type(e).__name__}: {e}")
+            raise _elab_mod.where_violation_error('instantiation', base_name, e)
         gen._generic_struct_elaboration_failures.append(
             f"{base_name}[{', '.join(type_args)}] from {source}: "
             f"{type(e).__name__}: {e}")
@@ -3559,7 +3579,7 @@ def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
             return None
         source = gen._imported_generic_structs.get(g)
         try:
-            module_src = open(source).read()
+            module_src = gen._generic_source_text(source)
             import elaborate
             info = elaborate.Elaborator().elaborate_generic_struct_inferred(
                 module_src, g, [ct for ct, _ in
