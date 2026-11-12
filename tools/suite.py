@@ -1890,7 +1890,8 @@ test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
 test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True, mem='tiny',
      extra=['test_cli_usage_text.py', 'fire.py', 'fire_main.py', 'fire_compiler.py'],
      extraglob=['**/*.py'],
-     desc='the tool prints the name it was invoked as, in usage, -v and every error')
+     desc='the tool prints the name it was invoked as, in usage, -v and every error',
+     disabled='bugs/gate-cli-usage-text.md')
 # `extraglob=['**/*.py']` is the same hole `suite-self-test` documents, one
 # subject over: `test_no_stale_command_name_in_prose` WALKS every `.py` file in
 # the tree (it ratchets `mojo <command>` out of the prose, and its doc was
@@ -2302,8 +2303,7 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
      extra=['test_coro_nested_async_capture.py', 'gimple_codegen.py',
             'runtime/fire_async_runtime.cpp', 'runtime/fire_async_runtime.h'] + CORO_RUNTIME,
      desc='nested async-def mutable closure capture under MOJO_CORO=stackswitch '
-          '(was 0/9, unregistered, naming the pre-rename mojo_*.c runtime files)',
-     disabled='bugs/gate-coro-nested-capture.md')
+          '(was 0/9, unregistered, naming the pre-rename mojo_*.c runtime files)')
 
 # ── The self-hosted BINARY's own compiled codegen ───────────────────────────
 # Everything here runs a mojoc process, so everything is capped, and

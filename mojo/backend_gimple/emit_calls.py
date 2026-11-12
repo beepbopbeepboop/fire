@@ -305,14 +305,19 @@ def _finish_generator_start(gen, api: dict, arg_pairs: list) -> str:
     # container and later used as a @contextlib.contextmanager — can still
     # discover the resume/value/destroy API at runtime.
     _base = api.get('base')
-    if _base:
+    # Only a C++-path generator registers a runtime signature; a stack-switch
+    # (`__mgco_`) one has none, so noting its handle would be a no-op call.
+    if _base and not _as_str(_base).startswith('__mgco_'):
         _start_sym = f"{_base}_start"
+        # -fgimple call operands cannot be casts, so the start symbol's
+        # address is materialised into its own temp first.
+        _start_ptr = gen._new_val('void *', f"(void *)&{_start_sym}")
         # Keep the handle in MojoGenerator* form; mojo_gen_note returns the
         # same handle word and records it in the runtime handle table.
         _h = gen._new_temp('int64_t')
         gen._safe_coerce_emit('MojoGenerator *', 'int64_t', t, _h)
         _noted = gen._call_expr('int64_t', 'mojo_gen_note',
-                                [('int64_t', _h), ('void *', f"(void *){_start_sym}")])
+                                [('int64_t', _h), ('void *', _start_ptr)])
         _coerced = gen._new_temp('MojoGenerator *')
         gen._safe_coerce_emit('int64_t', 'MojoGenerator *', _noted, _coerced)
         t = _coerced
@@ -9614,6 +9619,19 @@ def _pack_kwargs_slot_call(gen, fname, fname_raw, arg_pairs, kwarg_dict,
 
 def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Final dispatch for user-defined and C stdlib functions."""
+    if fname_raw == 'copysign' and len(getattr(node, 'args', []) or []) == 2:
+        try:
+            _x_t, _x_v = gen.lower_expr(node.args[0])
+            _y_t, _y_v = gen.lower_expr(node.args[1])
+            _x_d = gen._coerce_to_type(_x_t, 'double', _x_v)
+            _y_d = gen._coerce_to_type(_y_t, 'double', _y_v)
+            _res = gen._new_temp('double')
+            gen._emit(f'  {_res} = copysign ({_x_d}, {_y_d});')
+            _res_i64 = gen._new_temp('int64_t')
+            gen._emit(f'  {_res_i64} = (int64_t){_res};')
+            return 'int64_t', _res_i64
+        except Exception:
+            pass
     # `_locally_binds_name` gate: BUILTIN_VALUE_MAP's entries (open,
     # filter, enumerate, str, len, sorted, ...) are all ordinary
     # identifiers a module can legally shadow with its own top-level

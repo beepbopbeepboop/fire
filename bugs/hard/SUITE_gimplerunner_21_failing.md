@@ -40,10 +40,7 @@ Grouped by what the log shows. Each row is the case name from `test_gimple_runne
 - `gimple_with_generator_context_manager_exits`: refused, generator function with `yield`.
 - `gimple_with_generator_context_manager_exits_on_the_raise_path`: refused, same.
 
-### C. Memory limit only (stdout matches, RSS over the 40 MB limit) -- FIXED 2026-11-12
-
-The int-to-string conversion (`String(i)`, `str(i)`) was never freed; `mojo_str_word_fresh` now owns the
-result and the codegen registers it as fresh. The three cases pass at ~2.2 MB. Part doc deleted with the fix.
+### C. Memory limit only (stdout matches, RSS over the 40 MB limit)
 - `gimple_fresh_returning_string_functions_are_owned`: RSS 75.7 MB.
 - `gimple_string_locals_owned_when_only_read`: RSS 57.3 MB.
 - `gimple_string_method_results_are_owned`: RSS 57.3 MB.
@@ -65,4 +62,4 @@ result and the codegen registers it as fresh. The three cases pass at ~2.2 MB. P
 
 1. Split along the groups above: A and C are codegen, B is the coroutine project, D needs each
    test's expectation checked against CPython first (`tools/gdbtool` / the python3 reference).
-2. C is DONE (2026-11-12, see above). Remaining order: D's math return type (`math.copysign`), then A's dict keys.
+2. Start with C: three RSS cases, probably one ownership bug. Smallest and most contained.

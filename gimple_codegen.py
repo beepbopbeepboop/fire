@@ -3607,7 +3607,6 @@ class GimpleGen:
         'mojo_cstr_or_int_str':  ('char *',    ['int64_t']),
         'mojo_int_str_transient': ('char *',   ['int64_t']),
         'mojo_cstr_or_int_release': ('void',   ['int64_t', 'char *']),
-        'mojo_str_word_fresh':   ('char *',    ['int64_t']),
         'mojo_dict_new':         ('MojoDict *', []),
         'mojo_dict_set_str': ('void',      ['MojoDict *', 'char *', 'char *']),
         'mojo_dict_set_int': ('void',      ['MojoDict *', 'char *', 'int64_t']),
