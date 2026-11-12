@@ -366,47 +366,6 @@ def _pointer_return_kind(name: str):
     return r
 
 
-_GEN_SLOT_KINDS: dict = {}
-
-
-def _generator_slot_kinds(name: str):
-    """The per-slot kinds of the tuples a same-module generator yields, as a list
-    of env kind codes ('i' int, 'd' double, 'p' str, None unknown), or None when
-    it yields no tuple or its tuple shapes disagree.
-
-    A `for a, b in gen(...)` loop binds `a` and `b` from these (see the
-    tuple-target branch of `_static_env`), so a string slot the loop reads is
-    known to be a string when the loop body yields it on. Memoised per module,
-    the same way `_pointer_return_kind` is; a recursive generator reads the
-    unknown answer it set first, so the recursion stops there.
-    """
-    if name in _GEN_SLOT_KINDS:
-        return _GEN_SLOT_KINDS[name]
-    _GEN_SLOT_KINDS[name] = None
-    fd = None
-    for st in _MODULE_STMTS:
-        if isinstance(st, N.FunctionDef) and st.name == name \
-                and getattr(st, 'is_generator', False):
-            fd = st
-    if fd is None:
-        return None
-    env = _static_env(fd)
-    slots = None
-    for n in _walk(fd):
-        if not (isinstance(n, N.YieldExpr) and isinstance(n.value, N.TupleExpr)):
-            continue
-        ks = [_yield_kind(e, env) for e in n.value.elements]
-        if slots is None:
-            slots = ks
-        elif len(slots) == len(ks):
-            slots = [a if a == b else None for a, b in zip(slots, ks)]
-        else:
-            slots = None
-            break
-    _GEN_SLOT_KINDS[name] = slots
-    return slots
-
-
 def _callee_return_kind(expr, env: dict | None = None) -> str | None:
     """Scalar kind of `expr`'s value when `expr` is a call to a BARE name whose
     return type this module knows: a lambda-bound local of the enclosing
@@ -875,25 +834,6 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             continue
         env[tnames[0]] = 'i'
         env[tnames[1]] = elem
-    # `for a, b in gen(...):` where `gen` is a same-module tuple-yielding
-    # generator: each target takes its slot's kind (see _generator_slot_kinds),
-    # so a string slot is a 'p' name and a yield that re-yields it boxes it as a
-    # string. Unbound names only, the same rule as the enumerate case above.
-    for n in _fn_nodes:
-        if not isinstance(n, N.ForStmt):
-            continue
-        it = n.iterable
-        if not (isinstance(it, N.CallExpr) and isinstance(it.func, N.IdentExpr)):
-            continue
-        tnames = for_target_names(n.target)
-        if len(tnames) < 2 or any(t in env for t in tnames):
-            continue
-        slots = _generator_slot_kinds(it.func.name)
-        if not slots or len(slots) != len(tnames):
-            continue
-        for tn, k in zip(tnames, slots):
-            if k is not None:
-                env[tn] = k
     if struct_def is not None:
         for f in getattr(struct_def, 'fields', []):
             if isinstance(f, N.VarDecl):
@@ -1456,10 +1396,9 @@ def _tagged_consumers_ok(name: str, module_stmts=None) -> bool:
                 and x.func.name == name)
     # a handle bound ONCE to the generator call (`it = g(..)`) INSIDE one
     # function, every other use of that name in the same function being
-    # `list(it)`, `for x in it`, a comprehension over it, `it.close()`, or
-    # `with it` as a @contextlib.contextmanager handle: followed as if it were
-    # the call. Scoped per function -- an unrelated `it` in another function
-    # must not poison (or be mistaken for) this one.
+    # `list(it)`, `for x in it`, a comprehension over it, or `it.close()`:
+    # followed as if it were the call. Scoped per function -- an unrelated `it`
+    # in another function must not poison (or be mistaken for) this one.
     for fd in _scope_defs(mod):
         handles = {}
         for n in _walk(fd):
@@ -1488,11 +1427,6 @@ def _tagged_consumers_ok(name: str, module_stmts=None) -> bool:
                     and n.func.name == 'next' and len(n.args) >= 1
                     and isinstance(n.args[0], N.IdentExpr) and n.args[0].name in handles):
                 ok_uses.add(id(n.args[0]))
-            elif isinstance(n, N.WithStmt):
-                for _wi in n.items:
-                    if (isinstance(_wi.expr, N.IdentExpr)
-                            and _wi.expr.name in handles):
-                        ok_uses.add(id(_wi.expr))
             elif (isinstance(n, N.MemberExpr) and isinstance(n.obj, N.IdentExpr)
                     and n.obj.name in handles
                     and n.member in ('gi_frame', 'gi_running', 'gi_code', 'gi_suspended')):
@@ -1578,13 +1512,6 @@ def _tagged_consumers_ok(name: str, module_stmts=None) -> bool:
                 # `yield from g()` forwards the words; the delegating generator
                 # is itself tagged (its delegated kind is 'w')
                 for_iters.add(id(n.value))
-            elif isinstance(n, N.WithStmt):
-                # `with g()` / `with g() as x:` drives a @contextlib.contextmanager
-                # generator through the context-manager protocol (enter/yield
-                # value/exit), not by iterating yielded values as data.
-                for _wi in n.items:
-                    if _is_gcall(_wi.expr):
-                        for_iters.add(id(_wi.expr))
             if isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr) \
                     and n.func.name == name:
                 refs.append(id(n))
@@ -1789,14 +1716,6 @@ def _generator_value_kind(fn: N.FunctionDef,
             # exactly as a direct sibling delegation does -- fsutil's
             # `iter_files_by_suffix`, see
             # the (since-fixed) c_common/fsutil.py compile failure.
-            if _is_self_delegation(n.value, fn):
-                # `yield from <fn itself>(...)` re-yields what THIS generator
-                # yields; it is not a new source of kind. The fixpoint of a
-                # self-cycle is the kind of the direct yields, so the
-                # delegation contributes nothing rather than the None hole
-                # that `_resolve_gen_kind`'s cycle rule answers (which read
-                # a recursive tuple walk as "mixed tuple / non-tuple").
-                continue
             dk = delegated(n.value, fn) if delegated is not None else None
             kinds.add(dk)
             if dk == 'tuple':
@@ -2333,17 +2252,6 @@ def _register_generator_value_kinds(stmts: list) -> None:
     """
     for _n in _GEN_DEFS:
         _resolve_gen_kind(_n)
-
-
-def _is_self_delegation(value, fn: N.FunctionDef | None) -> bool:
-    """True for `yield from fn(...)` / `yield from fn` where `fn` is the
-    generator whose kind is being computed (a recursive generator's own
-    delegation). Matched by name, the same resolution `_delegated` uses."""
-    if fn is None:
-        return False
-    target = value.func if isinstance(value, N.CallExpr) else value
-    return (isinstance(target, N.IdentExpr)
-            and _cm_as_str(target.name) == _cm_as_str(fn.name))
 
 
 def _delegated(value, fn: N.FunctionDef = None):
@@ -3086,21 +2994,14 @@ def _ambiguous_yielded_params(fn: N.FunctionDef,
     for n in _walk(fn):
         if not isinstance(n, N.YieldExpr):
             continue
-        # A parameter that only reaches the yield as an ARGUMENT of a call whose result
-        # kind, not the argument kind, sets the slot does not set the slot's kind. That
-        # includes calls to this module's own functions (the callee's return kind) and
-        # str methods whose result is always `str` regardless of the argument kinds, such
-        # as `sep.join(xs)` and `fmt.format(...)`.
+        # A parameter that only reaches the yield as an ARGUMENT of a call to one of this
+        # module's own functions does not set the slot's kind: the call's result does (the
+        # callee's return kind). `yield _mojo_next(iterator)` is a yield of whatever
+        # `_mojo_next` returns, not of `iterator`.
         passed_through = set()
         for c in _walk(n.value):
-            if not isinstance(c, N.CallExpr):
-                continue
-            skip_args = False
-            if isinstance(c.func, N.IdentExpr) and c.func.name in _MODULE_FUNC_NAMES:
-                skip_args = True
-            elif isinstance(c.func, N.MemberExpr) and c.func.member in ('join', 'format'):
-                skip_args = True
-            if skip_args:
+            if (isinstance(c, N.CallExpr) and isinstance(c.func, N.IdentExpr)
+                    and c.func.name in _MODULE_FUNC_NAMES):
                 for a in c.args:
                     for sub in _walk(a):
                         passed_through.add(id(sub))
@@ -5261,18 +5162,7 @@ def _rewrite_expr(node, cvar: str, kind: str, env=None):
                     # consumer reads None back and `== None` holds.
                     els.append(_call('mojo_box_none', []))
                 else:
-                    # A string or double slot is boxed by its kind, so the tuple
-                    # records it (mojo_list_append_word reads the box's kind). A raw
-                    # pointer or raw double bits were recorded as an int, and a
-                    # consumer printed a string as its address.
-                    _t = _box_tag(e, env)
-                    _rev = _rewrite_expr(e, cvar, kind, env)
-                    if _t == 1:
-                        els.append(_call('mojo_box_from_str', [_rev]))
-                    elif _t == 2:
-                        els.append(_call('mojo_box_from_double', [_rev]))
-                    else:
-                        els.append(_rev)
+                    els.append(_rewrite_expr(e, cvar, kind, env))
             boxed = _call(f'__mojo_tuple_box_{len(els)}', els)
             return _call('__mojo_coro_yield_i', [_c_ident(cvar), boxed])
         val = (_rewrite_expr(node.value, cvar, kind, env) if node.value is not None
@@ -5498,76 +5388,6 @@ def _argkind(expr, caller_env: dict | None = None) -> str | tuple | None:
     return _yield_kind(expr, caller_env)
 
 
-def _list_narrowed_recursive_args(fn: N.FunctionDef) -> set:
-    """ids of the bare-identifier arguments of `fn`'s OWN recursive calls that
-    a dominating `if isinstance(NAME, list):` proves are lists.
-
-    The recursive call `walk(sub)` inside `if isinstance(sub, list):` is the
-    shape that used to refuse: `sub` is bound from `getattr(st, f, None)`, so
-    the static scan cannot type it, and the untypable argument recorded a
-    hole that made the generator's yielded parameter `xs` ambiguous -- even
-    though the guard proves the argument is a list, the same container kind as
-    the non-recursive call sites that pass `xs` a list literal. The narrowing
-    is only sound when the guarded branch never rebinds NAME, so a branch
-    that does (an assignment or a `for` target) proves nothing and is
-    skipped. Only the name's own type is established here: the element kind
-    stays unknown, which is why the caller records `('list', None)`, not a
-    concrete element kind."""
-    out = set()
-    for n in _walk(fn):
-        if not isinstance(n, N.IfStmt):
-            continue
-        c = n.condition
-        if not (isinstance(c, N.CallExpr) and isinstance(c.func, N.IdentExpr)
-                and c.func.name == 'isinstance' and len(c.args) == 2
-                and isinstance(c.args[0], N.IdentExpr)
-                and isinstance(c.args[1], N.IdentExpr)
-                and c.args[1].name == 'list'):
-            continue
-        guarded = c.args[0].name
-        body_nodes = []
-        for s in n.then_body:
-            body_nodes.extend(_walk(s))
-        rebound = False
-        for m in body_nodes:
-            if isinstance(m, N.AssignStmt) and isinstance(m.target, N.IdentExpr) \
-                    and m.target.name == guarded:
-                rebound = True
-            elif isinstance(m, N.ForStmt) and guarded in for_target_names(m.target):
-                rebound = True
-        if rebound:
-            continue
-        for m in body_nodes:
-            if not (isinstance(m, N.CallExpr) and isinstance(m.func, N.IdentExpr)
-                    and m.func.name == fn.name):
-                continue
-            for a in m.args:
-                if isinstance(a, N.IdentExpr) and a.name == guarded:
-                    out.add(id(a))
-    return out
-
-
-def _merge_list_holes(kinds: set) -> set:
-    """Fold a `('list', None)` observation (a list of unknown element kind,
-    from `_list_narrowed_recursive_args`) into a concrete `('list', k)` that
-    the same parameter's other call sites pass: both are the same container
-    word, and the concrete element kind is the one the parameter's body is
-    typed by. With no concrete list observation the `('list', None)` stays
-    and the slot is refused as before."""
-    concrete = False
-    for k in kinds:
-        if isinstance(k, tuple) and k[0] == 'list' and k[1] is not None:
-            concrete = True
-    if not concrete:
-        return kinds
-    out = set()
-    for k in kinds:
-        if isinstance(k, tuple) and k[0] == 'list' and k[1] is None:
-            continue
-        out.add(k)
-    return out
-
-
 def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
                                module_name: str | None = None) -> None:
     """Populate `_CALLSITE_PARAM_KINDS` (generators / async defs),
@@ -5740,7 +5560,7 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
                 else:
                     _has_kwargs_spread = True
                 continue
-            slot.setdefault(pname, set()).add(_call_observation(a, cenv))
+            slot.setdefault(pname, set()).add(_argkind(a, cenv))
         if _star_i is not None:
             # From the spread's own index to the end of the POSITIONAL
             # parameters, every one is now untypable.
@@ -5755,7 +5575,7 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
         for pname, a in kw.items():
             if pname not in by_name or not _unannotated(by_name[pname]):
                 continue
-            slot.setdefault(pname, set()).add(_call_observation(a, cenv))
+            slot.setdefault(pname, set()).add(_argkind(a, cenv))
         if _has_kwargs_spread:
             for _pn, _pa in pinfo:
                 if not _unannotated(_pa) or _pn in _kw_names:
@@ -5764,22 +5584,6 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
 
     # per callee: param name -> set of kinds seen (a None poisons the slot)
     seen: dict = {}
-    # ids of the recursive-call arguments that the enclosing `isinstance(_,
-    # list)` guard proves are lists, for the generator whose body is being
-    # walked (see `_list_narrowed_recursive_args`). A one-element holder
-    # because `_collect_from` rebinds it per function, and `_visit_call`
-    # reads it through the closure.
-    _narrowed_args: list = [set()]
-
-    def _call_observation(a, cenv):
-        """The kind one call argument contributes to its parameter's evidence:
-        `_argkind`, except that a bare identifier the caller's own
-        `isinstance(_, list)` guard narrows to a list at a recursive call is a
-        list of unknown element kind, not a hole."""
-        k = _argkind(a, cenv)
-        if k is None and id(a) in _narrowed_args[0]:
-            return ('list', None)
-        return k
 
     def _one_pass():
         """Collect every call's argument kinds. Split out of the driver
@@ -5882,13 +5686,6 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
                     if isinstance(m, N.FunctionDef):
                         fns.append((m, s))
             for fn, sdef in fns:
-                # Only this module's own generators can have a recursive call
-                # whose argument the guard narrows (the closure walk's
-                # functions belong to other modules, so none is "this" generator).
-                if not closure and fn.name in gen_names:
-                    _narrowed_args[0] = _list_narrowed_recursive_args(fn)
-                else:
-                    _narrowed_args[0] = set()
                 # The `struct_def` is load-bearing, not decoration:
                 # `_static_env` populates its `self.<field>` keys ONLY when it
                 # is handed the enclosing struct (see its `if struct_def is
@@ -5961,7 +5758,6 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
             resolved = {}
             conflicted = set()
             for pname, kinds in slot.items():
-                kinds = _merge_list_holes(kinds)
                 # A `None` in the evidence is a HOLE, not a kind: `_argkind`
                 # could not type that one argument syntactically, so the
                 # slot's real kind is simply unknown. The stack-switch ABI
@@ -8754,8 +8550,6 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('mojo_box_from_double', 'int64_t')
     gen.func_param_types.setdefault('mojo_box_from_bool', ['int64_t'])
     gen.func_return_types.setdefault('mojo_box_from_bool', 'int64_t')
-    gen.func_param_types.setdefault('mojo_box_from_str', ['char *'])
-    gen.func_return_types.setdefault('mojo_box_from_str', 'int64_t')
     gen.func_param_types.setdefault('mojo_box_none', [])
     gen.func_return_types.setdefault('mojo_box_none', 'int64_t')
     gen.func_param_types.setdefault(_BOX_NEW, ['int64_t'])

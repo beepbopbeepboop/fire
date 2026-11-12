@@ -63,3 +63,32 @@ reasons `Lib/contextlib.py` is refused by the async-function eligibility gate
 - Isolation through the `module_gen.py` refusing path matters for the final
   contextlib compile; a probe that only uses an in-process entry point that
   silently accepts the shape is not sufficient on its own.
+
+## Status 2026-11-12 — partial progress (cpp coroutine backend)
+
+Landed:
+- `mojo/backend_gimple/cpp_async.py`: async coroutine units now accept a
+  boxed/non-scalar return of one consistent supported type (pointer/container
+  results such as `MojoList *`, `MojoDict *`, `MojoSet *`, `MojoBytes *`,
+  `char *`, struct pointers, etc.) instead of refusing with
+  "every `return` must carry a scalar value". The promise/result slot stores
+  the value and awaiters read it back unchanged.
+- `mojo/backend_gimple/cpp_core.py`: list/tuple literal expressions in
+  compiled generator/coroutine bodies emit real `MojoList *` constructions (not
+  bare C++ brace-initializers), so a value-returning expression like
+  `return [1, 2, 3]` produces a `MojoList *`.
+
+Regression test (passes, MOJO_CORO=cpp / cpp20 async backend):
+- `test_regress_codegen_async_aenter_boxed_return.py` — an async function
+  returning a non-scalar list is awaited and the boxed value observed correctly.
+
+Verified:
+- `MOJO_CORO=cpp python3 tools/memslot.py --gb 8 --label boxed-aenter -- python3 test_regress_codegen_async_aenter_boxed_return.py`
+- `MOJO_CORO=cpp python3 tools/memslot.py --gb 8 --label async-runner -- python3 test_gimple_async_runner.py` (40/40)
+
+Still missing for the doc's full acceptance shape (`async with CM() as v:` in
+compiled module/codegen path): async context-manager protocol lowering for
+`async with` in cpp coroutine bodies and compilation/awaiting of async methods
+such as `__aenter__`/`__aexit__` in that path. The boxed-return root cause
+described in this doc is addressed for the cpp async coroutine result slot;
+remaining work is the consumer/protocol plumbing around it.

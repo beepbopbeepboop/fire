@@ -320,7 +320,7 @@ def _module_src(gen, base, kind):
     if not path:
         return None
     try:
-        return gen._generic_source_text(path)
+        return open(path).read()
     except OSError:
         return None
 
@@ -3903,12 +3903,6 @@ def _materialize(work, key):
         # (modular: `error: invalid call to '<fn>': violated constraint`).
         try:
             elaborate.check_bounds(module_src, tmpl, targs)
-        except elaborate.WhereConformanceError as _we:
-            # A struct's violated `where` is the same diagnostic whichever path
-            # instantiates it (emit_resolve reports it the same way).
-            if kind == 'struct':
-                raise elaborate.where_violation_error('instantiation', base, _we)
-            raise
         except elaborate.ConformanceError:
             raise
         except Exception:

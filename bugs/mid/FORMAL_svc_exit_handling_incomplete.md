@@ -1,6 +1,6 @@
 # FORMAL: `svc` exit handling is not structurally complete
 
-Status: PARTIALLY LANDED 2026-11-11. Parent: the overflow-guard wrong-spec fix (the guarded contract in `formal/arm64_proof_gen.py::_dylib_contract_proof`, 2026-11-12).
+Status: PARTIALLY LANDED 2026-11-11. Parent: `FORMAL_wrong_spec_accepted_since_overflow_traps.md`.
 
 Landed as 574813206 (archive) and f03896fff (master): the x16-discriminating model (exit is `none`, write
 continues at `pc + 4`), `work_step_svc` / `_exit` / `_write`, the svc step's right-hand side in the generator, no
@@ -82,4 +82,4 @@ Consequences of the model change (not bugs in themselves, but to know):
 5. Run the formal dylib test. Target: the marker's 6 failures, and the wrong-spec teeth check rejected.
 6. Only then remove the `expect=` marker on formal-dylib.
 
-Related: the overflow-guard wrong-spec fix (2026-11-12), which closed the soundness hole this doc's svc model underlies.
+Related: `FORMAL_wrong_spec_accepted_since_overflow_traps.md` (the soundness hole this closes).

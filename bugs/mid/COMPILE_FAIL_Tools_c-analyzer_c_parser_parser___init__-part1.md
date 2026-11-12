@@ -4,10 +4,9 @@ Part 1 of 4 of `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__
 (SPLIT 2026-11-11). This part is the tuple-target family of the companion's
 generator-body lowering: **seven of the eight remaining g++ errors** plus the
 silently-wrong stubbed statements. The sibling parts: part 2 (the companion
-dict-store slot — FIXED 2026-11-12, its doc deleted with the fix; it was
-downstream of this one), part 3 (the `.iterutil` import-floor refusal,
-`bugs/…-part3.md`), part 4 (the `..info` import-floor refusal,
-`bugs/mid/…-part4.md`) — the latter two independent of part 1.
+dict-store slot, `bugs/…-part2.md`, downstream of this one), part 3 (the
+`.iterutil` import-floor refusal, `bugs/…-part3.md`), part 4 (the `..info`
+import-floor refusal, `bugs/mid/…-part4.md`) — independent of parts 1-2.
 
 ## Summary
 
