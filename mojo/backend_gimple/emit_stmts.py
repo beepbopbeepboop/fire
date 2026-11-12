@@ -1680,7 +1680,7 @@ def _gen_stmt_AssignStmt(gen, node):
                 f"this function and also to a tagged generator word here "
                 f"cannot also hold a value of another C type; no "
                 f"representation holds both; refused")
-        if _unboxable_store and (_mixed_box or _tagged_mixed):
+        if _unboxable_store and _tagged_mixed:
             raise RuntimeError(
                 f"{tname!r}: a name bound to a tagged generator word elsewhere "
                 f"in this function and also to a container or pointer value "
