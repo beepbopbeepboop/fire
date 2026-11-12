@@ -6,13 +6,11 @@ lowered as `dirname == 0`. An EMPTY str head (`os.path.split('*.py')` gives
 branch was taken wrongly. The element of a word split is a str OR a bytes
 part -- a word of unknown kind -- and must be tested with `mojo_truthy_word`.
 
-Bug doc: bugs/CODEGEN_coro_a3_os_path_split_empty_head_truthy.md (default
-stackswitch coroutine path; the generator body is ordinary codegen).
+A bytes part yielded by the generator is an unboxed registered-bytes word of
+unknown kind and must still print as bytes, not as its address.
 
 Each case is one generator whose output is compared line-for-line with what
-CPython prints for the same source. The bytes cases count their yields rather
-than printing them: printing a bytes word yielded from a generator is a
-separate, still-open defect (bugs/CODEGEN_coro_a3_generator_bytes_word_print.md). Built with `fire.py build` (no
+CPython prints for the same source. Built with `fire.py build` (no
 MOJO_CORO setting), so the default coroutine path is what is under test.
 """
 import os
@@ -32,19 +30,15 @@ def g_split(pathname):
     yield dirname
     yield basename
 
-def count_yields(pathname):
-    c = 0
-    for n in g_split(pathname):
-        c += 1
-    return c
-
 def main():
     for n in g_split('a/b.py'):
         print(n)
     for n in g_split('*.py'):
         print(n)
-    print(count_yields(b'*.py'))
-    print(count_yields(b'a/b.py'))
+    for n in g_split(b'*.py'):
+        print(n)
+    for n in g_split(b'a/b.py'):
+        print(n)
 '''
 
 def cpython_output(oracle):
@@ -80,7 +74,7 @@ def main():
         print('want:', want)
         print('got: ', got)
         return 1
-    print('PASS os.path.split word-element truthiness (%d lines)' % (len(want) - 1))
+    print('PASS os.path.split word truthiness and bytes yield print (%d lines)' % (len(want) - 1))
     return 0
 
 

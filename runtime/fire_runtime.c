@@ -2164,10 +2164,12 @@ char *mojo_repr_boxed(int64_t v)
         }
     }
     /* Not a box: a word of unknown kind. A live heap string (or a registered
-     * literal) is a string, not the integer its address spells; every other
-     * word keeps its integer rendering. The caller strdup'd the box arms
-     * above, so this arm hands back its own copy too. */
+     * literal) is a string, and a registered bytes object is bytes, not the
+     * integer its address spells; every other word keeps its integer
+     * rendering. The caller strdup'd the box arms above, so this arm hands
+     * back its own copy too. */
     if (mojo_boxed_is_str(v)) return strdup((char *)(intptr_t)v);
+    if (mojo_is_registered_bytes(v)) return mojo_bytes_repr((MojoBytes *)(intptr_t)v);
     if (mojo_is_re_match(v)) return mojo_re_match_repr(v);
     return mojo_str_from_int(v);
 }
