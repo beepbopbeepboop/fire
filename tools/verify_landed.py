@@ -13,8 +13,10 @@ What a run does with its findings (gate_ledger.py):
   * a job red now that was green in the previous run is bisected over the commits between the two runs, so its report
     names the last commit it worked on and the first it did not;
   * that report is the `## Gate ledger` section of bugs/gate-<job>.md, and the job's registration in tools/suite.py
-    gets an `expect='gate-ledger: ...'` marker, so the gate stays usable while the job is worked;
-  * a job that was red and passes again loses its marker and its doc;
+    gets `disabled='bugs/gate-<job>.md'`, so the job costs the gate no time while it is worked (the doc is the switch:
+    the fixer who fixes it deletes the doc and the marker together);
+  * a job that was red and passes again (the fixer re-enabled it) loses any leftover marker and doc; one that is
+    re-enabled and still red is disabled again;
   * the marker/doc edits are one commit on branch `verify-ledger`, fast-forwarded onto master when master has not moved.
 Each failing job also becomes one fix task (`fix-gate-<job>`), claimed by the job's name, so a red job is repaired once,
 not re-queued by every run."""
@@ -98,27 +100,24 @@ def write_doc(job, e, sha, log):
     open(p, "w").write(txt)
 
 
-def marker_text(job, e):
-    return "%s red since %s (last working %s); see bugs/gate-%s.md" % (
-        G.MARK, (e.get("first_bad") or "an unknown commit")[:10], (e.get("last_good") or "unknown")[:10], job)
-
-
-def apply_findings(st, newly, recovered, sha, log):
+def apply_findings(st, newly, recovered, sha, log, failed=()):
     """Marker and doc edits for this run as one commit on `verify-ledger`, landed on master when it has not moved.
     Returns the commit sha or None."""
     C.git("switch", "-q", "-C", "verify-ledger", sha, cwd=VERIFY)
     sp = os.path.join(VERIFY, "tools", "suite.py")
     src = open(sp).read()
     notes = []
-    for j in newly:
+    # A job that is red AND runs is one a fixer re-enabled without finishing: it is skipped again, history kept.
+    again = [j for j in failed if j not in newly and st["jobs"].get(j, {}).get("red") and not G.get_disabled(src, j)]
+    for j in list(newly) + again:
         e = st["jobs"][j]
-        out = G.set_expect(src, j, marker_text(j, e))
-        e["marked"] = G.get_expect(out, j) is not None and G.get_expect(out, j).startswith(G.MARK)
+        out = G.set_disabled(src, j)
+        e["marked"] = G.get_disabled(out, j) is not None
         src = out
         write_doc(j, e, sha, log)
         notes.append("%s: first bad %s, last good %s" % (j, (e.get("first_bad") or "?")[:10], (e.get("last_good") or "?")[:10]))
     for j in recovered:
-        src = G.drop_expect(src, j)
+        src = G.drop_disabled(src, j)
         d = os.path.join(VERIFY, "bugs", "gate-%s.md" % j)
         if os.path.exists(d) and "## Gate ledger" in open(d).read():
             C.git("rm", "-q", "-f", os.path.relpath(d, VERIFY), cwd=VERIFY)
@@ -137,7 +136,7 @@ def apply_findings(st, newly, recovered, sha, log):
         print("ledger commit %s NOT landed (%s); it stays on branch verify-ledger" % (new[:10], r.stderr.strip()[:160]))
     else:
         print("ledger commit %s NOT landed: master moved during the run; it stays on branch verify-ledger" % new[:10])
-    for j in newly:
+    for j in list(newly) + again:
         st["jobs"][j]["marked"] = False
     return None
 
@@ -186,7 +185,7 @@ def main():
     for j in newly:
         bisect_job(j, st["jobs"][j], sha)
     checkout(sha)
-    landed = apply_findings(st, newly, recovered, sha, log) if (newly or recovered) else None
+    landed = apply_findings(st, newly, recovered, sha, log, jobs)
     G.save(st)
     json.dump(verdict, open(VERDICT, "w"), indent=1)
     print("full gate %s: %s, %ds, log %s" % ("GREEN" if verdict["ok"] else "RED", ", ".join(jobs) or "rc=%d" % rc,

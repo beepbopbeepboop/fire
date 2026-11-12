@@ -8,9 +8,10 @@ Four jobs, each a pure function over git and text so each can be tested without 
                            as long as there is at least one; it is no longer a timer.
   first_bad(commits, bad)  binary search: of COMMITS (oldest first, the last one known bad) the first that is bad.
                            The job before it is the last that worked.
-  set_expect / drop_expect edit the `expect=` marker of one registration in tools/suite.py (an ast splice, so a
-                           comment or a neighbouring job is never touched). Only markers whose text starts with
-                           MARK are ever dropped: a person's marker is theirs.
+  set_disabled / drop_disabled  edit the `disabled=` marker of one registration in tools/suite.py (an ast splice, so a
+                           comment or a neighbouring job is never touched). A red job is disabled with its gate doc as the
+                           switch, so it costs the gate no time; the fixer who fixes it deletes the doc and the marker.
+                           Only a marker naming bugs/gate-<job>.md is ever dropped: a person's marker is theirs.
 
 State is one file, <git common dir>/control/gate_ledger.json: per job, whether it is red, the last sha it worked on,
 the first sha it was seen failing on (None when no earlier run covered it), and the run that saw it."""
@@ -106,50 +107,80 @@ def _splice(b, lo, hi, text):
     return (b[:lo] + text.encode() + b[hi:]).decode()
 
 
-def get_expect(src, job):
-    """The registration's current expect text, or None when it has no marker (or no registration)."""
+def get_marker(src, job, kw_name):
+    """The registration's text for keyword KW_NAME (`expect` or `disabled`), or None when empty or absent."""
     for call in _registrations(src, job):
         for kw in call.keywords:
-            if kw.arg == "expect" and isinstance(kw.value, ast.Constant) and kw.value.value:
+            if kw.arg == kw_name and isinstance(kw.value, ast.Constant) and kw.value.value:
                 return kw.value.value
         return None
     return None
 
 
-def set_expect(src, job, reason):
-    """SRC with `expect=<reason>` on JOB's registration; unchanged when the job already carries any expect/disabled
-    marker (a marker is somebody's statement; this never overwrites one) or has no registration."""
+def set_marker(src, job, kw_name, value):
+    """SRC with `KW_NAME=<value>` on JOB's registration; unchanged when the job already carries any non-empty
+    expect/disabled marker (a marker is somebody's statement; this never overwrites one) or has no registration."""
     for call in _registrations(src, job):
         b, starts = _offsets(src)
         for kw in call.keywords:
-            if kw.arg == "disabled" and kw.value is not None and getattr(kw.value, "value", "x"):
+            if kw.arg in ("expect", "disabled") and getattr(kw.value, "value", "x"):
                 return src
-            if kw.arg == "expect":
-                if getattr(kw.value, "value", "x"):
-                    return src
+        for kw in call.keywords:
+            if kw.arg == kw_name:
                 lo, hi = _span(kw.value, starts)           # `expect=''`: fill it in
-                return _splice(b, lo, hi, repr(reason))
+                return _splice(b, lo, hi, repr(value))
         last = (call.keywords[-1].value if call.keywords else call.args[-1])
         _, hi = _span(last, starts)
         indent = " " * (call.args[0].col_offset if call.lineno != call.args[0].lineno else call.col_offset + 5)
         if call.lineno == call.end_lineno:
-            return _splice(b, hi, hi, ", expect=%r" % reason)
-        return _splice(b, hi, hi, ",\n%sexpect=%r" % (indent, reason))
+            return _splice(b, hi, hi, ", %s=%r" % (kw_name, value))
+        return _splice(b, hi, hi, ",\n%s%s=%r" % (indent, kw_name, value))
     return src
 
 
-def drop_expect(src, job, prefix=MARK):
-    """SRC without JOB's expect marker, but only when its text starts with PREFIX (ours)."""
+def drop_marker(src, job, kw_name, prefix):
+    """SRC without JOB's KW_NAME marker, but only when its text starts with PREFIX (ours)."""
     for call in _registrations(src, job):
         b, starts = _offsets(src)
         items = sorted(list(call.args) + [kw.value for kw in call.keywords], key=lambda n: (n.lineno, n.col_offset))
         for kw in call.keywords:
-            if kw.arg == "expect" and isinstance(kw.value, ast.Constant) and str(kw.value.value).startswith(prefix):
+            if kw.arg == kw_name and isinstance(kw.value, ast.Constant) and str(kw.value.value).startswith(prefix):
                 i = items.index(kw.value)
                 _, prev_end = _span(items[i - 1], starts)
                 _, end = _span(kw.value, starts)
                 return _splice(b, prev_end, end, "")
     return src
+
+
+def doc_path(job):
+    return "bugs/gate-%s.md" % job
+
+
+# A red job is DISABLED, not expect-marked: `disabled=<doc>` means the job is registered and never run (no process, no
+# memory, no wall time), so a known failure costs the gate nothing. The doc is the switch (tools/suite.py refuses to
+# load while a disabled test's doc is gone), so the fixer's commit that deletes the doc must also take the marker off.
+def set_disabled(src, job):
+    return set_marker(src, job, "disabled", doc_path(job))
+
+
+def drop_disabled(src, job):
+    return drop_marker(src, job, "disabled", doc_path(job))
+
+
+def get_disabled(src, job):
+    return get_marker(src, job, "disabled")
+
+
+def get_expect(src, job):
+    return get_marker(src, job, "expect")
+
+
+def set_expect(src, job, reason):
+    return set_marker(src, job, "expect", reason)
+
+
+def drop_expect(src, job, prefix=MARK):
+    return drop_marker(src, job, "expect", prefix)
 
 
 # ---- the state ------------------------------------------------------------------------------------------------
@@ -208,7 +239,7 @@ def report_text(job, e, run_sha, log, subj_of):
             "- **Last known working:** %s\n"
             "- **First known not working:** %s\n"
             "- **Seen red in the full gate at:** `%s` (log `%s`)\n"
-            "- **Marker:** `%s` on the job's registration in `tools/suite.py`, written by the gate ledger; it is removed "
-            "(and this doc with it) the first full gate where the job passes.\n"
+            "- **Skipped:** the job's registration in `tools/suite.py` carries `disabled='%s'`, so the gate spends no time on it. "
+            "To fix it: remove the `disabled=` argument, make the job pass, and delete this doc in the same commit.\n"
             % (show(e.get("last_good")), show(fb) if fb else "not bisected: " + (e.get("bisect_note") or "unknown"),
-               run_sha[:10], log, MARK))
+               run_sha[:10], log, doc_path(job)))

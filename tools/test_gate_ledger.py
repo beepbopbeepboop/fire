@@ -68,6 +68,18 @@ class Splice(unittest.TestCase):
         self.assertEqual(G.drop_expect(SRC, "gamma"), SRC)                 # a person's marker stays
         ast.parse(G.drop_expect(G.set_expect(SRC, "alpha", G.MARK + " x"), "alpha"))
 
+    def test_disabled_names_the_gate_doc_and_round_trips(self):
+        out = G.set_disabled(SRC, "beta")
+        ast.parse(out)
+        self.assertEqual(G.get_disabled(out, "beta"), "bugs/gate-beta.md")
+        self.assertEqual(G.drop_disabled(out, "beta"), SRC)
+        self.assertEqual(G.set_disabled(out, "beta"), out)                 # already disabled: no second marker
+        self.assertEqual(G.set_disabled(SRC, "gamma"), SRC)                # a person's expect marker is left alone
+
+    def test_a_disabled_marker_that_is_not_ours_stays(self):
+        src = SRC.replace("mem='tiny')\ntest('beta'", "mem='tiny', disabled='bugs/other.md')\ntest('beta'")
+        self.assertEqual(G.drop_disabled(src, "alpha"), src)
+
     def test_an_unknown_job_is_a_no_op(self):
         self.assertEqual(G.set_expect(SRC, "nope", "r"), SRC)
 
