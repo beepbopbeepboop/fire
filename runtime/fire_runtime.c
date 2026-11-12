@@ -17678,19 +17678,37 @@ void mojo_register_getattr_dispatch(int64_t (*fn)(void *, char *))
     }
     _getattr_dispatchers[_n_getattr_dispatchers++] = fn;
 }
-int64_t mojo_getattr_any(void *obj, char *attr)
+/* The one lookup behind mojo_getattr_any (raises on a miss) and
+ * mojo_getattr_default (yields the caller's default). *found reports
+ * whether any registered unit or the class-object table had `attr`. */
+static int64_t _getattr_any_lookup(void *obj, char *attr, int *found)
 {
-    { int64_t _cw; if (mojo_classobj_lookup(obj, attr, &_cw)) return _cw; }
+    { int64_t _cw; if (mojo_classobj_lookup(obj, attr, &_cw)) { *found = 1; return _cw; } }
     int saved = _mojo_getattr_nothrow;
     _mojo_getattr_nothrow = 1;
     for (int i = 0; i < _n_getattr_dispatchers; i++) {
         _mojo_getattr_missed = 0;
         int64_t r = _getattr_dispatchers[i](obj, attr);
-        if (!_mojo_getattr_missed) { _mojo_getattr_nothrow = saved; return r; }
+        if (!_mojo_getattr_missed) { _mojo_getattr_nothrow = saved; *found = 1; return r; }
     }
     _mojo_getattr_nothrow = saved;
-    mojo_raise_attribute_error(attr);
+    *found = 0;
     return 0;
+}
+int64_t mojo_getattr_any(void *obj, char *attr)
+{
+    int found;
+    int64_t r = _getattr_any_lookup(obj, attr, &found);
+    if (!found) mojo_raise_attribute_error(attr);
+    return r;
+}
+/* `getattr(obj, attr, dflt)` with a runtime-computed name: the same lookup
+ * as mojo_getattr_any, a miss yields `dflt` instead of raising. */
+int64_t mojo_getattr_default(void *obj, char *attr, int64_t dflt)
+{
+    int found;
+    int64_t r = _getattr_any_lookup(obj, attr, &found);
+    return found ? r : dflt;
 }
 
 /* ───────── next(word[, default]) ─────────

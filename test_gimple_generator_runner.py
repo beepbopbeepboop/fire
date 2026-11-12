@@ -11570,3 +11570,60 @@ def main():
 main()
 """, "1\n7\n")
 
+
+
+# A nested recursive generator that reads its elements' attributes through a
+# RUNTIME-named `getattr` (bugs/CODEGEN_coro_nested_recursive_generator_getattr.md).
+# The C++ companion used to refuse `getattr(obj, name)` with a non-static name,
+# so the whole module fell back to source. Now the name is dispatched through
+# the runtime's struct reflection (mojo_getattr_any / mojo_getattr_default): a
+# struct field hit returns its value, a miss returns the 3-arg default, and the
+# `yield from walk(xs, depth - 1)` self-delegation recurses. Expected output is
+# CPython's for the same program (the struct is a class there).
+test_generator_stdout("nested_recursive_generator_runtime_getattr_default", """\
+struct Node:
+    var v: Int
+    def __init__(out self, v: Int):
+        self.v = v
+
+def outer(nodes):
+    def walk(xs, depth: Int):
+        for i, st in enumerate(xs):
+            yield i
+            for fld in ('v', 'missing'):
+                sub = getattr(st, fld, -1)
+                yield sub
+        if depth > 0:
+            yield from walk(xs, depth - 1)
+    return walk(nodes, 1)
+
+def main():
+    for x in outer([Node(7), Node(9)]):
+        print(x)
+main()
+""", "0\n7\n-1\n1\n9\n-1\n0\n7\n-1\n1\n9\n-1\n")
+
+# The same getattr shape yielding a tuple slot from a nested recursive generator.
+test_generator_stdout("nested_recursive_tuple_generator_runtime_getattr", """\
+struct Node:
+    var v: Int
+    def __init__(out self, v: Int):
+        self.v = v
+
+def outer(body):
+    def inner(fn):
+        def walk(xs):
+            for i, st in enumerate(list(xs)):
+                yield xs, i
+                for fld in ('v', 'missing'):
+                    sub = getattr(st, fld, None)
+                    if isinstance(sub, list):
+                        yield from walk(sub)
+        return list(walk(fn))
+    return inner(body)
+
+def main():
+    for p in outer([Node(7), Node(9)]):
+        print(p[1])
+main()
+""", "0\n1\n")

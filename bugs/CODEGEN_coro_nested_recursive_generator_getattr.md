@@ -139,3 +139,31 @@ the commit that closes it.
   `mojo_repr_boxed`) and a scan that proves `body`'s kind from the call sites
   (`fd.body`, and the recursive `sub` from `getattr`).
 - Not verified this round: the fire.ci self-host build (integrator gate).
+
+### Update 2026-11-12 (round: root cause of the nested shape landed)
+
+- LANDED: the refusal's root cause. `cpp_core.py`'s getattr arm refused every
+  dynamic-name `getattr`, but the runtime already does the reflection:
+  `mojo_getattr_any` (cross-module struct dispatchers, the same lookup the C++
+  path uses for a member read off a word). The arm now emits
+  `mojo_getattr_any` for `getattr(obj, name)` and the new
+  `mojo_getattr_default` for `getattr(obj, name, dflt)`. Both share one lookup
+  (`_getattr_any_lookup` in `runtime/fire_runtime.c`); `mojo_getattr_any`'s
+  behavior is unchanged.
+- The minimal reproducer's NESTED shape now compiles and runs. Pinned by
+  `test_gimple_generator_runner.py::nested_recursive_generator_runtime_getattr_default`
+  (a recursive `yield from walk(xs, depth - 1)` with struct-field hits and
+  defaults; before this round it refused with this doc's message) and
+  `nested_recursive_tuple_generator_runtime_getattr` (the doc's tuple-yielding
+  shape; prints elements, which match CPython).
+- NOT DONE, still open:
+  1. Option 1 (lifting the capture-free generator to module level) still
+     refuses at obstacle 2: `walk(xs)` at module level has `xs` yielded and its
+     call sites `walk(sub)` (from `getattr`) are untypable, so
+     `_ambiguous_yielded_params` returns `{'xs'}`. The nested form no longer
+     needs the lift, so this matters only if the lift is still wanted.
+  2. Printing `list(walk(...))` shows a `0` tuple slot as `None`. Filed as
+     `bugs/CODEGEN_tuple_slot_zero_in_collected_list_prints_none.md`.
+  3. The fire.ci self-host build is the integrator's gate; not run here.
+- Doc stays open: the Done-when names the fire.ci self-host build, which has
+  not been run, and option 1's module-level form is still refused.
