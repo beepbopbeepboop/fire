@@ -68,10 +68,27 @@ void __GIMPLE parsing_IfStmt_print (IfStmt * self, CWriter * out)
 list[lx.Token]`, `body: Stmt`, `else_: lx.Token | None`, `else_body: Stmt |
 None`.
 
-This is **import-side only**. The same class written in the root module works:
-`.tmp/collision_probe.py` (`class IfStmt` with `if_`/`body`, `fire.py build`,
-then run) prints `3 4`. The defect appears when the class arrives through
-`do_imports`/the import closure.
+The trigger is the larger imported module set, not "imported at all". Two
+smaller measurements bound it:
+
+* The same class written in the **root** module works:
+  `.tmp/collision_probe.py` (`class IfStmt` with `if_`/`body`,
+  `fire.py build`, run) prints `3 4`.
+* A **minimal two-file** project (`helper.py` defines `class IfStmt` with
+  `if_`/`body`; `main.py` does `import helper; helper.IfStmt(3, 4).show()`)
+  also merges the fields and runs. Its generated typedef ends with
+  `int64_t if_; int64_t body;` after the pre-seeded fields.
+* Replacing the toy helper with the **real** `parsing.py` + `parser.py` +
+  `plexer.py` + `lexer.py` + `cwriter.py` set reproduces the analyzer's
+  failure exactly. `main.py` only needs
+  `import parser; parser.IfStmt(1, 2, 3, 4, 5).if_`; the emitted `IfStmt`
+  typedef goes back to the pre-seeded layout with no `if_`, and
+  `gcc -fgimple -fsyntax-only` on the result reports 25 errors:
+  `'IfStmt' has no member named 'if_'` (parsing.py) plus the
+  `ForStmt`/`WhileStmt` constructor errors attributed to `plexer.py`.
+
+So the repro the fix must satisfy is the real `parsing.py` module set, and the
+test below uses it.
 
 ### Code paths to start from
 
@@ -126,8 +143,9 @@ by themselves prove whether the pre-seeded dict entry, a compiler-side
    `_resolve_struct_cname` for method signatures. A fix that qualifies the
    typedef but leaves a bare `IfStmt *` in a method signature just moves the
    gcc error.
-5. **Tests** as below. The fixture must go through `do_imports=True`; a
-   single-file fixture passes today and proves nothing.
+5. **Tests** as below. The fixture must go through `do_imports=True` **and**
+   use the real `parsing.py` module set; both a single-file fixture and the
+   toy two-file fixture pass today and prove nothing.
 
 ## Acceptance
 
@@ -147,32 +165,31 @@ by themselves prove whether the pre-seeded dict entry, a compiler-side
 
 `python3 test_sibling_ast_name_collision.py` (new file) exits 0.
 
-The test builds a temporary sibling package:
+The test locates the CPython source tree (`$PYTHON_SRC` or
+`/Users/mrs/net/Python-3.14.6`); if
+`Tools/cases_generator/parsing.py` is absent it prints `SKIP` and exits 0. If
+present, it copies `parsing.py`, `parser.py`, `plexer.py`, `lexer.py` and
+`cwriter.py` into a temp dir under `.tmp/`, adds:
 
 ```python
-# parsing.py
-class IfStmt:
-    def __init__(self, if_: int, body: int):
-        self.if_ = if_
-        self.body = body
-    def show(self) -> None:
-        print(self.if_, self.body)
-
-# parser.py
-from parsing import IfStmt
-
 # main.py
 import parser
-parser.IfStmt(3, 4).show()
+
+def f() -> int:
+    s = parser.IfStmt(1, 2, 3, 4, 5)
+    return s.if_
 ```
 
-puts the directory on `sys.path`, calls
+puts the dir on `sys.path`, calls
 `gimple_codegen.compile_to_gimple(main_src, do_imports=True, filename=...)` and
-asserts (a) the `IfStmt` typedef carries the user's fields, (b) the emitted C
-compiles under `gcc -fgimple -fsyntax-only`. On the current tree (a) fails and
-(b) prints `'IfStmt' has no member named 'if_'`; measured by running the same
-`compile_to_gimple(..., do_imports=True)` call directly on this fixture
-(2026-11-11).
+asserts (a) the `IfStmt` typedef contains `if_`/`body`/`else_` and not
+`then_body`/`elifs`, (b) the emitted C compiles under
+`gcc -fgimple -fsyntax-only` with zero `error:` lines.
+
+On the current tree (a) is false and (b) reports
+`'IfStmt' has no member named 'if_'` (25 errors total), measured 2026-11-11 with
+exactly this fixture. The toy two-file version from the earlier status is *not*
+a valid regression test: it passes today.
 
 ## Out of scope
 
