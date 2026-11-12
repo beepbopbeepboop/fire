@@ -1649,8 +1649,7 @@ def _gen_stmt_AssignStmt(gen, node):
             _sk_key = (_as_str(gen.current_func_name), _as_str(tname))
             _sk_prev = gen._stored_kinds.get(_sk_key)
             if _sk_prev is not None and _sk_prev != vtype:
-                raise RuntimeError(
-                    f"{tname!r}: {ginf.mixed_name_non_int64_refusal(vtype)}")
+                raise RuntimeError(f"{tname!r}: {ginf.MIXED_NAME_NON_INT64_REFUSAL}")
             gen._stored_kinds[_sk_key] = vtype
         if _mixed_box and not _keep_tagged_box:
             v, vtype = ginf.box_mixed_store(gen, node.value, vtype, v, tname)
@@ -1658,10 +1657,8 @@ def _gen_stmt_AssignStmt(gen, node):
                 _keep_tagged_box = True
         if ((_tagged_bind and ginf.is_non_int_c_type(gen.var_types.get(tname)))
                 or (ginf.is_non_int_c_type(vtype) and _mixed_box)):
-            _other = (gen.var_types.get(tname) if _tagged_bind
-                      else vtype)
             raise RuntimeError(
-                f"{tname!r}: {ginf.mixed_name_non_int64_refusal(_other)}")
+                f"{tname!r}: {ginf.MIXED_NAME_NON_INT64_REFUSAL}")
         if (not _keep_tagged_box and _copy_src is not None
                 and ginf.tagged_next_bind_name(gen, _as_str(tname))):
             # The local is registered as a box by every store (the static

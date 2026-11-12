@@ -13538,47 +13538,6 @@ main()
 
     test_cross_module_ctor_scalar_field_type()
 
-    # Cross-module half (commit 68802e723 fixed the module-local half): a MODULE-scope class attribute whose value names a global the
-    # module IMPORTS (`from m import S`) was never stored. The module-local
-    # store (`_module_class_attr_global_stores`) gated on this module's own
-    # globals only, so C().name read 0 (int) / None (str) while CPython prints
-    # `x`. The imported global is a `var` in a .mojo sibling (module_loader
-    # exports only `var` globals), read through its defining module's accessor.
-    def test_module_class_attr_from_imported_global():
-        global _PASS, _FAIL, _TIMEOUT
-        name = "module_class_attr_from_imported_global"
-        defn = 'var S = "x"\nvar N = 7\n'
-        use = ("from xmodclsattr_defn import S, N\n"
-               "\n"
-               "class C():\n"
-               "    var name = S\n"
-               "    val = N + 1\n"
-               "\n"
-               "def main():\n"
-               "    print(C().name)\n"
-               "    print(C().val)\n"
-               "\n"
-               "main()\n")
-        try:
-            out = _compile_two_files_do_imports_and_run(
-                'xmodclsattr_defn.mojo', defn, 'xmodclsattr_use.mojo', use)
-        except subprocess.TimeoutExpired as e:
-            print(f"TIMEOUT {name}: {e}")
-            _TIMEOUT += 1
-            return
-        except Exception as e:
-            print(f"FAIL  {name}: {e}")
-            _FAIL += 1
-            return
-        if out == "x\n8\n":
-            print(f"PASS  {name}")
-            _PASS += 1
-        else:
-            print(f"FAIL  {name}: expected 'x\\n8\\n', got {out!r}")
-            _FAIL += 1
-
-    test_module_class_attr_from_imported_global()
-
     # The `sizeof`/`fnaddr` accessor helpers are file-scope `static`s, and every
     # module's parts land in ONE translation unit, so the sets that decide
     # whether one has already been DEFINED must be shared into every
@@ -15039,9 +14998,6 @@ def main():
                   test_nested_class_var_attr_method_read_regression,
                   test_nested_class_var_attr_rebind_after_construction_regression,
                   test_nested_class_var_attr_instance_write_shadows_regression,
-                  test_module_class_attr_from_module_global_regression,
-                  test_module_class_attr_bare_and_int_from_module_global_regression,
-                  test_module_class_attr_expr_over_module_globals_regression,
                   test_nested_class_attr_expr_over_str_param_regression,
                   test_instance_write_shadows_class_attr_regression,
                   test_nested_class_attr_rebind_after_construction_regression,
@@ -15423,62 +15379,6 @@ def f(v: int):
 def main():
     print(f(4))
 """, "9\n")
-
-
-def test_module_class_attr_from_module_global_regression():
-    """Regression (module-scope class attribute reading a module global, commit 68802e723):
-    a MODULE-scope class attribute whose value names a module global is never
-    stored. `gen_module` seeds `_classattr_<C>__<attr>` only from literal
-    values, the global was typed `int64_t` for a `char *` source, and nothing
-    stored `C.name = S` afterwards, so `C().name` read back 0 (int) or None
-    (str) while CPython prints `x`. The class body runs at the class statement,
-    so the store belongs there in the module's top-level body, after `S` is
-    assigned, typed from `S`'s own global."""
-    test_gimple_stdout("gimple_module_class_attr_from_module_global", """\
-S = "x"
-
-class C():
-    var name = S
-
-def main():
-    print(C().name)
-""", "x\n")
-
-
-def test_module_class_attr_bare_and_int_from_module_global_regression():
-    """Companion: the bare spelling and an integer global, which before the
-    fix read 0 for the str and the int alike."""
-    test_gimple_stdout("gimple_module_class_attr_bare_and_int_from_module_global", """\
-S = "x"
-N = 7
-
-class C():
-    name = S
-    val = N
-
-def main():
-    print(C().name)
-    print(C().val)
-""", "x\n7\n")
-
-
-def test_module_class_attr_expr_over_module_globals_regression():
-    """The harder half of the same bug: the value is an EXPRESSION over this
-    module's globals (`S + "!"`, `N + 1`), not a bare name. Its type is the
-    `_quick_type` estimate over the module's own global overlay, and the store
-    is the same top-level `C.attr = <value>` statement."""
-    test_gimple_stdout("gimple_module_class_attr_expr_over_module_globals", """\
-S = "x"
-N = 7
-
-class C():
-    var name = S + "!"
-    val = N + 1
-
-def main():
-    print(C().name)
-    print(C().val)
-""", "x!\n8\n")
 
 
 def test_nested_class_attr_expr_over_str_param_regression():

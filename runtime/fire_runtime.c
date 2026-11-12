@@ -2164,12 +2164,10 @@ char *mojo_repr_boxed(int64_t v)
         }
     }
     /* Not a box: a word of unknown kind. A live heap string (or a registered
-     * literal) is a string, and a registered bytes object is bytes, not the
-     * integer its address spells; every other word keeps its integer
-     * rendering. The caller strdup'd the box arms above, so this arm hands
-     * back its own copy too. */
+     * literal) is a string, not the integer its address spells; every other
+     * word keeps its integer rendering. The caller strdup'd the box arms
+     * above, so this arm hands back its own copy too. */
     if (mojo_boxed_is_str(v)) return strdup((char *)(intptr_t)v);
-    if (mojo_is_registered_bytes(v)) return mojo_bytes_repr((MojoBytes *)(intptr_t)v);
     if (mojo_is_re_match(v)) return mojo_re_match_repr(v);
     return mojo_str_from_int(v);
 }
@@ -2779,7 +2777,7 @@ static MojoList *_gen_drain(void *h, MojoGenSig *sg)
     int pending = mojo_exc_pending_get();
     ((void (*)(void *))sg->destroy)(h);
     if (pending) { mojo_exc_pending_set(0); mojo_raise(); }
-    if (sg->vkind == 5) {
+    if (sg->vkind == 5 || sg->vkind == 3) {
         /* Uniform from the FIRST element's classification, the way the vkind-5
          * arm did for str/int — extended to the bytes word that arm used to
          * call an int. */
@@ -2788,10 +2786,6 @@ static MojoList *_gen_drain(void *h, MojoGenSig *sg)
             else if (mojo_boxed_is_str(out->data[0])) mojo_list_set_kinds_uniform(out, 'p');
             else mojo_list_set_kinds_uniform(out, 'i');
         }
-    }
-    else if (sg->vkind == 3) {
-        if (out->len > 0 && mojo_is_registered_bytes(out->data[0])) mojo_list_set_kinds_uniform(out, MOJO_KIND_BYTES);
-        else mojo_list_set_kinds_uniform(out, 'p');
     }
     else if (sg->vkind == 0) mojo_list_set_kinds_uniform(out, 'i');
     else if (sg->vkind == 2) mojo_list_set_kinds_uniform(out, 'd');

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Corpus census for the mixed-container rebind decision behind
-CODEGEN_tagged_generator_mixed_type_container and
+bugs/mid/CODEGEN_tagged_generator_mixed_type_container.md and
 bugs/hard/CODEGEN_tagged_generator_mixed_type_step4.md.
 
 The question the decision needs answered: does any real .mojo source bind one

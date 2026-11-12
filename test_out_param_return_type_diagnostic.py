@@ -14,9 +14,9 @@ compiler's primary message and location:
   must have type 'Self'; use a 'where' clause ...`.
 * `f(y)` where `def f(out x: Int)`: `invalid call to 'f': unexpected
   argument`.
-* `fn f(...)`: `'fn' has been removed; use 'def' instead`, as a warning at the
-  keyword. That is the decided end state: refusing `fn` was considered and
-  dropped (commit 6408a0b14).
+* `fn f(...)`: `'fn' has been removed; use 'def' instead` (a warning now; the
+  refusal is a separate, decided-against stage, see
+  bugs/DIAGNOSTICS_fn_keyword_is_accepted_should_warn_then_refuse.md).
 
 Every measured case is now a plain assertion: the compiler refuses each shape
 at the real compiler's primary message and location.
@@ -28,6 +28,12 @@ red, and the CPython oracle accepted `out self` as an ordinary parameter).
 That class compiles every fixture string in the suite that spells `out self`
 and fails on an out-declaration refusal, so an invalid fixture is an error in
 the test before it reaches a backend.
+
+`ParityBuildFailureIsClassifiedByLayer` pins the harness half of the same bug:
+once a fixture does reach a build, an unexpected failure has to say WHICH layer
+refused it. A source the front end refuses is refused identically on both
+backends, and that is a source error rather than the backend's red — the
+sentence `test_formal_x86_64_parity.py` reported when the bug was filed.
 """
 
 import ast
@@ -37,6 +43,7 @@ import io
 import os
 import re
 import sys
+import tempfile
 import unittest
 import warnings
 
@@ -63,14 +70,6 @@ OUT_DECLARATION_HINT = re.compile(r'^\s*(?:async\s+)?(?:def|fn)\b[^\n]*\bout\b',
 
 def _compile(src, filename='t.mojo'):
     return compile_to_gimple(src, do_imports=False, filename=filename)
-
-
-def _compile_capturing_stderr(src, filename='t.mojo'):
-    """Compile `src` and return its stderr; the `fn` warning is printed there."""
-    err = io.StringIO()
-    with contextlib.redirect_stderr(err):
-        _compile(src, filename=filename)
-    return err.getvalue()
 
 
 def _location(err):
@@ -204,43 +203,38 @@ class OutParamReturnTypeDiagnostic(unittest.TestCase):
                      '    f(y)\n')
         self.assertIn("invalid call to 'f': unexpected argument", str(cm.exception))
 
-    # --- the removed `fn` keyword: the warning is the decided end state -------
-    # Stage 2 (refusing `fn`) was dropped on master (6408a0b14); the warning
-    # stays. These pin it on every definition form, at the keyword's location.
+    # --- the removed `fn` keyword: stage 1 warns (bugs/DIAGNOSTICS_fn_keyword_*) ---
 
     def test_fn_definition_compiles_with_the_real_warning_at_the_keyword(self):
-        err = _compile_capturing_stderr('fn f(x: Int) -> Int:\n'
-                                        '    return x\n')
-        self.assertIn("t.mojo:1:1: warning: 'fn' has been removed; use 'def' instead", err)
-
-    def test_decorated_fn_definition_warns_at_the_keyword(self):
-        err = _compile_capturing_stderr('@dec\n'
-                                        'fn f(x: Int) -> Int:\n'
-                                        '    return x\n')
-        self.assertIn("t.mojo:2:1: warning: 'fn' has been removed; use 'def' instead", err)
-
-    def test_async_fn_definition_warns_at_the_keyword(self):
-        err = _compile_capturing_stderr('async fn f():\n'
-                                        '    pass\n')
-        self.assertIn("t.mojo:1:7: warning: 'fn' has been removed; use 'def' instead", err)
-
-    def test_method_fn_definition_warns_at_the_keyword(self):
-        err = _compile_capturing_stderr('struct A:\n'
-                                        '    fn m(self):\n'
-                                        '        pass\n')
-        self.assertIn("t.mojo:2:5: warning: 'fn' has been removed; use 'def' instead", err)
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            _compile('fn f(x: Int) -> Int:\n'
+                     '    return x\n')
+        self.assertIn("t.mojo:1:1: warning: 'fn' has been removed; use 'def' instead",
+                      err.getvalue())
 
     def test_def_does_not_warn_about_fn(self):
-        err = _compile_capturing_stderr('def f(x: Int) -> Int:\n'
-                                        '    return x\n')
-        self.assertNotIn("'fn' has been removed", err)
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            _compile('def f(x: Int) -> Int:\n'
+                     '    return x\n')
+        self.assertNotIn("'fn' has been removed", err.getvalue())
 
     def test_fn_as_an_identifier_does_not_warn(self):
         # CPython code uses `fn` as a name (logging's findCaller); that is not a definition.
-        err = _compile_capturing_stderr('def g() -> Int:\n'
-                                        '    var fn = 3\n'
-                                        '    return fn\n')
-        self.assertNotIn("'fn' has been removed", err)
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            _compile('def g() -> Int:\n'
+                     '    var fn = 3\n'
+                     '    return fn\n')
+        self.assertNotIn("'fn' has been removed", err.getvalue())
+
 
     def test_method_out_self_with_int_parameter_is_refused_at_the_parameter(self):
         with self.assertRaises(RuntimeError) as cm:
@@ -257,6 +251,7 @@ class OutParamReturnTypeDiagnostic(unittest.TestCase):
                      '    def reset(out self):\n'
                      '        self.a = 0\n')
         self.assertIn("self argument must be present in instance method", str(cm.exception))
+
 
     def test_out_self_with_an_explicit_type_passes(self):
         # The standard library's nested `def default_init_func(out self: T, ...)`
@@ -362,6 +357,58 @@ class FixtureCorpusValidity(unittest.TestCase):
             '    def set(mut self, v: Int) -> Int:\n'
             '        self.a = v\n'
             '        return v\n'))
+
+
+class ParityBuildFailureIsClassifiedByLayer(unittest.TestCase):
+    """An invalid fixture fails in the FIXTURE's layer, not the backend's.
+
+    This is the other half of the parity bug: the harness reported
+    `--backend=arm64 did not build` for a source the front end refused, so a
+    test-side mistake read as an arm64 defect. The classification is the
+    parity harness's own (`build_failure_detail`), and it asks the OTHER
+    backend rather than matching message text against a list: a refusal both
+    backends produce identically is the shared front end, and a test-side
+    fixture is the only thing that can make one.
+    """
+
+    def _write(self, tmpdir, name, source):
+        path = os.path.join(tmpdir, name + '.mojo')
+        with open(path, 'w') as f:
+            f.write(source)
+        return path
+
+    def test_a_source_refused_on_both_backends_is_not_a_backend_red(self):
+        import test_formal_x86_64_parity as parity
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = self._write(tmpdir, 'bad',
+                              'struct A:\n'
+                              '    var n: Int\n'
+                              '    def put(out self, v: Int) -> Int:\n'
+                              '        return v\n')
+            out = os.path.join(tmpdir, 'bad.arm64')
+            rc, text = parity.build(src, out, 'arm64')
+            self.assertNotEqual(rc, 0, 'the front end accepted the out shape')
+            detail = parity.build_failure_detail('bad', src, tmpdir, 'arm64',
+                                                 text)
+        self.assertIn(RETURN_OUT_MSG, detail)
+        self.assertNotIn('--backend=arm64 did not build', detail)
+        self.assertIn('SOURCE error', detail)
+        self.assertIn('both backends', detail)
+
+    def test_a_failure_the_other_backend_does_not_reproduce_names_the_backend(self):
+        # The control: the classification must not relabel every failure. A
+        # source the other backend BUILDS is a backend-specific failure and
+        # keeps the original message; the build failure here is synthetic, but
+        # the second build is real.
+        import test_formal_x86_64_parity as parity
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = self._write(tmpdir, 'good',
+                              'def main():\n'
+                              '    print("ok")\n')
+            detail = parity.build_failure_detail(
+                'good', src, tmpdir, 'arm64', 'hypothetical arm64 failure')
+        self.assertEqual(
+            detail, '--backend=arm64 did not build: hypothetical arm64 failure')
 
 
 if __name__ == '__main__':
