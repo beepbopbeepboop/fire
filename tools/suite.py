@@ -4134,7 +4134,7 @@ test('ab-compare', [PY, 'tools/ab_compare.py'], deps=['ab-bside'],
 # Test files the estate check found unregistered (2026-11-10): each one runs in `check`.
 test('ambiguous-import-diagnostic', [PY, 'test_ambiguous_import_diagnostic.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
-test('attr-error-messages', [PY, 'test_attr_error_messages.py'], mem='tiny', expect='import os2 suffix differs from CPython at the MNE candidate cap; see bugs/DIAGNOSTICS_module_not_found_suffix_host_candidate_cap.md',
+test('attr-error-messages', [PY, 'test_attr_error_messages.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('backtick-import-literals', [PY, 'test_backtick_import_literals.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
