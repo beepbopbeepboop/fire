@@ -1978,14 +1978,13 @@ test('nonlocal', [PY, 'test_nonlocal.py'], cache=True, mem='tiny',
 # not `'mem'`: they invoke gcc directly on a snippet-sized translation unit,
 # the same `small`-workload shape `test_gimple.py` is, and a cap on a job
 # that never loads the whole closure buys nothing (see the MEMCLASS note).
-# `gimplerunner` is red on the tree (2026-11-11): 20 cases fail, a mix of wrong output,
-# RSS over the 40 MB limit, compile-time refusals, and one CPython-side mismatch. The 20 are listed
-# in bugs/hard/SUITE_gimplerunner_21_failing.md; the 21st, `gimple_nested_class_var_attr_from_str_param`,
-# was fixed 2026-11-11 by not minting a visible struct field for a per-execution class attribute
-# (bug:CODEGEN_nested_class_var_attr_untyped_field). The count in the marker is checked against the run,
-# so a case that starts or stops failing makes this marker disagree and the gate says so.
+# `gimplerunner` carried `expect='3 failing: ...'` while the merge of ten branches
+# left compile-and-execute rows red (a bound method stored in a module global, the
+# `zip_longest` absent fill, a module's own global shadowing a from-imported
+# homonym, a list of structs built in an imported module). All of them are fixed
+# and the marker is gone: an `expect=` on this job would now be reported as a
+# FAILURE ("marked expect= ... but it PASSES"), which is the anti-rot working.
 test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True, mem='tiny',
-     expect='20 failing: see bugs/hard/SUITE_gimplerunner_21_failing.md (wrong output, RSS over limit, compile refusals)',
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
@@ -2885,7 +2884,7 @@ test('formal-dylib', [PY, 'test_formal_dylib.py'],
      expect='6 failing: two wrong-spec teeth checks (a wrong spec is accepted, since the overflow traps, '
             'bugs/FORMAL_wrong_spec_accepted_since_overflow_traps.md) and four contract checks on branchy exports '
             '(an exit svc steps to none, so their contracts are guarded obligations, '
-            'bugs/mid/FORMAL_svc_exit_handling_incomplete.md)',
+            'bugs/FORMAL_svc_exit_handling_incomplete.md)',
      desc='formal dylib emission, Mach-O re-read, dlopen, prove')
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'], mem='tiny',
@@ -4136,10 +4135,14 @@ test('bootstrap-hotspots', [PY, 'test_bootstrap_hotspots.py'], mem='tiny',
 test('compile-linked-result', [PY, 'test_compile_linked_result.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('comptime-assert-diagnostic', [PY, 'test_comptime_assert_diagnostic.py'], mem='tiny',
+     expect='a called generic with a provably false comptime assert compiles: '
+            'bugs/DIAGNOSTICS_comptime_assert_in_called_generic_is_not_refused.md',
      desc='registered by the estate audit (every test file runs)')
 test('comptime-dtype-diagnostic', [PY, 'test_comptime_dtype_diagnostic.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('constrained-diagnostic', [PY, 'test_constrained_diagnostic.py'], mem='tiny',
+     expect='a called generic with a provably false constrained compiles: '
+            'bugs/DIAGNOSTICS_comptime_assert_in_called_generic_is_not_refused.md',
      desc='registered by the estate audit (every test file runs)')
 test('dict-none-key', [PY, 'test_dict_none_key.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
@@ -4338,11 +4341,6 @@ BUCKETS = {
               # that is a word rather than an absence — both are programs that
               # build, run and answer wrongly.
               'formal-shlex', 'formal-optional',
-              # …and the four the bucket census named (TEST_formal_tests_registered_in_no_bucket, 2026-11-12):
-              # registered by 0bf96e814, c7f641b19 and 4f0755020 and in no bucket, so no run executed them. Each
-              # measured alone at about 1 s, 0.0x GB, `preflight` only: NONE runs Lean, so they belong here.
-              'formal-try-model', 'formal-eh-tables',
-              'formal-once-bound-strings', 'formal-str-trim-runtime',
               # …and the third file the estate check named (2026-10-04, on the
               # merge of the formal20 batch), measured at 0.08 s and 0.03 GB —
               # the cheapest thing registered in this bucket by an order of

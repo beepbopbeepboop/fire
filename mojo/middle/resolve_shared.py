@@ -1111,23 +1111,6 @@ def _quick_type(gen, node) -> str:
                 _dv_types.append(gen._quick_type(_dp[1]))
             if not _dv_spread:
                 return gimple_ctypes.TypeLattice.join_all(_dv_types)
-        # A subscript of a tuple literal (`("a", "b")[0]`) or of any other
-        # tuple expression whose slot types are statically knowable from the
-        # literal: answer the indexed slot's type when the index is a constant
-        # integer, else the joined slot type. Without this the estimator fell
-        # through to int64_t and a function returning the slot was declared
-        # `int64_t` even when the slot holds a `char *`.
-        if (isinstance(obj, gimple_ctypes.TupleExpr) and obj.elements
-                and not isinstance(node.index, gimple_ctypes.SliceExpr)):
-            _idx = node.index
-            if isinstance(_idx, gimple_ctypes.IntLiteral):
-                try:
-                    _i = int(_idx.value)
-                except Exception:
-                    _i = None
-                if _i is not None and -len(obj.elements) <= _i < len(obj.elements):
-                    return gen._quick_type(obj.elements[_i])
-            return gen._infer_list_elem_type(obj.elements)
         if isinstance(obj, gimple_ctypes.IdentExpr):
             # `s[i]` where s is a plain char* string: the element is a
             # ONE-CHAR STRING, not a scalar. `_elem_types` has no entry for
@@ -1653,12 +1636,6 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
     # is tracked through `_quick_type`'s shape, not just direct literals, so
     # `q = n + 0` (n a real int parameter) boxes too.
     confident_scalars: set = set()
-    # Names bound by an UNPACK of a single iterable (whose per-element C type
-    # this scan does not know, so each target gets the int64_t storage
-    # default below). They are not evidence of a scalar at a call site: the
-    # element may be a container (`coro.py`'s `real_params`). Recorded for
-    # `module_gen`'s container-vs-scalar refusal.
-    unpacked_locals: set = set()
 
     # This pre-pass runs before self.var_types is populated for this
     # function, so _quick_type(IdentExpr(param_name)) falls through to its
@@ -1732,10 +1709,6 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
                             and isinstance(_cv.func, gimple_ctypes.MemberExpr)
                             and _cv.func.member == '_decode_str_literal_text')
                         elem_types = [('char *' if _is_decode else 'int64_t')] * len(targets)
-                        if not _is_decode:
-                            for _tu in targets:
-                                if isinstance(_tu, gimple_ctypes.IdentExpr):
-                                    unpacked_locals.add(_as_str(_tu.name))
                 else:
                     targets = [_as_node.target]
                     elem_types = [_local_value_type(gen, _as_node.value)]
@@ -1978,14 +1951,6 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
         if len(_kinds) > 1 or _float_conflict or _int_conflict:
             conflicting.add(_as_str(vname))
     gen._multi_kind_locals[_as_str(getattr(func, 'name', ''))] = conflicting
-    # The unpack targets, per function, for the container-vs-scalar contract:
-    # an `int64_t` target of a multi-value unpack is the storage DEFAULT, not
-    # proof of a number (a tuple element may be a list).
-    _tul = getattr(gen, '_tuple_unpack_locals', None)
-    if _tul is None:
-        gen._tuple_unpack_locals = {}
-        _tul = gen._tuple_unpack_locals
-    _tul[_as_str(getattr(func, 'name', ''))] = unpacked_locals
     # A conflicting name has no single C type, so its inferred type is the
     # BOX (`int64_t`), not whatever the pointer-wins lattice join answered.
     # For two container kinds the join already lands on `int64_t`; for a
@@ -2278,32 +2243,11 @@ def _type_expr_to_ann(gen, node) -> str:
         return f"{gen._type_expr_to_ann(node.obj)}.{node.member}"
     if isinstance(node, gimple_ctypes.IntLiteral):
         return str(node.value)
-    if isinstance(node, gimple_ctypes.FloatLiteral):
-        return _float_type_arg_text(node.value)
     if isinstance(node, gimple_ctypes.BoolLiteral):
         return 'True' if node.value else 'False'
     if isinstance(node, gimple_ctypes.UnaryOp) and node.op == '-' and isinstance(node.operand, gimple_ctypes.IntLiteral):
         return str(-node.operand.value)
-    if isinstance(node, gimple_ctypes.UnaryOp) and node.op == '-' and isinstance(node.operand, gimple_ctypes.FloatLiteral):
-        _text = _float_type_arg_text(node.operand.value)
-        return '-' + _text if _text else ''
     return ''
-
-def _float_type_arg_text(value) -> str:
-    """A float literal's rendering as a comptime bracket argument, or '' when
-    it has none (a non-finite value such as `1e999`, which is not a literal a
-    type argument can spell, so the call stays unbound). Python's repr drops
-    the decimal point from an exponent form (`1e+16`), which the elaborator
-    would not read back as a float (`where`-bindings match
-    `-?\\d+\\.\\d+([eE][-+]?\\d+)?`), so the point is always written: `1.0e+16`."""
-    value = float(value)
-    if value != value or value in (float('inf'), float('-inf')):
-        return ''
-    text = repr(value)
-    if '.' in text:
-        return text
-    mantissa, sep, exponent = text.partition('e')
-    return f"{mantissa}.0{sep}{exponent}"
 
 def _refine_generic_return_type(gen, info: dict, module_src: str, g: str,
                                  mangled_type_args: list, arg_count: int,

@@ -714,11 +714,6 @@ dylib_exports: list = None, globals_base: int = None,
         # names whose calls produce no value, transitively over `return <call>`
         # chains (`model.returnless_function_names`). None means "not computed".
         self._returnless = None
-        # Lazily filled by `_callee_returns_none` from `self._functions`: the
-        # name -> "every path answers None" resolver
-        # (`model.function_returns_none_resolver`). None means "not computed";
-        # the same one-table-per-compile shape as `_returnless`.
-        self._returns_none = None
         # Lazily filled by `_refuse_foreign_bytes_into_text_parameter`: the
         # parameters each function measures as TEXT, transitively through calls
         # that forward a bare parameter (`model.text_measured_parameters`).
@@ -4745,7 +4740,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             callee_is_bool=lambda callee: self._callee_is_bool(
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
-            callee_returns_none=self._callee_returns_none,
             callee_returned_parameter=self._callee_returned_parameter,
             dict_names=DICT_TYPE_NAMES,
             deref_kind=lambda e: M.pointer_deref_kind(
@@ -5212,31 +5206,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._returnless = M.returnless_function_names(
                 self._functions.values())
         return name not in self._returnless
-
-    def _callee_returns_none(self, name):
-        """Whether EVERY path out of the local function `name` answers `None`.
-
-        **Direction (b)'s question**, and the one `ValueKinds.is_none_value`
-        asks a call before `print` (or a `printf`'s `%s`) renders it: a
-        function that falls off its end, or whose every `return` is `None` or a
-        call to one that answers `None`, is statically `None`, and the four
-        characters are the only honest rendering this path has for it (a value
-        here is one 64-bit word, and `None` is the absence of one).
-
-        **The answer is the TRANSITIVE one, and the recursion lives in
-        `model.function_returns_none_resolver`** — the same shape as
-        `_callee_returns_value` above and for the same reason: `def h(a): return
-        g(a)` with a return-less `g` is `None` one hop out, so a reader that
-        stopped at the first function would print the word `g` never wrote.
-        The resolver is built once over `self._functions` (the emitter's table)
-        and its cycle/not-of-this-unit answers are the shared reader's, so
-        arm64 and x86-64 cannot disagree about what a call to one function
-        produces.
-        """
-        if self._returns_none is None:
-            self._returns_none = M.function_returns_none_resolver(
-                self._functions)
-        return self._returns_none(name)
 
     def _callee_returned_parameter(self, name):
         """The positional index of a parameter `name` hands straight back.
@@ -9776,18 +9745,10 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_int_overflow_trap(op, "vs")
             return
         if op == "*":
-            # The product fits in 64 bits exactly when the HIGH word (smulh) is
-            # the sign extension of the LOW word (mul), i.e. hi == lo asr 63 in
-            # every bit. The earlier sequence tested only bit 63 of hi XOR lo
-            # (`lsr #63`), which misses an overflow whose high word is nonzero
-            # but whose low word's top bit equals it: `triple(2**63 - 1)` wrapped
-            # to 9223372036854775805 and exited 0. The fix is the full test:
-            # sign(lo) into a scratch, XOR into hi, a zero result means it fits.
-            # x1 is the second operand, dead once `mul` has read it.
             self.asm.emit(encode_smulh_xd_xn_xm(2, 0, 1))
             self.asm.emit(encode_mul_xd_xn_xm(0, 0, 1))
-            self.asm.emit(encode_asr_xd_xn_imm(1, 0, 63))
-            self.asm.emit(encode_eor_xd_xn_xm(2, 2, 1))
+            self.asm.emit(encode_eor_xd_xn_xm(2, 2, 0))
+            self.asm.emit(encode_lsr_xd_xn_imm(2, 2, 63))
             self._emit_int_overflow_trap(op, None, reg=2)
             return
         raise CodegenError(
@@ -12268,25 +12229,16 @@ ctor_field_value=self._ctor_field_value_for(name),
         except Exception:
             pass
         self._refuse_unusable_printf_format(name, e)
-        # …and the same call's VARARGS, a value this build knows is `None`
-        # among them.  Direction (b) makes a call to a function that always
-        # answers `None` a value whose TEXT is decided at build time, so `%s`
-        # gets the four characters (`printf_none_argument_rewrite`) rather than
-        # the word the callee never wrote.  A NUMBER conversion of the same
-        # operand is refused, because CPython raises TypeError for
-        # `"%d" % None` and this path has no exception to raise.  The rewrite
-        # is the model's, asked at the same line in both emitters, so the two
-        # architectures cannot render one call differently.
-        rewritten = M.printf_none_argument_rewrite(
-            name, list(e.args or []), self._vkinds.is_none_value)
-        if rewritten is not None:
-            new_args, reason = rewritten
-            if reason is not None:
-                raise CodegenError(reason)
-            e = F.CallExpr(func=e.func, args=new_args,
-                           kwargs=getattr(e, "kwargs", None),
-                           line=getattr(e, "line", None),
-                           col=getattr(e, "col", None))
+        # …and the same call's VARARGS, each of which the format's conversions
+        # turn into TEXT.  A return-less call here is the same value this path
+        # cannot carry that `_print_call` refuses for `print`, at the other
+        # spelling of "render this word" — see
+        # `model.returnless_printf_argument_refusal` for why it is one reader and
+        # not a second copy of `_print_call`'s loop.
+        reason = M.returnless_printf_argument_refusal(
+            name, list(e.args or []), self._vkinds.no_value_callee_of)
+        if reason is not None:
+            raise CodegenError(reason)
         # …and the same call's ARGUMENTS against the callee's own parameter
         # types. Beside the line above and for the same reason — this is the last
         # point where the resolved callee and its arguments are both in hand —

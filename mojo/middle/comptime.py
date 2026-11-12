@@ -47,7 +47,6 @@ import fire_compiler as _fc
 # here are the same checks the backends make.
 BoolLiteral = _fc.BoolLiteral
 IntLiteral = _fc.IntLiteral
-FloatLiteral = _fc.FloatLiteral
 StringLiteral = _fc.StringLiteral
 IdentExpr = _fc.IdentExpr
 MemberExpr = _fc.MemberExpr
@@ -61,12 +60,6 @@ DictExpr = getattr(_fc, 'DictExpr', None)
 DottedLiteral = getattr(_fc, 'DottedLiteral', None)
 SubscriptExpr = getattr(_fc, 'SubscriptExpr', None)
 SliceExpr = getattr(_fc, 'SliceExpr', None)
-Comprehension = getattr(_fc, 'Comprehension', None)
-
-# Most elements a folded list comprehension may produce. Past this the value is
-# not folded (None), so the comptime-for it feeds falls back to the runtime
-# loop, which is the right answer for a comprehension that large anyway.
-COMPREHENSION_FOLD_CAP = 4096
 
 
 def compare_op(op: str, left, right):
@@ -259,78 +252,6 @@ def _resolve_dtype_name(node, bindings, platform=None):
     return _dtype_name_from_value(v)
 
 
-def _comprehension_iterable_values(iterable, bindings: dict, platform):
-    """The element values a comprehension generator iterates, or None.
-
-    `range(...)` expands through resolve_for_iterable (the same bounds the
-    unroller uses); anything else must fold to a list/tuple/str value."""
-    items = resolve_for_iterable(iterable, bindings, {}, COMPREHENSION_FOLD_CAP)
-    if items is None:
-        whole = eval_const(iterable, bindings, platform)
-        if isinstance(whole, (list, tuple, str)):
-            return list(whole)
-        return None
-    vals = []
-    for item in items:
-        v = eval_const(item, bindings, platform)
-        if v is None:
-            return None
-        vals.append(v)
-    return vals
-
-
-def _comprehension_run(node, generators: list, env: dict, out: list, platform):
-    """Depth-first walk of a comprehension's generators, appending each
-    element's value to `out`. False when any part is not foldable."""
-    if not generators:
-        v = eval_const(node.element, env, platform)
-        if v is None:
-            return False
-        if len(out) >= COMPREHENSION_FOLD_CAP:
-            return False
-        out.append(v)
-        return True
-    gen = generators[0]
-    if not isinstance(gen.target, str):
-        return False
-    values = _comprehension_iterable_values(gen.iterable, env, platform)
-    if values is None:
-        return False
-    for item in values:
-        sub = dict(env)
-        sub[gen.target] = item
-        keep = True
-        for cond in (gen.conditions or []):
-            c = eval_const_bool(cond, sub, platform=platform)
-            if c is None:
-                return False
-            if not c:
-                keep = False
-                break
-        if not keep:
-            continue
-        if not _comprehension_run(node, generators[1:], sub, out, platform):
-            return False
-    return True
-
-
-def _fold_comprehension(node, bindings: dict, platform):
-    """Fold a LIST comprehension (`[i * 2 for i in range(3)]`) to a Python list
-    of its element values, or None. Set/dict comprehensions are not folded.
-
-    This is what lets `comptime vals = [...]` bind a value, so a `comptime
-    for v in vals` unrolls with `v` bound and a `comptime assert` in it can fire.
-    An unknown element or iterable makes the whole comprehension unfoldable,
-    and the caller keeps its runtime behaviour."""
-    if getattr(node, 'kind', None) != 'list':
-        return None
-    out = []
-    if not _comprehension_run(node, list(node.generators or []),
-                              dict(bindings), out, platform):
-        return None
-    return out
-
-
 def _eval_subscript(node, bindings: dict, platform=None):
     """Fold subscript/slice on a comptime-known value, or None."""
     if SubscriptExpr is not None and isinstance(node, SubscriptExpr):
@@ -467,7 +388,6 @@ def eval_const(node, bindings: dict, platform: str = None):
             platform = None
     if isinstance(node, BoolLiteral): return node.value
     if isinstance(node, IntLiteral):  return node.value
-    if isinstance(node, FloatLiteral): return node.value
     if isinstance(node, StringLiteral):
         if getattr(node, 'is_interpolated', False):
             v = _eval_interpolated_string(node, bindings, platform)
@@ -495,8 +415,6 @@ def eval_const(node, bindings: dict, platform: str = None):
                 return None
             res.append(v)
         return res
-    if Comprehension is not None and isinstance(node, Comprehension):
-        return _fold_comprehension(node, bindings, platform)
     if DictExpr is not None and isinstance(node, DictExpr):
         res = {}
         for pair in getattr(node, 'pairs', []) or []:
@@ -526,18 +444,6 @@ def eval_const(node, bindings: dict, platform: str = None):
     # comptime `if` was UNRESOLVABLE (the documented first-branch-wins
     # fallback); folding it answers the measured value — strictly more
     # precise, the same direction as this file's own sys.platform fold.
-    # `_get_kgen_string["text"]()` — the stdlib's reflection spelling of a
-    # string constant (std.collections.string.string_span). Folded BY NAME, the
-    # same way `String`/`StaticString` are, so a diagnostic built from it reads
-    # its text instead of a temp name. The index is folded first, so a comptime
-    # string alias works too. Any other shape (arguments, an unknown index, a
-    # non-string value) stays unfolded.
-    if (isinstance(node, CallExpr) and not node.args and not node.kwargs
-            and isinstance(node.func, SubscriptExpr)
-            and isinstance(node.func.obj, IdentExpr)
-            and node.func.obj.name == '_get_kgen_string'):
-        v = eval_const(node.func.index, bindings, platform)
-        return v if isinstance(v, str) else None
     # `String(int)` / `String(bool)` stringifies at compile time so comptime
     # diagnostics (e.g. `comptime assert cond, "got " + String(x)`) produce
     # the evaluated message, not a lowered temp name.
@@ -874,7 +780,7 @@ def _const_foldable(node, bindings: dict, call_hook=None) -> bool:
     the cases `eval_const` / `eval_const_int` fold; anything else is not
     foldable. A call is foldable only when the backend's hook can run it,
     which is the one case that has to evaluate to find out."""
-    if isinstance(node, (BoolLiteral, IntLiteral, FloatLiteral, StringLiteral)):
+    if isinstance(node, (BoolLiteral, IntLiteral, StringLiteral)):
         return True
     if DottedLiteral is not None and isinstance(node, DottedLiteral):
         return True

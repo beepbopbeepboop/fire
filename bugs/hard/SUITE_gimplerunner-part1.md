@@ -1,4 +1,3 @@
-SPLIT: SUITE_gimplerunner-part1-part1, SUITE_gimplerunner-part1-part2
 # SUITE_gimplerunner: part 1 - Compilation failures
 
 ## Problem
