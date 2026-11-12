@@ -9095,13 +9095,7 @@ int mojo_dict_eq(MojoDict *a, MojoDict *b, int va, int vb)
     for (int64_t i = 0; i < a->cap; i++) {
         _DictSlot *sa = &a->slots[i];
         if (!sa->key) continue;
-        /* The key is looked up with the dict's OWN probe: an integer-domain slot
-         * (keykind 2) holds its number in ikey, not in the text, so it goes through
-         * _dict_lookup_ik; every other domain uses the string probe. The string
-         * probe on an integer slot missed, so equal int-keyed dicts compared
-         * unequal (d = {1: 2}; e = {1: 2}; d == e was False). */
-        _DictSlot *sb = sa->keykind == 2 ? _dict_lookup_ik(b, sa->ikey)
-                                          : _dict_lookup_k(b, sa->key, sa->keykind);
+        _DictSlot *sb = _dict_find_k(b, sa->key, sa->keykind);
         if (!sb || !sb->key) return 0;               /* key absent from b */
         /* The value is an untagged word: the codegen's static value type when
          * it has one, else this slot's own `kind` tag. */
