@@ -2187,6 +2187,46 @@ def _new_val(gen, ctype: str, rhs: str) -> str:
     return t
 
 
+def _select_val(gen, ctype: str, cond_ctype: str, cond_val: str, then_val, else_val) -> str:
+    """Branch-based `cond ? then : else`, producing a fresh temp of `ctype`.
+
+    A `?:` expression is not a legal GIMPLE r-value when either arm is a
+    call, and a parenthesized conditional is not a legal operand at all —
+    gcc `-fgimple` rejects `t = (c ? call (x) : lit)` with "expected
+    expression before '(' token" and `t = c ? call (x) : lit` with
+    "invalid operands in ternary operation" (both measured with
+    gcc-mp-15). So a select whose arms are not already plain variable
+    operands must be emitted as the same three-block shape
+    `_lower_TernaryExpr` uses: `if (cond) goto bb_then; else goto
+    bb_else;`, one arm per block, result merged after.
+
+    `then_val`/`else_val` are either GIMPLE values of `ctype` (strings) or
+    zero-argument callables called INSIDE their branch to produce one. The
+    callable form is what keeps a side effect (a user `__str__`/`__repr__`
+    call, say) lazy: `gen._call_expr` emits immediately, so a value passed
+    in ahead of time would already have run unconditionally — the branch
+    would guard nothing. A value that is already computed is selected
+    either way; a call is only emitted in its own block.
+    """
+    ctype = _as_str(ctype)
+    result = gen._new_temp(ctype)
+    cond = gen._ensure_bool_cond(cond_ctype, cond_val)
+    bb_then = gen._new_bb()
+    bb_else = gen._new_bb()
+    bb_merge = gen._new_bb()
+    gen._emit(f"  if ({cond}) goto {bb_then}; else goto {bb_else};")
+    gen._emit_label(bb_then)
+    tv = then_val() if callable(then_val) else then_val
+    gen._safe_coerce_emit(ctype, ctype, tv, result)
+    gen._emit(f"  goto {bb_merge};")
+    gen._emit_label(bb_else)
+    ev = else_val() if callable(else_val) else else_val
+    gen._safe_coerce_emit(ctype, ctype, ev, result)
+    gen._emit(f"  goto {bb_merge};")
+    gen._emit_label(bb_merge)
+    return result
+
+
 def _inc_val(gen, base: str) -> str:
     """`base + 1` as its own int64_t temp — the ONE way to spell a
     one-step advance in generated GIMPLE.
@@ -3483,6 +3523,16 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
                 'constraint failed' in _emsg
                 or 'comptime assertion failed' in _emsg):
             raise
+        # A `where` clause of the struct that is provably false for these type
+        # args is a real diagnostic (modular: `error: violated constraint`),
+        # not an elaboration-capability failure. Only this subclass surfaces:
+        # the bound check's other ConformanceErrors are the false positives the
+        # fall-through above exists for.
+        import elaborate as _elab_mod
+        if isinstance(e, _elab_mod.WhereConformanceError):
+            raise RuntimeError(
+                f"error: invalid instantiation of '{base_name}': violated constraint\n"
+                f"note: {type(e).__name__}: {e}")
         gen._generic_struct_elaboration_failures.append(
             f"{base_name}[{', '.join(type_args)}] from {source}: "
             f"{type(e).__name__}: {e}")

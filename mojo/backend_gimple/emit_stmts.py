@@ -567,25 +567,11 @@ def _gen_stmt_VarDecl(gen, node):
         # A `var`-declared name bound to more than one scalar kind in this
         # function is the int64_t box, exactly as its plain-assignment twin
         # (`ginf.mixed_scalar_locals`): box the initializer by its kind.
-        _scalar_mixed = (node.type_ann is None and isinstance(node.name, str)
-                         and ',' not in node.name
-                         and (node.name in ginf.mixed_scalar_locals(gen)
-                              or ginf.tagged_mixed_name(gen, node.name)))
-        if _scalar_mixed:
-            if vtype == 'double':
-                v = gen._call_expr('int64_t', 'mojo_box_from_double',
-                                   [('double', v)])
-                vtype = 'int64_t'
-            elif vtype == 'char *':
-                v = gen._call_expr('int64_t', 'mojo_box_from_str',
-                                   [('char *', v)])
-                vtype = 'int64_t'
-            elif (vtype in ('int', 'int64_t', '_Bool')
-                    and gimple_exprtypes.is_python_bool_expr(gen, node.value)
-                    and v not in getattr(gen, '_boxed_vals', ())):
-                v = gen._call_expr('int64_t', 'mojo_box_from_bool',
-                                   [('int64_t', gen._to_int64(vtype, v))])
-                vtype = 'int64_t'
+        _mixed_box = (node.type_ann is None and isinstance(node.name, str)
+                      and ',' not in node.name
+                      and ginf.mixed_box_name(gen, node.name))
+        if _mixed_box:
+            v, vtype = ginf.box_mixed_store(gen, node.value, vtype, v, node.name)
         # Type inference: if no annotation, use the value's type instead of 'int'
         if node.type_ann is None:
             ctype = vtype
@@ -607,7 +593,7 @@ def _gen_stmt_VarDecl(gen, node):
         # Use the actual declared type (may differ if variable was already declared
         # in an earlier branch with a different inferred type)
         actual_dst = gen.var_types.get(node.name, ctype)
-        if _scalar_mixed:
+        if _mixed_box:
             # Register the box-holding local so every consumer reads it by
             # kind (print/str/repr, `==`, arithmetic, `len`); see
             # `ginf.mixed_scalar_locals`. The DECLARATION is `int64_t` because
@@ -1508,17 +1494,12 @@ def _gen_stmt_AssignStmt(gen, node):
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name
-        # A name this function binds to more than one SCALAR kind (`int` /
-        # `double` / `str`) has no single C type. It is declared as the
-        # `int64_t` box and every non-int store is boxed below; see
-        # `ginf.mixed_scalar_locals`. A name bound to a tagged generator word
-        # AND to a scalar is the same representation (the tagged word is
-        # already the box), and `ginf.tagged_mixed_name` is the static answer
-        # for it -- without it a float/str store into such a name kept the
-        # old refusal. Asked for every simple-name store (cheap: the
-        # per-function walk is cached).
-        _tagged_mixed = ginf.tagged_mixed_name(gen, _as_str(tname))
-        _scalar_mixed = (tname in ginf.mixed_scalar_locals(gen)) or _tagged_mixed
+        # A box-holding name (`ginf.mixed_box_name`): bound to more than one
+        # scalar kind, or to a tagged generator word beside plain values. It
+        # has no single C type, so it is the `int64_t` box and every store
+        # into it is boxed by kind (`ginf.box_mixed_store`). Asked for every
+        # simple-name store (cheap: the per-function walks are cached).
+        _mixed_box = ginf.mixed_box_name(gen, tname)
         # Propagate `d[k]` slot-read tracking to the assigned local name so
         # later reads/prints of the name can recover the slot's runtime kind.
         _dsr = getattr(gen, '_dict_slot_reads', None)
@@ -1652,66 +1633,32 @@ def _gen_stmt_AssignStmt(gen, node):
         # MIXED_NAME_NON_INT64_REFUSAL. Refused here, before any store is
         # emitted, rather than unwrapping the box into a str/float slot.
         _tagged_bind = (v in getattr(gen, '_tagged_word_vals', ()) or _for_copy)
-        # A float/str store into a mixed-scalar (or tagged-plus-scalar) name is
-        # carried by the box, so it is not refused. Every OTHER non-int store
-        # (a container, a struct pointer) keeps the refusal: the box has no
-        # constructor for it, and silently casting a container pointer into a
-        # tagged word's slot was exactly the miscompile the refusal prevented.
-        _skip_mixed_refusal = _scalar_mixed and vtype in ('double', 'char *')
-        if not _skip_mixed_refusal and (
-                (_tagged_bind
-                 and ginf.is_non_int_c_type(gen.var_types.get(tname)))
-                or (ginf.is_non_int_c_type(vtype)
-                    and ginf.tagged_mixed_name(gen, _as_str(tname)))):
-            raise RuntimeError(
-                f"{tname!r}: {ginf.MIXED_NAME_NON_INT64_REFUSAL}")
+        # A float/str/bool/int store into a box-holding name is boxed by its
+        # kind here, BEFORE the refusal below reads the value's C type, so it
+        # is carried by the box rather than refused. Only a store the box has
+        # no constructor for (a container, a struct pointer) is refused:
+        # silently casting a container pointer into a tagged word's slot was
+        # exactly the miscompile the refusal prevented.
         # A float and a str stored into the same name of one function (`val = d["key"]` on a float dict, then
         # `val = "text"`): no representation holds both kinds, and the second store would cast a double to a pointer,
         # which gcc rejects ("cannot convert to a pointer type"). Refuse the function, with the same reason, at the
         # store that brings the second kind. The codegen types a name from its bindings as it goes, so the kinds
-        # already stored into the name are the record. A name `mixed_scalar_locals` found is the ONE exception: it is
-        # the int64_t box, and the stores below box each value by kind.
-        if vtype in ('double', 'char *') and not _scalar_mixed:
+        # already stored into the name are the record. A box-holding name is the ONE exception: it is the int64_t
+        # box, and the store below boxes each value by kind.
+        if vtype in ('double', 'char *') and not _mixed_box:
             _sk_key = (_as_str(gen.current_func_name), _as_str(tname))
             _sk_prev = gen._stored_kinds.get(_sk_key)
             if _sk_prev is not None and _sk_prev != vtype:
                 raise RuntimeError(f"{tname!r}: {ginf.MIXED_NAME_NON_INT64_REFUSAL}")
             gen._stored_kinds[_sk_key] = vtype
-        # A name bound to more than one scalar kind (see
-        # `ginf.mixed_scalar_locals`): the local is the `int64_t` box, so a
-        # float or str store goes in as a box of its own kind and an int store
-        # stays its bare word (the box's int arm is the word itself, which is
-        # what `mojo_box_word` / `mojo_repr_boxed` read back). Never re-box a
-        # value that already IS a box (a tagged word, or another mixed name
-        # copied over): `mojo_box_int` on a float box would truncate it.
-        if _scalar_mixed and not _keep_tagged_box:
-            if vtype == 'double':
-                v = gen._call_expr('int64_t', 'mojo_box_from_double',
-                                   [('double', v)])
-                vtype = 'int64_t'
-            elif vtype == 'char *':
-                v = gen._call_expr('int64_t', 'mojo_box_from_str',
-                                   [('char *', v)])
-                vtype = 'int64_t'
-            elif (vtype in ('int', 'int64_t', '_Bool')
-                    and gimple_exprtypes.is_python_bool_expr(gen, node.value)
-                    and v not in getattr(gen, '_boxed_vals', ())):
-                # A bool keeps its kind as a box, so `x = True` beside
-                # `x = 1.5` prints True, not 1 — the same `is_python_bool_expr`
-                # predicate print()/str()/repr() and the dict store use.
-                v = gen._call_expr('int64_t', 'mojo_box_from_bool',
-                                   [('int64_t', gen._to_int64(vtype, v))])
-                vtype = 'int64_t'
-            _keep_tagged_box = True
-        if (not _keep_tagged_box and vtype == 'int64_t'
-                and gen.var_types.get(tname, 'int64_t') == 'int64_t'
-                and ginf.tagged_mixed_name(gen, _as_str(tname))):
-            if (v not in getattr(gen, '_boxed_vals', ())
-                    and v not in getattr(gen, '_tagged_word_vals', ())):
-                _mb = gen._new_temp('int64_t')
-                gen._emit(f'  {_mb} = mojo_box_int ({v});')
-                v = _mb
-            _keep_tagged_box = True
+        if _mixed_box and not _keep_tagged_box:
+            v, vtype = ginf.box_mixed_store(gen, node.value, vtype, v, tname)
+            if gen.var_types.get(_as_str(tname), 'int64_t') == 'int64_t':
+                _keep_tagged_box = True
+        if ((_tagged_bind and ginf.is_non_int_c_type(gen.var_types.get(tname)))
+                or (ginf.is_non_int_c_type(vtype) and _mixed_box)):
+            raise RuntimeError(
+                f"{tname!r}: {ginf.MIXED_NAME_NON_INT64_REFUSAL}")
         if (not _keep_tagged_box and _copy_src is not None
                 and ginf.tagged_next_bind_name(gen, _as_str(tname))):
             # The local is registered as a box by every store (the static
@@ -1853,8 +1800,14 @@ def _gen_stmt_AssignStmt(gen, node):
             # trusted for. Real: `gen_module_impl`'s `_lens` is a dict at
             # line 1257 and a set at line 6114, and the self-host closure
             # could not be generated until this existed.
+            # A box-holding name is declared int64_t whatever the pre-pass
+            # joined its bindings to: a container-mixed name, or a name bound
+            # to a scalar of more than one kind or to a tagged generator word
+            # beside plain values (`ginf.mixed_box_name`). Without the last
+            # half the pre-pass's `double` hint declared `x` a double at its
+            # first store, and the tagged copy inside the loop was refused.
             _mixed = (tname in ginf.mixed_container_locals(gen)
-                      or _scalar_mixed)
+                      or ginf.mixed_box_name(gen, tname))
             if _mixed:
                 ctype = 'int64_t'
             else:

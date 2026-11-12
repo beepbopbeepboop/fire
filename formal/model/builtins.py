@@ -4486,20 +4486,26 @@ def print_arg_parts(args, *, no_value_callee=None, kind_of=None,
             # whose bytes this path does not hold.
             parts.append(("text", print_literal(a)))
             continue
-        callee = no_value_callee(a) if no_value_callee else None
-        if callee is not None:
-            raise CodegenError(returnless_value_refusal(callee))
         # A value whose CPython text is a COMPILE-TIME CONSTANT: `None`,
-        # `True`, `False`, and a NAME this build's bindings say holds one of
-        # them. It becomes literal text in the format string, so there is
-        # nothing to evaluate and nothing that can read a register the source
-        # never wrote.
+        # `True`, `False`, and a NAME or CALL this build's bindings say holds
+        # one of them. It becomes literal text in the format string, so there
+        # is nothing to evaluate and nothing that can read a register the
+        # source never wrote. **Asked BEFORE the refusal below**, because
+        # direction (b) makes a call to a function that always answers `None` a
+        # value with a decided TEXT — refusing it now would refuse something
+        # this path can render exactly.
         const = print_constant_text(a)
         if const is None and is_none is not None and is_none(a):
             const = NONE_TEXT
         if const is not None:
             parts.append(("text", print_literal_text(const)))
             continue
+        # …and a value this build cannot carry at all, which is the opposite
+        # answer and the one left for last: the callee produces no value, so
+        # there is no TEXT to fold and no word to convert.
+        callee = no_value_callee(a) if no_value_callee else None
+        if callee is not None:
+            raise CodegenError(returnless_value_refusal(callee))
         # A bool that is a VALUE and not a constant — a comparison, a `not`, a
         # name a declaration says is one, a call whose callee is declared
         # `-> Bool`, a field a struct declares `Bool`. The render is a `%s`

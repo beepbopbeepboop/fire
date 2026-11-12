@@ -4144,6 +4144,47 @@ def mixed_scalar_locals(gen) -> set:
     return mixed
 
 
+def mixed_box_name(gen, name) -> bool:
+    """True iff `name` is a BOX-HOLDING local of this function: declared as the
+    `int64_t` box, every store into it a box of its own kind, every read by
+    kind. Two sources agree on that representation and this is their one
+    answer: a name bound to more than one scalar kind (`mixed_scalar_locals`),
+    and a name bound to a tagged generator word beside plain values
+    (`tagged_mixed_name`). The store arms, the declaration and the `var`
+    initializer all ask this, never the two predicates separately."""
+    _n = _as_str(name)
+    return _n in mixed_scalar_locals(gen) or tagged_mixed_name(gen, _n)
+
+
+def box_mixed_store(gen, value_node, vtype: str, v: str, name) -> tuple:
+    """The store of `v` (C type `vtype`, from `value_node`) into the
+    box-holding local `name`, as `(v, vtype)` ready to store into the
+    `int64_t` box. Returns the input unchanged for a value that needs no box.
+
+    A float or str is boxed by its kind (`mojo_box_from_double` /
+    `mojo_box_from_str`), a Python bool by `mojo_box_from_bool` so it renders
+    True/False. A plain int is boxed with `mojo_box_int`, because the local's
+    reads are by kind and a bare word there would be read as a box. A value
+    that already IS a box (a tagged word, or another box-holding name copied
+    over) is never re-boxed: `mojo_box_int` on a float box would truncate it.
+    Only a box-holding local of C type `int64_t` is boxed; anything else
+    keeps its own type and the caller's refusal decides it."""
+    if gen.var_types.get(_as_str(name), 'int64_t') != 'int64_t':
+        return v, vtype
+    if vtype == 'double':
+        return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', v)]), 'int64_t'
+    if vtype == 'char *':
+        return gen._call_expr('int64_t', 'mojo_box_from_str', [('char *', v)]), 'int64_t'
+    if vtype in ('int', 'int64_t', '_Bool'):
+        if v in getattr(gen, '_boxed_vals', ()) or v in getattr(gen, '_tagged_word_vals', ()):
+            return v, 'int64_t'
+        _w = gen._to_int64(vtype, v)
+        if gimple_exprtypes.is_python_bool_expr(gen, value_node):
+            return gen._call_expr('int64_t', 'mojo_box_from_bool', [('int64_t', _w)]), 'int64_t'
+        return gen._call_expr('int64_t', 'mojo_box_int', [('int64_t', _w)]), 'int64_t'
+    return v, vtype
+
+
 def _declare_var(gen, name: str, ctype: str, elem: str | None = None, force: bool = False):
     """Register a C-level declaration for Python local `name`.
 
@@ -7174,6 +7215,10 @@ Order matters and is the same one `_repr_boxed_container` uses: the live
     """
     _res = gen._new_temp('int64_t')
     _it64 = gen._ensure_local('int64_t', value)
+    # The text of a kind-'p' string box (`mojo_box_from_str`, a tagged word that
+    # holds a str) is the pointer the box carries. `mojo_str_box_word` unwraps
+    # only that kind, so the string arm below measures the text itself.
+    _stxt = gen._call_expr('int64_t', 'mojo_str_box_word', [('int64_t', _it64)])
     bb_dict = gen._new_bb(); bb_not_dict = gen._new_bb()
     bb_set = gen._new_bb(); bb_not_set = gen._new_bb()
     bb_list = gen._new_bb(); bb_not_list = gen._new_bb()
@@ -7208,16 +7253,15 @@ Order matters and is the same one `_repr_boxed_container` uses: the live
     gen._emit(f'  {_res} = mojo_bytes_len ({_bp});')
     gen._emit(f'  goto {bb_after};')
     gen._emit_label(bb_not_byt)
-    # Ask the string test through the box's own word: a str stored as a
-    # kind-'p' MojoBox is a registered box, and `mojo_boxed_is_str` rejects
-    # every box on purpose (so a float box is not read as a string). The
-    # box's word is its pointer, which the discriminator does recognise; a
-    # float box survives `mojo_box_word` unchanged and stays rejected.
-    _ibw = gen._new_val('int64_t', f'mojo_box_word ({_it64})')
-    ibs = gen._call_expr('int', 'mojo_boxed_is_str', [('int64_t', _ibw)])
+    # `mojo_word_is_text` accepts a kind-'p' str box as well as a bare
+    # registered word; `mojo_boxed_is_str` rejects every box on purpose (so a
+    # float box is not read as text). The text pointer of a str box is its
+    # payload, which `mojo_str_box_word` returns (and the word unchanged for
+    # anything else).
+    ibs = gen._call_expr('int', 'mojo_word_is_text', [('int64_t', _it64)])
     gen._emit(f'  if ({ibs}) goto {bb_str}; else goto {bb_not_str};')
     gen._emit_label(bb_str)
-    _sp2 = gen._coerce_to_type('int64_t', 'char *', _ibw)
+    _sp2 = gen._coerce_to_type('int64_t', 'char *', _stxt)
     gen._emit(f'  {_res} = mojo_strlen ({_sp2});')
     gen._emit(f'  goto {bb_after};')
     gen._emit_label(bb_not_str)
@@ -7770,6 +7814,45 @@ def _gen_print(gen, args: list, kwargs: list = None):
             # A call result of unknown kind may be a boxed dict-slot value.
             if (_pi < len(args) and isinstance(args[_pi], gimple_ctypes.CallExpr)
                     and atype in ('int', 'int64_t')):
+                _stat_i = arg_static[_pi] if _pi < len(arg_static) else ''
+                _is_opt_ptr_niche = (isinstance(_stat_i, str)
+                                     and _stat_i.startswith('Optional[')
+                                     and 'Pointer[' in _stat_i)
+                if not _is_opt_ptr_niche:
+                    # Fallback: `peek()` on a peekable iterator returns
+                    # Optional[Pointer[...]] (a nullable pointer word) but the
+                    # static type may be erased/unavailable here.
+                    _call_arg = args[_pi]
+                    _cfunc = getattr(_call_arg, 'func', None)
+                    if (isinstance(_cfunc, gimple_ctypes.MemberExpr)
+                            and _as_str(getattr(_cfunc, 'member', '')) == 'peek'
+                            and not getattr(_call_arg, 'args', None)
+                            and not getattr(_call_arg, 'kwargs', None)):
+                        _is_opt_ptr_niche = True
+                if _is_opt_ptr_niche:
+                    # Optional[Pointer[...]] is lowered as a nullable pointer
+                    # word (0 = None). `mojo_cstr_or_int_str` would format the
+                    # pointer as a raw integer address; describe the Optional
+                    # instead (CODEGEN_peek_result_prints_raw_address).
+                    bb_some = gen._new_bb()
+                    bb_none = gen._new_bb()
+                    bb_done = gen._new_bb()
+                    _res = gen._new_temp('char *')
+                    _cond = gen._new_temp('_Bool')
+                    gen._emit(f'  {_cond} = {aval} != 0;')
+                    gen._emit(f'  if ({_cond}) goto {bb_some}; else goto {bb_none};')
+                    gen._emit_label(bb_some)
+                    _some_lit = gen._intern_string('Optional(Some)')
+                    _some_t = gen._new_val('char *', _some_lit)
+                    gen._emit(f'  {_res} = {_some_t};')
+                    gen._emit(f'  goto {bb_done};')
+                    gen._emit_label(bb_none)
+                    _none_lit = gen._intern_string('Optional(None)')
+                    _none_t = gen._new_val('char *', _none_lit)
+                    gen._emit(f'  {_res} = {_none_t};')
+                    gen._emit_label(bb_done)
+                    resolved_parts.append(('char *', _res))
+                    continue
                 _rv = gen._call_expr('char *', 'mojo_cstr_or_int_str',
                                      [('int64_t', aval)])
                 _cstr_held.append((aval, _rv))
@@ -7968,7 +8051,37 @@ def _gen_print(gen, args: list, kwargs: list = None):
             gen._emit(f'  {_fs} = mojo_sprintf_ptr ({_ft}, {_fp});')
             gen._emit(f'  {print_fn} ({_fs});')
         else:
-            if atype in ('int', 'int64_t'):
+            _opt_ptr_niche_emit = False
+            if isinstance(_stat, str) and _stat.startswith('Optional[') and 'Pointer[' in _stat:
+                _opt_ptr_niche_emit = True
+            if not _opt_ptr_niche_emit and args and i < len(args):
+                _earg = args[i]
+                if isinstance(_earg, gimple_ctypes.CallExpr):
+                    _efunc = getattr(_earg, 'func', None)
+                    if (isinstance(_efunc, gimple_ctypes.MemberExpr)
+                            and _as_str(getattr(_efunc, 'member', '')) == 'peek'
+                            and not getattr(_earg, 'args', None)
+                            and not getattr(_earg, 'kwargs', None)):
+                        _opt_ptr_niche_emit = True
+            if _opt_ptr_niche_emit and (atype in ('int', 'int64_t') or (isinstance(atype, str) and atype.endswith('*'))):
+                bb_some = gen._new_bb()
+                bb_none = gen._new_bb()
+                bb_done = gen._new_bb()
+                _cond = gen._new_temp('_Bool')
+                gen._emit(f'  {_cond} = ({aval}) != 0;')
+                gen._emit(f'  if ({_cond}) goto {bb_some}; else goto {bb_none};')
+                gen._emit_label(bb_some)
+                _some_lit = gen._intern_string('Optional(Some)')
+                _some_t = gen._new_val('char *', _some_lit)
+                gen._emit(f'  {print_fn} ({_some_t});')
+                gen._emit(f'  goto {bb_done};')
+                gen._emit_label(bb_none)
+                _none_lit = gen._intern_string('Optional(None)')
+                _none_t = gen._new_val('char *', _none_lit)
+                gen._emit(f'  {print_fn} ({_none_t});')
+                gen._emit(f'  goto {bb_done};')
+                gen._emit_label(bb_done)
+            elif atype in ('int', 'int64_t'):
                 # A word of unknown kind (e.g. boxed dict-slot value, or a string
                 # pointer held in an int64_t): render via the runtime's generic
                 # discriminator so None/bool/float kinds and string pointers print

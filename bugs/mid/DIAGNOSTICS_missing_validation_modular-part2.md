@@ -1,94 +1,98 @@
-# DIAGNOSTICS_missing_validation_modular part 2: adjacent string-literal message continuation
+# DIAGNOSTICS missing-validation part 2: fold `conforms_to(...)` in comptime conditions
 
-Part 2 of the split of `bugs/hard/DIAGNOSTICS_missing_validation_modular.md`.
-Plan: `docs/diagnostics-missing-validation-plan.md` §11 names
-`comptime_assert.mojo` as a formatting comparison; the long-message case is
-also a real missing diagnostic detail, because the message is truncated.
+Class: **mid** (this doc lives in `bugs/mid/`). It needs a conformance witness
+that walks the declared trait bases, plus one evaluation seam shared by the
+gimple comptime wrapper and `elaborate.check_where_clauses`.
 
-## Why this part
+Parent: `bugs/hard/DIAGNOSTICS_missing_validation_modular.md`. Plan:
+`docs/diagnostics-missing-validation-plan.md` §1/§2 (the
+generic/trait-reflection remainder).
 
-Modular's `test/mojo-parser/statements/comptime_assert.mojo` has:
+## Goal
 
-```mojo
-def test_assert_with_long_message[cond: Bool]():
-    comptime assert cond, "custom error message"
-                          " with long message "
-                          "and more"
-```
+A `comptime assert`, `constrained`, or `where` clause whose condition is
+`conforms_to(T, Trait)` must be decided at compile time when `T` is a concrete
+type. A provably-false condition must produce the existing diagnostic
+(`comptime assertion failed: <msg>` / `constraint failed: <msg>` /
+`requirement '<clause>' is not satisfied`). Today all three forms silently
+accept both the false and the true spelling.
 
-The three literals are one message. The integration test
-`test/mojo-integration/comptime_assert.mojo` is the same behaviour through the
-real compiler (`expected positive number, got -2`).
+## Current state (measured 2026-11-12)
 
-This tree keeps only the first literal. Measured 2026-11-10:
-
-```python
-ast = fire_compiler.Parser(fire_compiler.py_tokenize(src)).parse_module()
-# AssertStmt.msg == StringLiteral('custom error message')
-# then ExprStmt(StringLiteral(' with long message '))
-# then ExprStmt(StringLiteral('and more'))
-```
-
-Same-line adjacent literals already work (`"a" "b"` -> `"ab"`), and so does
-the parenthesised form, through `Parser._merge_string_literals`. The gap is
-only the bare continuation line: `py_tokenize` emits a `NEWLINE` at the end of
-the first literal line, and `prev_ended_string` suppresses `INDENT`/`DEDENT`
-for the next line but not that `NEWLINE`, so the parser never sees two
-adjacent `STRING` tokens.
+- `def f[T: AnyType](): comptime assert conforms_to(T, Tr), "no"` called as
+  `f[No]()` with `trait Tr: pass` / `struct No: pass` compiles with no
+  diagnostic; the same with `f[Yes]()` where `struct Yes(Tr): pass` also
+  compiles (correct, but by accident — nothing is evaluated).
+- `constrained[conforms_to(T, Tr), "no"]()` with a non-conforming `T` also
+  compiles.
+- `def f[T: AnyType]() where conforms_to(T, Tr)` called with `No` compiles.
+- `fire_compiler.py:60` has a runtime shim `def conforms_to(T, Trait): return
+  True`; it is a Python-level fallback, not part of the constant folder, so it
+  neither proves nor disproves a condition.
+- `mojo/middle/comptime.py::eval_const` (`~438`), `_const_foldable` (`~868`),
+  `eval_const_bool_state` (`~1001`) and `eval_const_call` (`~1133`) have no
+  `conforms_to` case. The existing `call_hook` seam cannot serve it: it folds a
+  call by running it with integer arguments, and `conforms_to`'s arguments are
+  a type and a trait name, not values.
 
 ## Scope
 
-`fire_compiler.py::py_tokenize` (phase 2, around the `prev_ended_string`
-handling at lines 2670-2795).
-
-- When the previous physical line ended with a `STRING` token and the current
-  line's first significant token is another string literal, suppress the
-  `NEWLINE` that ended the previous line so the parser's existing
-  `_merge_string_literals` folds the run. Do this only when
-  `paren_depth == 0`, the current line really starts with a string token
-  (including the `f`/`r`/`b`/`t` prefixes), and the previous line is not a
-  blank/comment line (the existing code already clears `prev_ended_string`
-  there).
-- Do not merge when the next line starts with anything else. In particular a
-  dedented `fn`/`def`/`main` after a line ending in a string must keep its
-  `DEDENT` and `NEWLINE` exactly as now.
-- Preserve the existing `_merge_string_literals` semantics for plain, raw,
-  bytes, f- and t-strings; this part adds no second concatenation rule.
-- A `comptime assert` message is the motivating site, but the fix belongs in
-  the tokenizer/parser, not in `execute_AssertStmt` or a message-only special
-  case.
-
-If the tokenizer change proves too broad, the fallback is to parse the
-`comptime assert` / `assert` message inside an implicit bracket context (the
-same way a call argument list suppresses `NEWLINE`), reusing
-`_merge_string_literals`; do not add a third string-joining implementation.
+1. **One conformance witness, not two.** Add a small resolver that answers
+   `conforms_to(<TypeExpr>, <TraitNameExpr>)` from a `{struct_name: [bases]}`
+   map, transitively (a struct conforms to a listed base and to that base's
+   ancestors), returning `None` when either name is unresolved. The gimple path
+   already has the map as `gen._struct_bases`
+   (`mojo/backend_gimple/module_gen.py`, ~7006); `check_where_clauses`
+   (`elaborate.py`, ~666) can build the same map from its `module_src`
+   (`StructDef.bases`, transitively) and reuse the resolver.
+2. **Evaluation seam.** Thread an optional conformance-predicate argument
+   through `eval_const` / `eval_const_bool` / `eval_const_bool_state` /
+   `_const_foldable` (a new keyword parameter; default `None` means "unknown",
+   so every existing caller keeps today's behaviour). A `CallExpr` whose callee
+   is `IdentExpr('conforms_to')`, with exactly two positional args and no
+   kwargs, folds to the predicate's `True`/`False`; `not conforms_to(...)`
+   follows from the existing `UnaryOp('not')` fold. Supply the gimple predicate
+   from `_eval_const_bool_state`/`_eval_const_bool`/`_eval_const_int` in
+   `mojo/backend_gimple/emit_infra.py` (~7850), and the `elaborate` one from
+   `check_where_clauses`.
+3. Do not invent a second conformance rule: extend/mirror
+   `elaborate.check_conformance` only for the method-requirement half, and use
+   the declared-base walk for the declaration half. An unknown trait or type
+   stays `None` (accepted conservatively), as elsewhere in the folder.
+4. The message is the caller's existing one. No new text.
 
 ## Acceptance
 
-Add to `test_comptime_assert_diagnostic.py`:
+- A false `conforms_to` in `comptime assert`, `constrained[...]`, and a
+  function `where` clause is rejected with the caller's normal message.
+- `conforms_to` on a conforming type (directly listed or inherited) compiles.
+- `not conforms_to(...)` on a conforming type is rejected by `comptime assert`
+  and accepted on a non-conforming type.
+- An unresolved type/trait (e.g. a bare `AnyType` parameter in a
+  non-instantiated body) stays undecided and does not produce a diagnostic.
+- `comptime assert True/False` and the DType predicates keep their current
+  behaviour.
 
-```python
-def test_comptime_assert_adjacent_literal_message():
-    src = ('def use_positive_int[x: Int]():\n'
-           '    comptime assert x > 0, "custom error message"\n'
-           '                          " with long message "\n'
-           '                          "and more"\n'
-           'def main():\n'
-           '    use_positive_int[0]()\n')
-    # compile_to_gimple(..., do_imports=True, filename=<real temp file>)
-    # must raise RuntimeError containing
-    #   `custom error message with long message and more`
-```
+## Done when
 
-Also add the modular integration shape (same message, `x = -2`) and a control
-that a blank line between two string literals is still not merged. The
-existing same-line and parenthesised cases in the file must keep passing.
+Add `test_conforms_to_condition_diagnostic.py` beside the other
+`test_*_diagnostic.py` files (do NOT register it in `tools/suite.py`) and run
+exactly:
 
-Run only:
+    python3 tools/memslot.py --gb 8 --label conforms-to-condition -- python3 test_conforms_to_condition_diagnostic.py
 
-    python3 test_comptime_assert_diagnostic.py
+The test uses locally declared traits/structs (no stdlib import), covers the
+three condition forms plus the `not`/positive/undecided controls, and builds
+the `where` case through `diagnostic_build.build_refusal` so the instantiated
+generic is exercised.
 
-No suite registration and no whole-closure compile.
+## Not in this part
+
+Conditional conformance declarations and method-requirement evidence are
+`bugs/mid/DIAGNOSTICS_trait_conformance-part1.md` and
+`-part2.md`; this part only makes the `conforms_to` *condition* fold. No test
+registration.
 
 ## Status
+
 - **Open.**

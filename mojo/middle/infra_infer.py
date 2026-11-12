@@ -2987,6 +2987,15 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                     # one for the same literal. Same shared rule, so the two
                     # cannot disagree about the dict they describe.
                     dict_val[v] = gimple_exprtypes.dict_literal_val_ctype(gen, val.pairs)
+                elif isinstance(val, gimple_ctypes.TupleExpr):
+                    # Tuple-literal binding: record the joined element type so
+                    # `_quick_type`'s subscript-of-IdentExpr lookup can answer
+                    # the slot type (e.g. `args = ("a","b"); return args[0]`
+                    # must be `char *`, not int64_t). The lowering records per-
+                    # slot types in `_tuple_slot_types` only at emit time, after
+                    # this pre-pass; seeding `elem` here is the cross-call /
+                    # return-type contract for the tuple's elements.
+                    elem[v] = gen._infer_list_elem_type(val.elements)
                 elif isinstance(val, gimple_ctypes.IdentExpr) and val.name in dict_val:
                     dict_val[v] = dict_val[val.name]
             elif (isinstance(n, gimple_ctypes.AssignStmt) and isinstance(n.target, gimple_ctypes.SubscriptExpr)

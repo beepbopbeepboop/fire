@@ -1,97 +1,80 @@
-# DIAGNOSTICS_missing_validation_modular part 4: fold `_get_kgen_string` in diagnostic messages
+# DIAGNOSTICS missing-validation part 4: fold float comparisons in comptime conditions
 
-Part 4 of the split of `bugs/hard/DIAGNOSTICS_missing_validation_modular.md`.
-The umbrella's Status names "reflection-driven messages like
-`StaticString(_get_kgen_string[...])`" as an open shape.
+Class: **easy** (this doc lives in `bugs/`). Two small edits: one literal case
+in the shared constant folder, and the float branch of the `where`-clause
+binding table.
 
-## Why this part
+Parent: `bugs/hard/DIAGNOSTICS_missing_validation_modular.md` (the
+"incomplete condition evaluation" remainder). Plan:
+`docs/diagnostics-missing-validation-plan.md`.
 
-`comptime assert`/`constrained` messages are folded by
-`mojo.middle.comptime.eval_const` so a diagnostic reads
-`expected positive number, got -2` instead of a compiler temp name. The
-`String(...)` / `StaticString(...)` / `StringSlice(...)` wrappers are already
-transparent to that fold. The standard library's reflection spelling is not:
+## Goal
 
-```mojo
-from std.collections.string.string_span import _get_kgen_string
+A `comptime assert` / `constrained` / `where` condition built from float
+literals or a `Float64` parameter must be decided at compile time. Today every
+float comparison is unfolded, so a provably-false one is silently accepted.
 
-fn f():
-    comptime assert False, StaticString(_get_kgen_string["hello"]())
-```
+## Current state (measured 2026-11-12)
 
-The AST is a `CallExpr` whose function is a `SubscriptExpr` over
-`IdentExpr('_get_kgen_string')` with a string-literal index, wrapped in
-`StaticString`. `eval_const` has no case for it, so the message does not fold.
-
-Measured 2026-11-10 with a local stand-in for the stdlib declaration:
-
-```mojo
-def _get_kgen_string[s: String]() -> String:
-    return s
-
-fn f():
-    comptime assert False, StaticString(_get_kgen_string["hello"]())
-```
-
-The compiler raises `comptime assertion failed: _t2`; the expected message is
-`hello`. (`StaticString("hello")` alone already folds to `hello`.)
+- `comptime assert 0.5 > 1.0, "small"` compiles with no diagnostic.
+- `comptime assert 1.5 != 1.5, "neq"` compiles with no diagnostic.
+- `constrained[0.5 > 1.0, "small"]()` compiles with no diagnostic.
+- The folder has no float case: `mojo/middle/comptime.py::eval_const` (~438)
+  handles `BoolLiteral`, `IntLiteral`, `StringLiteral`, ... but not
+  `FloatLiteral`; `_const_foldable` (~868) has the same gap in its literal
+  tuple. The comparison helper `compare_op` (~71) is type-agnostic and already
+  returns the right answer once a `float` reaches it.
+- `elaborate._where_bindings` (~652) accepts only a decimal integer or
+  `True`/`False` type argument, so `def f[x: Float64]() where x > 1.0` called
+  as `f[0.5]()` leaves the clause undecided and accepted.
+- Integer, Bool, and String comparisons already fold; `fold_arith` is
+  int-annotated, so float ARITHMETIC is out of scope.
 
 ## Scope
 
-`mojo/middle/comptime.py::eval_const` only:
-
-- recognise `CallExpr(func=SubscriptExpr(obj=IdentExpr('_get_kgen_string'),
-  index=<foldable string>), args=[], kwargs=[])` and return the folded index
-  string. `_get_kgen_string` is a compiler builtin name in the same sense as
-  `String`/`StaticString`: the fold is by name, not by importing the stdlib
-  module, so it also works for the reduced test above.
-- Fold the index with `eval_const` first (a literal, a comptime alias, or
-  `String` concatenation), so `_get_kgen_string[name]` works when `name` is a
-  comptime string.
-- Leave an unknown index, a non-empty argument list, or any other
-  `_get_kgen_string` shape unfolded (return `None`), exactly as today.
-- Do not add a second copy of the string-wrapping rule; the existing
-  `StaticString`/`String`/`StringSlice`/`StringSpan` case already turns the
-  result into a message. If `eval_const_int`/`eval_const_bool` have a separate
-  `_get_kgen_string` path later, call this one helper rather than duplicating
-  it.
+1. `mojo/middle/comptime.py`: `eval_const` returns `node.value` for a
+   `FloatLiteral`; `_const_foldable` lists `FloatLiteral` with the other
+   literals. Leave the arithmetic guard (`isinstance(l, (int, bool))`) alone —
+   only `compare_op` on floats is in scope, so `0.5 - 0.1 > 0.3` stays
+   unfolded rather than silently using a different arithmetic model.
+2. `elaborate._where_bindings`: accept a float type argument
+   (`-?\d+\.\d+([eE][-+]?\d+)?`) as a `float`, so a `Float64` parameter can
+   satisfy a float `where` clause. Keep the existing int/bool branches and the
+   "anything else is omitted" rule.
+3. No new message text: `comptime assertion failed: <msg>`,
+   `constraint failed: <msg>`, and the existing `requirement '...' is not
+   satisfied` are the diagnostics.
 
 ## Acceptance
 
-Add to `test_comptime_assert_diagnostic.py`:
+- `comptime assert 0.5 > 1.0, "small"`,
+  `comptime assert 1.5 != 1.5, "neq"`, and
+  `constrained[0.5 > 1.0, "small"]()` are rejected with their message.
+- True/equal float conditions compile: `0.5 < 1.0`, `1.5 == 1.5`.
+- `def f[x: Float64]() where x > 1.0` rejects `f[0.5]()` and accepts
+  `f[2.5]()` (via a real `fire.py build`; the in-process path does not
+  instantiate the generic).
+- A condition over a float that is only known at run time stays undecided and
+  compiles.
+- Integer/String/Bool conditions and `comptime if` keep their behaviour.
 
-```python
-def test_comptime_assert_message_get_kgen_string():
-    src = ('def _get_kgen_string[s: String]() -> String:\n'
-           '    return s\n'
-           'fn f():\n'
-           '    comptime assert False, StaticString(_get_kgen_string["hello"]())\n')
-    try:
-        # _compile_full: do_imports=True + a real temp file, the path that
-        # elaborates the generic `_get_kgen_string[s]` call.  The plain
-        # do_imports=False helper folds the message to the literal text
-        # `comptime assertion failed`, which is a different (and also wrong)
-        # path.
-        _compile_full(src)
-    except RuntimeError as e:
-        s = str(e)
-        assert 'comptime assertion failed: hello' in s, s
-        assert '_t' not in s.split('comptime assertion failed:')[-1], s
-        return
-    raise AssertionError('provably-false comptime assert compiled')
-```
+## Done when
 
-Also cover an unknown index (the message must remain unfolded and must not
-crash) and the `constrained` form in `test_constrained_diagnostic.py`.
+Add `test_comptime_float_condition_diagnostic.py` beside
+`test_comptime_dtype_diagnostic.py` (do NOT register it in `tools/suite.py`)
+and run exactly:
 
-Run only:
+    python3 tools/memslot.py --gb 8 --label comptime-float -- python3 test_comptime_float_condition_diagnostic.py
 
-    python3 test_comptime_assert_diagnostic.py
-    python3 test_constrained_diagnostic.py
+The test covers the `comptime assert`/`constrained` cases with
+`compile_to_gimple` and the two `where` cases through
+`diagnostic_build.build_refusal`.
 
-No suite registration and no whole-closure compile. The real
-`std.collections.string.string_span` import pulls the whole stdlib and is not
-required for this acceptance; the local declaration produces the same AST.
+## Not in this part
+
+Float arithmetic at comptime, float folding in the interpreter, and DType
+predicates. No test registration.
 
 ## Status
+
 - **Open.**
