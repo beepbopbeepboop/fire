@@ -77,11 +77,16 @@ def failed_job_names(log):
         txt = open(log, errors="replace").read()
     except OSError:
         return []
-    m = re.search(r"^FAILED:\n(.*?)(?=^[A-Z][A-Z-]+.*:\n|^suite:)", txt, re.S | re.M)
+    m = re.search(r"^FAILED:\n", txt, re.M)
     if not m:
         return []
     names = []
-    for line in m.group(1).splitlines():
+    # The section is its INDENTED lines: it ends at the first line that starts in column 0 (the `time: wall ...`
+    # summary, `suite: ...`, another heading). A lookahead on capitalised headings let `time: wall 0:36 | ... (0
+    # replayed ...)` through, and `time` was filed as a failing job (bugs/gate-time.md).
+    for line in txt[m.end():].splitlines():
+        if line.strip() and not line[0].isspace():
+            break
         t = line.strip().split()
         if t and re.fullmatch(r"[\w.:-]+", t[0]) and "(" in line:
             names.append(t[0].split(":")[0])
@@ -254,14 +259,22 @@ def enqueue_merge_fix(name, t, conflict_text):
         reg[name]["fixer"] = mname          # a fixer owns this branch: never hand the same one out twice
 
 
-def gate_doc(culprit, t, failing):
+def gate_doc(culprit, t, failing, files=()):
     """A red landing gate is not handed to a chain of fresh workers. The gate's failure is a bug like any other, so it
     gets a doc: bugs/gate-<job>.md, one per failing job, which the feeder routes easy -> mid -> hard like every doc.
     The culprit is superseded (its claims release, so the doc can be worked on master) and held (`hold` keeps it out
     of the landing candidates, so it cannot go red again in a loop). With culprit None the job was already red on
     master: only the docs are written and no branch is held. An existing doc is left alone. Returns the doc paths."""
-    jobs = failing or ["landing"]
+    # A job name becomes a file name: keep only things that are job names (never a path such as a failing stdlib file).
+    jobs = [j for j in (failing or []) if re.fullmatch(r"[\w.-]+", j)] or ["landing"]
     branch = t["branch"] if t else "master"
+    if culprit is not None:
+        # Hold the culprit FIRST: if writing a doc fails, the branch must still stay out of the landing candidates,
+        # or the next pass probes it, finds it red and fails the same way for ever.
+        with C.registry() as reg:
+            reg[culprit]["state"] = "superseded"
+            reg[culprit]["hold"] = True
+            reg[culprit]["gate_red"] = jobs
     paths = []
     for j in jobs:
         p = os.path.join(C.MAIN, "bugs", "gate-%s.md" % j)
@@ -275,11 +288,8 @@ def gate_doc(culprit, t, failing):
                 "**Two states:** this doc exists = the job is red and this is the work. Delete it when the job is green on master.\n\n"
                 "It is red on `%s`: reproduce it there (`python3 tools/suite.py %s`), then fix the cause. Do not skip or mark the test.\n"
                 % (j, j, branch, culprit or "master", branch, j))
-    if culprit is not None:
-        with C.registry() as reg:
-            reg[culprit]["state"] = "superseded"
-            reg[culprit]["hold"] = True
-            reg[culprit]["gate_red"] = jobs
+            if files:
+                f.write("\nFailing files at the time:\n%s\n" % "\n".join("- `%s`" % x for x in files))
     return paths
 
 

@@ -793,9 +793,14 @@ def probe(batch):
     if not pm:
         return "EMPTY", [], [], out
     fm = re.search(r"^FAILED_JOBS: ?(.*)$", out, re.M)
-    ff = re.search(r"^FAILED_FILES: ?(.*)$", out, re.M)
-    failing = (fm.group(1).split() if fm else []) + (ff.group(1).split() if ff else [])
+    failing = fm.group(1).split() if fm else []      # JOBS only: a failing file is not a job (see failed_files)
     return pm.group(1), pm.group(2).split(), failing, out
+
+
+def failed_files(out):
+    """The failing stdlib files a probe printed (FAILED_FILES): for the gate doc's body, never its name."""
+    ff = re.search(r"^FAILED_FILES: ?(.*)$", out, re.M)
+    return ff.group(1).split() if ff else []
 
 
 def find_culprit(seq, failing):
@@ -812,17 +817,13 @@ def find_culprit(seq, failing):
     return seq[hi - 1], failing or []
 
 
-LAND_BATCH = 8   # branches landed per pass: a larger batch merges them all into one gate run and one conflict storm
-
-
 def land():
+    # No batch cap. The cap (8) existed because a batch meant one HEAVY gate run and one conflict storm. The landing
+    # gate is now cheap (tools/gates.json `landing`: stdlib-syntax; the rest runs after landing in verify_landed.py),
+    # a conflicting branch is peeled off to a merge fixer inside the loop below, and a red is bisected to its culprit
+    # by find_culprit, so everything finished lands in ONE pass instead of queueing 8 at a time behind it.
     names = [n for n in I.pick_candidates(quiet=True) if n.startswith(PREFIXES) and n not in BUSY["names"]]
     names = fresh_first(names, C.load())
-    held = names[LAND_BATCH:]
-    names = names[:LAND_BATCH]
-    if held:
-        log("land: %d more finished branch(es) waiting behind the batch cap of %d: %s"
-            % (len(held), LAND_BATCH, ", ".join(held[:3]) + (" ..." if len(held) > 3 else "")))
     if not names:
         return None
     tasks = C.load()
@@ -852,7 +853,7 @@ def land():
         culprit, failing = find_culprit(merged, failing)
         log("red: %s breaks the gate (%s); it is held and bugs/gate-<job>.md is the work, the rest of the batch continues"
             % (culprit, " ".join(failing) or "jobs unknown"))
-        I.gate_doc(culprit, tasks[culprit], failing)
+        I.gate_doc(culprit, tasks[culprit], failing, failed_files(out))
         batch = [n for n in batch if n != culprit]
     return landed
 

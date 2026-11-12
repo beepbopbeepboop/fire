@@ -1204,6 +1204,89 @@ def _claimed_by_outside(path):
     return False
 
 
+ARCHIVE_REF = "refs/archive/"
+BRANCH_MIN_AGE_S = 24 * 3600     # a branch younger than this is never touched: something may be about to look at it
+
+
+def classify_retirable_branches():
+    """(tips, subsumed, dead) for the `work/*` branches nothing will ever land (see prune_work_branches for the rules).
+    A branch checked out in a worktree is still CLASSIFIED: its tree is what has to go first, and cleanup removes that
+    tree (clean ones only, with every liveness check) before the branch is deleted."""
+    reg = load()
+    byb = {t.get("branch"): t for t in reg.values()}
+    rows = subprocess.run(["git", "for-each-ref", "--no-merged", "master",
+                           "--format=%(refname:short) %(objectname) %(committerdate:unix)", "refs/heads/work/"],
+                          capture_output=True, text=True, cwd=MAIN).stdout.splitlines()
+    tips = {}
+    for r in rows:
+        name, sha, when = r.split()
+        tips[name] = (sha, int(when))
+    if not tips:
+        return tips, [], []
+    qtext = ""
+    for f in os.listdir(qdir()):
+        if f.endswith(".json"):
+            qtext += open(os.path.join(qdir(), f), errors="replace").read()
+    now = time.time()
+    ok = {n for n, (sha, when) in tips.items()
+          if now - when >= BRANCH_MIN_AGE_S and n not in qtext
+          and (byb.get(n) or {}).get("state") != "running"}
+    # one call: the tips no other tip contains. A tip not in it is reachable from another branch.
+    ind = subprocess.run(["git", "merge-base", "--independent"] + sorted({sha for sha, _ in tips.values()}),
+                         capture_output=True, text=True, cwd=MAIN)
+    if ind.returncode != 0:
+        return tips, [], []
+    independent = set(ind.stdout.split())
+    keeper = {}                                  # equal tips share a commit: exactly one name must stay
+    for n in sorted(tips):
+        sha = tips[n][0]
+        if n not in ok:                          # a protected name is the keeper for its commit
+            keeper[sha] = n
+        else:
+            keeper.setdefault(sha, n)
+    subsumed = [n for n in sorted(ok) if tips[n][0] not in independent or keeper[tips[n][0]] != n]
+    dead = []
+    for n in sorted(ok - set(subsumed)):
+        t = byb.get(n)
+        if t is None or (t.get("state") in TERMINAL and t.get("hold")):
+            dead.append(n)
+    return tips, subsumed, dead
+
+
+def prune_work_branches(dry_run=False):
+    """Retire the `work/*` branches nothing will ever land, so the branch list stays the size of the live work.
+
+    cleanup's `branch -d` only reaches branches already in master. The rest piled up (1,350+ on 2026-11-12): every
+    retry, continuation, merge-fix and gate-fix gets a NEW branch, and a task that ends abandoned/superseded leaves
+    its commits unmerged for ever. Two lossless rules, in order:
+
+      1. SUBSUMED: the tip is an ancestor of another unmerged work/* tip (a continuation was cut from it, a fixer
+         built on it). Every commit stays reachable from that branch, so the name is deleted outright.
+      2. DEAD: the task is terminal (integrated/abandoned/superseded) AND held, or there is no task at all (the
+         registry forgot it, so nothing can ever land it). Its tip is saved under refs/archive/<name> (invisible to
+         `git branch`, immune to gc) and the branch deleted. Recover with `git branch <name> refs/archive/<name>`.
+
+    Never touched: a branch checked out in any worktree (cleanup removes a clean, idle tree first), one younger than
+    BRANCH_MIN_AGE_S, a task that is running or finished-and-waiting (it may yet land), an abandoned task NOT held
+    (`continue` cuts its successor from it), or a branch named by a queued task. Returns (subsumed, archived) counts."""
+    tips, subsumed, dead = classify_retirable_branches()
+    out = subprocess.run(["git", "worktree", "list", "--porcelain"], capture_output=True, text=True, cwd=MAIN).stdout
+    busy = {l[len("branch refs/heads/"):] for l in out.splitlines() if l.startswith("branch refs/heads/")}
+    subsumed = [n for n in subsumed if n not in busy]
+    dead = [n for n in dead if n not in busy]
+    if dry_run:
+        print("would delete %d subsumed and archive %d dead work/* branches" % (len(subsumed), len(dead)))
+        return len(subsumed), len(dead)
+    for i in range(0, len(subsumed), 100):
+        subprocess.run(["git", "branch", "-D"] + subsumed[i:i + 100], capture_output=True, cwd=MAIN)
+    for n in dead:
+        r = subprocess.run(["git", "update-ref", ARCHIVE_REF + n, tips[n][0]], capture_output=True, cwd=MAIN)
+        if r.returncode == 0:                    # delete only once the archive ref is in place
+            subprocess.run(["git", "branch", "-D", n], capture_output=True, cwd=MAIN)
+    print("deleted %d subsumed work/* branches; archived %d dead ones under %s" % (len(subsumed), len(dead), ARCHIVE_REF))
+    return len(subsumed), len(dead)
+
+
 def cmd_cleanup(a):
     """Remove the worktrees we created and no longer use: a `work-*` tree whose HEAD is already an ancestor of
     master, with a clean tree (no modified or untracked-and-not-ignored files), and no live worker.
@@ -1224,6 +1307,12 @@ def cmd_cleanup(a):
             cur = {"path": l[9:]}; wt.append(cur)
         elif l.startswith("HEAD "):
             cur["head"] = l[5:]
+        elif l.startswith("branch refs/heads/"):
+            cur["branch"] = l[len("branch refs/heads/"):]
+    retire = set()
+    if a.branches:
+        _t, _s, _d = classify_retirable_branches()
+        retire = set(_s) | set(_d)             # work nothing will land: its clean, idle tree may go too
     try:
         dirs = live_session_dirs()
     except (RuntimeError, OSError, ValueError) as e:
@@ -1248,7 +1337,8 @@ def cmd_cleanup(a):
             kept.append((p, "live process in tree")); continue
         if _claimed_by_outside(p):
             kept.append((p, "claimed by an outside session")); continue
-        if subprocess.run(["git", "merge-base", "--is-ancestor", w["head"], "master"], cwd=MAIN).returncode != 0:
+        if (w.get("branch") not in retire
+                and subprocess.run(["git", "merge-base", "--is-ancestor", w["head"], "master"], cwd=MAIN).returncode != 0):
             kept.append((p, "unmerged")); continue
         cands.append(p)
 
@@ -1306,6 +1396,7 @@ def cmd_cleanup(a):
             for i in range(0, len(gone), 200):
                 subprocess.run(["git", "branch", "-d"] + gone[i:i + 200], capture_output=True, cwd=MAIN)
             print("deleted %d merged work/* branches" % len(gone))
+        prune_work_branches(a.dry_run)
     if a.prune:
         cmd_prune(a)
 
