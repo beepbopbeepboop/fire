@@ -4210,7 +4210,7 @@ test('sync-restart-guards', [PY, 'tools/test_sync_restart_guards.py'], mem='tiny
      desc='registered by the estate audit (every test file runs)')
 test('enum-desugar', [PY, 'test_enum_desugar.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
-test('linked-list-hash-step1', [PY, 'test_linked_list_hash_step1.py'], mem='tiny', expect='LinkedList.__hash__ lowers to a stub; see bugs/CODEGEN_linked_list_hash_stubbed.md',
+test('linked-list-hash-step1', [PY, 'test_linked_list_hash_step1.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 
 BUCKETS = {
