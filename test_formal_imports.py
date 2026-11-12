@@ -4381,13 +4381,15 @@ def test_a_constants_only_module_is_not_told_nothing_could_be_added(
     The constants are already inlined at their use sites by the
     module-constant substitution; what is absent is a RULE that a module with
     nothing to export needs no dylib at all, so an importer reading the
-    constant directly needs no library. That is one feature and the refusal
-    must name it, rather than telling a reader that nothing would help.
+    constant directly needs no library. That is one feature, and
+    `bugs/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` is where
+    it is written down — so the message now says which feature it is and where
+    it lives, rather than telling a reader that nothing would help.
 
-    **The assertion is on the false clause and on the missing rule being
-    named**, and both directions matter: a message that merely stopped saying
-    the false thing would leave the 6 files with no next step, which is the
-    same dead end in a quieter form.
+    **The assertion is on the false clause and on the owner being named**, and
+    both directions matter: a message that merely stopped saying the false thing
+    would leave the 6 files with no next step, which is the same dead end in a
+    quieter form.
     """
     sys.path.insert(0, HERE)
     from formal.build import no_public_api_reason
@@ -4402,15 +4404,14 @@ def test_a_constants_only_module_is_not_told_nothing_could_be_added(
           f"which is false — the constants are already inlined at their use "
           f"sites and the missing thing is a rule, not an implementation: "
           f"{reason}")
-    check("a BACKEND rule that a module nothing binds" in reason
-          and "needs no library at all" in reason,
-          "the refusal does not name the feature that would remove it (a "
-          f"backend rule that a module nothing binds needs no library at all, "
-          f"and a value model for container-valued module constants), so the "
-          f"files behind this row still have no next step: {reason}")
-    check("value model for a container-valued module constant" in reason,
-          "the refusal does not say why a container-valued module constant "
-          f"cannot be inlined today: {reason}")
+    check("FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib" in reason,
+          "the refusal does not name the feature that would remove it, so the "
+          f"6 files behind this row still have no next step: {reason}")
+    check("a BACKEND rule that a module nothing binds needs no library "
+          "at all" in reason,
+          "the refusal does not say the missing thing is a backend RULE "
+          f"rather than work on the module, which is the part a reader acts "
+          f"on: {reason}")
     # …and the branch's own judgement is untouched: there really is nothing an
     # importer could bind, and the refusal is still correct.
     check("nothing an importer could bind" in reason,

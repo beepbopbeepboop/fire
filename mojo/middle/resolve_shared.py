@@ -1111,23 +1111,6 @@ def _quick_type(gen, node) -> str:
                 _dv_types.append(gen._quick_type(_dp[1]))
             if not _dv_spread:
                 return gimple_ctypes.TypeLattice.join_all(_dv_types)
-        # A subscript of a tuple literal (`("a", "b")[0]`) or of any other
-        # tuple expression whose slot types are statically knowable from the
-        # literal: answer the indexed slot's type when the index is a constant
-        # integer, else the joined slot type. Without this the estimator fell
-        # through to int64_t and a function returning the slot was declared
-        # `int64_t` even when the slot holds a `char *`.
-        if (isinstance(obj, gimple_ctypes.TupleExpr) and obj.elements
-                and not isinstance(node.index, gimple_ctypes.SliceExpr)):
-            _idx = node.index
-            if isinstance(_idx, gimple_ctypes.IntLiteral):
-                try:
-                    _i = int(_idx.value)
-                except Exception:
-                    _i = None
-                if _i is not None and -len(obj.elements) <= _i < len(obj.elements):
-                    return gen._quick_type(obj.elements[_i])
-            return gen._infer_list_elem_type(obj.elements)
         if isinstance(obj, gimple_ctypes.IdentExpr):
             # `s[i]` where s is a plain char* string: the element is a
             # ONE-CHAR STRING, not a scalar. `_elem_types` has no entry for
