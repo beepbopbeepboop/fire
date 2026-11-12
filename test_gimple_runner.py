@@ -13579,6 +13579,97 @@ main()
 
     test_module_class_attr_from_imported_global()
 
+    # A FLOAT module-scope `var` imported by name. The defining module declared
+    # its global `int` (the VarDecl pre-scan's catch-all arm had no FloatLiteral
+    # row) and its initializer `0` (`_extract_init_expr` had no float row), so
+    # the accessor came out `int64_t` against the importer's `extern double`:
+    # "conflicting types for '<mod>__mojo_global_get_F'", and the value read
+    # back as 0 even when the types agreed. Both the bare read and a class
+    # attribute initialised from the import must print the float.
+    def test_imported_float_global():
+        global _PASS, _FAIL, _TIMEOUT
+        name = "imported_float_global"
+        defn = 'var F = 2.5\n'
+        use = ("from xmodattr_defn import F\n"
+               "\n"
+               "class C():\n"
+               "    var fl = F\n"
+               "\n"
+               "def main():\n"
+               "    print(F)\n"
+               "    print(C().fl)\n"
+               "\n"
+               "main()\n")
+        try:
+            out = _compile_two_files_do_imports_and_run(
+                'xmodattr_defn.mojo', defn, 'xmodattr_use.mojo', use)
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        if out == "2.5\n2.5\n":
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected '2.5\\n2.5\\n', got {out!r}")
+            _FAIL += 1
+
+    test_imported_float_global()
+
+    # The same defect from the definer side, no import involved: a module-scope
+    # `var F = g()` whose callee returns a float. Every RHS-to-type arm answered
+    # `int64_t` for it (the call arms only let pointers through), so the global
+    # was a box and `print(F)` read the double's bit pattern as an integer.
+    def test_float_global_from_call_same_module():
+        global _PASS, _FAIL, _TIMEOUT
+        name = "float_global_from_call_same_module"
+        src = ("def g():\n"
+               "    return 2.5\n"
+               "\n"
+               "var F = g()\n"
+               "\n"
+               "def main():\n"
+               "    print(F)\n"
+               "\n"
+               "main()\n")
+        try:
+            with tempfile.TemporaryDirectory() as wd:
+                entry = os.path.join(wd, 'floatcall_same.mojo')
+                open(entry, 'w').write(src)
+                from gimple_codegen import compile_to_gimple
+                c_code = compile_to_gimple(src, do_imports=False, filename=entry)
+                c_file = os.path.join(wd, 'floatcall_same.c')
+                exe_file = os.path.join(wd, 'floatcall_same.exe')
+                open(c_file, 'w').write(c_code)
+                runtime_dir = os.path.join(HERE, 'runtime')
+                result = subprocess.run(
+                    [find_gcc(), '-fgimple', f'-I{runtime_dir}', '-o', exe_file,
+                     c_file, os.path.join(runtime_dir, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+                if result.returncode != 0:
+                    raise RuntimeError(f"gcc -fgimple failed: {result.stderr[:300]}")
+                out = run_executable_stdout(exe_file)
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        if out == "2.5\n":
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected '2.5\\n', got {out!r}")
+            _FAIL += 1
+
+    test_float_global_from_call_same_module()
+
     # The `sizeof`/`fnaddr` accessor helpers are file-scope `static`s, and every
     # module's parts land in ONE translation unit, so the sets that decide
     # whether one has already been DEFINED must be shared into every

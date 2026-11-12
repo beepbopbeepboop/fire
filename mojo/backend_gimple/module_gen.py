@@ -14605,6 +14605,8 @@ def gen_module_impl(self, stmts: list):
                     return ret
                 elif ret == 'char *':
                     return 'char *'
+                elif ret == 'double':
+                    return 'double'
                 else:
                     # Delegate the unknown-callee fallback to _quick_type,
                     # which knows shape-specific results this table has no
@@ -14622,7 +14624,7 @@ def gen_module_impl(self, stmts: list):
                     # (int64_t/double/_Bool) still land on int64_t, matching
                     # this branch's old unconditional default.
                     qt2 = self._quick_type(_value)
-                    return qt2 if (qt2 == 'char *' or qt2.endswith(' *')) else 'int64_t'
+                    return qt2 if (qt2 == 'char *' or qt2.endswith(' *') or qt2 == 'double') else 'int64_t'
             elif (isinstance(_value.func, MemberExpr)
                     and _value.func.member in ('read', 'readline')
                     and not _value.args):
@@ -14661,7 +14663,7 @@ def gen_module_impl(self, stmts: list):
                 # discarded-pointer bug as the unknown-callee case above,
                 # and with the same fix. Non-pointers still land on int64_t.
                 qt4 = self._quick_type(_value)
-                return qt4 if (qt4 == 'char *' or qt4.endswith(' *')) else 'int64_t'
+                return qt4 if (qt4 == 'char *' or qt4.endswith(' *') or qt4 == 'double') else 'int64_t'
         elif (isinstance(_value, MemberExpr) and isinstance(_value.obj, IdentExpr)
                 and _value.obj.name in self.imported_symbols):
             _mx_mod = self.imported_symbols[_value.obj.name].get('module')
@@ -14672,6 +14674,8 @@ def gen_module_impl(self, stmts: list):
                     return _mx_t
                 elif _mx_t == '_Bool':
                     return 'int'
+                elif _mx_t == 'double':
+                    return 'double'
                 else:
                     return 'int64_t'
             # Not a known imported-module global: delegate to _quick_type,
@@ -14679,7 +14683,7 @@ def gen_module_impl(self, stmts: list):
             # char* value → 'char *', matching _lower_MemberExpr) are the
             # single source of truth for these RHS types.
             qt3 = self._quick_type(_value)
-            return qt3 if qt3 == 'char *' else 'int64_t'
+            return qt3 if (qt3 == 'char *' or qt3 == 'double') else 'int64_t'
         elif (isinstance(_value, MemberExpr) and isinstance(_value.obj, IdentExpr)
                 and gimple_exprtypes.is_bound_method_value(
                     self, _value,
@@ -14695,6 +14699,11 @@ def gen_module_impl(self, stmts: list):
                 return qt
             elif qt == '_Bool':
                 return 'int'
+            elif qt == 'double':
+                # A float literal (or float-valued expression) is a `double`
+                # global; collapsing it to int64_t made the definer's accessor
+                # disagree with the importer's `extern double`.
+                return 'double'
             else:
                 return 'int64_t'
 
@@ -15177,6 +15186,8 @@ def gen_module_impl(self, stmts: list):
                                 _phase17_set_gtype(_scan_stmt.name, ret, _scan_own)
                             elif ret == 'char *':
                                 _phase17_set_gtype(_scan_stmt.name, 'char *', _scan_own)
+                            elif ret == 'double':
+                                _phase17_set_gtype(_scan_stmt.name, 'double', _scan_own)
                             else:
                                 _phase17_set_gtype(_scan_stmt.name, 'int64_t', _scan_own)
                         elif (isinstance(_scan_stmt.value.func, MemberExpr)
@@ -15186,11 +15197,13 @@ def gen_module_impl(self, stmts: list):
                         elif (isinstance(_scan_stmt.value.func, MemberExpr)
                                 and _scan_stmt.value.func.member == 'readlines'):
                             _phase17_set_gtype(_scan_stmt.name, 'MojoList *', _scan_own)
+                        elif self._quick_type(_scan_stmt.value) == 'double':
+                            _phase17_set_gtype(_scan_stmt.name, 'double', _scan_own)
                         else:
                             _phase17_set_gtype(_scan_stmt.name, 'int64_t', _scan_own)
                     else:
                         qt = self._quick_type(_scan_stmt.value) or 'int64_t'
-                        _phase17_set_gtype(_scan_stmt.name, qt if (qt.endswith(' *') or qt == '_Bool') else 'int64_t', _scan_own)
+                        _phase17_set_gtype(_scan_stmt.name, qt if (qt.endswith(' *') or qt in ('_Bool', 'double')) else 'int64_t', _scan_own)
                 else:
                     _phase17_set_gtype(_scan_stmt.name, 'int64_t', _scan_own)
         elif isinstance(_scan_stmt, TryStmt):
@@ -16990,6 +17003,10 @@ def gen_module_impl(self, stmts: list):
                         global_decls.append(f"char * {gname};")
                         self._global_var_types[gname] = 'char *'
                         self._global_c_decl_types[gname] = 'char *'
+                    elif _ivt == 'double':
+                        global_decls.append(f"double {gname};")
+                        self._global_var_types[gname] = 'double'
+                        self._global_c_decl_types[gname] = 'double'
                     else:
                         global_decls.append(f"int64_t {gname};")
                         self._global_var_types[gname] = 'int64_t'
@@ -17016,6 +17033,10 @@ def gen_module_impl(self, stmts: list):
                     global_decls.append(f"{_mvt} {gname};")
                     self._global_var_types[gname] = _mvt
                     self._global_c_decl_types[gname] = _mvt
+                elif _mvt == 'double':
+                    global_decls.append(f"double {gname};")
+                    self._global_var_types[gname] = 'double'
+                    self._global_c_decl_types[gname] = 'double'
                 else:
                     global_decls.append(f"int64_t {gname};")
                     self._global_var_types[gname] = 'int64_t'
@@ -17070,6 +17091,13 @@ def gen_module_impl(self, stmts: list):
                 global_decls.append(f"int {gname};")
                 self._global_var_types[gname] = 'int'
                 self._global_c_decl_types[gname] = 'int'
+            elif qt == 'double':
+                # The same `double` answer `_phase17_value_type` and the
+                # VarDecl pre-scan give: an imported float global's accessor is
+                # `extern double` (module_loader's export c_return_type).
+                global_decls.append(f"double {gname};")
+                self._global_var_types[gname] = 'double'
+                self._global_c_decl_types[gname] = 'double'
             else:
                 global_decls.append(f"int64_t {gname};")
                 self._global_var_types[gname] = 'int64_t'
@@ -17171,6 +17199,10 @@ def gen_module_impl(self, stmts: list):
                             global_decls.append(f"char * {gname};")
                             self._global_var_types[gname] = 'char *'
                             self._global_c_decl_types[gname] = 'char *'
+                        elif _ivt == 'double':
+                            global_decls.append(f"double {gname};")
+                            self._global_var_types[gname] = 'double'
+                            self._global_c_decl_types[gname] = 'double'
                         else:
                             global_decls.append(f"int64_t {gname};")
                             self._global_var_types[gname] = 'int64_t'
@@ -17179,6 +17211,13 @@ def gen_module_impl(self, stmts: list):
                 global_decls.append(f"int {gname};")
                 self._global_var_types[gname] = 'int'
                 self._global_c_decl_types[gname] = 'int'
+            elif isinstance(_gv, FloatLiteral):
+                # A float literal is a `double` field. Without this row it fell
+                # to the catch-all `int` arm below, and the accessor an importer
+                # reads is `extern double` (module_loader's c_return_type).
+                global_decls.append(f"double {gname};")
+                self._global_var_types[gname] = 'double'
+                self._global_c_decl_types[gname] = 'double'
             elif isinstance(_gv, StringLiteral):
                 global_decls.append(f"char * {gname};")
                 self._global_var_types[gname] = 'char *'
@@ -17513,6 +17552,11 @@ def gen_module_impl(self, stmts: list):
                     # rather than an implicit one.
                     init_val = f'(int64_t)(void *){init_val}'
             elif init_val.lstrip('-').isdigit():
+                pass
+            elif c_type == 'double':
+                # A `double` field's initializer is the C spelling of a float
+                # literal (`_extract_init_expr`'s FloatLiteral row); resetting
+                # it to 0 silently zeroed `var F = 2.5`.
                 pass
             else:
                 if c_type.endswith(' *'):

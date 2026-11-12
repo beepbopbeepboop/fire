@@ -277,6 +277,15 @@ def _quick_type(gen, node) -> str:
         # agree by construction.
         if node.name in getattr(gen, '_own_global_var_types', {}):
             return _as_str(gen._own_global_var_types[node.name])
+        # A bare name this module IMPORTS as a module-scope global (BUG-2026-009)
+        # is read through the defining module's accessor, whose declared C
+        # return type is the answer `_lower_IdentExpr` itself uses for the read
+        # (emit_exprs' imported-global arm). Answering int64_t here typed a
+        # `var fl = F` class attribute as a box, so a float global came out as
+        # its truncated integer.
+        _imp_acc = getattr(gen, '_imported_global_accessors', {}).get(node.name)
+        if _imp_acc is not None:
+            return _as_str(_imp_acc[0])
         return 'int64_t'
     if (isinstance(node, gimple_ctypes.SubscriptExpr)
             and (isinstance(node.obj, gimple_ctypes.IdentExpr)
