@@ -11791,7 +11791,6 @@ int64_t mojo_add_words(int64_t a, int64_t b)
  * Used by tagged mixed-generator values whose kind is a runtime fact. */
 int64_t mojo_mul_word(int64_t a, int64_t b)
 {
-    fprintf(stderr,"MW a=%lld b=%lld ba=%d\\n",(long long)a,(long long)b,mojo_is_boxed(a));
     if (mojo_boxed_is_str(a))
         return (int64_t)(intptr_t)mojo_cstr_repeat((char *)(intptr_t)mojo_unbox_plain(a), mojo_box_int(b));
     if (mojo_boxed_is_str(b))
