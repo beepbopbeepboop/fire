@@ -3035,7 +3035,7 @@ def _gmi_emit_closure_recursive(self, func_parts: list, _emitted_closures: set,
             func_parts.append(_env_sz_def)
             func_parts.append('')
         func_parts.append(
-            f"{ci.env_struct} * __GIMPLE {alloc_fn} (void)\n"
+            f"__GIMPLE {ci.env_struct} * {alloc_fn} (void)\n"
             f"{{\n"
             f"  {ci.env_struct} * _e;\n"
             f"  void * _vp;\n"
@@ -17890,7 +17890,7 @@ def gen_module_impl(self, stmts: list):
         if _sz_def:
             parts.append(_sz_def)
         parts.append(
-            f"static {sn} * __GIMPLE _alloc_{sn} (void)\n"
+            f"__GIMPLE static {sn} * _alloc_{sn} (void)\n"
             f"{{\n"
             f"  {sn} * _p;\n"
             f"  void * _vp;\n"

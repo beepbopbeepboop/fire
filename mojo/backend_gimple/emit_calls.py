@@ -11727,6 +11727,36 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     return et, t
 
 
+def _emit_slice_step_zero_check(gen, step_v: str) -> str:
+    """Emit `if (step == 0) raise ValueError(...)` for a slice's step, and
+    return the typed int64 temp that holds the step.
+
+    `x[a:b:0]` is a ValueError in CPython -- a zero step is a contradiction,
+    not an empty range. Every slice helper treats step 0 as "step 1", so the
+    check has to live at the lowered call site, where a spelled step is
+    still visible.
+
+    Raw-GIMPLE hygiene: the comparison goes into a `_Bool` temp whose
+    operands are same-TYPE plain vars. A parenthesized comparison as the
+    whole RHS (`_t = (1 == _s)`) and a literal operand of the wrong width
+    are both rejected by gcc's strict grammar in a `__GIMPLE` function, and
+    the slice bodies that carry this check are `__GIMPLE` once their
+    enclosing method returns a pointer. Both the bytes and the list slice
+    use this one emitter.
+    """
+    _stepv = gen._new_val('int64_t', step_v)
+    _z0 = gen._new_val('int64_t', '0')
+    _stepzero = gen._new_val('_Bool', f'{_stepv} == {_z0}')
+    _lb = gen._new_bb(); _lo = gen._new_bb()
+    gen._emit(f'  if ({_stepzero}) goto {_lb}; else goto {_lo};')
+    gen._emit_label(_lb)
+    gen._emit_call('void', '', 'mojo_raise_value_error',
+                   [('char *', gen._intern_string('slice step cannot be zero'))])
+    gen._emit(f'  goto {_lo};')
+    gen._emit_label(_lo)
+    return _stepv
+
+
 def _lower_slice_bounds(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
     """Compute (start_v, stop_v) C expressions for a SliceExpr's bounds
     — shared by _lower_slice (read a sub-range) and the DelStmt lowering
@@ -11823,15 +11853,7 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         # because only a lowered call site knows a step was spelled at all:
         # an omitted step passes the literal 1, and the runtime's own
         # defensive default stays for the paths that pass 0 deliberately.
-        _zst = gen._new_val('int64_t', '(int64_t)0')
-        _stepzero = gen._new_val('_Bool', f'({step_v} == {_zst})')
-        _bb = gen._new_bb(); _bo = gen._new_bb()
-        gen._emit(f'  if ({_stepzero}) goto {_bb}; else goto {_bo};')
-        gen._emit_label(_bb)
-        gen._emit_call('void', '', 'mojo_raise_value_error',
-                       [('char *', gen._intern_string('slice step cannot be zero'))])
-        gen._emit(f'  goto {_bo};')
-        gen._emit_label(_bo)
+        _emit_slice_step_zero_check(gen, step_v)
         # Omitted start: pass the OMITTED sentinel (not 0) so mojo_bytes_slice
         # can pick the right endpoint for a negative step (`b[::-1]`).
         bstart_v = 'MOJO_SLICE_STOP_OMITTED' if node.start is None else start_v
@@ -11865,23 +11887,7 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         if getattr(node, 'step', None) is not None:
             _kt, kv = gen.lower_expr(node.step)
             step_v = gen._to_int64(_kt, kv)
-            # raw-GIMPLE hygiene (see `_bool_and`'s docstring): the
-            # zero-check comparison goes into a `_Bool` temp with same-TYPE
-            # plain-var operands — a parenthesized comparison as the whole
-            # RHS is rejected in a `__GIMPLE` function (this site currently
-            # fires only in non-__GIMPLE test fns, but the same slice in a
-            # raises: fn would hit it). Measured 2026-10-21 part 4
-            # integration.
-            _stepv = gen._new_val('int64_t', step_v)
-            _z0 = gen._new_val('int64_t', '0')
-            _stepzero = gen._new_val('_Bool', f'{_stepv} == {_z0}')
-            _lb = gen._new_bb(); _lo = gen._new_bb()
-            gen._emit(f'  if ({_stepzero}) goto {_lb}; else goto {_lo};')
-            gen._emit_label(_lb)
-            gen._emit_call('void', '', 'mojo_raise_value_error',
-                           [('char *', gen._intern_string('slice step cannot be zero'))])
-            gen._emit(f'  goto {_lo};')
-            gen._emit_label(_lo)
+            _stepv = _emit_slice_step_zero_check(gen, step_v)
             _hs = '0' if node.start is None else '1'
             _he = '0' if node.stop is None else '1'
             # Materialize the bounds: a cast expression (what `_to_int64`
