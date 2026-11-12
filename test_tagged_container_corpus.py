@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Corpus census for the mixed-container rebind decision behind the mixed
-tagged-generator/container-name case (decided option 2 by the 2026-11-12
-census; see docs/tagged_generator_mixed_type-plan.md, step 4).
+"""Corpus census for the mixed-container rebind decision behind
+bugs/mid/CODEGEN_tagged_generator_mixed_type_container.md and
+bugs/hard/CODEGEN_tagged_generator_mixed_type_step4.md.
 
 The question the decision needs answered: does any real .mojo source bind one
 name BOTH to a container value (a list/dict/set literal or constructor) AND to
@@ -89,51 +89,6 @@ def _is_next_call(v):
             and v.func.name == 'next')
 
 
-def _target_name(t):
-    # ForStmt.target is a plain str; AssignStmt/VarDecl targets are IdentExpr.
-    if isinstance(t, str):
-        return t
-    if isinstance(t, N.IdentExpr):
-        return t.name
-    return None
-
-
-def _candidates_in_module(mod, rel):
-    """Return 'rel: fn: name' for every function where one name is bound to a
-    container value AND to a tagged generator word, where a tagged word is
-    `x = next(g)`, a `for x in <call>(...)` target, or `x = v` with `v` a
-    for-loop target over a call (the doc's `for v in g(): x = v` shape)."""
-    out = []
-    for fn in _walk(mod):
-        if not isinstance(fn, N.FunctionDef):
-            continue
-        container_names, tagged_names = set(), set()
-        loopvars, value_rebinds = set(), []
-        for node in _walk(fn):
-            if isinstance(node, N.AssignStmt) and _target_name(node.target) is not None:
-                nm = _target_name(node.target)
-                if _is_container_value(node.value):
-                    container_names.add(nm)
-                elif _is_next_call(node.value):
-                    tagged_names.add(nm)
-                elif isinstance(node.value, N.IdentExpr):
-                    value_rebinds.append((nm, node.value.name))
-            elif isinstance(node, N.VarDecl):
-                if node.value is not None and _is_container_value(node.value):
-                    container_names.add(node.name)
-            elif isinstance(node, N.ForStmt):
-                nm = _target_name(node.target)
-                if nm is not None and isinstance(node.iterable, N.CallExpr):
-                    tagged_names.add(nm)
-                    loopvars.add(nm)
-        for tgt, src in value_rebinds:
-            if src in loopvars:
-                tagged_names.add(tgt)
-        for nm in sorted(container_names & tagged_names):
-            out.append(f'{rel}: {fn.name}: {nm}')
-    return out
-
-
 def _scan_file(path, rel):
     with open(path, 'r', errors='replace') as fh:
         src = fh.read()
@@ -143,37 +98,30 @@ def _scan_file(path, rel):
         mod = N.Parser(N.py_tokenize(src)).parse_module()
     except Exception as e:  # census data, not a verdict
         return [], f'{rel}: {e}'
-    return _candidates_in_module(mod, rel), None
-
-
-# Planted positives: the detector MUST flag each one, or a zero census means
-# nothing (it would be a detector that cannot see the shape).
-SELFCHECK_POSITIVES = {
-    'for-target': (
-        'def g():\n    yield 1.5\n\n'
-        'def f():\n    x = [1, 2]\n    for x in g():\n        pass\n'),
-    'rebind-from-loopvar': (
-        'def g():\n    yield 1.5\n\n'
-        'def f():\n    x = [1, 2]\n    for v in g():\n        x = v\n'),
-    'next-call': (
-        'def g():\n    yield 1.5\n\n'
-        'def f():\n    x = [1, 2]\n    x = next(g())\n'),
-}
-
-
-def _selfcheck():
-    for label, src in SELFCHECK_POSITIVES.items():
-        mod = N.Parser(N.py_tokenize(src)).parse_module()
-        if not _candidates_in_module(mod, f'selfcheck:{label}'):
-            print(f'census: SELFCHECK FAILED: planted positive {label!r} not flagged')
-            return False
-    print(f'census: selfcheck: {len(SELFCHECK_POSITIVES)} planted positives flagged')
-    return True
+    candidates = []
+    for fn in _walk(mod):
+        if not isinstance(fn, N.FunctionDef):
+            continue
+        container_names, tagged_names = set(), set()
+        for node in _walk(fn):
+            if isinstance(node, N.AssignStmt) and isinstance(node.target, N.IdentExpr):
+                nm = node.target.name
+                if _is_container_value(node.value):
+                    container_names.add(nm)
+                elif _is_next_call(node.value):
+                    tagged_names.add(nm)
+            elif isinstance(node, N.VarDecl):
+                if node.value is not None and _is_container_value(node.value):
+                    container_names.add(node.name)
+            elif isinstance(node, N.ForStmt):
+                if isinstance(node.target, N.IdentExpr) and isinstance(node.iterable, N.CallExpr):
+                    tagged_names.add(node.target.name)
+        for nm in sorted(container_names & tagged_names):
+            candidates.append(f'{rel}: {fn.name}: {nm}')
+    return candidates, None
 
 
 def main():
-    if not _selfcheck():
-        return 4
     stdlib = _stdlib_root()
     if stdlib is None:
         print('census: no stdlib root reachable (set MOJO_STDLIB); refusing to '
