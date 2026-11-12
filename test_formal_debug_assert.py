@@ -464,7 +464,7 @@ def test_a_frame_address_is_not_a_condition(tmpdir):
         "    var start: Int\n"
         "    var end: Int\n"
         "\n"
-        "    def check(mut self) -> Int:\n"
+        "    def check(out self) -> Int:\n"
         '        debug_assert(self.start <= self.end, "bad ", self)\n'
         "        return 1\n"
         "\n"

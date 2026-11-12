@@ -22385,12 +22385,12 @@ def no_public_api_reason(source_paths: list) -> str:
                 f"module constant — inline it at the use site, which needs "
                 f"storage this path does not have "
                 f"(a writable module global needs a cross-module accessor, which this path does not have yet) — and a BACKEND "
-                f"rule that a module nothing binds a concrete name from needs "
-                f"no library at all, an importer reading the constant directly "
-                f"instead of linking a library for it. Neither exists here, "
-                f"so this is refused at the build rather than linked as a "
-                f"library with nothing in it, and nothing here is waiting on "
-                f"this file.")
+                f"rule that a module nothing binds needs no library at all, an "
+                f"importer reading the constant directly instead of linking a "
+                f"library for it (`bugs/FORMAL_a_module_that_exports_nothing_"
+                f"cannot_be_a_dylib.md`). Neither exists here, so this is "
+                f"refused at the build rather than linked as a library with "
+                f"nothing in it, and nothing here is waiting on this file.")
     # The C-LIBRARY-SYMBOL case, checked before the generic ones because it is
     # the only rule that is a NAME test rather than a shape test, so it can hold
     # whatever the declarations look like. Its exclusion is right for a CALL and

@@ -167,16 +167,6 @@ def pid_alive(t):
     return alive(t.get("pid"))
 
 
-def finished_done_ok(t):
-    """A task the worker finished successfully: exit code 0 and a DONE verdict. sync --restart-dead must never
-    restart one, even if its process is gone (restarting supersedes finished work)."""
-    ec = os.path.join(t.get("worktree", ""), "exitcode")
-    try:
-        return open(ec).read().strip() == "0" and verdict(t) == "DONE"
-    except OSError:
-        return False
-
-
 def dead_running_tasks(tasks):
     """Registry entries that are running or were recorded as exited-err, whose process is gone, and that never wrote
     an exitcode. A dead worker stays here until it is restarted or superseded, so a restart skipped for want of a
@@ -532,27 +522,10 @@ def qdir():
     return d
 
 
-def free_task_name(name, limit=60):
-    """NAME cut to LIMIT characters, then made unique against the registry AND the queue. Truncating before the check
-    is the point: two different long names cut to the same 40/60 characters collided on the cut form, which the
-    old `name in load()` check on the uncut name never saw, and the second enqueue overwrote the first's queue file
-    (or its spawn hit `task ... already exists`). The suffix is a counter, so it is stable and cannot repeat."""
-    name = name[:limit].rstrip("-")
-    taken = set(load()) | {f[:-5] for f in os.listdir(qdir()) if f.endswith(".json")}
-    cand, k = name, 1
-    while cand in taken:
-        k += 1
-        suffix = "-%d" % k
-        cand = name[:limit - len(suffix)].rstrip("-") + suffix
-    return cand
-
-
 def cmd_enqueue(a):
     """Queue a task. `refill` starts it when a worker slot is free and every task named in --needs is
     integrated (so work that depends on an unlanded round can be queued now and starts itself)."""
     task = a.task if a.task is not None else open(a.task_file).read()
-    if os.path.exists(os.path.join(qdir(), a.name + ".json")):
-        sys.exit("task %s is already queued; a second enqueue would overwrite it (use free_task_name)" % a.name)
     # a task queued without --pool runs on whichever slot is free first (see refill); --pool only prefers one
     item = dict(name=a.name, claims=a.claim, base=a.base, task=task, files=a.file, needs=a.needs or [],
                 added=time.time(), pool=getattr(a, "pool", None), only=bool(getattr(a, "only", False)),
@@ -971,7 +944,7 @@ def cmd_gate(a):
     """gate list | gate off PATTERN --reason R --doc bugs/<name> --worker NAME | gate on PATTERN"""
     cfg = gates_cfg()
     if a.action == "list":
-        print("landing:", ", ".join(cfg["landing"]), "| full gate: whenever a landing since the last run touches something a gate reads")
+        print("landing:", ", ".join(cfg["landing"]), "| full every", cfg["full_every_minutes"], "min")
         for pat, e in cfg.get("off", {}).items():
             print("OFF  %-40s %s  (doc %s, worker %s, since %s)" % (pat, e["reason"], e["doc"], e["worker"], e["since"]))
         return
@@ -1638,10 +1611,6 @@ def cmd_sync(a):
                 with registry() as ts:
                     ts[n]["state"] = "abandoned"
                 print("  abandoned %s: its worktree %s is gone" % (n, t["worktree"]))
-                continue
-            # A task the worker finished successfully must never be restarted: it is done, not dead.
-            if finished_done_ok(t):
-                print("  skipped %s: verdict DONE with exit code 0" % n)
                 continue
             # DONE ratchet: if every doc claim's doc is gone (deleted on master), the task
             # is already resolved; mark superseded instead of restarting it forever.
