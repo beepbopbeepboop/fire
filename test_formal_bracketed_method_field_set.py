@@ -122,7 +122,7 @@ DIFF_CASES = [
     ("bracketed_method_call_does_not_invent_a_field",
      "struct Cell:\n"
      "    var _value: Int\n"
-     "    def bump[T: Int](mut self, k: Int):\n"
+     "    def bump[T: Int](out self, k: Int):\n"
      "        self._value = self._value + T + k\n"
      "\n"
      "def main() -> Int:\n"
@@ -307,7 +307,7 @@ FIELDSET_CASES = [
     ("a_bracketed_method_call_contributes_no_field",
      "struct Cell:\n"
      "    var _value: Int\n"
-     "    def bump[T: Int](mut self, k: Int) -> Int:\n"
+     "    def bump[T: Int](out self, k: Int) -> Int:\n"
      "        return self._value + T + k\n"
      "    def go(self) -> Int:\n"
      "        return self.bump[1](2)\n",
@@ -342,7 +342,7 @@ FIELDSET_CASES = [
     ("a_field_named_in_the_brackets_is_still_a_field",
      "struct Cell:\n"
      "    var index: Int\n"
-     "    def bump[T: Int](mut self, k: Int) -> Int:\n"
+     "    def bump[T: Int](out self, k: Int) -> Int:\n"
      "        return T + k + self.index\n"
      "    def go(self) -> Int:\n"
      "        return self.bump[self.index](2)\n",
@@ -536,7 +536,7 @@ REFUSALS = [
 X86_ABI_PARITY = [
     # The by-reference RECEIVER on the one shape the bracketing makes hardest,
     # and the row that replaces the refusal this file used to pin here.
-    # `def bump[T: Int](mut self, k: Int) -> Int` is a one-field mutator that
+    # `def bump[T: Int](out self, k: Int) -> Int` is a one-field mutator that
     # both changes its receiver and returns a value AND has a comptime
     # parameter, so its receiver is NOT argument 0: comptime parameters are
     # LEADING arguments (`model.incoming_args`), the cell address arrives in X1,
@@ -562,7 +562,7 @@ X86_ABI_PARITY = [
     ("x86_abi_a_bracketed_one_field_mutator_that_also_returns_a_value",
      "struct Cell:\n"
      "    var _value: Int\n"
-     "    def bump[T: Int](mut self, k: Int) -> Int:\n"
+     "    def bump[T: Int](out self, k: Int) -> Int:\n"
      "        self._value = self._value + T + k\n"
      "        return self._value\n"
      "\n"

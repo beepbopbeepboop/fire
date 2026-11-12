@@ -1618,7 +1618,6 @@ char *mojo_dict_get_str(MojoDict *d, char *key);
 int64_t mojo_dict_slot_kind(MojoDict *d, char *key);
 char *mojo_dict_repr_slot(MojoDict *d, char *key);
 int64_t mojo_dict_slot_boxed(MojoDict *d, char *key);
-int64_t mojo_dict_slot_boxed_kw(MojoDict *d, int64_t kw);
 int64_t     mojo_dict_setdefault_int(MojoDict *d, char *key, int64_t dflt);
 char       *mojo_dict_setdefault_str(MojoDict *d, char *key, char *dflt);
 MojoList   *mojo_dict_keys(MojoDict *d);

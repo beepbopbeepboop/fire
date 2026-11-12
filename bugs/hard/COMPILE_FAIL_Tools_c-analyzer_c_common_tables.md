@@ -1,4 +1,3 @@
-SPLIT: bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part1.md, bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2.md, bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3.md
 # COMPILE_FAIL: Tools/c-analyzer/c_common/tables.py
 
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`

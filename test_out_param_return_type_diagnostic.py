@@ -129,37 +129,12 @@ class OutParamReturnTypeDiagnostic(unittest.TestCase):
                      '    f(y)\n')
         self.assertIn("invalid call to 'f': unexpected argument", str(cm.exception))
 
-    # --- the removed `fn` keyword: stage 1 warns (bugs/DIAGNOSTICS_fn_keyword_*) ---
-
-    def test_fn_definition_compiles_with_the_real_warning_at_the_keyword(self):
-        import contextlib
-        import io
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
+    @unittest.expectedFailure  # gap: the removed `fn` keyword is accepted
+    def test_fn_keyword_is_refused(self):
+        with self.assertRaises(RuntimeError) as cm:
             _compile('fn f(x: Int) -> Int:\n'
                      '    return x\n')
-        self.assertIn("t.mojo:1:1: warning: 'fn' has been removed; use 'def' instead",
-                      err.getvalue())
-
-    def test_def_does_not_warn_about_fn(self):
-        import contextlib
-        import io
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            _compile('def f(x: Int) -> Int:\n'
-                     '    return x\n')
-        self.assertNotIn("'fn' has been removed", err.getvalue())
-
-    def test_fn_as_an_identifier_does_not_warn(self):
-        # CPython code uses `fn` as a name (logging's findCaller); that is not a definition.
-        import contextlib
-        import io
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            _compile('def g() -> Int:\n'
-                     '    var fn = 3\n'
-                     '    return fn\n')
-        self.assertNotIn("'fn' has been removed", err.getvalue())
+        self.assertIn("'fn' has been removed; use 'def' instead", str(cm.exception))
 
 
     def test_method_out_self_with_int_parameter_is_refused_at_the_parameter(self):

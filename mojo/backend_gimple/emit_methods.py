@@ -6752,11 +6752,7 @@ def _lower_pointer_method(gen, ov: str, ot: str, method: str, args: list) -> tup
         return 'int', gen._new_val('int', '0')
     if method in ('bitcast', 'address_of',
                   'unsafe_mut_cast', 'unsafe_origin_cast', 'unsafe_ptr_cast',
-                  'origin_cast', 'mut_cast', 'decay', 'as_noalias_ptr',
-                  'get_unsafe_pointer', '_get_unsafe_pointer',
-                  'get_ref_with_unsafe_interior_origin',
-                  '_get_ref_with_unsafe_interior_origin',
-                  'get_ref_with_origin', '_get_ref_with_origin'):
+                  'origin_cast', 'mut_cast', 'decay', 'as_noalias_ptr'):
         t = gen._new_temp(ot)
         gen._emit(f"  {t} = {ov};  /* {method}: pass-through */")
         return ot, t
@@ -7997,27 +7993,6 @@ def _imported_method_declared_ret(gen, struct_name: str, method: str):
 def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple:
     """Lower struct/class method calls: obj.method(args) → StructName_method(self, args)."""
     func = node.func
-    # Origin/ref accessors are semantically pointer identity in this
-    # codegen's lowered representation (refs/origins erase to addresses).
-    # Lower as pass-through when no concrete compiled method is known for
-    # the receiver, to avoid emitting undefined symbols like
-    # `int64_t__get_ref_with_unsafe_interior_origin`.
-    if method in ('get_ref_with_unsafe_interior_origin',
-                  '_get_ref_with_unsafe_interior_origin',
-                  'get_ref_with_origin', '_get_ref_with_origin',
-                  'get_unsafe_pointer', '_get_unsafe_pointer'):
-        _sn_pt = gimple_exprtypes._struct_name_of(ot) if isinstance(ot, str) and ot.endswith(' *') else ''
-        _has_concrete = False
-        if _sn_pt:
-            _has_concrete = (
-                f'{_sn_pt}_{method}' in gen.func_return_types
-                or method in gen._struct_method_names.get(_sn_pt, ())
-                or gen._struct_method_csym(_sn_pt, method, '') in gen.func_return_types
-            )
-        if not _has_concrete and not (getattr(node, 'args', None) or getattr(node, 'kwargs', None)):
-            t = gen._new_temp(ot)
-            gen._emit(f"  {t} = {ov};  /* {method}: pass-through */")
-            return ot, t
     is_class_ref = False
     # `cls.method(...)` inside a @classmethod: the receiver `cls` (in `ov`)
     # IS a real argument that must be prepended, exactly like `self` on an

@@ -613,40 +613,17 @@ def _quick_type(gen, node) -> str:
         # correct body, which is the same value-identity failure this row
         # exists to prevent, one level below the parameter it fixed.
         #
-        # The receiver's type is asked of _quick_type so constructor calls
-        # (`C().get()`) and other expressions whose result type is known are
-        # answered, not only plain identifiers already in var_types.
-        _sot = ''
+        # Gated on `var_types` actually naming a registered struct, so every
+        # still-unknown receiver keeps exactly the old behaviour and only a
+        # provable one changes.
         if isinstance(node.func.obj, gimple_ctypes.IdentExpr):
             _sot = gen.var_types.get(node.func.obj.name, '')
-        if not (_sot and _sot.endswith(' *')):
-            _sot = gen._quick_type(node.func.obj)
-        if isinstance(_sot, str) and _sot.endswith(' *'):
-            _ssn = gimple_exprtypes._struct_name_of(_sot)
-            if _ssn in gen.struct_field_types:
-                _smeth = node.func.member
-                if (_ssn, _smeth) in gen._generator_method_api:
-                    return 'MojoGenerator *'
-                # Method return type, including overload-id manglings, the
-                # same way the auto-invoked @property path resolves below.
-                _srt = gen.func_return_types.get(f"{_ssn}_{_smeth}")
-                if _srt:
-                    return _srt
-                candidates = gen._struct_method_signatures.get(_sms_key(_ssn, _smeth))
-                if candidates:
-                    overload_id = ''
-                    if len(candidates) == 1:
-                        overload_id = candidates[0].get('overload_id', '') or ''
-                    mangled = gen._struct_method_csym(_ssn, _smeth, overload_id)
-                    _srt = gen.func_return_types.get(
-                        mangled, gen.func_return_types.get(f"{_ssn}_{_smeth}"))
-                    if _srt:
-                        return _srt
-                # @property: a field with the same name but no method symbol
-                # is a stored field; otherwise the property getter's return
-                # type is the answer (mirrors the auto-invoke resolution
-                # further down).
-                if _smeth not in gen.struct_field_types.get(_ssn, {}):
+            if _sot.endswith(' *'):
+                _ssn = gimple_exprtypes._struct_name_of(_sot)
+                if _ssn in gen.struct_field_types:
+                    _smeth = node.func.member
+                    if (_ssn, _smeth) in gen._generator_method_api:
+                        return 'MojoGenerator *'
                     _srt = gen.func_return_types.get(f"{_ssn}_{_smeth}")
                     if _srt:
                         return _srt

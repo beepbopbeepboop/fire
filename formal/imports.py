@@ -3167,6 +3167,11 @@ HOST_MODULE_ADVICE = {
         "`formal/model.py`'s `InitShape`, `tools/formal_sweep.py`'s three). "
         "`Counter` is a dict rather than a record, so it is the other question: "
         "see bugs/FORMAL_listdir_no_run_time_sequence.md",
+    "copy":
+        "a field-wise copy of a type the COMPILER KNOWS at the call site is a "
+        "struct construction: build a new one and assign the fields. A copy "
+        "chosen at run time, over a graph whose shape the build cannot see, has "
+        "no answer here — the same missing thing as a type built at run time",
 }
 
 
@@ -3261,15 +3266,6 @@ def unresolvable_import_error(source_path: str, module_name: str) -> str:
     elif _is_host_module(module_name):
         kind = ("a host module (CPython standard library), which has no Mojo "
                 "source for this backend to compile")
-    elif (module_name.split(".")[0] in hostmod_source_modules()
-          and host_module_advice(module_name)):
-        # A WRITTEN host module with advice: its source is in the tree, but it
-        # declares constants only, so there is no boundary an importer can bind.
-        # Saying "no Mojo source" here would be false, and it is what the branch
-        # below says, so this case is named first.
-        kind = ("a host module (CPython standard library), whose Mojo source in "
-                "this tree declares only module-level constants, so it has no "
-                "function or type an importer could bind")
     elif is_cpython_stdlib(module_name):
         # The one sentence that used to be FALSE about the target.  CPython
         # ships `binascii`, `cmath`, `getopt`, `html`, `tomllib` and 217 other

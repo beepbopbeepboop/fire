@@ -38,20 +38,12 @@ import mlir
 from fire_compiler import for_target_is_tuple, for_target_single_name
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
+from mojo.backend_gimple.emit_calls import _box_escaping_dict_slot_read as _box_slot_read_escape
 
 
 def _lower_stmt_arg(gen, a):
-    # `ggc._box_escaping_dict_slot_read`, not a module-level
-    # `from ...emit_calls import ...`: emit_calls imports gimple_codegen, which
-    # imports THIS module, so a top-level import from it makes
-    # `import mojo.backend_gimple.emit_calls` fail outright ("cannot import name
-    # ... from partially initialized module ... most likely due to a circular
-    # import") -- the backend entry-point probe in test_suite.py is the thing
-    # that catches it. The module alias `ggc` (below) is bound by the time any
-    # function here RUNS, and every other emit_calls helper in this file is
-    # already reached the same way.
     t, v = gen.lower_expr(a)
-    return ggc._box_escaping_dict_slot_read(gen, a, t, v)
+    return _box_slot_read_escape(gen, a, t, v)
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.module_shared as msh
 import mojo.middle.itcursor as itc

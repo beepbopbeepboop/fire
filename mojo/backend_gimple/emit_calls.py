@@ -4138,8 +4138,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # rather than always routing through the generic opaque-value
     # fallback (mojo_hash, which can't tell a small int from a real
     # string apart from a raw int64_t without a static type hint).
-    # For a struct that defines __hash__(self, hasher), lower to the
-    # hasher protocol: new -> __hash__ -> finish (same as Python).
     if (fname_raw == 'hash' and len(node.args) == 1
             and not gen._locally_binds_name('hash')):
         ht, hv = gen.lower_expr(node.args[0])
@@ -4148,25 +4146,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if ht in ('char *', 'MojoStr *'):
             hv = gen._stringify_value(ht, hv) if ht != 'char *' else hv
             return 'int64_t', gen._call_expr('int64_t', 'mojo_hash_str', [('char *', hv)])
-        _sn_hash = gimple_exprtypes._struct_name_of(ht) if isinstance(ht, str) and ht.endswith(' *') else ''
-        if _sn_hash and '__hash__' in gen._struct_method_names.get(_sn_hash, ()):
-            _csym = None
-            for _cand in (gen._struct_method_csym(_sn_hash, '__hash__', ''),
-                          f'{_sn_hash}___hash__',
-                          f'{_sn_hash}__hash__'):
-                if (_cand in gen.func_return_types
-                        or _cand in gen.func_param_types
-                        or _cand in getattr(gen, '_KNOWN_SIGS', {})):
-                    _csym = _cand
-                    break
-            if _csym is None:
-                _csym = gen._struct_method_csym(_sn_hash, '__hash__', '')
-            _params = gen.func_param_types.get(_csym) or gen.func_param_types.get(f'{_sn_hash}___hash__') or []
-            # hasher-based __hash__(self, hasher)
-            if len(_params) >= 2:
-                _hv = gen._call_expr('int64_t', 'mojo_hasher_new', [])
-                gen._emit_call('void', '', _csym, [(ht, hv), ('int64_t', _hv)])
-                return 'int64_t', gen._call_expr('int64_t', 'mojo_hasher_finish', [('int64_t', _hv)])
         return 'int64_t', gen._call_expr('int64_t', 'mojo_hash', [('int64_t', gen._to_int64(ht, hv))])
 
     # sum(list_of_doubles): the generic `mojo_sum` (BUILTIN_VALUE_MAP
@@ -10990,22 +10969,6 @@ def _refuse_namedtuple_tuple_use(gen, ot: str, use: str) -> None:
             '(bug:COMPILE_FAIL_collections___init__)')
 
 
-def _list_slot_bytes(gen, list_val: str, idx64: str) -> tuple[str, str]:
-    """A `bytes` slot read off a list at a constant index.
-
-    The slot is held in the list's raw int64_t word and the word IS the
-    `MojoBytes *` pointer (see fire_runtime.h's MojoList comment), so the
-    accessor reads the int and the cast rebuilds the pointer. Shared by the
-    two constant-index slot arms in `_lower_subscript` -- the per-slot
-    `_struct_slot_kinds` table and the `_tuple_slot_types` table -- which
-    would otherwise spell the same coercion twice: the no-new-casts guard
-    counts spellings, and a duplicate is a second site to keep in sync.
-    """
-    _bt = gen._new_val('int64_t', f"mojo_list_get_int ({list_val}, {idx64})")
-    return 'MojoBytes *', gen._new_val(
-        'MojoBytes *', f"(MojoBytes *)(uintptr_t){_bt}")
-
-
 def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     # Keyword-parametrized slice, e.g. `x[byte=:-1]` (slice by byte offset).
     # The parser stashes the real SliceExpr in node.attrs (obj=None, since
@@ -11206,7 +11169,10 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                     return 'double', gen._new_val(
                         'double', f"mojo_list_get_double ({ov}, {idx64})")
                 if _skd == 'bytes':
-                    return _list_slot_bytes(gen, ov, idx64)
+                    _bt = gen._new_val('int64_t',
+                                       f"mojo_list_get_int ({ov}, {idx64})")
+                    return 'MojoBytes *', gen._new_val(
+                        'MojoBytes *', f"(MojoBytes *)(uintptr_t){_bt}")
                 if _skd == 'str':
                     # A `char *` slot, held in the raw int64_t slot (see
                     # fire_runtime.h's MojoList comment), so this is the
@@ -11244,7 +11210,10 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                     return 'char *', gen._new_val(
                         'char *', f"mojo_list_get_str ({ov}, {idx64})")
                 if _sct == 'MojoBytes *':
-                    return _list_slot_bytes(gen, ov, idx64)
+                    _bt = gen._new_val('int64_t',
+                                       f"mojo_list_get_int ({ov}, {idx64})")
+                    return 'MojoBytes *', gen._new_val(
+                        'MojoBytes *', f"(MojoBytes *)(uintptr_t){_bt}")
                 if _sct == '_Bool':
                     return '_Bool', gen._new_val(
                         '_Bool', f"(_Bool) mojo_list_get_int ({ov}, {idx64})")

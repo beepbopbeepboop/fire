@@ -50,41 +50,17 @@ class Split(unittest.TestCase):
         return path
 
     def test_a_split_doc_reports_its_parts(self):
-        self.write("hard/Xcase.md", "# X\nSPLIT: X-part1, X-part2\n")
-        self.write("mid/X-part1.md", "# part 1\n")
-        self.write("mid/X-part2.md", "# part 2\n")
+        self.write("hard/X.md", "# X\nSPLIT: X-part1, X-part2\n")
         with mock.patch.object(C, "MAIN", self.tmp):
-            self.assertEqual(S.split_reason("hard/Xcase"), "X-part1, X-part2")
+            self.assertEqual(S.split_reason("hard/X"), "X-part1, X-part2")
 
     def test_a_doc_without_the_line_has_no_split(self):
         self.write("hard/Y.md", "# Y\nno split here\n")
         with mock.patch.object(C, "MAIN", self.tmp):
             self.assertIsNone(S.split_reason("hard/Y"))
 
-    def test_a_split_whose_parts_are_all_on_disk_counts(self):
-        self.write("hard/Xcase.md", "# X\nSPLIT: X-part1, X-part2\n")
-        self.write("mid/X-part1.md", "# part 1\n")
-        self.write("X-part2.md", "# part 2\n")       # a part may be filed at any class directory
-        with mock.patch.object(C, "MAIN", self.tmp):
-            self.assertEqual(S.split_reason("hard/Xcase"), "X-part1, X-part2")
-
-    def test_a_split_naming_a_missing_part_is_an_orphan_and_does_not_count(self):
-        # 2026-11-11: an orphan SPLIT would park the original forever; None lets the replan run again
-        self.write("hard/Xcase.md", "# X\nSPLIT: X-part1, X-part2\n")
-        self.write("mid/X-part1.md", "# part 1\n")   # part2 was never filed
-        with mock.patch.object(C, "MAIN", self.tmp):
-            self.assertIsNone(S.split_reason("hard/Xcase"))
-
-    def test_the_replan_prompt_asks_each_part_for_a_done_when_test(self):
-        text = S.REPLAN_TASK % {"doc": "bugs/hard/Xcase.md", "cls": "hard", "slots": "opus",
-                                "servable": "easy, mid"}
-        self.assertIn("## Done when", text)
-        self.assertIn("ONE quick test", text)
-        self.assertIn("SPLIT: <base>-part1", text)
-
     def test_why_reports_a_split(self):
-        self.write("hard/Xcase.md", "# X\nSPLIT: X-part1\n")
-        self.write("mid/X-part1.md", "# part 1\n")
+        self.write("hard/X.md", "# X\nSPLIT: X-part1\n")
         with mock.patch.object(C, "MAIN", self.tmp), \
              mock.patch.object(C, "load", return_value={}), \
              mock.patch.object(C, "load_pool", return_value={"slots": [], "skip": []}), \
@@ -95,7 +71,7 @@ class Split(unittest.TestCase):
              mock.patch.object(S, "BUSY", {"names": set(), "claims": set()}), \
              mock.patch.object(S, "load_state", return_value={}), \
              mock.patch.object(S.subprocess, "run", return_value=mock.Mock(stdout="", returncode=0)):
-            self.assertIn("SPLIT", S.why("hard/Xcase"))
+            self.assertIn("SPLIT", S.why("hard/X"))
 
 
 class QueuedClass(unittest.TestCase):

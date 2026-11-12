@@ -418,36 +418,15 @@ def refill(target):
 SPLIT = re.compile(r"^SPLIT:[ \t]*(.+?)[ \t]*$", re.M)   # a doc decomposed into parts by a replan
 
 
-def part_exists(part):
-    """Whether a `SPLIT:` entry names a bug doc that is on disk, in whatever class directory it was filed.
-
-    The entry may be a bare name, `bugs/mid/<name>.md`, or `<name>.md`; the class directory is not
-    trusted, because a part may be filed at any servable class."""
-    stem = part.strip()
-    stem = re.sub(r"^bugs/", "", stem)
-    stem = re.sub(r"^(easy|mid|hard)/", "", stem)
-    stem = re.sub(r"\.md$", "", stem)
-    return bool(glob.glob(os.path.join(C.MAIN, "bugs", "**", stem + ".md"), recursive=True))
-
-
 def split_reason(doc):
     """The parts listed in the doc's `SPLIT:` line, or None. A SPLIT doc's parts carry the work, so
-    the feeder leaves the original alone (it stays at its class — the ladder is one-way).
-
-    Only a split whose parts all exist counts. A `SPLIT:` line naming a part that is not on disk is
-    an orphan: the original would stay parked forever with nothing working it. Returning None lets the
-    replan queue again, which re-decomposes the doc (2026-11-11)."""
+    the feeder leaves the original alone (it stays at its class — the ladder is one-way)."""
     try:
         with open(os.path.join(C.MAIN, doc_path(doc)), encoding="utf-8") as f:
             m = SPLIT.search(f.read())
     except OSError:
         return None
-    if not m:
-        return None
-    parts = [p for p in m.group(1).split(",") if p.strip()]
-    if not parts or not all(part_exists(p) for p in parts):
-        return None
-    return m.group(1)
+    return m.group(1) if m else None
 
 
 def unserved_classes(pool=None):
@@ -470,21 +449,12 @@ REPLAN_TASK = """You REPLAN a bug doc. You do NOT fix the bug.
 Read %(doc)s. It sits at a class the pool cannot serve (%(cls)s has no slot: %(slots)s), so it can
 never be worked as written. Decompose it instead:
 
-1. Decide the parts. Each part is a self-contained piece of work, small enough for a class the pool
-   CAN serve: %(servable)s. Never file a part at %(cls)s.
+1. Decide the parts. Each part is a self-contained piece of work with its own acceptance check,
+   small enough for a class the pool CAN serve: %(servable)s. Never file a part at %(cls)s.
 2. File each part as a new doc named "<base>-part1", "<base>-part2", ... under bugs/ or bugs/mid/
-   — the highest class you can argue it needs, within %(servable)s. Each part doc must have:
-   - a title and a Goal;
-   - a "## Acceptance" section with the observable result;
-   - a "## Done when" section naming ONE quick test (a file path and the command that runs it,
-     cheap enough to run in the gate's fast tier) that proves the part is fixed. A part with no
-     runnable test is not a part: write a test or make the part smaller.
-   Commit each new doc.
-3. Check your work before the SPLIT line: every part you named must exist on disk under bugs/ and
-   open with its title. Then add one line at the top of the ORIGINAL doc, in exactly this form:
-   SPLIT: <base>-part1, <base>-part2, ...
-   Commit it. The original stays at its class; its parts carry the work. A SPLIT line naming a part
-   that is not on disk is ignored, and the doc is replanned again.
+   — the highest class you can argue it needs, within %(servable)s. Commit each new doc.
+3. Add one line at the top of the ORIGINAL doc: SPLIT: <base>-part1, <base>-part2, ...
+   Commit it. The original stays at its class; its parts carry the work.
 4. Finish with the REPORT block and CONTROL-STATUS: DONE.
 
 Do not try to fix the bug yourself. Do not delete the original doc."""

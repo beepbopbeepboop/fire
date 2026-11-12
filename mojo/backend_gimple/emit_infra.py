@@ -3195,15 +3195,6 @@ _KW_DICT_FNS = frozenset([
     'mojo_dict_contains', 'mojo_dict_pop_int', 'mojo_dict_pop_str',
     'mojo_dict_pop_double', 'mojo_dict_setdefault_int',
     'mojo_dict_setdefault_str',
-    # The BOXED read. It is the one dict read that keeps a slot's own kind
-    # (`_dict_slot_boxed`: a bool stays a boxed bool, a None stays None), so it
-    # cannot be swapped for `mojo_dict_get_int_kw` on an int key -- that hands
-    # back the raw word and `print(d[True])` would say `1` where CPython says
-    # `True`. Its twin boxes the same slot the integer lookup finds, so an
-    # integer key reads the same value the char* spelling produces with nothing
-    # formatted to get there (`d[i]` on a `Dict[Int, Int]` used to stringify the
-    # key and release it every access).
-    'mojo_dict_slot_boxed',
     # The bool / None / struct setters. Absent from this set they were not
     # refused — `_apply_kw_keys` fell through to the "build the decimal string
     # now" arm, which stores the entry in the plain char* key DOMAIN while the

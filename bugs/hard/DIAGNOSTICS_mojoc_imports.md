@@ -1,5 +1,3 @@
-SPLIT: bugs/mid/DIAGNOSTICS_mojoc_imports-part1.md, bugs/mid/DIAGNOSTICS_mojoc_imports-part2.md, bugs/mid/DIAGNOSTICS_mojoc_imports-part3.md
-
 # DIAGNOSTICS step 10: mojoc / precompiled import errors
 
 Part of the umbrella `bugs/hard/DIAGNOSTICS_missing_validation_modular.md`;
