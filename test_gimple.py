@@ -8020,6 +8020,55 @@ def main():
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_self_delegating_generator_kind_ignores_its_own_yield_from():
+        """A recursive generator's `yield from <itself>(...)` re-yields its
+        own values, so it must not count as a non-tuple yield beside its
+        direct tuple yields. Before this, a module-level recursive tuple
+        walk (the shape `_lift_capture_free_nested_scopes` produces from a
+        nested `_walk_lists` in mojo/middle/coro.py) resolved to
+        (None, 'mixed tuple / non-tuple yields (v0)'). Driven through the
+        real parser and `_resolve_gen_kind`, the same path the lowering uses."""
+        global _PASS, _FAIL
+        name = "self_delegating_generator_kind_ignores_its_own_yield_from"
+        import mojo.middle.coro as coro
+        from fire_compiler import py_tokenize, Parser
+
+        def kind_of(src, gen_name):
+            stmts = Parser(py_tokenize(src)).parse_module()
+            stmts = stmts.body if hasattr(stmts, 'body') else stmts
+            coro._register_generator_defs(stmts)
+            return coro._resolve_gen_kind(gen_name)
+
+        walk_tuple = """\
+def walk(xs):
+    for i, st in enumerate(list(xs)):
+        yield xs, i
+        for fld in ('body',):
+            sub = getattr(st, fld, None)
+            if isinstance(sub, list):
+                yield from walk(sub)
+"""
+        walk_int = """\
+def g(n: int):
+    if n > 0:
+        yield n
+        yield from g(n - 1)
+"""
+        got_tuple = kind_of(walk_tuple, 'walk')
+        got_int = kind_of(walk_int, 'g')
+        if got_tuple[0] != 'tuple':
+            print(f"FAIL  {name}: recursive tuple walk resolved to "
+                  f"{got_tuple!r}, expected ('tuple', '')")
+            _FAIL += 1
+            return
+        if got_int[0] != 'i':
+            print(f"FAIL  {name}: recursive int generator resolved to "
+                  f"{got_int!r}, expected kind 'i'")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_user_defined_dunder_repr_is_called():
         """`repr(obj)` must call the struct's OWN `__repr__`. The generated
         field-dump `_mojo_repr_<Struct>` used to shadow it: the real method
@@ -14065,6 +14114,7 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_generator_bool_tuple_slot_is_bool(), 'test_generator_bool_tuple_slot_is_bool (line 12697)')
     _run_isolated(lambda: test_generator_int_yield_slot_stays_int64(), 'test_generator_int_yield_slot_stays_int64 (line 12698)')
     _run_isolated(lambda: test_generator_mixed_bool_and_int_yields_widen_to_int(), 'test_generator_mixed_bool_and_int_yields_widen_to_int (line 12699)')
+    _run_isolated(lambda: test_self_delegating_generator_kind_ignores_its_own_yield_from(), 'test_self_delegating_generator_kind_ignores_its_own_yield_from')
     _run_isolated(lambda: test_user_defined_dunder_repr_is_called(), 'test_user_defined_dunder_repr_is_called (line 12700)')
     _run_isolated(lambda: test_user_defined_dunder_repr_value(), 'test_user_defined_dunder_repr_value (line 12701)')
     _run_isolated(lambda: test_aliased_and_reexported_imports_resolve_to_the_defining_module(), 'test_aliased_and_reexported_imports_resolve_to_the_defining_module (line 12702)')

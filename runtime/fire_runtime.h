@@ -1519,6 +1519,8 @@ int64_t mojo_gen_call_with(void *start, MojoList *pre, MojoList *a, MojoDict *kw
 /* run-time class attributes (see the definitions): a class is its type tag */
 void    mojo_register_getattr_dispatch(int64_t (*fn)(void *, char *));
 int64_t mojo_getattr_any(void *obj, char *attr);   /* obj.attr on a word: struct reflection of any module */
+/* getattr(obj, attr, dflt) on a word with a runtime-computed name: a miss yields dflt. */
+int64_t mojo_getattr_default(void *obj, char *attr, int64_t dflt);
 void    mojo_class_register(int64_t tag, int64_t base_tag, char *name);
 void    mojo_class_setattr(int64_t tag, char *name, int64_t word);
 void    mojo_register_classattr_reader(int (*fn)(int64_t, char *, int64_t *));

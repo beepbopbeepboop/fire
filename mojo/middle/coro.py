@@ -1729,6 +1729,14 @@ def _generator_value_kind(fn: N.FunctionDef,
             # exactly as a direct sibling delegation does -- fsutil's
             # `iter_files_by_suffix`, see
             # the (since-fixed) c_common/fsutil.py compile failure.
+            if _is_self_delegation(n.value, fn):
+                # `yield from <fn itself>(...)` re-yields what THIS generator
+                # yields; it is not a new source of kind. The fixpoint of a
+                # self-cycle is the kind of the direct yields, so the
+                # delegation contributes nothing rather than the None hole
+                # that `_resolve_gen_kind`'s cycle rule answers (which read
+                # a recursive tuple walk as "mixed tuple / non-tuple").
+                continue
             dk = delegated(n.value, fn) if delegated is not None else None
             kinds.add(dk)
             if dk == 'tuple':
@@ -2265,6 +2273,17 @@ def _register_generator_value_kinds(stmts: list) -> None:
     """
     for _n in _GEN_DEFS:
         _resolve_gen_kind(_n)
+
+
+def _is_self_delegation(value, fn: N.FunctionDef | None) -> bool:
+    """True for `yield from fn(...)` / `yield from fn` where `fn` is the
+    generator whose kind is being computed (a recursive generator's own
+    delegation). Matched by name, the same resolution `_delegated` uses."""
+    if fn is None:
+        return False
+    target = value.func if isinstance(value, N.CallExpr) else value
+    return (isinstance(target, N.IdentExpr)
+            and _cm_as_str(target.name) == _cm_as_str(fn.name))
 
 
 def _delegated(value, fn: N.FunctionDef = None):

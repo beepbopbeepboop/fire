@@ -4393,33 +4393,22 @@ def _cpp_expr(gen, e) -> str:
                     and not gen._locally_binds_name('hasattr')):
                 return f"mojo_hasattr((int)({args[0]}), {args[1]})"
             if fname == 'getattr' and not gen._locally_binds_name('getattr'):
-                # `getattr(obj, name_expr)` — dynamic, runtime-string-
-                # keyed attribute lookup (save_env.py's `resource_info`:
-                # `getattr(self, get_name)`, where `get_name` is a
-                # RUNTIME-computed string, not a literal — could resolve
-                # to any of several differently-typed/-signatured bound
-                # methods depending on its value). This codegen's own
-                # `mojo_getattr` runtime helper is an honest always-0
-                # stub (no real name->member reflection table exists at
-                # all — struct fields/methods are resolved to fixed
-                # compile-time offsets/symbols, never dispatched by a
-                # runtime string), and there is no other codegen
-                # machinery here that could do this correctly either.
-                # Previously fell through to the generic bare-name-call
-                # fallback below, which emitted a literal, undeclared
-                # C++ identifier `getattr(...)` — a real, un-diagnosed
-                # g++ syntax error. Refuse honestly instead (same
-                # graceful "fall back to interpreting this module from
-                # source" path every other unsupported generator shape
-                # in this file already gets), matching this cluster's
-                # own established convention of converting a raw
-                # miscompile into an honest refusal rather than
-                # attempting unsupported reflection.
+                # `getattr(obj, name_expr)` — dynamic, runtime-string-keyed
+                # attribute lookup (save_env.py's `resource_info`:
+                # `getattr(self, get_name)`, `get_name` computed at run time).
+                # The runtime's cross-module struct reflection resolves it
+                # (mojo_getattr_any: every unit's registered dispatcher, then
+                # the class-object table), the same lookup the C++ path already
+                # uses for a member read off a word. A 2-arg miss raises
+                # AttributeError; a 3-arg miss yields the default.
+                if len(e.args) == 2:
+                    return f"mojo_getattr_any((void *)(intptr_t)({args[0]}), (char *)({args[1]}))"
+                if len(e.args) == 3:
+                    return (f"mojo_getattr_default((void *)(intptr_t)({args[0]}), "
+                            f"(char *)({args[1]}), (int64_t)({args[2]}))")
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
-                    "getattr(obj, name) with a non-static attribute "
-                    "name is not supported in a compiled generator/"
-                    "coroutine body (no runtime attribute-reflection "
-                    "table exists in this codegen)")
+                    f"getattr() with {len(e.args)} arguments is not a "
+                    "supported compiled generator/coroutine shape")
             if fname == 'range' and not gen._locally_binds_name('range'):
                 # range(stop) / range(start, stop) / range(start, stop,
                 # step) → the runtime's range object (iterated by the
