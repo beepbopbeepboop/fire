@@ -11,7 +11,7 @@ mojo/backend_gimple/module_gen.py:13818:19: error: assignment to 'char *' from '
 13818 |     # base's would read `_classattr_Base__tag` where CPython reads Child's,
 ```
 
-Line 13818 of `module_gen.py` is inside a long comment block (about per-receiver-class generator units); nothing there can fail. gcc's line is the last `#line` plus the generated lines since (the per-physical-line stamp in `emit_infra._emit_raw` now gives every statement line its own directive), so the real statement is somewhere after the statement that starts near line 13806 (`self._compile_nested_async_functions(s, _async_fns)`) in `gen_module_impl`.
+Line 13818 of `module_gen.py` is inside a long comment block (about per-receiver-class generator units); nothing there can fail. gcc's line is the last `#line` plus the generated lines since (see `CODEGEN_line_directives_drift_so_gimple_errors_name_the_wrong_line.md`), so the real statement is somewhere after the statement that starts near line 13806 (`self._compile_nested_async_functions(s, _async_fns)`) in `gen_module_impl`.
 
 ## Suspects (hypotheses, not findings)
 

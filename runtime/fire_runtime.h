@@ -1629,7 +1629,6 @@ void        mojo_dict_set_other_struct(MojoDict *d, char *key, void *obj);
  * (kind 6): the walker renders it through mojo_dict_repr_other_slot. */
 void        mojo_dict_set_other_struct_repr(MojoDict *d, char *key, void *obj, void *fn);
 char       *mojo_dict_repr_other_slot(MojoDict *d, int64_t i, int64_t v);
-void        mojo_dict_set_bytes_other_struct_repr(MojoDict *d, MojoBytes *key, void *obj, void *fn);
 void        mojo_dict_set_val_repr(MojoDict *d, void *fn);
 char       *mojo_dict_repr_val(MojoDict *d, int64_t v);
 

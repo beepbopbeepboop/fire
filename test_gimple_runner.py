@@ -35,21 +35,11 @@ def compile_mojo_to_gimple_exe(mojo_src: str, filename: str = '') -> str:
     """Compile mojo source to GIMPLE executable, return path to executable. A
     `filename` ending in `.py` compiles the text as Python source (Python scoping
     rules apply to nested defs)."""
-    from gimple_codegen import compile_to_gimple, compile_to_gimple_with_cpp
-
-    # A program with a generator the C++20 path lowers (`gimple_check_all_idiom`)
-    # has a companion .cpp that must be built and linked. That is the build the
-    # generator runner already does through the production linker, so reuse it
-    # rather than refuse the program: this is what `fire.py build` does.
-    if filename:
-        c_code, cpp_code = compile_to_gimple_with_cpp(mojo_src, filename=filename)
-    else:
-        c_code, cpp_code = compile_to_gimple_with_cpp(mojo_src)
-    if cpp_code.strip():
-        import test_gimple_generator_runner as _gen_runner
-        return _gen_runner._build_generator_program_from_code(c_code, cpp_code)
+    from gimple_codegen import compile_to_gimple
 
     with tempfile.NamedTemporaryFile(mode='w', suffix='.c', delete=False) as f:
+        # Compile mojo to GIMPLE C code
+        c_code = compile_to_gimple(mojo_src, filename=filename) if filename else compile_to_gimple(mojo_src)
         f.write(c_code)
         c_file = f.name
 

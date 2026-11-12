@@ -22,7 +22,7 @@ Six errors, one cause: a static table (`static const ReNode _reN_prog[] = {...}`
 
 The emitters are `gen._new_val('const ReNode *', info['prog_var'])` (and the `ranges_var` / `classinfo_var` twins) at `mojo/backend_gimple/emit_loops.py` (lines ~359 and ~454) and `mojo/backend_gimple/emit_methods.py` (~2485).
 
-The two functions in the build are the ones that use `re`: `fire_compiler.py` `_merge_string_literals` does `re.sub(r'(\\N\{[^{}]*\})|([{}])', lambda ..., _inner)` (line 7364), and `elaborate.py` `elaborate_overload_call` calls `re.sub` (line 1478). (The reported lines are a few lines past the statement: a multi-line statement's later physical lines were not stamped with its `#line`, so gcc counted from the statement's first line; that is fixed for ordinary functions and lambdas by `emit_infra._emit_raw`'s per-line stamp.)
+The two functions in the build are the ones that use `re`: `fire_compiler.py` `_merge_string_literals` does `re.sub(r'(\\N\{[^{}]*\})|([{}])', lambda ..., _inner)` (line 7364), and `elaborate.py` `elaborate_overload_call` calls `re.sub` (line 1478). (The reported lines are a few lines past the statement: see `CODEGEN_line_directives_drift_so_gimple_errors_name_the_wrong_line.md`.)
 
 ## What I could not reproduce
 

@@ -107,14 +107,6 @@ def gen_stmt(gen, node):
     if (gen._frame_func and hasattr(node, 'line') and node.line and node.line > 0
             and gen.current_func_name == gen._frame_func):
         gen._void_call('mojo_frame_set_line', [('int64_t', gen._new_val('int64_t', f'(int64_t){int(node.line)}'))])
-    # Every physical line this statement emits -- its own lines, its compound
-    # header's, and the lines of any synthetic lowering -- is stamped with this
-    # statement's directive by `emit_infra._emit_raw`, so GCC numbers it from
-    # the statement's own source line. A statement with no line (a synthetic
-    # node) inherits its enclosing statement's directive. Restored on exit, so
-    # a nested statement's lines are stamped with the nested line and the
-    # enclosing statement's remaining lines with its own again.
-    _outer_line_directive = getattr(gen, '_stmt_line_directive', None)
     if hasattr(node, 'line') and node.line and node.line > 0:
         # `_line_src_file` overrides `_current_filename` for the duration of
         # one enclosing unit (a base class's method body re-emitted as a
@@ -133,8 +125,38 @@ def gen_stmt(gen, node):
         # inlined.md, which is a different mechanism and does not own this.)
         filename = '' + (getattr(gen, '_line_src_file', '')
                          or getattr(gen, '_current_filename', ''))
-        gen._stmt_line_directive = (f"#line {node.line} \"{filename}\"" if filename
-                                    else f"#line {node.line}")
+        emitted_pairs = getattr(gen, '_emitted_line_pairs', set())
+
+        # Create unique key for this (filename, line) combination
+        pair_key = (filename, node.line)
+
+        # Emit #line only if we haven't emitted this exact pair before
+        if pair_key not in emitted_pairs:
+            if filename:
+                gen._emit(f"#line {node.line} \"{filename}\"")
+            else:
+                gen._emit(f"#line {node.line}")
+            emitted_pairs.add(pair_key)
+            gen._emitted_line_pairs = emitted_pairs
+
+    # A single Mojo statement (e.g. an assignment whose RHS is a call)
+    # commonly lowers to SEVERAL physical C lines (one per temp var), but
+    # the #line directive above is only emitted once, before the first of
+    # them. GCC's own line-counting for a -fgimple diagnostic increments
+    # per PHYSICAL line since the last #line directive, not per logical
+    # Mojo statement — so an error on e.g. the 3rd physical line of a
+    # one-statement expansion gets reported 2 lines past the statement's
+    # real source line (see BUG-2026-016: a bad field assignment reported
+    # 2 lines below the assignment itself). Re-stamping every physical
+    # line of a LEAF statement's own expansion with the same #line
+    # directive eliminates that drift, since GCC resets its count at
+    # every directive. Restricted to leaf statement kinds — a compound
+    # statement (if/while/for/try/with/...) recurses into gen_stmt for
+    # its own nested body, which already got its own correct #line calls;
+    # blindly re-stamping its ENTIRE emitted range here would instead
+    # overwrite those nested statements' correct line numbers with the
+    # outer compound statement's line.
+    body_start = len(gen.body_lines) if node_kind not in gen._COMPOUND_STMT_KINDS else None
 
     # Static dispatch: an explicit isinstance chain (one branch per
     # statement kind), NOT getattr(self, name)(node) on _STMT_DISPATCH.
@@ -221,7 +243,17 @@ def gen_stmt(gen, node):
         gimple_ctypes._debug_note('unknown statement dropped', node_kind)
         gen._emit(f"  /* TODO: {node_kind} */")
 
-    gen._stmt_line_directive = _outer_line_directive
+    if (body_start is not None and hasattr(node, 'line') and node.line and node.line > 0
+            and len(gen.body_lines) - body_start > 1):
+        filename = (getattr(gen, '_line_src_file', '')
+                    or getattr(gen, '_current_filename', ''))
+        directive = f"#line {node.line} \"{filename}\"" if filename else f"#line {node.line}"
+        # Skip the very first emitted line (already directly preceded by
+        # the directive above); re-stamp every one after it, from the end
+        # backwards so earlier insertions don't shift later indices.
+        for i in range(len(gen.body_lines) - 1, body_start, -1):
+            if gen.body_lines[i] != directive and not gen.body_lines[i].lstrip().startswith('#line '):
+                gen.body_lines.insert(i, directive)
 
 
 
@@ -1114,31 +1146,6 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str,
     # knows the NAME, which is what `_note_global_callable_store` is keyed on.
     ginf._note_global_callable_store(gen, tname, v)
     _note_global_generator_store(gen, tname, vtype, v)
-    _note_global_slot_kinds(gen, tname, v)
-
-
-def _note_global_slot_kinds(gen, tname: str, v: str) -> None:
-    """Remember the element kinds of a value stored into a module global, keyed by
-    the GLOBAL'S name. A global read mints a fresh temp, so the per-value tables
-    (`_maybe_kinds_vals`, `_elem_types`, `_struct_slot_kinds`) that the
-    subscript and loop lowerings consult are gone by then. Without this a
-    mixed list held in a global read its doubles' bits as ints (`b = a[:]` at
-    module scope printed `4612811918334230528`). The record is the last store's;
-    a read compiled before any store has no record, as before.
-    """
-    if not hasattr(gen, '_global_slot_info'):
-        gen._global_slot_info = {}
-    info = {}
-    if v in gen._maybe_kinds_vals:
-        info['mk'] = True
-    if v in gen._elem_types:
-        info['et'] = gen._elem_types[v]
-    if v in gen._struct_slot_kinds:
-        info['sk'] = gen._struct_slot_kinds[v]
-    if info:
-        gen._global_slot_info[tname] = info
-    else:
-        gen._global_slot_info.pop(tname, None)
 
 
 def _note_global_generator_store(gen, tname: str, vtype: str, v: str) -> None:
