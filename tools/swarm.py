@@ -888,7 +888,14 @@ def land():
     # gate is now cheap (tools/gates.json `landing`: stdlib-syntax; the rest runs after landing in verify_landed.py),
     # a conflicting branch is peeled off to a merge fixer inside the loop below, and a red is bisected to its culprit
     # by find_culprit, so everything finished lands in ONE pass instead of queueing 8 at a time behind it.
-    names = [n for n in I.pick_candidates(quiet=True) if n.startswith(PREFIXES) and n not in BUSY["names"]]
+    proofs = []
+    names = [n for n in I.pick_candidates(quiet=True, proof_out=proofs) if n.startswith(PREFIXES) and n not in BUSY["names"]]
+    for n, deleted in proofs:               # a DONE branch that deletes a doc without a test: a reviewer decides, not a person
+        if n.startswith(PREFIXES) and n not in BUSY["names"]:
+            tn = C.load()[n]
+            log("proof review: %s deletes %s with no test changed; handing it to a reviewer (TEST or NOTESTCASE)"
+                % (n, " ".join(deleted)))
+            I.enqueue_proof_review(n, tn, deleted)
     names = fresh_first(names, C.load())
     if not names:
         return None
