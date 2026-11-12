@@ -4970,16 +4970,6 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _msym = _gef._struct_method_csym(gen, _sn, '__len__', '')
             return 'int64_t', gen._call_expr(
                 'int64_t', _msym, [(at, av)])
-    if at in ('int', 'int64_t') and isinstance(node.args[0], gimple_ctypes.IdentExpr) \
-            and _as_str(node.args[0].name) in ginf.mixed_value_locals(gen):
-        # A container/scalar name (`mixed_value_locals`) is a box-holding word
-        # whose kind changes with each store, so the static `_actual_types`
-        # arms below would answer for the store that happened to be seen last
-        # (`x = [1, 2]; len(x); x = 5; len(x)` read a list header out of the
-        # int 5). The runtime answers by kind: a list/dict/set/bytes/str its
-        # length, anything else (an int) a TypeError, as CPython raises.
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_len_word',
-                                        [('int64_t', gen._ensure_local('int64_t', av))])
     if at in ('int', 'int64_t'):
         # `at` is just the local's declared storage type — for a value
         # widened to int64_t because it's joined with other assignment
@@ -11052,36 +11042,6 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                 _attr_val.obj = node.obj
                 _walk_ast_invalidate(_attr_val)
                 return gen._lower_slice(_attr_val)
-
-    # `x[slice(a, b, c)]` — the parser cannot fold this into a SliceExpr
-    # (the bounds are runtime values), so the index arrives as a call to the
-    # `slice` builtin. Without this arm it fell through to the scalar-index
-    # path, which cast the slice object to an integer and read ONE element:
-    # comptime.py's `_eval_subscript` does `base[slice(start, stop, step)]` on
-    # a comptime-known str/list, and the self-hosted compiler then emitted
-    # `mojo_char_at_str_cp (base, (int64_t)slice (...))` — a character read
-    # where a slice was meant. `slice` itself was also an undefined symbol at
-    # link time (declared in module_gen's `_util_pairs`, never defined), so
-    # `make bootstrap` could not link stage2/mojo at all.
-    if (isinstance(node.index, gimple_ctypes.CallExpr)
-            and isinstance(node.index.func, gimple_ctypes.IdentExpr)
-            and _as_str(node.index.func.name) == 'slice'
-            and not gen._locally_binds_name('slice')
-            and not node.index.kwargs
-            and 1 <= len(node.index.args or []) <= 3):
-        def _sl_arg(_i):
-            # `slice(None, stop)` is the ordinary "from the start" spelling,
-            # so a NoneLiteral bound means the same as an omitted bound.
-            if _i >= len(node.index.args):
-                return None
-            _a = node.index.args[_i]
-            return None if isinstance(_a, gimple_ctypes.NoneLiteral) else _a
-        _sl = gimple_ctypes.SliceExpr(
-            obj=node.obj,
-            start=_sl_arg(0), stop=_sl_arg(1), step=_sl_arg(2),
-            line=getattr(node, 'line', 0), col=getattr(node, 'col', 0))
-        _walk_ast_invalidate(_sl)
-        return gen._lower_slice(_sl)
 
     # Regular slice subscript: node.index is a bare SliceExpr (obj=None)
     # whose object is really the SubscriptExpr's own obj — forward it so

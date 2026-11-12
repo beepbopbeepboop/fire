@@ -2903,6 +2903,42 @@ def write_bytes(s: Span) -> Int:
     return external_call["write", Int64](1, s.unsafe_ptr(), len(s))
 """), 'mlir_write_bytes_bottom')
 
+    # 153b. GATE regression (bugs/gate-stdlib-syntax.md): a `__mlir_op` binary
+    #       op over _Bool operands must report the OPERANDS' type, not a
+    #       blanket int64_t. Before the fix the result temp was declared
+    #       int64_t and assigned `_t1 & _t2` (both _Bool) — legal in an
+    #       unchecked body, but `gcc -fgimple -x c` (which is what actually
+    #       parses a `__GIMPLE` body, the path std/builtin/bool.mojo's
+    #       __and__/__or__/__xor__ hit once the tag's position was pinned)
+    #       rejects it as "type mismatch in binary expression". test_gimple_
+    #       body is the only harness that checks the __GIMPLE body.
+    _run_isolated(lambda: test_gimple_body("mlir_bool_simd_and_xor", """\
+struct B:
+    var _mlir_value: Bool
+
+    def band(self, rhs: B) -> Bool:
+        return __mlir_op.`pop.simd.and`(self._mlir_value, rhs._mlir_value)
+
+    def bxor(self, rhs: B) -> Bool:
+        return __mlir_op.`pop.simd.xor`(self._mlir_value, rhs._mlir_value)
+"""), 'mlir_bool_simd_and_xor')
+
+    # 153c. The exact bool.mojo __invert__ shape: a pop.simd.xor whose second
+    #       operand is a __mlir_attr literal (lowered to a placeholder int),
+    #       so the two operands have DIFFERENT C types (_Bool and int). The
+    #       fix must materialize each to one joined type before the op, or a
+    #       checked body gets a mismatched-operand binary expression.
+    _run_isolated(lambda: test_gimple_body("mlir_bool_simd_xor_attr_operand", """\
+struct B:
+    var _mlir_value: Bool
+
+    def binv(self) -> Bool:
+        return __mlir_op.`pop.simd.xor`(
+            self._mlir_value,
+            __mlir_attr.`#kgen.simd<true> : !kgen.scalar<bool>`,
+        )
+"""), 'mlir_bool_simd_xor_attr_operand')
+
     # 154. libc-name mangling: `fn exit` becomes mojo_exit (no clash with libc exit),
     #      while external_call["exit"] keeps the raw libc symbol — exit from the library.
     _run_isolated(lambda: test("libc_name_mangle_exit", """\
