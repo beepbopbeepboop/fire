@@ -2750,6 +2750,8 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
     prev_ended_string = False  # previous physical line ended with a string literal,
                                # so this line continues an implicit string
                                # concatenation (`"a"\n "b"`)
+    prev_string_indent = -1    # indentation of that string-ending line; a
+                               # continuation must be indented further than it
     for line_idx, line in enumerate(joined):
         physical_line = line_nums[line_idx]
         expanded = _indent_expanded(line)
@@ -2773,6 +2775,7 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
         # was lexed from its stripped text, so an indented token's column
         # was short by the indentation and every column was 0-based.
         _stmt_cursor = 0
+        _merged_line = False  # this line joined the previous string-ending line
         for stmt_idx, stmt in enumerate(sub_stmts):
             stmt = stmt.strip()
             if not stmt: continue
@@ -2797,6 +2800,16 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                                     and (s[1] in '"\''
                                          or (len(s) >= 3 and s[1] in 'fFrRbBuUtT'
                                              and s[2] in '"\''))))
+            # A more-indented string line continuing a string-ending line is one
+            # implicit concatenation (`comptime assert c, "a"\n    " b"`). The
+            # NEWLINE that ended the previous line is already in `out`; drop it
+            # so the parser sees adjacent STRING tokens and `_merge_string_literals`
+            # folds them. Same-indent string lines stay separate statements, as
+            # they are in Python.
+            if _string_cont and indent > prev_string_indent \
+                    and out and out[-1].kind == "NEWLINE":
+                out.pop()
+                _merged_line = True
             if stmt_idx == 0 and paren_depth == 0 \
                     and not continued_from_prev \
                     and not (prev_ended_string and _string_cont):
@@ -2879,6 +2892,10 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
             _last_tok = _t
             break
         prev_ended_string = (_last_tok is not None and _last_tok.kind == "STRING")
+        # A merged continuation keeps the statement's own indent, so a third
+        # literal is still measured against the line that started the run.
+        if not _merged_line:
+            prev_string_indent = indent
     last_line = 0
     if line_nums:
         last_line = line_nums[-1]

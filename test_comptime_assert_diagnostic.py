@@ -535,8 +535,56 @@ def test_comptime_assert_local_alias_binding_true():
     _compile('fn f():\n    alias x = 5\n    comptime assert x == 5, "ok"\n')
 
 
+def test_comptime_assert_adjacent_literal_message():
+    # A bare continuation line of string literals is one message, not three
+    # statements (modular's comptime_assert.mojo long-message shape).
+    src = ('def use_positive_int[x: Int]():\n'
+           '    comptime assert x > 0, "custom error message"\n'
+           '                          " with long message "\n'
+           '                          "and more"\n'
+           'def main():\n'
+           '    use_positive_int[0]()\n')
+    try:
+        _compile_full(src)
+    except RuntimeError as e:
+        assert 'custom error message with long message and more' in str(e), e
+        return
+    raise AssertionError('provably-false comptime assert compiled without error')
+
+
+def test_comptime_assert_adjacent_literal_message_integration_shape():
+    # Modular's integration form: the same message, with the real value -2.
+    src = ('def use_positive_int[x: Int]():\n'
+           '    comptime assert x > 0, "custom error message"\n'
+           '                          " with long message "\n'
+           '                          "and more"\n'
+           'def main():\n'
+           '    use_positive_int[-2]()\n')
+    try:
+        _compile_full(src)
+    except RuntimeError as e:
+        assert 'custom error message with long message and more' in str(e), e
+        return
+    raise AssertionError('provably-false comptime assert compiled without error')
+
+
+def test_blank_line_between_string_literals_is_not_merged():
+    # A blank line ends the implicit concatenation: the second literal is its
+    # own statement, so the message is only the first literal.
+    from fire_compiler import Parser, py_tokenize, AssignStmt, ExprStmt
+    src = ('def f():\n'
+           '    x = "a"\n'
+           '\n'
+           '    "b"\n')
+    body = Parser(py_tokenize(src)).parse_module()[0].body
+    assert [type(s).__name__ for s in body] == ['AssignStmt', 'ExprStmt'], body
+
+
 if __name__ == '__main__':
     test_comptime_assert_false_fails()
+    test_comptime_assert_adjacent_literal_message()
+    test_comptime_assert_adjacent_literal_message_integration_shape()
+    test_blank_line_between_string_literals_is_not_merged()
     test_comptime_assert_false_no_msg()
     test_comptime_assert_true_passes()
     test_comptime_assert_comparison_fails()
