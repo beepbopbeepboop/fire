@@ -62,7 +62,7 @@ make the check ignore them). Resolved with our version; both directions of
 
 3. `ea14049db` / `2e3c98267` — 27 more commits (the container-variable
    f-string fix, the c-analyzer replans, the linked-list hash probe). One
-   conflict, `bugs/mid/DIAGNOSTICS_missing_validation_modular-part1.md`, where
+   conflict, in the `where (cond, "message")` part of the modular-validation split (since landed), where
    master had independently fixed the same dangling citation by naming the bug
    instead of the deleted doc's path; master's wording is taken. Two more reds:
    the merge re-exposed the ratchet on this round's own status doc (it had

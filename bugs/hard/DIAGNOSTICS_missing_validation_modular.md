@@ -1,6 +1,6 @@
 # DIAGNOSTICS: missing validation/error reporting for modular test cases
 
-SPLIT: DIAGNOSTICS_missing_validation_modular-part1
+SPLIT: all six parts have landed (see Status); the rest of this doc is still open.
 
 ## Symptom
 Modular test files expect compile-time errors/diagnostics that our compiler does not produce (it compiles them successfully). These are cases where modular's compiler rejects invalid code but ours accepts it.
@@ -112,6 +112,14 @@ See build/checkfail_candidates.json (61 error-like cases).
   an 'out' argument and a return type` at the return type's location
   (`mojo_package_moco_773.mojo`). Regression:
   `test_out_param_return_type_diagnostic.py`.
+- **Landed (2026-11-11):** `where (cond, "message")` is enforced on functions
+  and structs. The parser keeps struct `where` clauses and accepts repeated
+  `where` keywords; `elaborate.check_where_clauses` folds each clause with
+  `eval_const_bool_state` against the concrete type args, and a provably false
+  one raises `WhereConformanceError` (a ConformanceError), which the struct
+  instantiation path re-raises. An undecided clause is accepted as before, and
+  the DType regex checks run only when a clause is undecided. Regression:
+  `test_where_message_diagnostic.py`. Not done: the `lacking evidence` note.
 - **Landed (2026-11-11):** `StaticString(_get_kgen_string["text"]())` in a
   `comptime assert` / `constrained` message folds to its text
   (`comptime.eval_const`, by name, index folded first). An unknown index stays

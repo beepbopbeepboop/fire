@@ -887,6 +887,10 @@ class StructDef:
     # dropped PEP 728's `extra_items`/`closed` before any consumer could see
     # them — the root cause of PYTHON3.15_typeddict_extra_items.
     keywords: list = field(default_factory=list)
+    # The `where` clauses after the parameter list, parsed the same way as
+    # FunctionDef.where_clause: None when absent, one expression, or a list.
+    # A `(cond, "message")` entry is a TupleExpr. See _parse_where_clauses.
+    where_clause: object = None
     line: int = 0
     col: int = 0
     # A "mark visited" flag set via plain attribute assignment (not passed to
@@ -4782,21 +4786,7 @@ class Parser:
         # constraint fails (`where (Self.is_owned) else "may only be called on
         # owned lists":`); it is parsed, not skipped, so the clause is fully
         # consumed and the signature still ends at its COLON.
-        where_clause = None
-        where_else = None
-        if self._peek().kind == "NAME" and self._peek().value == "where":
-            self._advance()  # where
-            _wc_parts = []
-            while self._peek().kind not in ("COLON", "NEWLINE", "EOF"):
-                _wc_parts.append(self._parse_expr(0))
-                if self._peek().kind == "COMMA":
-                    self._advance()
-                    continue
-                break
-            where_clause = _wc_parts[0] if len(_wc_parts) == 1 else _wc_parts
-            if self._peek().kind == "KW" and self._peek().value == "else":
-                self._advance()  # else
-                where_else = self._parse_expr(0)
+        where_clause, where_else = self._parse_where_clauses()
         # Capture list in curly braces: `def handler(...) {mut count, var s}:`
         #
         # This used to be skipped token by token, which made the list
@@ -4852,6 +4842,35 @@ class Parser:
                            has_capture_list=has_capture_list,
                            where_clause=where_clause,
                            where_else=where_else)
+
+    def _parse_where_clauses(self):
+        """Parse any `where` clauses at the current position: `(clause, else)`.
+
+        A declaration may carry several `where` keywords (`where (a > 0, "a")
+        where (b > 0, "b")`) and each keyword may take comma-separated
+        expressions. Every expression goes into one list in source order; the
+        result is `None` (no clause), the single expression, or the list. A
+        `(cond, "message")` entry stays a TupleExpr, which the consumer reads
+        as a message clause. `else "<message>"` after the clauses is returned
+        separately (FunctionDef.where_else). Stops at the COLON / NEWLINE / EOF
+        that ends the declaration header, so the caller's own COLON check
+        still applies."""
+        parts = []
+        where_else = None
+        while self._peek().kind == "NAME" and self._peek().value == "where":
+            self._advance()  # where
+            while self._peek().kind not in ("COLON", "NEWLINE", "EOF"):
+                parts.append(self._parse_expr(0))
+                if self._peek().kind == "COMMA":
+                    self._advance()
+                    continue
+                break
+        if self._peek().kind == "KW" and self._peek().value == "else" and parts:
+            self._advance()  # else
+            where_else = self._parse_expr(0)
+        if not parts:
+            return None, where_else
+        return (parts[0] if len(parts) == 1 else parts), where_else
 
     def _parse_capture_list(self):
         """A brace-delimited CAPTURE list on a nested `def`:
@@ -5036,19 +5055,12 @@ class Parser:
                     expect_name = False
                     continue
                 self._advance()
-        # Optional `where conforms_to(...)` clause after the base list, the
-        # struct-level counterpart of the one `_parse_funcdef` already skips
-        # after a parameter list:
-        #     struct Iter[...](Iterable where conforms_to(...), ...) \
-        #         where conforms_to(T.Element, Deinitable):
-        # The bases are consumed as a token soup above, so the clause lands
-        # here. It constrains conformance and carries no codegen meaning in
-        # this backend, so it is skipped to the colon — the same treatment
-        # `_parse_funcdef`'s own `where` skip gets.
-        if self._peek().kind == "NAME" and self._peek().value == "where":
-            self._advance()
-            while self._peek().kind not in ("COLON", "NEWLINE", "EOF"):
-                self._advance()
+        # Optional `where` clauses after the parameter / base list, parsed as
+        # FunctionDef's are, so a struct's own constraint (`struct S[N: Int]
+        # where (N > 0, "N must be positive"):`) is enforced at instantiation.
+        # The bases themselves are a token soup above, so a `where` inside
+        # that list (`Movable where False`) is still consumed there.
+        struct_where, _ = self._parse_where_clauses()
         self._expect("COLON")
         self._lazy_import_blockers.append("classes")
         body = self._parse_block()
@@ -5235,7 +5247,8 @@ class Parser:
         return StructDef(name=name, fields=fields, methods=methods, decorators=decs,
                          comptime_aliases=aliases, bases=bases, keywords=class_keywords,
                          bracket_params=bracket_params,
-                         type_param_names=type_param_names)
+                         type_param_names=type_param_names,
+                         where_clause=struct_where)
 
     def _parse_enum(self):
         # `enum Name: member1, member2, ...` — not real Mojo syntax (the real
