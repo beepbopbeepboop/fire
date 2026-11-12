@@ -1,8 +1,7 @@
 # CODEGEN: generated C for nested generators / methods puts `#include` lines inside a function body
 
 Filed 2026-11-12 by the module-level recursive generator round
-(`CODEGEN_coro_module_level_recursive_generator_untyped_slot`, fixed in its own
-commit). Seven cases in `test_gimple_generator_runner.py` fail at HEAD with the
+(the module-level recursive generator refusal, fixed in 2ac8f2b79). Seven cases in `test_gimple_generator_runner.py` fail at HEAD with the
 same gcc error before that fix; they fail identically on the unmodified tree,
 so they are not regressions from it.
 
@@ -31,8 +30,8 @@ method defined inside a class/function.
 - `two_nested_asyncs_shared_capture_through_sibling` (`prog.c:1182`, in `run_caller`)
 
 The `tagged_generator_mixed_type_container_refused` failure in the same file
-is a different defect (an expected refusal that compiles); it is tracked by
-`bugs/mid/CODEGEN_tagged_generator_mixed_type_step4-part2.md`.
+is a different defect (an expected refusal that compiles); it is tracked as
+the tagged generator mixed-type container step-4 work.
 
 ## Reproduce
 

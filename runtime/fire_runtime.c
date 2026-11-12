@@ -2008,6 +2008,9 @@ void mojo_list_append_word(MojoList *l, int64_t w)
     /* a bytes object is a pointer too, but not a str: its own slot kind, so the
      * list reads and prints it as bytes (not as its address, an int) */
     if (mojo_is_registered_bytes(w)) { _list_word_push(l, MOJO_KIND_BYTES, w, 'i'); return; }
+    /* a list (or tuple) pointer is a nested container: its own kind, so the element is read and
+     * printed as that container (`[1, 2]` inside `([1, 2], 0)`), not as its address, an int */
+    if (mojo_is_registered_list(w)) { _list_word_push(l, MOJO_KIND_LIST, w, 'i'); return; }
     _list_word_push(l, 'i', w, 'i');
 }
 
