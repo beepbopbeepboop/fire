@@ -3776,6 +3776,25 @@ MIXED_NAME_NON_INT64_REFUSAL = (
     "cannot carry it; refused")
 
 
+def mixed_name_non_int64_refusal(other_ctype) -> str:
+    """Diagnostic for a name bound to a tagged generator word and also to a
+    value the tagged box cannot carry. Names the other binding by C type so a
+    container refusal is not described as str/float."""
+    if other_ctype in ('char *', 'const char *'):
+        other = 'a str value (char *)'
+    elif other_ctype in gimple_ctypes._SCALAR_FLOAT_TYPES:
+        other = f'a float value ({other_ctype})'
+    elif other_ctype is not None and str(other_ctype).endswith(' *'):
+        other = f'a container or pointer value ({other_ctype})'
+    elif other_ctype is not None:
+        other = f'a value of another C type ({other_ctype})'
+    else:
+        other = 'a value of another C type'
+    return (
+        "a name bound to a tagged generator word (a yield of more than one kind) "
+        f"cannot also hold {other}: the box cannot carry it; refused")
+
+
 def is_non_int_c_type(ctype) -> bool:
     """True for a C type a tagged word cannot be unwrapped into: a float/double
     or a pointer (a str is a `char *`, a container a `Mojo... *`). An integer
