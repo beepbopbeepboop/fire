@@ -26,8 +26,9 @@ TIMEOUT_S = 600
 CASES = {
     # Part 1: the builtin casts int() and float() on a double box. int(x) printed
     # the raw double; float(x) + 1.0 read the box pointer's bits as a double.
+    # Fixed: int/float of a tagged double box must unbox by kind.
     'double_box_casts': (
-        'bugs/mid/CODEGEN_tagged_generator_mixed_type_step2-part1.md',
+        'fixed: tagged double-box int()/float() casts',
         """\
 def g():
     yield 1

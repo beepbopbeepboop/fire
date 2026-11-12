@@ -1164,6 +1164,11 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
                     return rt
                 if _is_known_struct_ptr_ctype(rt, known_structs):
                     return rt
+    if isinstance(e, MemberExpr) and e.member in ('name', 'path') \
+            and not (isinstance(e.obj, IdentExpr) and e.obj.name in ('os', 'sys')):
+        # DirEntry.name/path (and most .name/.path attrs in compiled code) are
+        # string pointer words.
+        return 'char *'
     if isinstance(e, (ListExpr, DictExpr, SetExpr)):
         return 'MojoList *' if isinstance(e, ListExpr) else 'MojoDict *' if isinstance(e, DictExpr) else 'MojoSet *'
     if isinstance(e, Comprehension):
@@ -1172,6 +1177,14 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
         return 'char *'
     if isinstance(e, SubscriptExpr):
         if known is not None and isinstance(e.obj, IdentExpr) and (known.get(e.obj.name) in ('MojoList *', 'MojoDict *')):
+            # A dict whose stored VALUE type the caller knows (a struct
+            # pointer, `dict_val_types[name]`) reads back as that type, not the
+            # boxed int64 word the dict stores it as. Only a dict is consulted:
+            # a list's element type is not in this registry.
+            if known.get(e.obj.name) == 'MojoDict *' and dict_val_types is not None:
+                _vt = dict_val_types.get(e.obj.name)
+                if _vt is not None:
+                    return _vt
             return 'int64_t'
         return 'char *'
     if isinstance(e, AwaitExpr):
@@ -1694,6 +1707,12 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                 return None
             else:
                 t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api, known_structs, dict_val_types, method_return_types, fn_return_types, self_struct_ctype=self_struct_ctype, module_global_types=module_global_types)
+                # DirEntry.name/path and fsencode words are runtime int64_t words
+                # but semantically string/bytes pointers; treat as char * for yield
+                # type unification/boxing in generators.
+                if (isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr)
+                        and n.value.func.name in ('mojo_dirent_name', 'mojo_dirent_path', 'mojo_fsencode_w')):
+                    t = 'char *'
                 if t is None:
                     t = 'int64_t'
             if ctype is None:
