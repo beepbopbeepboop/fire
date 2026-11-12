@@ -2700,9 +2700,15 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                         # the bytes-or-str word actually is; `int64_t` would
                         # read as a plain number and lose the bytes kind.
                         return 'MojoList *', t
+                    # A word argument is a str OR a bytes path (the runtime
+                    # decides which), so the parts are words of UNKNOWN kind:
+                    # the element kind is left unrecorded, as the bytes arm
+                    # above does. Recording `int64_t` here typed each unpacked
+                    # part as a plain number, so `if not head:` became
+                    # `head == 0`, and an empty str head (a live non-NULL
+                    # pointer) read as true.
                     t = gen._call_expr('MojoList *', 'mojo_os_path_split_w',
                                         [(arg_type, arg_val)])
-                    gen._elem_types[t] = 'int64_t'
                     return 'MojoList *', t
                 t = gen._call_expr('MojoList *', 'int64_t_path_split',
                                     [(arg_type, arg_val)])
