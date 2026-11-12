@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""The full gate, run on master whenever a landing since the last run needs one, under the integrator's lock.
+"""The full gate, run on a pinned commit of master in its own worktree whenever a landing since the last run needs one.
 
     verify_landed.py [--sha SHA] [--force]
 
 The integrator lands on the cheap landing gate (tools/gates.json `landing`), so landings are not serialized behind the
 full suite. The full suite (`suite.py gate`, minus every gate that is OFF) costs ~35 minutes and runs as long as at
 least one first-parent commit since the last run touches something a gate reads (gate_ledger.pending): docs and the
-orchestration tools do not count. It never runs beside another suite run: it takes the SAME lock as the integrator
-(integrator.lock). Its verdict goes to <common-git-dir>/control/verify.json and the per-job history to gate_ledger.json.
+orchestration tools do not count. The gate takes HOURS, so it must not hold anything the integrator needs: it runs in
+../work-verify on the sha master had when it started (master marches on meanwhile, and landings continue), under its OWN
+lock (verify.lock: one verifier at a time). Only the short step that lands its ledger commit takes the integrator lock.
+Machine memory is bounded by memslot as for every suite run. Runs are spaced by gates.json `full_every_minutes`
+(measured from the end of the last one). Its verdict goes to <common-git-dir>/control/verify.json and the per-job history to gate_ledger.json.
 
 What a run does with its findings (gate_ledger.py):
   * a job red now that was green in the previous run is bisected over the commits between the two runs, so its report
@@ -17,7 +20,9 @@ What a run does with its findings (gate_ledger.py):
     the fixer who fixes it deletes the doc and the marker together);
   * a job that was red and passes again (the fixer re-enabled it) loses any leftover marker and doc; one that is
     re-enabled and still red is disabled again;
-  * the marker/doc edits are one commit on branch `verify-ledger`, fast-forwarded onto master when master has not moved.
+  * the marker/doc edits are one commit on branch `verify-ledger`, landed on master: fast-forwarded when master has not
+    moved, otherwise merged onto the master of the day (it touches only suite.py markers and bugs/gate-*.md docs); a
+    conflict leaves it on the branch.
 Each failing job also becomes one fix task (`fix-gate-<job>`), claimed by the job's name, so a red job is repaired once,
 not re-queued by every run."""
 import argparse, fcntl, json, os, re, subprocess, sys, time
@@ -141,16 +146,61 @@ def apply_findings(st, newly, recovered, sha, log, failed=()):
     C.git("commit", "-q", "-m", "gate ledger: %d red, %d recovered at %s\n\n%s\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
           % (len(newly), len(recovered), sha[:10], "\n".join(notes)), cwd=VERIFY)
     new = C.git("rev-parse", "HEAD", cwd=VERIFY)
-    if C.git("rev-parse", "master") == sha:
-        st, detail = SF.merge(C.MAIN, "--ff-only", "verify-ledger")
-        if st == "ok":
-            return new
-        print("ledger commit %s NOT landed (%s: %s); it stays on branch verify-ledger" % (new[:10], st, detail[:160]))
-    else:
-        print("ledger commit %s NOT landed: master moved during the run; it stays on branch verify-ledger" % new[:10])
+    if land_ledger(new, sha):
+        return new
     for j in list(newly) + again:
         st["jobs"][j]["marked"] = False
     return None
+
+
+def integrator_lock(wait_s=900):
+    """The integrator's lock, WAITED for (the verifier runs for hours and must not hold it; it needs it only for the
+    moment its ledger commit moves master). Returns the open lock file, or None if it could not be had in WAIT_S."""
+    lock = open(os.path.join(C.ctl_dir(), "integrator.lock"), "w")
+    end = time.time() + wait_s
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return lock
+        except OSError:
+            if time.time() > end:
+                lock.close()
+                return None
+            time.sleep(5)
+
+
+def land_ledger(new, sha, wait_s=900):
+    """Move master to include the ledger commit NEW (built on SHA, the commit the gate ran on). A gate takes hours, so
+    master has almost always moved since SHA: then the commit is MERGED onto the master of the day, which is safe because
+    it touches only suite.py's `disabled=` markers and bugs/gate-*.md docs; a conflict leaves it on branch verify-ledger.
+    The integrator lock is held only for this step."""
+    lock = integrator_lock(wait_s)
+    if lock is None:
+        print("ledger commit %s NOT landed: the integrator lock was busy for %ds; it stays on branch verify-ledger" % (new[:10], wait_s))
+        return False
+    try:
+        if C.git("rev-parse", "master", cwd=C.MAIN) == sha:
+            st, detail = SF.merge(C.MAIN, "--ff-only", "verify-ledger")
+        else:
+            st, detail = SF.merge(C.MAIN, "--no-edit", "-m", "gate ledger: merged onto the master of the day (the gate ran at %s)" % sha[:10],
+                                  "verify-ledger")
+        if st == "ok":
+            return True
+        print("ledger commit %s NOT landed (%s: %s); it stays on branch verify-ledger" % (new[:10], st, detail[:160]))
+        return False
+    finally:
+        lock.close()
+
+
+def verify_lock():
+    """One verifier at a time, on its OWN lock: the integrator keeps landing while a gate runs. None if one is running."""
+    lock = open(os.path.join(C.ctl_dir(), "verify.lock"), "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.close()
+        return None
+    return lock
 
 
 def main():
@@ -160,17 +210,20 @@ def main():
     a = ap.parse_args()
     prev = last_verdict()
     pend = due(a.force)
+    gap = C.gates_cfg().get("full_every_minutes", 0) * 60
+    if pend and not a.force and prev.get("epoch") and time.time() - prev["epoch"] < gap:
+        print("full gate due but spaced: the last run ended %d min ago (full_every_minutes %d)"
+              % ((time.time() - prev["epoch"]) // 60, gap // 60))
+        return 0
     if not pend:
         print("full gate not due: nothing since %s touches a gate (last run %s)"
               % ((prev.get("sha") or "never")[:10], prev.get("at", "never")))
         return 0
     print("full gate due: %d landing(s) need it: %s"
           % (len(pend), "; ".join("%s %s" % (s[:8], t[:50]) for s, t in pend[:5])))
-    lock = open(os.path.join(C.ctl_dir(), "integrator.lock"), "w")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        print("the integrator is running a suite now; one suite run at a time: not due yet")
+    lock = verify_lock()                  # its own lock: landings continue for the hours the gate takes
+    if lock is None:
+        print("another verifier is running (verify.lock); this one is not needed")
         return 0
     sha = a.sha or C.git("rev-parse", "master")
     if not os.path.isdir(VERIFY):

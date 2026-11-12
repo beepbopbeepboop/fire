@@ -951,7 +951,7 @@ def land():
                 I.enqueue_merge_fix(c, tasks[c], out)
                 batch.remove(c)
         if verdict == "BUSY":
-            log("integrator busy (the post-landing verifier holds the lock); landing waits for the next pass")
+            log("integrator busy (another integrator round holds the lock); landing waits for the next pass")
             break
         if verdict == "EMPTY" or not merged:
             break
