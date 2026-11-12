@@ -164,3 +164,29 @@ closes the composed block under `pre`). Those are the next round's first measure
   fix, so the new `pre` must be concrete, and a test must show a wrong multiplier is refuted on a non-overflow input.
 - `_is_svc` treats every `svc` as a bounded stop. The companion doc's item 4 is still open, so a trap block with a write
   `svc` inside it is not handled yet.
+
+### Landed 2026-11-12: the normal-path reader (step 2, detection only; not wired)
+
+`formal/arm64_proof_gen.py::_overflow_normal_path(words, entry, func_end)` reads the no-trap path of an export whose
+interior branches are overflow guards. It walks `_cfg_blocks` and uses `_trap_terminating` for "trap", so it means
+exactly what the rest of the generator means. It returns `(pcs, guards)`: `pcs` is every instruction the normal path
+executes, in execution order, and `guards` is `(cbz_pc, trap_pc)` for each guard. It returns `None` for a branch whose
+taken edge is not a trap, a `BL`, a jump into a trap, a loop, or a path that falls off the extent.
+
+Measured on the real compiled image (`compile_formal_dylib(['teeth.mojo'], prove=False)`, `base_addr` 0x100000370,
+entry 0x100000370): the walk returns 20 instructions, `0x370..0x3a8`, `0x3ac`, `0x3e8..0x3f4`, and one guard
+`(0x3a8, 0x3b0)`. The CFG is `cbz` at 0x3a8 (taken 0x3b0, the trap), `b` at 0x3ac to 0x3e8, `ret` at 0x3e8. Covered by
+`test_formal_call_proof_gen.py::TestOverflowGuardNormalPath` (3 tests: the fall-through path, a non-trap guard
+target refused, a trap that does not end the run refused). Run under `memslot --gb 8`: 3 OK.
+
+**Not landed, and this is still a FAIL:** `test_formal_dylib.py` is unchanged at PASS=22 FAIL=6. Nothing calls the
+reader yet. `_dylib_contract_proof` still refuses any non-straight-line body. Remaining steps, in order:
+
+1. Wire the reader into `_dylib_contract_proof`. The `pcs` list is the EXECUTED path, not `entry + 4*i`, so the
+   contiguity checks (`entry + m*4 == func_end`, `pcs = [entry + i*4 ...]`) must read `pcs` from the reader instead.
+2. `exitpc` and `noEarly`/`atExit` are stated at `func_end`, which is also the image end for the last export. The
+   normal path leaves at `ret` (0x3e8..0x3f4), not at the image end. That is the design question the Lean side must
+   answer, so it is the first decision for the next round (is the exit the `ret`'s address, or a second exit fact).
+3. Resolve the guard `cbz` statically as not-taken under the concrete `pre` (the decoded `smulh`/`eor`/`asr63`
+   expression), instead of as an `if`, so the composed `st_i` is one function of one state.
+4. Then the teeth test. Until then the wrong spec is still accepted.

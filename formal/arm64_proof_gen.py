@@ -8484,6 +8484,64 @@ def _is_trap_bl(b: dict, words: dict, trap: set) -> bool:
     return b["instrs"][-1] + 4 in trap
 
 
+def _overflow_normal_path(words: dict, entry: int, func_end: int):
+    """The NORMAL path of an export whose only interior branches are overflow traps.
+
+    `arm64_step` steps every branch, so an export that carries the integer
+    overflow guard (`20d8bdba1`) is not straight-line: its multiply is followed
+    by a `CBNZ` on the overflow flag whose taken edge is a trap block, and the
+    fall-through jumps over that trap to the normal tail.  `_dylib_contract_proof`
+    refuses that shape, which is why its contract is an admitted `sorry`.  This
+    reads the shape off the machine code and returns the path the machine takes
+    when no trap fires:
+
+        (pcs, guards)
+
+    `pcs` is every instruction the normal path executes, in execution order, and
+    `guards` is `(cbz_pc, trap_pc)` for each overflow branch on it: the branch
+    whose TAKEN edge is a trap, so the normal path has it NOT taken.  Those guards
+    are what a concrete non-overflow precondition is built from.
+
+    Returns None for anything else: a branch whose taken edge is not a trap, a
+    `BL` (a call is not followed here), a jump into a trap, a revisited block (a
+    loop), or a path that falls off the export's extent without a `RET`.  The
+    same `_cfg_blocks` / `_trap_terminating` the rest of the generator reads, so
+    "trap" means what it means everywhere else.
+    """
+    blocks = _cfg_blocks(words, entry, func_end)
+    by_start = {b["start"]: b for b in blocks}
+    trap = _trap_terminating(blocks, words)
+    pcs = []
+    guards = []
+    seen = set()
+    start = entry
+    while True:
+        b = by_start.get(start)
+        if b is None or start in seen or start in trap:
+            return None
+        seen.add(start)
+        pcs.extend(b["instrs"])
+        kind = b["kind"]
+        last = b["instrs"][-1]
+        if kind == "ret":
+            return pcs, guards
+        if kind == "seq":
+            nxt = last + 4
+        elif kind == "b":
+            nxt = b["targets"][0]
+        elif kind == "cbz":
+            fall, taken = b["targets"]
+            if taken not in trap:
+                return None
+            guards.append((last, taken))
+            nxt = fall
+        else:                       # bl: a call is not followed here
+            return None
+        if not (entry <= nxt < func_end):
+            return None
+        start = nxt
+
+
 def _unfollowable_calls(code: bytes, base: int, func_entry: int,
                         func_end: int) -> list:
     """Every `BL` in `[func_entry, func_end)` the CFG walk cannot follow, in

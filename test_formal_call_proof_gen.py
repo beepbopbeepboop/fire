@@ -3766,6 +3766,80 @@ class TestStepLemmasCoverTheExecutableRegionOnly(unittest.TestCase):
                 self.assertFalse(self.G._is_trap_bl(b, words, traps))
 
 
+class TestOverflowGuardNormalPath(unittest.TestCase):
+    """`_overflow_normal_path` reads the no-trap path of an overflow-guarded export.
+
+    The fixture is the SHAPE `20d8bdba1` emits for `n * 3` on arm64, with the
+    arithmetic replaced by NOPs (the reader decides on branches and traps only):
+
+        0x00..0x34  straight-line prefix (the multiply and its overflow test)
+        0x38        CBNZ x2 -> 0x40   the overflow guard; taken = trap
+        0x3c        B    -> 0x54      the normal path jumps over the trap
+        0x40..0x50  trap: movz x16,#4; svc (write); movz x16,#1; svc (exit)
+        0x54..0x58  normal tail: NOP; RET
+
+    On the normal path the guard is NOT taken, so the executed instructions are
+    0x00..0x3c, then 0x54, 0x58, with exactly one guard at 0x38 whose trap is 0x40.
+    """
+    NOP = 0xd503201f
+    RET = 0xd65f03c0
+    SVC = 0xd4000001
+
+    @staticmethod
+    def _movz_x16(imm):
+        return 0xd2800010 | (imm << 5)
+
+    @staticmethod
+    def _cbnz_x2(pc, target):
+        return 0xb5000000 | (((target - pc) // 4) << 5) | 2
+
+    @staticmethod
+    def _b(pc, target):
+        return 0x14000000 | (((target - pc) // 4) & 0x3ffffff)
+
+    def _image(self, *, guard_target=0x40, trap_svc=True):
+        import formal.arm64_proof_gen as G
+        words = {}
+        for pc in range(0x00, 0x38, 4):
+            words[pc] = self.NOP
+        words[0x38] = self._cbnz_x2(0x38, guard_target)
+        words[0x3c] = self._b(0x3c, 0x54)
+        words[0x40] = self.NOP
+        words[0x44] = self._movz_x16(4)
+        words[0x48] = self.SVC
+        words[0x4c] = self._movz_x16(1)
+        words[0x50] = self.SVC if trap_svc else self.NOP
+        words[0x54] = self.NOP
+        words[0x58] = self.RET
+        return G, words
+
+    def test_the_normal_path_of_an_overflow_guard_is_the_fall_through(self):
+        G, words = self._image()
+        got = G._overflow_normal_path(words, 0x00, 0x5c)
+        self.assertIsNotNone(
+            got, "the overflow-guarded export's normal path was refused, so "
+                 "its contract still cannot be emitted")
+        pcs, guards = got
+        self.assertEqual(
+            pcs, list(range(0x00, 0x40, 4)) + [0x54, 0x58],
+            "the normal path must run the prefix, the guard's fall-through, "
+            "the jump over the trap, and the tail -- and never the trap")
+        self.assertEqual(guards, [(0x38, 0x40)],
+                         "the guard must name its branch and its trap")
+
+    def test_a_branch_into_a_non_trap_is_refused(self):
+        # The same shape, but the "guard" jumps to an ordinary block: that is
+        # a real branch, not an overflow check, and the reader must say so.
+        G, words = self._image(guard_target=0x54)
+        self.assertIsNone(G._overflow_normal_path(words, 0x00, 0x5c))
+
+    def test_a_target_that_does_not_end_the_run_is_not_a_trap(self):
+        # Without the exit svc the "trap" falls into the tail and returns, so
+        # it is an ordinary block, the guard is a real branch, and it is refused.
+        G, words = self._image(trap_svc=False)
+        self.assertIsNone(G._overflow_normal_path(words, 0x00, 0x5c))
+
+
 class TestCallProofs(unittest.TestCase):
     """Compile the programs and read what came out."""
 
