@@ -1354,13 +1354,13 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # `x = yield` reads the word `send()` delivered (see `{base}_send`
         # below). The awaiter is what `co_yield` evaluates to: a plain
         # `co_yield` discards it, `x = co_yield ...` takes the sent word.
-        # It holds a pointer to the promise's own slot, so no reference to
-        # the promise type is needed here.
+        # Defined fully after the promise so await_resume can access promise
+        # fields and compute the handle for throw-into-generator checks.
         f"struct {promise}_sent_await {{",
-        f"    int64_t *slot;",
+        f"    {promise} *p;",
         f"    bool await_ready() noexcept {{ return false; }}",
         f"    void await_suspend(std::coroutine_handle<>) noexcept {{}}",
-        f"    int64_t await_resume() noexcept {{ return *slot; }}",
+        f"    int64_t await_resume() noexcept;",
         f"}};",
         f"struct {promise} {{",
         f"    {cpp_value_ctype} current_value{{}};",
@@ -1410,9 +1410,17 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         f"            mojo_exc_pending_set(1);",
         f"        }}",
         f"    }}",
-        f"    {promise}_sent_await yield_value({cpp_value_ctype} v) {{ current_value = v; return {{ &sent_word }}; }}",
+        f"    {promise}_sent_await yield_value({cpp_value_ctype} v) {{ current_value = v; return {{ this }}; }}",
         f"    void return_void() {{}}",
         f"}};",
+        f"inline int64_t {promise}_sent_await::await_resume() noexcept {{",
+        f"    int64_t __tt = 0; char *__tm = nullptr; void *__to = nullptr;",
+        f"    int64_t __hw = (int64_t)(intptr_t){handle_t}::from_promise(*p).address();",
+        f"    if (mojo_gen_throw_take(__hw, &__tt, &__tm, &__to)) {{",
+        f"        throw _MojoCppExc{{__tt, __tm, __to}};",
+        f"    }}",
+        f"    return p->sent_word;",
+        f"}}",
         # Self-recursion (see `self_recursed`/_cpp_yield_from's own
         # `is_self_recursive` branch): `{impl}`'s OWN body, built just
         # below, can call `{base}_start`/`_resume`/`_value`/`_destroy`

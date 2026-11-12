@@ -764,6 +764,12 @@ MojoList *mojo_iter_gen_handle(int64_t w);
 int64_t mojo_gen_note(int64_t h, void *start);
 int64_t mojo_gen_note_a3(int64_t h, int64_t vkind);   /* 0 int, 1 bool, 2 double, 3 str */
 int64_t mojo_gen_default_word(void *start, int64_t idx);
+void mojo_gen_throw_set(int64_t hw, int64_t type, char *msg, void *obj);
+int mojo_gen_throw_take(int64_t hw, int64_t *type, char **msg, void **obj);
+int mojo_gen_cm_is_handle(int64_t w);
+int64_t mojo_gen_cm_enter(int64_t w);
+void mojo_gen_cm_exit_normal(int64_t w);
+void mojo_gen_cm_exit_exc(int64_t w);
 /* `x in <boxed container>`: resolves list/dict/set at runtime instead of
  * the old hardcoded-false fallback. See mojo_in_dispatch_str's definition. */
 int mojo_in_dispatch_str(int64_t container, char *needle);

@@ -298,6 +298,24 @@ def _finish_generator_start(gen, api: dict, arg_pairs: list) -> str:
     construction paths."""
     t = gen._call_expr('MojoGenerator *', f"{api['base']}_start", arg_pairs)
     gen._generator_var_api[t] = api
+    # Register the live handle against its start symbol's runtime signature
+    # (`mojo_gen_sig_register` registered it at unit init), so consumers that
+    # lose static _generator_var_api tracking — e.g. a handle stored in a
+    # container and later used as a @contextlib.contextmanager — can still
+    # discover the resume/value/destroy API at runtime.
+    _base = api.get('base')
+    if _base:
+        _start_sym = f"{_base}_start"
+        # Keep the handle in MojoGenerator* form; mojo_gen_note returns the
+        # same handle word and records it in the runtime handle table.
+        _h = gen._new_temp('int64_t')
+        gen._safe_coerce_emit('MojoGenerator *', 'int64_t', t, _h)
+        _noted = gen._call_expr('int64_t', 'mojo_gen_note',
+                                [('int64_t', _h), ('void *', f"(void *){_start_sym}")])
+        _coerced = gen._new_temp('MojoGenerator *')
+        gen._safe_coerce_emit('int64_t', 'MojoGenerator *', _noted, _coerced)
+        t = _coerced
+        gen._generator_var_api[t] = api
     return t
 
 

@@ -6830,6 +6830,40 @@ def main() raises:
     print("done")
 """, "enter a\nbody a\nexit a\ncaught\ndone\n")
 
+    # scriptutil traceback_cm shape (part 2, no plain-assignment capture dep):
+    # nested @contextlib.contextmanager generator, single yield, try/except/finally
+    # around yield, reads an enclosing var local (capturable), instantiated and
+    # used as a context manager. Normal and exception paths exercise the
+    # contextmanager protocol: on body exception the generator receives it at
+    # the yield point (so finally/cleanup runs); re-raise propagates out.
+    test_gimple_stdout("gimple_contextmanager_nested_generator_captures_var_and_handles_exceptions",
+                       """\
+import contextlib
+
+def run(mode):
+    var show = "show"
+    @contextlib.contextmanager
+    def cm():
+        try:
+            yield 7
+        finally:
+            print("fin-" + show)
+
+    m = cm()
+    try:
+        with m as v:
+            print("body-" + str(v))
+            if mode == "boom":
+                raise ValueError("x")
+    except ValueError:
+        print("caught")
+
+def main():
+    run("ok")
+    print("---")
+    run("boom")
+""", "body-7\nfin-show\n---\nbody-7\nfin-show\ncaught\n")
+
     # Rebuilding a string from its characters must still be right now that the
     # character strings are shared and never freed: `out + ch` frees its own
     # conversion temp only for a number, never for a character (a free of a

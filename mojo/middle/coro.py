@@ -1396,9 +1396,10 @@ def _tagged_consumers_ok(name: str, module_stmts=None) -> bool:
                 and x.func.name == name)
     # a handle bound ONCE to the generator call (`it = g(..)`) INSIDE one
     # function, every other use of that name in the same function being
-    # `list(it)`, `for x in it`, a comprehension over it, or `it.close()`:
-    # followed as if it were the call. Scoped per function -- an unrelated `it`
-    # in another function must not poison (or be mistaken for) this one.
+    # `list(it)`, `for x in it`, a comprehension over it, `it.close()`, or
+    # `with it` as a @contextlib.contextmanager handle: followed as if it were
+    # the call. Scoped per function -- an unrelated `it` in another function
+    # must not poison (or be mistaken for) this one.
     for fd in _scope_defs(mod):
         handles = {}
         for n in _walk(fd):
@@ -1427,6 +1428,11 @@ def _tagged_consumers_ok(name: str, module_stmts=None) -> bool:
                     and n.func.name == 'next' and len(n.args) >= 1
                     and isinstance(n.args[0], N.IdentExpr) and n.args[0].name in handles):
                 ok_uses.add(id(n.args[0]))
+            elif isinstance(n, N.WithStmt):
+                for _wi in n.items:
+                    if (isinstance(_wi.expr, N.IdentExpr)
+                            and _wi.expr.name in handles):
+                        ok_uses.add(id(_wi.expr))
             elif (isinstance(n, N.MemberExpr) and isinstance(n.obj, N.IdentExpr)
                     and n.obj.name in handles
                     and n.member in ('gi_frame', 'gi_running', 'gi_code', 'gi_suspended')):
@@ -1512,6 +1518,13 @@ def _tagged_consumers_ok(name: str, module_stmts=None) -> bool:
                 # `yield from g()` forwards the words; the delegating generator
                 # is itself tagged (its delegated kind is 'w')
                 for_iters.add(id(n.value))
+            elif isinstance(n, N.WithStmt):
+                # `with g()` / `with g() as x:` drives a @contextlib.contextmanager
+                # generator through the context-manager protocol (enter/yield
+                # value/exit), not by iterating yielded values as data.
+                for _wi in n.items:
+                    if _is_gcall(_wi.expr):
+                        for_iters.add(id(_wi.expr))
             if isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr) \
                     and n.func.name == name:
                 refs.append(id(n))
