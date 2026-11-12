@@ -801,14 +801,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     # rather than once per local. Reset per function for the same reason as
     # every map above: local names recycle.
     gen._mixed_container_locals = None
-    # Names in THIS function bound to more than one distinct SCALAR kind
-    # (`int` / `double` / `str`), which therefore have no single C type and
-    # are declared as the `int64_t` box instead. The scalar twin of
-    # `_mixed_container_locals`, computed lazily by `mixed_scalar_locals`
-    # and reset per function for the same reason.
-    gen._mixed_scalar_locals = None
-    # The container/scalar twin: `mixed_value_locals`, reset for the same reason.
-    gen._mixed_value_locals = None
     # Lazily filled by `emit_exprs.none_bound_locals`: the locals some binding
     # in this function sets to the literal `None`. Per function, because local
     # names recycle.
@@ -968,8 +960,6 @@ class FuncState:
         self.fs_builtin_method_values: dict = {}
         self.fs_bm_tainted_locals: set = set()
         self.fs_mixed_container_locals: object = None
-        self.fs_mixed_scalar_locals: object = None
-        self.fs_mixed_value_locals: object = None
         self.fs_pybox_double_vars: object = None
         self.fs_pybox_vars: object = None
         self.fs_tagged_opt_read: object = None
@@ -1077,8 +1067,6 @@ def save_func_state(gen) -> FuncState:
     st.fs_builtin_method_values = gen._builtin_method_values
     st.fs_bm_tainted_locals = gen._bm_tainted_locals
     st.fs_mixed_container_locals = gen._mixed_container_locals
-    st.fs_mixed_scalar_locals = gen._mixed_scalar_locals
-    st.fs_mixed_value_locals = gen._mixed_value_locals
     st.fs_pybox_double_vars = gen._pybox_double_vars
     st.fs_pybox_vars = gen._pybox_vars
     st.fs_tagged_opt_read = gen._tagged_opt_read
@@ -1196,8 +1184,6 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._builtin_method_values = st.fs_builtin_method_values
     gen._bm_tainted_locals = st.fs_bm_tainted_locals
     gen._mixed_container_locals = st.fs_mixed_container_locals
-    gen._mixed_scalar_locals = st.fs_mixed_scalar_locals
-    gen._mixed_value_locals = st.fs_mixed_value_locals
     gen._pybox_double_vars = st.fs_pybox_double_vars
     gen._pybox_vars = st.fs_pybox_vars
     gen._tagged_opt_read = st.fs_tagged_opt_read
@@ -3406,21 +3392,6 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
         _td = _tagged_dyn_read(gen, val, 'str')
         if _td is not None:
             return 'char *', _td
-        # A word whose kind only the runtime knows (a boxed mixed-kind name,
-        # a dict-slot read): render it BY KIND before it becomes a key. A
-        # str box is a registered `MojoBox`, which the dict layer's
-        # "is this word a string?" tests deliberately reject, so handing the
-        # box word through keyed the entry by the box's ADDRESS
-        # (`s = 3000000000; s = "sk"; d2[s] = 6; d2["sk"]` missed).
-        # `mojo_cstr_or_int_str` answers the same way `print` does; the
-        # result is a transient key, released after its one consuming call.
-        if (val in getattr(gen, '_dyn_word_vals', ())
-                or _as_str(val) in getattr(gen, '_dyn_word_locals', ())):
-            _dk = gen._call_expr('char *', 'mojo_cstr_or_int_str',
-                                 [('int64_t', val)])
-            if transient:
-                gen._cstr_key_src[_dk] = val
-            return 'char *', _dk
         actual = gen._actual_types.get(val)
         if actual == 'char':
             cv = gen._new_val('char', f'(char){val}')
@@ -3776,25 +3747,6 @@ MIXED_NAME_NON_INT64_REFUSAL = (
     "cannot carry it; refused")
 
 
-def mixed_name_non_int64_refusal(other_ctype) -> str:
-    """Diagnostic for a name bound to a tagged generator word and also to a
-    value the tagged box cannot carry. Names the other binding by C type so a
-    container refusal is not described as str/float."""
-    if other_ctype in ('char *', 'const char *'):
-        other = 'a str value (char *)'
-    elif other_ctype in gimple_ctypes._SCALAR_FLOAT_TYPES:
-        other = f'a float value ({other_ctype})'
-    elif other_ctype is not None and str(other_ctype).endswith(' *'):
-        other = f'a container or pointer value ({other_ctype})'
-    elif other_ctype is not None:
-        other = f'a value of another C type ({other_ctype})'
-    else:
-        other = 'a value of another C type'
-    return (
-        "a name bound to a tagged generator word (a yield of more than one kind) "
-        f"cannot also hold {other}: the box cannot carry it; refused")
-
-
 def is_non_int_c_type(ctype) -> bool:
     """True for a C type a tagged word cannot be unwrapped into: a float/double
     or a pointer (a str is a `char *`, a container a `Mojo... *`). An integer
@@ -3927,55 +3879,6 @@ def tagged_recv_name(gen, name) -> bool:
                for v in values)
 
 
-def _walk_func_stmts(stmts, visit):
-    """Call `visit` on every statement of a function body, nested bodies
-    included, never descending into a nested `def` (its locals are its own)."""
-    if not stmts:
-        return
-    for s in stmts:
-        if isinstance(s, gimple_ctypes.FunctionDef):
-            continue
-        visit(s)
-        for attr in ('then_body', 'else_body', 'body', 'finalbody'):
-            _walk_func_stmts(getattr(s, attr, None), visit)
-        for _c, eb in (getattr(s, 'elifs', None) or ()):
-            _walk_func_stmts(eb, visit)
-        for h in (getattr(s, 'handlers', None) or ()):
-            _walk_func_stmts(getattr(h, 'body', None), visit)
-
-
-def _scalar_mixed_prescan(gen, body) -> tuple:
-    """The one pre-scan `mixed_scalar_locals` and `mixed_value_locals` share:
-    `(dict_val_types, annotated)` for the function `body`.
-
-    `dict_val_types` maps each `name = {...}` dict literal to its value's
-    C type, so a SUBSCRIPT read of it is classified before the literal is
-    lowered (`_quick_type` cannot answer that yet); a name bound to two
-    different value types is `'mixed'`. `annotated` is every name declared
-    with a type annotation -- a deliberate single type, never a mixed name."""
-    dict_val_types: dict = {}
-    annotated: set = set()
-
-    def visit(s):
-        if isinstance(s, gimple_ctypes.AssignStmt) \
-                and isinstance(s.target, gimple_ctypes.IdentExpr) \
-                and isinstance(s.value, gimple_ctypes.DictExpr):
-            _name = _as_str(s.target.name)
-            _dv = gimple_exprtypes.dict_literal_val_ctype(gen, s.value.pairs)
-            _prev = dict_val_types.get(_name)
-            if _prev is None:
-                dict_val_types[_name] = _dv
-            elif _prev != _dv:
-                dict_val_types[_name] = 'mixed'
-        elif isinstance(s, gimple_ctypes.VarDecl):
-            if getattr(s, 'type_ann', None) is not None \
-                    and isinstance(s.name, str):
-                annotated.add(_as_str(s.name))
-
-    _walk_func_stmts(body, visit)
-    return dict_val_types, annotated
-
-
 def mixed_container_locals(gen) -> set:
     """The names in THIS function's body that are assigned values of more
     than one distinct container kind (`MojoDict *` / `MojoList *` /
@@ -4050,259 +3953,6 @@ def mixed_container_locals(gen) -> set:
             mixed.add(_n)
     gen._mixed_container_locals = mixed
     return mixed
-
-
-def _mixed_scalar_int_binding(value) -> bool:
-    """Is this binding a REAL integer, not `_quick_type`'s int64_t fallback?
-
-    `int64_t` is also the answer `_quick_type` gives an unresolved name (a
-    loop target, an operand it cannot type), so trusting it boxes names that
-    only ever hold one real kind: `s = 0.0; s = s + x` became
-    {double, int} and its double store was boxed (measured: `test_gimple_
-    runner.py`'s `gimple_param_receiving_a_call_result_has_an_element_type`
-    printed a pointer as a float, and the string-concat tests allocated one
-    box per iteration). Only a numeric LITERAL (or unary sign on one) is a
-    provable integer here, which is the same `_is_confident_scalar` rule
-    `_infer_local_var_types` applies, reduced to the shapes this scan needs.
-    An unprovable int binding simply contributes no kind, so a real mix that
-    includes it falls back to the old refusal rather than guessing."""
-    if isinstance(value, (gimple_ctypes.IntLiteral, gimple_ctypes.BoolLiteral)):
-        return True
-    if isinstance(value, gimple_ctypes.UnaryOp) and value.op in ('+', '-'):
-        return _mixed_scalar_int_binding(value.operand)
-    return False
-
-
-def _mixed_scalar_binding_kind(gen, value, dict_val_types) -> str | None:
-    """The canonical SCALAR kind of one binding's value: 'int', 'double' or
-    'str', or None when the value is not a provable scalar.
-
-    `dict_val_types` is this function's own pre-scan of `name = {..}`
-    literal value types, used for a SUBSCRIPT read of such a dict: the scan
-    runs before the literal is lowered, so `gen._dict_val_types` does not
-    have the entry yet and `_quick_type` would answer its int64_t default.
-    An `int64_t` from `_quick_type` is deliberately NOT taken as a STRING or
-    FLOAT kind -- it is also that helper's unknown fallback -- but it IS a
-    real integer kind here: the box stores a bare int word, so an int beside
-    a float/str is exactly the mix the box exists for."""
-    if value is None:
-        return None
-    t = None
-    try:
-        t = gen._quick_type(value)
-    except Exception:
-        t = None
-    if (isinstance(value, gimple_ctypes.SubscriptExpr)
-            and isinstance(value.obj, gimple_ctypes.IdentExpr)):
-        _dv = dict_val_types.get(_as_str(value.obj.name))
-        if _dv is not None:
-            t = _dv
-    t = _as_str(t)
-    if not t:
-        return None
-    if t == 'char *':
-        return 'str'
-    if gimple_ctypes.TypeLattice.is_float(t):
-        return 'double'
-    if (t == '_Bool' or gimple_ctypes.TypeLattice.is_signed(t)
-            or gimple_ctypes.TypeLattice.is_unsigned(t)):
-        return 'int' if _mixed_scalar_int_binding(value) else None
-    return None
-
-
-def mixed_scalar_locals(gen) -> set:
-    """The names in THIS function's body assigned values of more than one
-    distinct SCALAR kind (`int`, `double`, `str`), computed once per
-    function and cached.
-
-    A Mojo/Python name has one type; a name rebound from a float to a str (or
-    an int to a str -- `x = 1; x = "s"` segfaulted, the int stored into a
-    `char *` slot) has no single C type. Before this, the store site pinned
-    the first binding's C type and every later one was a bare C cast: a
-    `double` truncated to an int, a `char *` reinterpreted as a pointer, or a
-    `double = char *` that gcc refuses outright. The answer is the runtime
-    `MojoBox` (`mojo_box_from_double` / `mojo_box_from_str`), the same
-    representation a kind-mixed generator word already uses: the local is
-    declared `int64_t`, a float/str store is boxed, an int store stays its
-    bare word, and every consumer reads the kind from the box
-    (`mojo_repr_boxed`, `mojo_box_word`, `mojo_float_arith_select`).
-
-    The scalar twin of `mixed_container_locals`, and it answers from
-    `gen._cur_func_body` for the same reason. Deliberately NOT consulted for
-    a name bound once: it keeps its real C type, as always."""
-    cached = getattr(gen, '_mixed_scalar_locals', None)
-    if cached is not None:
-        return cached
-    body = gen._cur_func_body
-    dict_val_types, annotated = _scalar_mixed_prescan(gen, body)
-
-    kinds: dict = {}
-
-    def note(name, value):
-        _k = _mixed_scalar_binding_kind(gen, value, dict_val_types)
-        if _k is not None:
-            _nm = _as_str(name)
-            _ks = kinds.get(_nm)
-            if _ks is None:
-                _ks = set()
-                kinds[_nm] = _ks
-            _ks.add(_k)
-
-    def visit(s):
-        if isinstance(s, gimple_ctypes.AssignStmt):
-            if isinstance(s.target, gimple_ctypes.IdentExpr):
-                note(s.target.name, s.value)
-            elif (isinstance(s.target, gimple_ctypes.TupleExpr)
-                    and isinstance(s.value, gimple_ctypes.TupleExpr)
-                    and len(s.value.elements) == len(s.target.elements)):
-                for _i in range(len(s.target.elements)):
-                    _t = s.target.elements[_i]
-                    if isinstance(_t, gimple_ctypes.IdentExpr):
-                        note(_t.name, s.value.elements[_i])
-        elif isinstance(s, gimple_ctypes.MultiAssignStmt):
-            _mts = s.targets
-            if _mts is not None:
-                for _t in _mts:
-                    if isinstance(_t, gimple_ctypes.IdentExpr):
-                        note(_t.name, s.value)
-        elif isinstance(s, gimple_ctypes.VarDecl):
-            if (isinstance(s.name, str) and ',' not in s.name
-                    and s.value is not None
-                    and getattr(s, 'type_ann', None) is None):
-                note(s.name, s.value)
-
-    _walk_func_stmts(body, visit)
-
-    mixed = set()
-    for _n, _ks in kinds.items():
-        if len(_ks) > 1 and _n not in annotated:
-            mixed.add(_n)
-    gen._mixed_scalar_locals = mixed
-    return mixed
-
-
-def mixed_value_locals(gen) -> set:
-    """The names in THIS function's body bound to a CONTAINER and to a
-    provable SCALAR (`int` / `double` / `str` / `bool`), computed once per
-    function and cached.
-
-    The container/scalar twin of `mixed_scalar_locals`, and the case that
-    neither of the two existing sets covers: `mixed_container_locals` sees
-    only container-vs-container, `mixed_scalar_locals` only scalar-vs-scalar.
-    `x = [1, 2]; x = 3` has no single C type, and `resolve_shared`'s
-    `_multi_kind_locals` already declares it `int64_t`, but nothing made the
-    STORES box by kind or the READS dispatch on the runtime kind, so `print(x)`
-    read the stale `MojoList *` after the `x = 3` ran (a SIGSEGV for a program
-    CPython runs cleanly).
-
-    A name in this set is a box-holding local (`mixed_box_name`): a container
-    store is its bare pointer word, an int store its bare int, and a float,
-    str or bool store is boxed by kind, so every consumer -- `print`, `str`,
-    `len`, truthiness -- reads the word by kind through the runtime
-    dispatchers (`mojo_cstr_or_int_str`, `mojo_len_word`, `mojo_truthy_word`),
-    which already recognise every kind this set can hold.
-
-    An ANNOTATED local is declared as its one type on purpose and is not a
-    mixed-kind name (the same exclusion `mixed_scalar_locals` makes). A
-    binding whose value is not provably a container or a scalar (None, a
-    struct pointer, an unresolved call) contributes no kind, so it cannot
-    turn an ordinary container local into a box by itself."""
-    cached = getattr(gen, '_mixed_value_locals', None)
-    if cached is not None:
-        return cached
-    body = gen._cur_func_body
-    dict_val_types, annotated = _scalar_mixed_prescan(gen, body)
-
-    kinds: dict = {}
-
-    def note(name, value):
-        _nm = _as_str(name)
-        _ks = kinds.setdefault(_nm, set())
-        try:
-            _qt = _as_str(gen._quick_type(value))
-        except Exception:
-            _qt = ''
-        if _qt in gimple_ctypes._CONTAINER_KIND_TYPES:
-            _ks.add('container')
-        if _mixed_scalar_binding_kind(gen, value, dict_val_types) is not None:
-            _ks.add('scalar')
-
-    def visit(s):
-        if isinstance(s, gimple_ctypes.AssignStmt):
-            if isinstance(s.target, gimple_ctypes.IdentExpr):
-                note(s.target.name, s.value)
-            elif (isinstance(s.target, gimple_ctypes.TupleExpr)
-                    and isinstance(s.value, gimple_ctypes.TupleExpr)
-                    and len(s.value.elements) == len(s.target.elements)):
-                for _i in range(len(s.target.elements)):
-                    _t = s.target.elements[_i]
-                    if isinstance(_t, gimple_ctypes.IdentExpr):
-                        note(_t.name, s.value.elements[_i])
-        elif isinstance(s, gimple_ctypes.VarDecl):
-            if (isinstance(s.name, str) and ',' not in s.name
-                    and s.value is not None
-                    and getattr(s, 'type_ann', None) is None):
-                note(s.name, s.value)
-
-    _walk_func_stmts(body, visit)
-
-    mixed = set()
-    for _n, _ks in kinds.items():
-        if _ks == {'container', 'scalar'} and _n not in annotated:
-            mixed.add(_n)
-    gen._mixed_value_locals = mixed
-    return mixed
-
-
-def mixed_box_name(gen, name) -> bool:
-    """True iff `name` is a BOX-HOLDING local of this function: declared as the
-    `int64_t` box, every store into it a box of its own kind, every read by
-    kind. Three sources agree on that representation and this is their one
-    answer: a name bound to more than one scalar kind (`mixed_scalar_locals`),
-    a name bound to a container beside a scalar (`mixed_value_locals`), and a
-    name bound to a tagged generator word beside plain values
-    (`tagged_mixed_name`). The store arms, the declaration and the `var`
-    initializer all ask this, never the predicates separately."""
-    _n = _as_str(name)
-    return (_n in mixed_scalar_locals(gen) or _n in mixed_value_locals(gen)
-            or tagged_mixed_name(gen, _n))
-
-
-def box_mixed_store(gen, value_node, vtype: str, v: str, name) -> tuple:
-    """The store of `v` (C type `vtype`, from `value_node`) into the
-    box-holding local `name`, as `(v, vtype)` ready to store into the
-    `int64_t` box. Returns the input unchanged for a value that needs no box.
-
-    A float or str is boxed by its kind (`mojo_box_from_double` /
-    `mojo_box_from_str`), a Python bool by `mojo_box_from_bool` so it renders
-    True/False. A plain int is boxed with `mojo_box_int`, because the local's
-    reads are by kind and a bare word there would be read as a box. A value
-    that already IS a box (a tagged word, or another box-holding name copied
-    over) is never re-boxed: `mojo_box_int` on a float box would truncate it.
-    Only a box-holding local of C type `int64_t` is boxed; anything else
-    keeps its own type and the caller's refusal decides it."""
-    if gen.var_types.get(_as_str(name), 'int64_t') != 'int64_t':
-        return v, vtype
-    if vtype in gimple_ctypes._CONTAINER_KIND_TYPES:
-        # A container is its own word, not a boxed value: the box has no kind
-        # byte for it, and the runtime recognises a container by its registry
-        # membership (`mojo_cstr_or_int_str`, `mojo_len_word`,
-        # `mojo_truthy_word`), which is how a container's identity is read
-        # everywhere else. Only a container stored into a `mixed_value_locals`
-        # name reaches here.
-        return gen._to_int64(vtype, v), 'int64_t'
-    if vtype == 'double':
-        return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', v)]), 'int64_t'
-    if vtype == 'char *':
-        return gen._call_expr('int64_t', 'mojo_box_from_str', [('char *', v)]), 'int64_t'
-    if vtype in ('int', 'int64_t', '_Bool'):
-        if v in getattr(gen, '_boxed_vals', ()) or v in getattr(gen, '_tagged_word_vals', ()):
-            return v, 'int64_t'
-        _w = gen._to_int64(vtype, v)
-        if gimple_exprtypes.is_python_bool_expr(gen, value_node):
-            return gen._call_expr('int64_t', 'mojo_box_from_bool', [('int64_t', _w)]), 'int64_t'
-        return gen._call_expr('int64_t', 'mojo_box_int', [('int64_t', _w)]), 'int64_t'
-    return v, vtype
 
 
 def _declare_var(gen, name: str, ctype: str, elem: str | None = None, force: bool = False):
@@ -5611,14 +5261,6 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
             and gimple_exprtypes.is_python_bool_expr(gen, enode):
         return gen._call_expr('char *', 'mojo_bool_to_str',
                               [('int', gen._new_val('int', f'(int){ev}'))])
-    # A container/scalar name (`mixed_value_locals`) is a box-holding word
-    # whose kind changes with each store: the static `_actual_types` retyping
-    # below would read the bare int of the LAST store through the container
-    # recorded by an EARLIER one. Ask the runtime by kind, as `print` does.
-    if enode is not None and et in ('int', 'int64_t') \
-            and isinstance(enode, gimple_ctypes.IdentExpr) \
-            and _as_str(enode.name) in mixed_value_locals(gen):
-        return _repr_boxed_container(gen, ev)
     # A `d[k]` read whose value type was unknown at compile time: stringify
     # by the slot's runtime kind rather than the raw int64_t word.
     _dsr = getattr(gen, '_dict_slot_reads', {})
@@ -5954,7 +5596,7 @@ def _elaborate_overload_call(gen, node: gimple_ctypes.CallExpr):
     for _kn, _kexpr in (getattr(node, 'kwargs', None) or []):
         arg_pairs.append(gen.lower_expr(_kexpr))
     try:
-        module_src = gen._generic_source_text(source)
+        module_src = open(source).read()
         import elaborate
         info = elaborate.Elaborator().elaborate_overload_call(
             module_src, g, [ct for ct, _ in arg_pairs])
@@ -6018,52 +5660,7 @@ def _maybe_lower_mlir_op(gen, node: gimple_ctypes.CallExpr):
     # bug (a 2-tuple unpack re-boxes an element to int64_t even if it
     # started as char*/a pointer).
     arg_vals = [_ap[1] for _ap in arg_pairs]
-    arg_types = [_ap[0] for _ap in arg_pairs]
-    op_name = gimple_ctypes.mlir.unwrap(func.member)
-
-    # GIMPLE type discipline (bool.mojo gate regression, bugs/gate-stdlib-
-    # syntax.md): a checked (__GIMPLE) body is rejected by gcc the moment a
-    # variable's declared type differs from the type of the expression it is
-    # assigned — `int64_t _t4 = _t2 & _t3;` with _Bool operands — and a
-    # binary op whose operand types differ has no form in GIMPLE at all.
-    # lower_op used to report a blanket 'int64_t' result over the operands'
-    # real type; every UNCHECKED context compiled the lie, and it sat until
-    # the tag's position was pinned (bugs/CODEGEN_gimple_tag_ignored_on_
-    # pointer_return.md) and the body was actually checked —
-    # std/builtin/bool.mojo's __and__/__or__/__xor__. Now: join the op's
-    # value operands to one type, materialize each differing operand into it
-    # through a one-level cast (the only cast GIMPLE allows on an assignment
-    # RHS), and tell lower_op the type it reports.
-    slots = None
-    if op_name in gimple_ctypes.mlir.BINARY_OPS or op_name in gimple_ctypes.mlir.MINMAX_OPS \
-            or op_name in gimple_ctypes.mlir.CMP_OPS:
-        slots = [0, 1]
-    elif op_name in gimple_ctypes.mlir.TERNARY_OPS:
-        slots = gimple_ctypes.mlir.TERNARY_SLOTS.get(op_name)
-    elif op_name in gimple_ctypes.mlir.UNARY_OPS:
-        slots = [0]
-    hint = None
-    vals = arg_vals
-    if slots:
-        _complete = True
-        for _t in arg_types:
-            if not _t or gimple_ctypes.TypeLattice.is_pointer(_t):
-                _complete = False
-        if _complete:
-            hint = gimple_ctypes.TypeLattice.join_all([arg_types[i] for i in slots])
-            if hint == 'int':
-                # join's internal _Bool+int marker: the word this runtime emits
-                hint = 'int64_t'
-            vals = list(arg_vals)
-            for i in range(len(vals)):
-                _target = hint
-                if op_name == 'pop.select' and i == 0:
-                    _target = '_Bool'   # a GIMPLE ternary's condition is a _Bool
-                if arg_types[i] != _target:
-                    _vt = gen._new_temp(_target)
-                    gen._emit(f'  {_vt} = ({_target}){vals[i]};')
-                    vals[i] = _vt
-    res = gimple_ctypes.mlir.lower_op(func.member, vals, attr_members, result_hint=hint)
+    res = gimple_ctypes.mlir.lower_op(func.member, arg_vals, attr_members)
     if res is None:
         # Operands already evaluated; yield 0 so surrounding code still compiles.
         # Distinguish "deferred by design" (GPU/coro/atomics/…) from "not met yet".
@@ -6073,12 +5670,8 @@ def _maybe_lower_mlir_op(gen, node: gimple_ctypes.CallExpr):
         t = gen._new_temp('int64_t')
         gen._emit(f"  {t} = (int64_t)0;  /* mlir __mlir_op.{op}: {note} */")
         return 'int64_t', t
-    ctype, expr, prelude = res
-    # Substitute each prelude temp into expr as it is emitted, so the
-    # statement order is the placeholder order.
-    for _i, (_pc, _pe) in enumerate(prelude):
-        expr = expr.replace('{t%d}' % _i, gen._new_val(_pc, _pe))
-    t = gen._new_val(ctype, expr)
+    ctype, expr = res
+    t = gen._new_val(ctype, f"{expr}")
     return ctype, t
 
 
@@ -7335,9 +6928,7 @@ def _repr_boxed_container(gen, value: str):
     gen._emit(f'  {_res} = {_sp2};')
     gen._emit(f'  goto {bb_after};')
     gen._emit_label(bb_not_str)
-    # Every other word: a float/bool/None box renders by its own kind, a bare
-    # integer as its decimal (mojo_repr_boxed answers both).
-    gen._emit(f'  {_res} = mojo_repr_boxed ({_it64});')
+    gen._emit(f'  {_res} = mojo_str_from_int ({_it64});')
     gen._emit_label(bb_after)
     return _res
 
@@ -7432,11 +7023,6 @@ Order matters and is the same one `_repr_boxed_container` uses: the live
     gen._emit(f'  {_res} = mojo_bytes_len ({_bp});')
     gen._emit(f'  goto {bb_after};')
     gen._emit_label(bb_not_byt)
-    # `mojo_word_is_text` accepts a kind-'p' str box as well as a bare
-    # registered word; `mojo_boxed_is_str` rejects every box on purpose (so a
-    # float box is not read as text). The text pointer of a str box is its
-    # payload, which `mojo_str_box_word` returns (and the word unchanged for
-    # anything else).
     ibs = gen._call_expr('int', 'mojo_word_is_text', [('int64_t', _it64)])
     gen._emit(f'  if ({ibs}) goto {bb_str}; else goto {bb_not_str};')
     gen._emit_label(bb_str)
