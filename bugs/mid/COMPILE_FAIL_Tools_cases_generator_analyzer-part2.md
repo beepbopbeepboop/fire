@@ -9,7 +9,7 @@ name as one of this compiler's own AST node classes (`IfStmt`, `ForStmt`,
 `WhileStmt`, `Parser`, ...), the generated C must define **the sibling's**
 struct — its own fields, its own `_alloc_`/`_init_` and its own method
 signatures — instead of the compiler's pre-seeded AST layout. This is the
-blocker that currently produces 22 of `analyzer.py`'s 27 gcc errors.
+blocker that currently produces 25 of `analyzer.py`'s 27 gcc errors.
 
 ## Current state (measured 2026-11-11, HEAD `d210765a2`)
 
@@ -75,9 +75,10 @@ smaller measurements bound it:
   `.tmp/collision_probe.py` (`class IfStmt` with `if_`/`body`,
   `fire.py build`, run) prints `3 4`.
 * A **minimal two-file** project (`helper.py` defines `class IfStmt` with
-  `if_`/`body`; `main.py` does `import helper; helper.IfStmt(3, 4).show()`)
-  also merges the fields and runs. Its generated typedef ends with
-  `int64_t if_; int64_t body;` after the pre-seeded fields.
+  `if_`/`body`; `main.py` does `import helper; helper.IfStmt(3, 4).show()`),
+  compiled with `compile_to_gimple(..., do_imports=True)`, also merges the
+  fields. Its generated typedef ends with `int64_t if_; int64_t body;` after
+  the pre-seeded fields.
 * Replacing the toy helper with the **real** `parsing.py` + `parser.py` +
   `plexer.py` + `lexer.py` + `cwriter.py` set reproduces the analyzer's
   failure exactly. `main.py` only needs
@@ -149,13 +150,14 @@ by themselves prove whether the pre-seeded dict entry, a compiler-side
 
 ## Acceptance
 
-* The new fixture (below) emits a `typedef struct <user-cname> IfStmt` with
-  `if_`, `body`, `else_`, `else_body` and no `then_body`/`elifs`, and
-  `gcc -fgimple -fsyntax-only` accepts the generated C. Today it rejects it with
+* The new fixture (below) emits a `typedef struct` for `IfStmt` (whether under
+  the bare or a module-qualified spelling) carrying `if_`, `body`, `else_`,
+  `else_body` and not `then_body`/`elifs`, and `gcc -fgimple -fsyntax-only`
+  accepts the generated C. Today it rejects it with
   `'IfStmt' has no member named 'if_'`.
 * In the analyzer build, all `has no member named` errors in `parsing.py` and
-  the `assignment ... from 'MojoList *'` constructor errors are gone. The
-  remaining error is part3's `analyzer.py:194`.
+  the `assignment ... from 'MojoList *'` constructor errors are gone. The only
+  remaining errors are part3's two at `analyzer.py:194`.
 * Self-host is not regressed: `python3 test_gimple.py` passes, and the
   integrator's `make gate` (bootstrap's stage1 == stage2 == stage3 comparison)
   is the heavy confirmation. Do not run the whole-closure/bootstrap chain in
