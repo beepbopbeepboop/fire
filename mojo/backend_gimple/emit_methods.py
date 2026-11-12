@@ -2701,9 +2701,15 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                         # the bytes-or-str word actually is; `int64_t` would
                         # read as a plain number and lose the bytes kind.
                         return 'MojoList *', t
+                    # A word argument is a str OR a bytes path (the runtime
+                    # decides which), so the parts are words of UNKNOWN kind:
+                    # the element kind is left unrecorded, as the bytes arm
+                    # above does. Recording `int64_t` here typed each unpacked
+                    # part as a plain number, so `if not head:` became
+                    # `head == 0`, and an empty str head (a live non-NULL
+                    # pointer) read as true.
                     t = gen._call_expr('MojoList *', 'mojo_os_path_split_w',
                                         [(arg_type, arg_val)])
-                    gen._elem_types[t] = 'int64_t'
                     return 'MojoList *', t
                 t = gen._call_expr('MojoList *', 'int64_t_path_split',
                                     [(arg_type, arg_val)])
@@ -3338,17 +3344,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                                       'sysconfig.get_config_var() stubbed')
 
         if (module_name == 'gimple_codegen' and method_name in (
-                'compile_to_gimple', 'compile_to_gimple_cached',
-                # `compile_to_gimple_parallel_frozen` (b30d14b21) has a body
-                # IDENTICAL to `compile_to_gimple`'s -- both forward to
-                # `_run_pipeline` + `_refuse_dropped_companion` -- and fire.py's
-                # `--dump-full` handler calls it. It was added to fire.py without
-                # being added here, so the compiled binary's own `--dump-full`
-                # fell through to the weak stub
-                # (`compile_to_gimple_parallel_frozen: unavailable in compiled
-                # mode`) and wrote a 0-byte .ci: `test_selfhost.py`'s
-                # run_produced_binary half, which counts those diagnostics.
-                'compile_to_gimple_parallel_frozen')):
+                'compile_to_gimple', 'compile_to_gimple_cached')):
             # gimple_codegen.compile_to_gimple(src, do_imports=False, filename="") → returns char*
             # compile_to_gimple_cached lowers to the SAME C runtime wrapper
             # (gimple_codegen_compile_to_gimple, runtime/fire_runtime.c):

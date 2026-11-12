@@ -2885,7 +2885,7 @@ test('formal-dylib', [PY, 'test_formal_dylib.py'],
      expect='6 failing: two wrong-spec teeth checks (a wrong spec is accepted, since the overflow traps, '
             'bugs/FORMAL_wrong_spec_accepted_since_overflow_traps.md) and four contract checks on branchy exports '
             '(an exit svc steps to none, so their contracts are guarded obligations, '
-            'bugs/mid/FORMAL_svc_exit_handling_incomplete.md)',
+            'bugs/FORMAL_svc_exit_handling_incomplete.md)',
      desc='formal dylib emission, Mach-O re-read, dlopen, prove')
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'], mem='tiny',

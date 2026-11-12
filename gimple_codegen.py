@@ -1639,16 +1639,6 @@ class GimpleGen:
         # whichever kind its first assignment site carries. Module scope, like
         # `_inferred_var_types`' per-function half it is read beside.
         self._multi_kind_locals: dict[str, set] = {}
-        # Function name -> the locals bound by an UNPACK of a single iterable
-        # (`a, b, ... = call()`/`= some_list`), whose per-element C types the
-        # pre-pass does not know and therefore leaves at the `int64_t` storage
-        # default. Read by `module_gen`'s container-vs-scalar contract: an
-        # `int64_t` there is not proof the argument is a number — it may be a
-        # container element (coro.py's `real_params` from
-        # `base, is_method, real_params, ... = _async_method_setup(...)` is a
-        # list) — while an ordinary local bound by a call or a parameter keeps
-        # counting as a scalar, so a genuinely mixed call site is still refused.
-        self._tuple_unpack_locals: dict[str, set] = {}
         # Call-result VALUE names holding a container whose kind the CALLER
         # cannot know statically (the result of a call to a
         # `_multi_kind_return_funcs` member). Per-function like the other
@@ -5774,8 +5764,6 @@ class GimpleGen:
         return grsl._new_temp(self, ctype)
     def _new_val(self, ctype: str, rhs: str) -> str:
         return grsl._new_val(self, ctype, rhs)
-    def _select_val(self, ctype: str, cond_ctype: str, cond_val: str, then_val, else_val) -> str:
-        return grsl._select_val(self, ctype, cond_ctype, cond_val, then_val, else_val)
     def _inc_val(self, base: str) -> str:
         return grsl._inc_val(self, base)
     def _call_expr(self, ret_type: str, fname: str, arg_pairs: list, arg_nodes: list = None) -> str:
