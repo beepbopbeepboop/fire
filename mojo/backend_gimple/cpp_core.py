@@ -1622,26 +1622,11 @@ def _cpp_expr_static_ctype(gen, e):
                 return rt
     if (isinstance(e, gimple_ctypes.MemberExpr)
             and isinstance(e.obj, gimple_ctypes.IdentExpr)):
-        # A struct field read on a known struct-pointer receiver
-        # (`self.<field>`, or `<struct-ptr local>.<field>`).
-        _obj_name = e.obj.name
-        _struct_name = None
-        if _obj_name == 'self':
-            _struct_name = getattr(gen, '_cpp_gen_self_struct', None)
-        elif _obj_name == 'cls':
-            _struct_name = getattr(gen, '_cpp_gen_self_struct', None)
-        else:
-            _struct_name = gen._cpp_struct_ptr_local(_obj_name)
-        if _struct_name:
-            _ft = gen.struct_field_types.get(_struct_name, {}).get(e.member)
-            if _ft in ('char *', 'int64_t', 'double', '_Bool', 'MojoList *',
-                       'MojoDict *', 'MojoSet *'):
-                return _ft
         # A module-level CONSTANT read as a value (`os.linesep`) — the same
         # real field read `_cpp_expr`'s MemberExpr case now emits, and the
         # same ctype, so a `not os.linesep` / `x == os.linesep` test is
         # decided on the string's emptiness rather than on a null pointer.
-        _mglob = _cpp_module_global_field(gen, _obj_name, e.member)
+        _mglob = _cpp_module_global_field(gen, e.obj.name, e.member)
         if _mglob is not None:
             return _mglob[0]
     return None
@@ -2123,36 +2108,6 @@ def _cpp_is_struct_pointer_elem(gen, el) -> bool:
     return bool(ct) and ct.endswith(' *') and ct[:-2] in gen.struct_field_types
 
 
-def _cpp_typed_list_elem(gen, el):
-    """One NON-literal element of a flat list literal -> `(kind, expr)`. The
-    element's inferred scalar ctype picks its accessor (`char *` -> str,
-    `double` -> flt, `int64_t`/`_Bool` -> the int64_t box). An element whose
-    kind cannot be inferred REFUSES: at a call-argument position nothing
-    later re-types the box, so defaulting it to int64_t would hand a string
-    to an integer accessor. (The statement-level `_cpp_container_literal_init`
-    keeps its int64_t default; a container-typed local is re-typed by its
-    own uses.) A dict/set element has no flat representation here and
-    refuses. Nested list/tuple and struct-pointer elements never reach this
-    point (`_cpp_list_literal_arg_expr` boxes those)."""
-    if isinstance(el, (gimple_ctypes.DictExpr, gimple_ctypes.SetExpr)):
-        raise gimple_exprtypes._UnsupportedGeneratorShape(
-            "a nested dict/set literal has no representation as a list "
-            "element in a list-literal argument of a compiled-generator call")
-    ct = gimple_exprtypes._infer_simple_expr_ctype(
-        el, gen._cpp_declared, getattr(gen, '_cpp_gen_self_fields', None),
-        gen._async_api)
-    if ct is None:
-        raise gimple_exprtypes._UnsupportedGeneratorShape(
-            "an element of a list-literal argument of a compiled-generator "
-            "call has a value kind that cannot be resolved in a coroutine body")
-    ev = gen._cpp_expr(el)
-    if ct == 'char *':
-        return ('str', f"(char *)({ev})")
-    if ct == 'double':
-        return ('flt', f"(double)({ev})")
-    return ('int', f"(int64_t)({ev})")
-
-
 def _cpp_call_arg_expr(gen, a):
     """One call-argument expression for a compiled-generator/coroutine call.
     A list LITERAL has no valid C++ text at an argument position (`_cpp_expr`
@@ -2169,12 +2124,9 @@ def _cpp_list_literal_arg_expr(gen, lit):
     valued C++ expression: `mojo_list_new ()` for the empty literal,
     otherwise an immediately-invoked lambda that constructs the list and
     appends every element through its scalar accessor (append_str/_int/
-    _double). A literal element takes its kind from the literal; any other
-    element takes it from its inferred ctype (`_cpp_typed_list_elem`, the
-    same typing `_cpp_container_literal_init` gives a statement-level list).
-    All elements must agree on one scalar kind — a mixed literal refuses
-    (the caller's contract collection already hints nothing for mixed
-    literals). Works for both ListExpr and TupleExpr (same `.elements`
+    _double). All elements must agree on one scalar type — anything else
+    refuses (the caller's contract collection already hints nothing for
+    mixed literals). Works for both ListExpr and TupleExpr (same `.elements`
     shape, both box down to the one MojoList* runtime representation this
     body model uses for both Python lists and tuples) — used both at a
     compiled-generator call-argument position and at an ordinary runtime-
@@ -2202,7 +2154,10 @@ def _cpp_list_literal_arg_expr(gen, lit):
         elif isinstance(el, gimple_ctypes.FloatLiteral):
             kinds.append(('flt', gen._cpp_expr(el)))
         else:
-            kinds.append(_cpp_typed_list_elem(gen, el))
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                "a non-scalar element in a list-literal argument of a "
+                "compiled-generator call is not supported in a coroutine "
+                "body")
     kind = kinds[0][0]
     if any(k != kind for k, _ in kinds):
         raise gimple_exprtypes._UnsupportedGeneratorShape(
@@ -7473,12 +7428,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         _container_literal = isinstance(s.value, (gimple_ctypes.ListExpr,
                                                   gimple_ctypes.DictExpr,
                                                   gimple_ctypes.SetExpr))
-        # A container literal's raw expression text (`val`) is only needed
-        # for a target that does NOT take the container-init path below; it
-        # is lowered lazily there. Lowering it eagerly here made a valid
-        # `stack = [top]` refuse whenever an element's kind is unresolved,
-        # though the statement-level init types that element by default.
-        val = None if _container_literal else gen._cpp_expr(s.value)
+        val = gen._cpp_expr(s.value)
         _rhs_tagged = _cpp_is_tagged_word_expr(gen, s.value)
         if name not in declared:
             # `x = StructName(args)` — see `_cpp_expr`'s CallExpr
@@ -7577,8 +7527,6 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     module_global_types=getattr(
                         gen, '_cpp_module_global_ctypes', None),
                     dict_val_types=getattr(gen, '_cpp_local_dict_val_types', None))
-                if ctype is None:
-                    ctype = _cpp_expr_static_ctype(gen, s.value)
             if ctype is None:
                 ctype = 'int64_t'  # default for unknown-type locals
             declared[name] = ctype
@@ -7638,8 +7586,6 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 init = _cpp_container_literal_init(gen, cpp_name, s.value, indent)
                 if init is not None:
                     return init
-            if val is None:
-                val = gen._cpp_expr(s.value)
             if isinstance(val, str) and val.startswith('@@CSYM:'):
                 return [f"{indent}{cpp_name} = _mj_w({val});"]
             _acast0 = _cpp_assign_cast_type(gen, val)
@@ -7652,8 +7598,6 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             init = _cpp_container_literal_init(gen, cpp_name, s.value, indent)
             if init is not None:
                 return init
-        if val is None:
-            val = gen._cpp_expr(s.value)
         # A mutated-by-reference capture (see `_gen_cpp_async_unit`'s
         # `mut_capture_names` docstring) is a pointer parameter -- the
         # WRITE must go through it (`*name = ...`), not overwrite the
@@ -8765,7 +8709,6 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     # case not attempted here — stays False for that branch, matching
     # its existing (unchanged) refusal behavior.
     is_self_recursive = False
-    _nested_capture_arg_exprs = None
     # `self.method(...)` — a generator METHOD call (e.g. calendar.py's
     # `Calendar.itermonthdates` doing `for y, m, d in self.
     # itermonthdays3(year, month):`), resolved via
@@ -8839,7 +8782,6 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
         # reordering), taking the whole module down with it.
         _self_name = getattr(gen, '_cpp_gen_self_name', None)
         is_self_recursive = (_self_name is not None and sub_name == _self_name)
-        _nested_capture_arg_exprs = None
         if is_self_recursive:
             # Same locally-tracked self-context `_cpp_yield_from` uses
             # — no premature/partial registration into the real
@@ -8863,9 +8805,7 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
             # identical reason (this body references its own
             # not-yet-textually-defined extern "C" wrappers).
             gen._cpp_gen_self_recursed = True
-            receiver_exprs = []
         else:
-            receiver_exprs = []
             api = gen._generator_api.get(sub_name)
             if api is None or sub_name not in gen._supported_generators:
                 # ...or one IMPORTED by name (`from .iterutil import
@@ -8874,37 +8814,13 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
                 # extern "C" symbols drive it (registered just below).
                 api = getattr(gen, '_imported_generator_bindings', {}).get(sub_name)
             if api is None:
-                # A nested generator defined inside this same compiled
-                # generator/coroutine (claimed and compiled with its
-                # enclosing captures by cpp_async._compile_nested_generator_closures),
-                # registered in _nested_generator_api keyed (current generator
-                # name, nested name) — not in _generator_api. Its _start call
-                # takes the user positional arguments first, then each
-                # captured enclosing name as an ordinary identifier in scope.
-                _ng = getattr(gen, '_nested_generator_api', {})
-                api = _ng.get((getattr(gen, '_cpp_gen_self_name', None), sub_name))
-                if api is not None:
-                    _caps = api.get('captures') or []
-                    _user_n = len(api.get('params') or []) - len(_caps)
-                    if getattr(call, 'kwargs', None) or len(call.args) != _user_n:
-                        raise gimple_exprtypes._UnsupportedGeneratorShape(
-                            f"call to nested generator {sub_name!r} with keyword "
-                            "or defaulted arguments is not supported (only the "
-                            "plain positional form is threaded, together with "
-                            "its enclosing-scope captures)")
-                    _nested_capture_arg_exprs = [
-                        _cpp_call_arg_expr(gen, gimple_ctypes.IdentExpr(_cn))
-                        for _cn, _ in _caps]
-                else:
-                    raise gimple_exprtypes._UnsupportedGeneratorShape(
-                        f"`for ... in {sub_name}(...)` does not consume a generator "
-                        "this compile has itself already translated via the "
-                        "C++20-coroutine path (either it's not a generator this "
-                        "codegen supports, or it's defined LATER in this module — "
-                        "the consumed generator must be defined earlier)")
-    # `receiver_exprs` was populated above for method/self/cls cases.
-    # For a nested generator, capture values are appended after the user
-    # positional arguments (assembled below) to form its full _start args.
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    f"`for ... in {sub_name}(...)` does not consume a generator "
+                    "this compile has itself already translated via the "
+                    "C++20-coroutine path (either it's not a generator this "
+                    "codegen supports, or it's defined LATER in this module — "
+                    "the consumed generator must be defined earlier)")
+        receiver_exprs = []
     sub_params = api.get('params') or []
     # Pad omitted trailing arguments from the callee's registered param
     # defaults (same convention the direct `<base>_start(...)` construction
@@ -8922,25 +8838,18 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
               or getattr(gen, '_func_param_defaults', {}).get(f"{api['base']}_start")
               or [])
     arg_exprs = receiver_exprs + [_cpp_call_arg_expr(gen, a) for a in call.args]
-    # A nested generator's captures are appended AFTER its user positional
-    # arguments (never default-padded); emit_calls._emit_nested_generator_start_call
-    # assembles the same [user args] + [captures] sequence.
-    _expected = (len(sub_params) - len(_nested_capture_arg_exprs)
-                 if _nested_capture_arg_exprs is not None else len(sub_params))
-    while len(arg_exprs) < _expected:
+    while len(arg_exprs) < len(sub_params):
         _dv = gimple_exprtypes._trailing_default_at(_dflts, len(sub_params), len(arg_exprs))
         if _dv is None:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 f"`for ... in {sub_name}(...)`: expected "
-                f"{_expected - len(receiver_exprs)} argument(s), "
+                f"{len(sub_params) - len(receiver_exprs)} argument(s), "
                 f"got {len(call.args)}")
         arg_exprs.append(gen._default_expr_to_pair(_dv, cxx=True)[1])
-    if _nested_capture_arg_exprs is not None:
-        arg_exprs.extend(_nested_capture_arg_exprs)
     if len(arg_exprs) > len(sub_params):
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"`for ... in {sub_name}(...)`: expected "
-            f"{_expected - len(receiver_exprs)} argument(s), "
+            f"{len(sub_params) - len(receiver_exprs)} argument(s), "
             f"got {len(call.args)}")
     base = api['base']
     # Register this callee into the module-level extern-decl map, so the
@@ -9133,109 +9042,6 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         except Exception:
             _call_txt = gen._cpp_expr(s.iterable)
         _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
-        # If this is a call through a tabled foreign callable with known iterator
-        # element type (e.g. csv.reader), bind the loop target accordingly.
-        _elem_ctype = None
-        _is_tabled_callable = False
-        try:
-            if (isinstance(s.iterable, gimple_ctypes.CallExpr)
-                    and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)):
-                _fcname = s.iterable.func.name
-                import mojo.middle.types as _mtypes_mod
-                _foreign = getattr(_mtypes_mod, '_FOREIGN_CALLABLES', {}) or {}
-                _foreign_iter = getattr(_mtypes_mod, '_FOREIGN_CALLABLE_ITER_ELEM', {}) or {}
-                _get_qualified_name = getattr(_mtypes_mod, '_get_qualified_name', None)
-                _pd = None
-                _pdefaults = getattr(gen, '_func_param_defaults', None) or {}
-                if isinstance(_pdefaults, dict):
-                    _cand = _pdefaults.get(_fcname)
-                    if _cand is not None and not isinstance(_cand, list):
-                        _pd = _cand
-                    else:
-                        for _k, _v in _pdefaults.items():
-                            if isinstance(_v, list):
-                                for _pair in _v:
-                                    try:
-                                        if _pair and _pair[0] == _fcname:
-                                            _pd = _pair[1]; break
-                                    except Exception:
-                                        pass
-                            if _pd is not None:
-                                break
-                if _pd is None and getattr(gen, '_func_node', None) is not None:
-                    _fnd = getattr(gen._func_node, 'param_defaults', None) or {}
-                    if isinstance(_fnd, dict):
-                        _pd = _fnd.get(_fcname)
-                _q = None
-                if _pd is not None and _get_qualified_name is not None:
-                    try:
-                        _q = _get_qualified_name(_pd)
-                    except Exception:
-                        _q = None
-                if (_q and (_q in _foreign or _q in _foreign_iter)) or (_fcname in _foreign or _fcname in _foreign_iter):
-                    _is_tabled_callable = True
-                if _q and _q in _foreign_iter:
-                    _elem_ctype = _foreign_iter[_q]
-                if _elem_ctype is None and _fcname in _foreign_iter:
-                    _elem_ctype = _foreign_iter[_fcname]
-        except Exception:
-            _elem_ctype = None
-        # An untabled callable-valued parameter/local must still be refused by
-        # name rather than miscompiled/silently mishandled. Do not refuse when
-        # the param resolves to a known/tabled foreign callable, or to a known
-        # compiled generator/async function (those have their own lowering).
-        _is_known_generator_callee = False
-        try:
-            if _pd is not None:
-                _pdname = None
-                if isinstance(_pd, gimple_ctypes.IdentExpr):
-                    _pdname = _pd.name
-                elif isinstance(_pd, gimple_ctypes.AttributeExpr):
-                    _pdname = f"{getattr(getattr(_pd, 'obj', None), 'name', '')}.{getattr(_pd, 'attr', '')}".strip('.')
-                if _pdname and (_pdname in getattr(gen, '_generator_api', {})
-                                or _pdname in getattr(gen, '_async_api', {})
-                                or _pdname.split('.')[-1] in getattr(gen, '_generator_api', {})
-                                or _pdname.split('.')[-1] in getattr(gen, '_async_api', {})):
-                    _is_known_generator_callee = True
-            # Direct name fallback
-            if (s.iterable.func.name in getattr(gen, '_generator_api', {})
-                    or s.iterable.func.name in getattr(gen, '_async_api', {})):
-                _is_known_generator_callee = True
-        except Exception:
-            pass
-        if (isinstance(s.iterable, gimple_ctypes.CallExpr)
-                and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
-                and s.iterable.func.name in getattr(gen, '_cpp_param_names', ())
-                and not _is_tabled_callable
-                and not _is_known_generator_callee):
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"a `for` over a call through the callable-valued local/parameter "
-                f"'{s.iterable.func.name}(...)' is not supported in a compiled "
-                f"generator/coroutine body")
-        if _elem_ctype and isinstance(s.target, str) and not for_target_is_tuple(s.target) and not s.else_body:
-            _ctr = gen._cpp_fresh_name("_mg_i")
-            _tname = s.target
-            _lines = []
-            if _tname not in declared:
-                declared[_tname] = _elem_ctype
-                _ctype = _elem_ctype
-                _lines.append(f"{indent}{_ctype} {_tname};")
-            else:
-                _ctype = declared[_tname] or _elem_ctype
-            _lines.append(f"{indent}for (int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
-            if _ctype == 'double':
-                _get = f"mojo_list_get_double({_wi}, {_ctr})"
-            elif _ctype in ('char *', 'const char *'):
-                _get = f"mojo_list_get_str({_wi}, {_ctr})"
-            else:
-                _get = f"mojo_list_get_int({_wi}, {_ctr})"
-                if _ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
-                    _get = f"({ _ctype })(intptr_t){_get}"
-            _lines.append(f"{indent}    {_tname} = {_get};")
-            for inner in s.body:
-                _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-            _lines.append(f"{indent}}}")
-            return _pre + _lines
         _inner_for = gimple_ctypes.ForStmt(
             target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
             body=s.body, else_body=s.else_body)
@@ -9247,60 +9053,6 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             and s.iterable.func.name in getattr(gen, '_cpp_param_names', ())):
         _cdecl = declared.get(s.iterable.func.name) if declared else None
         if isinstance(_cdecl, str) and _cdecl.startswith('std::function'):
-            _fcname = s.iterable.func.name
-            _elem_ctype = None
-            try:
-                import mojo.middle.types as _mtypes_mod
-                _foreign_iter = getattr(_mtypes_mod, '_FOREIGN_CALLABLE_ITER_ELEM', {}) or {}
-                _get_qualified_name = getattr(_mtypes_mod, '_get_qualified_name', None)
-            except Exception:
-                _foreign_iter = {}
-                _get_qualified_name = None
-            # Try to resolve foreign callable iterator element type from param default.
-            try:
-                _pd = None
-                _pdefaults = getattr(gen, '_func_param_defaults', None) or {}
-                # param-keyed dict form
-                if isinstance(_pdefaults, dict):
-                    _cand = _pdefaults.get(_fcname)
-                    if _cand is not None and not isinstance(_cand, list):
-                        _pd = _cand
-                    else:
-                        # function-keyed form: {func_name: [(param, default_node), ...]}
-                        for _k, _v in _pdefaults.items():
-                            if isinstance(_v, list):
-                                for _pair in _v:
-                                    try:
-                                        if _pair and _pair[0] == _fcname:
-                                            _pd = _pair[1]
-                                            break
-                                    except Exception:
-                                        pass
-                            if _pd is not None:
-                                break
-                if _pd is None and getattr(gen, '_func_node', None) is not None:
-                    _fnd = getattr(gen._func_node, 'param_defaults', None) or {}
-                    if isinstance(_fnd, dict):
-                        _pd = _fnd.get(_fcname)
-                    elif isinstance(_fnd, list):
-                        for _pair in _fnd:
-                            try:
-                                if _pair and _pair[0] == _fcname:
-                                    _pd = _pair[1]; break
-                            except Exception:
-                                pass
-                if _pd is not None and _get_qualified_name is not None:
-                    try:
-                        _q = _get_qualified_name(_pd)
-                        if _q and _q in _foreign_iter:
-                            _elem_ctype = _foreign_iter[_q]
-                    except Exception:
-                        pass
-                # fallback: if callee name itself is a known foreign iterable
-                if _elem_ctype is None and _fcname in _foreign_iter:
-                    _elem_ctype = _foreign_iter[_fcname]
-            except Exception:
-                pass
             _wi = gen._cpp_fresh_name("_mg_witer")
             declared[_wi] = 'MojoList *'
             if not hasattr(gen, '_cpp_word_iter_locals'):
@@ -9313,30 +9065,6 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             except Exception:
                 _call_txt = gen._cpp_expr(s.iterable)
             _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
-            if _elem_ctype and isinstance(s.target, str) and not for_target_is_tuple(s.target) and not s.else_body:
-                _ctr = gen._cpp_fresh_name("_mg_i")
-                _tname = s.target
-                _lines = []
-                if _tname not in declared:
-                    declared[_tname] = _elem_ctype
-                    _ctype = _elem_ctype
-                    _lines.append(f"{indent}{_ctype} {_tname};")
-                else:
-                    _ctype = declared[_tname] or _elem_ctype
-                _lines.append(f"{indent}for (int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
-                if _ctype == 'double':
-                    _get = f"mojo_list_get_double({_wi}, {_ctr})"
-                elif _ctype in ('char *', 'const char *'):
-                    _get = f"mojo_list_get_str({_wi}, {_ctr})"
-                else:
-                    _get = f"mojo_list_get_int({_wi}, {_ctr})"
-                    if _ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
-                        _get = f"({ _ctype })(intptr_t){_get}"
-                _lines.append(f"{indent}    {_tname} = {_get};")
-                for inner in s.body:
-                    _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-                _lines.append(f"{indent}}}")
-                return _pre + _lines
             _inner_for = gimple_ctypes.ForStmt(
                 target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
                 body=s.body, else_body=s.else_body)
@@ -9514,30 +9242,12 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         elif _is_callable_local:
             # Look up param default
             try:
-                import mojo.middle.types as _mtypes_mod2
-                _get_qualified_name = getattr(_mtypes_mod2, '_get_qualified_name', None)
-            except Exception:
-                _get_qualified_name = None
-            try:
                 _pdefaults = getattr(gen, '_func_param_defaults', None) or {}
-                _pd = None
-                if isinstance(_pdefaults, dict):
-                    _cand = _pdefaults.get(_cl_callee)
-                    if _cand is not None and not isinstance(_cand, list):
-                        _pd = _cand
-                    else:
-                        for _k, _v in _pdefaults.items():
-                            if isinstance(_v, list):
-                                for _pair in _v:
-                                    try:
-                                        if _pair and _pair[0] == _cl_callee:
-                                            _pd = _pair[1]; break
-                                    except Exception:
-                                        pass
-                            if _pd is not None:
-                                break
-                if _pd is not None and _get_qualified_name is not None:
+                _pd = _pdefaults.get(_cl_callee)
+                if _pd is not None:
+                    # Try to extract qualified name
                     try:
+                        from mojo.middle.types import _get_qualified_name
                         _q = _get_qualified_name(_pd)
                         if _q and _q in _foreign_iter:
                             _resolved_foreign = _q
@@ -9548,18 +9258,10 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     try:
                         _fn = gen._func_node
                         _fdefaults = getattr(_fn, 'param_defaults', None) or {}
-                        _pd2 = None
-                        if isinstance(_fdefaults, dict):
-                            _pd2 = _fdefaults.get(_cl_callee)
-                        elif isinstance(_fdefaults, list):
-                            for _pair in _fdefaults:
-                                try:
-                                    if _pair and _pair[0] == _cl_callee:
-                                        _pd2 = _pair[1]; break
-                                except Exception:
-                                    pass
-                        if _pd2 is not None and _get_qualified_name is not None:
+                        _pd2 = _fdefaults.get(_cl_callee)
+                        if _pd2 is not None:
                             try:
+                                from mojo.middle.types import _get_qualified_name
                                 _q = _get_qualified_name(_pd2)
                                 if _q and _q in _foreign_iter:
                                     _resolved_foreign = _q
@@ -9572,7 +9274,6 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         # If we have a resolved foreign table entry that gives iterator element ctype,
         # we need to handle it (step 4)
         if _resolved_foreign is not None and _resolved_foreign in _foreign_iter:
-            _elem_ctype = _foreign_iter[_resolved_foreign] or 'int64_t'
             _wi = gen._cpp_fresh_name("_mg_witer")
             declared[_wi] = 'MojoList *'
             if not hasattr(gen, '_cpp_word_iter_locals'):
@@ -9606,32 +9307,6 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                              + f"{gen._cpp_container_cast_prefix('MojoList', False)}mojo_list_get_int({_wi}, {_ctr});")
                 for _si, _nm in enumerate(_names):
                     _lines.append(f"{indent}    {_nm} = mojo_list_get_int({_tup}, {_si});")
-                for inner in s.body:
-                    _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-                _lines.append(f"{indent}}}")
-                return _pre + _lines
-            # Single-target iteration: bind element using table's element ctype.
-            if isinstance(s.target, str):
-                _ctr = gen._cpp_fresh_name("_mg_i")
-                _tname = s.target
-                _lines = []
-                if _tname not in declared:
-                    declared[_tname] = _elem_ctype
-                    _ctype = _elem_ctype
-                    _lines.append(f"{indent}{_ctype} {_tname};")
-                else:
-                    _ctype = declared[_tname] or _elem_ctype
-                _lines.append(f"{indent}for (int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
-                if _ctype == 'double':
-                    _get = f"mojo_list_get_double({_wi}, {_ctr})"
-                elif _ctype in ('char *', 'const char *'):
-                    _get = f"mojo_list_get_str({_wi}, {_ctr})"
-                else:
-                    # MojoList*/containers and word-typed values travel as int64_t slots.
-                    _get = f"mojo_list_get_int({_wi}, {_ctr})"
-                    if _ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
-                        _get = f"({ _ctype })(intptr_t){_get}"
-                _lines.append(f"{indent}    {_tname} = {_get};")
                 for inner in s.body:
                     _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
                 _lines.append(f"{indent}}}")
@@ -10536,9 +10211,6 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                                     else 'int64_t')
                             declared[_nm] = _tct
                             lines.append(f"{indent}{'char *' if _tct == 'char *' else 'int64_t'} {_nm};")
-                    if s.else_body:
-                        _brk_var = gen._cpp_fresh_name("_mg_brk")
-                        lines.append(f"{indent}bool {_brk_var} = false;")
                     lines.append(f"{indent}for (int64_t {_ctr} = 0; "
                                  f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _itname)}); "
                                  f"{_ctr}++) {{")
@@ -10561,18 +10233,9 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                         else:
                             lines.append(f"{indent}    {_nm} = "
                                          f"mojo_list_get_int({_tupvar}, {_si});")
-                    if s.else_body:
-                        for inner in s.body:
-                            lines.extend(gen._cpp_stmt_with_break_flag(inner, declared, indent + '    ', _brk_var))
-                    else:
-                        for inner in s.body:
-                            lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                    for inner in s.body:
+                        lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
                     lines.append(f"{indent}}}")
-                    if s.else_body:
-                        lines.append(f"{indent}if (!{_brk_var}) {{")
-                        for inner in s.else_body:
-                            lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-                        lines.append(f"{indent}}}")
                     return lines
                 # A known struct-pointer element type (e.g. `Thing *`,
                 # from `_field_elem_types` -- the `self.<field>: list
@@ -10721,36 +10384,6 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 # fallback caught it first). Real: ftplib.py's mlsd.
                 _iter_list_expr = _cpp_as('MojoList *', gen._cpp_expr(s.iterable))
                 _iter_elem = 'char *'
-            elif (isinstance(s.iterable, (gimple_ctypes.TupleExpr,
-                                          gimple_ctypes.ListExpr))
-                    and isinstance(target, str) and not for_target_is_tuple(target)):
-                # `for fld in ('v', 'missing'):` — a list/tuple LITERAL used
-                # directly as the loop iterable. `_cpp_expr` already lowered
-                # the literal to a real `MojoList *` (a self-invoking lambda
-                # that constructs and fills one: there is no braced-init-list
-                # C++ value for a container in this model), but the generic
-                # range-for below emitted `for (auto fld : <that>)`, and a
-                # raw `MojoList *` has no ADL `begin`/`end` — g++:
-                # "'begin' was not declared in this scope" /
-                # "'end' was not declared in this scope". Iterate it through
-                # the same cached-local + indexed lowering every other
-                # list-valued iterable here uses. Element type comes from the
-                # literal elements themselves (all-str -> char *, all-float
-                # -> double, else the boxed int64_t convention). Real: the
-                # nested recursive generator in
-                # test_gimple_generator_runner.py looping over
-                # `('v', 'missing')` while walking struct attributes.
-                _iter_list_expr = _cpp_as('MojoList *', iter_expr)
-                _lit_etype = None
-                for _lit_el in s.iterable.elements:
-                    _lit_ect = gimple_exprtypes._infer_simple_expr_ctype(
-                        _lit_el, gen._cpp_declared,
-                        getattr(gen, '_cpp_gen_self_fields', None),
-                        gen._async_api) or 'int64_t'
-                    _lit_etype = (_lit_ect if _lit_etype is None
-                                  else (gimple_ctypes.TypeLattice.join(
-                                      _lit_etype, _lit_ect) or 'int64_t'))
-                _iter_elem = _lit_etype
             elif (isinstance(s.iterable, gimple_ctypes.IdentExpr)
                     and gen._cpp_declared is not None
                     and gen._cpp_declared.get(s.iterable.name) == 'char *'):
@@ -10810,16 +10443,6 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 _cached = gen._cpp_fresh_name("_mg_iter")
                 _ctr = gen._cpp_fresh_name("_mg_i")
                 lines = [f"{indent}MojoList *{_cached} = {_iter_list_expr};"]
-                # for/else: the else body runs only when the loop completes
-                # WITHOUT a `break`. This lowering has to carry it itself (it
-                # returns before the generic for/else block below), with the
-                # same shared break-flag protocol that block uses; without it
-                # a `for x in <list-valued expr>: ... else: ...` silently
-                # dropped the else body.
-                _iter_brk = None
-                if s.else_body:
-                    _iter_brk = gen._cpp_fresh_name("_mg_brk")
-                    lines.insert(0, f"{indent}bool {_iter_brk} = false;")
                 if _iter_elem == 'char *':
                     if not target_was_declared:
                         declared[target] = 'char *'
@@ -10847,18 +10470,9 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                                  f"{_ctr} < mojo_list_len({_cached}); {_ctr}++) {{")
                     lines.append(f"{indent}    {target} = mojo_list_get_int({_cached}, {_ctr});")
                 for inner in s.body:
-                    if _iter_brk is None:
-                        lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-                    else:
-                        lines.extend(gen._cpp_stmt_with_break_flag(
-                            inner, declared, indent + '    ', _iter_brk))
+                    lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
                 _cpp_refuse_unpacking_target(target)
                 lines.append(f"{indent}}}")
-                if _iter_brk is not None:
-                    lines.append(f"{indent}if (!{_iter_brk}) {{")
-                    for inner in s.else_body:
-                        lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-                    lines.append(f"{indent}}}")
                 return lines
             if s.else_body:
                 # for/else: the else body runs only when the loop

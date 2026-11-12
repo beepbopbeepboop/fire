@@ -336,22 +336,6 @@ def _assign_target(gen, tgt, et, ev):
             if ev in gen._dyn_word_vals:
                 gen._dyn_word_vals.add(_un)
             gen._boxed_vals.add(_un)
-            # A tagged word stays tagged through the bind: the local holds the
-            # same box, and the arithmetic/comparison selectors key off
-            # `_tagged_word_vals` to read it by kind. Without this a call
-            # result bound to a name (`l = eval_const(x)`) was boxed for
-            # printing but read as a plain integer by `l + r`. The NAME is
-            # recorded too, not just the temp: a later read of a plain local
-            # lowers to the name itself, so a temp-only marker never reached
-            # the operand (`a = f(0); print(a * 2)` printed the box address).
-            if ev in getattr(gen, '_tagged_word_vals', ()):
-                gen._tagged_word_vals.add(_un)
-                if (isinstance(tgt, IdentExpr)
-                        and gen.var_types.get(_as_str(tgt.name), 'int64_t')
-                        == 'int64_t'):
-                    _tn = _as_str(tgt.name)
-                    gen._tagged_word_vals.add(_tn)
-                    gen._boxed_vals.add(_tn)
             ev = _un
         gen._track_pointer_actual_type(tgt.name, gen.var_types[tgt.name], ev, et)
         gen._safe_coerce_emit(et, gen.var_types[tgt.name], ev, gen._write_dest(tgt.name))

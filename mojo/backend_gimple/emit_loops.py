@@ -280,14 +280,7 @@ def _re_sub_repl_is_callback(gen, cb_arg) -> bool:
     the only way to reference "a function" is by its bare, undeclared
     name — a closure (tracked in `_closure_envs`) or a plain top-level
     `def` name — so a bare identifier that's already a known local/
-    global *variable* can't be one; that's the tell used below.
-
-    Every LambdaExpr is a callable, capturing or not: a non-capturing one
-    lifts to a bare top-level C function, a capturing one to a
-    MojoBoundMethod whose (fn, env) _lower_re_sub_callback unpacks. Neither
-    is a replacement string, so neither may fall to the else branch."""
-    if isinstance(cb_arg, gimple_ctypes.LambdaExpr):
-        return True
+    global *variable* can't be one; that's the tell used below."""
     if not isinstance(cb_arg, gimple_ctypes.IdentExpr):
         return False
     if cb_arg.name in gen._closure_envs:
@@ -301,16 +294,7 @@ def _lower_re_sub_callback(gen, cb_arg) -> tuple[str, str]:
     """Resolve a re.sub(pattern, CALLBACK, src) callback argument to a
     (fn_ptr_temp, env_temp) pair of void* values, shared by both the
     POSIX-backed mojo_re_sub_fn path and the regex-engine-backed
-    mojo_regex_sub_fn path (identical callback ABI: char *(*)(void *, char *)).
-
-    For LambdaExpr:
-    - If the lambda captures enclosing locals (detected by lower_expr adding it to
-      gen._closure_vals), its value is a MojoBoundMethod whose fn takes the env as
-      its leading argument (the mojo_bound_method_call_N convention). That is the
-      regex callback ABI exactly, so the callback gets (bm->fn, bm->self).
-    - If the lambda is non-capturing, lower_expr returns a bare function pointer,
-      which the callback path uses with env=0.
-    """
+    mojo_regex_sub_fn path (identical callback ABI: char *(*)(void *, char *))."""
     if isinstance(cb_arg, gimple_ctypes.IdentExpr) and cb_arg.name in gen._closure_envs:
         # _closure_envs maps inner_name → env_var (NOT lifted_name)
         # Get the actual lifted function name from _all_closures
@@ -331,40 +315,11 @@ def _lower_re_sub_callback(gen, cb_arg) -> tuple[str, str]:
         else:
             gen._emit(f'  {env_t} = (void *)0;')
         return fn_ptr_t, env_t
-    # Fallback: treat callback as a simple function pointer.
-    #
-    # Route the conversion through `_coerce_to_type`, never a hand-written
-    # `(void *){cb_val}`: a bare top-level `def` lowers to the file-scope
-    # `static void * _funcptr_<fn>` (see calls_shared._callable_value_symbol),
-    # and a C-style cast whose operand is that GLOBAL DECL is not a legal
-    # raw-GIMPLE operand — gcc reports "invalid operand in unary operation"
-    # for `_t6 = (void *)_funcptr_repl_9f63a2;` inside a `__GIMPLE` body (the
-    # `.ci` parse `fire.py build` uses), while the bare assignment
-    # `_t6 = _funcptr_repl_9f63a2;` is accepted. `_coerce_to_type` already
-    # owns this rule (same `void *` is a plain copy, any other type is
-    # materialised into a register temp before the cast), so the fix is to
-    # use it rather than to spell a second answer here.
-    if isinstance(cb_arg, gimple_ctypes.LambdaExpr):
-        # Lower the lambda; after lowering, we can check whether it produced
-        # a bound method (capturing) or a bare function pointer (non-capturing)
-        # by looking in gen._closure_vals: the capturing path adds its result
-        # to _closure_vals, the non-capturing path does not.
-        cb_type, cb_val = gen.lower_expr(cb_arg)
-        if cb_val in gen._closure_vals:
-            fn_ptr_t = gen._call_expr('void *', 'mojo_bound_method_fn',
-                                      [('void *', cb_val)])
-            env_t = gen._call_expr('void *', 'mojo_bound_method_self',
-                                   [('void *', cb_val)])
-            return fn_ptr_t, env_t
-        fn_ptr_t = gen._new_val('void *', f'(void *){cb_val}')
-        env_t = gen._new_val('void *', '(void *)0')
-        return fn_ptr_t, env_t
-    # Fallback: treat callback as a simple function pointer.
+    # Fallback: treat callback as a simple function pointer
     cb_type, cb_val = gen.lower_expr(cb_arg)
-    fn_ptr_t = gen._new_val('void *', gen._coerce_to_type(cb_type, 'void *', cb_val))
+    fn_ptr_t = gen._new_val('void *', f'(void *){cb_val}')
     env_t = gen._new_val('void *', '(void *)0')
     return fn_ptr_t, env_t
-
 
 
 def _gen_for_regex_iter(gen, node: gimple_ctypes.ForStmt, pattern: str) -> None:
@@ -401,19 +356,15 @@ def _gen_for_regex_iter(gen, node: gimple_ctypes.ForStmt, pattern: str) -> None:
     info = gen._regex_progs[pattern]
     ngroups = info['ngroups']
 
-    prog_local = gen._new_val('const ReNode *', gimple_ctypes.regex_compile.table_ref(info['prog_var']))
-    ranges_local = gen._new_val('const ReRange *', gimple_ctypes.regex_compile.table_ref(info['ranges_var']))
-    classinfo_local = gen._new_val('const ReClassInfo *', gimple_ctypes.regex_compile.table_ref(info['classinfo_var']))
-    names_local = gen._new_val('const char * *', gimple_ctypes.regex_compile.table_ref(info['names_var']))
+    prog_local = gen._new_val('const ReNode *', info['prog_var'])
+    ranges_local = gen._new_val('const ReRange *', info['ranges_var'])
+    classinfo_local = gen._new_val('const ReClassInfo *', info['classinfo_var'])
+    names_local = gen._new_val('const char * *', info['names_var'])
 
     text_len = gen._call_expr('int64_t', 'mojo_strlen', [('char *', text_val)])
     pos_var = gen._new_temp('int64_t')
     gen._emit(f'  {pos_var} = (int64_t)0;')
-    # Byte size of one int64_t group-offset array. A literal, not `sizeof`:
-    # `sizeof` is not a GIMPLE operand, so a `__GIMPLE` body (a method or a
-    # lifted closure) that spelled it was refused by gcc -x c. int64_t is
-    # exactly 64 bits (C99 7.18.1.1), so 8 is the width, not a guess.
-    gsize = gen._new_val('int64_t', str(8 * (ngroups + 1)))
+    gsize = gen._new_val('int64_t', f'(int64_t)(sizeof(int64_t) * {ngroups + 1})')
     gstart_vp = gen._new_val('void *', f'malloc ({gsize})')
     gstart_var = gen._new_val('int64_t *', f'(int64_t *){gstart_vp}')
     gend_vp = gen._new_val('void *', f'malloc ({gsize})')
@@ -459,14 +410,8 @@ def _gen_for_regex_iter(gen, node: gimple_ctypes.ForStmt, pattern: str) -> None:
     # pos = (mend > pos) ? mend : pos + 1 — advance past the match, or by
     # one char on a zero-width match, exactly like Python's finditer.
     pos_plus1 = gen._inc_val(pos_var)
-    # `mend_var` is address-taken (`&mend_var` is the out-param of
-    # mojo_regex_search), and raw GIMPLE rejects an addressable local as a
-    # comparison or `?:` operand ("invalid operands in binary operation").
-    # Read it once into a plain temp and use that for both the compare and
-    # the select.
-    mend_val = gen._new_val('int64_t', mend_var)
-    cmp_t = gen._new_val('_Bool', f'{mend_val} > {pos_var}')
-    next_pos = gen._new_val('int64_t', f'{cmp_t} ? {mend_val} : {pos_plus1}')
+    cmp_t = gen._new_val('_Bool', f'{mend_var} > {pos_var}')
+    next_pos = gen._new_val('int64_t', f'{cmp_t} ? {mend_var} : {pos_plus1}')
     gen._emit(f'  {pos_var} = {next_pos};')
     gen._emit(f'  goto {bb_cond};')
     gen._emit_label(bb_after)
@@ -506,15 +451,14 @@ def _emit_regex_scan(gen, pattern: str, text_val: str) -> tuple:
     target is `bb_post`, which is where the advance lives."""
     info = _regex_prog_for(gen, pattern)
     ngroups = info['ngroups']
-    prog_local = gen._new_val('const ReNode *', gimple_ctypes.regex_compile.table_ref(info['prog_var']))
-    ranges_local = gen._new_val('const ReRange *', gimple_ctypes.regex_compile.table_ref(info['ranges_var']))
-    classinfo_local = gen._new_val('const ReClassInfo *', gimple_ctypes.regex_compile.table_ref(info['classinfo_var']))
+    prog_local = gen._new_val('const ReNode *', info['prog_var'])
+    ranges_local = gen._new_val('const ReRange *', info['ranges_var'])
+    classinfo_local = gen._new_val('const ReClassInfo *', info['classinfo_var'])
 
     text_len = gen._call_expr('int64_t', 'mojo_strlen', [('char *', text_val)])
     pos_var = gen._new_temp('int64_t')
     gen._emit(f'  {pos_var} = (int64_t)0;')
-    # Group-offset array byte size: why this is a literal is noted in _gen_for_regex_iter.
-    gsize = gen._new_val('int64_t', str(8 * (ngroups + 1)))
+    gsize = gen._new_val('int64_t', f'(int64_t)(sizeof(int64_t) * {ngroups + 1})')
     gstart_vp = gen._new_val('void *', f'malloc ({gsize})')
     gstart_var = gen._new_val('int64_t *', f'(int64_t *){gstart_vp}')
     gend_vp = gen._new_val('void *', f'malloc ({gsize})')
@@ -2307,18 +2251,9 @@ def _gen_for_enumerate(gen, node):
         for vi, vname in enumerate(tuple_vars):
             if vname == '_':
                 continue
+            cv = gen._cname(vname)
             force = gen.var_types.get(vname) not in (None, pair_elem)
             gen._declare_var(vname, pair_elem, force=force)
-            # AFTER the declaration, never before: `force` mints a fresh
-            # `_shadowN_<name>` C identifier and re-points `_c_names` at it,
-            # so a `_cname` captured first names the OLD variable. Real: a
-            # loop target already typed `char *` by an earlier use, unpacked
-            # from a runtime pair list (`for i, (a, b) in enumerate(pairs)`),
-            # force-renamed `a` to an `int64_t` shadow while the store below
-            # still wrote the ORIGINAL `char * a` — `a = mojo_list_get_int(...)`
-            # uncast (-Wint-conversion), and the body read the never-assigned
-            # shadow. See bug:CODEGEN_unpack_loop_var_unified_to_char_star_loses_slot_store_cast.
-            cv = gen._cname(vname)
             if suf_inner == 'str':
                 ts = gen._new_val('char *', f"mojo_list_get_str ({tuple_ptr}, {vi})")
                 if gen.var_types.get(vname, pair_elem) == 'char *':

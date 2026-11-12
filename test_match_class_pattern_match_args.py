@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression: positional class patterns must bind through __match_args__ (COMPILE_FAIL_Tools_cases_generator_analyzer-part1, fixed):
+"""Regression for bugs/mid/COMPILE_FAIL_Tools_cases_generator_analyzer-part1:
 positional class patterns (`case C(x, y):`) must bind through
 `C.__match_args__`, not through the capture names.
 
