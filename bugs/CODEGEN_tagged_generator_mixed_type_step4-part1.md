@@ -14,8 +14,8 @@ it. No compiler code changes — that is part2.
 
 ## Current state (measured 2026-11-12, on this branch's HEAD)
 
-- `bugs/mid/CODEGEN_tagged_generator_mixed_type_container.md` holds the open
-  decision and says exactly what measurement settles it: grep the stdlib and
+- CODEGEN_tagged_generator_mixed_type_container (resolved, option 2) held the open
+  decision and said what measurement settles it: grep the stdlib and
   `test/` corpus for the rebind shape; if none, option 2 closes the doc.
 - The reproducible census probe is committed as `test_tagged_container_corpus.py`
   (repo root). Its 2026-11-12 run:
@@ -38,10 +38,9 @@ it. No compiler code changes — that is part2.
 
        python3 tools/memslot.py --gb 8 --label tagged-container-census -- python3 test_tagged_container_corpus.py
 
-2. If the candidate count is 0, record the decision in
-   `bugs/mid/CODEGEN_tagged_generator_mixed_type_container.md`'s Status:
-   option 2, the date, the counts (stdlib/repo files scanned, candidates 0),
-   and the exact probe command. If the candidate count is non-zero, review
+2. If the candidate count is 0, record the decision (option 2) with the date,
+   the counts (stdlib/repo files scanned, candidates 0), and the exact probe
+   command in the relevant docs/status. If the candidate count is non-zero, review
    each printed candidate by hand; a real kind-mixed generator rebinding a
    container to its loop variable flips the decision to option 1 — **STOP and
    report NEEDS-INFO** with the candidates listed (part2's scope was set by
@@ -55,8 +54,8 @@ it. No compiler code changes — that is part2.
 
 ## Acceptance
 
-- `bugs/mid/CODEGEN_tagged_generator_mixed_type_container.md` records option 2
-  with the measured counts and the probe command (or the NEEDS-INFO stop path
+- CODEGEN_tagged_generator_mixed_type_container is resolved as option 2
+  with the measured counts and the probe command recorded (or the NEEDS-INFO stop path
   with the candidates listed).
 - `docs/tagged_generator_mixed_type-plan.md` step 4 reflects the decision.
 - `python3 test_tagged_container_corpus.py` exits 0.

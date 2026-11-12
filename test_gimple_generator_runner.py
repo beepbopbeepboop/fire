@@ -5400,6 +5400,23 @@ main()
     test_generator_matches_cpython("tagged_for_target_copy_into_float", _mixed_float, _mixed_float)
     test_generator_matches_cpython("tagged_for_target_plain_float_store_after_copy",
                                    _mixed_after, _mixed_after)
+    # A name bound to a tagged generator word cannot also hold a container
+    # (the box has no container constructor/kind). The refusal must name the
+    # container binding rather than describing it as str/float.
+    # CODEGEN_tagged_generator_mixed_type_container (option 2, resolved).
+    test_generator_refused("tagged_generator_mixed_type_container_refused", """\
+def g():
+    yield 1
+    yield None
+    yield 2
+def main():
+    x = [1, 2]
+    for v in g():
+        x = v
+        print(x)
+    print(len(x))
+main()
+""", "container or pointer value")
 
 def run_cpp_send_tests():
     # `it.send(v)` on a generator compiled by the C++20 backend (MOJO_CORO=cpp).

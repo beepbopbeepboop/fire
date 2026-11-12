@@ -7,8 +7,11 @@ deleted in the same commit, as for any bug.
 | doc | what it needs | for |
 |---|---|---|
 | `CODEGEN_simd_and_array_values_erase_to_int64.md` | see doc | workers |
+| `CODEGEN_tagged_generator_mixed_type_step1.md` | see doc | workers |
 | `CODEGEN_tagged_generator_mixed_type_step2.md` | see doc | workers |
+| `CODEGEN_tagged_generator_mixed_type_step3.md` | see doc | workers |
 | `CODEGEN_tagged_generator_mixed_type_step4.md` | see doc | workers |
+| `CODEGEN_tagged_generator_mixed_type_step5.md` | see doc | workers |
 | `COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md` | see doc | workers |
 | `COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md` | see doc | workers |
@@ -29,8 +32,5 @@ deleted in the same commit, as for any bug.
 | `SUITE_gimplerunner-part1.md` | see doc | workers |
 | `SUITE_gimplerunner-part2.md` | see doc | workers |
 | `SUITE_gimplerunner-part3.md` | see doc | workers |
-| `SUITE_gimplerunner-part3-part1.md` | see doc | workers |
-| `SUITE_gimplerunner-part3-part2.md` | see doc | workers |
 | `SUITE_gimplerunner.md` | see doc | workers |
-| `SUITE_gimplerunner_21_failing.md` | see doc | workers |
 | `SUITE_silentnoop.md` | see doc | workers |
