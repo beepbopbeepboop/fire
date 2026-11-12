@@ -10311,6 +10311,13 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             return 'int64_t', gen._call_expr('int64_t', 'mojo_make_int', [('char *', cp)])
         if at == 'double':
             return 'int64_t', gen._new_val('int64_t', f'(int64_t){av}')
+        # A tagged/boxed word (a double box holds the double's bits, not a
+        # numeric int64_t) must be read by kind: `mojo_box_int` returns the
+        # double box truncated toward zero (Python's `int(float)`), and the
+        # raw word for a non-double box or a plain int. Without this, int(x)
+        # of a boxed 2.5 returned the box or its bits instead of 2.
+        if at in ('int64_t', 'int', '_Bool') and av in getattr(gen, '_boxed_vals', ()):
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_box_int', [('int64_t', av)])
         if at == 'int64_t':
             return 'int64_t', av
         if at in ('int', '_Bool'):
@@ -10324,6 +10331,12 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         if at in ('int64_t', 'int', '_Bool') and gen._actual_types.get(av) == 'char *':
             cp = gen._new_val('char *', f'(char *){av}')
             return 'double', gen._call_expr('double', 'mojo_make_float', [('char *', cp)])
+        # A tagged/boxed word: `mojo_box_double` returns the double a 'd' box
+        # holds, promotes an int/None/bool box's word to double, and is a
+        # no-op cast for a plain int. Without this, float(x) of a boxed 2.5
+        # read the box pointer's bits as a double.
+        if at in ('int64_t', 'int', '_Bool') and av in getattr(gen, '_boxed_vals', ()):
+            return 'double', gen._call_expr('double', 'mojo_box_double', [('int64_t', av)])
         if at in ('int64_t', 'int', '_Bool'): return 'double', gen._new_val('double', f'(double){av}')
         if at == 'double':                    return 'double', av
 
