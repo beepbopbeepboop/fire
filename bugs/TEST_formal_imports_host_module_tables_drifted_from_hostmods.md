@@ -1,6 +1,6 @@
 # TEST: five host-module tables in formal/imports.py disagree with the tree (test_formal_imports.py, 5 FAIL)
 
-Status: OPEN, 1 of 5 fixed. Filed 2026-11-11 on master. Measured: `python3 test_formal_imports.py` gives `PASS=90 FAIL=5`; after item 1, `PASS=91 FAIL=4`.
+Status: FIXED in 587e71dc6 (and 84da0d25f for item 1). All five rows now pass; the import test's last failure is a load-sensitive timing bound (see that commit).  Filed 2026-11-11 on master. Measured: `python3 test_formal_imports.py` gives `PASS=90 FAIL=5`; after item 1, `PASS=91 FAIL=4`.
 These are not caused by the out-self or lexer work. They were red on master before it. The struct RECOVER commit does not
 own them: none of the five test names appear in its version of the file.
 
@@ -45,3 +45,7 @@ written. The tables were not updated, and the test is the thing that noticed.
 2. Make the tables agree with the tree, one commit per table, and rerun `test_formal_imports.py` after each.
 3. For item 2 and 3, decide the refusal text first, then the doc it cites: either write the doc or name the reason.
 4. Delete this doc in the commit that makes the last of the five pass.
+
+## Resolution (2026-11-11, commit 587e71dc6)
+
+All five rows pass. Item 1 (builtins) fixed in 84da0d25f. Items 2 and 3 (refusal wording and its cited doc) by the host-module branch in `unresolvable_import_error` and `bugs/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`. Item 4 (advice for a written module) by the constants-only exemption, checked against the file. Item 5 (copy's verdict) by the test row moving to `written`.
