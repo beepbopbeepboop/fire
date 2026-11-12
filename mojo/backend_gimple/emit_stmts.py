@@ -1627,6 +1627,15 @@ def _gen_stmt_AssignStmt(gen, node):
             v = gen._call_expr('int64_t', 'mojo_box_from_double', [('double', v)])
             vtype = 'int64_t'
             _keep_tagged_box = True
+        # A STR stored into a mixed tagged name is boxed the same way, as a
+        # kind-'p' box (`mojo_box_from_str`), so a C++-path literal that is not
+        # a registered string still renders as its text. Only `char *` is
+        # lifted: containers stay refused, as their own representation question.
+        if vtype == 'char *' and (_tagged_bind
+                                  or ginf.tagged_mixed_name(gen, _as_str(tname))):
+            v = gen._call_expr('int64_t', 'mojo_box_from_str', [('char *', v)])
+            vtype = 'int64_t'
+            _keep_tagged_box = True
         if ((_tagged_bind and ginf.is_non_int_c_type(gen.var_types.get(tname)))
                 or (ginf.is_non_int_c_type(vtype)
                     and ginf.tagged_mixed_name(gen, _as_str(tname)))):

@@ -5305,6 +5305,8 @@ main()
     # a char*), and the float local printed `1.0` / `0.0` for `1` / None. A
     # Mojo name has one type, so the refusal is the honest answer in either
     # direction (the copy first, or the plain store first).
+    # A str stored into a mixed tagged name is a kind-'p' box. Both directions
+    # and the reads (print, ==, +, len, f-string) are checked against CPython.
     _mixed_str = """\
 def g():
     yield 1
@@ -5312,11 +5314,31 @@ def g():
     yield 2
 def main():
     x = "s"
+    print(x)
+    for v in g():
+        x = v
+        print(x)
+        print(x == None)
+    x = "t"
+    print(x)
+    print(x + "!")
+    print(len(x))
+    print(f"<{x}>")
+main()
+"""
+    _mixed_str_after = """\
+def g():
+    yield 1
+    yield None
+    yield 2
+def main():
+    x = 0
     for v in g():
         x = v
         print(x)
     x = "t"
     print(x)
+    print(len(x))
 main()
 """
     # A float stored into a mixed tagged name is a box (`mojo_box_from_double`),
@@ -5355,7 +5377,9 @@ def main():
     print(x)
 main()
 """
-    test_generator_refused("tagged_for_target_copy_into_str_refused", _mixed_str, "refused")
+    test_generator_matches_cpython("tagged_for_target_copy_into_str", _mixed_str, _mixed_str)
+    test_generator_matches_cpython("tagged_for_target_plain_str_store_after_copy",
+                                   _mixed_str_after, _mixed_str_after)
     test_generator_matches_cpython("tagged_for_target_copy_into_float", _mixed_float, _mixed_float)
     test_generator_matches_cpython("tagged_for_target_plain_float_store_after_copy",
                                    _mixed_after, _mixed_after)

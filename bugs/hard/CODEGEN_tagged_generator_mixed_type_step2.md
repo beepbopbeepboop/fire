@@ -1,6 +1,6 @@
 # CODEGEN_tagged_generator_mixed_type_step2
 
-SPLIT: CODEGEN_tagged_generator_mixed_type_step2-part3 (part1 landed in b6c72c837, part2 in this commit)
+SPLIT: all parts have landed (part1 b6c72c837, part2 0bce80f69, part3 in the commit that adds this line).
 
 ## Parent plan
 docs/tagged_generator_mixed_type-plan.md
@@ -25,4 +25,9 @@ Step 2 complete per plan.
   so a `double` pre-pass hint no longer declares such a name a double. The two float fixtures in
   `test_gimple_generator_runner.py` are CPython-oracle cases. Runner: 434 passed, 22 failed,
   the same 22 as the baseline; all nine `tagged_for_target_*` cases pass.
-- part 3 (str): not started.
+- part 3 (landed 2026-11-11): a str stored into a mixed tagged name is a kind-'p' box
+  (`mojo_box_from_str`, `emit_stmts.py`). Reads: `x + "!"` (`emit_exprs.py`: the literal-cast arm
+  skips a boxed or dynamic operand), `len(x)` (`emit_infra.py` `_len_of_boxed`, with the new
+  narrow `mojo_is_str_box` / `mojo_str_box_word` / `mojo_word_is_text` in `fire_runtime.c`).
+  `print`, `==` and f-strings already worked. Containers stay refused (not in step 2's scope).
+  Runner: 435 passed, 22 failed, the same 22 as the baseline.

@@ -2427,6 +2427,27 @@ int mojo_boxed_is_str(int64_t v) {
     return 0;
 }
 
+/* A kind-'p' STRING BOX (`mojo_box_from_str`): true only for that kind, so a
+ * float, bytes, None or bool box is not taken as a string. The narrow predicate
+ * `len()` needs, because `mojo_boxed_is_str` deliberately rejects every box. */
+int mojo_is_str_box(int64_t v)
+{
+    if (!mojo_is_boxed(v)) return 0;
+    return ((MojoBox *)(intptr_t)v)->kind == 'p';
+}
+/* The text pointer a kind-'p' box holds, and the word itself for anything else. */
+int64_t mojo_str_box_word(int64_t v)
+{
+    if (!mojo_is_str_box(v)) return v;
+    return ((MojoBox *)(intptr_t)v)->bits;
+}
+/* A word whose text `len()` should measure: a kind-'p' box, or a bare word
+ * `mojo_boxed_is_str` already accepts. */
+int mojo_word_is_text(int64_t v)
+{
+    return mojo_is_str_box(v) || mojo_boxed_is_str(v);
+}
+
 /* A Python tuple literal lowers to the exact same MojoList as a list literal
  * (see _lower_tuple_literal in gimple_codegen.py) — there is no separate
  * container struct — so the tuple marker below is the ONLY thing that
