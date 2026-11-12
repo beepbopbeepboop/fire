@@ -5319,6 +5319,9 @@ def main():
     print(x)
 main()
 """
+    # A float stored into a mixed tagged name is a box (`mojo_box_from_double`),
+    # not a refusal. Both directions are checked against CPython, the oracle
+    # measured at test time, so these cannot pin this compiler's own answer.
     _mixed_float = """\
 def g():
     yield 1
@@ -5326,11 +5329,16 @@ def g():
     yield 2
 def main():
     x = 0.5
+    print(x)
     for v in g():
         x = v
         print(x)
+        print(x == None)
     x = 2.5
     print(x)
+    print(x + 1.0)
+    print(x * 2)
+    print(x > 1.0)
 main()
 """
     _mixed_after = """\
@@ -5348,9 +5356,9 @@ def main():
 main()
 """
     test_generator_refused("tagged_for_target_copy_into_str_refused", _mixed_str, "refused")
-    test_generator_refused("tagged_for_target_copy_into_float_refused", _mixed_float, "refused")
-    test_generator_refused("tagged_for_target_plain_float_store_after_copy_refused",
-                           _mixed_after, "refused")
+    test_generator_matches_cpython("tagged_for_target_copy_into_float", _mixed_float, _mixed_float)
+    test_generator_matches_cpython("tagged_for_target_plain_float_store_after_copy",
+                                   _mixed_after, _mixed_after)
 
 def run_cpp_send_tests():
     # `it.send(v)` on a generator compiled by the C++20 backend (MOJO_CORO=cpp).

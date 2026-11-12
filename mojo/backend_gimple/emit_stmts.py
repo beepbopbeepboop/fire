@@ -1610,6 +1610,23 @@ def _gen_stmt_AssignStmt(gen, node):
         # MIXED_NAME_NON_INT64_REFUSAL. Refused here, before any store is
         # emitted, rather than unwrapping the box into a str/float slot.
         _tagged_bind = (v in getattr(gen, '_tagged_word_vals', ()) or _for_copy)
+        # A DOUBLE stored into a mixed tagged name is boxed, not refused: the
+        # `'d'` box carries the float kind, so the name stays the box-holding
+        # int64_t local that every other store makes it (`mojo_box_from_double`,
+        # the same box `mojo_repr_boxed` and `mojo_box_word` already read).
+        # `_keep_tagged_box` keeps it: the mixed-name arm below would otherwise
+        # re-box it with `mojo_box_int`, which truncates a double box to its
+        # integer. Other non-int C types (`char *`, containers) stay refused.
+        if (vtype in gimple_ctypes._SCALAR_FLOAT_TYPES
+                and (_tagged_bind or ginf.tagged_mixed_name(gen, _as_str(tname)))):
+            # A `float` is widened to `double` first: the box holds a double.
+            if vtype != 'double':
+                _dv = gen._new_temp('double')
+                gen._emit(f'  {_dv} = (double) ({v});')
+                v = _dv
+            v = gen._call_expr('int64_t', 'mojo_box_from_double', [('double', v)])
+            vtype = 'int64_t'
+            _keep_tagged_box = True
         if ((_tagged_bind and ginf.is_non_int_c_type(gen.var_types.get(tname)))
                 or (ginf.is_non_int_c_type(vtype)
                     and ginf.tagged_mixed_name(gen, _as_str(tname)))):
@@ -1776,7 +1793,15 @@ def _gen_stmt_AssignStmt(gen, node):
             # trusted for. Real: `gen_module_impl`'s `_lens` is a dict at
             # line 1257 and a set at line 6114, and the self-host closure
             # could not be generated until this existed.
-            _mixed = tname in ginf.mixed_container_locals(gen)
+            # A box-holding name is declared int64_t whatever the pre-pass
+            # joined its bindings to: a container-mixed name, or a name bound
+            # to a tagged generator word beside plain values (`x = 0` and
+            # `x = 2.5` around `for x in g()`). Without the second half the
+            # pre-pass's `double` hint declared `x` a double at its first store,
+            # and the tagged copy inside the loop was refused. The same
+            # `tagged_mixed_name` predicate the store arm uses.
+            _mixed = (tname in ginf.mixed_container_locals(gen)
+                      or ginf.tagged_mixed_name(gen, _as_str(tname)))
             if _mixed:
                 ctype = 'int64_t'
             else:
