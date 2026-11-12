@@ -2361,6 +2361,55 @@ def _src_loc(src: str, pos: int, filename: str = "") -> str:
     return f"{line}:{col}: "
 
 
+def _iter_ast_nodes(root):
+    """Every dataclass node under `root`, depth-first, without recursion limits."""
+    stack = [root]
+    while stack:
+        x = stack.pop()
+        if isinstance(x, (list, tuple)):
+            stack.extend(x)
+        elif dataclasses.is_dataclass(x) and not isinstance(x, type):
+            yield x
+            for f in dataclasses.fields(x):
+                stack.append(getattr(x, f.name))
+
+
+def _check_out_argument_calls(stmts, filename) -> None:
+    """An `out` argument is not a call argument (measured with the real compiler,
+    2026-11-11): `def f(out x: Int)` called as `f(y)` is refused with
+    "invalid call to 'f': unexpected argument" at the argument. Checked for a
+    module-level function whose name is defined once and that has no `*args`:
+    a positional argument past the non-`out` parameters is refused. Keyword
+    arguments and a missing `out` argument are not this check."""
+    defs = {}
+    for st in stmts:
+        if type(st).__name__ == "FunctionDef":
+            defs[st.name] = defs.get(st.name, 0) + 1
+    capacity = {}
+    for st in stmts:
+        if type(st).__name__ != "FunctionDef" or defs.get(st.name) != 1:
+            continue
+        conv = st.param_convs or {}
+        if not any(v == "out" for v in conv.values()):
+            continue
+        if any(str(p[0]).startswith("*") for p in st.params):
+            continue
+        capacity[st.name] = len([p for p in st.params if conv.get(p[0]) != "out"])
+    if not capacity:
+        return
+    for node in _iter_ast_nodes(stmts):
+        if type(node).__name__ != "CallExpr":
+            continue
+        fn = node.func
+        if type(fn).__name__ != "IdentExpr" or fn.name not in capacity:
+            continue
+        cap = capacity[fn.name]
+        if len(node.args) > cap:
+            a = node.args[cap]
+            loc = f"{filename}:{a.line}:{a.col}: " if filename else f"{a.line}:{a.col}: "
+            raise RuntimeError(f"{loc}error: invalid call to '{fn.name}': unexpected argument")
+
+
 def _warn_fn_keyword(filename, tok) -> None:
     """Stage 1 of the `fn` removal (bugs/DIAGNOSTICS_fn_keyword_is_accepted_should_warn_then_refuse.md):
     a `fn` DEFINITION is still accepted, and it draws the real compiler's
@@ -8546,7 +8595,9 @@ class Parser:
         while not self._at_end():
             self._parse_stmt_into(stmts)
             self._skip_newlines()
-        return _synthesize_fieldwise_inits(stmts)
+        stmts = _synthesize_fieldwise_inits(stmts)
+        _check_out_argument_calls(stmts, self._filename)
+        return stmts
 
     def _parse_stmt_into(self, stmts: list):
         """Parse one statement and append it to `stmts`.

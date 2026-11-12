@@ -119,7 +119,6 @@ class OutParamReturnTypeDiagnostic(unittest.TestCase):
                      '        self.n = v\n')
         self.assertIn("'self' argument must have type 'Self'", str(cm.exception))
 
-    @unittest.expectedFailure  # gap: an out argument passed as a call argument
     def test_out_argument_passed_positionally_is_refused(self):
         with self.assertRaises(RuntimeError) as cm:
             _compile('def f(out x: Int):\n'
