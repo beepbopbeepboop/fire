@@ -108,6 +108,12 @@ Recorded 2026-11-02 after a near-miss report; the owner exception added
 2026-11-05, when the user asked for a runaway 46 GB `fire.py --dump-full`
 (left by an agent's own aborted build) to be killed.
 
+## Landings carry your uncommitted edits across (tools/stash_ff.py)
+The integrator gates in `../work-integ` (branch `integ`) and then moves master, which is checked out here. The final
+merge stashes your uncommitted tracked edits (by sha, never by stash position), merges, re-applies and drops the stash
+only when the re-apply was clean. A landing therefore waits only for a real textual conflict with your edits; then the
+merge is undone, your files are exactly as they were, and the next pass retries. Untracked files are not stashed.
+
 ## Bug rounds — every round must move us closer to the end
 Base directive (user, 2026-10-31): one work round handles ONE bug, fully
 finished (including its commit) before the next round starts. Earlier batches

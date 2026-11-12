@@ -23,6 +23,7 @@ One round:
 import argparse, fcntl, os, re, shutil, subprocess, sys, tempfile, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control as C
+import stash_ff as SF
 
 INTEG = os.path.join(C.PARENT, "work-integ")
 
@@ -94,14 +95,21 @@ def test_failures(tree):
 
 
 def land_on_master():
-    r = subprocess.run(["git", "merge", "--ff-only", "integ"], cwd=C.MAIN, capture_output=True, text=True)
-    if r.returncode == 0:
+    """Move master (checked out in C.MAIN, where people edit) to `integ`. The merge goes through stash_ff, so an
+    uncommitted edit to a file the landing also changes no longer stops it: the edits are carried across, and only a
+    real textual conflict with them makes the landing wait (the merge is undone, the edits are exactly as they were)."""
+    st, detail = SF.merge(C.MAIN, "--ff-only", "integ")
+    if st == "ok":
         return
+    if st == "blocked":
+        sys.exit("landing waits: %s" % detail)
     base = C.git("merge-base", "master", "integ")
     moved = C.git("diff", "--name-only", base, "master").splitlines()
     if moved and all(f in CONTROLLER_FILES for f in moved):
-        C.git("merge", "--no-edit", "-m", "integrate: merge gated tree over controller-tool commits", "integ")
-        return
+        st, detail = SF.merge(C.MAIN, "--no-edit", "-m", "integrate: merge gated tree over controller-tool commits", "integ")
+        if st == "ok":
+            return
+        sys.exit("landing waits: %s" % detail)
     sys.exit("master moved under the round (%s): cannot fast-forward; redo the round" % ", ".join(moved[:5]))
 
 

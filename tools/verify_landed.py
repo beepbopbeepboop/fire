@@ -24,6 +24,7 @@ import argparse, fcntl, json, os, re, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control as C
 import gate_ledger as G
+import stash_ff as SF
 
 VERIFY = os.path.join(C.PARENT, "work-verify")
 VERDICT = os.path.join(C.ctl_dir(), "verify.json")
@@ -130,10 +131,10 @@ def apply_findings(st, newly, recovered, sha, log, failed=()):
           % (len(newly), len(recovered), sha[:10], "\n".join(notes)), cwd=VERIFY)
     new = C.git("rev-parse", "HEAD", cwd=VERIFY)
     if C.git("rev-parse", "master") == sha:
-        r = subprocess.run(["git", "merge", "--ff-only", "verify-ledger"], cwd=C.MAIN, capture_output=True, text=True)
-        if r.returncode == 0:
+        st, detail = SF.merge(C.MAIN, "--ff-only", "verify-ledger")
+        if st == "ok":
             return new
-        print("ledger commit %s NOT landed (%s); it stays on branch verify-ledger" % (new[:10], r.stderr.strip()[:160]))
+        print("ledger commit %s NOT landed (%s: %s); it stays on branch verify-ledger" % (new[:10], st, detail[:160]))
     else:
         print("ledger commit %s NOT landed: master moved during the run; it stays on branch verify-ledger" % new[:10])
     for j in list(newly) + again:
