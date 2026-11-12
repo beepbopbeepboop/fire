@@ -1,7 +1,7 @@
 # CODEGEN: a generator returned through nested defs is refused at build
 
-Split out 2026-11-12 from `CODEGEN_tuple_slot_zero_in_collected_list_prints_none.md`
-("Second gap"), whose fix landed on this branch; the second gap was not part of it.
+Split out 2026-11-12 from the tuple-slot-zero-prints-None bug (its "Second gap"),
+whose first gap was fixed in 1f1ac8bb3; the second gap was not part of that fix.
 
 ## Reproducer (today)
 

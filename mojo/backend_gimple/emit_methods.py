@@ -3101,19 +3101,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             return gen._lower_call(_bare_node)
 
         # Check if this is a known module method
-        if (method_name == 'copysign' and len(node.args) == 2):
-            try:
-                _x_t,_x_v = gen.lower_expr(node.args[0])
-                _y_t,_y_v = gen.lower_expr(node.args[1])
-                _x_d = gen._coerce_to_type(_x_t,'double',_x_v)
-                _y_d = gen._coerce_to_type(_y_t,'double',_y_v)
-                _res = gen._new_temp('double')
-                gen._emit(f'  {_res} = __builtin_copysign ({_x_d}, {_y_d});')
-                _res_i64 = gen._new_temp('int64_t')
-                gen._emit(f'  {_res_i64} = (int64_t){_res};')
-                return 'int64_t', _res_i64
-            except Exception:
-                pass
         if (module_name == 'os' and method_name in ('fspath', 'fsdecode') and len(node.args) == 1
                 and not getattr(node, 'kwargs', None)):
             # `os.fspath(p)` of a str / bytes path is the path itself (a path-like object's
@@ -3687,16 +3674,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     _libm_m = None
                     if module_name in ('math', 'std.math') or (isinstance(module_name,str) and module_name.endswith('.math')):
                         _libm_m = 'math'
-                    if _libm_m and method_name == 'copysign' and len(node.args) == 2:
-                        _x_t,_x_v = gen.lower_expr(node.args[0])
-                        _y_t,_y_v = gen.lower_expr(node.args[1])
-                        _x_d = gen._coerce_to_type(_x_t,'double',_x_v)
-                        _y_d = gen._coerce_to_type(_y_t,'double',_y_v)
-                        _res = gen._new_temp('double')
-                        gen._emit(f'  {_res} = __builtin_copysign ({_x_d}, {_y_d});')
-                        _res_i64 = gen._new_temp('int64_t')
-                        gen._emit(f'  {_res_i64} = (int64_t){_res};')
-                        return 'int64_t', _res_i64
                 except Exception:
                     pass
                 _mgc_is_plain_fn = (
@@ -5127,20 +5104,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             except Exception:
                 pass
         if _libm_mod:
-                                    # Special handling for copysign to avoid function call issues
-            if method == 'copysign' and len(node.args) == 2:
-                try:
-                    _x_t, _x_v = gen.lower_expr(node.args[0])
-                    _y_t, _y_v = gen.lower_expr(node.args[1])
-                    _x_d = gen._coerce_to_type(_x_t, 'double', _x_v)
-                    _y_d = gen._coerce_to_type(_y_t, 'double', _y_v)
-                    _res = gen._new_temp('double')
-                    gen._emit(f'  {_res} = copysign ({_x_d}, {_y_d});')
-                    _res_i64 = gen._new_temp('int64_t')
-                    gen._emit(f'  {_res_i64} = (int64_t){_res};')
-                    return 'int64_t', _res_i64
-                except Exception:
-                    pass
             _lc = module_member_libc(_libm_mod, method)
             if _lc is not None and len(_lc[2]) == len(node.args):
                 # A libm symbol behind a module marker: lower it as the libc
@@ -7246,8 +7209,9 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
         # real MojoBytes * (the same runtime constructor `bytes(s)` uses). The
         # encoding is passed through as a char*; the runtime's
         # mojo_bytes_from_str resolves it against its codec table (utf-8,
-        # ascii, latin-1; anything else is a LookupError). `errors` is not
-        # forwarded, so every codec runs with strict error handling.
+        # ascii, latin-1; anything else is a LookupError). `errors` is the
+        # second positional argument or the `errors=` keyword, forwarded to
+        # the runtime, which honours strict (default), replace and ignore.
         if arg_pairs:
             _enc = arg_pairs[0]
         else:
@@ -7257,8 +7221,14 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
             _enc_val = gen._intern_string('utf-8')
         else:
             _enc_val = _enc[1] if _enc[0] == 'char *' else gen._coerce_to_type(_enc[0], 'char *', _enc[1])
-        _err = next(((gen.lower_expr(_kv)) for _kn, _kv in (kwargs or [])
-                     if _kn == 'errors'), None)
+        # `s.encode("ascii", "replace")` passes `errors` positionally; it was
+        # read from the keyword only, so the positional handler was dropped and
+        # every codec ran strict (UnicodeEncodeError where CPython replaces).
+        if len(arg_pairs) > 1:
+            _err = arg_pairs[1]
+        else:
+            _err = next(((gen.lower_expr(_kv)) for _kn, _kv in (kwargs or [])
+                         if _kn == 'errors'), None)
         if _err is None:
             _err_val = gen._intern_string('strict')
         else:
@@ -7496,8 +7466,14 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
             enc = _enc[1]
         else:
             enc = gen._coerce_to_type(_enc[0], 'char *', _enc[1])
-        _err = next(((gen.lower_expr(_kv)) for _kn, _kv in (kwargs or [])
-                     if _kn == 'errors'), None)
+        # The handler is the second positional or the `errors=` keyword, the
+        # same as str.encode above: `b"\xff".decode("ascii", "replace")` dropped
+        # a positional handler and ran strict.
+        if len(arg_pairs) > 1:
+            _err = arg_pairs[1]
+        else:
+            _err = next(((gen.lower_expr(_kv)) for _kn, _kv in (kwargs or [])
+                         if _kn == 'errors'), None)
         if _err is None:
             err = gen._intern_string('strict')
         else:

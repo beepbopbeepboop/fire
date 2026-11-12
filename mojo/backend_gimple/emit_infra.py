@@ -5688,7 +5688,15 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
         # discriminator so kinds survive. For a plain integer it is the same
         # decimal string.
         if et in ('int', 'int64_t'):
-            return gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', nv)])
+            # The result is a FRESH copy the caller owns (`mojo_str_word_fresh`
+            # releases the conversion's own transient/borrowed result itself),
+            # so it is registered as fresh: a consumer that reads it once
+            # (`len`, `+`, an f-string cat) frees it, where before the
+            # conversion was never freed. A consumer that stores the pointer
+            # claims nothing and the value is simply not freed, as before.
+            _sv = gen._call_expr('char *', 'mojo_str_word_fresh', [('int64_t', nv)])
+            gen._note_fresh_result(_sv)
+            return _sv
         return gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
     if et in ('double', 'float', '__fp16'):
         fv = ev if et == 'double' else gen._new_val('double', f'(double){ev}')

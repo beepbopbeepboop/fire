@@ -1092,6 +1092,10 @@ def pick_slot(item, busy):
     if item.get("only"):                       # pinned: its slot or nothing
         return pool_slot(item["pool"]) if item.get("pool") and slot_free(pool_slot(item["pool"]), busy) else None
     slots = load_pool()["slots"]
+    # A slot whose class is not a work class (`orch`, the reserved Sonnet slot for orchestration reviews) takes only
+    # tasks PINNED to it (`only`, above). Without this an UNCLASSED task (the verifier's fix-gate-*) overflowed into it
+    # whenever the ordinary slots were full or banned, and ran on paid Sonnet (2026-11-12).
+    slots = [x for x in slots if slot_class(x) in CLASSES]
     if item.get("cls"):                        # a classed task stays in its class: its slots or nothing
         slots = [x for x in slots if accepts(x, item["cls"])]
     pref = item.get("pool")

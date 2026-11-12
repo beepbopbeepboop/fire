@@ -6139,6 +6139,70 @@ def main():
 main()
 """, "0\n1\n")
 
+    # The module-level form of the same recursive walk (no enclosing function).
+    # The recursive call `walk(sub)` has an argument the static scan cannot type
+    # (`getattr(st, fld, None)`), but the `isinstance(sub, list)` guard proves
+    # it is a list, so the yielded parameter `xs` is a list, not an ambiguous
+    # slot. Used to refuse: "yields ['xs'], whose call sites do not all pass
+    # the same statically-known type".
+    test_generator_stdout("module_level_recursive_tuple_generator_getattr_guarded", """\
+def walk(xs):
+    for i, st in enumerate(list(xs)):
+        yield xs, i
+        for fld in ('body',):
+            sub = getattr(st, fld, None)
+            if isinstance(sub, list):
+                yield from walk(sub)
+
+def outer(body):
+    return list(walk(body))
+
+def main():
+    for p in outer([1, 2]):
+        print(p[1])
+main()
+""", "0\n1\n")
+
+    # The guard is what makes the recursive argument a list. Without it the
+    # argument is an untypable hole and the slot must still refuse.
+    test_generator_refused("module_level_recursive_tuple_generator_unguarded_refuses", """\
+def walk(xs):
+    for i, st in enumerate(list(xs)):
+        yield xs, i
+        for fld in ('body',):
+            sub = getattr(st, fld, None)
+            yield from walk(sub)
+
+def outer(body):
+    return list(walk(body))
+
+def main():
+    for p in outer([1, 2]):
+        print(p[1])
+main()
+""", "yields ['xs']")
+
+    # A guarded branch that rebinds the argument proves nothing about the value
+    # passed to the recursive call, so it must still refuse.
+    test_generator_refused("module_level_recursive_tuple_generator_rebound_guard_refuses", """\
+def walk(xs):
+    for i, st in enumerate(list(xs)):
+        yield xs, i
+        for fld in ('body',):
+            sub = getattr(st, fld, None)
+            if isinstance(sub, list):
+                sub = 1.5
+                yield from walk(sub)
+
+def outer(body):
+    return list(walk(body))
+
+def main():
+    for p in outer([1, 2]):
+        print(p[1])
+main()
+""", "yields ['xs']")
+
 
 def run_generator_tuple_repr_tests():
     # A tuple yielded by a generator is built by `__mojo_tuple_box_N` (the

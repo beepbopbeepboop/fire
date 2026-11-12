@@ -5080,9 +5080,9 @@ print(type(b) == bytes, len(b) == 3, b == b'abc')
 s = "é"
 print(s.encode("ascii", "replace"))
 print(s.encode("ascii", "ignore"))
-print(b"\xff".decode("ascii", "replace"))
+print(b"\\xff".decode("ascii", "replace"))
 try:
-    b"\xff\xfe".decode("utf-8")
+    b"\\xff\\xfe".decode("utf-8")
 except UnicodeDecodeError:
     print("utf-8 decode refused malformed")
 """)
@@ -13612,6 +13612,44 @@ main()
             _FAIL += 1
 
     test_module_class_attr_from_imported_global()
+
+    # A module-scope `var` initialised from a CALL to a same-file `def`,
+    # imported by name. The defining module types the global from the
+    # callee's return type (int64_t here, double for a Float64 return); the
+    # export table used to answer `void *` for every call-valued RHS, so the
+    # importer's extern disagreed with the accessor and gcc rejected the TU:
+    # "conflicting types for '<mod>__mojo_global_get_N'".
+    def _test_imported_call_initialized_global(name, defn, use_src, expect):
+        global _PASS, _FAIL, _TIMEOUT
+        try:
+            out = _compile_two_files_do_imports_and_run(
+                'xmodint_defn.mojo', defn, 'xmodint_use.mojo', use_src)
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        if out == expect:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected {expect!r}, got {out!r}")
+            _FAIL += 1
+
+    _test_imported_call_initialized_global(
+        "imported_call_initialized_global_int",
+        "def g():\n    return 7\n\nvar N = g()\n",
+        "from xmodint_defn import N\n\ndef main():\n    print(N)\n\nmain()\n",
+        "7\n")
+
+    _test_imported_call_initialized_global(
+        "imported_call_initialized_global_float",
+        "def h() -> Float64:\n    return 2.5\n\nvar F = h()\n",
+        "from xmodint_defn import F\n\ndef main():\n    print(F)\n\nmain()\n",
+        "2.5\n")
 
     # A FLOAT module-scope `var` imported by name. The defining module declared
     # its global `int` (the VarDecl pre-scan's catch-all arm had no FloatLiteral

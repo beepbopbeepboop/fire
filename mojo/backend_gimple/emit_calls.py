@@ -9614,19 +9614,6 @@ def _pack_kwargs_slot_call(gen, fname, fname_raw, arg_pairs, kwarg_dict,
 
 def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Final dispatch for user-defined and C stdlib functions."""
-    if fname_raw == 'copysign' and len(getattr(node, 'args', []) or []) == 2:
-        try:
-            _x_t, _x_v = gen.lower_expr(node.args[0])
-            _y_t, _y_v = gen.lower_expr(node.args[1])
-            _x_d = gen._coerce_to_type(_x_t, 'double', _x_v)
-            _y_d = gen._coerce_to_type(_y_t, 'double', _y_v)
-            _res = gen._new_temp('double')
-            gen._emit(f'  {_res} = copysign ({_x_d}, {_y_d});')
-            _res_i64 = gen._new_temp('int64_t')
-            gen._emit(f'  {_res_i64} = (int64_t){_res};')
-            return 'int64_t', _res_i64
-        except Exception:
-            pass
     # `_locally_binds_name` gate: BUILTIN_VALUE_MAP's entries (open,
     # filter, enumerate, str, len, sorted, ...) are all ordinary
     # identifiers a module can legally shadow with its own top-level
@@ -11883,6 +11870,40 @@ def _lower_slice_bounds(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
     return start_v, stop_v
 
 
+def _slice_slot_kinds(gen, ov: str, node, t: str) -> None:
+    """Record the per-slot kinds of `t`, a slice of the mixed list `ov`.
+
+    Slot k of the slice is slot start + k*step of `ov`, so its kinds are `ov`'s
+    kinds PICKED at those slots -- not `ov`'s whole kinds list. Copying the whole
+    list made `c = a[1:]` on `a = [1, 2.5]` read slot 0 as an int (the first
+    kind), so the float's bits printed as an integer. With constant bounds the
+    pick is Python's own slice of the static list. With a bound known only at
+    run time the static kinds cannot say, so the result is runtime-kinded: the
+    list's own kinds row (kept by the runtime's slice) answers the reads.
+    """
+    src = gen._struct_slot_kinds.get(ov)
+    if src is None:
+        gen._struct_slot_kinds.pop(t, None)
+        return
+    if isinstance(src, ginf._RuntimeKinded):
+        gen._struct_slot_kinds[t] = src
+        return
+    bounds = []
+    for part in (node.start, node.stop, getattr(node, 'step', None)):
+        if part is None:
+            bounds.append(None)
+        elif isinstance(part, gimple_ctypes.IntLiteral):
+            bounds.append(part.value)
+        else:
+            gen._struct_slot_kinds[t] = ginf._RuntimeKinded(['int', 'str'])
+            return
+    if bounds[2] == 0:
+        # A zero step is a run-time error; the runtime reports it.
+        gen._struct_slot_kinds[t] = ginf._RuntimeKinded(['int', 'str'])
+        return
+    gen._struct_slot_kinds[t] = list(src)[slice(*bounds)]
+
+
 def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
     ot, ov = gen.lower_expr(node.obj)
     # A BOXED receiver carries its real kind in `_actual_types`, and every
@@ -11993,10 +12014,7 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
             t = gen._new_val('MojoList *', f"mojo_list_slice ({ov}, {start_v}, {stop_v})")
         if ov in getattr(gen, '_maybe_kinds_vals', ()):
             gen._maybe_kinds_vals.add(t)
-            if ov in getattr(gen, '_struct_slot_kinds', {}):
-                gen._struct_slot_kinds[t] = gen._struct_slot_kinds[ov]
-            else:
-                gen._struct_slot_kinds.pop(t, None)
+            _slice_slot_kinds(gen, ov, node, t)
             gen._elem_types.pop(t, None)
             return 'MojoList *', t
         # propagate elem type

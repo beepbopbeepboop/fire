@@ -1890,8 +1890,7 @@ test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
 test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True, mem='tiny',
      extra=['test_cli_usage_text.py', 'fire.py', 'fire_main.py', 'fire_compiler.py'],
      extraglob=['**/*.py'],
-     desc='the tool prints the name it was invoked as, in usage, -v and every error',
-     disabled='bugs/gate-cli-usage-text.md')
+     desc='the tool prints the name it was invoked as, in usage, -v and every error')
 # `extraglob=['**/*.py']` is the same hole `suite-self-test` documents, one
 # subject over: `test_no_stale_command_name_in_prose` WALKS every `.py` file in
 # the tree (it ratchets `mojo <command>` out of the prose, and its doc was
@@ -2888,10 +2887,10 @@ test('formal-eh-tables', [PY, 'test_formal_eh_tables.py'],
 test('formal-dylib', [PY, 'test_formal_dylib.py'],
      deps=['preflight', 'prooflib'],
      mem='tiny',
-     expect='6 failing: two wrong-spec teeth checks (a wrong spec is accepted, since the overflow traps, '
-            'bugs/FORMAL_wrong_spec_accepted_since_overflow_traps.md) and four contract checks on branchy exports '
-            '(an exit svc steps to none, so their contracts are guarded obligations, '
-            'bugs/mid/FORMAL_svc_exit_handling_incomplete.md)',
+     expect='4 failing: three hole-count checks on the overflow-trapping exports, whose termination '
+            'obligations an exit svc keeps named (bugs/mid/FORMAL_svc_exit_handling_incomplete.md), and the '
+            'branching export whose termination the test expects proved but which stays named '
+            '(bugs/FORMAL_dylib_branchy_termination_walk_named.md)',
      desc='formal dylib emission, Mach-O re-read, dlopen, prove')
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'], mem='tiny',
