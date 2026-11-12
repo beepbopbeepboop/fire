@@ -957,18 +957,18 @@ def _cpp_fstring_list_piece(gen, expr_node, v):
     else:
         elem_cty = None
     if elem_cty == 'double':
-        return f"mojo_repr_list_doubles((MojoList *)({v}))"
+        return f"mojo_repr_list_doubles({_cpp_as('MojoList *', v)})"
     if elem_cty == 'int64_t':
-        return f"mojo_repr_list_ints((MojoList *)({v}))"
+        return f"mojo_repr_list_ints({_cpp_as('MojoList *', v)})"
     if elem_cty == '_Bool':
-        return f"mojo_repr_list_bools((MojoList *)({v}))"
+        return f"mojo_repr_list_bools({_cpp_as('MojoList *', v)})"
     if elem_cty == 'MojoBytes *':
-        return f"mojo_repr_list_bytes((MojoList *)({v}))"
+        return f"mojo_repr_list_bytes({_cpp_as('MojoList *', v)})"
     if elem_cty == 'char *':
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             "f-string interpolation of a list whose elements are str has "
             "no scalar C++ string form in this compiled generator/coroutine body")
-    return f"mojo_repr_list_kinds((MojoList *)({v}), NULL)"
+    return f"mojo_repr_list_kinds({_cpp_as('MojoList *', v)}, NULL)"
 
 
 def _cpp_string_literal_expr(gen, val: str, is_interp: str) -> str:
