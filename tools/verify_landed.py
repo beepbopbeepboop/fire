@@ -54,6 +54,17 @@ def passed_jobs(tree):
 
 
 def checkout(sha):
+    """Put the verify tree on SHA. Nobody edits this tree, but something did (2026-11-12: a stray hand-edit of
+    formal/build.py made `git checkout` abort, and the full gate silently did not run for 8 days while 239 landings
+    piled up). So uncommitted tracked edits are SAVED as a patch under .git/control/ first (never lost), then the tree
+    is reset: the verifier owns it, and a gate result on a tree with someone's edits in it would not be a result on SHA."""
+    if C.git("status", "--porcelain", "--untracked-files=no", cwd=VERIFY, check=False):
+        patch = os.path.join(C.ctl_dir(), "verify-dirty-%s.patch" % time.strftime("%Y%m%d-%H%M%S"))
+        diff = subprocess.run(["git", "diff", "HEAD"], cwd=VERIFY, capture_output=True, text=True).stdout
+        with open(patch, "w") as f:
+            f.write(diff)
+        print("verify tree %s had uncommitted edits: saved to %s (git apply to restore), tree reset" % (VERIFY, patch), flush=True)
+        C.git("reset", "-q", "--hard", cwd=VERIFY)
     C.git("checkout", "-q", "--detach", sha, cwd=VERIFY)
 
 
@@ -165,7 +176,7 @@ def main():
     if not os.path.isdir(VERIFY):
         C.git("worktree", "add", "--detach", VERIFY, sha)
     else:
-        C.git("checkout", "-q", "--detach", sha, cwd=VERIFY)
+        checkout(sha)
     log = os.path.join(VERIFY, "verify-%s.log" % sha[:8])
     cmd = ["python3", "tools/suite.py", "gate"] + C.gate_skip_args()
     t0 = time.time()
