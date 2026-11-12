@@ -2,7 +2,7 @@
 # boxed string word payload (not the raw tagged word pointer) to string
 # consumers like concatenation. `(x or '') + 'z'` where x is a received
 # tagged string/None word must behave as in CPython.
-# (bugs/mid/SUITE_gimplegenerators.md, received_or_str_operand_cpp)
+# (SUITE_gimplegenerators received_or_str_operand_cpp, fixed on this branch)
 
 import test_gimple_generator_runner as t
 

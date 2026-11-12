@@ -6620,11 +6620,44 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
                    '_ASYNC_FN_NAMES', '_STRUCT_NAMES',
                    '_UNTHREADABLE_NESTED_ASYNC_GENS', '_NATIVE_FUTURE_CLASSES',
                    '_NO_WD_FORWARD', '_VALUE_USED_FUNCS', '_FUNC_RET_KIND',
-                   '_MODULE_FUNC_NAMES', '_GEN_RESOLVING', '_GEN_REC_ASSUME'):
+                   '_MODULE_FUNC_NAMES', '_GEN_RESOLVING', '_GEN_REC_ASSUME',
+                   '_ASYNC_HANDLE_KIND_BY_FUNC'):
             _v = getattr(_coro2, _c, None)
             if isinstance(_v, (dict, list, set)):
                 try: _v.clear()
                 except Exception: pass
+        # Counters / single-slot state containers must be reset to their
+        # initial values, not just cleared (some are indexed as [0]).
+        _async_ret = getattr(_coro2, '_ASYNC_RET_KIND', None)
+        if isinstance(_async_ret, list):
+            try:
+                _async_ret[:] = ['i']
+            except Exception:
+                pass
+        _await_tmp = getattr(_coro2, '_AWAIT_TMP', None)
+        if isinstance(_await_tmp, list):
+            try:
+                _await_tmp[:] = [0]
+            except Exception:
+                pass
+        _aw_counter = getattr(_coro2, '_AW_COUNTER', None)
+        if isinstance(_aw_counter, list):
+            try:
+                _aw_counter[:] = [0]
+            except Exception:
+                pass
+        _yf_counter = getattr(_coro2, '_yf_counter', None)
+        if isinstance(_yf_counter, list):
+            try:
+                _yf_counter[:] = [0]
+            except Exception:
+                pass
+        _py_src = getattr(_coro2, '_PY_SRC', None)
+        if isinstance(_py_src, list):
+            try:
+                _py_src[:] = [False]
+            except Exception:
+                pass
     except Exception:
         pass
     try:
@@ -6677,11 +6710,9 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # compile boundary (next step).
     try:
         for _modname, _names in (
-            ('mojo.backend_gimple.cpp_async', ('_FOREIGN_CALLABLES', '_RUNTIME_CALLABLE_WORDS')),
-            ('mojo.backend_gimple.emit_exprs', ('_RUNTIME_CALLABLE_VALUES_NAMES',)),
+            ('mojo.backend_gimple.cpp_async', ('_FOREIGN_CALLABLES',)),
             ('mojo.backend_gimple.emit_methods', ('_MODULE_MEMBER_LIBC',)),
             ('mojo.backend_gimple.emit_funcs', ('_SELFHOST_EXTRA_FIELD_CACHE',)),
-            ('mojo.middle.calls_shared', ('_RUNTIME_CALLABLE_VALUES',)),
             ('mojo.middle.iter_factory', ('_MOJO_ELEM_C',)),
         ):
             import importlib as _il2
