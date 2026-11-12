@@ -971,7 +971,7 @@ def cmd_gate(a):
     """gate list | gate off PATTERN --reason R --doc bugs/<name> --worker NAME | gate on PATTERN"""
     cfg = gates_cfg()
     if a.action == "list":
-        print("landing:", ", ".join(cfg["landing"]), "| full every", cfg["full_every_minutes"], "min")
+        print("landing:", ", ".join(cfg["landing"]), "| full gate: whenever a landing since the last run touches something a gate reads")
         for pat, e in cfg.get("off", {}).items():
             print("OFF  %-40s %s  (doc %s, worker %s, since %s)" % (pat, e["reason"], e["doc"], e["worker"], e["since"]))
         return
