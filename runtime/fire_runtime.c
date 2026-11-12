@@ -2427,27 +2427,6 @@ int mojo_boxed_is_str(int64_t v) {
     return 0;
 }
 
-/* A kind-'p' STRING BOX (`mojo_box_from_str`): true only for that kind, so a
- * float, bytes, None or bool box is not taken as a string. The narrow predicate
- * `len()` needs, because `mojo_boxed_is_str` deliberately rejects every box. */
-int mojo_is_str_box(int64_t v)
-{
-    if (!mojo_is_boxed(v)) return 0;
-    return ((MojoBox *)(intptr_t)v)->kind == 'p';
-}
-/* The text pointer a kind-'p' box holds, and the word itself for anything else. */
-int64_t mojo_str_box_word(int64_t v)
-{
-    if (!mojo_is_str_box(v)) return v;
-    return ((MojoBox *)(intptr_t)v)->bits;
-}
-/* A word whose text `len()` should measure: a kind-'p' box, or a bare word
- * `mojo_boxed_is_str` already accepts. */
-int mojo_word_is_text(int64_t v)
-{
-    return mojo_is_str_box(v) || mojo_boxed_is_str(v);
-}
-
 /* A Python tuple literal lowers to the exact same MojoList as a list literal
  * (see _lower_tuple_literal in gimple_codegen.py) — there is no separate
  * container struct — so the tuple marker below is the ONLY thing that
@@ -9095,13 +9074,7 @@ int mojo_dict_eq(MojoDict *a, MojoDict *b, int va, int vb)
     for (int64_t i = 0; i < a->cap; i++) {
         _DictSlot *sa = &a->slots[i];
         if (!sa->key) continue;
-        /* The key is looked up with the dict's OWN probe: an integer-domain slot
-         * (keykind 2) holds its number in ikey, not in the text, so it goes through
-         * _dict_lookup_ik; every other domain uses the string probe. The string
-         * probe on an integer slot missed, so equal int-keyed dicts compared
-         * unequal (d = {1: 2}; e = {1: 2}; d == e was False). */
-        _DictSlot *sb = sa->keykind == 2 ? _dict_lookup_ik(b, sa->ikey)
-                                          : _dict_lookup_k(b, sa->key, sa->keykind);
+        _DictSlot *sb = _dict_find_k(b, sa->key, sa->keykind);
         if (!sb || !sb->key) return 0;               /* key absent from b */
         /* The value is an untagged word: the codegen's static value type when
          * it has one, else this slot's own `kind` tag. */

@@ -5651,21 +5651,11 @@ class Interpreter:
         # argv instead of the isolated one and take the same branch forever.
         if module == 'sys' or module.split('.')[0] == 'sys':
             return self._sys_proxy
-        # A name with no dot in it resolves exactly as `from module import
-        # ...` does — the same sys/types proxies, the same sibling `.mojo`
-        # preference, the same real-importlib fallback, the same
-        # ModuleNotFoundError propagation (see `_resolve_from_import_module`
-        # for all three). Delegating rather than repeating that chain is not
-        # only DRY: it gives the two methods the SAME return type, which
-        # matters because `_LazyImportTarget.load` binds them to one slot.
-        # Returning `_TYPES_PROXY` (`_TypesProxy *`) beside `mod`
-        # (`_MojoModuleObject *`) made the join of this method's returns
-        # order-dependent — two distinct pointers join to the box, a pointer
-        # and the box join to the pointer — so the inferred type, and with it
-        # the C type every caller's temp is declared with, differed between
-        # inference passes while the emitted prototype kept the first one.
-        if alias or '.' not in module:
-            return self._resolve_from_import_module(module)
+        # `types.LazyImportType` must name OUR proxy class: lazy imports of
+        # `.mojo` sibling modules resolve through this interpreter, so the
+        # host's native lazy-import type would describe the wrong objects.
+        if module == 'types':
+            return _TYPES_PROXY
         # Prefer a sibling .mojo file/package over a same-named *real*
         # Python module — otherwise a coincidentally-named .py file
         # anywhere on sys.path (including this very project's own helper
@@ -5677,6 +5667,8 @@ class Interpreter:
         # name collision with an installed/local Python module.
         mod = self._load_mojo_sibling_module(module)
         if mod is not None:
+            if alias or '.' not in module:
+                return mod
             # `import a.b` binds the top-level name `a`; _bind_dotted_import
             # builds the intermediate namespace chain (and replaces any lazy
             # placeholder under that name rather than trying to reify it).
@@ -5701,6 +5693,8 @@ class Interpreter:
         # above, so by the time we reach the real importlib call, a
         # ModuleNotFoundError here always means a genuinely missing module.
         imported = importlib.import_module(module)
+        if alias or '.' not in module:
+            return imported
         # `import a.b` binds the top-level package name `a`.
         return importlib.import_module(module.split('.')[0])
 
@@ -6821,11 +6815,7 @@ class Interpreter:
         cond = self.eval_expr(node.value)
         if not cond:
             msg = self.eval_expr(node.msg) if getattr(node, 'msg', None) is not None else None
-            # Same `Assert Error: ` prefix the compiled path prints
-            # (mojo/backend_gimple/emit_stmts.py, the assert trap), so the
-            # modular `assert_failure_message.mojo` CHECK line holds on both.
-            text = msg if msg is not None else 'assert failed'
-            raise AssertionError(f"{self._loc(node)}Assert Error: {text}")
+            raise AssertionError(f"{self._loc(node)}{msg if msg is not None else 'assert failed'}")
         return None
 
     def execute_NonlocalStmt(self, node):
@@ -7882,38 +7872,8 @@ class Interpreter:
         else:
             raise NotImplementedError(f"{self._loc(expr)}Unary operator {op} not implemented")
 
-    def _eval_constrained_bracket(self, expr):
-        """`constrained[cond, msg]()` — the bracket form of Mojo's builtin.
-
-        The compiled path diagnoses a provably-false condition at compile time
-        (mojo/backend_gimple/emit_calls.py, `constrained`). The interpreter has
-        no compile-time pass, so it checks the condition when the call runs:
-        false raises `constraint failed: <msg>` (or `constraint failed` with no
-        message), true is a no-op. A name the user has bound themselves is a
-        real callee and is not intercepted. The message is only evaluated on
-        failure, and an error in the condition propagates rather than being
-        read as false."""
-        idx = expr.func.index
-        if isinstance(idx, (N.TupleExpr, N.ListExpr)):
-            elems = list(getattr(idx, 'elements', None) or [])
-        else:
-            elems = [idx]
-        if not elems:
-            raise TypeError(f"{self._loc(expr)}constrained[] needs a condition")
-        if self.eval_expr(elems[0]):
-            return None
-        msg = self.eval_expr(elems[1]) if len(elems) > 1 else None
-        text = 'constraint failed' if msg is None else f'constraint failed: {msg}'
-        raise RuntimeError(f"{self._loc(expr)}{text}")
-
     def eval_CallExpr(self, expr):
         """Evaluate function call."""
-        func_node = expr.func
-        if (isinstance(func_node, N.SubscriptExpr)
-                and isinstance(func_node.obj, N.IdentExpr)
-                and func_node.obj.name == 'constrained'
-                and not self.scope.has('constrained')):
-            return self._eval_constrained_bracket(expr)
         func = self.eval_expr(expr.func)
         # Call-site unpacking: `g(*args)` / `g(**opts)`. fire_compiler.py's
         # LPAREN arg-list parser lets `_parse_unary` wrap a starred argument

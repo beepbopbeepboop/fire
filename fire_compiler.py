@@ -740,9 +740,6 @@ class FunctionDef:
     # is: that list is the RUNTIME parameter list and its length is the
     # trailing-default offset arithmetic's input.
     comptime_param_annotations: dict = field(default_factory=dict)
-    # Names declared `*Name: Type` in the bracket list (variadic parameters),
-    # in declaration order. Read by _check_variadic_element_types.
-    variadic_bracket_params: list = field(default_factory=list)
     is_generator: bool = False  # True if `yield`/`yield from` appears directly in this
         # function's own body (not inside a nested def/lambda/comprehension — a `yield`
         # there belongs to THAT inner scope, matching real Python scoping rules).
@@ -890,13 +887,6 @@ class StructDef:
     # dropped PEP 728's `extra_items`/`closed` before any consumer could see
     # them — the root cause of PYTHON3.15_typeddict_extra_items.
     keywords: list = field(default_factory=list)
-    # The `where` clauses after the parameter list, parsed the same way as
-    # FunctionDef.where_clause: None when absent, one expression, or a list.
-    # A `(cond, "message")` entry is a TupleExpr. See _parse_where_clauses.
-    where_clause: object = None
-    # (name, type-annotation source) for each bracket parameter, in declaration
-    # order. Read by _check_inferred_param_dependencies.
-    bracket_types: list = field(default_factory=list)
     line: int = 0
     col: int = 0
     # A "mark visited" flag set via plain attribute assignment (not passed to
@@ -2384,199 +2374,6 @@ def _iter_ast_nodes(root):
                 stack.append(getattr(x, f.name))
 
 
-def _parse_type_text(text):
-    """The expression AST of a type annotation's source text, or None."""
-    try:
-        return Parser(py_tokenize(text))._parse_expr(0)
-    except Exception:
-        return None
-
-
-def _is_placeholder(e) -> bool:
-    return type(e).__name__ == "IdentExpr" and e.name == "_"
-
-
-def _has_placeholder(e) -> bool:
-    if e is None:
-        return False
-    if _is_placeholder(e):
-        return True
-    if type(e).__name__ == "SubscriptExpr":
-        return _has_placeholder(e.obj) or _has_placeholder(e.index)
-    if type(e).__name__ == "TupleExpr":
-        return any(_has_placeholder(x) for x in e.elements)
-    return False
-
-
-def _type_elements(e) -> list:
-    """The bracket arguments of a subscript type, as a list (one for `T[x]`)."""
-    idx = e.index
-    if type(idx).__name__ == "TupleExpr":
-        return list(idx.elements)
-    return [idx]
-
-
-def _render_type(e, env) -> str:
-    """Source text of a type expression, with each name in `env` replaced by its
-    already-rendered text. Source is written the way Mojo prints it:
-    `Pair[c, c]`."""
-    n = type(e).__name__
-    if n == "IdentExpr":
-        return env.get(e.name, e.name) if env else e.name
-    if n == "IntLiteral":
-        return f"Int({e.value})"
-    if n == "SubscriptExpr":
-        args = ", ".join(_render_type(x, env) for x in _type_elements(e))
-        return f"{_render_type(e.obj, env)}[{args}]"
-    if n == "TupleExpr":
-        return "(" + ", ".join(_render_type(x, env) for x in e.elements) + ")"
-    return "?"
-
-
-def _idents_in_order(e, out: list) -> list:
-    """Every name in `e`, in the order it first appears, appended to `out`."""
-    n = type(e).__name__
-    if n == "IdentExpr":
-        if e.name not in out:
-            out.append(e.name)
-    elif n == "SubscriptExpr":
-        _idents_in_order(e.obj, out)
-        for x in _type_elements(e):
-            _idents_in_order(x, out)
-    elif n == "TupleExpr":
-        for x in e.elements:
-            _idents_in_order(x, out)
-    return out
-
-
-def _check_inferred_param_dependencies(stmts, filename) -> None:
-    """An inferred parameter (`_` in its type) cannot depend on a non-inferred
-    parameter of the same signature (measured with the real compiler, 2026-11-11,
-    modular test/mojo-parser/autoparam_dependency_errors.mojo):
-
-        struct NeedsPair[a: Int, b: Int, p: Pair[a, b]]: ...
-        struct RepeatedDep[c: Int, X: NeedsPair[c, c, _]]: ...
-        # error: inferred parameter of type 'Pair[c, c]' cannot depend on
-        #        non-inferred parameter 'c'
-
-    The `_` in `NeedsPair[c, c, _]` is the implicit parameter `p` of
-    NeedsPair; its type `Pair[a, b]` with `a`, `b` replaced by the arguments
-    is `Pair[c, c]`. Reported once per distinct non-inferred name it mentions,
-    at the struct's line. Only a callee declared in the same module is checked:
-    a callee this file does not declare cannot be proven, so it is skipped."""
-    structs = {}
-    for st in stmts:
-        if type(st).__name__ == "StructDef":
-            structs.setdefault(st.name, st)
-    lines = []
-    for st in stmts:
-        if type(st).__name__ != "StructDef" or not st.bracket_types:
-            continue
-        non_inferred = {name for name, t in st.bracket_types
-                        if not _has_placeholder(_parse_type_text(t or ""))}
-        for _pname, ptype in st.bracket_types:
-            outer = _parse_type_text(ptype or "")
-            if outer is None or type(outer).__name__ != "SubscriptExpr":
-                continue
-            callee = structs.get(outer.obj.name) if type(outer.obj).__name__ == "IdentExpr" else None
-            if callee is None or not callee.bracket_types:
-                continue
-            args = _type_elements(outer)
-            if len(args) != len(callee.bracket_types):
-                continue
-            for slot, arg in enumerate(args):
-                if not _is_placeholder(arg):
-                    continue
-                cname, ctype = callee.bracket_types[slot]
-                implicit = _parse_type_text(ctype or "")
-                if implicit is None:
-                    continue
-                # Callee parameter -> the rendered argument the caller passed.
-                env = {}
-                for j, (jname, _jt) in enumerate(callee.bracket_types):
-                    if j != slot:
-                        env[jname] = _render_type(args[j], None)
-                rendered = _render_type(implicit, env)
-                # The caller's names the implicit type reads: the callee's
-                # params it mentions, replaced by the arguments that carry them.
-                reads = []
-                for name in _idents_in_order(implicit, []):
-                    if name in env:
-                        j = [k for k, (n2, _t2) in enumerate(callee.bracket_types) if n2 == name][0]
-                        for dep in _idents_in_order(args[j], []):
-                            if dep not in reads:
-                                reads.append(dep)
-                for dep in reads:
-                    if dep in non_inferred:
-                        loc = f"{filename}:{st.line}:1: " if filename else f"{st.line}:1: "
-                        lines.append(f"{loc}error: inferred parameter of type "
-                                     f"'{rendered}' cannot depend on non-inferred "
-                                     f"parameter '{dep}'")
-    if lines:
-        raise RuntimeError("\n".join(lines))
-
-
-def _render_element_type(e, structs) -> str:
-    """The element type of a variadic parameter as Mojo prints it: an unnamed
-    `_` placeholder is shown as the name of the parameter it stands for in the
-    callee (`NeedsPair[a, b, _]` prints `NeedsPair[a, b, p]`)."""
-    if type(e).__name__ == "SubscriptExpr" and type(e.obj).__name__ == "IdentExpr":
-        callee = structs.get(e.obj.name)
-        parts = []
-        for k, x in enumerate(_type_elements(e)):
-            if _is_placeholder(x) and callee is not None and k < len(callee.bracket_types):
-                parts.append(callee.bracket_types[k][0])
-            else:
-                parts.append(_render_element_type(x, structs))
-        return f"{e.obj.name}[{', '.join(parts)}]"
-    return _render_type(e, None)
-
-
-def _check_variadic_element_types(stmts, filename) -> None:
-    """A variadic parameter's element type must be an inferred-free type that
-    names none of the signature's own bracket parameters (measured with the real
-    compiler, 2026-11-11, modular test/mojo-parser/autoparam_dependency_errors.mojo):
-
-        def variadic_deps[a: Int, b: Int, *Xs: NeedsPair[a, b, _]](): ...
-        # error: element type parameter 'NeedsPair[a, b, p]' must be an
-        #        'inferred' parameter
-
-    A `_` placeholder makes the element an inferred parameter, and a name from
-    the signature makes it depend on a parameter the signature declares. Neither
-    is allowed, and each variadic parameter is reported once. `*Xs: Int`,
-    `*Xs: Movable` and `*Xs: Pair[1, 2]` name no parameter and pass."""
-    structs = {}
-    for st in stmts:
-        if type(st).__name__ == "StructDef":
-            structs.setdefault(st.name, st)
-    fns = []
-    for st in stmts:
-        if type(st).__name__ == "FunctionDef":
-            fns.append(st)
-        elif type(st).__name__ == "StructDef":
-            fns.extend(m for m in (st.methods or []) if type(m).__name__ == "FunctionDef")
-    lines = []
-    for fn in fns:
-        variadic = getattr(fn, "variadic_bracket_params", None) or []
-        if not variadic:
-            continue
-        signature = set(fn.comptime_params or [])
-        for v in variadic:
-            elem_text = (fn.comptime_param_annotations or {}).get(v)
-            elem = _parse_type_text(elem_text or "")
-            if elem is None:
-                continue
-            mentioned = set(_idents_in_order(elem, []))
-            if not (_has_placeholder(elem) or (mentioned & signature)):
-                continue
-            rendered = _render_element_type(elem, structs)
-            loc = f"{filename}:{fn.line}:1: " if filename else f"{fn.line}:1: "
-            lines.append(f"{loc}error: element type parameter '{rendered}' "
-                         f"must be an 'inferred' parameter")
-    if lines:
-        raise RuntimeError("\n".join(lines))
-
-
 def _check_out_argument_calls(stmts, filename) -> None:
     """An `out` argument is not a call argument (measured with the real compiler,
     2026-11-11): `def f(out x: Int)` called as `f(y)` is refused with
@@ -2953,8 +2750,6 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
     prev_ended_string = False  # previous physical line ended with a string literal,
                                # so this line continues an implicit string
                                # concatenation (`"a"\n "b"`)
-    prev_string_indent = -1    # indentation of that string-ending line; a
-                               # continuation must be indented further than it
     for line_idx, line in enumerate(joined):
         physical_line = line_nums[line_idx]
         expanded = _indent_expanded(line)
@@ -2978,7 +2773,6 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
         # was lexed from its stripped text, so an indented token's column
         # was short by the indentation and every column was 0-based.
         _stmt_cursor = 0
-        _merged_line = False  # this line joined the previous string-ending line
         for stmt_idx, stmt in enumerate(sub_stmts):
             stmt = stmt.strip()
             if not stmt: continue
@@ -3003,16 +2797,6 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                                     and (s[1] in '"\''
                                          or (len(s) >= 3 and s[1] in 'fFrRbBuUtT'
                                              and s[2] in '"\''))))
-            # A more-indented string line continuing a string-ending line is one
-            # implicit concatenation (`comptime assert c, "a"\n    " b"`). The
-            # NEWLINE that ended the previous line is already in `out`; drop it
-            # so the parser sees adjacent STRING tokens and `_merge_string_literals`
-            # folds them. Same-indent string lines stay separate statements, as
-            # they are in Python.
-            if _string_cont and indent > prev_string_indent \
-                    and out and out[-1].kind == "NEWLINE":
-                out.pop()
-                _merged_line = True
             if stmt_idx == 0 and paren_depth == 0 \
                     and not continued_from_prev \
                     and not (prev_ended_string and _string_cont):
@@ -3095,10 +2879,6 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
             _last_tok = _t
             break
         prev_ended_string = (_last_tok is not None and _last_tok.kind == "STRING")
-        # A merged continuation keeps the statement's own indent, so a third
-        # literal is still measured against the line that started the run.
-        if not _merged_line:
-            prev_string_indent = indent
     last_line = 0
     if line_nums:
         last_line = line_nums[-1]
@@ -4639,13 +4419,6 @@ class Parser:
     _struct_param_names: list
     _known_traits: set
     _lazy_import_blockers: list
-    # The `*Name: Type` variadic bracket parameters of the LAST bracket list
-    # parsed (`_parse_generic_params_capture`), read once by `_parse_funcdef`
-    # to fill `FunctionDef.variadic_bracket_params`. A plain attribute
-    # assignment rather than a dataclass field with a default: it is only
-    # meaningful immediately after a bracket list, and `_parse_funcdef` reads
-    # it only inside the `if LBRACKET` branch that just set it.
-    _last_bracket_variadics: list
 
     def __init__(self, tokens: list[Token]):
         self._tok = tokens
@@ -4658,8 +4431,6 @@ class Parser:
         # INNERMOST disallowed scope (CPython's symtable checks try first,
         # then function, then class, and each nested block starts fresh).
         self._lazy_import_blockers = []
-        # Empty until a bracket list is parsed; see the class-level note.
-        self._last_bracket_variadics = []
         # `comptime NAME = <rhs>` the parser could not parse, as
         # `[(loc, text, exception_text), ...]`. A comptime right-hand side has
         # two very different fates that used to be INDISTINGUISHABLE: a
@@ -4777,11 +4548,9 @@ class Parser:
         comptime_params = []
         comptime_param_defaults = {}
         comptime_param_annotations = {}
-        variadic_bracket_params = []
         if self._peek().kind == "LBRACKET":
             (comptime_params, comptime_param_defaults,
              comptime_param_annotations) = self._parse_generic_params_capture()
-            variadic_bracket_params = list(self._last_bracket_variadics)
         _fn_name_tok = t
         self._expect("LPAREN")
         _params_start = self._pos
@@ -4996,7 +4765,21 @@ class Parser:
         # constraint fails (`where (Self.is_owned) else "may only be called on
         # owned lists":`); it is parsed, not skipped, so the clause is fully
         # consumed and the signature still ends at its COLON.
-        where_clause, where_else = self._parse_where_clauses()
+        where_clause = None
+        where_else = None
+        if self._peek().kind == "NAME" and self._peek().value == "where":
+            self._advance()  # where
+            _wc_parts = []
+            while self._peek().kind not in ("COLON", "NEWLINE", "EOF"):
+                _wc_parts.append(self._parse_expr(0))
+                if self._peek().kind == "COMMA":
+                    self._advance()
+                    continue
+                break
+            where_clause = _wc_parts[0] if len(_wc_parts) == 1 else _wc_parts
+            if self._peek().kind == "KW" and self._peek().value == "else":
+                self._advance()  # else
+                where_else = self._parse_expr(0)
         # Capture list in curly braces: `def handler(...) {mut count, var s}:`
         #
         # This used to be skipped token by token, which made the list
@@ -5045,7 +4828,6 @@ class Parser:
                            comptime_params=comptime_params,
                            comptime_param_defaults=comptime_param_defaults,
                            comptime_param_annotations=comptime_param_annotations,
-                           variadic_bracket_params=variadic_bracket_params,
                            is_generator=is_generator,
                            yield_bearing_node_ids=yield_bearing_node_ids,
                            is_async=is_async,
@@ -5053,35 +4835,6 @@ class Parser:
                            has_capture_list=has_capture_list,
                            where_clause=where_clause,
                            where_else=where_else)
-
-    def _parse_where_clauses(self):
-        """Parse any `where` clauses at the current position: `(clause, else)`.
-
-        A declaration may carry several `where` keywords (`where (a > 0, "a")
-        where (b > 0, "b")`) and each keyword may take comma-separated
-        expressions. Every expression goes into one list in source order; the
-        result is `None` (no clause), the single expression, or the list. A
-        `(cond, "message")` entry stays a TupleExpr, which the consumer reads
-        as a message clause. `else "<message>"` after the clauses is returned
-        separately (FunctionDef.where_else). Stops at the COLON / NEWLINE / EOF
-        that ends the declaration header, so the caller's own COLON check
-        still applies."""
-        parts = []
-        where_else = None
-        while self._peek().kind == "NAME" and self._peek().value == "where":
-            self._advance()  # where
-            while self._peek().kind not in ("COLON", "NEWLINE", "EOF"):
-                parts.append(self._parse_expr(0))
-                if self._peek().kind == "COMMA":
-                    self._advance()
-                    continue
-                break
-        if self._peek().kind == "KW" and self._peek().value == "else" and parts:
-            self._advance()  # else
-            where_else = self._parse_expr(0)
-        if not parts:
-            return None, where_else
-        return (parts[0] if len(parts) == 1 else parts), where_else
 
     def _parse_capture_list(self):
         """A brace-delimited CAPTURE list on a nested `def`:
@@ -5266,12 +5019,19 @@ class Parser:
                     expect_name = False
                     continue
                 self._advance()
-        # Optional `where` clauses after the parameter / base list, parsed as
-        # FunctionDef's are, so a struct's own constraint (`struct S[N: Int]
-        # where (N > 0, "N must be positive"):`) is enforced at instantiation.
-        # The bases themselves are a token soup above, so a `where` inside
-        # that list (`Movable where False`) is still consumed there.
-        struct_where, _ = self._parse_where_clauses()
+        # Optional `where conforms_to(...)` clause after the base list, the
+        # struct-level counterpart of the one `_parse_funcdef` already skips
+        # after a parameter list:
+        #     struct Iter[...](Iterable where conforms_to(...), ...) \
+        #         where conforms_to(T.Element, Deinitable):
+        # The bases are consumed as a token soup above, so the clause lands
+        # here. It constrains conformance and carries no codegen meaning in
+        # this backend, so it is skipped to the colon — the same treatment
+        # `_parse_funcdef`'s own `where` skip gets.
+        if self._peek().kind == "NAME" and self._peek().value == "where":
+            self._advance()
+            while self._peek().kind not in ("COLON", "NEWLINE", "EOF"):
+                self._advance()
         self._expect("COLON")
         self._lazy_import_blockers.append("classes")
         body = self._parse_block()
@@ -5458,10 +5218,7 @@ class Parser:
         return StructDef(name=name, fields=fields, methods=methods, decorators=decs,
                          comptime_aliases=aliases, bases=bases, keywords=class_keywords,
                          bracket_params=bracket_params,
-                         type_param_names=type_param_names,
-                         where_clause=struct_where,
-                         bracket_types=[(f.name, f.type_ann) for f in param_fields
-                                        if isinstance(f, VarDecl)])
+                         type_param_names=type_param_names)
 
     def _parse_enum(self):
         # `enum Name: member1, member2, ...` — not real Mojo syntax (the real
@@ -7795,13 +7552,8 @@ class Parser:
             if t.kind == 'COMMA':
                 self._advance()
                 continue
-            # Try to parse: name: Type [= default]. `mut` is a convention keyword
-            # elsewhere, but a bracket parameter may be named `mut`
-            # (`struct XOrigin[mut: Int, ...]`, modular's parameters_errors.mojo);
-            # it is a name when a colon follows it.
-            _mut_name = (t.kind == 'KW' and t.value == 'mut'
-                         and self._peek(1).kind == 'COLON')
-            if t.kind == 'NAME' or _mut_name:
+            # Try to parse: name: Type [= default]
+            if t.kind == 'NAME':
                 name = t.value
                 self._struct_param_names.append(name)
                 self._advance()
@@ -7944,8 +7696,6 @@ class Parser:
         names = []
         defaults = {}
         annotations = {}
-        variadic = []
-        pending_star = False
         depth = 1
         expect_name = True
         while depth > 0:
@@ -7969,21 +7719,10 @@ class Parser:
             if t.kind == "EOF":
                 break
             if t.kind == "COMMA" and depth == 1:
-                # A bare `*,` is the keyword-only separator, not a variadic: its
-                # star must not carry onto the next parameter's name.
-                pending_star = False
                 self._advance(); expect_name = True; continue
-            if depth == 1 and expect_name and t.kind == "OP" and t.value == "*":
-                # `*Name: Type`: a variadic bracket parameter.
-                pending_star = True
-                self._advance()
-                continue
             if depth == 1 and expect_name and t.kind in ("NAME", "KW"):
                 _nm = t.value
                 names.append(_nm)
-                if pending_star:
-                    variadic.append(_nm)
-                    pending_star = False
                 self._advance()
                 expect_name = False
                 if self._peek().kind == "COLON":
@@ -7995,7 +7734,6 @@ class Parser:
                     defaults[_nm] = self._parse_bracket_param_default()
                 continue
             self._advance()
-        self._last_bracket_variadics = variadic
         return names, defaults, annotations
 
     def _capture_bracket_param_annotation(self) -> str:
@@ -8869,8 +8607,6 @@ class Parser:
             self._skip_newlines()
         stmts = _synthesize_fieldwise_inits(stmts)
         _check_out_argument_calls(stmts, self._filename)
-        _check_inferred_param_dependencies(stmts, self._filename)
-        _check_variadic_element_types(stmts, self._filename)
         return stmts
 
     def _parse_stmt_into(self, stmts: list):

@@ -86,10 +86,10 @@ struct Holder:
     var kept: Pair
     var n: Int
 
-    def keep_single(mut self, s: Single):
+    def keep_single(out self, s: Single):
         self.n = s.only
 
-    def keep_text(mut self, s):
+    def keep_text(out self, s):
         self.n = len(s)
 """
 

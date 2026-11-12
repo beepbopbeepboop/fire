@@ -15425,35 +15425,6 @@ main()
 """)
 
 
-def test_dict_equality_by_value_for_integer_keys():
-    """`d == e` on two separately-built dicts with integer keys was False: the
-    comparison probed an integer-domain slot (keykind 2) with the string probe,
-    which cannot find it. The probe is the dict's own, so equal dicts compare
-    equal, unequal values and unequal keys still differ, and key order does not
-    matter (the convergence loop `nxt == proven` depends on this)."""
-    test_gimple_matches_cpython("gimple_dict_eq_int_keys", """\
-def main():
-    d = {1: 2}
-    e = {1: 2}
-    print(d == e)
-    f = {1: 2}
-    g = {1: 3}
-    print(f == g)
-    h = {5: 'a', 7: 'b'}
-    k = {7: 'b', 5: 'a'}
-    print(h == k)
-    m = {'x': 1, 'y': 2}
-    n = {'y': 2, 'x': 1}
-    print(m == n)
-    p = {1: 2}
-    q = {2: 2}
-    print(p == q)
-    print({} == {})
-    print({1: 2, 3: 4} == {1: 2})
-main()
-""")
-
-
 def test_slice_equals_after_a_multibyte_character():
     """`src[j:j + n] == lit` after a non-ASCII character compared the BYTES at
     the codepoint offsets (`mojo_cstr_region_eq` read start/stop as byte

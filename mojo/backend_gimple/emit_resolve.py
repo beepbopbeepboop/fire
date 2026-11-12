@@ -3483,16 +3483,6 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
                 'constraint failed' in _emsg
                 or 'comptime assertion failed' in _emsg):
             raise
-        # A `where` clause of the struct that is provably false for these type
-        # args is a real diagnostic (modular: `error: violated constraint`),
-        # not an elaboration-capability failure. Only this subclass surfaces:
-        # the bound check's other ConformanceErrors are the false positives the
-        # fall-through above exists for.
-        import elaborate as _elab_mod
-        if isinstance(e, _elab_mod.WhereConformanceError):
-            raise RuntimeError(
-                f"error: invalid instantiation of '{base_name}': violated constraint\n"
-                f"note: {type(e).__name__}: {e}")
         gen._generic_struct_elaboration_failures.append(
             f"{base_name}[{', '.join(type_args)}] from {source}: "
             f"{type(e).__name__}: {e}")

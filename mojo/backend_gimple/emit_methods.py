@@ -4908,27 +4908,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # GCC: "cannot convert to a pointer type". A genuine Mojo
         # `UnsafePointer[T]` receiver keeps raw-pointer semantics: T
         # itself has no unresolvable base-class inheritance.
-        #
-        # NOTE the user-method exclusion, which is the same bug one step
-        # narrower: a user struct that DEFINES a method spelled like a
-        # raw-pointer protocol method must dispatch to its OWN method, not
-        # to `*{recv}`. `class _LazyImportTarget: ... def load(self):`
-        # (myinterpreter.py, PEP 810 lazy imports) compiled
-        # `module = self.load()` to `_t = *self; module = _t;` — the call
-        # dropped, the whole struct copied by value — so the self-host
-        # closure's `_LazyImportTarget_load` returned a struct where gcc
-        # wanted a word ("aggregate value used where an integer was
-        # expected", "non-register as LHS of unary operation"), and
-        # `_LazyImportType.resolve`'s `self._target.load()` became a
-        # `*self->_target` deref. The `value` branch above already excludes
-        # every known struct; the discriminator here is narrower on purpose:
-        # only a struct that actually DEFINES the name, because a genuine
-        # `UnsafePointer[T]` receiver has no `load` in `_struct_method_names`
-        # and must keep its raw-pointer meaning.
-        _recv_struct = gimple_exprtypes._struct_name_of(ot)
-        if not (_recv_struct in (gen.struct_field_types or {})
-                and method in gen._struct_method_names.get(_recv_struct, ())):
-            return gen._lower_pointer_method(ov, ot, method, node.args)
+        return gen._lower_pointer_method(ov, ot, method, node.args)
     if ot == 'void *':
         return gen._lower_file_method(ov, method, node.args)
 
