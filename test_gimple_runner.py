@@ -2329,6 +2329,19 @@ def main():
     print(mk("x"))
 """, "x!\n")
 
+    # A function returning a subscript of a tuple local must be declared to
+    # return the slot's type (e.g. `char *` for a string element), not the
+    # int64_t default — otherwise the string pointer prints in decimal.
+    test_gimple_stdout(
+        "gimple_tuple_index_return_type", """\
+def f():
+    args = ("a", "b")
+    return args[0]
+
+def main():
+    print(f())
+""", "a\n")
+
     # The shape the bug was reported for (`http.server._main`'s
     # `DualStackServerMixin.finish_request`): a PARAMETER rebound before the
     # `class` statement, read by a method as a FIELD of the captured object
