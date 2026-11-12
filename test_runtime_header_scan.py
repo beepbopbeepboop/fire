@@ -508,7 +508,13 @@ def test_every_declaration_is_seen():
     # spelling produces with nothing formatted to get there. The codegen half
     # is ONE set entry (`emit_infra._KW_DICT_FNS`), which `_apply_kw_keys`
     # renames through — the same mechanism as the other fourteen twins.
-    for header, want in (('fire_runtime.h', 807),   # --fix writes the live figure
+    #
+    # 807 -> 810 (2026-11-11, 73076be07 "a str stored into a mixed tagged name
+    # is a box"): THREE names, all from the mixed-tagged-name box work —
+    # `mojo_is_str_box`, `mojo_str_box_word`, `mojo_word_is_text`. The header
+    # grew without the prose census following, which is exactly the drift this
+    # check exists to catch.
+    for header, want in (('fire_runtime.h', 810),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already
