@@ -1254,6 +1254,7 @@ def _infer_multi_kind_return(gen, body, params=None,
         # whichever one happened to be lowered last.
         gen._cur_func_body = body
         gen._mixed_container_locals = None
+        gen._mixed_scalar_locals = None
         # Imported HERE rather than at module scope: `gimple_codegen.py`
         # imports this module before it imports `emit_infra`, so a top-level
         # `import ... emit_infra` in this file is a circular import that
@@ -1333,6 +1334,7 @@ def _infer_multi_kind_return(gen, body, params=None,
             gen.current_func_name = _saved_cur
             gen._cur_func_body = _saved_body
             gen._mixed_container_locals = None
+            gen._mixed_scalar_locals = None
 
 
 def _homogeneous_tuple_ann_elem(self, _ret_ann):
@@ -11023,7 +11025,25 @@ def gen_module_impl(self, stmts: list):
             return True
         if not st:
             return False
-        return _as_str(st) in ('char *', 'double', 'int64_t', 'int', 'bool')
+        if _as_str(st) == 'char *' or _as_str(st) == 'double':
+            return True
+        # An INTEGER observation is proof unless the name came from a
+        # multi-value UNPACK of a single iterable: `_infer_local_var_types`
+        # types each such target with the `int64_t` STORAGE DEFAULT because
+        # the per-element type is not knowable there, and the element may be a
+        # container. `coro.py`'s `base, is_method, real_params, ... =
+        # _async_method_setup(...)` feeds `_mark_coro_param_elem_kinds(
+        # real_params)`, and reading that default as "a number" refused the
+        # file for a parameter every call site passes a list. Everything else
+        # -- a literal (answered above), a call result, a parameter, an
+        # ordinary local -- keeps counting, so `each([4, 5])` beside
+        # `each(n)` where `n = 3` (or `n = f()`) is still refused.
+        if isinstance(a, gimple_ctypes.IdentExpr):
+            _unpacked = (getattr(self, '_tuple_unpack_locals', None) or {}).get(
+                _as_str(caller_name), ())
+            if _as_str(a.name) in _unpacked:
+                return False
+        return _as_str(st) in ('int64_t', 'int', 'bool')
 
     def _resolve_param_containers():
         """Turn the collected container observations into the contract.
