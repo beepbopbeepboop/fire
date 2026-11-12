@@ -1978,13 +1978,12 @@ test('nonlocal', [PY, 'test_nonlocal.py'], cache=True, mem='tiny',
 # not `'mem'`: they invoke gcc directly on a snippet-sized translation unit,
 # the same `small`-workload shape `test_gimple.py` is, and a cap on a job
 # that never loads the whole closure buys nothing (see the MEMCLASS note).
-# `gimplerunner` carried `expect='3 failing: ...'` while the merge of ten branches
-# left compile-and-execute rows red (a bound method stored in a module global, the
-# `zip_longest` absent fill, a module's own global shadowing a from-imported
-# homonym, a list of structs built in an imported module). All of them are fixed
-# and the marker is gone: an `expect=` on this job would now be reported as a
-# FAILURE ("marked expect= ... but it PASSES"), which is the anti-rot working.
+# `gimplerunner` is red on the tree (2026-11-11): 21 of 604 cases fail, a mix of wrong output,
+# RSS over the 40 MB limit, compile-time refusals, and one CPython-side mismatch. The 21 are listed
+# in bugs/hard/SUITE_gimplerunner_21_failing.md. The count in the marker is checked against the run,
+# so a case that starts or stops failing makes this marker disagree and the gate says so.
 test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True, mem='tiny',
+     expect='21 failing: see bugs/hard/SUITE_gimplerunner_21_failing.md (wrong output, RSS over limit, compile refusals)',
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
