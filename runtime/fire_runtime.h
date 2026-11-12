@@ -754,7 +754,6 @@ int64_t mojo_next_word(int64_t w, int has_default, int64_t dflt);   /* next(x[, 
 int64_t mojo_getitem_word(int64_t w, int64_t i);   /* list element / string character of an unknown-kind word */
 void    mojo_chain_extend(MojoList *dst, int64_t src);   /* itertools.chain, one argument */
 int64_t mojo_add_words(int64_t a, int64_t b);   /* str+str concatenates, else integer add */
-int64_t mojo_mul_word(int64_t a, int64_t b);     /* str*int repeats (a str box/ptr), else integer mul */
 MojoList *mojo_iter_word(int64_t v);   /* list / dict keys / set / str / bytes of a word of unknown kind */
 /* Compiled-generator signatures (filled by each unit's constructor) and the
  * live-handle table behind a dynamic call; see the definitions. */
@@ -1444,11 +1443,6 @@ typedef struct {
                      * `mojo_dict_slot_key` already formats from `ikey`.
                      * Zero-defaulted: an integer slot freshly made in this
                      * table prints unquoted, as before. */
-    void    *repr;    /* kind 6 only: the repr function (int64_t -> char *) of THIS
-                     * slot's struct type, recorded by mojo_dict_set_other_struct_repr.
-                     * The dict's one recorded function (val_repr) describes kind-5
-                     * slots only, so a second struct type otherwise had no repr at
-                     * all and printed its address. NULL everywhere else. */
 } _DictSlot;
 
 /* Value-kind tags for _DictSlot.kind. Kept in the header so generated code
@@ -1626,11 +1620,6 @@ void        mojo_dict_set_struct(MojoDict *d, char *key, void *obj);
  * (kind 6), so the walker sends this slot to the generic dispatch while the
  * kind-5 slots go to the recorded function. */
 void        mojo_dict_set_other_struct(MojoDict *d, char *key, void *obj);
-/* A struct of another type, with ITS OWN repr function recorded on the slot
- * (kind 6): the walker renders it through mojo_dict_repr_other_slot. */
-void        mojo_dict_set_other_struct_repr(MojoDict *d, char *key, void *obj, void *fn);
-char       *mojo_dict_repr_other_slot(MojoDict *d, int64_t i, int64_t v);
-void        mojo_dict_set_bytes_other_struct_repr(MojoDict *d, MojoBytes *key, void *obj, void *fn);
 void        mojo_dict_set_val_repr(MojoDict *d, void *fn);
 char       *mojo_dict_repr_val(MojoDict *d, int64_t v);
 

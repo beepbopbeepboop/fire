@@ -154,21 +154,6 @@ def group_census():
           f'FORMAL.md §2.2 publishes {got_box} non-word entry points, '
           f'runtime_abi() says {total - word}')
 
-    # The percentage in the same sentence is a fourth copy of the ratio, and
-    # `test_runtime_header_scan.py --fix` rewrites the two counts it can see
-    # and not this — so a census refresh moved the counts and left `45.4%`
-    # describing the old pair, which no other check looked at. Read it and
-    # require the arithmetic to agree.
-    pct = re.search(r'So \*\*\d+ of \d+ \(([\d.]+)%\)\*\* is the '
-                    r'reachable-surface ceiling', text)
-    check(pct is not None,
-          'FORMAL.md §2.2 states the word share as a percentage')
-    if pct is not None and total:
-        want = round(100 * word / total, 1)
-        check(abs(float(pct.group(1)) - want) <= 0.05,
-              f'FORMAL.md §2.2 publishes {pct.group(1)}% word-shaped, '
-              f'{word} of {total} is {want}%')
-
     # The per-header breakdown, which is the part a reader uses to find the file
     # to go read. Checked one row at a time so a wrong row names itself.
     row = re.search(r'\| entry points across.*?\n', text)

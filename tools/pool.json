@@ -46,7 +46,7 @@
     {
       "name": "haiku",
       "model": "claude-haiku-5-5",
-      "count": 1,
+      "count": 2,
       "kind": "claude",
       "recover_hours": 4.23,
       "class": "easy"
@@ -54,7 +54,7 @@
     {
       "name": "opencode-paid",
       "model": "opencode-go/deepseek-v4.1-flash",
-      "count": 2,
+      "count": 1,
       "kind": "opencode",
       "recover_hours": 2.5,
       "long_recover_days": 15,

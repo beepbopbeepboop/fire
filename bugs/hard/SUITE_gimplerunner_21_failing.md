@@ -66,15 +66,3 @@ result and the codegen registers it as fresh. The three cases pass at ~2.2 MB. P
 1. Split along the groups above: A and C are codegen, B is the coroutine project, D needs each
    test's expectation checked against CPython first (`tools/gdbtool` / the python3 reference).
 2. C is DONE (2026-11-12, see above). Remaining order: D's math return type (`math.copysign`), then A's dict keys.
-
-## Status (2026-11-12, end of round)
-
-Fixed and committed, each with its part doc deleted: group C (RSS string ownership, 75931501a),
-`gimple_math_module_members_lower_to_libm` (9336604b6), `gimple_enum_case_without_eq_is_refused`
-(40ac094b9), `gimple_str_encode_errors_and_decode_remaining` (8cf78b639),
-`gimple_str_window_matches_cpython` (0ba1e267e), `gimple_tuple_dict_key_*` and the other part-4
-cases (46d36b17f), and the part-5 dict-repr cases (46d36b17f). `gimple_list_slice_mixed` is fixed
-(38c4bbcd3), and its part doc records the open module-scope sibling.
-
-Still open: part 2 (generator companion: a wrong-answer on mixed-kind yields, plus the harness
-change; plan in its doc, 44800a615).

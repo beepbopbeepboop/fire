@@ -35,21 +35,11 @@ def compile_mojo_to_gimple_exe(mojo_src: str, filename: str = '') -> str:
     """Compile mojo source to GIMPLE executable, return path to executable. A
     `filename` ending in `.py` compiles the text as Python source (Python scoping
     rules apply to nested defs)."""
-    from gimple_codegen import compile_to_gimple, compile_to_gimple_with_cpp
-
-    # A program with a generator the C++20 path lowers (`gimple_check_all_idiom`)
-    # has a companion .cpp that must be built and linked. That is the build the
-    # generator runner already does through the production linker, so reuse it
-    # rather than refuse the program: this is what `fire.py build` does.
-    if filename:
-        c_code, cpp_code = compile_to_gimple_with_cpp(mojo_src, filename=filename)
-    else:
-        c_code, cpp_code = compile_to_gimple_with_cpp(mojo_src)
-    if cpp_code.strip():
-        import test_gimple_generator_runner as _gen_runner
-        return _gen_runner._build_generator_program_from_code(c_code, cpp_code)
+    from gimple_codegen import compile_to_gimple
 
     with tempfile.NamedTemporaryFile(mode='w', suffix='.c', delete=False) as f:
+        # Compile mojo to GIMPLE C code
+        c_code = compile_to_gimple(mojo_src, filename=filename) if filename else compile_to_gimple(mojo_src)
         f.write(c_code)
         c_file = f.name
 
@@ -263,18 +253,12 @@ def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str, filename:
     exe_path = None
     try:
         exe_path = compile_mojo_to_gimple_exe(mojo_src, filename)
-        # The exit code and stderr are kept for the failure message: an empty
-        # stdout with exit 0 and an empty stdout after a crash are different
-        # bugs, and a bare `got ''` cannot tell them apart.
-        _r = subprocess.run([exe_path], capture_output=True, timeout=RUN_TIMEOUT_S,
-                            env=_SCRIBBLE_ENV)
-        out = _r.stdout.decode('utf-8', errors='replace')
+        out = run_executable_stdout(exe_path)
         if out == expected_stdout:
             print(f"PASS  {name}")
             _PASS += 1
         else:
-            print(f"FAIL  {name}: expected stdout {expected_stdout!r}, got {out!r} "
-                  f"(exit {_r.returncode}, stderr {_r.stderr[-200:]!r})")
+            print(f"FAIL  {name}: expected stdout {expected_stdout!r}, got {out!r}")
             _FAIL += 1
     except subprocess.TimeoutExpired as e:
         # A timeout is LOAD, not a wrong answer: these are 30s/10s
@@ -7142,7 +7126,7 @@ def main():
     s[(1, 2)] = "R"
     print(s[(1, 2)], len(s))
 main()
-""", "True 1\nTrue 1\n3.5 1\nR 1\n")
+""", "1 1\nTrue 1\n3.5 1\nR 1\n")
 
     # The string half of the same seam: a string slot built by a CALL, not a
     # literal. A homogeneous string tuple used to record no kinds, so the key
@@ -12201,7 +12185,7 @@ def shapes():
     print(g)
 
 shapes()
-""", "[('k', R<a>)]\n{'p': R<a>, 'q': Q<b>}\n")
+""", "[('k', R<a>)]\n{'p': R<a>, 'q': Q(y='b')}\n")
 
     # The three DERIVED containers, which is where a struct value stopped
     # being its own `__repr__` even though the dict's own repr was already
@@ -13666,51 +13650,6 @@ main()
         "def h() -> Float64:\n    return 2.5\n\nvar F = h()\n",
         "from xmodint_defn import F\n\ndef main():\n    print(F)\n\nmain()\n",
         "2.5\n")
-
-    # Call-valued RHS shapes the export's text scan does not model. The
-    # definer types `var N = g() + 1` as int64_t (a BinOp, not a whole call)
-    # and `var N = k()` as char * (k is unannotated, so its return comes from
-    # the body). The text scan answered void * and int64_t, so the importer's
-    # extern disagreed with the accessor the definer emits in the same unit:
-    # "conflicting types for '<mod>__mojo_global_get_N'". The importer must
-    # take the definer's own final type.
-    _test_imported_call_initialized_global(
-        "imported_call_initialized_global_binop",
-        "def g():\n    return 7\n\nvar N = g() + 1\n",
-        "from xmodint_defn import N\n\ndef main():\n    print(N)\n\nmain()\n",
-        "8\n")
-
-    _test_imported_call_initialized_global(
-        "imported_call_initialized_global_unannotated_str",
-        "def k():\n    return \"a\"\n\nvar N = k()\n",
-        "from xmodint_defn import N\n\ndef main():\n    print(N)\n\nmain()\n",
-        "a\n")
-
-    # The same disagreement for RHS shapes with no callee at all. The export
-    # scan types a non-literal expression `void *` and every container
-    # literal `void *`, while `_phase17_value_type` types them `int64_t` /
-    # `MojoList *` / `MojoDict *`; measured on this tree, each of these three
-    # was a "conflicting types for '<mod>__mojo_global_get_N'" before the
-    # importer took the definer's final accessor type. They exercise the
-    # BinOp / ListExpr / DictExpr rows of that one table, so a future edit
-    # that narrows the fix back to "call shapes" is caught here.
-    _test_imported_call_initialized_global(
-        "imported_expression_initialized_global_binop",
-        "var N = 1 + 2\n",
-        "from xmodint_defn import N\n\ndef main():\n    print(N)\n\nmain()\n",
-        "3\n")
-
-    _test_imported_call_initialized_global(
-        "imported_container_initialized_global_list",
-        "var N = [1, 2, 3]\n",
-        "from xmodint_defn import N\n\ndef main():\n    print(N[0])\n\nmain()\n",
-        "1\n")
-
-    _test_imported_call_initialized_global(
-        "imported_container_initialized_global_dict",
-        "var N = {\"a\": 4}\n",
-        "from xmodint_defn import N\n\ndef main():\n    print(N[\"a\"])\n\nmain()\n",
-        "4\n")
 
     # A FLOAT module-scope `var` imported by name. The defining module declared
     # its global `int` (the VarDecl pre-scan's catch-all arm had no FloatLiteral

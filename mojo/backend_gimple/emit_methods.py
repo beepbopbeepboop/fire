@@ -2482,9 +2482,9 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         src_type, src_val = gen.lower_expr(node.args[0])
         if src_type not in ('char *', 'void *'):
             src_val = gen._new_val('char *', f'(char *){gen._ensure_local(src_type, src_val)}')
-        prog_local = gen._new_val('const ReNode *', gimple_ctypes.regex_compile.table_ref(info['prog_var']))
-        ranges_local = gen._new_val('const ReRange *', gimple_ctypes.regex_compile.table_ref(info['ranges_var']))
-        classinfo_local = gen._new_val('const ReClassInfo *', gimple_ctypes.regex_compile.table_ref(info['classinfo_var']))
+        prog_local = gen._new_val('const ReNode *', info['prog_var'])
+        ranges_local = gen._new_val('const ReRange *', info['ranges_var'])
+        classinfo_local = gen._new_val('const ReClassInfo *', info['classinfo_var'])
         t = gen._call_expr('MojoList *', 'mojo_regex_split', [
             ('const ReNode *', prog_local), ('const ReRange *', ranges_local),
             ('const ReClassInfo *', classinfo_local),
@@ -3181,9 +3181,9 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                         gimple_ctypes._debug_note(f're.sub compile-time regex compile failed for {folded_pattern!r}', e)
                 is_callback = gen._re_sub_repl_is_callback(cb_arg)
                 if info is not None:
-                    prog_local = gen._new_val('const ReNode *', gimple_ctypes.regex_compile.table_ref(info['prog_var']))
-                    ranges_local = gen._new_val('const ReRange *', gimple_ctypes.regex_compile.table_ref(info['ranges_var']))
-                    classinfo_local = gen._new_val('const ReClassInfo *', gimple_ctypes.regex_compile.table_ref(info['classinfo_var']))
+                    prog_local = gen._new_val('const ReNode *', info['prog_var'])
+                    ranges_local = gen._new_val('const ReRange *', info['ranges_var'])
+                    classinfo_local = gen._new_val('const ReClassInfo *', info['classinfo_var'])
                     t = gen._new_temp('char *')
                     if is_callback:
                         fn_ptr_t, env_t = gen._lower_re_sub_callback(cb_arg)
@@ -5936,17 +5936,9 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             _pres_word = None
             if (result_type == 'char *' and val_type not in ('char *',)
                     and not _container_vt):
-                # An int-valued dict's `raw` above IS the int getter's word:
-                # reuse it. A second call would read the key again, and a
-                # container key's placeholder was consumed by the first, so the
-                # second call missed (`t.get(("a", 1), "dflt")` printed the
-                # default for a stored value).
-                if val_type in ('int64_t', 'int', '_Bool'):
-                    _pres_word = raw
-                else:
-                    _pres_word = gen._call_expr(
-                        'int64_t', f'mojo_dict_get{_sfx}_int',
-                        [('MojoDict *', ov), (key_type, key_val)])
+                _pres_word = gen._call_expr(
+                    'int64_t', f'mojo_dict_get{_sfx}_int',
+                    [('MojoDict *', ov), (key_type, key_val)])
                 raw = gen._call_expr('char *', 'mojo_cstr_or_int_str',
                                      [('int64_t', _pres_word)])
                 val_type = 'char *'
