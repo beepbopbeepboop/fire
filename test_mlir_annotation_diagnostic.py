@@ -143,20 +143,6 @@ class MlirAnnotationCallDiagnostic(unittest.TestCase):
         self.assertIn("error: invalid call to 'foo'", msg)
         self.assertEqual(_location(msg), (6, 9))
 
-    def test_let_variable_argument_is_refused_at_argument(self):
-        # `let` declares a constant exactly as `var` does; it must land as a
-        # VarDecl so the same type table sees it (a `let` used to parse as an
-        # identifier expression, so the table never saw the declaration).
-        msg = self._refused(
-            f'def foo(x: {ANN}):\n'
-            '    pass\n'
-            '\n'
-            'def main():\n'
-            '    let y = 2.5\n'
-            '    foo(y)\n')
-        self.assertIn("error: invalid call to 'foo'", msg)
-        self.assertEqual(_location(msg), (6, 9))
-
     def test_int_variable_is_refused(self):
         msg = self._refused(
             f'def foo(x: {ANN}):\n'

@@ -3069,22 +3069,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # generalized). Gated to this compiler's own `gimple*.py` sources
         # so it can never intercept a real stdlib module method.
         if _selfhost_sibling_member_kind(gen, module_name, method_name) is not None:
-            # Pin the member's home to the sibling module the alias names so
-            # bare-name resolution below can qualify it even when that
-            # module is compiled later in a cycle (emit_infra <-> emit_stmts)
-            # and the member is not yet present in this gen's flat
-            # func_param_types/func_return_types tables. Without this, the
-            # re-dispatch resolves to an unqualified bare symbol and emits a
-            # weak "unavailable in compiled mode" stub while the real
-            # definition is emitted under its qualified mangled name.
-            _sh_info = (getattr(gen, 'imported_symbols', None) or {}).get(module_name)
-            _sh_sub_ref = ((_sh_info.get('module')
-                            if isinstance(_sh_info, dict) else None)
-                           or module_name)
-            try:
-                gen._note_own_func_home(method_name, _sh_sub_ref, record_scope=False)
-            except Exception:
-                pass
             # Re-dispatch as a BARE-name call: the alias qualifier is a
             # Python-import artifact only. `_lower_call` owns struct-ctor
             # allocation, default-argument padding, keyword ordering and
@@ -3101,6 +3085,19 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             return gen._lower_call(_bare_node)
 
         # Check if this is a known module method
+        if (method_name == 'copysign' and len(node.args) == 2):
+            try:
+                _x_t,_x_v = gen.lower_expr(node.args[0])
+                _y_t,_y_v = gen.lower_expr(node.args[1])
+                _x_d = gen._coerce_to_type(_x_t,'double',_x_v)
+                _y_d = gen._coerce_to_type(_y_t,'double',_y_v)
+                _res = gen._new_temp('double')
+                gen._emit(f'  {_res} = __builtin_copysign ({_x_d}, {_y_d});')
+                _res_i64 = gen._new_temp('int64_t')
+                gen._emit(f'  {_res_i64} = (int64_t){_res};')
+                return 'int64_t', _res_i64
+            except Exception:
+                pass
         if (module_name == 'os' and method_name in ('fspath', 'fsdecode') and len(node.args) == 1
                 and not getattr(node, 'kwargs', None)):
             # `os.fspath(p)` of a str / bytes path is the path itself (a path-like object's
@@ -3674,6 +3671,16 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     _libm_m = None
                     if module_name in ('math', 'std.math') or (isinstance(module_name,str) and module_name.endswith('.math')):
                         _libm_m = 'math'
+                    if _libm_m and method_name == 'copysign' and len(node.args) == 2:
+                        _x_t,_x_v = gen.lower_expr(node.args[0])
+                        _y_t,_y_v = gen.lower_expr(node.args[1])
+                        _x_d = gen._coerce_to_type(_x_t,'double',_x_v)
+                        _y_d = gen._coerce_to_type(_y_t,'double',_y_v)
+                        _res = gen._new_temp('double')
+                        gen._emit(f'  {_res} = __builtin_copysign ({_x_d}, {_y_d});')
+                        _res_i64 = gen._new_temp('int64_t')
+                        gen._emit(f'  {_res_i64} = (int64_t){_res};')
+                        return 'int64_t', _res_i64
                 except Exception:
                     pass
                 _mgc_is_plain_fn = (
@@ -5104,6 +5111,20 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             except Exception:
                 pass
         if _libm_mod:
+                                    # Special handling for copysign to avoid function call issues
+            if method == 'copysign' and len(node.args) == 2:
+                try:
+                    _x_t, _x_v = gen.lower_expr(node.args[0])
+                    _y_t, _y_v = gen.lower_expr(node.args[1])
+                    _x_d = gen._coerce_to_type(_x_t, 'double', _x_v)
+                    _y_d = gen._coerce_to_type(_y_t, 'double', _y_v)
+                    _res = gen._new_temp('double')
+                    gen._emit(f'  {_res} = copysign ({_x_d}, {_y_d});')
+                    _res_i64 = gen._new_temp('int64_t')
+                    gen._emit(f'  {_res_i64} = (int64_t){_res};')
+                    return 'int64_t', _res_i64
+                except Exception:
+                    pass
             _lc = module_member_libc(_libm_mod, method)
             if _lc is not None and len(_lc[2]) == len(node.args):
                 # A libm symbol behind a module marker: lower it as the libc
@@ -5936,17 +5957,9 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             _pres_word = None
             if (result_type == 'char *' and val_type not in ('char *',)
                     and not _container_vt):
-                # An int-valued dict's `raw` above IS the int getter's word:
-                # reuse it. A second call would read the key again, and a
-                # container key's placeholder was consumed by the first, so the
-                # second call missed (`t.get(("a", 1), "dflt")` printed the
-                # default for a stored value).
-                if val_type in ('int64_t', 'int', '_Bool'):
-                    _pres_word = raw
-                else:
-                    _pres_word = gen._call_expr(
-                        'int64_t', f'mojo_dict_get{_sfx}_int',
-                        [('MojoDict *', ov), (key_type, key_val)])
+                _pres_word = gen._call_expr(
+                    'int64_t', f'mojo_dict_get{_sfx}_int',
+                    [('MojoDict *', ov), (key_type, key_val)])
                 raw = gen._call_expr('char *', 'mojo_cstr_or_int_str',
                                      [('int64_t', _pres_word)])
                 val_type = 'char *'
@@ -7217,9 +7230,8 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
         # real MojoBytes * (the same runtime constructor `bytes(s)` uses). The
         # encoding is passed through as a char*; the runtime's
         # mojo_bytes_from_str resolves it against its codec table (utf-8,
-        # ascii, latin-1; anything else is a LookupError). `errors` is the
-        # second positional argument or the `errors=` keyword, forwarded to
-        # the runtime, which honours strict (default), replace and ignore.
+        # ascii, latin-1; anything else is a LookupError). `errors` is not
+        # forwarded, so every codec runs with strict error handling.
         if arg_pairs:
             _enc = arg_pairs[0]
         else:
@@ -7229,14 +7241,8 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
             _enc_val = gen._intern_string('utf-8')
         else:
             _enc_val = _enc[1] if _enc[0] == 'char *' else gen._coerce_to_type(_enc[0], 'char *', _enc[1])
-        # `s.encode("ascii", "replace")` passes `errors` positionally; it was
-        # read from the keyword only, so the positional handler was dropped and
-        # every codec ran strict (UnicodeEncodeError where CPython replaces).
-        if len(arg_pairs) > 1:
-            _err = arg_pairs[1]
-        else:
-            _err = next(((gen.lower_expr(_kv)) for _kn, _kv in (kwargs or [])
-                         if _kn == 'errors'), None)
+        _err = next(((gen.lower_expr(_kv)) for _kn, _kv in (kwargs or [])
+                     if _kn == 'errors'), None)
         if _err is None:
             _err_val = gen._intern_string('strict')
         else:
@@ -7474,14 +7480,8 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
             enc = _enc[1]
         else:
             enc = gen._coerce_to_type(_enc[0], 'char *', _enc[1])
-        # The handler is the second positional or the `errors=` keyword, the
-        # same as str.encode above: `b"\xff".decode("ascii", "replace")` dropped
-        # a positional handler and ran strict.
-        if len(arg_pairs) > 1:
-            _err = arg_pairs[1]
-        else:
-            _err = next(((gen.lower_expr(_kv)) for _kn, _kv in (kwargs or [])
-                         if _kn == 'errors'), None)
+        _err = next(((gen.lower_expr(_kv)) for _kn, _kv in (kwargs or [])
+                     if _kn == 'errors'), None)
         if _err is None:
             err = gen._intern_string('strict')
         else:

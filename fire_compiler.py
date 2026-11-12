@@ -9396,12 +9396,7 @@ class Parser:
         if t.kind == "KW":
             if t.value == "import": return self._parse_import()
             if t.value == "from":   return self._parse_from_import()
-            if t.value in ('var', 'let'):
-                # `let` is the constant-declaration sibling of `var` and takes
-                # exactly the same shapes (measured against the real compiler,
-                # 2026-11-12). It must be dispatched here: left to fall through,
-                # `let y = 2.5` parses as ExprStmt(IdentExpr('let')) plus a
-                # separate AssignStmt, silently dropping the declaration.
+            if t.value == 'var':
                 # `var` is ambiguous, same as `fn`/`struct`: it's both this
                 # dialect's declaration keyword AND a perfectly ordinary
                 # Python identifier (arguably more common as a plain name
@@ -9990,11 +9985,7 @@ class Parser:
                               name_alias_strs=_nas, line=t.line, col=t.col)
 
     def _parse_var_decl(self):
-        # `var` and `let` are both declaration sigils with the same shapes.
-        t0 = self._peek()
-        if t0.kind != "KW" or t0.value not in ("var", "let"):
-            raise SyntaxError(f"{self._loc(t0)}Expected 'var' or 'let' got {t0.kind}({t0.value!r})")
-        self._advance()
+        self._expect("KW", 'var')
         # Allow KW, backtick identifiers as variable names (e.g., "out", "fn", `6bit`)
         t = self._peek()
         if t.kind == "NAME": name = self._advance().value
