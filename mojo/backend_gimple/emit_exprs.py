@@ -4537,22 +4537,14 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             return 'char *', t
         # int/int64_t + char* or char* + int/int64_t when one side is a string literal
         # → this is Python string concatenation where one operand is a string stored as int
-        # A box or dynamic word on the other side is not an integer to cast:
-        # its kind decides the spelling, so it falls through to the rendering
-        # branch below (`mojo_cstr_or_int_str`). Casting the box's word here
-        # made `x + "!"` read a kind-'p' box as a pointer to its own header.
-        _lhs_boxed = (lv in getattr(gen, '_boxed_vals', ())
-                      or gen._is_dyn_word(left_node, lv))
-        _rhs_boxed = (rv in getattr(gen, '_boxed_vals', ())
-                      or gen._is_dyn_word(right_node, rv))
-        if right_is_lit and rt == 'char *' and lt in ('int', 'int64_t') and not _lhs_boxed:
+        if right_is_lit and rt == 'char *' and lt in ('int', 'int64_t'):
             ip = gen._new_temp('int64_t')
             cp = gen._new_temp('char *')
             gen._emit(f'  {ip} = (int64_t){lv};')
             gen._emit(f'  {cp} = (char *){ip};')
             t = gen._call_expr('char *', 'mojo_str_cat', [('char *', cp), ('char *', rv)])
             return 'char *', t
-        if left_is_lit and lt == 'char *' and rt in ('int', 'int64_t') and not _rhs_boxed:
+        if left_is_lit and lt == 'char *' and rt in ('int', 'int64_t'):
             ip = gen._new_temp('int64_t')
             cp = gen._new_temp('char *')
             gen._emit(f'  {ip} = (int64_t){rv};')

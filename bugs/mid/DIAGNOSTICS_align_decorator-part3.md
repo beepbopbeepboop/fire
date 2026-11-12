@@ -1,25 +1,18 @@
-# DIAGNOSTICS @align decorator — part 3: regression test (comptime function call in `@align`)
+# DIAGNOSTICS step 6, part 3: evaluate a comptime function call in `@align`
 
-Split from `bugs/hard/DIAGNOSTICS_align_decorator.md` (umbrella step 6 of
-`bugs/hard/DIAGNOSTICS_missing_validation_modular.md`; plan:
-`docs/diagnostics-missing-validation-plan.md` §6). This part adds the missing
-expression shape and the original integration acceptance test.
+Part of the split of `bugs/hard/DIAGNOSTICS_align_decorator.md`; the original
+doc is part of the umbrella
+`bugs/hard/DIAGNOSTICS_missing_validation_modular.md` and the plan is
+`docs/diagnostics-missing-validation-plan.md` §6.
 
-## Class
-easy
-
-## Prerequisites / depends on
-`bugs/mid/DIAGNOSTICS_align_decorator-part1.md` and
-`bugs/mid/DIAGNOSTICS_align_decorator-part2.md` (parsing/storage and
-power-of-two validation with diagnostics propagated at instantiation). This
-part must reuse parts 1/2's validator rather than add a third one.
-
-## Goal
-Add support for evaluating a comptime function call in `@align(...)` (so the
-original modular shape is diagnosed) and add the committed regression test for
-`@align` decorator validation.
+**Prerequisites:** part 1 (the shared `@align` value rule, fixed) and part 2
+(`bugs/mid/DIAGNOSTICS_align_decorator-part2.md`, evaluation against a generic
+struct's bracket parameters at elaboration time). This part adds the one
+missing expression shape and the original integration acceptance test; it must
+reuse parts 1/2's validator rather than add a third one.
 
 ## Why this part
+
 The modular integration test uses a function call in the decorator:
 
 ```mojo
@@ -43,57 +36,73 @@ def main():
 ```
 
 `alignment = 23` -> `calculate_illegal_alignment(23)` -> `69`, which is not a
-power of 2. Part 2's evaluator can see the call as a `CallExpr` but may not be
-able to fold it without a call hook; this part supplies that capability.
+power of 2. The current tree compiles the equivalent source (verified with the
+exact shape above, minus `TrivialRegisterPassable`/stdlib imports, through
+`gimple_codegen.compile_to_gimple(..., do_imports=True, filename=<real file>)`):
+there is no `@align` consumer, so the call is never evaluated and no
+diagnostic is produced.
+
+Part 2's evaluator sees `calculate_illegal_alignment(23)` as a `CallExpr` and
+declines it. This part supplies a `call_hook` so the same
+`mojo.middle.comptime.eval_const_int(expr, bindings, call_hook=...)` folds it,
+exactly as the ordinary comptime path already folds an imported call.
 
 ## Scope
-- Use the existing call-evaluation seam: `mojo.middle.comptime.eval_const_int`
-  already takes `call_hook(name, argvals) -> int | None` (see the gimple path's
-  existing hook in `mojo/backend_gimple/emit_infra.py::_comptime_call_hook`,
-  which resolves/imports and runs via `comptime.evaluate`). Do not write a new
-  interpreter.
-- Provide module-local lookup for the hook at elaboration time (full module
-  source available): e.g. `elaborate.extract_fn_source(module_src, name)` then
-  `comptime.evaluate(fn_src, name, argvals)`, returning `None` on failure.
-  `@no_inline` on the callee must not change the answer.
-- Bound evaluation: only pure scalar calls whose arguments are compile-time ints
-  may fold. A call that cannot be resolved/evaluated must not cause a false
-  diagnostic or crash (return `None` / remain accepted per existing behavior);
-  do not recurse without a depth bound.
-- Reuse part 1's value test and part 2's elaboration/error-propagation path. On
-  an invalid result raise the same `RuntimeError` carrying
-  `function instantiation failed` and
-  `struct alignment must be a positive power of 2, got <N>`, propagated to the
-  instantiation site.
-- Layout is out of scope: a valid `@align` value continues to compile without
-  applying alignment to emitted struct/alloca layout (validation only).
 
-## Acceptance / regression test
-- Create `test_align_decorator_diagnostic.py` next to existing diagnostics
-  tests (e.g. beside `test_comptime_dtype_diagnostic.py`) using the
-  `_compile_full` pattern: write source under `.tmp/` and call
-  `gimple_codegen.compile_to_gimple(src, do_imports=True, filename=<path>)`.
-- `python3 test_align_decorator_diagnostic.py` is the narrow verification for
-  this bug and passes once parts 1-3 are implemented.
-- Cover (matching observable expectations where applicable to this compiler's
-  diagnostic wording):
-  - a valid power-of-two alignment accepted (e.g. `@align(4)` / `@align(8)`),
-  - an invalid non-power-of-2 alignment rejected with the expected diagnostic
-    (`struct alignment must be a positive power of 2, got N`, and/or
-    `function instantiation failed` context as produced),
-  - the original modular parametric/call case:
-    `@align(calculate_illegal_alignment(alignment))` with `alignment` as the
-    struct's bracket parameter, `calculate_illegal_alignment(x) = x * 3`,
-    instantiated as `[23]` -> diagnostic containing `function instantiation
-    failed` and `struct alignment must be a positive power of 2, got 69`.
-  - same call shape, valid result (e.g. `x * 2`, `[32]` -> compiles / 64),
-  - same call shape, another invalid result (e.g. `x * 3`, `[22]` -> `got 66`),
-  - function returns `0` / negative value -> diagnostic, not silent compile,
-  - a call the hook cannot evaluate (e.g. non-scalar argument) compiles or
-    reports the existing unknown diagnostic; must not crash.
-- Do not import `TrivialRegisterPassable` or `std.testing` in the test; they
-  are orthogonal and would add stdlib dependencies. Do not require
-  whole-closure builds, `--dump-full`, or the quality gate.
+1. **Use the existing call-evaluation seam.** Do not write a new interpreter.
+   `mojo.middle.comptime.eval_const_int` already takes
+   `call_hook(name, argvals) -> int | None`. The gimple path's existing hook
+   is `mojo/backend_gimple/emit_infra.py::_comptime_call_hook`, which looks
+   the callee up in `gen._imported_fn_sources`, extracts it with
+   `elaborate.extract_fn_source`, and runs it as cached machine code with
+   `comptime.evaluate(fn_src, name, argvals)`.
+2. **Provide the module-local lookup.** At `elaborate.Elaborator.
+   elaborate_generic_struct`, the full module source is available even though
+   the extracted struct template is not. Build the hook from `module_src`:
+   `elaborate.extract_fn_source(module_src, name)` then
+   `comptime.evaluate(fn_src, name, argvals)`, returning `None` on any
+   failure. `@no_inline` is just a decorator on the callee and must not change
+   the answer.
+3. **Bound the evaluation.** Only a pure scalar call whose arguments are all
+   compile-time ints may fold. A call the hook cannot resolve (missing
+   function, non-scalar parameter, body with side effects that needs the
+   runtime) returns `None`; an unanswerable expression must stay accepted,
+   not become a false diagnostic. Do not recurse without a depth bound.
+4. **Reuse part 1's value test** and part 2's elaboration error path. On an
+   invalid result raise the same `RuntimeError` carrying
+   `function instantiation failed` and
+   `struct alignment must be a positive power of 2, got <N>`, and make sure
+   `mojo/backend_gimple/emit_resolve.py::_ensure_generic_struct` /
+   `_elaborate_generic_struct_call` re-raise it (parts 2/3 add the phrase to
+   their allow-list, or a dedicated diagnostic exception is propagated).
+5. **Layout is still out of scope.** A valid `@align` value continues to
+   compile without applying the alignment to the emitted struct/alloca; the
+   original bug doc asks for validation only.
+
+## Acceptance
+
+Add `test_align_decorator_diagnostic.py` (the filename the original doc names)
+beside `test_comptime_dtype_diagnostic.py`. Use its `_compile_full` pattern:
+write the source under `.tmp/` and call
+`gimple_codegen.compile_to_gimple(src, do_imports=True, filename=<path>)`.
+
+    python3 test_align_decorator_diagnostic.py
+
+Required cases:
+
+| source | expected |
+|---|---|
+| the modular shape above with `calculate_illegal_alignment(x) = x * 3` and `AlignedTrivialParam[23]` | `RuntimeError` containing `function instantiation failed` **and** `struct alignment must be a positive power of 2, got 69` |
+| same shape, `calculate_alignment(x) = x * 2` and `[...][32]` | compiles (64) |
+| same shape, `return x * 3` and `[22]` | diagnostic with `got 66` |
+| function returns `0` / a negative value | diagnostic, not a silent compile |
+| a call the hook cannot evaluate (e.g. a non-scalar argument) | compiles or reports the existing unknown-diagnostic; must not crash |
+
+Use the exact modular call spelling `@align(calculate_illegal_alignment(alignment))`
+with `alignment` as the struct's bracket parameter, so the test proves the
+call is evaluated *after* the bracket substitution. Do not import
+`TrivialRegisterPassable` or `std.testing`; they are orthogonal to this
+validator and would make the test depend on stdlib availability.
 
 ## Status
-- **Open (replan/merge).**
+- **Open.**

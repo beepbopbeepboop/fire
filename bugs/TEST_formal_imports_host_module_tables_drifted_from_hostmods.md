@@ -12,11 +12,11 @@ own them: none of the five test names appear in its version of the file.
    the test's `placed` row moved to its `written` table, which is the rule the test's own docstring states.
 
 2. **a host-module refusal says what this target offers instead**: the refusal does not name that the record callers
-   want is a struct. The advice pointed at the removed constants-only exports-nothing bug doc, which did
+   want is a struct. The advice points at `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib`, which does
    not exist in the tree.
 
 3. **a host-module refusal carries its measured next step**: the same refusal, same missing doc
-   (the removed constants-only exports-nothing bug doc). The real reason is not stated anywhere it can be
+   (`FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib`). The real reason is not stated anywhere it can be
    read from.
 
 4. **every host-module advice entry is honest**: `HOST_MODULE_ADVICE['collections']` tells a reader to write a struct,
@@ -48,4 +48,4 @@ written. The tables were not updated, and the test is the thing that noticed.
 
 ## Resolution (2026-11-11, commit 587e71dc6)
 
-All five rows pass. Item 1 (builtins) fixed in 84da0d25f. Items 2 and 3 (refusal wording and its cited reason) by the host-module branch in `unresolvable_import_error` and by naming the constants-only exports-nothing reason directly. Item 4 (advice for a written module) by the constants-only exemption, checked against the file. Item 5 (copy's verdict) by the test row moving to `written`.
+All five rows pass. Item 1 (builtins) fixed in 84da0d25f. Items 2 and 3 (refusal wording and its cited doc) by the host-module branch in `unresolvable_import_error` and `bugs/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`. Item 4 (advice for a written module) by the constants-only exemption, checked against the file. Item 5 (copy's verdict) by the test row moving to `written`.

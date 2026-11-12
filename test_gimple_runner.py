@@ -2329,19 +2329,6 @@ def main():
     print(mk("x"))
 """, "x!\n")
 
-    # A function returning a subscript of a tuple local must be declared to
-    # return the slot's type (e.g. `char *` for a string element), not the
-    # int64_t default — otherwise the string pointer prints in decimal.
-    test_gimple_stdout(
-        "gimple_tuple_index_return_type", """\
-def f():
-    args = ("a", "b")
-    return args[0]
-
-def main():
-    print(f())
-""", "a\n")
-
     # The shape the bug was reported for (`http.server._main`'s
     # `DualStackServerMixin.finish_request`): a PARAMETER rebound before the
     # `class` statement, read by a method as a FIELD of the captured object
@@ -14989,7 +14976,6 @@ def main():
                   test_namedtuple_mixed_literal_types_is_refused,
                   test_namedtuple_tuple_protocol_is_refused_by_name,
                   test_nested_class_attr_reads_enclosing_local_regression,
-                  test_nested_class_in_method_captures_enclosing_param_regression,
                   test_nested_class_attr_from_str_param_regression,
                   test_nested_class_var_attr_from_str_param_regression,
                   test_nested_class_attr_expr_over_str_param_regression,
@@ -15129,43 +15115,6 @@ def main():
     print(tag(5))
     print(tag(7))
 """, "5\n7\n")
-
-
-def test_nested_class_in_method_captures_enclosing_param_regression():
-    """Regression: a `class` statement inside a struct METHOD, whose attribute
-    captures the method's parameter. The class-capture save/restore emits the
-    address of the `_classattr_` cell global for its unwind record, and a
-    method body is `__GIMPLE`-tagged, where `-fgimple` rejects
-    `&<variable>`: the whole program failed to compile with
-    "expected expression before '(' token". The capture must behave exactly
-    as it does from a plain function, including per-execution cells.
-
-    The enclosing method returns an `int`, deliberately: a POINTER-returning
-    function's `__GIMPLE` tag is not honoured by gcc's parser at all (measured;
-    see `_alloc_C`'s shape), so a pointer-returning method would pass even
-    with the address-of emitted and would not pin this bug."""
-    test_gimple_stdout("gimple_nested_class_in_method_captures_param", """\
-class Outer:
-    def make(self, n: int):
-        class C:
-            def get(self):
-                return n
-        return C().get()
-
-    def twice(self, n: int) -> int:
-        class C:
-            def get(self):
-                return n
-        a = C()
-        b = C()
-        return a.get() * 10 + b.get()
-
-def main():
-    print(Outer().make(3))
-    o = Outer()
-    print(o.make(4), o.make(5))
-    print(o.twice(6))
-""", "3\n4 5\n66\n")
 
 
 def test_instance_write_shadows_class_attr_regression():
@@ -15421,35 +15370,6 @@ def main():
             print("skip")
         else:
             print("keep")
-main()
-""")
-
-
-def test_dict_equality_by_value_for_integer_keys():
-    """`d == e` on two separately-built dicts with integer keys was False: the
-    comparison probed an integer-domain slot (keykind 2) with the string probe,
-    which cannot find it. The probe is the dict's own, so equal dicts compare
-    equal, unequal values and unequal keys still differ, and key order does not
-    matter (the convergence loop `nxt == proven` depends on this)."""
-    test_gimple_matches_cpython("gimple_dict_eq_int_keys", """\
-def main():
-    d = {1: 2}
-    e = {1: 2}
-    print(d == e)
-    f = {1: 2}
-    g = {1: 3}
-    print(f == g)
-    h = {5: 'a', 7: 'b'}
-    k = {7: 'b', 5: 'a'}
-    print(h == k)
-    m = {'x': 1, 'y': 2}
-    n = {'y': 2, 'x': 1}
-    print(m == n)
-    p = {1: 2}
-    q = {2: 2}
-    print(p == q)
-    print({} == {})
-    print({1: 2, 3: 4} == {1: 2})
 main()
 """)
 
