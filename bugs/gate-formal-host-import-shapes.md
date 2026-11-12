@@ -8,13 +8,12 @@
 - Dead host imports removed: `import inspect` in `formal/arm64_proof_gen.py`, `subprocess` in
   `test_formal_container_stride_pin.py`, `from types import SimpleNamespace` in
   `test_formal_frame_method_finder.py`. The job's `test_the_whole_tree_has_no_dead_host_import` passes.
+- `tools/generate_dashboard.py` now formats its timestamp with `time.strftime('%Y-%m-%d %H:%M')`
+  and no longer imports `datetime`, so `test_ratchet_datetime_is_not_imported_again` passes.
+- Dead host import `subprocess` removed from `test_class_rebind_late_binding.py` (found by the
+  tree-wide dead-import ratchet while fixing this bug).
 
-## Still red (2 cases)
-
-1. **datetime is still used live.** `test_ratchet_datetime_is_not_imported_again` fails (files 3, live 1).
-   The live use is `tools/generate_dashboard.py`: `from datetime import datetime` (line 8) and
-   `datetime.now().strftime('%Y-%m-%d %H:%M')` (line 782). Fix: format with `time.strftime('%Y-%m-%d %H:%M')`
-   and drop the import. Then the row is dead and the case passes.
+## Still red (1 case)
 
 2. **importlib.util row names differ.** `test_importlib_util_row_names_include_find_spec` expects the row to
    name `find_spec`, `module_from_spec` and `spec_from_file_location`. The live row names only

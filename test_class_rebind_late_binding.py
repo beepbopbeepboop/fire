@@ -8,7 +8,7 @@ what CPython answers, not refuse the program and not snapshot the value at the c
     python3 test_class_rebind_late_binding.py
 
 Uses the compiled path's own helpers from test_gimple_runner, so the compile and run match every other gimple test."""
-import os, sys, subprocess
+import os, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from test_gimple_runner import compile_mojo_to_gimple_exe, run_executable_stdout  # noqa: E402
