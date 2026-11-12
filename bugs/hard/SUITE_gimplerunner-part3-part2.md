@@ -1,4 +1,3 @@
-SPLIT: SUITE_gimplerunner-part3-part2-part1, SUITE_gimplerunner-part3-part2-part2, SUITE_gimplerunner-part3-part2-part3
 # SUITE_gimplerunner-part3-part2: wrong stdout values
 
 ## Goal

@@ -1254,8 +1254,6 @@ def _infer_multi_kind_return(gen, body, params=None,
         # whichever one happened to be lowered last.
         gen._cur_func_body = body
         gen._mixed_container_locals = None
-        gen._mixed_scalar_locals = None
-        gen._mixed_value_locals = None
         # Imported HERE rather than at module scope: `gimple_codegen.py`
         # imports this module before it imports `emit_infra`, so a top-level
         # `import ... emit_infra` in this file is a circular import that
@@ -1335,8 +1333,6 @@ def _infer_multi_kind_return(gen, body, params=None,
             gen.current_func_name = _saved_cur
             gen._cur_func_body = _saved_body
             gen._mixed_container_locals = None
-            gen._mixed_scalar_locals = None
-            gen._mixed_value_locals = None
 
 
 def _homogeneous_tuple_ann_elem(self, _ret_ann):
@@ -2908,102 +2904,6 @@ def _own_class_field_index(fields, name) -> int:
     return _pick
 
 
-# C types a module-scope class attribute may take from a module global it names
-# (`class C(): var name = S`). Each is a storage type the class-attribute global
-# can hold by plain assignment; a container or struct global is left to the
-# literal/container paths, which this shape does not reach.
-_MODULE_CLASS_ATTR_GLOBAL_CTYPES = ('char *', 'int64_t', 'double')
-
-
-def _module_class_attr_global_ctype(gen, value):
-    """C type of a module-scope class attribute's value when it reads ONLY
-    globals (`S`, `S + "!"`, `N + 1`) of THIS module or of a module it imports
-    by name, and that type is in `_MODULE_CLASS_ATTR_GLOBAL_CTYPES`; else None.
-
-    Every free name must be a global this module owns (`_own_global_var_types`,
-    not the shared `_global_var_types`: that table holds names another module
-    shares) or a `from m import` global (`_imported_global_home`). Any call or
-    other name makes the value None (its store is then left to nothing, as
-    before). The type is `_quick_type`'s estimate over the same overlay the
-    rest of the module resolves names from."""
-    _names = _used_idents_node(value)
-    if not _names:
-        return None
-    for _n in _names:
-        _nm = _as_str(_n)
-        if _nm in gen._own_global_var_types:
-            continue
-        # `from m import S` of a module-scope `var` global: the name's storage
-        # is the defining module's accessor. `_imported_global_home` is set only
-        # for those (emit_infra's global_var branch), and both tables are filled
-        # before any top-level statement runs, so the store reads it as any
-        # other global. A from-imported FUNCTION is not in it and stays None.
-        if _nm in gen._imported_global_home:
-            continue
-        return None
-    _t = _as_str(gen._quick_type(value))
-    # A module `Int` global is declared `int` (the frontend's spelling); the
-    # class attribute it seeds is the 64-bit `int64_t` every literal `Int`
-    # class attribute uses, and the store widens it.
-    if _t == 'int':
-        return 'int64_t'
-    if _t in _MODULE_CLASS_ATTR_GLOBAL_CTYPES:
-        return _t
-    return None
-
-
-def _module_class_attr_global_stores(gen, cls):
-    """Top-level `C.attr = <global>` statements for a module-scope `class`
-    statement's class attributes whose value names a module global.
-
-    A module-scope class body runs at the class statement, and the seeder in
-    `gen_module` (`class_attr_inits`, emitted into `_mojo_classattr_init`, which
-    runs BEFORE any top-level statement) can seed only literals. So a value
-    that reads a global is stored where the class statement sits in the
-    module's top-level body, after that global has been assigned. Each store
-    is an ordinary `AssignStmt` to the class attribute, lowered by the same
-    path as the function-scoped class statement (emit_stmts._gen_stmt_
-    StructDef), and the global's C type is recorded here so the declaration
-    pass (which runs after the top-level body is generated) agrees with it.
-
-    Only the OWN declaration of each attribute counts (see
-    `_own_class_field_index`): an override must store its own value, not the
-    base's, exactly as the seeder does."""
-    stores = []
-    # A class declared inside a function is not module scope: its attributes
-    # are per-execution cells / captures, stored by its own `class` statement.
-    if cls.name in getattr(gen, '_fn_scoped_structs', ()):
-        return stores
-    _cattrs = gen._class_attrs.get(cls.name, {})
-    _fl = _as_list(cls.fields)
-    for _aname in _cattrs:
-        _aname = _as_str(_aname)
-        _mangled = _as_str(_cattrs[_aname])
-        _own_idx = _own_class_field_index(cls.fields, _aname)
-        if _own_idx < 0:
-            continue
-        _cfd = _class_field_decl(_fl[_own_idx])
-        if _cfd is None or _as_str(_cfd[0]) != _aname:
-            continue
-        _ct = _module_class_attr_global_ctype(gen, _cfd[1])
-        if _ct is None:
-            continue
-        _line = getattr(cls, 'line', 0)
-        gen._global_var_types[_mangled] = _ct
-        # The field-typing pass runs BEFORE this module's globals are typed, so
-        # it fell back to the `<Cls> *` "unknown" field type; now that the
-        # global's type is known, the field takes it. The allocator's
-        # per-instance seed is gated on field and global agreeing.
-        _fts = gen.struct_field_types.get(cls.name)
-        if _fts is not None:
-            _fts[_aname] = _ct
-        stores.append(AssignStmt(
-            target=MemberExpr(obj=IdentExpr(name=cls.name, line=_line),
-                              member=_aname, line=_line),
-            value=_cfd[1], line=_line))
-    return stores
-
-
 def _ctor_param_evidence(gen, struct_name, param, xf_own) -> str:
     """The literal-evidence ctype for `<struct>::<param>` of an UNANNOTATED
     `__init__` parameter, or `''` when there is none.
@@ -3131,7 +3031,7 @@ def _gmi_emit_closure_recursive(self, func_parts: list, _emitted_closures: set,
             func_parts.append(_env_sz_def)
             func_parts.append('')
         func_parts.append(
-            f"__GIMPLE {ci.env_struct} * {alloc_fn} (void)\n"
+            f"{ci.env_struct} * __GIMPLE {alloc_fn} (void)\n"
             f"{{\n"
             f"  {ci.env_struct} * _e;\n"
             f"  void * _vp;\n"
@@ -3461,36 +3361,6 @@ def _cattr_value_is_constant(v) -> bool:
     may read the enclosing function's locals and is stored per execution."""
     return isinstance(v, (IntLiteral, FloatLiteral, StringLiteral, BoolLiteral,
                           NoneLiteral))
-
-
-def _cattr_value_is_cell(gen, cls_name: str, v) -> bool:
-    """True when a class-level attribute's value is kept in a per-execution
-    cell instead of a plain module global: the class is function-scoped and
-    the value is not a constant. This is the exact condition under which the
-    class-attribute registration in `gen_module_impl` records the mangled
-    name in `_cell_cattr_types`, so the two can never disagree.
-
-    No VISIBLE struct field may be created for such an attribute (both of the
-    field-creation loops in `gen_module_impl` consult this): the allocator's
-    per-instance init fires only when the field type and the global type
-    agree, and a cell attribute's global is a POINTER to the cell, so the
-    field is written by nothing — and `_lower_MemberExpr` prefers a struct
-    field over the class-attribute path, so every instance read hit that dead
-    field instead of the per-execution cell. `def h(s: str): class C(): var
-    name = s` therefore read back 0 for a `char *` (the field typed `C *`
-    by the "we don't know what this holds" fallback) and `None` when the
-    annotation typed it `char *` right (CODEGEN_nested_class_var_attr_
-    untyped_field). A bare, unannotated `name = s` never creates a field and
-    works — the annotation or the `var` spelling is what mints the field.
-    With the field gone, the read and the instance write both go through the
-    same cell + dynamic-storage machinery the bare spelling already uses
-    (`_cattr_instance_read` reads the cell this instance was built under;
-    an instance write `a.name = 9` lands in the dynamic storage and shadows
-    it), so every spelling of a per-execution attribute lowers identically,
-    the way CPython's class namespace treats them.
-    """
-    return (cls_name in getattr(gen, '_fn_scoped_structs', ())
-            and v is not None and not _cattr_value_is_constant(v))
 
 
 def _struct_typedef_fields(gen, sn) -> dict:
@@ -6279,20 +6149,6 @@ def gen_module_impl(self, stmts: list):
             # '_comptime_rhs_failures'` / `'_struct_param_names'`.
             '_comptime_rhs_failures': 'MojoList *',
             '_struct_param_names': 'MojoList *',
-            # `Parser._lazy_import_blockers` (PEP 810 lazy imports): the stack
-            # `parse_funcdef`/`parse_struct`/`parse_trait`/`parse_try` push the
-            # enclosing scope onto and `parse_lazy_import` reads the innermost
-            # entry. Added by master's lazy-import work; the dataclass field
-            # landed without this row, so the self-hosted `Parser` struct
-            # omitted it and gcc rejected every access with
-            # `'Parser' has no member named '_lazy_import_blockers'`.
-            '_lazy_import_blockers': 'MojoList *',
-            # `_last_bracket_variadics`: the `*Name: Type` variadic bracket
-            # parameters of the last bracket list parsed. The dataclass
-            # declaration was added alongside this row — the hardcoded layout
-            # is not derived from the dataclass, so a field the parser writes
-            # and `_parse_funcdef` reads needs BOTH.
-            '_last_bracket_variadics': 'MojoList *',
             # NOT `_CONV_KWS`: that is a CLASS-level constant
             # (`Parser._CONV_KWS = {...}`, fire_compiler.py), not an instance
             # field. Listing it here made `self._CONV_KWS` read this
@@ -6473,10 +6329,6 @@ def gen_module_impl(self, stmts: list):
         # is — it is a real Python bool on the dataclass.
         'captures': 'MojoList *',
         'has_capture_list': '_Bool',
-        # `*Name: Type` variadic bracket parameters, filled from
-        # `Parser._last_bracket_variadics` by `_parse_funcdef` and read by
-        # `_check_variadic_element_types`.
-        'variadic_bracket_params': 'MojoList *',
         'where_clause': 'int64_t',
         'where_else': 'int64_t',
         'line': 'int64_t',
@@ -6555,8 +6407,6 @@ def gen_module_impl(self, stmts: list):
         'extra': 'MojoList *',
         'line': 'int64_t',
         'col': 'int64_t',
-        # `lazy import ...` (PEP 810) — see ImportStmt.lazy in fire_compiler.py.
-        'lazy': '_Bool',
         'decorators': 'MojoList *',
     }
     self.struct_field_types['FromImportStmt'] = {
@@ -6565,8 +6415,6 @@ def gen_module_impl(self, stmts: list):
         'wildcard': '_Bool',
         'line': 'int64_t',
         'col': 'int64_t',
-        # `lazy from ... import ...` (PEP 810) — see FromImportStmt.lazy.
-        'lazy': '_Bool',
         'name_alias_strs': 'MojoList *',
         'decorators': 'MojoList *',
     }
@@ -6798,12 +6646,6 @@ def gen_module_impl(self, stmts: list):
         'bracket_params': 'MojoList *',
         'type_param_names': 'MojoList *',
         'keywords': 'MojoList *',
-        # `where_clause` is the same shape as FunctionDef's (None / one
-        # expression / a list) and takes the same boxed word;
-        # `bracket_types` is the (name, annotation source) pairs of the
-        # bracket parameter list.
-        'where_clause': 'int64_t',
-        'bracket_types': 'MojoList *',
     }
     self.struct_field_types['TraitDef'] = {
         'name': 'char *', 'methods': 'MojoList *', 'decorators': 'MojoList *',
@@ -7730,13 +7572,6 @@ def gen_module_impl(self, stmts: list):
             for field in (s.fields if hasattr(s, 'fields') else []):
                 if isinstance(field, VarDecl) and field.name and field.name != 'self':
                     if not field.type_ann and field.name not in self.struct_field_types[s.name]:
-                        # A per-execution cell attribute (a non-constant value
-                        # of a function-scoped class) gets NO visible struct
-                        # field — creating one here is exactly what made
-                        # `var NAME = <param>` read back 0 through the
-                        # instance (see `_cattr_value_is_cell`).
-                        if _cattr_value_is_cell(self, s.name, getattr(field, 'value', None)):
-                            continue
                         _inherited_ft = None
                         for _base_name in (getattr(s, 'bases', None) or []):
                             _base_ft = self.struct_field_types.get(_base_name, {})
@@ -7916,7 +7751,8 @@ def gen_module_impl(self, stmts: list):
                 # a.attr` reads 5, not the later call's 7. See
                 # nested class attribute reading an enclosing local (fixed).
                 # Module-scope classes and constants keep the plain global.
-                if _cattr_value_is_cell(self, s.name, v):
+                if (s.name in getattr(self, '_fn_scoped_structs', ())
+                        and v is not None and not _cattr_value_is_constant(v)):
                     _cells = getattr(self, '_cell_cattr_types', None)
                     if _cells is None:
                         _cells = {}
@@ -8003,16 +7839,7 @@ def gen_module_impl(self, stmts: list):
                         f_name = field.target.name
                     if _as_str(s.name) == 'StringLiteral':
                         _ind = f_name in self.struct_field_types[s.name]
-                    # Same rule as the unannotated VarDecl walk above: a
-                    # per-execution cell attribute is not a visible struct
-                    # field. The annotation is what typed `name: str = s`
-                    # `char *` right and still read `None` through the
-                    # instance — the field was never seeded, and the read
-                    # prefers it over the cell (see `_cattr_value_is_cell`).
-                    _cell_attr = _cattr_value_is_cell(self, s.name,
-                                                      getattr(field, 'value', None))
-                    if (f_name not in self.struct_field_types[s.name]
-                            and not _cell_attr):
+                    if f_name not in self.struct_field_types[s.name]:
                         ft = _mojo_type(_as_str(field.type_ann))
                         # System/POSIX typedefs (time_t, suseconds_t, size_t,
                         # ...) are spelled in the stdlib as Mojo aliases that
@@ -11123,25 +10950,7 @@ def gen_module_impl(self, stmts: list):
             return True
         if not st:
             return False
-        if _as_str(st) == 'char *' or _as_str(st) == 'double':
-            return True
-        # An INTEGER observation is proof unless the name came from a
-        # multi-value UNPACK of a single iterable: `_infer_local_var_types`
-        # types each such target with the `int64_t` STORAGE DEFAULT because
-        # the per-element type is not knowable there, and the element may be a
-        # container. `coro.py`'s `base, is_method, real_params, ... =
-        # _async_method_setup(...)` feeds `_mark_coro_param_elem_kinds(
-        # real_params)`, and reading that default as "a number" refused the
-        # file for a parameter every call site passes a list. Everything else
-        # -- a literal (answered above), a call result, a parameter, an
-        # ordinary local -- keeps counting, so `each([4, 5])` beside
-        # `each(n)` where `n = 3` (or `n = f()`) is still refused.
-        if isinstance(a, gimple_ctypes.IdentExpr):
-            _unpacked = (getattr(self, '_tuple_unpack_locals', None) or {}).get(
-                _as_str(caller_name), ())
-            if _as_str(a.name) in _unpacked:
-                return False
-        return _as_str(st) in ('int64_t', 'int', 'bool')
+        return _as_str(st) in ('char *', 'double', 'int64_t', 'int', 'bool')
 
     def _resolve_param_containers():
         """Turn the collected container observations into the contract.
@@ -11426,144 +11235,6 @@ def gen_module_impl(self, stmts: list):
             _e = None
         _callee_ret_elem_memo[fname] = _e
         return _e
-
-    # ── an unpacked tuple slot the callee returns as a container ──
-    #
-    # `base, is_m, real_params, prologue = _setup(fn)` types every unpack
-    # target as the int64_t box (`_infer_local_var_types_core`'s fallback for a
-    # value it cannot split), and `_is_noncontainer_arg` reads that box as a
-    # SCALAR. So a list handed back through a returned tuple, passed to a
-    # parameter that another call site feeds a direct list, tripped
-    # `_refuse_mixed_container_params` even though nothing in it is a str or a
-    # number: coro.py's `_mark_coro_param_elem_kinds`, reached through
-    # `_async_method_setup`'s tuple. The box is the fallback, not evidence of a
-    # scalar, so the exemption is evidence-based and narrow. A name is exempt
-    # ONLY when every binding of it in the caller is a tuple unpack from a
-    # module-level call whose returns, in that slot, are containers on every
-    # return statement. A slot the callee returns as a str or a number (or
-    # anything it cannot prove a container) keeps the observation, so
-    # `s, n = pair()` with `pair` returning `"de", 1` still refuses.
-    _CONTAINER_CTYPES = ('MojoList *', 'MojoDict *', 'MojoSet *')
-    _caller_body_by_name: dict = {}
-    for _cbn, _cbb in _caller_bodies:
-        _caller_body_by_name[_as_str(_cbn)] = _cbb
-    _caller_binding_memo: dict = {}   # caller -> {name: [binding | None]}
-    _container_slot_memo: dict = {}   # (callee, index, arity) -> bool
-
-    def _target_names(target):
-        """Every bare name a store target binds (`a`, `(a, b)`, `[a, *b]`)."""
-        names: list = []
-        pending: list = [target]
-        while pending:
-            _t = pending.pop()
-            if isinstance(_t, gimple_ctypes.IdentExpr):
-                names.append(_as_str(_t.name))
-            elif isinstance(_t, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
-                pending.extend(_t.elements)
-        return names
-
-    def _caller_bindings(caller_name):
-        """{name: [binding]} for one caller body. A binding is `(callee,
-        index, arity)` for slot `index` of `a, b, ... = callee(...)` with a
-        bare module-level callee, and None for every other way a name is
-        bound (assignment, `var`, loop target, walrus, parameter)."""
-        _cached = _caller_binding_memo.get(caller_name)
-        if _cached is not None:
-            return _cached
-        table: dict = {}
-        _cfd = _fn_by_name.get(caller_name)
-        if _cfd is not None:
-            for _p in (_cfd.params or []):
-                table.setdefault(_as_str(_p[0]), []).append(None)
-        for _n in _walk_ast(_caller_body_by_name.get(caller_name) or []):
-            if isinstance(_n, gimple_ctypes.AssignStmt):
-                _t = _n.target
-                _v = _n.value
-                if (isinstance(_t, gimple_ctypes.TupleExpr)
-                        and isinstance(_v, gimple_ctypes.CallExpr)
-                        and isinstance(_v.func, gimple_ctypes.IdentExpr)
-                        and _as_str(_v.func.name) in _fn_by_name):
-                    _callee = _as_str(_v.func.name)
-                    _arity = len(_t.elements)
-                    for _i, _el in enumerate(_t.elements):
-                        if isinstance(_el, gimple_ctypes.IdentExpr):
-                            table.setdefault(_as_str(_el.name), []).append((_callee, _i, _arity))
-                        else:
-                            for _nm in _target_names(_el):
-                                table.setdefault(_nm, []).append(None)
-                    continue
-                for _nm in _target_names(_t):
-                    table.setdefault(_nm, []).append(None)
-            elif isinstance(_n, gimple_ctypes.VarDecl):
-                table.setdefault(_as_str(_n.name), []).append(None)
-            elif isinstance(_n, gimple_ctypes.ForStmt):
-                for _nm in _target_names(_n.target):
-                    table.setdefault(_nm, []).append(None)
-            elif isinstance(_n, gimple_ctypes.MultiAssignStmt):
-                for _t in _n.targets:
-                    for _nm in _target_names(_t):
-                        table.setdefault(_nm, []).append(None)
-            elif isinstance(_n, gimple_ctypes.WalrusExpr):
-                table.setdefault(_as_str(_n.name), []).append(None)
-        _caller_binding_memo[caller_name] = table
-        return table
-
-    def _element_is_container(callee, e):
-        if isinstance(e, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr,
-                          gimple_ctypes.DictExpr, gimple_ctypes.SetExpr)):
-            return True
-        if isinstance(e, gimple_ctypes.IdentExpr):
-            _nm = _as_str(e.name)
-            _vt = self._inferred_var_types.get(callee, {}).get(_nm)
-            if _vt is None:
-                _vt = self._inferred_param_types.get(callee, {}).get(_nm)
-            return _as_str(_vt) in _CONTAINER_CTYPES
-        return False
-
-    def _slot_is_container(callee, index, arity):
-        """Does every return statement of `callee` yield a `arity`-tuple whose
-        slot `index` is a container? False for no returns, a non-tuple return,
-        or a tuple of another arity. Returns inside nested defs are not the
-        callee's own, so they are skipped."""
-        _key = (callee, index, arity)
-        if _key in _container_slot_memo:
-            return _container_slot_memo[_key]
-        _ans = False
-        _cfd = _fn_by_name.get(callee)
-        if _cfd is not None:
-            _nested_ids: set = set()
-            for _n in _walk_ast(_cfd.body):
-                if isinstance(_n, gimple_ctypes.FunctionDef):
-                    for _m in _walk_ast(_n.body):
-                        _nested_ids.add(id(_m))
-            _rets: list = []
-            for _n in _walk_ast(_cfd.body):
-                if isinstance(_n, gimple_ctypes.ReturnStmt) and id(_n) not in _nested_ids:
-                    _rets.append(_n)
-            _ans = len(_rets) > 0
-            for _r in _rets:
-                _rv = _r.value
-                if (not isinstance(_rv, gimple_ctypes.TupleExpr)
-                        or len(_rv.elements) != arity
-                        or not _element_is_container(callee, _rv.elements[index])):
-                    _ans = False
-                    break
-        _container_slot_memo[_key] = _ans
-        return _ans
-
-    def _unpack_from_container_slot(a, caller_name):
-        """Is call argument `a` a name whose every binding in `caller_name` is
-        a container-returning tuple-unpack slot (see the block above)?"""
-        if not isinstance(a, gimple_ctypes.IdentExpr):
-            return False
-        _bs = _caller_bindings(_as_str(caller_name)).get(_as_str(a.name))
-        if not _bs:
-            return False
-        for _b in _bs:
-            if _b is None or not _slot_is_container(_b[0], _b[1], _b[2]):
-                return False
-        return True
-
     _scalar_obs: dict[str, dict[str, set]] = {}   # callee -> {pname -> {types}}
     # Struct-pointer observations, collected in their own map (see
     # `_arg_struct_ptr_type`'s docstring for why they must not share
@@ -11707,8 +11378,7 @@ def gen_module_impl(self, stmts: list):
                     _record_param_container(callee, pnames[i], _pc)
 
                 st = _arg_scalar_type(caller_name, a)
-                if (_pc is None and _is_noncontainer_arg(a, caller_name, st)
-                        and not _unpack_from_container_slot(a, caller_name)):
+                if _pc is None and _is_noncontainer_arg(a, caller_name, st):
                     _record_param_noncontainer(callee, pnames[i])
                 if not st:
                     # An int/bool/None literal contributes NOTHING above, and
@@ -11846,10 +11516,9 @@ def gen_module_impl(self, stmts: list):
                         _kwpc = _static_arg_container(_kw[1], caller_name)
                         if _kwpc is not None:
                             _record_param_container(callee, _kwn, _kwpc)
-                        elif (_is_noncontainer_arg(
+                        elif _is_noncontainer_arg(
                                 _kw[1], caller_name,
-                                _arg_scalar_type(caller_name, _kw[1]))
-                                and not _unpack_from_container_slot(_kw[1], caller_name)):
+                                _arg_scalar_type(caller_name, _kw[1])):
                             _record_param_noncontainer(callee, _kwn)
                         break
 
@@ -13690,16 +13359,8 @@ def gen_module_impl(self, stmts: list):
                         'refusal', e)
             continue
         self._supported_async[s.name] = s
-        _astar = None
-        _akw = None
-        for _i, (_pn, _pt) in enumerate(getattr(s, 'params', None) or []):
-            if _pn.startswith('**'):
-                _akw = _i
-            elif _pn.startswith('*'):
-                _astar = _i
         self._async_api[s.name] = {
             'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
-            'star_slot': _astar, 'kwargs_slot': _akw,
         }
         self.func_param_types[f"{base}_start"] = param_ctypes
         self._generator_cpp_units.append(cpp_text)
@@ -13742,16 +13403,8 @@ def gen_module_impl(self, stmts: list):
                             '(pass 2)', e)
                 continue
             self._supported_async[s.name] = s
-            _astar = None
-            _akw = None
-            for _i, (_pn, _pt) in enumerate(getattr(s, 'params', None) or []):
-                if _pn.startswith('**'):
-                    _akw = _i
-                elif _pn.startswith('*'):
-                    _astar = _i
             self._async_api[s.name] = {
                 'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
-                'star_slot': _astar, 'kwargs_slot': _akw,
             }
             self.func_param_types[f"{base}_start"] = param_ctypes
             self._generator_cpp_units.append(cpp_text)
@@ -15730,10 +15383,6 @@ def gen_module_impl(self, stmts: list):
                 if self._lambda_parts:
                     func_parts.extend(self._lambda_parts)
                     self._lambda_parts = []
-            # The class body runs at this statement: a class attribute that
-            # reads a module global is stored here, in source order, after
-            # that global's own assignment (see _module_class_attr_global_stores).
-            toplevel_stmts.extend(_module_class_attr_global_stores(self, stmt))
         elif isinstance(stmt, TraitDef):
             lines = [f"typedef struct {stmt.name}_vtable {{"]
             _seen_vtable_members: set = set()
@@ -17632,18 +17281,6 @@ def gen_module_impl(self, stmts: list):
                             # before the class statement runs cannot dereference
                             # NULL; the class statement installs the real one.
                             class_attr_decls.append(f"{_cell_t} * {mangled};")
-                            # The unwind record's slot is the ADDRESS of that
-                            # global, and a `__GIMPLE`-tagged method body (where
-                            # a method's `class` statement lives) rejects
-                            # `&<variable>`. This untagged accessor takes the
-                            # address where plain C allows it; the tagged body
-                            # calls it instead (see emit_methods._
-                            # cattr_restore_begin). Emitted with the declaration
-                            # so the two cannot drift.
-                            class_attr_decls.append(
-                                f"static void {gimple_ctypes.cattr_unwind_push(mangled)}"
-                                f" (void *saved)"
-                                f" {{ mojo_cleanup_push_cattr ((void **) &{mangled}, saved); }}")
                             class_attr_inits.append(
                                 f"  {mangled} = ({_cell_t} *) calloc (1, sizeof ({_cell_t}));")
                             break
@@ -17765,11 +17402,7 @@ def gen_module_impl(self, stmts: list):
                             ctype = 'int64_t'
                             class_attr_inits.append(f'  {mangled} = {_signed_int64_c_literal(v.value)};')
                         else:
-                            # A reference to a module global is stored by the
-                            # class statement's top-level store (see
-                            # _module_class_attr_global_stores), typed as that
-                            # global. Anything else is seeded by no one here.
-                            ctype = _module_class_attr_global_ctype(self, v) or 'int64_t'
+                            ctype = 'int64_t'
                         class_attr_decls.append(f"{ctype} {mangled};")
                         self._global_var_types[mangled] = ctype
                         # a float literal has no global of its own kind (it is read as a
@@ -18010,7 +17643,7 @@ def gen_module_impl(self, stmts: list):
         if _sz_def:
             parts.append(_sz_def)
         parts.append(
-            f"__GIMPLE static {sn} * _alloc_{sn} (void)\n"
+            f"static {sn} * __GIMPLE _alloc_{sn} (void)\n"
             f"{{\n"
             f"  {sn} * _p;\n"
             f"  void * _vp;\n"

@@ -18,9 +18,7 @@ import subprocess
 import monomorphize as mm
 from fire_compiler import (py_tokenize, Parser, FunctionDef, StructDef,
                           TraitDef, split_top_level_commas, VarDecl,
-                          AssignStmt, IdentExpr, TupleExpr, StringLiteral)
-from mojo.middle.comptime import (eval_const_bool_state, CONST_TRUE,
-                                  CONST_FALSE)
+                          AssignStmt, IdentExpr)
 from gimple_codegen import _mojo_type
 from mojo.middle.types import _body_builds_struct_tuple
 
@@ -32,16 +30,6 @@ class ConformanceError(Exception):
     trait bound that the concrete type does not meet (it is missing a required
     method, or its signature differs). The message is the compile error a user
     sees."""
-
-
-class WhereConformanceError(ConformanceError):
-    """A `where` clause of a generic is provably false for the concrete type
-    arguments (`where (N > 0, "N must be positive")`). A subclass of
-    ConformanceError, so it is an ordinary conformance diagnostic to every
-    caller, and it is the one the struct instantiation path re-raises: its
-    trait-bound swallow exists for false positives of the bound check, and
-    a where clause that folds to false is not one of those."""
-
 
 # The generic head is `monomorphize.head_match`, which finds it with BRACKETS
 # BALANCED rather than with a `[^\]]*` class -- a parameter whose type is itself
@@ -624,136 +612,10 @@ def _is_int_dtype(t: str) -> bool:
     return False
 
 
-def _template_where_clauses(template_src: str):
-    """The parsed `where` clause expressions of a generic template (a function
-    or a struct), as a list in source order, or None when the template does not
-    parse. `(cond, "message")` entries are TupleExpr, as the parser leaves them."""
-    try:
-        stmts = Parser(py_tokenize(textwrap.dedent(template_src))).parse_module()
-    except Exception:
-        return None
-    for s in stmts:
-        if isinstance(s, (FunctionDef, StructDef)):
-            w = s.where_clause
-            if w is None:
-                return []
-            return list(w) if isinstance(w, list) else [w]
-    return None
-
-
-def _header_where_texts(template_src: str):
-    """The source text of each `where` clause of a template's declaration
-    header, in source order.
-
-    Read from the header itself rather than from a regex over the whole
-    template: a `where` inside the base list (`struct S[T](Movable where
-    False)`) is part of the base list, not a clause of the declaration, and the
-    parser already leaves it out of the clauses. The header runs to the first
-    colon outside brackets and string literals; a clause runs to the next
-    `where` at the same depth, or to an `else "<message>"` tail."""
-    src = template_src
-    depth, quote, end = 0, None, len(src)
-    marks = []
-    i = 0
-    while i < len(src):
-        c = src[i]
-        if quote:
-            if c == '\\':
-                i += 2
-                continue
-            if c == quote:
-                quote = None
-        elif c in '"\'':
-            quote = c
-        elif c in '([{':
-            depth += 1
-        elif c in ')]}':
-            depth -= 1
-        elif c == ':' and depth == 0:
-            end = i
-            break
-        elif (depth == 0 and src.startswith('where', i)
-                and (i == 0 or not (src[i - 1].isalnum() or src[i - 1] == '_'))
-                and not (src[i + 5:i + 6].isalnum() or src[i + 5:i + 6] == '_')):
-            marks.append(i)
-        i += 1
-    texts = []
-    for k, start in enumerate(marks):
-        stop = marks[k + 1] if k + 1 < len(marks) else end
-        clause = src[start + len('where'):stop]
-        clause = re.sub(r'\s+else\s+(["\']).*$', '', clause, flags=re.S)
-        texts.append(clause.strip())
-    return texts
-
-
-def where_violation_error(kind: str, name: str, exc: 'WhereConformanceError'):
-    """The user-facing error for a generic instantiation that violates a `where`
-    clause. Every instantiation entry point (an explicit `Struct[...]` in a
-    body, the in-TU elaboration queue) reports through this one function, so the
-    modular wording (`error: invalid <kind> of '<name>': violated constraint`)
-    does not depend on which path reached the check."""
-    return RuntimeError(
-        f"error: invalid {kind} of '{name}': violated constraint\n"
-        f"note: {type(exc).__name__}: {exc}")
-
-
-def _split_where_message(expr):
-    """`(cond, "message")` -> (cond, message); any other clause -> (expr, None)."""
-    if (isinstance(expr, TupleExpr) and len(expr.elements) == 2
-            and isinstance(expr.elements[1], StringLiteral)):
-        return expr.elements[0], expr.elements[1].value
-    return expr, None
-
-
-def _where_bindings(targs: dict) -> dict:
-    """The comptime bindings a clause folds against: a concrete integer, float,
-    or Bool type argument. Any other argument is left out, so a clause over it
-    is undecided rather than wrong."""
-    bindings = {}
-    for name, conc in targs.items():
-        text = str(conc).strip()
-        if re.fullmatch(r'-?\d+', text):
-            bindings[name] = int(text)
-        elif re.fullmatch(r'-?\d+\.\d+([eE][-+]?\d+)?', text):
-            bindings[name] = float(text)
-        elif text in ('True', 'False'):
-            bindings[name] = (text == 'True')
-    return bindings
-
-
 def check_where_clauses(module_src: str, template_src: str, targs: dict):
-    """Enforce the template's `where` clauses for the concrete `targs`.
-
-    Each clause is folded by the shared constant folder
-    (mojo.middle.comptime.eval_const_bool_state): a provably false clause raises
-    ConformanceError with its message, or its source when it has none. A true
-    clause passes. An undecided clause (a name the folder cannot resolve, such
-    as a comptime assert proved elsewhere in the body) is accepted as before.
-    The regex checks for `T.is_floating_point()` / `is_integral()` / `T == U`
-    only run for a template the parser cannot read or whose clause the folder
-    could not decide, so DType predicates keep their existing result."""
-    clauses = _template_where_clauses(template_src)
-    undecided = clauses is None
-    if clauses:
-        src_texts = _header_where_texts(template_src)
-        bindings = _where_bindings(targs)
-        for i, item in enumerate(clauses):
-            cond, msg = _split_where_message(item)
-            state = eval_const_bool_state(cond, bindings)
-            if state == CONST_FALSE:
-                if msg is not None:
-                    raise WhereConformanceError(msg)
-                text = (src_texts[i] if len(src_texts) == len(clauses)
-                        else ' and '.join(src_texts))
-                raise WhereConformanceError(f"requirement '{text}' is not satisfied")
-            if state != CONST_TRUE:
-                undecided = True
-    if undecided:
-        _check_where_text_predicates(template_src, targs)
-
-
-def _check_where_text_predicates(template_src: str, targs: dict):
-    """The DType / type-equality where checks, by regex over the clause text."""
+    """Check where clause constraints like dtype.is_floating_point()."""
+    # Look for where clauses
+    # Simple pattern matching
     for m in re.finditer(r'where\s+(.+?)(?::|\n|$)', template_src):
         clause = m.group(1).strip()
         # Check for X.is_floating_point()

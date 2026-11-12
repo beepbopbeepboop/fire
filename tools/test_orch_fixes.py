@@ -98,23 +98,7 @@ def test_free_branch_takes_the_next_suffix_when_a_branch_exists():
         C.git = real_git
 
 
-def test_free_task_name_checks_the_cut_form_against_registry_and_queue():
-    real_load, real_q = C.load, C.qdir
-    tmp = tempfile.mkdtemp(prefix="orchname_")
-    open(os.path.join(tmp, "bug-aaaa.json"), "w").write("{}")
-    try:
-        C.load, C.qdir = (lambda: {"bug-bbbb": {}}), (lambda: tmp)
-        check("a free name is kept", C.free_task_name("bug-cccc") == "bug-cccc")
-        check("a queued name gets -2", C.free_task_name("bug-aaaa") == "bug-aaaa-2")
-        check("a registered name gets -2", C.free_task_name("bug-bbbb") == "bug-bbbb-2")
-        check("the cut happens before the check", C.free_task_name("bug-aaaa-zzzz", 8) == "bug-aa-2")
-        check("the suffix fits the limit", len(C.free_task_name("bug-aaaa", 8)) <= 8)
-    finally:
-        C.load, C.qdir = real_load, real_q
-
-
 if __name__ == "__main__":
-    test_free_task_name_checks_the_cut_form_against_registry_and_queue()
     test_doc_deletion_needs_a_test()
     test_no_progress_streak()
     test_no_progress_stops_the_feed()

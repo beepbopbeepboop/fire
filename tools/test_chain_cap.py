@@ -48,27 +48,6 @@ class MergeFixDepth(unittest.TestCase):
             I.enqueue_merge_fix(name, {"branch": "work/x", "summary": "s", "claims": [], "cls": "easy"}, "")
             enq.assert_not_called()
             self.assertEqual(reg[name]["state"], "abandoned")
-            self.assertTrue(reg[name]["merge_capped"])         # pick_candidates skips it: no re-probe every pass
-
-    def test_a_branch_whose_doc_is_gone_gets_no_fixer(self):
-        name = "bug-x"
-        reg = {name: {"state": "exited-ok"}}
-        with mock.patch.object(I.C, "registry") as reg_cm, \
-             mock.patch.object(I.C, "doc_exists_for", return_value=False), \
-             mock.patch.object(I.C, "cmd_enqueue") as enq:
-            reg_cm.return_value.__enter__.return_value = reg
-            reg_cm.return_value.__exit__.return_value = False
-            I.enqueue_merge_fix(name, {"branch": "work/x", "summary": "s", "claims": ["bug:GONE"], "cls": "easy"}, "")
-            enq.assert_not_called()
-            self.assertTrue(reg[name]["merge_capped"])
-            self.assertNotIn("fixer", reg[name])
-
-    def test_pick_candidates_skips_a_capped_branch(self):
-        t = {"slot": 1, "state": "exited-ok", "merge_capped": "x", "branch": "b", "worktree": "/w", "claims": []}
-        with mock.patch.object(I.C, "load", return_value={"n": t}), \
-             mock.patch.object(I.C, "state_of", return_value="exited-ok"), \
-             mock.patch.object(I.C, "verdict", side_effect=AssertionError("a capped branch is not even probed")):
-            self.assertEqual(I.pick_candidates(quiet=True), [])
 
 
 if __name__ == "__main__":

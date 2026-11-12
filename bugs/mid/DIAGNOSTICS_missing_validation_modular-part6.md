@@ -1,97 +1,72 @@
-# DIAGNOSTICS missing-validation part 6: refuse mutually recursive generic instantiation (and cap elaboration depth)
+# DIAGNOSTICS_missing_validation_modular part 6: interpreter `constrained[...]()`
 
-Class: **mid** (this doc lives in `bugs/mid/`). It generalises an existing
-per-template self-call check and adds a depth cap around an instantiation loop
-that currently ends in a silent stub.
+Part 6 of the split of `bugs/hard/DIAGNOSTICS_missing_validation_modular.md`.
+This is the "non-gimple/formal backends" item in the umbrella's Status: the
+gimple backend diagnoses `constrained`, the interpreter does not know the
+builtin at all.
 
-Parent: `bugs/hard/DIAGNOSTICS_missing_validation_modular.md` (the
-elaboration-recursion remainder). Plan:
-`docs/diagnostics-missing-validation-plan.md` §5, measured against
-`elaboration_error_recursion1.mojo`.
+## Why this part
 
-## Goal
+The gimple path rejects a provably-false `constrained` at compile time
+(`constraint failed: <msg>`, with `test_constrained_diagnostic.py` as the
+regression). On the interpreter path the same program does not reach any
+constraint logic:
 
-An uninstantiable recursive generic must be refused with a diagnostic, in both
-the in-TU and the `.o` elaboration paths. Direct self-recursion already is;
-mutual recursion is not — it silently compiles a stub that answers 0.
+    $ python3 fire.py run constrained_false.mojo
+    NameError: name 'constrained' is not defined
 
-## Current state (measured 2026-11-12)
+Measured 2026-11-10 with
 
-- Direct self-recursion is refused: `fire.py build` on
-  `def self_recursion[i: Int]() -> Int: var x = self_recursion[i + 1](); return x`
-  exits 1 with
-  `cannot compile module: self recursive call to 'self_recursion' will cause an infinite loop`.
-  The checks are `mojo/backend_gimple/elab_intu.py` (~3100, the in-TU pass),
-  `mojo/backend_gimple/emit_resolve.py` (~2999/3015) and
-  `mojo/backend_gimple/emit_calls.py` (~3135), plus the shared
-  `self_recursive_uninstantiable` (`emit_calls.py`, ~1858).
-- Mutual recursion is silently accepted:
-  `def a[i: Int]() -> Int: return b[i + 1]()` /
-  `def b[i: Int]() -> Int: return a[i + 1]()` called as `a[1]()` builds with
-  `rc=0`, no diagnostic, and the binary runs. The in-TU check compares the
-  callee base with `rec['base']` only, and `a`'s body calling `b` is a
-  different base; `b[i + 1]` then has a non-concrete argument, so
-  `_concrete_args` returns `None` and the call becomes a weak stub. The
-  modular file's own expectation is that this is an error, with the
-  `elaborator expansion is N levels deep - infinite recursion?` /
-  `error recurses N times` notes.
-- `monomorphize.ELAB_DEPTH` (~943) already counts nested instantiation builds
-  (incremented and decremented around the CAS build, ~1186/1200) but is used
-  only for the optional `MOJO_ELAB_LOG` trace.
+```mojo
+fn f():
+    constrained[1 == 2, "bad"]()
+fn main():
+    f()
+```
+
+`python3 fire.py run` exits 1 with `NameError` and a traceback, not
+`constraint failed: bad`. The true form `constrained[True]()` fails the same
+way, so even valid programs using the builtin cannot run under the interpreter.
+The parser produces a `CallExpr` whose `func` is a `SubscriptExpr` over
+`IdentExpr('constrained')`; `myinterpreter.py` has no case for it.
 
 ## Scope
 
-1. **Generalise the in-TU refusal.** In `elab_intu.py`'s `visit`, a bracketed
-   generic call inside a concrete (monomorphized) template that is not all
-   concrete must be refused, not left to become an extern stub — that is the
-   actual defect, and `base == rec['base']` is only its commonest shape. Keep
-   the existing wording when `base == rec['base']` (the regression pins it);
-   for another callee name it and say the instantiation cannot be materialized.
-   Apply the same rule to the `.o` route's calls
-   (`emit_resolve._elaborate_generic_call` and the `emit_calls` stub arm).
-2. **Depth cap.** Turn `ELAB_DEPTH` into a hard guard as well as a trace: a
-   nested elaboration deeper than a documented limit (modular's default is 128,
-   `--elaboration-max-depth`) raises
-   `elaborator expansion is N levels deep - infinite recursion?` and must
-   unwind (`ELAB_DEPTH` decremented on the error path too). This is the guard
-   for cascades the concreteness test cannot see, and it is what makes an
-   unanticipated shape fail in bounded work rather than loop.
-3. Do not swallow the error in the instantiation `try/except`: the existing
-   re-raise path for compile-time diagnostics from an instantiated body
-   (`emit_resolve.py`, ~3476) is the precedent; a refusal must surface as a
-   nonzero build, not fall through to the stub.
-4. If the diagnostic plumbing has a note channel, attach
-   `error recurses N times` with the observed depth; the two load-bearing
-   strings are the ones in Acceptance.
+`myinterpreter.py` (the `constrained` call path):
+
+- recognise a call whose `func` is `SubscriptExpr(obj=IdentExpr('constrained'))`
+  (the bracket form `constrained[cond, msg]()`), evaluate the first bracket
+  argument, and:
+  - if it is false, raise `RuntimeError("constraint failed: <msg>")` (or
+    `constraint failed` when no message) so `fire.py run` exits nonzero with
+    the same wording the gimple path uses;
+  - if it is true, return `None` (the builtin has no value);
+  - if evaluation raises `NameError`/another error, propagate it; an unknown
+    condition must not be treated as false.
+- Handle the parenthesised form only if the parser represents it the same way;
+  do not add a second parser representation for it.
+- Do not try to make the interpreter a compile-time checker. Evaluating the
+  condition in the interpreter and failing at run time is the interpreter's
+  contract; the observable is the same diagnostic text and a nonzero exit.
 
 ## Acceptance
 
-- The direct self-recursion program still exits nonzero with
-  `self recursive call to 'self_recursion' will cause an infinite loop`.
-- The mutual `a`/`b` program exits nonzero, within a bounded time (the test
-  uses a subprocess timeout), with `infinite recursion` or
-  `self recursive call` in the output — no `rc=0`, no hang.
-- A finite chain (`a` calls `b`, `b` returns a constant) builds and runs.
-- A finite chain a few levels deep, below the cap, builds.
-- The existing bracket/`comptime` diagnostics tests keep passing.
+Add `test_interpreter_constrained_diagnostic.py` beside
+`test_interpreter_assert_message.py`, using `python3 fire.py run <temp file>`:
 
-## Done when
+| source | expected |
+|---|---|
+| `constrained[1 == 2, "bad"]()` in `main` | exit nonzero; stderr contains `constraint failed: bad` |
+| `constrained[1 == 1, "ok"]()` | exit 0; no `constraint failed` |
+| `constrained[False]()` | exit nonzero; stderr contains `constraint failed` |
+| `constrained[False, "bad"]()` inside a helper called from `main` | nonzero; `constraint failed: bad` |
 
-Add `test_elaboration_recursion_diagnostic.py` beside the other
-`test_*_diagnostic.py` files (do NOT register it in `tools/suite.py`) and run
-exactly:
+Run only:
 
-    python3 tools/memslot.py --gb 8 --label elaboration-recursion -- python3 test_elaboration_recursion_diagnostic.py
+    python3 test_interpreter_constrained_diagnostic.py
+    python3 test_myinterpreter.py
 
-The test invokes `fire.py build` through a helper with
-`subprocess.run(..., timeout=120)` for every case, so a regression that hangs
-or silently accepts is a failure rather than a gate hang.
-
-## Not in this part
-
-The exact note inventory of `elaboration_error_recursion1.mojo` beyond the two
-strings above, and recursion in the formal backends. No test registration.
+No suite registration and no compile step.
 
 ## Status
-
 - **Open.**
