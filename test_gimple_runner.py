@@ -15515,6 +15515,32 @@ def main():
 """, "x!\n8\n")
 
 
+def test_module_class_attr_call_value_regression():
+    """A module-scope class attribute whose value is a CALL (`f()` of a module
+    function with a declared `String` return, `len(S)` of a builtin) was never
+    stored: `_module_class_attr_global_ctype` returned None for any free name
+    that was not a global, so `C().name` read 0 and `C().n` read 0 while CPython
+    prints `q` and `1`. The store belongs at the class statement, typed from the
+    callee's declared return (bugs/CODEGEN_module_scope_class_attr_call_value_
+    unstored.md)."""
+    test_gimple_stdout("gimple_module_class_attr_call_value", """\
+S = "x"
+
+def f() -> String:
+    return "q"
+
+class C():
+    var name = f()
+    var n = len(S)
+
+def main():
+    print(C().name)
+    print(C().n)
+
+main()
+""", "q\n1\n")
+
+
 def test_nested_class_attr_expr_over_str_param_regression():
     """Companion to the bare-name case above:
     an EXPRESSION over the enclosing function's parameters is typed from the

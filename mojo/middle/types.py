@@ -384,7 +384,33 @@ _BUILTIN_RET_CTYPES = {
     'frozenset': 'MojoSet *',
 }
 
-_SCALAR_INT_TYPES = frozenset({'int', 'char', '_Bool', 'int8_t', 'int16_t', 'int32_t', 'int64_t', 'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'})
+# Scalar builtins whose result type is fixed by the builtin alone, whatever
+# the arguments are. Read by `_quick_type` (resolve_shared.py) for the call's
+# type, and by the module-scope class-attribute gate (module_gen.py), which
+# must accept exactly the calls `_quick_type` can type from the builtin rather
+# than from a guess. One table, so the two cannot disagree.
+#
+# `abs(x)` is NOT here: it returns its argument's own type, so it is answered
+# where the argument is available. Same for every other name that needs its
+# arguments. Each entry is only used when the name is not shadowed by a
+# module-level def or import (`_locally_binds_name`).
+#
+# `isinstance()`/`all()`/`any()` always return a plain Python bool regardless
+# of their arguments' types, so they are `_Bool` here. The real emission
+# (_lower_builtin_isinstance/_lower_builtin_all_any) produces a C `int`, but
+# `_Bool` matches every other boolean-producing case in `_quick_type` (BinaryOp
+# compare/'in', CompareChain, UnaryOp 'not', BoolLiteral) and avoids joining as
+# an opaque int64_t/pointer against a sibling return path of a real pointer
+# type (the comprehension return-type int64_t-default bug: a comprehension
+# returned from a function whose sibling return path is a pointer).
+_BUILTIN_SCALAR_RET_CTYPES = {
+    'float': 'double', 'int': 'int64_t', 'str': 'char *',
+    'len': 'int64_t', 'ord': 'int64_t', 'chr': 'char *',
+    'bool': '_Bool', 'repr': 'char *',
+    'isinstance': '_Bool', 'all': '_Bool', 'any': '_Bool',
+}
+
+_SCALAR_INT_TYPES =frozenset({'int', 'char', '_Bool', 'int8_t', 'int16_t', 'int32_t', 'int64_t', 'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'})
 # The plain SIGNED subset: the operand types for which `a / b` is true division
 # (Float64). One definition, read by the plain tail (emit_exprs.py), the
 # coroutine emitter (cpp_core.py) and the static result-type inference

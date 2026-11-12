@@ -101,6 +101,7 @@ import mojo.middle.funcs_shared as funcs_shared
 import mojo.middle.itcursor as itc
 from mojo.middle.funcs_shared import param_default_pairs
 from mojo.middle.types import _TUPLE_ANN_BY_NAME, _unpack_target_leaf_names
+from mojo.middle.types import _BUILTIN_SCALAR_RET_CTYPES, _LIBM_FN_RETVALS
 from mojo.middle.types import PRESENCE_WORD, presence_bit, presence_word_count, presence_set_stmt
 from mojo.middle.methods_shared import _is_selfhost_source_file, poly_dispatch_plan
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _SELFHOST_KWARGS_HAS_VARARG, _SELFHOST_KWARGS_SLOTS, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
@@ -2915,22 +2916,63 @@ def _own_class_field_index(fields, name) -> int:
 _MODULE_CLASS_ATTR_GLOBAL_CTYPES = ('char *', 'int64_t', 'double')
 
 
+def _module_class_attr_callee_typed(gen, name):
+    """Whether a call to `name` inside a module-scope class attribute's value
+    has a result type the gate can name WITHOUT guessing, so the store can be
+    typed from the callee rather than from `_quick_type`'s fallback.
+
+    A function THIS module defines answers with its published return type, and
+    is typed only when that type is known (`_func_return_type_for_call` with no
+    default). A builtin answers with its fixed result type
+    (`_BUILTIN_SCALAR_RET_CTYPES`, or a libm function's `_LIBM_FN_RETVALS`),
+    and only while this module does not shadow the bare name with its own def
+    or import. Anything else (a from-imported function, a sibling's name, an
+    unknown callee) is not typed here and makes the value None."""
+    if name in gen._local_top_level_func_names:
+        return gen._func_return_type_for_call(name, None) is not None
+    if gen._locally_binds_name(name):
+        return False
+    return name in _BUILTIN_SCALAR_RET_CTYPES or name in _LIBM_FN_RETVALS
+
+
 def _module_class_attr_global_ctype(gen, value):
     """C type of a module-scope class attribute's value when it reads ONLY
     globals (`S`, `S + "!"`, `N + 1`) of THIS module or of a module it imports
-    by name, and that type is in `_MODULE_CLASS_ATTR_GLOBAL_CTYPES`; else None.
+    by name, or CALLS whose result type is known (`f()` of a module function
+    with a known return, `len(S)` of a builtin), and that type is in
+    `_MODULE_CLASS_ATTR_GLOBAL_CTYPES`; else None.
 
-    Every free name must be a global this module owns (`_own_global_var_types`,
-    not the shared `_global_var_types`: that table holds names another module
-    shares) or a `from m import` global (`_imported_global_home`). Any call or
-    other name makes the value None (its store is then left to nothing, as
-    before). The type is `_quick_type`'s estimate over the same overlay the
-    rest of the module resolves names from."""
+    Every name in VALUE position must be a global this module owns
+    (`_own_global_var_types`, not the shared `_global_var_types`: that table
+    holds names another module shares) or a `from m import` global
+    (`_imported_global_home`). A name used ONLY as a callee is judged by
+    `_module_class_attr_callee_typed` instead. Any other name makes the value
+    None (its store is then left to nothing, as before). The type is
+    `_quick_type`'s estimate over the same overlay the rest of the module
+    resolves names from; for a callee in `_module_class_attr_callee_typed`'s
+    accepted set that estimate is the callee's own answer, not a guess."""
     _names = _used_idents_node(value)
     if not _names:
         return None
+    # Callee positions are a call's `func`, and a name is a callee-only name
+    # when every reference to it is in such a position. A name also used as a
+    # value (`f + f()`) is checked as a value, which is the stricter answer.
+    _callee_ids = set()
+    _callee_names = set()
+    _value_refs = set()
+    for _w in _walk_ast(value):
+        if isinstance(_w, CallExpr) and isinstance(_w.func, IdentExpr):
+            _callee_ids.add(id(_w.func))
+            _callee_names.add(_as_str(_w.func.name))
+    for _w in _walk_ast(value):
+        if isinstance(_w, IdentExpr) and id(_w) not in _callee_ids:
+            _value_refs.add(_as_str(_w.name))
     for _n in _names:
         _nm = _as_str(_n)
+        if _nm in _callee_names and _nm not in _value_refs:
+            if _module_class_attr_callee_typed(gen, _nm):
+                continue
+            return None
         if _nm in gen._own_global_var_types:
             continue
         # `from m import S` of a module-scope `var` global: the name's storage
