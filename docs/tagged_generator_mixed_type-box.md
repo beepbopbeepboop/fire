@@ -119,6 +119,120 @@ target is registered the way a `next(g)` bind is:
 `_keep_tagged_box`, `MIXED_NAME_NON_INT64_REFUSAL`, `tagged_mixed_name`,
 `mojo_box_int`, `mojo_box_word`, `_stored_kinds`.
 
+## 4. The read side
+
+### 4a. The binder census: `_local_bindings` (`emit_infra.py` ~3614-3687)
+
+Returns every binding of a name in THIS function's body: the `value` for a
+plain `name = <value>`, and `None` for every other binder (an augmented or
+multi-assign, a for or with target, a comprehension generator, and any other
+node whose `.name` is the name). An ambiguous form counts as a binder, so an
+over-count only refuses an optimisation. Computed from `gen._cur_func_body` and
+cached in `gen._local_bindings_cache` under `(id(body), name)`; the body id is
+in the key because `module_gen` swaps the body without going through
+`_reset_func`.
+
+### 4b. The per-name rules (`emit_infra.py`)
+
+Each takes `(gen, name)` and answers False for a parameter or an unbound name.
+
+- `tagged_next_bind_name` (~3688). True: every binding is `name = next(g)` for
+  one generator local `g` bound exactly once, or a copy of another name that is
+  itself such a name (`_seen` breaks copy cycles). False: any other binder, two
+  different generators, or a `g` that is a parameter or bound more than once.
+  Safe because every store into the name is the same tagged word, so no store
+  can hand a consumer a bare word where it expects a box.
+- `tagged_for_target_name` (~3824). True: every binding is a `for name in <tagged
+  generator>` target, and the count of such loops equals the count of binders.
+  False: a plain assignment, a tuple target (`for_target_is_tuple`), or a loop
+  whose iterable fails `_tagged_generator_iterable`. Safe because a rebinding
+  anywhere makes the loop count differ from the binder count.
+- `tagged_mixed_name` (~3758). True: the name is bound to a tagged word somewhere
+  AND to a plain value elsewhere, and is not a `tagged_next_bind_name`. Exits
+  early, with no body walk, when no `_generator_api` entry has `mixed_slots`.
+  Safe because a mixed name's every store is boxed (see 3a), so the local is a
+  box-holding local with no bare-word store.
+- `tagged_recv_name` (~3857). True: every binding is `name = yield`
+  (`__mojo_coro_yield_i`). False: any other binder. Safe because the resume word
+  is either the None box or a bare integer, and a consumer renders both
+  correctly (`mojo_repr_boxed`).
+- `_tagged_generator_iterable` (~3798). True: the for-iterable is a call of a
+  generator whose `_generator_api` entry has `mixed_slots` and
+  `value_ctype == 'int64_t'`, either written directly or through a local bound
+  exactly once to such a call. `_generator_api` is built before any body is
+  emitted, so the answer does not depend on lowering order.
+
+### 4c. The operand rule: `_is_tagged_box_operand` (`emit_exprs.py` ~1249)
+
+An already-lowered operand `val` is a tagged box iff `val` is in `_boxed_vals`
+AND (`val` is in `_tagged_word_vals`, or the AST node is an `IdentExpr` whose
+name satisfies `tagged_for_target_name`).
+
+The split doc asked to record why a for-target word is in `_boxed_vals` but not
+in `_tagged_word_vals`. Read at HEAD, that premise does not hold in general:
+
+- the single-target arm of `emit_loops.py` (~4005-4006) adds the target to
+  BOTH `_boxed_vals` and `_tagged_word_vals`, so the first test in the rule
+  already answers True for it;
+- the tuple-unpack arm (~3988-3997) adds to `_boxed_vals` only, and
+  `tagged_for_target_name` skips tuple targets, so a tuple-unpacked word is
+  covered by neither test. This is an open gap in the operand rule, not a
+  documented design.
+- a copy of a for-target (`_for_copy` in `emit_stmts.py`) enters
+  `_tagged_word_vals` through `_keep_tagged_box`.
+
+### 4d. The per-kind readers (`runtime/fire_runtime.c`)
+
+- `mojo_box_int` (~1983): unwraps. A `'d'` box is truncated toward zero
+  (`(int64_t)mojo_box_double`), so a fresh double box must never be passed
+  through it. Any other box returns its `bits`; a non-box returns itself.
+- `mojo_box_word` (~1993): unwraps every box EXCEPT a `'d'` box, which is kept.
+  A non-box returns itself.
+- `mojo_box_double` (~1800): a `'d'` box returns its double bits; a non-double
+  box returns its `bits` as a double; a non-box returns `(double)v`.
+- `mojo_word_is_none` (~2026): true for a `'n'` box, and for a `'p'` or `'s'` box
+  whose `bits` is 0 (a NULL slot). A bare word is never None.
+- `mojo_unbox_plain` (~2012): a `'n'` box becomes 0, a `'b'` box its 0/1, a `'p'`
+  or `'s'` box its pointer. Every other word, including a `'d'` box, is kept.
+  Omitted from the split doc; it is what a tuple-unpack target uses.
+- `mojo_repr_boxed` (~2143): the str() spelling by kind (`'d'` float, `'p'` the
+  string itself, `'s'` bytes repr, `'l'` list repr, `'n'` None, `'b'` True/False,
+  otherwise the integer). Its non-box arm: a registered string
+  (`mojo_boxed_is_str`), a regex match, or the plain integer. Uses str() not
+  repr() semantics.
+- `mojo_cstr_or_int_str` (~14515): the value-side str spelling of a word. A box
+  is spelled by kind (a `'d'` box as a float, others via `mojo_repr_boxed`), a
+  registered str is returned as-is, bytes and regex matches are spelled, a
+  registered list is keyed, and an integer is its decimal. Returns a fresh
+  heap string.
+- `mojo_word_cstr_value` (~14550): the value sibling, for a callee that
+  dispatches on the word's kind. A `'p'` or `'s'` box, or a plain string or
+  bytes word, returns the address borrowed, without quoting. Other boxes and
+  integers follow `mojo_cstr_or_int_str`.
+- `mojo_float_arith_select` (~1962) and `mojo_float_cmp_select` (~1972): if
+  either operand is a `'d'` box, return a fresh double box holding the double
+  result (arithmetic) or the double comparison (compare); otherwise the integer
+  answer. The codegen treats the arithmetic result as a tagged word.
+
+### 4e. The arithmetic dispatch (`emit_exprs.py`)
+
+- `_tagged_unary_neg` (~1263): negation of a tagged operand.
+- `_tagged_arith_select` (~4122): for `+ - * ...` beside an integer. It computes
+  both the integer answer and the double answer, and `mojo_float_arith_select`
+  picks by the operand's kind. A double operand is not handled here.
+- `_tagged_cmp_select` (~4160): for `< <= > >=` beside an integer, the same shape
+  with `mojo_float_cmp_select`.
+
+### 4f. The refusal as the read path sees it
+
+`MIXED_NAME_NON_INT64_REFUSAL` (`emit_infra.py` ~3744) and its two trigger halves
+(`emit_stmts.py` ~1612-1617) refuse a tagged word stored into a non-int name,
+and a non-int64 value stored into a mixed name. Without the refusal, a str
+would be read as a box (a bare pointer read as a box, a segfault) and a float's
+bits would sit in an int64 box slot (printing `1.0` or `0.0`). The box already
+has the `'p'` and `'d'` kinds, so the step 2 parts lift the refusal by
+handling those kinds in the store, not by changing the box format.
+
 ## Test baseline for the step 1 round
 
 Carried over from the step 1 part 1 round (measured there at f9c83c88f,
