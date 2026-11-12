@@ -320,6 +320,35 @@ def test_c_shape(name: str, mojo_src: str, must_have: list, must_not_have: list)
         _FAIL += 1
 
 
+def test_tag_leads_every_definition(name: str, mojo_src: str, must_have: list):
+    """Every `__GIMPLE` tag in the generated C leads its declaration.
+
+    gcc -fgimple honours the tag only in declaration-specifier position
+    (`__GIMPLE static C * f (...)`). After the return type
+    (`static C * __GIMPLE f (...)`) it lands in the declarator and is
+    silently ignored, so a POINTER-returning body is compiled as ordinary C
+    and never GIMPLE-checked. `test_c_shape` pins each emitter's spelling;
+    this checks the whole generated output instead, so a new definition
+    emitter cannot reintroduce the old shape unnoticed. `must_have` names
+    the pointer-returning definitions that make the check non-vacuous.
+    """
+    global _PASS, _FAIL
+    ok, c_src, stderr = gimple_compiles(mojo_src)
+    missing = [m for m in must_have if m not in c_src]
+    stray = [ln.strip() for ln in c_src.splitlines()
+             if '__GIMPLE' in ln and not ln.startswith('__GIMPLE ')]
+    if ok and not missing and not stray:
+        print(f"PASS  {name}")
+        _PASS += 1
+    else:
+        print(f"FAIL  {name}: compiles={ok} missing={missing} "
+              f"tag_not_leading_its_declaration={stray[:3]}")
+        if not ok:
+            for line in stderr.splitlines()[:8]:
+                print(f"      {line}")
+        _FAIL += 1
+
+
 def test_kinds_marker_scope():
     """The per-slot-kinds marker must not outlive the function that set it.
 
@@ -1222,6 +1251,40 @@ def main():
 """, must_have=['__GIMPLE char * Holder_get (Holder * self)',
                 '__GIMPLE int64_t make_inner ('],
          must_not_have=['char * __GIMPLE Holder_get', 'int64_t __GIMPLE make_inner'])
+
+    # The same rule as ONE whole-output invariant, over a program that emits
+    # every tagged shape at once: a struct alloc helper, a pointer-returning
+    # method, a scalar-returning method and a lifted closure. `test_c_shape`
+    # above pins the four spellings that exist today; this catches a fifth
+    # definition emitter that puts the tag in the declarator, where gcc
+    # silently stops GIMPLE-checking the body.
+    test_tag_leads_every_definition('every_gimple_tag_leads_its_declaration', """\
+struct P:
+    var x: Int
+
+    def __init__(out self, x: Int):
+        self.x = x
+
+class Holder:
+    def __init__(self, v):
+        self.v = v
+    def get(self):
+        t = self.v
+        return t
+
+def make(n: Int) -> Int:
+    var items = List[P]()
+    items.append(P(n))
+    def inner() -> Int:
+        return n + 1
+    return inner() + items[0].x
+
+def main():
+    print(Holder("hello").get())
+    print(make(2))
+""", must_have=['__GIMPLE static P * _alloc_P (void)',
+                '__GIMPLE char * Holder_get (Holder * self)',
+                '__GIMPLE int64_t make_inner ('])
 
     # An unannotated integer local is 64-bit storage, like Mojo's `Int` and Python's
     # int: it used to be a 32-bit `int` whenever every assignment was a small
