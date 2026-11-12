@@ -190,3 +190,23 @@ reader yet. `_dylib_contract_proof` still refuses any non-straight-line body. Re
 3. Resolve the guard `cbz` statically as not-taken under the concrete `pre` (the decoded `smulh`/`eor`/`asr63`
    expression), instead of as an `if`, so the composed `st_i` is one function of one state.
 4. Then the teeth test. Until then the wrong spec is still accepted.
+
+### Measured 2026-11-12 (round 3): the six failures are one root, and the reader is still not wired
+
+- `test_formal_dylib.py` baseline unchanged: PASS=22 FAIL=6, exit 1 (`memslot --gb 8`, 64 s wall).
+- The four failures the step-4 notes said were NOT inspected are the same root, not separate ones. Probe on the
+  "conditional value" program's `csetval` export (`var b = not n; var m = n * 3; return m`): its body has the
+  overflow guard `cbnz x2` at `0x3bc` (the step table gives it an `if arm64_reg 2 s ≠ 0` pc), so the emitter refuses
+  the body on the trap branch. The `cset` at `0x390` is not the reason. The same trap is in every case that
+  multiplies by 3, which is all six.
+- CSEL is modelled in `lib/ProofLib.lean` (~2956). The test docstring in `test_a_conditional_value_is_not_a_branch`
+  says it is not; that docstring is stale.
+- The guard's operand chain is in the step table: `0x3a8` loads x0 from the stack, `0x3ac` `smulh x2,x0,x1`, `0x3b0`
+  `mul x0,x0,x1`, `0x3b4` `asr x1,x0,#63`, `0x3b8` `eor x2,x2,x1`, `0x3bc` the guard. Every link has a model
+  `arm64_step` arm (`smulh64` at ProofLib ~1054, `asr64`, `^^^`).
+
+**Still open, and this round did not land code.** The remaining work is the design in "Implementation plan" and the
+four "Remaining steps" above. The decision it has not made is how `Refine.BlockCert` quantifies over a guarded body:
+it is stated for every state at the entry, and the guard is only sound under `pre`, so the cert must become
+`∀ st, pre st → …`. Until that is decided the Lean statement cannot be written, and that is the next round's first
+step.
