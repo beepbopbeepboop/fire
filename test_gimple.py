@@ -1168,6 +1168,33 @@ def f(n: Int) -> Int:
     return p.x
 """, must_have=["_init_P (&_owned_storage"], must_not_have=["= _alloc_P ();"]), 'owned_struct_local_is_initialised_in_the_frame')
 
+    # The `_alloc_<Struct>` helper returns a POINTER, and the `__GIMPLE` tag
+    # has to sit in declaration-specifier position (`__GIMPLE static P * f`).
+    # After the return type (`static P * __GIMPLE f`) gcc does not honour the
+    # tag at all: the body is ordinary C, never GIMPLE-checked, for every
+    # pointer-returning tagged function. Pin both halves: the tag is in the
+    # honoured position, and the body still compiles under the strict GIMPLE
+    # grammar (`-x c`, the self-host build's path).
+    _alloc_src = """\
+struct P:
+    var x: Int
+
+    def __init__(out self, x: Int):
+        self.x = x
+
+def make(n: Int) -> Int:
+    var items = List[P]()
+    items.append(P(n))
+    return items[0].x
+
+def main():
+    print(make(3))
+"""
+    test_c_shape('alloc_helper_tag_in_declaration_specifier_position', _alloc_src,
+                 must_have=['__GIMPLE static P * _alloc_P (void)'],
+                 must_not_have=['static P * __GIMPLE _alloc_P'])
+    test_gimple_body('alloc_helper_body_compiles_as_gimple', _alloc_src)
+
     # An unannotated integer local is 64-bit storage, like Mojo's `Int` and Python's
     # int: it used to be a 32-bit `int` whenever every assignment was a small
     # literal or 32-bit arithmetic (`var a = 0; a += 2000000000` wrapped).

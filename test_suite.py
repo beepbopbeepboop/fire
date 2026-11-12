@@ -1307,7 +1307,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      #     with it.  The registry is the authority for both: a
                      #     census entry for a job that no longer carries an
                      #     `expect=` fails this very check.
-                     'gimplerunner': 20,
+                     'gimplerunner': 21,
                      'x86-containers': 1,
      # `ab-native` JOINS on 2026-10-28, gate triage: it was out of this census
      # while it was DISABLED (a disabled job never runs, so it states no count
@@ -1325,8 +1325,8 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           f'per-item verdicts rather than against a summary line, see '
           f'`observed_fanout_failures`; the registry no longer carries one '
           f'(the stage2 dumps stopped failing the way the marker described). '
-          f'`gimplerunner` is here at 20 (bugs/hard/SUITE_gimplerunner_21_failing.md: '
-          f'its run prints `Results: 592 passed, 20 failed`). `formal-x86-endtoend` is the only '
+          f'`gimplerunner` is here at 21 (bugs/hard/SUITE_gimplerunner_21_failing.md: '
+          f'its run prints `Results: 583 passed, 21 failed`). `formal-x86-endtoend` is the only '
             f'entry that is a Lean proof sweep rather than a compiled or '
             f'interpreted one, and the count is checkable at all only because '
             f'`formal/x86_64_endtoend_test.py` prints a `PASS=n FAIL=m of N` '

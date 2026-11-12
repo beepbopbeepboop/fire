@@ -1254,8 +1254,6 @@ def _infer_multi_kind_return(gen, body, params=None,
         # whichever one happened to be lowered last.
         gen._cur_func_body = body
         gen._mixed_container_locals = None
-        gen._mixed_scalar_locals = None
-        gen._mixed_value_locals = None
         # Imported HERE rather than at module scope: `gimple_codegen.py`
         # imports this module before it imports `emit_infra`, so a top-level
         # `import ... emit_infra` in this file is a circular import that
@@ -1335,8 +1333,6 @@ def _infer_multi_kind_return(gen, body, params=None,
             gen.current_func_name = _saved_cur
             gen._cur_func_body = _saved_body
             gen._mixed_container_locals = None
-            gen._mixed_scalar_locals = None
-            gen._mixed_value_locals = None
 
 
 def _homogeneous_tuple_ann_elem(self, _ret_ann):
@@ -3035,7 +3031,7 @@ def _gmi_emit_closure_recursive(self, func_parts: list, _emitted_closures: set,
             func_parts.append(_env_sz_def)
             func_parts.append('')
         func_parts.append(
-            f"{ci.env_struct} * __GIMPLE {alloc_fn} (void)\n"
+            f"__GIMPLE {ci.env_struct} * {alloc_fn} (void)\n"
             f"{{\n"
             f"  {ci.env_struct} * _e;\n"
             f"  void * _vp;\n"
@@ -3365,36 +3361,6 @@ def _cattr_value_is_constant(v) -> bool:
     may read the enclosing function's locals and is stored per execution."""
     return isinstance(v, (IntLiteral, FloatLiteral, StringLiteral, BoolLiteral,
                           NoneLiteral))
-
-
-def _cattr_value_is_cell(gen, cls_name: str, v) -> bool:
-    """True when a class-level attribute's value is kept in a per-execution
-    cell instead of a plain module global: the class is function-scoped and
-    the value is not a constant. This is the exact condition under which the
-    class-attribute registration in `gen_module_impl` records the mangled
-    name in `_cell_cattr_types`, so the two can never disagree.
-
-    No VISIBLE struct field may be created for such an attribute (both of the
-    field-creation loops in `gen_module_impl` consult this): the allocator's
-    per-instance init fires only when the field type and the global type
-    agree, and a cell attribute's global is a POINTER to the cell, so the
-    field is written by nothing — and `_lower_MemberExpr` prefers a struct
-    field over the class-attribute path, so every instance read hit that dead
-    field instead of the per-execution cell. `def h(s: str): class C(): var
-    name = s` therefore read back 0 for a `char *` (the field typed `C *`
-    by the "we don't know what this holds" fallback) and `None` when the
-    annotation typed it `char *` right (CODEGEN_nested_class_var_attr_
-    untyped_field). A bare, unannotated `name = s` never creates a field and
-    works — the annotation or the `var` spelling is what mints the field.
-    With the field gone, the read and the instance write both go through the
-    same cell + dynamic-storage machinery the bare spelling already uses
-    (`_cattr_instance_read` reads the cell this instance was built under;
-    an instance write `a.name = 9` lands in the dynamic storage and shadows
-    it), so every spelling of a per-execution attribute lowers identically,
-    the way CPython's class namespace treats them.
-    """
-    return (cls_name in getattr(gen, '_fn_scoped_structs', ())
-            and v is not None and not _cattr_value_is_constant(v))
 
 
 def _struct_typedef_fields(gen, sn) -> dict:
@@ -7634,13 +7600,6 @@ def gen_module_impl(self, stmts: list):
             for field in (s.fields if hasattr(s, 'fields') else []):
                 if isinstance(field, VarDecl) and field.name and field.name != 'self':
                     if not field.type_ann and field.name not in self.struct_field_types[s.name]:
-                        # A per-execution cell attribute (a non-constant value
-                        # of a function-scoped class) gets NO visible struct
-                        # field — creating one here is exactly what made
-                        # `var NAME = <param>` read back 0 through the
-                        # instance (see `_cattr_value_is_cell`).
-                        if _cattr_value_is_cell(self, s.name, getattr(field, 'value', None)):
-                            continue
                         _inherited_ft = None
                         for _base_name in (getattr(s, 'bases', None) or []):
                             _base_ft = self.struct_field_types.get(_base_name, {})
@@ -7820,7 +7779,8 @@ def gen_module_impl(self, stmts: list):
                 # a.attr` reads 5, not the later call's 7. See
                 # nested class attribute reading an enclosing local (fixed).
                 # Module-scope classes and constants keep the plain global.
-                if _cattr_value_is_cell(self, s.name, v):
+                if (s.name in getattr(self, '_fn_scoped_structs', ())
+                        and v is not None and not _cattr_value_is_constant(v)):
                     _cells = getattr(self, '_cell_cattr_types', None)
                     if _cells is None:
                         _cells = {}
@@ -7907,16 +7867,7 @@ def gen_module_impl(self, stmts: list):
                         f_name = field.target.name
                     if _as_str(s.name) == 'StringLiteral':
                         _ind = f_name in self.struct_field_types[s.name]
-                    # Same rule as the unannotated VarDecl walk above: a
-                    # per-execution cell attribute is not a visible struct
-                    # field. The annotation is what typed `name: str = s`
-                    # `char *` right and still read `None` through the
-                    # instance — the field was never seeded, and the read
-                    # prefers it over the cell (see `_cattr_value_is_cell`).
-                    _cell_attr = _cattr_value_is_cell(self, s.name,
-                                                      getattr(field, 'value', None))
-                    if (f_name not in self.struct_field_types[s.name]
-                            and not _cell_attr):
+                    if f_name not in self.struct_field_types[s.name]:
                         ft = _mojo_type(_as_str(field.type_ann))
                         # System/POSIX typedefs (time_t, suseconds_t, size_t,
                         # ...) are spelled in the stdlib as Mojo aliases that
@@ -11027,25 +10978,7 @@ def gen_module_impl(self, stmts: list):
             return True
         if not st:
             return False
-        if _as_str(st) == 'char *' or _as_str(st) == 'double':
-            return True
-        # An INTEGER observation is proof unless the name came from a
-        # multi-value UNPACK of a single iterable: `_infer_local_var_types`
-        # types each such target with the `int64_t` STORAGE DEFAULT because
-        # the per-element type is not knowable there, and the element may be a
-        # container. `coro.py`'s `base, is_method, real_params, ... =
-        # _async_method_setup(...)` feeds `_mark_coro_param_elem_kinds(
-        # real_params)`, and reading that default as "a number" refused the
-        # file for a parameter every call site passes a list. Everything else
-        # -- a literal (answered above), a call result, a parameter, an
-        # ordinary local -- keeps counting, so `each([4, 5])` beside
-        # `each(n)` where `n = 3` (or `n = f()`) is still refused.
-        if isinstance(a, gimple_ctypes.IdentExpr):
-            _unpacked = (getattr(self, '_tuple_unpack_locals', None) or {}).get(
-                _as_str(caller_name), ())
-            if _as_str(a.name) in _unpacked:
-                return False
-        return _as_str(st) in ('int64_t', 'int', 'bool')
+        return _as_str(st) in ('char *', 'double', 'int64_t', 'int', 'bool')
 
     def _resolve_param_containers():
         """Turn the collected container observations into the contract.
@@ -17890,7 +17823,7 @@ def gen_module_impl(self, stmts: list):
         if _sz_def:
             parts.append(_sz_def)
         parts.append(
-            f"static {sn} * __GIMPLE _alloc_{sn} (void)\n"
+            f"__GIMPLE static {sn} * _alloc_{sn} (void)\n"
             f"{{\n"
             f"  {sn} * _p;\n"
             f"  void * _vp;\n"

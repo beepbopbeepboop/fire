@@ -1,4 +1,3 @@
-SPLIT: SUITE_gimplerunner_21_failing-part1, SUITE_gimplerunner_21_failing-part2, SUITE_gimplerunner_21_failing-part3, SUITE_gimplerunner_21_failing-part4, SUITE_gimplerunner_21_failing-part5, SUITE_gimplerunner_21_failing-part6, SUITE_gimplerunner_21_failing-part7, SUITE_gimplerunner_21_failing-part8, SUITE_gimplerunner_21_failing-part9, SUITE_gimplerunner_21_failing-part10
 # SUITE_gimplerunner: 21 failing cases (2026-11-11)
 
 Filed when the `gimplerunner` job was marked `expect=` in `tools/suite.py`. Replaces the open
@@ -9,13 +8,7 @@ work from; those docs' done-checks are not reliable (see Status).
 
 - Run: `python3 test_gimple_runner.py` on this tree, log at `.tmp/gimplerunner-verify.log`.
   Result: 583 passed, 21 failed, exit 1. No `gcc -fgimple compilation failed` line.
-- 2026-11-11: `gimple_nested_class_var_attr_from_str_param` is fixed — the `var`
-  spelling of a per-execution class attribute no longer mints a visible struct
-  field that shadows the cell (bug:CODEGEN_nested_class_var_attr_untyped_field,
-  doc deleted with its fix). Six regressions covering every spelling of a
-  per-execution attribute were added beside it; a full re-run on this branch
-  reports 592 passed, 20 failed (612 cases).
-- Not done: the 20 below are still failing.
+- Not done: all 21 are still failing.
 - The part-1 triage doc's done-check matches the heading text inside its own Acceptance section,
   so it passes without an inventory. No inventory has been recorded anywhere; this section is it.
 
@@ -48,6 +41,7 @@ Grouped by what the log shows. Each row is the case name from `test_gimple_runne
 ### D. Other wrong output or expectation
 - `gimple_str_window_matches_cpython`: output differs from CPython.
 - `gimple_math_module_members_lower_to_libm`: prints nothing, expected the libm results.
+- `gimple_nested_class_var_attr_from_str_param`: prints `0 0`, expected `x y`.
 - `gimple_str_encode_errors_and_decode_remaining`: CPython itself exits 1 on this program. Check
   whether the test's expectation or the program is wrong before any codegen change.
 - `gimple_enum_case_without_eq_is_refused`: the program builds where the test expects a refusal
@@ -55,7 +49,7 @@ Grouped by what the log shows. Each row is the case name from `test_gimple_runne
 
 ## Done when
 
-`python3 test_gimple_runner.py` reports 612 passed, 0 failed, and the `gimplerunner` marker in
+`python3 test_gimple_runner.py` reports 604 passed, 0 failed, and the `gimplerunner` marker in
 `tools/suite.py` is removed in the same commit (an `expect=` that passes is reported as a failure).
 
 ## Next steps

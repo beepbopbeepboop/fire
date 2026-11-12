@@ -2624,11 +2624,10 @@ def _check_out_argument_calls(stmts, filename) -> None:
 
 
 def _warn_fn_keyword(filename, tok) -> None:
-    """The `fn` keyword was removed from the language. A `fn` DEFINITION is
-    still accepted and draws the real compiler's message at the keyword; the
-    decision on 2026-11-11 (6408a0b14) is a warning, not a refusal. An
-    identifier named `fn` is not a definition and is not reported: CPython code
-    uses it as a name, and the parser accepts that."""
+    """Stage 1 of the `fn` removal (bugs/DIAGNOSTICS_fn_keyword_is_accepted_should_warn_then_refuse.md):
+    a `fn` DEFINITION is still accepted, and it draws the real compiler's
+    message at the keyword. An identifier named `fn` is not a definition and is
+    not reported: CPython code uses it as a name, and the parser accepts that."""
     loc = f"{filename}:{tok.line}:{tok.col}: " if filename else f"{tok.line}:{tok.col}: "
     print(f"{loc}warning: 'fn' has been removed; use 'def' instead", file=sys.stderr)
 
@@ -4707,8 +4706,8 @@ class Parser:
 
     def _check_out_self_declaration(self, name, fn_name_tok, params, param_convs, toks):
         """Refuse an `out self` receiver on a method that is not a constructor,
-        the shapes the real compiler refuses at the declaration (measured with
-        `tools/mojo build` on 2026-11-11):
+        the shapes the real compiler refuses at the declaration (measured
+        2026-11-11; see bugs/TEST_out_self_with_return_type_fixtures_are_invalid_mojo.md):
 
         * `out self` with no other parameter: `self argument must be present
           in instance method`, at the function name;
@@ -5456,7 +5455,6 @@ class Parser:
             aliases[_cvnode.target] = _cvnode.value
         decs    = getattr(self, "_pending_decs", [])
         self._pending_decs = []
-        self._validate_align_decorators(decs)
         return StructDef(name=name, fields=fields, methods=methods, decorators=decs,
                          comptime_aliases=aliases, bases=bases, keywords=class_keywords,
                          bracket_params=bracket_params,
@@ -5464,50 +5462,6 @@ class Parser:
                          where_clause=struct_where,
                          bracket_types=[(f.name, f.type_ann) for f in param_fields
                                         if isinstance(f, VarDecl)])
-
-    def _validate_align_decorators(self, decorators):
-        for dec in decorators:
-            head = None
-            args = None
-            kwargs = None
-            loc_line = 0
-            loc_col = 0
-            if isinstance(dec, str):
-                if dec == "align":
-                    head = "align"
-                    args = []
-                    kwargs = []
-            elif isinstance(dec, CallExpr):
-                func = dec.func
-                if isinstance(func, IdentExpr) and func.name == "align":
-                    head = "align"
-                    args = dec.args
-                    kwargs = dec.kwargs
-                    loc_line = getattr(dec, "line", 0) or getattr(func, "line", 0)
-                    loc_col = getattr(dec, "col", 0) or getattr(func, "col", 0)
-            if head != "align":
-                continue
-            loc_tok = Token("", "", loc_line, loc_col)
-            if len(args) != 1 or (kwargs and len(kwargs) != 0):
-                raise SyntaxError(
-                    f"{self._loc(loc_tok)}@align requires exactly one argument")
-            arg = args[0]
-            val = self._eval_align_constant_int(arg)
-            if val is None:
-                continue
-            if val <= 0 or (val & (val - 1)) != 0:
-                raise SyntaxError(
-                    f"{self._loc(loc_tok)}@align value must be a positive power of 2")
-            if val > (1 << 29):
-                raise SyntaxError(
-                    f"{self._loc(loc_tok)}@align value exceeds maximum alignment (2^29)")
-
-    def _eval_align_constant_int(self, expr):
-        if isinstance(expr, IntLiteral):
-            return expr.value
-        if isinstance(expr, UnaryOp) and expr.op == "-" and isinstance(expr.operand, IntLiteral):
-            return -expr.operand.value
-        return None
 
     def _parse_enum(self):
         # `enum Name: member1, member2, ...` — not real Mojo syntax (the real

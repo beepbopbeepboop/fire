@@ -1,8 +1,6 @@
-SPLIT: CODEGEN_tagged_generator_mixed_type_step2-part1, CODEGEN_tagged_generator_mixed_type_step2-part2
-
 # CODEGEN_tagged_generator_mixed_type_step2
 
-Earlier decomposition: the step 2 box work landed as commits b6c72c837 (part 1), 0bce80f69 (part 2) and 73076be07 (part 3); see Status below.
+SPLIT: all parts have landed (part1 b6c72c837, part2 0bce80f69, part3 in the commit that adds this line).
 
 ## Parent plan
 docs/tagged_generator_mixed_type-plan.md
