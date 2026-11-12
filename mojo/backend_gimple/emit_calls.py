@@ -1929,7 +1929,34 @@ def self_recursive_uninstantiable(gen, func) -> str | None:
     return base
 
 
+def _lower_tuple_box_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """`__mojo_tuple_box_N(a, b, ...)`: a generator's yielded tuple, boxed slot by
+    slot (see mojo/middle/coro.py). A slot whose C value is a string or a double
+    is boxed BY ITS C TYPE here, because the yield site cannot always know it: a
+    loop target read with `mojo_list_get_str` is a `char *` only at this point,
+    and a raw pointer recorded as a word read back as an int."""
+    slot_pairs = []
+    for a in node.args:
+        at, av = gen.lower_expr(a)
+        if at == 'char *':
+            bv = gen._call_expr('int64_t', 'mojo_box_from_str', [('char *', av)])
+        elif at == 'double':
+            bv = gen._call_expr('int64_t', 'mojo_box_from_double', [('double', av)])
+        elif _as_str(av) in getattr(gen, '_boxed_vals', ()):
+            # Already a tagged box (a loop target read with mojo_list_get_boxed):
+            # pass the box itself. Unwrapping it to its bits would drop the kind
+            # the tuple records, so a string box read back as an int.
+            bv = _as_str(av)
+        else:
+            bv = gen._to_int64(at, av)
+        slot_pairs.append(('int64_t', bv))
+    return 'int64_t', gen._call_expr('int64_t', _as_str(node.func.name), slot_pairs)
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    if (isinstance(node.func, gimple_ctypes.IdentExpr)
+            and re.match(r'^__mojo_tuple_box_\d+$', _as_str(node.func.name))):
+        return _lower_tuple_box_call(gen, node)
     _c = _try_lower_constrained(gen, node)
     if _c is not None:
         return _c
@@ -11648,6 +11675,13 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             gen._elem_types[lp] = gen._elem_types[ov]
         if ov in gen._nested_elem_types:
             gen._nested_elem_types[lp] = gen._nested_elem_types[ov]
+        # The same list, cast: it keeps the per-slot kinds the word carried (a
+        # module global's, see _note_global_slot_kinds), or a mixed slice reads
+        # its doubles' bits as ints.
+        if _as_str(ov) in gen._maybe_kinds_vals:
+            gen._maybe_kinds_vals.add(_as_str(lp))
+        if _as_str(ov) in gen._struct_slot_kinds:
+            gen._struct_slot_kinds[_as_str(lp)] = gen._struct_slot_kinds[_as_str(ov)]
         # Get element type: check _elem_types (if ov is a tracked temp), else check _nested_elem_types
         elem = gen._elem_of(ov)
         if not elem or elem == 'int64_t':
@@ -11656,6 +11690,14 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                 elem = gen._elem_types[ov]
             elif ov in gen._nested_elem_types:
                 elem = gen._nested_elem_types[ov]
+        # A list that records its own per-slot kinds (a mixed literal, a slice of
+        # one, a module global holding one) reads each slot through the boxed
+        # accessor, as the direct list branch does: its tracked element type is
+        # the promoted one, wrong for the int slots.
+        if _as_str(lp) in gen._maybe_kinds_vals:
+            t = gen._new_val('int64_t', f"mojo_list_get_boxed ({lp}, {idx64})")
+            gen._boxed_vals.add(t)
+            return 'int64_t', t
         if elem == 'char *':
             t = gen._new_val('char *', f"mojo_list_get_str ({lp}, {idx64})")
             return 'char *', t
@@ -11945,6 +11987,12 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         _np_cast = gen._new_temp(ot)
         gen._emit(f"  {_ip_cast} = (int64_t){_ov_local};")
         gen._emit(f"  {_np_cast} = ({ot}){_ip_cast};")
+        # The re-typed value is the same list: it keeps the element kinds the
+        # original carried (a module global's, see _note_global_slot_kinds).
+        if _as_str(ov) in gen._maybe_kinds_vals:
+            gen._maybe_kinds_vals.add(_np_cast)
+        if _as_str(ov) in gen._struct_slot_kinds:
+            gen._struct_slot_kinds[_np_cast] = gen._struct_slot_kinds[_as_str(ov)]
         ov = _np_cast
     start_v, stop_v = gen._lower_slice_bounds(node)
 

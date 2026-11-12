@@ -366,6 +366,47 @@ def _pointer_return_kind(name: str):
     return r
 
 
+_GEN_SLOT_KINDS: dict = {}
+
+
+def _generator_slot_kinds(name: str):
+    """The per-slot kinds of the tuples a same-module generator yields, as a list
+    of env kind codes ('i' int, 'd' double, 'p' str, None unknown), or None when
+    it yields no tuple or its tuple shapes disagree.
+
+    A `for a, b in gen(...)` loop binds `a` and `b` from these (see the
+    tuple-target branch of `_static_env`), so a string slot the loop reads is
+    known to be a string when the loop body yields it on. Memoised per module,
+    the same way `_pointer_return_kind` is; a recursive generator reads the
+    unknown answer it set first, so the recursion stops there.
+    """
+    if name in _GEN_SLOT_KINDS:
+        return _GEN_SLOT_KINDS[name]
+    _GEN_SLOT_KINDS[name] = None
+    fd = None
+    for st in _MODULE_STMTS:
+        if isinstance(st, N.FunctionDef) and st.name == name \
+                and getattr(st, 'is_generator', False):
+            fd = st
+    if fd is None:
+        return None
+    env = _static_env(fd)
+    slots = None
+    for n in _walk(fd):
+        if not (isinstance(n, N.YieldExpr) and isinstance(n.value, N.TupleExpr)):
+            continue
+        ks = [_yield_kind(e, env) for e in n.value.elements]
+        if slots is None:
+            slots = ks
+        elif len(slots) == len(ks):
+            slots = [a if a == b else None for a, b in zip(slots, ks)]
+        else:
+            slots = None
+            break
+    _GEN_SLOT_KINDS[name] = slots
+    return slots
+
+
 def _callee_return_kind(expr, env: dict | None = None) -> str | None:
     """Scalar kind of `expr`'s value when `expr` is a call to a BARE name whose
     return type this module knows: a lambda-bound local of the enclosing
@@ -834,6 +875,25 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             continue
         env[tnames[0]] = 'i'
         env[tnames[1]] = elem
+    # `for a, b in gen(...):` where `gen` is a same-module tuple-yielding
+    # generator: each target takes its slot's kind (see _generator_slot_kinds),
+    # so a string slot is a 'p' name and a yield that re-yields it boxes it as a
+    # string. Unbound names only, the same rule as the enumerate case above.
+    for n in _fn_nodes:
+        if not isinstance(n, N.ForStmt):
+            continue
+        it = n.iterable
+        if not (isinstance(it, N.CallExpr) and isinstance(it.func, N.IdentExpr)):
+            continue
+        tnames = for_target_names(n.target)
+        if len(tnames) < 2 or any(t in env for t in tnames):
+            continue
+        slots = _generator_slot_kinds(it.func.name)
+        if not slots or len(slots) != len(tnames):
+            continue
+        for tn, k in zip(tnames, slots):
+            if k is not None:
+                env[tn] = k
     if struct_def is not None:
         for f in getattr(struct_def, 'fields', []):
             if isinstance(f, N.VarDecl):
@@ -5201,7 +5261,18 @@ def _rewrite_expr(node, cvar: str, kind: str, env=None):
                     # consumer reads None back and `== None` holds.
                     els.append(_call('mojo_box_none', []))
                 else:
-                    els.append(_rewrite_expr(e, cvar, kind, env))
+                    # A string or double slot is boxed by its kind, so the tuple
+                    # records it (mojo_list_append_word reads the box's kind). A raw
+                    # pointer or raw double bits were recorded as an int, and a
+                    # consumer printed a string as its address.
+                    _t = _box_tag(e, env)
+                    _rev = _rewrite_expr(e, cvar, kind, env)
+                    if _t == 1:
+                        els.append(_call('mojo_box_from_str', [_rev]))
+                    elif _t == 2:
+                        els.append(_call('mojo_box_from_double', [_rev]))
+                    else:
+                        els.append(_rev)
             boxed = _call(f'__mojo_tuple_box_{len(els)}', els)
             return _call('__mojo_coro_yield_i', [_c_ident(cvar), boxed])
         val = (_rewrite_expr(node.value, cvar, kind, env) if node.value is not None
@@ -8683,6 +8754,8 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('mojo_box_from_double', 'int64_t')
     gen.func_param_types.setdefault('mojo_box_from_bool', ['int64_t'])
     gen.func_return_types.setdefault('mojo_box_from_bool', 'int64_t')
+    gen.func_param_types.setdefault('mojo_box_from_str', ['char *'])
+    gen.func_return_types.setdefault('mojo_box_from_str', 'int64_t')
     gen.func_param_types.setdefault('mojo_box_none', [])
     gen.func_return_types.setdefault('mojo_box_none', 'int64_t')
     gen.func_param_types.setdefault(_BOX_NEW, ['int64_t'])

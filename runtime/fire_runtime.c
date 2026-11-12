@@ -7915,6 +7915,15 @@ static _DictSlot *_dict_lookup_bytes(MojoDict *d, MojoBytes *key)
     return sl;
 }
 
+/* The bytes-key twin of mojo_dict_set_other_struct_repr: a second struct type
+ * under a bytes key, with its own repr kept on the slot. */
+void mojo_dict_set_bytes_other_struct_repr(MojoDict *d, MojoBytes *key, void *obj, void *fn)
+{
+    mojo_dict_set_bytes_other_struct(d, key, obj);
+    _DictSlot *sl = _dict_lookup_bytes(d, key);
+    if (sl && sl->key) sl->repr = fn;
+}
+
 int64_t mojo_dict_get_bytes_int(MojoDict *d, MojoBytes *key)
 {
     _DictSlot *sl = _dict_lookup_bytes(d, key);

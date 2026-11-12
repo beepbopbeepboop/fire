@@ -2726,7 +2726,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             aval = _ub
         if (atype == 'int64_t' and aval in getattr(gen, '_boxed_vals', ())
                 and not _is_pointer_view_helper(fname)
-                and not _as_str(fname).startswith('mojo_')):
+                and not _as_str(fname).startswith(('mojo_', '__mojo_tuple_box_'))):
             # A slot read out of a kind-mixed tuple/list arrives as a BOX, and a
             # `None` slot is the shared kind-'n' box. A USER function's
             # parameter has no None word: it is `0` (the same word a `None`
@@ -7270,10 +7270,11 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
                            [('MojoDict *', dict_val),
                             ('void *', elem_repr_operand(gen, _shim))])
         _st = 'struct' if _have in ('', _shim) else 'other_struct'
-        if _st == 'other_struct' and not _bs:
+        if _st == 'other_struct':
             # A second struct type: its own repr goes on the slot, since the
-            # dict's recorded function describes only the first one.
-            gen._emit_call('void', '', 'mojo_dict_set_other_struct_repr',
+            # dict's recorded function describes only the first one. The bytes-
+            # keyed setter is the `_bs` twin of the str one.
+            gen._emit_call('void', '', f'mojo_dict_set_{_bs}other_struct_repr',
                            [('MojoDict *', dict_val), (key_ctype, key_val),
                             (val_ctype, val),
                             ('void *', elem_repr_operand(gen, _shim))])

@@ -1114,6 +1114,31 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str,
     # knows the NAME, which is what `_note_global_callable_store` is keyed on.
     ginf._note_global_callable_store(gen, tname, v)
     _note_global_generator_store(gen, tname, vtype, v)
+    _note_global_slot_kinds(gen, tname, v)
+
+
+def _note_global_slot_kinds(gen, tname: str, v: str) -> None:
+    """Remember the element kinds of a value stored into a module global, keyed by
+    the GLOBAL'S name. A global read mints a fresh temp, so the per-value tables
+    (`_maybe_kinds_vals`, `_elem_types`, `_struct_slot_kinds`) that the
+    subscript and loop lowerings consult are gone by then. Without this a
+    mixed list held in a global read its doubles' bits as ints (`b = a[:]` at
+    module scope printed `4612811918334230528`). The record is the last store's;
+    a read compiled before any store has no record, as before.
+    """
+    if not hasattr(gen, '_global_slot_info'):
+        gen._global_slot_info = {}
+    info = {}
+    if v in gen._maybe_kinds_vals:
+        info['mk'] = True
+    if v in gen._elem_types:
+        info['et'] = gen._elem_types[v]
+    if v in gen._struct_slot_kinds:
+        info['sk'] = gen._struct_slot_kinds[v]
+    if info:
+        gen._global_slot_info[tname] = info
+    else:
+        gen._global_slot_info.pop(tname, None)
 
 
 def _note_global_generator_store(gen, tname: str, vtype: str, v: str) -> None:
