@@ -11870,6 +11870,40 @@ def _lower_slice_bounds(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
     return start_v, stop_v
 
 
+def _slice_slot_kinds(gen, ov: str, node, t: str) -> None:
+    """Record the per-slot kinds of `t`, a slice of the mixed list `ov`.
+
+    Slot k of the slice is slot start + k*step of `ov`, so its kinds are `ov`'s
+    kinds PICKED at those slots -- not `ov`'s whole kinds list. Copying the whole
+    list made `c = a[1:]` on `a = [1, 2.5]` read slot 0 as an int (the first
+    kind), so the float's bits printed as an integer. With constant bounds the
+    pick is Python's own slice of the static list. With a bound known only at
+    run time the static kinds cannot say, so the result is runtime-kinded: the
+    list's own kinds row (kept by the runtime's slice) answers the reads.
+    """
+    src = gen._struct_slot_kinds.get(ov)
+    if src is None:
+        gen._struct_slot_kinds.pop(t, None)
+        return
+    if isinstance(src, ginf._RuntimeKinded):
+        gen._struct_slot_kinds[t] = src
+        return
+    bounds = []
+    for part in (node.start, node.stop, getattr(node, 'step', None)):
+        if part is None:
+            bounds.append(None)
+        elif isinstance(part, gimple_ctypes.IntLiteral):
+            bounds.append(part.value)
+        else:
+            gen._struct_slot_kinds[t] = ginf._RuntimeKinded(['int', 'str'])
+            return
+    if bounds[2] == 0:
+        # A zero step is a run-time error; the runtime reports it.
+        gen._struct_slot_kinds[t] = ginf._RuntimeKinded(['int', 'str'])
+        return
+    gen._struct_slot_kinds[t] = list(src)[slice(*bounds)]
+
+
 def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
     ot, ov = gen.lower_expr(node.obj)
     # A BOXED receiver carries its real kind in `_actual_types`, and every
@@ -11980,10 +12014,7 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
             t = gen._new_val('MojoList *', f"mojo_list_slice ({ov}, {start_v}, {stop_v})")
         if ov in getattr(gen, '_maybe_kinds_vals', ()):
             gen._maybe_kinds_vals.add(t)
-            if ov in getattr(gen, '_struct_slot_kinds', {}):
-                gen._struct_slot_kinds[t] = gen._struct_slot_kinds[ov]
-            else:
-                gen._struct_slot_kinds.pop(t, None)
+            _slice_slot_kinds(gen, ov, node, t)
             gen._elem_types.pop(t, None)
             return 'MojoList *', t
         # propagate elem type

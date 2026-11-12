@@ -1561,6 +1561,80 @@ void mojo_list_inherit_kinds(MojoList *dst, MojoList *src)
     else if (k) mojo_list_set_elem_repr(dst, NULL);
 }
 
+/* Kinds strings for list SLICES, interned by content. A slice's kinds are a
+ * new string (slot k takes the source's kind at first + k*step), but the
+ * distinct slot patterns a program builds are few, so each is stored once and
+ * shared, never freed -- the same lifetime every other kinds row already has.
+ * An open-addressed table keyed by the string's bytes (FNV-1a). Not
+ * thread-safe, like the rest of the list registry. */
+static const char **_kinds_intern_tab;
+static size_t _kinds_intern_cap, _kinds_intern_used;
+
+static uint64_t _kinds_intern_hash(const char *s, size_t n) {
+    uint64_t h = 1469598103934665603ULL;
+    for (size_t i = 0; i < n; i++) { h ^= (unsigned char)s[i]; h *= 1099511628211ULL; }
+    return h;
+}
+
+static const char *_kinds_intern(const char *s, size_t n) {
+    if ((_kinds_intern_used + 1) * 2 > _kinds_intern_cap) {
+        size_t ncap = _kinds_intern_cap ? _kinds_intern_cap * 2 : 64;
+        const char **nt = (const char **)calloc(ncap, sizeof *nt);
+        for (size_t i = 0; i < _kinds_intern_cap; i++) {
+            if (!_kinds_intern_tab[i]) continue;
+            size_t m = strlen(_kinds_intern_tab[i]);
+            size_t j = (size_t)(_kinds_intern_hash(_kinds_intern_tab[i], m) & (ncap - 1));
+            while (nt[j]) j = (j + 1) & (ncap - 1);
+            nt[j] = _kinds_intern_tab[i];
+        }
+        free((void *)_kinds_intern_tab);
+        _kinds_intern_tab = nt;
+        _kinds_intern_cap = ncap;
+    }
+    size_t mask = _kinds_intern_cap - 1;
+    size_t j = (size_t)(_kinds_intern_hash(s, n) & mask);
+    while (_kinds_intern_tab[j]) {
+        if (strlen(_kinds_intern_tab[j]) == n && memcmp(_kinds_intern_tab[j], s, n) == 0)
+            return _kinds_intern_tab[j];
+        j = (j + 1) & mask;
+    }
+    char *c = (char *)malloc(n + 1);
+    memcpy(c, s, n);
+    c[n] = '\0';
+    _kinds_intern_tab[j] = c;
+    _kinds_intern_used++;
+    return c;
+}
+
+/* `dst` is a slice of `src`: slot k of dst is slot first + k*step of src, so
+ * dst's kinds are src's kinds PICKED at those slots. mojo_list_inherit_kinds
+ * copies src's whole string from slot 0, which mislabels every slice that does
+ * not start there: `a = [1, 2.5]; c = a[1:]; c[0]` read the double's bits as an
+ * int (gimple_list_slice_mixed). A slot past the end of src's string has no
+ * kind, and is an int as the slot reader says. The element repr follows as in
+ * mojo_list_inherit_kinds. */
+static void _mojo_list_inherit_kinds_slice(MojoList *dst, MojoList *src,
+                                           int64_t first, int64_t step, int64_t count)
+{
+    if (!dst || !src) return;
+    const char *k = mojo_list_get_kinds(src);
+    if (k && count > 0) {
+        size_t klen = strlen(k);
+        char *pick = (char *)malloc((size_t)count + 1);
+        for (int64_t i = 0; i < count; i++) {
+            int64_t idx = first + i * step;
+            pick[i] = (idx >= 0 && (size_t)idx < klen && k[idx]) ? k[idx] : 'i';
+        }
+        pick[count] = '\0';
+        mojo_list_set_kinds(dst, _kinds_intern(pick, (size_t)count));
+        free(pick);
+    } else if (k) {
+        mojo_list_set_kinds(dst, "");
+    }
+    _KindRow *sr = _kinds_row((uint64_t)(uintptr_t)src);
+    if (sr && sr->repr_fn) mojo_list_set_elem_repr(dst, (void *)sr->repr_fn);
+    else if (k) mojo_list_set_elem_repr(dst, NULL);
+}
 
 /* ── The per-list ELEMENT REPR ────────────────────────────────────────────
    `mojo_list_set_elem_repr` records how to render one element of this list;
@@ -3469,7 +3543,7 @@ MojoList *mojo_list_slice(MojoList *l, int64_t start, int64_t stop)
      * as `l` does (a `struct.unpack` of a mixed format, a heterogeneous
      * literal). The comprehension above appends as plain int64_t, which loses
      * that description. */
-    mojo_list_inherit_kinds(r, l);
+    _mojo_list_inherit_kinds_slice(r, l, start, 1, stop > start ? stop - start : 0);
     /* `t[:]` is a tuple when `t` is: slicing does not change a container's
      * type in Python, and the marker is a per-address registry entry rather
      * than a distinct container type, so without this the slice printed
@@ -3613,7 +3687,7 @@ MojoList *mojo_list_slice_step(MojoList *l,
         mojo_list_append_int(r, l->data[idx]);
         idx += step;
     }
-    mojo_list_inherit_kinds(r, l);
+    _mojo_list_inherit_kinds_slice(r, l, s, step, slen);
     if (mojo_is_tuple(l)) mojo_mark_as_tuple(r);
     return r;
 }
