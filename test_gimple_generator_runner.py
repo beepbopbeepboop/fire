@@ -2249,6 +2249,31 @@ def main():
 main()
 """, "/r/a\n")
 
+    # A generator that takes an UNANNOTATED callable parameter and calls it
+    # with a positional argument and a keyword argument (the shape that
+    # refused scriptutil._iter_filenames: `process(filenames, relroot=relroot)`),
+    # passed a concrete module function at the call sites, must lower as a
+    # declared callable value and match CPython.
+    _src = """\
+def process(filenames, relroot=None):
+    for f in filenames:
+        yield (f, relroot)
+
+def _iter(filenames, process, relroot):
+    items = process(filenames, relroot=relroot)
+    for x in items:
+        yield x
+
+def main():
+    for v in _iter(["a", "b"], process, "/root"):
+        print(v[0], v[1])
+
+main()
+"""
+    test_generator_matches_cpython(
+        "cpp_coroutine_callable_param_keyword_call_compiled_vs_cpython",
+        _src, _src)
+
     # A class defined INSIDE a generator body is hoisted to module scope, but
     # its class-level attributes are seeded from module-level globals at
     # allocation time, so one whose value names a local of the generator
