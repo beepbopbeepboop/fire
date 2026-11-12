@@ -983,7 +983,7 @@ def main():
                 subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "cleanup"], capture_output=True, cwd=C.MAIN)  # landed trees go
                 log("landed; post-landing verifier started")
         except Exception as e:      # an unattended loop must survive one bad pass
-            log("pass failed: %r" % (e,))
+            log("pass failed: %r\n%s" % (e, traceback.format_exc()))   # the traceback names the line; the repr alone cost a code read (2026-11-12)
         if not a.interval:
             return
         time.sleep(a.interval)
