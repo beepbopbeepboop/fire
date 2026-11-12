@@ -374,16 +374,26 @@ def sh(s):
 
 def unmerged_branches():
     """Branches under refs/heads/ with commits that are NOT in master, in ONE git call (a per-task
-    `rev-list` over hundreds of tasks is what made status take minutes)."""
-    out = subprocess.run(["git", "for-each-ref", "--no-merged", "master", "--format=%(refname:short)", "refs/heads/"],
-                         capture_output=True, text=True, cwd=MAIN).stdout
-    return set(out.split())
+    `rev-list` over hundreds of tasks is what made status take minutes). Returns None when the merge
+    check can't be read (e.g., master unresolvable in the worktree context) so callers never prune
+    on an unreadable merge state."""
+    r = subprocess.run(["git", "for-each-ref", "--no-merged", "master", "--format=%(refname:short)", "refs/heads/"],
+                       capture_output=True, text=True, cwd=MAIN)
+    if r.returncode != 0:
+        return None
+    return set(r.stdout.split())
 
 
 def done_and_gone(t, unmerged):
     """A finished task with nothing left to look at: terminal state, no worktree directory, and no commits
     outside master (its branch is merged or deleted). Such an entry holds no claim (terminal claims are
-    ignored), no process and no work, so `status` hides it and `prune` may drop it."""
+    ignored), no process and no work, so `status` hides it and `prune` may drop it. Returns False when
+    `unmerged` is None (the merge check can't be read), so callers never prune on an unreadable merge
+    state."""
+    if unmerged is None:
+        # The merge check couldn't be read (e.g., master unresolvable in the worktree context).
+        # Don't prune - we can't be sure which branches are merged.
+        return False
     return (t.get("state") in TERMINAL and not os.path.isdir(t["worktree"])
             and t.get("branch") not in unmerged)
 
@@ -406,7 +416,7 @@ def cmd_status(a):
                 lines = [l for l in f.read().splitlines() if l.strip()]
             last = lines[-1][:90] if lines else ""
         v = verdict(t)
-        n_ahead = ahead(t) if t.get("branch") in unmerged else 0
+        n_ahead = ahead(t) if (unmerged is not None and t.get("branch") in unmerged) else 0
         return st, v, n_ahead, dirty, last
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=16) as ex:
@@ -425,6 +435,8 @@ def cmd_prune(a):
     Never touches a task that is running, has a worktree, has commits outside master, or is in a
     non-terminal state."""
     unmerged = unmerged_branches()
+    if unmerged is None:
+        print("prune: merge check unreadable (master does not resolve in %s); keeping every entry" % MAIN)
     with registry() as tasks:
         gone = [n for n, t in tasks.items() if done_and_gone(t, unmerged) and state_of(t) != "running"]
         if not a.dry_run:
