@@ -695,9 +695,6 @@ MojoList *mojo_exc_args(void *obj);
 MojoList *mojo_list_new(void);
 int mojo_is_registered_list(int64_t addr);
 int mojo_boxed_is_str(int64_t v);
-int mojo_is_str_box(int64_t v);
-int64_t mojo_str_box_word(int64_t v);
-int mojo_word_is_text(int64_t v);
 /* Register a non-heap string (the codegen's `__rodata` literal pool) so
  * `mojo_boxed_is_str` can tell it from a bare int64_t. See `_reg_str` in the
  * .c for the discriminator this feeds. */
@@ -764,12 +761,6 @@ MojoList *mojo_iter_gen_handle(int64_t w);
 int64_t mojo_gen_note(int64_t h, void *start);
 int64_t mojo_gen_note_a3(int64_t h, int64_t vkind);   /* 0 int, 1 bool, 2 double, 3 str */
 int64_t mojo_gen_default_word(void *start, int64_t idx);
-void mojo_gen_throw_set(int64_t hw, int64_t type, char *msg, void *obj);
-int mojo_gen_throw_take(int64_t hw, int64_t *type, char **msg, void **obj);
-int mojo_gen_cm_is_handle(int64_t w);
-int64_t mojo_gen_cm_enter(int64_t w);
-void mojo_gen_cm_exit_normal(int64_t w);
-void mojo_gen_cm_exit_exc(int64_t w);
 /* `x in <boxed container>`: resolves list/dict/set at runtime instead of
  * the old hardcoded-false fallback. See mojo_in_dispatch_str's definition. */
 int mojo_in_dispatch_str(int64_t container, char *needle);
@@ -1443,11 +1434,6 @@ typedef struct {
                      * `mojo_dict_slot_key` already formats from `ikey`.
                      * Zero-defaulted: an integer slot freshly made in this
                      * table prints unquoted, as before. */
-    void    *repr;    /* kind 6 only: the repr function (int64_t -> char *) of THIS
-                     * slot's struct type, recorded by mojo_dict_set_other_struct_repr.
-                     * The dict's one recorded function (val_repr) describes kind-5
-                     * slots only, so a second struct type otherwise had no repr at
-                     * all and printed its address. NULL everywhere else. */
 } _DictSlot;
 
 /* Value-kind tags for _DictSlot.kind. Kept in the header so generated code
@@ -1524,8 +1510,6 @@ int64_t mojo_gen_call_with(void *start, MojoList *pre, MojoList *a, MojoDict *kw
 /* run-time class attributes (see the definitions): a class is its type tag */
 void    mojo_register_getattr_dispatch(int64_t (*fn)(void *, char *));
 int64_t mojo_getattr_any(void *obj, char *attr);   /* obj.attr on a word: struct reflection of any module */
-/* getattr(obj, attr, dflt) on a word with a runtime-computed name: a miss yields dflt. */
-int64_t mojo_getattr_default(void *obj, char *attr, int64_t dflt);
 void    mojo_class_register(int64_t tag, int64_t base_tag, char *name);
 void    mojo_class_setattr(int64_t tag, char *name, int64_t word);
 void    mojo_register_classattr_reader(int (*fn)(int64_t, char *, int64_t *));
@@ -1625,11 +1609,6 @@ void        mojo_dict_set_struct(MojoDict *d, char *key, void *obj);
  * (kind 6), so the walker sends this slot to the generic dispatch while the
  * kind-5 slots go to the recorded function. */
 void        mojo_dict_set_other_struct(MojoDict *d, char *key, void *obj);
-/* A struct of another type, with ITS OWN repr function recorded on the slot
- * (kind 6): the walker renders it through mojo_dict_repr_other_slot. */
-void        mojo_dict_set_other_struct_repr(MojoDict *d, char *key, void *obj, void *fn);
-char       *mojo_dict_repr_other_slot(MojoDict *d, int64_t i, int64_t v);
-void        mojo_dict_set_bytes_other_struct_repr(MojoDict *d, MojoBytes *key, void *obj, void *fn);
 void        mojo_dict_set_val_repr(MojoDict *d, void *fn);
 char       *mojo_dict_repr_val(MojoDict *d, int64_t v);
 
@@ -2229,9 +2208,6 @@ char *mojo_word_cstr_value(int64_t v);
    Transient block, same ownership and same release rule as the entry above. */
 char *mojo_int_str_transient(int64_t v);
 void mojo_cstr_or_int_release(int64_t orig, char *s);
-/* `str(v)` for an Int-kinded word: a FRESH heap copy of the conversion, owned
-   by the caller (free it once its one use is done). See the .c comment. */
-char *mojo_str_word_fresh(int64_t v);
 /* The dict-STORE twin of the release above: same ownership protocol, plus
    the key's SPELLING — a pooled canonical decimal reached the store as an
    INTEGER, so the slot the store just wrote prints its key unquoted, while

@@ -881,22 +881,13 @@ def user_dunder_repr_call(gen, struct_name: str, ctype: str, cval: str, prefer):
         _csym = gen._struct_method_csym(struct_name, _dunder, '')
         if gen.func_return_types.get(_csym) != 'char *':
             continue
+        _call = gen._call_expr('char *', _csym, [(ctype, _local)])
         # Same null semantics the generated field-dump has: a NULL object
         # reprs as "None" rather than crashing. Interned through
         # `_intern_string` because a bare `"None"` literal is not a GIMPLE
         # r-value (see its own docstring).
         _none = gen._intern_string('None')
-        # The select is real control flow, not a `(cond ? call : lit)`
-        # expression: gcc `-fgimple` rejects the parenthesized conditional
-        # and the call-armed ternary alike. The call stays LAZY — `then_val`
-        # is a thunk `_select_val` invokes inside the taken block only, so
-        # a NULL receiver still reprs as "None" without ever calling the
-        # user's dunder. (A value passed here would be emitted eagerly,
-        # ahead of the branch, and would run the dunder on NULL.)
-        return gen._select_val('char *', ctype, _local,
-                               lambda: gen._call_expr('char *', _csym,
-                                                      [(ctype, _local)]),
-                               _none)
+        return gen._new_val('char *', f'({_local} ? {_call} : {_none})')
     return None
 
 

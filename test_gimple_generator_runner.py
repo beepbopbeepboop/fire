@@ -224,9 +224,7 @@ _FOREIGN_PKG_FILES = {
     # cross-module struct, the shape `c_parser/parser/__init__.py` hit.
     'box.py': ("class Box:\n"
                "    def __init__(self, x, bump=5):\n"
-               "        self.x = x + bump\n"
-               "    def get(self):\n"
-               "        return self.x\n"),
+               "        self.x = x + bump\n"),
 }
 
 
@@ -387,39 +385,6 @@ def test_generator_c_compiles(name: str, mojo_src: str):
             _PASS += 1
         else:
             print(f"FAIL  {name}: gcc -fgimple errors:\n{r.stderr}")
-            _FAIL += 1
-    except Exception as e:
-        print(f"FAIL  {name}: {e}")
-        _FAIL += 1
-
-
-def _stray_include_lines(c_code: str) -> list:
-    """Return the 1-based line numbers of every `#include` directive that sits
-    inside a brace-delimited body (brace depth > 0). The module prelude is the
-    only place a header may appear; a copy inside a function is a gcc error."""
-    depth = 0
-    stray = []
-    for n, line in enumerate(c_code.splitlines(), 1):
-        if depth > 0 and line.lstrip().startswith('#include'):
-            stray.append(n)
-        depth += line.count('{') - line.count('}')
-    return stray
-
-
-def test_generator_c_no_stray_include(name: str, mojo_src: str):
-    """Emit the generator module's C and assert no `#include` lands inside a
-    function body. Pins the nested generator / generator method emitter
-    (the 2026-11-12 `#include <sys/types.h>` inside `T_run` gcc error, fixed
-    on this tree)."""
-    global _PASS, _FAIL
-    try:
-        c_code, _cpp = gimple_codegen.compile_to_gimple_with_cpp(mojo_src)
-        stray = _stray_include_lines(c_code)
-        if not stray:
-            print(f"PASS  {name}")
-            _PASS += 1
-        else:
-            print(f"FAIL  {name}: #include inside a function body at line(s) {stray}")
             _FAIL += 1
     except Exception as e:
         print(f"FAIL  {name}: {e}")
@@ -1868,75 +1833,6 @@ def main():
 main()
 """)
 
-    # A parameter that reaches a yield only as the argument of a
-    # result-kind-independent string method (str.join / str.format) must not
-    # make the yield slot conflicted: the yielded value is always a string.
-    _join_src = """\
-def _render_table(columns):
-    yield '\\t'.join(columns)
-    yield 'done'
-
-
-def build_section(name):
-    columns = ('a', 'b')
-
-    def render():
-        yield f'{name}:'
-        for line in _render_table(columns):
-            yield line
-
-    return render
-
-
-def main():
-    render = build_section('types')
-    for line in render():
-        print(line)
-
-
-main()
-"""
-    test_generator_matches_cpython(
-        "generator_yield_join_arg_does_not_conflict_slot_nested", _join_src, _join_src)
-
-    _join_direct_src = """\
-def _render_table(columns):
-    yield '\\t'.join(columns)
-    yield 'done'
-
-
-def main():
-    for line in _render_table(('a', 'b')):
-        print(line)
-    cols = ('x', 'y')
-    for line in _render_table(cols):
-        print(line)
-
-
-main()
-"""
-    test_generator_matches_cpython(
-        "generator_yield_join_arg_does_not_conflict_slot_direct", _join_direct_src, _join_direct_src)
-
-    # Control: yielding a conflicted parameter's elements AND the parameter
-    # itself keeps the genuine yield-kind disagreement (not a join-result
-    # case), so the generator must still be refused rather than compiled with
-    # a single wrong value slot.
-    test_generator_refused("generator_conflicted_yielded_param_still_refused", """\
-def g(xs):
-    for x in xs:
-        yield x
-    yield xs
-
-def main():
-    for v in g(["p"]):
-        pass
-    for v in g([1]):
-        pass
-
-main()
-""", "values must agree on one scalar type")
-
     # A `*spread` CANNOT supply a keyword-only parameter — real Python syntax
     # puts everything after a bare `*` out of a positional unpack's reach — so
     # a call that fills it by explicit keyword must keep resolving. This is the
@@ -2281,31 +2177,6 @@ def main():
 
 main()
 """, "/r/a\n")
-
-    # A generator that takes an UNANNOTATED callable parameter and calls it
-    # with a positional argument and a keyword argument (the shape that
-    # refused scriptutil._iter_filenames: `process(filenames, relroot=relroot)`),
-    # passed a concrete module function at the call sites, must lower as a
-    # declared callable value and match CPython.
-    _src = """\
-def process(filenames, relroot=None):
-    for f in filenames:
-        yield (f, relroot)
-
-def _iter(filenames, process, relroot):
-    items = process(filenames, relroot=relroot)
-    for x in items:
-        yield x
-
-def main():
-    for v in _iter(["a", "b"], process, "/root"):
-        print(v[0], v[1])
-
-main()
-"""
-    test_generator_matches_cpython(
-        "cpp_coroutine_callable_param_keyword_call_compiled_vs_cpython",
-        _src, _src)
 
     # A class defined INSIDE a generator body is hoisted to module scope, but
     # its class-level attributes are seeded from module-level globals at
@@ -2707,12 +2578,11 @@ def main():
     for v in probe():
         print(v)
 """, "unpack call argument is not supported")
-    # A `*`-spread of an untyped list parameter: the parameter's declared
-    # container type is now resolved, so the unpack forwards it as a list
-    # copy (correct) rather than refusing it as an unproven boxed source.
-    test_generator_matches_cpython(
-        "cpp_coroutine_unpack_list_param_source",
-        """\
+    # A spread whose SOURCE is a boxed int64_t local (an untyped
+    # parameter): the runtime kind is unproven, and *unpack of a
+    # non-iterable is a TypeError to refuse, not a miscompile to guess at.
+    test_generator_refused(
+        "cpp_coroutine_unpack_boxed_source_refused", """\
 def probe(src, *, start=[]):
     f = lambda *a: a[0]
     yield f(*src)
@@ -2720,14 +2590,7 @@ def probe(src, *, start=[]):
 def main():
     for v in probe([4, 5]):
         print(v)
-""", """\
-def probe(src):
-    f = lambda *a: a[0]
-    yield f(*src)
-
-for v in probe([4, 5]):
-    print(v)
-""")
+""", "unpack call argument is not supported")
     # A `*`-spread of a list whose TRACKED element kind is str: the lambda
     # body reads `*args` through the int64-box getters, so a copied str
     # slot would come back as a pointer — the same reason the non-spread
@@ -2798,80 +2661,6 @@ def run_ctor_default_arg_in_generator_tests():
         "\n"
         "main()\n",
         "9\n12\n")
-
-
-def run_struct_ptr_through_local_dict_tests():
-    # A struct pointer stored into a local dict and read back inside a cpp
-    # generator body. The store went through the int64 slot (correct: the
-    # dict's value representation is a boxed word), but the read-back was
-    # typed as the int64 default, so `got.x` treated the raw pointer word as
-    # a boxed value and printed nothing (the program crashed). The reader
-    # must carry the stored struct type, exactly as the `self.<field>`
-    # struct-valued dict already does. The read comes TEXTUALLY BEFORE the
-    # store (the read sits in the `if` arm, the store in the `else` arm), as
-    # `c_parser/parser/__init__.py`'s `_iter_source` does, so the value type
-    # must be known before the body is lowered in order.
-    # The plain shape first: store, then read back in the same arm.
-    _test_foreign_a3_generator_handle(
-        "generator_struct_ptr_through_local_dict_store_then_read",
-        "from .box import Box\n"
-        "\n"
-        "def consume(n, *, start=[]):\n"
-        "    allinfo = {}\n"
-        "    allinfo['a'] = Box(n)\n"
-        "    got = allinfo['a']\n"
-        "    yield got.x\n"
-        "\n"
-        "def main():\n"
-        "    for v in consume(4):\n"
-        "        print(v)\n"
-        "\n"
-        "main()\n",
-        "9\n")
-    _test_foreign_a3_generator_handle(
-        "generator_struct_ptr_through_local_dict_read_back",
-        "from .box import Box\n"
-        "\n"
-        "def consume(n, *, start=[]):\n"
-        "    allinfo = {}\n"
-        "    for i in range(2):\n"
-        "        if i == 1:\n"
-        "            got = allinfo['a']\n"
-        "            yield got.x\n"
-        "        else:\n"
-        "            b = Box(n)\n"
-        "            allinfo['a'] = b\n"
-        "\n"
-        "def main():\n"
-        "    for v in consume(4):\n"
-        "        print(v)\n"
-        "\n"
-        "main()\n",
-        "9\n")
-    # ... and used through a METHOD call on the read-back, which is what
-    # `_iter_source` does (`srcinfo._add_line(...)`, `srcinfo.too_much(...)`):
-    # the receiver's type must be the stored struct pointer, not the int64
-    # word, or the call is emitted on an integer.
-    _test_foreign_a3_generator_handle(
-        "generator_struct_ptr_through_local_dict_method_call",
-        "from .box import Box\n"
-        "\n"
-        "def consume(n, *, start=[]):\n"
-        "    allinfo = {}\n"
-        "    for i in range(2):\n"
-        "        if i == 1:\n"
-        "            got = allinfo['a']\n"
-        "            yield got.get()\n"
-        "        else:\n"
-        "            b = Box(n)\n"
-        "            allinfo['a'] = b\n"
-        "\n"
-        "def main():\n"
-        "    for v in consume(4):\n"
-        "        print(v)\n"
-        "\n"
-        "main()\n",
-        "9\n")
 
 
 def run_nested_generator_capture_tests():
@@ -2987,24 +2776,6 @@ def outer(n: Int):
 def main():
     outer(5)
 """, "10\n11\n")
-    # A first-bound plain assignment local read by a nested generator must
-    # be capturable when it is not rebound (scriptutil.traceback_cm's
-    # `showtb = ns.pop('traceback')` shape). The read may drive control flow.
-    test_generator_stdout("nested_generator_captures_plain_bool_assignment", """\
-def outer():
-    showtb = True
-    def g():
-        if showtb:
-            yield 1
-        else:
-            yield 0
-    for v in g():
-        print(v)
-
-
-def main():
-    outer()
-""", "1\n")
     test_generator_matches_cpython("nested_generator_mutates_enclosing_var_via_nonlocal", """\
 def outer():
     var k = 5
@@ -3076,36 +2847,6 @@ def outer():
         yield k
     return g
 """, "variable(s) k")
-    test_generator_c_no_stray_include("nested_generator_method_no_stray_include", """\
-struct T:
-    var k: Int
-    def __init__(out self, k: Int):
-        self.k = k
-    def run(self):
-        def g():
-            yield self.k
-            yield self.k + 1
-        for v in g():
-            print(v)
-
-def main():
-    var t = T(7)
-    t.run()
-""")
-    test_generator_c_no_stray_include("generator_method_no_stray_include", """\
-struct T:
-    var k: Int
-    def __init__(out self, k: Int):
-        self.k = k
-    def run(self) -> Generator[Int]:
-        yield self.k
-        yield self.k + 1
-
-def main():
-    var t = T(3)
-    for v in t.run():
-        print(v)
-""")
     # A nested generator defined in a METHOD that reads `self` (test_frame.py's
     # `g`). `self` is handed over as a hidden pointer, not boxed, so the
     # generator sees the live receiver: a read, a write that lands on the
@@ -3226,12 +2967,9 @@ def main():
     var b = B(2)
     b.run()
 """, "1\n102\n")
-    # `return g()` hands the generator out of the method: the nested
-    # generator captures `self` and escapes as a live handle. The
-    # dedicated generator-runner harness cannot yet build this case, but
-    # the compiler path (`fire.py run`) supports it.
-    _name = "nested_generator_method_self_escaping"
-    _src = """\
+    # `return g()` hands the generator out of the method, which would outlive
+    # the `self` it holds, so it stays refused.
+    test_generator_refused("nested_generator_method_self_escaping_refused", """\
 struct T:
     var k: Int
     def __init__(out self, k: Int):
@@ -3246,24 +2984,7 @@ def main():
     var it = t.run()
     for v in it:
         print(v)
-"""
-    try:
-        import subprocess as _sp, tempfile as _tf, os as _os
-        _wd = _tf.mkdtemp(prefix='mojo_gen_escape_self_')
-        _p = _os.path.join(_wd, 'prog.py')
-        with open(_p, 'w') as _f:
-            _f.write(_src)
-        _r = _sp.run(['python3', 'fire.py', 'run', _p],
-                     capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
-        if _r.returncode == 0 and _r.stdout == "7\n":
-            print(f"PASS  {_name}")
-            globals()['_PASS'] = globals().get('_PASS', 0) + 1
-        else:
-            print(f"FAIL  {_name}: rc={_r.returncode} out={_r.stdout!r} err={_r.stderr!r}")
-            globals()['_FAIL'] = globals().get('_FAIL', 0) + 1
-    except Exception as _e:
-        print(f"FAIL  {_name}: {_e}")
-        globals()['_FAIL'] = globals().get('_FAIL', 0) + 1
+""", "variable(s) self")
 
 
 def run_star_args_call_tests():
@@ -3406,56 +3127,6 @@ def main():
     for v in b.items(4, 5):
         print(v)
 """, "100\n4\n5\n")
-
-    # `yield from g` where `g` is a local holding a compiled-generator
-    # handle, inside a NESTED generator (the body the cpp coroutine path
-    # compiles). The handle must be driven through its resume/value API,
-    # not treated as a plain collection. (regression:
-    # nested generator: yield from a local holding a generator handle)
-    test_generator_matches_cpython(
-        "nested_generator_yield_from_handle_local",
-        """\
-def leaf():
-    yield 'a'
-    yield 'b'
-
-
-def outer():
-    def inner():
-        g = leaf()
-        yield from g
-
-    yield from inner()
-
-
-def main():
-    for x in outer():
-        print(x)
-
-
-main()
-""",
-        """\
-def leaf():
-    yield 'a'
-    yield 'b'
-
-
-def outer():
-    def inner():
-        g = leaf()
-        yield from g
-
-    yield from inner()
-
-
-def main():
-    for x in outer():
-        print(x)
-
-
-main()
-""")
 
 
 def run_escaping_nested_generator_tests():
@@ -3605,40 +3276,6 @@ def main():
 
 main()
 """, "")
-
-    # An escaping (returned) generator whose first yield is the empty string
-    # must keep a string value slot: a char*-typed cpp coroutine generator's
-    # values were classified as ints when draining through mojo_iter_word, so
-    # the strings printed as addresses (COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part3).
-    # The render shape also captures a name and yields an f-string between
-    # leading and trailing empty strings.
-    test_generator_matches_cpython("escaping_generator_empty_string_first_yield_render_shape", """\
-def make(name):
-    def render():
-        yield ''
-        yield f'{name}:'
-        yield ''
-    return render
-
-
-def main():
-    for v in make('types')():
-        print(v)
-
-
-main()
-""", """\
-def make(name):
-    def render():
-        yield ''
-        yield f'{name}:'
-        yield ''
-    return render
-
-
-for v in make('types')():
-    print(v)
-""")
 
 
 # A None received by `x = yield` used in arithmetic must raise TypeError, as
@@ -5568,42 +5205,6 @@ main()
         test_generator_matches_cpython("tagged_none_identity_for_cpp", _for_src, _for_src)
 
 def run_tagged_for_target_bind_tests():
-    # A name bound to a tagged generator word (the loop target's box) and also
-    # to a container value is refused: no representation holds both. The
-    # refusal names the name, the container C type, and the two binding shapes
-    # (direction 2: tagged word elsewhere, container store here). Direction 1
-    # (container-typed name stored a tagged word) raises at the same site with
-    # the symmetric wording.
-    _container_mixed = """\
-def g():
-    yield 1
-    yield None
-    yield 2
-def main():
-    x = [1, 2]
-    for v in g():
-        x = v
-        print(x)
-    print(len(x))
-main()
-"""
-    global _PASS, _FAIL
-    try:
-        gimple_codegen.compile_to_gimple_with_cpp(_container_mixed, do_imports=False)
-        print("FAIL  tagged_for_target_container_mixed_refused: expected a refusal, but it compiled")
-        _FAIL += 1
-    except Exception as e:
-        _msg = str(e)
-        _ok = ("cannot also hold a value of another C type" in _msg
-               and "'x'" in _msg and "MojoList *" in _msg
-               and "tagged generator word elsewhere" in _msg
-               and "container value" in _msg and "here" in _msg)
-        if _ok:
-            print("PASS  tagged_for_target_container_mixed_refused")
-            _PASS += 1
-        else:
-            print(f"FAIL  tagged_for_target_container_mixed_refused: refused with the wrong reason: {e}")
-            _FAIL += 1
     # A for-loop TARGET over a kind-mixed generator, copied to a name
     # (`x = v`), must keep the yield's kind exactly as `x = next(g)` does
     # (run_tagged_word_bind_tests). The copy used to unwrap the box with
@@ -5698,15 +5299,9 @@ main()
     with coro.pinned('cpp'):
         test_generator_matches_cpython("tagged_for_target_copy_mixed_name_none_cpp",
                                        _mixed_none, _mixed_none)
-    # Open item 1 of the 15th round: a mixed name whose OTHER store is not
-    # int64. The copy of a tagged word into a str or float local used to
-    # compile to a bare unwrap: the str local segfaulted (an int word used as
-    # a char*), and the float local printed `1.0` / `0.0` for `1` / None. A
-    # Mojo name has one type, so the name is the int64_t box
-    # (`ginf.mixed_box_name`): each store keeps its own kind in the MojoBox and
-    # every consumer reads it by kind. A str stored into a mixed tagged name is
-    # a kind-'p' box. Both directions and the reads (print, ==, +, len,
-    # f-string) are pinned to CPython on the same text.
+    # A MIXED name whose OTHER store is a scalar float (step 2 part 2): the
+    # float store is boxed as kind-'d' so the name can hold the tagged
+    # generator word and a float. The string case is still refused (part 3).
     _mixed_str = """\
 def g():
     yield 1
@@ -5714,36 +5309,13 @@ def g():
     yield 2
 def main():
     x = "s"
-    print(x)
-    for v in g():
-        x = v
-        print(x)
-        print(x == None)
-    x = "t"
-    print(x)
-    print(x + "!")
-    print(len(x))
-    print(f"<{x}>")
-main()
-"""
-    _mixed_str_after = """\
-def g():
-    yield 1
-    yield None
-    yield 2
-def main():
-    x = 0
     for v in g():
         x = v
         print(x)
     x = "t"
     print(x)
-    print(len(x))
 main()
 """
-    # A float stored into a mixed tagged name is a box (`mojo_box_from_double`),
-    # not a refusal. Both directions are checked against CPython, the oracle
-    # measured at test time, so these cannot pin this compiler's own answer.
     _mixed_float = """\
 def g():
     yield 1
@@ -5777,45 +5349,11 @@ def main():
     print(x)
 main()
 """
-    test_generator_matches_cpython("tagged_for_target_copy_into_str", _mixed_str, _mixed_str)
-    # A tuple-yielding generator with a None slot: the None is a box (kind 'n') in
-    # the yielded tuple, the tuple-unpacked names are tagged words, so `== None`,
-    # `print`, and arithmetic on the int slot all agree with CPython.
-    _tuple_none = """\
-def g():
-    yield 1, 10
-    yield None, 20
-    yield 2, 30
-def main():
-    for a, b in g():
-        print(a)
-        print(a == None)
-        print(b + 1)
-main()
-"""
-    test_generator_matches_cpython("tagged_tuple_slot_none", _tuple_none, _tuple_none)
-    test_generator_matches_cpython("tagged_for_target_plain_str_store_after_copy",
-                                   _mixed_str_after, _mixed_str_after)
-    test_generator_matches_cpython("tagged_for_target_copy_into_float", _mixed_float, _mixed_float)
+    test_generator_matches_cpython("tagged_for_target_copy_into_float",
+                                   _mixed_float, _mixed_float)
     test_generator_matches_cpython("tagged_for_target_plain_float_store_after_copy",
                                    _mixed_after, _mixed_after)
-    # A name bound to a tagged generator word cannot also hold a container
-    # (the box has no container constructor/kind). The refusal must name the
-    # container binding rather than describing it as str/float.
-    # CODEGEN_tagged_generator_mixed_type_container (option 2, resolved).
-    test_generator_refused("tagged_generator_mixed_type_container_refused", """\
-def g():
-    yield 1
-    yield None
-    yield 2
-def main():
-    x = [1, 2]
-    for v in g():
-        x = v
-        print(x)
-    print(len(x))
-main()
-""", "container or pointer value")
+    test_generator_refused("tagged_for_target_copy_into_str_refused", _mixed_str, "refused")
 
 def run_cpp_send_tests():
     # `it.send(v)` on a generator compiled by the C++20 backend (MOJO_CORO=cpp).
@@ -6212,167 +5750,7 @@ def main():
 main()
 """)
 
-def run_nested_recursive_generator_getattr_tests():
-    # A nested recursive generator that reads its elements' attributes through
-    # a RUNTIME-named `getattr` (the compiled-generator getattr refusal, fixed
-    # in 37c877f7c). The C++ companion used to refuse `getattr(obj, name)` with
-    # a non-static name, so the whole module fell back to source. Now the name
-    # is dispatched through the runtime's struct reflection (mojo_getattr_any /
-    # mojo_getattr_default): a struct field hit returns its value, a miss
-    # returns the 3-arg default, and the `yield from walk(xs, depth - 1)`
-    # self-delegation recurses. Expected output is CPython's for the same
-    # program (the struct is a class there).
-    test_generator_stdout("nested_recursive_generator_runtime_getattr_default", """\
-struct Node:
-    var v: Int
-    def __init__(out self, v: Int):
-        self.v = v
-
-def outer(nodes):
-    def walk(xs, depth: Int):
-        for i, st in enumerate(xs):
-            yield i
-            for fld in ('v', 'missing'):
-                sub = getattr(st, fld, -1)
-                yield sub
-        if depth > 0:
-            yield from walk(xs, depth - 1)
-    return walk(nodes, 1)
-
-def main():
-    for x in outer([Node(7), Node(9)]):
-        print(x)
-main()
-""", "0\n7\n-1\n1\n9\n-1\n0\n7\n-1\n1\n9\n-1\n")
-
-    # The same getattr shape yielding a tuple slot from a nested recursive
-    # generator. Before 37c877f7c this refused with "getattr(obj, name) with a
-    # non-static attribute name is not supported in a compiled generator".
-    test_generator_stdout("nested_recursive_tuple_generator_runtime_getattr", """\
-struct Node:
-    var v: Int
-    def __init__(out self, v: Int):
-        self.v = v
-
-def outer(body):
-    def inner(fn):
-        def walk(xs):
-            for i, st in enumerate(list(xs)):
-                yield xs, i
-                for fld in ('v', 'missing'):
-                    sub = getattr(st, fld, None)
-                    if isinstance(sub, list):
-                        yield from walk(sub)
-        return list(walk(fn))
-    return inner(body)
-
-def main():
-    for p in outer([Node(7), Node(9)]):
-        print(p[1])
-main()
-""", "0\n1\n")
-
-    # The module-level form of the same recursive walk (no enclosing function).
-    # The recursive call `walk(sub)` has an argument the static scan cannot type
-    # (`getattr(st, fld, None)`), but the `isinstance(sub, list)` guard proves
-    # it is a list, so the yielded parameter `xs` is a list, not an ambiguous
-    # slot. Used to refuse: "yields ['xs'], whose call sites do not all pass
-    # the same statically-known type".
-    test_generator_stdout("module_level_recursive_tuple_generator_getattr_guarded", """\
-def walk(xs):
-    for i, st in enumerate(list(xs)):
-        yield xs, i
-        for fld in ('body',):
-            sub = getattr(st, fld, None)
-            if isinstance(sub, list):
-                yield from walk(sub)
-
-def outer(body):
-    return list(walk(body))
-
-def main():
-    for p in outer([1, 2]):
-        print(p[1])
-main()
-""", "0\n1\n")
-
-    # The guard is what makes the recursive argument a list. Without it the
-    # argument is an untypable hole and the slot must still refuse.
-    test_generator_refused("module_level_recursive_tuple_generator_unguarded_refuses", """\
-def walk(xs):
-    for i, st in enumerate(list(xs)):
-        yield xs, i
-        for fld in ('body',):
-            sub = getattr(st, fld, None)
-            yield from walk(sub)
-
-def outer(body):
-    return list(walk(body))
-
-def main():
-    for p in outer([1, 2]):
-        print(p[1])
-main()
-""", "yields ['xs']")
-
-    # A guarded branch that rebinds the argument proves nothing about the value
-    # passed to the recursive call, so it must still refuse.
-    test_generator_refused("module_level_recursive_tuple_generator_rebound_guard_refuses", """\
-def walk(xs):
-    for i, st in enumerate(list(xs)):
-        yield xs, i
-        for fld in ('body',):
-            sub = getattr(st, fld, None)
-            if isinstance(sub, list):
-                sub = 1.5
-                yield from walk(sub)
-
-def outer(body):
-    return list(walk(body))
-
-def main():
-    for p in outer([1, 2]):
-        print(p[1])
-main()
-""", "yields ['xs']")
-
-
-def run_generator_tuple_repr_tests():
-    # A tuple yielded by a generator is built by `__mojo_tuple_box_N` (the
-    # A3 runtime, runtime/fire_coro_gen.c), and `list(gen)` puts that box
-    # into a list. The box was never marked as a TUPLE, so its repr fell
-    # back to list brackets: `[[1, 2], 0]` for `([1, 2], 0)`. A list's
-    # ELEMENT that is itself a list was then printed as a raw address,
-    # because the word-append recorded an int kind for it. Both are the
-    # tuple's own shape (CPython: `[([1, 2], 0), ([1, 2], 1)]`).
-    #
-    # The 0 slot is the one the bug doc named as reading back as None; it
-    # is pinned here too, because it is the same repr and a regression
-    # there would be indistinguishable from this one.
-    test_generator_stdout("generator_tuple_in_list_repr_nested_list_and_zero", """\
-def walk(xs):
-    for i, st in enumerate(list(xs)):
-        yield xs, i
-def outer(body):
-    return list(walk(body))
-def main():
-    print(outer([1, 2]))
-main()
-""", "[([1, 2], 0), ([1, 2], 1)]\n")
-
-    test_generator_stdout("generator_tuple_of_ints_repr_keeps_parens", """\
-def walk(n):
-    for i in range(2):
-        yield i, i * 2
-def main():
-    print(list(walk(3)))
-main()
-""", "[(0, 0), (1, 2)]\n")
-
-
 def run_tests():
-    run_generator_tuple_repr_tests()
-    run_nested_recursive_generator_getattr_tests()
     run_cpp_send_tests()
     run_send_into_just_started_regression()
     run_cpp_path_multi_arg_print_tests()
@@ -6395,7 +5773,6 @@ def run_tests():
     run_variadic_lambda_value_tests()
     run_unpack_call_forward_tests()
     run_ctor_default_arg_in_generator_tests()
-    run_struct_ptr_through_local_dict_tests()
     run_mixed_yield_kind_tests()
     run_next_method_tests()
     run_next_return_position_tests()
@@ -9835,7 +9212,6 @@ def main():
     _foreign_a3_generator_handle_for_loop()
     _foreign_cpp_module_global_value()
     _cpp_for_over_callable_local_is_named()
-    _regression_read_table_callable_reader()
     _cpp_coroutine_builtin_module_constant()
     _cpp_coroutine_exc_ctor_value()
 
@@ -10050,95 +9426,6 @@ async def outer():
     print(acc)
 
 asyncio.run(outer())
-""")
-
-    # ── the same shapes driven from an `async def` under asyncio.run ──────
-    # The consumer here is itself a coroutine driven by asyncio.run, so the
-    # `async for` desugars to the stack-switch drive loop before the nested
-    # generator is lifted out of the lowered body. That desugar used to spell
-    # the callee `__mgco_<name>_start` — a symbol nothing defines once the
-    # lift qualifies the hoisted body `__mgco_<lowered-parent>_<name>` — so the
-    # call landed on the weak "unavailable in compiled mode" stub and the loop
-    # ran ZERO times (CPython verifies the twin below prints 11).
-    test_generator_matches_cpython("nested_async_gen_driven_by_async_for_in_async_def", """\
-import asyncio
-
-async def main():
-    async def gen():
-        yield 11
-    async for x in gen():
-        print(x)
-
-asyncio.run(main())
-""", """\
-import asyncio
-
-async def main():
-    async def gen():
-        yield 11
-    async for x in gen():
-        print(x)
-
-asyncio.run(main())
-""")
-
-    # A plain nested `async def` the consumer awaits, not an async
-    # generator: the same drive-loop desugar, the same dangling-symbol
-    # shape (`__mgco_helper_start`), the same silent zero.
-    test_generator_matches_cpython("nested_async_def_awaited_in_async_def", """\
-import asyncio
-
-async def main():
-    async def helper():
-        return 42
-    print(await helper())
-
-asyncio.run(main())
-""", """\
-import asyncio
-
-async def main():
-    async def helper():
-        return 42
-    print(await helper())
-
-asyncio.run(main())
-""")
-
-    # One level deeper: `inner` is nested in `outer`, which is nested in an
-    # `async def` under asyncio.run. The lift runs once per nesting level,
-    # so the drive loop one level down must see the far-qualified symbol
-    # (`__mgco_..._inner_start`); a one-pass lift left it dangling.
-    test_generator_matches_cpython("doubly_nested_async_gen_driven_by_async_for_in_async_def", """\
-import asyncio
-
-async def main():
-    async def outer():
-        async def inner():
-            yield 7
-            yield 8
-        total = 0
-        async for x in inner():
-            total = total + x
-        return total
-    print(await outer())
-
-asyncio.run(main())
-""", """\
-import asyncio
-
-async def main():
-    async def outer():
-        async def inner():
-            yield 7
-            yield 8
-        total = 0
-        async for x in inner():
-            total = total + x
-        return total
-    print(await outer())
-
-asyncio.run(main())
 """)
 
     # ── the wait-descriptor boundary ────────────────────────────────────
@@ -12101,30 +11388,6 @@ def main():
     outer(10)
 """, "13\n11\n")
 
-    # Flag instance iteration via __iter__ yielding from self._iter_member_()
-    # (enum.py Flag.__iter__ pattern) — _iter_member_ aliased to a generator
-    # method, called via self._iter_member_() inside a generator method with
-    # yield from.
-    test_generator_stdout("flag_instance_iter_via_iter_member_alias", """\
-struct Flag:
-    @classmethod
-    def _iter_member_by_value_(cls, value: Int):
-        yield 1
-        yield value
-
-    _iter_member_ = _iter_member_by_value_
-
-    def __iter__(self):
-        yield from self._iter_member_(7)
-
-def main():
-    f = Flag()
-    for x in f.__iter__():
-        print(x)
-
-main()
-""", "1\n7\n")
-
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)
@@ -12146,4 +11409,29 @@ if __name__ == '__main__':
     if _FAIL:
         raise SystemExit(1)
 
+
+
+# Flag instance iteration via __iter__ yielding from self._iter_member_()
+# (enum.py Flag.__iter__ pattern) — _iter_member_ aliased to a generator
+# method, called via self._iter_member_() inside a generator method with
+# yield from.
+test_generator_stdout("flag_instance_iter_via_iter_member_alias", """\
+struct Flag:
+    @classmethod
+    def _iter_member_by_value_(cls, value: Int):
+        yield 1
+        yield value
+
+    _iter_member_ = _iter_member_by_value_
+
+    def __iter__(self):
+        yield from self._iter_member_(7)
+
+def main():
+    f = Flag()
+    for x in f.__iter__():
+        print(x)
+
+main()
+""", "1\n7\n")
 

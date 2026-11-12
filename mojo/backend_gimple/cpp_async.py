@@ -1077,10 +1077,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     nested_helper_lines: list[str] = _cpp_compile_nested_sync_helpers(
         gen, fn, base, declared, self_fields, struct_name)
     gcc_._cpp_reset_unit_state(gen)
-    # Struct-valued local dicts, seeded before the body is lowered in order so
-    # a read that textually precedes its store is still typed (see
-    # `_cpp_prescan_dict_struct_values`).
-    gen._cpp_local_dict_val_types = gcc_._cpp_prescan_dict_struct_values(gen, fn)
     _tagged_yield = False
     try:
         body_lines: list[str] = []
@@ -1153,95 +1149,19 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # consumes this generator through `for` loops, which bind the value as a
         # boxed word. Box each site by its marked ctype.
         _tagged_yield = False
-        _has_dirent_word_yield_tags = any(
-            (('/*Y:str*/' in _bl or '/*Y:bytes*/' in _bl)
-             and ('mojo_dirent_name(' in _bl or 'mojo_dirent_path(' in _bl
-                  or 'mojo_fsencode_w(' in _bl))
-            for _bl in body_lines)
-        _gvk = None
-        try:
-            _gvk = coro_mod._generator_value_kind(
-                fn, coro_mod._static_env(fn, struct_def))[0]
-        except Exception:
-            _gvk = None
         if ((value_ctype is None
                 or (value_ctype == 'char *'
                     and any('/*Y:bytes*/' in _bl for _bl in body_lines))
-                or any('/*Y:none*/' in _bl for _bl in body_lines)
-                or (value_ctype == 'int64_t' and _has_dirent_word_yield_tags))
+                or any('/*Y:none*/' in _bl for _bl in body_lines))
                 and not has_tuple_yield
-                and _gvk == 'w'):
+                and coro_mod._generator_value_kind(
+                    fn, coro_mod._static_env(fn, struct_def))[0] == 'w'):
             # the stack-switch kind analysis (which also checks the consumers)
             # must agree: every yield has a KNOWN kind -- the cpp typer alone
             # reads an unresolved name as int64_t, which would tag a hole.
             _tag_body = _cpp_tag_yield_sites(body_lines)
             if _tag_body is not None:
                 body_lines = _tag_body
-                value_ctype = 'int64_t'
-                gen._cpp_last_mixed_slots = True
-                _tagged_yield = True
-            elif value_ctype == 'int64_t' and _has_dirent_word_yield_tags:
-                # Uniform pointer-word yields (e.g. DirEntry.name/fsencode words)
-                # were marked as Y:str at emission but look like int64_t to the
-                # cpp typer; box them as tagged words so consumers see strings.
-                def _box_word_yields(lines):
-                    out = []
-                    for ln in lines:
-                        m = _Y_SITE.search(ln.strip())
-                        if m is not None:
-                            _yt = m.group(2).strip()
-                            if (_yt in ('str', 'bytes')
-                                    and ('mojo_dirent_name(' in m.group(3)
-                                         or 'mojo_dirent_path(' in m.group(3)
-                                         or 'mojo_fsencode_w(' in m.group(3))):
-                                indent = ln[:len(ln) - len(ln.lstrip())]
-                                expr = m.group(3)
-                                prefix = m.group(1)
-                                box = 'mojo_box_from_str' if _yt == 'str' else 'mojo_box_from_bytes'
-                                out.append(f"{indent}{prefix}co_yield {box}({expr});")
-                                continue
-                        out.append(ln)
-                    return out
-                body_lines = _box_word_yields(body_lines)
-                value_ctype = 'int64_t'
-                gen._cpp_last_mixed_slots = True
-                _tagged_yield = True
-        elif (value_ctype == 'int64_t'
-              and not has_tuple_yield and not _tagged_yield
-              and any(('mojo_dirent_name(' in _bl or 'mojo_dirent_path(' in _bl
-                       or 'mojo_fsencode_w(' in _bl)
-                      and ('/*Y:str*/' in _bl or '/*Y:bytes*/' in _bl)
-                      for _bl in body_lines)):
-            # Fallback: DirEntry/fsencode pointer-word yields are runtime int64_t
-            # words but must cross the cpp coroutine boundary as boxed str/bytes
-            # values. Box tagged word yields when coro kind analysis could not
-            # prove 'w' on the original AST.
-            _tag_body = _cpp_tag_yield_sites(body_lines)
-            if _tag_body is not None:
-                body_lines = _tag_body
-                value_ctype = 'int64_t'
-                gen._cpp_last_mixed_slots = True
-                _tagged_yield = True
-            else:
-                def _box_word_yields(lines):
-                    out = []
-                    for ln in lines:
-                        m = _Y_SITE.search(ln.strip())
-                        if m is not None:
-                            _yt = m.group(2).strip()
-                            if (_yt in ('str', 'bytes')
-                                    and ('mojo_dirent_name(' in m.group(3)
-                                         or 'mojo_dirent_path(' in m.group(3)
-                                         or 'mojo_fsencode_w(' in m.group(3))):
-                                indent = ln[:len(ln) - len(ln.lstrip())]
-                                expr = m.group(3)
-                                prefix = m.group(1)
-                                box = 'mojo_box_from_str' if _yt == 'str' else 'mojo_box_from_bytes'
-                                out.append(f"{indent}{prefix}co_yield {box}({expr});")
-                                continue
-                        out.append(ln)
-                    return out
-                body_lines = _box_word_yields(body_lines)
                 value_ctype = 'int64_t'
                 gen._cpp_last_mixed_slots = True
                 _tagged_yield = True
@@ -1354,13 +1274,13 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # `x = yield` reads the word `send()` delivered (see `{base}_send`
         # below). The awaiter is what `co_yield` evaluates to: a plain
         # `co_yield` discards it, `x = co_yield ...` takes the sent word.
-        # Defined fully after the promise so await_resume can access promise
-        # fields and compute the handle for throw-into-generator checks.
+        # It holds a pointer to the promise's own slot, so no reference to
+        # the promise type is needed here.
         f"struct {promise}_sent_await {{",
-        f"    {promise} *p;",
+        f"    int64_t *slot;",
         f"    bool await_ready() noexcept {{ return false; }}",
         f"    void await_suspend(std::coroutine_handle<>) noexcept {{}}",
-        f"    int64_t await_resume() noexcept;",
+        f"    int64_t await_resume() noexcept {{ return *slot; }}",
         f"}};",
         f"struct {promise} {{",
         f"    {cpp_value_ctype} current_value{{}};",
@@ -1410,17 +1330,9 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         f"            mojo_exc_pending_set(1);",
         f"        }}",
         f"    }}",
-        f"    {promise}_sent_await yield_value({cpp_value_ctype} v) {{ current_value = v; return {{ this }}; }}",
+        f"    {promise}_sent_await yield_value({cpp_value_ctype} v) {{ current_value = v; return {{ &sent_word }}; }}",
         f"    void return_void() {{}}",
         f"}};",
-        f"inline int64_t {promise}_sent_await::await_resume() noexcept {{",
-        f"    int64_t __tt = 0; char *__tm = nullptr; void *__to = nullptr;",
-        f"    int64_t __hw = (int64_t)(intptr_t){handle_t}::from_promise(*p).address();",
-        f"    if (mojo_gen_throw_take(__hw, &__tt, &__tm, &__to)) {{",
-        f"        throw _MojoCppExc{{__tt, __tm, __to}};",
-        f"    }}",
-        f"    return p->sent_word;",
-        f"}}",
         # Self-recursion (see `self_recursed`/_cpp_yield_from's own
         # `is_self_recursive` branch): `{impl}`'s OWN body, built just
         # below, can call `{base}_start`/`_resume`/`_value`/`_destroy`
@@ -1859,13 +1771,6 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
                         and _binding_site_count(_before, _cn) == 0))
                for _cn, _ in caps):
             continue
-        # `self` in a method cannot be supplied to a nested generator whose
-        # result escapes the enclosing frame (the receiver would outlive the
-        # method's frame), so do not thread it as a capture in that case and
-        # let the generator unit refuse it honestly.
-        _caps_for_compile = list(caps)
-        if any(_cn == 'self' for _cn, _ in caps) and coro_mod._generator_result_escapes(outer_fn, inner.name):
-            _caps_for_compile = [(_cn, _ct) for _cn, _ct in caps if _cn != 'self']
         # Captured names the enclosing function's contract marks kind-mixed
         # stay kind-mixed inside the generator frame.
         gen._cpp_inherited_mixed = set(
@@ -1873,7 +1778,7 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
             if _cn in getattr(gen, '_param_elem_mixed', {}).get(outer_fn.name, ()))
         try:
             cpp_text, value_ctype, base, param_ctypes = gen._gen_cpp_generator_unit(
-                inner, extra_captures=_caps_for_compile)
+                inner, extra_captures=caps)
         except gimple_exprtypes._UnsupportedGeneratorShape as e:
             gen._cpp_refusal_reasons.setdefault(inner.name, str(e))
             continue
@@ -2587,12 +2492,10 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
     # complexity.
     param_ctypes: list[tuple[str, str]] = []
     for pn, pt in (fn.params or []):
-        if pn.startswith('**'):
-            param_ctypes.append((pn[2:], 'MojoDict *'))
-            continue
         if pn.startswith('*'):
-            param_ctypes.append((pn[1:], 'MojoList *'))
-            continue
+            raise gimple_exprtypes._UnsupportedAsyncShape(
+                f"{fn.name}: *args/**kwargs parameters not supported "
+                "for compiled async functions")
         ctype = gen._param_ctype(pn, pt, fn)
         # See the identical struct-pointer-acceptance note in
         # _gen_cpp_generator_unit — same allow-list, same reasoning,
@@ -2874,15 +2777,10 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
             body_lines.append("    co_return;")
         else:
             raise gimple_exprtypes._UnsupportedAsyncShape(
-                f"{fn.name}: every `return` must carry a value of one "
-                "consistent supported type")
-    # Boxed/non-scalar async return values (pointer-typed results such as
-    # MojoList*/MojoDict*/MojoSet*/MojoBytes*, char *, struct pointers,
-    # etc.) are stored in the coroutine promise's result slot and read back
-    # unchanged by awaiters/consumers.
-    if (value_ctype != 'void' and value_ctype.endswith(' *')
-            and value_ctype not in ('MojoList *', 'MojoDict *', 'MojoSet *',
-                                    'MojoBytes *', 'char *', 'void *')
+                f"{fn.name}: every `return` must carry a scalar value "
+                "(int64_t/double/_Bool), and all of them must agree on "
+                "one consistent type")
+    if (value_ctype.endswith(' *') and value_ctype not in ('MojoList *', 'MojoDict *', 'MojoSet *')
             and value_ctype[:-2] in gen.struct_field_types):
         gen._cpp_value_struct_names.add(value_ctype[:-2])
 
@@ -3861,12 +3759,10 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
     gen._cpp_last_mixed_slots = False
     param_ctypes: list[tuple[str, str]] = []
     for pn, pt in (fn.params or []):
-        if pn.startswith('**'):
-            param_ctypes.append((pn[2:], 'MojoDict *'))
-            continue
         if pn.startswith('*'):
-            param_ctypes.append((pn[1:], 'MojoList *'))
-            continue
+            raise gimple_exprtypes._UnsupportedAsyncShape(
+                f"{fn.name}: *args/**kwargs parameters not supported "
+                "for compiled async generators")
         ctype = gen._param_ctype(pn, pt, fn)
         # See the identical struct-pointer-acceptance note in
         # _gen_cpp_generator_unit — same allow-list, same reasoning,

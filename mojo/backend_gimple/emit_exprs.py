@@ -1086,17 +1086,6 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         else:
             # Global is int64_t or same type as ctype — direct assignment is valid.
             gen._emit(f'  {t} = {field_ref};')
-        # The element kinds the global's last store recorded (see
-        # _note_global_slot_kinds): carried onto this read's temp, which is what
-        # the subscript and loop lowerings look up.
-        _gsi = getattr(gen, '_global_slot_info', {}).get(name)
-        if _gsi:
-            if _gsi.get('mk'):
-                gen._maybe_kinds_vals.add(t)
-            if 'et' in _gsi:
-                gen._elem_types[t] = _gsi['et']
-            if 'sk' in _gsi:
-                gen._struct_slot_kinds[t] = _gsi['sk']
         return ctype, t
     ctype = gen._type_of(name)
     # membership + subscript, NOT `gen._c_names.get(name, name)` — on the
@@ -4547,25 +4536,15 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                                   gen._is_fresh_operand(right_node, rv2))
             return 'char *', t
         # int/int64_t + char* or char* + int/int64_t when one side is a string literal
-        # → this is Python string concatenation where one operand is a string stored as int.
-        # A box or dynamic word on the other side is not an integer to cast:
-        # its kind decides the spelling, so it falls through to the rendering
-        # branch below (`mojo_cstr_or_int_str`). Casting the box's word here
-        # concatenated its heap ADDRESS as a C string (a mixed-kind local
-        # `x = "s"; x = 1.5` printed a control byte before the `!`), and made
-        # `x + "!"` read a kind-'p' box as a pointer to its own header.
-        _lhs_boxed = (lv in getattr(gen, '_boxed_vals', ())
-                      or gen._is_dyn_word(left_node, lv))
-        _rhs_boxed = (rv in getattr(gen, '_boxed_vals', ())
-                      or gen._is_dyn_word(right_node, rv))
-        if right_is_lit and rt == 'char *' and lt in ('int', 'int64_t') and not _lhs_boxed:
+        # → this is Python string concatenation where one operand is a string stored as int
+        if right_is_lit and rt == 'char *' and lt in ('int', 'int64_t'):
             ip = gen._new_temp('int64_t')
             cp = gen._new_temp('char *')
             gen._emit(f'  {ip} = (int64_t){lv};')
             gen._emit(f'  {cp} = (char *){ip};')
             t = gen._call_expr('char *', 'mojo_str_cat', [('char *', cp), ('char *', rv)])
             return 'char *', t
-        if left_is_lit and lt == 'char *' and rt in ('int', 'int64_t') and not _rhs_boxed:
+        if left_is_lit and lt == 'char *' and rt in ('int', 'int64_t'):
             ip = gen._new_temp('int64_t')
             cp = gen._new_temp('char *')
             gen._emit(f'  {ip} = (int64_t){rv};')

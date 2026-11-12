@@ -508,46 +508,7 @@ def test_every_declaration_is_seen():
     # spelling produces with nothing formatted to get there. The codegen half
     # is ONE set entry (`emit_infra._KW_DICT_FNS`), which `_apply_kw_keys`
     # renames through — the same mechanism as the other fourteen twins.
-    #
-    # 807 -> 810 (2026-11-12): the `str`-box predicates `mojo_is_str_box` and
-    # `mojo_word_is_text`, plus the accessor `mojo_str_box_word` (73076be07,
-    # "codegen: a str stored into a mixed tagged name is a box (step 2 part
-    # 3)"). A `str` stored into a name that also holds a tagged generator word
-    # is boxed with a kind-'p' box, so `len(x)` and `x + "!"` have to ask
-    # whether a word is such a box; all three are word-shaped (an `int64_t` in
-    # and a word or `int` out), which is why the word figure moves 415 -> 418
-    # with them. The commit added the declarations without a rung — the drift
-    # this ladder exists to catch — so the number is read off the call (810),
-    # not added up.
-    #
-    # 810 -> 821 (2026-11-12, the gate fix for `rthdrscan` at 203fd5ea3c):
-    # ELEVEN names, none of which bumped this ladder, so the job was red on
-    # 810 vs 821 (and already on 810 vs 817 at the gate commit, where seven of
-    # them had landed) and the prose copies of the census were stale with it.
-    # Read off the call (821), the whole delta, in four commits:
-    #   +6  `mojo_gen_cm_is_handle` / `mojo_gen_cm_enter` /
-    #       `mojo_gen_cm_exit_normal` / `mojo_gen_cm_exit_exc` and
-    #       `mojo_gen_throw_set` / `mojo_gen_throw_take` (b04aaf28c,
-    #       "codegen: lower contextmanager generators used in `with`") — the
-    #       handle test, the enter/exit entries, and the throw state an
-    #       exception escaping a `with` leaves for `__exit__` to inspect.
-    #   +1  `mojo_getattr_default` (37c877f7c, "codegen: a runtime-named
-    #       getattr in a compiled generator dispatches, not refuses") — the
-    #       three-argument `getattr(obj, name, default)` miss arm.
-    #   +1  `mojo_str_word_fresh` (75931501a, "codegen: str(int) and
-    #       String(int) results are owned") — the owned conversion whose one
-    #       use can be freed, rather than the borrowed transient.
-    #   +3  `mojo_dict_set_other_struct_repr` /
-    #       `mojo_dict_set_bytes_other_struct_repr` /
-    #       `mojo_dict_repr_other_slot` (46d36b17f, "dict keys and dict value
-    #       reprs: tuple keys read back, items pairs print, struct values per
-    #       slot") — a dict slot holding a struct type the dict's recorded repr
-    #       does not describe, in both key domains, and the walker's reader.
-    # Seven are word-shaped (the five generator entries, `getattr_default` and
-    # `str_word_fresh`) and four are box-shaped (`throw_take` and the three
-    # dict entries), which is the whole 418 -> 425 word and 502 -> 506 box
-    # movement in the quoted figures — `--fix` wrote those from this scan.
-    for header, want in (('fire_runtime.h', 821),   # --fix writes the live figure
+    for header, want in (('fire_runtime.h', 807),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already
@@ -802,32 +763,6 @@ CENSUS_QUOTES = (
     ('FORMAL.md',
      r'So \*\*(\d+) of (\d+) \([\d.]+%\)\*\* is the reachable-surface ceiling',
      ('word', 'total')),
-    # The RESTATEMENTS of the census outside §2.2's table (§3.2's non-word
-    # sentence, §5's "N of the box-crossing", §6's phase-2 word row and the two
-    # sentences below it). They are in this table because they were exactly what
-    # a hand refresh missed: a rung that adds a word-shaped entry point moves
-    # `word` and leaves `box` alone, and the §3.2 sentence quotes `box` where
-    # §2.2's table is the thing a person edits. They are read with the same
-    # `live_census()` the table's own rows use, and `--fix` writes them, so a
-    # refresh cannot stop at the table again.
-    ('FORMAL.md',
-     r'So the \*\*(\d+)\*\* non-word entry points',
-     ('box',)),
-    ('FORMAL.md',
-     r'the (\d+)\s*\nbox-crossing entry points of §2\.2',
-     ('box',)),
-    ('FORMAL.md',
-     r'and the (\d+) become callable',
-     ('box',)),
-    ('FORMAL.md',
-     r'\| word-shaped entry points \(`runtime_abi`\) \| (\d+) \| (\d+) \|',
-     ('word', 'word')),
-    ('FORMAL.md',
-     r'gaps between the\s+(\d+) of the row above',
-     ('word',)),
-    ('FORMAL.md',
-     r'\*\*\d+ of the (\d+)\*\* the dylib\s+does not export',
-     ('word',)),
     ('formal/build.py',
      r'§3\.1 for the word-shaped surface \((\d+) entry points, (\d+) of them '
      r'word-shaped,',

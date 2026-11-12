@@ -16,7 +16,6 @@ broken one differ in load-command details, and this is the test that notices.
     python3 test_formal_run.py [-v] [case ...]
 """
 import argparse
-import glob
 import os
 import platform
 import re
@@ -27204,17 +27203,11 @@ def check_type_value_tag_generator(verbose=False):
     stdlib = os.environ.get("MOJO_STDLIB") or os.path.join(
         os.path.dirname(os.path.dirname(here)),
         "modular", "mojo", "stdlib", "std")
-    # The closure is of MOJO imports, from the Mojo programs this file builds
-    # (formal/examples). Python modules are not walked: the compiler's own
-    # Python files import Python's host modules (`importlib.util` in
-    # emit_resolve.py), which are not Mojo imports and do not belong to this
-    # check. Measured: 94 example programs reach 94 .mojo files, 0 unresolved.
-    seen, unresolved = set(), set()
-    stack = sorted(glob.glob(os.path.join(os.path.dirname(here), "formal", "examples", "*.mojo")))
+    seen, stack, unresolved = set(), [here], set()
     while stack:
         p = stack.pop()
         rp = os.path.realpath(p)
-        if rp in seen or not p or not os.path.exists(p) or not p.endswith(".mojo"):
+        if rp in seen or not p or not os.path.exists(p):
             continue
         seen.add(rp)
         for m in I.imported_modules(I.module_statements(p)):
