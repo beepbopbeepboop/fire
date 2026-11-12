@@ -813,7 +813,7 @@ def auth_failed(t):
     return bool(AUTH_ERR.search(tail))
 
 
-CONTROLLER_FILES = {"TASK.md", "work.log", "exitcode"}    # written into a worker's tree by the controller itself
+CONTROLLER_FILES = {"TASK.md", "work.log", "exitcode", "REPORT.md"}   # written into a worker's tree by the controller, or (REPORT.md) the worker's closing report, left untracked
 
 
 def tree_extras(wt):

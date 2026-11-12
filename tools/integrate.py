@@ -177,6 +177,60 @@ def mark_landed(merged):
         C.retire_landed(n)
 
 
+def has_notestcase(branch):
+    """Whether some commit master lacks carries a line `NOTESTCASE: <reason>`: a reviewer's recorded decision that this
+    deletion is justified without a test (the doc is obsolete or a duplicate, the fix already landed under a named
+    commit, or an existing test the reviewer ran covers it). The reason is required: an empty marker is no decision."""
+    log = C.git("log", "master.." + branch, "--format=%B", check=False)
+    return bool(re.search(r"^NOTESTCASE:[ \t]*\S", log, re.M))
+
+
+PROOF_DEPTH = 2          # a reviewer that finishes with neither a test, a NOTESTCASE nor a restored doc is reviewed once more
+
+
+def enqueue_proof_review(name, t, deleted):
+    """A finished branch that deletes a bug doc but changes no test is handed to a REVIEWER, not to a person. The
+    deletion is a claim, not proof (2026-11-11: a one-commit branch deleted an open doc with no test and landed). The
+    reviewer, a worker starting on the branch, decides one of three things and records it in a commit:
+      TEST        the fix is real but unproven: it writes the regression test;
+      NOTESTCASE  the deletion is justified without one: it commits a `NOTESTCASE: <reason and evidence>` line;
+      (restore)   neither can be shown: it puts the doc back, so the bug is open again.
+    The branch lands once it has a changed test file, a NOTESTCASE line from a `fix-proof-*` task, or no deletion."""
+    import argparse as _ap
+    if name.count("fix-proof-") >= PROOF_DEPTH:
+        _cap_merge_fix(name, "proof review depth cap: %s finished %d reviews with neither a test, a NOTESTCASE nor a "
+                             "restored doc; it is abandoned" % (name, PROOF_DEPTH))
+        return
+    task = ("Branch %s (a finished worker branch; original task: %s) deletes the bug doc(s) %s but changes no test file. "
+            "A deletion is a claim, not proof. You are the REVIEWER: you start on that branch. Read the doc(s) as they are "
+            "on master (`git show master:PATH`), the branch's diff (`git diff master...HEAD`) and its commit messages, then "
+            "decide EXACTLY ONE of the outcomes below. Both TEST and NOTESTCASE are legitimate and both land the branch: "
+            "landing without a test is fine when there is a real reason, and a test is better when you can write one that "
+            "means something. Prefer TEST when it is feasible; choose NOTESTCASE when a test would add nothing, and say why.\n"
+            "1. TEST. The fix is real but unproven. Write a focused regression test at the repo root (`test_<area>_<what>.py`, "
+            "narrow and fast, run under `python3 tools/memslot.py --gb 8 --label t --`) that exercises what the doc's "
+            "Acceptance / Done-when / Test section asks for. A test that cannot fail proves nothing: say in the commit message "
+            "which assertion would fail without the branch's change. Commit it.\n"
+            "2. NOTESTCASE. The deletion is justified without a new test (a valid outcome, not a shortcut): the doc is obsolete, a duplicate, an index or "
+            "planning doc, already fixed on master by a commit you can name, or its fix is covered by an EXISTING test you "
+            "ran and name. Make a new commit whose message contains a line `NOTESTCASE: <the concrete reason and the "
+            "evidence: the commit hash, or the test file you ran and its result>`. If you cannot name the evidence you may "
+            "not choose this.\n"
+            "3. If neither can be shown, the bug is not proven fixed: restore the doc(s) (`git show master:PATH > PATH`, "
+            "then commit) and say why.\n"
+            "Do not change the fix itself unless review shows it is wrong. You are a light worker: no gate, no self-host "
+            "build, never git stash. Finish with the REPORT block, naming which of TEST / NOTESTCASE / restored you chose, "
+            "and a CONTROL-STATUS line."
+            % (t["branch"], t["summary"][:150], ", ".join(deleted)))
+    pname = C.free_task_name("fix-proof-" + name)
+    C.cmd_enqueue(_ap.Namespace(name=pname, claim=t["claims"] or ["task:" + pname], task=task, task_file=None,
+                                file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls")))
+    with C.registry() as reg:
+        reg[name]["state"] = "superseded"
+        reg[name]["fixer"] = pname          # the reviewer owns this branch: never hand the same one out twice
+    C.retire_task(name)                     # its tree goes; the branch is the reviewer's base
+
+
 def deletes_doc_without_test(deleted, changed):
     """A branch that deletes an open bug doc is only landed by the integrator when it also changes a test file: the
     doc's named test is then part of the same change. Without one, a deleted doc is a claim, not a proof (2026-11-11:
@@ -194,7 +248,7 @@ def red_on_master(job):
         shutil.rmtree(d, ignore_errors=True)
 
 
-def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
+def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=(), proof_out=None):
     """Tasks whose worker has exited with commits, a clean tree and a DONE verdict: only a finished bug is integrated."""
     cands = []
     say = (lambda *_: None) if quiet else print
@@ -219,14 +273,16 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
             say("skip %s: worker says %s, not DONE (the swarm continues it)" % (name, C.verdict(t) or "nothing")); continue
         if not C.ahead(t):
             say("skip %s: no commits" % name); continue
-        if C.git("status", "--short", cwd=t["worktree"]) and name not in allow_dirty:
+        if C.tree_extras(t["worktree"]) and name not in allow_dirty:
             say("skip %s: dirty worktree (unfinished)" % name); continue
         deleted = [p for p in C.git("diff", "--name-only", "--diff-filter=D", "master...%s" % t["branch"],
                                     check=False).split() if p.startswith("bugs/") and p.endswith(".md")]
         changed = C.git("diff", "--name-only", "master...%s" % t["branch"], check=False).split()
-        if deletes_doc_without_test(deleted, changed):
-            say("skip %s: deletes %s with no test file changed; the doc's named test must land with the deletion, "
-                "so a person lands it" % (name, " ".join(deleted)))
+        if deletes_doc_without_test(deleted, changed) and not (name.startswith("fix-proof-") and has_notestcase(t["branch"])):
+            say("skip %s: deletes %s with no test file changed; a reviewer decides TEST or NOTESTCASE (fix-proof-*)"
+                % (name, " ".join(deleted)))
+            if proof_out is not None:
+                proof_out.append((name, deleted))
             continue
         cands.append(name)
     return cands
