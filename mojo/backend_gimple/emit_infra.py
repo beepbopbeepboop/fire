@@ -5999,7 +5999,52 @@ def _maybe_lower_mlir_op(gen, node: gimple_ctypes.CallExpr):
     # bug (a 2-tuple unpack re-boxes an element to int64_t even if it
     # started as char*/a pointer).
     arg_vals = [_ap[1] for _ap in arg_pairs]
-    res = gimple_ctypes.mlir.lower_op(func.member, arg_vals, attr_members)
+    arg_types = [_ap[0] for _ap in arg_pairs]
+    op_name = gimple_ctypes.mlir.unwrap(func.member)
+
+    # GIMPLE type discipline (bool.mojo gate regression, bugs/gate-stdlib-
+    # syntax.md): a checked (__GIMPLE) body is rejected by gcc the moment a
+    # variable's declared type differs from the type of the expression it is
+    # assigned — `int64_t _t4 = _t2 & _t3;` with _Bool operands — and a
+    # binary op whose operand types differ has no form in GIMPLE at all.
+    # lower_op used to report a blanket 'int64_t' result over the operands'
+    # real type; every UNCHECKED context compiled the lie, and it sat until
+    # the tag's position was pinned (bugs/CODEGEN_gimple_tag_ignored_on_
+    # pointer_return.md) and the body was actually checked —
+    # std/builtin/bool.mojo's __and__/__or__/__xor__. Now: join the op's
+    # value operands to one type, materialize each differing operand into it
+    # through a one-level cast (the only cast GIMPLE allows on an assignment
+    # RHS), and tell lower_op the type it reports.
+    slots = None
+    if op_name in gimple_ctypes.mlir.BINARY_OPS or op_name in gimple_ctypes.mlir.MINMAX_OPS \
+            or op_name in gimple_ctypes.mlir.CMP_OPS:
+        slots = [0, 1]
+    elif op_name in gimple_ctypes.mlir.TERNARY_OPS:
+        slots = gimple_ctypes.mlir.TERNARY_SLOTS.get(op_name)
+    elif op_name in gimple_ctypes.mlir.UNARY_OPS:
+        slots = [0]
+    hint = None
+    vals = arg_vals
+    if slots:
+        _complete = True
+        for _t in arg_types:
+            if not _t or gimple_ctypes.TypeLattice.is_pointer(_t):
+                _complete = False
+        if _complete:
+            hint = gimple_ctypes.TypeLattice.join_all([arg_types[i] for i in slots])
+            if hint == 'int':
+                # join's internal _Bool+int marker: the word this runtime emits
+                hint = 'int64_t'
+            vals = list(arg_vals)
+            for i in range(len(vals)):
+                _target = hint
+                if op_name == 'pop.select' and i == 0:
+                    _target = '_Bool'   # a GIMPLE ternary's condition is a _Bool
+                if arg_types[i] != _target:
+                    _vt = gen._new_temp(_target)
+                    gen._emit(f'  {_vt} = ({_target}){vals[i]};')
+                    vals[i] = _vt
+    res = gimple_ctypes.mlir.lower_op(func.member, vals, attr_members, result_hint=hint)
     if res is None:
         # Operands already evaluated; yield 0 so surrounding code still compiles.
         # Distinguish "deferred by design" (GPU/coro/atomics/…) from "not met yet".
@@ -6009,8 +6054,12 @@ def _maybe_lower_mlir_op(gen, node: gimple_ctypes.CallExpr):
         t = gen._new_temp('int64_t')
         gen._emit(f"  {t} = (int64_t)0;  /* mlir __mlir_op.{op}: {note} */")
         return 'int64_t', t
-    ctype, expr = res
-    t = gen._new_val(ctype, f"{expr}")
+    ctype, expr, prelude = res
+    # Substitute each prelude temp into expr as it is emitted, so the
+    # statement order is the placeholder order.
+    for _i, (_pc, _pe) in enumerate(prelude):
+        expr = expr.replace('{t%d}' % _i, gen._new_val(_pc, _pe))
+    t = gen._new_val(ctype, expr)
     return ctype, t
 
 
