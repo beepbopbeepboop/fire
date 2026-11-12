@@ -6815,7 +6815,11 @@ class Interpreter:
         cond = self.eval_expr(node.value)
         if not cond:
             msg = self.eval_expr(node.msg) if getattr(node, 'msg', None) is not None else None
-            raise AssertionError(f"{self._loc(node)}{msg if msg is not None else 'assert failed'}")
+            # Same `Assert Error: ` prefix the compiled path prints
+            # (mojo/backend_gimple/emit_stmts.py, the assert trap), so the
+            # modular `assert_failure_message.mojo` CHECK line holds on both.
+            text = msg if msg is not None else 'assert failed'
+            raise AssertionError(f"{self._loc(node)}Assert Error: {text}")
         return None
 
     def execute_NonlocalStmt(self, node):
