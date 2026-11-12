@@ -156,6 +156,8 @@ def mark_landed(merged):
             if left:
                 sys.exit("refusing to mark %s integrated: %d commit(s) of %s are not on master" % (n, left, reg[n]["branch"]))
             reg[n]["state"] = "integrated"
+    for n in merged:                         # landing is not finished until the tree and branch are gone too
+        C.retire_landed(n)
 
 
 def deletes_doc_without_test(deleted, changed):
@@ -275,6 +277,8 @@ def gate_doc(culprit, t, failing, files=()):
             reg[culprit]["state"] = "superseded"
             reg[culprit]["hold"] = True
             reg[culprit]["gate_red"] = jobs
+    if culprit is not None:
+        C.retire_task(culprit)            # held for good: archive its tip, drop its tree and branch
     paths = []
     for j in jobs:
         p = os.path.join(C.MAIN, "bugs", "gate-%s.md" % j)
