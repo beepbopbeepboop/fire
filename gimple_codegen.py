@@ -6749,8 +6749,10 @@ def compile_to_c(mojo_src: str, auto_gpu: bool = True) -> str:
     """
     c_code, _gen = _run_pipeline(mojo_src, auto_gpu=auto_gpu)
 
-    # Strip __GIMPLE annotations for executability
-    c_code = c_code.replace(' __GIMPLE ', ' ')
+    # Strip __GIMPLE annotations for executability. The tag now leads a
+    # declaration (`__GIMPLE static P * f`) as often as it follows a
+    # space, so match it as a word wherever it sits.
+    c_code = re.sub(r'\b__GIMPLE\b ', '', c_code)
     return c_code
 
 

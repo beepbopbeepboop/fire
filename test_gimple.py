@@ -162,8 +162,8 @@ def selfhost_emitted_return_type(module: str, struct: str, method: str) -> str:
     it: the definition's header is at column 0 and a `{` body comes next,
     while a declaration ends in `;` and a call site is indented and ends in
     `;` too. Only the DEFINITION's header carries the `__GIMPLE` tag between
-    the return type and the name, so it is stripped before the type is
-    returned — otherwise the caller would read `Parser` for a `Parser *`.
+    the return type (`__GIMPLE Parser * f`), so it is stripped before the
+    type is returned — otherwise the caller would read `__GIMPLE Parser *`.
     The mangled name (`fire_compiler_Parser__parse_expr`) is matched on its
     tail, so this does not care whether the module qualified it.
     """
@@ -174,10 +174,13 @@ def selfhost_emitted_return_type(module: str, struct: str, method: str) -> str:
     for m in head_of.finditer(c_src):
         if not c_src[m.end():].lstrip().startswith('{'):
             continue
-        head = m.group(1)
-        if '/*' in head or head.rstrip().endswith('*'):
+        # The tag sits in front of the return type (`__GIMPLE MojoList * f`),
+        # so strip it BEFORE judging the head: a pointer return ends in `*`
+        # by its own spelling, and that is the case this must return.
+        head = re.sub(r'\b__GIMPLE\b', '', m.group(1)).strip()
+        if '/*' in head:
             continue
-        return re.sub(r'\b__GIMPLE\b', '', head).strip()
+        return head
     return ''
 
 
@@ -1194,6 +1197,31 @@ def main():
                  must_have=['__GIMPLE static P * _alloc_P (void)'],
                  must_not_have=['static P * __GIMPLE _alloc_P'])
     test_gimple_body('alloc_helper_body_compiles_as_gimple', _alloc_src)
+
+    # The same rule for a METHOD and a LIFTED CLOSURE: their definitions were
+    # `C * __GIMPLE f (...)` (emit_funcs `_gen_struct_method`, emit_loops
+    # `_gen_lifted_closure`), so a pointer-returning method's body was never
+    # GIMPLE-checked. Pin the honoured spelling for a pointer return (method
+    # `char *`) and a scalar return (closure `int64_t`).
+    test_c_shape('method_and_closure_tag_in_declaration_specifier_position', """\
+class Holder:
+    def __init__(self, v):
+        self.v = v
+    def get(self):
+        t = self.v
+        return t
+
+def make(n: Int) -> Int:
+    def inner() -> Int:
+        return n + 1
+    return inner()
+
+def main():
+    print(Holder("hello").get())
+    print(make(2))
+""", must_have=['__GIMPLE char * Holder_get (Holder * self)',
+                '__GIMPLE int64_t make_inner ('],
+         must_not_have=['char * __GIMPLE Holder_get', 'int64_t __GIMPLE make_inner'])
 
     # An unannotated integer local is 64-bit storage, like Mojo's `Int` and Python's
     # int: it used to be a 32-bit `int` whenever every assignment was a small
@@ -7162,10 +7190,11 @@ def root_cas_hash_call(parts) -> str:
         # prototype block is emitted ahead of the method bodies (it has to be
         # — `_mojo_getattr_Sub`'s bound-method arm takes the ADDRESS of this
         # symbol, and a declaration after its use is an implicit one). Only a
-        # definition's header carries the `__GIMPLE` tag between the return
-        # type and the name — the same distinction
-        # `selfhost_emitted_return_type` above matches on.
-        start = c_src.find("__GIMPLE Sub___eq__ (")
+        # definition's header carries the `__GIMPLE` tag in front of the
+        # return type (`__GIMPLE int64_t Sub___eq__ (...)`) — the same
+        # distinction `selfhost_emitted_return_type` above matches on.
+        _m = re.search(r'^__GIMPLE [^\n;]*\bSub___eq__ \(', c_src, re.M)
+        start = _m.start() if _m else -1
         if start < 0:
             print(f"FAIL  {name}: Sub___eq__ was never emitted (inheritance merge did not run)")
             _FAIL += 1
@@ -7731,7 +7760,8 @@ def main():
             # The DEFINITION, not the forward declaration: the declaration
             # is emitted from the same registry, but matching on it would
             # silently pass if only one of the two were ever fixed.
-            start = c.find('__GIMPLE Holder_get (')
+            _m = re.search(r'^__GIMPLE [^\n;]*\bHolder_get \(', c, re.M)
+            start = _m.start() if _m else -1
             if start < 0:
                 print(f"FAIL  {name}: {label} getter definition was never "
                       f"emitted")

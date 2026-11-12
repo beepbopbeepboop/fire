@@ -87,6 +87,45 @@ function is still tagged after the type:
   (`compile_stdlib.py`) and a whole-closure compile to enumerate, and was not
   run here (light-worker budget).
 
+## Status (2026-11-12, round 2) — method and closure tags moved; sweep gate open
+
+**Landed:**
+- `mojo/backend_gimple/emit_funcs.py` (`_gen_struct_method`) and
+  `mojo/backend_gimple/emit_loops.py` (`_gen_lifted_closure`): the `__GIMPLE`
+  tag now leads the return type (`__GIMPLE char * Holder_get (...)`,
+  `__GIMPLE int64_t make_inner (...)`). The setjmp fallback (untagged) is
+  unchanged. Prototypes are plain C and are unchanged.
+- The GIMPLE sweep found a construct the strict grammar rejects in the
+  newly-checked bodies: the bytes-slice zero-step check emitted
+  `_t = (1 == _s)` (a parenthesised comparison as the whole RHS, with a
+  wrong-width literal operand). The bytes and list slice sites now share
+  `emit_calls.py` `_emit_slice_step_zero_check`, which uses same-type plain-var
+  operands (the list site's existing pattern, now the only one).
+- `gimple_codegen.py` `compile_to_c`: the `' __GIMPLE '` strip missed a tag at
+  line start, so it now strips the word `__GIMPLE` wherever it sits.
+- `test_gimple.py`: `Sub___eq__` / `Holder_get` definition searches match the
+  tag in front of the return type; `handwritten_selfhost_signature_tables`
+  no longer skips a pointer return (it skipped any head ending in `*`, which
+  only worked because the tag used to follow the `*`); new test
+  `method_and_closure_tag_in_declaration_specifier_position` pins both spellings.
+  `test_runtime_alloc_census.py`'s hand-written GIMPLE TU uses the honoured
+  spelling. `test_dispatch_phase_c.py` and `test_generic_struct_local_linked_list.py`
+  named in the earlier Done-when do not reference these headers (no change).
+- Quick tests: `test_gimple.py` 443 passed, 0 failed;
+  `test_runtime_alloc_census.py` ok. The regression guard for the slice
+  construct is the existing `bytes_field_slice_and_augassign_accumulation`,
+  which fails with the tag move alone.
+
+**Still open (the Done-when gate, not run by this round):**
+1. `compile_stdlib.py`: the `skip <module>:` count and the `U` (unexpected)
+   count must not rise. Newly-checked pointer-returning bodies are the risk.
+2. `gimplerunner`: no new GIMPLE rejections. Any further strict-grammar
+   rejection is the same class as the slice case above (parenthesised RHS,
+   wrong-width literal in a comparison, `sizeof`, inline cast in a non-call
+   position); fix at the emitter, not per test.
+3. Only when 1 and 2 are clean: `git rm` this doc and run
+   `python3 tools/dangling_doc_refs.py --ratchet` in the same commit.
+
 ## Done when
 
 `python3 tools/memslot.py --gb 8 --label x -- python3 test_gimple.py` passes
