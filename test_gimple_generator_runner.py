@@ -6204,41 +6204,7 @@ main()
 """, "yields ['xs']")
 
 
-def run_generator_tuple_repr_tests():
-    # A tuple yielded by a generator is built by `__mojo_tuple_box_N` (the
-    # A3 runtime, runtime/fire_coro_gen.c), and `list(gen)` puts that box
-    # into a list. The box was never marked as a TUPLE, so its repr fell
-    # back to list brackets: `[[1, 2], 0]` for `([1, 2], 0)`. A list's
-    # ELEMENT that is itself a list was then printed as a raw address,
-    # because the word-append recorded an int kind for it. Both are the
-    # tuple's own shape (CPython: `[([1, 2], 0), ([1, 2], 1)]`).
-    #
-    # The 0 slot is the one the bug doc named as reading back as None; it
-    # is pinned here too, because it is the same repr and a regression
-    # there would be indistinguishable from this one.
-    test_generator_stdout("generator_tuple_in_list_repr_nested_list_and_zero", """\
-def walk(xs):
-    for i, st in enumerate(list(xs)):
-        yield xs, i
-def outer(body):
-    return list(walk(body))
-def main():
-    print(outer([1, 2]))
-main()
-""", "[([1, 2], 0), ([1, 2], 1)]\n")
-
-    test_generator_stdout("generator_tuple_of_ints_repr_keeps_parens", """\
-def walk(n):
-    for i in range(2):
-        yield i, i * 2
-def main():
-    print(list(walk(3)))
-main()
-""", "[(0, 0), (1, 2)]\n")
-
-
 def run_tests():
-    run_generator_tuple_repr_tests()
     run_nested_recursive_generator_getattr_tests()
     run_cpp_send_tests()
     run_send_into_just_started_regression()

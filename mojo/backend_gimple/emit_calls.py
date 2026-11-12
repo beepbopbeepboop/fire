@@ -7948,7 +7948,9 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     lifted_name = f'{outer_ctx}_lambda_{gen._lambda_counter}'
 
     # Build a synthetic FunctionDef whose body is `return <lambda.body>`
-    syn_body = [gimple_ctypes.ReturnStmt(value=node.body)]
+    # The synthetic statements carry the lambda's own line: the lifted body is
+    # emitted into its own C function, and its lines are numbered from these.
+    syn_body = [gimple_ctypes.ReturnStmt(value=node.body, line=node.line, col=node.col)]
     # ...except for `print(...)`, the one STATEMENT-level builtin reachable
     # from a lambda's expression body. `print`'s separators and its trailing
     # newline live ONLY in `gen._gen_print`, which the statement dispatcher
@@ -7967,8 +7969,8 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     if (isinstance(node.body, gimple_ctypes.CallExpr)
             and isinstance(node.body.func, gimple_ctypes.IdentExpr)
             and gen._ident_call_name(node.body.func) == 'print'):
-        syn_body = [gimple_ctypes.ExprStmt(value=node.body),
-                    gimple_ctypes.ReturnStmt(value=gimple_ctypes.NoneLiteral())]
+        syn_body = [gimple_ctypes.ExprStmt(value=node.body, line=node.line, col=node.col),
+                    gimple_ctypes.ReturnStmt(value=gimple_ctypes.NoneLiteral(), line=node.line, col=node.col)]
     # Lambda params are (pname, default_value) not (pname, type_ann).
     # Strip defaults so _gen_lifted_closure doesn't try to resolve them as types.
     # Plain unpack loop, NOT `[(p, None) for p, _ in node.params]` — a
@@ -11553,14 +11555,8 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             _cks = getattr(gen, '_cstr_key_src', None)
             if _cks is not None:
                 _cks.pop(iv, None)
-        # A CONTAINER key (a tuple) is passed as its word; the placeholder is
-        # renamed to the `_kw` twin, which reads it by content. Recording the
-        # slot read below under the key's CHARACTERS would make a later read of
-        # the same name (`print(x)`) look the tuple up by its pointer, and miss.
-        _word_key = _as_str(iv) in gen._kw_key_src
         t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed', [('MojoDict *', ov), (idx_type, iv)])
-        if not _word_key:
-            _mark_unknown_dict_value(gen, ov, t, iv, 'str' if idx_type == 'char *' else None)
+        _mark_unknown_dict_value(gen, ov, t, iv, 'str' if idx_type == 'char *' else None)
         return 'int64_t', t
 
     # Opaque Python object (typed as int) — treat as MojoList via cast

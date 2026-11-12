@@ -5936,17 +5936,9 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             _pres_word = None
             if (result_type == 'char *' and val_type not in ('char *',)
                     and not _container_vt):
-                # An int-valued dict's `raw` above IS the int getter's word:
-                # reuse it. A second call would read the key again, and a
-                # container key's placeholder was consumed by the first, so the
-                # second call missed (`t.get(("a", 1), "dflt")` printed the
-                # default for a stored value).
-                if val_type in ('int64_t', 'int', '_Bool'):
-                    _pres_word = raw
-                else:
-                    _pres_word = gen._call_expr(
-                        'int64_t', f'mojo_dict_get{_sfx}_int',
-                        [('MojoDict *', ov), (key_type, key_val)])
+                _pres_word = gen._call_expr(
+                    'int64_t', f'mojo_dict_get{_sfx}_int',
+                    [('MojoDict *', ov), (key_type, key_val)])
                 raw = gen._call_expr('char *', 'mojo_cstr_or_int_str',
                                      [('int64_t', _pres_word)])
                 val_type = 'char *'

@@ -2200,6 +2200,15 @@ def _emit(gen, line: str):
 
 
 def _emit_raw(gen, line: str):
+    # GCC numbers a `-fgimple` diagnostic from the last `#line` directive,
+    # counting physical lines. So every statement line gets its own directive
+    # directly above it (gen_stmt sets `_stmt_line_directive` to the innermost
+    # statement's); a statement that lowers to many lines is no longer
+    # attributed to its first line plus a count. Directives, preprocessor
+    # lines and blanks are not statement lines and are not stamped.
+    _d = getattr(gen, '_stmt_line_directive', None)
+    if _d and line.strip() and not line.lstrip().startswith('#'):
+        gen.body_lines.append(_d)
     gen.body_lines.append(line)
     # Track values produced by a runtime call that always returns a brand-new
     # container (see `_FRESH_CONTAINER_RETURNS`). A consumer that receives
@@ -7261,14 +7270,6 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
                            [('MojoDict *', dict_val),
                             ('void *', elem_repr_operand(gen, _shim))])
         _st = 'struct' if _have in ('', _shim) else 'other_struct'
-        if _st == 'other_struct' and not _bs:
-            # A second struct type: its own repr goes on the slot, since the
-            # dict's recorded function describes only the first one.
-            gen._emit_call('void', '', 'mojo_dict_set_other_struct_repr',
-                           [('MojoDict *', dict_val), (key_ctype, key_val),
-                            (val_ctype, val),
-                            ('void *', elem_repr_operand(gen, _shim))])
-            return
         gen._emit_call('void', '', 'mojo_dict_set_' + _bs + _st,
                        [('MojoDict *', dict_val), (key_ctype, key_val),
                         (val_ctype, val)])

@@ -2,19 +2,20 @@
 
 ## Status (2026-11-12)
 
-- DONE, all four named cases pass: `gimple_list_slice_mixed` (list slices take their own
-  slots' kinds), `gimple_dict_items_pair_var_prints_as_a_pair` (a str-keyed items pair is a
-  `MojoList *`, its key a string, and the element repr is not applied to a string slot),
-  `gimple_dict_value_repr_uses_the_struct_dunder` and `gimple_dict_value_repr_remaining_two_shapes`
-  (a dict's struct value uses its own repr first; a second struct type records its repr on its
-  slot as kind 6). One test expectation was wrong and is corrected: `Q(y='b')` is the field dump
-  the test rules out; CPython prints `Q<b>` from `Q.__repr__`.
-- REMAINING (not one of the named cases): at MODULE scope a mixed list's kinds do not reach a
-  name. `a = [1, 2.5]` / `b = a[:]` / `print(b[1])` prints raw bits (`print(a[1])` is right), and
-  the same program inside a `def main()` is right. Module-level globals lose the maybe-kinds
-  marker. Open.
-- REMAINING (narrow): a bytes-keyed dict with a second struct type still records no repr for that
-  slot (`mojo_dict_set_bytes_other_struct`); only the str-keyed path carries it.
+- DONE: `gimple_list_slice_mixed`. A bounded slice of a mixed list copied the source's
+  whole per-slot kinds (codegen `_struct_slot_kinds`, and the runtime's kinds row), so
+  slot 0 of `a[1:]` took slot 0 of `a`'s kind. Now the codegen picks the kinds at the
+  slice's slots (`_slice_slot_kinds` in `emit_calls.py`; runtime `_mojo_list_inherit_kinds_slice`
+  in `fire_runtime.c`, interned by content so the table stays bounded).
+- REMAINING (still failing): `gimple_dict_items_pair_var_prints_as_a_pair`,
+  `gimple_dict_value_repr_uses_the_struct_dunder`, `gimple_dict_value_repr_remaining_two_shapes`.
+- NEW SIBLING, not in this doc's cases: at MODULE scope the mixed-list kinds are not
+  carried to a name. `a = [1, 2.5]` / `b = a[:]` / `print(b[1])` prints the raw double bits
+  (`mod2` probe: `print(a[1])` is right, `b[1]` is wrong). The same program inside a
+  `def main()` is right. Module-level globals lose the maybe-kinds marker.
+
+
+Split from `bugs/hard/SUITE_gimplerunner_21_failing.md` (group A, repr/slot subset).
 
 ## Goal
 
