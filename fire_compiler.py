@@ -740,6 +740,9 @@ class FunctionDef:
     # is: that list is the RUNTIME parameter list and its length is the
     # trailing-default offset arithmetic's input.
     comptime_param_annotations: dict = field(default_factory=dict)
+    # Names declared `*Name: Type` in the bracket list (variadic parameters),
+    # in declaration order. Read by _check_variadic_element_types.
+    variadic_bracket_params: list = field(default_factory=list)
     is_generator: bool = False  # True if `yield`/`yield from` appears directly in this
         # function's own body (not inside a nested def/lambda/comprehension — a `yield`
         # there belongs to THAT inner scope, matching real Python scoping rules).
@@ -891,6 +894,9 @@ class StructDef:
     # FunctionDef.where_clause: None when absent, one expression, or a list.
     # A `(cond, "message")` entry is a TupleExpr. See _parse_where_clauses.
     where_clause: object = None
+    # (name, type-annotation source) for each bracket parameter, in declaration
+    # order. Read by _check_inferred_param_dependencies.
+    bracket_types: list = field(default_factory=list)
     line: int = 0
     col: int = 0
     # A "mark visited" flag set via plain attribute assignment (not passed to
@@ -2376,6 +2382,199 @@ def _iter_ast_nodes(root):
             yield x
             for f in dataclasses.fields(x):
                 stack.append(getattr(x, f.name))
+
+
+def _parse_type_text(text):
+    """The expression AST of a type annotation's source text, or None."""
+    try:
+        return Parser(py_tokenize(text))._parse_expr(0)
+    except Exception:
+        return None
+
+
+def _is_placeholder(e) -> bool:
+    return type(e).__name__ == "IdentExpr" and e.name == "_"
+
+
+def _has_placeholder(e) -> bool:
+    if e is None:
+        return False
+    if _is_placeholder(e):
+        return True
+    if type(e).__name__ == "SubscriptExpr":
+        return _has_placeholder(e.obj) or _has_placeholder(e.index)
+    if type(e).__name__ == "TupleExpr":
+        return any(_has_placeholder(x) for x in e.elements)
+    return False
+
+
+def _type_elements(e) -> list:
+    """The bracket arguments of a subscript type, as a list (one for `T[x]`)."""
+    idx = e.index
+    if type(idx).__name__ == "TupleExpr":
+        return list(idx.elements)
+    return [idx]
+
+
+def _render_type(e, env) -> str:
+    """Source text of a type expression, with each name in `env` replaced by its
+    already-rendered text. Source is written the way Mojo prints it:
+    `Pair[c, c]`."""
+    n = type(e).__name__
+    if n == "IdentExpr":
+        return env.get(e.name, e.name) if env else e.name
+    if n == "IntLiteral":
+        return f"Int({e.value})"
+    if n == "SubscriptExpr":
+        args = ", ".join(_render_type(x, env) for x in _type_elements(e))
+        return f"{_render_type(e.obj, env)}[{args}]"
+    if n == "TupleExpr":
+        return "(" + ", ".join(_render_type(x, env) for x in e.elements) + ")"
+    return "?"
+
+
+def _idents_in_order(e, out: list) -> list:
+    """Every name in `e`, in the order it first appears, appended to `out`."""
+    n = type(e).__name__
+    if n == "IdentExpr":
+        if e.name not in out:
+            out.append(e.name)
+    elif n == "SubscriptExpr":
+        _idents_in_order(e.obj, out)
+        for x in _type_elements(e):
+            _idents_in_order(x, out)
+    elif n == "TupleExpr":
+        for x in e.elements:
+            _idents_in_order(x, out)
+    return out
+
+
+def _check_inferred_param_dependencies(stmts, filename) -> None:
+    """An inferred parameter (`_` in its type) cannot depend on a non-inferred
+    parameter of the same signature (measured with the real compiler, 2026-11-11,
+    modular test/mojo-parser/autoparam_dependency_errors.mojo):
+
+        struct NeedsPair[a: Int, b: Int, p: Pair[a, b]]: ...
+        struct RepeatedDep[c: Int, X: NeedsPair[c, c, _]]: ...
+        # error: inferred parameter of type 'Pair[c, c]' cannot depend on
+        #        non-inferred parameter 'c'
+
+    The `_` in `NeedsPair[c, c, _]` is the implicit parameter `p` of
+    NeedsPair; its type `Pair[a, b]` with `a`, `b` replaced by the arguments
+    is `Pair[c, c]`. Reported once per distinct non-inferred name it mentions,
+    at the struct's line. Only a callee declared in the same module is checked:
+    a callee this file does not declare cannot be proven, so it is skipped."""
+    structs = {}
+    for st in stmts:
+        if type(st).__name__ == "StructDef":
+            structs.setdefault(st.name, st)
+    lines = []
+    for st in stmts:
+        if type(st).__name__ != "StructDef" or not st.bracket_types:
+            continue
+        non_inferred = {name for name, t in st.bracket_types
+                        if not _has_placeholder(_parse_type_text(t or ""))}
+        for _pname, ptype in st.bracket_types:
+            outer = _parse_type_text(ptype or "")
+            if outer is None or type(outer).__name__ != "SubscriptExpr":
+                continue
+            callee = structs.get(outer.obj.name) if type(outer.obj).__name__ == "IdentExpr" else None
+            if callee is None or not callee.bracket_types:
+                continue
+            args = _type_elements(outer)
+            if len(args) != len(callee.bracket_types):
+                continue
+            for slot, arg in enumerate(args):
+                if not _is_placeholder(arg):
+                    continue
+                cname, ctype = callee.bracket_types[slot]
+                implicit = _parse_type_text(ctype or "")
+                if implicit is None:
+                    continue
+                # Callee parameter -> the rendered argument the caller passed.
+                env = {}
+                for j, (jname, _jt) in enumerate(callee.bracket_types):
+                    if j != slot:
+                        env[jname] = _render_type(args[j], None)
+                rendered = _render_type(implicit, env)
+                # The caller's names the implicit type reads: the callee's
+                # params it mentions, replaced by the arguments that carry them.
+                reads = []
+                for name in _idents_in_order(implicit, []):
+                    if name in env:
+                        j = [k for k, (n2, _t2) in enumerate(callee.bracket_types) if n2 == name][0]
+                        for dep in _idents_in_order(args[j], []):
+                            if dep not in reads:
+                                reads.append(dep)
+                for dep in reads:
+                    if dep in non_inferred:
+                        loc = f"{filename}:{st.line}:1: " if filename else f"{st.line}:1: "
+                        lines.append(f"{loc}error: inferred parameter of type "
+                                     f"'{rendered}' cannot depend on non-inferred "
+                                     f"parameter '{dep}'")
+    if lines:
+        raise RuntimeError("\n".join(lines))
+
+
+def _render_element_type(e, structs) -> str:
+    """The element type of a variadic parameter as Mojo prints it: an unnamed
+    `_` placeholder is shown as the name of the parameter it stands for in the
+    callee (`NeedsPair[a, b, _]` prints `NeedsPair[a, b, p]`)."""
+    if type(e).__name__ == "SubscriptExpr" and type(e.obj).__name__ == "IdentExpr":
+        callee = structs.get(e.obj.name)
+        parts = []
+        for k, x in enumerate(_type_elements(e)):
+            if _is_placeholder(x) and callee is not None and k < len(callee.bracket_types):
+                parts.append(callee.bracket_types[k][0])
+            else:
+                parts.append(_render_element_type(x, structs))
+        return f"{e.obj.name}[{', '.join(parts)}]"
+    return _render_type(e, None)
+
+
+def _check_variadic_element_types(stmts, filename) -> None:
+    """A variadic parameter's element type must be an inferred-free type that
+    names none of the signature's own bracket parameters (measured with the real
+    compiler, 2026-11-11, modular test/mojo-parser/autoparam_dependency_errors.mojo):
+
+        def variadic_deps[a: Int, b: Int, *Xs: NeedsPair[a, b, _]](): ...
+        # error: element type parameter 'NeedsPair[a, b, p]' must be an
+        #        'inferred' parameter
+
+    A `_` placeholder makes the element an inferred parameter, and a name from
+    the signature makes it depend on a parameter the signature declares. Neither
+    is allowed, and each variadic parameter is reported once. `*Xs: Int`,
+    `*Xs: Movable` and `*Xs: Pair[1, 2]` name no parameter and pass."""
+    structs = {}
+    for st in stmts:
+        if type(st).__name__ == "StructDef":
+            structs.setdefault(st.name, st)
+    fns = []
+    for st in stmts:
+        if type(st).__name__ == "FunctionDef":
+            fns.append(st)
+        elif type(st).__name__ == "StructDef":
+            fns.extend(m for m in (st.methods or []) if type(m).__name__ == "FunctionDef")
+    lines = []
+    for fn in fns:
+        variadic = getattr(fn, "variadic_bracket_params", None) or []
+        if not variadic:
+            continue
+        signature = set(fn.comptime_params or [])
+        for v in variadic:
+            elem_text = (fn.comptime_param_annotations or {}).get(v)
+            elem = _parse_type_text(elem_text or "")
+            if elem is None:
+                continue
+            mentioned = set(_idents_in_order(elem, []))
+            if not (_has_placeholder(elem) or (mentioned & signature)):
+                continue
+            rendered = _render_element_type(elem, structs)
+            loc = f"{filename}:{fn.line}:1: " if filename else f"{fn.line}:1: "
+            lines.append(f"{loc}error: element type parameter '{rendered}' "
+                         f"must be an 'inferred' parameter")
+    if lines:
+        raise RuntimeError("\n".join(lines))
 
 
 def _check_out_argument_calls(stmts, filename) -> None:
@@ -4569,9 +4768,11 @@ class Parser:
         comptime_params = []
         comptime_param_defaults = {}
         comptime_param_annotations = {}
+        variadic_bracket_params = []
         if self._peek().kind == "LBRACKET":
             (comptime_params, comptime_param_defaults,
              comptime_param_annotations) = self._parse_generic_params_capture()
+            variadic_bracket_params = list(self._last_bracket_variadics)
         _fn_name_tok = t
         self._expect("LPAREN")
         _params_start = self._pos
@@ -4835,6 +5036,7 @@ class Parser:
                            comptime_params=comptime_params,
                            comptime_param_defaults=comptime_param_defaults,
                            comptime_param_annotations=comptime_param_annotations,
+                           variadic_bracket_params=variadic_bracket_params,
                            is_generator=is_generator,
                            yield_bearing_node_ids=yield_bearing_node_ids,
                            is_async=is_async,
@@ -5248,7 +5450,9 @@ class Parser:
                          comptime_aliases=aliases, bases=bases, keywords=class_keywords,
                          bracket_params=bracket_params,
                          type_param_names=type_param_names,
-                         where_clause=struct_where)
+                         where_clause=struct_where,
+                         bracket_types=[(f.name, f.type_ann) for f in param_fields
+                                        if isinstance(f, VarDecl)])
 
     def _parse_enum(self):
         # `enum Name: member1, member2, ...` — not real Mojo syntax (the real
@@ -7582,8 +7786,13 @@ class Parser:
             if t.kind == 'COMMA':
                 self._advance()
                 continue
-            # Try to parse: name: Type [= default]
-            if t.kind == 'NAME':
+            # Try to parse: name: Type [= default]. `mut` is a convention keyword
+            # elsewhere, but a bracket parameter may be named `mut`
+            # (`struct XOrigin[mut: Int, ...]`, modular's parameters_errors.mojo);
+            # it is a name when a colon follows it.
+            _mut_name = (t.kind == 'KW' and t.value == 'mut'
+                         and self._peek(1).kind == 'COLON')
+            if t.kind == 'NAME' or _mut_name:
                 name = t.value
                 self._struct_param_names.append(name)
                 self._advance()
@@ -7726,6 +7935,8 @@ class Parser:
         names = []
         defaults = {}
         annotations = {}
+        variadic = []
+        pending_star = False
         depth = 1
         expect_name = True
         while depth > 0:
@@ -7749,10 +7960,21 @@ class Parser:
             if t.kind == "EOF":
                 break
             if t.kind == "COMMA" and depth == 1:
+                # A bare `*,` is the keyword-only separator, not a variadic: its
+                # star must not carry onto the next parameter's name.
+                pending_star = False
                 self._advance(); expect_name = True; continue
+            if depth == 1 and expect_name and t.kind == "OP" and t.value == "*":
+                # `*Name: Type`: a variadic bracket parameter.
+                pending_star = True
+                self._advance()
+                continue
             if depth == 1 and expect_name and t.kind in ("NAME", "KW"):
                 _nm = t.value
                 names.append(_nm)
+                if pending_star:
+                    variadic.append(_nm)
+                    pending_star = False
                 self._advance()
                 expect_name = False
                 if self._peek().kind == "COLON":
@@ -7764,6 +7986,7 @@ class Parser:
                     defaults[_nm] = self._parse_bracket_param_default()
                 continue
             self._advance()
+        self._last_bracket_variadics = variadic
         return names, defaults, annotations
 
     def _capture_bracket_param_annotation(self) -> str:
@@ -8637,6 +8860,8 @@ class Parser:
             self._skip_newlines()
         stmts = _synthesize_fieldwise_inits(stmts)
         _check_out_argument_calls(stmts, self._filename)
+        _check_inferred_param_dependencies(stmts, self._filename)
+        _check_variadic_element_types(stmts, self._filename)
         return stmts
 
     def _parse_stmt_into(self, stmts: list):
