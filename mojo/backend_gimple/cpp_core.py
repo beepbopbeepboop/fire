@@ -1403,6 +1403,102 @@ def _cpp_reset_unit_state(gen):
     # semantics) rather than re-scanning from element 0. See
     # CODEGEN_generator_function_Lib_ipaddress's `_find_address_range`.
     gen._cpp_list_iter_cursor = {}
+    # Per-unit map of a local DICT name to the struct-pointer ctype its
+    # VALUES carry (`'Box *'`). Dict storage is the boxed int64 word, so
+    # without this a read-back `d[k]` would be typed as the int64 default and
+    # `.field` access on it would dereference a raw word. Seeded once per unit
+    # by `_cpp_prescan_dict_struct_values` (before the body is lowered, so a
+    # read that precedes its store textually is still typed); consumed by
+    # `_infer_simple_expr_ctype`'s SubscriptExpr case (via `dict_val_types`)
+    # and by the SubscriptExpr read lowering below.
+    gen._cpp_local_dict_val_types = {}
+
+
+def _cpp_prescan_dict_struct_values(gen, fn):
+    """Map each local dict name in `fn`'s own body to the struct-pointer ctype
+    its values are stored as, or nothing if the stored type is not provable.
+
+    A local `x` is a struct-pointer local of `S` when EVERY assignment to it in
+    the body is either a constructor call `S(...)` (with `S` a known struct) or
+    a subscript read (`d[k]`), and at least one is a constructor. The subscript
+    read is the only other shape allowed because it is the value this scan is
+    computing; any other RHS (a call, a literal, arithmetic) disqualifies the
+    name, so an ambiguous local never gets a struct type. A dict `d` gets
+    `S *` when a store `d[k] = x` has a value that is such a local or a
+    constructor call directly, and every store into `d` agrees on `S`.
+
+    Only the body's own statements are scanned (nested defs/lambdas are their
+    own scope). The result is keyed by name, which is the `dict_val_types`
+    receiver key `_infer_simple_expr_ctype` expects for a bare local."""
+    structs = gen.struct_field_types
+
+    def _ctor_struct(e):
+        if (isinstance(e, gimple_ctypes.CallExpr)
+                and isinstance(e.func, gimple_ctypes.IdentExpr)
+                and e.func.name in structs):
+            return f"{e.func.name} *"
+        return None
+
+    nodes = []
+    for st in fn.body:
+        nodes.extend(gimple_exprtypes._walk_own_body(st))
+
+    def _idents(t):
+        return [x.name for x in gimple_exprtypes._walk_ast(t)
+                if isinstance(x, gimple_ctypes.IdentExpr)]
+
+    # Every name this body binds, and with what. `ctors[name]` is the set of
+    # struct ctypes its plain `name = S(...)` assignments carry; `poisoned`
+    # holds names with any binding this scan cannot type. Over-poisoning only
+    # loses a type (the local keeps the int64 default), never invents one, so
+    # every other binder form poisons the names it may bind.
+    ctors: dict = {}
+    poisoned: set = set()
+    for n in nodes:
+        if isinstance(n, gimple_ctypes.AssignStmt):
+            if isinstance(n.target, gimple_ctypes.IdentExpr):
+                name = n.target.name
+                if isinstance(n.value, gimple_ctypes.SubscriptExpr):
+                    ctors.setdefault(name, set())   # a dict read: being typed
+                    continue
+                ct = _ctor_struct(n.value)
+                if ct is None:
+                    poisoned.add(name)
+                else:
+                    ctors.setdefault(name, set()).add(ct)
+            elif not isinstance(n.target, gimple_ctypes.SubscriptExpr):
+                poisoned.update(_idents(n.target))
+        elif isinstance(n, gimple_ctypes.AugAssignStmt):
+            poisoned.update(_idents(n.target))
+        elif isinstance(n, gimple_ctypes.ForStmt):
+            poisoned.update(_idents(n.target))
+        elif isinstance(n, gimple_ctypes.WithStmt):
+            poisoned.update(_idents(n.items))
+        elif isinstance(n, gimple_ctypes.WalrusExpr):
+            poisoned.add(n.name)
+    struct_locals = {name: next(iter(cts)) for name, cts in ctors.items()
+                     if name not in poisoned and len(cts) == 1}
+
+    # Stored value type per dict name; a conflicting or untypable store
+    # poisons the dict.
+    dict_vals: dict = {}
+    bad: set = set()
+    for n in nodes:
+        if not (isinstance(n, gimple_ctypes.AssignStmt)
+                and isinstance(n.target, gimple_ctypes.SubscriptExpr)
+                and isinstance(n.target.obj, gimple_ctypes.IdentExpr)):
+            continue
+        d = n.target.obj.name
+        v = n.value
+        if isinstance(v, gimple_ctypes.IdentExpr) and v.name in struct_locals:
+            ct = struct_locals[v.name]
+        else:
+            ct = _ctor_struct(v)
+        if ct is None or (d in dict_vals and dict_vals[d] != ct):
+            bad.add(d)
+        else:
+            dict_vals[d] = ct
+    return {d: ct for d, ct in dict_vals.items() if d not in bad}
 
 
 # The module-string -> C-qualifier sanitization EVERY cross-module registry
@@ -5579,6 +5675,12 @@ def _cpp_expr(gen, e) -> str:
             if gen._cpp_declared is not None and isinstance(e.obj, gimple_ctypes.IdentExpr) \
                     and gen._cpp_declared.get(e.obj.name) == 'MojoDict *':
                 key_expr = gen._cpp_dict_key_expr(e.index, idx)
+                # A struct-valued dict (`_cpp_local_dict_val_types`) stores the
+                # pointer as its int64 word; cast the word back to the struct
+                # pointer the reader is typed as (see the prescan above).
+                _vct = getattr(gen, '_cpp_local_dict_val_types', {}).get(e.obj.name)
+                if _vct is not None:
+                    return f"({_vct})mojo_dict_get_int({_cpp_as('MojoDict *', obj)}, {key_expr})"
                 return f"mojo_dict_get_int({_cpp_as('MojoDict *', obj)}, {key_expr})"
             # A bare identifier that names a real module-level FUNCTION
             # is never a string/container: `Unpack[self]` (typing.py's
@@ -7431,7 +7533,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     gen._async_api,
                     fn_return_types=_cpp_trusted_fn_return_types(gen),
                     module_global_types=getattr(
-                        gen, '_cpp_module_global_ctypes', None))
+                        gen, '_cpp_module_global_ctypes', None),
+                    dict_val_types=getattr(gen, '_cpp_local_dict_val_types', None))
             if ctype is None:
                 ctype = 'int64_t'  # default for unknown-type locals
             declared[name] = ctype

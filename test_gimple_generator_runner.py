@@ -224,7 +224,9 @@ _FOREIGN_PKG_FILES = {
     # cross-module struct, the shape `c_parser/parser/__init__.py` hit.
     'box.py': ("class Box:\n"
                "    def __init__(self, x, bump=5):\n"
-               "        self.x = x + bump\n"),
+               "        self.x = x + bump\n"
+               "    def get(self):\n"
+               "        return self.x\n"),
 }
 
 
@@ -2669,6 +2671,80 @@ def run_ctor_default_arg_in_generator_tests():
         "\n"
         "main()\n",
         "9\n12\n")
+
+
+def run_struct_ptr_through_local_dict_tests():
+    # A struct pointer stored into a local dict and read back inside a cpp
+    # generator body. The store went through the int64 slot (correct: the
+    # dict's value representation is a boxed word), but the read-back was
+    # typed as the int64 default, so `got.x` treated the raw pointer word as
+    # a boxed value and printed nothing (the program crashed). The reader
+    # must carry the stored struct type, exactly as the `self.<field>`
+    # struct-valued dict already does. The read comes TEXTUALLY BEFORE the
+    # store (the read sits in the `if` arm, the store in the `else` arm), as
+    # `c_parser/parser/__init__.py`'s `_iter_source` does, so the value type
+    # must be known before the body is lowered in order.
+    # The plain shape first: store, then read back in the same arm.
+    _test_foreign_a3_generator_handle(
+        "generator_struct_ptr_through_local_dict_store_then_read",
+        "from .box import Box\n"
+        "\n"
+        "def consume(n, *, start=[]):\n"
+        "    allinfo = {}\n"
+        "    allinfo['a'] = Box(n)\n"
+        "    got = allinfo['a']\n"
+        "    yield got.x\n"
+        "\n"
+        "def main():\n"
+        "    for v in consume(4):\n"
+        "        print(v)\n"
+        "\n"
+        "main()\n",
+        "9\n")
+    _test_foreign_a3_generator_handle(
+        "generator_struct_ptr_through_local_dict_read_back",
+        "from .box import Box\n"
+        "\n"
+        "def consume(n, *, start=[]):\n"
+        "    allinfo = {}\n"
+        "    for i in range(2):\n"
+        "        if i == 1:\n"
+        "            got = allinfo['a']\n"
+        "            yield got.x\n"
+        "        else:\n"
+        "            b = Box(n)\n"
+        "            allinfo['a'] = b\n"
+        "\n"
+        "def main():\n"
+        "    for v in consume(4):\n"
+        "        print(v)\n"
+        "\n"
+        "main()\n",
+        "9\n")
+    # ... and used through a METHOD call on the read-back, which is what
+    # `_iter_source` does (`srcinfo._add_line(...)`, `srcinfo.too_much(...)`):
+    # the receiver's type must be the stored struct pointer, not the int64
+    # word, or the call is emitted on an integer.
+    _test_foreign_a3_generator_handle(
+        "generator_struct_ptr_through_local_dict_method_call",
+        "from .box import Box\n"
+        "\n"
+        "def consume(n, *, start=[]):\n"
+        "    allinfo = {}\n"
+        "    for i in range(2):\n"
+        "        if i == 1:\n"
+        "            got = allinfo['a']\n"
+        "            yield got.get()\n"
+        "        else:\n"
+        "            b = Box(n)\n"
+        "            allinfo['a'] = b\n"
+        "\n"
+        "def main():\n"
+        "    for v in consume(4):\n"
+        "        print(v)\n"
+        "\n"
+        "main()\n",
+        "9\n")
 
 
 def run_nested_generator_capture_tests():
@@ -5827,6 +5903,7 @@ def run_tests():
     run_variadic_lambda_value_tests()
     run_unpack_call_forward_tests()
     run_ctor_default_arg_in_generator_tests()
+    run_struct_ptr_through_local_dict_tests()
     run_mixed_yield_kind_tests()
     run_next_method_tests()
     run_next_return_position_tests()

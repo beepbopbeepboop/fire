@@ -1077,6 +1077,10 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     nested_helper_lines: list[str] = _cpp_compile_nested_sync_helpers(
         gen, fn, base, declared, self_fields, struct_name)
     gcc_._cpp_reset_unit_state(gen)
+    # Struct-valued local dicts, seeded before the body is lowered in order so
+    # a read that textually precedes its store is still typed (see
+    # `_cpp_prescan_dict_struct_values`).
+    gen._cpp_local_dict_val_types = gcc_._cpp_prescan_dict_struct_values(gen, fn)
     _tagged_yield = False
     try:
         body_lines: list[str] = []
