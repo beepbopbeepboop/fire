@@ -11235,6 +11235,144 @@ def gen_module_impl(self, stmts: list):
             _e = None
         _callee_ret_elem_memo[fname] = _e
         return _e
+
+    # ── an unpacked tuple slot the callee returns as a container ──
+    #
+    # `base, is_m, real_params, prologue = _setup(fn)` types every unpack
+    # target as the int64_t box (`_infer_local_var_types_core`'s fallback for a
+    # value it cannot split), and `_is_noncontainer_arg` reads that box as a
+    # SCALAR. So a list handed back through a returned tuple, passed to a
+    # parameter that another call site feeds a direct list, tripped
+    # `_refuse_mixed_container_params` even though nothing in it is a str or a
+    # number: coro.py's `_mark_coro_param_elem_kinds`, reached through
+    # `_async_method_setup`'s tuple. The box is the fallback, not evidence of a
+    # scalar, so the exemption is evidence-based and narrow. A name is exempt
+    # ONLY when every binding of it in the caller is a tuple unpack from a
+    # module-level call whose returns, in that slot, are containers on every
+    # return statement. A slot the callee returns as a str or a number (or
+    # anything it cannot prove a container) keeps the observation, so
+    # `s, n = pair()` with `pair` returning `"de", 1` still refuses.
+    _CONTAINER_CTYPES = ('MojoList *', 'MojoDict *', 'MojoSet *')
+    _caller_body_by_name: dict = {}
+    for _cbn, _cbb in _caller_bodies:
+        _caller_body_by_name[_as_str(_cbn)] = _cbb
+    _caller_binding_memo: dict = {}   # caller -> {name: [binding | None]}
+    _container_slot_memo: dict = {}   # (callee, index, arity) -> bool
+
+    def _target_names(target):
+        """Every bare name a store target binds (`a`, `(a, b)`, `[a, *b]`)."""
+        names: list = []
+        pending: list = [target]
+        while pending:
+            _t = pending.pop()
+            if isinstance(_t, gimple_ctypes.IdentExpr):
+                names.append(_as_str(_t.name))
+            elif isinstance(_t, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+                pending.extend(_t.elements)
+        return names
+
+    def _caller_bindings(caller_name):
+        """{name: [binding]} for one caller body. A binding is `(callee,
+        index, arity)` for slot `index` of `a, b, ... = callee(...)` with a
+        bare module-level callee, and None for every other way a name is
+        bound (assignment, `var`, loop target, walrus, parameter)."""
+        _cached = _caller_binding_memo.get(caller_name)
+        if _cached is not None:
+            return _cached
+        table: dict = {}
+        _cfd = _fn_by_name.get(caller_name)
+        if _cfd is not None:
+            for _p in (_cfd.params or []):
+                table.setdefault(_as_str(_p[0]), []).append(None)
+        for _n in _walk_ast(_caller_body_by_name.get(caller_name) or []):
+            if isinstance(_n, gimple_ctypes.AssignStmt):
+                _t = _n.target
+                _v = _n.value
+                if (isinstance(_t, gimple_ctypes.TupleExpr)
+                        and isinstance(_v, gimple_ctypes.CallExpr)
+                        and isinstance(_v.func, gimple_ctypes.IdentExpr)
+                        and _as_str(_v.func.name) in _fn_by_name):
+                    _callee = _as_str(_v.func.name)
+                    _arity = len(_t.elements)
+                    for _i, _el in enumerate(_t.elements):
+                        if isinstance(_el, gimple_ctypes.IdentExpr):
+                            table.setdefault(_as_str(_el.name), []).append((_callee, _i, _arity))
+                        else:
+                            for _nm in _target_names(_el):
+                                table.setdefault(_nm, []).append(None)
+                    continue
+                for _nm in _target_names(_t):
+                    table.setdefault(_nm, []).append(None)
+            elif isinstance(_n, gimple_ctypes.VarDecl):
+                table.setdefault(_as_str(_n.name), []).append(None)
+            elif isinstance(_n, gimple_ctypes.ForStmt):
+                for _nm in _target_names(_n.target):
+                    table.setdefault(_nm, []).append(None)
+            elif isinstance(_n, gimple_ctypes.MultiAssignStmt):
+                for _t in _n.targets:
+                    for _nm in _target_names(_t):
+                        table.setdefault(_nm, []).append(None)
+            elif isinstance(_n, gimple_ctypes.WalrusExpr):
+                table.setdefault(_as_str(_n.name), []).append(None)
+        _caller_binding_memo[caller_name] = table
+        return table
+
+    def _element_is_container(callee, e):
+        if isinstance(e, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr,
+                          gimple_ctypes.DictExpr, gimple_ctypes.SetExpr)):
+            return True
+        if isinstance(e, gimple_ctypes.IdentExpr):
+            _nm = _as_str(e.name)
+            _vt = self._inferred_var_types.get(callee, {}).get(_nm)
+            if _vt is None:
+                _vt = self._inferred_param_types.get(callee, {}).get(_nm)
+            return _as_str(_vt) in _CONTAINER_CTYPES
+        return False
+
+    def _slot_is_container(callee, index, arity):
+        """Does every return statement of `callee` yield a `arity`-tuple whose
+        slot `index` is a container? False for no returns, a non-tuple return,
+        or a tuple of another arity. Returns inside nested defs are not the
+        callee's own, so they are skipped."""
+        _key = (callee, index, arity)
+        if _key in _container_slot_memo:
+            return _container_slot_memo[_key]
+        _ans = False
+        _cfd = _fn_by_name.get(callee)
+        if _cfd is not None:
+            _nested_ids: set = set()
+            for _n in _walk_ast(_cfd.body):
+                if isinstance(_n, gimple_ctypes.FunctionDef):
+                    for _m in _walk_ast(_n.body):
+                        _nested_ids.add(id(_m))
+            _rets: list = []
+            for _n in _walk_ast(_cfd.body):
+                if isinstance(_n, gimple_ctypes.ReturnStmt) and id(_n) not in _nested_ids:
+                    _rets.append(_n)
+            _ans = len(_rets) > 0
+            for _r in _rets:
+                _rv = _r.value
+                if (not isinstance(_rv, gimple_ctypes.TupleExpr)
+                        or len(_rv.elements) != arity
+                        or not _element_is_container(callee, _rv.elements[index])):
+                    _ans = False
+                    break
+        _container_slot_memo[_key] = _ans
+        return _ans
+
+    def _unpack_from_container_slot(a, caller_name):
+        """Is call argument `a` a name whose every binding in `caller_name` is
+        a container-returning tuple-unpack slot (see the block above)?"""
+        if not isinstance(a, gimple_ctypes.IdentExpr):
+            return False
+        _bs = _caller_bindings(_as_str(caller_name)).get(_as_str(a.name))
+        if not _bs:
+            return False
+        for _b in _bs:
+            if _b is None or not _slot_is_container(_b[0], _b[1], _b[2]):
+                return False
+        return True
+
     _scalar_obs: dict[str, dict[str, set]] = {}   # callee -> {pname -> {types}}
     # Struct-pointer observations, collected in their own map (see
     # `_arg_struct_ptr_type`'s docstring for why they must not share
@@ -11378,7 +11516,8 @@ def gen_module_impl(self, stmts: list):
                     _record_param_container(callee, pnames[i], _pc)
 
                 st = _arg_scalar_type(caller_name, a)
-                if _pc is None and _is_noncontainer_arg(a, caller_name, st):
+                if (_pc is None and _is_noncontainer_arg(a, caller_name, st)
+                        and not _unpack_from_container_slot(a, caller_name)):
                     _record_param_noncontainer(callee, pnames[i])
                 if not st:
                     # An int/bool/None literal contributes NOTHING above, and
@@ -11516,9 +11655,10 @@ def gen_module_impl(self, stmts: list):
                         _kwpc = _static_arg_container(_kw[1], caller_name)
                         if _kwpc is not None:
                             _record_param_container(callee, _kwn, _kwpc)
-                        elif _is_noncontainer_arg(
+                        elif (_is_noncontainer_arg(
                                 _kw[1], caller_name,
-                                _arg_scalar_type(caller_name, _kw[1])):
+                                _arg_scalar_type(caller_name, _kw[1]))
+                                and not _unpack_from_container_slot(_kw[1], caller_name)):
                             _record_param_noncontainer(callee, _kwn)
                         break
 
