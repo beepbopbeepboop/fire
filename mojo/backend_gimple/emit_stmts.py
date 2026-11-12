@@ -1634,17 +1634,16 @@ def _gen_stmt_AssignStmt(gen, node):
         # emitted, rather than unwrapping the box into a str/float slot.
         _tagged_bind = (v in getattr(gen, '_tagged_word_vals', ()) or _for_copy)
         # A float/str/bool/int store into a box-holding name is boxed by its
-        # kind here, BEFORE the refusal below reads the value's C type, so it
-        # is carried by the box rather than refused. Only a store the box has
-        # no constructor for (a container, a struct pointer) is refused:
-        # silently casting a container pointer into a tagged word's slot was
-        # exactly the miscompile the refusal prevented.
-        # A float and a str stored into the same name of one function (`val = d["key"]` on a float dict, then
-        # `val = "text"`): no representation holds both kinds, and the second store would cast a double to a pointer,
-        # which gcc rejects ("cannot convert to a pointer type"). Refuse the function, with the same reason, at the
-        # store that brings the second kind. The codegen types a name from its bindings as it goes, so the kinds
-        # already stored into the name are the record. A box-holding name is the ONE exception: it is the int64_t
-        # box, and the store below boxes each value by kind.
+        # kind here, BEFORE any refusal below reads the value's C type, so it
+        # is carried by the box rather than refused. A container stored into a
+        # tagged-mixed name is refused (the tagged box has no container kind);
+        # remember the original type across boxing so that refusal still fires.
+        # A float and a str stored into the same name of one function
+        # (`val = d["key"]` on a float dict, then `val = "text"`): no
+        # representation holds both kinds, and the second store would cast a
+        # double to a pointer, which gcc rejects. Refuse the function at the
+        # store that brings the second kind. A box-holding name is the
+        # exception: it is the int64_t box, and stores are boxed by kind.
         if vtype in ('double', 'char *') and not _mixed_box:
             _sk_key = (_as_str(gen.current_func_name), _as_str(tname))
             _sk_prev = gen._stored_kinds.get(_sk_key)
@@ -1652,6 +1651,8 @@ def _gen_stmt_AssignStmt(gen, node):
                 raise RuntimeError(
                     f"{tname!r}: {ginf.mixed_name_non_int64_refusal(vtype)}")
             gen._stored_kinds[_sk_key] = vtype
+        _orig_vtype = vtype
+        _decl_t_before = gen.var_types.get(tname)
         if _mixed_box and not _keep_tagged_box:
             v, vtype = ginf.box_mixed_store(gen, node.value, vtype, v, tname)
             if gen.var_types.get(_as_str(tname), 'int64_t') == 'int64_t':
@@ -1661,19 +1662,31 @@ def _gen_stmt_AssignStmt(gen, node):
         # conflicting C type, and which side was the tagged word vs container,
         # while keeping the substring "cannot also hold a value of another C
         # type" that test_dict_slot_read_regression.py Test 2 asserts.
-        if _tagged_bind and ginf.is_non_int_c_type(gen.var_types.get(tname)):
-            _decl_t = gen.var_types.get(tname)
+        _tagged_mixed = ginf.tagged_mixed_name(gen, tname)
+        # Container/struct pointers (other than str `char *`) cannot be carried
+        # by the tagged box. Floats and strs are boxed above and are allowed.
+        _unboxable_ptr = (
+            _decl_t_before is not None
+            and str(_decl_t_before).endswith(' *')
+            and _decl_t_before not in ('char *', 'const char *'))
+        _unboxable_store = (
+            _orig_vtype is not None
+            and str(_orig_vtype).endswith(' *')
+            and _orig_vtype not in ('char *', 'const char *'))
+        if _tagged_bind and _unboxable_ptr:
             raise RuntimeError(
-                f"{tname!r}: a name bound to a container value of C type "
-                f"'{_decl_t}' elsewhere in this function and also to a tagged "
-                f"generator word here cannot also hold a value of another C "
-                f"type; no representation holds both; refused")
-        if ginf.is_non_int_c_type(vtype) and _mixed_box:
+                f"{tname!r}: a name bound to a container or pointer value "
+                f"(container value of C type '{_decl_t_before}') elsewhere in "
+                f"this function and also to a tagged generator word here "
+                f"cannot also hold a value of another C type; no "
+                f"representation holds both; refused")
+        if _unboxable_store and (_mixed_box or _tagged_mixed):
             raise RuntimeError(
                 f"{tname!r}: a name bound to a tagged generator word elsewhere "
-                f"in this function and also to a container value of C type "
-                f"'{vtype}' here cannot also hold a value of another C type; "
-                f"no representation holds both; refused")
+                f"in this function and also to a container or pointer value "
+                f"(container value of C type '{_orig_vtype}') here cannot also "
+                f"hold a value of another C type; no representation holds "
+                f"both; refused")
         if (not _keep_tagged_box and _copy_src is not None
                 and ginf.tagged_next_bind_name(gen, _as_str(tname))):
             # The local is registered as a box by every store (the static
