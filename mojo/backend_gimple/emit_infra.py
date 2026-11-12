@@ -7579,6 +7579,45 @@ def _gen_print(gen, args: list, kwargs: list = None):
             # A call result of unknown kind may be a boxed dict-slot value.
             if (_pi < len(args) and isinstance(args[_pi], gimple_ctypes.CallExpr)
                     and atype in ('int', 'int64_t')):
+                _stat_i = arg_static[_pi] if _pi < len(arg_static) else ''
+                _is_opt_ptr_niche = (isinstance(_stat_i, str)
+                                     and _stat_i.startswith('Optional[')
+                                     and 'Pointer[' in _stat_i)
+                if not _is_opt_ptr_niche:
+                    # Fallback: `peek()` on a peekable iterator returns
+                    # Optional[Pointer[...]] (a nullable pointer word) but the
+                    # static type may be erased/unavailable here.
+                    _call_arg = args[_pi]
+                    _cfunc = getattr(_call_arg, 'func', None)
+                    if (isinstance(_cfunc, gimple_ctypes.MemberExpr)
+                            and _as_str(getattr(_cfunc, 'member', '')) == 'peek'
+                            and not getattr(_call_arg, 'args', None)
+                            and not getattr(_call_arg, 'kwargs', None)):
+                        _is_opt_ptr_niche = True
+                if _is_opt_ptr_niche:
+                    # Optional[Pointer[...]] is lowered as a nullable pointer
+                    # word (0 = None). `mojo_cstr_or_int_str` would format the
+                    # pointer as a raw integer address; describe the Optional
+                    # instead (CODEGEN_peek_result_prints_raw_address).
+                    bb_some = gen._new_bb()
+                    bb_none = gen._new_bb()
+                    bb_done = gen._new_bb()
+                    _res = gen._new_temp('char *')
+                    _cond = gen._new_temp('_Bool')
+                    gen._emit(f'  {_cond} = {aval} != 0;')
+                    gen._emit(f'  if ({_cond}) goto {bb_some}; else goto {bb_none};')
+                    gen._emit_label(bb_some)
+                    _some_lit = gen._intern_string('Optional(Some)')
+                    _some_t = gen._new_val('char *', _some_lit)
+                    gen._emit(f'  {_res} = {_some_t};')
+                    gen._emit(f'  goto {bb_done};')
+                    gen._emit_label(bb_none)
+                    _none_lit = gen._intern_string('Optional(None)')
+                    _none_t = gen._new_val('char *', _none_lit)
+                    gen._emit(f'  {_res} = {_none_t};')
+                    gen._emit_label(bb_done)
+                    resolved_parts.append(('char *', _res))
+                    continue
                 _rv = gen._call_expr('char *', 'mojo_cstr_or_int_str',
                                      [('int64_t', aval)])
                 _cstr_held.append((aval, _rv))
@@ -7777,7 +7816,37 @@ def _gen_print(gen, args: list, kwargs: list = None):
             gen._emit(f'  {_fs} = mojo_sprintf_ptr ({_ft}, {_fp});')
             gen._emit(f'  {print_fn} ({_fs});')
         else:
-            if atype in ('int', 'int64_t'):
+            _opt_ptr_niche_emit = False
+            if isinstance(_stat, str) and _stat.startswith('Optional[') and 'Pointer[' in _stat:
+                _opt_ptr_niche_emit = True
+            if not _opt_ptr_niche_emit and args and i < len(args):
+                _earg = args[i]
+                if isinstance(_earg, gimple_ctypes.CallExpr):
+                    _efunc = getattr(_earg, 'func', None)
+                    if (isinstance(_efunc, gimple_ctypes.MemberExpr)
+                            and _as_str(getattr(_efunc, 'member', '')) == 'peek'
+                            and not getattr(_earg, 'args', None)
+                            and not getattr(_earg, 'kwargs', None)):
+                        _opt_ptr_niche_emit = True
+            if _opt_ptr_niche_emit and (atype in ('int', 'int64_t') or (isinstance(atype, str) and atype.endswith('*'))):
+                bb_some = gen._new_bb()
+                bb_none = gen._new_bb()
+                bb_done = gen._new_bb()
+                _cond = gen._new_temp('_Bool')
+                gen._emit(f'  {_cond} = ({aval}) != 0;')
+                gen._emit(f'  if ({_cond}) goto {bb_some}; else goto {bb_none};')
+                gen._emit_label(bb_some)
+                _some_lit = gen._intern_string('Optional(Some)')
+                _some_t = gen._new_val('char *', _some_lit)
+                gen._emit(f'  {print_fn} ({_some_t});')
+                gen._emit(f'  goto {bb_done};')
+                gen._emit_label(bb_none)
+                _none_lit = gen._intern_string('Optional(None)')
+                _none_t = gen._new_val('char *', _none_lit)
+                gen._emit(f'  {print_fn} ({_none_t});')
+                gen._emit(f'  goto {bb_done};')
+                gen._emit_label(bb_done)
+            elif atype in ('int', 'int64_t'):
                 # A word of unknown kind (e.g. boxed dict-slot value, or a string
                 # pointer held in an int64_t): render via the runtime's generic
                 # discriminator so None/bool/float kinds and string pointers print
