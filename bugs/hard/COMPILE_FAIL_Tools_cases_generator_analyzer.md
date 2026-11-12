@@ -1,4 +1,4 @@
-SPLIT: COMPILE_FAIL_Tools_cases_generator_analyzer-part1, COMPILE_FAIL_Tools_cases_generator_analyzer-part2, COMPILE_FAIL_Tools_cases_generator_analyzer-part3, COMPILE_FAIL_Tools_cases_generator_analyzer-part4
+SPLIT: bugs/mid/COMPILE_FAIL_Tools_cases_generator_analyzer-part1.md, bugs/mid/COMPILE_FAIL_Tools_cases_generator_analyzer-part2.md, bugs/mid/COMPILE_FAIL_Tools_cases_generator_analyzer-part4.md (the str()/repr() None-guard sub-bug — the `", ".join` line's gcc `-fgimple` error — is fixed; its part-3 doc was deleted with the fix)
 
 ## Status (2026-10-29, worktree bug-compile-fail-tools-cases-generator-a — PARTIAL)
 
