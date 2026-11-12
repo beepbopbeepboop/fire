@@ -1,6 +1,6 @@
 # COMPILE_FAIL_Tools_cases_generator_analyzer-part1: positional class patterns bind through `__match_args__`
 
-Part 1 of 4 of `bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md`.
+Part 1 of 3 of `bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md`.
 
 ## Goal
 
@@ -93,7 +93,7 @@ different order.
    model has no `isinstance`; `fire.py build --formal` keeps refusing it with
    its existing message. That is deliberate and out of this part (see
    `## Out of scope`).
-5. **Tests** (new file, next to `test_match_class_pattern_positional.py`), as
+5. **Tests** (`test_match_class_pattern_match_args.py`, next to `test_match_class_pattern_positional.py`), as
    described under `## Acceptance`.
 
 ## Acceptance
@@ -120,7 +120,9 @@ different order.
 
 ## Done when
 
-`python3 test_match_class_pattern_match_args.py` (new file) exits 0.
+`python3 test_match_class_pattern_match_args.py` exits 0. The file is on disk;
+on the 2026-11-12 tree it fails (reversed fixture: `AttributeError: p`; no-`__match_args__`
+fixture: exit 0 printing `3`), so it is a real red test, not a placeholder.
 
 It must fail on the current tree (compiled path prints
 `Unhandled exception: AttributeError: p`) and pass after the change. It runs the
@@ -132,6 +134,6 @@ also covers the missing-`__match_args__` and too-many-sub-patterns cases.
 
 * The formal backend's refusal of class patterns (no `isinstance` in its model).
 * Keyword class patterns (`case C(x=0)`).
-* The analyzer build itself — that is part2/part3/part4. This part is a
+* The analyzer build itself — that is part2/part3. This part is a
   correctness fix on the same feature path; it is not what blocks the build
   today.
