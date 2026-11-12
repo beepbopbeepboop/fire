@@ -3363,6 +3363,36 @@ def _cattr_value_is_constant(v) -> bool:
                           NoneLiteral))
 
 
+def _cattr_value_is_cell(gen, cls_name: str, v) -> bool:
+    """True when a class-level attribute's value is kept in a per-execution
+    cell instead of a plain module global: the class is function-scoped and
+    the value is not a constant. This is the exact condition under which the
+    class-attribute registration in `gen_module_impl` records the mangled
+    name in `_cell_cattr_types`, so the two can never disagree.
+
+    No VISIBLE struct field may be created for such an attribute (both of the
+    field-creation loops in `gen_module_impl` consult this): the allocator's
+    per-instance init fires only when the field type and the global type
+    agree, and a cell attribute's global is a POINTER to the cell, so the
+    field is written by nothing — and `_lower_MemberExpr` prefers a struct
+    field over the class-attribute path, so every instance read hit that dead
+    field instead of the per-execution cell. `def h(s: str): class C(): var
+    name = s` therefore read back 0 for a `char *` (the field typed `C *`
+    by the "we don't know what this holds" fallback) and `None` when the
+    annotation typed it `char *` right (CODEGEN_nested_class_var_attr_
+    untyped_field). A bare, unannotated `name = s` never creates a field and
+    works — the annotation or the `var` spelling is what mints the field.
+    With the field gone, the read and the instance write both go through the
+    same cell + dynamic-storage machinery the bare spelling already uses
+    (`_cattr_instance_read` reads the cell this instance was built under;
+    an instance write `a.name = 9` lands in the dynamic storage and shadows
+    it), so every spelling of a per-execution attribute lowers identically,
+    the way CPython's class namespace treats them.
+    """
+    return (cls_name in getattr(gen, '_fn_scoped_structs', ())
+            and v is not None and not _cattr_value_is_constant(v))
+
+
 def _struct_typedef_fields(gen, sn) -> dict:
     """The `{field: ctype}` map a struct's `typedef` body is rendered from: its
     Python-visible fields (`struct_field_types`) plus the hidden per-execution
@@ -7600,6 +7630,13 @@ def gen_module_impl(self, stmts: list):
             for field in (s.fields if hasattr(s, 'fields') else []):
                 if isinstance(field, VarDecl) and field.name and field.name != 'self':
                     if not field.type_ann and field.name not in self.struct_field_types[s.name]:
+                        # A per-execution cell attribute (a non-constant value
+                        # of a function-scoped class) gets NO visible struct
+                        # field — creating one here is exactly what made
+                        # `var NAME = <param>` read back 0 through the
+                        # instance (see `_cattr_value_is_cell`).
+                        if _cattr_value_is_cell(self, s.name, getattr(field, 'value', None)):
+                            continue
                         _inherited_ft = None
                         for _base_name in (getattr(s, 'bases', None) or []):
                             _base_ft = self.struct_field_types.get(_base_name, {})
@@ -7779,8 +7816,7 @@ def gen_module_impl(self, stmts: list):
                 # a.attr` reads 5, not the later call's 7. See
                 # nested class attribute reading an enclosing local (fixed).
                 # Module-scope classes and constants keep the plain global.
-                if (s.name in getattr(self, '_fn_scoped_structs', ())
-                        and v is not None and not _cattr_value_is_constant(v)):
+                if _cattr_value_is_cell(self, s.name, v):
                     _cells = getattr(self, '_cell_cattr_types', None)
                     if _cells is None:
                         _cells = {}
@@ -7867,7 +7903,16 @@ def gen_module_impl(self, stmts: list):
                         f_name = field.target.name
                     if _as_str(s.name) == 'StringLiteral':
                         _ind = f_name in self.struct_field_types[s.name]
-                    if f_name not in self.struct_field_types[s.name]:
+                    # Same rule as the unannotated VarDecl walk above: a
+                    # per-execution cell attribute is not a visible struct
+                    # field. The annotation is what typed `name: str = s`
+                    # `char *` right and still read `None` through the
+                    # instance — the field was never seeded, and the read
+                    # prefers it over the cell (see `_cattr_value_is_cell`).
+                    _cell_attr = _cattr_value_is_cell(self, s.name,
+                                                      getattr(field, 'value', None))
+                    if (f_name not in self.struct_field_types[s.name]
+                            and not _cell_attr):
                         ft = _mojo_type(_as_str(field.type_ann))
                         # System/POSIX typedefs (time_t, suseconds_t, size_t,
                         # ...) are spelled in the stdlib as Mojo aliases that
