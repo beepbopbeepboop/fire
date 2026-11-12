@@ -1835,6 +1835,75 @@ def main():
 main()
 """)
 
+    # A parameter that reaches a yield only as the argument of a
+    # result-kind-independent string method (str.join / str.format) must not
+    # make the yield slot conflicted: the yielded value is always a string.
+    _join_src = """\
+def _render_table(columns):
+    yield '\\t'.join(columns)
+    yield 'done'
+
+
+def build_section(name):
+    columns = ('a', 'b')
+
+    def render():
+        yield f'{name}:'
+        for line in _render_table(columns):
+            yield line
+
+    return render
+
+
+def main():
+    render = build_section('types')
+    for line in render():
+        print(line)
+
+
+main()
+"""
+    test_generator_matches_cpython(
+        "generator_yield_join_arg_does_not_conflict_slot_nested", _join_src, _join_src)
+
+    _join_direct_src = """\
+def _render_table(columns):
+    yield '\\t'.join(columns)
+    yield 'done'
+
+
+def main():
+    for line in _render_table(('a', 'b')):
+        print(line)
+    cols = ('x', 'y')
+    for line in _render_table(cols):
+        print(line)
+
+
+main()
+"""
+    test_generator_matches_cpython(
+        "generator_yield_join_arg_does_not_conflict_slot_direct", _join_direct_src, _join_direct_src)
+
+    # Control: yielding a conflicted parameter's elements AND the parameter
+    # itself keeps the genuine yield-kind disagreement (not a join-result
+    # case), so the generator must still be refused rather than compiled with
+    # a single wrong value slot.
+    test_generator_refused("generator_conflicted_yielded_param_still_refused", """\
+def g(xs):
+    for x in xs:
+        yield x
+    yield xs
+
+def main():
+    for v in g(["p"]):
+        pass
+    for v in g([1]):
+        pass
+
+main()
+""", "values must agree on one scalar type")
+
     # A `*spread` CANNOT supply a keyword-only parameter — real Python syntax
     # puts everything after a bare `*` out of a positional unpack's reach — so
     # a call that fills it by explicit keyword must keep resolving. This is the
