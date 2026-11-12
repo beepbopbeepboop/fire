@@ -82,6 +82,14 @@ def main():
                 assert t0.get("merge_capped") and t0["cap_review"]["applied"] == "no verdict", "a vanished reviewer: stays capped"
         finally:
             for p in patches: p.stop()
+    # (4) the reserved slot takes only tasks pinned to it
+    pool = {"slots": [{"name": "haiku", "model": "m1", "count": 0, "class": "easy"},
+                      {"name": C.ORCH_POOL, "model": "m2", "count": 1, "class": "orch"}]}
+    with mock.patch.object(C, "load_pool", lambda: pool), mock.patch.object(C, "dead_models", lambda: {}):
+        assert C.pick_slot({"name": "fix-gate-x", "cls": None}, {}) is None, "an unclassed task must not overflow into the orch slot"
+        assert C.pick_slot({"name": "x", "cls": "mid"}, {}) is None
+        got = C.pick_slot({"name": "fix-orch-x", "pool": C.ORCH_POOL, "only": True}, {})
+        assert got and got["name"] == C.ORCH_POOL, "a pinned review gets it"
     print("test_orch_review: ok")
 
 
