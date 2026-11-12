@@ -2386,6 +2386,7 @@ def _check_out_argument_calls(stmts, filename) -> None:
         if type(st).__name__ == "FunctionDef":
             defs[st.name] = defs.get(st.name, 0) + 1
     capacity = {}
+    out_names = {}
     for st in stmts:
         if type(st).__name__ != "FunctionDef" or defs.get(st.name) != 1:
             continue
@@ -2395,6 +2396,7 @@ def _check_out_argument_calls(stmts, filename) -> None:
         if any(str(p[0]).startswith("*") for p in st.params):
             continue
         capacity[st.name] = len([p for p in st.params if conv.get(p[0]) != "out"])
+        out_names[st.name] = {p[0] for p in st.params if conv.get(p[0]) == "out"}
     if not capacity:
         return
     for node in _iter_ast_nodes(stmts):
@@ -2408,6 +2410,14 @@ def _check_out_argument_calls(stmts, filename) -> None:
             a = node.args[cap]
             loc = f"{filename}:{a.line}:{a.col}: " if filename else f"{a.line}:{a.col}: "
             raise RuntimeError(f"{loc}error: invalid call to '{fn.name}': unexpected argument")
+        # An out parameter is not a keyword argument either. Real Mojo reports it
+        # at the VALUE (measured: `f(x=y)` at 6:9, the `y`).
+        for kw_name, kw_value in (node.kwargs or []):
+            if kw_name in out_names[fn.name]:
+                loc = (f"{filename}:{kw_value.line}:{kw_value.col}: " if filename
+                       else f"{kw_value.line}:{kw_value.col}: ")
+                raise RuntimeError(
+                    f"{loc}error: invalid call to '{fn.name}': unexpected keyword argument '{kw_name}'")
 
 
 def _warn_fn_keyword(filename, tok) -> None:

@@ -88,6 +88,18 @@ type (`fix/selected.json` in the measurement scratchpad):
 - Whether a fixture that uses Mojo-only syntax belongs in a Python-only suite is not decided here. The project target is
   100% Python, so the fixture set needs its own review.
 
+## Out-argument call sites (measured with `tools/mojo build`, 2026-11-11)
+
+| call | real Mojo | ours |
+|---|---|---|
+| `f(y)` for `def f(out x: Int)` | `invalid call to 'f': unexpected argument` at `y` (6:7) | refused, 6:7 |
+| `f(x=y)` for `def f(out x: Int)` | `invalid call to 'f': unexpected keyword argument 'x'` at `y` (6:9) | refused, 6:9 (added after the first measurement) |
+| `f(1, y)` for `def f(a: Int, out x: Int)` | `invalid call to 'f': unexpected argument` at `y` (6:10) | refused, 6:10 |
+| `f(1)` for `def f(a: Int, out x: Int)` | accepted (the out argument is returned, not passed) | accepted |
+| `f(a=1, b=2)` for ordinary parameters | accepted | accepted |
+
+All five are pinned in `test_out_param_return_type_diagnostic.py`.
+
 ## Design
 
 - **A validity gate on fixtures.** Every fixture that claims to be valid Mojo is compiled by the real compiler
