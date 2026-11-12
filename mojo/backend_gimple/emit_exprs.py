@@ -1086,17 +1086,6 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         else:
             # Global is int64_t or same type as ctype — direct assignment is valid.
             gen._emit(f'  {t} = {field_ref};')
-        # The element kinds the global's last store recorded (see
-        # _note_global_slot_kinds): carried onto this read's temp, which is what
-        # the subscript and loop lowerings look up.
-        _gsi = getattr(gen, '_global_slot_info', {}).get(name)
-        if _gsi:
-            if _gsi.get('mk'):
-                gen._maybe_kinds_vals.add(t)
-            if 'et' in _gsi:
-                gen._elem_types[t] = _gsi['et']
-            if 'sk' in _gsi:
-                gen._struct_slot_kinds[t] = _gsi['sk']
         return ctype, t
     ctype = gen._type_of(name)
     # membership + subscript, NOT `gen._c_names.get(name, name)` — on the

@@ -1854,8 +1854,7 @@ test('interp-tokenizer-oracle', [PY, 'test_myinterpreter_validation.py'],
      mem='tiny', cache=True,
      extra=['test_myinterpreter_validation.py', 'fire_compiler.py',
             'myinterpreter.py', 'formal/examples'],
-     desc='the interpreter\'s tokenizer vs the imported one, over the corpus '
-          'of snippets and whole files')
+     desc='the interpreter\'s tokenizer vs the imported one, over 67 texts')
 test('metalgpu', [PY, 'test_metal_codegen.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_metal_codegen.py',
                              'mojo/middle/metal_ops.py',
@@ -2502,8 +2501,7 @@ test('stdlib-tests', [PY, 'test_stdlib.py'], mem='program',
 # moment a recorded peak stops fitting its class).
 test('stdlib-dylib', [PY, 'tools/stdlib_dylib_ratchet.py'],
      mem='tiny', excl=True, timeout=3600,
-     desc='from-scratch stdlib dylib; reports modules that fell back to source',
-     disabled='bugs/gate-stdlib-dylib.md')
+     desc='from-scratch stdlib dylib; reports modules that fell back to source')
 test('runtimedylib', [PY, 'test_runtime_dylib.py'],
      deps=['preflight'], mem='tiny',
      desc='the runtime dylib: export table, per-arch link, cross-arch checks')
@@ -2884,10 +2882,10 @@ test('formal-eh-tables', [PY, 'test_formal_eh_tables.py'],
 test('formal-dylib', [PY, 'test_formal_dylib.py'],
      deps=['preflight', 'prooflib'],
      mem='tiny',
-     expect='4 failing: three hole-count checks on the overflow-trapping exports, whose termination '
-            'obligations an exit svc keeps named (bugs/mid/FORMAL_svc_exit_handling_incomplete.md), and the '
-            'branching export whose termination the test expects proved but which stays named '
-            '(bugs/FORMAL_dylib_branchy_termination_walk_named.md)',
+     expect='6 failing: two wrong-spec teeth checks (a wrong spec is accepted, since the overflow traps, '
+            'bugs/FORMAL_wrong_spec_accepted_since_overflow_traps.md) and four contract checks on branchy exports '
+            '(an exit svc steps to none, so their contracts are guarded obligations, '
+            'bugs/mid/FORMAL_svc_exit_handling_incomplete.md)',
      desc='formal dylib emission, Mach-O re-read, dlopen, prove')
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'], mem='tiny',
@@ -4180,8 +4178,7 @@ test('python315-sentinel', [PY, 'test_python315_sentinel.py'], mem='tiny',
 test('qualified-member-no-leak', [PY, 'test_qualified_member_no_leak.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('reg-formal-ast-bridge-two-arg', [PY, 'test_reg_formal_ast_bridge_two_arg.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)',
-     disabled='bugs/gate-reg-formal-ast-bridge-two-arg.md')
+     desc='registered by the estate audit (every test file runs)')
 test('selfhost-debug-flag', [PY, 'test_selfhost_debug_flag.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('sys-utf8-default-encoding', [PY, 'test_sys_utf8_default_encoding.py'], mem='tiny',

@@ -10,7 +10,7 @@ module-level constants are byte-identical to their originals.
 """
 from __future__ import annotations
 import re
-from mojo.middle.types import _LIBM_FN_RETVALS, _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _CPP_CALLABLE_CTYPE_STARARGS, _CPP_CALLABLE_CTYPE_KWARGS, _CPP_CALLABLE_CTYPE_STAR_KW, _FLOAT_TYPES, _SIGNED_INT_TRUE_DIV_TYPES
+from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _CPP_CALLABLE_CTYPE_STARARGS, _CPP_CALLABLE_CTYPE_KWARGS, _CPP_CALLABLE_CTYPE_STAR_KW, _FLOAT_TYPES, _SIGNED_INT_TRUE_DIV_TYPES
 import dataclasses
 from fire_compiler import is_fstring_literal, for_target_names, AugAssignStmt, MultiAssignStmt, WalrusExpr, VarDecl, WithStmt, TryStmt, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt, IfStmt, MatchStmt, StructDef, AssignStmt
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
@@ -1132,11 +1132,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
         if isinstance(e.func.obj, IdentExpr) and e.func.obj.name == 'math':
             if e.func.member in ('isnan', 'isinf', 'isfinite', 'isclose'):
                 return '_Bool'
-            # Every 1:1 libm member answers with the table that names its C
-            # return type (`_LIBM_FN_RETVALS`), not a shorter copy of it: the
-            # copy missed `pow`, `hypot` and `copysign`, so `print(math.copysign(3, -1))`
-            # typed the call as an int and printed `-3` for `-3.0`.
-            if e.func.member == 'fsum' or _LIBM_FN_RETVALS.get(_as_str(e.func.member)) == 'double':
+            if e.func.member in ('floor', 'ceil', 'fabs', 'sqrt', 'log', 'log10', 'exp', 'sin', 'cos', 'tan', 'fsum'):
                 return 'double'
         if e.func.member == 'format':
             return 'char *'
