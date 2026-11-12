@@ -950,6 +950,27 @@ def _cpp_collect_os_path_aliases(fn) -> dict:
     return out
 
 
+def _cpp_fstring_list_piece(gen, expr_node, v):
+    """C++ expression emitted for the repr of a `MojoList *` interpolated into an f-string."""
+    if isinstance(expr_node, gimple_ctypes.IdentExpr):
+        elem_cty = (getattr(gen, '_cpp_list_local_elem_types', {}) or {}).get(expr_node.name)
+    else:
+        elem_cty = None
+    if elem_cty == 'double':
+        return f"mojo_repr_list_doubles((MojoList *)({v}))"
+    if elem_cty == 'int64_t':
+        return f"mojo_repr_list_ints((MojoList *)({v}))"
+    if elem_cty == '_Bool':
+        return f"mojo_repr_list_bools((MojoList *)({v}))"
+    if elem_cty == 'MojoBytes *':
+        return f"mojo_repr_list_bytes((MojoList *)({v}))"
+    if elem_cty == 'char *':
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            "f-string interpolation of a list whose elements are str has "
+            "no scalar C++ string form in this compiled generator/coroutine body")
+    return f"mojo_repr_list_kinds((MojoList *)({v}), NULL)"
+
+
 def _cpp_string_literal_expr(gen, val: str, is_interp: str) -> str:
     """`_cpp_expr`'s counterpart of the ordinary GIMPLE path's
     `_lower_StringLiteral` (gimple_gen_exprs.py) — decodes an f-string
@@ -1068,6 +1089,22 @@ def _cpp_string_literal_expr(gen, val: str, is_interp: str) -> str:
                     # path disagreed with CPython on `f"{flag!r}"` (and, via
                     # the escape pass, `!a`).
                     piece = f'(({v}) ? "True" : "False")'
+                elif ectype == 'MojoList *':
+                    piece = _cpp_fstring_list_piece(gen, expr_node, v)
+                elif ectype == 'MojoDict *':
+                    raise gimple_exprtypes._UnsupportedGeneratorShape(
+                        f"f-string interpolation '{{{part_text}}}' of a "
+                        "container-typed dict has no scalar C++ string form in "
+                        "this compiled generator/coroutine body "
+                        "(this emitter has no container-repr walker; refuse "
+                        "rather than print the dict's raw header bytes)")
+                elif ectype == 'MojoSet *':
+                    raise gimple_exprtypes._UnsupportedGeneratorShape(
+                        f"f-string interpolation '{{{part_text}}}' of a "
+                        "container-typed set has no scalar C++ string form in "
+                        "this compiled generator/coroutine body "
+                        "(this emitter has no container-repr walker; refuse "
+                        "rather than print the set's raw header bytes)")
                 else:
                     piece = f"mojo_str((void *)({v}))"
                 if conv == 'a':
@@ -1083,6 +1120,22 @@ def _cpp_string_literal_expr(gen, val: str, is_interp: str) -> str:
                 piece = f"mojo_repr_float(({v}))"
             elif ectype == '_Bool':
                 piece = f'(({v}) ? "True" : "False")'
+            elif ectype == 'MojoList *':
+                piece = _cpp_fstring_list_piece(gen, expr_node, v)
+            elif ectype == 'MojoDict *':
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    f"f-string interpolation '{{{part_text}}}' of a "
+                    "container-typed dict has no scalar C++ string form in "
+                    "this compiled generator/coroutine body "
+                    "(this emitter has no container-repr walker; refuse "
+                    "rather than print the dict's raw header bytes)")
+            elif ectype == 'MojoSet *':
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    f"f-string interpolation '{{{part_text}}}' of a "
+                    "container-typed set has no scalar C++ string form in "
+                    "this compiled generator/coroutine body "
+                    "(this emitter has no container-repr walker; refuse "
+                    "rather than print the set's raw header bytes)")
             else:
                 piece = f"mojo_str((void *)({v}))"
             if spec:
