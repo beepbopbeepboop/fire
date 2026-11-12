@@ -2882,10 +2882,10 @@ test('formal-eh-tables', [PY, 'test_formal_eh_tables.py'],
 test('formal-dylib', [PY, 'test_formal_dylib.py'],
      deps=['preflight', 'prooflib'],
      mem='tiny',
-     expect='6 failing: two wrong-spec teeth checks (a wrong spec is accepted, since the overflow traps, '
-            'bugs/FORMAL_wrong_spec_accepted_since_overflow_traps.md) and four contract checks on branchy exports '
-            '(an exit svc steps to none, so their contracts are guarded obligations, '
-            'bugs/FORMAL_svc_exit_handling_incomplete.md)',
+     expect='4 failing: three hole-count checks on the overflow-trapping exports, whose termination '
+            'obligations an exit svc keeps named (bugs/FORMAL_svc_exit_handling_incomplete.md), and the '
+            'branching export whose termination the test expects proved but which stays named '
+            '(bugs/FORMAL_dylib_branchy_termination_walk_named.md)',
      desc='formal dylib emission, Mach-O re-read, dlopen, prove')
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'], mem='tiny',

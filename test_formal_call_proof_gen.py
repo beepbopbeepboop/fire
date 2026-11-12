@@ -3840,6 +3840,79 @@ class TestOverflowGuardNormalPath(unittest.TestCase):
         self.assertIsNone(G._overflow_normal_path(words, 0x00, 0x5c))
 
 
+class TestGuardedContractEmission(unittest.TestCase):
+    """`_dylib_contract_proof` emits a PROVED guarded contract for an overflow-guarded
+    export, and refuses the shapes it cannot prove.
+
+    The fixture is `TestOverflowGuardNormalPath`'s shape at base 0: a 14-instruction
+    prefix, a guard at 0x38 whose TAKEN edge is the exit-svc trap at 0x40, a `B` over
+    the trap, then the normal tail ending in `RET`.  The guard's gate is a condition on
+    the ENTRY state (`gcond`), so the contract is the guarded one.  Fast: no Lean run.
+    """
+    ADD0 = 0x91000000                  # add x0, x0, #0 (the executed path)
+    RET = 0xd65f03c0
+    SVC = 0xd4000001
+
+    @staticmethod
+    def _movz_x16(imm):
+        return 0xd2800010 | (imm << 5)
+
+    def _code(self, guard_word, trap=True):
+        words = {}
+        for pc in range(0x00, 0x38, 4):
+            words[pc] = self.ADD0          # executed: the model must decode it
+        words[0x38] = guard_word
+        words[0x3c] = 0x14000000 | (((0x54 - 0x3c) // 4) & 0x3ffffff)
+        words[0x40] = 0xd503201f
+        words[0x44] = self._movz_x16(4)
+        words[0x48] = self.SVC
+        words[0x4c] = self._movz_x16(1)
+        words[0x50] = self.SVC if trap else 0xd503201f
+        words[0x54] = self.ADD0
+        words[0x58] = self.RET
+        return b"".join(words[pc].to_bytes(4, "little") for pc in range(0x00, 0x5c, 4))
+
+    @staticmethod
+    def _cbnz_x2(pc, target):
+        return 0xb5000000 | (((target - pc) // 4) << 5) | 2
+
+    @staticmethod
+    def _bcond(pc, target, cond):
+        return 0x54000000 | ((((target - pc) // 4) & 0x7ffff) << 5) | cond
+
+    def _emit(self, code):
+        import formal.arm64_proof_gen as G
+        return G._dylib_contract_proof("guarded_probe", 0x0, 0x0, code,
+                                       "(fun n => n)", 0x5c)
+
+    def test_a_cbnz_guard_emits_a_proved_guarded_contract(self):
+        out = self._emit(self._code(self._cbnz_x2(0x38, 0x40)))
+        self.assertTrue(out, "the guarded export's contract was refused")
+        self.assertIn("abbrev gcond", out)
+        self.assertIn("¬ (arm64_reg 2 (S14 s) ≠ 0)", out,
+                      "the gate must be the CBNZ's own not-taken condition, on the "
+                      "prefix chain at the guard")
+        self.assertIn("Contracts.agrees_of_body_under dylib_image guarded_probe gcond bodyI",
+                      out)
+        self.assertNotIn("sorry", out, "the emitted contract must carry no sorry")
+
+    def test_a_bcond_guard_gates_on_the_flags(self):
+        # `b.vs` (cond 6) on the overflow flag: the gate is `¬ arm64_matches_condition`.
+        out = self._emit(self._code(self._bcond(0x38, 0x40, 6)))
+        self.assertTrue(out, "a B.cond overflow guard was refused")
+        self.assertIn("¬ (arm64_matches_condition 6 (S14 s).nzcv = true)", out)
+
+    def test_a_guard_whose_taken_edge_is_not_a_trap_emits_nothing(self):
+        out = self._emit(self._code(self._cbnz_x2(0x38, 0x54), trap=True))
+        self.assertEqual(out, "", "a real branch was given a contract")
+
+    def test_a_cbz_guard_is_refused_because_its_gate_is_not_proved(self):
+        # CBZ falls through when the register is NONZERO, which is not the gate the
+        # emitter builds (and no `cbz_not_taken` lemma exists), so it is refused.
+        cbz = 0xb4000000 | (((0x40 - 0x38) // 4) << 5) | 2
+        self.assertEqual(self._emit(self._code(cbz)), "")
+
+
 class TestCbnzNotTakenLemma(unittest.TestCase):
     """`cbnz_not_taken` (lib/ProofLibSteps8.lean): a CBNZ whose register is zero
     falls through and changes nothing else.  The overflow guard's normal path
