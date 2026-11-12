@@ -2856,10 +2856,11 @@ def _prescan_func_import_frames(gen, body: list, owner_name: str) -> None:
     # last-def-wins binding must not erase the first definition's imports —
     # every reference is resolved against the union, with the later def's
     # own binding winning where both name the same bare name.
-    _prev_frame = gen._func_import_frames.get(owner_name)
+    _prev_frame = _as_dict(gen._func_import_frames.get(owner_name))
     if _prev_frame is None:
         gen._func_import_frames[owner_name] = frame
     else:
+        _prev_frame = _as_dict(_prev_frame)
         for _fm_nm in frame:
             _prev_frame[_fm_nm] = frame[_fm_nm]
     for child in nested:
@@ -3051,7 +3052,7 @@ def _func_qualifier(gen, bare_name: str) -> str:
         _cand = _sanitize_qualifier(home[bare_name])
         _lex_homes = getattr(gen, '_lexical_func_import_homes', None)
         if _lex_homes and bare_name in _lex_homes:
-            for _lq in _lex_homes[bare_name].split('|'):
+            for _lq in _as_str(_lex_homes[bare_name]).split('|'):
                 if _sanitize_qualifier(_lq) != _cand:
                     raise RuntimeError(_ambiguous_func_import_error(bare_name))
         return _cand

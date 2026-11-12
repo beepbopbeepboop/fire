@@ -3539,7 +3539,7 @@ def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
         _outer_frame = _as_dict(_as_dict(_outer_frames).get(outer_name))
         if _outer_frame:
             for _of_nm in _outer_frame:
-                _closure_scope[_of_nm] = _outer_frame[_of_nm]
+                _closure_scope[_of_nm] = _as_str(_outer_frame[_of_nm])
     gen._collect_body_import_bindings(ci.inner_def.body, _closure_scope)
     gen.current_func_name = ci.lifted_name
     gen._captures  = dict(ci.captures)
