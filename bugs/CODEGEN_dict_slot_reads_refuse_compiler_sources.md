@@ -67,9 +67,9 @@ Check it against the fire.ci build, not only this probe.
 - FIXED: the `parameter 'real_params' of '_mark_coro_param_elem_kinds' is
   passed a container at one call site and a str or number at another` refusal
   was a false positive — every call site passes a list; only the pre-pass's
-  `int64_t` tuple-unpack default was read as "a number". `module_gen`'s
-  `_is_noncontainer_arg` now needs a scalar the pre-pass PROVED; `coro.py`
-  gets past that refusal.
+  `int64_t` default for each target of a multi-value UNPACK was read as "a
+  number". `module_gen`'s `_is_noncontainer_arg` now exempts exactly those
+  unpack targets; `coro.py` gets past that refusal.
 - STILL BLOCKED: `mojo/middle/coro.py` now stops on a different, independent
   shape: its nested recursive generator `_walk_lists` uses a dynamic
   `getattr` and is refused by the C++ coroutine companion. Filed as

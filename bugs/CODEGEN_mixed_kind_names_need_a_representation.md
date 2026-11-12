@@ -46,13 +46,16 @@ Not decided. Option 3 is a source change, not a codegen fix.
 - LANDED: the container/scalar parameter refusal no longer fires for a false
   positive. `_is_noncontainer_arg` (`module_gen.py`) treated an `int64_t`
   local as "provably not a container", but `int64_t` is also the pre-pass's
-  unknown/tuple-unpack storage default. It now requires a name the pre-pass
-  PROVED scalar (a direct numeric literal); a literal argument is still a
-  non-container observer, so `each([4, 5])` beside `each("de")` is still
-  refused. This removes `coro.py`'s
+  storage default for each target of a multi-value UNPACK
+  (`a, b, ... = call()`), where the per-element type is genuinely unknown.
+  It now exempts exactly those unpack targets (recorded as
+  `_tuple_unpack_locals` by `resolve_shared._infer_local_var_types_core`); a
+  literal argument, a call result, a parameter and every ordinary local are
+  still non-container observers, so `each([4, 5])` beside `each("de")` or
+  beside `each(n)` where `n = 3` is still refused. This removes `coro.py`'s
   `parameter 'real_params' ... passed a container at one call site and a str
   or number at another` refusal, which was false at every call site: all of
-  them pass a list.
+  them pass a list, and `real_params` is one target of a six-value unpack.
 - STILL BLOCKED: `mojo/middle/coro.py` compiles past the parameter refusal and
   now stops on an INDEPENDENT generator shape: its two-level-deep recursive
   generator `_walk_lists` (inside `_lower_callable_choices._rewrite_fn`) uses
