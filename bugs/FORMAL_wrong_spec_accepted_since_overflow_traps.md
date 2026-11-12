@@ -242,3 +242,57 @@ Nothing calls the new lemma yet, so the six failures are unchanged.
    PASS, with the right-spec CONTROL still accepted. Then delete this doc in that commit and run the ratchet.
 
 **Not verified:** whether `bv_decide` closes the guarded value identity for `triple`. That is step 3's first measurement.
+
+### Round 5 (2026-11-12): planning guide for the executed-path emitter (no fix landed)
+
+**Measured this round:** `python3 tools/memslot.py --gb 8 --label quick-reader -- python3 -m pytest -q
+test_formal_call_proof_gen.py -k TestOverflowGuardNormalPath` → 3 passed (0.49 s, peak 0.1 GB). The reader is
+sound on its fixture. Nothing else was measured, so `test_formal_dylib.py` is still PASS=22 FAIL=6 by the
+round-4 measurement.
+
+**Why this round is a planning round:** the rest of the fix is a rewrite of `_dylib_contract_proof`'s core
+(about 400 lines of Python plus new Lean), not a patch. Its design is below so the next round can start writing
+code. Do not re-derive it.
+
+**What `_dylib_contract_proof` assumes that a guarded body breaks.** Each of these is a literal in the emitter:
+
+1. `m = (func_end - entry)//4` and `pcs = [entry + i*4]`: the normal path is not contiguous (0x3ac jumps to 0x3e8).
+   Take `pcs, guards = _overflow_normal_path(words_full, entry, func_end)` instead. `words_full` is the image word
+   table, not the `words[k0:k0+m]` slice.
+2. `dylib_sr_{k0 + i}`: the per-instruction lemma index must be the word index of `pcs[i]`, i.e.
+   `(pcs[i] - base) // 4`, not `k0 + i`.
+3. `S{k}_pc` (`entry + 4k`) and `runsTo{k}` use `runs_cons_seq` only. A `B` in the path needs `runs_cons_jump`
+   (`lib/ProofLib.lean` ~4136: `hjump : st'.pc ≠ st.pc`), and the pc after it is the jump target, not `pc + 4`.
+4. The guard `CBNZ x2` at `pcs` index `j` (`guards[0][0]`): `arm64_step` answers `if … then some taken else some
+   fall`. Under the guard the emitter resolves it to the fall-through. The guard is a Lean `def`:
+   `def {ident}_guard (s : Arm64State) : Prop := arm64_reg 2 (S_j s) = 0` (not-taken ⟺ x2 = 0; `S_j` is the
+   prefix chain, so the expression is the model's own, per round 4). This is the one place a new Lean lemma is
+   needed: `guard_not_taken : {ident}_guard s → arm64_step (S_j s) code = some (fall-through state)`, proved from
+   the `cbnz` arm of `arm64_step`. **That arm has not been read yet**; reading it is the first action.
+5. The block is `Refine.GuardedBlockCert dylib_code body {ident}_guard` (`lib/Refine.lean` line 92), `body.pcs = pcs`
+   (executed order), `body.step = S_m`. `guarded_block_advance` (line 100) already gives the advance under `g st`.
+6. `pc_writes` and `_step_rhs`: the single allowed pc-moving step is the last one (`ret`). Extend it to allow a `B`
+   at an interior index as well, provided the reader already validated it is a jump into the normal tail.
+
+**Exit (the round-3 question), answered from the reader's output.** The reader returns the `RET` as the last path
+instruction, and in both fixtures the `RET` is the export's final word. So `exportEnd = func_end` is still the exit,
+and `atExit`/`noEarly` need no new fact. **Confirm once on the real image** before relying on it: print
+`func_end` and `words[func_end - 4]` for `compile_formal_dylib(['teeth.mojo'], prove=False)`. If the last word is
+not the `RET`, the second exit fact from round 3 is needed and this guide is wrong there.
+
+**Order of work for the next round (each step has a measurement before the next):**
+1. Read `arm64_step`'s `CBNZ` arm (`lib/ProofLib.lean`), and write `guard_not_taken` in `lib/Refine.lean` or
+   `lib/ProofLibSteps*.lean` (whichever already holds the `cbz` lemmas). Build it alone with `lean -o` and check it
+   has no `sorry`.
+2. Measure `bv_decide` on the value identity alone, outside the generator: `∀ n, {ident}_guard (start n) →
+   arm64_reg 0 (S_m (start n)) = n * 3`, written by hand for `triple`. If `bv_decide` cannot close it, that is the
+   blocker, and the round ends PARTIAL with that measurement in the doc. Do not start the emitter until this closes.
+3. Emitter: items 1-6 above, behind the reader's `None` (keep the refusal for anything else). Add a unit test in
+   `test_formal_call_proof_gen.py` (next to `TestOverflowGuardNormalPath`) that `_dylib_contract_proof` on the
+   guarded fixture returns a non-empty contract whose `_guard` def contains the expected `= 0`, and that the same
+   fixture with a non-trap guard target still returns `""`.
+4. `test_formal_dylib.py`: the two wrong-spec cases must now FAIL in Lean with a counterexample (the `n*5` spec is
+   refuted at n = 1, which satisfies the guard), and the right-spec CONTROL must still be accepted.
+
+**Quick tests for the next round:** `test_formal_call_proof_gen.py -k TestOverflowGuardNormalPath` (0.5 s) and the
+new emitter test; then `test_formal_dylib.py` once, as the Done-when test. Nothing else.
