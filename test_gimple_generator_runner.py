@@ -2967,9 +2967,12 @@ def main():
     var b = B(2)
     b.run()
 """, "1\n102\n")
-    # `return g()` hands the generator out of the method, which would outlive
-    # the `self` it holds, so it stays refused.
-    test_generator_refused("nested_generator_method_self_escaping_refused", """\
+    # `return g()` hands the generator out of the method: the nested
+    # generator captures `self` and escapes as a live handle. The
+    # dedicated generator-runner harness cannot yet build this case, but
+    # the compiler path (`fire.py run`) supports it.
+    _name = "nested_generator_method_self_escaping"
+    _src = """\
 struct T:
     var k: Int
     def __init__(out self, k: Int):
@@ -2984,7 +2987,24 @@ def main():
     var it = t.run()
     for v in it:
         print(v)
-""", "variable(s) self")
+"""
+    try:
+        import subprocess as _sp, tempfile as _tf, os as _os
+        _wd = _tf.mkdtemp(prefix='mojo_gen_escape_self_')
+        _p = _os.path.join(_wd, 'prog.py')
+        with open(_p, 'w') as _f:
+            _f.write(_src)
+        _r = _sp.run(['python3', 'fire.py', 'run', _p],
+                     capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+        if _r.returncode == 0 and _r.stdout == "7\n":
+            print(f"PASS  {_name}")
+            globals()['_PASS'] = globals().get('_PASS', 0) + 1
+        else:
+            print(f"FAIL  {_name}: rc={_r.returncode} out={_r.stdout!r} err={_r.stderr!r}")
+            globals()['_FAIL'] = globals().get('_FAIL', 0) + 1
+    except Exception as _e:
+        print(f"FAIL  {_name}: {_e}")
+        globals()['_FAIL'] = globals().get('_FAIL', 0) + 1
 
 
 def run_star_args_call_tests():
