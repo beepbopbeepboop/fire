@@ -23,7 +23,15 @@ import integrate as I
 import task_text as T
 
 PREFIXES = ("bug-", "fix-")
-STOP = re.compile(r"^STOP:[ \t]*(.+?)[ \t]*$", re.M)   # the stop indicator: a line `STOP: <reason>` in the bug doc
+def marker(word):
+    """A doc's control line `WORD: <value>` as a regex. The line is written by workers inside Markdown, and the
+    commonest way to write it is as a heading (`# SPLIT: ...`, 2026-11-12: a replan's perfectly good decomposition
+    was ignored for that reason, the replan ran a second time, and a person had to delete the `# `), so a leading
+    heading, quote, bullet or bold/code markup is accepted. Mid-line prose never matches: the word must start the line."""
+    return re.compile(r"^[ \t]*(?:#{1,6}[ \t]+|>[ \t]*|[-*+][ \t]+)?[*_`]*%s:[*_`]*[ \t]*(.+?)[ \t]*[*_`]*[ \t]*$" % word, re.M)
+
+
+STOP = marker("STOP")   # the stop indicator: a line `STOP: <reason>` in the bug doc
 
 
 def state_path():
@@ -429,7 +437,7 @@ def refill(target):
     return lines[-1] if lines else ""
 
 
-SPLIT = re.compile(r"^SPLIT:[ \t]*(.+?)[ \t]*$", re.M)   # a doc decomposed into parts by a replan
+SPLIT = marker("SPLIT")   # a doc decomposed into parts by a replan
 
 
 def part_exists(part):
@@ -504,6 +512,7 @@ never be worked as written. Decompose it instead:
 3. Check your work before the SPLIT line: every part you named must exist on disk under bugs/ and
    open with its title. Then add one line at the top of the ORIGINAL doc, in exactly this form:
    SPLIT: <base>-part1, <base>-part2, ...
+   Write it as a plain line of text: no leading `#`, `>`, `-` or bold (a heading is tolerated, but plain is the form).
    Commit it. The original stays at its class; its parts carry the work. A SPLIT line naming a part
    that is not on disk is ignored, and the doc is replanned again.
 4. Finish with the REPORT block and CONTROL-STATUS: DONE.

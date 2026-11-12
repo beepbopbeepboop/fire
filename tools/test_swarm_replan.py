@@ -64,6 +64,24 @@ class Split(unittest.TestCase):
         with mock.patch.object(C, "MAIN", self.tmp):
             self.assertEqual(S.split_reason("hard/Xcase"), "X-part1, X-part2")
 
+    def test_a_marker_written_as_markdown_still_counts(self):
+        # 2026-11-12: a replan wrote `# SPLIT: ...` (a heading); the parser needed column 0, so the decomposition was
+        # ignored and the replan ran a second time.
+        for i, line in enumerate(("# SPLIT: X-part1, X-part2", "## SPLIT: X-part1, X-part2", "> SPLIT: X-part1, X-part2",
+                                  "- SPLIT: X-part1, X-part2", "**SPLIT:** X-part1, X-part2", "`SPLIT: X-part1, X-part2`")):
+            self.write("hard/Xmd%d.md" % i, "%s\n\n# X\n" % line)
+            self.write("mid/X-part1.md", "# part 1\n")
+            self.write("mid/X-part2.md", "# part 2\n")
+            with mock.patch.object(C, "MAIN", self.tmp):
+                self.assertEqual(S.split_reason("hard/Xmd%d" % i), "X-part1, X-part2", line)
+
+    def test_prose_mentioning_split_is_not_a_marker(self):
+        self.write("hard/Z.md", "# Z\nWe SPLIT: this is prose in the middle of a line.\nthe doc says SPLIT: a, b here\n")
+        with mock.patch.object(C, "MAIN", self.tmp):
+            self.assertIsNone(S.split_reason("hard/Z"))
+        self.assertIsNone(S.STOP.search("we should STOP: now"))
+        self.assertEqual(S.STOP.search("## STOP: needs the owner").group(1), "needs the owner")
+
     def test_a_doc_without_the_line_has_no_split(self):
         self.write("hard/Y.md", "# Y\nno split here\n")
         with mock.patch.object(C, "MAIN", self.tmp):
