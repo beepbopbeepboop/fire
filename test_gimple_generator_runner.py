@@ -5305,6 +5305,8 @@ main()
     # a char*), and the float local printed `1.0` / `0.0` for `1` / None. A
     # Mojo name has one type, so the refusal is the honest answer in either
     # direction (the copy first, or the plain store first).
+    # A str stored into a mixed tagged name is a kind-'p' box. Both directions
+    # and the reads (print, ==, +, len, f-string) are checked against CPython.
     _mixed_str = """\
 def g():
     yield 1
@@ -5312,13 +5314,36 @@ def g():
     yield 2
 def main():
     x = "s"
+    print(x)
+    for v in g():
+        x = v
+        print(x)
+        print(x == None)
+    x = "t"
+    print(x)
+    print(x + "!")
+    print(len(x))
+    print(f"<{x}>")
+main()
+"""
+    _mixed_str_after = """\
+def g():
+    yield 1
+    yield None
+    yield 2
+def main():
+    x = 0
     for v in g():
         x = v
         print(x)
     x = "t"
     print(x)
+    print(len(x))
 main()
 """
+    # A float stored into a mixed tagged name is a box (`mojo_box_from_double`),
+    # not a refusal. Both directions are checked against CPython, the oracle
+    # measured at test time, so these cannot pin this compiler's own answer.
     _mixed_float = """\
 def g():
     yield 1
@@ -5326,11 +5351,16 @@ def g():
     yield 2
 def main():
     x = 0.5
+    print(x)
     for v in g():
         x = v
         print(x)
+        print(x == None)
     x = 2.5
     print(x)
+    print(x + 1.0)
+    print(x * 2)
+    print(x > 1.0)
 main()
 """
     _mixed_after = """\
@@ -5347,10 +5377,28 @@ def main():
     print(x)
 main()
 """
-    test_generator_refused("tagged_for_target_copy_into_str_refused", _mixed_str, "refused")
-    test_generator_refused("tagged_for_target_copy_into_float_refused", _mixed_float, "refused")
-    test_generator_refused("tagged_for_target_plain_float_store_after_copy_refused",
-                           _mixed_after, "refused")
+    test_generator_matches_cpython("tagged_for_target_copy_into_str", _mixed_str, _mixed_str)
+    # A tuple-yielding generator with a None slot: the None is a box (kind 'n') in
+    # the yielded tuple, the tuple-unpacked names are tagged words, so `== None`,
+    # `print`, and arithmetic on the int slot all agree with CPython.
+    _tuple_none = """\
+def g():
+    yield 1, 10
+    yield None, 20
+    yield 2, 30
+def main():
+    for a, b in g():
+        print(a)
+        print(a == None)
+        print(b + 1)
+main()
+"""
+    test_generator_matches_cpython("tagged_tuple_slot_none", _tuple_none, _tuple_none)
+    test_generator_matches_cpython("tagged_for_target_plain_str_store_after_copy",
+                                   _mixed_str_after, _mixed_str_after)
+    test_generator_matches_cpython("tagged_for_target_copy_into_float", _mixed_float, _mixed_float)
+    test_generator_matches_cpython("tagged_for_target_plain_float_store_after_copy",
+                                   _mixed_after, _mixed_after)
 
 def run_cpp_send_tests():
     # `it.send(v)` on a generator compiled by the C++20 backend (MOJO_CORO=cpp).
@@ -9423,6 +9471,95 @@ async def outer():
     print(acc)
 
 asyncio.run(outer())
+""")
+
+    # ── the same shapes driven from an `async def` under asyncio.run ──────
+    # The consumer here is itself a coroutine driven by asyncio.run, so the
+    # `async for` desugars to the stack-switch drive loop before the nested
+    # generator is lifted out of the lowered body. That desugar used to spell
+    # the callee `__mgco_<name>_start` — a symbol nothing defines once the
+    # lift qualifies the hoisted body `__mgco_<lowered-parent>_<name>` — so the
+    # call landed on the weak "unavailable in compiled mode" stub and the loop
+    # ran ZERO times (CPython verifies the twin below prints 11).
+    test_generator_matches_cpython("nested_async_gen_driven_by_async_for_in_async_def", """\
+import asyncio
+
+async def main():
+    async def gen():
+        yield 11
+    async for x in gen():
+        print(x)
+
+asyncio.run(main())
+""", """\
+import asyncio
+
+async def main():
+    async def gen():
+        yield 11
+    async for x in gen():
+        print(x)
+
+asyncio.run(main())
+""")
+
+    # A plain nested `async def` the consumer awaits, not an async
+    # generator: the same drive-loop desugar, the same dangling-symbol
+    # shape (`__mgco_helper_start`), the same silent zero.
+    test_generator_matches_cpython("nested_async_def_awaited_in_async_def", """\
+import asyncio
+
+async def main():
+    async def helper():
+        return 42
+    print(await helper())
+
+asyncio.run(main())
+""", """\
+import asyncio
+
+async def main():
+    async def helper():
+        return 42
+    print(await helper())
+
+asyncio.run(main())
+""")
+
+    # One level deeper: `inner` is nested in `outer`, which is nested in an
+    # `async def` under asyncio.run. The lift runs once per nesting level,
+    # so the drive loop one level down must see the far-qualified symbol
+    # (`__mgco_..._inner_start`); a one-pass lift left it dangling.
+    test_generator_matches_cpython("doubly_nested_async_gen_driven_by_async_for_in_async_def", """\
+import asyncio
+
+async def main():
+    async def outer():
+        async def inner():
+            yield 7
+            yield 8
+        total = 0
+        async for x in inner():
+            total = total + x
+        return total
+    print(await outer())
+
+asyncio.run(main())
+""", """\
+import asyncio
+
+async def main():
+    async def outer():
+        async def inner():
+            yield 7
+            yield 8
+        total = 0
+        async for x in inner():
+            total = total + x
+        return total
+    print(await outer())
+
+asyncio.run(main())
 """)
 
     # ── the wait-descriptor boundary ────────────────────────────────────

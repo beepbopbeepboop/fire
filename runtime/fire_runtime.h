@@ -695,6 +695,9 @@ MojoList *mojo_exc_args(void *obj);
 MojoList *mojo_list_new(void);
 int mojo_is_registered_list(int64_t addr);
 int mojo_boxed_is_str(int64_t v);
+int mojo_is_str_box(int64_t v);
+int64_t mojo_str_box_word(int64_t v);
+int mojo_word_is_text(int64_t v);
 /* Register a non-heap string (the codegen's `__rodata` literal pool) so
  * `mojo_boxed_is_str` can tell it from a bare int64_t. See `_reg_str` in the
  * .c for the discriminator this feeds. */
