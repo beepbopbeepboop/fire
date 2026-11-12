@@ -49,7 +49,7 @@ shape above is different: the `async for` sits inside an `async def` that is dri
 
 ## Where the history is
 
-`bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md` item 3 (the ordinary-function shape) was fixed on the
+The captured-parameter capture crash's item 3 (the ordinary-function shape) was fixed on the
 archive by `c136822d3`, whose `emit_loops.py` and `coro.py` changes are already on master. The `async def`-driven shape
 was not covered by that fix. The archive branch carries no further work for it.
 
