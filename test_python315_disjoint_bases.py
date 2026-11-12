@@ -80,6 +80,54 @@ class TestDisjointBaseInterpreter(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr + "\n" + r.stdout)
         self.assertEqual(r.stdout, "7\n1\n")
 
+    def test_dataclass_is_a_compile_time_transform_not_an_applied_decorator(self):
+        # The counterexample to the test above: `@dataclass` must be SKIPPED,
+        # not applied. CPython's dataclasses.dataclass rewrites a real Python
+        # class (it reads __qualname__ and generates __init__/__eq__/__repr__),
+        # while an interpreted class is a MojoClass — handing one over raised
+        # "'P' object has no attribute '__qualname__'" on 3.15, which killed
+        # every program whose source defines a dataclass.
+        #
+        # Its construction half (fill the declared fields, in declaration
+        # order, with their defaults) is what the interpreter's own
+        # constructor already does, so not applying it loses nothing here.
+        src = (
+            "from dataclasses import dataclass\n"
+            "\n"
+            "@dataclass\n"
+            "class P:\n"
+            "    a: int\n"
+            "    b: str = 'x'\n"
+            "\n"
+            "p = P(1)\n"
+            "print(p.a, p.b)\n"
+        )
+        r = self._run_fire(src)
+        self.assertEqual(r.returncode, 0, r.stderr + "\n" + r.stdout)
+        self.assertEqual(r.stdout, "1 x\n")
+
+    def test_dotted_dataclass_spellings(self):
+        # Both the bare dotted name and the parameterised form: the latter
+        # resolves `dataclasses.dataclass(frozen=True)` to the decorator
+        # FACTORY, so the skip has to match the CallExpr's callee and not
+        # only a bare string.
+        src = (
+            "import dataclasses\n"
+            "\n"
+            "@dataclasses.dataclass\n"
+            "class A:\n"
+            "    a: int\n"
+            "\n"
+            "@dataclasses.dataclass(frozen=True)\n"
+            "class B:\n"
+            "    b: int\n"
+            "\n"
+            "print(A(2).a, B(3).b)\n"
+        )
+        r = self._run_fire(src)
+        self.assertEqual(r.returncode, 0, r.stderr + "\n" + r.stdout)
+        self.assertEqual(r.stdout, "2 3\n")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -32,7 +32,7 @@ number that disagrees is stale, not wrong; the name is the claim.
 ## 1. The thesis
 
 `fire.py` has two machine-code backends. The gimple backend emits C, links
-`runtime/fire_runtime.c` (765 KB) plus the other runtime translation units, and
+`runtime/fire_runtime.c` (781 KB) plus the other runtime translation units, and
 hands the result to a system linker. The formal backend emits Mach-O or ELF
 itself, links **libSystem, and — since phase 2 landed — the per-architecture
 runtime dylib when and only when the image names something in it**, and carries
@@ -85,8 +85,9 @@ is a claim about a run, and this document's job is to be a claim about the tree.
 
 ### 2.2 A minority of the runtime surface is word-shaped
 
-**Re-measured 2026-10-04.** This section's figures have now moved twice and the
-move is always the same direction: the runtime has grown. `formal.model`'s
+**Re-measured 2026-11-12; the census below is the live one.** This section's
+figures have moved repeatedly and the move is always the same direction: the
+runtime has grown. `formal.model`'s
 `runtime_abi()` is the authority and it reads **every** header in `runtime/`,
 not just `fire_runtime.h`:
 
@@ -96,9 +97,9 @@ not just `fire_runtime.h`:
 | **word in, word out** | **425** | every parameter and the return value is one 64-bit word |
 | not word-shaped | **506** | a box crosses the boundary — in an argument, in the return, or both |
 
-So **425 of 931 (45.4%)** is the reachable-surface ceiling. The previous
-revision of this section published 402 of 863 (46.6%), and before that 389 of
-455 (77%) — the word *share* has been stable across recent censuses. Two headers have been added
+So **425 of 931 (45.6%)** is the reachable-surface ceiling. The previous
+revision of this section published 418 of 920 (45.4%), and before that 402 of
+863 (46.6%) and 389 of 455 (77%) — the word *share* has been stable across recent censuses. Two headers have been added
 since (`fire_coro.h`, `fire_metal.h`), `fire_runtime.h` alone grew by 115
 entry points, and `fire_coro.h` going from zero to 7 is why the header count is
 11 rather than 10.
@@ -529,7 +530,7 @@ refused, and the refusal now names the *type* mismatch rather than a prefix.
 
 So the honest statement of the surface is **323 word-shaped calls are callable
 from a formal image today**, not the "0" this document published when the phase
-was written, and not the 219 of §2.2. The two gaps between the
+was written, and not the 425 of §2.2. The two gaps between the
 425 of the row above and 323 are
 both deliberate and both named:
 
