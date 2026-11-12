@@ -1172,6 +1172,14 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
         return 'char *'
     if isinstance(e, SubscriptExpr):
         if known is not None and isinstance(e.obj, IdentExpr) and (known.get(e.obj.name) in ('MojoList *', 'MojoDict *')):
+            # A dict whose stored VALUE type the caller knows (a struct
+            # pointer, `dict_val_types[name]`) reads back as that type, not the
+            # boxed int64 word the dict stores it as. Only a dict is consulted:
+            # a list's element type is not in this registry.
+            if known.get(e.obj.name) == 'MojoDict *' and dict_val_types is not None:
+                _vt = dict_val_types.get(e.obj.name)
+                if _vt is not None:
+                    return _vt
             return 'int64_t'
         return 'char *'
     if isinstance(e, AwaitExpr):

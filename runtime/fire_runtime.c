@@ -15720,18 +15720,6 @@ int64_t mojo_len(int obj) { (void)obj; return 0; }
  * CPython says for an int), not a quiet 0. */
 int64_t mojo_len_word(int64_t v)
 {
-    /* A boxed word: only the kinds with a length have one. A str box ('p')
-     * holds its pointer; a bytes box ('s') its MojoBytes. Anything else (a
-     * float, an int, None) has no len() in Python, so raise rather than read
-     * the box header as a list (which is what `mojo_list_len` below would
-     * do -- it has no way to tell a box from a list pointer). */
-    if (mojo_is_boxed(v)) {
-        MojoBox *bx = (MojoBox *)(intptr_t)v;
-        if (mojo_is_str_box(v)) return (int64_t)strlen((char *)(intptr_t)mojo_str_box_word(v));
-        if (bx->kind == 's') return mojo_bytes_len((MojoBytes *)(intptr_t)bx->bits);
-        mojo_raise_type_error((char *)"object has no len()");
-        return 0;
-    }
     if (mojo_is_registered_list(v)) return mojo_list_len((MojoList *)(intptr_t)v);
     if (mojo_is_registered_dict(v)) return mojo_dict_len((MojoDict *)(intptr_t)v);
     if (mojo_is_registered_set(v)) return mojo_set_len((MojoSet *)(intptr_t)v);

@@ -1,7 +1,5 @@
 # CODEGEN_tagged_generator_mixed_type_step4
 
-SPLIT: CODEGEN_tagged_generator_mixed_type_step4-part1, CODEGEN_tagged_generator_mixed_type_step4-part2
-
 ## Parent plan
 docs/tagged_generator_mixed_type-plan.md
 

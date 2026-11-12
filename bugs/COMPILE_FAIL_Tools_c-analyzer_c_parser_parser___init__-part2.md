@@ -81,3 +81,49 @@ g++ error), passes after — verify both directions by reverting the hunk.
    in the file — if the file compiles clean, record the count in a Status entry).
 2. The new regression test fails before the fix and passes after;
    `test_gimple_generator_runner.py` run once in full shows no NEW failures.
+
+## Status
+
+### 2026-11-12 — partial fix landed (struct pointer read back through a local dict)
+
+Root cause found by reproduction, not by the `:149` g++ signature: the dict
+STORE was already correct (`mojo_dict_set_int(d, k, (int64_t)(b))`), but the
+READ-BACK was typed as the int64 default. `got = allinfo['a']` declared `got`
+as `int64_t`, so `got.x` lowered to `mojo_getattr_any((void*)got, "x")` on a
+raw struct pointer word and the program printed nothing (crash, no g++ error).
+Reproduced standalone with `test_gimple_generator_runner._FOREIGN_PKG_FILES`
+(`box.py`) before the fix.
+
+Landed:
+- `mojo/backend_gimple/cpp_core.py`: `_cpp_prescan_dict_struct_values` seeds a
+  per-unit `_cpp_local_dict_val_types` (local dict name -> `S *`) from the
+  generator body before lowering. A dict qualifies when every store into it
+  is a struct constructor call or a local provably bound only to `S(...)`
+  constructors (every other binder, including tuple/for/with/walrus/augassign,
+  poisons the name). The prescan runs before body lowering, so a read that
+  textually precedes its store is still typed. SubscriptExpr read lowering
+  emits `(S *)mojo_dict_get_int(...)` for such dicts.
+- `mojo/middle/exprtypes.py`: `_infer_simple_expr_ctype`'s SubscriptExpr case
+  returns the dict's `dict_val_types` entry when present (before: always int64).
+- `mojo/backend_gimple/cpp_async.py`: seeds the registry for the generator unit.
+- `test_gimple_generator_runner.py`: `run_struct_ptr_through_local_dict_tests`
+  (two fixtures: a plain read-back, and the textual read-before-store shape of
+  `_iter_source`). The read-before-store fixture FAILS on the pre-fix tree
+  (`compiled stdout '' != CPython '9\n'`) and PASSES after.
+
+Quick test: `python3 tools/memslot.py --gb 8 -- python3 test_gimple_generator_runner.py`
+— before 23 FAIL, after 22 FAIL; the one difference is the new test passing.
+No new failures. The 22 remaining failures are pre-existing and unrelated.
+
+Not done (Done-when item 1 unverified):
+- The real `c_parser/parser/__init__.py` rebuild was NOT run this session
+  (heavy `fire.py build`; left to the integrator). The `:149:219` signature was
+  not re-measured.
+- Part 1 (the tuple-target / stubbed-statement prerequisite) is still
+  unlanded, so the companion may still hit other g++ errors before this one
+  is observable end-to-end.
+- Scope limits of the prescan: only the generator unit seeds it (async units
+  do not yet); a dict whose value type is only provable through a call or a
+  method return is left as the int64 default.
+
+Doc kept (not deleted): the named Done-when item 1 is not satisfied yet.

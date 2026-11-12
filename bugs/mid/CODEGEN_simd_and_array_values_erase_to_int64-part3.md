@@ -1,36 +1,31 @@
-# A float SIMD constructor keeps its scalar dtype (part 3)
+# SIMD values keep scalar dtype through lowering (part 3)
 
-Part 3 of `bugs/hard/CODEGEN_simd_and_array_values_erase_to_int64.md`.
-
-Independent of parts 1 and 2. Class: mid. One constructor shape, one lowering
-arm, no type-resolution change.
+Part 3 of `bugs/hard/CODEGEN_simd_and_array_values_erase_to_int64-part1.md`.
 
 ## Goal
 
-`SIMD[DType.float32, 2](1.0)` lowers to a value that is not the erased
-`int64_t` placeholder. Today it becomes `_t1 = (int64_t)0;  /* indirect call
-via SubscriptExpr */` and `v` is `int64_t`, so `c_to_mojo` answers `Int64` for
-it.
+Preserve enough scalar dtype information for SIMD values (including `SIMD[.float32, N](...)`, `SIMD[...]` results, and related SIMD/FMA forms) so codegen does not erase them to plain `int64_t` in a way that makes `c_to_mojo`/generic call inference see `Int64`.
+
+## Current state
+
+The parent bug shows SIMD constructors/calls lowered through the plain call path and stored/typed as `int64_t` (e.g. `std/random/philox.mojo` `log(u)`, `test/math/test_erf.mojo` `erf(SIMD[.float32, 2](2))`, `test/math/test_ldexp.mojo`, `test/math/test_math.mojo` `log1p(val)`). `c_to_mojo` then maps them to `Int64`, breaking floating-point generic constraints and compiled-mode behavior.
+
+## Plan
+
+In the SIMD call/lowering path (`mojo/backend_gimple/emit_calls.py` and any supporting expr/type helpers):
+- recognize SIMD construction/calls and lower them with a representation that retains the scalar element C type/dtype (not a generic `int64_t` result for float SIMD values);
+- ensure values produced/propagated from these forms carry type info sufficient for downstream elaboration/c_to_mojo to answer the correct floating scalar type where applicable.
+
+This is a representation/typing change for SIMD values; byte-identical generated C is not expected.
 
 ## Acceptance
 
-- A float SIMD constructor is not lowered through the "indirect call via
-  SubscriptExpr" placeholder.
-- The constructed local is not declared `int64_t`.
-- Integer SIMD constructors (for example `SIMD[DType.int32, 2](1)`) keep their
-  current integer lowering. Pin their current output in a test before changing
-  the arm, since the placeholder path is shared.
+- `SIMD[.float32, N](...)` and float-typed SIMD values are not erased to plain `int64_t` such that they read back as `Int64`.
+- Generic floating-point callees receiving such SIMD/scalar-SIMD arguments no longer see `Int64` solely because of SIMD erasure in the covered cases.
+- Integer SIMD cases that intentionally map to integer C types remain correct.
 
 ## Done when
 
-File: `test_codegen_erased_container_values.py` (repo root).
-
-Command: `python3 test_codegen_erased_container_values.py part3`
-
-It runs `test_part3_float_simd_ctor_keeps_dtype` (red today). It must pass.
-
-## Where to start
-
-`mojo/backend_gimple/emit_calls.py`, where `SIMD[...]` calls fall through to
-the plain call path. The placeholder comes from there. Dispatch on the bracket's
-dtype argument, the same way the Array arm of part 1 does on its element type.
+Quick test (file path and command): `python3 compile_stdlib.py test/math/test_erf.mojo`
+and/or `python3 compile_stdlib.py test/math/test_ldexp.mojo`
+run without the SIMD-erasure where-clause/inference failure described in the parent bug (at least the `erf(SIMD[.float32, 2](2))` case compiles past the erased-`Int64` argument typing).

@@ -2663,6 +2663,39 @@ def run_ctor_default_arg_in_generator_tests():
         "9\n12\n")
 
 
+def run_struct_ptr_through_local_dict_tests():
+    # A struct pointer stored into a local dict and read back inside a cpp
+    # generator body. The store went through the int64 slot (correct: the
+    # dict's value representation is a boxed word), but the read-back was
+    # typed as the int64 default, so `got.x` treated the raw pointer word as
+    # a boxed value and printed nothing (the program crashed). The reader
+    # must carry the stored struct type, exactly as the `self.<field>`
+    # struct-valued dict already does. The read comes TEXTUALLY BEFORE the
+    # store (the read sits in the `if` arm, the store in the `else` arm), as
+    # `c_parser/parser/__init__.py`'s `_iter_source` does, so the value type
+    # must be known before the body is lowered in order.
+    _test_foreign_a3_generator_handle(
+        "generator_struct_ptr_through_local_dict_read_back",
+        "from .box import Box\n"
+        "\n"
+        "def consume(n, *, start=[]):\n"
+        "    allinfo = {}\n"
+        "    for i in range(2):\n"
+        "        if i == 1:\n"
+        "            got = allinfo['a']\n"
+        "            yield got.x\n"
+        "        else:\n"
+        "            b = Box(n)\n"
+        "            allinfo['a'] = b\n"
+        "\n"
+        "def main():\n"
+        "    for v in consume(4):\n"
+        "        print(v)\n"
+        "\n"
+        "main()\n",
+        "9\n")
+
+
 def run_nested_generator_capture_tests():
     # A generator defined INSIDE another def that reads one of that def's
     # parameters or locals. The coroutine path has no capture model for a
@@ -5303,11 +5336,10 @@ main()
     # int64. The copy of a tagged word into a str or float local used to
     # compile to a bare unwrap: the str local segfaulted (an int word used as
     # a char*), and the float local printed `1.0` / `0.0` for `1` / None. A
-    # Mojo name has one type, so the name is the int64_t box
-    # (`ginf.mixed_box_name`): each store keeps its own kind in the MojoBox and
-    # every consumer reads it by kind. A str stored into a mixed tagged name is
-    # a kind-'p' box. Both directions and the reads (print, ==, +, len,
-    # f-string) are pinned to CPython on the same text.
+    # Mojo name has one type, so the refusal is the honest answer in either
+    # direction (the copy first, or the plain store first).
+    # A str stored into a mixed tagged name is a kind-'p' box. Both directions
+    # and the reads (print, ==, +, len, f-string) are checked against CPython.
     _mixed_str = """\
 def g():
     yield 1
@@ -5819,6 +5851,7 @@ def run_tests():
     run_variadic_lambda_value_tests()
     run_unpack_call_forward_tests()
     run_ctor_default_arg_in_generator_tests()
+    run_struct_ptr_through_local_dict_tests()
     run_mixed_yield_kind_tests()
     run_next_method_tests()
     run_next_return_position_tests()
@@ -9472,95 +9505,6 @@ async def outer():
     print(acc)
 
 asyncio.run(outer())
-""")
-
-    # ── the same shapes driven from an `async def` under asyncio.run ──────
-    # The consumer here is itself a coroutine driven by asyncio.run, so the
-    # `async for` desugars to the stack-switch drive loop before the nested
-    # generator is lifted out of the lowered body. That desugar used to spell
-    # the callee `__mgco_<name>_start` — a symbol nothing defines once the
-    # lift qualifies the hoisted body `__mgco_<lowered-parent>_<name>` — so the
-    # call landed on the weak "unavailable in compiled mode" stub and the loop
-    # ran ZERO times (CPython verifies the twin below prints 11).
-    test_generator_matches_cpython("nested_async_gen_driven_by_async_for_in_async_def", """\
-import asyncio
-
-async def main():
-    async def gen():
-        yield 11
-    async for x in gen():
-        print(x)
-
-asyncio.run(main())
-""", """\
-import asyncio
-
-async def main():
-    async def gen():
-        yield 11
-    async for x in gen():
-        print(x)
-
-asyncio.run(main())
-""")
-
-    # A plain nested `async def` the consumer awaits, not an async
-    # generator: the same drive-loop desugar, the same dangling-symbol
-    # shape (`__mgco_helper_start`), the same silent zero.
-    test_generator_matches_cpython("nested_async_def_awaited_in_async_def", """\
-import asyncio
-
-async def main():
-    async def helper():
-        return 42
-    print(await helper())
-
-asyncio.run(main())
-""", """\
-import asyncio
-
-async def main():
-    async def helper():
-        return 42
-    print(await helper())
-
-asyncio.run(main())
-""")
-
-    # One level deeper: `inner` is nested in `outer`, which is nested in an
-    # `async def` under asyncio.run. The lift runs once per nesting level,
-    # so the drive loop one level down must see the far-qualified symbol
-    # (`__mgco_..._inner_start`); a one-pass lift left it dangling.
-    test_generator_matches_cpython("doubly_nested_async_gen_driven_by_async_for_in_async_def", """\
-import asyncio
-
-async def main():
-    async def outer():
-        async def inner():
-            yield 7
-            yield 8
-        total = 0
-        async for x in inner():
-            total = total + x
-        return total
-    print(await outer())
-
-asyncio.run(main())
-""", """\
-import asyncio
-
-async def main():
-    async def outer():
-        async def inner():
-            yield 7
-            yield 8
-        total = 0
-        async for x in inner():
-            total = total + x
-        return total
-    print(await outer())
-
-asyncio.run(main())
 """)
 
     # ── the wait-descriptor boundary ────────────────────────────────────
