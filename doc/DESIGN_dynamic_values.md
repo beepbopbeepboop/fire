@@ -14,8 +14,9 @@ silently:
 - `d = {"n": None, "z": 0, "b": False, "f": 1.5}`, then `print(d[k])` for each key: prints `0.0 0.0 0.0 1.5`.
   CPython prints `None 0 False 1.5`.
 
-The same gap appears for a name or parameter that takes two kinds (`val = d["k"]` as a float, then `val = "text"`),
-which is refused today (see `CODEGEN_mixed_kind_names_need_a_representation.md`).
+The name/parameter half of that gap now has an interim representation: an `int64_t` box carries a name that holds
+both a float and a str, and a parameter that sees a container and a number, pinned against CPython by
+`test_mixed_kind_name_representation.py`. That box is the ad-hoc mechanism this design replaces, not the design.
 
 ## Root cause (measured)
 
@@ -45,8 +46,8 @@ which is refused today (see `CODEGEN_mixed_kind_names_need_a_representation.md`)
   or floats.
 - The dict records a value kind per slot already (`mojo_dict_set_*` writes it). A read from a mixed dict returns a
   `MojoValue` built from that slot. Arithmetic, comparison, `str`, `repr`, and `print` dispatch on the tag.
-- Names and parameters that see more than one kind use `MojoValue` as their type. This subsumes the refusal in
-  `CODEGEN_mixed_kind_names_need_a_representation.md`.
+- Names and parameters that see more than one kind use `MojoValue` as their type. This subsumes the interim `int64_t`
+  box for a float-and-str name / container-and-number parameter (`test_mixed_kind_name_representation.py`).
 - The address-tagged box is retired for the dynamic path once `MojoValue` covers its uses.
 
 Why this option: it keeps the performance of typed code where types are known, it is correct for mixed kinds without
@@ -63,8 +64,8 @@ and comparisons), with C tests. Then reads from mixed dicts return `MojoValue`, 
 dispatch on the tag. Done when the CPython-comparison test (`test_subscript_read_of_each_value_kind`) and the
 `mixed_str_first` probe match CPython.
 
-Phase 2, names and parameters. A name or parameter with more than one kind uses `MojoValue`. Retires the mixed-kind
-refusal. Done when `CODEGEN_mixed_kind_names_need_a_representation.md`'s done-when holds.
+Phase 2, names and parameters. A name or parameter with more than one kind uses `MojoValue`. Retires the interim
+`int64_t` box while `test_mixed_kind_name_representation.py` stays CPython-identical.
 
 Phase 3, retire the address-tagged box on the dynamic path, once no consumer uses it.
 

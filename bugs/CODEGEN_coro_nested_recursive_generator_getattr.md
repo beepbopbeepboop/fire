@@ -1,8 +1,9 @@
 # CODEGEN: coro.py's nested recursive generator with a dynamic getattr cannot compile
 
-Found 2026-11-11 while landing the mixed-kind-name representation
-(`bugs/CODEGEN_mixed_kind_names_need_a_representation.md`). It is the NEXT
-blocker on `mojo/middle/coro.py` compiling, after the mixed container/scalar
+Found 2026-11-11 while landing the mixed-kind-name box representation (the
+float-and-str-in-one-name fix; the bug doc that recorded it has been deleted
+now that its named cases pass). It is the NEXT blocker on
+`mojo/middle/coro.py` compiling, after the mixed container/scalar
 parameter refusal was fixed.
 
 ## What I ran
@@ -91,7 +92,32 @@ compile_module_to_c(open('mojo/middle/coro.py').read(), '.tmp/coro.py', 'coro', 
 returns C text, and the fire.ci self-host build is green. Delete this doc in
 the commit that closes it.
 
-## Status
+## Status (2026-11-12)
 
-Open. Not started; filed from the mixed-kind-name round so the next session
-does not have to re-derive it.
+- `mojo/middle/coro.py` now COMPILES to C. It no longer contains the shape
+  this doc is about: `_lower_callable_choices`'s `_walk_lists` is an eager
+  list-returning recursive function instead of a recursive generator, so its
+  dynamic `getattr` goes through the ordinary codegen. The module's own
+  compile is pinned by `test_selfhost.py::coro_module_compiles_to_c` (fails
+  before that rewrite with this doc's refusal, passes after). The fire.ci
+  self-host build itself was NOT run (the integrator runs the gate).
+- STILL OPEN for the SHAPE, not for coro.py. The minimal reproducer in this
+  doc still refuses. Option 1 (lift the capture-free deep generator) was
+  implemented and measured far enough to find the two NEXT obstacles, so a
+  later session does not have to rediscover them:
+  1. Once lifted to module level, `yield from self(...)` is read by
+     `_generator_value_kind` as an unresolved delegation: `_resolve_gen_kind`
+     breaks the self-cycle by returning None, and `_generator_value_kind`
+     counts that None as a NON-TUPLE yield beside the direct tuple yield, so
+     the generator is refused with "mixed tuple / non-tuple yields (v0)".
+     The honest fixpoint is to treat `yield from <this same generator>` as
+     contributing no new kind (the direct yields answer it).
+  2. After that, the tuple-slot static typing refuses: `_walk_lists`'s
+     `yield body, i` has slot `body` whose call sites (`fd.body`, and the
+     recursive `sub` from `getattr`) the static scan cannot type, so
+     `_ambiguous_yielded_params` returns `{'body'}` and the A3 slot has no
+     fixed C type. A codegen fix needs a boxed/tagged tuple slot (the
+     `'l'` box kind exists in `mojo_repr_boxed`) or a static type the scan
+     can actually prove. Rewriting the call sites to avoid an untyped
+     parameter would defeat the point: user code of this shape stays
+     untypeable by construction.

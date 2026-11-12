@@ -15,10 +15,11 @@ Every case is pinned against CPython on the SAME text (`print` output must be
 byte-identical), so a written-down expected string cannot drift.
 
 A container and a number passed to one parameter (the other shape the bug
-doc names) is pinned too: the parameter keeps the int64_t box and `print`
+doc named) is pinned too: the parameter keeps the int64_t box and `print`
 dispatches on the value's runtime kind.
 
-Quick test for bugs/CODEGEN_mixed_kind_names_need_a_representation.md.
+This is the regression test for the mixed-kind-name box; it stays here after
+the bug doc was retired so the representation cannot regress.
 """
 import subprocess
 import sys

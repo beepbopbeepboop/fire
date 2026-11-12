@@ -5922,20 +5922,30 @@ def _lower_callable_choices(stmts: list) -> None:
             return
 
         def _walk_lists(body):
+            # An eager list of `(statement-list, index)` pairs, NOT a
+            # recursive generator. The caller materializes the walk with
+            # `list(...)` before it mutates anything, so the order and the
+            # positions are identical either way; as a plain function its
+            # dynamic `getattr` is lowered by the ordinary codegen, while a
+            # generator of this shape is refused by the C++ coroutine
+            # companion (and `compile_to_gimple`, which builds the
+            # self-host binary, cannot link that companion at all).
+            out = []
             for i, st in enumerate(list(body)):
-                yield body, i
+                out.append((body, i))
                 for fld in ('body', 'then_body', 'else_body', 'finally_body'):
                     sub = getattr(st, fld, None)
                     if isinstance(sub, list):
-                        yield from _walk_lists(sub)
+                        out.extend(_walk_lists(sub))
                 for el in (getattr(st, 'elifs', None) or []):
                     if isinstance(el, (list, tuple)) and len(el) > 1 and isinstance(el[1], list):
-                        yield from _walk_lists(el[1])
+                        out.extend(_walk_lists(el[1]))
                 for h in (getattr(st, 'handlers', None) or []):
                     if isinstance(getattr(h, 'body', None), list):
-                        yield from _walk_lists(h.body)
+                        out.extend(_walk_lists(h.body))
+            return out
 
-        for body, i in list(_walk_lists(fd.body)):
+        for body, i in _walk_lists(fd.body):
             st = body[i]
             if (isinstance(st, N.AssignStmt) and isinstance(st.target, N.IdentExpr)
                     and st.target.name in good and isinstance(st.value, N.IdentExpr)):
