@@ -4837,22 +4837,14 @@ def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set, local_map: dict
                 call_expr, cpre = _rewrite_asyncio_run(_arg, cvar, task_vars, local_map,
                                                        handle_vars)
                 pre.extend(cpre)
-                # An AssignStmt, not a VarDecl: at module scope the
-                # module-global pre-scan records a plain assignment's name
-                # as a `_root_globals` field and types it from the value,
-                # while a VarDecl is declared as a `_toplevel` local. The
-                # store then went to the field and the read to the local,
-                # so `asyncio.run(main())` read an uninitialised pointer
-                # ("a coroutine was expected"). Inside a function the
-                # assignment binds a local exactly as before.
-                pre.append(N.AssignStmt(target=_c_ident(h), value=call_expr))
+                pre.append(N.VarDecl(name=h, type_ann=None, value=call_expr))
                 pre.append(N.ExprStmt(value=_call('__mojo_async_run_gen', [_c_ident(h)])))
             elif isinstance(_arg, N.IdentExpr) and _arg.name in (handle_vars or ()):
                 # The name IS the handle: no `_start` call to emit, so
                 # introduce the temp the way the `.wait()` branch below does
                 # (reuse the already-live var rather than a redundant copy's
                 # worth of a second binding).
-                pre.append(N.AssignStmt(target=_c_ident(h), value=_c_ident(_arg.name)))
+                pre.append(N.VarDecl(name=h, type_ann=None, value=_c_ident(_arg.name)))
                 pre.append(N.ExprStmt(value=_call('__mojo_async_run_gen', [_c_ident(h)])))
             else:
                 raise RuntimeError(
@@ -4867,13 +4859,13 @@ def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set, local_map: dict
             # var create_task's passthrough left it bound to); reuse it
             # directly instead of introducing a redundant copy.
             task_expr = _unwrap_transfer(node.func.obj)
-            pre.append(N.AssignStmt(target=_c_ident(h), value=task_expr))
+            pre.append(N.VarDecl(name=h, type_ann=None, value=task_expr))
             pre.append(N.ExprStmt(value=_call('__mojo_async_run_gen', [_c_ident(h)])))
         _driven = node.args[0] if _is_asyncio_run_call(node) else node.func.obj
-        pre.append(N.AssignStmt(target=_c_ident(rv),
-                                value=_async_result_read(
-                                    _result_kind_of(_driven),
-                                    _call('__mojo_gen_retval', [_c_ident(h)]))))
+        pre.append(N.VarDecl(name=rv, type_ann=None,
+                             value=_async_result_read(
+                                 _result_kind_of(_driven),
+                                 _call('__mojo_gen_retval', [_c_ident(h)]))))
         return _c_ident(rv), pre
     return node, pre
 
