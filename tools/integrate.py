@@ -83,7 +83,7 @@ def failed_job_names(log):
     names = []
     # The section is its INDENTED lines: it ends at the first line that starts in column 0 (the `time: wall ...`
     # summary, `suite: ...`, another heading). A lookahead on capitalised headings let `time: wall 0:36 | ... (0
-    # replayed ...)` through, and `time` was filed as a failing job (bugs/gate-time.md).
+    # replayed ...)` through, and `time` was filed as a failing job (the red-gate crash, fixed in 4340a0f17).
     for line in txt[m.end():].splitlines():
         if line.strip() and not line[0].isspace():
             break
