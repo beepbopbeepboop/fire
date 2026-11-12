@@ -17281,6 +17281,18 @@ def gen_module_impl(self, stmts: list):
                             # before the class statement runs cannot dereference
                             # NULL; the class statement installs the real one.
                             class_attr_decls.append(f"{_cell_t} * {mangled};")
+                            # The unwind record's slot is the ADDRESS of that
+                            # global, and a `__GIMPLE`-tagged method body (where
+                            # a method's `class` statement lives) rejects
+                            # `&<variable>`. This untagged accessor takes the
+                            # address where plain C allows it; the tagged body
+                            # calls it instead (see emit_methods._
+                            # cattr_restore_begin). Emitted with the declaration
+                            # so the two cannot drift.
+                            class_attr_decls.append(
+                                f"static void {gimple_ctypes.cattr_unwind_push(mangled)}"
+                                f" (void *saved)"
+                                f" {{ mojo_cleanup_push_cattr ((void **) &{mangled}, saved); }}")
                             class_attr_inits.append(
                                 f"  {mangled} = ({_cell_t} *) calloc (1, sizeof ({_cell_t}));")
                             break

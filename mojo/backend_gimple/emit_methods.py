@@ -348,7 +348,15 @@ def _cattr_restore_begin(gen, body) -> None:
             # without reaching a `return` writes `_saved` back during
             # `mojo_raise`'s unwind (see fire_runtime.c's MOJO_CLEANUP_CATTR).
             # Popped by `_cattr_leave` on every normal exit.
-            gen._emit(f"  mojo_cleanup_push_cattr ((void **) &{_gname}, (void *) {_saved});")
+            #
+            # Through the untagged accessor, NOT `mojo_cleanup_push_cattr
+            # ((void **) &{_gname}, ...)`: the slot is the global's ADDRESS,
+            # and a struct METHOD's body is `__GIMPLE`-tagged, where
+            # `-fgimple` rejects `&<variable>` (a function-scoped class
+            # declared in a method failed to compile with "expected expression
+            # before '(' token"). module_gen emits the accessor beside the
+            # global's declaration, so it exists exactly when the global does.
+            gen._emit(f"  {gimple_ctypes.cattr_unwind_push(_gname)} ({_saved});")
 
 
 def _cattr_snapshot(gen) -> list:
