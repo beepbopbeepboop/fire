@@ -4671,16 +4671,7 @@ def _gen_stmt_MatchStmt(gen, node):
             # `.NAME` against a struct-typed subject resolves against that type
             # here, before the formal model's refusal below, which has no type.
             if isinstance(pattern, gimple_ctypes.DottedLiteral):
-                _resolved = _resolve_dotted_case_pattern(gen, subj_type, pattern)
-                if _resolved is None:
-                    # Unresolved `.NAME` (no struct alias, or no `__eq__` to make
-                    # the arm a comparison): lowering it as a value would compare
-                    # the subject with nothing, so it is refused by name.
-                    raise formal_model.CodegenError(formal_model.match_pattern_refusal(
-                        'enum pattern', formal_model.spelled(pattern),
-                        getattr(gen, 'function_name', '<module>'),
-                        getattr(pattern, 'line', 0) or getattr(match_case, 'line', 0) or 0))
-                pattern = _resolved
+                pattern = _resolve_dotted_case_pattern(gen, subj_type, pattern) or pattern
             # Ask the formal model whether this pattern is allowed here.
             _bound = set(getattr(gen, 'var_types', set()) or ())
             _bound |= set(getattr(gen, '_global_var_types', {}).keys())

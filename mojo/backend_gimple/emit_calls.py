@@ -9614,6 +9614,19 @@ def _pack_kwargs_slot_call(gen, fname, fname_raw, arg_pairs, kwarg_dict,
 
 def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Final dispatch for user-defined and C stdlib functions."""
+    if fname_raw == 'copysign' and len(getattr(node, 'args', []) or []) == 2:
+        try:
+            _x_t, _x_v = gen.lower_expr(node.args[0])
+            _y_t, _y_v = gen.lower_expr(node.args[1])
+            _x_d = gen._coerce_to_type(_x_t, 'double', _x_v)
+            _y_d = gen._coerce_to_type(_y_t, 'double', _y_v)
+            _res = gen._new_temp('double')
+            gen._emit(f'  {_res} = copysign ({_x_d}, {_y_d});')
+            _res_i64 = gen._new_temp('int64_t')
+            gen._emit(f'  {_res_i64} = (int64_t){_res};')
+            return 'int64_t', _res_i64
+        except Exception:
+            pass
     # `_locally_binds_name` gate: BUILTIN_VALUE_MAP's entries (open,
     # filter, enumerate, str, len, sorted, ...) are all ordinary
     # identifiers a module can legally shadow with its own top-level

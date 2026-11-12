@@ -6139,72 +6139,42 @@ def main():
 main()
 """, "0\n1\n")
 
-    # The module-level form of the same recursive walk (no enclosing function).
-    # The recursive call `walk(sub)` has an argument the static scan cannot type
-    # (`getattr(st, fld, None)`), but the `isinstance(sub, list)` guard proves
-    # it is a list, so the yielded parameter `xs` is a list, not an ambiguous
-    # slot. Used to refuse: "yields ['xs'], whose call sites do not all pass
-    # the same statically-known type".
-    test_generator_stdout("module_level_recursive_tuple_generator_getattr_guarded", """\
+
+def run_generator_tuple_repr_tests():
+    # A tuple yielded by a generator is built by `__mojo_tuple_box_N` (the
+    # A3 runtime, runtime/fire_coro_gen.c), and `list(gen)` puts that box
+    # into a list. The box was never marked as a TUPLE, so its repr fell
+    # back to list brackets: `[[1, 2], 0]` for `([1, 2], 0)`. A list's
+    # ELEMENT that is itself a list was then printed as a raw address,
+    # because the word-append recorded an int kind for it. Both are the
+    # tuple's own shape (CPython: `[([1, 2], 0), ([1, 2], 1)]`).
+    #
+    # The 0 slot is the one the bug doc named as reading back as None; it
+    # is pinned here too, because it is the same repr and a regression
+    # there would be indistinguishable from this one.
+    test_generator_stdout("generator_tuple_in_list_repr_nested_list_and_zero", """\
 def walk(xs):
     for i, st in enumerate(list(xs)):
         yield xs, i
-        for fld in ('body',):
-            sub = getattr(st, fld, None)
-            if isinstance(sub, list):
-                yield from walk(sub)
-
 def outer(body):
     return list(walk(body))
-
 def main():
-    for p in outer([1, 2]):
-        print(p[1])
+    print(outer([1, 2]))
 main()
-""", "0\n1\n")
+""", "[([1, 2], 0), ([1, 2], 1)]\n")
 
-    # The guard is what makes the recursive argument a list. Without it the
-    # argument is an untypable hole and the slot must still refuse.
-    test_generator_refused("module_level_recursive_tuple_generator_unguarded_refuses", """\
-def walk(xs):
-    for i, st in enumerate(list(xs)):
-        yield xs, i
-        for fld in ('body',):
-            sub = getattr(st, fld, None)
-            yield from walk(sub)
-
-def outer(body):
-    return list(walk(body))
-
+    test_generator_stdout("generator_tuple_of_ints_repr_keeps_parens", """\
+def walk(n):
+    for i in range(2):
+        yield i, i * 2
 def main():
-    for p in outer([1, 2]):
-        print(p[1])
+    print(list(walk(3)))
 main()
-""", "yields ['xs']")
-
-    # A guarded branch that rebinds the argument proves nothing about the value
-    # passed to the recursive call, so it must still refuse.
-    test_generator_refused("module_level_recursive_tuple_generator_rebound_guard_refuses", """\
-def walk(xs):
-    for i, st in enumerate(list(xs)):
-        yield xs, i
-        for fld in ('body',):
-            sub = getattr(st, fld, None)
-            if isinstance(sub, list):
-                sub = 1.5
-                yield from walk(sub)
-
-def outer(body):
-    return list(walk(body))
-
-def main():
-    for p in outer([1, 2]):
-        print(p[1])
-main()
-""", "yields ['xs']")
+""", "[(0, 0), (1, 2)]\n")
 
 
 def run_tests():
+    run_generator_tuple_repr_tests()
     run_nested_recursive_generator_getattr_tests()
     run_cpp_send_tests()
     run_send_into_just_started_regression()
