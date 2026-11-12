@@ -40,7 +40,7 @@ def test_inline_floor_division_is_not_stripped():
 
 
 def test_positional_only_separator_in_parameter_list():
-    src = "def f[T: Boolable, //](mut self):\n    pass\n"
+    src = "def f[T: Boolable, //](out self):\n    pass\n"
     mod = _parse(src)
     assert len(mod) == 1
     assert mod[0].name == "f"
