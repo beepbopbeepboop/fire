@@ -122,7 +122,7 @@ DIFF_CASES = [
     ("bracketed_method_call_does_not_invent_a_field",
      "struct Cell:\n"
      "    var _value: Int\n"
-     "    def bump[T: Int](out self, k: Int):\n"
+     "    def bump[T: Int](mut self, k: Int):\n"
      "        self._value = self._value + T + k\n"
      "\n"
      "def main() -> Int:\n"
