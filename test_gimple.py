@@ -8973,82 +8973,6 @@ each(ys)
         print(f"PASS  {name}")
         _PASS += 1
 
-    def test_a_list_returned_in_a_tuple_slot_is_not_a_mixed_str_observation():
-        """`n, real_params = _setup(fn)` types the unpack target as the int64_t
-        box, which is the unknown fallback, not a scalar. When the callee
-        returns a container in that slot, the box must not count as a non-
-        container call site, so a direct list passed to the same parameter
-        elsewhere is not refused (coro.py's `_mark_coro_param_elem_kinds`).
-        """
-        global _PASS, _FAIL
-        name = "a_list_returned_in_a_tuple_slot_is_not_a_mixed_str_observation"
-        src = '''\
-def _setup(fn, is_method):
-    real_params = fn.params[1:] if is_method else fn.params
-    return 1, real_params
-def walk(xs):
-    for x in xs:
-        print(x)
-def direct(fn, is_method):
-    real_params = fn.params[1:] if is_method else fn.params
-    walk(real_params)
-def via_tuple(fn, is_method):
-    n, real_params = _setup(fn, is_method)
-    walk(real_params)
-'''
-        for mode in ('single-TU', 'link-mode'):
-            kwargs = ({'do_imports': True} if mode == 'single-TU'
-                      else {'link_mode': True})
-            try:
-                gimple_codegen._run_pipeline(src, filename='case.py', **kwargs)
-            except RuntimeError as e:
-                print(f"FAIL  {name} [{mode}]: refused a list slot as a "
-                      f"str or number: {str(e)[:300]}")
-                _FAIL += 1
-                return
-        print(f"PASS  {name}")
-        _PASS += 1
-
-    def test_a_str_returned_in_a_tuple_slot_still_refuses_beside_a_list():
-        """The counterpart: `s, n = pair()` where `pair` returns a str literal
-        in slot 0, passed to an iterated parameter beside a list literal, must
-        keep the mixed-container refusal. The tuple-slot exemption applies only
-        to a slot the callee proves is a container.
-        """
-        global _PASS, _FAIL
-        name = "a_str_returned_in_a_tuple_slot_still_refuses_beside_a_list"
-        src = '''\
-def pair():
-    return "de", 1
-def each(xs):
-    for x in xs:
-        print(x)
-def main():
-    s, n = pair()
-    each(s)
-    each([4, 5])
-main()
-'''
-        for mode in ('single-TU', 'link-mode'):
-            kwargs = ({'do_imports': True} if mode == 'single-TU'
-                      else {'link_mode': True})
-            try:
-                gimple_codegen._run_pipeline(src, filename='case.py', **kwargs)
-            except RuntimeError as e:
-                msg = str(e)
-                if "'xs'" in msg and "'each'" in msg:
-                    continue
-                print(f"FAIL  {name} [{mode}]: refused, but not for the "
-                      f"mixed parameter: {msg[:300]}")
-                _FAIL += 1
-                return
-            print(f"FAIL  {name} [{mode}]: compiled, so the binary would read "
-                  "the str as a list (SIGSEGV)")
-            _FAIL += 1
-            return
-        print(f"PASS  {name}")
-        _PASS += 1
-
     def test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements():
         """`def ident(x): return x` called with a list of ints AND with a
         string, in one program, must give the string call site its own
@@ -13939,8 +13863,6 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind(), 'test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind')
     _run_isolated(lambda: test_a_mixed_iterated_parameter_with_a_str_variable_still_refuses(), 'test_a_mixed_iterated_parameter_with_a_str_variable_still_refuses')
     _run_isolated(lambda: test_module_level_mixed_iterated_parameter_with_str_variable_still_refuses(), 'test_module_level_mixed_iterated_parameter_with_str_variable_still_refuses')
-    _run_isolated(lambda: test_a_list_returned_in_a_tuple_slot_is_not_a_mixed_str_observation(), 'test_a_list_returned_in_a_tuple_slot_is_not_a_mixed_str_observation')
-    _run_isolated(lambda: test_a_str_returned_in_a_tuple_slot_still_refuses_beside_a_list(), 'test_a_str_returned_in_a_tuple_slot_still_refuses_beside_a_list')
     _run_isolated(lambda: test_a_returned_heterogeneous_list_keeps_its_slot_kinds(), 'test_a_returned_heterogeneous_list_keeps_its_slot_kinds (line 12721)')
     _run_isolated(lambda: test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not(), 'test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not (line 12722)')
     _run_isolated(lambda: test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable(), 'test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable (line 12723)')

@@ -4639,13 +4639,6 @@ class Parser:
     _struct_param_names: list
     _known_traits: set
     _lazy_import_blockers: list
-    # The `*Name: Type` variadic bracket parameters of the LAST bracket list
-    # parsed (`_parse_generic_params_capture`), read once by `_parse_funcdef`
-    # to fill `FunctionDef.variadic_bracket_params`. A plain attribute
-    # assignment rather than a dataclass field with a default: it is only
-    # meaningful immediately after a bracket list, and `_parse_funcdef` reads
-    # it only inside the `if LBRACKET` branch that just set it.
-    _last_bracket_variadics: list
 
     def __init__(self, tokens: list[Token]):
         self._tok = tokens
@@ -4658,8 +4651,6 @@ class Parser:
         # INNERMOST disallowed scope (CPython's symtable checks try first,
         # then function, then class, and each nested block starts fresh).
         self._lazy_import_blockers = []
-        # Empty until a bracket list is parsed; see the class-level note.
-        self._last_bracket_variadics = []
         # `comptime NAME = <rhs>` the parser could not parse, as
         # `[(loc, text, exception_text), ...]`. A comptime right-hand side has
         # two very different fates that used to be INDISTINGUISHABLE: a

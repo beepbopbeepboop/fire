@@ -6985,10 +6985,6 @@ Order matters and is the same one `_repr_boxed_container` uses: the live
     """
     _res = gen._new_temp('int64_t')
     _it64 = gen._ensure_local('int64_t', value)
-    # The text of a kind-'p' string box (`mojo_box_from_str`, a tagged word that
-    # holds a str) is the pointer the box carries. `mojo_str_box_word` unwraps
-    # only that kind, so the string arm below measures the text itself.
-    _stxt = gen._call_expr('int64_t', 'mojo_str_box_word', [('int64_t', _it64)])
     bb_dict = gen._new_bb(); bb_not_dict = gen._new_bb()
     bb_set = gen._new_bb(); bb_not_set = gen._new_bb()
     bb_list = gen._new_bb(); bb_not_list = gen._new_bb()
@@ -7023,10 +7019,10 @@ Order matters and is the same one `_repr_boxed_container` uses: the live
     gen._emit(f'  {_res} = mojo_bytes_len ({_bp});')
     gen._emit(f'  goto {bb_after};')
     gen._emit_label(bb_not_byt)
-    ibs = gen._call_expr('int', 'mojo_word_is_text', [('int64_t', _it64)])
+    ibs = gen._call_expr('int', 'mojo_boxed_is_str', [('int64_t', _it64)])
     gen._emit(f'  if ({ibs}) goto {bb_str}; else goto {bb_not_str};')
     gen._emit_label(bb_str)
-    _sp2 = gen._coerce_to_type('int64_t', 'char *', _stxt)
+    _sp2 = gen._coerce_to_type('int64_t', 'char *', _it64)
     gen._emit(f'  {_res} = mojo_strlen ({_sp2});')
     gen._emit(f'  goto {bb_after};')
     gen._emit_label(bb_not_str)
