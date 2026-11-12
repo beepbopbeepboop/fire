@@ -409,7 +409,8 @@ def _stray_include_lines(c_code: str) -> list:
 def test_generator_c_no_stray_include(name: str, mojo_src: str):
     """Emit the generator module's C and assert no `#include` lands inside a
     function body. Pins the nested generator / generator method emitter
-    (bugs/CODEGEN_nested_generator_method_include_inside_function.md)."""
+    (the 2026-11-12 `#include <sys/types.h>` inside `T_run` gcc error, fixed
+    on this tree)."""
     global _PASS, _FAIL
     try:
         c_code, _cpp = gimple_codegen.compile_to_gimple_with_cpp(mojo_src)
