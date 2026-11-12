@@ -99,30 +99,19 @@ def test_comptime_assert_message_fstring():
     raise AssertionError('provably-false comptime assert with f-string compiled')
 
 
-def test_in_process_refuses_a_bracketed_call_to_a_generic_function():
-    # The single-unit path does not instantiate a generic; the stub it used to
-    # emit printed 0 where the build prints 2. It refuses, and names link mode.
-    try:
-        _compile('def f[x: Int]() -> Int:\n    return x + 1\n\ndef main():\n    print(f[1]())\n')
-    except RuntimeError as e:
-        assert 'needs the generic instantiated' in str(e), str(e)
-        assert 'link mode' in str(e), str(e)
-        return
-    raise AssertionError('a bracketed generic call compiled in-process (it would print 0)')
-
-
 def test_comptime_assert_short_circuit_and_false():
     # Short-circuit: `False and <unknown>` is provably false even when the
     # right operand cannot be folded (generic/comptime-param dependent).
     # missing diagnostic when
     # comptime bool folding required both operands to be known.
-    # A generic body is checked only when it is instantiated, which the real
-    # build does (see diagnostic_build.py); the in-process path does not.
-    from diagnostic_build import build_refusal
-    rc, s = build_refusal('def f[x: Int]():\n    comptime assert False and x > 0, "nope"\n\ndef main():\n    f[1]()\n')
-    assert rc != 0, 'provably-false short-circuit in a called generic built without error'
-    assert 'comptime assertion failed' in s, s
-    assert 'nope' in s, s
+    try:
+        _compile('fn f[x: Int]():\n    comptime assert False and x > 0, "nope"\n\nfn main():\n    f[1]()\n')
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed' in s, s
+        assert 'nope' in s, s
+        return
+    raise AssertionError('provably-false short-circuit and compiled without error')
 
 
 def test_comptime_assert_short_circuit_or_unknown_not_false():

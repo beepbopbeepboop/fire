@@ -60,3 +60,12 @@ global into a fresh function-local temp and restore it from there at the exit
 `gimple_codegen`'s `_emitting_plain_func` note says the strict dialect
 requires. Then re-run `test_gimple_runner.py`'s nested-class group plus a
 method-nested case added beside `gimple_nested_class_method_reads_*`.
+
+## Done when
+`test_gimple_runner.py::test_nested_class_in_method_captures_enclosing_param_regression`
+(`gimple_nested_class_in_method_captures_param`) compiles and prints `3`, then
+`4 5`, then `66`: the repro above plus a per-execution cell check, both in
+methods whose return type is `int`. A pointer-returning method is deliberately
+not used — gcc does not honour the `__GIMPLE` tag when the return type is a
+pointer (the tag lands in the declarator), so that shape compiles even with the
+bug present and would not pin it.
