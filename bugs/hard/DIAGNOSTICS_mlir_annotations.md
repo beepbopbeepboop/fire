@@ -1,4 +1,5 @@
 # DIAGNOSTICS step 7: MLIR type/attribute annotations
+SPLIT: DIAGNOSTICS_mlir_annotations-part1, DIAGNOSTICS_mlir_annotations-part2
 
 Part of the umbrella `bugs/hard/DIAGNOSTICS_missing_validation_modular.md`;
 plan: `docs/diagnostics-missing-validation-plan.md` §7.
