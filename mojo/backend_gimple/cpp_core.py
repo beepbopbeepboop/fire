@@ -1703,7 +1703,7 @@ def _cpp_exc_ctor_value(gen, node) -> bool:
 
 _CPP_RT_RETURN_CTYPE = {
     'mojo_path_join': 'char *', 'mojo_str_cat': 'char *', 'mojo_cstr_slice': 'char *',
-    'mojo_dirent_name': 'int64_t', 'mojo_dirent_path': 'int64_t',
+    'mojo_dirent_name': 'char *', 'mojo_dirent_path': 'char *',
     'mojo_fsencode_w': 'int64_t',
     'mojo_list_new': 'MojoList *', 'mojo_list_slice_word': 'MojoList *',
     'mojo_bytes_from_str': 'MojoBytes *', 'mojo_bytes_from_cstr': 'MojoBytes *',
@@ -2953,16 +2953,19 @@ def _cpp_expr(gen, e) -> str:
             return f"({gen._cpp_expr(e.condition)} ? {_tb(e.then_val)} : {_tb(e.else_val)})"
         return f"({gen._cpp_expr(e.condition)} ? {gen._cpp_expr(e.then_val)} : {gen._cpp_expr(e.else_val)})"
     if isinstance(e, gimple_ctypes.BinaryOp):
-        if e.op in _NONE_ARITH_BINOPS:
-            _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
-            _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
         if e.op == '//':
             # Python floor division — uses the same __mojo_floordiv
             # runtime helper the GIMPLE path's _lower_floordiv emits (a
             # plain C `/` truncates toward zero, which differs for
             # negative operands; this helper floors like Python).
+            if e.op in _NONE_ARITH_BINOPS:
+                _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
+                _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
             return f"__mojo_floordiv({gen._cpp_expr(e.left)}, {gen._cpp_expr(e.right)})"
         if e.op == '**':
+            if e.op in _NONE_ARITH_BINOPS:
+                _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
+                _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
             return f"pow({gen._cpp_expr(e.left)}, {gen._cpp_expr(e.right)})"
         if e.op == '+':
             # String concatenation (`current + part`, pprint.py's shape;
@@ -2996,6 +2999,9 @@ def _cpp_expr(gen, e) -> str:
                 except Exception:
                     return False
             if _is_str_operand(e.left) and _is_str_operand(e.right):
+                # String concatenation: do not install numeric None-arith
+                # guards, which would force tagged-word string operands
+                # through an int64_t path and lose char* conversions.
                 return (f"mojo_str_cat((char *)({gen._cpp_expr(e.left)}), "
                         f"(char *)({gen._cpp_expr(e.right)}))")
             # `word + "literal"` / `"literal" + word`: Python's `+` with a str
@@ -3018,6 +3024,31 @@ def _cpp_expr(gen, e) -> str:
                     or (isinstance(e.left, gimple_ctypes.StringLiteral) and _is_word_ident(e.right))):
                 return (f"mojo_str_cat((char *)(intptr_t)({gen._cpp_expr(e.left)}), "
                         f"(char *)(intptr_t)({gen._cpp_expr(e.right)}))")
+            _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
+            _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
+        elif e.op == '*':
+            # String repetition (`"=" * (70 - len(text))`, Apple/
+            # __main__.py's `group()` generator) → mojo_cstr_repeat,
+            # mirroring the ordinary GIMPLE path's char*/int lowering
+            # (gimple_gen_exprs.py's `mojo_cstr_repeat` case, both
+            # operand orders). Real Python's `str * int` (and `int *
+            # str`) is always string repetition — never overloaded to
+            # mean anything else — so this only needs to tell "is one
+            # side string-typed", not inspect both sides' exact types.
+            # Falls through to the plain `*` below for a genuinely
+            # all-numeric multiply (the overwhelmingly common case).
+            if _cpp_is_str_expr(gen, e.left) and not _cpp_is_str_expr(gen, e.right):
+                return (f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.left)}), "
+                        f"(int64_t)({gen._cpp_expr(e.right)}))")
+            if _cpp_is_str_expr(gen, e.right) and not _cpp_is_str_expr(gen, e.left):
+                return (f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.right)}), "
+                        f"(int64_t)({gen._cpp_expr(e.left)}))")
+            _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
+            _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
+        else:
+            if e.op in _NONE_ARITH_BINOPS:
+                _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
+                _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
         if e.op == '*':
             # String repetition (`"=" * (70 - len(text))`, Apple/
             # __main__.py's `group()` generator) → mojo_cstr_repeat,
@@ -5051,12 +5082,21 @@ def _cpp_expr(gen, e) -> str:
             # (`std::function` supports `operator()`), so it must stay
             # here rather than move under the refusal below. Same
             # C/C++-keyword rename agreement as every other read of a
-            # renamed name (see _cpp_kw_param_renames).
+            # renamed name (see _cpp_kw_param_renames). The variadic-family
+            # callable locals (`*args`/`**kwargs`) take a PACKED container,
+            # not the raw arguments, so they are handled by the branch below
+            # and must not fall through to this direct-call path.
             if gen._cpp_declared is not None:
                 _dcall = gen._cpp_declared.get(fname)
-                if (_dcall in (
-                        gimple_ctypes._CPP_CALLABLE_CTYPE,
-                        gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG)) or _cpp_is_callable_ctype(_dcall):
+                _variadic_callable = (
+                    gimple_ctypes._CPP_CALLABLE_CTYPE_STARARGS,
+                    gimple_ctypes._CPP_CALLABLE_CTYPE_KWARGS,
+                    gimple_ctypes._CPP_CALLABLE_CTYPE_STAR_KW)
+                if _dcall not in _variadic_callable and (
+                        (_dcall in (
+                            gimple_ctypes._CPP_CALLABLE_CTYPE,
+                            gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG))
+                        or _cpp_is_callable_ctype(_dcall)):
                     cpp_fname = gen._cpp_kw_param_renames.get(fname, fname)
                     return f"{cpp_fname}({', '.join(args)})"
             # A call through a DECLARED `*args`/`**kwargs`-family
@@ -6451,12 +6491,23 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             # out to be of different known scalar kinds, `_gen_cpp_generator_unit`
             # boxes each site by this marker (a TAGGED-word value slot);
             # otherwise it is just a comment.
+            _yexpr = s.value.value
             _ysite = gimple_exprtypes._infer_simple_expr_ctype(
-                s.value.value, declared, getattr(gen, '_cpp_gen_self_fields', None),
+                _yexpr, declared, getattr(gen, '_cpp_gen_self_fields', None),
                 gen._async_api) or 'unresolved'
+            _yexpr_cpp = gen._cpp_expr(_yexpr)
             _ytag = {'char *': 'str', 'double': 'dbl', '_Bool': 'bool',
                      'int64_t': 'int', 'MojoBytes *': 'bytes'}.get(_ysite, 'other')   # no raw `*` in a comment
-            return [f"{indent}co_yield /*Y:{_ytag}*/ ({gen._cpp_expr(s.value.value)});"]
+            # DirEntry name/path and fsencode words are int64_t runtime words but
+            # represent str/bytes pointers; tag and cast them as string/bytes
+            # words so heterogeneous/tagged generator yields box and print correctly.
+            if (isinstance(_yexpr, gimple_ctypes.CallExpr)
+                    and isinstance(_yexpr.func, gimple_ctypes.IdentExpr)
+                    and _yexpr.func.name in ('mojo_dirent_name', 'mojo_dirent_path',
+                                             'mojo_fsencode_w')):
+                _ytag = 'bytes' if _yexpr.func.name == 'mojo_fsencode_w' else 'str'
+                _yexpr_cpp = f"(char *)(intptr_t)({_yexpr_cpp})"
+            return [f"{indent}co_yield /*Y:{_ytag}*/ ({_yexpr_cpp});"]
         if isinstance(s.value, gimple_ctypes.YieldFromExpr):
             if gen._cpp_emit_kind in ('async', 'async_gen'):
                 raise gimple_exprtypes._UnsupportedAsyncShape(
@@ -6675,8 +6726,17 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 and not getattr(s.value, 'kwargs', None)):
             fname = s.value.func.name
             dct = declared.get(fname) if declared else None
-            # If it's a typed std::function (not int64_t boxed), prefer direct call
-            if _cpp_is_callable_ctype(dct) and dct not in (gimple_ctypes._CPP_CALLABLE_CTYPE, gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG):
+            # If it's a typed std::function (not int64_t boxed), prefer direct call.
+            # Variadic-family callables (`*args`/`**kwargs`) take a PACKED
+            # container, not the raw arguments, so let the expression path
+            # handle their packing rather than passing args directly here.
+            _variadic_callable_stmt = (
+                gimple_ctypes._CPP_CALLABLE_CTYPE_STARARGS,
+                gimple_ctypes._CPP_CALLABLE_CTYPE_KWARGS,
+                gimple_ctypes._CPP_CALLABLE_CTYPE_STAR_KW)
+            if _cpp_is_callable_ctype(dct) and dct not in (
+                    gimple_ctypes._CPP_CALLABLE_CTYPE,
+                    gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG) and dct not in _variadic_callable_stmt:
                 cpp_fname = gen._cpp_kw_param_renames.get(fname, fname)
                 args_list = [gen._cpp_expr(a) for a in s.value.args]
                 return [f"{indent}{cpp_fname}({', '.join(args_list)});"]
@@ -8821,22 +8881,9 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             gen._cpp_word_iter_locals = set()
         gen._cpp_word_iter_locals.add(_wi)
         try:
-            _pos_parts = []
-            for _aa in (s.iterable.args or []):
-                _pos_parts.append(gen._cpp_expr(_aa))
-            for _kn, _kv in (getattr(s.iterable, 'kwargs', None) or []):
-                _pos_parts.append(gen._cpp_expr(_kv))
-            _callee_name = s.iterable.func.name
-            _call_txt = (
-                "[&]() { struct _W { int64_t w; "
-                "operator int64_t() const { return w; } "
-                "operator char *() const { return (char *)w; } "
-                + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
-                          for _k in ('MojoList', 'MojoDict', 'MojoSet'))
-                + "}; "
-                "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
-                + ''.join(f"mojo_list_append_int(_a, (int64_t)(intptr_t)({_e})); " for _e in _pos_parts)
-                + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_callee_name}), _a, _k)}}; }}()")
+            _call_txt = _cpp_dyn_call_expr(gen, s.iterable)
+            if _call_txt is None:
+                _call_txt = gen._cpp_expr(s.iterable)
         except Exception:
             _call_txt = gen._cpp_expr(s.iterable)
         _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
@@ -8857,22 +8904,9 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 gen._cpp_word_iter_locals = set()
             gen._cpp_word_iter_locals.add(_wi)
             try:
-                _pos_parts = []
-                for _aa in (s.iterable.args or []):
-                    _pos_parts.append(gen._cpp_expr(_aa))
-                for _kn, _kv in (getattr(s.iterable, 'kwargs', None) or []):
-                    _pos_parts.append(gen._cpp_expr(_kv))
-                _callee_name = s.iterable.func.name
-                _call_txt = (
-                    "[&]() { struct _W { int64_t w; "
-                    "operator int64_t() const { return w; } "
-                    "operator char *() const { return (char *)w; } "
-                    + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
-                              for _k in ('MojoList', 'MojoDict', 'MojoSet'))
-                    + "}; "
-                    "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
-                    + ''.join(f"mojo_list_append_int(_a, (int64_t)(intptr_t)({_e})); " for _e in _pos_parts)
-                    + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_callee_name}), _a, _k)}}; }}()")
+                _call_txt = _cpp_dyn_call_expr(gen, s.iterable)
+                if _call_txt is None:
+                    _call_txt = gen._cpp_expr(s.iterable)
             except Exception:
                 _call_txt = gen._cpp_expr(s.iterable)
             _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
@@ -8992,26 +9026,24 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             # Call the foreign callable
             _call_res = f"{_cpp_fc}({_args})"
             lines = [f"{indent}MojoList *{_itvar} = mojo_list_new();"]
-            # Build a positional-only call through mojo_dyn_call: kwargs passed
-            # as a non-empty dict require the callee's sig registration, which
-            # ordinary (non-generator) functions do not have, so flatten every
-            # argument (positional + keyword values) into the positional list
-            # and pass an empty kwargs dict.
+            # Build call through mojo_dyn_call preserving positional/keyword args.
             try:
-                _parts = []
-                for _ae in _argstrs:
-                    _parts.append(
-                        f"mojo_list_append_int(_a, (int64_t)(intptr_t)({_ae})); ")
-                _call_res = (
-                    "[&]() { struct _W { int64_t w; "
-                    "operator int64_t() const { return w; } "
-                    "operator char *() const { return (char *)w; } "
-                    + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
-                              for _k in ('MojoList', 'MojoDict', 'MojoSet'))
-                    + "}; "
-                    "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
-                    + ''.join(_parts)
-                    + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_cpp_fc}), _a, _k)}}; }}()")
+                _call_res = _cpp_dyn_call_expr(gen, s.iterable)
+                if _call_res is None:
+                    _parts = []
+                    for _ae in _argstrs:
+                        _parts.append(
+                            f"mojo_list_append_int(_a, (int64_t)(intptr_t)({_ae})); ")
+                    _call_res = (
+                        "[&]() { struct _W { int64_t w; "
+                        "operator int64_t() const { return w; } "
+                        "operator char *() const { return (char *)w; } "
+                        + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
+                                  for _k in ('MojoList', 'MojoDict', 'MojoSet'))
+                        + "}; "
+                        "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
+                        + ''.join(_parts)
+                        + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_cpp_fc}), _a, _k)}}; }}()")
             except Exception:
                 _call_res = f"{_cpp_fc}({_args})"
             # For csv.reader style, we need to iterate over its result
@@ -9092,24 +9124,11 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             if not hasattr(gen, '_cpp_word_iter_locals'):
                 gen._cpp_word_iter_locals = set()
             gen._cpp_word_iter_locals.add(_wi)
-            # Build positional-only call (flatten kwargs) to avoid runtime sig lookup.
+            # Build call preserving positional/keyword args.
             try:
-                _pos_parts = []
-                for _aa in (s.iterable.args or []):
-                    _pos_parts.append(gen._cpp_expr(_aa))
-                for _kn, _kv in (getattr(s.iterable, 'kwargs', None) or []):
-                    _pos_parts.append(gen._cpp_expr(_kv))
-                _callee_name = s.iterable.func.name
-                _call_txt = (
-                    "[&]() { struct _W { int64_t w; "
-                    "operator int64_t() const { return w; } "
-                    "operator char *() const { return (char *)w; } "
-                    + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
-                              for _k in ('MojoList', 'MojoDict', 'MojoSet'))
-                    + "}; "
-                    "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
-                    + ''.join(f"mojo_list_append_int(_a, (int64_t)(intptr_t)({_e})); " for _e in _pos_parts)
-                    + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_callee_name}), _a, _k)}}; }}()")
+                _call_txt = _cpp_dyn_call_expr(gen, s.iterable)
+                if _call_txt is None:
+                    _call_txt = gen._cpp_expr(s.iterable)
             except Exception:
                 _call_txt = gen._cpp_expr(s.iterable)
             _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
@@ -9378,7 +9397,10 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                         if (declared.get(_nm) == 'char *'
                             or _nm in (getattr(gen, '_cpp_str_evidence_names', None) or ()))
                         else 'mojo_list_get_int')
-                lines.append(f"{indent}    {_nm} = {_get}({_z}, {_ctr});")
+                _rhs = f"{_get}({_z}, {_ctr})"
+                if _get == 'mojo_list_get_str' and declared.get(_nm) not in (None, 'char *'):
+                    _rhs = f"(int64_t)(intptr_t){_rhs}"
+                lines.append(f"{indent}    {_nm} = {_rhs};")
             for inner in s.body:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
             lines.append(f"{indent}}}")
@@ -9741,8 +9763,10 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             lines.append(f"{indent}for (int64_t {_ctr} = 0; "
                          f"{_ctr} < mojo_list_len({_dlist}); {_ctr}++) {{")
             if _dict_iter_elem == 'char *':
-                lines.append(f"{indent}    {target} = "
-                             f"mojo_list_get_str({_dlist}, {_ctr});")
+                _rhs = f"mojo_list_get_str({_dlist}, {_ctr})"
+                if declared.get(target) not in (None, 'char *'):
+                    _rhs = f"(int64_t)(intptr_t){_rhs}"
+                lines.append(f"{indent}    {target} = {_rhs};")
             else:
                 lines.append(f"{indent}    {target} = "
                              f"mojo_list_get_int({_dlist}, {_ctr});")
@@ -10095,11 +10119,15 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 if _eff_elem == 'char *':
                     if not target_was_declared:
                         lines.append(f"{indent}char *{target};")
+                        _eff_rhs = f"mojo_list_get_str({_cpp_as('MojoList *', _itname)}, {_ctr})"
+                    elif declared.get(target) == 'char *':
+                        _eff_rhs = f"mojo_list_get_str({_cpp_as('MojoList *', _itname)}, {_ctr})"
+                    else:
+                        _eff_rhs = f"(int64_t)(intptr_t)mojo_list_get_str({_cpp_as('MojoList *', _itname)}, {_ctr})"
                     lines.append(f"{indent}for (int64_t {_ctr} = 0; "
                                  f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _itname)}); "
                                  f"{_ctr}++) {{")
-                    lines.append(f"{indent}    {target} = "
-                                 f"mojo_list_get_str({_cpp_as('MojoList *', _itname)}, {_ctr});")
+                    lines.append(f"{indent}    {target} = {_eff_rhs};")
                 elif _eff_elem == 'double':
                     if not target_was_declared:
                         lines.append(f"{indent}double {target};")
@@ -10264,9 +10292,14 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     if not target_was_declared:
                         declared[target] = 'char *'
                         lines.append(f"{indent}char *{target};")
+                        _name_asn = f"{target} = mojo_list_get_str({_cached}, {_ctr});"
+                    elif declared.get(target) == 'char *':
+                        _name_asn = f"{target} = mojo_list_get_str({_cached}, {_ctr});"
+                    else:
+                        _name_asn = f"{target} = (int64_t)(intptr_t)mojo_list_get_str({_cached}, {_ctr});"
                     lines.append(f"{indent}for (int64_t {_ctr} = 0; "
                                  f"{_ctr} < mojo_list_len({_cached}); {_ctr}++) {{")
-                    lines.append(f"{indent}    {target} = mojo_list_get_str({_cached}, {_ctr});")
+                    lines.append(f"{indent}    {_name_asn}")
                 elif _iter_elem == 'double':
                     if not target_was_declared:
                         declared[target] = 'double'

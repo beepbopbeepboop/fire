@@ -2578,11 +2578,12 @@ def main():
     for v in probe():
         print(v)
 """, "unpack call argument is not supported")
-    # A spread whose SOURCE is a boxed int64_t local (an untyped
-    # parameter): the runtime kind is unproven, and *unpack of a
-    # non-iterable is a TypeError to refuse, not a miscompile to guess at.
-    test_generator_refused(
-        "cpp_coroutine_unpack_boxed_source_refused", """\
+    # A `*`-spread of an untyped list parameter: the parameter's declared
+    # container type is now resolved, so the unpack forwards it as a list
+    # copy (correct) rather than refusing it as an unproven boxed source.
+    test_generator_matches_cpython(
+        "cpp_coroutine_unpack_list_param_source",
+        """\
 def probe(src, *, start=[]):
     f = lambda *a: a[0]
     yield f(*src)
@@ -2590,7 +2591,14 @@ def probe(src, *, start=[]):
 def main():
     for v in probe([4, 5]):
         print(v)
-""", "unpack call argument is not supported")
+""", """\
+def probe(src):
+    f = lambda *a: a[0]
+    yield f(*src)
+
+for v in probe([4, 5]):
+    print(v)
+""")
     # A `*`-spread of a list whose TRACKED element kind is str: the lambda
     # body reads `*args` through the int64-box getters, so a copied str
     # slot would come back as a pointer — the same reason the non-spread
@@ -11523,6 +11531,30 @@ def main():
     outer(10)
 """, "13\n11\n")
 
+    # Flag instance iteration via __iter__ yielding from self._iter_member_()
+    # (enum.py Flag.__iter__ pattern) — _iter_member_ aliased to a generator
+    # method, called via self._iter_member_() inside a generator method with
+    # yield from.
+    test_generator_stdout("flag_instance_iter_via_iter_member_alias", """\
+struct Flag:
+    @classmethod
+    def _iter_member_by_value_(cls, value: Int):
+        yield 1
+        yield value
+
+    _iter_member_ = _iter_member_by_value_
+
+    def __iter__(self):
+        yield from self._iter_member_(7)
+
+def main():
+    f = Flag()
+    for x in f.__iter__():
+        print(x)
+
+main()
+""", "1\n7\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)
@@ -11544,29 +11576,4 @@ if __name__ == '__main__':
     if _FAIL:
         raise SystemExit(1)
 
-
-
-# Flag instance iteration via __iter__ yielding from self._iter_member_()
-# (enum.py Flag.__iter__ pattern) — _iter_member_ aliased to a generator
-# method, called via self._iter_member_() inside a generator method with
-# yield from.
-test_generator_stdout("flag_instance_iter_via_iter_member_alias", """\
-struct Flag:
-    @classmethod
-    def _iter_member_by_value_(cls, value: Int):
-        yield 1
-        yield value
-
-    _iter_member_ = _iter_member_by_value_
-
-    def __iter__(self):
-        yield from self._iter_member_(7)
-
-def main():
-    f = Flag()
-    for x in f.__iter__():
-        print(x)
-
-main()
-""", "1\n7\n")
 

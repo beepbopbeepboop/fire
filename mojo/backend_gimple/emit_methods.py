@@ -2343,7 +2343,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     args = args[:-1]
                 if len(args) == 4:
                     try:
-                        import mojo.backend_gimple.emit_calls as ggc
                         fake = gimple_ctypes.CallExpr(func=gimple_ctypes.MemberExpr(obj=gimple_ctypes.IdentExpr(name='type'), member='__new__'), args=args, kwargs=[])
                         return ggc._lower_call(gen, fake)
                     except Exception:
