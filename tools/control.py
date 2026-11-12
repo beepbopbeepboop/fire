@@ -814,6 +814,12 @@ def auth_failed(t):
     return bool(AUTH_ERR.search(tail))
 
 
+FINISHING_PREFIXES = ("fix-merge-", "fix-red-", "fix-proof-", "fix-orch-")   # tasks that carry finished work to master
+def refill_key(item):
+    """Queue order for refill: tasks that finish done work first, then oldest first."""
+    return (0 if item["name"].startswith(FINISHING_PREFIXES) else 1, item["added"])
+
+
 ORCH_POOL = "sonnet-orch"       # the slot reserved for orchestration reviews (tools/pool.json): Sonnet, class "orch", which no doc has
 MAX_CAP_REVIEWS = 3              # a task whose cap fires this many times stays capped: the review did not cure it
 DEPTH_KEYS = {"merge_depth": ("fix-merge-", "fix-red-"), "proof_depth": ("fix-proof-",)}
@@ -1141,7 +1147,10 @@ def cmd_refill(a):
     live = sum(busy.values())
     if a.target is None:
         a.target = max(pool_total(), live)
-    items = sorted(items_all, key=lambda i: i["added"])
+    # Work that FINISHES something already done goes first: a merge fixer, a proof reviewer or an orchestration reviewer
+    # holds a finished branch and its claim, and every pass that starts a fresh doc instead leaves that branch waiting
+    # (2026-11-12: 14 proof reviewers sat behind fresh docs while 9 finished branches waited). Then oldest first.
+    items = sorted(items_all, key=refill_key)
     started = 0
     items = [i for i in items if i["name"].startswith(tuple(a.prefix.split(",")))]
     # The FORMAL lane is the owner's: its Qwen runs formal* tasks by hand, and the swarm never starts one, on any slot
