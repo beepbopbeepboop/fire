@@ -941,6 +941,11 @@ def main():
         sys.exit(who())
     if a.why:
         sys.exit(why(a.why))
+    # Landings fast-forward master in C.MAIN (the tree this file lives in), so that tree must have master checked out.
+    # It should be the integrator's own tree (tools/master_tree.py setup), not the one a person edits in.
+    if C.git("branch", "--show-current", cwd=C.MAIN, check=False) != "master":
+        sys.exit("%s does not have master checked out, so landings cannot fast-forward it. Start the swarm from the "
+                 "tree that owns master (python3 tools/master_tree.py setup creates ../work-master)." % C.MAIN)
     # redirect output to the log file so it is captured without a shell redirect
     if a.log_file:
         os.makedirs(os.path.dirname(os.path.abspath(a.log_file)), exist_ok=True)
