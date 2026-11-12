@@ -16,7 +16,6 @@ only (`stdlib-syntax`); the full gate was not run.
 ## Still holding a claim (left on purpose)
 | entry | why it was not landed |
 |---|---|
-| `bug-diagnostics-module-not-found-suffix` | merges clean, but deletes its doc with no test change, so the deletion rule refuses it. Needs a person. |
 | `bug-codegen-enum-member-eq-prints-int-no` | merge conflict with master |
 | `bug-codegen-linked-list-hash-stubbed` | merge conflict with master |
 | `bug-mid-suite-gimplegenerators-6583` | merge conflicts (2), SUITE work |
@@ -27,3 +26,9 @@ only (`stdlib-syntax`); the full gate was not run.
 | `fix-red-fix-red-fix-red-fix-red-fix-red-fix-merge-fix-leftov` | its doc is gone; not triaged |
 | `recover-apply-haiku-r2-r2-r2-r2-r2-r332` | other lane (archive), 167 commits, not touched |
 | `recover-review-dangling-r2-r2-r2-r30` | other lane (archive), 30 commits, not touched |
+
+## Follow-up: `bug-diagnostics-module-not-found-suffix` (landed as a clean branch)
+The original branch also raised four ceilings in `dangling_refs_baseline.py` (BLOW, CLAUDE, CRASH, FORMAL). Those are
+not carried over. The test passes on master (`test_attr_error_messages.py`), so the stale `expect=` and the doc were
+removed on a clean branch, which landed as `8cace76b5`. The original entry is now abandoned; its branch and worktree
+(`work-6576`) are kept, unmerged, as the record of the rejected ceilings.
