@@ -13690,8 +13690,16 @@ def gen_module_impl(self, stmts: list):
                         'refusal', e)
             continue
         self._supported_async[s.name] = s
+        _astar = None
+        _akw = None
+        for _i, (_pn, _pt) in enumerate(getattr(s, 'params', None) or []):
+            if _pn.startswith('**'):
+                _akw = _i
+            elif _pn.startswith('*'):
+                _astar = _i
         self._async_api[s.name] = {
             'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+            'star_slot': _astar, 'kwargs_slot': _akw,
         }
         self.func_param_types[f"{base}_start"] = param_ctypes
         self._generator_cpp_units.append(cpp_text)
@@ -13734,8 +13742,16 @@ def gen_module_impl(self, stmts: list):
                             '(pass 2)', e)
                 continue
             self._supported_async[s.name] = s
+            _astar = None
+            _akw = None
+            for _i, (_pn, _pt) in enumerate(getattr(s, 'params', None) or []):
+                if _pn.startswith('**'):
+                    _akw = _i
+                elif _pn.startswith('*'):
+                    _astar = _i
             self._async_api[s.name] = {
                 'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+                'star_slot': _astar, 'kwargs_slot': _akw,
             }
             self.func_param_types[f"{base}_start"] = param_ctypes
             self._generator_cpp_units.append(cpp_text)

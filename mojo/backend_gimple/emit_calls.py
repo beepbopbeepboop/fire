@@ -3361,6 +3361,16 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if fname_raw in gen._async_api:
         api = gen._async_api[fname_raw]
         arg_pairs = [gen.lower_expr(a) for a in node.args]
+        _async_star = api.get('star_slot')
+        if _async_star is not None:
+            # Do not pack spread-arg calls (element count unknown at compile time).
+            _can_pack = True
+            for _a in (getattr(node, 'args', None) or []):
+                if isinstance(_a, gimple_ctypes.UnaryOp) and _as_str(_a.op) == '*':
+                    _can_pack = False
+                    break
+            if _can_pack:
+                arg_pairs = _pack_generator_star_args(gen, arg_pairs, _async_star)
         handle = gen._call_expr('MojoAsync *', f"{api['base']}_start", arg_pairs)
         gen._async_var_api[handle] = api
         return 'MojoAsync *', handle
