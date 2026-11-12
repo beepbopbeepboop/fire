@@ -224,7 +224,9 @@ _FOREIGN_PKG_FILES = {
     # cross-module struct, the shape `c_parser/parser/__init__.py` hit.
     'box.py': ("class Box:\n"
                "    def __init__(self, x, bump=5):\n"
-               "        self.x = x + bump\n"),
+               "        self.x = x + bump\n"
+               "    def get(self):\n"
+               "        return self.x\n"),
 }
 
 
@@ -2701,6 +2703,30 @@ def run_struct_ptr_through_local_dict_tests():
         "        if i == 1:\n"
         "            got = allinfo['a']\n"
         "            yield got.x\n"
+        "        else:\n"
+        "            b = Box(n)\n"
+        "            allinfo['a'] = b\n"
+        "\n"
+        "def main():\n"
+        "    for v in consume(4):\n"
+        "        print(v)\n"
+        "\n"
+        "main()\n",
+        "9\n")
+    # ... and used through a METHOD call on the read-back, which is what
+    # `_iter_source` does (`srcinfo._add_line(...)`, `srcinfo.too_much(...)`):
+    # the receiver's type must be the stored struct pointer, not the int64
+    # word, or the call is emitted on an integer.
+    _test_foreign_a3_generator_handle(
+        "generator_struct_ptr_through_local_dict_method_call",
+        "from .box import Box\n"
+        "\n"
+        "def consume(n, *, start=[]):\n"
+        "    allinfo = {}\n"
+        "    for i in range(2):\n"
+        "        if i == 1:\n"
+        "            got = allinfo['a']\n"
+        "            yield got.get()\n"
         "        else:\n"
         "            b = Box(n)\n"
         "            allinfo['a'] = b\n"
