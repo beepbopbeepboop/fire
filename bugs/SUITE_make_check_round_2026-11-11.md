@@ -1,0 +1,49 @@
+# Round 2026-11-11: `make check` reds fixed on master
+
+**Status:** 6 jobs fixed and committed on `master`; master pulled to `d210765a2`.
+Stopping here so the code can be moved around.
+
+## Fixed (each with its own commit)
+
+| job | commit | what was wrong |
+|---|---|---|
+| `no-new-casts` | `bfe9096f2` | `_lower_subscript` spelled the same bytes-slot coercion twice (the `_struct_slot_kinds` arm and the `_tuple_slot_types` arm `dd73f8bcd` added); the guard counts spellings. One `_list_slot_bytes` helper serves both. |
+| `formal-bracketed-method-field-set` | `d05a3c8c7` | Six existing cases declared `out self` WITH a return type, which modular rejects (`mojo/test/mojo-parser/decls/decls_errors.mojo:108`) and `551bbbccf` started rejecting here. Rewritten to `mut self` — the same `MUTATING_RECEIVER_CONVENTIONS` entry the model already used. Three cases were in `test_formal_bracketed_method_field_set.py` (the first crashed the job out of `_parse_funcdef`), three in `test_formal_frame_slot_subscript_census.py` (the census tool swallows the parse failure and returned `[]`). |
+| `doc-refs-stale-verdicts` | `99eb78995` | `bugs/hard/README.md` named 8 deleted docs and had no row for 17 docs on disk. Now indexes exactly the 25 docs on disk. |
+| `gimple` | `1851f24bf` | `d[i]` on a `Dict[Int, Int]` stringified the key (`mojo_cstr_or_int_str` + a release per access). `mojo_dict_slot_boxed` is now in `emit_infra._KW_DICT_FNS` and has a `_kw` twin, `mojo_dict_slot_boxed_kw`, which answers through `_dict_slot_boxed` so a bool/None slot keeps its kind. |
+| `runtimediff` | `1851f24bf` | `dict_items_reads_each_slot_kind`: a container stored under dict kind 0 rendered as its own ADDRESS in `print(d)`, `d.items()` and `d.values()`. `_dict_val_repr_int` now declines a registered-container word, and the emitted `_mojo_repr_dict` hands a container kind-0 slot to `_mojo_generic_elem_repr`. The probe is the container registry, not a range test, so an integer stored under kind 0 (2^40) still renders as itself. |
+| `suite-self-test` (1 row) | `07131682d` | `emit_stmts` imported `_box_escaping_dict_slot_read` from `emit_calls` at module level; `emit_calls -> gimple_codegen -> emit_stmts` made `import mojo.backend_gimple.emit_calls` fail outright. Now reached through the `ggc` alias every other helper in that file uses. |
+
+## Master pulled
+
+`origin/master` was 20 commits ahead, then 2 more; both merged (`e8e703447`,
+`d97ad68c7`). One conflict, `bugs/hard/README.md`: master's own index is stale
+(its `doc-refs-stale-verdicts` job is red there — 2 names it lists do not exist,
+17 docs on disk have no row; it had dropped `.md` from deleted docs' names to
+make the check ignore them). Resolved with our version; both directions of
+`test_dangling_doc_refs.py` pass. The `doc-refs` ratchet is green.
+
+## Verified
+
+- `test_gimple.py` 437 passed / 0 failed (was 435/2)
+- `test_runtime_diff.py` 69/0 (was 68/1)
+- `test_ptr_registry.py` 28/28
+- `test_runtime_header_scan.py` 53/53 (the new declaration is banked: 806 -> 807)
+- `test_dangling_doc_refs.py` 7/7
+- `tools/dangling_doc_refs.py --ratchet` green
+- `test_suite.py` 358/19 (was 357/20)
+
+## Still open
+
+From the report, the jobs not addressed here: `gimplegenerators`, `gimplerunner`,
+`silentnoop`, `modcache`, `formal-host-import-shapes`, `suite-self-test` (19
+rows), `doc-refs` (marker), `async-void-return`, `bootstrap-stage1-dumps`,
+`formal-link-accounting`. Several names in the report (`selfhost`, `linkmode`,
+`runtimere`, `globcompiled`, `rthdrscan`, `ptrreg`, `sqliteruntime`,
+`formal-sweep-truth`, `formal-per-struct-asks`, `formal-doc-truth`, `formal-sys`,
+`formal-read-before-store`) are green on current master.
+
+`async-void-return`'s two failures are a codegen gap, not a bug in a lowering:
+an async closure calling an unresolved callee (`Ctx.enqueue_cpu_function`'s
+wrapper) is refused. `modcache`, `gimplerunner` and `silentnoop` were not
+reproduced here.
