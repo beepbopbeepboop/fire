@@ -5455,6 +5455,7 @@ class Parser:
             aliases[_cvnode.target] = _cvnode.value
         decs    = getattr(self, "_pending_decs", [])
         self._pending_decs = []
+        self._validate_align_decorators(decs)
         return StructDef(name=name, fields=fields, methods=methods, decorators=decs,
                          comptime_aliases=aliases, bases=bases, keywords=class_keywords,
                          bracket_params=bracket_params,
@@ -5462,6 +5463,50 @@ class Parser:
                          where_clause=struct_where,
                          bracket_types=[(f.name, f.type_ann) for f in param_fields
                                         if isinstance(f, VarDecl)])
+
+    def _validate_align_decorators(self, decorators):
+        for dec in decorators:
+            head = None
+            args = None
+            kwargs = None
+            loc_line = 0
+            loc_col = 0
+            if isinstance(dec, str):
+                if dec == "align":
+                    head = "align"
+                    args = []
+                    kwargs = []
+            elif isinstance(dec, CallExpr):
+                func = dec.func
+                if isinstance(func, IdentExpr) and func.name == "align":
+                    head = "align"
+                    args = dec.args
+                    kwargs = dec.kwargs
+                    loc_line = getattr(dec, "line", 0) or getattr(func, "line", 0)
+                    loc_col = getattr(dec, "col", 0) or getattr(func, "col", 0)
+            if head != "align":
+                continue
+            loc_tok = Token("", "", loc_line, loc_col)
+            if len(args) != 1 or (kwargs and len(kwargs) != 0):
+                raise SyntaxError(
+                    f"{self._loc(loc_tok)}@align requires exactly one argument")
+            arg = args[0]
+            val = self._eval_align_constant_int(arg)
+            if val is None:
+                continue
+            if val <= 0 or (val & (val - 1)) != 0:
+                raise SyntaxError(
+                    f"{self._loc(loc_tok)}@align value must be a positive power of 2")
+            if val > (1 << 29):
+                raise SyntaxError(
+                    f"{self._loc(loc_tok)}@align value exceeds maximum alignment (2^29)")
+
+    def _eval_align_constant_int(self, expr):
+        if isinstance(expr, IntLiteral):
+            return expr.value
+        if isinstance(expr, UnaryOp) and expr.op == "-" and isinstance(expr.operand, IntLiteral):
+            return -expr.operand.value
+        return None
 
     def _parse_enum(self):
         # `enum Name: member1, member2, ...` — not real Mojo syntax (the real
