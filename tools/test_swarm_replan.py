@@ -35,6 +35,14 @@ class Unserved(unittest.TestCase):
                           {"name": "opus", "model": "m/o", "count": 0, "class": "hard"}]}
         self.assertEqual(S.unserved_classes(pool), {"hard": ["opus"]})
 
+    def test_an_accepted_unserved_policy_is_still_unserved_for_replan(self):
+        pool = {**REAL_POOL, "classes": {"unserved_policy": {"hard": "replan"}}}
+        self.assertEqual(S.unserved_classes(pool), {"hard": ["opus"]})
+
+    def test_an_accepted_unserved_policy_is_not_warned_about(self):
+        pool = {**REAL_POOL, "classes": {"unserved_policy": {"hard": "replan"}}}
+        self.assertEqual(S.unserved_classes(pool, warn_only=True), {})
+
 
 class Split(unittest.TestCase):
     def setUp(self):
