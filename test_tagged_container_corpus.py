@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Corpus census for the mixed-container rebind decision behind
-bugs/mid/CODEGEN_tagged_generator_mixed_type_container.md and
-bugs/hard/CODEGEN_tagged_generator_mixed_type_step4.md.
+"""Corpus census for the mixed-container rebind decision behind the mixed
+tagged-generator/container-name case (decided option 2 by the 2026-11-12
+census; see docs/tagged_generator_mixed_type-plan.md, step 4).
 
 The question the decision needs answered: does any real .mojo source bind one
 name BOTH to a container value (a list/dict/set literal or constructor) AND to
