@@ -5954,7 +5954,7 @@ def _elaborate_overload_call(gen, node: gimple_ctypes.CallExpr):
     for _kn, _kexpr in (getattr(node, 'kwargs', None) or []):
         arg_pairs.append(gen.lower_expr(_kexpr))
     try:
-        module_src = open(source).read()
+        module_src = gen._generic_source_text(source)
         import elaborate
         info = elaborate.Elaborator().elaborate_overload_call(
             module_src, g, [ct for ct, _ in arg_pairs])

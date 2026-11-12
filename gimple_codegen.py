@@ -5036,6 +5036,23 @@ class GimpleGen:
         return gfn._find_generic_source(self, module, name, kind, depth)
     def _register_imported_generics(self, stmts) -> None:
         return gfn._register_imported_generics(self, stmts)
+    def _generic_source_text(self, path: str) -> str:
+        """The source text of the module that defines a generic at `path`.
+
+        A generic defined in the module being compiled is registered under
+        `_current_filename` (module_gen's local-generics scan), and that file
+        may not exist on disk: the harness and any caller that compiles from
+        memory pass the text, not a path. The text the parser consumed
+        (`_source_text`) is the authority for that file, so it is used
+        whenever `path` names it; any other path is read from disk. Every
+        generic-instantiation site reads through here so that a local generic
+        is instantiated the same way whether or not its file exists."""
+        cur = getattr(self, '_current_filename', None)
+        text = getattr(self, '_source_text', '')
+        if text and cur and os.path.abspath(path) == os.path.abspath(cur):
+            return text
+        with open(path) as f:
+            return f.read()
     def _register_imported_generic_structs(self, stmts) -> None:
         return gfn._register_imported_generic_structs(self, stmts)
     @staticmethod
