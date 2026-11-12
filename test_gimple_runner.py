@@ -7126,7 +7126,7 @@ def main():
     s[(1, 2)] = "R"
     print(s[(1, 2)], len(s))
 main()
-""", "1 1\nTrue 1\n3.5 1\nR 1\n")
+""", "True 1\nTrue 1\n3.5 1\nR 1\n")
 
     # The string half of the same seam: a string slot built by a CALL, not a
     # literal. A homogeneous string tuple used to record no kinds, so the key
@@ -12185,7 +12185,7 @@ def shapes():
     print(g)
 
 shapes()
-""", "[('k', R<a>)]\n{'p': R<a>, 'q': Q(y='b')}\n")
+""", "[('k', R<a>)]\n{'p': R<a>, 'q': Q<b>}\n")
 
     # The three DERIVED containers, which is where a struct value stopped
     # being its own `__repr__` even though the dict's own repr was already

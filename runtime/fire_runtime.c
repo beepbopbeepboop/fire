@@ -7683,6 +7683,23 @@ void mojo_dict_set_other_struct(MojoDict *d, char *key, void *obj)
     _dict_set_raw(d, key, (int64_t)(uintptr_t)obj, 6);
 }
 
+/* The string-key store of a struct of another type, with its repr function
+ * kept on the slot (see the field's comment in fire_runtime.h). The slot is
+ * found after the store, so grow and the int-key canonicalisation are handled
+ * by the same lookup every other reader uses. */
+void mojo_dict_set_other_struct_repr(MojoDict *d, char *key, void *obj, void *fn)
+{
+    mojo_dict_set_other_struct(d, key, obj);
+    _DictSlot *sl = _dict_find_k(d, key, 0);
+    if (sl && sl->key) sl->repr = fn;
+}
+
+char *mojo_dict_repr_other_slot(MojoDict *d, int64_t i, int64_t v)
+{
+    if (!d || i < 0 || i >= d->cap || !d->slots[i].repr) return NULL;
+    return ((char *(*)(int64_t))d->slots[i].repr)(v);
+}
+
 void mojo_dict_set_val_repr(MojoDict *d, void *fn)
 {
     if (!d) return;
@@ -10867,6 +10884,12 @@ char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
            strictly more information than a slot's storage kind ('i' for a
            struct pointer is as true as 'i' for a small int and as useless). */
         char *_re = mojo_list_repr_elem(l, mojo_list_get_int(l, _i));
+        /* ...except a slot the kinds row calls a STRING: an element repr is a
+         * thunk for a value word (a struct pointer, or a dict's value kind), and
+         * handing it a char* key printed the key's address. A dict item pair is
+         * the case that set it for slot 1 alone (mojo_dict_items), and this loop
+         * asks every slot. A string slot is spelled by its own kind. */
+        if (_re && _k == MOJO_KIND_STR) { free(_re); _re = NULL; }
         if (_re) {
             _buf = mojo_str_cat_free(_buf, _re);
             free(_re);
@@ -14939,9 +14962,13 @@ static void _tuple_key_elem(char **buf, size_t *len, size_t *cap, int64_t w,
                             char k, int ecode)
 {
     if (ecode == MOJO_EQ_UNKNOWN) {
-        if (k == 'p' && _pr_has(&_reg_str, (uint64_t)w)) ecode = MOJO_EQ_STR;
-        else if (k == 'p') ecode = MOJO_EQ_INT;
-        else ecode = _kind_to_eq(k);
+        /* A 'p' slot is a str BY ITS RECORDED KIND, whether the string is a
+         * literal in the registered pool or a heap string built at run time (a
+         * `+`, a call result). Asking the literal pool first encoded every heap
+         * string as an integer, so `(s,)` for a computed `s` got a different key
+         * from the same tuple built from a literal. A slot with no recorded kind
+         * reads as 'i' (mojo_list_slot_kind), so 'p' is never a guess. */
+        ecode = (k == 'p') ? MOJO_EQ_STR : _kind_to_eq(k);
     }
     char tmp[_INT_STR_BLOCK];
     if (ecode == MOJO_EQ_DOUBLE) {

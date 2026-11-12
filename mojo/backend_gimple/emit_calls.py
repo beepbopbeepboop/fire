@@ -11553,8 +11553,14 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             _cks = getattr(gen, '_cstr_key_src', None)
             if _cks is not None:
                 _cks.pop(iv, None)
+        # A CONTAINER key (a tuple) is passed as its word; the placeholder is
+        # renamed to the `_kw` twin, which reads it by content. Recording the
+        # slot read below under the key's CHARACTERS would make a later read of
+        # the same name (`print(x)`) look the tuple up by its pointer, and miss.
+        _word_key = _as_str(iv) in gen._kw_key_src
         t = gen._call_expr('int64_t', 'mojo_dict_slot_boxed', [('MojoDict *', ov), (idx_type, iv)])
-        _mark_unknown_dict_value(gen, ov, t, iv, 'str' if idx_type == 'char *' else None)
+        if not _word_key:
+            _mark_unknown_dict_value(gen, ov, t, iv, 'str' if idx_type == 'char *' else None)
         return 'int64_t', t
 
     # Opaque Python object (typed as int) — treat as MojoList via cast
