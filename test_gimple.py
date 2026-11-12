@@ -3059,12 +3059,12 @@ struct B:
 """), 'mlir_bool_simd_xor_attr_operand')
 
     # 153d. The third of std/builtin/bool.mojo's trio (__and__/__or__/__xor__):
-    #       pop.simd.or over two _Bool fields. The gate regression that named
-    #       this doc (the stdlib-syntax red once the GIMPLE tag was pinned) was
-    #       fixed at the root in f4a7ee488; 153b/153c pin and/xor and the
-    #       mixed-type attr operand, and this pins the missing `or` shape. It
-    #       fails on the pre-fix lowering with gcc's "type mismatch in binary
-    #       expression" on `int64_t _t = _t1 | _t2;` (both operands _Bool).
+    #       pop.simd.or over two _Bool fields. The stdlib-syntax red once the
+    #       GIMPLE tag was pinned was fixed at the root in f4a7ee488; 153b/153c
+    #       pin and/xor and the mixed-type attr operand, and this pins the
+    #       missing `or` shape. It fails on the pre-fix lowering with gcc's
+    #       "type mismatch in binary expression" on `int64_t _t = _t1 | _t2;`
+    #       (both operands _Bool).
     _run_isolated(lambda: test_gimple_body("mlir_bool_simd_or", """\
 struct B:
     var _mlir_value: Bool

@@ -1,6 +1,6 @@
 # CODEGEN: genexp local bound to a tagged-generator word refuses a str join
 
-**Found:** 2026-11-12, while running `python3 test_gimple.py` for the GIMPLE-tag gate fix (bugs/gate-stdlib-syntax.md, fixed in f4a7ee488).
+**Found:** 2026-11-12, while running `python3 test_gimple.py` for the GIMPLE-tag gate fix (fixed in f4a7ee488).
 
 ## Symptom
 ```
