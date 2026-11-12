@@ -61,6 +61,18 @@ from mojo.middle.calls_shared import (
 )
 from mojo.middle.methods_shared import _is_selfhost_source_file
 
+def _module_generic_function_names(gen) -> set:
+    """Names of this module's top-level generic FUNCTIONS (a `comptime_params`
+    list on a FunctionDef), read from the root statements the pipeline gave the
+    generator. A generic is instantiated only in link mode."""
+    names = set()
+    for stmts in (getattr(gen, '_closure_call_stmts', None) or []):
+        for st in stmts or []:
+            if type(st).__name__ == 'FunctionDef' and getattr(st, 'comptime_params', None):
+                names.add(st.name)
+    return names
+
+
 def _generator_star_slot(api: dict, node) -> int | None:
     """The C-signature slot of a generator's `*args` parameter, when this
     call packs its positional arguments into it, else None.
@@ -3105,6 +3117,18 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 raise RuntimeError(
                     f"cannot compile module: a bracketed call {_base_name}[...]() "
                     f"needs link-mode specialisation, which this build does not do")
+        # A bracketed call to a generic FUNCTION of this module, in the
+        # single-unit path (not link mode), is not instantiated there: the stub
+        # below is `0`, a silent wrong answer (`print(f[1]())` printed 0, the
+        # build prints 2). Link mode instantiates it, so the refusal names that.
+        if (isinstance(node.func, gimple_ctypes.SubscriptExpr)
+                and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+                and not getattr(gen, 'link_imports', False)
+                and node.func.obj.name in _module_generic_function_names(gen)):
+            raise RuntimeError(
+                f"cannot compile in-process: a bracketed call "
+                f"{node.func.obj.name}[...]() needs the generic instantiated, which "
+                f"the single-unit path does not do; link mode (fire build) does")
         # A SELF-RECURSIVE generic call (`self_recursion[i + 1]()` inside the
         # monomorphized `self_recursion`) cannot be materialized, and stubbing
         # it to 0 (below) would be a silent wrong answer. Refuse loudly.

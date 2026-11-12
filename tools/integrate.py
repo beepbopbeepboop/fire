@@ -23,6 +23,7 @@ One round:
 import argparse, fcntl, os, re, shutil, subprocess, sys, tempfile, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control as C
+import stash_ff as SF
 
 INTEG = os.path.join(C.PARENT, "work-integ")
 
@@ -94,14 +95,21 @@ def test_failures(tree):
 
 
 def land_on_master():
-    r = subprocess.run(["git", "merge", "--ff-only", "integ"], cwd=C.MAIN, capture_output=True, text=True)
-    if r.returncode == 0:
+    """Move master (checked out in C.MAIN, where people edit) to `integ`. The merge goes through stash_ff, so an
+    uncommitted edit to a file the landing also changes no longer stops it: the edits are carried across, and only a
+    real textual conflict with them makes the landing wait (the merge is undone, the edits are exactly as they were)."""
+    st, detail = SF.merge(C.MAIN, "--ff-only", "integ")
+    if st == "ok":
         return
+    if st == "blocked":
+        sys.exit("landing waits: %s" % detail)
     base = C.git("merge-base", "master", "integ")
     moved = C.git("diff", "--name-only", base, "master").splitlines()
     if moved and all(f in CONTROLLER_FILES for f in moved):
-        C.git("merge", "--no-edit", "-m", "integrate: merge gated tree over controller-tool commits", "integ")
-        return
+        st, detail = SF.merge(C.MAIN, "--no-edit", "-m", "integrate: merge gated tree over controller-tool commits", "integ")
+        if st == "ok":
+            return
+        sys.exit("landing waits: %s" % detail)
     sys.exit("master moved under the round (%s): cannot fast-forward; redo the round" % ", ".join(moved[:5]))
 
 
@@ -179,6 +187,8 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
         # feed's DONE ratchet then skipped it forever, a dead end with no path forward.
         if st not in ("exited-ok", "exited-err", "integration-failed", "superseded", "abandoned"):
             continue
+        if t.get("merge_capped"):
+            continue                        # the merge-fix chain was stopped (depth cap, or no doc for a fixer to serve)
         if t.get("fixer"):
             continue                        # a merge/red fixer owns this branch; re-probing it would queue a second one
         if C.verdict(t) != "DONE" and name not in ignore_verdict:
@@ -201,6 +211,16 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
 MERGE_FIX_DEPTH = 3   # fixers of fixers before a branch is abandoned
 
 
+def _cap_merge_fix(name, why):
+    """Stop handing NAME to merge fixers. `merge_capped` is what pick_candidates reads: the state alone is not enough,
+    because abandoned/superseded branches are still landing candidates (their work is finished), so without the flag
+    a capped branch conflicted and was "capped" again on every pass, forever."""
+    with C.registry() as reg:
+        reg[name]["state"] = "abandoned"
+        reg[name]["merge_capped"] = why
+    print(why, flush=True)
+
+
 def enqueue_merge_fix(name, t, conflict_text):
     """A branch that cannot merge onto master is handed back to a worker, not left for a human: queue a
     merge task that starts from the branch, merges master into it, resolves, and verifies narrowly."""
@@ -208,9 +228,14 @@ def enqueue_merge_fix(name, t, conflict_text):
     # A merge fixer that conflicts again gets a fixer of its own, and so on, while master keeps moving. Past a few
     # levels the chain is not converging: abandon the branch instead of nesting `fix-merge-fix-merge-...` (2026-11-10).
     if name.count("fix-merge-") + name.count("fix-red-") >= MERGE_FIX_DEPTH:
-        with C.registry() as reg:
-            reg[name]["state"] = "abandoned"
-        print("merge-fix depth cap: %s is abandoned, not fixed again" % name, flush=True)
+        _cap_merge_fix(name, "merge-fix depth cap: %s is abandoned, not fixed again" % name)
+        return
+    if not C.doc_exists_for(t.get("claims") or []):
+        # sync drops a queued task whose claims name no doc, so this fixer would be removed on the next pass and the
+        # branch would be re-probed, conflict and be handed to a new fixer forever (2026-11-11: 170 rounds on
+        # fix-gate-formal-doc-truth, and bug-mid-codegen-tagged-generator-mixed-t left `fixer` naming a vanished task)
+        _cap_merge_fix(name, "merge-fix: %s has no bug doc for its claims %s; no fixer is queued (sync would drop it)"
+                       % (name, t.get("claims")))
         return
     files = sorted(set(l.split("Merge conflict in ")[-1].strip() for l in conflict_text.splitlines() if "Merge conflict in" in l))
     task = ("Branch %s (a finished, verified worker branch; original task: %s) conflicts with current master in: %s. "
@@ -221,10 +246,8 @@ def enqueue_merge_fix(name, t, conflict_text):
             "python3 tools/memslot.py --gb 8 --label x --. You are a light worker: no gate, no self-host build. Never use git stash. "
             "Commit the merge. Finish with the REPORT block and a CONTROL-STATUS line."
             % (t["branch"], t["summary"][:150], ", ".join(files) or "see `git merge master`"))
-    mname = "fix-merge-" + name
-    if mname in C.load():
-        mname += "-%d" % int(time.time() % 100000)
-    C.cmd_enqueue(_ap.Namespace(name=mname[:60], claim=t["claims"] or ["task:" + mname], task=task, task_file=None,
+    mname = C.free_task_name("fix-merge-" + name)
+    C.cmd_enqueue(_ap.Namespace(name=mname, claim=t["claims"] or ["task:" + mname], task=task, task_file=None,
                                 file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls")))
     with C.registry() as reg:
         reg[name]["state"] = "superseded"

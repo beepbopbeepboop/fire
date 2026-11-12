@@ -9745,10 +9745,18 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_int_overflow_trap(op, "vs")
             return
         if op == "*":
+            # The product fits in 64 bits exactly when the HIGH word (smulh) is
+            # the sign extension of the LOW word (mul), i.e. hi == lo asr 63 in
+            # every bit. The earlier sequence tested only bit 63 of hi XOR lo
+            # (`lsr #63`), which misses an overflow whose high word is nonzero
+            # but whose low word's top bit equals it: `triple(2**63 - 1)` wrapped
+            # to 9223372036854775805 and exited 0. The fix is the full test:
+            # sign(lo) into a scratch, XOR into hi, a zero result means it fits.
+            # x1 is the second operand, dead once `mul` has read it.
             self.asm.emit(encode_smulh_xd_xn_xm(2, 0, 1))
             self.asm.emit(encode_mul_xd_xn_xm(0, 0, 1))
-            self.asm.emit(encode_eor_xd_xn_xm(2, 2, 0))
-            self.asm.emit(encode_lsr_xd_xn_imm(2, 2, 63))
+            self.asm.emit(encode_asr_xd_xn_imm(1, 0, 63))
+            self.asm.emit(encode_eor_xd_xn_xm(2, 2, 1))
             self._emit_int_overflow_trap(op, None, reg=2)
             return
         raise CodegenError(
