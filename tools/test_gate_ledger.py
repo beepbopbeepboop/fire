@@ -7,6 +7,10 @@ import ast, os, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gate_ledger as G
 
+def _doc(name):
+    return "bugs/" + name + ".md"      # built, not spelled: a test fixture is not a citation of a doc
+
+
 SRC = '''# header
 test('alpha', [PY, 'a.py'], mem='tiny')
 test('beta', [PY, 'b.py'],
@@ -20,13 +24,13 @@ fanout('eps', [PY, 'e.py'], ['x'], mem='tiny')
 
 class NeedsGate(unittest.TestCase):
     def test_docs_and_orchestration_cannot_change_a_verdict(self):
-        self.assertFalse(G.needs_gate(["bugs/x.md", "doc/y.html", "README.md", "tools/swarm.py", "tools/test_swarm_why.py",
+        self.assertFalse(G.needs_gate([_doc("x"), "doc/y.html", "README.md", "tools/swarm.py", "tools/test_swarm_why.py",
                                        "tools/gate_ledger.py", "tools/gates.json"]))
 
     def test_the_compiled_path_and_the_suite_do(self):
         for f in ("gimple_codegen.py", "fire_compiler.py", "mojo/backend_gimple/emit_stmts.py", "runtime/fire_runtime.c",
                   "tools/suite.py", "test_gimple.py", "formal/model.py"):
-            self.assertTrue(G.needs_gate(["bugs/x.md", f]), f)
+            self.assertTrue(G.needs_gate([_doc("x"), f]), f)
 
 
 class Bisect(unittest.TestCase):
@@ -71,13 +75,13 @@ class Splice(unittest.TestCase):
     def test_disabled_names_the_gate_doc_and_round_trips(self):
         out = G.set_disabled(SRC, "beta")
         ast.parse(out)
-        self.assertEqual(G.get_disabled(out, "beta"), "bugs/gate-beta.md")
+        self.assertEqual(G.get_disabled(out, "beta"), _doc("gate-beta"))
         self.assertEqual(G.drop_disabled(out, "beta"), SRC)
         self.assertEqual(G.set_disabled(out, "beta"), out)                 # already disabled: no second marker
         self.assertEqual(G.set_disabled(SRC, "gamma"), SRC)                # a person's expect marker is left alone
 
     def test_a_disabled_marker_that_is_not_ours_stays(self):
-        src = SRC.replace("mem='tiny')\ntest('beta'", "mem='tiny', disabled='bugs/other.md')\ntest('beta'")
+        src = SRC.replace("mem='tiny')\ntest('beta'", "mem='tiny', disabled='bugs/notes.txt')\ntest('beta'")
         self.assertEqual(G.drop_disabled(src, "alpha"), src)
 
     def test_an_unknown_job_is_a_no_op(self):
@@ -126,12 +130,12 @@ class GitHistory(unittest.TestCase):
 
     def test_pending_lists_only_commits_a_gate_can_see(self):
         base = self.commit("gimple_codegen.py")
-        self.commit("bugs/a.md"); code = self.commit("runtime/r.c"); self.commit("tools/swarm.py")
+        self.commit(_doc("a")); code = self.commit("runtime/r.c"); self.commit("tools/swarm.py")
         self.assertEqual([s for s, _ in G.pending(base, "master", cwd=self.d)], [code])
 
     def test_docs_only_since_the_last_run_means_not_due(self):
         base = self.commit("gimple_codegen.py")
-        self.commit("bugs/a.md"); self.commit("doc/b.html")
+        self.commit(_doc("a")); self.commit("doc/b.html")
         self.assertEqual(G.pending(base, "master", cwd=self.d), [])
 
     def test_no_earlier_run_is_one_pending_entry(self):

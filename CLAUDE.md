@@ -108,13 +108,11 @@ Recorded 2026-11-02 after a near-miss report; the owner exception added
 2026-11-05, when the user asked for a runaway 46 GB `fire.py --dump-full`
 (left by an agent's own aborted build) to be killed.
 
-## The integrator owns master — start the swarm from `../work-master`
-Landings fast-forward master in the tree the swarm runs from (`C.MAIN` is the directory `tools/` lives in), so that tree
-must be one nobody edits: an uncommitted edit that a landing also touches used to stop the landing. One time:
-`python3 tools/master_tree.py setup` (master moves to `../work-master`, this checkout goes to `dev`, edits stay in
-place). Then start the swarm with `python3 ../work-master/tools/swarm.py` (it refuses a tree that is not on master).
-To take landings into your checkout: `python3 tools/master_tree.py sync` (stash, fast-forward, re-apply, drop only
-when clean; a conflict keeps the stash entry). To land your own commits from `dev`, merge them in `../work-master`.
+## Landings carry your uncommitted edits across (tools/stash_ff.py)
+The integrator gates in `../work-integ` (branch `integ`) and then moves master, which is checked out here. The final
+merge stashes your uncommitted tracked edits (by sha, never by stash position), merges, re-applies and drops the stash
+only when the re-apply was clean. A landing therefore waits only for a real textual conflict with your edits; then the
+merge is undone, your files are exactly as they were, and the next pass retries. Untracked files are not stashed.
 
 ## Bug rounds — every round must move us closer to the end
 Base directive (user, 2026-10-31): one work round handles ONE bug, fully

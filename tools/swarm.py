@@ -823,16 +823,6 @@ def land():
     if held:
         log("land: %d more finished branch(es) waiting behind the batch cap of %d: %s"
             % (len(held), LAND_BATCH, ", ".join(held[:3]) + (" ..." if len(held) > 3 else "")))
-    dirty = set(C.git("diff", "--name-only", "HEAD", cwd=C.MAIN).split())
-    if dirty:
-        tasks, keep = C.load(), []
-        for n in names:
-            hit = dirty & set(C.git("diff", "--name-only", "master..." + tasks[n]["branch"], check=False).split())
-            if hit:
-                log("holding %s: the main checkout has uncommitted edits to %s" % (n, ", ".join(sorted(hit))))
-            else:
-                keep.append(n)
-        names = keep
     if not names:
         return None
     tasks = C.load()
@@ -853,7 +843,7 @@ def land():
             r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py"), "--stdlib", "--only"] + merged,
                                capture_output=True, text=True, cwd=C.MAIN)
             for line in (r.stdout + r.stderr).splitlines():
-                if line.startswith(("GREEN", "RED", "CONFLICT", "another integrator", "master moved")):
+                if line.startswith(("GREEN", "RED", "CONFLICT", "another integrator", "master moved", "landing waits")):
                     log(line[:200])
             landed = "GREEN" in (r.stdout + r.stderr)
             break
@@ -941,11 +931,9 @@ def main():
         sys.exit(who())
     if a.why:
         sys.exit(why(a.why))
-    # Landings fast-forward master in C.MAIN (the tree this file lives in), so that tree must have master checked out.
-    # It should be the integrator's own tree (tools/master_tree.py setup), not the one a person edits in.
+    # Landings move master in C.MAIN (the tree this file lives in), so that tree must have master checked out.
     if C.git("branch", "--show-current", cwd=C.MAIN, check=False) != "master":
-        sys.exit("%s does not have master checked out, so landings cannot fast-forward it. Start the swarm from the "
-                 "tree that owns master (python3 tools/master_tree.py setup creates ../work-master)." % C.MAIN)
+        sys.exit("%s does not have master checked out, so landings cannot move it." % C.MAIN)
     # redirect output to the log file so it is captured without a shell redirect
     if a.log_file:
         os.makedirs(os.path.dirname(os.path.abspath(a.log_file)), exist_ok=True)
