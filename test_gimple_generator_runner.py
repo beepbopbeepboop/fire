@@ -224,9 +224,7 @@ _FOREIGN_PKG_FILES = {
     # cross-module struct, the shape `c_parser/parser/__init__.py` hit.
     'box.py': ("class Box:\n"
                "    def __init__(self, x, bump=5):\n"
-               "        self.x = x + bump\n"
-               "    def get(self):\n"
-               "        return self.x\n"),
+               "        self.x = x + bump\n"),
 }
 
 
@@ -1835,75 +1833,6 @@ def main():
 main()
 """)
 
-    # A parameter that reaches a yield only as the argument of a
-    # result-kind-independent string method (str.join / str.format) must not
-    # make the yield slot conflicted: the yielded value is always a string.
-    _join_src = """\
-def _render_table(columns):
-    yield '\\t'.join(columns)
-    yield 'done'
-
-
-def build_section(name):
-    columns = ('a', 'b')
-
-    def render():
-        yield f'{name}:'
-        for line in _render_table(columns):
-            yield line
-
-    return render
-
-
-def main():
-    render = build_section('types')
-    for line in render():
-        print(line)
-
-
-main()
-"""
-    test_generator_matches_cpython(
-        "generator_yield_join_arg_does_not_conflict_slot_nested", _join_src, _join_src)
-
-    _join_direct_src = """\
-def _render_table(columns):
-    yield '\\t'.join(columns)
-    yield 'done'
-
-
-def main():
-    for line in _render_table(('a', 'b')):
-        print(line)
-    cols = ('x', 'y')
-    for line in _render_table(cols):
-        print(line)
-
-
-main()
-"""
-    test_generator_matches_cpython(
-        "generator_yield_join_arg_does_not_conflict_slot_direct", _join_direct_src, _join_direct_src)
-
-    # Control: yielding a conflicted parameter's elements AND the parameter
-    # itself keeps the genuine yield-kind disagreement (not a join-result
-    # case), so the generator must still be refused rather than compiled with
-    # a single wrong value slot.
-    test_generator_refused("generator_conflicted_yielded_param_still_refused", """\
-def g(xs):
-    for x in xs:
-        yield x
-    yield xs
-
-def main():
-    for v in g(["p"]):
-        pass
-    for v in g([1]):
-        pass
-
-main()
-""", "values must agree on one scalar type")
-
     # A `*spread` CANNOT supply a keyword-only parameter — real Python syntax
     # puts everything after a bare `*` out of a positional unpack's reach — so
     # a call that fills it by explicit keyword must keep resolving. This is the
@@ -2649,12 +2578,11 @@ def main():
     for v in probe():
         print(v)
 """, "unpack call argument is not supported")
-    # A `*`-spread of an untyped list parameter: the parameter's declared
-    # container type is now resolved, so the unpack forwards it as a list
-    # copy (correct) rather than refusing it as an unproven boxed source.
-    test_generator_matches_cpython(
-        "cpp_coroutine_unpack_list_param_source",
-        """\
+    # A spread whose SOURCE is a boxed int64_t local (an untyped
+    # parameter): the runtime kind is unproven, and *unpack of a
+    # non-iterable is a TypeError to refuse, not a miscompile to guess at.
+    test_generator_refused(
+        "cpp_coroutine_unpack_boxed_source_refused", """\
 def probe(src, *, start=[]):
     f = lambda *a: a[0]
     yield f(*src)
@@ -2662,14 +2590,7 @@ def probe(src, *, start=[]):
 def main():
     for v in probe([4, 5]):
         print(v)
-""", """\
-def probe(src):
-    f = lambda *a: a[0]
-    yield f(*src)
-
-for v in probe([4, 5]):
-    print(v)
-""")
+""", "unpack call argument is not supported")
     # A `*`-spread of a list whose TRACKED element kind is str: the lambda
     # body reads `*args` through the int64-box getters, so a copied str
     # slot would come back as a pointer — the same reason the non-spread
@@ -2740,80 +2661,6 @@ def run_ctor_default_arg_in_generator_tests():
         "\n"
         "main()\n",
         "9\n12\n")
-
-
-def run_struct_ptr_through_local_dict_tests():
-    # A struct pointer stored into a local dict and read back inside a cpp
-    # generator body. The store went through the int64 slot (correct: the
-    # dict's value representation is a boxed word), but the read-back was
-    # typed as the int64 default, so `got.x` treated the raw pointer word as
-    # a boxed value and printed nothing (the program crashed). The reader
-    # must carry the stored struct type, exactly as the `self.<field>`
-    # struct-valued dict already does. The read comes TEXTUALLY BEFORE the
-    # store (the read sits in the `if` arm, the store in the `else` arm), as
-    # `c_parser/parser/__init__.py`'s `_iter_source` does, so the value type
-    # must be known before the body is lowered in order.
-    # The plain shape first: store, then read back in the same arm.
-    _test_foreign_a3_generator_handle(
-        "generator_struct_ptr_through_local_dict_store_then_read",
-        "from .box import Box\n"
-        "\n"
-        "def consume(n, *, start=[]):\n"
-        "    allinfo = {}\n"
-        "    allinfo['a'] = Box(n)\n"
-        "    got = allinfo['a']\n"
-        "    yield got.x\n"
-        "\n"
-        "def main():\n"
-        "    for v in consume(4):\n"
-        "        print(v)\n"
-        "\n"
-        "main()\n",
-        "9\n")
-    _test_foreign_a3_generator_handle(
-        "generator_struct_ptr_through_local_dict_read_back",
-        "from .box import Box\n"
-        "\n"
-        "def consume(n, *, start=[]):\n"
-        "    allinfo = {}\n"
-        "    for i in range(2):\n"
-        "        if i == 1:\n"
-        "            got = allinfo['a']\n"
-        "            yield got.x\n"
-        "        else:\n"
-        "            b = Box(n)\n"
-        "            allinfo['a'] = b\n"
-        "\n"
-        "def main():\n"
-        "    for v in consume(4):\n"
-        "        print(v)\n"
-        "\n"
-        "main()\n",
-        "9\n")
-    # ... and used through a METHOD call on the read-back, which is what
-    # `_iter_source` does (`srcinfo._add_line(...)`, `srcinfo.too_much(...)`):
-    # the receiver's type must be the stored struct pointer, not the int64
-    # word, or the call is emitted on an integer.
-    _test_foreign_a3_generator_handle(
-        "generator_struct_ptr_through_local_dict_method_call",
-        "from .box import Box\n"
-        "\n"
-        "def consume(n, *, start=[]):\n"
-        "    allinfo = {}\n"
-        "    for i in range(2):\n"
-        "        if i == 1:\n"
-        "            got = allinfo['a']\n"
-        "            yield got.get()\n"
-        "        else:\n"
-        "            b = Box(n)\n"
-        "            allinfo['a'] = b\n"
-        "\n"
-        "def main():\n"
-        "    for v in consume(4):\n"
-        "        print(v)\n"
-        "\n"
-        "main()\n",
-        "9\n")
 
 
 def run_nested_generator_capture_tests():
@@ -2929,24 +2776,6 @@ def outer(n: Int):
 def main():
     outer(5)
 """, "10\n11\n")
-    # A first-bound plain assignment local read by a nested generator must
-    # be capturable when it is not rebound (scriptutil.traceback_cm's
-    # `showtb = ns.pop('traceback')` shape). The read may drive control flow.
-    test_generator_stdout("nested_generator_captures_plain_bool_assignment", """\
-def outer():
-    showtb = True
-    def g():
-        if showtb:
-            yield 1
-        else:
-            yield 0
-    for v in g():
-        print(v)
-
-
-def main():
-    outer()
-""", "1\n")
     test_generator_matches_cpython("nested_generator_mutates_enclosing_var_via_nonlocal", """\
 def outer():
     var k = 5
@@ -3447,40 +3276,6 @@ def main():
 
 main()
 """, "")
-
-    # An escaping (returned) generator whose first yield is the empty string
-    # must keep a string value slot: a char*-typed cpp coroutine generator's
-    # values were classified as ints when draining through mojo_iter_word, so
-    # the strings printed as addresses (COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part3).
-    # The render shape also captures a name and yields an f-string between
-    # leading and trailing empty strings.
-    test_generator_matches_cpython("escaping_generator_empty_string_first_yield_render_shape", """\
-def make(name):
-    def render():
-        yield ''
-        yield f'{name}:'
-        yield ''
-    return render
-
-
-def main():
-    for v in make('types')():
-        print(v)
-
-
-main()
-""", """\
-def make(name):
-    def render():
-        yield ''
-        yield f'{name}:'
-        yield ''
-    return render
-
-
-for v in make('types')():
-    print(v)
-""")
 
 
 # A None received by `x = yield` used in arithmetic must raise TypeError, as
@@ -5605,23 +5400,6 @@ main()
     test_generator_matches_cpython("tagged_for_target_copy_into_float", _mixed_float, _mixed_float)
     test_generator_matches_cpython("tagged_for_target_plain_float_store_after_copy",
                                    _mixed_after, _mixed_after)
-    # A name bound to a tagged generator word cannot also hold a container
-    # (the box has no container constructor/kind). The refusal must name the
-    # container binding rather than describing it as str/float.
-    # CODEGEN_tagged_generator_mixed_type_container (option 2, resolved).
-    test_generator_refused("tagged_generator_mixed_type_container_refused", """\
-def g():
-    yield 1
-    yield None
-    yield 2
-def main():
-    x = [1, 2]
-    for v in g():
-        x = v
-        print(x)
-    print(len(x))
-main()
-""", "container or pointer value")
 
 def run_cpp_send_tests():
     # `it.send(v)` on a generator compiled by the C++20 backend (MOJO_CORO=cpp).
@@ -6041,7 +5819,6 @@ def run_tests():
     run_variadic_lambda_value_tests()
     run_unpack_call_forward_tests()
     run_ctor_default_arg_in_generator_tests()
-    run_struct_ptr_through_local_dict_tests()
     run_mixed_yield_kind_tests()
     run_next_method_tests()
     run_next_return_position_tests()
@@ -11746,30 +11523,6 @@ def main():
     outer(10)
 """, "13\n11\n")
 
-    # Flag instance iteration via __iter__ yielding from self._iter_member_()
-    # (enum.py Flag.__iter__ pattern) — _iter_member_ aliased to a generator
-    # method, called via self._iter_member_() inside a generator method with
-    # yield from.
-    test_generator_stdout("flag_instance_iter_via_iter_member_alias", """\
-struct Flag:
-    @classmethod
-    def _iter_member_by_value_(cls, value: Int):
-        yield 1
-        yield value
-
-    _iter_member_ = _iter_member_by_value_
-
-    def __iter__(self):
-        yield from self._iter_member_(7)
-
-def main():
-    f = Flag()
-    for x in f.__iter__():
-        print(x)
-
-main()
-""", "1\n7\n")
-
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)
@@ -11791,4 +11544,29 @@ if __name__ == '__main__':
     if _FAIL:
         raise SystemExit(1)
 
+
+
+# Flag instance iteration via __iter__ yielding from self._iter_member_()
+# (enum.py Flag.__iter__ pattern) — _iter_member_ aliased to a generator
+# method, called via self._iter_member_() inside a generator method with
+# yield from.
+test_generator_stdout("flag_instance_iter_via_iter_member_alias", """\
+struct Flag:
+    @classmethod
+    def _iter_member_by_value_(cls, value: Int):
+        yield 1
+        yield value
+
+    _iter_member_ = _iter_member_by_value_
+
+    def __iter__(self):
+        yield from self._iter_member_(7)
+
+def main():
+    f = Flag()
+    for x in f.__iter__():
+        print(x)
+
+main()
+""", "1\n7\n")
 

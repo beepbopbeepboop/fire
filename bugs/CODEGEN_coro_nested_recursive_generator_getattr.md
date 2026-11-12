@@ -121,3 +121,21 @@ the commit that closes it.
      can actually prove. Rewriting the call sites to avoid an untyped
      parameter would defeat the point: user code of this shape stays
      untypeable by construction.
+
+### Update 2026-11-12 (round: obstacle 1 landed)
+
+- LANDED: obstacle 1 above. `_generator_value_kind` now treats
+  `yield from <this same generator>` as contributing no kind
+  (`_is_self_delegation`, mojo/middle/coro.py). A module-level recursive tuple
+  walk resolves to `('tuple', '')` instead of
+  `(None, 'mixed tuple / non-tuple yields (v0)')`. Pinned by
+  `test_gimple.py::test_self_delegating_generator_kind_ignores_its_own_yield_from`
+  (fails on the pre-fix kind answer, passes after).
+- NOT CHANGED: the minimal reproducer above still refuses, now at obstacle 2
+  (the tuple-slot static typing: `body` is untyped, `_ambiguous_yielded_params`
+  returns `{'body'}`). Done-when is therefore still unmet; this doc stays open.
+- Next step: obstacle 2. Decide between a boxed/tagged tuple slot for
+  parameters the static scan cannot type (the `'l'` box kind in
+  `mojo_repr_boxed`) and a scan that proves `body`'s kind from the call sites
+  (`fd.body`, and the recursive `sub` from `getattr`).
+- Not verified this round: the fire.ci self-host build (integrator gate).

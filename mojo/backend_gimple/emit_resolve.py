@@ -3530,7 +3530,9 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
         # fall-through above exists for.
         import elaborate as _elab_mod
         if isinstance(e, _elab_mod.WhereConformanceError):
-            raise _elab_mod.where_violation_error('instantiation', base_name, e)
+            raise RuntimeError(
+                f"error: invalid instantiation of '{base_name}': violated constraint\n"
+                f"note: {type(e).__name__}: {e}")
         gen._generic_struct_elaboration_failures.append(
             f"{base_name}[{', '.join(type_args)}] from {source}: "
             f"{type(e).__name__}: {e}")
