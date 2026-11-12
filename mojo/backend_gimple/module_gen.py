@@ -1255,6 +1255,7 @@ def _infer_multi_kind_return(gen, body, params=None,
         gen._cur_func_body = body
         gen._mixed_container_locals = None
         gen._mixed_scalar_locals = None
+        gen._mixed_value_locals = None
         # Imported HERE rather than at module scope: `gimple_codegen.py`
         # imports this module before it imports `emit_infra`, so a top-level
         # `import ... emit_infra` in this file is a circular import that
@@ -1335,6 +1336,7 @@ def _infer_multi_kind_return(gen, body, params=None,
             gen._cur_func_body = _saved_body
             gen._mixed_container_locals = None
             gen._mixed_scalar_locals = None
+            gen._mixed_value_locals = None
 
 
 def _homogeneous_tuple_ann_elem(self, _ret_ann):
