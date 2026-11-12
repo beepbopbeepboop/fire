@@ -68,14 +68,12 @@ def test_constrained_tstring_message():
 
 def test_constrained_short_circuit_and_false():
     # Short-circuit: provably-false `and` must diagnose even if rhs is unknown.
-    try:
-        _compile('fn f[x: Int]():\n    constrained[False and x > 0, "nope"]()\n\nfn main():\n    f[1]()\n')
-    except RuntimeError as e:
-        s = str(e)
-        assert 'constraint failed' in s, s
-        assert 'nope' in s, s
-        return
-    raise AssertionError('provably-false short-circuit constrained compiled')
+    # Checked at instantiation, which the real build does (see diagnostic_build.py).
+    from diagnostic_build import build_refusal
+    rc, s = build_refusal('def f[x: Int]():\n    constrained[False and x > 0, "nope"]()\n\ndef main():\n    f[1]()\n')
+    assert rc != 0, 'provably-false constrained in a called generic built without error'
+    assert 'constraint failed' in s, s
+    assert 'nope' in s, s
 
 
 def test_constrained_short_circuit_or_false_needs_rhs():

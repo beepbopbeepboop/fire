@@ -1,6 +1,11 @@
 # DIAGNOSTICS: a provably false `comptime assert` in a called generic function compiles
 
-Status: OPEN. Filed 2026-11-11 on master. Measured with the real compiler (`tools/mojo build`) and ours (`compile_to_gimple`).
+Status: RESOLVED FOR THE BUILD, OPEN FOR THE IN-PROCESS API. Filed 2026-11-11 on master.
+
+Corrected diagnosis (2026-11-11, after the fix): the real build (`fire.py build`) ALREADY refuses a called generic with a provably false assert or constrained: `comptime assertion failed: nope` and `constraint failed: nope`, both matching the tests. The gap was in the in-process `compile_to_gimple` path, which does not instantiate a generic. The two tests now check the diagnostic through the real build (`diagnostic_build.py`), and the suite markers are removed.
+
+Still open: `compile_to_gimple` (do_imports True or False) emits an unresolved `func(...)` for a call to an uninstantiated generic, silently, instead of refusing. Anything that uses that API for a program with a called generic gets no diagnostic and no definition for the callee.
+ Measured with the real compiler (`tools/mojo build`) and ours (`compile_to_gimple`).
 
 ## Symptom
 
