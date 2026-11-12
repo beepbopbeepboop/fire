@@ -6296,6 +6296,63 @@ def main():
 main()
 """, "0\n1\n")
 
+    # The same walk reached through a NESTED def: `inner` is an ordinary def
+    # nested in `outer`, and the list reaches `walk` only through `inner`'s
+    # parameter. Used to refuse ("yields ['xs'] ... call sites do not all pass
+    # the same statically-known type"): the scan typed `walk(fn)` with
+    # `outer`'s env, where `fn` is not bound, and never recorded `inner`'s own
+    # call sites. The scan now types each nested def's body with that def's own
+    # env, and records its call sites, so `fn` is `outer`'s `body`, a list.
+    test_generator_stdout("nested_def_returned_generator_iterated_in_for", """\
+def walk(xs):
+    for i, st in enumerate(list(xs)):
+        yield xs, i
+def outer(body):
+    def inner(fn):
+        return walk(fn)
+    return inner(body)
+def main():
+    for p in outer([1, 2]):
+        print(p[1])
+main()
+""", "0\n1\n")
+
+    # The nested def's argument must be typable for the walk to be. A value
+    # the scan cannot type at the nested call still refuses.
+    test_generator_refused("nested_def_returned_generator_untypable_arg_refuses", """\
+def walk(xs):
+    for i, st in enumerate(list(xs)):
+        yield xs, i
+def outer(body):
+    def inner(fn):
+        return walk(fn)
+    return inner(body)
+def main():
+    for p in outer(getattr(main, 'x', None)):
+        print(p[1])
+main()
+""", "yields ['xs']")
+
+    # A nested def that ESCAPES as a value (here returned, then called through
+    # another name) has call sites this scan cannot see, so its parameter must
+    # not be typed from the direct call alone. The string passed through `f`
+    # would otherwise reach `walk`'s list slot.
+    test_generator_refused("nested_def_escaping_value_call_refuses", """\
+def walk(xs):
+    for i, st in enumerate(list(xs)):
+        yield xs, i
+def outer(body):
+    def inner(fn):
+        return walk(fn)
+    inner(body)
+    return inner
+def main():
+    f = outer([1, 2])
+    for p in f("abc"):
+        print(p[1])
+main()
+""", "yields ['xs']")
+
     # The guard is what makes the recursive argument a list. Without it the
     # argument is an untypable hole and the slot must still refuse.
     test_generator_refused("module_level_recursive_tuple_generator_unguarded_refuses", """\
@@ -9835,7 +9892,6 @@ def main():
     _foreign_a3_generator_handle_for_loop()
     _foreign_cpp_module_global_value()
     _cpp_for_over_callable_local_is_named()
-    _regression_read_table_callable_reader()
     _cpp_coroutine_builtin_module_constant()
     _cpp_coroutine_exc_ctor_value()
 

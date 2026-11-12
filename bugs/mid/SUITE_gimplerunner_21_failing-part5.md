@@ -9,11 +9,12 @@
   (a dict's struct value uses its own repr first; a second struct type records its repr on its
   slot as kind 6). One test expectation was wrong and is corrected: `Q(y='b')` is the field dump
   the test rules out; CPython prints `Q<b>` from `Q.__repr__`.
-- DONE (2026-11-12): module-scope mixed-list kinds. A global's element kinds are recorded at
-  its store and carried onto each read (`_note_global_slot_kinds`, emit_exprs global read), and
-  the slice and list-cast paths keep them (emit_calls). `b = a[:]` at module scope now prints 2.5.
-- DONE (2026-11-12): bytes-keyed dict with a second struct type renders its own repr
-  (`mojo_dict_set_bytes_other_struct_repr`).
+- REMAINING (not one of the named cases): at MODULE scope a mixed list's kinds do not reach a
+  name. `a = [1, 2.5]` / `b = a[:]` / `print(b[1])` prints raw bits (`print(a[1])` is right), and
+  the same program inside a `def main()` is right. Module-level globals lose the maybe-kinds
+  marker. Open.
+- REMAINING (narrow): a bytes-keyed dict with a second struct type still records no repr for that
+  slot (`mojo_dict_set_bytes_other_struct`); only the str-keyed path carries it.
 
 ## Goal
 
