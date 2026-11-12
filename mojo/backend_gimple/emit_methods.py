@@ -3069,6 +3069,22 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # generalized). Gated to this compiler's own `gimple*.py` sources
         # so it can never intercept a real stdlib module method.
         if _selfhost_sibling_member_kind(gen, module_name, method_name) is not None:
+            # Pin the member's home to the sibling module the alias names so
+            # bare-name resolution below can qualify it even when that
+            # module is compiled later in a cycle (emit_infra <-> emit_stmts)
+            # and the member is not yet present in this gen's flat
+            # func_param_types/func_return_types tables. Without this, the
+            # re-dispatch resolves to an unqualified bare symbol and emits a
+            # weak "unavailable in compiled mode" stub while the real
+            # definition is emitted under its qualified mangled name.
+            _sh_info = (getattr(gen, 'imported_symbols', None) or {}).get(module_name)
+            _sh_sub_ref = ((_sh_info.get('module')
+                            if isinstance(_sh_info, dict) else None)
+                           or module_name)
+            try:
+                gen._note_own_func_home(method_name, _sh_sub_ref, record_scope=False)
+            except Exception:
+                pass
             # Re-dispatch as a BARE-name call: the alias qualifier is a
             # Python-import artifact only. `_lower_call` owns struct-ctor
             # allocation, default-argument padding, keyword ordering and
