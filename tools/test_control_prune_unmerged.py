@@ -1,14 +1,27 @@
 #!/usr/bin/env python3
-"""Regression test: prune never drops entries whose branch ref exists with commits outside master.
+"""Regression test: when the merge check cannot be read, prune drops nothing.
 
-Previously, when `unmerged_branches()` returned an empty set (because the git command failed or
-master was unresolvable in the worktree context), `done_and_gone` treated every branch as merged
-and pruned terminal entries whose worktree dir no longer matched. This test simulates that scenario:
-a throwaway git repo acts as `MAIN`, `control.MAIN` is pointed at it, and an unmerged branch with a
-commit not on master exists. `cmd_prune` must keep the terminal registry entry.
+2026-11-11: the task registry was cleaned before the orchestrator restart and 572 entries whose
+branches held commits master does not have were removed from the registry (the only record mapping
+entry -> branch/worktree/claims). The branches and worktrees were left alone; only the registry rows
+were lost.
 
-The fix: `unmerged_branches()` returns None when the merge check can't be read, and
-`done_and_gone()` refuses to prune when `unmerged` is None.
+Root cause: `unmerged_branches()` ran `git for-each-ref --no-merged master` and discarded the exit
+code, so an unreadable merge state (master unresolvable in the worktree context) came back as an
+EMPTY set — every branch read as "merged". `done_and_gone()` then called a terminal entry with a
+missing worktree DONE-AND-GONE, and `cmd_prune` dropped it, unlanded commits and all. A failed merge
+check must mean "keep", never "merged".
+
+This test builds a repo where `master` does not resolve (exactly the worktree-context failure mode)
+and points control.MAIN at it:
+
+  * `unmerged_branches()` must report the merge state as unreadable (None), not as an empty set.
+  * `cmd_prune` must KEEP a terminal registry entry whose branch has commits outside the default
+    branch, even though its worktree directory is gone.
+  * `cmd_status` must not crash on the same unreadable merge state, and must keep showing the entry.
+
+On the pre-fix code the entry was pruned (and, with the first fix but without the cmd_status guard,
+status crashed with TypeError), so this test fails there and passes only with the complete fix.
 """
 import argparse
 import io
@@ -31,15 +44,19 @@ def g(cwd, *a):
 
 def main():
     with tempfile.TemporaryDirectory() as d:
-        repo = os.path.join(d, "repo"); os.makedirs(repo)
-        g(repo, "init", "-q", "-b", "master")
+        # A repo whose default branch is not master: `git for-each-ref --no-merged master` fails,
+        # the "merge check can't be read" case.
+        repo = os.path.join(d, "repo")
+        os.makedirs(repo)
+        g(repo, "init", "-q", "-b", "main")
         g(repo, "commit", "-q", "--allow-empty", "-m", "root")
+        g(repo, "branch", "work/fix-some-feature")
+        g(repo, "checkout", "-q", "work/fix-some-feature")
+        g(repo, "commit", "-q", "--allow-empty", "-m", "unlanded work")
+        g(repo, "checkout", "-q", "main")
 
-        # A worktree detached at master, like the fleet worktree
-        wt = os.path.join(d, "work-1")
-        g(repo, "worktree", "add", "-q", "--detach", wt, "master")
+        gone = os.path.join(d, "work-gone")  # worktree directory does NOT exist: prune's target
 
-        # A registry entry for a terminal task whose branch has unmerged commits
         ctl = os.path.join(d, "ctl")
         os.makedirs(ctl)
         os.environ["CONTROL_CTL_DIR"] = ctl
@@ -48,37 +65,42 @@ def main():
             json.dump({
                 "test-task-1": {
                     "slot": 1,
-                    "state": "finished",   # terminal state
-                    "worktree": wt,
+                    "state": "abandoned",  # terminal
+                    "worktree": gone,
                     "branch": "work/fix-some-feature",
                     "claims": [],
+                    "pid": 0,
                 }
             }, f)
 
         control.MAIN = repo
 
-        # Create an unmerged branch with a commit outside master
-        g(repo, "branch", "work/fix-some-feature")
-        g(repo, "checkout", "-q", "work/fix-some-feature")
-        g(repo, "commit", "-q", "--allow-empty", "-m", "feature commit")
-        g(repo, "checkout", "-q", "master")
-
-        # Verify the fix: unmerged_branches() must see the branch as unmerged
         um = control.unmerged_branches()
-        assert um == {"work/fix-some-feature"}, um
+        if um is not None:
+            print("BUG: unreadable merge check reported as %r, not None" % (um,))
+            return 1
 
-        # Prune: the terminal entry must be KEPT (branch has unmerged commits)
-        a = argparse.Namespace(dry_run=False, branches=False, prune=True, jobs=16)
+        a = argparse.Namespace(dry_run=False)
         buf = io.StringIO()
         with redirect_stdout(buf):
             control.cmd_prune(a)
-        out = buf.getvalue()
-
-        with open(tasks_json, "r") as f:
+        with open(tasks_json) as f:
             tasks = json.load(f)
-
         if "test-task-1" not in tasks:
-            print("BUG: terminal entry with unmerged branch was pruned! Output:", out)
+            print("BUG: terminal entry with unlanded commits was pruned when the merge check "
+                  "could not be read! Output:", buf.getvalue())
+            return 1
+
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                control.cmd_status(argparse.Namespace(all=False, verbose=False))
+        except TypeError as e:
+            print("BUG: cmd_status crashed on an unreadable merge state: %s" % e)
+            return 1
+        if "test-task-1" not in buf.getvalue():
+            print("BUG: cmd_status hid a live entry when the merge check could not be read! "
+                  "Output:", buf.getvalue())
             return 1
         print("test_control_prune_unmerged: ok")
         return 0

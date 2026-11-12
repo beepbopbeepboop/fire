@@ -406,7 +406,7 @@ def cmd_status(a):
                 lines = [l for l in f.read().splitlines() if l.strip()]
             last = lines[-1][:90] if lines else ""
         v = verdict(t)
-        n_ahead = ahead(t) if t.get("branch") in unmerged else 0
+        n_ahead = ahead(t) if (unmerged is not None and t.get("branch") in unmerged) else 0
         return st, v, n_ahead, dirty, last
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=16) as ex:
@@ -425,6 +425,8 @@ def cmd_prune(a):
     Never touches a task that is running, has a worktree, has commits outside master, or is in a
     non-terminal state."""
     unmerged = unmerged_branches()
+    if unmerged is None:
+        print("prune: merge check unreadable (master does not resolve in %s); keeping every entry" % MAIN)
     with registry() as tasks:
         gone = [n for n, t in tasks.items() if done_and_gone(t, unmerged) and state_of(t) != "running"]
         if not a.dry_run:
