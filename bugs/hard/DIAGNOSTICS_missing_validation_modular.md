@@ -1,6 +1,6 @@
 # DIAGNOSTICS: missing validation/error reporting for modular test cases
 
-SPLIT: all six parts have landed (see Status); the rest of this doc is still open.
+SPLIT: DIAGNOSTICS_missing_validation_modular-part1, DIAGNOSTICS_missing_validation_modular-part2, DIAGNOSTICS_missing_validation_modular-part3, DIAGNOSTICS_missing_validation_modular-part4, DIAGNOSTICS_missing_validation_modular-part5, DIAGNOSTICS_missing_validation_modular-part6
 
 ## Symptom
 Modular test files expect compile-time errors/diagnostics that our compiler does not produce (it compiles them successfully). These are cases where modular's compiler rejects invalid code but ours accepts it.
