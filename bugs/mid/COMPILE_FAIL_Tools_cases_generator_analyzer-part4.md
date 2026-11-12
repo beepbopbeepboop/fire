@@ -1,6 +1,6 @@
-# COMPILE_FAIL_Tools_cases_generator_analyzer-part3: analyzer.py builds and matches CPython on real input
+# COMPILE_FAIL_Tools_cases_generator_analyzer-part4: analyzer.py builds and matches CPython on real input
 
-Part 3 of 3 of `bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md`.
+Part 4 of 4 of `bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md`.
 
 ## Goal
 
@@ -8,8 +8,8 @@ Close the original doc: `python3 fire.py build` of
 `Python-3.14.6/Tools/cases_generator/analyzer.py` exits 0 with no `error:`
 lines, the binary runs, and its analysis output on a real `bytecodes.c` is
 byte-identical to CPython running the same analyzer. This part owns the
-end-to-end acceptance; the code fix is part2 (sibling struct layout); the
-parenthesized ternary is already landed (b00e6669e). Part1 is an independent correctness fix on the
+end-to-end acceptance; the code fixes are part2 (sibling struct layout) and
+part3 (parenthesized ternary). Part1 is an independent correctness fix on the
 class-pattern path and does not gate the build.
 
 ## Current state (measured 2026-11-11, HEAD `d210765a2`)
@@ -21,13 +21,12 @@ python3 tools/memslot.py --gb 8 --label analyzer-build -- \
 ```
 
 Exit 1 in **15.3 s**, peak 0.1-0.6 GB across two runs (well inside 8 GB).
-26 `error:` lines on the 2026-11-12 re-run (27 on the 2026-11-11 measurement; the
-two `analyzer.py:194` ones are gone with b00e6669e):
+27 `error:` lines:
 
 | family | count | part that fixes it |
 |---|---|---|
 | sibling `IfStmt`/`ForStmt`/`WhileStmt` layout (`has no member named if_/body/for_/header/while_`, plus the constructor int64-vs-MojoList assignments) | 22 in `parsing.py` + 3 misattributed to `plexer.py` | part2 |
-| `analyzer.py:194:10: expected expression before '(' token` (reported twice, same site) | 2 | landed, b00e6669e |
+| `analyzer.py:194:10: expected expression before '(' token` (reported twice, same site) | 2 | part3 |
 
 Two things the original doc's older entries name are **already fixed in this
 tree** and must not be re-investigated as if open:
@@ -44,13 +43,13 @@ stubbing link path the old entry describes.
 
 ## Plan
 
-1. **Preconditions.** Confirm part2's change is present (the sibling typedef
-   carries `if_`/`body`) and that b00e6669e (the `str()`/`repr()` None guard as
-   control flow, not `(... ? ... : ...)`) is in the tree. If part2 is not landed,
-   stop and report it rather than duplicating its fix here.
+1. **Preconditions.** Confirm part2's and part3's changes are present (the
+   sibling typedef carries `if_`/`body`, and the `str()` None guard is a
+   branch, not `(... ? ... : ...)`). If either is not landed, stop and report
+   the missing part rather than duplicating its fix here.
 2. **Re-run the build command above.** Require exit 0 and no `error:` line.
    If a new error family appears, root-cause it here:
-   * if it is a small, self-contained lowering defect (same size as the b00e6669e ternary fix),
+   * if it is a small, self-contained lowering defect (same size as part3),
      fix it in this part with a regression test;
    * if it is a new architectural family (another same-bare-name table, a
      refused construct, link-mode policy), file a new doc for it, commit that,
@@ -82,7 +81,7 @@ stubbing link path the old entry describes.
 * Run: the compiled analyzer's stdout on `Python/bytecodes.c` is
   byte-identical to `python3 analyzer.py` on the same file, and the binary
   exits 0.
-* `python3 test_match_class_pattern_positional.py` and the part1/part2
+* `python3 test_match_class_pattern_positional.py` and the part1/part2/part3
   regression tests still pass.
 * Self-host: the integrator's `make gate` is the confirmation that the part2
   identity change did not alter the compiler's own struct set. This part does
@@ -90,9 +89,7 @@ stubbing link path the old entry describes.
 
 ## Done when
 
-`python3 test_analyzer_build.py` exits 0. The file is on disk; it builds through
-its own memslot wrapper, and on the 2026-11-12 tree it fails at the build step
-(exit 1, 26 error lines, first `plexer.py:292:5: ... 'ForStmt' has no member named 'header'`).
+`python3 test_analyzer_build.py` (new file) exits 0.
 
 The test:
 
@@ -107,7 +104,7 @@ The test:
    asserts identical stdout and both exit 0;
 4. on success prints `PASS: analyzer.py builds and matches CPython`.
 
-It fails on the current tree at step 2 (build exit 1, 26 error lines). Expected cost
+It fails on the current tree at step 2 (build exit 1, 27 errors). Expected cost
 on this machine: ~20 s and <1 GB, i.e. the same size as the `gimple` test.
 
 ## Out of scope

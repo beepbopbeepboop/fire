@@ -14998,6 +14998,9 @@ def main():
                   test_nested_class_var_attr_method_read_regression,
                   test_nested_class_var_attr_rebind_after_construction_regression,
                   test_nested_class_var_attr_instance_write_shadows_regression,
+                  test_module_class_attr_from_module_global_regression,
+                  test_module_class_attr_bare_and_int_from_module_global_regression,
+                  test_module_class_attr_expr_over_module_globals_regression,
                   test_nested_class_attr_expr_over_str_param_regression,
                   test_instance_write_shadows_class_attr_regression,
                   test_nested_class_attr_rebind_after_construction_regression,
@@ -15379,6 +15382,62 @@ def f(v: int):
 def main():
     print(f(4))
 """, "9\n")
+
+
+def test_module_class_attr_from_module_global_regression():
+    """Regression (bug:CODEGEN_module_scope_class_attr_nonliteral_unstored):
+    a MODULE-scope class attribute whose value names a module global is never
+    stored. `gen_module` seeds `_classattr_<C>__<attr>` only from literal
+    values, the global was typed `int64_t` for a `char *` source, and nothing
+    stored `C.name = S` afterwards, so `C().name` read back 0 (int) or None
+    (str) while CPython prints `x`. The class body runs at the class statement,
+    so the store belongs there in the module's top-level body, after `S` is
+    assigned, typed from `S`'s own global."""
+    test_gimple_stdout("gimple_module_class_attr_from_module_global", """\
+S = "x"
+
+class C():
+    var name = S
+
+def main():
+    print(C().name)
+""", "x\n")
+
+
+def test_module_class_attr_bare_and_int_from_module_global_regression():
+    """Companion: the bare spelling and an integer global, which before the
+    fix read 0 for the str and the int alike."""
+    test_gimple_stdout("gimple_module_class_attr_bare_and_int_from_module_global", """\
+S = "x"
+N = 7
+
+class C():
+    name = S
+    val = N
+
+def main():
+    print(C().name)
+    print(C().val)
+""", "x\n7\n")
+
+
+def test_module_class_attr_expr_over_module_globals_regression():
+    """The harder half of the same bug: the value is an EXPRESSION over this
+    module's globals (`S + "!"`, `N + 1`), not a bare name. Its type is the
+    `_quick_type` estimate over the module's own global overlay, and the store
+    is the same top-level `C.attr = <value>` statement."""
+    test_gimple_stdout("gimple_module_class_attr_expr_over_module_globals", """\
+S = "x"
+N = 7
+
+class C():
+    var name = S + "!"
+    val = N + 1
+
+def main():
+    print(C().name)
+    print(C().val)
+""", "x!\n8\n")
 
 
 def test_nested_class_attr_expr_over_str_param_regression():

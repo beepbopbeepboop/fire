@@ -43,31 +43,32 @@ fallback) while the global is `int64_t`, so the allocator's per-instance init
 (also gated on the two agreeing) never fires either. The read then hits the
 unseeded field (`var` spellings) or the unseeded global (bare spelling).
 
-## Next step
+## Status (2026-11-12): partially fixed — module-global references
 
-In the module-scope seeder, when the attribute's value is an `IdentExpr` that
-names THIS module's own global, emit the store into `_mojo_classattr_init`
-(the global is a static C variable in the same TU — `_classattr_C__name = S;`
-is a plain assignment) and take the attribute's ctype from the module global's
-own binding (the same table the module-globals struct/typedef block resolves
-from), so the field/global type agreement the allocator init is gated on can
-hold. A reference to another module's global, or an expression over globals
-(`S + "!"`), is the harder half: it needs the value evaluated at module init
-in the global's own type, which is where `_quick_type` with the module-globals
-overlay would go, mirroring the fn-scoped parameter resolution the cell case
-already has.
+Landed: a module-scope class attribute whose value reads a global OF THIS
+MODULE is now stored. `gen_module`'s top-level loop emits `C.attr = <value>`
+at the class statement's position (`_module_class_attr_global_stores` in
+`mojo/backend_gimple/module_gen.py`), after the global is assigned; the
+`_classattr_` global and the struct field take the global's C type
+(`_module_class_attr_global_ctype`, `_quick_type` over this module's
+`_own_global_var_types`). Covered by `test_gimple_runner.py`:
+`gimple_module_class_attr_from_module_global` (the Done-when case, passes),
+`..._bare_and_int_from_module_global` (`name = S`, `val = N` → `x`, `7`), and
+`..._expr_over_module_globals` (`S + "!"`, `N + 1`). All three fail on the
+pre-fix tree (0 / blank output).
 
-## Done when
+Still open:
+- A value naming a global of ANOTHER module (`from m import S` then
+  `class C(): var name = S`). The helper answers None for it (it only accepts
+  this module's own globals), so it stays unstored, as before. Not measured
+  this session. Next step: resolve the imported global's C storage
+  (`<mod>_toplev.S` via `_global_to_module`) and type from the shared table
+  under the same test, then store it at the class statement.
+- A value calling a function or reading a name that is not a module global
+  (`len(S)`, a builtin): answered None, unstored, unchanged.
 
-```
-S = "x"
+## Done when (remaining)
 
-class C():
-    var name = S
-
-def main():
-    print(C().name)
-```
-
-prints `x` in `test_gimple_runner.py` (add the regression beside the
-`gimple_nested_class_var_attr_*` cluster).
+The cross-module case above prints the imported value from a module-scope
+class attribute, checked by a regression beside the `gimple_module_class_attr_*`
+cluster. The three module-local cases already pass.

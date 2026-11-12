@@ -1254,8 +1254,6 @@ def _infer_multi_kind_return(gen, body, params=None,
         # whichever one happened to be lowered last.
         gen._cur_func_body = body
         gen._mixed_container_locals = None
-        gen._mixed_scalar_locals = None
-        gen._mixed_value_locals = None
         # Imported HERE rather than at module scope: `gimple_codegen.py`
         # imports this module before it imports `emit_infra`, so a top-level
         # `import ... emit_infra` in this file is a circular import that
@@ -1335,8 +1333,6 @@ def _infer_multi_kind_return(gen, body, params=None,
             gen.current_func_name = _saved_cur
             gen._cur_func_body = _saved_body
             gen._mixed_container_locals = None
-            gen._mixed_scalar_locals = None
-            gen._mixed_value_locals = None
 
 
 def _homogeneous_tuple_ann_elem(self, _ret_ann):
@@ -2906,6 +2902,93 @@ def _own_class_field_index(fields, name) -> int:
         if _cfd is not None and _cfd[0] == name:
             _pick = _i
     return _pick
+
+
+# C types a module-scope class attribute may take from a module global it names
+# (`class C(): var name = S`). Each is a storage type the class-attribute global
+# can hold by plain assignment; a container or struct global is left to the
+# literal/container paths, which this shape does not reach.
+_MODULE_CLASS_ATTR_GLOBAL_CTYPES = ('char *', 'int64_t', 'double')
+
+
+def _module_class_attr_global_ctype(gen, value):
+    """C type of a module-scope class attribute's value when it reads ONLY
+    globals of THIS module (`S`, `S + "!"`, `N + 1`), and that type is in
+    `_MODULE_CLASS_ATTR_GLOBAL_CTYPES`; else None.
+
+    Every free name must be in `_own_global_var_types` (not the shared
+    `_global_var_types`): that table holds only globals this compile's own
+    module assigns, so a name another module shares is not mistaken for this
+    module's global, and any call or foreign name makes the value None (its
+    store is then left to nothing, as before). The type is `_quick_type`'s
+    estimate over the same overlay the rest of the module resolves names from."""
+    _names = _used_idents_node(value)
+    if not _names:
+        return None
+    for _n in _names:
+        if _as_str(_n) not in gen._own_global_var_types:
+            return None
+    _t = _as_str(gen._quick_type(value))
+    # A module `Int` global is declared `int` (the frontend's spelling); the
+    # class attribute it seeds is the 64-bit `int64_t` every literal `Int`
+    # class attribute uses, and the store widens it.
+    if _t == 'int':
+        return 'int64_t'
+    if _t in _MODULE_CLASS_ATTR_GLOBAL_CTYPES:
+        return _t
+    return None
+
+
+def _module_class_attr_global_stores(gen, cls):
+    """Top-level `C.attr = <global>` statements for a module-scope `class`
+    statement's class attributes whose value names a module global.
+
+    A module-scope class body runs at the class statement, and the seeder in
+    `gen_module` (`class_attr_inits`, emitted into `_mojo_classattr_init`, which
+    runs BEFORE any top-level statement) can seed only literals. So a value
+    that reads a global is stored where the class statement sits in the
+    module's top-level body, after that global has been assigned. Each store
+    is an ordinary `AssignStmt` to the class attribute, lowered by the same
+    path as the function-scoped class statement (emit_stmts._gen_stmt_
+    StructDef), and the global's C type is recorded here so the declaration
+    pass (which runs after the top-level body is generated) agrees with it.
+
+    Only the OWN declaration of each attribute counts (see
+    `_own_class_field_index`): an override must store its own value, not the
+    base's, exactly as the seeder does."""
+    stores = []
+    # A class declared inside a function is not module scope: its attributes
+    # are per-execution cells / captures, stored by its own `class` statement.
+    if cls.name in getattr(gen, '_fn_scoped_structs', ()):
+        return stores
+    _cattrs = gen._class_attrs.get(cls.name, {})
+    _fl = _as_list(cls.fields)
+    for _aname in _cattrs:
+        _aname = _as_str(_aname)
+        _mangled = _as_str(_cattrs[_aname])
+        _own_idx = _own_class_field_index(cls.fields, _aname)
+        if _own_idx < 0:
+            continue
+        _cfd = _class_field_decl(_fl[_own_idx])
+        if _cfd is None or _as_str(_cfd[0]) != _aname:
+            continue
+        _ct = _module_class_attr_global_ctype(gen, _cfd[1])
+        if _ct is None:
+            continue
+        _line = getattr(cls, 'line', 0)
+        gen._global_var_types[_mangled] = _ct
+        # The field-typing pass runs BEFORE this module's globals are typed, so
+        # it fell back to the `<Cls> *` "unknown" field type; now that the
+        # global's type is known, the field takes it. The allocator's
+        # per-instance seed is gated on field and global agreeing.
+        _fts = gen.struct_field_types.get(cls.name)
+        if _fts is not None:
+            _fts[_aname] = _ct
+        stores.append(AssignStmt(
+            target=MemberExpr(obj=IdentExpr(name=cls.name, line=_line),
+                              member=_aname, line=_line),
+            value=_cfd[1], line=_line))
+    return stores
 
 
 def _ctor_param_evidence(gen, struct_name, param, xf_own) -> str:
@@ -11027,25 +11110,7 @@ def gen_module_impl(self, stmts: list):
             return True
         if not st:
             return False
-        if _as_str(st) == 'char *' or _as_str(st) == 'double':
-            return True
-        # An INTEGER observation is proof unless the name came from a
-        # multi-value UNPACK of a single iterable: `_infer_local_var_types`
-        # types each such target with the `int64_t` STORAGE DEFAULT because
-        # the per-element type is not knowable there, and the element may be a
-        # container. `coro.py`'s `base, is_method, real_params, ... =
-        # _async_method_setup(...)` feeds `_mark_coro_param_elem_kinds(
-        # real_params)`, and reading that default as "a number" refused the
-        # file for a parameter every call site passes a list. Everything else
-        # -- a literal (answered above), a call result, a parameter, an
-        # ordinary local -- keeps counting, so `each([4, 5])` beside
-        # `each(n)` where `n = 3` (or `n = f()`) is still refused.
-        if isinstance(a, gimple_ctypes.IdentExpr):
-            _unpacked = (getattr(self, '_tuple_unpack_locals', None) or {}).get(
-                _as_str(caller_name), ())
-            if _as_str(a.name) in _unpacked:
-                return False
-        return _as_str(st) in ('int64_t', 'int', 'bool')
+        return _as_str(st) in ('char *', 'double', 'int64_t', 'int', 'bool')
 
     def _resolve_param_containers():
         """Turn the collected container observations into the contract.
@@ -15618,6 +15683,10 @@ def gen_module_impl(self, stmts: list):
                 if self._lambda_parts:
                     func_parts.extend(self._lambda_parts)
                     self._lambda_parts = []
+            # The class body runs at this statement: a class attribute that
+            # reads a module global is stored here, in source order, after
+            # that global's own assignment (see _module_class_attr_global_stores).
+            toplevel_stmts.extend(_module_class_attr_global_stores(self, stmt))
         elif isinstance(stmt, TraitDef):
             lines = [f"typedef struct {stmt.name}_vtable {{"]
             _seen_vtable_members: set = set()
@@ -17649,7 +17718,11 @@ def gen_module_impl(self, stmts: list):
                             ctype = 'int64_t'
                             class_attr_inits.append(f'  {mangled} = {_signed_int64_c_literal(v.value)};')
                         else:
-                            ctype = 'int64_t'
+                            # A reference to a module global is stored by the
+                            # class statement's top-level store (see
+                            # _module_class_attr_global_stores), typed as that
+                            # global. Anything else is seeded by no one here.
+                            ctype = _module_class_attr_global_ctype(self, v) or 'int64_t'
                         class_attr_decls.append(f"{ctype} {mangled};")
                         self._global_var_types[mangled] = ctype
                         # a float literal has no global of its own kind (it is read as a

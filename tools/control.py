@@ -311,7 +311,6 @@ def cmd_spawn(a):
         # every refill cycle on `fatal: a branch named ... already exists`).
         branch = free_branch(a.name)
         git("worktree", "add", "-b", branch, wt, a.base)
-        retire_base(a.base)               # a continuation now carries the predecessor's commits: its name can go
         os.makedirs(os.path.join(wt, ".tmp"), exist_ok=True)
         prompt = open(os.path.join(MAIN, "tools", "control_prompt.md")).read().format(
             name=a.name, worktree=wt, branch=branch, main=MAIN, task=task.strip(),
@@ -375,26 +374,16 @@ def sh(s):
 
 def unmerged_branches():
     """Branches under refs/heads/ with commits that are NOT in master, in ONE git call (a per-task
-    `rev-list` over hundreds of tasks is what made status take minutes). Returns None when the merge
-    check can't be read (e.g., master unresolvable in the worktree context) so callers never prune
-    on an unreadable merge state."""
-    r = subprocess.run(["git", "for-each-ref", "--no-merged", "master", "--format=%(refname:short)", "refs/heads/"],
-                       capture_output=True, text=True, cwd=MAIN)
-    if r.returncode != 0:
-        return None
-    return set(r.stdout.split())
+    `rev-list` over hundreds of tasks is what made status take minutes)."""
+    out = subprocess.run(["git", "for-each-ref", "--no-merged", "master", "--format=%(refname:short)", "refs/heads/"],
+                         capture_output=True, text=True, cwd=MAIN).stdout
+    return set(out.split())
 
 
 def done_and_gone(t, unmerged):
     """A finished task with nothing left to look at: terminal state, no worktree directory, and no commits
     outside master (its branch is merged or deleted). Such an entry holds no claim (terminal claims are
-    ignored), no process and no work, so `status` hides it and `prune` may drop it. Returns False when
-    `unmerged` is None (the merge check can't be read), so callers never prune on an unreadable merge
-    state."""
-    if unmerged is None:
-        # The merge check couldn't be read (e.g., master unresolvable in the worktree context).
-        # Don't prune - we can't be sure which branches are merged.
-        return False
+    ignored), no process and no work, so `status` hides it and `prune` may drop it."""
     return (t.get("state") in TERMINAL and not os.path.isdir(t["worktree"])
             and t.get("branch") not in unmerged)
 
@@ -417,7 +406,7 @@ def cmd_status(a):
                 lines = [l for l in f.read().splitlines() if l.strip()]
             last = lines[-1][:90] if lines else ""
         v = verdict(t)
-        n_ahead = ahead(t) if (unmerged is not None and t.get("branch") in unmerged) else 0
+        n_ahead = ahead(t) if t.get("branch") in unmerged else 0
         return st, v, n_ahead, dirty, last
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=16) as ex:
@@ -436,8 +425,6 @@ def cmd_prune(a):
     Never touches a task that is running, has a worktree, has commits outside master, or is in a
     non-terminal state."""
     unmerged = unmerged_branches()
-    if unmerged is None:
-        print("prune: merge check unreadable (master does not resolve in %s); keeping every entry" % MAIN)
     with registry() as tasks:
         gone = [n for n, t in tasks.items() if done_and_gone(t, unmerged) and state_of(t) != "running"]
         if not a.dry_run:
@@ -518,8 +505,6 @@ def cmd_mark(a):
                      % (a.name, tasks[a.name]["branch"], ahead(tasks[a.name])))
         tasks[a.name]["state"] = a.state
     print("%s -> %s" % (a.name, a.state))
-    if a.state in TERMINAL:
-        retire_task(a.name)               # the end of a task cleans up after itself; `cleanup` is only the safety net
 
 
 def cmd_log(a):
@@ -813,94 +798,15 @@ def auth_failed(t):
     return bool(AUTH_ERR.search(tail))
 
 
-CONTROLLER_FILES = {"TASK.md", "work.log", "exitcode"}    # written into a worker's tree by the controller itself
-
-
-def tree_extras(wt):
-    """The entries `git status` shows in worker tree WT that are NOT the controller's own files (TASK.md, work.log,
-    exitcode, .tmp/). A finished tree whose only changes are those holds nothing of the worker's: older branches
-    still track TASK.md (untracked since 9855b224e), so the controller's own rewrite of it made 58 finished trees
-    look dirty for ever and cleanup could never remove them."""
-    st = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"],
-                        capture_output=True, text=True, cwd=wt).stdout
-    return [l[3:] for l in st.splitlines() if l[3:] not in CONTROLLER_FILES and not l[3:].startswith(".tmp/")]
-
-
-def retire_landed(name):
-    """The last step of a landing: its tree and branch go with it, in the same operation, so nothing waits for a later
-    cleanup pass. Runs only for a task whose every commit is on master (`ahead == 0`), whose worker is not alive, and
-    whose tree holds nothing but the controller's own files; anything else is KEPT and reported (never forced).
-    Removes the worktree, deletes the now-merged branch (`-d`, which refuses an unmerged one) and drops the registry
-    entry. Returns True when the tree and branch are gone."""
-    t = load().get(name)
-    if not t or ahead(t) > 0:
-        return False
-    if alive(t.get("pid")) and state_of(t) == "running":
-        print("retire %s: its worker is still running; kept" % name)
-        return False
-    wt = t["worktree"]
-    if os.path.isdir(wt):
-        extra = tree_extras(wt)
-        if extra:
-            print("retire %s: %d uncommitted file(s) in %s (%s); kept" % (name, len(extra), wt, extra[0]))
-            return False
-        r = subprocess.run(["git", "worktree", "remove", "--force", wt], capture_output=True, text=True, cwd=MAIN)
-        if r.returncode != 0:
-            print("retire %s: %s; kept" % (name, r.stderr.strip()[:100]))
-            return False
-    subprocess.run(["git", "worktree", "prune"], cwd=MAIN)
-    subprocess.run(["git", "branch", "-d", t["branch"]], capture_output=True, cwd=MAIN)
-    with registry() as reg:
-        reg.pop(name, None)
-    return True
-
-
-def retire_task(name):
-    """What a task's end owes: called when it reaches a terminal state, so the normal path leaves nothing behind.
-      - every commit on master (landed, or never committed): retire_landed: tree, branch and registry entry go.
-      - unlanded commits, HELD (a gate-red culprit): its tip is saved under refs/archive/<name>, then tree, branch and
-        entry go. Nothing will land it; the archive keeps it recoverable.
-      - unlanded commits, not held (abandoned because a continuation takes over): only the clean tree goes. The
-        branch is the continuation's base; retire_base deletes the name once the successor is cut from it.
-    A tree with anything of the worker's in it is never touched. Returns True when anything was retired."""
-    t = load().get(name)
-    if not t or state_of(t) not in TERMINAL:
-        return False
-    if ahead(t) == 0:
-        return retire_landed(name)
-    wt = t["worktree"]
-    if os.path.isdir(wt):
-        if tree_extras(wt):
-            return False
-        if subprocess.run(["git", "worktree", "remove", "--force", wt], capture_output=True, cwd=MAIN).returncode != 0:
-            return False
-        subprocess.run(["git", "worktree", "prune"], cwd=MAIN)
-    if t.get("hold"):
-        sha = git("rev-parse", t["branch"], check=False)
-        if sha and subprocess.run(["git", "update-ref", ARCHIVE_REF + t["branch"], sha], cwd=MAIN).returncode == 0:
-            subprocess.run(["git", "branch", "-D", t["branch"]], capture_output=True, cwd=MAIN)
-            with registry() as reg:
-                reg.pop(name, None)
-    return True
-
-
-def retire_base(base):
-    """A continuation was just cut from branch BASE: its commits now live on the successor's branch (same tip), so the
-    predecessor's name is deleted when its task is terminal and has no tree. Never deletes a branch whose task is alive."""
-    if not base.startswith("work/"):
-        return
-    owner = next((t for t in load().values() if t.get("branch") == base), None)
-    if owner is not None and (state_of(owner) not in TERMINAL or os.path.isdir(owner["worktree"])):
-        return
-    subprocess.run(["git", "branch", "-D", base], capture_output=True, cwd=MAIN)
-
-
 def bounce(name, t):
     """Take a dead-on-arrival task back to the QUEUE, leaving no trace: drop its worktree and branch (only after proving
     nothing in it is the worker's: no commits, and nothing beyond the files spawn itself wrote) and re-enqueue it under
     the same name, so the claim, the doc list and the formal%d counter are unchanged. Returns False if it kept the tree."""
     wt = t["worktree"]
-    if tree_extras(wt):
+    mine = {"TASK.md", "work.log", "exitcode", ".tmp/"}
+    st = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], capture_output=True, text=True, cwd=wt).stdout
+    extra = [l[3:] for l in st.splitlines() if not (l[3:] in mine or l[3:].startswith(".tmp/"))]
+    if extra:
         return False
     if t.get("pool") and limit_hit(t):
         mark_dead(t["model"], pool_slot(t["pool"]), limit_reset(t))   # the ban ends at the printed reset, else the recovery time
@@ -1286,89 +1192,6 @@ def _claimed_by_outside(path):
     return False
 
 
-ARCHIVE_REF = "refs/archive/"
-BRANCH_MIN_AGE_S = 24 * 3600     # a branch younger than this is never touched: something may be about to look at it
-
-
-def classify_retirable_branches():
-    """(tips, subsumed, dead) for the `work/*` branches nothing will ever land (see prune_work_branches for the rules).
-    A branch checked out in a worktree is still CLASSIFIED: its tree is what has to go first, and cleanup removes that
-    tree (clean ones only, with every liveness check) before the branch is deleted."""
-    reg = load()
-    byb = {t.get("branch"): t for t in reg.values()}
-    rows = subprocess.run(["git", "for-each-ref", "--no-merged", "master",
-                           "--format=%(refname:short) %(objectname) %(committerdate:unix)", "refs/heads/work/"],
-                          capture_output=True, text=True, cwd=MAIN).stdout.splitlines()
-    tips = {}
-    for r in rows:
-        name, sha, when = r.split()
-        tips[name] = (sha, int(when))
-    if not tips:
-        return tips, [], []
-    qtext = ""
-    for f in os.listdir(qdir()):
-        if f.endswith(".json"):
-            qtext += open(os.path.join(qdir(), f), errors="replace").read()
-    now = time.time()
-    ok = {n for n, (sha, when) in tips.items()
-          if now - when >= BRANCH_MIN_AGE_S and n not in qtext
-          and (byb.get(n) or {}).get("state") != "running"}
-    # one call: the tips no other tip contains. A tip not in it is reachable from another branch.
-    ind = subprocess.run(["git", "merge-base", "--independent"] + sorted({sha for sha, _ in tips.values()}),
-                         capture_output=True, text=True, cwd=MAIN)
-    if ind.returncode != 0:
-        return tips, [], []
-    independent = set(ind.stdout.split())
-    keeper = {}                                  # equal tips share a commit: exactly one name must stay
-    for n in sorted(tips):
-        sha = tips[n][0]
-        if n not in ok:                          # a protected name is the keeper for its commit
-            keeper[sha] = n
-        else:
-            keeper.setdefault(sha, n)
-    subsumed = [n for n in sorted(ok) if tips[n][0] not in independent or keeper[tips[n][0]] != n]
-    dead = []
-    for n in sorted(ok - set(subsumed)):
-        t = byb.get(n)
-        if t is None or (t.get("state") in TERMINAL and t.get("hold")):
-            dead.append(n)
-    return tips, subsumed, dead
-
-
-def prune_work_branches(dry_run=False):
-    """Retire the `work/*` branches nothing will ever land, so the branch list stays the size of the live work.
-
-    cleanup's `branch -d` only reaches branches already in master. The rest piled up (1,350+ on 2026-11-12): every
-    retry, continuation, merge-fix and gate-fix gets a NEW branch, and a task that ends abandoned/superseded leaves
-    its commits unmerged for ever. Two lossless rules, in order:
-
-      1. SUBSUMED: the tip is an ancestor of another unmerged work/* tip (a continuation was cut from it, a fixer
-         built on it). Every commit stays reachable from that branch, so the name is deleted outright.
-      2. DEAD: the task is terminal (integrated/abandoned/superseded) AND held, or there is no task at all (the
-         registry forgot it, so nothing can ever land it). Its tip is saved under refs/archive/<name> (invisible to
-         `git branch`, immune to gc) and the branch deleted. Recover with `git branch <name> refs/archive/<name>`.
-
-    Never touched: a branch checked out in any worktree (cleanup removes a clean, idle tree first), one younger than
-    BRANCH_MIN_AGE_S, a task that is running or finished-and-waiting (it may yet land), an abandoned task NOT held
-    (`continue` cuts its successor from it), or a branch named by a queued task. Returns (subsumed, archived) counts."""
-    tips, subsumed, dead = classify_retirable_branches()
-    out = subprocess.run(["git", "worktree", "list", "--porcelain"], capture_output=True, text=True, cwd=MAIN).stdout
-    busy = {l[len("branch refs/heads/"):] for l in out.splitlines() if l.startswith("branch refs/heads/")}
-    subsumed = [n for n in subsumed if n not in busy]
-    dead = [n for n in dead if n not in busy]
-    if dry_run:
-        print("would delete %d subsumed and archive %d dead work/* branches" % (len(subsumed), len(dead)))
-        return len(subsumed), len(dead)
-    for i in range(0, len(subsumed), 100):
-        subprocess.run(["git", "branch", "-D"] + subsumed[i:i + 100], capture_output=True, cwd=MAIN)
-    for n in dead:
-        r = subprocess.run(["git", "update-ref", ARCHIVE_REF + n, tips[n][0]], capture_output=True, cwd=MAIN)
-        if r.returncode == 0:                    # delete only once the archive ref is in place
-            subprocess.run(["git", "branch", "-D", n], capture_output=True, cwd=MAIN)
-    print("deleted %d subsumed work/* branches; archived %d dead ones under %s" % (len(subsumed), len(dead), ARCHIVE_REF))
-    return len(subsumed), len(dead)
-
-
 def cmd_cleanup(a):
     """Remove the worktrees we created and no longer use: a `work-*` tree whose HEAD is already an ancestor of
     master, with a clean tree (no modified or untracked-and-not-ignored files), and no live worker.
@@ -1389,12 +1212,6 @@ def cmd_cleanup(a):
             cur = {"path": l[9:]}; wt.append(cur)
         elif l.startswith("HEAD "):
             cur["head"] = l[5:]
-        elif l.startswith("branch refs/heads/"):
-            cur["branch"] = l[len("branch refs/heads/"):]
-    retire = set()
-    if a.branches:
-        _t, _s, _d = classify_retirable_branches()
-        retire = set(_s) | set(_d)             # work nothing will land: its clean, idle tree may go too
     try:
         dirs = live_session_dirs()
     except (RuntimeError, OSError, ValueError) as e:
@@ -1419,15 +1236,15 @@ def cmd_cleanup(a):
             kept.append((p, "live process in tree")); continue
         if _claimed_by_outside(p):
             kept.append((p, "claimed by an outside session")); continue
-        if (w.get("branch") not in retire
-                and subprocess.run(["git", "merge-base", "--is-ancestor", w["head"], "master"], cwd=MAIN).returncode != 0):
+        if subprocess.run(["git", "merge-base", "--is-ancestor", w["head"], "master"], cwd=MAIN).returncode != 0:
             kept.append((p, "unmerged")); continue
         cands.append(p)
 
     # `git status` over a worker tree with a build/ in it is the slow step (~0.1-1 s each, 1900+ trees on
     # 2026-10-23 made the sequential loop outlast a 2-minute command timeout), and it is I/O bound, so fan it out.
     def is_dirty(p):
-        return bool(tree_extras(p))             # the controller's own files (TASK.md, work.log, ...) are not dirt
+        return bool(subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True,
+                                   cwd=p).stdout.strip())
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=a.jobs) as ex:
         dirty = list(ex.map(is_dirty, cands))
@@ -1453,7 +1270,7 @@ def cmd_cleanup(a):
     for p in safe:
         if a.dry_run:
             print("would remove", p); continue
-        r = subprocess.run(["git", "worktree", "remove", "--force", p], capture_output=True, text=True, cwd=MAIN)  # only controller files can differ: is_dirty said so
+        r = subprocess.run(["git", "worktree", "remove", p], capture_output=True, text=True, cwd=MAIN)
         if r.returncode == 0: done += 1
         else: print("kept", p, r.stderr.strip()[:100])
     subprocess.run(["git", "worktree", "prune"], cwd=MAIN)
@@ -1477,7 +1294,6 @@ def cmd_cleanup(a):
             for i in range(0, len(gone), 200):
                 subprocess.run(["git", "branch", "-d"] + gone[i:i + 200], capture_output=True, cwd=MAIN)
             print("deleted %d merged work/* branches" % len(gone))
-        prune_work_branches(a.dry_run)
     if a.prune:
         cmd_prune(a)
 
