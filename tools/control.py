@@ -525,16 +525,6 @@ LIMIT_ERR = re.compile(r"model (is )?(unavailable|not found)|unknown model|usage
 AUTH_ERR = re.compile(r"Failed to authenticate|OAuth (session )?expired|could not be refreshed|"
                       r"invalid[_-]?api[_-]?key|401 Unauthorized|Please run .claude.*login", re.I)
 BREAKER_MIN = 30   # after a worker dies on arrival, start nothing new for this long
-# The landing step merges BATCH branches a pass (swarm.LAND_BATCH) and each pass runs a gate, so finished work
-# arrives far faster than it lands. Unlanded worktrees piled up to 1500 (2026-11-11) because refill never looked at
-# the backlog it was adding to. Past this many work worktrees, refill starts nothing new until landing catches up.
-BACKLOG_MAX = 32
-
-
-def work_worktrees():
-    """How many worktrees are checked out on a work/* branch: the backlog refill must not grow past BACKLOG_MAX."""
-    out = git("worktree", "list", "--porcelain", check=False)
-    return sum(1 for l in out.splitlines() if l.startswith("branch refs/heads/work/"))
 
 
 def breaker_path():
@@ -879,11 +869,6 @@ def cmd_refill(a):
     if time.time() < breaker_until():
         print("%s refill: breaker open for %.0f more min, starting nothing" % (
             time.strftime("%T"), (breaker_until() - time.time()) / 60), flush=True)
-        return
-    backlog = work_worktrees()
-    if backlog >= BACKLOG_MAX:
-        print("%s refill: %d work worktrees unlanded (limit %d), starting nothing until landing catches up" % (
-            time.strftime("%T"), backlog, BACKLOG_MAX), flush=True)
         return
     busy = running_by_slot(tasks, live_set)
     live = sum(busy.values())

@@ -80,44 +80,10 @@ def test_gate_doc_without_culprit_holds_nothing():
         C.MAIN, C.registry = real_main, real_reg
 
 
-def test_work_worktrees_counts_only_work_branches():
-    real_git = C.git
-    porcelain = ("worktree /a\nHEAD x\nbranch refs/heads/master\n\n"
-                 "worktree /b\nHEAD y\nbranch refs/heads/work/fix-a\n\n"
-                 "worktree /c\nHEAD z\ndetached\n\n"
-                 "worktree /d\nHEAD w\nbranch refs/heads/work/fix-b\n")
-    try:
-        C.git = lambda *a, **k: porcelain
-        check("work_worktrees counts the work/* checkouts and nothing else", C.work_worktrees() == 2)
-    finally:
-        C.git = real_git
-
-
-def test_refill_starts_nothing_at_the_backlog_limit():
-    import io, contextlib as cl
-    real_bl, real_git = C.BACKLOG_MAX, C.git
-    real_tasks, real_breaker = C.load, C.breaker_until
-    try:
-        C.BACKLOG_MAX = 3
-        C.git = lambda *a, **k: "".join("branch refs/heads/work/x%d\n" % i for i in range(3))
-        C.load = lambda: {}
-        C.breaker_until = lambda: 0
-        out = io.StringIO()
-        with cl.redirect_stdout(out):
-            C.cmd_refill(type("A", (), {"target": None, "prefix": "bug,fix,fix-replan"})())
-        check("refill starts nothing when work worktrees reach the limit",
-              "starting nothing until landing catches up" in out.getvalue())
-    finally:
-        C.BACKLOG_MAX, C.git = real_bl, real_git
-        C.load, C.breaker_until = real_tasks, real_breaker
-
-
 if __name__ == "__main__":
     test_doc_deletion_needs_a_test()
     test_no_progress_streak()
     test_no_progress_stops_the_feed()
     test_gate_doc_without_culprit_holds_nothing()
-    test_work_worktrees_counts_only_work_branches()
-    test_refill_starts_nothing_at_the_backlog_limit()
     print("%d failure(s)" % len(FAILED))
     sys.exit(1 if FAILED else 0)
