@@ -3277,6 +3277,40 @@ def main():
 main()
 """, "")
 
+    # An escaping (returned) generator whose first yield is the empty string
+    # must keep a string value slot: a char*-typed cpp coroutine generator's
+    # values were classified as ints when draining through mojo_iter_word, so
+    # the strings printed as addresses (COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part3).
+    # The render shape also captures a name and yields an f-string between
+    # leading and trailing empty strings.
+    test_generator_matches_cpython("escaping_generator_empty_string_first_yield_render_shape", """\
+def make(name):
+    def render():
+        yield ''
+        yield f'{name}:'
+        yield ''
+    return render
+
+
+def main():
+    for v in make('types')():
+        print(v)
+
+
+main()
+""", """\
+def make(name):
+    def render():
+        yield ''
+        yield f'{name}:'
+        yield ''
+    return render
+
+
+for v in make('types')():
+    print(v)
+""")
+
 
 # A None received by `x = yield` used in arithmetic must raise TypeError, as
 # CPython does. The None box has no numeric kind, so the tagged arithmetic
