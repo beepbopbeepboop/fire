@@ -1634,59 +1634,31 @@ def _gen_stmt_AssignStmt(gen, node):
         # emitted, rather than unwrapping the box into a str/float slot.
         _tagged_bind = (v in getattr(gen, '_tagged_word_vals', ()) or _for_copy)
         # A float/str/bool/int store into a box-holding name is boxed by its
-        # kind here, BEFORE any refusal below reads the value's C type, so it
-        # is carried by the box rather than refused. A container stored into a
-        # tagged-mixed name is refused (the tagged box has no container kind);
-        # remember the original type across boxing so that refusal still fires.
-        # A float and a str stored into the same name of one function
-        # (`val = d["key"]` on a float dict, then `val = "text"`): no
-        # representation holds both kinds, and the second store would cast a
-        # double to a pointer, which gcc rejects. Refuse the function at the
-        # store that brings the second kind. A box-holding name is the
-        # exception: it is the int64_t box, and stores are boxed by kind.
+        # kind here, BEFORE the refusal below reads the value's C type, so it
+        # is carried by the box rather than refused. Only a store the box has
+        # no constructor for (a container, a struct pointer) is refused:
+        # silently casting a container pointer into a tagged word's slot was
+        # exactly the miscompile the refusal prevented.
+        # A float and a str stored into the same name of one function (`val = d["key"]` on a float dict, then
+        # `val = "text"`): no representation holds both kinds, and the second store would cast a double to a pointer,
+        # which gcc rejects ("cannot convert to a pointer type"). Refuse the function, with the same reason, at the
+        # store that brings the second kind. The codegen types a name from its bindings as it goes, so the kinds
+        # already stored into the name are the record. A box-holding name is the ONE exception: it is the int64_t
+        # box, and the store below boxes each value by kind.
         if vtype in ('double', 'char *') and not _mixed_box:
             _sk_key = (_as_str(gen.current_func_name), _as_str(tname))
             _sk_prev = gen._stored_kinds.get(_sk_key)
             if _sk_prev is not None and _sk_prev != vtype:
-                raise RuntimeError(
-                    f"{tname!r}: {ginf.mixed_name_non_int64_refusal(vtype)}")
+                raise RuntimeError(f"{tname!r}: {ginf.MIXED_NAME_NON_INT64_REFUSAL}")
             gen._stored_kinds[_sk_key] = vtype
-        _orig_vtype = vtype
-        _decl_t_before = gen.var_types.get(tname)
         if _mixed_box and not _keep_tagged_box:
             v, vtype = ginf.box_mixed_store(gen, node.value, vtype, v, tname)
             if gen.var_types.get(_as_str(tname), 'int64_t') == 'int64_t':
                 _keep_tagged_box = True
-        # A tagged generator word cannot also hold a container/pointer value
-        # (the box has no container constructor/kind). Name the binding, the
-        # conflicting C type, and which side was the tagged word vs container,
-        # while keeping the substring "cannot also hold a value of another C
-        # type" that test_dict_slot_read_regression.py Test 2 asserts.
-        _tagged_mixed = ginf.tagged_mixed_name(gen, tname)
-        # Container/struct pointers (other than str `char *`) cannot be carried
-        # by the tagged box. Floats and strs are boxed above and are allowed.
-        _unboxable_ptr = (
-            _decl_t_before is not None
-            and str(_decl_t_before).endswith(' *')
-            and _decl_t_before not in ('char *', 'const char *'))
-        _unboxable_store = (
-            _orig_vtype is not None
-            and str(_orig_vtype).endswith(' *')
-            and _orig_vtype not in ('char *', 'const char *'))
-        if _tagged_bind and _unboxable_ptr:
+        if ((_tagged_bind and ginf.is_non_int_c_type(gen.var_types.get(tname)))
+                or (ginf.is_non_int_c_type(vtype) and _mixed_box)):
             raise RuntimeError(
-                f"{tname!r}: a name bound to a container or pointer value "
-                f"(container value of C type '{_decl_t_before}') elsewhere in "
-                f"this function and also to a tagged generator word here "
-                f"cannot also hold a value of another C type; no "
-                f"representation holds both; refused")
-        if _unboxable_store and (_mixed_box or _tagged_mixed):
-            raise RuntimeError(
-                f"{tname!r}: a name bound to a tagged generator word elsewhere "
-                f"in this function and also to a container or pointer value "
-                f"(container value of C type '{_orig_vtype}') here cannot also "
-                f"hold a value of another C type; no representation holds "
-                f"both; refused")
+                f"{tname!r}: {ginf.MIXED_NAME_NON_INT64_REFUSAL}")
         if (not _keep_tagged_box and _copy_src is not None
                 and ginf.tagged_next_bind_name(gen, _as_str(tname))):
             # The local is registered as a box by every store (the static
@@ -6449,12 +6421,10 @@ def _gen_stmt_TryStmt(gen, node):
     gen._flow_none_state = _merged
 
 
-def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs, _on_exc=False):
+def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs):
     """Emit every `with`-item's teardown (`__exit__` call, generator
     resume/destroy, or a placeholder comment), in REVERSE index order —
-    last acquired, first released. On the exception path (_on_exc), a
-    generic generator-context-manager handle uses the exception-aware
-    runtime exit so cleanup semantics are preserved.
+    last acquired, first released.
 
     HOISTED out of `_gen_stmt_WithStmt` (was a nested closure reading the
     enclosing function's `_ctx_ts`/`_ctx_vs`/`_ctx_sns`/`_gctx_bases`/
@@ -6511,47 +6481,15 @@ def _with_emit_exits(gen, _ex_ts, _ex_vs, _ex_sns, _ex_gbases, _ex_gvs, _on_exc=
             _gval = _as_str(_gval)
             # Generator context manager: the final resume() runs the
             # body from its bare yield to co_return (= __exit__), then
-            # the coroutine frame is destroyed. On exception path, throw the
-            # pending exception into the generator (contextmanager protocol).
-            if _gbase == '__mojo_gen_cm':
-                _hw = gen._new_temp('int64_t')
-                gen._safe_coerce_emit('MojoGenerator *', 'int64_t', _gval, _hw)
-                _exit_fn = 'mojo_gen_cm_exit_exc' if _on_exc else 'mojo_gen_cm_exit_normal'
-                gen._emit_call('void', '', _exit_fn, [('int64_t', _hw)])
-            elif _on_exc:
-                _hw = gen._new_temp('int64_t')
-                gen._safe_coerce_emit('MojoGenerator *', 'int64_t', _gval, _hw)
-                if _gbase.startswith('__mgco_'):
-                    # Stack-switch generator: use runtime throw API.
-                    _et = gen._call_expr('int64_t', 'mojo_exc_type_get', [])
-                    _em = gen._call_expr('char *', 'mojo_exc_msg_get', [])
-                    _eo = gen._call_expr('void *', 'mojo_exc_obj_get', [])
-                    _emw = gen._new_temp('int64_t')
-                    gen._safe_coerce_emit('char *', 'int64_t', _em, _emw)
-                    _eow = gen._new_temp('int64_t')
-                    gen._safe_coerce_emit('void *', 'int64_t', _eo, _eow)
-                    gen._emit_call('void', '', 'mojo_exc_pending_set', [('int', '0')])
-                    gen._emit_call('int64_t', '', '__mojo_gen_throw',
-                                   [('int64_t', _hw), ('int64_t', _et),
-                                    ('int64_t', _emw), ('int64_t', _eow)])
-                else:
-                    # C++20 compiled generator: arm throw state, then resume.
-                    _et = gen._call_expr('int64_t', 'mojo_exc_type_get', [])
-                    _em = gen._call_expr('char *', 'mojo_exc_msg_get', [])
-                    _eo = gen._call_expr('void *', 'mojo_exc_obj_get', [])
-                    gen._emit_call('void', '', 'mojo_gen_throw_set',
-                                   [('int64_t', _hw), ('int64_t', _et),
-                                    ('char *', _em), ('void *', _eo)])
-                    gen._emit_call('void', '', 'mojo_exc_pending_set', [('int', '0')])
-                    done_t = gen._new_temp('_Bool')
-                    gen._emit(f"  {done_t} = {_gbase}_resume ({_gval});")
-                gen._emit_call('void', '', f"{_gbase}_destroy",
-                               [('MojoGenerator *', _gval)])
-            else:
-                done_t = gen._new_temp('_Bool')
-                gen._emit(f"  {done_t} = {_gbase}_resume ({_gval});")
-                gen._emit_call('void', '', f"{_gbase}_destroy",
-                               [('MojoGenerator *', _gval)])
+            # the coroutine frame is destroyed. resume()'s _Bool
+            # result (False == already done) is intentionally
+            # discarded — real Python's __exit__ return value only
+            # suppresses exceptions, and this normal-path emission
+            # runs after an unexceptional body.
+            done_t = gen._new_temp('_Bool')
+            gen._emit(f"  {done_t} = {_gbase}_resume ({_gval});")
+            gen._emit_call('void', '', f"{_gbase}_destroy",
+                           [('MojoGenerator *', _gval)])
             continue
         exit_fn = gen._struct_method_csym(sn, '__exit__', '')
         if exit_fn in gen.func_return_types or f"{sn}___exit__" in gen.func_return_types:
@@ -6664,30 +6602,6 @@ def _gen_stmt_WithStmt(gen, node):
                     gen._declare_var(alias, 'int64_t')
                 gen._safe_coerce_emit('int64_t', gen.var_types[alias], val_t, alias)
             _gctx_bases.append(base)
-            _gctx_vs.append(ctx_v)
-            _ctx_ts.append(ctx_t)
-            _ctx_vs.append(ctx_v)
-            _ctx_sns.append(None)
-            continue
-        # A MojoGenerator* used as a context manager but not statically tracked
-        # in _generator_var_api (e.g. stored in a container and retrieved). If
-        # it is a registered generator handle, drive it via the runtime's
-        # generic generator-context-manager helpers.
-        if ctx_t == 'MojoGenerator *' and gen_api is None:
-            _hw = gen._new_temp('int64_t')
-            gen._safe_coerce_emit('MojoGenerator *', 'int64_t', ctx_v, _hw)
-            if item.alias is not None:
-                alias = _with_item_alias_name(item.alias)
-                val_t = gen._call_expr('int64_t', 'mojo_gen_cm_enter',
-                                       [('int64_t', _hw)])
-                if alias not in gen.var_types:
-                    gen._declare_var(alias, 'int64_t')
-                gen._safe_coerce_emit('int64_t', gen.var_types[alias], val_t, alias)
-            else:
-                gen._emit_call('int64_t', '', 'mojo_gen_cm_enter', [('int64_t', _hw)])
-            # Mark as generic generator-cm: use special sentinel base so
-            # _with_emit_exits can emit runtime-driven exit.
-            _gctx_bases.append('__mojo_gen_cm')
             _gctx_vs.append(ctx_v)
             _ctx_ts.append(ctx_t)
             _ctx_vs.append(ctx_v)
@@ -7001,23 +6915,11 @@ def _gen_stmt_WithStmt(gen, node):
 
         gen._emit_label(bb_exc)
         gen._emit("  mojo_exc_pop ();")
-        _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs, True)
-        # A context manager may suppress the exception (e.g. a
-        # @contextlib.contextmanager generator that catches and does not
-        # re-raise). Propagate only if an exception is still pending after
-        # exits.
-        _pend = gen._call_expr('int', 'mojo_exc_pending_get', [])
-        _has_pend = gen._new_temp('_Bool')
-        gen._emit(f"  {_has_pend} = {_pend} != 0;")
-        _bb_reraise = gen._new_bb()
-        _bb_supp = gen._new_bb()
-        gen._emit(f"  if ({_has_pend}) goto {_bb_reraise}; else goto {_bb_supp};")
-        gen._emit_label(_bb_reraise)
+        _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs)
         gen._emit("  mojo_raise ();")
+        # Only emit goto if the exception handler didn't end with a return
         if not gen._last_was_terminal:
             gen._emit(f"  goto {bb_after};")
-        gen._emit_label(_bb_supp)
-        gen._emit(f"  goto {bb_after};")
 
         gen._emit_label(bb_after)
     else:

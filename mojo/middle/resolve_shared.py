@@ -32,7 +32,7 @@ from mojo.middle.solvers import *  # noqa: F401,F403
 from mojo.middle.types import (  # underscore names: `import *` won't carry these
     _struct_value_codes, _struct_slot_kinds, _struct_elem_ctype,
     _SCALAR_FLOAT_TYPES, _LIBM_FN_RETVALS, _BUILTIN_RET_CTYPES,
-    _body_builds_struct_tuple, _BUILTIN_SCALAR_RET_CTYPES,
+    _body_builds_struct_tuple,
 )
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.comptime as comptime_eval
@@ -277,15 +277,6 @@ def _quick_type(gen, node) -> str:
         # agree by construction.
         if node.name in getattr(gen, '_own_global_var_types', {}):
             return _as_str(gen._own_global_var_types[node.name])
-        # A bare name this module IMPORTS as a module-scope global (BUG-2026-009)
-        # is read through the defining module's accessor, whose declared C
-        # return type is the answer `_lower_IdentExpr` itself uses for the read
-        # (emit_exprs' imported-global arm). Answering int64_t here typed a
-        # `var fl = F` class attribute as a box, so a float global came out as
-        # its truncated integer.
-        _imp_acc = getattr(gen, '_imported_global_accessors', {}).get(node.name)
-        if _imp_acc is not None:
-            return _as_str(_imp_acc[0])
         return 'int64_t'
     if (isinstance(node, gimple_ctypes.SubscriptExpr)
             and (isinstance(node.obj, gimple_ctypes.IdentExpr)
@@ -439,7 +430,7 @@ def _quick_type(gen, node) -> str:
         # was right, the declaration was not).
         #
         _BUILTIN_CTORS = _BUILTIN_RET_CTYPES
-        # Same `_locally_binds_name` gate as `_BUILTIN_SCALAR_RET_CTYPES` just
+        # Same `_locally_binds_name` gate as `_BUILTIN_SCALARS` just
         # below — `set`/`dict`/`list` are ordinary identifiers a module
         # could shadow with its own top-level def/import.
         if fname in _BUILTIN_CTORS and not gen._locally_binds_name(fname):
@@ -447,6 +438,26 @@ def _quick_type(gen, node) -> str:
         # Scalar builtins, matching the lowering (float()->double, etc.). Without
         # these, [float(i), ...] infers an int element type and nested float
         # lists silently read/return as int.
+        _BUILTIN_SCALARS = {'float': 'double', 'int': 'int64_t', 'str': 'char *',
+                            'len': 'int64_t', 'ord': 'int64_t', 'chr': 'char *',
+                            'bool': '_Bool', 'repr': 'char *',
+                            # isinstance()/all()/any() always return a plain
+                            # Python bool regardless of their arguments' types
+                            # (same "no argument-type inspection needed"
+                            # reasoning as len/ord above) — without this,
+                            # `return isinstance(...)`/`return all(...)`/
+                            # `return any(...)` fell through to the int64_t
+                            # default below. Real emission (_lower_builtin_
+                            # isinstance/_lower_builtin_all_any) actually
+                            # produces a C `int`, but declaring the more
+                            # precise `_Bool` here still matches every other
+                            # boolean-producing case above (BinaryOp compare/
+                            # 'in', CompareChain, UnaryOp 'not', BoolLiteral)
+                            # and avoids joining as an opaque int64_t/pointer
+                            # against a sibling return path of a real pointer
+                            # type (see bugs/hard/CODEGEN_comprehension_
+                            # return_type_defaults_int64.md's follow-up note).
+                            'isinstance': '_Bool', 'all': '_Bool', 'any': '_Bool'}
         # `abs(x)` returns x's own type, so it cannot sit in that table
         # (which answers without looking at arguments) — it is answered
         # here, where the argument is available. Without it the estimator
@@ -478,8 +489,8 @@ def _quick_type(gen, node) -> str:
         # Mirrors the `open` builtin-shadowing gate at this class's
         # `_lower_builtin_all_any` call site — same `_locally_binds_name`
         # mechanism, see its docstring.
-        if fname in _BUILTIN_SCALAR_RET_CTYPES and not gen._locally_binds_name(fname):
-            return _BUILTIN_SCALAR_RET_CTYPES[fname]
+        if fname in _BUILTIN_SCALARS and not gen._locally_binds_name(fname):
+            return _BUILTIN_SCALARS[fname]
         # `struct_field_types` is keyed by the struct's own bare name as
         # written in its DEFINING module, so a `from M import Class as
         # Alias` call site misses it and falls through to the int64_t
