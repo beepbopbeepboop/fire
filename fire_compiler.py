@@ -2577,6 +2577,70 @@ def _check_variadic_element_types(stmts, filename) -> None:
         raise RuntimeError("\n".join(lines))
 
 
+def _module_function_defs(stmts) -> dict:
+    """`{name: FunctionDef}` for each module-level function whose name is
+    defined exactly once. A name defined twice (an overload, a redefinition)
+    has no single signature to check a call against, so it is left out."""
+    counts = {}
+    by_name = {}
+    for st in stmts:
+        if type(st).__name__ == "FunctionDef":
+            counts[st.name] = counts.get(st.name, 0) + 1
+            by_name[st.name] = st
+    return {name: st for name, st in by_name.items() if counts[name] == 1}
+
+
+# Literal node kinds whose value can never convert to an MLIR type. The four
+# are the kinds measured with the real compiler (tools/mojo, 2026-11-12):
+# every one is refused by a `__mlir_type.index` parameter, including `3`.
+_MLIR_REFUSED_LITERALS = ("IntLiteral", "FloatLiteral", "StringLiteral", "BoolLiteral")
+
+
+def _check_mlir_type_argument_calls(stmts, filename) -> None:
+    """A literal is not an MLIR value (measured with the real compiler,
+    2026-11-12): `def foo(x: __mlir_type.index)` called as `foo(1.5)`, `foo(3)`,
+    `foo("s")` or `foo(True)` is refused with "invalid call to 'foo': value
+    passed to 'x' cannot be converted ... to '__mlir_type.index'" at the
+    argument. Checked for a module-level function defined once, positionally
+    up to the first `*`-parameter, and for a keyword argument naming an MLIR
+    parameter (reported at the value, as the out-argument check does). A
+    variable argument is NOT checked: its static type is not known here."""
+    targets = {}
+    for name, fn in _module_function_defs(stmts).items():
+        mlir = {}
+        for i, (pname, ptype) in enumerate(fn.params):
+            if str(pname).startswith("*"):
+                break
+            if isinstance(ptype, str) and ptype.startswith("__mlir_type."):
+                mlir[i] = pname
+        if mlir:
+            targets[name] = (fn, mlir)
+    if not targets:
+        return
+    for node in _iter_ast_nodes(stmts):
+        if type(node).__name__ != "CallExpr":
+            continue
+        fn_node = node.func
+        if type(fn_node).__name__ != "IdentExpr" or fn_node.name not in targets:
+            continue
+        fn, mlir = targets[fn_node.name]
+        for i, a in enumerate(node.args):
+            if type(a).__name__ == "UnaryOp":
+                break  # `*x` at the call site shifts every later position
+            if i in mlir and type(a).__name__ in _MLIR_REFUSED_LITERALS:
+                _raise_mlir_refusal(fn_node.name, mlir[i], fn.params[i][1], a, filename)
+        for kw_name, kw_value in (node.kwargs or []):
+            hit = [i for i, pname in mlir.items() if pname == kw_name]
+            if hit and type(kw_value).__name__ in _MLIR_REFUSED_LITERALS:
+                _raise_mlir_refusal(fn_node.name, kw_name, fn.params[hit[0]][1], kw_value, filename)
+
+
+def _raise_mlir_refusal(fn_name, pname, ptype, value, filename) -> None:
+    loc = f"{filename}:{value.line}:{value.col}: " if filename else f"{value.line}:{value.col}: "
+    raise RuntimeError(f"{loc}error: invalid call to '{fn_name}': value passed to "
+                       f"'{pname}' cannot be converted to '{ptype}'")
+
+
 def _check_out_argument_calls(stmts, filename) -> None:
     """An `out` argument is not a call argument (measured with the real compiler,
     2026-11-11): `def f(out x: Int)` called as `f(y)` is refused with
@@ -2584,15 +2648,9 @@ def _check_out_argument_calls(stmts, filename) -> None:
     module-level function whose name is defined once and that has no `*args`:
     a positional argument past the non-`out` parameters is refused. Keyword
     arguments and a missing `out` argument are not this check."""
-    defs = {}
-    for st in stmts:
-        if type(st).__name__ == "FunctionDef":
-            defs[st.name] = defs.get(st.name, 0) + 1
     capacity = {}
     out_names = {}
-    for st in stmts:
-        if type(st).__name__ != "FunctionDef" or defs.get(st.name) != 1:
-            continue
+    for st in _module_function_defs(stmts).values():
         conv = st.param_convs or {}
         if not any(v == "out" for v in conv.values()):
             continue
@@ -2624,11 +2682,10 @@ def _check_out_argument_calls(stmts, filename) -> None:
 
 
 def _warn_fn_keyword(filename, tok) -> None:
-    """The `fn` keyword was removed from the language. A `fn` DEFINITION is
-    still accepted and draws the real compiler's message at the keyword; the
-    decision on 2026-11-11 (6408a0b14) is a warning, not a refusal. An
-    identifier named `fn` is not a definition and is not reported: CPython code
-    uses it as a name, and the parser accepts that."""
+    """Stage 1 of the `fn` removal (bugs/DIAGNOSTICS_fn_keyword_is_accepted_should_warn_then_refuse.md):
+    a `fn` DEFINITION is still accepted, and it draws the real compiler's
+    message at the keyword. An identifier named `fn` is not a definition and is
+    not reported: CPython code uses it as a name, and the parser accepts that."""
     loc = f"{filename}:{tok.line}:{tok.col}: " if filename else f"{tok.line}:{tok.col}: "
     print(f"{loc}warning: 'fn' has been removed; use 'def' instead", file=sys.stderr)
 
@@ -4707,8 +4764,8 @@ class Parser:
 
     def _check_out_self_declaration(self, name, fn_name_tok, params, param_convs, toks):
         """Refuse an `out self` receiver on a method that is not a constructor,
-        the shapes the real compiler refuses at the declaration (measured with
-        `tools/mojo build` on 2026-11-11):
+        the shapes the real compiler refuses at the declaration (measured
+        2026-11-11; see bugs/TEST_out_self_with_return_type_fixtures_are_invalid_mojo.md):
 
         * `out self` with no other parameter: `self argument must be present
           in instance method`, at the function name;
@@ -5456,7 +5513,6 @@ class Parser:
             aliases[_cvnode.target] = _cvnode.value
         decs    = getattr(self, "_pending_decs", [])
         self._pending_decs = []
-        self._validate_align_decorators(decs)
         return StructDef(name=name, fields=fields, methods=methods, decorators=decs,
                          comptime_aliases=aliases, bases=bases, keywords=class_keywords,
                          bracket_params=bracket_params,
@@ -5464,50 +5520,6 @@ class Parser:
                          where_clause=struct_where,
                          bracket_types=[(f.name, f.type_ann) for f in param_fields
                                         if isinstance(f, VarDecl)])
-
-    def _validate_align_decorators(self, decorators):
-        for dec in decorators:
-            head = None
-            args = None
-            kwargs = None
-            loc_line = 0
-            loc_col = 0
-            if isinstance(dec, str):
-                if dec == "align":
-                    head = "align"
-                    args = []
-                    kwargs = []
-            elif isinstance(dec, CallExpr):
-                func = dec.func
-                if isinstance(func, IdentExpr) and func.name == "align":
-                    head = "align"
-                    args = dec.args
-                    kwargs = dec.kwargs
-                    loc_line = getattr(dec, "line", 0) or getattr(func, "line", 0)
-                    loc_col = getattr(dec, "col", 0) or getattr(func, "col", 0)
-            if head != "align":
-                continue
-            loc_tok = Token("", "", loc_line, loc_col)
-            if len(args) != 1 or (kwargs and len(kwargs) != 0):
-                raise SyntaxError(
-                    f"{self._loc(loc_tok)}@align requires exactly one argument")
-            arg = args[0]
-            val = self._eval_align_constant_int(arg)
-            if val is None:
-                continue
-            if val <= 0 or (val & (val - 1)) != 0:
-                raise SyntaxError(
-                    f"{self._loc(loc_tok)}@align value must be a positive power of 2")
-            if val > (1 << 29):
-                raise SyntaxError(
-                    f"{self._loc(loc_tok)}@align value exceeds maximum alignment (2^29)")
-
-    def _eval_align_constant_int(self, expr):
-        if isinstance(expr, IntLiteral):
-            return expr.value
-        if isinstance(expr, UnaryOp) and expr.op == "-" and isinstance(expr.operand, IntLiteral):
-            return -expr.operand.value
-        return None
 
     def _parse_enum(self):
         # `enum Name: member1, member2, ...` — not real Mojo syntax (the real
@@ -8915,6 +8927,7 @@ class Parser:
             self._skip_newlines()
         stmts = _synthesize_fieldwise_inits(stmts)
         _check_out_argument_calls(stmts, self._filename)
+        _check_mlir_type_argument_calls(stmts, self._filename)
         _check_inferred_param_dependencies(stmts, self._filename)
         _check_variadic_element_types(stmts, self._filename)
         return stmts

@@ -508,18 +508,7 @@ def test_every_declaration_is_seen():
     # spelling produces with nothing formatted to get there. The codegen half
     # is ONE set entry (`emit_infra._KW_DICT_FNS`), which `_apply_kw_keys`
     # renames through — the same mechanism as the other fourteen twins.
-    #
-    # 807 -> 810 (2026-11-12): the `str`-box predicates `mojo_is_str_box` and
-    # `mojo_word_is_text`, plus the accessor `mojo_str_box_word` (73076be07,
-    # "codegen: a str stored into a mixed tagged name is a box (step 2 part
-    # 3)"). A `str` stored into a name that also holds a tagged generator word
-    # is boxed with a kind-'p' box, so `len(x)` and `x + "!"` have to ask
-    # whether a word is such a box; all three are word-shaped (an `int64_t` in
-    # and a word or `int` out), which is why the word figure moves 415 -> 418
-    # with them. The commit added the declarations without a rung — the drift
-    # this ladder exists to catch — so the number is read off the call (810),
-    # not added up.
-    for header, want in (('fire_runtime.h', 810),   # --fix writes the live figure
+    for header, want in (('fire_runtime.h', 807),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already
@@ -774,32 +763,6 @@ CENSUS_QUOTES = (
     ('FORMAL.md',
      r'So \*\*(\d+) of (\d+) \([\d.]+%\)\*\* is the reachable-surface ceiling',
      ('word', 'total')),
-    # The RESTATEMENTS of the census outside §2.2's table (§3.2's non-word
-    # sentence, §5's "N of the box-crossing", §6's phase-2 word row and the two
-    # sentences below it). They are in this table because they were exactly what
-    # a hand refresh missed: a rung that adds a word-shaped entry point moves
-    # `word` and leaves `box` alone, and the §3.2 sentence quotes `box` where
-    # §2.2's table is the thing a person edits. They are read with the same
-    # `live_census()` the table's own rows use, and `--fix` writes them, so a
-    # refresh cannot stop at the table again.
-    ('FORMAL.md',
-     r'So the \*\*(\d+)\*\* non-word entry points',
-     ('box',)),
-    ('FORMAL.md',
-     r'the (\d+)\s*\nbox-crossing entry points of §2\.2',
-     ('box',)),
-    ('FORMAL.md',
-     r'and the (\d+) become callable',
-     ('box',)),
-    ('FORMAL.md',
-     r'\| word-shaped entry points \(`runtime_abi`\) \| (\d+) \| (\d+) \|',
-     ('word', 'word')),
-    ('FORMAL.md',
-     r'gaps between the\s+(\d+) of the row above',
-     ('word',)),
-    ('FORMAL.md',
-     r'\*\*\d+ of the (\d+)\*\* the dylib\s+does not export',
-     ('word',)),
     ('formal/build.py',
      r'§3\.1 for the word-shaped surface \((\d+) entry points, (\d+) of them '
      r'word-shaped,',

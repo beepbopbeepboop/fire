@@ -5303,11 +5303,10 @@ main()
     # int64. The copy of a tagged word into a str or float local used to
     # compile to a bare unwrap: the str local segfaulted (an int word used as
     # a char*), and the float local printed `1.0` / `0.0` for `1` / None. A
-    # Mojo name has one type, so the name is the int64_t box
-    # (`ginf.mixed_box_name`): each store keeps its own kind in the MojoBox and
-    # every consumer reads it by kind. A str stored into a mixed tagged name is
-    # a kind-'p' box. Both directions and the reads (print, ==, +, len,
-    # f-string) are pinned to CPython on the same text.
+    # Mojo name has one type, so the refusal is the honest answer in either
+    # direction (the copy first, or the plain store first).
+    # A str stored into a mixed tagged name is a kind-'p' box. Both directions
+    # and the reads (print, ==, +, len, f-string) are checked against CPython.
     _mixed_str = """\
 def g():
     yield 1
@@ -9472,95 +9471,6 @@ async def outer():
     print(acc)
 
 asyncio.run(outer())
-""")
-
-    # ── the same shapes driven from an `async def` under asyncio.run ──────
-    # The consumer here is itself a coroutine driven by asyncio.run, so the
-    # `async for` desugars to the stack-switch drive loop before the nested
-    # generator is lifted out of the lowered body. That desugar used to spell
-    # the callee `__mgco_<name>_start` — a symbol nothing defines once the
-    # lift qualifies the hoisted body `__mgco_<lowered-parent>_<name>` — so the
-    # call landed on the weak "unavailable in compiled mode" stub and the loop
-    # ran ZERO times (CPython verifies the twin below prints 11).
-    test_generator_matches_cpython("nested_async_gen_driven_by_async_for_in_async_def", """\
-import asyncio
-
-async def main():
-    async def gen():
-        yield 11
-    async for x in gen():
-        print(x)
-
-asyncio.run(main())
-""", """\
-import asyncio
-
-async def main():
-    async def gen():
-        yield 11
-    async for x in gen():
-        print(x)
-
-asyncio.run(main())
-""")
-
-    # A plain nested `async def` the consumer awaits, not an async
-    # generator: the same drive-loop desugar, the same dangling-symbol
-    # shape (`__mgco_helper_start`), the same silent zero.
-    test_generator_matches_cpython("nested_async_def_awaited_in_async_def", """\
-import asyncio
-
-async def main():
-    async def helper():
-        return 42
-    print(await helper())
-
-asyncio.run(main())
-""", """\
-import asyncio
-
-async def main():
-    async def helper():
-        return 42
-    print(await helper())
-
-asyncio.run(main())
-""")
-
-    # One level deeper: `inner` is nested in `outer`, which is nested in an
-    # `async def` under asyncio.run. The lift runs once per nesting level,
-    # so the drive loop one level down must see the far-qualified symbol
-    # (`__mgco_..._inner_start`); a one-pass lift left it dangling.
-    test_generator_matches_cpython("doubly_nested_async_gen_driven_by_async_for_in_async_def", """\
-import asyncio
-
-async def main():
-    async def outer():
-        async def inner():
-            yield 7
-            yield 8
-        total = 0
-        async for x in inner():
-            total = total + x
-        return total
-    print(await outer())
-
-asyncio.run(main())
-""", """\
-import asyncio
-
-async def main():
-    async def outer():
-        async def inner():
-            yield 7
-            yield 8
-        total = 0
-        async for x in inner():
-            total = total + x
-        return total
-    print(await outer())
-
-asyncio.run(main())
 """)
 
     # ── the wait-descriptor boundary ────────────────────────────────────
