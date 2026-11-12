@@ -11573,7 +11573,7 @@ main()
 
 
 # A nested recursive generator that reads its elements' attributes through a
-# RUNTIME-named `getattr` (bugs/CODEGEN_coro_nested_recursive_generator_getattr.md).
+# RUNTIME-named `getattr` (the compiled-generator getattr refusal, fixed in 37c877f7c).
 # The C++ companion used to refuse `getattr(obj, name)` with a non-static name,
 # so the whole module fell back to source. Now the name is dispatched through
 # the runtime's struct reflection (mojo_getattr_any / mojo_getattr_default): a

@@ -1,7 +1,7 @@
 # CODEGEN: a 0 in a tuple slot of a list collected from a generator prints None
 
 Filed 2026-11-12 while landing the nested recursive generator getattr fix
-(`bugs/CODEGEN_coro_nested_recursive_generator_getattr.md`). Related to, but the
+(the compiled-generator `getattr` refusal, fixed in 37c877f7c). Related to, but the
 reverse of, `bugs/mid/CODEGEN_tagged_tuple_slot_none_prints_zero.md` (there a
 `None` reads back as `0`; here a `0` reads back as `None`).
 
