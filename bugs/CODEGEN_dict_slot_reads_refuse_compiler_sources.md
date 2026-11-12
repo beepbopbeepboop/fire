@@ -59,21 +59,18 @@ Check it against the fire.ci build, not only this probe.
 
 ## Status (2026-11-12)
 
-- LANDED (2026-11-12, latest): the stage1 bootstrap dump of the compiler's own
-  source is green again. `fire.py --dump fire_compiler.py` (the gate job
-  `bootstrap-stage1-dumps:fire_compiler.py`) refused from `172523b14`
-  ("CODEGEN: fix tagged-mixed container refusal after merge", which widened the
-  container-store refusal to `_mixed_box or _tagged_mixed`) through
-  `0cce3da396`: `'body': a name bound to a tagged generator word ... also to a
-  container or pointer value (container value of C type 'MojoList *') ...`
-  — `body` is a container-beside-scalar name (`mixed_value_locals`), so the
-  dump wrote a 0-byte `fire_compiler.ci` and exited 1. The narrowing below
-  (`_tagged_mixed` only) fixes it: the whole stage1 fanout passes (50/50 jobs,
-  `bootstrap-stage1-dumps:fire_compiler.py` 8.9 s / 0.2 GB). The gate tracking
-  doc for that job is deleted with this entry; the compiler-source half is
-  pinned by `test_dict_slot_read_regression.py` Test 6 (that file's Test 5 pins
-  the minimal container-store shape).
-- LANDED (2026-11-12): the container refusal was too wide. `_gen_stmt_AssignStmt`
+- LANDED (2026-11-12, latest-2, branch -2): `mojo/middle/coro.py`'s `pinned` was a
+  `@contextlib.contextmanager` generator, which the compiled path refuses, so the module
+  refused as a whole and `coro_module_compiles_to_c` failed. It is now a plain class with
+  `__enter__`/`__exit__` (same enter/restore), and the unused `import contextlib` is dropped.
+  Measured: `ast_rewriter.py`, `module_shared.py` and `coro.py` each compile in isolation
+  (`linkable=False`); `coro_module_compiles_to_c()` returns True; `test_dict_slot_read_regression.py`
+  and `test_mixed_kind_name_representation.py` pass (20/20). `test_async_void_return.py` 9/11,
+  the same 2 failures as master (filed as `bugs/CODEGEN_enqueue_cpu_async_lift_unresolved_callee.md`).
+  The generator-context-manager refusal is filed as `bugs/CODEGEN_contextmanager_generator_refused.md`.
+- The fire.ci self-host build is still NOT run (heavy, integrator). The doc stays open for it.
+
+- LANDED (2026-11-12, latest): the container refusal was too wide. `_gen_stmt_AssignStmt`
   (`emit_stmts.py`) refused a container store whenever the name was a box-holding local
   (`_mixed_box`), and since eb2a7e330b that includes a container-beside-scalar name
   (`mixed_value_locals`), which is supposed to carry a container as its bare word. The

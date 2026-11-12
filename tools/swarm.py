@@ -766,9 +766,9 @@ def apply_moves(st):
                     open(os.path.join(C.MAIN, f), "w", encoding="utf-8").write(body)
                 for base, old, new, cited in plan:
                     os.makedirs(os.path.dirname(os.path.join(C.MAIN, new)), exist_ok=True)
-                    mv = subprocess.run(["git", "mv", old, new], cwd=C.MAIN, capture_output=True, text=True)
-                    if mv.returncode:            # git's reason is on stderr; _git returns only stdout
-                        raise RuntimeError("git mv %s %s failed: %s" % (old, new, mv.stderr.strip()))
+                    rc, _ = _git("mv", old, new)
+                    if rc:
+                        raise RuntimeError("git mv %s %s failed" % (old, new))
                     done.append((old, new))
             except Exception:                    # put back what this pass changed, then report it
                 for old, new in reversed(done):

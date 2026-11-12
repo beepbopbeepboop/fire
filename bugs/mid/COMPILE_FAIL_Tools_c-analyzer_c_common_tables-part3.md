@@ -1,41 +1,27 @@
-# COMPILE_FAIL: Tools/c-analyzer/c_common/tables.py — part 3: end-to-end `tables.py` build after the parse_table and read_table shape fixes
+# COMPILE_FAIL: Tools/c-analyzer/c_common/tables.py — part 3: `csv.reader` runtime/iterator and end-to-end `tables.py` compile
 
-Parent: `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` (SPLIT). This part closes the file-level bug; it does NOT add new subsystems.
+Parent: `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` (SPLIT). This part completes the file-level fix for `tables.py` given parts 1-2.
 
-Depends on: part 1 (`bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part1.md`, mixed-scalar tuple literal at the raise-message position) and part 2 (`bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2.md`, `with` over a tabled foreign callable). Also builds on the csv.reader foreign-callable table/runtime work already on master (commits 373cf8633, 4cb02b8c1, 7e6a8ac5c — the previous split's parts 1-3, all fixed and deleted).
-
-## Goal
-
-`Tools/c-analyzer/c_common/tables.py` compiles and builds through this compiler's cpp C++20-coroutine path — the two generator functions (`parse_table`, `read_table`) and their bodies correctly lowered — or the remaining shape is named honestly and filed as a fresh part, not worked around.
+Depends on: part 1 (foreign-callable table + param typing) and part 2 (`_cpp_for_stmt`/typing support for iterating a call through a tabled callable-valued param).
 
 ## Scope
 
-1. Reproduce: `mkdir -p .tmp/ca && cp -R /Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common /Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer .tmp/ca/` then build (see Done when).
-2. Fix what parts 1+2 leave behind, staying inside the two generator functions and the shared mechanisms they already use. Candidate residuals, in the order the diagnostics will surface them (measure first; do not pre-fix without evidence):
-   - `read_table`: the recursion `yield from read_table(infile, ...)` now flows the part-2 bound HANDLE (not a path) into this call; `isinstance(infile, str)` is then False, so the path taken is `strutil._iter_significant_lines(infile)` then `next(lines)`. Iteration over the handle — or its read-all-lines alternative via `mojo_file_read_all` (`runtime/fire_runtime.c` ~lines 1028/1116) iterated as a `MojoList *` — is the likeliest hard residual. Decide one honestly; do not fake the file object.
-   - `parse_table`: `yield row, filename` — a TUPLE yield; check the yield-agreement machinery (the tagged-word yields cover scalar words; a tuple yield may need the boxed representation from part 1's world).
-   - `parse_table`: `for line, filename in strutil.parse_entries(entries, ignoresep=sep)` — a cross-module generator delegated with a KEYWORD argument (`ignoresep=sep`), tuple-unpacked loop target. Check `_cpp_for_generator_delegate`'s kwargs handling.
-   - `read_table`: `fix_row = _normalize_fix_read(fix)` then `tuple(fix_row(row))` — a call through a callable LOCAL holding a closure (capturing `fix`/`markers`); check the declared-callable-local call path. If this shape needs a new subsystem (a closure-capture calling convention for generator bodies), STOP and file a fresh part; do not grow this part into one.
-   - `read_table`: `next(lines)` over an A3-lowered foreign generator handle (`strutil._iter_significant_lines`) — should already work via the foreign-A3-generator machinery (commit 93eacde6); verify, don't assume.
-3. If any residual is its own feature (new runtime iterator, new lowering subsystem), file it as a fresh part under `bugs/` or `bugs/mid/` and record it here and in the parent doc — do not let part 3 become the whole project again.
-4. Update the parent doc's Status with the outcome (what builds, what refuses and why). If the end-to-end build succeeds, the file-level bug is done; note it there (the parent doc itself is NOT to be deleted by this part — the replan protocol keeps it).
+Provide the concrete runtime/representation for `csv.reader` as a tabled foreign callable and make `Tools/c-analyzer/c_common/tables.py` compile end-to-end.
+
+Concrete work:
+1. Implement the runtime iterator/row representation for `csv.reader` (iterator of rows / `list[str]` element shape the table promises) in `runtime/` and wire it into emission/build so compiled code can obtain and iterate rows from the tabled `csv.reader` callable (including the default `_get_reader=csv.reader` path in `read_table`).
+2. Ensure `fix_row(row)` / `tuple(fix_row(row))` and element access over the produced row type are correctly typed and lowered (finishing any residual from part 2 for this concrete element shape).
+3. Handle any remaining `read_table` eligibility/lowering constraints needed for this file (e.g. kwonly/coroutine eligibility noted in parent) so the module-level blocker is removed.
+4. Flip `_regression_read_table_callable_reader` in `test_gimple_generator_runner.py` from a refusal pin to a stdlib-output comparison against CPython ground truth (via the tree's usual mechanism, e.g. `tools/mojo` as noted in parent), and add/keep a refusal regression for an **untabled** callable so unknown callees remain honestly refused.
+5. Verify the target: `Tools/c-analyzer/c_common/tables.py` (from Python-3.14.6 sources as in the parent doc) builds. Note: `c_analyzer/__init__.py` and `c_common/fsutil.py` share the same callable-valued-parameter/foreign-callable blocker family; this part may reuse the table/runtime mechanism for `csv.reader` but is scoped to landing `tables.py` unless extending is trivial and separately verified.
 
 ## Acceptance
 
-- `python3 fire.py build -o .tmp/ca/tables_out .tmp/ca/c_common/tables.py` exits 0; `MOJO_DEBUG=1` shows no `parse_table` or `read_table` refusal for the shapes parts 1 and 2 fixed, and no refusal at all for the file.
-- `_regression_read_table_callable_reader` (the CPython-comparison regression in `test_gimple_generator_runner.py`) still passes; an untabled default still refuses by name.
-- No whole-closure compile, no `make gate`; only the build above and the existing regressions.
-
-## Done when
-
-```
-mkdir -p .tmp/ca && cp -R /Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common /Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer .tmp/ca/ && python3 tools/memslot.py --gb 8 --label tables-build -- python3 fire.py build -o .tmp/ca/tables_out .tmp/ca/c_common/tables.py
-```
-
-exits 0 (no `Error building` line; the binary runs).
+- `tables.py`'s module-level compile/build failure tracked by the parent doc is resolved (targeted build succeeds). `read_table` compiles and, on the covered case, produces output matching CPython ground truth.
+- `_regression_read_table_callable_reader` (or its successor) asserts correct behavior for the tabled `csv.reader` case; an untabled callable still yields a named refusal (no silent wrong behavior).
+- No whole-closure compile, self-host build, or full gate in the worker; run only the narrowest verification for this change (wrap any compile in `python3 tools/memslot.py --gb 8 --label <what> -- <cmd>`). If a heavier suite is required, record it as NOT DONE for the integrator.
 
 ## References
 
-- Parent: `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` (Status entries 2026-10-29 … 2026-11-12).
-- Depends on: `bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part1.md`, `bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2.md`.
-- Sites: `mojo/backend_gimple/cpp_core.py` (`_cpp_for_stmt`, yield machinery, `_cpp_raise_stmt`), `mojo/backend_gimple/emit_resolve.py` (`publish_a3_generators`), `mojo/middle/infra_infer.py`, `.tmp/ca/c_common/tables.py` and `.tmp/ca/c_common/strutil.py` (copied sources).
+- Parent doc: `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` (plan step 5, runtime/iterator need, shared blockers with `c_analyzer/__init__.py` and `c_common/fsutil.py`).
+- Key sites: `runtime/`, `mojo/backend_gimple/cpp_core.py`, `mojo/backend_gimple/coro.py`, `test_gimple_generator_runner.py`, foreign-callable table from part 1.

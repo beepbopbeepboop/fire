@@ -1894,7 +1894,6 @@ def _register_link_imports(gen, stmts: list) -> list:
                         # available: on-demand elaboration for a generic /
                         # overloaded `def`, whole-module inlining for
                         # anything else. See `_classify_unresolved_export`.
-                        _found = False
                         if source:
                             try:
                                 msrc = open(source).read()
@@ -1926,14 +1925,6 @@ def _register_link_imports(gen, stmts: list) -> list:
                                                 _sibling, _smsrc):
                                             _found = True
                                             break
-                        # Link mode: no dylib for a local module. Inline the
-                        # module so its definitions (including global accessors)
-                        # land in this TU. This is the route that `_link_inline_modules`
-                        # already uses for functions and structs — it compiles the
-                        # sibling module into this translation unit so its globals
-                        # and their accessors are available on the link line.
-                        if not _found and not from_reflection and source and source.endswith('.mojo'):
-                            gen._link_inline_modules.add(stmt.module)
                         continue
                     if sym in seen:
                         continue
@@ -2611,23 +2602,6 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             # element access) cast directly to a pointer type is the
             # same -Wint-to-pointer-cast size mismatch as 'int' — widen
             # through int64_t first, same as the other narrow sources.
-            v = gen._ensure_local(s, v)
-            ip = gen._new_val('int64_t', f'(int64_t){v}')
-            gen._emit(f'  {dest} = ({d}){ip};')
-        elif d.endswith(' *') and s in ('double', 'float'):
-            # A FLOAT returned from a function whose inferred return type is a
-            # pointer. `comptime.py`'s `eval_const` is the live case: it
-            # genuinely returns bool/int/float/str/tuple, so its return-type
-            # join lands on `char *` (the string branches), and the
-            # `return node.value` for a FloatLiteral (added by 13b16397d) then
-            # emitted a bare `(char *)<double>` — not valid C at all, gcc:
-            # "cannot convert to a pointer type", which took down
-            # `make mojoc`, `make stage2/mojo` and `test_selfhost.py`'s build.
-            # The int→pointer spellings above are accepted by gcc with a
-            # warning; a float→pointer is rejected outright, which is why only
-            # this source kind needed a branch. Same two-step as everywhere
-            # else in this file, and the same truncate-to-int word
-            # `_to_int64('double', ...)` hands every other float consumer.
             v = gen._ensure_local(s, v)
             ip = gen._new_val('int64_t', f'(int64_t){v}')
             gen._emit(f'  {dest} = ({d}){ip};')
@@ -3569,12 +3543,7 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
         _emsg = str(e)
         if isinstance(e, RuntimeError) and (
                 'constraint failed' in _emsg
-                or 'comptime assertion failed' in _emsg
-                or ('function instantiation failed' in _emsg
-                    and 'struct alignment must be a positive power of 2' in _emsg)
-                or ('function instantiation failed' in _emsg
-                    and 'use of unknown declaration' in _emsg
-                    and '@align' in _emsg)):
+                or 'comptime assertion failed' in _emsg):
             raise
         # A `where` clause of the struct that is provably false for these type
         # args is a real diagnostic (modular: `error: violated constraint`),
@@ -3625,12 +3594,7 @@ def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
             _emsg = str(e)
             if isinstance(e, RuntimeError) and (
                     'constraint failed' in _emsg
-                    or 'comptime assertion failed' in _emsg
-                    or ('function instantiation failed' in _emsg
-                        and 'struct alignment must be a positive power of 2' in _emsg)
-                    or ('function instantiation failed' in _emsg
-                        and 'use of unknown declaration' in _emsg
-                        and '@align' in _emsg)):
+                    or 'comptime assertion failed' in _emsg):
                 raise
             gimple_ctypes._debug_note('inferred generic struct elaboration failed')
             info = None

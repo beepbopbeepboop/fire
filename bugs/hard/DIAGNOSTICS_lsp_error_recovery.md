@@ -1,4 +1,4 @@
-SPLIT: bugs/mid/DIAGNOSTICS_lsp_error_recovery-part2, bugs/mid/DIAGNOSTICS_lsp_error_recovery-part3 (part 1 fixed: parser recovers past malformed declarations; regression test_parser_error_recovery_part1.py)
+SPLIT: bugs/mid/DIAGNOSTICS_lsp_error_recovery-part1, bugs/mid/DIAGNOSTICS_lsp_error_recovery-part2, bugs/mid/DIAGNOSTICS_lsp_error_recovery-part3
 
 # DIAGNOSTICS step 8: LSP error recovery
 

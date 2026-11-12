@@ -881,10 +881,6 @@ class StructDef:
     fields: list
     methods: list[FunctionDef]
     decorators: list = field(default_factory=list)
-    # Parsed argument/expression of a struct's `@align(...)` decorator, or None
-    # when absent. Kept on the StructDef so later stages (e.g. struct emission
-    # and elaboration-time validation) can inspect it directly.
-    align_expr: object = None
     comptime_aliases: dict = field(default_factory=dict)  # name -> value expr
     bases: list = field(default_factory=list)  # base class/struct names, e.g. `struct Child(Base):`
     # Keyword arguments in the class/struct base list, e.g.
@@ -2579,74 +2575,6 @@ def _check_variadic_element_types(stmts, filename) -> None:
                          f"must be an 'inferred' parameter")
     if lines:
         raise RuntimeError("\n".join(lines))
-
-
-def _module_name_from_filename(filename: str | None) -> str | None:
-    if not filename:
-        return None
-    import os
-    base = os.path.basename(filename)
-    if not base:
-        return None
-    name, _ext = os.path.splitext(base)
-    return name or None
-
-
-def _docstring_block_abs_loc(block, node_line: int, node_col: int):
-    # node positions are 1-based within the parsed block snippet.
-    if node_line <= 1:
-        return (block.line, block.col + max(node_col - 1, 0))
-    return (block.line + node_line - 1, node_col)
-
-
-def _check_docstring_self_imports(stmts, filename) -> None:
-    """Reject `import X` / `from X import ...` (and equivalent self-imports)
-    inside mojo docstring code blocks of module X."""
-    import os
-    module_name = _module_name_from_filename(filename)
-    if not module_name:
-        return
-    try:
-        from mojo.middle.docstring_blocks import extract_module_docstring_mojo_blocks
-    except Exception:
-        return
-    # Read source text for accurate positions when possible.
-    source = None
-    if filename and os.path.exists(filename):
-        try:
-            with open(filename, "r", encoding="utf-8") as f:
-                source = f.read()
-        except Exception:
-            source = None
-    try:
-        blocks = extract_module_docstring_mojo_blocks(stmts, source=source)
-    except Exception:
-        return
-    for block in blocks:
-        try:
-            block_stmts = Parser(py_tokenize(block.code)).parse_module()
-        except Exception:
-            # A non-parsing doc example is not a self-import diagnostic.
-            continue
-        for st in block_stmts:
-            imported_modules = []
-            if isinstance(st, ImportStmt):
-                if st.module:
-                    imported_modules.append((st.module, getattr(st, "line", 1), getattr(st, "col", 1)))
-                extra = getattr(st, "extra", None) or []
-                for mod, _alias in extra:
-                    if mod:
-                        imported_modules.append((mod, getattr(st, "line", 1), getattr(st, "col", 1)))
-            elif isinstance(st, FromImportStmt):
-                mod = st.module or ""
-                if mod and not mod.startswith("."):
-                    imported_modules.append((mod, getattr(st, "line", 1), getattr(st, "col", 1)))
-            for mod, ln, col in imported_modules:
-                root = mod.split(".", 1)[0]
-                if root == module_name:
-                    abs_line, abs_col = _docstring_block_abs_loc(block, ln or 1, col or 1)
-                    loc = f"{filename}:{abs_line}:{abs_col}: " if filename else f"{abs_line}:{abs_col}: "
-                    raise SyntaxError(f"{loc}error: module '{module_name}' cannot import itself")
 
 
 def _module_function_defs(stmts) -> dict:
@@ -4987,19 +4915,6 @@ def _canon_conv(conv: str):
 # ── Code generator ─────────────────────────────────────────────────
 
 
-def align_value_error(val):
-    """Shared @align value rule: None if valid, else a diagnostic suffix."""
-    try:
-        v = int(val)
-    except Exception:
-        return f"@align value must be a positive power of 2, got {val}"
-    if v <= 0 or (v & (v - 1)) != 0:
-        return f"@align value must be a positive power of 2, got {v}"
-    if v > (1 << 29):
-        return "@align value exceeds maximum alignment (2^29)"
-    return None
-
-
 class Parser:
     _tok: list
     _pos: int
@@ -5030,11 +4945,6 @@ class Parser:
         self._lazy_import_blockers = []
         # Empty until a bracket list is parsed; see the class-level note.
         self._last_bracket_variadics = []
-        # Diagnostics recorded while parsing in recovery mode. Each entry is a
-        # SyntaxError (or a string message) describing a recovered parse error.
-        # `parse_module(recover=True)` collects errors here and continues; the
-        # default non-recovering path still raises on the first error.
-        self.errors = []
         # `comptime NAME = <rhs>` the parser could not parse, as
         # `[(loc, text, exception_text), ...]`. A comptime right-hand side has
         # two very different fates that used to be INDISTINGUISHABLE: a
@@ -5831,27 +5741,13 @@ class Parser:
         decs    = getattr(self, "_pending_decs", [])
         self._pending_decs = []
         self._validate_align_decorators(decs)
-        align_expr = self._extract_struct_align_expr(decs)
         return StructDef(name=name, fields=fields, methods=methods, decorators=decs,
-                         align_expr=align_expr,
                          comptime_aliases=aliases, bases=bases, keywords=class_keywords,
                          bracket_params=bracket_params,
                          type_param_names=type_param_names,
                          where_clause=struct_where,
                          bracket_types=[(f.name, f.type_ann) for f in param_fields
                                         if isinstance(f, VarDecl)])
-
-    def _extract_struct_align_expr(self, decorators):
-        for dec in (decorators or []):
-            if isinstance(dec, CallExpr):
-                func = dec.func
-                if isinstance(func, IdentExpr) and func.name == "align":
-                    if dec.args:
-                        return dec.args[0]
-                    return None
-            elif isinstance(dec, str) and dec == "align":
-                return None
-        return None
 
     def _validate_align_decorators(self, decorators):
         for dec in decorators:
@@ -5883,9 +5779,12 @@ class Parser:
             val = self._eval_align_constant_int(arg)
             if val is None:
                 continue
-            err = align_value_error(val)
-            if err is not None:
-                raise SyntaxError(f"{self._loc(loc_tok)}{err}")
+            if val <= 0 or (val & (val - 1)) != 0:
+                raise SyntaxError(
+                    f"{self._loc(loc_tok)}@align value must be a positive power of 2")
+            if val > (1 << 29):
+                raise SyntaxError(
+                    f"{self._loc(loc_tok)}@align value exceeds maximum alignment (2^29)")
 
     def _eval_align_constant_int(self, expr):
         if isinstance(expr, IntLiteral):
@@ -5967,9 +5866,7 @@ class Parser:
             else:
                 aliases[member_name] = IntLiteral(next_auto, raw='')
                 next_auto += 1
-        align_expr = self._extract_struct_align_expr(decs)
         return StructDef(name=name, fields=[], methods=[], decorators=decs,
-                         align_expr=align_expr,
                          comptime_aliases=aliases)
 
     def _parse_trait(self):
@@ -8187,7 +8084,6 @@ class Parser:
         return target, saw_comma
 
     def _parse_generator(self):
-        for_tok = self._peek()
         self._expect("KW", "for")
         target, _ = self._parse_generator_target()
         self._expect("KW", "in")
@@ -8195,11 +8091,7 @@ class Parser:
         conditions = []
         while self._is_kw("if"):
             self._advance(); conditions.append(self._parse_expr(1))
-        # The clause's own `for` keyword: genexp_body builds this clause's
-        # ForStmt from it, and a line-less ForStmt emits no `#line` directive
-        # for its lines (the iterable lowering, the loop header).
-        return Generator(target=target, iterable=iterable, conditions=conditions,
-                         line=for_tok.line, col=for_tok.col)
+        return Generator(target=target, iterable=iterable, conditions=conditions)
 
     def _parse_generators(self):
         """Parse one or more chained `for ... in ... [if ...]` clauses, as in
@@ -9170,16 +9062,10 @@ class Parser:
                 self._advance()  # skip =
                 keywords[keyword_name] = self._parse_expr(0)  # parse and store value
             else:
-                first_tok = self._peek()
                 first = self._parse_expr(0)
                 if self._is_kw("for"):
                     gens = self._parse_generators()  # allow chained for-clauses
-                    # The genexp's line/col is its element's first token, as
-                    # the parenthesised form's is its `(`. Without it the
-                    # hoisted `__genexp_N` body had no line, so none of its
-                    # statements carried a `#line` directive.
-                    args = [Comprehension(kind="generator", element=first, generators=gens,
-                                          line=first_tok.line, col=first_tok.col)]
+                    args = [Comprehension(kind="generator", element=first, generators=gens)]
                     continue
                 args.append(first)
             if self._peek().kind == "COMMA": self._advance()
@@ -9305,74 +9191,18 @@ class Parser:
     def _is_kw(self, *w) -> bool:
         t = self._peek(); return t.kind == "KW" and t.value in w
 
-    def parse_module(self, recover: bool = False) -> list:
+    def parse_module(self) -> list:
         stmts = []
-        self.errors = []
         self._skip_newlines()
         while not self._at_end():
-            if recover:
-                start_pos = self._pos
-                try:
-                    self._parse_stmt_into(stmts)
-                except SyntaxError as e:
-                    self.errors.append(e)
-                    # Synchronize: advance past the failing construct so parsing
-                    # can continue at the next likely top-level declaration.
-                    self._synchronize_top_level(start_pos)
-                except Exception as e:
-                    # Treat other parse-time failures as recoverable errors too
-                    # so a malformed declaration does not abort the module.
-                    self.errors.append(e)
-                    self._synchronize_top_level(start_pos)
-            else:
-                self._parse_stmt_into(stmts)
+            self._parse_stmt_into(stmts)
             self._skip_newlines()
         stmts = _synthesize_fieldwise_inits(stmts)
         _check_out_argument_calls(stmts, self._filename)
         _check_mlir_type_argument_calls(stmts, self._filename)
         _check_inferred_param_dependencies(stmts, self._filename)
         _check_variadic_element_types(stmts, self._filename)
-        _check_docstring_self_imports(stmts, self._filename)
         return stmts
-
-    def _synchronize_top_level(self, start_pos: int):
-        """Recover after a parse error at module scope by skipping tokens until
-        the parser is positioned at a plausible start of the next top-level
-        declaration or statement. Must always make progress when not at EOF."""
-        if self._pos == start_pos and not self._at_end():
-            self._advance()
-        # Skip to a NEWLINE at module level, then consume layout/newlines until
-        # we reach a token that is not inside an indented block we failed in.
-        while not self._at_end():
-            t = self._peek()
-            if t.kind == "NEWLINE":
-                self._advance()
-                # Consume blank lines and dedents back to module scope.
-                while not self._at_end():
-                    t2 = self._peek()
-                    if t2.kind in ("NEWLINE", "DEDENT"):
-                        self._advance()
-                        continue
-                    if t2.kind == "INDENT":
-                        # Still inside/entering an indented region (e.g. we
-                        # failed mid-block); consume and keep seeking module
-                        # level.
-                        self._advance()
-                        continue
-                    break
-                # At module scope now? A top-level token follows (no INDENT
-                # pending). Stop so the main loop can parse it.
-                if self._at_end():
-                    return
-                if self._peek().kind not in ("INDENT", "DEDENT"):
-                    return
-                continue
-            if t.kind == "DEDENT":
-                self._advance()
-                if not self._at_end() and self._peek().kind not in ("INDENT", "DEDENT", "NEWLINE"):
-                    return
-                continue
-            self._advance()
 
     def _parse_stmt_into(self, stmts: list):
         """Parse one statement and append it to `stmts`.
