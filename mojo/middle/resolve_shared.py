@@ -2260,11 +2260,32 @@ def _type_expr_to_ann(gen, node) -> str:
         return f"{gen._type_expr_to_ann(node.obj)}.{node.member}"
     if isinstance(node, gimple_ctypes.IntLiteral):
         return str(node.value)
+    if isinstance(node, gimple_ctypes.FloatLiteral):
+        return _float_type_arg_text(node.value)
     if isinstance(node, gimple_ctypes.BoolLiteral):
         return 'True' if node.value else 'False'
     if isinstance(node, gimple_ctypes.UnaryOp) and node.op == '-' and isinstance(node.operand, gimple_ctypes.IntLiteral):
         return str(-node.operand.value)
+    if isinstance(node, gimple_ctypes.UnaryOp) and node.op == '-' and isinstance(node.operand, gimple_ctypes.FloatLiteral):
+        _text = _float_type_arg_text(node.operand.value)
+        return '-' + _text if _text else ''
     return ''
+
+def _float_type_arg_text(value) -> str:
+    """A float literal's rendering as a comptime bracket argument, or '' when
+    it has none (a non-finite value such as `1e999`, which is not a literal a
+    type argument can spell, so the call stays unbound). Python's repr drops
+    the decimal point from an exponent form (`1e+16`), which the elaborator
+    would not read back as a float (`where`-bindings match
+    `-?\\d+\\.\\d+([eE][-+]?\\d+)?`), so the point is always written: `1.0e+16`."""
+    value = float(value)
+    if value != value or value in (float('inf'), float('-inf')):
+        return ''
+    text = repr(value)
+    if '.' in text:
+        return text
+    mantissa, sep, exponent = text.partition('e')
+    return f"{mantissa}.0{sep}{exponent}"
 
 def _refine_generic_return_type(gen, info: dict, module_src: str, g: str,
                                  mangled_type_args: list, arg_count: int,
