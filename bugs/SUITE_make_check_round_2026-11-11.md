@@ -51,11 +51,11 @@ make the check ignore them). Resolved with our version; both directions of
    - `bugs/hard/README.md` again — the five SPLIT part docs had no row
      (`ae3f0228a`).
    - the `doc-refs` ratchet — two new dangling citations, one real
-     (`DIAGNOSTICS_elaboration_recursion.md`, deleted when its bug was fixed;
-     now on a line that says so) and one fixture
-     (`tools/test_swarm_replan.py` writes a synthetic `bugs/hard/X.md` into a
-     temp dir; sanctioned in the ledger at 1, documented in its header)
-     (`3070c1081`).
+     (the deleted elaboration-recursion diagnostics doc, which master's side of
+     the next merge rewrites as "the elaboration-recursion diagnostics bug doc")
+     and one fixture (`tools/test_swarm_replan.py` writes a synthetic hard-class
+     doc named `X.md` into a temp dir; sanctioned in the ledger at 1, documented
+     in its header) (`3070c1081`).
    - `test_formal_bracketed_method_field_set.py` — master's new
      `_check_out_self_declaration` refused the last `out self` fixture
      (`7c06a4ffe`).
