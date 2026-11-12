@@ -11762,16 +11762,50 @@ int64_t mojo_getitem_word(int64_t w, int64_t i)
 }
 
 /* `a + b` where both are words of unknown kind: two strings concatenate, both
- * lists concatenate via mojo_list_concat, otherwise adds as integers (the word
- * is its own value). */
+ * lists concatenate via mojo_list_concat, double boxes add as a double,
+ * otherwise adds as integers (the word is its own value). */
 int64_t mojo_add_words(int64_t a, int64_t b)
 {
     if (mojo_boxed_is_str(a) && mojo_boxed_is_str(b))
-        return (int64_t)(intptr_t)mojo_str_cat((char *)(intptr_t)a, (char *)(intptr_t)b);
+        return (int64_t)(intptr_t)mojo_str_cat((char *)(intptr_t)mojo_unbox_plain(a),
+                                               (char *)(intptr_t)mojo_unbox_plain(b));
     if (mojo_is_registered_list(a) && mojo_is_registered_list(b))
         return (int64_t)(intptr_t)mojo_list_concat((MojoList *)(intptr_t)a,
                                                   (MojoList *)(intptr_t)b);
-    return a + b;
+    {
+        int da = mojo_is_boxed(a) && ((MojoBox *)(intptr_t)a)->kind == 'd';
+        int db = mojo_is_boxed(b) && ((MojoBox *)(intptr_t)b)->kind == 'd';
+        if (da || db) {
+            double av = da ? mojo_box_double(a) : (double)mojo_box_int(a);
+            double bv = db ? mojo_box_double(b) : (double)mojo_box_int(b);
+            return mojo_box_from_double(av + bv);
+        }
+    }
+    return mojo_box_int(a) + mojo_box_int(b);
+}
+
+/* `a * b` where one side is a word of unknown kind that may be a string (a
+ * kind-'p' str box or a string pointer), a double box, or an integer: string
+ * repetition when a side is a string, a boxed double product when a side is a
+ * double box, otherwise integer multiplication of the words' integer values.
+ * Used by tagged mixed-generator values whose kind is a runtime fact. */
+int64_t mojo_mul_word(int64_t a, int64_t b)
+{
+    fprintf(stderr,"MW a=%lld b=%lld ba=%d\\n",(long long)a,(long long)b,mojo_is_boxed(a));
+    if (mojo_boxed_is_str(a))
+        return (int64_t)(intptr_t)mojo_cstr_repeat((char *)(intptr_t)mojo_unbox_plain(a), mojo_box_int(b));
+    if (mojo_boxed_is_str(b))
+        return (int64_t)(intptr_t)mojo_cstr_repeat((char *)(intptr_t)mojo_unbox_plain(b), mojo_box_int(a));
+    {
+        int da = mojo_is_boxed(a) && ((MojoBox *)(intptr_t)a)->kind == 'd';
+        int db = mojo_is_boxed(b) && ((MojoBox *)(intptr_t)b)->kind == 'd';
+        if (da || db) {
+            double av = da ? mojo_box_double(a) : (double)mojo_box_int(a);
+            double bv = db ? mojo_box_double(b) : (double)mojo_box_int(b);
+            return mojo_box_from_double(av * bv);
+        }
+    }
+    return mojo_box_int(a) * mojo_box_int(b);
 }
 
 MojoList *mojo_iter_boxed_list(int64_t v)
