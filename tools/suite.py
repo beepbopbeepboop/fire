@@ -2972,8 +2972,7 @@ test('formal-sweep-truth', [PY, 'test_formal_sweep_truth.py'],
      desc='the sweep, measured against the interpreter: no invented coverage')
 test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
      deps=['preflight'], mem='tiny',
-     desc='every bound symbol is accounted for, on every container format',
-     disabled='bugs/gate-formal-link-accounting.md')
+     desc='every bound symbol is accounted for, on every container format')
 # Scaffold holes are ledgered in formal/proof_gaps.py and counted by
 # library_census; every sorry must live only in lib/Scaffold.lean.
 test('formal-proof-gaps', [PY, 'test_formal_proof_gaps.py'],
