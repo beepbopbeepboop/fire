@@ -6,6 +6,8 @@ deleted in the same commit, as for any bug.
 
 | doc | what it needs | for |
 |---|---|---|
+| `CODEGEN_simd_and_array_values_erase_to_int64-part1.md` | see doc | workers |
+| `CODEGEN_simd_and_array_values_erase_to_int64-part2.md` | see doc | workers |
 | `CODEGEN_simd_and_array_values_erase_to_int64.md` | see doc | workers |
 | `CODEGEN_tagged_generator_mixed_type_step1.md` | see doc | workers |
 | `CODEGEN_tagged_generator_mixed_type_step2.md` | see doc | workers |
@@ -29,5 +31,8 @@ deleted in the same commit, as for any bug.
 | `DIAGNOSTICS_mojoc_imports.md` | see doc | workers |
 | `DIAGNOSTICS_trait_conformance.md` | see doc | workers |
 | `GPU_offload_validation_modular.md` | see doc | workers |
+| `SUITE_gimplerunner-part1.md` | see doc | workers |
+| `SUITE_gimplerunner-part2.md` | see doc | workers |
+| `SUITE_gimplerunner-part3.md` | see doc | workers |
 | `SUITE_gimplerunner.md` | see doc | workers |
 | `SUITE_silentnoop.md` | see doc | workers |
