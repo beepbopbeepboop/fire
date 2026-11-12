@@ -13,7 +13,7 @@ The interpreter is already correct (`myinterpreter.py:execute_MatchStmt`,
 
 ## Current state (measured 2026-11-11, HEAD `d210765a2`)
 
-A seven-line program (`.tmp/match_args_probe.py`) whose class declares the
+A small program (`.tmp/match_args_probe.py`) whose class declares the
 attributes in the opposite order to the captures:
 
 ```python

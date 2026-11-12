@@ -20,7 +20,8 @@ python3 tools/memslot.py --gb 8 --label analyzer-build -- \
     python3 fire.py build -o .tmp/ca/analyzer-bin .tmp/ca/cases_generator/analyzer.py
 ```
 
-Exit 1 in **15.3 s**, peak 0.6 GB (well inside 8 GB). 27 `error:` lines:
+Exit 1 in **15.3 s**, peak 0.1-0.6 GB across two runs (well inside 8 GB).
+27 `error:` lines:
 
 | family | count | part that fixes it |
 |---|---|---|
