@@ -48,6 +48,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import platform
 import shutil
 import struct
@@ -2283,8 +2284,7 @@ def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
         ("subprocess", "admitted",
          "a source AND `@admitted` contracts for the operations whose answer is "
          "a host fact"),
-        ("copy", "modelled", "in HOST_MODELLED and unwritten: a gap with an "
-                             "owner"),
+        ("copy", "written", "formal/hostmods/copy.mojo answers it"),
         ("asyncio", "unreachable",
          "in HOST_UNREACHABLE: an event loop and a thread are objects this "
          "image does not have"),
@@ -2534,8 +2534,9 @@ def test_a_host_module_refusal_carries_its_measured_next_step(tmpdir, _shared):
     # the append safe for `formal_sweep.py`'s message families.
     base = I.unresolvable_import_error("prog.mojo", "collections")
     check(base.startswith("prog.mojo imports 'collections', which is a host "
-                          "module (CPython standard library), which has no Mojo "
-                          "source for this backend to compile"),
+                          "module (CPython standard library), whose Mojo source "
+                          "in this tree declares only module-level constants, so "
+                          "it has no function or type an importer could bind"),
           f"the generated wording changed shape, so anything matching on it "
           f"moves: {base!r}")
 
@@ -2553,13 +2554,26 @@ def test_host_module_advice_is_honest(tmpdir, _shared):
     not name the thing the module is wanted FOR is a generic sentence, and a
     generic sentence in a generated message is noise."""
     import formal.imports as I
+    # A written module keeps its advice only when its source exports NOTHING
+    # (constants only): the refusal still happens, so the advice is still the
+    # next step. Today that is `collections`, whose source has module-level
+    # constants and no function or type, which `formal/build.py`'s
+    # exports-nothing refusal names. Checked against the file, not trusted.
+    CONSTANT_ONLY_SOURCES = {"collections"}
     for name, advice in I.HOST_MODULE_ADVICE.items():
         src = I.resolve_module_path(name, relative_to=os.path.join(HERE, "x"),
                                     project_root=HERE)
-        check(src is None,
-              f"HOST_MODULE_ADVICE has an entry for {name!r} but it now "
-              f"resolves to {src!r} — a module source exists, so the advice is "
-              f"telling a reader to write what is already in the tree")
+        if src is not None:
+            check(name in CONSTANT_ONLY_SOURCES,
+                  f"HOST_MODULE_ADVICE has an entry for {name!r} but it now "
+                  f"resolves to {src!r} — a module source exists, so the advice "
+                  f"is telling a reader to write what is already in the tree")
+            with open(src) as _f:
+                _decls = [l for l in _f if re.match(r"\s*(def|fn|struct|trait)\b", l)]
+            check(not _decls,
+                  f"{name!r} is exempt from the advice check as a constants-only "
+                  f"source, but {src!r} declares "
+                  f"{_decls[0].strip() if _decls else ''!r}")
         check(len(advice) > 40,
               f"the advice for {name!r} is too short to be a next step: "
               f"{advice!r}")

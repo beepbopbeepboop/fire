@@ -1,5 +1,7 @@
 # DIAGNOSTICS step 2: Trait conformance diagnostics
 
+SPLIT: DIAGNOSTICS_trait_conformance-part1, DIAGNOSTICS_trait_conformance-part2, DIAGNOSTICS_trait_conformance-part3, DIAGNOSTICS_trait_conformance-part4, DIAGNOSTICS_trait_conformance-part5, DIAGNOSTICS_trait_conformance-part6, DIAGNOSTICS_trait_conformance-part7
+
 Part of the umbrella `bugs/hard/DIAGNOSTICS_missing_validation_modular.md`;
 plan: `docs/diagnostics-missing-validation-plan.md` §2.
 

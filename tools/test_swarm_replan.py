@@ -51,6 +51,8 @@ class Split(unittest.TestCase):
 
     def test_a_split_doc_reports_its_parts(self):
         self.write("hard/X.md", "# X\nSPLIT: X-part1, X-part2\n")
+        self.write("mid/X-part1.md", "# part 1\n")
+        self.write("mid/X-part2.md", "# part 2\n")
         with mock.patch.object(C, "MAIN", self.tmp):
             self.assertEqual(S.split_reason("hard/X"), "X-part1, X-part2")
 
@@ -59,8 +61,30 @@ class Split(unittest.TestCase):
         with mock.patch.object(C, "MAIN", self.tmp):
             self.assertIsNone(S.split_reason("hard/Y"))
 
+    def test_a_split_whose_parts_are_all_on_disk_counts(self):
+        self.write("hard/X.md", "# X\nSPLIT: X-part1, X-part2\n")
+        self.write("mid/X-part1.md", "# part 1\n")
+        self.write("X-part2.md", "# part 2\n")       # a part may be filed at any class directory
+        with mock.patch.object(C, "MAIN", self.tmp):
+            self.assertEqual(S.split_reason("hard/X"), "X-part1, X-part2")
+
+    def test_a_split_naming_a_missing_part_is_an_orphan_and_does_not_count(self):
+        # 2026-11-11: an orphan SPLIT would park the original forever; None lets the replan run again
+        self.write("hard/X.md", "# X\nSPLIT: X-part1, X-part2\n")
+        self.write("mid/X-part1.md", "# part 1\n")   # part2 was never filed
+        with mock.patch.object(C, "MAIN", self.tmp):
+            self.assertIsNone(S.split_reason("hard/X"))
+
+    def test_the_replan_prompt_asks_each_part_for_a_done_when_test(self):
+        text = S.REPLAN_TASK % {"doc": "bugs/hard/X.md", "cls": "hard", "slots": "opus",
+                                "servable": "easy, mid"}
+        self.assertIn("## Done when", text)
+        self.assertIn("ONE quick test", text)
+        self.assertIn("SPLIT: <base>-part1", text)
+
     def test_why_reports_a_split(self):
         self.write("hard/X.md", "# X\nSPLIT: X-part1\n")
+        self.write("mid/X-part1.md", "# part 1\n")
         with mock.patch.object(C, "MAIN", self.tmp), \
              mock.patch.object(C, "load", return_value={}), \
              mock.patch.object(C, "load_pool", return_value={"slots": [], "skip": []}), \

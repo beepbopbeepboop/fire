@@ -2145,7 +2145,11 @@ STALE_PER_CHILD_BUDGETS = {
     # image. Both are per-child walls on an image the case built itself, which is
     # what a residue row is for; neither is the SUBJECT of its test, so neither
     # moves to `BUDGET_IS_THE_SUBJECT`.
+    'test_bootstrap_hotspots.py': 1,
+    'test_dict_slot_read_regression.py': 1,
+    'test_formal_admitted_two_args.py': 1,
     'test_formal_dylib.py': 2,
+    'test_formal_fstring_printf_regress.py': 1,
     'test_formal_proof_breadth.py': 6,  # +1 with the bulk merge of the formal-worker branches
     'test_formal_specs.py': 1,  # +1 on 2026-10-05: work/formal36-contracts-language's
                                  # `lean` run of a generated spec proof
@@ -2153,10 +2157,17 @@ STALE_PER_CHILD_BUDGETS = {
     'test_formal_sweep_truth.py': 1,  # +1 on 2026-10-04 (76143aaa), a row the
                                       # census missed when that file's literal
                                       # arrived with the derived host-import rows
+    'test_imported_decorator_regression.py': 2,
     'test_metal_codegen.py': 9,
     'test_ptr_registry.py': 2,
+    'test_python315_frozendict.py': 1,
+    'test_python315_sentinel.py': 1,
+    'test_regress_timespec_type.py': 1,
+    'test_regression_profiling_package.py': 1,
     'test_runtime_dylib.py': 1,
     'test_selfhost_memory.py': 1,
+    'test_typeddict_extra_items_regression.py': 1,
+    'test_unpacking_in_comprehensions.py': 1,
 }
 
 #: Files where a per-child literal is the SUBJECT rather than residue, with the

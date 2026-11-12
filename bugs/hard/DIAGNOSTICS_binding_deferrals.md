@@ -1,3 +1,4 @@
+SPLIT: DIAGNOSTICS_binding_deferrals-part1, DIAGNOSTICS_binding_deferrals-part2
 # DIAGNOSTICS step 4: Binding deferral reporting
 
 Part of the umbrella `bugs/hard/DIAGNOSTICS_missing_validation_modular.md`;

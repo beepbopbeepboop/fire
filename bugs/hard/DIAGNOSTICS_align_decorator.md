@@ -1,5 +1,7 @@
 # DIAGNOSTICS step 6: @align decorator validation
 
+SPLIT: DIAGNOSTICS_align_decorator-part1, DIAGNOSTICS_align_decorator-part2, DIAGNOSTICS_align_decorator-part3
+
 Part of the umbrella `bugs/hard/DIAGNOSTICS_missing_validation_modular.md`;
 plan: `docs/diagnostics-missing-validation-plan.md` §6.
 
