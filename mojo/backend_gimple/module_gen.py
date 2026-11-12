@@ -2913,21 +2913,30 @@ _MODULE_CLASS_ATTR_GLOBAL_CTYPES = ('char *', 'int64_t', 'double')
 
 def _module_class_attr_global_ctype(gen, value):
     """C type of a module-scope class attribute's value when it reads ONLY
-    globals of THIS module (`S`, `S + "!"`, `N + 1`), and that type is in
-    `_MODULE_CLASS_ATTR_GLOBAL_CTYPES`; else None.
+    globals (`S`, `S + "!"`, `N + 1`) of THIS module or of a module it imports
+    by name, and that type is in `_MODULE_CLASS_ATTR_GLOBAL_CTYPES`; else None.
 
-    Every free name must be in `_own_global_var_types` (not the shared
-    `_global_var_types`): that table holds only globals this compile's own
-    module assigns, so a name another module shares is not mistaken for this
-    module's global, and any call or foreign name makes the value None (its
-    store is then left to nothing, as before). The type is `_quick_type`'s
-    estimate over the same overlay the rest of the module resolves names from."""
+    Every free name must be a global this module owns (`_own_global_var_types`,
+    not the shared `_global_var_types`: that table holds names another module
+    shares) or a `from m import` global (`_imported_global_home`). Any call or
+    other name makes the value None (its store is then left to nothing, as
+    before). The type is `_quick_type`'s estimate over the same overlay the
+    rest of the module resolves names from."""
     _names = _used_idents_node(value)
     if not _names:
         return None
     for _n in _names:
-        if _as_str(_n) not in gen._own_global_var_types:
-            return None
+        _nm = _as_str(_n)
+        if _nm in gen._own_global_var_types:
+            continue
+        # `from m import S` of a module-scope `var` global: the name's storage
+        # is the defining module's accessor. `_imported_global_home` is set only
+        # for those (emit_infra's global_var branch), and both tables are filled
+        # before any top-level statement runs, so the store reads it as any
+        # other global. A from-imported FUNCTION is not in it and stays None.
+        if _nm in gen._imported_global_home:
+            continue
+        return None
     _t = _as_str(gen._quick_type(value))
     # A module `Int` global is declared `int` (the frontend's spelling); the
     # class attribute it seeds is the 64-bit `int64_t` every literal `Int`
