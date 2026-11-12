@@ -3101,19 +3101,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             return gen._lower_call(_bare_node)
 
         # Check if this is a known module method
-        if (method_name == 'copysign' and len(node.args) == 2):
-            try:
-                _x_t,_x_v = gen.lower_expr(node.args[0])
-                _y_t,_y_v = gen.lower_expr(node.args[1])
-                _x_d = gen._coerce_to_type(_x_t,'double',_x_v)
-                _y_d = gen._coerce_to_type(_y_t,'double',_y_v)
-                _res = gen._new_temp('double')
-                gen._emit(f'  {_res} = __builtin_copysign ({_x_d}, {_y_d});')
-                _res_i64 = gen._new_temp('int64_t')
-                gen._emit(f'  {_res_i64} = (int64_t){_res};')
-                return 'int64_t', _res_i64
-            except Exception:
-                pass
         if (module_name == 'os' and method_name in ('fspath', 'fsdecode') and len(node.args) == 1
                 and not getattr(node, 'kwargs', None)):
             # `os.fspath(p)` of a str / bytes path is the path itself (a path-like object's
@@ -3687,16 +3674,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     _libm_m = None
                     if module_name in ('math', 'std.math') or (isinstance(module_name,str) and module_name.endswith('.math')):
                         _libm_m = 'math'
-                    if _libm_m and method_name == 'copysign' and len(node.args) == 2:
-                        _x_t,_x_v = gen.lower_expr(node.args[0])
-                        _y_t,_y_v = gen.lower_expr(node.args[1])
-                        _x_d = gen._coerce_to_type(_x_t,'double',_x_v)
-                        _y_d = gen._coerce_to_type(_y_t,'double',_y_v)
-                        _res = gen._new_temp('double')
-                        gen._emit(f'  {_res} = __builtin_copysign ({_x_d}, {_y_d});')
-                        _res_i64 = gen._new_temp('int64_t')
-                        gen._emit(f'  {_res_i64} = (int64_t){_res};')
-                        return 'int64_t', _res_i64
                 except Exception:
                     pass
                 _mgc_is_plain_fn = (
@@ -5127,20 +5104,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             except Exception:
                 pass
         if _libm_mod:
-                                    # Special handling for copysign to avoid function call issues
-            if method == 'copysign' and len(node.args) == 2:
-                try:
-                    _x_t, _x_v = gen.lower_expr(node.args[0])
-                    _y_t, _y_v = gen.lower_expr(node.args[1])
-                    _x_d = gen._coerce_to_type(_x_t, 'double', _x_v)
-                    _y_d = gen._coerce_to_type(_y_t, 'double', _y_v)
-                    _res = gen._new_temp('double')
-                    gen._emit(f'  {_res} = copysign ({_x_d}, {_y_d});')
-                    _res_i64 = gen._new_temp('int64_t')
-                    gen._emit(f'  {_res_i64} = (int64_t){_res};')
-                    return 'int64_t', _res_i64
-                except Exception:
-                    pass
             _lc = module_member_libc(_libm_mod, method)
             if _lc is not None and len(_lc[2]) == len(node.args):
                 # A libm symbol behind a module marker: lower it as the libc
