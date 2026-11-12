@@ -1,30 +1,39 @@
-# Span inherits element type from tracked Array/container sources (part 2)
+# Span(<tracked container>) inherits the element type (part 2)
 
-Part 2 of `bugs/hard/CODEGEN_simd_and_array_values_erase_to_int64-part1.md`.
+Part 2 of `bugs/hard/CODEGEN_simd_and_array_values_erase_to_int64.md`.
 
-Depends on part 1 making `Array[...]` values tracked; this part makes `Span(<tracked value>)` preserve element type so subscript lowering does not fall back to byte reads.
+Depends on part 1: until `Array[...]` is a tracked container, there is no
+element type for `Span` to inherit. Class: mid. The inheritance is the existing
+`_span_list` arm, extended to Array-backed sources.
 
 ## Goal
 
-When `Span(...)` is constructed from a tracked container/list-like value (including Arrays fixed by part 1), propagate the source element type so `Span` element accesses use the correct typed getter/lowering instead of the untracked byte path.
-
-## Current state
-
-The parent bug measures `Span(a)` over an erased `Array` yielding no `_elem_types` entry, so `_lower_subscript`'s untracked-`Span` arm treats `_data` as `char *` and reads one byte. The call `tanh(x[0])` then sees `char`/`Int` instead of a floating type. The `_span_list` / tracked-`MojoList *` path already inherits element type when the source is tracked, but Array sources are not reaching that state.
-
-## Plan
-
-In `mojo/backend_gimple/emit_calls.py` and/or the Span construction/subscript helpers:
-- ensure `Span(source)` records/inherits element type from `source` when `source` has tracked element type (`gen._elem_types` / equivalent span tracking), covering Array-backed tracked values;
-- avoid the untracked-span byte fallback for these cases so element reads and `c_to_mojo` see the real element C/Mojo type.
+`Span(a)` over a tracked `Array` records the source element type, so
+`_lower_subscript` reads elements with a typed getter. Today the source has no
+`_elem_types` entry, the untracked-Span arm treats `_data` as `char *`, and
+`s[0]` reads ONE BYTE through `_mojo_at_char`. That byte is what
+`tanh(x[0])` then sees as `Int`.
 
 ## Acceptance
 
-- `Span` over a tracked `Array[Float32, 4]` value yields element accesses typed as the float element (not one-byte `char` reads).
-- `tanh(x[i])` / similar generic math calls over such a span no longer fail where-clause inference due to the element lowering as `char`/`Int` (once element types are preserved end-to-end for the case covered here).
-- Existing Span behavior over already-tracked list sources remains unchanged.
+- `Span` over an `Array[Float32, 4]` value does not read elements through
+  `_mojo_at_char` (the one-byte path).
+- The element read carries the source element type, so the `tanh(x[i])`
+  where-clause no longer sees `char`/`Int`.
+- `Span` over an already-tracked list source is unchanged.
 
 ## Done when
 
-Quick test (file path and command): `python3 compile_stdlib.py test/math/test_tanh.mojo`
-(or the narrowest single-file compile command this tree uses for that test) completes without the erased-element `char`/`Int` where-clause failure described in the parent bug for `tanh(x[i])` over a Span of array elements.
+File: `test_codegen_erased_container_values.py` (repo root).
+
+Command: `python3 test_codegen_erased_container_values.py part2`
+
+It runs `test_part2_span_over_array_inherits_element_type` (red today; it is
+also red until part 1 lands, because the source is still erased). It must pass.
+
+## Where to start
+
+`mojo/backend_gimple/emit_calls.py`, the `Span(...)` constructor arm and the
+`_span_list` path that already inherits element type from a tracked
+`MojoList *`. Extend that to a source that part 1 has recorded in
+`gen._elem_types`.
