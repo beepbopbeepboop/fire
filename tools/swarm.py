@@ -37,21 +37,7 @@ def load_state():
         return {"fed": {}}
 
 
-_SEEN = {}                    # message key -> time it was last printed
-REPEAT_QUIET_S = 3600         # an unchanged status line is printed again at most this often
-COUNTER_LINES = ("guard:", "cleanup:", "config:", "feed ", "land:", "wait ", "held ")   # a count moving is not news
-
-
 def log(msg):
-    """Print one timestamped line, unless the same line was printed within REPEAT_QUIET_S. Passes run every few
-    minutes and most of them find the same state as the last one, so the log used to be 90% repeats (356 `guard:`,
-    246 `wait hard/...`, 209 `holding ...` in one run); a line that is an EVENT (a spawn, a landing, a retire) names
-    a pid or a task and never repeats exactly. Counter lines compare with their digits blanked."""
-    key = re.sub(r"\d+", "#", msg) if msg.startswith(COUNTER_LINES) else msg
-    now = time.time()
-    if now - _SEEN.get(key, -REPEAT_QUIET_S) < REPEAT_QUIET_S:
-        return
-    _SEEN[key] = now
     print("%s %s" % (time.strftime("%T"), msg), flush=True)
 
 
@@ -274,9 +260,9 @@ def feed():
             continue                       # the reason is a view (swarm.py --feed / --why), not a line per pass
         cls = doc_class(doc, st, base)
         name = task_name(doc)
-        if name in C.load() or os.path.exists(os.path.join(C.qdir(), name + ".json")):
-            name = C.free_task_name(name, 40 + 5)       # the 40-char name collides with an old or queued task
-            log("renamed %s: %s" % (doc, name))
+        if name in C.load():                   # the 40-char name collides with an old task: make it unique
+            log("renamed %s: %s is already in the registry" % (doc, name))
+            name += "-%d" % int(time.time() % 10000)
         prev = last_attempt(base) if st["fed"].get(doc) else None
         if prev:
             log("re-feed %s: previous attempt %s" % (doc, prev))
@@ -731,8 +717,8 @@ def continue_partial(st):
             continue
         cls = doc_class(doc, st, base)
         cont = task_name(doc)
-        if cont in C.load() or os.path.exists(os.path.join(C.qdir(), cont + ".json")):
-            cont = C.free_task_name(cont, 40 + 5)
+        if cont in C.load():
+            cont += "-%d" % int(time.time() % 10000)
         if enqueue_doc(doc, base, cls, cont, start=t["branch"]):
             track[doc] = {"head": head, "name": cont}
             subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "mark", name, "abandoned"],
@@ -823,6 +809,16 @@ def land():
     if held:
         log("land: %d more finished branch(es) waiting behind the batch cap of %d: %s"
             % (len(held), LAND_BATCH, ", ".join(held[:3]) + (" ..." if len(held) > 3 else "")))
+    dirty = set(C.git("diff", "--name-only", "HEAD", cwd=C.MAIN).split())
+    if dirty:
+        tasks, keep = C.load(), []
+        for n in names:
+            hit = dirty & set(C.git("diff", "--name-only", "master..." + tasks[n]["branch"], check=False).split())
+            if hit:
+                log("holding %s: the main checkout has uncommitted edits to %s" % (n, ", ".join(sorted(hit))))
+            else:
+                keep.append(n)
+        names = keep
     if not names:
         return None
     tasks = C.load()
@@ -843,7 +839,7 @@ def land():
             r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py"), "--stdlib", "--only"] + merged,
                                capture_output=True, text=True, cwd=C.MAIN)
             for line in (r.stdout + r.stderr).splitlines():
-                if line.startswith(("GREEN", "RED", "CONFLICT", "another integrator", "master moved", "landing waits")):
+                if line.startswith(("GREEN", "RED", "CONFLICT", "another integrator", "master moved")):
                     log(line[:200])
             landed = "GREEN" in (r.stdout + r.stderr)
             break
@@ -931,9 +927,6 @@ def main():
         sys.exit(who())
     if a.why:
         sys.exit(why(a.why))
-    # Landings move master in C.MAIN (the tree this file lives in), so that tree must have master checked out.
-    if C.git("branch", "--show-current", cwd=C.MAIN, check=False) != "master":
-        sys.exit("%s does not have master checked out, so landings cannot move it." % C.MAIN)
     # redirect output to the log file so it is captured without a shell redirect
     if a.log_file:
         os.makedirs(os.path.dirname(os.path.abspath(a.log_file)), exist_ok=True)
