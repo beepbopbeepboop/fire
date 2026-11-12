@@ -650,14 +650,16 @@ def _split_where_message(expr):
 
 
 def _where_bindings(targs: dict) -> dict:
-    """The comptime bindings a clause folds against: a concrete integer or
-    Bool type argument. Any other argument is left out, so a clause over it is
-    undecided rather than wrong."""
+    """The comptime bindings a clause folds against: a concrete integer, float,
+    or Bool type argument. Any other argument is left out, so a clause over it
+    is undecided rather than wrong."""
     bindings = {}
     for name, conc in targs.items():
         text = str(conc).strip()
         if re.fullmatch(r'-?\d+', text):
             bindings[name] = int(text)
+        elif re.fullmatch(r'-?\d+\.\d+([eE][-+]?\d+)?', text):
+            bindings[name] = float(text)
         elif text in ('True', 'False'):
             bindings[name] = (text == 'True')
     return bindings
