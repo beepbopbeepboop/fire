@@ -296,3 +296,18 @@ not the `RET`, the second exit fact from round 3 is needed and this guide is wro
 
 **Quick tests for the next round:** `test_formal_call_proof_gen.py -k TestOverflowGuardNormalPath` (0.5 s) and the
 new emitter test; then `test_formal_dylib.py` once, as the Done-when test. Nothing else.
+
+### Landed 2026-11-12 (round 6): step 1 of the round-5 guide, the not-taken CBNZ lemma
+
+- `lib/ProofLibSteps8.lean`: `cbnz_not_taken` (after `work_step_cbnz`). If `arm64_reg rn s = 0`, then `arm64_step s code =
+  some { s with pc := s.pc + 4 }`. Proved from `work_step_cbnz` plus one `if_neg`. Axioms: the standard set plus the
+  `bv_decide` ones that the `work_step_*` lemmas already carry; no `sorry`.
+- `test_formal_call_proof_gen.py::TestCbnzNotTakenLemma`: a Lean-checked probe that uses the lemma, asserting ok and zero
+  sorries. It passes (`-k "TestCbnzNotTakenLemma or TestOverflowGuardNormalPath"`: 4 passed, peak 1.3 GB). I did not rebuild
+  the tree without the lemma to watch the probe fail first; the pre-lemma failure is `unknown identifier`.
+- Lean build note: `ensure_library(find_lean('.'), 'lib')` (formal/lean.py) builds the oleans in ~60 s from a cold tree.
+  `LEAN_PATH=lib lean -o ... lib/ProofLibSteps8.lean` on its own fails with `unknown module prefix 'ProofLib'`.
+
+**Not landed, and nothing calls the lemma yet.** `test_formal_dylib.py` is unchanged by this round and the two wrong-spec
+cases still fail. Round 5's step 2 is still first: measure `bv_decide` on the hand-written value identity for `triple`,
+`∀ n, {ident}_guard (start n) → arm64_reg 0 (S_m (start n)) = n * 3`, before the emitter is touched.

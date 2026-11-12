@@ -3840,6 +3840,35 @@ class TestOverflowGuardNormalPath(unittest.TestCase):
         self.assertIsNone(G._overflow_normal_path(words, 0x00, 0x5c))
 
 
+class TestCbnzNotTakenLemma(unittest.TestCase):
+    """`cbnz_not_taken` (lib/ProofLibSteps8.lean): a CBNZ whose register is zero
+    falls through and changes nothing else.  The overflow guard's normal path
+    needs exactly this fact, so it is checked through Lean, not by reading it.
+
+    Before the lemma existed the probe below is `unknown identifier`; after, it
+    checks with no `sorry`.  Skipped when Lean or the library is not built."""
+
+    def test_the_not_taken_case_checks_with_no_sorry(self):
+        if not _lean() or not os.path.isfile(
+                os.path.join(HERE, "lib", "ProofLibSteps8.olean")):
+            self.skipTest("Lean library not built")
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as tmp:
+            p = os.path.join(tmp, "cbnz_probe.lean")
+            with open(p, "w") as f:
+                f.write(
+                    "import ProofLibSteps8\n\n"
+                    "theorem cbnz_probe (s : Arm64State) (code : Nat → UInt8)\n"
+                    "    (pc : Nat) (w : UInt32) (hpc : s.pc = pc)\n"
+                    "    (hread : arm64_read_insn code pc = w)\n"
+                    "    (h : (w &&& 0xff000000) = 0xb5000000)\n"
+                    "    (hz : arm64_reg ((w &&& 0x1f).toNat) s = 0) :\n"
+                    "    arm64_step s code = some { s with pc := s.pc + 4 } :=\n"
+                    "  cbnz_not_taken s code pc w hpc hread h hz\n")
+            ok, detail, n = _check_proof(p)
+            self.assertTrue(ok, detail[-400:])
+            self.assertEqual(n, 0, "the probe uses a sorry somewhere: " + detail[-400:])
+
+
 class TestCallProofs(unittest.TestCase):
     """Compile the programs and read what came out."""
 
