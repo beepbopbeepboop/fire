@@ -17,7 +17,7 @@
     control.py queue               # what is waiting
     control.py restart NAME        # snapshot, stop and continue a worker as NAME-rN from its own branch
     control.py unstick [--idle-min 25]   # restart workers that are stalled (idle log AND no CPU in their tree)
-    control.py cleanup [--dry-run] # remove worktrees whose branch is merged, clean, and not running, then delete the merged work/* branches (--no-branches keeps them), then prunes finished registry entries (--no-prune keeps them)
+    control.py cleanup [--dry-run] # remove worktrees whose branch is merged, clean, with no live session or process in them, then delete the merged work/* branches (--no-branches keeps them), then prunes finished registry entries (--no-prune keeps them)
     control.py ps                  # our live workers (not the user's own opencode sessions)
     control.py reap [--dry-run]    # kill leftovers (lean, gcc, ...) in finished workers' trees
     control.py digest NAME         # verdict, commits, diffstat, the worker's REPORT block
@@ -1158,7 +1158,10 @@ def cmd_cleanup(a):
     2026-10-04: 403 worktrees held 257 GB. The removal is `git worktree remove` WITHOUT --force, so git
     itself refuses a tree with anything it would lose; unmerged work, dirty trees, running workers and
     `integ` are listed and left alone. Merged work/* branches with no worktree are then deleted with
-    `git branch -d` (their commits are on master; `ahead()` reads a missing branch as 0 ahead)."""
+    `git branch -d` (their commits are on master; `ahead()` reads a missing branch as 0 ahead).
+    2026-11-10: a tree a plain PROCESS is working in (a hand-started test run, not a worker, not an
+    opencode session, no outside claim) is also left alone — the run's cwd check is rescanned at the
+    moment of removal, since the run of one is irreversible."""
     reg = load()
     byw = {os.path.realpath(t["worktree"]): (n, t) for n, t in reg.items()}
     wt, cur = [], {}
@@ -1173,6 +1176,11 @@ def cmd_cleanup(a):
     except (RuntimeError, OSError, ValueError) as e:
         print("cleanup: %s; removing nothing" % e)     # cannot tell which trees an agent is driving: remove none
         return
+    try:
+        cwds = live_cwds(jobs=a.jobs)
+    except (RuntimeError, OSError, ValueError) as e:
+        print("cleanup: %s; removing nothing" % e)     # cannot tell which trees a process is in: remove none
+        return
     cands, kept = [], []
     for w in wt:
         p = os.path.realpath(w["path"])
@@ -1183,6 +1191,8 @@ def cmd_cleanup(a):
             kept.append((p, "running")); continue
         if any(d == p or d.startswith(p + os.sep) for d in dirs):
             kept.append((p, "live opencode session")); continue
+        if any(c == p or c.startswith(p + os.sep) for c in cwds):
+            kept.append((p, "live process in tree")); continue
         if _claimed_by_outside(p):
             kept.append((p, "claimed by an outside session")); continue
         if subprocess.run(["git", "merge-base", "--is-ancestor", w["head"], "master"], cwd=MAIN).returncode != 0:
@@ -1200,6 +1210,21 @@ def cmd_cleanup(a):
     safe = []
     for p, d in zip(cands, dirty):
         (kept if d else safe).append((p, "dirty") if d else p)
+    if safe and not a.dry_run:
+        # The snapshot above predates the (parallel) git-status fan-out; rescan at the moment of the
+        # irreversible step, so a run that started in the gap is still seen.
+        try:
+            cwds = live_cwds(jobs=a.jobs)
+        except (RuntimeError, OSError, ValueError) as e:
+            print("cleanup: %s; removing nothing" % e)
+            return
+        still = []
+        for p in safe:
+            if any(c == p or c.startswith(p + os.sep) for c in cwds):
+                kept.append((p, "live process in tree"))
+            else:
+                still.append(p)
+        safe = still
     done = 0
     for p in safe:
         if a.dry_run:
@@ -1429,6 +1454,44 @@ def live_session_dirs(window_s=SESSION_WINDOW_S, listing=None):
     now_ms = time.time() * 1000
     return {os.path.realpath(s["directory"]) for s in listing
             if s.get("directory") and now_ms - s.get("updated", 0) <= window_s * 1000}
+
+
+def live_cwds(jobs=16):
+    """The working directory of every live process, as a set of realpaths.
+
+    2026-11-10: `cleanup` removed a detached work-* tree at master while a full gimple-runner run was
+    working in it, because none of its protections see a plain process — the registry knows only workers
+    IT started, `opencode session list` only sessions the service drives, and outside claims only what
+    someone registered. A detached tree at master with a hand-started run passes every check, and
+    `git worktree remove` (without --force) agrees, since an in-progress run writes only ignored files.
+    A live process whose cwd is a tree or under one means the tree is in use, whatever its state says.
+
+    `ps` is the process table here (one call, ~50-100 ms; see procrun) and `lsof -d cwd` is the only
+    way to read a macOS process's directory, per-pid (~50 ms each, so the pids fan out). Raises when
+    the table cannot be read, like `live_session_dirs`: a cleanup that cannot tell which trees a
+    process is in removes nothing, so a dead `lsof` must fail the call, not return an empty set that
+    reads as "nothing is running anywhere"."""
+    if not shutil.which("lsof"):
+        raise RuntimeError("lsof is not available; cannot read process cwds")
+    r = subprocess.run(["ps", "-axo", "pid="], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError("ps failed: " + (r.stderr or r.stdout).strip()[:200])
+    pids = [int(x) for x in r.stdout.split()]
+
+    def one(pid):
+        try:
+            o = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                               capture_output=True, text=True, timeout=30).stdout
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        for line in o.splitlines():
+            if line.startswith("n"):
+                return os.path.realpath(line[1:])
+        return ""
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=jobs) as ex:
+        return {c for c in ex.map(one, pids) if c}
 
 
 def busy_task_names(dirs, tasks):
