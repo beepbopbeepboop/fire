@@ -2674,6 +2674,23 @@ def run_struct_ptr_through_local_dict_tests():
     # store (the read sits in the `if` arm, the store in the `else` arm), as
     # `c_parser/parser/__init__.py`'s `_iter_source` does, so the value type
     # must be known before the body is lowered in order.
+    # The plain shape first: store, then read back in the same arm.
+    _test_foreign_a3_generator_handle(
+        "generator_struct_ptr_through_local_dict_store_then_read",
+        "from .box import Box\n"
+        "\n"
+        "def consume(n, *, start=[]):\n"
+        "    allinfo = {}\n"
+        "    allinfo['a'] = Box(n)\n"
+        "    got = allinfo['a']\n"
+        "    yield got.x\n"
+        "\n"
+        "def main():\n"
+        "    for v in consume(4):\n"
+        "        print(v)\n"
+        "\n"
+        "main()\n",
+        "9\n")
     _test_foreign_a3_generator_handle(
         "generator_struct_ptr_through_local_dict_read_back",
         "from .box import Box\n"

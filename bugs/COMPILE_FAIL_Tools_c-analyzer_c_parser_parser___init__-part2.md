@@ -127,3 +127,23 @@ Not done (Done-when item 1 unverified):
   method return is left as the int64 default.
 
 Doc kept (not deleted): the named Done-when item 1 is not satisfied yet.
+
+### 2026-11-12 (round 2) — regression coverage corrected
+
+The round-1 Status above says the regression has two fixtures. Only the
+read-before-store fixture (`generator_struct_ptr_through_local_dict_read_back`,
+the `_iter_source` shape) was in `run_struct_ptr_through_local_dict_tests`.
+Round 2 added the plain store-then-read fixture
+(`generator_struct_ptr_through_local_dict_store_then_read`), so both shapes are
+now covered.
+
+Verified: `python3 tools/memslot.py --gb 8 -- python3 test_gimple_generator_runner.py`
+— 438 passed, 22 failed. Both struct-pointer fixtures PASS. The 22 failures are
+the same set as round 1 (diffed by name), all pre-existing.
+
+Not verified this round: the plain fixture was NOT checked fail-before-fix
+(that needs reverting the cpp_core/exprtypes/cpp_async hunks; not done).
+
+Done-when item 1 (the real `c_parser/parser/__init__.py` rebuild with the
+`:149:219` signature gone) is still NOT run. It is a heavy `fire.py build` and
+belongs to the integrator. Part 1 is still the prerequisite. The doc stays.
