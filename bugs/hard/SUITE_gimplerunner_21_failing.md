@@ -1,9 +1,9 @@
 SPLIT: SUITE_gimplerunner_21_failing-part1, SUITE_gimplerunner_21_failing-part2, SUITE_gimplerunner_21_failing-part3, SUITE_gimplerunner_21_failing-part4, SUITE_gimplerunner_21_failing-part5, SUITE_gimplerunner_21_failing-part6, SUITE_gimplerunner_21_failing-part7, SUITE_gimplerunner_21_failing-part8, SUITE_gimplerunner_21_failing-part9, SUITE_gimplerunner_21_failing-part10
 # SUITE_gimplerunner: 21 failing cases (2026-11-11)
 
-Filed when the `gimplerunner` job was marked `expect=` in `tools/suite.py`. Replaces the open
-part docs `SUITE_gimplerunner-part1/2/3` and `SUITE_gimplerunner-part1-part1/2` as the place to
-work from; those docs' done-checks are not reliable (see Status).
+Filed when the `gimplerunner` job was marked `expect=` in `tools/suite.py`. This is the one doc for the
+job: the older `SUITE_gimplerunner` tree (from the 2026-11-08 `make check` run) was removed on 2026-11-12, its
+done-checks having been unreliable (see Status).
 
 ## Status
 
