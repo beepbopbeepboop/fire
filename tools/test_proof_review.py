@@ -67,8 +67,11 @@ def main():
                 assert "Both TEST and NOTESTCASE are legitimate" in queued[0].task, "NOTESTCASE must be a legitimate outcome, not a last resort"
                 assert reg["bug-a"]["state"] == "superseded" and reg["bug-a"]["fixer"] == "fix-proof-bug-a"
                 reg["fix-proof-fix-proof-bug-a"] = dict(reg["bug-a"], state="exited-ok")
-                I.enqueue_proof_review("fix-proof-fix-proof-bug-a", reg["fix-proof-fix-proof-bug-a"], ["bugs/DOC_a.md"])
-                assert len(queued) == 1, "past PROOF_DEPTH no further reviewer is queued"
+                orch = []
+                with mock.patch.object(C, "enqueue_orch_review", lambda n, kind, why: orch.append((n, kind))):
+                    I.enqueue_proof_review("fix-proof-fix-proof-bug-a", reg["fix-proof-fix-proof-bug-a"], ["bugs/DOC_a.md"])
+                assert len(queued) == 1, "past PROOF_DEPTH no further proof reviewer is queued"
+                assert orch == [("fix-proof-fix-proof-bug-a", "proof review depth")], "the cap goes to an orchestration reviewer"
                 assert reg["fix-proof-fix-proof-bug-a"].get("merge_capped"), "and the branch is capped, not looped"
         finally:
             for p in patches: p.stop()

@@ -341,7 +341,8 @@ def cmd_spawn(a):
                              model=a.model, pool=a.pool if sl else None, kind=kind, pid=p.pid,
                              started=time.strftime("%F %T"),
                              base=a.base, files=a.file, task=task, cls=getattr(a, "cls", None),   # what `bounce` needs to put it back on the queue
-                             state="running", summary=task.strip().splitlines()[0][:200])
+                             state="running", summary=task.strip().splitlines()[0][:200],
+                             **(getattr(a, "meta", None) or {}))   # chain depths ride along (merge_depth, proof_depth)
     fleet_ledger.record_spawn(ctl_dir(), a.name, p.pid, wt, cmd)     # the only processes the fleet may ever signal
     print("spawned %s: %s (pid %d), log %s/work.log" % (a.name, wt, p.pid, wt))
 
@@ -571,7 +572,7 @@ def cmd_enqueue(a):
     # a task queued without --pool runs on whichever slot is free first (see refill); --pool only prefers one
     item = dict(name=a.name, claims=a.claim, base=a.base, task=task, files=a.file, needs=a.needs or [],
                 added=time.time(), pool=getattr(a, "pool", None), only=bool(getattr(a, "only", False)),
-                cls=getattr(a, "cls", None))
+                cls=getattr(a, "cls", None), meta=getattr(a, "meta", None) or {})
     json.dump(item, open(os.path.join(qdir(), a.name + ".json"), "w"), indent=1)
     print("queued %s (needs: %s)" % (a.name, ", ".join(item["needs"]) or "nothing"))
 
@@ -813,6 +814,136 @@ def auth_failed(t):
     return bool(AUTH_ERR.search(tail))
 
 
+ORCH_POOL = "sonnet-orch"       # the slot reserved for orchestration reviews (tools/pool.json): Sonnet, class "orch", which no doc has
+MAX_CAP_REVIEWS = 3              # a task whose cap fires this many times stays capped: the review did not cure it
+DEPTH_KEYS = {"merge_depth": ("fix-merge-", "fix-red-"), "proof_depth": ("fix-proof-",)}
+
+
+def fixer_depth(name, t, key):
+    """How deep NAME is in its chain of fixers (key `merge_depth`) or reviewers (`proof_depth`). A recorded depth wins:
+    it travels with the task (queue item `meta` -> registry) and is reset to 0 by an orchestration review's FORWARD or
+    FIXED. Counting prefixes in the NAME, as this used to, cannot be reset: the name only ever grows."""
+    if key in (t or {}):
+        return t[key]
+    return sum(name.count(p) for p in DEPTH_KEYS[key])
+
+
+def depth_meta(t, key, name):
+    """The `meta` a fixer/reviewer queued from task NAME carries: both depths, with KEY one deeper."""
+    m = {k: fixer_depth(name, t, k) for k in DEPTH_KEYS}
+    m[key] += 1
+    return m
+
+
+def _cap_slug(name):
+    core = re.sub(r"^((fix-merge-|fix-red-|fix-proof-|fix-orch-)+)", "", name)
+    return re.sub(r"[^a-z0-9]+", "-", core.lower()).strip("-")[:40] or "task"
+
+
+def _chain_evidence(name, t):
+    """What an orchestration reviewer needs to judge a chain: its tasks, the branch's commits, the swarm log lines."""
+    slug = _cap_slug(name)
+    rows = []
+    for n, x in sorted(load().items(), key=lambda kv: kv[1].get("started", "")):
+        if slug[:24] and slug[:24] in re.sub(r"[^a-z0-9]+", "-", n.lower()):
+            rows.append("  %-62s %-17s %3d ahead  started %s" % (n[:62], state_of(x), ahead(x), x.get("started", "?")))
+    commits = git("log", "--format=%h %ad %s", "--date=format:%m-%d %H:%M", "master.." + t["branch"], check=False).splitlines()
+    lines = []
+    for lf in ("swarm.out", "swarm.out.2026-11-12"):
+        lp = os.path.join(ctl_dir(), lf)
+        if os.path.exists(lp):
+            lines += [l for l in open(lp, errors="replace").read().splitlines() if slug[:24] in re.sub(r"[^a-z0-9]+", "-", l.lower())]
+    return ("Tasks in this chain (oldest first):\n%s\n\nCommits on %s that master lacks (%d):\n%s\n\n"
+            "Lines about it in .git/control/swarm.out (%d, last 25 shown):\n%s\n"
+            % ("\n".join(rows[-25:]) or "  (none found)", t["branch"], len(commits),
+               "\n".join("  " + c[:150] for c in commits[:20]) or "  (none)", len(lines),
+               "\n".join("  " + l[:200] for l in lines[-25:]) or "  (none)"))
+
+
+ORCH_REVIEW_TASK = """You are an ORCHESTRATION REVIEWER. A chain of automated tasks hit a depth cap, and the cap fired instead of the
+work finishing. Your job is to find out WHY, and decide whether the cap was right. Read %(doc)s (the evidence), the swarm log
+(.git/control/swarm.out), tools/swarm.py, tools/integrate.py and tools/control.py, and doc/ORCHESTRATION.html (what the
+flow is meant to do). You start on master.
+
+Capped task: %(name)s (branch %(branch)s). Cap: %(kind)s. Why it fired: %(why)s
+
+Decide EXACTLY ONE:
+
+FORWARD  The chain is making real progress and the orchestration is behaving as designed: each round resolves real work, any
+         conflicts come from master moving while rounds run, nothing loops on itself. The cap was simply too tight for this
+         chain. The cap will be reset and the chain may continue. Say what shows the progress (commits, conflicts resolved,
+         tests passing).
+FIXED    The chain is looping because of a DEFECT IN THE ORCHESTRATION (a rule that cannot be satisfied, a task handed back
+         over and over, state not cleaned up, a parse that rejects good input). Fix the defect in tools/*.py, with a test
+         (tools/test_*.py) that fails without the fix; run it and the neighbouring tools/test_*.py, wrapped in
+         `python3 tools/memslot.py --gb 8 --label t --`. Commit it: it lands through the normal landing, and only then is
+         the cap reset, so the fixed code is what handles the chain. Name the defect and the commit.
+STOP     Neither: the chain is not progressing AND the orchestration is sound (the branch really cannot be merged, or it
+         needs a design decision). Say exactly what is needed. The cap stays.
+
+Rules: you are a light worker (no gate, no self-host build, never git stash). Edit only tools/ and docs; do not touch the
+capped branch. Do NOT delete %(doc)s: the orchestrator removes it when it applies your verdict. Finish with the REPORT block,
+the line `ORCH-VERDICT: FORWARD`, `ORCH-VERDICT: FIXED` or `ORCH-VERDICT: STOP` (exactly one, on its own line), and
+CONTROL-STATUS: DONE."""
+
+
+def enqueue_orch_review(name, kind, why):
+    """A depth cap fired on task NAME: queue a Sonnet reviewer (slot ORCH_POOL, pinned) instead of just giving up. The
+    reviewer decides FORWARD (reset the cap, the chain continues), FIXED (it fixed the orchestration: reset once that has
+    landed) or STOP (stay capped); the verdict is read by swarm.apply_orch_reviews. The work needs a doc to exist (sync
+    drops a queued task whose claims name none), so the evidence is written as bugs/ORCH_REVIEW_<slug>.md, which the
+    swarm's skip list keeps out of the ordinary feed. Returns True when a review was queued."""
+    import argparse as _ap
+    t = load().get(name)
+    prev = ((t or {}).get("cap_review") or {}).get("n", 0)
+    if not t or prev >= MAX_CAP_REVIEWS:
+        print("orchestration review: %s hit the cap %d time(s) already; it stays capped" % (name, prev), flush=True)
+        return False
+    slug = _cap_slug(name)
+    base = "ORCH_REVIEW_%s" % slug
+    doc = os.path.join(MAIN, "bugs", base + ".md")
+    task = ORCH_REVIEW_TASK % dict(doc="bugs/%s.md" % base, name=name, branch=t["branch"], kind=kind, why=why)
+    with open(doc, "w") as f:
+        f.write("# Orchestration review: %s hit the %s cap\n\n%s\n\n## Evidence\n\n%s\n"
+                % (name, kind, task, _chain_evidence(name, t)))
+    rname = free_task_name("fix-orch-" + slug)
+    cmd_enqueue(_ap.Namespace(name=rname, claim=["bug:" + base], task=task, task_file=None, file=[], base="master",
+                              needs=[], model=None, cls=None, pool=ORCH_POOL, only=True))
+    with registry() as reg:
+        reg[name]["cap_review"] = {"reviewer": rname, "kind": kind, "doc": doc, "n": prev + 1}
+    print("orchestration review: %s hit the %s cap; queued %s (Sonnet) to decide FORWARD, FIXED or STOP" % (name, kind, rname),
+          flush=True)
+    return True
+
+
+ORCH_VERDICT = re.compile(r"^ORCH-VERDICT:[ \t]*(FORWARD|FIXED|STOP)\b", re.M)
+
+
+def orch_verdict(t):
+    """The reviewer's verdict (FORWARD, FIXED or STOP), read from the end of its worker log; None if it gave none."""
+    try:
+        txt = open(os.path.join(t["worktree"], "work.log"), errors="replace").read()
+    except OSError:
+        return None
+    m = ORCH_VERDICT.findall(txt)
+    return m[-1] if m else None
+
+
+def reset_cap(name, verdict):
+    """FORWARD or FIXED: the capped task may be handed to fixers again, from depth 0, and its review doc goes."""
+    with registry() as reg:
+        t = reg[name]
+        t.pop("merge_capped", None)
+        t.pop("fixer", None)
+        t["merge_depth"] = 0
+        t["proof_depth"] = 0
+        cr = t.setdefault("cap_review", {})
+        cr["verdict"], cr["applied"] = verdict, time.strftime("%F %T")
+        doc = cr.get("doc")
+    if doc and os.path.exists(doc):
+        os.remove(doc)
+
+
 CONTROLLER_FILES = {"TASK.md", "work.log", "exitcode", "REPORT.md"}   # written into a worker's tree by the controller, or (REPORT.md) the worker's closing report, left untracked
 
 
@@ -909,6 +1040,7 @@ def bounce(name, t):
     with registry() as reg:
         reg.pop(name, None)
     item = dict(name=name, claims=t["claims"], base=t.get("base") or "master", task=t.get("task") or _task_text(t),
+                meta={k: t[k] for k in DEPTH_KEYS if k in t},
                 files=t.get("files", []), needs=[], added=time.time(), model=t.get("model"), pool=t.get("pool"),
                 cls=t.get("cls"))
     json.dump(item, open(os.path.join(qdir(), name + ".json"), "w"), indent=1)
@@ -1046,7 +1178,8 @@ def cmd_refill(a):
         # were skipped on every pass as "already exists"); the task starts under a fresh name instead
         name = it["name"] if it["name"] not in tasks else "%s-%d" % (it["name"][:50], int(time.time() * 1000) % 1000000)
         ns = argparse.Namespace(name=name, claim=it["claims"], task=it["task"], task_file=None,
-                                file=it["files"], base=it["base"], model=None, pool=sl["name"], cls=it.get("cls"))
+                                file=it["files"], base=it["base"], model=None, pool=sl["name"], cls=it.get("cls"),
+                                meta=it.get("meta"))
         try:
             cmd_spawn(ns)
         except SystemExit as e:

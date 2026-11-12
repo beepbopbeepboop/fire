@@ -197,9 +197,9 @@ def enqueue_proof_review(name, t, deleted):
       (restore)   neither can be shown: it puts the doc back, so the bug is open again.
     The branch lands once it has a changed test file, a NOTESTCASE line from a `fix-proof-*` task, or no deletion."""
     import argparse as _ap
-    if name.count("fix-proof-") >= PROOF_DEPTH:
+    if C.fixer_depth(name, t, "proof_depth") >= PROOF_DEPTH:
         _cap_merge_fix(name, "proof review depth cap: %s finished %d reviews with neither a test, a NOTESTCASE nor a "
-                             "restored doc; it is abandoned" % (name, PROOF_DEPTH))
+                             "restored doc; it is abandoned" % (name, PROOF_DEPTH), kind="proof review depth")
         return
     task = ("Branch %s (a finished worker branch; original task: %s) deletes the bug doc(s) %s but changes no test file. "
             "A deletion is a claim, not proof. You are the REVIEWER: you start on that branch. Read the doc(s) as they are "
@@ -224,7 +224,8 @@ def enqueue_proof_review(name, t, deleted):
             % (t["branch"], t["summary"][:150], ", ".join(deleted)))
     pname = C.free_task_name("fix-proof-" + name)
     C.cmd_enqueue(_ap.Namespace(name=pname, claim=t["claims"] or ["task:" + pname], task=task, task_file=None,
-                                file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls")))
+                                file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls"),
+                                meta=C.depth_meta(t, "proof_depth", name)))
     with C.registry() as reg:
         reg[name]["state"] = "superseded"
         reg[name]["fixer"] = pname          # the reviewer owns this branch: never hand the same one out twice
@@ -291,7 +292,7 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=(), p
 MERGE_FIX_DEPTH = 3   # fixers of fixers before a branch is abandoned
 
 
-def _cap_merge_fix(name, why):
+def _cap_merge_fix(name, why, kind=None):
     """Stop handing NAME to merge fixers. `merge_capped` is what pick_candidates reads: the state alone is not enough,
     because abandoned/superseded branches are still landing candidates (their work is finished), so without the flag
     a capped branch conflicted and was "capped" again on every pass, forever."""
@@ -299,6 +300,11 @@ def _cap_merge_fix(name, why):
         reg[name]["state"] = "abandoned"
         reg[name]["merge_capped"] = why
     print(why, flush=True)
+    if kind:
+        # A depth cap is a symptom: either the chain is converging and the cap is too tight, or the orchestration is
+        # looping on a defect. A Sonnet reviewer decides which (FORWARD / FIXED / STOP); until it answers the branch
+        # stays capped. Caps that are not about depth (no doc for a fixer to serve) get no reviewer: nothing to reset.
+        C.enqueue_orch_review(name, kind, why)
 
 
 def enqueue_merge_fix(name, t, conflict_text):
@@ -307,8 +313,8 @@ def enqueue_merge_fix(name, t, conflict_text):
     import argparse as _ap
     # A merge fixer that conflicts again gets a fixer of its own, and so on, while master keeps moving. Past a few
     # levels the chain is not converging: abandon the branch instead of nesting `fix-merge-fix-merge-...` (2026-11-10).
-    if name.count("fix-merge-") + name.count("fix-red-") >= MERGE_FIX_DEPTH:
-        _cap_merge_fix(name, "merge-fix depth cap: %s is abandoned, not fixed again" % name)
+    if C.fixer_depth(name, t, "merge_depth") >= MERGE_FIX_DEPTH:
+        _cap_merge_fix(name, "merge-fix depth cap: %s is abandoned, not fixed again" % name, kind="merge-fix depth")
         return
     if not C.doc_exists_for(t.get("claims") or []):
         # sync drops a queued task whose claims name no doc, so this fixer would be removed on the next pass and the
@@ -328,7 +334,8 @@ def enqueue_merge_fix(name, t, conflict_text):
             % (t["branch"], t["summary"][:150], ", ".join(files) or "see `git merge master`"))
     mname = C.free_task_name("fix-merge-" + name)
     C.cmd_enqueue(_ap.Namespace(name=mname, claim=t["claims"] or ["task:" + mname], task=task, task_file=None,
-                                file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls")))
+                                file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls"),
+                                meta=C.depth_meta(t, "merge_depth", name)))
     with C.registry() as reg:
         reg[name]["state"] = "superseded"
         reg[name]["fixer"] = mname          # a fixer owns this branch: never hand the same one out twice

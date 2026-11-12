@@ -143,6 +143,48 @@ def drop_queued_busy():
             log("dropped queued %s: %s is held by a live session" % (item.get("name", f), ", ".join(clash)))
 
 
+def apply_orch_reviews():
+    """Act on the verdicts of orchestration reviewers (control.enqueue_orch_review), once per pass, BEFORE the feed and
+    the retire step: a FORWARD reviewer that committed nothing is retired as a no-commit worker, and its log, where the
+    verdict is, goes with its tree.
+      FORWARD  the chain is converging: reset the cap now, the capped branch is handed to fixers again from depth 0.
+      FIXED    the reviewer fixed the orchestration: wait until its branch has LANDED (its registry entry is gone), so
+               the reset happens on the fixed code (a landing reloads the swarm), then reset.
+      STOP / no verdict   the cap stays (a review that cannot help is not retried past MAX_CAP_REVIEWS)."""
+    for name, t in C.load().items():
+        cr = t.get("cap_review")
+        if not cr or cr.get("applied"):
+            continue
+        rname = cr["reviewer"]
+        r = C.load().get(rname)
+        if cr.get("verdict") == "FIXED":          # recorded earlier: waiting for the fix to land
+            if r is None:
+                C.reset_cap(name, "FIXED")
+                log("orchestration review of %s: FIXED and landed; the cap is reset, the new code handles it" % name)
+            continue
+        if r is None:
+            log("orchestration review of %s: reviewer %s is gone without a verdict; it stays capped" % (name, rname))
+            with C.registry() as reg:
+                reg[name]["cap_review"]["applied"] = "no verdict"
+            continue
+        if C.state_of(r) == "running":
+            continue
+        v = C.orch_verdict(r)
+        if v == "FORWARD":
+            C.reset_cap(name, "FORWARD")
+            log("orchestration review of %s: FORWARD (%s); the cap is reset and the chain may continue" % (name, rname))
+        elif v == "FIXED":
+            with C.registry() as reg:
+                reg[name]["cap_review"]["verdict"] = "FIXED"
+            log("orchestration review of %s: FIXED by %s; the cap is reset once its fix has landed" % (name, rname))
+        else:
+            with C.registry() as reg:
+                reg[name]["cap_review"]["applied"] = v or "no verdict"
+                reg[name]["cap_review"]["verdict"] = v or "none"
+            log("orchestration review of %s: %s by %s; it stays capped (see %s)"
+                % (name, v or "no ORCH-VERDICT line", rname, cr.get("doc", "its review doc")))
+
+
 def drop_queued_unserved(unserved):
     """A queued task whose class no slot serves can never start, and its claim keeps the doc from the only thing that
     can move it: the replan skips a doc whose claim a queued task holds. 2026-11-12: `bug-hard-suite-gimplerunner-part2`
@@ -1041,6 +1083,7 @@ def main():
                 if unserved:
                     log("config: class(es) with docs but no slot: %s" % ", ".join(
                         "%s (%s count 0)" % (c, "/".join(s)) for c, s in sorted(unserved.items())))
+                apply_orch_reviews()
                 replanned = replan_unserved()
                 if replanned:
                     log("replan: queued %d replan task(s) for docs at an unserved class" % replanned)
