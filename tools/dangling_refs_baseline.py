@@ -98,7 +98,7 @@ BASELINE = {
     'test_formal_host_import_wall.py': 1,
     'test_formal_hostmods_census.py': 1,
     'test_formal_hostmods_conformance.py': 1,
-    'test_formal_imports.py': 12,
+    'test_formal_imports.py': 11,
     'test_formal_interop.py': 1,
     'test_formal_isa_census.py': 1,
     'test_formal_link_accounting.py': 3,
@@ -165,6 +165,7 @@ BASELINE = {
     'tools/task_text.py': 4,
     'tools/test_swarm_class_refresh.py': 2,
     'tools/test_swarm_feed.py': 13,
+    'tools/test_swarm_replan.py': 1,
 }
 
 # `BARE_BASELINE`: the same per-file ceilings for the BARE class — a citation
