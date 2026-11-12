@@ -1443,11 +1443,6 @@ typedef struct {
                      * `mojo_dict_slot_key` already formats from `ikey`.
                      * Zero-defaulted: an integer slot freshly made in this
                      * table prints unquoted, as before. */
-    void    *repr;    /* kind 6 only: the repr function (int64_t -> char *) of THIS
-                     * slot's struct type, recorded by mojo_dict_set_other_struct_repr.
-                     * The dict's one recorded function (val_repr) describes kind-5
-                     * slots only, so a second struct type otherwise had no repr at
-                     * all and printed its address. NULL everywhere else. */
 } _DictSlot;
 
 /* Value-kind tags for _DictSlot.kind. Kept in the header so generated code
@@ -1625,11 +1620,6 @@ void        mojo_dict_set_struct(MojoDict *d, char *key, void *obj);
  * (kind 6), so the walker sends this slot to the generic dispatch while the
  * kind-5 slots go to the recorded function. */
 void        mojo_dict_set_other_struct(MojoDict *d, char *key, void *obj);
-/* A struct of another type, with ITS OWN repr function recorded on the slot
- * (kind 6): the walker renders it through mojo_dict_repr_other_slot. */
-void        mojo_dict_set_other_struct_repr(MojoDict *d, char *key, void *obj, void *fn);
-char       *mojo_dict_repr_other_slot(MojoDict *d, int64_t i, int64_t v);
-void        mojo_dict_set_bytes_other_struct_repr(MojoDict *d, MojoBytes *key, void *obj, void *fn);
 void        mojo_dict_set_val_repr(MojoDict *d, void *fn);
 char       *mojo_dict_repr_val(MojoDict *d, int64_t v);
 
@@ -2229,9 +2219,6 @@ char *mojo_word_cstr_value(int64_t v);
    Transient block, same ownership and same release rule as the entry above. */
 char *mojo_int_str_transient(int64_t v);
 void mojo_cstr_or_int_release(int64_t orig, char *s);
-/* `str(v)` for an Int-kinded word: a FRESH heap copy of the conversion, owned
-   by the caller (free it once its one use is done). See the .c comment. */
-char *mojo_str_word_fresh(int64_t v);
 /* The dict-STORE twin of the release above: same ownership protocol, plus
    the key's SPELLING — a pooled canonical decimal reached the store as an
    INTEGER, so the slot the store just wrote prints its key unquoted, while

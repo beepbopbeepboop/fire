@@ -40,7 +40,7 @@ container read. And `valid`, `top_kind` and `member_kind` are named at their
 definitions as names CPython's `json` does not have, for the same reason
 `sys.write_stdout` is not one: CPython spells "this text is malformed" by
 raising, and this path has no exceptions to raise
-(there are no exceptions on this path), so the question has to become a return
+(`bugs/FORMAL_no_exceptions.md`), so the question has to become a return
 value to be asked at all. Status convention: hoststatus.mojo.
 
 THE PRIMITIVE THIS FILE IS BUILT ON
@@ -1174,7 +1174,8 @@ def dumps_int(n) -> str:
 
     `%lld` and NOT `%d`, which is measured and not a matter of taste: a `%d`
     conversion is 32 bits wide on this path, so `snprintf("%d", 4294967296)`
-    writes `-2147483648` (the `-1` a `%d` prints for `~2**62` is the formatter, not the operator). Every
+    writes `-2147483648` (`bugs/FORMAL_string_value_model.md` §2, "the `-1` a
+    `%d` prints for `~2**62` is the formatter, not the operator"). Every
     other `printf` in this tree that prints a number a caller could have made
     large is `%d` and is therefore only right below 2**31 — a 24-byte buffer
     is 20 digits plus a sign, which is the widest `-2^63` needs.

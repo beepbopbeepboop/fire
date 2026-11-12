@@ -5580,8 +5580,8 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'({sorted(outside)[:8]}); a new one is a ratchet failure')
     check('dangling refs: it does not invent one — a cited doc that EXISTS is '
           'not reported',
-          'bugs/OPEN_WORK.md' in have
-          and 'OPEN_WORK.md' not in by_doc
+          'bugs/FORMAL_known_limits.md' in have
+          and 'FORMAL_known_limits.md' not in by_doc
           and 'CODEGEN_ab_native_fails.md' not in by_doc,
           f'the walk found {len(have)} docs under bugs/; a walk that reports '
           f'every citation would make the census meaningless, so the '
@@ -5594,14 +5594,12 @@ def test_a_deleted_bug_doc_is_not_still_cited():
     # asserted directly rather than read out of a total, because a census check
     # cannot tell "fixed" from "the number went down".
     #
-    # The control doc of the check above is `OPEN_WORK.md` and not the
-    # `FORMAL_known_limits.md` this used to name: that one is DELETED (its fix
-    # landed, so CLAUDE.md's rule removed it), and a control that asserts "this
-    # doc exists" about a deleted doc fails for a reason that has nothing to do
-    # with the walk — the second time this control has had to move (the first
-    # from the right-shift doc). `OPEN_WORK.md` is cited from 10 files
-    # (CLAUDE.md among them) and is an index no fix deletes, so the branch is
-    # exercised by a real corpus rather than by a name nothing mentions.
+    # The control doc of the check above is `FORMAL_known_limits.md` and not the
+    # right-shift doc this used to name: that one is DELETED (its fix landed, so
+    # CLAUDE.md's rule removed it), and a control that asserts "this doc exists"
+    # about a deleted doc fails for a reason that has nothing to do with the walk.
+    # `FORMAL_known_limits.md` is cited from 38 files, so the branch is exercised
+    # by a real corpus rather than by a name nothing mentions.
     gone = {('test_formal_hashlib.py', 'FORMAL_arm64_lsl_imm_is_wrong_for_'
              'every_amount_above_8.md'),
             ('test_formal_run.py', 'FORMAL_arm64_lsl_imm_is_wrong_for_every_'
@@ -5619,9 +5617,8 @@ def test_a_deleted_bug_doc_is_not_still_cited():
     # it built "every `.md` basename MINUS the bug docs'" and then reported a
     # citation when the name was not in that set, so a bare citation of a LIVE
     # bug doc was reported as dangling. 14 of them were
-    # `FORMAL_known_limits.md`, which the check above used as its positive
-    # control for the `bugs/`-prefixed class (since moved to `OPEN_WORK.md`) —
-    # so the tool
+    # `FORMAL_known_limits.md`, which is the very document the check above uses
+    # as its positive control for the `bugs/`-prefixed class — so the tool
     # reported its own control as broken and every figure quoted from it
     # (the doc deleted by commit 0702d4087 quotes 289) was wrong by 64. The bare class is deliberately outside the ratchet,
     # so nothing else would have caught it.

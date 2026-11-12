@@ -74,13 +74,6 @@ def neg(n):
 """
 
 
-# A PROVED per-export contract, in either spelling: `agrees_of_body` for a
-# straight-line body, or `agrees_of_body_under ... gcond` for one whose
-# overflow guards are the only branches on its normal path.  IDENT is the
-# export's name (or a regex for it).
-_PROVED = r"Contracts\.agrees_of_body(?:_under)? dylib_image IDENT (?:gcond )?bodyI"
-
-
 REC = "@@"
 RUN_TIMEOUT = 300
 
@@ -716,10 +709,7 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
         check(_re.search(rf"theorem {ident}_semantics_total\b", text),
               f"{ident} has no `_semantics_total` theorem: every export gets "
               f"one, proved or named")
-        # A proved contract is either the straight-line `agrees_of_body` or,
-        # for a body with overflow guards, the guarded `agrees_of_body_under`
-        # over the guard's own `bodyI`.  Both are proved; neither is a `_spec`.
-        proved = bool(_re.search(_PROVED.replace("IDENT", ident), text))
+        proved = (f"Contracts.agrees_of_body dylib_image {ident} bodyI" in text)
         named = bool(_re.search(rf"theorem {ident}_spec\b", text))
         # The emitter's THREE states for an export's contract, and the
         # difference between the last two is the whole point: "no claim, and it
@@ -973,7 +963,8 @@ def test_several_exports_and_no_derivable_spec(tmpdir, shared):
     for i, (ident, spec) in enumerate(
             [("dylib_export_0_add1", "n + (1 : UInt64)"),
              ("dylib_export_1_mul2", "n * (2 : UInt64)")]):
-        check(_re.search(_PROVED.replace("IDENT", ident), text),
+        check(_re.search(rf"Contracts\.agrees_of_body dylib_image {ident} bodyI",
+                         text),
               f"{ident}'s contract is not proved: a dylib with several exports "
               f"still gets a named obligation instead, which is the defect this "
               f"case exists to keep fixed")
@@ -1099,12 +1090,12 @@ def test_an_export_that_binds_a_local_still_gets_a_proved_contract(tmpdir, share
     for name in ("one_local", "two_locals"):
         ident = ("dylib_export_%d_%s"
                  % ([e["name"] for e in built["exports"]].index(name), name))
-        check(_re.search(_PROVED.replace("IDENT", ident), text),
+        check(_re.search(rf"Contracts\.agrees_of_body dylib_image {ident} bodyI",
+                         text),
               f"{name}'s contract is not proved, so widening the derivation "
               f"did not reach the proof layer")
     check(not _re.search(r"rebound\b.*_spec\b", text, _re.S)
-          or not _re.search(r"agrees_of_body(?:_under)? dylib_image "
-                            r"dylib_export_2_rebound", text),
+          or "agrees_of_body dylib_image dylib_export_2_rebound" not in text,
           "the rebound export was given a contract anyway")
     check("dylib_export_2_rebound" in text
           and "NO SPEC DERIVED for dylib_export_2_rebound" in text,
@@ -2265,11 +2256,11 @@ def test_a_conditional_value_is_not_a_branch(tmpdir, shared):
     with open(path, "w") as f:
         f.write(generate_dylib_proof(code, info, exports, specs))
     text = open(path).read()
-    check(_re.search(_PROVED.replace("IDENT", r"dylib_export_\d+_csetval"),
-                     text),
+    check(_re.search(r"Contracts\.agrees_of_body dylib_image "
+                     r"dylib_export_\d+_csetval bodyI", text),
           "the cset-bearing export got no proved contract, so a step that "
           "chooses a VALUE is still being read as a step that chooses a pc")
-    check(not _re.search(r"agrees_of_body(?:_under)? dylib_image "
+    check(not _re.search(r"agrees_of_body dylib_image "
                          r"dylib_export_\d+_branched", text)
           and _re.search(r"theorem dylib_export_\w+_branched_spec\b", text),
           "the branching export must keep its NAMED obligation and get no "

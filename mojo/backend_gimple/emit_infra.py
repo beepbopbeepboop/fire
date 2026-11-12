@@ -2200,15 +2200,6 @@ def _emit(gen, line: str):
 
 
 def _emit_raw(gen, line: str):
-    # GCC numbers a `-fgimple` diagnostic from the last `#line` directive,
-    # counting physical lines. So every statement line gets its own directive
-    # directly above it (gen_stmt sets `_stmt_line_directive` to the innermost
-    # statement's); a statement that lowers to many lines is no longer
-    # attributed to its first line plus a count. Directives, preprocessor
-    # lines and blanks are not statement lines and are not stamped.
-    _d = getattr(gen, '_stmt_line_directive', None)
-    if _d and line.strip() and not line.lstrip().startswith('#'):
-        gen.body_lines.append(_d)
     gen.body_lines.append(line)
     # Track values produced by a runtime call that always returns a brand-new
     # container (see `_FRESH_CONTAINER_RETURNS`). A consumer that receives
@@ -2726,7 +2717,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             aval = _ub
         if (atype == 'int64_t' and aval in getattr(gen, '_boxed_vals', ())
                 and not _is_pointer_view_helper(fname)
-                and not _as_str(fname).startswith(('mojo_', '__mojo_tuple_box_'))):
+                and not _as_str(fname).startswith('mojo_')):
             # A slot read out of a kind-mixed tuple/list arrives as a BOX, and a
             # `None` slot is the shared kind-'n' box. A USER function's
             # parameter has no None word: it is `0` (the same word a `None`
@@ -5697,15 +5688,7 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
         # discriminator so kinds survive. For a plain integer it is the same
         # decimal string.
         if et in ('int', 'int64_t'):
-            # The result is a FRESH copy the caller owns (`mojo_str_word_fresh`
-            # releases the conversion's own transient/borrowed result itself),
-            # so it is registered as fresh: a consumer that reads it once
-            # (`len`, `+`, an f-string cat) frees it, where before the
-            # conversion was never freed. A consumer that stores the pointer
-            # claims nothing and the value is simply not freed, as before.
-            _sv = gen._call_expr('char *', 'mojo_str_word_fresh', [('int64_t', nv)])
-            gen._note_fresh_result(_sv)
-            return _sv
+            return gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', nv)])
         return gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
     if et in ('double', 'float', '__fp16'):
         fv = ev if et == 'double' else gen._new_val('double', f'(double){ev}')
@@ -7270,15 +7253,6 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
                            [('MojoDict *', dict_val),
                             ('void *', elem_repr_operand(gen, _shim))])
         _st = 'struct' if _have in ('', _shim) else 'other_struct'
-        if _st == 'other_struct':
-            # A second struct type: its own repr goes on the slot, since the
-            # dict's recorded function describes only the first one. The bytes-
-            # keyed setter is the `_bs` twin of the str one.
-            gen._emit_call('void', '', f'mojo_dict_set_{_bs}other_struct_repr',
-                           [('MojoDict *', dict_val), (key_ctype, key_val),
-                            (val_ctype, val),
-                            ('void *', elem_repr_operand(gen, _shim))])
-            return
         gen._emit_call('void', '', 'mojo_dict_set_' + _bs + _st,
                        [('MojoDict *', dict_val), (key_ctype, key_val),
                         (val_ctype, val)])

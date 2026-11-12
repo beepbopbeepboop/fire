@@ -2922,19 +2922,22 @@ def _func_qualifier(gen, bare_name: str) -> str:
     own_home = getattr(gen, '_own_imported_func_home', None)
     if own_home and bare_name in own_home:
         qualifier = own_home[bare_name]
-        # If bare_name is marked _AMBIGUOUS_FUNC_HOME (two same-named imports
-        # from different sibling modules, each lexically nested in a different
-        # scope), don't refuse outright: the lexical scope resolver above
-        # (Tier 2) already had first crack at this reference and found no
-        # enclosing import that binds bare_name, so the only remaining option
-        # short of erroring is to let the caller fall through to the shared
-        # whole-program registry (Tier 4). That mirrors _imported_def_pts's
-        # `definer_only` contract (an _AMBIGUOUS entry means "no answer", not
-        # a wrong answer) and keeps every tier in this file symmetric: no
-        # stale RuntimeError that contradicts the other three call sites
-        # which already treat the sentinel as a fall-through.
-        if qualifier != gimple_codegen._AMBIGUOUS_FUNC_HOME:
-            return _sanitize_qualifier(qualifier)
+        # _AMBIGUOUS_FUNC_HOME: this program transitively imports two
+        # different sibling modules that each define `bare_name`, and the
+        # lexical scope resolver above found no enclosing `from ... import`
+        # that binds it. The reference cannot mean either module, so refuse.
+        # Falling through to the shared whole-program registry (Tier 4)
+        # here is a silent miscompile: it resolves the name to whichever
+        # sibling registered last (IMPORT_ambiguous_sibling_function).
+        # Callers that only ESTIMATE a type catch this via
+        # _func_home_qualifier and treat it as "no answer".
+        if qualifier == gimple_codegen._AMBIGUOUS_FUNC_HOME:
+            raise RuntimeError(
+                f"error: import of '{bare_name}' is ambiguous: this program "
+                f"transitively imports two different sibling modules that "
+                f"both define a free function named '{bare_name}', and no "
+                f"enclosing `from ... import {bare_name}` in scope selects one")
+        return _sanitize_qualifier(qualifier)
     home = getattr(gen, '_imported_func_home', None)
     if home and bare_name in home:
         return _sanitize_qualifier(home[bare_name])
