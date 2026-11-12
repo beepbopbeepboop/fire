@@ -2492,10 +2492,12 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
     # complexity.
     param_ctypes: list[tuple[str, str]] = []
     for pn, pt in (fn.params or []):
+        if pn.startswith('**'):
+            param_ctypes.append((pn[2:], 'MojoDict *'))
+            continue
         if pn.startswith('*'):
-            raise gimple_exprtypes._UnsupportedAsyncShape(
-                f"{fn.name}: *args/**kwargs parameters not supported "
-                "for compiled async functions")
+            param_ctypes.append((pn[1:], 'MojoList *'))
+            continue
         ctype = gen._param_ctype(pn, pt, fn)
         # See the identical struct-pointer-acceptance note in
         # _gen_cpp_generator_unit — same allow-list, same reasoning,
@@ -3759,10 +3761,12 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
     gen._cpp_last_mixed_slots = False
     param_ctypes: list[tuple[str, str]] = []
     for pn, pt in (fn.params or []):
+        if pn.startswith('**'):
+            param_ctypes.append((pn[2:], 'MojoDict *'))
+            continue
         if pn.startswith('*'):
-            raise gimple_exprtypes._UnsupportedAsyncShape(
-                f"{fn.name}: *args/**kwargs parameters not supported "
-                "for compiled async generators")
+            param_ctypes.append((pn[1:], 'MojoList *'))
+            continue
         ctype = gen._param_ctype(pn, pt, fn)
         # See the identical struct-pointer-acceptance note in
         # _gen_cpp_generator_unit — same allow-list, same reasoning,

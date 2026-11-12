@@ -1255,7 +1255,6 @@ def _infer_multi_kind_return(gen, body, params=None,
         gen._cur_func_body = body
         gen._mixed_container_locals = None
         gen._mixed_scalar_locals = None
-        gen._mixed_value_locals = None
         # Imported HERE rather than at module scope: `gimple_codegen.py`
         # imports this module before it imports `emit_infra`, so a top-level
         # `import ... emit_infra` in this file is a circular import that
@@ -1336,7 +1335,6 @@ def _infer_multi_kind_return(gen, body, params=None,
             gen._cur_func_body = _saved_body
             gen._mixed_container_locals = None
             gen._mixed_scalar_locals = None
-            gen._mixed_value_locals = None
 
 
 def _homogeneous_tuple_ann_elem(self, _ret_ann):
@@ -13594,8 +13592,16 @@ def gen_module_impl(self, stmts: list):
                         'refusal', e)
             continue
         self._supported_async[s.name] = s
+        _astar = None
+        _akw = None
+        for _i, (_pn, _pt) in enumerate(getattr(s, 'params', None) or []):
+            if _pn.startswith('**'):
+                _akw = _i
+            elif _pn.startswith('*'):
+                _astar = _i
         self._async_api[s.name] = {
             'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+            'star_slot': _astar, 'kwargs_slot': _akw,
         }
         self.func_param_types[f"{base}_start"] = param_ctypes
         self._generator_cpp_units.append(cpp_text)
@@ -13638,8 +13644,16 @@ def gen_module_impl(self, stmts: list):
                             '(pass 2)', e)
                 continue
             self._supported_async[s.name] = s
+            _astar = None
+            _akw = None
+            for _i, (_pn, _pt) in enumerate(getattr(s, 'params', None) or []):
+                if _pn.startswith('**'):
+                    _akw = _i
+                elif _pn.startswith('*'):
+                    _astar = _i
             self._async_api[s.name] = {
                 'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+                'star_slot': _astar, 'kwargs_slot': _akw,
             }
             self.func_param_types[f"{base}_start"] = param_ctypes
             self._generator_cpp_units.append(cpp_text)

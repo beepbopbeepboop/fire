@@ -55,3 +55,23 @@ eligibility/refusal gate for that shape.
   causes if one lands before the other.
 - Do not spend a turn only re-verifying the refusal; land the fix or a concrete
   isolated reproducer/test that demonstrates forward progress.
+
+## Status 2026-11-12
+
+- `mojo/backend_gimple/cpp_async.py`: `_gen_cpp_async_unit` and
+  `_gen_cpp_async_generator_unit` now accept `*args` (`MojoList *`) and
+  `**kwargs` (`MojoDict *`) coroutine parameters instead of refusing with
+  "`*args/**kwargs` parameters not supported for compiled async functions".
+- `mojo/backend_gimple/module_gen.py`: async API entries now record
+  `star_slot`/`kwargs_slot` for top-level compiled async functions.
+- `mojo/backend_gimple/emit_calls.py`: async handle construction packs trailing
+  positional args into the `*args` list when the callee has a `star_slot`.
+- Regression test `test_regress_async_variadic_params.py` compiles the minimal
+  module-gen shapes (`async def __aexit__(self, *args)`, `**kwargs`, combined,
+  fixed+`*args`, struct async method with `*args`) via `gen_module` and asserts
+  the refusal is absent.
+- Not verified here: full `Lib/contextlib.py` compile (heavy; depends on part2
+  for boxed non-scalar `__aenter__` return and any remaining causes). Doc kept
+  until end-to-end compile is confirmed. `tools/dangling_doc_refs.py --ratchet`
+  had unrelated pre-existing ratchet failures in this tree, so doc deletion was
+  deferred.
