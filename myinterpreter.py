@@ -37,6 +37,52 @@ _COMPARE_OPS = {'==', '!=', '<', '>', '<=', '>=', 'in', 'not in', 'is', 'is not'
 _GENEXP_ITER_NAME = '__mojo_genexp_iter__'
 
 
+# `@dataclass` / `@dataclasses.dataclass` is a COMPILE-TIME TRANSFORM, not a
+# runtime wrapper — the same argument `formal/dataclass_transform.py` records
+# for the compiled backends. CPython's `dataclasses.dataclass` rewrites a REAL
+# Python class: it reads the class's `__qualname__`, `__module__`, `__mro__`
+# and `__annotations__` and generates `__init__`/`__eq__`/`__repr__` methods.
+# This interpreter's classes are `MojoClass` objects, not Python classes, so
+# handing one to the real decorator raised on its first `__qualname__` read —
+# and executing `fire_compiler.py`, whose 65 AST dataclasses are decorated this
+# way, died at class-definition time (`interp-tokenizer-oracle` never reached
+# `py_tokenize` at all).
+#
+# Its ONE observable half on a struct — construct by filling the declared
+# fields in declaration order with their defaults — is what
+# `MojoClass.__call__` already does, so applying it would be a no-op even if it
+# succeeded. A class that really IS a Python class (execute_StructDef's
+# `types.new_class` path) still gets the decorator applied for real; see the
+# `isinstance(bound, MojoClass)` guard in `_apply_function_decorators`.
+_DATACLASS_DECORATORS = frozenset({'dataclass', 'dataclasses.dataclass'})
+
+
+def _decorator_dotted_name(node):
+    """The dotted SOURCE spelling of a decorator node (`dataclass`,
+    `dataclasses.dataclass`), or None for a shape this cannot spell.
+
+    A bare decorator is stored as a plain string; one with an argument list is
+    a `CallExpr` whose `func` is that dotted name's nested
+    `IdentExpr`/`MemberExpr` (fire_compiler's `_dotted_name_expr`), and a
+    `@spec(...)` is a `DecoratorArgs` that keeps the dotted name itself.
+    Needed because matching only the bare string misses every dotted or
+    parameterised spelling of a compile-time decorator."""
+    if isinstance(node, str):
+        return node
+    if isinstance(node, N.DecoratorArgs):
+        return node.name
+    if isinstance(node, N.CallExpr):
+        return _decorator_dotted_name(node.func)
+    if isinstance(node, N.IdentExpr):
+        return node.name
+    if isinstance(node, N.MemberExpr):
+        base = _decorator_dotted_name(node.obj)
+        if base is None:
+            return None
+        return base + '.' + node.member
+    return None
+
+
 # ---------------------------------------------------------------------------
 # CPython 3.15 "improved error messages" (What's New in 3.15): an UNCAUGHT
 # AttributeError is printed with a suggestion computed at PRINT time from two
@@ -5345,6 +5391,12 @@ class Interpreter:
         """
         decs = getattr(node, 'decorators', None) or []
         for d in reversed(decs):
+            # A dataclass transform applied to one of THIS interpreter's
+            # classes (see _DATACLASS_DECORATORS): skip it rather than hand a
+            # MojoClass to CPython's dataclasses, which cannot process one.
+            if isinstance(bound, MojoClass) \
+                    and _decorator_dotted_name(d) in _DATACLASS_DECORATORS:
+                continue
             if isinstance(d, str):
                 if d in self._COMPILE_TIME_DECORATORS:
                     continue
