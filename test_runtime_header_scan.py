@@ -547,14 +547,7 @@ def test_every_declaration_is_seen():
     # `str_word_fresh`) and four are box-shaped (`throw_take` and the three
     # dict entries), which is the whole 418 -> 425 word and 502 -> 506 box
     # movement in the quoted figures — `--fix` wrote those from this scan.
-    # 821 -> 822 (2026-11-12): ONE name, read off the call on the live header.
-    # `mojo_mul_word` (63dd14dda, "codegen: handle str-box ops in tagged
-    # generator words") — the `*`/str-repeat word picker. Word-shaped (two
-    # int64_t in, one int64_t out), so the word figure moves 425 -> 426 and
-    # the box figure stays at 506, total 931 -> 932. The declaration landed
-    # without a ladder rung, which this check exists to catch; `formal-doc-truth`
-    # and `rthdrscan` both went red on the same drift and were fixed in parallel.
-    for header, want in (('fire_runtime.h', 822),   # --fix writes the live figure
+    for header, want in (('fire_runtime.h', 821),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already

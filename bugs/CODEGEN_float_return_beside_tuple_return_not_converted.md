@@ -1,6 +1,6 @@
 # CODEGEN: a function returning a float on one path and a tuple on another fails `gcc -fgimple` ("cannot convert to a pointer type"), which breaks the self-host build
 
-Status: OPEN. Filed 2026-11-12 from a failing `make` of `fire.o`. Class: easy (one narrow codegen case, a small standalone repro below).
+Status: OPEN. Filed 2026-11-12 from a failing `make` of `fire.o`. Re-measured 2026-11-12 (planning round, see `## Status (2026-11-12)` at the end): the gcc error is GONE on master, but the underlying bug is worse than the symptom — the float is silently truncated, and the program segfaults at run time. The guide below is the next step; no code has landed yet.
 
 ## Symptom
 
@@ -87,3 +87,55 @@ Fix the codegen, not the call site: a function that returns a float on one path 
 ## Done when
 
 `python3 test_float_return_beside_tuple_return.py` passes. Then, as the integrator's concern and not a worker's: the `fire.o` step of the self-host build (the command in the Symptom section) gets past `mojo/middle/comptime.py`. A worker does not run the whole-closure build; report that step as not run.
+
+## Status (2026-11-12, planning round)
+
+### What is true on master (HEAD bd6048baa), measured
+
+The gcc error in the Symptom section no longer reproduces, because a previous change already routes the float through an `int64_t` temp:
+
+- `mojo/backend_gimple/emit_resolve.py:2615-2630`, the `elif d.endswith(' *') and s in ('double', 'float')` arm of `_sce_simple_emit`, emits `_tN = (int64_t)<double>; dest = (<ptr>)_tN;`. Pinned by `test_float_into_pointer_return_regression.py`.
+- `mixed_ret.py` (the repro above) now compiles: `gcc-mp-15 -Og` and `-Os` both exit 0.
+
+That fix is the bug, not the cure. `(int64_t)` truncates the value, and the caller then treats the integer as a `MojoList *`:
+
+- Generated C for `eval_const` on the float arm: `_t7 = _t6->value; _t9 = (int64_t)_t7; _t8 = (MojoList *)_t9; return _t8;`. `eval_const(FloatLit(1.5))` returns a list pointer to address `1`.
+- Run-time, through the production compile path (`test_gimple_runner.compile_mojo_to_gimple_exe` + run), every mixed-return shape below exits with SIGSEGV (rc -11), and CPython prints the values shown:
+
+| function (returns, in order) | GIMPLE binary | CPython |
+|---|---|---|
+| `1.5`, `"s"`, `None` (`pick`) | rc -11, no output | `1.5` / `s` / `None` |
+| `2.5`, `(1, 2)`, `None` (`tup`) | rc -11, no output | `2.5` / `(1, 2)` / `None` |
+| `1.5`, `"s"` (only two arms) | rc -11, no output | `1.5` / `s` |
+
+- The inferred C return type is `char *` / `MojoList *`, not a tagged word, because `TypeLattice.join` lets a pointer beat a double: `mojo/middle/types.py:187-194` (`join`), reached through `TypeLattice.join_all` in `mojo/middle/infra_infer.py:1916-1921` (`_infer_return_type_core`) and the wrapper `gimple_codegen.py:5644`.
+- The element-level guard in `mojo/middle/resolve_shared.py:1483-1492` refuses a float+pointer mix only for the RETURN ELEMENT (`_return_elem_types`, the tuple slot), not for the function's own C return type. That is why the function type is still a pointer.
+
+### Decision for the next round (recommended: option A)
+
+**A. Tagged-word return for a float+pointer join.** A function whose return arms join a `double` with a pointer returns `int64_t`, the tagged word the codebase already uses for "a double that must travel beside non-doubles" (`_int64_may_hold_float`, `mojo_box_from_double`). Each arm is boxed or wrapped:
+- `double` arm: `mojo_box_from_double(v)` (fresh kind-'d' box, `runtime/fire_runtime.c:1889`).
+- `str` arm: `mojo_box_from_str(s)` (kind-'p', `fire_runtime.h:864`).
+- `None` arm: `mojo_box_none()` (`fire_runtime.h:865`).
+- `tuple`/`list` arm: NEW `mojo_box_from_list(MojoList *)`, kind 'l'. `mojo_repr_boxed` already renders kind 'l' (`fire_runtime.c:2237`) but nothing creates one; `'l'` today is only a list-slot kind.
+- any other pointer kind (dict, set, bytes): refuse at codegen with a diagnostic naming the function. Do not guess.
+
+Option B, refusing a float+pointer return at codegen, is rejected: it turns `comptime.py`'s `eval_const` into an unbuildable program, which is the workaround CLAUDE.md forbids.
+
+### Implementation plan (files, functions, order)
+
+1. `runtime/fire_runtime.c` / `fire_runtime.h`: add `mojo_box_from_list(MojoList *)` beside `mojo_box_from_str` (kind 'l', `bits` = the list pointer, registered in `_reg_box` like the others). Add the header prototype.
+2. `mojo/middle/infra_infer.py`: `_infer_return_type_core` (1916) — when `acc` holds a `double` AND a pointer, return `'int64_t'` and record the function in a `return_may_hold_float` set (module-level, like `_int64_may_hold_float`). The same change in `gimple_codegen.py:5644` if it is a second copy: consolidate, do not duplicate (CLAUDE.md).
+3. `mojo/backend_gimple/emit_resolve.py` `_sce_simple_emit`: the `double`/`float` → pointer arm must not truncate. With the function's return type now `int64_t`, a return of a double goes through `mojo_box_from_double`; a pointer arm goes through the box helper for its kind. Remove the `(int64_t)` truncation arm. (The `(int64_t)<double>` form is what `test_float_into_pointer_return_regression.py` pins; that test must be rewritten to assert the boxed form, not deleted.)
+4. Callers (`mojo/middle/calls_shared.py`, `_quick_type` of `CallExpr`, `mojo/backend_gimple/emit_infra.py` around 7512-7690): a call to a `return_may_hold_float` function has type `int64_t` and is a possibly-boxed word. Extend the existing name-form precedent `_is_may_hold_float_param` to `CallExpr` nodes whose callee is in that set: print and f-string render through `mojo_repr_boxed`; a use as a pointer goes through `mojo_box_word` first. `TypeLattice.coerce` (`types.py:253-256`) refuses an `int64_t`→pointer cast outright, so every such coercion has to be routed through the unwrap, not a bare cast.
+5. `mojo/middle/resolve_shared.py:1483-1492`: unchanged in behaviour; its refusal already matches option A for the element case.
+
+### Tests that prove it
+
+- `test_float_return_beside_tuple_return.py` (new, next to `test_float_into_pointer_return_regression.py`): for each row of the run-time table above, compile through `compile_mojo_to_gimple_exe(src, filename='x.py')`, run, and compare stdout to CPython's. This is the doc's named quick test. It FAILS on master (rc -11 today) and must pass after.
+- `test_float_into_pointer_return_regression.py`: rewrite its two assertions (currently pinning `(int64_t)2.5`) to the boxed form; keep `test_int_return_into_the_same_shape_still_compiles`.
+- `mixed_ret.py` (the Minimal repro): `eval_const(FloatLit(1.5))` prints `1.5`, and `TupleE(...)` prints the tuple.
+
+### Not done in this round
+
+No code changed. The self-host `fire.o` step is the integrator's to run (see Done when). `eval_const`'s callers in `mojo/middle/comptime.py` have not been audited for which consumers read the value as a float, which option A's step 4 depends on: do that audit first in the next round.
