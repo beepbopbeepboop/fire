@@ -2302,8 +2302,7 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
      extra=['test_coro_nested_async_capture.py', 'gimple_codegen.py',
             'runtime/fire_async_runtime.cpp', 'runtime/fire_async_runtime.h'] + CORO_RUNTIME,
      desc='nested async-def mutable closure capture under MOJO_CORO=stackswitch '
-          '(was 0/9, unregistered, naming the pre-rename mojo_*.c runtime files)',
-     disabled='bugs/gate-coro-nested-capture.md')
+          '(was 0/9, unregistered, naming the pre-rename mojo_*.c runtime files)')
 
 # ── The self-hosted BINARY's own compiled codegen ───────────────────────────
 # Everything here runs a mojoc process, so everything is capped, and
