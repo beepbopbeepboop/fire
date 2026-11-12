@@ -3869,6 +3869,44 @@ class TestCbnzNotTakenLemma(unittest.TestCase):
             self.assertEqual(n, 0, "the probe uses a sorry somewhere: " + detail[-400:])
 
 
+class TestGuardedExportBody(unittest.TestCase):
+    """`Contracts.ExportBodyUnder` / `agrees_of_body_under`: the guarded export layer.
+
+    An export whose body carries an overflow guard is straight-line only on the
+    inputs where the guard `g` holds, so its contract is the GUARDED obligation
+    `Refine.export_result_spec_under (fun n => g (startState n))`.  The unguarded
+    `ExportBody` cannot carry a guard, which is why the wrong-spec teeth test is
+    still an admitted `sorry`.  This probe is the layer the emitter will target:
+    given a guarded body and the machine's agreement on `g`-inputs, the guarded
+    obligation follows, with no `sorry`.  Before the layer exists the probe is
+    `unknown identifier`.  Skipped when Lean or the library is not built."""
+
+    def test_the_guarded_body_discharges_the_guarded_obligation(self):
+        if not _lean() or not os.path.isfile(
+                os.path.join(HERE, "lib", "ProofLib.olean")):
+            self.skipTest("Lean library not built")
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as tmp:
+            p = os.path.join(tmp, "guarded_body_probe.lean")
+            with open(p, "w") as f:
+                f.write(
+                    "import Contracts\n\n"
+                    "theorem guarded_body_probe (image : DylibImage)\n"
+                    "    (export_ : DylibExport) (g : Arm64State → Prop)\n"
+                    "    (b : Contracts.ExportBodyUnder image export_ g)\n"
+                    "    (spec : UInt64 → UInt64)\n"
+                    "    (hfuel : b.block.pcs.length + 1 ≤ DylibExport.exportFuel image 0)\n"
+                    "    (hreg : ∀ n, g (Contracts.startState image export_ n) →\n"
+                    "      arm64_reg 0 (b.block.step (Contracts.startState image export_ n))"
+                    " = spec n) :\n"
+                    "    Refine.export_result_spec_under\n"
+                    "      (fun n => g (Contracts.startState image export_ n))\n"
+                    "      image export_ spec :=\n"
+                    "  Contracts.agrees_of_body_under image export_ g b spec hfuel hreg\n")
+            ok, detail, n = _check_proof(p)
+            self.assertTrue(ok, detail[-400:])
+            self.assertEqual(n, 0, "the probe uses a sorry somewhere: " + detail[-400:])
+
+
 class TestGuardedValueIdentity(unittest.TestCase):
     """The value of `triple`'s normal path is `n * 3`, Lean-checked on the REAL image.
 

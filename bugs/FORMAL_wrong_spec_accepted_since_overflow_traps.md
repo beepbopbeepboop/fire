@@ -329,3 +329,43 @@ cases still fail. Round 5's step 2 is still first: measure `bv_decide` on the ha
   only if the RET's target is the caller; decide it in that round). `test_formal_dylib.py` is still PASS=22 FAIL=6.
 - Lean note: the generator's preamble contains a `sorry` on `_semantics_total` (an obligation by design), so the probe cuts the preamble
   before it. Do not paste the preamble into a test that asserts zero sorries.
+
+### Landed 2026-11-12 (round 8): the guarded export-body layer in Lean (partial, coverage + infrastructure)
+
+- `lib/Contracts.lean`: `ExportBodyUnder image export_ g`, the guarded sibling of `ExportBody`. Its `cert` is
+  `Refine.GuardedBlockCert image.code block g`; its `atExit` and `noEarly` are the unguarded fields restricted to
+  `g (startState n)`. Also `runs_to_body_under` (the run lands on the body's effect for a `g`-argument; the proof is
+  `runs_to_body`'s with the guard passed through) and `agrees_of_body_under` (a body that agrees with `spec` on
+  `g`-arguments discharges `Refine.export_result_spec_under (fun n => g (startState n))`). No `sorry`.
+- `test_formal_call_proof_gen.py::TestGuardedExportBody`: a Lean probe that applies `agrees_of_body_under`. Before the
+  layer it fails with `Unknown identifier Contracts.ExportBodyUnder` (measured); after, it passes with no `sorry`.
+  `-k "TestGuardedExportBody or TestOverflowGuardNormalPath or TestCbnzNotTakenLemma or TestGuardedValueIdentity"`:
+  6 passed, 13 s, peak 1.7 GB.
+- The `cbnz`/`cbz` kind: `_cfg_blocks` gives CBNZ (word idx 17) the kind `"cbz"` with `targets = [fall, taken]`, the same
+  as CBZ and B.cond. So the teeth image's guard at 0x3a8 is a CBNZ, and `cbnz_not_taken` (round 6) is the lemma the
+  emitter needs for it. No CBZ lemma is needed for this image.
+- Measured unchanged: `python3 test_formal_dylib.py -v` gives `PASS=22 FAIL=6`, the same six names.
+
+**Still not landed: the emitter. This bug is NOT fixed, and the doc is kept.** Remaining, in order:
+
+1. `formal/arm64_proof_gen.py::_dylib_contract_proof`: take `pcs, guards` from `_overflow_normal_path(words_full, entry,
+   func_end)`. Every `pcs`-based name (`S{k}_pc`, `runsTo{k}`, `dylib_sr_{k0+i}`) becomes `pcs[i]`-based, using
+   `(pcs[i] - base)//4` for the lemma index.
+2. The guard step's `st_i` is `{ prev with pc := prev.pc + 4 }`, justified by `cbnz_not_taken` (its hypothesis is
+   `arm64_reg rn (S_i s) = 0`, the NOT-taken condition). Its `_step_rhs` is an `if`, so the `some`-only check at
+   `_dylib_contract_proof` must accept the guard index explicitly.
+3. A `B` on the normal path (0x3ac to 0x3e8) is a `pc`-writing step whose `S_{i+1}` is `st_i` with no `+4`, and its
+   `runsTo` link is `runs_cons_jump` (`lib/ProofLib.lean` ~4136), not `runs_cons_seq`.
+4. `def {ident}_guard : Arm64State → Prop := fun s => arm64_reg 2 (S_j s) = 0` (the cbnz's register, x2 for this image),
+   emitted as a `def`, never `opaque`.
+5. Build `Contracts.ExportBodyUnder dylib_image {ident} {ident}_guard'` (where `guard'` is the `_guard` taken at
+   `startState`), with `cert` from a `GuardedBlockCert` version of `bodyCert`, and `atExit`/`noEarly` taken from the
+   guarded forms. The exit is `func_end`, which is the image end for the last export (`exportEnd_here` already handles it).
+6. `spec` becomes `Contracts.agrees_of_body_under`, and the fallback `_spec` `sorry` becomes the proved guarded
+   obligation. The wrong spec (`n * 5`) must then be refuted by Lean, and the right spec (`n * 3`) must be accepted.
+7. Done when: `test_formal_dylib.py` "a wrong spec is rejected, not believed" and "a wrong spec on a multi-export image is
+   rejected" pass, with the right-spec CONTROL still accepted. Then delete this doc and run `dangling_doc_refs.py --ratchet`.
+
+Quick tests for the next round: `TestGuardedExportBody` (2 s), the `TestOverflowGuardNormalPath` class (0.5 s), then
+`test_formal_dylib.py -v` once. The integrator gates the stdlib compile; the dylib emitter change is in `formal/`, so
+the next round should also add a `_dylib_contract_proof` unit test beside `TestOverflowGuardNormalPath`.
