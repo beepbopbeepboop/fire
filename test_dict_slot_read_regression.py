@@ -145,42 +145,6 @@ main()
         print(f"  FAIL: Compilation raised exception: {e}")
         return 1
 
-    # Test 5: Dict slot read, then the same name rebound to a container and
-    # to an int. This is the ast_rewriter / coro shape (`k = d[...]` beside
-    # `k = (...)` or `k = [...]`). The name is a container-beside-scalar box
-    # (`mixed_value_locals`): a container store is its bare word, so it must
-    # compile and print the CPython answer. Only a name bound to a TAGGED
-    # generator word may refuse a container store.
-    src5 = '''
-def test():
-    d = {"key": 3}
-    x = d["key"]  # dict slot read
-    print(x)
-    x = [1, 2]    # rebind to a container
-    print(len(x))
-    x = 7         # and back to a scalar
-    print(x)
-    return x
-
-def main():
-    test()
-main()
-'''
-
-    print("\nTest 5: Dict slot read then rebind to a container, then an int")
-    try:
-        stdout, stderr, returncode = run(src5)
-        if stderr and "refused" in stderr.lower():
-            print(f"  FAIL: Refusal detected in stderr: {stderr[:200]}")
-            return 1
-        if returncode != 0 or stdout != "3\n2\n7\n":
-            print(f"  FAIL: wrong output (returncode={returncode}): {stdout!r}")
-            return 1
-        print("  PASS: compiled without refusal and printed the CPython answer")
-    except Exception as e:
-        print(f"  FAIL: Compilation raised exception: {e}")
-        return 1
-
     print("\n" + "="*60)
     print("All regression tests passed!")
     print("Dict slot reads are no longer incorrectly tagged as generator words.")

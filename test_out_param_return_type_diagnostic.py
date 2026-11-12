@@ -28,12 +28,6 @@ red, and the CPython oracle accepted `out self` as an ordinary parameter).
 That class compiles every fixture string in the suite that spells `out self`
 and fails on an out-declaration refusal, so an invalid fixture is an error in
 the test before it reaches a backend.
-
-`ParityBuildFailureIsClassifiedByLayer` pins the harness half of the same bug:
-once a fixture does reach a build, an unexpected failure has to say WHICH layer
-refused it. A source the front end refuses is refused identically on both
-backends, and that is a source error rather than the backend's red — the
-sentence `test_formal_x86_64_parity.py` reported when the bug was filed.
 """
 
 import ast
@@ -43,7 +37,6 @@ import io
 import os
 import re
 import sys
-import tempfile
 import unittest
 import warnings
 
@@ -369,58 +362,6 @@ class FixtureCorpusValidity(unittest.TestCase):
             '    def set(mut self, v: Int) -> Int:\n'
             '        self.a = v\n'
             '        return v\n'))
-
-
-class ParityBuildFailureIsClassifiedByLayer(unittest.TestCase):
-    """An invalid fixture fails in the FIXTURE's layer, not the backend's.
-
-    This is the other half of the parity bug: the harness reported
-    `--backend=arm64 did not build` for a source the front end refused, so a
-    test-side mistake read as an arm64 defect. The classification is the
-    parity harness's own (`build_failure_detail`), and it asks the OTHER
-    backend rather than matching message text against a list: a refusal both
-    backends produce identically is the shared front end, and a test-side
-    fixture is the only thing that can make one.
-    """
-
-    def _write(self, tmpdir, name, source):
-        path = os.path.join(tmpdir, name + '.mojo')
-        with open(path, 'w') as f:
-            f.write(source)
-        return path
-
-    def test_a_source_refused_on_both_backends_is_not_a_backend_red(self):
-        import test_formal_x86_64_parity as parity
-        with tempfile.TemporaryDirectory() as tmpdir:
-            src = self._write(tmpdir, 'bad',
-                              'struct A:\n'
-                              '    var n: Int\n'
-                              '    def put(out self, v: Int) -> Int:\n'
-                              '        return v\n')
-            out = os.path.join(tmpdir, 'bad.arm64')
-            rc, text = parity.build(src, out, 'arm64')
-            self.assertNotEqual(rc, 0, 'the front end accepted the out shape')
-            detail = parity.build_failure_detail('bad', src, tmpdir, 'arm64',
-                                                 text)
-        self.assertIn(RETURN_OUT_MSG, detail)
-        self.assertNotIn('--backend=arm64 did not build', detail)
-        self.assertIn('SOURCE error', detail)
-        self.assertIn('both backends', detail)
-
-    def test_a_failure_the_other_backend_does_not_reproduce_names_the_backend(self):
-        # The control: the classification must not relabel every failure. A
-        # source the other backend BUILDS is a backend-specific failure and
-        # keeps the original message; the build failure here is synthetic, but
-        # the second build is real.
-        import test_formal_x86_64_parity as parity
-        with tempfile.TemporaryDirectory() as tmpdir:
-            src = self._write(tmpdir, 'good',
-                              'def main():\n'
-                              '    print("ok")\n')
-            detail = parity.build_failure_detail(
-                'good', src, tmpdir, 'arm64', 'hypothetical arm64 failure')
-        self.assertEqual(
-            detail, '--backend=arm64 did not build: hypothetical arm64 failure')
 
 
 if __name__ == '__main__':

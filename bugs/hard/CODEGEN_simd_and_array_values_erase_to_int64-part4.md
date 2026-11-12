@@ -1,5 +1,3 @@
-SPLIT: CODEGEN_simd_and_array_values_erase_to_int64-part4-part1
-
 # A float SIMD value survives a call and a return (part 4)
 
 Part 4 of `bugs/hard/CODEGEN_simd_and_array_values_erase_to_int64.md`.

@@ -33,8 +33,9 @@ It does four things:
      (`c_common/scriptutil.py`).
    - `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md`
      (`c_common/tables.py`).
-   - the `ggc` shadow `UnboundLocalError` in `emit_methods._lower_method_call`
-     triggered by `c_parser/info.py` (fixed on the gimplegenerators work).
+   - `bugs/mid/SUITE_gimplegenerators.md` (the `ggc` shadow
+     `UnboundLocalError` in `emit_methods._lower_method_call`, which
+     `c_parser/info.py` triggers).
 3. If the build still fails, records the verbatim `Unsupported shape(s)` list
    in this doc and files the remaining named blocker as a new
    `bugs/<AREA>_<slug>.md` with the exact command, output, and next step. If

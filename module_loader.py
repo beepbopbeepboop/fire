@@ -96,19 +96,6 @@ def _ml_parse_var_global(text: str) -> list:
     return [name, ann, rhs]
 
 
-def _ml_plain_call_callee(rhs: str) -> str:
-    """NAME for a whole-RHS `NAME(...)` call (one bare identifier, whose
-    argument list closes exactly at the final character), else ''. `g()` and
-    `g(1, (2))` qualify; `g() + 1`, `a.b()`, `g()()` and `"x"` do not."""
-    e = _ml_ident_end(rhs, 0)
-    if e == 0 or e >= len(rhs) or rhs[e] != '(':
-        return ''
-    for i in range(e, len(rhs)):
-        if rhs[i] == ')' and _ml_paren_delta(rhs[e:i + 1]) == 0:
-            return rhs[:e] if i == len(rhs) - 1 else ''
-    return ''
-
-
 def _ml_is_space(c) -> bool:
     """`c` is one of the characters a regex `\\s` matches in this compiler's
     own sources."""
@@ -1214,15 +1201,6 @@ class ModuleLoader:
                 _vrhs = _vparts[2]
                 if _vname in exports or (_apply_c_stdlib_skip and _vname in _C_STDLIB_SKIP):
                     continue   # a same-named fn/def export always wins
-                # `var NAME = callee(...)`: the callee's C return type when
-                # `callee` is a plain `def` exported by this same file ('' if
-                # the RHS is not a whole-call to one). See the RHS-shape arm.
-                _vcallee_ct = ''
-                _vcallee = _ml_plain_call_callee(_vrhs)
-                if (_vcallee != '' and _vcallee in exports
-                        and exports[_vcallee].get('kind') is None
-                        and 'c_return_type' in exports[_vcallee]):
-                    _vcallee_ct = exports[_vcallee]['c_return_type']
                 _SCALAR_INT_ANNS = frozenset({
                     'Int', 'Int8', 'Int16', 'Int32', 'Int64',
                     'UInt', 'UInt8', 'UInt16', 'UInt32', 'UInt64',
@@ -1274,22 +1252,6 @@ class ModuleLoader:
                     # compute()`) — still a real int64_t at the C level,
                     # not a boxed pointer.
                     _vctype = 'int64_t'
-                elif _vcallee_ct != '':
-                    # `var N = g()` where `g` is a `def` in this same file:
-                    # the defining module types the global from `g`'s return
-                    # type by module_gen's `_phase17_value_type` rule for
-                    # a known callee — a pointer return (`X *`), `char *` and
-                    # `double` pass through, everything else is `int64_t`.
-                    # Mirror that rule from the export's own fn entry (the
-                    # signature the definer reads), so the importer's extern
-                    # matches the accessor the defining module emits. Before
-                    # this, every call-valued RHS answered `void *` and
-                    # `var N = g()` with `g() -> int` failed "conflicting
-                    # types" in the importer's translation unit.
-                    if _vcallee_ct.endswith(' *') or _vcallee_ct in ('char *', 'double'):
-                        _vctype = _vcallee_ct
-                    else:
-                        _vctype = 'int64_t'
                 else:
                     # struct instance / call / container / other: real
                     # pointer at the C level (BUG-2026-030's "structs are
