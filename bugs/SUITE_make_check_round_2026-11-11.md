@@ -33,6 +33,33 @@ make the check ignore them). Resolved with our version; both directions of
 - `tools/dangling_doc_refs.py --ratchet` green
 - `test_suite.py` 358/19 (was 357/20)
 
+## The two master merges
+
+`origin/master` moved twice while this round ran; both are merged.
+
+1. `e8e703447` / `d97ad68c7` — 22 commits (PEP 810 lazy imports, the narrowed
+   `out self` check, import ambiguity by lexical scope, `isinstance` reporting
+   `_Bool`, cpp-path f-string refusals, comptime assert in a called generic,
+   `formal/elf` `.rela.dyn`, orchestration tooling). One conflict,
+   `bugs/hard/README.md`: master's own index was stale (its
+   `doc-refs-stale-verdicts` job was red there — 2 names it lists do not exist,
+   17 docs on disk have no row; it had dropped `.md` from deleted docs' names to
+   make the check ignore them). Resolved with our version.
+2. `7f75c96cb` / `73e8057ae` (by the integrator) — 83 commits: the SPLIT
+   decompositions, the `out self` check, more diagnostics. Three reds followed,
+   all fixed here:
+   - `bugs/hard/README.md` again — the five SPLIT part docs had no row
+     (`ae3f0228a`).
+   - the `doc-refs` ratchet — two new dangling citations, one real
+     (`DIAGNOSTICS_elaboration_recursion.md`, deleted when its bug was fixed;
+     now on a line that says so) and one fixture
+     (`tools/test_swarm_replan.py` writes a synthetic `bugs/hard/X.md` into a
+     temp dir; sanctioned in the ledger at 1, documented in its header)
+     (`3070c1081`).
+   - `test_formal_bracketed_method_field_set.py` — master's new
+     `_check_out_self_declaration` refused the last `out self` fixture
+     (`7c06a4ffe`).
+
 ## Still open
 
 From the report, the jobs not addressed here: `gimplegenerators`, `gimplerunner`,
@@ -47,3 +74,16 @@ rows), `doc-refs` (marker), `async-void-return`, `bootstrap-stage1-dumps`,
 an async closure calling an unresolved callee (`Ctx.enqueue_cpu_function`'s
 wrapper) is refused. `modcache`, `gimplerunner` and `silentnoop` were not
 reproduced here.
+
+## Pre-existing, not from the merge
+
+`bugs/TEST_out_self_with_return_type_fixtures_are_invalid_mojo.md` (OPEN, HARD)
+is the same `out self` question in the fixtures themselves: 32 of them across
+five files declare `out self` on an ordinary method, which modular refuses
+(`out` is the RESULT convention). They are red independent of this round —
+`test_formal_method_param_field.py` 11, `test_formal_debug_assert.py` 2, and
+`test_formal_run.py`'s share — because `551bbbccf` made our front end refuse
+the combination. The fix is mechanical (`out self` -> `mut self`, as done here
+for the four in `test_formal_bracketed_method_field_set.py` and the three in
+`test_formal_frame_slot_subscript_census.py`) but it is a separate campaign the
+bug doc tracks.
