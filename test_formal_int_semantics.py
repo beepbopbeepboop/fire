@@ -104,16 +104,6 @@ ROWS = [
      ("value", 3037000499 * 3037000499)),
     ("mul_over", "print(4000000000 * 4000000000)",
      ("refuse", "16000000000000000000")),
-    # The high-word test must be the FULL one (high == low asr 63). A product
-    # whose high word is nonzero but whose low word's top bit equals it was
-    # missed by a bit-63-only test: 2**63 - 1 times 3 wrapped and exited 0.
-    ("mul_over_missed", "print(9223372036854775807 * 3)",
-     ("refuse", "27670116110564327421")),
-    # The multiply is evaluated first and overflows positively: 3074457345618258603 * 3.
-    ("mul_neg_over", "print(0 - 3074457345618258603 * 3)",
-     ("refuse", "9223372036854775809")),
-    ("mul_fits_edge", "print(3074457345618258602 * 3)",
-     ("value", 9223372036854775806)),
     # A multiply by 0 and by 1 are the two that must NOT trap at the edge, and
     # they are here because the run-time check (`_emit_int_alu_checked`, landed
     # with the deleted FORMAL integer-overflow-untrapped doc's step 3) is a

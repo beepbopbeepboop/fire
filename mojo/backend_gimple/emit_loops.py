@@ -3773,12 +3773,9 @@ def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
     # _gen_struct_method's identical handling just above -- a lifted
     # closure whose OWN body emitted a real setjmp must not be tagged
     # `__GIMPLE` either, for the same reason.
-    # Tag in declaration-specifier position (before the return type), for
-    # the same reason as emit_funcs' method header: after a pointer return
-    # the tag is ignored by gcc -fgimple.
     _sig_kw = '' if gen._func_used_setjmp else '__GIMPLE '
     lines = [
-        f"{_sig_kw}{ret_type} {ci.lifted_name} ({params_str})",
+        f"{ret_type} {_sig_kw}{ci.lifted_name} ({params_str})",
         "{",
         *gen.decls,
         *gen.body_lines,
@@ -3877,11 +3874,6 @@ def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_pt
             # instead of printing as 0 / a pointer's decimal.
             raw = gen._new_val('int64_t', f"mojo_list_get_boxed ({list_ptr}, {i})")
             gen._boxed_vals.add(cvn)
-            # The slot's kind is only known at run time, so the name is a TAGGED
-            # word: arithmetic selects by the box's kind (`b + 1` stays an int),
-            # and a None box compares `== None`. A bare int is not a box and the
-            # select answers its integer, so an int slot is unchanged.
-            gen._tagged_word_vals.add(cvn)
             gen._emit(f"  {cvn} = {raw};")
         else:
             raw = gen._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {i})")
@@ -3999,16 +3991,10 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
         # A generator that iterates a kind-mixed list parameter yields BOXES in
         # its int64_t slots (see cpp_core's `_cpp_mixed_list_params` read), so
         # the unpacked names must resolve them at each use.
-        # Each int64_t name is a TAGGED word, as the single-target arm below
-        # marks it: a None yield must print None and compare `== None`, and an
-        # arithmetic operand must read by kind (`b + 1` must stay an int). Marking
-        # only `_boxed_vals` left the box to the untagged double arm, which read
-        # `11` back as `11.0`.
         if api.get('mixed_slots'):
             for _mvn in var_names:
                 if gen.var_types.get(_mvn) == 'int64_t':
                     gen._boxed_vals.add(gen._cname(_mvn))
-                    gen._tagged_word_vals.add(gen._cname(_mvn))
     else:
         gen._emit(f"  {gen._cname(var)} = {val};")
         if api.get('mixed_slots') and gen.var_types.get(var) == 'int64_t':

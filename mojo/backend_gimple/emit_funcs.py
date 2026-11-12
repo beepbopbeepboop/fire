@@ -4958,12 +4958,9 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # runtime segfault. Fall back to gen_func's existing LENIENT
     # (non-`__GIMPLE`) path for exactly those bodies; every other
     # method keeps `__GIMPLE` unchanged.
-    # The tag goes in FRONT of the return type (declaration-specifier
-    # position): after it (`C * __GIMPLE f`) gcc -fgimple ignores the tag
-    # for a pointer return and the body is never GIMPLE-checked.
     _sig_kw = '' if gen._func_used_setjmp else '__GIMPLE '
     lines = [
-        f"{_sig_kw}{ret_type} {mangled} ({params_str})",
+        f"{ret_type} {_sig_kw}{mangled} ({params_str})",
         "{",
         *gen.decls,
         *gen.body_lines,

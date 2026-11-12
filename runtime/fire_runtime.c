@@ -2164,12 +2164,10 @@ char *mojo_repr_boxed(int64_t v)
         }
     }
     /* Not a box: a word of unknown kind. A live heap string (or a registered
-     * literal) is a string, and a registered bytes object is bytes, not the
-     * integer its address spells; every other word keeps its integer
-     * rendering. The caller strdup'd the box arms above, so this arm hands
-     * back its own copy too. */
+     * literal) is a string, not the integer its address spells; every other
+     * word keeps its integer rendering. The caller strdup'd the box arms
+     * above, so this arm hands back its own copy too. */
     if (mojo_boxed_is_str(v)) return strdup((char *)(intptr_t)v);
-    if (mojo_is_registered_bytes(v)) return mojo_bytes_repr((MojoBytes *)(intptr_t)v);
     if (mojo_is_re_match(v)) return mojo_re_match_repr(v);
     return mojo_str_from_int(v);
 }
@@ -2427,27 +2425,6 @@ int mojo_boxed_is_str(int64_t v) {
          * `_reg_struct_tag`): a struct handle is not a string. */
         return !_mojo_is_struct_word(v);
     return 0;
-}
-
-/* A kind-'p' STRING BOX (`mojo_box_from_str`): true only for that kind, so a
- * float, bytes, None or bool box is not taken as a string. The narrow predicate
- * `len()` needs, because `mojo_boxed_is_str` deliberately rejects every box. */
-int mojo_is_str_box(int64_t v)
-{
-    if (!mojo_is_boxed(v)) return 0;
-    return ((MojoBox *)(intptr_t)v)->kind == 'p';
-}
-/* The text pointer a kind-'p' box holds, and the word itself for anything else. */
-int64_t mojo_str_box_word(int64_t v)
-{
-    if (!mojo_is_str_box(v)) return v;
-    return ((MojoBox *)(intptr_t)v)->bits;
-}
-/* A word whose text `len()` should measure: a kind-'p' box, or a bare word
- * `mojo_boxed_is_str` already accepts. */
-int mojo_word_is_text(int64_t v)
-{
-    return mojo_is_str_box(v) || mojo_boxed_is_str(v);
 }
 
 /* A Python tuple literal lowers to the exact same MojoList as a list literal
@@ -2779,7 +2756,7 @@ static MojoList *_gen_drain(void *h, MojoGenSig *sg)
     int pending = mojo_exc_pending_get();
     ((void (*)(void *))sg->destroy)(h);
     if (pending) { mojo_exc_pending_set(0); mojo_raise(); }
-    if (sg->vkind == 5) {
+    if (sg->vkind == 5 || sg->vkind == 3) {
         /* Uniform from the FIRST element's classification, the way the vkind-5
          * arm did for str/int — extended to the bytes word that arm used to
          * call an int. */
@@ -2788,10 +2765,6 @@ static MojoList *_gen_drain(void *h, MojoGenSig *sg)
             else if (mojo_boxed_is_str(out->data[0])) mojo_list_set_kinds_uniform(out, 'p');
             else mojo_list_set_kinds_uniform(out, 'i');
         }
-    }
-    else if (sg->vkind == 3) {
-        if (out->len > 0 && mojo_is_registered_bytes(out->data[0])) mojo_list_set_kinds_uniform(out, MOJO_KIND_BYTES);
-        else mojo_list_set_kinds_uniform(out, 'p');
     }
     else if (sg->vkind == 0) mojo_list_set_kinds_uniform(out, 'i');
     else if (sg->vkind == 2) mojo_list_set_kinds_uniform(out, 'd');
@@ -9101,13 +9074,7 @@ int mojo_dict_eq(MojoDict *a, MojoDict *b, int va, int vb)
     for (int64_t i = 0; i < a->cap; i++) {
         _DictSlot *sa = &a->slots[i];
         if (!sa->key) continue;
-        /* The key is looked up with the dict's OWN probe: an integer-domain slot
-         * (keykind 2) holds its number in ikey, not in the text, so it goes through
-         * _dict_lookup_ik; every other domain uses the string probe. The string
-         * probe on an integer slot missed, so equal int-keyed dicts compared
-         * unequal (d = {1: 2}; e = {1: 2}; d == e was False). */
-        _DictSlot *sb = sa->keykind == 2 ? _dict_lookup_ik(b, sa->ikey)
-                                          : _dict_lookup_k(b, sa->key, sa->keykind);
+        _DictSlot *sb = _dict_find_k(b, sa->key, sa->keykind);
         if (!sb || !sb->key) return 0;               /* key absent from b */
         /* The value is an untagged word: the codegen's static value type when
          * it has one, else this slot's own `kind` tag. */
@@ -15726,18 +15693,6 @@ int64_t mojo_len(int obj) { (void)obj; return 0; }
  * CPython says for an int), not a quiet 0. */
 int64_t mojo_len_word(int64_t v)
 {
-    /* A boxed word: only the kinds with a length have one. A str box ('p')
-     * holds its pointer; a bytes box ('s') its MojoBytes. Anything else (a
-     * float, an int, None) has no len() in Python, so raise rather than read
-     * the box header as a list (which is what `mojo_list_len` below would
-     * do -- it has no way to tell a box from a list pointer). */
-    if (mojo_is_boxed(v)) {
-        MojoBox *bx = (MojoBox *)(intptr_t)v;
-        if (mojo_is_str_box(v)) return (int64_t)strlen((char *)(intptr_t)mojo_str_box_word(v));
-        if (bx->kind == 's') return mojo_bytes_len((MojoBytes *)(intptr_t)bx->bits);
-        mojo_raise_type_error((char *)"object has no len()");
-        return 0;
-    }
     if (mojo_is_registered_list(v)) return mojo_list_len((MojoList *)(intptr_t)v);
     if (mojo_is_registered_dict(v)) return mojo_dict_len((MojoDict *)(intptr_t)v);
     if (mojo_is_registered_set(v)) return mojo_set_len((MojoSet *)(intptr_t)v);
@@ -17684,43 +17639,26 @@ void mojo_register_getattr_dispatch(int64_t (*fn)(void *, char *))
     }
     _getattr_dispatchers[_n_getattr_dispatchers++] = fn;
 }
-/* The one lookup behind mojo_getattr_any (raises on a miss) and
- * mojo_getattr_default (yields the caller's default). *found reports
- * whether any registered unit or the class-object table had `attr`. */
-static int64_t _getattr_any_lookup(void *obj, char *attr, int *found)
+int64_t mojo_getattr_any(void *obj, char *attr)
 {
-    { int64_t _cw; if (mojo_classobj_lookup(obj, attr, &_cw)) { *found = 1; return _cw; } }
+    { int64_t _cw; if (mojo_classobj_lookup(obj, attr, &_cw)) return _cw; }
     int saved = _mojo_getattr_nothrow;
     _mojo_getattr_nothrow = 1;
     for (int i = 0; i < _n_getattr_dispatchers; i++) {
         _mojo_getattr_missed = 0;
         int64_t r = _getattr_dispatchers[i](obj, attr);
-        if (!_mojo_getattr_missed) { _mojo_getattr_nothrow = saved; *found = 1; return r; }
+        if (!_mojo_getattr_missed) { _mojo_getattr_nothrow = saved; return r; }
     }
     _mojo_getattr_nothrow = saved;
-    *found = 0;
+    mojo_raise_attribute_error(attr);
     return 0;
 }
-int64_t mojo_getattr_any(void *obj, char *attr)
-{
-    int found;
-    int64_t r = _getattr_any_lookup(obj, attr, &found);
-    if (!found) mojo_raise_attribute_error(attr);
-    return r;
-}
-/* `getattr(obj, attr, dflt)` with a runtime-computed name: the same lookup
- * as mojo_getattr_any, a miss yields `dflt` instead of raising. */
-int64_t mojo_getattr_default(void *obj, char *attr, int64_t dflt)
-{
-    int found;
-    int64_t r = _getattr_any_lookup(obj, attr, &found);
-    return found ? r : dflt;
-}
 
-/* Peek a registered generator handle's signature without removing it.
- * Exposed so compiled `with` blocks can drive @contextlib.contextmanager
- * handles even when static _generator_var_api tracking was lost (e.g. the
- * handle was stored in a container). */
+/* ───────── next(word[, default]) ─────────
+ * `next(x)` where `x` is a word of unknown kind: a generator handle the run time has been told
+ * about (`mojo_gen_note*`, `mojo_gen_call_with`, a dynamic call) is stepped one value; anything
+ * else is not an iterator. StopIteration (or the default) when it is exhausted. */
+#define _MOJO_EXC_TAG_STOPITERATION 590612416
 static MojoGenSig *_gen_handle_peek(int64_t w)
 {
     if (!_ghnd_cap) return 0;
@@ -17732,108 +17670,6 @@ static MojoGenSig *_gen_handle_peek(int64_t w)
     }
     return 0;
 }
-
-/* Per-handle throw state for generator context manager exit: when exiting a
- * `with` block with an exception, the context manager protocol throws the
- * exception into the generator at its yield point. Keyed by handle address. */
-typedef struct MojoGenThrow { void *h; int64_t type; char *msg; void *obj; struct MojoGenThrow *next; } MojoGenThrow;
-static MojoGenThrow *_gen_throw_head;
-void mojo_gen_throw_set(int64_t hw, int64_t type, char *msg, void *obj)
-{
-    void *h = (void *)(intptr_t)hw;
-    for (MojoGenThrow *p = _gen_throw_head; p; p = p->next) {
-        if (p->h == h) { p->type = type; p->msg = msg; p->obj = obj; return; }
-    }
-    MojoGenThrow *n = (MojoGenThrow *)malloc(sizeof *n);
-    if (!n) return;
-    n->h = h; n->type = type; n->msg = msg; n->obj = obj; n->next = _gen_throw_head; _gen_throw_head = n;
-}
-int mojo_gen_throw_take(int64_t hw, int64_t *type, char **msg, void **obj)
-{
-    void *h = (void *)(intptr_t)hw;
-    MojoGenThrow **pp = &_gen_throw_head;
-    while (*pp) {
-        if ((*pp)->h == h) {
-            MojoGenThrow *dead = *pp;
-            if (type) *type = dead->type;
-            if (msg) *msg = dead->msg;
-            if (obj) *obj = dead->obj;
-            *pp = dead->next;
-            free(dead);
-            return 1;
-        }
-        pp = &(*pp)->next;
-    }
-    return 0;
-}
-
-int mojo_gen_cm_is_handle(int64_t w)
-{
-    return _gen_handle_peek(w) != 0;
-}
-
-/* __enter__ for a generator-based context manager: resume once and return
- * the yielded value (boxed as a word). Returns 0 and leaves exception state
- * if the generator does not yield. */
-int64_t mojo_gen_cm_enter(int64_t w)
-{
-    MojoGenSig *sg = _gen_handle_peek(w);
-    if (!sg) { mojo_raise_type_error((char *)"generator context manager is not a registered handle"); return 0; }
-    void *h = (void *)(intptr_t)w;
-    if (!((bool (*)(void *))sg->resume)(h)) {
-        /* Did not yield - treat as exhausted/error. */
-        return 0;
-    }
-    switch (sg->vkind) {
-    case 1: return ((bool (*)(void *))sg->value)(h) ? 1 : 0;
-    case 2: return mojo_box_from_double(((double (*)(void *))sg->value)(h));
-    default: return ((int64_t (*)(void *))sg->value)(h);
-    }
-}
-
-/* __exit__ for a generator-based context manager on the normal path:
- * resume once to run post-yield/cleanup, then destroy. */
-void mojo_gen_cm_exit_normal(int64_t w)
-{
-    MojoGenSig *sg = _gen_handle_peek(w);
-    if (!sg) return;
-    void *h = (void *)(intptr_t)w;
-    (void)((bool (*)(void *))sg->resume)(h);
-    ((void (*)(void *))sg->destroy)(h);
-}
-
-/* __exit__ for a generator-based context manager on the exception path.
- * Throw the currently pending exception into the generator (as
- * contextlib.contextmanager requires), let it run to completion or handle
- * it, then destroy the handle. If the generator suppresses the exception by
- * returning normally, the pending exception is cleared; if it propagates
- * (re-raises the same or raises a different one), that exception remains
- * pending for the caller. */
-void mojo_gen_cm_exit_exc(int64_t w)
-{
-    MojoGenSig *sg = _gen_handle_peek(w);
-    if (!sg) return;
-    void *h = (void *)(intptr_t)w;
-    int64_t et = mojo_exc_type_get();
-    char *em = mojo_exc_msg_get();
-    void *eo = mojo_exc_obj_get();
-    /* Arm the throw for this handle: C++20 compiled generators consume it in
-     * await_resume; stack-switch generators may need runtime-specific throw
-     * handling, but setting state is harmless if unused. */
-    mojo_gen_throw_set(w, et, em, eo);
-    mojo_exc_pending_set(0);
-    (void)((bool (*)(void *))sg->resume)(h);
-    /* If resume completed without setting a new pending exception, the
-     * generator handled/suppressed the exception. If it set pending, that's
-     * the exception to propagate (possibly the same one re-raised). */
-    ((void (*)(void *))sg->destroy)(h);
-}
-
-/* ───────── next(word[, default]) ─────────
- * `next(x)` where `x` is a word of unknown kind: a generator handle the run time has been told
- * about (`mojo_gen_note*`, `mojo_gen_call_with`, a dynamic call) is stepped one value; anything
- * else is not an iterator. StopIteration (or the default) when it is exhausted. */
-#define _MOJO_EXC_TAG_STOPITERATION 590612416
 int64_t mojo_next_word(int64_t w, int has_default, int64_t dflt)
 {
     if (mojo_is_listiter(w)) {
