@@ -3869,6 +3869,83 @@ class TestCbnzNotTakenLemma(unittest.TestCase):
             self.assertEqual(n, 0, "the probe uses a sorry somewhere: " + detail[-400:])
 
 
+class TestGuardedValueIdentity(unittest.TestCase):
+    """The value of `triple`'s normal path is `n * 3`, Lean-checked on the REAL image.
+
+    `_overflow_normal_path` gives the executed instructions of `n * 3`'s export
+    (the overflow guard's fall-through is one of them, so the guard is resolved as
+    NOT taken).  The step effects are the generator's own `_step_rhs` bodies, composed
+    `T_{i+1} s = body_i (T_i s)` with the guard's `some` replaced by its fall-through.
+    `simp` alone closes `arm64_reg 0 (T_N (start n)) = n * 3`: the stack round trip
+    is decided by the library's read-after-write lemmas on ground addresses, so no
+    `bv_decide` is needed for the value.  That is the measurement the overflow-guard
+    doc's round-5 plan waited on; the emitter is not wired yet.
+    """
+
+    def test_triple_normal_path_value_checks_with_no_sorry(self):
+        if not _lean() or not os.path.isfile(
+                os.path.join(HERE, "lib", "ProofLib.olean")):
+            self.skipTest("Lean library not built")
+        from formal.arm64_proof_gen import (
+            _step_branch_index, _step_rhs, _overflow_normal_path,
+            _VALUE_SIMP, generate_dylib_proof)
+        from formal.build import compile_formal_dylib
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as tmp:
+            src = os.path.join(tmp, "teeth.mojo")
+            with open(src, "w") as f:
+                f.write("def triple(n):\n  return n * 3\n")
+            built = compile_formal_dylib([src], output=os.path.join(tmp, "t.dylib"),
+                                         prove=False)
+            code = built["code"]
+            export = built["exports"][0]
+            entry = export["entry"]
+            base = built["info"]["base_addr"]
+            words = {base + 4 * i: int.from_bytes(code[4 * i:4 * i + 4], "little")
+                     for i in range(len(code) // 4)}
+            pcs, guards = _overflow_normal_path(words, entry, base + len(code))
+            self.assertEqual(len(guards), 1, "the fixture has one overflow guard")
+            guard_pc = guards[0][0]
+            bodies = []
+            for pc in pcs:
+                w = words[pc]
+                rhs = _step_rhs(w, _step_branch_index(w))
+                if pc == guard_pc:
+                    rhs = "some { s with pc := s.pc + 4 }"
+                bodies.append(rhs[len("some "):] if rhs.startswith("some ") else rhs)
+            # The generator's own preamble (code, per-instruction lemmas, image),
+            # cut before the first obligation, which is a sorry by design.
+            pre = generate_dylib_proof(code, built["info"], built["exports"],
+                                       {"triple": "(fun n => (n * (3 : UInt64)))"})
+            cut = pre.index("/-- OBLIGATION, not proved: this export's run terminates")
+            n = len(bodies)
+            out = [pre[:cut],
+                   "\ndef start (n : UInt64) : Arm64State :=\n"
+                   "  Contracts.startState dylib_image dylib_export_0_triple n\n",
+                   "def T0 (s : Arm64State) : Arm64State := s\n"]
+            for i, b in enumerate(bodies):
+                out.append(f"def T{i + 1} (s : Arm64State) : Arm64State :=\n"
+                           f"  (fun s => {b}) (T{i} s)\n")
+            unfold = ", ".join(
+                [f"T{k}" for k in range(n, -1, -1)]
+                + ["start", "Contracts.startState", "Arm64State.init", "arm64_reg",
+                   "arm64_set_reg", "dylib_image", "dylib_export_0_triple", _VALUE_SIMP])
+            out.append(
+                f"theorem value_identity (n : UInt64) :\n"
+                f"    arm64_reg 0 (T{n} (start n)) = n * 3 := by\n"
+                f"  simp +decide only [{unfold}]\n"
+                f"  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, "
+                f"mem_read_two_writes_same, mem_read_two_writes_adjacent, "
+                f"mem_read_two_writes]\n")
+            p = os.path.join(tmp, "value_probe.lean")
+            with open(p, "w") as f:
+                f.write("".join(out))
+            res = _check_proof(p)
+            self.assertIsNotNone(res)
+            ok, detail, nsorry = res
+            self.assertTrue(ok, detail[-600:])
+            self.assertEqual(nsorry, 0, "the probe uses a sorry: " + detail[-400:])
+
+
 class TestCallProofs(unittest.TestCase):
     """Compile the programs and read what came out."""
 

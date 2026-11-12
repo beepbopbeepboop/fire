@@ -311,3 +311,21 @@ new emitter test; then `test_formal_dylib.py` once, as the Done-when test. Nothi
 **Not landed, and nothing calls the lemma yet.** `test_formal_dylib.py` is unchanged by this round and the two wrong-spec
 cases still fail. Round 5's step 2 is still first: measure `bv_decide` on the hand-written value identity for `triple`,
 `∀ n, {ident}_guard (start n) → arm64_reg 0 (S_m (start n)) = n * 3`, before the emitter is touched.
+
+### Landed 2026-11-12 (round 7): the round-5 blocker decision is measured; `bv_decide` is not needed for the value
+
+- **Measured:** the normal path of `triple` (the 20 executed instructions, guard resolved not-taken, `T_{i+1} s = body_i (T_i s)`
+  from the generator's own `_step_rhs` bodies, on the REAL image from `compile_formal_dylib(prove=False)`) closes
+  `arm64_reg 0 (T20 (start n)) = n * 3` with `simp +decide only [...]` then `simp [mem_read_after_write_u64, ...]`. No `bv_decide`:
+  a `bv_decide` line after it errors "No goals". The stack round trip (`stp`/`ldp` at ground addresses, `sp` 0xfffffffffffffff0 - 16
+  and `- 131072`) is decided by the library's read-after-write lemmas. Probe: `.tmp/probe/mkprobe.py` (scratch, not committed).
+- **Landed as coverage:** `test_formal_call_proof_gen.py::TestGuardedValueIdentity` checks exactly that chain through Lean with no
+  `sorry` (5 guard/value tests pass, `-k "TestGuardedValueIdentity or TestOverflowGuardNormalPath or TestCbnzNotTakenLemma"`,
+  12 s, peak 1.7 GB). It pins that the emitter's value identity is decidable. It does NOT yet prove a wrong multiplier is refuted, and it
+  is not a fail-before test: nothing in the emitter changed.
+- **So round 5's step 2 is closed:** the value is not the blocker. What remains is step 1 (wire the reader into
+  `_dylib_contract_proof`, with `pcs` executed-order, `B` via `runs_cons_jump`, `_guard` def, `GuardedBlockCert`) and step 3
+  (`exportEnd`/`atExit` at the `ret`, which is the last word of the export, `func_end - 4`, so `atExit` at `func_end` is still the exit
+  only if the RET's target is the caller; decide it in that round). `test_formal_dylib.py` is still PASS=22 FAIL=6.
+- Lean note: the generator's preamble contains a `sorry` on `_semantics_total` (an obligation by design), so the probe cuts the preamble
+  before it. Do not paste the preamble into a test that asserts zero sorries.
