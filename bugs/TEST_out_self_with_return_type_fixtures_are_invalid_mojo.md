@@ -1,13 +1,15 @@
 # TEST: fixtures declare `out self` and a return type, which is invalid Mojo, and nothing checks them
 
-Status: PARTLY FIXED on master (2026-11-11). Area: TEST (fixture validity).
+Status: PARTLY FIXED on master (2026-11-11). The compiler items and the 42-fixture conversion are landed; the other-invalidity campaign remains. Area: TEST (fixture validity).
 
 Landed, all pinned in `test_out_param_return_type_diagnostic.py`:
 - the declaration refusals: `out self` with no other parameter, and with a non-`Self` first parameter (`47848c104`, narrowed to an unannotated `self` in `fbe7549e3`);
 - the call-site refusals: a positional `out` argument past the non-`out` parameters (`9b07afdcf`), and a keyword `out` argument (`020ab7a89`);
 - the first error for `out self` with a return type now matches real Mojo's primary message at its position (`f18e70878`, the 1-based lexer columns).
 
-STILL OPEN: the fixture campaign. 32 fixtures in five test files still declare `out self` on a non-constructor method, or an `out` parameter with a return type, which real Mojo refuses. The three parity fixtures are fixed (`e26a073ed`). The campaign needs its own pass, per fixture, against real Mojo, which is the fixture-validity gate described under Fix order.
+Fixture campaign (2026-11-11): 42 fixture strings in five test files declared an invalid `out` form (the earlier count of 32 used a narrower pattern). The real compiler flags the `out` declaration in 39; the other three (`copy_from`, `take`, `fill`) have a valid declaration with an invalid call, or an unresolved import. All 42 were converted: 60 `out self` declarations became `mut self`, inside the fixture strings only. After the conversion no fixture gets an out-related refusal from the real compiler. The remaining errors in those fixtures are other invalidity (`printf`, lowercase `int`, `main` returning a value, structs without `__init__`, implicit copies), which is a separate campaign and is not claimed here.
+
+Behaviour: the five test files pass on the converted tree (`test_formal_debug_assert.py` 98/98, `test_formal_frame_field_census.py` OK, `test_formal_method_param_field.py` 38/38, `test_lexer_double_slash_operator.py` exit 0, `test_formal_run.py` 1360 pass, 1 fail). On HEAD the same files fail (2/98, 11/38, exit 1, 27 fail), because HEAD refuses these declarations. The one remaining `test_formal_run.py` failure is `tag-generator`'s import closure (`importlib.util`), which is not an `out` check.
 
 ## Symptom
 
