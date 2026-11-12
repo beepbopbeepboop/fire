@@ -1,7 +1,5 @@
 # DIAGNOSTICS step 3: Inferred-parameter dependency errors
 
-SPLIT: DIAGNOSTICS_inferred_param_dependency-part1, DIAGNOSTICS_inferred_param_dependency-part2, DIAGNOSTICS_inferred_param_dependency-part3
-
 Part of the umbrella `bugs/hard/DIAGNOSTICS_missing_validation_modular.md`;
 plan: `docs/diagnostics-missing-validation-plan.md` §3.
 
