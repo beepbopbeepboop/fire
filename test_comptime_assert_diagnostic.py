@@ -629,8 +629,57 @@ def test_comptime_assert_comprehension_over_unknown_stays_unfolded():
              '        comptime assert v != 4, "bad"\n')
 
 
+def test_comptime_assert_message_get_kgen_string():
+    src = ('def _get_kgen_string[s: String]() -> String:\n'
+           '    return s\n'
+           'fn f():\n'
+           '    comptime assert False, StaticString(_get_kgen_string["hello"]())\n')
+    try:
+        # _compile_full: do_imports=True + a real temp file, the path that
+        # elaborates the generic `_get_kgen_string[s]` call.
+        _compile_full(src)
+    except RuntimeError as e:
+        s = str(e)
+        assert 'comptime assertion failed: hello' in s, s
+        assert '_t' not in s.split('comptime assertion failed:')[-1], s
+        return
+    raise AssertionError('provably-false comptime assert compiled')
+
+
+def test_comptime_assert_message_get_kgen_string_comptime_alias():
+    try:
+        _compile('''def _get_kgen_string[s: String]() -> String:
+    return s
+fn f():
+    comptime name = "hi"
+    comptime assert False, StaticString(_get_kgen_string[name]())
+''')
+    except RuntimeError as e:
+        assert 'comptime assertion failed: hi' in str(e), e
+        return
+    raise AssertionError('provably-false comptime assert compiled')
+
+
+def test_comptime_assert_message_get_kgen_string_unknown_index_unfolded():
+    # An index that is not a comptime string stays unfolded: the assert still
+    # reports, it just cannot name the text, and nothing crashes.
+    try:
+        _compile('''def _get_kgen_string[s: String]() -> String:
+    return s
+fn f(x: String):
+    comptime assert False, StaticString(_get_kgen_string[x]())
+''')
+    except RuntimeError as e:
+        assert 'comptime assertion failed' in str(e), e
+        return
+    raise AssertionError('provably-false comptime assert compiled')
+
+
 if __name__ == '__main__':
     test_comptime_assert_false_fails()
+    test_comptime_assert_message_get_kgen_string()
+    test_comptime_assert_message_get_kgen_string_comptime_alias()
+    test_comptime_assert_message_get_kgen_string_unknown_index_unfolded()
     test_comptime_assert_in_comptime_for_list_comprehension()
     test_comptime_assert_in_comptime_for_list_comprehension_true()
     test_comptime_assert_in_comptime_for_comprehension_filter()

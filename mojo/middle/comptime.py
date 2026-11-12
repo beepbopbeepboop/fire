@@ -524,6 +524,18 @@ def eval_const(node, bindings: dict, platform: str = None):
     # comptime `if` was UNRESOLVABLE (the documented first-branch-wins
     # fallback); folding it answers the measured value — strictly more
     # precise, the same direction as this file's own sys.platform fold.
+    # `_get_kgen_string["text"]()` — the stdlib's reflection spelling of a
+    # string constant (std.collections.string.string_span). Folded BY NAME, the
+    # same way `String`/`StaticString` are, so a diagnostic built from it reads
+    # its text instead of a temp name. The index is folded first, so a comptime
+    # string alias works too. Any other shape (arguments, an unknown index, a
+    # non-string value) stays unfolded.
+    if (isinstance(node, CallExpr) and not node.args and not node.kwargs
+            and isinstance(node.func, SubscriptExpr)
+            and isinstance(node.func.obj, IdentExpr)
+            and node.func.obj.name == '_get_kgen_string'):
+        v = eval_const(node.func.index, bindings, platform)
+        return v if isinstance(v, str) else None
     # `String(int)` / `String(bool)` stringifies at compile time so comptime
     # diagnostics (e.g. `comptime assert cond, "got " + String(x)`) produce
     # the evaluated message, not a lowered temp name.

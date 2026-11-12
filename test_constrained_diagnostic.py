@@ -361,8 +361,22 @@ def test_constrained_in_comptime_for_list_comprehension_true():
              '        constrained[v != 5, "ok"]()\n')
 
 
+def test_constrained_message_get_kgen_string():
+    try:
+        _compile('''def _get_kgen_string[s: String]() -> String:
+    return s
+fn f():
+    constrained[False, StaticString(_get_kgen_string["hello"]())]()
+''')
+    except RuntimeError as e:
+        assert 'constraint failed: hello' in str(e), e
+        return
+    raise AssertionError('provably-false constrained compiled')
+
+
 if __name__ == '__main__':
     test_constrained_bracket_false_fails()
+    test_constrained_message_get_kgen_string()
     test_constrained_in_comptime_for_list_comprehension_fails()
     test_constrained_in_comptime_for_list_comprehension_true()
     test_constrained_bracket_false_no_msg()

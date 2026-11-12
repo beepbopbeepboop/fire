@@ -1,6 +1,6 @@
 # DIAGNOSTICS: missing validation/error reporting for modular test cases
 
-SPLIT: DIAGNOSTICS_missing_validation_modular-part1, DIAGNOSTICS_missing_validation_modular-part4
+SPLIT: DIAGNOSTICS_missing_validation_modular-part1
 
 ## Symptom
 Modular test files expect compile-time errors/diagnostics that our compiler does not produce (it compiles them successfully). These are cases where modular's compiler rejects invalid code but ours accepts it.
@@ -112,6 +112,11 @@ See build/checkfail_candidates.json (61 error-like cases).
   an 'out' argument and a return type` at the return type's location
   (`mojo_package_moco_773.mojo`). Regression:
   `test_out_param_return_type_diagnostic.py`.
+- **Landed (2026-11-11):** `StaticString(_get_kgen_string["text"]())` in a
+  `comptime assert` / `constrained` message folds to its text
+  (`comptime.eval_const`, by name, index folded first). An unknown index stays
+  unfolded. Regression: `test_comptime_assert_diagnostic.py`,
+  `test_constrained_diagnostic.py`.
 - **Landed (2026-11-11):** `comptime for` over a list comprehension
   (`[i * 2 for i in range(3)]`, with `if` filters, bound by name or direct):
   `comptime.eval_const` folds a list comprehension to its element values, so
