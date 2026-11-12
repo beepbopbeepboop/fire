@@ -5545,6 +5545,7 @@ class Interpreter:
                     _ns.update(ns)
 
                 cls = types.new_class(node.name, tuple(python_bases), kw_dict, _exec_body)
+                cls = self._apply_function_decorators(node, cls)
                 self.scope.define(node.name, cls)
                 return cls
             except Exception:
@@ -5553,6 +5554,7 @@ class Interpreter:
                          comptime_aliases=comptime_aliases, static_methods=static_methods,
                          class_methods=class_methods, def_scope=self.scope,
                          keywords=kw_dict)
+        cls = self._apply_function_decorators(node, cls)
         self.scope.define(node.name, cls)
         return cls
 
