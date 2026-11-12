@@ -1,8 +1,8 @@
 # DIAGNOSTICS: the removed `fn` keyword is accepted; warn now, refuse once the hits are gone
 
-Status: STAGE 1 LANDED (warning). STAGE 2 (refusal) OPEN, waiting on the hit list (measured 2026-11-11 in this worktree; volume blocks a one-commit refusal).
+Status: STAGE 1 LANDED (`31d480274`). STAGE 2 (refusal) DROPPED by decision on 2026-11-11 (`6408a0b14`): there is no further work on this item. The warning stays, and the integrator or gate tester handles any hits as testing finds them.
 
-Stage 1: `fire_compiler.py`'s `_warn_fn_keyword` prints `warning: 'fn' has been removed; use 'def' instead` at the keyword of a `fn` DEFINITION (statement, decorated, async). An identifier `fn` is not reported. Pinned by `test_out_param_return_type_diagnostic.py`. Static hit inventory recorded below (warning-on whole-test-tree collection not run; grep/AST scan).
+Stage 1: `fire_compiler.py`'s `_warn_fn_keyword` prints `warning: 'fn' has been removed; use 'def' instead` at the keyword of a `fn` DEFINITION (statement, decorated, async). An identifier `fn` is not reported. Pinned by `test_out_param_return_type_diagnostic.py`. The hit inventory below is the record of what stage 2 would have had to migrate; stage 2 is dropped, so it is not a work list.
 
 ## What the real compiler does (measured, `tools/mojo build`, 2026-11-11)
 
@@ -116,13 +116,17 @@ test_x86_64_examples.py: 1
 ```
 
 **2026-11-11 (this worktree):** Stage 1 remains in place and pinned (`test_out_param_return_type_diagnostic` 16/16
-PASS, incl. the `fn` warning/location/identifier cases). Stage 2 cannot be landed as a single focused change: 18
-`.mojo` definition sites and 630 fixture `fn`-line instances across 51 test files still use `fn` (spanning formal/,
-x86, gimple, runtime/coro, fixtures, etc.). Converting the warning to a refusal now would break this corpus; clearing
-it requires coordinated, per-area fixture migration (keeping intentional keyword cases as refusal tests) and is
-out-of-scope for one worker claim. Next step: run the full test tree with the warning enabled and harvest warning
-locations to confirm this static list, then migrate hits area-by-area (owning tests per commit), finally flip
-`_warn_fn_keyword` to a refusal and update `test_out_param_return_type_diagnostic.py`'s `fn` case to assert the error.
+PASS, incl. the `fn` warning/location/identifier cases). Stage 2 was dropped by decision on master (`6408a0b14`), so
+the inventory above is a record rather than a work list.
+
+## Done when
+
+`test_out_param_return_type_diagnostic.py`'s `fn` warning cases pass: the statement, decorated, async and method
+definition forms each warn at the `fn` keyword, and `def` and an identifier named `fn` do not:
+
+    python3 tools/memslot.py --gb 8 --label fn -- python3 test_out_param_return_type_diagnostic.py
+
+Stage 2 is dropped, so the warning is the decided end state; this doc is deleted in the commit where that test passes.
 
 ## How to find the hits, not just the ones a grep finds
 
@@ -144,6 +148,6 @@ A grep finds `fn` at the start of a line. It misses `fn` after a decorator, insi
 
 ## Related
 
-- `test_out_param_return_type_diagnostic.py`: the `fn` keyword case, an expected failure today. It becomes a plain
-  assertion when the refusal lands.
+- `test_out_param_return_type_diagnostic.py`: the `fn` warning, location and identifier cases, now plain assertions
+  because the warning is the decided end state.
 - `bugs/TEST_out_self_with_return_type_fixtures_are_invalid_mojo.md`: the same family of fixture-validity problem.

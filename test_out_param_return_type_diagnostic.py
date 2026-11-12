@@ -14,7 +14,8 @@ compiler's primary message and location:
   must have type 'Self'; use a 'where' clause ...`. Our compiler accepts it.
 * `f(y)` where `def f(out x: Int)`: `invalid call to 'f': unexpected
   argument`. Our compiler accepts it.
-* `fn f(...)`: `'fn' has been removed; use 'def' instead`. Our compiler accepts it.
+* `fn f(...)`: `'fn' has been removed; use 'def' instead`. Our compiler accepts it
+  with the same message as a warning, at the keyword (the decided end state).
 
 Cases we already match are plain assertions. Cases we do not yet match are
 `expectedFailure` with the bug doc that owns them: an unexpected success is a
@@ -23,6 +24,8 @@ failure, so the marker must be removed in the commit that fixes the gap.
 Umbrella: bugs/TEST_out_self_with_return_type_fixtures_are_invalid_mojo.md.
 """
 
+import contextlib
+import io
 import os
 import re
 import sys
@@ -39,6 +42,14 @@ BUG = "bugs/TEST_out_self_with_return_type_fixtures_are_invalid_mojo.md"
 
 def _compile(src, filename='t.mojo'):
     return compile_to_gimple(src, do_imports=False, filename=filename)
+
+
+def _compile_capturing_stderr(src, filename='t.mojo'):
+    """Compile `src` and return its stderr; the `fn` warning is printed there."""
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        _compile(src, filename=filename)
+    return err.getvalue()
 
 
 def _location(err):
@@ -128,37 +139,43 @@ class OutParamReturnTypeDiagnostic(unittest.TestCase):
                      '    f(y)\n')
         self.assertIn("invalid call to 'f': unexpected argument", str(cm.exception))
 
-    # --- the removed `fn` keyword: stage 1 warns (bugs/DIAGNOSTICS_fn_keyword_*) ---
+    # --- the removed `fn` keyword: the warning is the decided end state -------
+    # Stage 2 (refusing `fn`) was dropped on master (6408a0b14); the warning
+    # stays. These pin it on every definition form, at the keyword's location.
 
     def test_fn_definition_compiles_with_the_real_warning_at_the_keyword(self):
-        import contextlib
-        import io
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            _compile('fn f(x: Int) -> Int:\n'
-                     '    return x\n')
-        self.assertIn("t.mojo:1:1: warning: 'fn' has been removed; use 'def' instead",
-                      err.getvalue())
+        err = _compile_capturing_stderr('fn f(x: Int) -> Int:\n'
+                                        '    return x\n')
+        self.assertIn("t.mojo:1:1: warning: 'fn' has been removed; use 'def' instead", err)
+
+    def test_decorated_fn_definition_warns_at_the_keyword(self):
+        err = _compile_capturing_stderr('@dec\n'
+                                        'fn f(x: Int) -> Int:\n'
+                                        '    return x\n')
+        self.assertIn("t.mojo:2:1: warning: 'fn' has been removed; use 'def' instead", err)
+
+    def test_async_fn_definition_warns_at_the_keyword(self):
+        err = _compile_capturing_stderr('async fn f():\n'
+                                        '    pass\n')
+        self.assertIn("t.mojo:1:7: warning: 'fn' has been removed; use 'def' instead", err)
+
+    def test_method_fn_definition_warns_at_the_keyword(self):
+        err = _compile_capturing_stderr('struct A:\n'
+                                        '    fn m(self):\n'
+                                        '        pass\n')
+        self.assertIn("t.mojo:2:5: warning: 'fn' has been removed; use 'def' instead", err)
 
     def test_def_does_not_warn_about_fn(self):
-        import contextlib
-        import io
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            _compile('def f(x: Int) -> Int:\n'
-                     '    return x\n')
-        self.assertNotIn("'fn' has been removed", err.getvalue())
+        err = _compile_capturing_stderr('def f(x: Int) -> Int:\n'
+                                        '    return x\n')
+        self.assertNotIn("'fn' has been removed", err)
 
     def test_fn_as_an_identifier_does_not_warn(self):
         # CPython code uses `fn` as a name (logging's findCaller); that is not a definition.
-        import contextlib
-        import io
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            _compile('def g() -> Int:\n'
-                     '    var fn = 3\n'
-                     '    return fn\n')
-        self.assertNotIn("'fn' has been removed", err.getvalue())
+        err = _compile_capturing_stderr('def g() -> Int:\n'
+                                        '    var fn = 3\n'
+                                        '    return fn\n')
+        self.assertNotIn("'fn' has been removed", err)
 
 
     def test_method_out_self_with_int_parameter_is_refused_at_the_parameter(self):
