@@ -147,3 +147,22 @@ Not verified this round: the plain fixture was NOT checked fail-before-fix
 Done-when item 1 (the real `c_parser/parser/__init__.py` rebuild with the
 `:149:219` signature gone) is still NOT run. It is a heavy `fire.py build` and
 belongs to the integrator. Part 1 is still the prerequisite. The doc stays.
+
+### 2026-11-12 (round 3) — both struct-pointer fixtures verified fail-before/pass-after
+
+Closes round 2's open item: the plain store-then-read fixture was not checked
+fail-before. Done by reverting the three non-test fix hunks
+(`mojo/backend_gimple/cpp_core.py`, `mojo/middle/exprtypes.py`,
+`mojo/backend_gimple/cpp_async.py`) from a saved patch, running the new
+fixtures, and re-applying the patch. Results:
+
+- Fix applied: `generator_struct_ptr_through_local_dict_store_then_read` PASS,
+  `generator_struct_ptr_through_local_dict_read_back` PASS.
+- Fix reverted: both FAIL with `compiled stdout '' != CPython '9\n'`.
+
+Full `test_gimple_generator_runner.py` with the fix: 438 passed, 22 failed
+(same count as round 2; not re-diffed by name this round).
+
+Done-when item 1 is still NOT run (heavy `fire.py build` of
+`c_parser/parser/__init__.py`, integrator's job), and part 1 is still the
+prerequisite. The doc stays.
