@@ -4338,6 +4338,11 @@ BUCKETS = {
               # that is a word rather than an absence — both are programs that
               # build, run and answer wrongly.
               'formal-shlex', 'formal-optional',
+              # …and the four the bucket census named (TEST_formal_tests_registered_in_no_bucket, 2026-11-12):
+              # registered by 0bf96e814, c7f641b19 and 4f0755020 and in no bucket, so no run executed them. Each
+              # measured alone at about 1 s, 0.0x GB, `preflight` only: NONE runs Lean, so they belong here.
+              'formal-try-model', 'formal-eh-tables',
+              'formal-once-bound-strings', 'formal-str-trim-runtime',
               # …and the third file the estate check named (2026-10-04, on the
               # merge of the formal20 batch), measured at 0.08 s and 0.03 GB —
               # the cheapest thing registered in this bucket by an order of
