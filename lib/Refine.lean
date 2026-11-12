@@ -81,6 +81,33 @@ theorem block_advance (code : Nat → UInt8) (b : Block) (exit g : Nat)
   go_exit_block code exit b.pcs.length g st (b.step st)
     (hcert.runs st hpc) hmid htc
 
+/-- Certificate for a GUARDED block: the body's normal path is one function of one
+    state ONLY on the states the guard `g` admits.  An export whose body carries an
+    overflow guard (`cbnz` to a trap, not taken on the normal path) is straight-line
+    exactly under `g`, the not-taken condition at that branch, computed from the
+    entry state.  The guard is a concrete `def` over the entry state (never
+    `opaque`), so a wrong spec is refutable on a `g`-state.  `g` is over the ENTRY
+    state, not each intermediate state: the emitter composes the prefix into the
+    guard. -/
+structure GuardedBlockCert (code : Nat → UInt8) (b : Block) (g : Arm64State → Prop) :
+    Prop where
+  runs : ∀ st, st.pc = b.entry_pc → g st →
+    arm64_runs code b.pcs.length st = some (b.step st)
+
+/-- The guarded advance: on a `g`-state, a `GuardedBlockCert` block advances the
+    same way `block_advance` does.  Same proof as `block_advance`, with the guard
+    passed through the certificate. -/
+theorem guarded_block_advance (code : Nat → UInt8) (b : Block) (g : Arm64State → Prop)
+    (exit gl : Nat) (st : Arm64State) (hpc : st.pc = b.entry_pc)
+    (hg : g st) (hcert : GuardedBlockCert code b g)
+    (hmid : ∀ u, u < b.pcs.length → ∀ su,
+      arm64_runs code u st = some su → su.pc ≠ exit)
+    (htc : (b.step st).pc ≠ exit) :
+    arm64_go_exit st code exit (b.pcs.length + gl) =
+      arm64_go_exit (b.step st) code exit gl :=
+  go_exit_block code exit b.pcs.length gl st (b.step st)
+    (hcert.runs st hpc hg) hmid htc
+
 /-! ## 3. Control-flow layer
 
 The generator emits the executed path as a list of edges.  Each edge is one of

@@ -210,3 +210,35 @@ four "Remaining steps" above. The decision it has not made is how `Refine.BlockC
 it is stated for every state at the entry, and the guard is only sound under `pre`, so the cert must become
 `∀ st, pre st → …`. Until that is decided the Lean statement cannot be written, and that is the next round's first
 step.
+
+### Landed 2026-11-12 (round 4): the guarded block certificate, and the decision it encodes
+
+**Decision, made:** the guard is a concrete `def` over the ENTRY state `g : Arm64State → Prop`, and the block certificate is
+guarded by it, not by a per-state `pre`. The composed prefix (`smulh`/`mul`/`asr`/`eor` up to the `cbnz`) is folded into
+`g`, so `g st` is "the not-taken condition at the overflow guard, computed from `st`". A wrong multiplier is refutable
+because `g` holds for `n = 1` (`1 * 3` does not overflow, and `1 * 5 ≠ 1 * 3`).
+
+**Landed (infrastructure, not yet a fix for any test):** `lib/Refine.lean` now has, after `block_advance`:
+- `structure GuardedBlockCert code b g`: `∀ st, st.pc = b.entry_pc → g st → arm64_runs code b.pcs.length st = some (b.step st)`.
+- `theorem guarded_block_advance`: the same conclusion as `block_advance`, under `g st` as an extra hypothesis. Proof is
+  `go_exit_block ...` applied to `hcert.runs st hpc hg`, identical to `block_advance`. No `sorry`.
+
+Verified: `lib/Refine.olean` was rebuilt after the edit (lean `-o` does not write on error), and `test_formal_dylib.py`
+(`memslot --gb 8`, peak 1.9 GB) is unchanged at PASS=22 FAIL=6, including "no module under lib/ admits a sorry or an admit".
+Nothing calls the new lemma yet, so the six failures are unchanged.
+
+**Next step, in order (the work is now in the emitter):**
+1. `formal/arm64_proof_gen.py::_dylib_contract_proof`: take `pcs` and `guards` from `_overflow_normal_path` (not `entry + 4*i`).
+   Keep the refusal for any body where the reader returns None.
+2. Emit `def {ident}_guard : Arm64State → Prop := fun s => <the cbnz's operand, evaluated over the prefix state>`. The
+   prefix is the composed `st_i` chain up to the `cbnz`, so this is `(S_k s).regs 2 = 0` in the model's own names, not a
+   re-decoded expression. (Using the model's composition keeps `g` concrete and avoids a second decoder.)
+3. Emit `theorem bodyCert : Refine.GuardedBlockCert dylib_code body {ident}_guard` and the guarded `_spec` obligation as
+   `Refine.export_result_spec_under (fun n => {ident}_guard (start n))`, proved by `guarded_block_advance` plus `bv_decide`
+   for the value. The unguarded `export_result_spec` stays for bodies with no guard.
+4. The `exitpc` question from round 3 still applies: the normal path leaves at the `ret` (0x3e8..0x3f4), so `atExit`/
+   `noEarly` must be stated at that `ret`'s exit, or as a second exit fact. Decide this in step 1, not later.
+5. Quick test: `test_formal_dylib.py` "a wrong spec is rejected, not believed" and "a wrong spec on a multi-export image"
+   PASS, with the right-spec CONTROL still accepted. Then delete this doc in that commit and run the ratchet.
+
+**Not verified:** whether `bv_decide` closes the guarded value identity for `triple`. That is step 3's first measurement.
