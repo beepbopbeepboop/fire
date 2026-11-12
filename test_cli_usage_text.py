@@ -219,13 +219,12 @@ def test_no_hardcoded_tool_name_left_in_source():
 # a prose edit it did not make.  The sweep it ratchets is the commit that
 # added this check; the doc it belonged to was deleted with that sweep.
 _STALE_COMMAND = re.compile(
-    # `(?<!tools/)`: `tools/mojo <cmd>` is the real-Mojo wrapper, a command that
-    # exists and is quoted as itself, not this tool's old name.
-    r'(?<!tools/)\bmojo (?:build|run|repl|dylib|formalbuild|--formal|--dump|--jit|-h|-v)\b')
+    r'\bmojo (?:build|run|repl|dylib|formalbuild|--formal|--dump|--jit|-h|-v)\b')
 _LEGACY_NAMES_OKAY = {
     'fire.py': 4,                                  # rename history, stage2/mojo, Real Mojo's own
     'test_cli_usage_text.py': 2,                   # this file's own "what it used to print"
     'test_selfhost_memory.py': 1,                  # the self-host binary's own dump flag
+    'test_link_mode.py': 1,                        # real-Mojo wrapper's `run` command, quoted as itself
     'mojo/backend_gimple/emit_resolve.py': 1,      # stage2/mojo
     'mojo/middle/infra_infer.py': 1,               # stage2/mojo
     'tools/suite.py': 1,                           # stage2/mojo

@@ -1,9 +1,9 @@
 SPLIT: SUITE_gimplerunner_21_failing-part1, SUITE_gimplerunner_21_failing-part2, SUITE_gimplerunner_21_failing-part3, SUITE_gimplerunner_21_failing-part4, SUITE_gimplerunner_21_failing-part5, SUITE_gimplerunner_21_failing-part6, SUITE_gimplerunner_21_failing-part7, SUITE_gimplerunner_21_failing-part8, SUITE_gimplerunner_21_failing-part9, SUITE_gimplerunner_21_failing-part10
 # SUITE_gimplerunner: 21 failing cases (2026-11-11)
 
-Filed when the `gimplerunner` job was marked `expect=` in `tools/suite.py`. This is the one doc for the
-job: the older `SUITE_gimplerunner` tree (from the 2026-11-08 `make check` run) was removed on 2026-11-12, its
-done-checks having been unreliable (see Status).
+Filed when the `gimplerunner` job was marked `expect=` in `tools/suite.py`. Replaces the open
+part docs `SUITE_gimplerunner-part1/2/3` and `SUITE_gimplerunner-part1-part1/2` as the place to
+work from; those docs' done-checks are not reliable (see Status).
 
 ## Status
 
@@ -40,10 +40,7 @@ Grouped by what the log shows. Each row is the case name from `test_gimple_runne
 - `gimple_with_generator_context_manager_exits`: refused, generator function with `yield`.
 - `gimple_with_generator_context_manager_exits_on_the_raise_path`: refused, same.
 
-### C. Memory limit only (stdout matches, RSS over the 40 MB limit) -- FIXED 2026-11-12
-
-The int-to-string conversion (`String(i)`, `str(i)`) was never freed; `mojo_str_word_fresh` now owns the
-result and the codegen registers it as fresh. The three cases pass at ~2.2 MB. Part doc deleted with the fix.
+### C. Memory limit only (stdout matches, RSS over the 40 MB limit)
 - `gimple_fresh_returning_string_functions_are_owned`: RSS 75.7 MB.
 - `gimple_string_locals_owned_when_only_read`: RSS 57.3 MB.
 - `gimple_string_method_results_are_owned`: RSS 57.3 MB.
@@ -65,16 +62,4 @@ result and the codegen registers it as fresh. The three cases pass at ~2.2 MB. P
 
 1. Split along the groups above: A and C are codegen, B is the coroutine project, D needs each
    test's expectation checked against CPython first (`tools/gdbtool` / the python3 reference).
-2. C is DONE (2026-11-12, see above). Remaining order: D's math return type (`math.copysign`), then A's dict keys.
-
-## Status (2026-11-12, end of round)
-
-Fixed and committed, each with its part doc deleted: group C (RSS string ownership, 75931501a),
-`gimple_math_module_members_lower_to_libm` (9336604b6), `gimple_enum_case_without_eq_is_refused`
-(40ac094b9), `gimple_str_encode_errors_and_decode_remaining` (8cf78b639),
-`gimple_str_window_matches_cpython` (0ba1e267e), `gimple_tuple_dict_key_*` and the other part-4
-cases (46d36b17f), and the part-5 dict-repr cases (46d36b17f). `gimple_list_slice_mixed` is fixed
-(38c4bbcd3), and its part doc records the open module-scope sibling.
-
-Still open: part 2 (generator companion: a wrong-answer on mixed-kind yields, plus the harness
-change; plan in its doc, 44800a615).
+2. Start with C: three RSS cases, probably one ownership bug. Smallest and most contained.
