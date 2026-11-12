@@ -5303,10 +5303,11 @@ main()
     # int64. The copy of a tagged word into a str or float local used to
     # compile to a bare unwrap: the str local segfaulted (an int word used as
     # a char*), and the float local printed `1.0` / `0.0` for `1` / None. A
-    # Mojo name has one type, so the refusal is the honest answer in either
-    # direction (the copy first, or the plain store first).
-    # A str stored into a mixed tagged name is a kind-'p' box. Both directions
-    # and the reads (print, ==, +, len, f-string) are checked against CPython.
+    # Mojo name has one type, so the name is the int64_t box
+    # (`ginf.mixed_box_name`): each store keeps its own kind in the MojoBox and
+    # every consumer reads it by kind. A str stored into a mixed tagged name is
+    # a kind-'p' box. Both directions and the reads (print, ==, +, len,
+    # f-string) are pinned to CPython on the same text.
     _mixed_str = """\
 def g():
     yield 1

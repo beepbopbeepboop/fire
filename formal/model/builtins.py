@@ -2036,7 +2036,7 @@ GIMPLE_RUNTIME_PREFIX = "mojo_"
 #
 # This is the generalisation of the `GIMPLE_LIST_PREFIX` special case that
 # stood here before, and that constant is gone: a hand-kept list of prefixes is
-# a list that rots, and the shape answers the same question for all 917 entry
+# a list that rots, and the shape answers the same question for all 920 entry
 # points the headers declare rather than for the 40-odd names one prefix
 # happened to cover.
 
@@ -2218,7 +2218,7 @@ def _parse_ctype(decl: str, is_param: bool = False) -> tuple:
     because it does in a parameter list and does not in a return type:
     `void *db` is a `void *` with a name, `void *` is not. Getting that backwards
     makes every parameter a type called `void db`, which nothing recognises as a
-    scalar — and a rule that refuses all 917 entry points for that reason looks
+    scalar — and a rule that refuses all 920 entry points for that reason looks
     exactly like a rule that has measured them all and found none reachable.
 
     The result is the RESOLVED type, which is what every reader of it wants:
@@ -4486,20 +4486,26 @@ def print_arg_parts(args, *, no_value_callee=None, kind_of=None,
             # whose bytes this path does not hold.
             parts.append(("text", print_literal(a)))
             continue
-        callee = no_value_callee(a) if no_value_callee else None
-        if callee is not None:
-            raise CodegenError(returnless_value_refusal(callee))
         # A value whose CPython text is a COMPILE-TIME CONSTANT: `None`,
-        # `True`, `False`, and a NAME this build's bindings say holds one of
-        # them. It becomes literal text in the format string, so there is
-        # nothing to evaluate and nothing that can read a register the source
-        # never wrote.
+        # `True`, `False`, and a NAME or CALL this build's bindings say holds
+        # one of them. It becomes literal text in the format string, so there
+        # is nothing to evaluate and nothing that can read a register the
+        # source never wrote. **Asked BEFORE the refusal below**, because
+        # direction (b) makes a call to a function that always answers `None` a
+        # value with a decided TEXT — refusing it now would refuse something
+        # this path can render exactly.
         const = print_constant_text(a)
         if const is None and is_none is not None and is_none(a):
             const = NONE_TEXT
         if const is not None:
             parts.append(("text", print_literal_text(const)))
             continue
+        # …and a value this build cannot carry at all, which is the opposite
+        # answer and the one left for last: the callee produces no value, so
+        # there is no TEXT to fold and no word to convert.
+        callee = no_value_callee(a) if no_value_callee else None
+        if callee is not None:
+            raise CodegenError(returnless_value_refusal(callee))
         # A bool that is a VALUE and not a constant — a comparison, a `not`, a
         # name a declaration says is one, a call whose callee is declared
         # `-> Bool`, a field a struct declares `Bool`. The render is a `%s`

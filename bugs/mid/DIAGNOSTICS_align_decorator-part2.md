@@ -10,10 +10,15 @@ struct instantiation.
 mid
 
 ## Prerequisite / depends on
-`bugs/mid/DIAGNOSTICS_align_decorator-part1.md` (struct `@align(expr)` is
-parsed/stored on the AST and a parser helper recognises `@align` / validates a
-constant value). This part extends that same rule to a generic struct's bracket
-parameters; it must not add a second validation implementation.
+The shared `@align` value rule (positive, power of 2, at most 2^29) is
+implemented: `fire_compiler.py::_validate_align_decorators` (called from
+`_parse_struct`) validates a struct's constant `@align(...)` argument at parse
+time, with regression test `test_align_decorator_literal_diagnostic.py`.
+`bugs/mid/DIAGNOSTICS_align_decorator-part1.md` (the align expression stored on
+the AST) is the remaining dependency: this part's parametric cases read the
+expression back at elaboration. This part extends the same rule to a generic
+struct's bracket parameters; it must not add a second validation
+implementation.
 
 ## Goal
 Enforce that a struct's `@align(expr)` resolves to a positive power of 2. A
@@ -110,3 +115,10 @@ this part once implemented.
 
 ## Status
 - **Open (replan/merge).**
+- **2026-11-12 (merge with the part-1 fix):** the prerequisite's constant-value
+  rule landed with the branch side of the merge (`_validate_align_decorators`
+  in `fire_compiler.py`; its part-1 doc was removed with the fix, per the
+  "a fully fixed bug's doc is deleted" convention). Remaining for this part:
+  parametric/arithmetic evaluation at instantiation (the `elaborate_generic_struct`
+  scope above) with the `function instantiation failed` / `struct alignment
+  must be a positive power of 2, got <N>` diagnostic.
