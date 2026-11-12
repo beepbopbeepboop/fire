@@ -69,7 +69,7 @@ def test_constrained_tstring_message():
 def test_constrained_short_circuit_and_false():
     # Short-circuit: provably-false `and` must diagnose even if rhs is unknown.
     try:
-        _compile('fn f[x: Int]():\n    constrained[False and x > 0, "nope"]()\n')
+        _compile('fn f[x: Int]():\n    constrained[False and x > 0, "nope"]()\n\nfn main():\n    f[1]()\n')
     except RuntimeError as e:
         s = str(e)
         assert 'constraint failed' in s, s

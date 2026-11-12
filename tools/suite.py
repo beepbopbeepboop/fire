@@ -4134,7 +4134,7 @@ test('ab-compare', [PY, 'tools/ab_compare.py'], deps=['ab-bside'],
 # Test files the estate check found unregistered (2026-11-10): each one runs in `check`.
 test('ambiguous-import-diagnostic', [PY, 'test_ambiguous_import_diagnostic.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
-test('attr-error-messages', [PY, 'test_attr_error_messages.py'], mem='tiny', expect='import os2 suffix differs from CPython at the MNE candidate cap; see bugs/DIAGNOSTICS_module_not_found_suffix_host_candidate_cap.md',
+test('attr-error-messages', [PY, 'test_attr_error_messages.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('backtick-import-literals', [PY, 'test_backtick_import_literals.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
@@ -4143,10 +4143,14 @@ test('bootstrap-hotspots', [PY, 'test_bootstrap_hotspots.py'], mem='tiny',
 test('compile-linked-result', [PY, 'test_compile_linked_result.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('comptime-assert-diagnostic', [PY, 'test_comptime_assert_diagnostic.py'], mem='tiny',
+     expect='a called generic with a provably false comptime assert compiles: '
+            'bugs/DIAGNOSTICS_comptime_assert_in_called_generic_is_not_refused.md',
      desc='registered by the estate audit (every test file runs)')
 test('comptime-dtype-diagnostic', [PY, 'test_comptime_dtype_diagnostic.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('constrained-diagnostic', [PY, 'test_constrained_diagnostic.py'], mem='tiny',
+     expect='a called generic with a provably false constrained compiles: '
+            'bugs/DIAGNOSTICS_comptime_assert_in_called_generic_is_not_refused.md',
      desc='registered by the estate audit (every test file runs)')
 test('dict-none-key', [PY, 'test_dict_none_key.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
@@ -4212,7 +4216,7 @@ test('swarm-why', [PY, 'tools/test_swarm_why.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('sync-restart-guards', [PY, 'tools/test_sync_restart_guards.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
-test('enum-desugar', [PY, 'test_enum_desugar.py'], mem='tiny', expect='enum member comparison prints 1 where CPython prints True; see bugs/CODEGEN_enum_member_eq_prints_int_not_bool.md',
+test('enum-desugar', [PY, 'test_enum_desugar.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('linked-list-hash-step1', [PY, 'test_linked_list_hash_step1.py'], mem='tiny', expect='LinkedList.__hash__ lowers to a stub; see bugs/CODEGEN_linked_list_hash_stubbed.md',
      desc='registered by the estate audit (every test file runs)')

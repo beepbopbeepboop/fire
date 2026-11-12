@@ -105,7 +105,7 @@ def test_comptime_assert_short_circuit_and_false():
     # missing diagnostic when
     # comptime bool folding required both operands to be known.
     try:
-        _compile('fn f[x: Int]():\n    comptime assert False and x > 0, "nope"\n')
+        _compile('fn f[x: Int]():\n    comptime assert False and x > 0, "nope"\n\nfn main():\n    f[1]()\n')
     except RuntimeError as e:
         s = str(e)
         assert 'comptime assertion failed' in s, s

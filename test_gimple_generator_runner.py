@@ -5634,6 +5634,44 @@ main()
 """)
 
 
+def run_cpp_path_fstring_container_literal_refusal():
+    """A COLLECTION LITERAL interpolated into an f-string on the cpp-path
+    generator emitter (`cpp_core._cpp_string_literal_expr`) must refuse
+    honestly, not emit invalid C++ that only g++ catches.
+
+    `_cpp_expr` lowers a list/tuple/dict/set literal to a C++ braced-init-list,
+    which is only valid where this emitter puts it into a container-typed
+    local or a real runtime constructor. The interpolation arm assumed every
+    field lowered to ONE scalar and wrapped it as `mojo_str((void *)({v}))`,
+    so `f"{[1, 2]}"` produced `mojo_str((void *)({1, 2}))` and the whole
+    `--jit` build failed with "expected ';' before '}' token" (the
+    interpreter prints `[1, 2]`, so this was a compiled-path-only hard
+    failure). There is no container-repr walker in this expression-only
+    emitter, so the same chokepoint that refuses a direct `yield [1, 2]`
+    refuses the literal here — before any C++ is emitted."""
+    with coro.pinned('cpp'):
+        test_generator_refused("cpp_path_fstring_list_literal_refused", """\
+def g():
+    print(f"{[1, 2]}")
+    yield 0
+""", "collection literal")
+        test_generator_refused("cpp_path_fstring_tuple_literal_refused", """\
+def g():
+    print(f"{(1, 2)}")
+    yield 0
+""", "collection literal")
+        test_generator_refused("cpp_path_fstring_dict_literal_refused", """\
+def g():
+    print(f"{ {'a': 1} }")
+    yield 0
+""", "collection literal")
+        test_generator_refused("cpp_path_fstring_set_literal_refused", """\
+def g():
+    print(f"{ {1, 2} }")
+    yield 0
+""", "collection literal")
+
+
 def run_send_into_just_started_regression():
     # Bug: CODEGEN_send_into_just_started_generator_is_not_refused
     # `g.send(7)` on a fresh generator must raise TypeError, not resume.
@@ -5693,6 +5731,7 @@ def run_tests():
     run_send_into_just_started_regression()
     run_cpp_path_multi_arg_print_tests()
     run_cpp_path_fstring_conversion_tests()
+    run_cpp_path_fstring_container_literal_refusal()
     run_none_yield_tests()
     run_tagged_none_equality_tests()
     run_tagged_none_identity_tests()
