@@ -2577,6 +2577,296 @@ def _check_variadic_element_types(stmts, filename) -> None:
         raise RuntimeError("\n".join(lines))
 
 
+def _module_function_defs(stmts) -> dict:
+    """`{name: FunctionDef}` for each module-level function whose name is
+    defined exactly once. A name defined twice (an overload, a redefinition)
+    has no single signature to check a call against, so it is left out."""
+    counts = {}
+    by_name = {}
+    for st in stmts:
+        if type(st).__name__ == "FunctionDef":
+            counts[st.name] = counts.get(st.name, 0) + 1
+            by_name[st.name] = st
+    return {name: st for name, st in by_name.items() if counts[name] == 1}
+
+
+# Literal node kinds whose value can never convert to an MLIR type. The four
+# are the kinds measured with the real compiler (tools/mojo, 2026-11-12):
+# every one is refused by a `__mlir_type.index` parameter, including `3`.
+_MLIR_REFUSED_LITERALS = ("IntLiteral", "FloatLiteral", "StringLiteral", "BoolLiteral")
+
+# The primitive value type names this front end recognises — the values a
+# `__mlir_type.*` parameter can never hold. Measured with the real compiler
+# (tools/mojo, 2026-11-12): a value of type Int, Float64, Int64, String or
+# Bool is each refused by a `__mlir_type.index` parameter, whether it arrives
+# as a literal, a `var` of that type (declared or inferred from its literal
+# initialiser) or a parameter of it. The families are the front end's own
+# scalar vocabulary (myinterpreter's _INT_TYPE_NAMES / _FLOAT_TYPE_NAMES)
+# plus Bool and String.
+_MLIR_REFUSED_PRIMITIVES = frozenset((
+    "Int", "Int8", "Int16", "Int32", "Int64", "Int128", "Int256",
+    "UInt", "UInt8", "UInt16", "UInt32", "UInt64", "UInt128", "UInt256",
+    "Float16", "Float32", "Float64", "BFloat16",
+    "Bool", "String",
+))
+
+# The type the real compiler infers for a `var` from a LITERAL initialiser
+# (measured 2026-11-12: `var y = 3` is 'Int', `var y = 2.5` is 'Float64',
+# `var y = "s"` is 'String', `var y = True` is 'Bool' — each refused at a
+# `__mlir_type.index` argument). Keys are the front end's own literal node
+# kinds, so `var y = <literal>` gets exactly the value the same literal
+# carries when passed as a call argument.
+_MLIR_LITERAL_INIT_TYPES = {
+    "IntLiteral": "Int",
+    "FloatLiteral": "Float64",
+    "StringLiteral": "String",
+    "BoolLiteral": "Bool",
+}
+
+# (node kind, field) pairs whose content belongs to a CHILD scope, not the
+# scope being walked: function and lambda bodies, struct field and method
+# lists, trait method lists, except-handler bodies, with-statement bodies and
+# the expressions of a comprehension. `_mlir_iter_scope` stops there;
+# `_mlir_child_scopes` visits each as its own scope with its own bindings.
+_MLIR_SCOPE_SKIP = frozenset((
+    ("FunctionDef", "body"),
+    ("LambdaExpr", "body"),
+    ("StructDef", "fields"),
+    ("StructDef", "methods"),
+    ("TraitDef", "methods"),
+    ("ExceptHandler", "body"),
+    ("WithStmt", "body"),
+    ("Comprehension", "element"),
+    ("Comprehension", "value"),
+    ("Comprehension", "generators"),
+))
+
+
+def _mlir_iter_scope(content):
+    """Every dataclass node under `content`, depth-first, without recursion
+    limits, without entering child-scope content (`_MLIR_SCOPE_SKIP`): that
+    content is walked by the child scope's own pass. The stack walk yields in
+    reverse document order; `_mlir_nodes_in_order` re-orders it."""
+    stack = [content]
+    while stack:
+        x = stack.pop()
+        if isinstance(x, (list, tuple)):
+            stack.extend(x)
+        elif dataclasses.is_dataclass(x) and not isinstance(x, type):
+            kind = type(x).__name__
+            yield x
+            for f in dataclasses.fields(x):
+                if (kind, f.name) in _MLIR_SCOPE_SKIP:
+                    continue
+                stack.append(getattr(x, f.name))
+
+
+def _mlir_nodes_in_order(content):
+    """`_mlir_iter_scope` in source order: bindings are collected and calls
+    checked in the order the source declares them (a later same-scope
+    declaration shadows an earlier one, and the first source-order bad call
+    is the one reported)."""
+    return reversed(list(_mlir_iter_scope(content)))
+
+
+def _mlir_decl_type(decl):
+    """The primitive type of a `var` declaration, or None. The declared
+    annotation wins when present (only if it names one of
+    _MLIR_REFUSED_PRIMITIVES); otherwise the type of a literal initialiser
+    (_MLIR_LITERAL_INIT_TYPES). None also means "bound, type unknown to this
+    front end" — a non-primitive declaration or a non-literal initialiser —
+    and it still shadows an outer binding of the same name at lookup."""
+    if isinstance(decl.type_ann, str):
+        return decl.type_ann if decl.type_ann in _MLIR_REFUSED_PRIMITIVES else None
+    if decl.value is not None:
+        return _MLIR_LITERAL_INIT_TYPES.get(type(decl.value).__name__)
+    return None
+
+
+def _mlir_bare_names(target):
+    """The local names a comma-joined unpacking target binds: a lone `y`, or
+    each element of an `a, b`. Dotted (`st.lineno`) and subscripted
+    (`d["k"]`) elements SET an existing value, and a starred (`*rest`)
+    element takes the remainder container; none of them binds a fresh local,
+    so they are left out."""
+    if not isinstance(target, str):
+        return []
+    names = []
+    for part in target.split(","):
+        part = part.strip()
+        if part and not any(ch in part for ch in '.,[*"\''):
+            names.append(part)
+    return names
+
+
+def _mlir_param_bindings(names, types):
+    """{name: type-or-None} for a scope's parameters, where `names` is the
+    parameter name list and `types` the parallel declared-type list (holes
+    are None). A parameter of a primitive type is a value of that type
+    (measured 2026-11-12: `def bar(y: Float64)` calling `foo(y)` is refused
+    at the `y`); every other parameter still binds its name, shadowing an
+    outer binding of the same name. `*args`-style parameters bind the
+    unstarred name and hold a container, so they shadow as unknown."""
+    bindings = {}
+    for i, pname in enumerate(names):
+        if not isinstance(pname, str):
+            continue
+        ptype = types[i] if i < len(types) else None
+        if pname.startswith("*"):
+            bindings[pname[1:]] = None
+        else:
+            bindings[pname] = (ptype if isinstance(ptype, str)
+                               and ptype in _MLIR_REFUSED_PRIMITIVES else None)
+    return bindings
+
+
+def _mlir_scope_bindings(content):
+    """{name: type-or-None} for the bindings DECLARED in one scope: its own
+    `var` declarations (declared or literal-initialiser type, _mlir_decl_type)
+    and comptime variables (their declared annotation is discarded at parse
+    time, so only a literal initialiser gives a type), plus the targets of
+    its `for` loops and `:=` (bound, type unknown to this front end). A None
+    entry shadows an outer binding of the same name: the lookup must stop at
+    the inner binding even when its type is unknown. In source order, so a
+    later declaration (e.g. a `for` target over a `var` of the same name)
+    shadows the earlier one."""
+    bindings = {}
+    for node in _mlir_nodes_in_order(content):
+        kind = type(node).__name__
+        if kind == "VarDecl":
+            if "," not in node.name:
+                bindings[node.name] = _mlir_decl_type(node)
+        elif kind == "ComptimeVarStmt":
+            if node.target:
+                t = None
+                if node.value is not None:
+                    t = _MLIR_LITERAL_INIT_TYPES.get(type(node.value).__name__)
+                bindings[node.target] = t
+        elif kind in ("ForStmt", "ComptimeForStmt"):
+            for name in _mlir_bare_names(node.target):
+                bindings[name] = None
+        elif kind == "WalrusExpr":
+            if node.name:
+                bindings[node.name] = None
+    return bindings
+
+
+def _mlir_child_scopes(content):
+    """(child_content, child_bindings) for every direct child scope under
+    `content`, in reverse document order (the caller reverses before
+    scheduling). Function and lambda bodies carry their parameters' bindings;
+    a struct's scope is its fields plus its methods (the methods become child
+    scopes when that scope is walked); a trait's is its methods;
+    except-handler, with-statement and comprehension bodies carry their bound
+    names (types this front end does not track: they only shadow)."""
+    for node in _mlir_iter_scope(content):
+        kind = type(node).__name__
+        if kind == "FunctionDef":
+            yield node.body, _mlir_param_bindings(
+                [p[0] for p in node.params], [p[1] for p in node.params])
+        elif kind == "LambdaExpr":
+            yield node.body, _mlir_param_bindings(
+                [p[0] for p in node.params], node.param_types)
+        elif kind == "StructDef":
+            yield list(node.fields) + list(node.methods), {}
+        elif kind == "TraitDef":
+            yield list(node.methods), {}
+        elif kind == "ExceptHandler":
+            bindings = {}
+            if node.name:
+                bindings[node.name] = None
+            yield node.body, bindings
+        elif kind == "WithStmt":
+            bindings = {}
+            for item in node.items:
+                for name in _mlir_bare_names(item.alias):
+                    bindings[name] = None
+            yield node.body, bindings
+        elif kind == "Comprehension":
+            bindings = {}
+            for gen in node.generators:
+                if isinstance(gen.target, str) and "," not in gen.target:
+                    bindings[gen.target] = None
+            yield ([node.element] + ([node.value] if node.value is not None else [])
+                   + list(node.generators)), bindings
+
+
+def _check_mlir_type_argument_calls(stmts, filename) -> None:
+    """A literal, or a value of primitive type, is not an MLIR value
+    (measured with the real compiler, 2026-11-12): `def foo(x:
+    __mlir_type.index)` called as `foo(1.5)`, `foo(3)`, `foo("s")`, `foo(True)`,
+    with a primitive-typed variable (`var y = 2.5; foo(y)`, `var y: Int64 = 3;
+    foo(y)`), or with a primitive-typed parameter (`def bar(y: Float64):
+    foo(y)`) is refused with "invalid call to 'foo': value passed to 'x'
+    cannot be converted ... to '__mlir_type.index'" at the argument. Checked
+    for a module-level function defined once, positionally up to the first
+    `*`-parameter, and for a keyword argument naming an MLIR parameter
+    (reported at the value, as the out-argument check does).
+
+    A variable's static type comes from the per-scope table merged over the
+    lexical scopes around the call: the scope's own `var`/comptime
+    declarations (declared type, or the type of a literal initialiser) and its
+    parameters, with the innermost binding of a name winning. A name whose
+    type this front end does not track (a non-literal initialiser, a
+    non-primitive declaration, a loop/handler/with/comprehension target, an
+    unannotated parameter) is never refused — and still shadows an outer
+    binding of the same name. The real message's `from '<type>'` half is not
+    reproduced."""
+    targets = {}
+    for name, fn in _module_function_defs(stmts).items():
+        mlir = {}
+        for i, (pname, ptype) in enumerate(fn.params):
+            if str(pname).startswith("*"):
+                break
+            if isinstance(ptype, str) and ptype.startswith("__mlir_type."):
+                mlir[i] = pname
+        if mlir:
+            targets[name] = (fn, mlir)
+    if not targets:
+        return
+    work = [(list(stmts), {})]
+    while work:
+        content, outer = work.pop()
+        table = {**outer, **_mlir_scope_bindings(content)}
+        for node in _mlir_nodes_in_order(content):
+            if type(node).__name__ != "CallExpr":
+                continue
+            fn_node = node.func
+            if type(fn_node).__name__ != "IdentExpr" or fn_node.name not in targets:
+                continue
+            fn, mlir = targets[fn_node.name]
+            for i, a in enumerate(node.args):
+                if type(a).__name__ == "UnaryOp":
+                    break  # `*x` at the call site shifts every later position
+                if i in mlir and _mlir_argument_refused(a, table):
+                    _raise_mlir_refusal(fn_node.name, mlir[i], fn.params[i][1], a, filename)
+            for kw_name, kw_value in (node.kwargs or []):
+                hit = [i for i, pname in mlir.items() if pname == kw_name]
+                if hit and _mlir_argument_refused(kw_value, table):
+                    _raise_mlir_refusal(fn_node.name, kw_name, fn.params[hit[0]][1], kw_value, filename)
+        children = list(_mlir_child_scopes(content))
+        for child_content, child_bindings in reversed(children):
+            work.append((child_content, {**table, **child_bindings}))
+
+
+def _mlir_argument_refused(value, table):
+    """Whether a call argument must be refused at an MLIR parameter: a
+    literal of one of _MLIR_REFUSED_LITERALS, or an identifier the scope table
+    resolves to a primitive value type."""
+    kind = type(value).__name__
+    if kind in _MLIR_REFUSED_LITERALS:
+        return True
+    if kind == "IdentExpr":
+        return table.get(value.name) is not None
+    return False
+
+
+def _raise_mlir_refusal(fn_name, pname, ptype, value, filename) -> None:
+    loc = f"{filename}:{value.line}:{value.col}: " if filename else f"{value.line}:{value.col}: "
+    raise RuntimeError(f"{loc}error: invalid call to '{fn_name}': value passed to "
+                       f"'{pname}' cannot be converted to '{ptype}'")
+
+
 def _check_out_argument_calls(stmts, filename) -> None:
     """An `out` argument is not a call argument (measured with the real compiler,
     2026-11-11): `def f(out x: Int)` called as `f(y)` is refused with
@@ -2584,15 +2874,9 @@ def _check_out_argument_calls(stmts, filename) -> None:
     module-level function whose name is defined once and that has no `*args`:
     a positional argument past the non-`out` parameters is refused. Keyword
     arguments and a missing `out` argument are not this check."""
-    defs = {}
-    for st in stmts:
-        if type(st).__name__ == "FunctionDef":
-            defs[st.name] = defs.get(st.name, 0) + 1
     capacity = {}
     out_names = {}
-    for st in stmts:
-        if type(st).__name__ != "FunctionDef" or defs.get(st.name) != 1:
-            continue
+    for st in _module_function_defs(stmts).values():
         conv = st.param_convs or {}
         if not any(v == "out" for v in conv.values()):
             continue
@@ -2624,10 +2908,11 @@ def _check_out_argument_calls(stmts, filename) -> None:
 
 
 def _warn_fn_keyword(filename, tok) -> None:
-    """Stage 1 of the `fn` removal (bugs/DIAGNOSTICS_fn_keyword_is_accepted_should_warn_then_refuse.md):
-    a `fn` DEFINITION is still accepted, and it draws the real compiler's
-    message at the keyword. An identifier named `fn` is not a definition and is
-    not reported: CPython code uses it as a name, and the parser accepts that."""
+    """The `fn` keyword was removed from the language. A `fn` DEFINITION is
+    still accepted and draws the real compiler's message at the keyword; the
+    decision on 2026-11-11 (6408a0b14) is a warning, not a refusal. An
+    identifier named `fn` is not a definition and is not reported: CPython code
+    uses it as a name, and the parser accepts that."""
     loc = f"{filename}:{tok.line}:{tok.col}: " if filename else f"{tok.line}:{tok.col}: "
     print(f"{loc}warning: 'fn' has been removed; use 'def' instead", file=sys.stderr)
 
@@ -8914,6 +9199,7 @@ class Parser:
             self._skip_newlines()
         stmts = _synthesize_fieldwise_inits(stmts)
         _check_out_argument_calls(stmts, self._filename)
+        _check_mlir_type_argument_calls(stmts, self._filename)
         _check_inferred_param_dependencies(stmts, self._filename)
         _check_variadic_element_types(stmts, self._filename)
         return stmts

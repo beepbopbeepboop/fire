@@ -37,7 +37,7 @@ another C type (str or float): the box cannot carry it; refused".
 `"cannot also hold a value of another C type"` on this path — keep that
 substring (in the shared constant, or in whatever constants replace it).
 
-Repro (from `bugs/mid/CODEGEN_tagged_generator_mixed_type_container.md`):
+Repro (from CODEGEN_tagged_generator_mixed_type_container, resolved option 2):
 
 ```mojo
 def g():
@@ -79,14 +79,10 @@ or float) …` from the emit_stmts.py site.
    container-typed) as a second case if the harness allows it cheaply;
    otherwise one case plus a comment naming direction 1 as the same raise
    site.
-4. `git rm bugs/mid/CODEGEN_tagged_generator_mixed_type_container.md` in the
-   same commit — the decision part1 records closes it (decided option 2, and
-   this part lands it). Rewrite the two citations it leaves behind:
-   `docs/tagged_generator_mixed_type-plan.md` (the step-4 paragraph part1
-   amended) and the `Status (2026-11-11)` line of
-   `bugs/hard/CODEGEN_tagged_generator_mixed_type_step4.md` (name the symptom
-   — "the mixed container case is a named diagnostic" — not the deleted path;
-   keep the hard doc's SPLIT line untouched). Then run
+4. The container mixed-name case is resolved by refusing with a diagnostic naming
+   the container binding (option 2), with `tagged_generator_mixed_type_container_refused`
+   in `test_gimple_generator_runner.py`. Rewrite citations of deleted docs to name the
+   symptom, not the deleted path. Then run
    `python3 tools/dangling_doc_refs.py --ratchet` and fix anything it names;
    it must not gain a citation.
 
@@ -99,8 +95,7 @@ or float) …` from the emit_stmts.py site.
 - The new refusal case(s) in `run_tagged_for_target_bind_tests` pass; no
   other case changes state. The 22 known failures stay exactly the ones in
   `bugs/mid/SUITE_gimplegenerators.md`.
-- `bugs/mid/CODEGEN_tagged_generator_mixed_type_container.md` is deleted and
-  `python3 tools/dangling_doc_refs.py --ratchet` reports no new dangling
+- `python3 tools/dangling_doc_refs.py --ratchet` reports no new dangling
   citations.
 
 ## Done when
