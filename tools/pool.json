@@ -54,7 +54,7 @@
     {
       "name": "opencode-paid",
       "model": "opencode-go/deepseek-v4.1-flash",
-      "count": 1,
+      "count": 2,
       "kind": "opencode",
       "recover_hours": 2.5,
       "long_recover_days": 15,

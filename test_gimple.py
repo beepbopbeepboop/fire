@@ -3021,7 +3021,8 @@ def write_bytes(s: Span) -> Int:
     return external_call["write", Int64](1, s.unsafe_ptr(), len(s))
 """), 'mlir_write_bytes_bottom')
 
-    # 153b. GATE regression (bugs/gate-stdlib-syntax.md): a `__mlir_op` binary
+    # 153b. GATE regression (stdlib-syntax red on std/builtin/bool.mojo once the
+    #       GIMPLE tag was pinned; fixed in f4a7ee488): a `__mlir_op` binary
     #       op over _Bool operands must report the OPERANDS' type, not a
     #       blanket int64_t. Before the fix the result temp was declared
     #       int64_t and assigned `_t1 & _t2` (both _Bool) — legal in an
@@ -3056,6 +3057,21 @@ struct B:
             __mlir_attr.`#kgen.simd<true> : !kgen.scalar<bool>`,
         )
 """), 'mlir_bool_simd_xor_attr_operand')
+
+    # 153d. The third of std/builtin/bool.mojo's trio (__and__/__or__/__xor__):
+    #       pop.simd.or over two _Bool fields. The stdlib-syntax red once the
+    #       GIMPLE tag was pinned was fixed at the root in f4a7ee488; 153b/153c
+    #       pin and/xor and the mixed-type attr operand, and this pins the
+    #       missing `or` shape. It fails on the pre-fix lowering with gcc's
+    #       "type mismatch in binary expression" on `int64_t _t = _t1 | _t2;`
+    #       (both operands _Bool).
+    _run_isolated(lambda: test_gimple_body("mlir_bool_simd_or", """\
+struct B:
+    var _mlir_value: Bool
+
+    def bor(self, rhs: B) -> Bool:
+        return __mlir_op.`pop.simd.or`(self._mlir_value, rhs._mlir_value)
+"""), 'mlir_bool_simd_or')
 
     # 154. libc-name mangling: `fn exit` becomes mojo_exit (no clash with libc exit),
     #      while external_call["exit"] keeps the raw libc symbol — exit from the library.

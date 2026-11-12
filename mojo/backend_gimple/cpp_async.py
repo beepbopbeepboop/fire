@@ -2874,10 +2874,15 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
             body_lines.append("    co_return;")
         else:
             raise gimple_exprtypes._UnsupportedAsyncShape(
-                f"{fn.name}: every `return` must carry a scalar value "
-                "(int64_t/double/_Bool), and all of them must agree on "
-                "one consistent type")
-    if (value_ctype.endswith(' *') and value_ctype not in ('MojoList *', 'MojoDict *', 'MojoSet *')
+                f"{fn.name}: every `return` must carry a value of one "
+                "consistent supported type")
+    # Boxed/non-scalar async return values (pointer-typed results such as
+    # MojoList*/MojoDict*/MojoSet*/MojoBytes*, char *, struct pointers,
+    # etc.) are stored in the coroutine promise's result slot and read back
+    # unchanged by awaiters/consumers.
+    if (value_ctype != 'void' and value_ctype.endswith(' *')
+            and value_ctype not in ('MojoList *', 'MojoDict *', 'MojoSet *',
+                                    'MojoBytes *', 'char *', 'void *')
             and value_ctype[:-2] in gen.struct_field_types):
         gen._cpp_value_struct_names.add(value_ctype[:-2])
 

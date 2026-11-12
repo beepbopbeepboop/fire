@@ -2767,7 +2767,12 @@ def _emit_reflection_dispatch(self, parts):
                 "     * probe is what tells the two apart WITHOUT a range test, so a large\n"
                 "     * INTEGER stored under kind 0 (2^40) still renders as itself rather than\n"
                 "     * being read as a pointer. */\n"
-                "    char *_s = mojo_dict_slot_repr(_v, d->slots[_i].kind);\n"
+                "    /* A STRUCT value (kind 5) takes its own repr first: `mojo_dict_slot_repr`\n"
+                "     * answers the decimal of its word, which is never NULL, so the struct arm\n"
+                "     * below was unreachable and `print({'p': obj})` printed the object's address. */\n"
+                "    char *_s = (d->slots[_i].kind == 5) ? _mojo_dict_val_repr(d, _v)\n"
+                "             : (d->slots[_i].kind == 6) ? mojo_dict_repr_other_slot(d, _i, _v)\n"
+                "                                        : mojo_dict_slot_repr(_v, d->slots[_i].kind);\n"
                 "    if (!_s || (d->slots[_i].kind == 0 && _v > 65536\n"
                 "                && (mojo_is_registered_list(_v)\n"
                 "                    || mojo_is_registered_dict(_v)\n"
@@ -5105,6 +5110,34 @@ def gen_module_impl(self, stmts: list):
                     if _cv is not None:
                         self._import_module_comptime_vals[module_qualifier][_cn.target] = _cv
     self._import_scope_stack.append({})
+    # Whole-module body-import pre-scan, BEFORE any function or lifted
+    # closure is emitted (both consume these two registries):
+    #
+    # * `_func_import_frames` — each container's own lexical bindings,
+    #   keyed by the name its body is emitted under. `_gen_lifted_closure_body`
+    #   seeds a closure's frame from its enclosing container's entry, so a
+    #   closure that references a free function imported in the enclosing
+    #   function still resolves it (closures are emitted before that
+    #   function's body).
+    # * `_lexical_func_import_homes` — every (name, module) pair any body
+    #   in this unit binds. `_func_qualifier`'s tier-3 fallback uses this to
+    #   refuse a reference no lexical scope binds when another body binds
+    #   the same name to a DIFFERENT sibling (the silent
+    #   IMPORT_ambiguous_sibling_function miscompile).
+    #
+    # Both must be populated here, not lazily while each body compiles:
+    # the refusal has to be independent of source order (the reference may
+    # come before the conflicting import).
+    self._func_import_frames = {}
+    self._lexical_func_import_homes = {}
+    for _ps_st in stmts:
+        if isinstance(_ps_st, FunctionDef):
+            self._prescan_func_import_frames(
+                getattr(_ps_st, 'body', None) or [], _as_str(_ps_st.name))
+        elif isinstance(_ps_st, (StructDef, TraitDef)):
+            for _ps_m in (getattr(_ps_st, 'methods', None) or []):
+                self._prescan_func_import_frames(
+                    getattr(_ps_m, 'body', None) or [], _as_str(_ps_m.name))
     _generator_fns: dict[int, FunctionDef] = {}
     _async_fns: dict[int, FunctionDef] = {}
     for n in _walk_ast(stmts):
@@ -6171,6 +6204,33 @@ def gen_module_impl(self, stmts: list):
                 self._all_transitive_stmts_ordered.clear()
             if hasattr(self, '_all_transitive_stmts_ids'):
                 self._all_transitive_stmts_ids.clear()
+
+        # Pre-register all functions from self-host sibling modules into shared
+        # tables before dependent call sites are lowered (fixes cycles between
+        # sibling modules like emit_infra <-> emit_stmts).
+        try:
+            _SH_PREFIXES = ('mojo.', 'gimple_', 'ast_rewriter', 'mlir', 'regex_compile',
+                            'module_loader', 'ownership_destruct', 'fire_compiler',
+                            'determinism_trace', 'imports', 'elaborate', 'monomorphize',
+                            'comptime', 'cas', 'build_stdlib_dylib', 'driver')
+            _mod_stmts_map = getattr(self, '_module_stmts', None) or {}
+            for _mod_name, _mod_stmts in _mod_stmts_map.items():
+                _is_sh = False
+                for _pref in _SH_PREFIXES:
+                    if _mod_name.startswith(_pref):
+                        _is_sh = True
+                        break
+                if not _is_sh:
+                    continue
+                for _ms in (_mod_stmts or []):
+                    if isinstance(_ms, FunctionDef):
+                        try:
+                            if hasattr(self, '_imported_func_home'):
+                                self._imported_func_home.setdefault(_ms.name, _mod_name)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
 
     # No epoch bump here, and the absence is worth stating because it looks
     # like the omission a reader would expect to correct. Every nested
@@ -14647,6 +14707,8 @@ def gen_module_impl(self, stmts: list):
                     return ret
                 elif ret == 'char *':
                     return 'char *'
+                elif ret == 'double':
+                    return 'double'
                 else:
                     # Delegate the unknown-callee fallback to _quick_type,
                     # which knows shape-specific results this table has no
@@ -14664,7 +14726,7 @@ def gen_module_impl(self, stmts: list):
                     # (int64_t/double/_Bool) still land on int64_t, matching
                     # this branch's old unconditional default.
                     qt2 = self._quick_type(_value)
-                    return qt2 if (qt2 == 'char *' or qt2.endswith(' *')) else 'int64_t'
+                    return qt2 if (qt2 == 'char *' or qt2.endswith(' *') or qt2 == 'double') else 'int64_t'
             elif (isinstance(_value.func, MemberExpr)
                     and _value.func.member in ('read', 'readline')
                     and not _value.args):
@@ -14703,7 +14765,7 @@ def gen_module_impl(self, stmts: list):
                 # discarded-pointer bug as the unknown-callee case above,
                 # and with the same fix. Non-pointers still land on int64_t.
                 qt4 = self._quick_type(_value)
-                return qt4 if (qt4 == 'char *' or qt4.endswith(' *')) else 'int64_t'
+                return qt4 if (qt4 == 'char *' or qt4.endswith(' *') or qt4 == 'double') else 'int64_t'
         elif (isinstance(_value, MemberExpr) and isinstance(_value.obj, IdentExpr)
                 and _value.obj.name in self.imported_symbols):
             _mx_mod = self.imported_symbols[_value.obj.name].get('module')
@@ -14714,6 +14776,8 @@ def gen_module_impl(self, stmts: list):
                     return _mx_t
                 elif _mx_t == '_Bool':
                     return 'int'
+                elif _mx_t == 'double':
+                    return 'double'
                 else:
                     return 'int64_t'
             # Not a known imported-module global: delegate to _quick_type,
@@ -14721,7 +14785,7 @@ def gen_module_impl(self, stmts: list):
             # char* value → 'char *', matching _lower_MemberExpr) are the
             # single source of truth for these RHS types.
             qt3 = self._quick_type(_value)
-            return qt3 if qt3 == 'char *' else 'int64_t'
+            return qt3 if (qt3 == 'char *' or qt3 == 'double') else 'int64_t'
         elif (isinstance(_value, MemberExpr) and isinstance(_value.obj, IdentExpr)
                 and gimple_exprtypes.is_bound_method_value(
                     self, _value,
@@ -14737,6 +14801,11 @@ def gen_module_impl(self, stmts: list):
                 return qt
             elif qt == '_Bool':
                 return 'int'
+            elif qt == 'double':
+                # A float literal (or float-valued expression) is a `double`
+                # global; collapsing it to int64_t made the definer's accessor
+                # disagree with the importer's `extern double`.
+                return 'double'
             else:
                 return 'int64_t'
 
@@ -15219,6 +15288,8 @@ def gen_module_impl(self, stmts: list):
                                 _phase17_set_gtype(_scan_stmt.name, ret, _scan_own)
                             elif ret == 'char *':
                                 _phase17_set_gtype(_scan_stmt.name, 'char *', _scan_own)
+                            elif ret == 'double':
+                                _phase17_set_gtype(_scan_stmt.name, 'double', _scan_own)
                             else:
                                 _phase17_set_gtype(_scan_stmt.name, 'int64_t', _scan_own)
                         elif (isinstance(_scan_stmt.value.func, MemberExpr)
@@ -15228,11 +15299,13 @@ def gen_module_impl(self, stmts: list):
                         elif (isinstance(_scan_stmt.value.func, MemberExpr)
                                 and _scan_stmt.value.func.member == 'readlines'):
                             _phase17_set_gtype(_scan_stmt.name, 'MojoList *', _scan_own)
+                        elif self._quick_type(_scan_stmt.value) == 'double':
+                            _phase17_set_gtype(_scan_stmt.name, 'double', _scan_own)
                         else:
                             _phase17_set_gtype(_scan_stmt.name, 'int64_t', _scan_own)
                     else:
                         qt = self._quick_type(_scan_stmt.value) or 'int64_t'
-                        _phase17_set_gtype(_scan_stmt.name, qt if (qt.endswith(' *') or qt == '_Bool') else 'int64_t', _scan_own)
+                        _phase17_set_gtype(_scan_stmt.name, qt if (qt.endswith(' *') or qt in ('_Bool', 'double')) else 'int64_t', _scan_own)
                 else:
                     _phase17_set_gtype(_scan_stmt.name, 'int64_t', _scan_own)
         elif isinstance(_scan_stmt, TryStmt):
@@ -17032,6 +17105,10 @@ def gen_module_impl(self, stmts: list):
                         global_decls.append(f"char * {gname};")
                         self._global_var_types[gname] = 'char *'
                         self._global_c_decl_types[gname] = 'char *'
+                    elif _ivt == 'double':
+                        global_decls.append(f"double {gname};")
+                        self._global_var_types[gname] = 'double'
+                        self._global_c_decl_types[gname] = 'double'
                     else:
                         global_decls.append(f"int64_t {gname};")
                         self._global_var_types[gname] = 'int64_t'
@@ -17058,6 +17135,10 @@ def gen_module_impl(self, stmts: list):
                     global_decls.append(f"{_mvt} {gname};")
                     self._global_var_types[gname] = _mvt
                     self._global_c_decl_types[gname] = _mvt
+                elif _mvt == 'double':
+                    global_decls.append(f"double {gname};")
+                    self._global_var_types[gname] = 'double'
+                    self._global_c_decl_types[gname] = 'double'
                 else:
                     global_decls.append(f"int64_t {gname};")
                     self._global_var_types[gname] = 'int64_t'
@@ -17112,6 +17193,13 @@ def gen_module_impl(self, stmts: list):
                 global_decls.append(f"int {gname};")
                 self._global_var_types[gname] = 'int'
                 self._global_c_decl_types[gname] = 'int'
+            elif qt == 'double':
+                # The same `double` answer `_phase17_value_type` and the
+                # VarDecl pre-scan give: an imported float global's accessor is
+                # `extern double` (module_loader's export c_return_type).
+                global_decls.append(f"double {gname};")
+                self._global_var_types[gname] = 'double'
+                self._global_c_decl_types[gname] = 'double'
             else:
                 global_decls.append(f"int64_t {gname};")
                 self._global_var_types[gname] = 'int64_t'
@@ -17213,6 +17301,10 @@ def gen_module_impl(self, stmts: list):
                             global_decls.append(f"char * {gname};")
                             self._global_var_types[gname] = 'char *'
                             self._global_c_decl_types[gname] = 'char *'
+                        elif _ivt == 'double':
+                            global_decls.append(f"double {gname};")
+                            self._global_var_types[gname] = 'double'
+                            self._global_c_decl_types[gname] = 'double'
                         else:
                             global_decls.append(f"int64_t {gname};")
                             self._global_var_types[gname] = 'int64_t'
@@ -17221,6 +17313,13 @@ def gen_module_impl(self, stmts: list):
                 global_decls.append(f"int {gname};")
                 self._global_var_types[gname] = 'int'
                 self._global_c_decl_types[gname] = 'int'
+            elif isinstance(_gv, FloatLiteral):
+                # A float literal is a `double` field. Without this row it fell
+                # to the catch-all `int` arm below, and the accessor an importer
+                # reads is `extern double` (module_loader's c_return_type).
+                global_decls.append(f"double {gname};")
+                self._global_var_types[gname] = 'double'
+                self._global_c_decl_types[gname] = 'double'
             elif isinstance(_gv, StringLiteral):
                 global_decls.append(f"char * {gname};")
                 self._global_var_types[gname] = 'char *'
@@ -17555,6 +17654,11 @@ def gen_module_impl(self, stmts: list):
                     # rather than an implicit one.
                     init_val = f'(int64_t)(void *){init_val}'
             elif init_val.lstrip('-').isdigit():
+                pass
+            elif c_type == 'double':
+                # A `double` field's initializer is the C spelling of a float
+                # literal (`_extract_init_expr`'s FloatLiteral row); resetting
+                # it to 0 silently zeroed `var F = 2.5`.
                 pass
             else:
                 if c_type.endswith(' *'):
