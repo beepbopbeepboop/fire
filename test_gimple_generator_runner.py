@@ -2929,6 +2929,24 @@ def outer(n: Int):
 def main():
     outer(5)
 """, "10\n11\n")
+    # A first-bound plain assignment local read by a nested generator must
+    # be capturable when it is not rebound (scriptutil.traceback_cm's
+    # `showtb = ns.pop('traceback')` shape). The read may drive control flow.
+    test_generator_stdout("nested_generator_captures_plain_bool_assignment", """\
+def outer():
+    showtb = True
+    def g():
+        if showtb:
+            yield 1
+        else:
+            yield 0
+    for v in g():
+        print(v)
+
+
+def main():
+    outer()
+""", "1\n")
     test_generator_matches_cpython("nested_generator_mutates_enclosing_var_via_nonlocal", """\
 def outer():
     var k = 5
