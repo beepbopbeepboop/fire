@@ -3,7 +3,7 @@ may return a boxed/non-scalar value (e.g. MojoList *) and have it observed
 correctly by an awaiting consumer.
 
 This covers the core of
-bugs/mid/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union-part2.md:
+COMPILE_FAIL_Lib_contextlib boxed non-scalar __aenter__ return in async coroutine codegen (part2):
 the coroutine promise/result slot must store and read back boxed values, not
 refuse them as "every `return` must carry a scalar value".
 """
