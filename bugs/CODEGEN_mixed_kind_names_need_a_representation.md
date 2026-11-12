@@ -10,7 +10,9 @@ So the compiler refuses these programs on purpose, with two messages:
 - `parameter ... is passed a container at one call site and a str or number at another`
   (`module_gen.py`, `_refuse_mixed_container_params`)
 
-Effect today: `mojo/middle/coro.py` cannot compile, and the dict-slot regression test (case 2) is refused by design.
+Effect when this doc was written: `mojo/middle/coro.py` could not compile, and the dict-slot regression test
+(case 2) was refused by design. Both of those specific refusals are now gone (see Status); `coro.py` still fails on a
+separate generator shape.
 
 ## Why it matters
 `coro.py` is part of the compiler's own sources. The fire.ci self-host build needs it, so the compiler cannot be
@@ -27,10 +29,49 @@ built from its own source while this refusal stands. See `CODEGEN_dict_slot_read
 
 Not decided. Option 3 is a source change, not a codegen fix.
 
-## Status
-Open. Not started. The design choice (1 vs 2 vs 3) is the owner's.
+## Status (2026-11-11)
+
+- LANDED: the per-kind representation for a NAME that holds more than one
+  SCALAR kind (`int` / `double` / `str`). `emit_infra.mixed_scalar_locals`
+  finds such a name, the store arm in `emit_stmts.py` declares it `int64_t`
+  and boxes a float/str store with `mojo_box_from_double` /
+  `mojo_box_from_str` (a bool keeps its kind with `mojo_box_from_bool`; an
+  int stays its bare word), and the consumers read the kind back
+  (`mojo_repr_boxed`, `mojo_box_word`, `mojo_float_arith_select`,
+  `mojo_len_word`, the box-aware `_len_of_boxed` str test, and box-aware dict
+  keys in `_char_to_cstr`). Both store orders, the dict-read case, branches,
+  and `var` declarations work. The tagged-generator mixed float/str cases
+  (the two `bugs/mid/CODEGEN_tagged_generator_mixed_type_step2-part*` docs)
+  are covered by the same path through `ginf.tagged_mixed_name`.
+- LANDED: the container/scalar parameter refusal no longer fires for a false
+  positive. `_is_noncontainer_arg` (`module_gen.py`) treated an `int64_t`
+  local as "provably not a container", but `int64_t` is also the pre-pass's
+  unknown/tuple-unpack storage default. It now requires a name the pre-pass
+  PROVED scalar (a direct numeric literal); a literal argument is still a
+  non-container observer, so `each([4, 5])` beside `each("de")` is still
+  refused. This removes `coro.py`'s
+  `parameter 'real_params' ... passed a container at one call site and a str
+  or number at another` refusal, which was false at every call site: all of
+  them pass a list.
+- STILL BLOCKED: `mojo/middle/coro.py` compiles past the parameter refusal and
+  now stops on an INDEPENDENT generator shape: its two-level-deep recursive
+  generator `_walk_lists` (inside `_lower_callable_choices._rewrite_fn`) uses
+  a dynamic `getattr`, reaches the C++ coroutine companion instead of the A3
+  stack-switch path, and that companion refuses dynamic attribute names. See
+  `CODEGEN_coro_nested_recursive_generator_getattr.md` (filed with the exact
+  repro and next step). `coro.py` therefore does not compile yet, and the
+  fire.ci self-host build was NOT run.
+- The dict-slot regression test's case 2 now compiles and prints the CPython
+  answer (`test_dict_slot_read_regression.py`).
+
+Option 2 (per-kind clone) was NOT taken: the box already exists and is the
+representation the rest of the compiled path uses for kind-mixed words.
 
 ## Done when
-A program with a float and a str in one name, and a program with a container and a number passed to one parameter,
-both compile and print the CPython answer; `mojo/middle/coro.py` compiles; the fire.ci build is green. Then delete this
-doc in the same commit as the change that closes it.
+
+`python3 tools/memslot.py --gb 8 --label mixed-kind -- python3
+test_mixed_kind_name_representation.py` passes (a float and a str in one name
+— literal, dict-read and branch shapes — plus a container and a number passed
+to one parameter, all pinned to CPython), `mojo/middle/coro.py` compiles, and
+the fire.ci build is green. Then delete this doc in the same commit as the
+change that closes it.

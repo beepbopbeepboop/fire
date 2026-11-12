@@ -1639,6 +1639,16 @@ class GimpleGen:
         # whichever kind its first assignment site carries. Module scope, like
         # `_inferred_var_types`' per-function half it is read beside.
         self._multi_kind_locals: dict[str, set] = {}
+        # Function name -> the locals bound by an UNPACK of a single iterable
+        # (`a, b, ... = call()`/`= some_list`), whose per-element C types the
+        # pre-pass does not know and therefore leaves at the `int64_t` storage
+        # default. Read by `module_gen`'s container-vs-scalar contract: an
+        # `int64_t` there is not proof the argument is a number — it may be a
+        # container element (coro.py's `real_params` from
+        # `base, is_method, real_params, ... = _async_method_setup(...)` is a
+        # list) — while an ordinary local bound by a call or a parameter keeps
+        # counting as a scalar, so a genuinely mixed call site is still refused.
+        self._tuple_unpack_locals: dict[str, set] = {}
         # Call-result VALUE names holding a container whose kind the CALLER
         # cannot know statically (the result of a call to a
         # `_multi_kind_return_funcs` member). Per-function like the other

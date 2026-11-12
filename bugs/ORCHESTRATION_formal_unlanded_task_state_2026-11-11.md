@@ -708,7 +708,7 @@ Each row: entry name, its last state, commits not on master, branch, worktree, c
 
 | entry | state | commits | branch | worktree | claims | verdict |
 |---|---|---|---|---|---|---|
-| `bug-formal-formal-a-module-that-exports-5458` | abandoned | 1 | `work/bug-formal-formal-a-module-that-exports-5458` | `/Users/mrs/net/chatgpt/claude/work-4563` | constants-only host module refused as host-module/unresolvable import, not exports-nothing (fixed; bug doc deleted) | - |
+| `bug-formal-formal-a-module-that-exports-5458` | abandoned | 1 | `work/bug-formal-formal-a-module-that-exports-5458` | `/Users/mrs/net/chatgpt/claude/work-4563` | bug:FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib | - |
 
 ## formal-formal-a-one-field-mutator-ha  (6 entries, max 1 commits)
 

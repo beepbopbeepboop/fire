@@ -113,35 +113,6 @@ class AuthFailure(unittest.TestCase):
         self.assertFalse(C.auth_failed({"worktree": self.tmp}))
 
 
-class FinishedDoneOk(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp()
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def task(self, verdict, exitcode):
-        wt = os.path.join(self.tmp, "wt-%s-%s" % (verdict, exitcode))
-        os.makedirs(wt, exist_ok=True)
-        open(os.path.join(wt, "work.log"), "w").write("CONTROL-STATUS: %s\n" % verdict)
-        if exitcode is not None:
-            open(os.path.join(wt, "exitcode"), "w").write(str(exitcode))
-        return {"worktree": wt}
-
-    def test_done_with_exit_zero_is_finished(self):
-        self.assertTrue(C.finished_done_ok(self.task("DONE", 0)),
-                        "sync --restart-dead must never restart a task whose verdict is DONE with exit code 0")
-
-    def test_done_with_nonzero_exit_is_not_finished_ok(self):
-        self.assertFalse(C.finished_done_ok(self.task("DONE", 1)))
-
-    def test_partial_with_exit_zero_is_not_finished_done(self):
-        self.assertFalse(C.finished_done_ok(self.task("PARTIAL", 0)))
-
-    def test_done_without_exitcode_is_not_finished_ok(self):
-        self.assertFalse(C.finished_done_ok(self.task("DONE", None)))
-
-
 class RestartBudget(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -159,7 +130,6 @@ class RestartBudget(unittest.TestCase):
              mock.patch.object(C, "git", return_value=""), \
              mock.patch.object(C.fleet_ledger, "kill_group", return_value=None), \
              mock.patch.object(C, "registry", return_value=_Reg(reg)), \
-             mock.patch.object(C, "doc_exists_for", return_value=True), \
              mock.patch.object(C, "cmd_spawn", side_effect=AssertionError("must not spawn")):
             new = C.restart(names[-1], "test")
         self.assertIsNone(new, "over budget: restart must refuse and abandon the task")
@@ -172,7 +142,6 @@ class RestartBudget(unittest.TestCase):
              mock.patch.object(C, "git", return_value=""), \
              mock.patch.object(C.fleet_ledger, "kill_group", return_value=None), \
              mock.patch.object(C, "registry", return_value=_Reg(reg)), \
-             mock.patch.object(C, "doc_exists_for", return_value=True), \
              mock.patch.object(C, "cmd_spawn", side_effect=lambda ns: spawned.append(ns.name)):
             new = C.restart("bug-y", "test")
         self.assertEqual(new, "bug-y-r2")

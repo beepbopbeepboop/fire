@@ -57,17 +57,35 @@ tagging a dict read whose name is later rebound with another C type. The fix is 
 `module_shared.py` and `coro.py` compile in the fire.ci build, and `test_dict_slot_read_regression.py` still passes.
 Check it against the fire.ci build, not only this probe.
 
-## Status (2026-11-11)
+## Status (2026-11-11, second entry)
 
-- FIXED: `ast_rewriter.py` and `module_shared.py` compile (the refusal was the dict-slot tag, fixed in 7fe6798cc).
-- REFUSED BY DESIGN: `mojo/middle/coro.py` is refused with `parameter 'real_params' of '_mark_coro_param_elem_kinds' is
-  passed a container at one call site and a str or number at another`. The compiled path has no representation that
-  holds both kinds (`module_gen.py`, `_refuse_mixed_container_params`). Expected until that representation exists:
-  see `CODEGEN_mixed_kind_names_need_a_representation.md`.
-- REFUSED BY DESIGN: a float and a str stored into one name (regression test case 2) now refuse with the mixed-name
-  reason, instead of emitting a double-to-pointer cast gcc rejects. The same design gap.
-- `test_dict_slot_read_regression.py` passes with case 2 expecting that refusal.
-- NOT RUN: the fire.ci self-host build. Its check needs `coro.py` to compile, which is blocked on the design gap.
+- FIXED: a float and a str stored into one name (regression test case 2). The
+  name is the `int64_t` box (`emit_infra.mixed_scalar_locals`), so the program
+  compiles and prints the CPython answer; `test_dict_slot_read_regression.py`
+  asserts that answer now. See
+  `CODEGEN_mixed_kind_names_need_a_representation.md`.
+- FIXED: the `parameter 'real_params' of '_mark_coro_param_elem_kinds' is
+  passed a container at one call site and a str or number at another` refusal
+  was a false positive — every call site passes a list; only the pre-pass's
+  `int64_t` tuple-unpack default was read as "a number". `module_gen`'s
+  `_is_noncontainer_arg` now needs a scalar the pre-pass PROVED; `coro.py`
+  gets past that refusal.
+- STILL BLOCKED: `mojo/middle/coro.py` now stops on a different, independent
+  shape: its nested recursive generator `_walk_lists` uses a dynamic
+  `getattr` and is refused by the C++ coroutine companion. Filed as
+  `CODEGEN_coro_nested_recursive_generator_getattr.md` with the exact repro
+  and next step. The fire.ci self-host build was NOT run.
+- SUPERSEDED status (kept for the history of this hop): `ast_rewriter.py` and `module_shared.py` compile (the refusal
+  was the dict-slot tag, fixed in 7fe6798cc).
+- SUPERSEDED: the two "REFUSED BY DESIGN" entries below described the same
+  design gap. They are fixed as of this entry; the paragraphs are kept only so
+  the earlier measurement is not lost.
+- OLD: `mojo/middle/coro.py` was refused with `parameter 'real_params' of '_mark_coro_param_elem_kinds' is
+  passed a container at one call site and a str or number at another` (`module_gen.py`, `_refuse_mixed_container_params`).
+- OLD: a float and a str stored into one name (regression test case 2) refused with the mixed-name reason.
+- `test_dict_slot_read_regression.py` now passes with case 2 compiling and printing the CPython answer.
+- NOT RUN: the fire.ci self-host build. Its check needs `coro.py` to compile, which is blocked on the nested-generator
+  shape, not on the mixed-kind representation.
 
 Done when the mixed-kind representation exists, `coro.py` compiles, and the fire.ci build is green. Until then this doc
 stays open with the status above.

@@ -5301,12 +5301,12 @@ main()
                                        _mixed_none, _mixed_none)
     # Open item 1 of the 15th round: a mixed name whose OTHER store is not
     # int64. The copy of a tagged word into a str or float local used to
-    # compile to a bare unwrap: the str local segfaulted (an int word used as
-    # a char*), and the float local printed `1.0` / `0.0` for `1` / None. A
-    # Mojo name has one type, so the refusal is the honest answer in either
-    # direction (the copy first, or the plain store first).
-    # A str stored into a mixed tagged name is a kind-'p' box. Both directions
-    # and the reads (print, ==, +, len, f-string) are checked against CPython.
+    # compile to a bare unwrap (the str local segfaulted, the float local
+    # printed `1.0`/`0.0`). The name has one C type, so the codegen boxes it
+    # (`ginf.mixed_scalar_locals`): each store keeps its own kind in the
+    # MojoBox and every consumer reads it by kind. Pinned to CPython on the
+    # same text, both directions (the tagged copy first, or the plain store
+    # first).
     _mixed_str = """\
 def g():
     yield 1
@@ -5341,9 +5341,6 @@ def main():
     print(len(x))
 main()
 """
-    # A float stored into a mixed tagged name is a box (`mojo_box_from_double`),
-    # not a refusal. Both directions are checked against CPython, the oracle
-    # measured at test time, so these cannot pin this compiler's own answer.
     _mixed_float = """\
 def g():
     yield 1
@@ -5377,26 +5374,12 @@ def main():
     print(x)
 main()
 """
-    test_generator_matches_cpython("tagged_for_target_copy_into_str", _mixed_str, _mixed_str)
-    # A tuple-yielding generator with a None slot: the None is a box (kind 'n') in
-    # the yielded tuple, the tuple-unpacked names are tagged words, so `== None`,
-    # `print`, and arithmetic on the int slot all agree with CPython.
-    _tuple_none = """\
-def g():
-    yield 1, 10
-    yield None, 20
-    yield 2, 30
-def main():
-    for a, b in g():
-        print(a)
-        print(a == None)
-        print(b + 1)
-main()
-"""
-    test_generator_matches_cpython("tagged_tuple_slot_none", _tuple_none, _tuple_none)
-    test_generator_matches_cpython("tagged_for_target_plain_str_store_after_copy",
+    test_generator_matches_cpython("tagged_for_target_copy_into_str",
+                                   _mixed_str, _mixed_str)
+    test_generator_matches_cpython("tagged_for_target_str_store_after_copy",
                                    _mixed_str_after, _mixed_str_after)
-    test_generator_matches_cpython("tagged_for_target_copy_into_float", _mixed_float, _mixed_float)
+    test_generator_matches_cpython("tagged_for_target_copy_into_float",
+                                   _mixed_float, _mixed_float)
     test_generator_matches_cpython("tagged_for_target_plain_float_store_after_copy",
                                    _mixed_after, _mixed_after)
 

@@ -18,9 +18,7 @@ import subprocess
 import monomorphize as mm
 from fire_compiler import (py_tokenize, Parser, FunctionDef, StructDef,
                           TraitDef, split_top_level_commas, VarDecl,
-                          AssignStmt, IdentExpr, TupleExpr, StringLiteral)
-from mojo.middle.comptime import (eval_const_bool_state, CONST_TRUE,
-                                  CONST_FALSE)
+                          AssignStmt, IdentExpr)
 from gimple_codegen import _mojo_type
 from mojo.middle.types import _body_builds_struct_tuple
 
@@ -32,16 +30,6 @@ class ConformanceError(Exception):
     trait bound that the concrete type does not meet (it is missing a required
     method, or its signature differs). The message is the compile error a user
     sees."""
-
-
-class WhereConformanceError(ConformanceError):
-    """A `where` clause of a generic is provably false for the concrete type
-    arguments (`where (N > 0, "N must be positive")`). A subclass of
-    ConformanceError, so it is an ordinary conformance diagnostic to every
-    caller, and it is the one the struct instantiation path re-raises: its
-    trait-bound swallow exists for false positives of the bound check, and
-    a where clause that folds to false is not one of those."""
-
 
 # The generic head is `monomorphize.head_match`, which finds it with BRACKETS
 # BALANCED rather than with a `[^\]]*` class -- a parameter whose type is itself
@@ -624,79 +612,10 @@ def _is_int_dtype(t: str) -> bool:
     return False
 
 
-def _template_where_clauses(template_src: str):
-    """The parsed `where` clause expressions of a generic template (a function
-    or a struct), as a list in source order, or None when the template does not
-    parse. `(cond, "message")` entries are TupleExpr, as the parser leaves them."""
-    try:
-        stmts = Parser(py_tokenize(textwrap.dedent(template_src))).parse_module()
-    except Exception:
-        return None
-    for s in stmts:
-        if isinstance(s, (FunctionDef, StructDef)):
-            w = s.where_clause
-            if w is None:
-                return []
-            return list(w) if isinstance(w, list) else [w]
-    return None
-
-
-def _split_where_message(expr):
-    """`(cond, "message")` -> (cond, message); any other clause -> (expr, None)."""
-    if (isinstance(expr, TupleExpr) and len(expr.elements) == 2
-            and isinstance(expr.elements[1], StringLiteral)):
-        return expr.elements[0], expr.elements[1].value
-    return expr, None
-
-
-def _where_bindings(targs: dict) -> dict:
-    """The comptime bindings a clause folds against: a concrete integer or
-    Bool type argument. Any other argument is left out, so a clause over it is
-    undecided rather than wrong."""
-    bindings = {}
-    for name, conc in targs.items():
-        text = str(conc).strip()
-        if re.fullmatch(r'-?\d+', text):
-            bindings[name] = int(text)
-        elif text in ('True', 'False'):
-            bindings[name] = (text == 'True')
-    return bindings
-
-
 def check_where_clauses(module_src: str, template_src: str, targs: dict):
-    """Enforce the template's `where` clauses for the concrete `targs`.
-
-    Each clause is folded by the shared constant folder
-    (mojo.middle.comptime.eval_const_bool_state): a provably false clause raises
-    ConformanceError with its message, or its source when it has none. A true
-    clause passes. An undecided clause (a name the folder cannot resolve, such
-    as a comptime assert proved elsewhere in the body) is accepted as before.
-    The regex checks for `T.is_floating_point()` / `is_integral()` / `T == U`
-    only run for a template the parser cannot read or whose clause the folder
-    could not decide, so DType predicates keep their existing result."""
-    clauses = _template_where_clauses(template_src)
-    undecided = clauses is None
-    if clauses:
-        src_texts = [m.group(1).strip() for m in
-                     re.finditer(r'where\s+(.+?)(?::|\n|$)', template_src)]
-        bindings = _where_bindings(targs)
-        for i, item in enumerate(clauses):
-            cond, msg = _split_where_message(item)
-            state = eval_const_bool_state(cond, bindings)
-            if state == CONST_FALSE:
-                if msg is not None:
-                    raise WhereConformanceError(msg)
-                text = (src_texts[i] if len(src_texts) == len(clauses)
-                        else ' and '.join(src_texts))
-                raise WhereConformanceError(f"requirement '{text}' is not satisfied")
-            if state != CONST_TRUE:
-                undecided = True
-    if undecided:
-        _check_where_text_predicates(template_src, targs)
-
-
-def _check_where_text_predicates(template_src: str, targs: dict):
-    """The DType / type-equality where checks, by regex over the clause text."""
+    """Check where clause constraints like dtype.is_floating_point()."""
+    # Look for where clauses
+    # Simple pattern matching
     for m in re.finditer(r'where\s+(.+?)(?::|\n|$)', template_src):
         clause = m.group(1).strip()
         # Check for X.is_floating_point()
