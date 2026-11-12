@@ -1,20 +1,22 @@
 # TEST: five host-module tables in formal/imports.py disagree with the tree (test_formal_imports.py, 5 FAIL)
 
-Status: OPEN. Filed 2026-11-11 on master. Measured: `python3 test_formal_imports.py` gives `PASS=90 FAIL=5`.
+Status: OPEN, 1 of 5 fixed. Filed 2026-11-11 on master. Measured: `python3 test_formal_imports.py` gives `PASS=90 FAIL=5`; after item 1, `PASS=91 FAIL=4`.
 These are not caused by the out-self or lexer work. They were red on master before it. The struct RECOVER commit does not
 own them: none of the five test names appear in its version of the file.
 
 ## The five failures (measured reasons, verbatim from the run)
 
-1. **no standard-library module is left in neither tier**: `host_module_tier('builtins')` is `''`, not `'unreachable'`.
-   `builtins` is the interpreter's own namespace (`set(dir(builtins))`), so its tier should be `unreachable`.
+1. **FIXED (test row moved, not the table)**: **no standard-library module is left in neither tier**: `host_module_tier('builtins')` is `''`, not `'unreachable'`.
+   `builtins` is the interpreter's own namespace (`set(dir(builtins))`). It was written as `formal/hostmods/builtins.mojo`
+   on 2026-11-08 and left the unreachable table by that rule, so its tier is `''`. The test still expected `unreachable`;
+   the test's `placed` row moved to its `written` table, which is the rule the test's own docstring states.
 
 2. **a host-module refusal says what this target offers instead**: the refusal does not name that the record callers
-   want is a struct. The advice points at `bugs/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`, which does
+   want is a struct. The advice points at `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib`, which does
    not exist in the tree.
 
 3. **a host-module refusal carries its measured next step**: the same refusal, same missing doc
-   (`bugs/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`). The real reason is not stated anywhere it can be
+   (`FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib`). The real reason is not stated anywhere it can be
    read from.
 
 4. **every host-module advice entry is honest**: `HOST_MODULE_ADVICE['collections']` tells a reader to write a struct,
