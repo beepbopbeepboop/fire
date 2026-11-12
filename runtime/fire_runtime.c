@@ -14645,11 +14645,33 @@ void mojo_cstr_or_int_release(int64_t orig, char *s) {
      it is the SAME predicate mojo_cstr_or_int_str chose the branch with: a
      registered list is the only value that produces this kind of string, so
      the two cannot disagree about which allocation `s` is. */
-    if (mojo_is_registered_list(orig) || mojo_is_registered_bytes(orig)) { free(s); return; }
+    /* A regex match's repr (`mojo_re_match_repr`) is an ordinary malloc of its
+     * own size, not a pool block: pooling it would hand a block that may be
+     * larger than _INT_STR_BLOCK out as an Int key's scratch. Freed outright,
+     * like the other two non-integer spellings. */
+    if (mojo_is_registered_list(orig) || mojo_is_registered_bytes(orig)
+            || mojo_is_re_match(orig)) { free(s); return; }
     /* `s` is the decimal `mojo_cstr_or_int_str` made through mojo_str_from_int,
      * i.e. a block from `_int_str_block`: back to the pool it came from. */
     *(char **)s = _int_str_pool;
     _int_str_pool = s;
+}
+
+/* `str(v)` for a word the codegen treats as an Int (the int arm of
+ * `_stringify_value`): the spelling `mojo_cstr_or_int_str` gives, as a FRESH
+ * heap string the caller owns outright. The conversion's own result is
+ * borrowed (a str word), transient (a pool block) or a heap string of its own
+ * (a box, a container repr); it is copied here and released through its own
+ * protocol, so the copy is always the caller's to free. The codegen registers
+ * the result as fresh, which lets `len`, `+` and an f-string cat free it after
+ * its one use. Before this, `len(String(i))` and `"n=" + String(i)` never
+ * freed the conversion: ~32 B per iteration, measured over 100k and 400k. */
+char *mojo_str_word_fresh(int64_t v)
+{
+    char *s = mojo_cstr_or_int_str(v);
+    char *d = strdup(s);
+    mojo_cstr_or_int_release(v, s);
+    return d;
 }
 
 /* The dict-STORE twin of `mojo_cstr_or_int_release`: the SAME ownership
