@@ -450,17 +450,24 @@ def split_reason(doc):
     return m.group(1)
 
 
-def unserved_classes(pool=None):
+def unserved_classes(pool=None, *, warn_only=False):
     """Classes the pool documents but cannot serve: no slot of that class has any count.
 
     A doc at such a class can never be worked, and the escalation ladder has no way out of it —
     2026-11-10: `hard` is documented as "bugs/hard/*.md (Opus 5.5)" while opus has count 0 and has
-    never run a task, so 25 hard docs sat there with no path forward."""
+    never run a task, so 25 hard docs sat there with no path forward.
+
+    warn_only: when True, omit classes whose lack of a slot is an accepted policy recorded in
+    pool.json's classes.unserved_policy — the configured handling (e.g. replan) applies, so the
+    swarm must not warn on every pass."""
     pool = pool or C.load_pool()
+    accepted = (pool.get("classes") or {}).get("unserved_policy") or {}
     out = {}
     for cls in C.CLASSES:
         slots = [sl for sl in pool["slots"] if C.accepts(sl, cls)]
         if not any(sl.get("count", 0) > 0 for sl in slots):
+            if warn_only and cls in accepted:
+                continue
             out[cls] = [sl["name"] for sl in slots]
     return out
 
@@ -949,7 +956,7 @@ def main():
                     log("cleanup: " + line.strip())
             fed = cont = retired = 0
             if guard_ok:
-                unserved = unserved_classes()
+                unserved = unserved_classes(warn_only=True)
                 if unserved:
                     log("config: class(es) with docs but no slot: %s" % ", ".join(
                         "%s (%s count 0)" % (c, "/".join(s)) for c, s in sorted(unserved.items())))
