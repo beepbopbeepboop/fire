@@ -4970,16 +4970,6 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _msym = _gef._struct_method_csym(gen, _sn, '__len__', '')
             return 'int64_t', gen._call_expr(
                 'int64_t', _msym, [(at, av)])
-    if at in ('int', 'int64_t') and isinstance(node.args[0], gimple_ctypes.IdentExpr) \
-            and _as_str(node.args[0].name) in ginf.mixed_value_locals(gen):
-        # A container/scalar name (`mixed_value_locals`) is a box-holding word
-        # whose kind changes with each store, so the static `_actual_types`
-        # arms below would answer for the store that happened to be seen last
-        # (`x = [1, 2]; len(x); x = 5; len(x)` read a list header out of the
-        # int 5). The runtime answers by kind: a list/dict/set/bytes/str its
-        # length, anything else (an int) a TypeError, as CPython raises.
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_len_word',
-                                        [('int64_t', gen._ensure_local('int64_t', av))])
     if at in ('int', 'int64_t'):
         # `at` is just the local's declared storage type — for a value
         # widened to int64_t because it's joined with other assignment
