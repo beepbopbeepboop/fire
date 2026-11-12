@@ -104,7 +104,7 @@ The same narrow check as part 1 (its Test section owns the baseline):
     python3 tools/memslot.py --gb 8 --label tgbox-doc -- python3 test_gimple_generator_runner.py
 
 No new failure against the 22-case baseline recorded in
-`bugs/CODEGEN_tagged_generator_mixed_type_step1-part1.md`, and every
+`docs/tagged_generator_mixed_type-box.md` ("Test baseline"), and every
 `tagged_for_target_*` case passing.
 
 ## Acceptance

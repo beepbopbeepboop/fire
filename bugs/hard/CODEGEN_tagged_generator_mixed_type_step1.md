@@ -1,6 +1,6 @@
 # CODEGEN_tagged_generator_mixed_type_step1
 
-SPLIT: CODEGEN_tagged_generator_mixed_type_step1-part1, CODEGEN_tagged_generator_mixed_type_step1-part2
+SPLIT: CODEGEN_tagged_generator_mixed_type_step1-part2 (the read side; the store side is in docs/tagged_generator_mixed_type-box.md)
 
 ## Parent plan
 docs/tagged_generator_mixed_type-plan.md
