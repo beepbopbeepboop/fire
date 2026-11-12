@@ -11100,6 +11100,60 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
                     f"{indent}}}"]
 
     call = yf.value
+    # `yield from <generator-handle local>` — delegate through an existing
+    # compiled-generator handle's resume/value API (same protocol as the
+    # call-start delegation below and as `for x in g:` / `next(g)` on a
+    # handle local). The handle is owned by the local; do NOT destroy it
+    # on exhaustion (the same never-frees convention every other
+    # generator-handle consumer in this emitter follows).
+    if (isinstance(call, gimple_ctypes.IdentExpr)
+            and call.name in getattr(gen, '_cpp_generator_var_api', {})):
+        _yh_api = gen._cpp_generator_var_api[call.name]
+        _yh_base = _yh_api['base']
+        _yh_handle = gen._cpp_kw_param_renames.get(call.name, call.name)
+        _yh_refs = getattr(gen, '_cpp_xmod_generator_refs', None)
+        if _yh_refs is not None:
+            _yh_refs.setdefault(_yh_base, {
+                'value_ctype': _yh_api.get('value_ctype', 'int64_t'),
+                'params': list(_yh_api.get('params') or [])})
+        # Forward declaration for the callee's wrappers when its unit comes
+        # later in this .cpp (same as the call-start delegation path).
+        _fwd = getattr(gen, '_cpp_fwd_gen_delegates', None)
+        if _fwd is not None and _yh_base != getattr(gen, '_cpp_gen_self_base', None):
+            _fwd_sig = ', '.join(
+                gimple_exprtypes._c_to_cpp_scalar_type(_ct)
+                for _ct in (gen.func_param_types.get(f"{_yh_base}_start") or [])) or 'void'
+            _fwd.append((_yh_base, _fwd_sig,
+                         gimple_exprtypes._c_to_cpp_scalar_type(
+                             _yh_api.get('value_ctype') or 'int64_t')))
+        # `yield from` forwards `send()` to the sub-generator (same as the
+        # call-start form below): first step is the implicit next()/resume
+        # delivering None, later steps forward the word the outer generator
+        # was resumed with via send.
+        if _yh_base.startswith('_mojogen_'):
+            _yh_first = f"{_yh_base}_resume({_yh_handle})"
+            _yh_step = lambda _fw: f"{_yh_base}_send({_yh_handle}, {_fw})"
+        else:
+            gen._cpp_runtime_gen_resume_used = True
+            _yh_first = f"__mojo_gen_resume ((int64_t)(intptr_t){_yh_handle}, mojo_box_none())"
+            _yh_step = lambda _fw: f"__mojo_gen_resume ((int64_t)(intptr_t){_yh_handle}, {_fw})"
+        _fw = gen._cpp_fresh_name("_mg_yf_word")
+        return [
+            f"{indent}{{",
+            f"{indent}    int64_t {_fw} = mojo_box_none();",
+            f"{indent}    if ({_yh_first}) {{",
+            f"{indent}        for (;;) {{",
+            f"{indent}            {_fw} = co_yield {_yh_base}_value({_yh_handle});",
+            f"{indent}            if (!{_yh_step(_fw)}) break;",
+            f"{indent}        }}",
+            f"{indent}    }}",
+            f"{indent}    if (mojo_exc_pending_get()) {{",
+            f"{indent}        mojo_exc_pending_set(0);",
+            f"{indent}        throw _MojoCppExc{{ mojo_exc_type_get(), "
+            f"mojo_exc_msg_get(), mojo_exc_obj_get() }};",
+            f"{indent}    }}",
+            f"{indent}}}",
+        ]
     # `yield from <ListExpr/TupleExpr>` — delegate to a plain collection:
     # emit `for (auto _yf_item : <collection>) { co_yield _yf_item; }`
     if isinstance(call, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
