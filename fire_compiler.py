@@ -2624,10 +2624,11 @@ def _check_out_argument_calls(stmts, filename) -> None:
 
 
 def _warn_fn_keyword(filename, tok) -> None:
-    """Stage 1 of the `fn` removal (bugs/DIAGNOSTICS_fn_keyword_is_accepted_should_warn_then_refuse.md):
-    a `fn` DEFINITION is still accepted, and it draws the real compiler's
-    message at the keyword. An identifier named `fn` is not a definition and is
-    not reported: CPython code uses it as a name, and the parser accepts that."""
+    """The `fn` keyword was removed from the language. A `fn` DEFINITION is
+    still accepted and draws the real compiler's message at the keyword; the
+    decision on 2026-11-11 (6408a0b14) is a warning, not a refusal. An
+    identifier named `fn` is not a definition and is not reported: CPython code
+    uses it as a name, and the parser accepts that."""
     loc = f"{filename}:{tok.line}:{tok.col}: " if filename else f"{tok.line}:{tok.col}: "
     print(f"{loc}warning: 'fn' has been removed; use 'def' instead", file=sys.stderr)
 

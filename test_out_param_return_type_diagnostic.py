@@ -14,9 +14,9 @@ compiler's primary message and location:
   must have type 'Self'; use a 'where' clause ...`.
 * `f(y)` where `def f(out x: Int)`: `invalid call to 'f': unexpected
   argument`.
-* `fn f(...)`: `'fn' has been removed; use 'def' instead` (a warning now; the
-  refusal is a separate, decided-against stage, see
-  bugs/DIAGNOSTICS_fn_keyword_is_accepted_should_warn_then_refuse.md).
+* `fn f(...)`: `'fn' has been removed; use 'def' instead`, as a warning at the
+  keyword. That is the decided end state: refusing `fn` was considered and
+  dropped (commit 6408a0b14).
 
 Every measured case is now a plain assertion: the compiler refuses each shape
 at the real compiler's primary message and location.
@@ -63,6 +63,14 @@ OUT_DECLARATION_HINT = re.compile(r'^\s*(?:async\s+)?(?:def|fn)\b[^\n]*\bout\b',
 
 def _compile(src, filename='t.mojo'):
     return compile_to_gimple(src, do_imports=False, filename=filename)
+
+
+def _compile_capturing_stderr(src, filename='t.mojo'):
+    """Compile `src` and return its stderr; the `fn` warning is printed there."""
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        _compile(src, filename=filename)
+    return err.getvalue()
 
 
 def _location(err):
@@ -196,38 +204,43 @@ class OutParamReturnTypeDiagnostic(unittest.TestCase):
                      '    f(y)\n')
         self.assertIn("invalid call to 'f': unexpected argument", str(cm.exception))
 
-    # --- the removed `fn` keyword: stage 1 warns (bugs/DIAGNOSTICS_fn_keyword_*) ---
+    # --- the removed `fn` keyword: the warning is the decided end state -------
+    # Stage 2 (refusing `fn`) was dropped on master (6408a0b14); the warning
+    # stays. These pin it on every definition form, at the keyword's location.
 
     def test_fn_definition_compiles_with_the_real_warning_at_the_keyword(self):
-        import contextlib
-        import io
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            _compile('fn f(x: Int) -> Int:\n'
-                     '    return x\n')
-        self.assertIn("t.mojo:1:1: warning: 'fn' has been removed; use 'def' instead",
-                      err.getvalue())
+        err = _compile_capturing_stderr('fn f(x: Int) -> Int:\n'
+                                        '    return x\n')
+        self.assertIn("t.mojo:1:1: warning: 'fn' has been removed; use 'def' instead", err)
+
+    def test_decorated_fn_definition_warns_at_the_keyword(self):
+        err = _compile_capturing_stderr('@dec\n'
+                                        'fn f(x: Int) -> Int:\n'
+                                        '    return x\n')
+        self.assertIn("t.mojo:2:1: warning: 'fn' has been removed; use 'def' instead", err)
+
+    def test_async_fn_definition_warns_at_the_keyword(self):
+        err = _compile_capturing_stderr('async fn f():\n'
+                                        '    pass\n')
+        self.assertIn("t.mojo:1:7: warning: 'fn' has been removed; use 'def' instead", err)
+
+    def test_method_fn_definition_warns_at_the_keyword(self):
+        err = _compile_capturing_stderr('struct A:\n'
+                                        '    fn m(self):\n'
+                                        '        pass\n')
+        self.assertIn("t.mojo:2:5: warning: 'fn' has been removed; use 'def' instead", err)
 
     def test_def_does_not_warn_about_fn(self):
-        import contextlib
-        import io
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            _compile('def f(x: Int) -> Int:\n'
-                     '    return x\n')
-        self.assertNotIn("'fn' has been removed", err.getvalue())
+        err = _compile_capturing_stderr('def f(x: Int) -> Int:\n'
+                                        '    return x\n')
+        self.assertNotIn("'fn' has been removed", err)
 
     def test_fn_as_an_identifier_does_not_warn(self):
         # CPython code uses `fn` as a name (logging's findCaller); that is not a definition.
-        import contextlib
-        import io
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            _compile('def g() -> Int:\n'
-                     '    var fn = 3\n'
-                     '    return fn\n')
-        self.assertNotIn("'fn' has been removed", err.getvalue())
-
+        err = _compile_capturing_stderr('def g() -> Int:\n'
+                                        '    var fn = 3\n'
+                                        '    return fn\n')
+        self.assertNotIn("'fn' has been removed", err)
 
     def test_method_out_self_with_int_parameter_is_refused_at_the_parameter(self):
         with self.assertRaises(RuntimeError) as cm:
@@ -244,7 +257,6 @@ class OutParamReturnTypeDiagnostic(unittest.TestCase):
                      '    def reset(out self):\n'
                      '        self.a = 0\n')
         self.assertIn("self argument must be present in instance method", str(cm.exception))
-
 
     def test_out_self_with_an_explicit_type_passes(self):
         # The standard library's nested `def default_init_func(out self: T, ...)`
