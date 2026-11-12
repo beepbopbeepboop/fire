@@ -1561,6 +1561,7 @@ void mojo_list_inherit_kinds(MojoList *dst, MojoList *src)
     else if (k) mojo_list_set_elem_repr(dst, NULL);
 }
 
+
 /* ── The per-list ELEMENT REPR ────────────────────────────────────────────
    `mojo_list_set_elem_repr` records how to render one element of this list;
    `mojo_list_repr_elem` is what a repr walker asks per slot and gets NULL from
@@ -6397,32 +6398,45 @@ int64_t mojo_str_find(char *s, char *needle) {
  * == 2), and an inverted or out-of-range window is a miss rather than the
  * empty-slice answer. Mirrors mojo_bytes_rfind_from, which is the same
  * search over a length-tagged buffer. */
-int64_t mojo_str_rfind_from(char *s, char *needle, int64_t start, int64_t stop) {
+/* Python's str.find / str.rfind over a window: start and stop are CODEPOINT
+ * indices with slice semantics (negative counts from the end and is clamped,
+ * an omitted stop is the end). A start past the end, or a stop before the
+ * window's start, is no window: -1. An empty needle matches at the window's
+ * start for find and at its end for rfind, and answers that index. Returns the
+ * codepoint index of the first (or last) match wholly inside the window.
+ *
+ * mojo_str_find_from / mojo_str_rfind_from used to convert the raw start and
+ * stop straight to byte offsets: a negative bound fell through the conversion
+ * and the search ran over the wrong span, so `"abcabc".find("b", -2, -1)` read
+ * -1 where CPython reads 4 (gimple_str_window_matches_cpython). */
+static int64_t _mojo_str_find_window(char *s, char *needle, int64_t start, int64_t stop, int reverse)
+{
     if ((intptr_t)s < 65536 || (intptr_t)needle < 65536) return -1;
-    if (!s || !needle) return -1;
-    int64_t byte_start = mojo_utf8_codepoint_to_byte_offset(s, start);
-    int64_t byte_stop;
-    if (stop == MOJO_SLICE_STOP_OMITTED) {
-        byte_stop = (int64_t)strlen(s);
-    } else {
-        byte_stop = mojo_utf8_codepoint_to_byte_offset(s, stop);
-    }
-    if (byte_stop < byte_start) return -1;
+    int64_t len = mojo_str_codepoint_len(s);
+    int64_t lo = start;
+    int64_t hi = (stop == MOJO_SLICE_STOP_OMITTED) ? len : stop;
+    if (lo < 0) { lo += len; if (lo < 0) lo = 0; }
+    if (hi < 0) { hi += len; if (hi < 0) hi = 0; }
+    if (hi > len) hi = len;
+    if (lo > len || hi < lo) return -1;
+    int64_t blen = (int64_t)strlen(s);
+    int64_t blo = lo >= len ? blen : mojo_utf8_codepoint_to_byte_offset(s, lo);
+    int64_t bhi = hi >= len ? blen : mojo_utf8_codepoint_to_byte_offset(s, hi);
     int64_t nlen = (int64_t)strlen(needle);
-    if (nlen == 0) {
-        /* empty needle matches at end of window in codepoints */
-        /* return stop in codepoints */
-        if (stop == MOJO_SLICE_STOP_OMITTED) {
-            return mojo_str_codepoint_len(s);
-        }
-        return stop;
-    }
-    for (int64_t i = byte_stop - nlen; i >= byte_start; i--) {
-        if (memcmp(s + i, needle, (size_t)nlen) == 0) {
-            return mojo_utf8_codepoint_index(s, i);
-        }
+    if (nlen == 0) return reverse ? hi : lo;
+    if (bhi - blo < nlen) return -1;
+    if (reverse) {
+        for (int64_t i = bhi - nlen; i >= blo; i--)
+            if (memcmp(s + i, needle, (size_t)nlen) == 0) return mojo_utf8_codepoint_index(s, i);
+    } else {
+        for (int64_t i = blo; i + nlen <= bhi; i++)
+            if (memcmp(s + i, needle, (size_t)nlen) == 0) return mojo_utf8_codepoint_index(s, i);
     }
     return -1;
+}
+
+int64_t mojo_str_rfind_from(char *s, char *needle, int64_t start, int64_t stop) {
+    return _mojo_str_find_window(s, needle, start, stop, 1);
 }
 
 /* str.rfind(needle): index of the LAST occurrence of needle in s, or -1.
@@ -6438,27 +6452,7 @@ int64_t mojo_str_rfind(char *s, char *needle) {
  * 2) == 2 but "ab".find("", 3) == -1). On a hit the returned index is absolute
  * (relative to `s`, not to `s + start`). */
 int64_t mojo_str_find_from(char *s, char *needle, int64_t start, int64_t stop) {
-    if ((intptr_t)s < 65536 || (intptr_t)needle < 65536) return -1;
-    if (!s || !needle) return -1;
-    /* start/stop are in codepoint units now */
-    int64_t byte_start = mojo_utf8_codepoint_to_byte_offset(s, start);
-    int64_t byte_stop;
-    if (stop == MOJO_SLICE_STOP_OMITTED) {
-        byte_stop = (int64_t)strlen(s);
-    } else {
-        /* stop is exclusive end in codepoints? Or we need to search within range */
-        byte_stop = mojo_utf8_codepoint_to_byte_offset(s, stop);
-    }
-    int64_t slen = (int64_t)strlen(s);
-    if (byte_start > slen || byte_stop < byte_start) return -1;
-    int64_t nlen = (int64_t)strlen(needle);
-    if (nlen == 0) return start;
-    for (int64_t i = byte_start; i + nlen <= byte_stop; i++) {
-        if (memcmp(s + i, needle, (size_t)nlen) == 0) {
-            return mojo_utf8_codepoint_index(s, i);
-        }
-    }
-    return -1;
+    return _mojo_str_find_window(s, needle, start, stop, 0);
 }
 
 /* Deliberately NOT named mojo_getenv: `getenv` is in _FORCE_RENAME_RESERVED
