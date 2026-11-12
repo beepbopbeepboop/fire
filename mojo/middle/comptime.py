@@ -47,7 +47,6 @@ import fire_compiler as _fc
 # here are the same checks the backends make.
 BoolLiteral = _fc.BoolLiteral
 IntLiteral = _fc.IntLiteral
-FloatLiteral = _fc.FloatLiteral
 StringLiteral = _fc.StringLiteral
 IdentExpr = _fc.IdentExpr
 MemberExpr = _fc.MemberExpr
@@ -467,7 +466,6 @@ def eval_const(node, bindings: dict, platform: str = None):
             platform = None
     if isinstance(node, BoolLiteral): return node.value
     if isinstance(node, IntLiteral):  return node.value
-    if isinstance(node, FloatLiteral): return node.value
     if isinstance(node, StringLiteral):
         if getattr(node, 'is_interpolated', False):
             v = _eval_interpolated_string(node, bindings, platform)
@@ -874,7 +872,7 @@ def _const_foldable(node, bindings: dict, call_hook=None) -> bool:
     the cases `eval_const` / `eval_const_int` fold; anything else is not
     foldable. A call is foldable only when the backend's hook can run it,
     which is the one case that has to evaluate to find out."""
-    if isinstance(node, (BoolLiteral, IntLiteral, FloatLiteral, StringLiteral)):
+    if isinstance(node, (BoolLiteral, IntLiteral, StringLiteral)):
         return True
     if DottedLiteral is not None and isinstance(node, DottedLiteral):
         return True

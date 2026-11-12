@@ -53,8 +53,8 @@ its name says.
 
 `sys.exit(code)` is absent for a DIFFERENT and settled reason: `doc/ABI.md`'s
 export rule declines to advertise a C library symbol, and `exit` is one
-(`reflect._CLIB_SYMS`; measured and settled as a known limit
-of the export rule). No module dylib can therefore be called by that name. On this target
+(`reflect._CLIB_SYMS`; measured and settled in `bugs/FORMAL_known_limits.md`
+1.1). No module dylib can therefore be called by that name. On this target
 the working spelling is the library's own `exit(code)`, which lowers today as
 an extern call - see `test_formal_sys.py`.
 

@@ -641,62 +641,6 @@ def _template_where_clauses(template_src: str):
     return None
 
 
-def _header_where_texts(template_src: str):
-    """The source text of each `where` clause of a template's declaration
-    header, in source order.
-
-    Read from the header itself rather than from a regex over the whole
-    template: a `where` inside the base list (`struct S[T](Movable where
-    False)`) is part of the base list, not a clause of the declaration, and the
-    parser already leaves it out of the clauses. The header runs to the first
-    colon outside brackets and string literals; a clause runs to the next
-    `where` at the same depth, or to an `else "<message>"` tail."""
-    src = template_src
-    depth, quote, end = 0, None, len(src)
-    marks = []
-    i = 0
-    while i < len(src):
-        c = src[i]
-        if quote:
-            if c == '\\':
-                i += 2
-                continue
-            if c == quote:
-                quote = None
-        elif c in '"\'':
-            quote = c
-        elif c in '([{':
-            depth += 1
-        elif c in ')]}':
-            depth -= 1
-        elif c == ':' and depth == 0:
-            end = i
-            break
-        elif (depth == 0 and src.startswith('where', i)
-                and (i == 0 or not (src[i - 1].isalnum() or src[i - 1] == '_'))
-                and not (src[i + 5:i + 6].isalnum() or src[i + 5:i + 6] == '_')):
-            marks.append(i)
-        i += 1
-    texts = []
-    for k, start in enumerate(marks):
-        stop = marks[k + 1] if k + 1 < len(marks) else end
-        clause = src[start + len('where'):stop]
-        clause = re.sub(r'\s+else\s+(["\']).*$', '', clause, flags=re.S)
-        texts.append(clause.strip())
-    return texts
-
-
-def where_violation_error(kind: str, name: str, exc: 'WhereConformanceError'):
-    """The user-facing error for a generic instantiation that violates a `where`
-    clause. Every instantiation entry point (an explicit `Struct[...]` in a
-    body, the in-TU elaboration queue) reports through this one function, so the
-    modular wording (`error: invalid <kind> of '<name>': violated constraint`)
-    does not depend on which path reached the check."""
-    return RuntimeError(
-        f"error: invalid {kind} of '{name}': violated constraint\n"
-        f"note: {type(exc).__name__}: {exc}")
-
-
 def _split_where_message(expr):
     """`(cond, "message")` -> (cond, message); any other clause -> (expr, None)."""
     if (isinstance(expr, TupleExpr) and len(expr.elements) == 2
@@ -706,16 +650,14 @@ def _split_where_message(expr):
 
 
 def _where_bindings(targs: dict) -> dict:
-    """The comptime bindings a clause folds against: a concrete integer, float,
-    or Bool type argument. Any other argument is left out, so a clause over it
-    is undecided rather than wrong."""
+    """The comptime bindings a clause folds against: a concrete integer or
+    Bool type argument. Any other argument is left out, so a clause over it is
+    undecided rather than wrong."""
     bindings = {}
     for name, conc in targs.items():
         text = str(conc).strip()
         if re.fullmatch(r'-?\d+', text):
             bindings[name] = int(text)
-        elif re.fullmatch(r'-?\d+\.\d+([eE][-+]?\d+)?', text):
-            bindings[name] = float(text)
         elif text in ('True', 'False'):
             bindings[name] = (text == 'True')
     return bindings
@@ -735,7 +677,8 @@ def check_where_clauses(module_src: str, template_src: str, targs: dict):
     clauses = _template_where_clauses(template_src)
     undecided = clauses is None
     if clauses:
-        src_texts = _header_where_texts(template_src)
+        src_texts = [m.group(1).strip() for m in
+                     re.finditer(r'where\s+(.+?)(?::|\n|$)', template_src)]
         bindings = _where_bindings(targs)
         for i, item in enumerate(clauses):
             cond, msg = _split_where_message(item)
