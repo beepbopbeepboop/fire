@@ -5063,6 +5063,34 @@ def gen_module_impl(self, stmts: list):
                     if _cv is not None:
                         self._import_module_comptime_vals[module_qualifier][_cn.target] = _cv
     self._import_scope_stack.append({})
+    # Whole-module body-import pre-scan, BEFORE any function or lifted
+    # closure is emitted (both consume these two registries):
+    #
+    # * `_func_import_frames` — each container's own lexical bindings,
+    #   keyed by the name its body is emitted under. `_gen_lifted_closure_body`
+    #   seeds a closure's frame from its enclosing container's entry, so a
+    #   closure that references a free function imported in the enclosing
+    #   function still resolves it (closures are emitted before that
+    #   function's body).
+    # * `_lexical_func_import_homes` — every (name, module) pair any body
+    #   in this unit binds. `_func_qualifier`'s tier-3 fallback uses this to
+    #   refuse a reference no lexical scope binds when another body binds
+    #   the same name to a DIFFERENT sibling (the silent
+    #   IMPORT_ambiguous_sibling_function miscompile).
+    #
+    # Both must be populated here, not lazily while each body compiles:
+    # the refusal has to be independent of source order (the reference may
+    # come before the conflicting import).
+    self._func_import_frames = {}
+    self._lexical_func_import_homes = {}
+    for _ps_st in stmts:
+        if isinstance(_ps_st, FunctionDef):
+            self._prescan_func_import_frames(
+                getattr(_ps_st, 'body', None) or [], _as_str(_ps_st.name))
+        elif isinstance(_ps_st, (StructDef, TraitDef)):
+            for _ps_m in (getattr(_ps_st, 'methods', None) or []):
+                self._prescan_func_import_frames(
+                    getattr(_ps_m, 'body', None) or [], _as_str(_ps_m.name))
     _generator_fns: dict[int, FunctionDef] = {}
     _async_fns: dict[int, FunctionDef] = {}
     for n in _walk_ast(stmts):

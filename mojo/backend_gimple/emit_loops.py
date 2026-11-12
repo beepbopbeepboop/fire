@@ -27,7 +27,7 @@ from fire_compiler import (
     GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    _as_str, _pair_key, _sms_key,
+    _as_str, _as_dict, _pair_key, _sms_key,
 )
 import regex_compile
 import mlir
@@ -3525,8 +3525,21 @@ def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
     gen._current_module_ctx = gen.module_name if len(gen.module_name) > 0 else "root"
     # Per-lexical-scope import tracking: a lifted closure body is its own
     # lexical scope (its own local `from X import ...` statements shadow
-    # the enclosing function's / module's same-named bindings).
+    # the enclosing function's / module's same-named bindings). Seed it
+    # with the ENCLOSING container's bindings first, so a free function
+    # imported by an enclosing function body (rather than at module scope)
+    # is still visible here — closures are emitted before that function's
+    # body compiles, so its frame is gone/never on the stack, and its
+    # imports are recorded by the whole-module pre-scan in
+    # `_func_import_frames`. The body's own pre-scan below overwrites the
+    # seeded names, which is exactly the shadowing Mojo/Python apply.
     _closure_scope = gen._push_import_scope()
+    _outer_frames = getattr(gen, '_func_import_frames', None)
+    if _outer_frames and outer_name:
+        _outer_frame = _as_dict(_as_dict(_outer_frames).get(outer_name))
+        if _outer_frame:
+            for _of_nm in _outer_frame:
+                _closure_scope[_of_nm] = _outer_frame[_of_nm]
     gen._collect_body_import_bindings(ci.inner_def.body, _closure_scope)
     gen.current_func_name = ci.lifted_name
     gen._captures  = dict(ci.captures)
