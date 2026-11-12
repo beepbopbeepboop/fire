@@ -655,6 +655,9 @@ class ImportStmt:
     extra: object = None  # list[(module, alias|None)] for `import a, b, c`
     line: int = 0
     col: int = 0
+    # `lazy import ...` (PEP 810): bind a proxy now, resolve on first use.
+    # Only the parser can set this true, and only at module scope.
+    lazy: bool = False
     # Decorators applied to the import (`@stable(recursive=True)` in front of
     # `from ... import ...`), same shape as `FunctionDef.decorators`: bare
     # names, or CallExpr/DecoratorArgs for a parameterised form.
@@ -667,6 +670,8 @@ class FromImportStmt:
     wildcard: bool = False
     line: int = 0
     col: int = 0
+    # `lazy from ... import ...` (PEP 810) — see ImportStmt.lazy.
+    lazy: bool = False
     # Parser-built flat list[str]: `name` or `name|alias`. `names`' tuples
     # box their str slots to int64_t self-hosted. Read via gimple_ctypes._fi_name
     # / _fi_alias.
@@ -4345,12 +4350,19 @@ class Parser:
     _comptime_rhs_failures: list
     _struct_param_names: list
     _known_traits: set
+    _lazy_import_blockers: list
 
     def __init__(self, tokens: list[Token]):
         self._tok = tokens
         self._pos = 0
         self._filename = ""
         self._pending_decs = []  # decorators awaiting next struct/trait
+        # Enclosing scopes an explicit `lazy import` may not appear in, as
+        # PEP 810 spells them: "function", "class", "try". Empty at module
+        # level. A stack rather than a flag because the error names the
+        # INNERMOST disallowed scope (CPython's symtable checks try first,
+        # then function, then class, and each nested block starts fresh).
+        self._lazy_import_blockers = []
         # `comptime NAME = <rhs>` the parser could not parse, as
         # `[(loc, text, exception_text), ...]`. A comptime right-hand side has
         # two very different fates that used to be INDISTINGUISHABLE: a
@@ -4730,7 +4742,9 @@ class Parser:
                     self._skip_bracketed()
             ret = self._parse_type_ann()
         self._expect("COLON")
+        self._lazy_import_blockers.append("functions")
         body = self._parse_block()
+        self._lazy_import_blockers.pop()
         is_generator, yield_bearing_node_ids = _detect_generator(body)
         return FunctionDef(name=name, params=params, return_type=ret,
                            body=body, decorators=decorators,
@@ -4946,7 +4960,9 @@ class Parser:
             while self._peek().kind not in ("COLON", "NEWLINE", "EOF"):
                 self._advance()
         self._expect("COLON")
+        self._lazy_import_blockers.append("classes")
         body = self._parse_block()
+        self._lazy_import_blockers.pop()
         fields  = param_fields + [s for s in body if isinstance(s, (VarDecl, AssignStmt))]
         methods = [s for s in body if isinstance(s, FunctionDef)]
 
@@ -5225,7 +5241,9 @@ class Parser:
                 elif t.kind == "EOF":
                     break
         self._expect("COLON")
+        self._lazy_import_blockers.append("classes")
         body = self._parse_block()
+        self._lazy_import_blockers.pop()
         methods = [s for s in body if isinstance(s, FunctionDef)]
         decs = getattr(self, "_pending_decs", [])
         self._pending_decs = []
@@ -5242,6 +5260,7 @@ class Parser:
         # from "always 0" to the truth.
         line = self._peek().line
         self._expect("KW", "try"); self._expect("COLON")
+        self._lazy_import_blockers.append("try/except blocks")
         body = self._parse_block()
         handlers = []
         while self._is_kw("except"):
@@ -5331,6 +5350,7 @@ class Parser:
         finally_body = None
         if self._is_kw("finally"):
             self._advance(); self._expect("COLON"); finally_body = self._parse_block()
+        self._lazy_import_blockers.pop()
         return TryStmt(body=body, handlers=handlers,
                        else_body=else_body, finally_body=finally_body,
                        line=line)
@@ -8657,6 +8677,13 @@ class Parser:
             if nxt.kind == "NAME" or (nxt.kind == "STRING" and nxt.value.startswith("`")):
                 self._advance()  # consume 'param'
                 return self._parse_comptime()
+        # `lazy` is a soft keyword (PEP 810, Python 3.15) — only a lazy
+        # import when the very next token is `import`/`from`; everywhere else
+        # it is an ordinary identifier, exactly like `match`/`async` above.
+        if t.kind == "NAME" and t.value == "lazy":
+            nxt = self._peek(1)
+            if nxt.kind == "KW" and nxt.value in ("import", "from"):
+                return self._parse_lazy_import()
         # `match` is a soft keyword (like Python's own) — only a match
         # statement when followed by a real expression and a top-level `:`
         # before the line ends; otherwise it's an ordinary identifier
@@ -9139,6 +9166,51 @@ class Parser:
         return ImportStmt(module=module, alias=alias, extra=extra,
                           line=t.line, col=t.col)
 
+    def _parse_lazy_import(self):
+        """`lazy import ...` / `lazy from ... import ...` (PEP 810).
+
+        `lazy` is a SOFT keyword: `_KEYWORDS` deliberately does not contain
+        it, so `lazy = 5`, `lazy(...)` and `import lazy` keep working. The
+        statement is recognized here only when `lazy` is immediately followed
+        by one of the two import keywords; `_parse_stmt` makes that check.
+
+        CPython's symtable rejects an explicit lazy import from an enclosing
+        function, class, or try block, and rejects `lazy from ... import *`
+        and `lazy from __future__ import ...` outright. Those are parse-time
+        errors (the module never runs), so they are raised here rather than
+        deferred to execution.
+        """
+        lazy_tok = self._advance()          # consume the soft keyword
+        is_from = self._is_kw("from")
+        import_type = "from ... import" if is_from else "import"
+        if is_from:
+            node = self._parse_from_import()
+            # CPython's parser rejects a lazy __future__ import before the
+            # symtable gets a chance to check the enclosing scope, so this
+            # message wins even inside a function/try block.
+            if not node.module.startswith('.') and node.module == '__future__':
+                raise SyntaxError(
+                    f"{self._loc(lazy_tok)}"
+                    "lazy from __future__ import is not allowed")
+            if self._lazy_import_blockers:
+                where = self._lazy_import_blockers[-1]
+                raise SyntaxError(
+                    f"{self._loc(lazy_tok)}"
+                    f"lazy {import_type} not allowed inside {where}")
+            if node.wildcard:
+                raise SyntaxError(
+                    f"{self._loc(lazy_tok)}"
+                    "lazy from ... import * is not allowed")
+        else:
+            if self._lazy_import_blockers:
+                where = self._lazy_import_blockers[-1]
+                raise SyntaxError(
+                    f"{self._loc(lazy_tok)}"
+                    f"lazy {import_type} not allowed inside {where}")
+            node = self._parse_import()
+        node.lazy = True
+        return node
+
     def _parse_import_target(self):
         # Handle relative imports: import .warp, import ..sibling
         module = ""
@@ -9182,6 +9254,11 @@ class Parser:
         elif not module:
             # No dots and no name: error
             self._expect("NAME")  # Will raise error
+        if (self._peek().kind == "NAME" and self._peek().value == "lazy"
+                and self._peek(1).kind == "KW" and self._peek(1).value == "import"):
+            raise SyntaxError(
+                f"{self._loc(self._peek())}"
+                "use 'lazy from ... ' instead of 'from ... lazy import'")
         self._expect("KW", "import")
         if self._peek().kind == "OP" and self._peek().value == "*":
             self._advance()
