@@ -3080,7 +3080,7 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     for _kn, _kexpr in (getattr(node, 'kwargs', None) or []):
         arg_pairs.append(gen.lower_expr(_kexpr))
     try:
-        module_src = open(source).read()
+        module_src = gen._generic_source_text(source)
         import elaborate
         el = elaborate.Elaborator()
         # A generic being elaborated here MAY contain a nested async/
@@ -3476,7 +3476,7 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
     if not all(gimple_exprtypes._is_concrete_type_arg(ta) for ta in type_args):
         return None
     try:
-        module_src = open(source).read()
+        module_src = gen._generic_source_text(source)
         import elaborate
         info = elaborate.Elaborator().elaborate_generic_struct(module_src, base_name, type_args)
     except Exception as e:
@@ -3557,7 +3557,7 @@ def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
             return None
         source = gen._imported_generic_structs.get(g)
         try:
-            module_src = open(source).read()
+            module_src = gen._generic_source_text(source)
             import elaborate
             info = elaborate.Elaborator().elaborate_generic_struct_inferred(
                 module_src, g, [ct for ct, _ in

@@ -320,7 +320,7 @@ def _module_src(gen, base, kind):
     if not path:
         return None
     try:
-        return open(path).read()
+        return gen._generic_source_text(path)
     except OSError:
         return None
 
