@@ -15,7 +15,6 @@ issues are tracked by their own bug docs/markers or are green on this tree.
 | `gimple` | `1851f24bf` | `Dict[Int, Int]` subscript stringified the key; boxed read now uses `_kw` path preserving slot kind. |
 | `runtimediff` | `1851f24bf` | Container stored under dict kind 0 rendered as its address; repr now dispatches by container registry. |
 | `suite-self-test` (1 row) | `07131682d` | `emit_stmts` module-level import cycle fixed by using the `ggc` alias. |
-| `selfhost` | `5b82f8169` | master's PEP 810 lazy-import work landed code the self-hosted compiler cannot compile: five missing hardcoded AST struct fields, a user struct's own `load`/`store` hijacked by the raw-pointer branch, and `_resolve_import_module`'s order-dependent return type. |
 
 ## Verified at the time
 
@@ -25,9 +24,6 @@ issues are tracked by their own bug docs/markers or are green on this tree.
 - `test_runtime_header_scan.py` 53/53
 - `test_dangling_doc_refs.py` 7/7
 - `tools/dangling_doc_refs.py --ratchet` green
-- `test_gimple.py` 439/0 (after `5b82f8169`)
-- `test_runtime_header_scan.py` 53/53 (after `3f6d20d1a`)
-- `stage1/fire.ci` -> `gcc -fgimple` produces `fire.o`, no errors (after `5b82f8169`)
 
 ## Master merges during the round
 
