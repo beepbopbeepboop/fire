@@ -161,6 +161,13 @@ class OutParamReturnTypeDiagnostic(unittest.TestCase):
                      '    return fn\n')
         self.assertNotIn("'fn' has been removed", err.getvalue())
 
+    @unittest.expectedFailure  # stage 2: the warning becomes the refusal (bugs/DIAGNOSTICS_fn_keyword_*)
+    def test_fn_keyword_is_refused(self):
+        with self.assertRaises(RuntimeError) as cm:
+            _compile('fn f(x: Int) -> Int:\n'
+                     '    return x\n')
+        self.assertIn("'fn' has been removed; use 'def' instead", str(cm.exception))
+
 
     def test_method_out_self_with_int_parameter_is_refused_at_the_parameter(self):
         with self.assertRaises(RuntimeError) as cm:
