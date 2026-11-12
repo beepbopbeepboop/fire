@@ -3013,14 +3013,21 @@ def _ambiguous_yielded_params(fn: N.FunctionDef,
     for n in _walk(fn):
         if not isinstance(n, N.YieldExpr):
             continue
-        # A parameter that only reaches the yield as an ARGUMENT of a call to one of this
-        # module's own functions does not set the slot's kind: the call's result does (the
-        # callee's return kind). `yield _mojo_next(iterator)` is a yield of whatever
-        # `_mojo_next` returns, not of `iterator`.
+        # A parameter that only reaches the yield as an ARGUMENT of a call whose result
+        # kind, not the argument kind, sets the slot does not set the slot's kind. That
+        # includes calls to this module's own functions (the callee's return kind) and
+        # str methods whose result is always `str` regardless of the argument kinds, such
+        # as `sep.join(xs)` and `fmt.format(...)`.
         passed_through = set()
         for c in _walk(n.value):
-            if (isinstance(c, N.CallExpr) and isinstance(c.func, N.IdentExpr)
-                    and c.func.name in _MODULE_FUNC_NAMES):
+            if not isinstance(c, N.CallExpr):
+                continue
+            skip_args = False
+            if isinstance(c.func, N.IdentExpr) and c.func.name in _MODULE_FUNC_NAMES:
+                skip_args = True
+            elif isinstance(c.func, N.MemberExpr) and c.func.member in ('join', 'format'):
+                skip_args = True
+            if skip_args:
                 for a in c.args:
                     for sub in _walk(a):
                         passed_through.add(id(sub))

@@ -162,8 +162,8 @@ def selfhost_emitted_return_type(module: str, struct: str, method: str) -> str:
     it: the definition's header is at column 0 and a `{` body comes next,
     while a declaration ends in `;` and a call site is indented and ends in
     `;` too. Only the DEFINITION's header carries the `__GIMPLE` tag between
-    the return type and the name, so it is stripped before the type is
-    returned — otherwise the caller would read `Parser` for a `Parser *`.
+    the return type (`__GIMPLE Parser * f`), so it is stripped before the
+    type is returned — otherwise the caller would read `__GIMPLE Parser *`.
     The mangled name (`fire_compiler_Parser__parse_expr`) is matched on its
     tail, so this does not care whether the module qualified it.
     """
@@ -174,10 +174,13 @@ def selfhost_emitted_return_type(module: str, struct: str, method: str) -> str:
     for m in head_of.finditer(c_src):
         if not c_src[m.end():].lstrip().startswith('{'):
             continue
-        head = m.group(1)
-        if '/*' in head or head.rstrip().endswith('*'):
+        # The tag sits in front of the return type (`__GIMPLE MojoList * f`),
+        # so strip it BEFORE judging the head: a pointer return ends in `*`
+        # by its own spelling, and that is the case this must return.
+        head = re.sub(r'\b__GIMPLE\b', '', m.group(1)).strip()
+        if '/*' in head:
             continue
-        return re.sub(r'\b__GIMPLE\b', '', head).strip()
+        return head
     return ''
 
 
@@ -311,6 +314,35 @@ def test_c_shape(name: str, mojo_src: str, must_have: list, must_not_have: list)
         _PASS += 1
     else:
         print(f"FAIL  {name}: compiles={ok} missing={missing} unexpectedly_present={present}")
+        if not ok:
+            for line in stderr.splitlines()[:8]:
+                print(f"      {line}")
+        _FAIL += 1
+
+
+def test_tag_leads_every_definition(name: str, mojo_src: str, must_have: list):
+    """Every `__GIMPLE` tag in the generated C leads its declaration.
+
+    gcc -fgimple honours the tag only in declaration-specifier position
+    (`__GIMPLE static C * f (...)`). After the return type
+    (`static C * __GIMPLE f (...)`) it lands in the declarator and is
+    silently ignored, so a POINTER-returning body is compiled as ordinary C
+    and never GIMPLE-checked. `test_c_shape` pins each emitter's spelling;
+    this checks the whole generated output instead, so a new definition
+    emitter cannot reintroduce the old shape unnoticed. `must_have` names
+    the pointer-returning definitions that make the check non-vacuous.
+    """
+    global _PASS, _FAIL
+    ok, c_src, stderr = gimple_compiles(mojo_src)
+    missing = [m for m in must_have if m not in c_src]
+    stray = [ln.strip() for ln in c_src.splitlines()
+             if '__GIMPLE' in ln and not ln.startswith('__GIMPLE ')]
+    if ok and not missing and not stray:
+        print(f"PASS  {name}")
+        _PASS += 1
+    else:
+        print(f"FAIL  {name}: compiles={ok} missing={missing} "
+              f"tag_not_leading_its_declaration={stray[:3]}")
         if not ok:
             for line in stderr.splitlines()[:8]:
                 print(f"      {line}")
@@ -1167,6 +1199,92 @@ def f(n: Int) -> Int:
     var p = P(n)
     return p.x
 """, must_have=["_init_P (&_owned_storage"], must_not_have=["= _alloc_P ();"]), 'owned_struct_local_is_initialised_in_the_frame')
+
+    # The `_alloc_<Struct>` helper returns a POINTER, and the `__GIMPLE` tag
+    # has to sit in declaration-specifier position (`__GIMPLE static P * f`).
+    # After the return type (`static P * __GIMPLE f`) gcc does not honour the
+    # tag at all: the body is ordinary C, never GIMPLE-checked, for every
+    # pointer-returning tagged function. Pin both halves: the tag is in the
+    # honoured position, and the body still compiles under the strict GIMPLE
+    # grammar (`-x c`, the self-host build's path).
+    _alloc_src = """\
+struct P:
+    var x: Int
+
+    def __init__(out self, x: Int):
+        self.x = x
+
+def make(n: Int) -> Int:
+    var items = List[P]()
+    items.append(P(n))
+    return items[0].x
+
+def main():
+    print(make(3))
+"""
+    test_c_shape('alloc_helper_tag_in_declaration_specifier_position', _alloc_src,
+                 must_have=['__GIMPLE static P * _alloc_P (void)'],
+                 must_not_have=['static P * __GIMPLE _alloc_P'])
+    test_gimple_body('alloc_helper_body_compiles_as_gimple', _alloc_src)
+
+    # The same rule for a METHOD and a LIFTED CLOSURE: their definitions were
+    # `C * __GIMPLE f (...)` (emit_funcs `_gen_struct_method`, emit_loops
+    # `_gen_lifted_closure`), so a pointer-returning method's body was never
+    # GIMPLE-checked. Pin the honoured spelling for a pointer return (method
+    # `char *`) and a scalar return (closure `int64_t`).
+    test_c_shape('method_and_closure_tag_in_declaration_specifier_position', """\
+class Holder:
+    def __init__(self, v):
+        self.v = v
+    def get(self):
+        t = self.v
+        return t
+
+def make(n: Int) -> Int:
+    def inner() -> Int:
+        return n + 1
+    return inner()
+
+def main():
+    print(Holder("hello").get())
+    print(make(2))
+""", must_have=['__GIMPLE char * Holder_get (Holder * self)',
+                '__GIMPLE int64_t make_inner ('],
+         must_not_have=['char * __GIMPLE Holder_get', 'int64_t __GIMPLE make_inner'])
+
+    # The same rule as ONE whole-output invariant, over a program that emits
+    # every tagged shape at once: a struct alloc helper, a pointer-returning
+    # method, a scalar-returning method and a lifted closure. `test_c_shape`
+    # above pins the four spellings that exist today; this catches a fifth
+    # definition emitter that puts the tag in the declarator, where gcc
+    # silently stops GIMPLE-checking the body.
+    test_tag_leads_every_definition('every_gimple_tag_leads_its_declaration', """\
+struct P:
+    var x: Int
+
+    def __init__(out self, x: Int):
+        self.x = x
+
+class Holder:
+    def __init__(self, v):
+        self.v = v
+    def get(self):
+        t = self.v
+        return t
+
+def make(n: Int) -> Int:
+    var items = List[P]()
+    items.append(P(n))
+    def inner() -> Int:
+        return n + 1
+    return inner() + items[0].x
+
+def main():
+    print(Holder("hello").get())
+    print(make(2))
+""", must_have=['__GIMPLE static P * _alloc_P (void)',
+                '__GIMPLE char * Holder_get (Holder * self)',
+                '__GIMPLE int64_t make_inner ('])
 
     # An unannotated integer local is 64-bit storage, like Mojo's `Int` and Python's
     # int: it used to be a 32-bit `int` whenever every assignment was a small
@@ -2902,6 +3020,42 @@ struct Span:
 def write_bytes(s: Span) -> Int:
     return external_call["write", Int64](1, s.unsafe_ptr(), len(s))
 """), 'mlir_write_bytes_bottom')
+
+    # 153b. GATE regression (bugs/gate-stdlib-syntax.md): a `__mlir_op` binary
+    #       op over _Bool operands must report the OPERANDS' type, not a
+    #       blanket int64_t. Before the fix the result temp was declared
+    #       int64_t and assigned `_t1 & _t2` (both _Bool) — legal in an
+    #       unchecked body, but `gcc -fgimple -x c` (which is what actually
+    #       parses a `__GIMPLE` body, the path std/builtin/bool.mojo's
+    #       __and__/__or__/__xor__ hit once the tag's position was pinned)
+    #       rejects it as "type mismatch in binary expression". test_gimple_
+    #       body is the only harness that checks the __GIMPLE body.
+    _run_isolated(lambda: test_gimple_body("mlir_bool_simd_and_xor", """\
+struct B:
+    var _mlir_value: Bool
+
+    def band(self, rhs: B) -> Bool:
+        return __mlir_op.`pop.simd.and`(self._mlir_value, rhs._mlir_value)
+
+    def bxor(self, rhs: B) -> Bool:
+        return __mlir_op.`pop.simd.xor`(self._mlir_value, rhs._mlir_value)
+"""), 'mlir_bool_simd_and_xor')
+
+    # 153c. The exact bool.mojo __invert__ shape: a pop.simd.xor whose second
+    #       operand is a __mlir_attr literal (lowered to a placeholder int),
+    #       so the two operands have DIFFERENT C types (_Bool and int). The
+    #       fix must materialize each to one joined type before the op, or a
+    #       checked body gets a mismatched-operand binary expression.
+    _run_isolated(lambda: test_gimple_body("mlir_bool_simd_xor_attr_operand", """\
+struct B:
+    var _mlir_value: Bool
+
+    def binv(self) -> Bool:
+        return __mlir_op.`pop.simd.xor`(
+            self._mlir_value,
+            __mlir_attr.`#kgen.simd<true> : !kgen.scalar<bool>`,
+        )
+"""), 'mlir_bool_simd_xor_attr_operand')
 
     # 154. libc-name mangling: `fn exit` becomes mojo_exit (no clash with libc exit),
     #      while external_call["exit"] keeps the raw libc symbol — exit from the library.
@@ -7135,10 +7289,11 @@ def root_cas_hash_call(parts) -> str:
         # prototype block is emitted ahead of the method bodies (it has to be
         # — `_mojo_getattr_Sub`'s bound-method arm takes the ADDRESS of this
         # symbol, and a declaration after its use is an implicit one). Only a
-        # definition's header carries the `__GIMPLE` tag between the return
-        # type and the name — the same distinction
-        # `selfhost_emitted_return_type` above matches on.
-        start = c_src.find("__GIMPLE Sub___eq__ (")
+        # definition's header carries the `__GIMPLE` tag in front of the
+        # return type (`__GIMPLE int64_t Sub___eq__ (...)`) — the same
+        # distinction `selfhost_emitted_return_type` above matches on.
+        _m = re.search(r'^__GIMPLE [^\n;]*\bSub___eq__ \(', c_src, re.M)
+        start = _m.start() if _m else -1
         if start < 0:
             print(f"FAIL  {name}: Sub___eq__ was never emitted (inheritance merge did not run)")
             _FAIL += 1
@@ -7704,7 +7859,8 @@ def main():
             # The DEFINITION, not the forward declaration: the declaration
             # is emitted from the same registry, but matching on it would
             # silently pass if only one of the two were ever fixed.
-            start = c.find('__GIMPLE Holder_get (')
+            _m = re.search(r'^__GIMPLE [^\n;]*\bHolder_get \(', c, re.M)
+            start = _m.start() if _m else -1
             if start < 0:
                 print(f"FAIL  {name}: {label} getter definition was never "
                       f"emitted")
