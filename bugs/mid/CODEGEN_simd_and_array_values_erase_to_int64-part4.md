@@ -1,30 +1,35 @@
-# Resolve Scalar/comptime-DType annotations to scalar C types (part 4)
+# A float SIMD value survives a call and a return (part 4)
 
-Part 4 of `bugs/hard/CODEGEN_simd_and_array_values_erase_to_int64-part1.md`.
+Part 4 of `bugs/hard/CODEGEN_simd_and_array_values_erase_to_int64.md`.
+
+Depends on part 3: a float SIMD value must first be constructed with its dtype
+(part 3) before argument and return typing can carry it. Class: mid. This part
+is the propagation of part 3's type through locals, arguments and results.
 
 ## Goal
 
-Make `_resolve_type` (and related annotation resolution) resolve `Scalar[X]` / `SIMD[X, 1]` to the correct scalar C type of `X`, including when `X` is a comptime/local binding to a `DType` value such as `DType.float32` or `DType.float64`.
-
-## Current state
-
-The parent bug notes: `Scalar[dtype]` is `SIMD[dtype, 1]`, and `_resolve_type` answers `int64_t` for both `Scalar[Float32]` and `DType.float32` (while `Float32` itself answers `float`). Because of this, `Array[Scalar[dtype], N]` cannot recover its element type from the annotation it is written with, contributing to erased element/value typing.
-
-## Plan
-
-In the type-resolution code (e.g. `mojo/backend_gimple/emit_calls.py` / `emit_expr.py` / the module that owns `_resolve_type`, per local structure):
-- teach resolution that `Scalar[X]` means `SIMD[X, 1]` and resolves to the scalar C type corresponding to `X`;
-- resolve `X` through comptime locals/bindings that refer to `DType.float32`, `DType.float64`, and other supported dtypes, not only direct type spellings like `Float32`;
-- keep unknown/unresolved cases conservative (no silent wrong scalar mapping).
+A float SIMD value passed to `id_simd(x: SIMD[DType.float32, 2])` and returned
+keeps its float representation. Today the local `r` is `int64_t` and so is the
+argument, so generic call typing sees `Int64`.
 
 ## Acceptance
 
-- `_resolve_type` maps `Scalar[Float32]` / `SIMD[Float32, 1]` to the float scalar C type (and analogous float64 cases), not `int64_t`.
-- When `dtype` is a comptime local bound to `DType.float32`/`DType.float64`, `Scalar[dtype]` / `SIMD[dtype, 1]` resolve to the corresponding scalar C type.
-- `Array[Scalar[dtype], N]` annotations can recover the intended element scalar type in the contexts this resolver feeds.
+- In the probe, the local that receives the call result is not declared
+  `int64_t` (`int64_t r;` is absent from the function body).
+- The function body carries no "indirect call via SubscriptExpr" placeholder.
+- The callee's parameter and return C types are float-typed, not `int64_t`.
 
 ## Done when
 
-Quick test (inline probe, no test file): run
-`python3 -c "import sys; sys.path.insert(0,'.'); import build_stdlib_dylib as b; src='from sys.info import DType\nfn f():\n    comptime dt = DType.float32\n    var a: Array[Scalar[dt], 4]\n'; c=b.compile_module_to_c(src,'sc.mojo','sc',linkable=False); print(c)"`
-and confirm the resolved/emitted element/storage type for `Array[Scalar[dt], 4]` is based on `float` (not `int64_t`) once annotation resolution and construction/type tracking are wired for this form. If this exact snippet is not yet a supported compile shape, the implementing worker must replace this probe with one concrete quick command that demonstrates `Scalar[dtype]`/comptime-`DType` resolution to the correct scalar C type.
+File: `test_codegen_erased_container_values.py` (repo root).
+
+Command: `python3 test_codegen_erased_container_values.py part4`
+
+It runs `test_part4_float_simd_survives_call_and_return` (red today; red until
+part 3 lands). It must pass.
+
+## Where to start
+
+`mojo/backend_gimple/emit_calls.py` for call-result typing, and the
+parameter/return `_mojo_type` mapping. Thread the dtype from part 3's
+constructed value into the local's declared C type.

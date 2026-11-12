@@ -6,8 +6,6 @@ deleted in the same commit, as for any bug.
 
 | doc | what it needs | for |
 |---|---|---|
-| `CODEGEN_simd_and_array_values_erase_to_int64-part1.md` | see doc | workers |
-| `CODEGEN_simd_and_array_values_erase_to_int64-part2.md` | see doc | workers |
 | `CODEGEN_simd_and_array_values_erase_to_int64.md` | see doc | workers |
 | `CODEGEN_tagged_generator_mixed_type_step1.md` | see doc | workers |
 | `CODEGEN_tagged_generator_mixed_type_step2.md` | see doc | workers |
