@@ -167,6 +167,16 @@ def pid_alive(t):
     return alive(t.get("pid"))
 
 
+def finished_done_ok(t):
+    """A task the worker finished successfully: exit code 0 and a DONE verdict. sync --restart-dead must never
+    restart one, even if its process is gone (restarting supersedes finished work)."""
+    ec = os.path.join(t.get("worktree", ""), "exitcode")
+    try:
+        return open(ec).read().strip() == "0" and verdict(t) == "DONE"
+    except OSError:
+        return False
+
+
 def dead_running_tasks(tasks):
     """Registry entries that are running or were recorded as exited-err, whose process is gone, and that never wrote
     an exitcode. A dead worker stays here until it is restarted or superseded, so a restart skipped for want of a
@@ -1611,6 +1621,10 @@ def cmd_sync(a):
                 with registry() as ts:
                     ts[n]["state"] = "abandoned"
                 print("  abandoned %s: its worktree %s is gone" % (n, t["worktree"]))
+                continue
+            # A task the worker finished successfully must never be restarted: it is done, not dead.
+            if finished_done_ok(t):
+                print("  skipped %s: verdict DONE with exit code 0" % n)
                 continue
             # DONE ratchet: if every doc claim's doc is gone (deleted on master), the task
             # is already resolved; mark superseded instead of restarting it forever.
