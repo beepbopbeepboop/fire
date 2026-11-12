@@ -55,3 +55,38 @@ yielded. The A3 path yields `''` and then `*.py`, i.e. it takes the
    Pin it with a test next to `test_coro_cpp_os_path_split.py`, with the same
    expected output (`a`, `b.py`, `*.py`) but run WITHOUT `MOJO_CORO=cpp`.
 3. Check the bytes variant (`b'*.py'`), which must print `b'*.py'` only.
+
+## Status (2026-11-12) — truthiness fixed; bytes printing split out
+
+**Root cause (found and fixed).** `mojo/backend_gimple/emit_methods.py`, the
+`os.path.split` arm, word-argument branch: the result list's elements were
+recorded as `int64_t` (`gen._elem_types[t] = 'int64_t'`). A word argument is a
+str OR a bytes path, so the parts are words of unknown kind; recording
+`int64_t` made the unpacked `dirname` a plain number and `if not dirname:`
+lowered to `dirname == 0`. An empty str head is a live non-NULL pointer, so
+it read as true. The fix leaves the element kind unrecorded, as the bytes arm
+directly above already did; the unpacked locals are then marked dyn-word
+(`loops_shared.py`, `_dyn_word_vals`) and the test lowers to
+`mojo_truthy_word`, which answers a live str by its first byte and a bytes
+object by its length.
+
+**Landed.** `test_os_path_split_word_truthy.py`: the repro generator without
+`MOJO_CORO`, built with `fire.py build`. The str cases (`a`, `b.py`, `*.py`)
+match CPython, and the bytes cases count yields (`b'*.py'` → 1,
+`b'a/b.py'` → 2) instead of printing. Red without the fix (`''` printed,
+bytes counts 2/2), green with it. Existing `test_bytes_os_path_regress.py`
+(16 cases) and `test_regress_split_coro.py` still pass.
+
+**Still open (this doc is NOT done).** Step 3 of the Next step — the bytes
+variant printing `b'*.py'` — is blocked by a separate defect: a generator's
+bytes yield reaches the consumer as a raw word that `mojo_repr_boxed` prints
+as an address. Filed as `bugs/CODEGEN_coro_a3_generator_bytes_word_print.md`
+with the two candidate fixes. Full fix = that doc's quick test restored to
+print the bytes lines, then this doc and that doc deleted together.
+
+## Done when
+
+`python3 fire.py build` of the repro above (no `MOJO_CORO`) prints
+`a`, `b.py`, `*.py`, `b'*.py'`, `b'a'`, `b'b.py'` — the same lines CPython
+prints — which is `test_os_path_split_word_truthy.py` with its bytes cases
+restored to `print(n)` (see the bytes doc's Next step 2).
