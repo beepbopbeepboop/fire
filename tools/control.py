@@ -528,7 +528,7 @@ BREAKER_MIN = 30   # after a worker dies on arrival, start nothing new for this 
 # The landing step merges BATCH branches a pass (swarm.LAND_BATCH) and each pass runs a gate, so finished work
 # arrives far faster than it lands. Unlanded worktrees piled up to 1500 (2026-11-11) because refill never looked at
 # the backlog it was adding to. Past this many work worktrees, refill starts nothing new until landing catches up.
-BACKLOG_MAX = 150
+BACKLOG_MAX = 32
 
 
 def work_worktrees():
