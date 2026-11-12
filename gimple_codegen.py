@@ -1350,7 +1350,7 @@ class GimpleGen:
         # `_cpp_param_struct_names`/`_cpp_ctor_struct_names`, just triggered
         # by the YIELDED value's type instead of a parameter/constructor —
         # merged into the same typedef-emission loop (gen_module) rather
-        # than a separate one. See CODEGEN_enum_runtime_class_creation.md's
+        # than a separate one. See CODEGEN_enum_runtime_class_creation's
         # 2026-08-20 update.
         self._cpp_value_struct_names: set[str] = set()
         # Module-level function names (for variadic-unmangled calls like os.py's
@@ -1828,7 +1828,7 @@ class GimpleGen:
         # or transitively) — populated by gen_module_impl. Such a struct
         # gets a synthesized `_data: MojoBytes *` payload field populated
         # by `__new__` / `super().__new__(cls, val)`, and inherited bytes
-        # ops route to it. See bugs/COMPILE_FAIL_zipfile___init__.md.
+        # ops route to it. See COMPILE_FAIL_zipfile___init__.
         self._bytes_subclass_structs: set = set()
         self._bytes_subclass_payload_argidx: dict = {}
         # Lazily-created container attributes used across gen_module/body
@@ -2155,7 +2155,7 @@ class GimpleGen:
         # functions is emitted twice into the one flattened translation unit
         # — a hard "redefinition of X" GCC error for every single symbol in
         # the file (see bugs/hard/
-        # CODEGEN_multiple_inheritance_duplicate_method_symbols.md, whose
+        # CODEGEN_multiple_inheritance_duplicate_method_symbols, whose
         # original multiple-inheritance/struct-merge hypothesis this
         # superseded: the real, confirmed cause is this self-shadowing
         # import, not the inheritance-merge machinery — `python3 fire.py
@@ -2199,7 +2199,7 @@ class GimpleGen:
         # in _module_stmts (and mirrored via _all_transitive_stmts_ordered) for the
         # whole process lifetime causing resource blowup. We now only keep the
         # flattened ordered list needed for reconciliation; module ASTs can be
-        # dropped after emission. See bugs/hard/CODEGEN_bootstrap_resource_blowup.md
+        # dropped after emission. See CODEGEN_bootstrap_resource_blowup
         self._all_transitive_stmts_ordered: list = []
         self._all_transitive_stmts_ids: set = set()
         # Phase 2 (same doc as above): per-top-level-statement memoization
@@ -2736,7 +2736,7 @@ class GimpleGen:
         # `mojo_boxed_is_str` is a RANGE test, so it calls every positive
         # int64 in [2^31, 2^47) a pointer and hands it to `strcmp` --
         # `d[3000000000] = 1` was a SIGSEGV. See
-        # bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md and
+        # RUNTIME_int64_key_above_2gb_dereferenced_as_pointer and
         # `_char_to_cstr`'s word_ok branch, the one consumer.
         self._int_word_vals: set = set()
         self._fresh_str_tmps: set = set()  # see emit_infra._emit_str_cat

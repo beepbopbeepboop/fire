@@ -1,5 +1,5 @@
-# Regression for the deleted doc bugs/CODEGEN_dispatched_for_loop_shares_one_var_between_dict_and_list_arms.md
-# (codegen half fixed; inference half tracked in PARTIAL_WORK_HANDOFF.md §2.1)
+# Regression for the deleted doc CODEGEN_dispatched_for_loop_shares_one_var_between_dict_and_list_arms
+# (codegen half fixed; inference half tracked in PARTIAL_WORK_HANDOFF §2.1)
 #
 # `for i in <value whose type is unknown>:` lowers to a runtime dict/set/list
 # dispatch in `_gen_for_iter`. The arms used to share ONE C variable, declared

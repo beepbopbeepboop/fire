@@ -4093,7 +4093,7 @@ def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) ->
                                 f"decorator {_gmi_decorator_head(_rb_dec)!r} on {_rb_d.name!r} is inside a "
                                 f"module-level block, which the compiled path cannot rebind yet; it would "
                                 f"silently call the undecorated function (see "
-                                f"bugs/hard/COMPILE_FAIL_decorator_application_dropped.md)")
+                                f"COMPILE_FAIL_decorator_application_dropped)")
     return _gmi_rebind_block(self, stmts, _rb_scope, at_module)
 
 
@@ -4262,7 +4262,7 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
     statement list plus every enclosing scope's defs) to its FunctionDef.
 
     A same-module decorator on a `def` is applied by rebinding the name
-    (`_gmi_decorator_pass`, the bugs/hard/COMPILE_FAIL_decorator_application_dropped.md
+    (`_gmi_decorator_pass`, the COMPILE_FAIL_decorator_application_dropped
     fix). That rebinding is only meaningful for a CALLABLE decorator result:
     a scalar-returning decorator rebinds `step` to a non-callable, which
     CPython raises on as `TypeError: 'int' object is not callable`. So that
@@ -4351,7 +4351,7 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
                     f"(not callable), so {_rd_fn.name!r} is rebound to a scalar; "
                     f"the compiled path does not apply decorators to a def yet and "
                     f"would silently call the undecorated function (see "
-                    f"bugs/hard/COMPILE_FAIL_decorator_application_dropped.md)")
+                    f"COMPILE_FAIL_decorator_application_dropped)")
 
 
 def _declare_posthoc_class_attrs(stmts: list) -> None:
@@ -7076,7 +7076,7 @@ def gen_module_impl(self, stmts: list):
     # `x == y`, `x + y`, `x in y`, `b''.join(...)`, `bytes(x)`, `.decode()`,
     # `.hex()`, `.startswith`/`.split`/...) route to `inst->_data` unless
     # the subclass overrides the corresponding dunder/method. See
-    # bugs/COMPILE_FAIL_zipfile___init__.md.
+    # COMPILE_FAIL_zipfile___init__.
     _BUILTIN_BYTES_BASES = ('bytes',)
     _bytes_subclass: set = set()
     _bsc_changed = True
@@ -9243,7 +9243,7 @@ def gen_module_impl(self, stmts: list):
                                 # this correctly once `cls` is seeded the
                                 # same way `self` is; only the seed was
                                 # missing. See CODEGEN_generator_function_
-                                # Lib_tarfile.md.
+                                # Lib_tarfile.
                                 self.var_types[pname] = f"{s.name} *"
                             elif (ptype is None and self._inferred_param_types.get(
                                     _mangled_key, {}).get(pname) in ('char *', 'double')):
@@ -9258,7 +9258,7 @@ def gen_module_impl(self, stmts: list):
                         # and for why the three call sites share it):
                         # `return <local>` where the local holds a pointer
                         # value must not fall to the int64_t default.
-                        # COMPILE_FAIL_zipfile___init__.md.
+                        # COMPILE_FAIL_zipfile___init__.
                         try:
                             for _vn, _vt in self._infer_local_var_types(m).items():
                                 if gimple_ctypes._seedable_local_ctype(_vt):
@@ -10216,7 +10216,7 @@ def gen_module_impl(self, stmts: list):
     # _cpp_struct_method_refs loop — stays at the int64_t default even when
     # every call site in the module passes a genuine string expression
     # (Lib/ftplib.py: sendcmd('TYPE A'), voidcmd('QUIT'), ...; see bugs/
-    # CODEGEN_generator_function_Lib_ftplib.md gap #1). Receiver resolution
+    # CODEGEN_generator_function_Lib_ftplib gap #1). Receiver resolution
     # is deliberately narrow: a bare `self` inside a method of a known
     # StructDef, or an identifier whose own _inferred_var_types entry is a
     # "<Struct> *" pointer. Everything else (attribute chains, unknown
@@ -10410,7 +10410,7 @@ def gen_module_impl(self, stmts: list):
                 # `self._val += data[...]` emitted raw `char * + MojoList *`
                 # pointer addition and gcc -fgimple died with "internal
                 # compiler error: in build2, at tree.cc" (bugs/
-                # COMPILE_FAIL_Tools_gdb_libpython.md).
+                # COMPILE_FAIL_Tools_gdb_libpython).
                 if cur in (None, 'int', 'int64_t') \
                         or (cur == 'MojoList *' and not types_is_double):
                     self._inferred_param_types.setdefault(key, {})[pname] = (
@@ -16583,7 +16583,7 @@ def gen_module_impl(self, stmts: list):
                 # boxed-pointer `int64_t` every write/read site already
                 # assumes — a 64-bit pointer written through a 32-bit `int`
                 # field truncates to garbage (observed: box.3d game's
-                # DYLIB_module_global_list_scratch_segfault.md, EXC_BAD_ACCESS
+                # DYLIB_module_global_list_scratch_segfault, EXC_BAD_ACCESS
                 # in mojo_list_append_int on a corrupted receiver pointer).
                 _ctype = 'MojoDict *' if value.func.obj.name in ('dict', 'Dict') else (
                     'MojoSet *' if value.func.obj.name in ('set', 'Set') else 'MojoList *')

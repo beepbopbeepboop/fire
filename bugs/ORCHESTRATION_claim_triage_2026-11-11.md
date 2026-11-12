@@ -47,3 +47,19 @@ removed on a clean branch, which landed as `8cace76b5`. The original entry is no
 - **Still holding, left on purpose:** the three SUITE entries (`suite-gimplegenerators`, `suite-doc-refs-ratchet-red`,
   `suite-residue-budgets`), which you asked me to keep out of this; the formal entry (formal worker); and the two
   `recover-*` entries (other lane).
+
+## Third pass (2026-11-11): the SUITE holders
+- **`bug-suite-residue-budgets-after-estate-r`: not landed; abandoned.** The branch's census was built against an older
+  master. Merged with current master, the residue check still fails: it sets the census to 23 where the walk finds 27
+  files. The five files the walk counts and the census does not are `test_dict_slot_read_bug.py`,
+  `test_dict_slot_read_bug_demo.py`, `test_dict_slot_read_regression.py`, `test_peekable_iterator_link.py`, and
+  `test_python315_lazy_imports.py`. The check requires their call sites to be read before they are counted, which is
+  review, not a number to paste. The merge is kept as `work/residue-land` (not on master).
+- **`bug-mid-suite-gimplegenerators-6583`: not landed; abandoned.** Four commits of compiled-path codegen across six code
+  files, with two merge conflicts. Proving it needs the generator runner, which is heavy, so it stays out under the
+  cheap-tests rule. Branch and worktree (`work-6532`) kept.
+- **`bug-suite-doc-refs-ratchet-red-r36`: not landed; abandoned.** Twenty-nine commits, most of them "re-verification"
+  doc churn. It also raises the ceilings for BLOW, CLAUDE, CRASH and FORMAL in `dangling_refs_baseline.py`, the same
+  change I refused for the module-not-found branch: the ratchet only shrinks. Branch and worktree (`work-6514`) kept.
+- Note for the restart: abandoned entries whose doc is still on master will be fed again by the normal doc queue.
+  That is by design, but it is the reason the SUITE docs need a decision, not just a claim release.

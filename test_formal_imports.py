@@ -1571,8 +1571,6 @@ def test_no_standard_library_module_is_left_in_neither_tier(tmpdir, _shared):
     import formal.imports as I
     placed = {
         # name: (tier, why that tier, in one line)
-        "builtins": ("unreachable",
-                     "`set(dir(builtins))`: the interpreter's own namespace"),
         "sysconfig": ("unreachable",
                       "where an embedded CPython would be installed"),
         "datetime": ("modelled", "a clock this tree reads, plus arithmetic"),
@@ -1584,6 +1582,9 @@ def test_no_standard_library_module_is_left_in_neither_tier(tmpdir, _shared):
     # the tree \u2014 `formal/imports.py`'s rule fires by itself and this row is
     # what checks that it did.
     written = {
+        "builtins": ("the interpreter's own namespace, which the hostmod now answers "
+                     "for the three files that spell `set(dir(builtins))`",
+                     "formal/hostmods/builtins.mojo"),
         "html": ("five character replacements over a string",
                  "formal/hostmods/html.mojo"),
         "posixpath": ("`os/path/__init__.mojo` IS CPython's posixpath",

@@ -639,11 +639,11 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             # shape, so nothing can reach _cpp_expr's MemberExpr
             # "non-self member access" fallback (invalid C++ on a
             # scalar) or silently read the placeholder as a real value.
-            # See bugs/hard/CODEGEN_enum_runtime_class_creation.md's
+            # See CODEGEN_enum_runtime_class_creation's
             # 2026-08-21 update for the motivating Lib/enum.py
             # `Flag._iter_member_by_value_` shape (previously refused
             # unconditionally here — see the
-            # CODEGEN_generator_classmethod_first_param_must_be_self.md
+            # CODEGEN_generator_classmethod_first_param_must_be_self
             # hard-bug doc for that original, narrower carve-out).
             if not gen._cls_refs_supported(fn.body, struct_name):
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
@@ -781,7 +781,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # "conflicting types" GCC error across the whole-program
         # compile the moment both were transitively reachable (real:
         # `python3 fire.py build .../Lib/os.py`) — see
-        # CODEGEN_generator_function_symbol_not_module_qualified.md.
+        # CODEGEN_generator_function_symbol_not_module_qualified.
         # `_func_qualifier` is called here EXACTLY as `_func_csym` calls
         # it for an ordinary function's definition: `fn.name` is always
         # one of THIS gen_module() call's own top-level FunctionDefs at
@@ -906,7 +906,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # (WRONG on two counts at once: the kwarg-forwarding skip that
     # fallback shares with nothing, and defaulting the WHOLE function's
     # yield-value type to char* — see
-    # CODEGEN_generator_recursive_yield_from_no_arg_forwarding.md).
+    # CODEGEN_generator_recursive_yield_from_no_arg_forwarding).
     # Set here (this function's own `base`/`param_ctypes` are already
     # fully computed above) and cleared in `finally`, mirroring
     # `_cpp_gen_self_struct`'s exact same scoped-context convention.

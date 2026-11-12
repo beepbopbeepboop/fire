@@ -40,7 +40,7 @@ def in_tree(fn):
 
 
 def test_two_states_for_a_claim():
-    """bugs/x.md exists -> the claim has work; deleted -> it has none."""
+    """x exists -> the claim has work; deleted -> it has none."""
     def body(tmp):
         p = os.path.join(tmp, "bugs", "bug-x-thing.md")
         open(p, "w").write("# x\n")

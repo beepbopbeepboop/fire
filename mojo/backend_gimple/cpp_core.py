@@ -1348,7 +1348,7 @@ def _cpp_reset_unit_state(gen):
     # `next(it, default)` advance a genuine resumable position, and a later
     # `for x in it:` continues from that position (real Python iterator
     # semantics) rather than re-scanning from element 0. See
-    # bugs/CODEGEN_generator_function_Lib_ipaddress.md's `_find_address_range`.
+    # CODEGEN_generator_function_Lib_ipaddress's `_find_address_range`.
     gen._cpp_list_iter_cursor = {}
 
 
@@ -2543,7 +2543,7 @@ def _cpp_expr(gen, e) -> str:
         # which `cls` structurally cannot have; an unrecognized name)
         # must refuse rather than silently emit `cls->member` (invalid
         # C++ on a scalar int64_t) or `cls.member` (equally invalid).
-        # See bugs/hard/CODEGEN_enum_runtime_class_creation.md's 2026-08-21
+        # See CODEGEN_enum_runtime_class_creation's 2026-08-21
         # update for the motivating `cls._flag_mask_`/`cls.
         # _value2member_map_` shapes (Flag._iter_member_by_value_).
         if struct_name and isinstance(e.obj, gimple_ctypes.IdentExpr) and e.obj.name == 'cls':
@@ -3920,7 +3920,7 @@ def _cpp_expr(gen, e) -> str:
             # cast back to the real pointer type. Real: Lib/enum.py's
             # `Flag._iter_member_by_value_`: `cls._value2member_map_.
             # get(val)` returns a `Flag *`. See
-            # CODEGEN_enum_runtime_class_creation.md's 2026-08-20
+            # CODEGEN_enum_runtime_class_creation's 2026-08-20
             # update.
             if (_str_obj_ctype == 'MojoDict *' and e.func.member == 'get'
                     and len(e.args) in (1, 2)):
@@ -4268,7 +4268,7 @@ def _cpp_expr(gen, e) -> str:
                 # the recursive-yield-from iter_files repro took the base
                 # case for a list argument and yielded the raw MojoList*
                 # pointer as an int; see bugs/hard/
-                # CODEGEN_generator_recursive_yield_from_no_arg_forwarding.md).
+                # CODEGEN_generator_recursive_yield_from_no_arg_forwarding).
                 _tnames = None
                 if isinstance(e.args[1], gimple_ctypes.IdentExpr):
                     _tnames = [e.args[1].name]
@@ -4499,7 +4499,7 @@ def _cpp_expr(gen, e) -> str:
                 # callee 'list(...)'" honest refusal of the WHOLE
                 # generator -- confirmed the single most common blocker
                 # across the real-world corpus this codegen targets, see
-                # e.g. bugs/CODEGEN_generator_function_Lib_ipaddress.md's
+                # e.g. CODEGEN_generator_function_Lib_ipaddress's
                 # `_collapse_addresses_internal`). Mirrors the ordinary
                 # (non-coroutine) GIMPLE path's own `_lower_ctor_from_
                 # iterable` (gimple_gen_calls.py): synthesize the
@@ -5460,7 +5460,7 @@ def _cpp_expr(gen, e) -> str:
         # the SAME simplification the tuple/list-unpack branch's own
         # `mojo_list_get_int` call above already established as this
         # model's accepted convention for "unknown list element type".
-        # See CODEGEN_generator_non_plain_assignment_target_refused.md's
+        # See CODEGEN_generator_non_plain_assignment_target_refused's
         # 2026-08-19 update.
         if isinstance(e.obj, (gimple_ctypes.IdentExpr, gimple_ctypes.StringLiteral, gimple_ctypes.SubscriptExpr, gimple_ctypes.SliceExpr)):
             if gen._cpp_declared is not None and isinstance(e.obj, gimple_ctypes.IdentExpr) \
@@ -6758,7 +6758,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             # identifier assignment target is supported" refusal below,
             # even though the exact same decomposition this TupleExpr
             # branch already does applies unchanged. See
-            # CODEGEN_generator_non_plain_assignment_target_refused.md.
+            # CODEGEN_generator_non_plain_assignment_target_refused.
             # When `expr` is a call to a module function returning a
             # MojoList* (tokenize.py's `encoding, consumed =
             # detect_encoding(readline)` — detect_encoding returns a
@@ -10603,7 +10603,7 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
         # DYNAMICALLY resolved exception class (real, recurring idiom:
         # `raise self._imap.error(...)` in imaplib.py's Idler.burst,
         # plus test.support's run_with_locale/subst_drive — see
-        # CODEGEN_generator_raise_non_static_exception_class.md's three
+        # CODEGEN_generator_raise_non_static_exception_class's three
         # confirmed occurrences) has no statically-known class NAME to
         # look up in _exc_type_id, so it can't get a real per-class tag
         # the way `raise ExcName(...)` does. Rather than refuse the
@@ -11133,7 +11133,7 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
         # currently-working `yield from <expr>` shape. Real:
         # Lib/test/libregrtest/runtests.py's `RunTests.iter_tests`:
         # `yield from self.tests` (a MojoList* field). See
-        # CODEGEN_generator_function_Lib_test_libregrtest_runtests.md.
+        # CODEGEN_generator_function_Lib_test_libregrtest_runtests.
         #
         # Element accessor: the above cast handles the CONTAINER's own
         # pointer type, but the elements inside it aren't always
@@ -11424,7 +11424,7 @@ def _cls_refs_supported(gen, body, struct_name: str) -> bool:
 
     See gimple_codegen.py's classmethod-generator eligibility check
     (this method's only caller) and bugs/CODEGEN_generator_function_
-    Lib_enum.md's 2026-08-21 update for the motivating Lib/enum.py
+    Lib_enum's 2026-08-21 update for the motivating Lib/enum.py
     `Flag._iter_member_by_value_`/`_iter_member_by_def_` shapes.
     """
     class_attrs = gen._class_attrs.get(struct_name, {})
