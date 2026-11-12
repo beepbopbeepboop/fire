@@ -27,9 +27,9 @@ crashes and the other declines" is the shape that must not survive.
 An UNEXPECTED build failure is classified by layer before it is reported: the
 source is built on the other backend too, and a refusal both backends produce
 with the same sentence is a fixture/source error, not the backend's red.  That
-is `build_failure_detail`; the campaign that filed this file's sibling bug
-(`TEST_formal_fixtures_are_invalid_mojo_beyond_out_self`) found the harness
-calling a front-end refusal a backend failure.
+is `build_failure_detail`; the fixture-validity campaign found the harness
+calling a front-end refusal a backend failure (pinned by
+`test_out_param_return_type_diagnostic.py`'s `ParityBuildFailureIsClassifiedByLayer`).
 
 `FAILING_CASES` are the third shape: a program every machine leaves through a
 TRAP, so CPython raises too and its own stdout is the expectation.  Nothing

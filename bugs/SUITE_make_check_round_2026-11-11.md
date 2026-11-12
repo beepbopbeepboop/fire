@@ -43,7 +43,7 @@ issues are tracked by their own bug docs/markers or are green on this tree.
 Fixtures that declare `out self` on a non-constructor (Modular refuses them)
 are fixed and now swept by `test_out_param_return_type_diagnostic.py`'s
 `FixtureCorpusValidity`; the remaining invalid-Mojo fixture content is a
-separate campaign, `bugs/TEST_formal_fixtures_are_invalid_mojo_beyond_out_self.md`.
+separate campaign (the fixture-validity bug beyond the `out` shapes; its harness half is closed, see `test_out_param_return_type_diagnostic.py`'s `ParityBuildFailureIsClassifiedByLayer`).
 
 ## Done when
 
