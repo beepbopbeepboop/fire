@@ -1,6 +1,13 @@
 # TEST: fixtures declare `out self` and a return type, which is invalid Mojo, and nothing checks them
 
-Status: OPEN (HARD). Filed 2026-11-11. Area: TEST (fixture validity), with a diagnostic-wording mismatch.
+Status: PARTLY FIXED on master (2026-11-11). Area: TEST (fixture validity).
+
+Landed, all pinned in `test_out_param_return_type_diagnostic.py`:
+- the declaration refusals: `out self` with no other parameter, and with a non-`Self` first parameter (`47848c104`, narrowed to an unannotated `self` in `fbe7549e3`);
+- the call-site refusals: a positional `out` argument past the non-`out` parameters (`9b07afdcf`), and a keyword `out` argument (`020ab7a89`);
+- the first error for `out self` with a return type now matches real Mojo's primary message at its position (`f18e70878`, the 1-based lexer columns).
+
+STILL OPEN: the fixture campaign. 32 fixtures in five test files still declare `out self` on a non-constructor method, or an `out` parameter with a return type, which real Mojo refuses. The three parity fixtures are fixed (`e26a073ed`). The campaign needs its own pass, per fixture, against real Mojo, which is the fixture-validity gate described under Fix order.
 
 ## Symptom
 
@@ -78,7 +85,7 @@ type (`fix/selected.json` in the measurement scratchpad):
 - Real Mojo does not support all of Python, so it is not a valid oracle for whole fixtures. The validity check must be
   per declaration: does real Mojo flag this `out` declaration?
 
-## Decisions and what is still open
+## Decisions and what is still open (historical; the compiler items below have landed)
 
 - Real Mojo is the reference for the `out`-declaration constructs only, not for whole fixtures.
 - The expected behaviour of our compiler for each row of the table above is the real compiler's primary message at the
