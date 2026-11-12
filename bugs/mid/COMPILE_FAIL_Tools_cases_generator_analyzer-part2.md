@@ -1,6 +1,6 @@
 # COMPILE_FAIL_Tools_cases_generator_analyzer-part2: a sibling class named like a compiler AST node keeps its own layout
 
-Part 2 of 3 of `bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md`.
+Part 2 of 4 of `bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md`.
 
 ## Goal
 
@@ -9,8 +9,7 @@ name as one of this compiler's own AST node classes (`IfStmt`, `ForStmt`,
 `WhileStmt`, `Parser`, ...), the generated C must define **the sibling's**
 struct — its own fields, its own `_alloc_`/`_init_` and its own method
 signatures — instead of the compiler's pre-seeded AST layout. This is the
-blocker behind the bulk of the analyzer build's gcc errors (25 of them in the
-sibling-set repro below).
+blocker that currently produces 25 of `analyzer.py`'s 27 gcc errors.
 
 ## Current state (measured 2026-11-11, HEAD `d210765a2`)
 
@@ -27,7 +26,7 @@ groups them as:
 |---|---|---|
 | `parsing.py` | 22 | the sibling module's `IfStmt`/`ForStmt`/`WhileStmt` methods |
 | `plexer.py` | 3 | **`#line` misattribution**: the source `plexer.py` is 124 lines, so `plexer.py:292/316/586` are really emitted while the line map named `plexer.py`; the statements are `parsing.py`'s constructors |
-| `analyzer.py` | 2 | the parenthesized ternary at `:194`, FIXED by b00e6669e after this measurement; not this part |
+| `analyzer.py` | 2 | part3 (the parenthesized ternary), not this part |
 
 Representative errors:
 
@@ -158,7 +157,7 @@ by themselves prove whether the pre-seeded dict entry, a compiler-side
   `'IfStmt' has no member named 'if_'`.
 * In the analyzer build, all `has no member named` errors in `parsing.py` and
   the `assignment ... from 'MojoList *'` constructor errors are gone. The only
-  remaining errors are none from the parenthesized ternary, which b00e6669e has landed.
+  remaining errors are part3's two at `analyzer.py:194`.
 * Self-host is not regressed: `python3 test_gimple.py` passes, and the
   integrator's `make gate` (bootstrap's stage1 == stage2 == stage3 comparison)
   is the heavy confirmation. Do not run the whole-closure/bootstrap chain in
@@ -166,9 +165,7 @@ by themselves prove whether the pre-seeded dict entry, a compiler-side
 
 ## Done when
 
-`python3 test_sibling_ast_name_collision.py` exits 0. The file is on disk and
-fails on the 2026-11-12 tree with the same 25 gcc errors (`'ForStmt' has no member
-named 'header'` in `plexer.py:292` first).
+`python3 test_sibling_ast_name_collision.py` (new file) exits 0.
 
 The test locates the CPython source tree (`$PYTHON_SRC` or
 `/Users/mrs/net/Python-3.14.6`); if
@@ -201,6 +198,6 @@ a valid regression test: it passes today.
 * Link-mode sibling resolution (`fire.py build`'s link mode stubbing
   `parser.*`/`lexer.*`): a separate recorded blocker; this part is the
   `do_imports`/inline path the analyzer build takes.
-* The parenthesized-ternary error at `analyzer.py:194` (landed as b00e6669e) and the
+* The parenthesized-ternary error at `analyzer.py:194` (part3) and the
   class-pattern binding bug (part1).
 * Making `fire.py run` import sibling modules from the script's directory.

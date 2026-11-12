@@ -1396,10 +1396,9 @@ def _tagged_consumers_ok(name: str, module_stmts=None) -> bool:
                 and x.func.name == name)
     # a handle bound ONCE to the generator call (`it = g(..)`) INSIDE one
     # function, every other use of that name in the same function being
-    # `list(it)`, `for x in it`, a comprehension over it, `it.close()`, or
-    # `with it` as a @contextlib.contextmanager handle: followed as if it were
-    # the call. Scoped per function -- an unrelated `it` in another function
-    # must not poison (or be mistaken for) this one.
+    # `list(it)`, `for x in it`, a comprehension over it, or `it.close()`:
+    # followed as if it were the call. Scoped per function -- an unrelated `it`
+    # in another function must not poison (or be mistaken for) this one.
     for fd in _scope_defs(mod):
         handles = {}
         for n in _walk(fd):
@@ -1428,11 +1427,6 @@ def _tagged_consumers_ok(name: str, module_stmts=None) -> bool:
                     and n.func.name == 'next' and len(n.args) >= 1
                     and isinstance(n.args[0], N.IdentExpr) and n.args[0].name in handles):
                 ok_uses.add(id(n.args[0]))
-            elif isinstance(n, N.WithStmt):
-                for _wi in n.items:
-                    if (isinstance(_wi.expr, N.IdentExpr)
-                            and _wi.expr.name in handles):
-                        ok_uses.add(id(_wi.expr))
             elif (isinstance(n, N.MemberExpr) and isinstance(n.obj, N.IdentExpr)
                     and n.obj.name in handles
                     and n.member in ('gi_frame', 'gi_running', 'gi_code', 'gi_suspended')):
@@ -1518,13 +1512,6 @@ def _tagged_consumers_ok(name: str, module_stmts=None) -> bool:
                 # `yield from g()` forwards the words; the delegating generator
                 # is itself tagged (its delegated kind is 'w')
                 for_iters.add(id(n.value))
-            elif isinstance(n, N.WithStmt):
-                # `with g()` / `with g() as x:` drives a @contextlib.contextmanager
-                # generator through the context-manager protocol (enter/yield
-                # value/exit), not by iterating yielded values as data.
-                for _wi in n.items:
-                    if _is_gcall(_wi.expr):
-                        for_iters.add(id(_wi.expr))
             if isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr) \
                     and n.func.name == name:
                 refs.append(id(n))
@@ -1729,14 +1716,6 @@ def _generator_value_kind(fn: N.FunctionDef,
             # exactly as a direct sibling delegation does -- fsutil's
             # `iter_files_by_suffix`, see
             # the (since-fixed) c_common/fsutil.py compile failure.
-            if _is_self_delegation(n.value, fn):
-                # `yield from <fn itself>(...)` re-yields what THIS generator
-                # yields; it is not a new source of kind. The fixpoint of a
-                # self-cycle is the kind of the direct yields, so the
-                # delegation contributes nothing rather than the None hole
-                # that `_resolve_gen_kind`'s cycle rule answers (which read
-                # a recursive tuple walk as "mixed tuple / non-tuple").
-                continue
             dk = delegated(n.value, fn) if delegated is not None else None
             kinds.add(dk)
             if dk == 'tuple':
@@ -2273,17 +2252,6 @@ def _register_generator_value_kinds(stmts: list) -> None:
     """
     for _n in _GEN_DEFS:
         _resolve_gen_kind(_n)
-
-
-def _is_self_delegation(value, fn: N.FunctionDef | None) -> bool:
-    """True for `yield from fn(...)` / `yield from fn` where `fn` is the
-    generator whose kind is being computed (a recursive generator's own
-    delegation). Matched by name, the same resolution `_delegated` uses."""
-    if fn is None:
-        return False
-    target = value.func if isinstance(value, N.CallExpr) else value
-    return (isinstance(target, N.IdentExpr)
-            and _cm_as_str(target.name) == _cm_as_str(fn.name))
 
 
 def _delegated(value, fn: N.FunctionDef = None):
@@ -3026,21 +2994,14 @@ def _ambiguous_yielded_params(fn: N.FunctionDef,
     for n in _walk(fn):
         if not isinstance(n, N.YieldExpr):
             continue
-        # A parameter that only reaches the yield as an ARGUMENT of a call whose result
-        # kind, not the argument kind, sets the slot does not set the slot's kind. That
-        # includes calls to this module's own functions (the callee's return kind) and
-        # str methods whose result is always `str` regardless of the argument kinds, such
-        # as `sep.join(xs)` and `fmt.format(...)`.
+        # A parameter that only reaches the yield as an ARGUMENT of a call to one of this
+        # module's own functions does not set the slot's kind: the call's result does (the
+        # callee's return kind). `yield _mojo_next(iterator)` is a yield of whatever
+        # `_mojo_next` returns, not of `iterator`.
         passed_through = set()
         for c in _walk(n.value):
-            if not isinstance(c, N.CallExpr):
-                continue
-            skip_args = False
-            if isinstance(c.func, N.IdentExpr) and c.func.name in _MODULE_FUNC_NAMES:
-                skip_args = True
-            elif isinstance(c.func, N.MemberExpr) and c.func.member in ('join', 'format'):
-                skip_args = True
-            if skip_args:
+            if (isinstance(c, N.CallExpr) and isinstance(c.func, N.IdentExpr)
+                    and c.func.name in _MODULE_FUNC_NAMES):
                 for a in c.args:
                     for sub in _walk(a):
                         passed_through.add(id(sub))
@@ -6023,30 +5984,20 @@ def _lower_callable_choices(stmts: list) -> None:
             return
 
         def _walk_lists(body):
-            # An eager list of `(statement-list, index)` pairs, NOT a
-            # recursive generator. The caller materializes the walk with
-            # `list(...)` before it mutates anything, so the order and the
-            # positions are identical either way; as a plain function its
-            # dynamic `getattr` is lowered by the ordinary codegen, while a
-            # generator of this shape is refused by the C++ coroutine
-            # companion (and `compile_to_gimple`, which builds the
-            # self-host binary, cannot link that companion at all).
-            out = []
             for i, st in enumerate(list(body)):
-                out.append((body, i))
+                yield body, i
                 for fld in ('body', 'then_body', 'else_body', 'finally_body'):
                     sub = getattr(st, fld, None)
                     if isinstance(sub, list):
-                        out.extend(_walk_lists(sub))
+                        yield from _walk_lists(sub)
                 for el in (getattr(st, 'elifs', None) or []):
                     if isinstance(el, (list, tuple)) and len(el) > 1 and isinstance(el[1], list):
-                        out.extend(_walk_lists(el[1]))
+                        yield from _walk_lists(el[1])
                 for h in (getattr(st, 'handlers', None) or []):
                     if isinstance(getattr(h, 'body', None), list):
-                        out.extend(_walk_lists(h.body))
-            return out
+                        yield from _walk_lists(h.body)
 
-        for body, i in _walk_lists(fd.body):
+        for body, i in list(_walk_lists(fd.body)):
             st = body[i]
             if (isinstance(st, N.AssignStmt) and isinstance(st.target, N.IdentExpr)
                     and st.target.name in good and isinstance(st.value, N.IdentExpr)):

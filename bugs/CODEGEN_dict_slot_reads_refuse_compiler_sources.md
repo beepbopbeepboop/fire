@@ -57,43 +57,20 @@ tagging a dict read whose name is later rebound with another C type. The fix is 
 `module_shared.py` and `coro.py` compile in the fire.ci build, and `test_dict_slot_read_regression.py` still passes.
 Check it against the fire.ci build, not only this probe.
 
-## Status (2026-11-12)
+## Status (2026-11-11)
 
-- `mojo/middle/coro.py` COMPILES: its last blocker was the nested recursive
-  generator `_walk_lists`, whose dynamic `getattr` the C++ companion refuses.
-  It is an eager list-returning function now, so the compiler's own module
-  compiles through the ordinary path (pinned by
-  `test_selfhost.py::coro_module_compiles_to_c`). The remaining open item is
-  the CODE SHAPE for arbitrary user code, not this build (the dynamic-`getattr`
-  refusal that blocked it is fixed in 37c877f7c).
-- FIXED: a float and a str stored into one name (regression test case 2). The
-  name is the `int64_t` box (`emit_infra.mixed_scalar_locals`), so the program
-  compiles and prints the CPython answer; `test_dict_slot_read_regression.py`
-  asserts that answer now. The representation is pinned by
-  `test_mixed_kind_name_representation.py`.
-- FIXED: the `parameter 'real_params' of '_mark_coro_param_elem_kinds' is
-  passed a container at one call site and a str or number at another` refusal
-  was a false positive — every call site passes a list; only the pre-pass's
-  `int64_t` default for each target of a multi-value UNPACK was read as "a
-  number". `module_gen`'s `_is_noncontainer_arg` now exempts exactly those
-  unpack targets; `coro.py` gets past that refusal.
-- STILL UNVERIFIED (heavy): the fire.ci self-host build was NOT run in this
-  round. Every named module now compiles in isolation; the gate that builds
-  fire.ci is the integrator's.
-- SUPERSEDED status (kept for the history of this hop): `ast_rewriter.py` and `module_shared.py` compile (the refusal
-  was the dict-slot tag, fixed in 7fe6798cc).
-- SUPERSEDED: the two "REFUSED BY DESIGN" entries below described the same
-  design gap. They are fixed as of this entry; the paragraphs are kept only so
-  the earlier measurement is not lost.
-- OLD: `mojo/middle/coro.py` was refused with `parameter 'real_params' of '_mark_coro_param_elem_kinds' is
-  passed a container at one call site and a str or number at another` (`module_gen.py`, `_refuse_mixed_container_params`).
-- OLD: a float and a str stored into one name (regression test case 2) refused with the mixed-name reason.
-- `test_dict_slot_read_regression.py` now passes with case 2 compiling and printing the CPython answer.
-- NOT RUN: the fire.ci self-host build. Its earlier blocker was the nested-generator shape, not the mixed-kind
-  representation; `coro.py` compiles in isolation now (2026-11-12), so only the heavy integrated build remains.
+- FIXED: `ast_rewriter.py` and `module_shared.py` compile (the refusal was the dict-slot tag, fixed in 7fe6798cc).
+- REFUSED BY DESIGN: `mojo/middle/coro.py` is refused with `parameter 'real_params' of '_mark_coro_param_elem_kinds' is
+  passed a container at one call site and a str or number at another`. The compiled path has no representation that
+  holds both kinds (`module_gen.py`, `_refuse_mixed_container_params`). Expected until that representation exists:
+  see `CODEGEN_mixed_kind_names_need_a_representation.md`.
+- REFUSED BY DESIGN: a float and a str stored into one name (regression test case 2) now refuse with the mixed-name
+  reason, instead of emitting a double-to-pointer cast gcc rejects. The same design gap.
+- `test_dict_slot_read_regression.py` passes with case 2 expecting that refusal.
+- NOT RUN: the fire.ci self-host build. Its check needs `coro.py` to compile, which is blocked on the design gap.
 
-Done when the mixed-kind representation exists, `coro.py` compiles, and the fire.ci build is green. The first two hold
-(2026-11-12); this doc stays open only for the heavy fire.ci verification, which the integrator runs.
+Done when the mixed-kind representation exists, `coro.py` compiles, and the fire.ci build is green. Until then this doc
+stays open with the status above.
 
 ## Process note
 
