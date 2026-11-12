@@ -1,3 +1,5 @@
+SPLIT: bugs/mid/DIAGNOSTICS_lsp_error_recovery-part1, bugs/mid/DIAGNOSTICS_lsp_error_recovery-part2, bugs/mid/DIAGNOSTICS_lsp_error_recovery-part3
+
 # DIAGNOSTICS step 8: LSP error recovery
 
 Part of the umbrella `bugs/hard/DIAGNOSTICS_missing_validation_modular.md`;

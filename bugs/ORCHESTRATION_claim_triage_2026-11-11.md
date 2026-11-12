@@ -38,7 +38,7 @@ removed on a clean branch, which landed as `8cace76b5`. The original entry is no
   own `isinstance` fix already resolves it. The branch's doc deletion and marker removal were the change that landed.
 - **`bug-codegen-linked-list-hash-stubbed`: abandoned.** The branch's test passes on master too, but the doc's open half
   (`hash(l)`) is still open: a probe of two equal lists does not link, on master and on the branch. Deleting the doc
-  would have closed that. Filed as `bugs/CODEGEN_linked_list_hash_probe_link_error.md` (`b3d052c53`).
+  would have closed that. Filed as a linked-list hash probe/link bug doc (`b3d052c53`, later fixed and deleted).
 - **`bug-mid-gate-red-recover-land-2026-11-02-2747`: abandoned, not landed.** Its fix is in self-host codegen aimed at
   `mojoc` and the bootstrap jobs. Proving it needs a full self-host build, which is out of scope under the cheap-tests rule.
   Its branch stays as the record. The doc `bugs/mid/GATE_red_recover-land_2026-11-02.md` is still on master.

@@ -1,3 +1,4 @@
+SPLIT: DIAGNOSTICS_docstring_self_import-part1, DIAGNOSTICS_docstring_self_import-part2
 # DIAGNOSTICS step 9: Docstring code-block self-import
 
 Part of the umbrella `bugs/hard/DIAGNOSTICS_missing_validation_modular.md`;

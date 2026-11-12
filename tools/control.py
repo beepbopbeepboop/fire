@@ -267,6 +267,15 @@ def claim_blocker(claims, tasks):
     return None
 
 
+def free_branch(name):
+    """`work/<name>`, or the first `work/<name>-N` that no branch holds yet. Never reuses a branch: one that exists may
+    carry commits that have not landed."""
+    branch, k = "work/" + name, 1
+    while git("rev-parse", "--verify", "--quiet", "refs/heads/" + branch, check=False).strip():
+        branch, k = "work/%s-%d" % (name, k), k + 1
+    return branch
+
+
 def cmd_spawn(a):
     """Start a worker. A task runs on a POOL SLOT (tools/pool.json): its model and runner come from the slot, and it
     never moves to another model. `--model` (a bare model, no slot) is for hand-run experiments only."""
@@ -285,7 +294,12 @@ def cmd_spawn(a):
         if blocked:
             sys.exit(blocked)
         n = next_slot()
-        wt, branch = os.path.join(PARENT, "work-%d" % n), "work/" + a.name
+        wt = os.path.join(PARENT, "work-%d" % n)
+        # A branch named work/<name> can already exist: an earlier attempt of the same task left it behind with
+        # commits that have not landed. Reusing or deleting it would destroy that work, so the new attempt takes the
+        # next free suffix instead (2026-11-11: a queued bug-codegen-dict-slot-reads-refuse-compi failed to spawn
+        # every refill cycle on `fatal: a branch named ... already exists`).
+        branch = free_branch(a.name)
         git("worktree", "add", "-b", branch, wt, a.base)
         os.makedirs(os.path.join(wt, ".tmp"), exist_ok=True)
         prompt = open(os.path.join(MAIN, "tools", "control_prompt.md")).read().format(

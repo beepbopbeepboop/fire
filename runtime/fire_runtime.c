@@ -12171,7 +12171,23 @@ char *mojo_dict_slot_repr(int64_t v, int64_t kind)
  * and the dict-level `val_repr` (a struct shim) keeps precedence over all of
  * them. Indices are `_DictSlot.kind`; 5/6 have no thunk and are NULL, which
  * `mojo_list_repr_elem`'s contract already treats as "this says nothing". */
-static char *_dict_val_repr_int(int64_t v)    { return mojo_dict_slot_repr(v, 0); }
+static char *_dict_val_repr_int(int64_t v)
+{
+    /* Kind 0 is also how a CONTAINER is stored (`mojo_dict_set_int` stores the
+     * handle as a plain int64_t word), so a non-zero word under this thunk may
+     * be a POINTER and only the caller's dispatch can render it. Answering
+     * `mojo_str_from_int` for one printed the container's ADDRESS as the value:
+     * `print(d.items())` on `{'c': [1, 2]}` gave `[('c', 4374364288)]` where
+     * CPython gives `[('c', [1, 2])]`, and `print(d.values())` gave the same
+     * decimal. Decline exactly those words — the registered-container probe,
+     * NOT a range test, so a large INTEGER stored under kind 0 (2^40) still
+     * renders as itself rather than being read as a pointer. */
+    if (v > 65536 && (mojo_is_registered_list(v) || mojo_is_registered_dict(v)
+                      || mojo_is_registered_set(v)
+                      || mojo_is_registered_bytes(v)))
+        return NULL;
+    return mojo_dict_slot_repr(v, 0);
+}
 static char *_dict_val_repr_double(int64_t v) { return mojo_dict_slot_repr(v, 1); }
 static char *_dict_val_repr_str(int64_t v)    { return mojo_dict_slot_repr(v, 2); }
 static char *_dict_val_repr_bool(int64_t v)   { return mojo_dict_slot_repr(v, 3); }
@@ -14964,6 +14980,26 @@ int64_t mojo_dict_get_int_kw(MojoDict *d, int64_t kw)
     }
     _DictSlot *sl = _dict_lookup_ik(d, kw);
     return sl ? sl->val : 0;
+}
+
+/* The BOXED read's `_kw` twin. `mojo_dict_slot_boxed` is the one dict read that
+ * keeps a slot's own kind (a bool stays a boxed bool, a None stays None), so it
+ * cannot be replaced by `mojo_dict_get_int_kw` — that hands back the raw word
+ * and `print(d[True])` would say `1` where CPython says `True`. This is the same
+ * three-arm `_kw_kind` dispatch as every other twin, with `_dict_slot_boxed`
+ * (not `->val`) as the answer, so an INTEGER key reaches the same boxed value
+ * the char* spelling produces and nothing is formatted to get there. */
+int64_t mojo_dict_slot_boxed_kw(MojoDict *d, int64_t kw)
+{
+    char *ck; int k = _kw_kind(kw, &ck);
+    if (k == _KW_STR) { return mojo_dict_slot_boxed(d, (char *)(intptr_t)kw); }
+    if (k == _KW_CONT) {
+        int64_t v = mojo_dict_slot_boxed(d, ck);
+        mojo_dict_key_free(ck);
+        return v;
+    }
+    _DictSlot *sl = _dict_lookup_ik(d, kw);
+    return _dict_slot_boxed(sl);
 }
 
 double mojo_dict_get_double_kw(MojoDict *d, int64_t kw)

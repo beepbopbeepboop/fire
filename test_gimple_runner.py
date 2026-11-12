@@ -3082,6 +3082,23 @@ c()
     # read; `add(a, b)` is two, and is the shape that shows the arity is
     # really wrong rather than merely untidy.
     #
+    # A function whose only `return` is a call to a USER-CLASS method:
+    # the callee is a MemberExpr and the function's inferred return type
+    # must follow the method's return type, not default to int64_t
+    # (which truncates a double).  (deleted bug doc: CODEGEN_function_return_type_from_method_call)
+    test_gimple_matches_cpython("gimple_function_return_type_from_method_call", """\
+class C:
+    def get(self):
+        return 2.5
+
+def mk():
+    return C().get()
+
+def main():
+    print(mk())
+main()
+""")
+
     # Two fixes, and the second was only reachable after the first: the global
     # store records `_actual_types[name] = 'MojoBoundMethod *'` (the kind IS
     # known there — `_bound_method_ret_types` holds a bound method and nothing
