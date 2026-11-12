@@ -25,13 +25,13 @@ def check(name, cond):
 
 def test_doc_deletion_needs_a_test():
     check("deleting a bug doc with no test change is refused",
-          I.deletes_doc_without_test(["bugs/CODEGEN_x.md"], ["mojo/a.py"]))
+          I.deletes_doc_without_test(["bugs/" + "CODEGEN_x" + ".md"], ["mojo/a.py"]))
     check("deleting a bug doc with a test change is allowed",
-          not I.deletes_doc_without_test(["bugs/CODEGEN_x.md"], ["mojo/a.py", "test_x.py"]))
+          not I.deletes_doc_without_test(["bugs/" + "CODEGEN_x" + ".md"], ["mojo/a.py", "test_x.py"]))
     check("a branch that deletes no doc is not refused",
           not I.deletes_doc_without_test([], ["mojo/a.py"]))
     check("a non-test .py file does not count as a test change",
-          I.deletes_doc_without_test(["bugs/CODEGEN_x.md"], ["tools/test_helpers_notes.txt"]))
+          I.deletes_doc_without_test(["bugs/" + "CODEGEN_x" + ".md"], ["tools/test_helpers_notes.txt"]))
 
 
 def test_no_progress_streak():

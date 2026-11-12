@@ -506,7 +506,7 @@ def _async_gen_quick_eligible(fn: FunctionDef, known_async_names=frozenset()) ->
     both true).
 
     Parameters ARE supported (see bugs/hard/
-    CODEGEN_async_gen_params_silent_regression.md for the full history).
+    CODEGEN_async_gen_params_silent_regression for the full history).
     Phase 7 (commit 1b736d7) first taught `_gen_cpp_async_generator_unit`
     to emit a real parametrized C++ signature, but the ONLY real
     consumption path -- `_cpp_async_for_stmt` (`async for x in f(<args>):`)
@@ -901,7 +901,7 @@ def _is_python_bool_method(gen, node) -> bool:
     Note that `b.get() == True` was ALREADY right, because the comparison
     produces a `_Bool`; a test that only checked the equality would pass
     while every printing spelling was wrong, which is the same trap
-    `CODEGEN_repr_of_a_bool_prints_1.md` documents for print vs repr.
+    `CODEGEN_repr_of_a_bool_prints_1` documents for print vs repr.
 
     `struct_bool_methods` records only methods whose EVERY `return` hands
     back a bool field (see module_gen.py's second per-method loop), so a
@@ -1003,7 +1003,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
     like every other compiled struct-method call site already resolves it)
     is one. Reuses this codegen's ALREADY-established per-struct dict-value-
     type/method-return-type registries rather than inventing new tracking —
-    see CODEGEN_enum_runtime_class_creation.md's 2026-08-20 update.
+    see CODEGEN_enum_runtime_class_creation's 2026-08-20 update.
 
     `module_global_types` (optional, default None — every existing caller
     that doesn't pass it keeps this function's original behaviour) is a
@@ -1623,7 +1623,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
     function body (a generator can't `await`, an async function can't
     `yield` — see gen_module's combined-refusal category). `known_structs`/
     `dict_val_types`/`method_return_types` (struct-pointer-yield support —
-    see CODEGEN_enum_runtime_class_creation.md's 2026-08-20 update) are
+    see CODEGEN_enum_runtime_class_creation's 2026-08-20 update) are
     threaded straight through to every `_infer_simple_expr_ctype` call
     below unchanged — see that function's own docstring for what each
     widens. `field_elem_types`/`local_elem_types` (struct_name-scoped

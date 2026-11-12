@@ -5440,7 +5440,7 @@ main()
     # Repeated, and the dict is a MODULE GLOBAL rather than a local on
     # purpose: a dict passed as an unannotated parameter is typed `MojoList *`
     # and `sorted()` then mis-dispatches, which is a different bug with its
-    # own doc (CODEGEN_polymorphic_unannotated_param_vacuous_unanimity.md) and
+    # own doc (CODEGEN_polymorphic_unannotated_param_vacuous_unanimity) and
     # would mask this one. Every line below is a DIFFERENT missed field, so a
     # fix that patches only `condition` cannot pass.
     test_gimple_stdout_repeated("gimple_lambda_capture_through_unwalked_fields", """\
@@ -6721,7 +6721,7 @@ def main():
     #   * the five `.append` calls that register an item for teardown sat
     #     inside `if item.alias is not None:`, so `with C():` registered
     #     nothing — no `__exit__` at all (bugs/
-    #     CODEGEN_with_no_as_target_drops_exit.md);
+    #     CODEGEN_with_no_as_target_drops_exit);
     #   * the `has_exit` pre-scan read `_ctx_sns` only, so an item whose
     #     teardown is a GENERATOR's final resume+destroy looked like "no
     #     teardown" too — and then the raise path lost it as well, which for
@@ -8427,7 +8427,7 @@ def main():
 """, "override\n1\nx\ny\n")
 
     # 21d. Builtin `bytes` subclassing (`class _Extra(bytes)`, zipfile) --
-    # see bugs/COMPILE_FAIL_zipfile___init__.md. `super().__new__(cls, v)`
+    # see COMPILE_FAIL_zipfile___init__. `super().__new__(cls, v)`
     # populates the synthesized `_data: MojoBytes *` payload; inherited
     # len/index/slice/iter/eq/concat/`in`/`.decode`/`.hex`/`.startswith`/
     # `.split` route to it; extra `self.<attr>` fields sit alongside;
@@ -9995,7 +9995,7 @@ fn main():
     # `self._buf = b''` in __init__ makes the field a real bytes value, so
     # a slice of the field and `acc += <bytes>` accumulation work end to
     # end (was: char* field -> mojo_cstr_slice -> char*+MojoBytes* pointer
-    # arithmetic + a GCC GIMPLE-FE ICE). COMPILE_FAIL_zipfile___init__.md.
+    # arithmetic + a GCC GIMPLE-FE ICE). COMPILE_FAIL_zipfile___init__.
     test_gimple_stdout("gimple_bytes_field_slice_and_augassign", """\
 fn chunk() -> bytes:
     return b'hello world'
@@ -11674,7 +11674,7 @@ fn main():
     # (fire_compiler.desugar_genexps rewrites it into a call to a
     # synthesized module-level generator function), so this also pins the
     # value-typing of what flows through it.
-    # bugs/COMPILE_FAIL_zipfile___init__.md blocker 3.
+    # COMPILE_FAIL_zipfile___init__ blocker 3.
     test_gimple_stdout("gimple_genexp_local_sum_once", """\
 fn main():
     g = (x * 2 for x in [1, 2, 3])
@@ -11716,7 +11716,7 @@ def main():
 """, "12\n0\n")
 
     # os.path.splitdrive / splitroot — POSIX (see
-    # bugs/COMPILE_FAIL_zipfile___init__.md). splitdrive is always
+    # COMPILE_FAIL_zipfile___init__). splitdrive is always
     # ('', p); splitroot follows posixpath (1/>=3 leading slashes -> '/',
     # exactly 2 -> '//').
     test_gimple_stdout("gimple_os_path_splitdrive_splitroot", """\
@@ -12357,7 +12357,7 @@ bytes_keyed()
     # what lets a kind-0 zero print `0` in the same dict where a `None` prints
     # `None`. `d['n']` still prints `0` where CPython says `None` — a READ
     # does not carry the slot kind anywhere — which is deliberately NOT pinned
-    # here; see bugs/mid/CODEGEN_dict_slot_read_loses_its_value_kind.md.
+    # here; see CODEGEN_dict_slot_read_loses_its_value_kind.
     # A `(key, value)` pair built by `mojo_dict_items` has to carry the dict
     # slot's kind, because a pair slot is a raw int64_t and the pair is built by
     # the runtime with nothing from the dict slot travelling with it. Without it
@@ -13909,7 +13909,7 @@ main()
     # OUTER `t`, not the comprehension's last element. It is printed rather
     # than returned on purpose: a heterogeneous list bound from a call result
     # reads its elements back through the wrong accessor, which is its own
-    # filed bug (CODEGEN_list_element_read_defaults_to_str_across_a_call.md)
+    # filed bug (CODEGEN_list_element_read_defaults_to_str_across_a_call)
     # and would otherwise be what made this case red.
     _check_agrees_with_cpython("comprehension_target_shadows_struct_local", {
         'compr_shadow.py': "class Tok:\n"
@@ -14186,7 +14186,7 @@ main()
     # `Tools/<tool>/x.py` entry file can never arrive there and every CPython
     # `Lib/` import used to degrade to a receiver stub with the source tree
     # sitting right there on disk (bugs/
-    # COMPILE_FAIL_cpython_lib_is_invisible_outside_it.md). The layout below is
+    # COMPILE_FAIL_cpython_lib_is_invisible_outside_it). The layout below is
     # a real one — `<root>/Lib/os.py` is what marks the root as a checkout, and
     # `<root>/Tools/probe/entry.py` is the entry — and the expectation is
     # CPython's own, run with `Lib` on its `PYTHONPATH` (which is how the

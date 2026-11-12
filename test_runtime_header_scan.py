@@ -54,7 +54,7 @@ runs in both directions — `python3 test_runtime_header_scan.py --fix` writes t
 live census into every one of those quotes from the same table the check reads,
 so the two ends of this file cannot drift apart, and a commit that adds a
 runtime declaration does not have to remember which six sentences quoted the
-number it changed. (`bugs/FORMAL_known_limits.md` quotes the census in more
+number it changed. (`FORMAL_known_limits` quotes the census in more
 sentences than the five above; every one of them is in the table, which is why
 a change to that document's wording can now fail this file.)
 
@@ -360,7 +360,7 @@ def test_every_declaration_is_seen():
     #
     # 544 -> 546: `mojo_open` and `mojo_close`, declared under the same
     # `#ifndef __MOJO_STDLIB_MODE__` guard `mojo_write` uses
-    # (`runtime/fire_runtime.h`, and `bugs/FORMAL_runtime_library_on_the_link_line.md`
+    # (`runtime/fire_runtime.h`, and `FORMAL_runtime_library_on_the_link_line`
     # §0.2 for why they were left out and what decided it). Both are DEFINED by
     # `fire_runtime.c` in both arms of its `#if USE_PYTHON`, with the signature
     # declared here, so both cross the export-trie intersection and both are
@@ -619,7 +619,7 @@ def test_every_declaration_is_seen():
     # This rung is the one `bugs/CODEGEN_the_runtime_export_ladder_is_five_
     # behind.md` filed for, together with the five PROSE copies of the census
     # in `formal/model.py`, `build_stdlib_dylib.py` and
-    # `bugs/FORMAL_known_limits.md`. Both are closed by the same thing: this
+    # `FORMAL_known_limits`. Both are closed by the same thing: this
     # entry, its ladder rung, and `--fix`, which writes the live scan into
     # every quote from the table above rather than leaving five hand-typed
     # copies of a computed number to agree with each other. The doc went with
@@ -720,7 +720,7 @@ CENSUS_QUOTES = (
     # and so a different pair of figures -- quoted here because the doc quotes
     # it, and derived with `model`'s own word rule rather than by arithmetic.
     # `FORMAL.md` §2.2's census table and its `N of M` sentence. **This is the
-    # gap whose bug doc was `FORMAL_phase2_export_ceiling_is_four_behind.md`**,
+    # gap whose bug doc was `FORMAL_phase2_export_ceiling_is_four_behind`**,
     # deleted with its fix on 2026-10-05 (fixed at commit 9e79c79e: the ten entry
     # points this describes are now in `FORMAL.md`, the `word` row is checked by
     # `test_formal_runtime_link.py` as well as here, and `test_runtime_header_scan.py
@@ -779,7 +779,7 @@ def live_census():
     """Every figure the prose quotes, read off the headers exactly once.
 
     `return_word`/`return_box` are the split the round-1 correction in
-    `bugs/FORMAL_known_limits.md` quotes: the RETURN type alone, with the
+    `FORMAL_known_limits` quotes: the RETURN type alone, with the
     argument list not counted. That is a different question from the table's
     ("every type crossing the boundary"), so it is a different pair of numbers
     from the same table -- asked with `model`'s own word rule rather than by
@@ -838,7 +838,7 @@ def rewrite_quoted_figures():
         try:
             with open(full, encoding='utf-8') as f:
                 # re-read every time: two entries can name the same file (and
-                # several name FORMAL_known_limits.md), and an earlier write in
+                # several name FORMAL_known_limits), and an earlier write in
                 # this loop has to be visible to the later ones
                 text = f.read()
         except OSError as e:

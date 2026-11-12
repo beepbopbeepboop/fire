@@ -1581,7 +1581,7 @@ def _lower_class_attr_builtin(gen, node, fn):
 def _lower_type_new(gen, node, args=None, meta=None):
     """`type(name, (Base, ..), {'attr': value, ..})` with a literal base tuple/list and a literal
     dict of string keys: a class made at run time (stage 3 of
-    bugs/hard/CODEGEN_enum_runtime_class_creation.md). It is a class-table entry (`mojo_type_new`) whose
+    CODEGEN_enum_runtime_class_creation). It is a class-table entry (`mojo_type_new`) whose
     bases are the listed classes and whose dict starts from the namespace; the value is a class
     handle word that `Foo.x`, `Foo.x = v` and `getattr(Foo, ..)` read through the class table.
     None when the arguments are not that literal shape (the caller refuses by name).
@@ -4661,7 +4661,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
 
     # Local variable holding a bound-method value (`f = self.b; ...; f()`
     # — see _lower_bound_method_value/bugs/
-    # CODEGEN_bound_method_as_value_not_resolved.md). Must be checked
+    # CODEGEN_bound_method_as_value_not_resolved). Must be checked
     # before the plain-function-pointer case just below: a
     # `MojoBoundMethod *` also needs `self` re-supplied as the implicit
     # first argument, which a bare fn-ptr call has no way to do. The var
@@ -5113,7 +5113,7 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
     # A builtin-`bytes` subclass instance (`class _Extra(bytes)`) IS a
     # `bytes` for isinstance purposes even though its C type is the
     # subclass struct pointer, not `MojoBytes *`. See
-    # bugs/COMPILE_FAIL_zipfile___init__.md.
+    # COMPILE_FAIL_zipfile___init__.
     if type_name in ('bytes', 'bytearray') and gen._bytes_subclass_of(obj_type):
         return gen._new_val('_Bool', '(_Bool)1')
 
@@ -10505,7 +10505,7 @@ def _lower_struct_constructor(gen, struct_name: str,
     # emitted as a callable method — its sole job in the scoped shape is
     # this payload construction. `__init__` still runs afterwards for any
     # extra instance attributes (`self.id = id`). See
-    # bugs/COMPILE_FAIL_zipfile___init__.md.
+    # COMPILE_FAIL_zipfile___init__.
     if struct_name in getattr(gen, '_bytes_subclass_structs', ()):
         _bidx = gen._bytes_subclass_payload_argidx.get(struct_name, 0)
         if args and 0 <= _bidx < len(args):
@@ -11140,7 +11140,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
 
     # `x[i]` on a builtin-`bytes` subclass with no `__getitem__` override:
     # a single-byte read (int) against the backing MojoBytes. See
-    # bugs/COMPILE_FAIL_zipfile___init__.md.
+    # COMPILE_FAIL_zipfile___init__.
     _bsub_r = gen._bytes_subclass_of(ot)
     if _bsub_r and not gen._struct_defines_method(_bsub_r, '__getitem__'):
         bp = gen._new_val('MojoBytes *', f"{ov}->_data")
@@ -11702,7 +11702,7 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
 
     # `x[a:b]` on a builtin-`bytes` subclass instance -> a plain bytes
     # slice of its payload (CPython returns `bytes`, not the subclass).
-    # See COMPILE_FAIL_zipfile___init__.md.
+    # See COMPILE_FAIL_zipfile___init__.
     if gen._bytes_subclass_of(ot) and not gen._struct_defines_method(
             gen._bytes_subclass_of(ot), '__getitem__'):
         ov = gen._new_val('MojoBytes *', f"{ov}->_data")

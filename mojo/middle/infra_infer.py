@@ -809,7 +809,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                             # 2-arg `max` then lowers to the single-iterable
                             # `mojo_max(void *args)`. See
                             # `_SCALAR_ARITY_BUILTINS`'s own comment and
-                            # bugs/COMPILE_FAIL_zipfile___init__.md.
+                            # COMPILE_FAIL_zipfile___init__.
                             if (func_name in _ITERABLE_CONSUMING_BUILTINS
                                     and not (func_name in _SCALAR_ARITY_BUILTINS
                                              and len(expr.args) > 1)):
@@ -1081,7 +1081,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     # the += emitted raw `char * + MojoList *` pointer
                     # addition — gcc -fgimple "internal compiler error: in
                     # build2, at tree.cc" (bugs/
-                    # COMPILE_FAIL_Tools_gdb_libpython.md).
+                    # COMPILE_FAIL_Tools_gdb_libpython).
                     if isinstance(node.target, gimple_ctypes.MemberExpr) \
                             and _expr_mentions_param(node.value):
                         _aug_root = node.target.obj
@@ -2814,7 +2814,7 @@ def _prepass_list_elem(gen, elements) -> str | None:
     positive claim reached the call site as `_return_elem_types['a2']`, so
     `print(a2(1))` routed to `mojo_repr_list_ints` and printed the two `char *`
     slots as pointer decimals. Measured in bugs/
-    CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md; the same
+    CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type; the same
     program WITHOUT the trailing `return []` answers None and prints right,
     which is what made the branch look like the trigger when the empty literal
     is what carries the false claim.

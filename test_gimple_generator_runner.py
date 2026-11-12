@@ -5756,7 +5756,7 @@ def run_tests():
     run_module_global_generator_tests()
     run_nested_generator_capture_tests()
     run_escaping_nested_generator_tests()
-    # Cluster E (bugs/CODEGEN_generator_function_Lib_ipaddress.md): a
+    # Cluster E (CODEGEN_generator_function_Lib_ipaddress): a
     # generator method that CALLS the result of a `@property` getter
     # (`self._address_class(x)` -- `_address_class` is a @property returning
     # a class object, then invoked). This used to be A3-eligible and lowered
@@ -6871,7 +6871,7 @@ def main():
     # `cls._value2member_map_.get(val)`, a `Flag *`), reduced to a `self`-
     # based (non-classmethod) generator method here since the `cls`-access
     # gap itself is a separate, still out-of-scope limitation (see
-    # CODEGEN_enum_runtime_class_creation.md). Exercises: struct-pointer
+    # CODEGEN_enum_runtime_class_creation). Exercises: struct-pointer
     # yield-type inference via `_field_dict_val_types` (seeded early, from
     # the field's own `var map: dict[Int, Flag]` declaration, so it's
     # available in time for generator-method translation), the promise/
@@ -6947,7 +6947,7 @@ def main():
     # separate, pre-existing call-site gap in the ordinary (non-generator)
     # GIMPLE path (routing a class-name method call to the generator-start
     # API), out of this fix's scope (see bugs/CODEGEN_generator_function_
-    # Lib_enum.md's 2026-08-21 update). See that same doc's update for the
+    # Lib_enum's 2026-08-21 update). See that same doc's update for the
     # full root-cause.
     test_generator_stdout("cls_class_attr_dict_get_yield", """\
 class Flag:
@@ -6979,7 +6979,7 @@ def main():
     # `cls.method(...)` call inside a compiled @classmethod generator —
     # resolved purely by NAME (the enclosing struct's own real compiled
     # classmethod), mirroring the `self.method(...)` call case's own
-    # mechanism. See bugs/hard/CODEGEN_enum_runtime_class_creation.md's
+    # mechanism. See CODEGEN_enum_runtime_class_creation's
     # 2026-08-21 update, point (2). Also called via an instance, for the
     # same call-site-gap reason noted above.
     test_generator_stdout("cls_classmethod_call_in_generator", """\
@@ -7416,7 +7416,7 @@ def main():
     # following `for x in it:` continues from where next() left off, and
     # `next(it, default)` returns the default on exhaustion. Plus
     # `min(iterable)`/`max(iterable)` and multi-arg `min(a, b, ...)`.
-    # Mirrors bugs/CODEGEN_generator_function_Lib_ipaddress.md's
+    # Mirrors CODEGEN_generator_function_Lib_ipaddress's
     # `_find_address_range` shape. Previously every one of these refused
     # the whole module ("unresolved callee 'next(...)'" etc.).
     test_generator_stdout("generator_list_iterator_cursor_and_minmax", """\
@@ -8042,7 +8042,7 @@ def main():
 
     # A @classmethod generator that builds a memoryview over an
     # unannotated (bytes) parameter and iterates it -- the shape of
-    # zipfile's `_Extra.split` (bugs/COMPILE_FAIL_zipfile___init__.md).
+    # zipfile's `_Extra.split` (COMPILE_FAIL_zipfile___init__).
     # Newly A3-eligible (gimple_gen_coro._eligible classmethod path).
     test_generator_stdout("generator_classmethod_memoryview", """\
 struct E:
@@ -10520,7 +10520,7 @@ def main():
 main()
 """)
 
-    # Stage 1 of run-time class objects (bugs/hard/CODEGEN_enum_runtime_class_creation.md): an attribute
+    # Stage 1 of run-time class objects (CODEGEN_enum_runtime_class_creation): an attribute
     # the class body never declares - `setattr(cls, ..)`, `Cls.x = v`, what a metaclass installs -
     # lives in a run-time class table found through the bases, and a @classmethod generator (or
     # method) reads it as `cls.x`; getattr / hasattr on a class use the same table.

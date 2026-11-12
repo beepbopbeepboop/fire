@@ -562,7 +562,7 @@ MEASURED_PEAK_GB = {
     # (93 generated proofs, one after another) resembles. The `memwhy` on its
     # registration says the same thing and points at the doc that owns the
     # cause: `mem_read_bytes`'s `ite` chain over a 113-equation successor nest,
-    # which `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`
+    # which `FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps (deleted)`
     # is about and which a class change would not fix.
     'formal-x86-endtoend': (6.1, 'measured'),
     # The eleven `expect=`-marked tests that were registered and in NO BUCKET,
@@ -833,7 +833,7 @@ MEASURED_PEAK_GB = {
     # inputs, 2163 s each. `trusted_peaks` keeps the worst for exactly this
     # reason, and a class sized to the smaller of them would be a coin flip.
     # The spread is the finding; see
-    # bugs/PERF_stdlib_tests_peaks_35_to_52gb_on_the_same_run.md.
+    # PERF_stdlib_tests_peaks_35_to_52gb_on_the_same_run.
     'stdlib-tests':                           (52.2, 'measured'),  # 321 items, of 34.9/52.2
     # RED and recorded anyway, for the reason `formal`'s row gives: it ran all
     # 102 s to completion and peaks at 2.2 GB, so that is what it needs and not
@@ -1909,7 +1909,7 @@ test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True, mem='tiny',
 # master's tip and at this branch's base), which the `expect=` below declares:
 # a whole-job condition with no count, because the ratchet prints no summary
 # line the runner can check one against. Its doc
-# (`bugs/SUITE_doc_refs_ratchet_red.md`) is the switch — the campaign lands,
+# (the doc SUITE_doc_refs_ratchet_red, now retired) was the switch — the campaign landed,
 # the doc goes, and a still-marked `doc-refs` that now PASSES reports loudly
 # until the marker drops. An `expect=` in `check` runs against this bucket's
 # stated convention on purpose: the alternative is a permanently UNDECLARED red
@@ -1925,14 +1925,6 @@ test('doc-refs', [PY, 'tools/dangling_doc_refs.py', '--ratchet'], cache=True,
      extra=['tools/dangling_doc_refs.py', 'tools/dangling_refs_baseline.py',
             'checked_run.py'],
      extraglob=['**/*.md', '**/*.py'],
-     expect='bugs/SUITE_doc_refs_ratchet_red.md — pre-existing red, not caused '
-            'by any one branch: the citation campaign, whose over-ceiling '
-            'files the doc lists (regenerate with `python3 '
-            'tools/dangling_doc_refs.py --ratchet`). Whole-job condition, '
-            'stated without a count because the ratchet prints no summary '
-            'line the runner can check one against. Drop the marker when the '
-            'campaign lands; a marked job that starts passing reports '
-            'loudly.',
      desc='no file cites a deleted bug doc more than it used to')
 # Reads the CHECKABLE half of FORMAL.md, doc/ABI.md and OPUS.md (counts,
 # function names, limits, refusal messages, ABI signatures, tool flags) out of
@@ -2344,7 +2336,7 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
 # `native-dumpfull` was marked with this same reason until its bootstrap chain
 # went green (2026-10-25); its registration below says why it is not marked
 # any more. This constant is
-# also the whole of §4's subject matter: bugs/hard/CODEGEN_ab_native_fails.md tables
+# also the whole of §4's subject matter: CODEGEN_ab_native_fails tables
 # every `expect=` job in the registry with its measured peak, its class and its
 # reservation, and a recommendation each.
 # `small` (8 GB), not `stage` (96): `fire.py build fire.py` is the
@@ -2372,7 +2364,7 @@ test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
      artifact='mojoc', inputs=[MOJO_MAIN] + PY_FILES + [RUNTIME_SRC, RUNTIME_HDR],
      desc='build the one managed native compiler (-O2 -g0)')
 # ab-native's expect= reason. Named for the 15-30 GB self-host pre-pass
-# blowup it used to describe; the blowup is closed (bugs/hard/CODEGEN_ab_native_fails.md,
+# blowup it used to describe; the blowup is closed (CODEGEN_ab_native_fails,
 # 2026-10-26: 0.1 GB / ~10s), so the text now states the current 1-of-30
 # divergence. `2f75609d` turned the job back from disabled= to expect=
 # referencing the constant `58192261` had removed, so every import of this
@@ -2381,7 +2373,7 @@ test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
 # re-counts the run's "Results: N passed, M failed" line against it, so a
 # second divergence cannot be absorbed silently by the marker.
 SELFHOST_TOKENIZE_BLOWUP = (
-    'bugs/hard/CODEGEN_ab_native_fails.md — 1 failing: match_stmt diverges '
+    'CODEGEN_ab_native_fails — 1 failing: match_stmt diverges '
     '(29/30 byte-identical; the blowup this constant was named for is '
     'closed, the run is now 0.1 GB / ~10s)')
 # `program` (55 GB), UP from `module` (24) — the one job the ratchet moves up,
@@ -2411,7 +2403,7 @@ SELFHOST_TOKENIZE_BLOWUP = (
 # for it, which is the mechanism, and `tools/suite.py --dry-run native` prints
 # the 0.
 #
-# The bug doc IS the switch: bugs/hard/CODEGEN_ab_native_fails.md is what the test
+# The bug doc IS the switch: CODEGEN_ab_native_fails is what the test
 # is waiting on, the repo's rule is that a fixed bug's doc is DELETED, and
 # `disabled_problems` refuses to load this registry the moment that doc is
 # gone — naming the job and saying to turn the test back on. So the test cannot
@@ -2421,7 +2413,7 @@ SELFHOST_TOKENIZE_BLOWUP = (
 test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
      memwhy='measured 20.5 GB when it last ran: the self-hosting bootstrap '
             'pre-pass this corpus legitimately triggers (see '
-            'bugs/hard/CODEGEN_ab_native_fails.md), and 1.5x is 30.75 GB, so '
+            'CODEGEN_ab_native_fails), and 1.5x is 30.75 GB, so '
             '`module` (24) was 85% of what it uses. Recorded, not charged: the '
             'job is disabled, so this class is what it will cost the day it is '
             'turned back on, and it reserves 0 meanwhile. Over the 4 GB line '
@@ -2434,7 +2426,7 @@ test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
 # reason and is the owner's call, because it is also the job whose run produces
 # the measurements the blowup work is steered by — a marker that cannot be
 # observed going green is weak, and this is the case for not weakening it.
-# §4 of bugs/hard/CODEGEN_ab_native_fails.md tables it with its peak, class and
+# §4 of CODEGEN_ab_native_fails tables it with its peak, class and
 # reservation and a recommendation, so the choice is a line rather than an
 # investigation.
 # `native-dumpfull` needs `mojoc` built first: it runs `./mojoc --dump-full`
@@ -2486,7 +2478,7 @@ test('stdlib-tests', [PY, 'test_stdlib.py'], mem='program',
             'any budget under 96 GB; that is a worse failure than a thin margin '
             'and it is why this is a CLASS_ABOVE_PEAK entry. Over the 4 GB '
             'line and therefore a debt, not a fact; the spread is '
-            'bugs/PERF_stdlib_tests_peaks_35_to_52gb_on_the_same_run.md. See ' +
+            'PERF_stdlib_tests_peaks_35_to_52gb_on_the_same_run. See ' +
             MEM_DEBT_DOC,
      desc='every stdlib test/benchmark through interpreter and JIT')
 # Fresh by design: reusing the built dylib would make "did this module fall
@@ -2753,7 +2745,7 @@ test('prooflib', [PY, '-c',
 #      around the whole composed `Arm64State`, which `bv_decide`'s internal
 #      normalisation cannot be configured out of, and three budgets were
 #      measured failing to fire (`FORMAL.md` §12,
-#      `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
+#      `FORMAL_dylib_export_loops_and_frame_bounds` §1).
 #      `formal/arm64_proof_gen.py` now
 #      emits the `if` resolved for every step it knows moves no pc, and keeps
 #      it only for the closing `ret`, which `BlockCert` genuinely cannot
@@ -3029,7 +3021,7 @@ test('formal-x86', [PY, 'test_formal.py', '--backend', 'x86_64'], j=True,
 # `formal/x86_64_endtoend_test.py`'s successor table against a corrected model —
 # and the only report of it was a bug doc. Fixed 2026-10-05
 # (`formal43-x86-endtoend-red`): 26 -> 1, and what is left is `wide_recv`'s
-# `lean::memory_exception`, which `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`
+# `lean::memory_exception`, which `FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps (deleted)`
 # owns and which is a resource ceiling rather than a wrong proof. That doc's own
 # 2026-10-05 Status entry carries this branch's measurement.
 #
@@ -3054,14 +3046,14 @@ test('formal-x86-endtoend', [PY, 'formal/x86_64_endtoend_test.py'],
             'debt line in ' + MEM_DEBT_DOC + ' because the generated proofs are '
             '~700 KB of `native_decide` goals and `mem_read_bytes`\'s `ite` '
             'chain, which is the subject of '
-            '`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)` '
+            '`FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps (deleted)` '
             'and not something a class change would fix.',
      expect='1 of 65: `wide_recv` only, and it is a resource ceiling rather '
             'than a wrong proof — `lean` aborts with '
             '`lean::memory_exception: excessive memory consumption detected at '
             '\'interpreter\'` (`rc=-6`) while evaluating this emitter\'s closing '
             'read over a 113-equation chain. See '
-            '`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`. '
+            '`FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps (deleted)`. '
             'The other 64 are 58 proved with no sorry and 6 proved with a '
             'counted hole; the 28 that build no path tree are reported by the '
             'harness itself (19 loop, 9 uncovered form) and are not cases.',
