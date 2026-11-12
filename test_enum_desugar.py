@@ -56,6 +56,25 @@ def main():
     print(x, repr(x), f"{x}", "%s" % x, isinstance(x, Color))
 main()
 ''',
+    # Regression: a boolean-producing expression must print True/False, not the
+    # integer 1/0. isinstance reported its result as C `int` (unlike all/any,
+    # which report `_Bool`), so print's boxed-dict-slot discriminator
+    # (mojo_cstr_or_int_str) rendered the 0/1 bit as a bare integer — the
+    # estate audit's `Color.GREEN Color.GREEN 1` where CPython prints `True`.
+    # The isinstance lines are the ones that failed before the fix; the
+    # all/any/comparison lines guard the shared `_Bool` path they all take.
+    "bool_results_print_true_false": '''
+from enum import Enum
+class Color(Enum):
+    RED = 1
+    GREEN = 2
+
+x = Color.GREEN
+print(isinstance(x, Color))
+print(isinstance(1, int), isinstance("a", str))
+print(all([1, 0]), any([1, 0]))
+print(x == Color.RED, x is Color.RED)
+''',
 }
 
 
