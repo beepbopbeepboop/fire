@@ -1789,8 +1789,7 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
             'runtime/fire_python.h',
             'formal/model', 'FORMAL.md', 'formal/build.py',
             'build_stdlib_dylib.py'],
-     desc='runtime header export scan sees every declaration',
-     disabled='bugs/gate-rthdrscan.md')
+     desc='runtime header export scan sees every declaration')
 # `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
 # the ratchet, and the reason it needed a measurement to be safe.
 # `test_selfhost.py` calls `fire.build_executable(fire.py)`, which is the
@@ -1855,8 +1854,7 @@ test('interp-tokenizer-oracle', [PY, 'test_myinterpreter_validation.py'],
      mem='tiny', cache=True,
      extra=['test_myinterpreter_validation.py', 'fire_compiler.py',
             'myinterpreter.py', 'formal/examples'],
-     desc='the interpreter\'s tokenizer vs the imported one, over 67 texts',
-     disabled='bugs/gate-interp-tokenizer-oracle.md')
+     desc='the interpreter\'s tokenizer vs the imported one, over 67 texts')
 test('metalgpu', [PY, 'test_metal_codegen.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_metal_codegen.py',
                              'mojo/middle/metal_ops.py',
@@ -1890,8 +1888,7 @@ test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
 test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True, mem='tiny',
      extra=['test_cli_usage_text.py', 'fire.py', 'fire_main.py', 'fire_compiler.py'],
      extraglob=['**/*.py'],
-     desc='the tool prints the name it was invoked as, in usage, -v and every error',
-     disabled='bugs/gate-cli-usage-text.md')
+     desc='the tool prints the name it was invoked as, in usage, -v and every error')
 # `extraglob=['**/*.py']` is the same hole `suite-self-test` documents, one
 # subject over: `test_no_stale_command_name_in_prose` WALKS every `.py` file in
 # the tree (it ratchets `mojo <command>` out of the prose, and its doc was
@@ -1945,8 +1942,7 @@ test('formal-doc-truth', [PY, 'test_formal_doc_truth.py'], mem='tiny', cache=Tru
             'formal/x86_64_proof_gen.py', 'build_stdlib_dylib.py',
             'reflect.py'],
      desc='every checkable figure in FORMAL.md, doc/ABI.md and OPUS.md '
-          'agrees with the tree',
-     disabled='bugs/gate-formal-doc-truth.md')
+          'agrees with the tree')
 # The two checks that arrived with a merge and ran by nothing (the estate check
 # in suite-self-test reported both). The stale-verdict half of doc-refs has a
 # negative control -- a deliberately wrong verdict row must be flagged or the
@@ -2303,8 +2299,7 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
      extra=['test_coro_nested_async_capture.py', 'gimple_codegen.py',
             'runtime/fire_async_runtime.cpp', 'runtime/fire_async_runtime.h'] + CORO_RUNTIME,
      desc='nested async-def mutable closure capture under MOJO_CORO=stackswitch '
-          '(was 0/9, unregistered, naming the pre-rename mojo_*.c runtime files)',
-     disabled='bugs/gate-coro-nested-capture.md')
+          '(was 0/9, unregistered, naming the pre-rename mojo_*.c runtime files)')
 
 # ── The self-hosted BINARY's own compiled codegen ───────────────────────────
 # Everything here runs a mojoc process, so everything is capped, and
@@ -2506,8 +2501,7 @@ test('stdlib-tests', [PY, 'test_stdlib.py'], mem='program',
 # moment a recorded peak stops fitting its class).
 test('stdlib-dylib', [PY, 'tools/stdlib_dylib_ratchet.py'],
      mem='tiny', excl=True, timeout=3600,
-     desc='from-scratch stdlib dylib; reports modules that fell back to source',
-     disabled='bugs/gate-stdlib-dylib.md')
+     desc='from-scratch stdlib dylib; reports modules that fell back to source')
 test('runtimedylib', [PY, 'test_runtime_dylib.py'],
      deps=['preflight'], mem='tiny',
      desc='the runtime dylib: export table, per-arch link, cross-arch checks')
@@ -2975,8 +2969,7 @@ test('formal-sweep-truth', [PY, 'test_formal_sweep_truth.py'],
      desc='the sweep, measured against the interpreter: no invented coverage')
 test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
      deps=['preflight'], mem='tiny',
-     desc='every bound symbol is accounted for, on every container format',
-     disabled='bugs/gate-formal-link-accounting.md')
+     desc='every bound symbol is accounted for, on every container format')
 # Scaffold holes are ledgered in formal/proof_gaps.py and counted by
 # library_census; every sorry must live only in lib/Scaffold.lean.
 test('formal-proof-gaps', [PY, 'test_formal_proof_gaps.py'],
@@ -4185,8 +4178,7 @@ test('python315-sentinel', [PY, 'test_python315_sentinel.py'], mem='tiny',
 test('qualified-member-no-leak', [PY, 'test_qualified_member_no_leak.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('reg-formal-ast-bridge-two-arg', [PY, 'test_reg_formal_ast_bridge_two_arg.py'], mem='tiny',
-     desc='registered by the estate audit (every test file runs)',
-     disabled='bugs/gate-reg-formal-ast-bridge-two-arg.md')
+     desc='registered by the estate audit (every test file runs)')
 test('selfhost-debug-flag', [PY, 'test_selfhost_debug_flag.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('sys-utf8-default-encoding', [PY, 'test_sys_utf8_default_encoding.py'], mem='tiny',

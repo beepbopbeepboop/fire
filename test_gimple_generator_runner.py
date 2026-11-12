@@ -5435,42 +5435,6 @@ main()
         test_generator_matches_cpython("tagged_none_identity_for_cpp", _for_src, _for_src)
 
 def run_tagged_for_target_bind_tests():
-    # A name bound to a tagged generator word (the loop target's box) and also
-    # to a container value is refused: no representation holds both. The
-    # refusal names the name, the container C type, and the two binding shapes
-    # (direction 2: tagged word elsewhere, container store here). Direction 1
-    # (container-typed name stored a tagged word) raises at the same site with
-    # the symmetric wording.
-    _container_mixed = """\
-def g():
-    yield 1
-    yield None
-    yield 2
-def main():
-    x = [1, 2]
-    for v in g():
-        x = v
-        print(x)
-    print(len(x))
-main()
-"""
-    global _PASS, _FAIL
-    try:
-        gimple_codegen.compile_to_gimple_with_cpp(_container_mixed, do_imports=False)
-        print("FAIL  tagged_for_target_container_mixed_refused: expected a refusal, but it compiled")
-        _FAIL += 1
-    except Exception as e:
-        _msg = str(e)
-        _ok = ("cannot also hold a value of another C type" in _msg
-               and "'x'" in _msg and "MojoList *" in _msg
-               and "tagged generator word elsewhere" in _msg
-               and "container value" in _msg and "here" in _msg)
-        if _ok:
-            print("PASS  tagged_for_target_container_mixed_refused")
-            _PASS += 1
-        else:
-            print(f"FAIL  tagged_for_target_container_mixed_refused: refused with the wrong reason: {e}")
-            _FAIL += 1
     # A for-loop TARGET over a kind-mixed generator, copied to a name
     # (`x = v`), must keep the yield's kind exactly as `x = next(g)` does
     # (run_tagged_word_bind_tests). The copy used to unwrap the box with
@@ -6138,6 +6102,70 @@ def main():
         print(p[1])
 main()
 """, "0\n1\n")
+
+    # The module-level form of the same recursive walk (no enclosing function).
+    # The recursive call `walk(sub)` has an argument the static scan cannot type
+    # (`getattr(st, fld, None)`), but the `isinstance(sub, list)` guard proves
+    # it is a list, so the yielded parameter `xs` is a list, not an ambiguous
+    # slot. Used to refuse: "yields ['xs'], whose call sites do not all pass
+    # the same statically-known type".
+    test_generator_stdout("module_level_recursive_tuple_generator_getattr_guarded", """\
+def walk(xs):
+    for i, st in enumerate(list(xs)):
+        yield xs, i
+        for fld in ('body',):
+            sub = getattr(st, fld, None)
+            if isinstance(sub, list):
+                yield from walk(sub)
+
+def outer(body):
+    return list(walk(body))
+
+def main():
+    for p in outer([1, 2]):
+        print(p[1])
+main()
+""", "0\n1\n")
+
+    # The guard is what makes the recursive argument a list. Without it the
+    # argument is an untypable hole and the slot must still refuse.
+    test_generator_refused("module_level_recursive_tuple_generator_unguarded_refuses", """\
+def walk(xs):
+    for i, st in enumerate(list(xs)):
+        yield xs, i
+        for fld in ('body',):
+            sub = getattr(st, fld, None)
+            yield from walk(sub)
+
+def outer(body):
+    return list(walk(body))
+
+def main():
+    for p in outer([1, 2]):
+        print(p[1])
+main()
+""", "yields ['xs']")
+
+    # A guarded branch that rebinds the argument proves nothing about the value
+    # passed to the recursive call, so it must still refuse.
+    test_generator_refused("module_level_recursive_tuple_generator_rebound_guard_refuses", """\
+def walk(xs):
+    for i, st in enumerate(list(xs)):
+        yield xs, i
+        for fld in ('body',):
+            sub = getattr(st, fld, None)
+            if isinstance(sub, list):
+                sub = 1.5
+                yield from walk(sub)
+
+def outer(body):
+    return list(walk(body))
+
+def main():
+    for p in outer([1, 2]):
+        print(p[1])
+main()
+""", "yields ['xs']")
 
 
 def run_tests():

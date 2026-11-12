@@ -44,10 +44,10 @@ Currently, `tagged_mixed_name` detects when a name is both a tagged word and bou
   Read consumers verified: `print`, `==`, `+` (a literal-cast arm fixed), `len` (narrow
   `mojo_is_str_box` predicate), f-strings.
 - Step 3 (read sites): covered by the step 2 consumer checks above; no separate change.
-- Step 4 (remove the refusal): floats and strs are done. The mixed container case is refused by
-  design with a named diagnostic (naming the name, the container C type, and the two binding
-  shapes); decided option 2 by the 2026-11-12 corpus census (610 stdlib + 226 repo files, 0
-  candidates). See `test_gimple_generator_runner.py::tagged_generator_mixed_type_container_refused`.
+- Step 4 (remove the refusal): floats and strs are done. The container case
+  (CODEGEN_tagged_generator_mixed_type_container) is closed as option 2: a mixed
+  tagged-word/container name is refused with a diagnostic naming the container/pointer
+  binding (`test_gimple_generator_runner.py::tagged_generator_mixed_type_container_refused`).
 - Step 5 (regression test): the cases are registered in `test_gimple_generator_runner.py`
   (`run_tagged_for_target_bind_tests`, `gimplegenerators`). A separate
   `test_tagged_generator_mixed_type.py` would duplicate them, so it is not added.
