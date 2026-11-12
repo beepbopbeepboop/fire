@@ -99,23 +99,40 @@ def test_failures(tree):
     return set(re.findall(r"^FAIL\s+(.+?)(?::|$)", r.stdout, re.M)), r
 
 
-def land_on_master():
+def land_on_master(regate=None, tries=3):
     """Move master (checked out in C.MAIN, where people edit) to `integ`. The merge goes through stash_ff, so an
     uncommitted edit to a file the landing also changes no longer stops it: the edits are carried across, and only a
-    real textual conflict with them makes the landing wait (the merge is undone, the edits are exactly as they were)."""
-    st, detail = SF.merge(C.MAIN, "--ff-only", "integ")
-    if st == "ok":
-        return
-    if st == "blocked":
-        sys.exit("landing waits: %s" % detail)
-    base = C.git("merge-base", "master", "integ")
-    moved = C.git("diff", "--name-only", base, "master").splitlines()
-    if moved and all(f in CONTROLLER_FILES for f in moved):
-        st, detail = SF.merge(C.MAIN, "--no-edit", "-m", "integrate: merge gated tree over controller-tool commits", "integ")
+    real textual conflict with them makes the landing wait (the merge is undone, the edits are exactly as they were).
+
+    Master moves while a round gates (other lanes land here too, and a round takes minutes), so "master moved" is the
+    normal case on a busy machine, not an error. Redoing the whole round never converges there: it was the reason a
+    24-branch backlog could not land (2026-11-12). Instead the round absorbs it:
+      - master moved in no file, or only controller files: merge the gated tree over it, as before;
+      - master moved in real files: merge master INTO the round, re-run the landing gate (REGATE, the same cheap gate)
+        on that result so what lands is exactly what was gated, and retry; a textual conflict or a red re-gate stops
+        the landing with master untouched."""
+    for attempt in range(tries):
+        st, detail = SF.merge(C.MAIN, "--ff-only", "integ")
         if st == "ok":
             return
-        sys.exit("landing waits: %s" % detail)
-    sys.exit("master moved under the round (%s): cannot fast-forward; redo the round" % ", ".join(moved[:5]))
+        if st == "blocked":
+            sys.exit("landing waits: %s" % detail)
+        base = C.git("merge-base", "master", "integ", cwd=C.MAIN)
+        moved = C.git("diff", "--name-only", base, "master", cwd=C.MAIN).splitlines()
+        if all(f in CONTROLLER_FILES for f in moved):
+            st, detail = SF.merge(C.MAIN, "--no-edit", "-m", "integrate: merge gated tree over controller-tool commits", "integ")
+            if st == "ok":
+                return
+            sys.exit("landing waits: %s" % detail)
+        r = subprocess.run(["git", "merge", "--no-edit", "master"], cwd=INTEG, capture_output=True, text=True)
+        if r.returncode:
+            subprocess.run(["git", "merge", "--abort"], cwd=INTEG)
+            sys.exit("master moved under the round (%s) and conflicts with it: redo the round" % ", ".join(moved[:5]))
+        print("master moved (%s): merged it into the round%s; retrying the landing"
+              % (", ".join(moved[:5]), " and re-gating" if regate else ""))
+        if regate and regate() != 0:
+            sys.exit("RED after master moved (%s): master untouched; redo the round" % ", ".join(moved[:5]))
+    sys.exit("master kept moving under the round (%d tries): redo the round" % tries)
 
 
 def ungate_red(names, merged, why):
@@ -488,7 +505,8 @@ def main():
         print("FAILED_FILES: %s" % " ".join(files))
         sys.exit(rc)
     if rc == 0:
-        land_on_master()
+        land_on_master(None if a.jobs or (a.stdlib and not landing_left)
+                       else lambda: run(gate_cmd, INTEG, os.path.join(INTEG, "gate.log")))
         mark_landed(merged)
         print("GREEN: master fast-forwarded to %s; integrated %s" % (C.git("rev-parse", "--short", "master"), merged))
     else:
