@@ -1855,8 +1855,8 @@ test('interp-tokenizer-oracle', [PY, 'test_myinterpreter_validation.py'],
      mem='tiny', cache=True,
      extra=['test_myinterpreter_validation.py', 'fire_compiler.py',
             'myinterpreter.py', 'formal/examples'],
-     desc='the interpreter\'s tokenizer vs the imported one, over 67 texts',
-     disabled='bugs/gate-interp-tokenizer-oracle.md')
+     desc='the interpreter\'s tokenizer vs the imported one, over the corpus '
+          'of snippets and whole files')
 test('metalgpu', [PY, 'test_metal_codegen.py'], cache=True, mem='tiny',
      extra=GIMPLE_SOURCES + ['test_metal_codegen.py',
                              'mojo/middle/metal_ops.py',
