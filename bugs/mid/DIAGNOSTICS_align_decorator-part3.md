@@ -9,7 +9,7 @@ expression shape and the original integration acceptance test.
 easy
 
 ## Prerequisites / depends on
-`bugs/mid/DIAGNOSTICS_align_decorator-part1.md` and
+Part 1 (parsing/storage of the align expression on StructDef) and
 `bugs/mid/DIAGNOSTICS_align_decorator-part2.md` (parsing/storage and
 power-of-two validation with diagnostics propagated at instantiation). Part 1's
 value rule is already implemented: `fire_compiler.py::_validate_align_decorators`
