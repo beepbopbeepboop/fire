@@ -169,26 +169,6 @@ def integrator_lock(wait_s=900):
             time.sleep(5)
 
 
-def clear_untracked_twins(ledger):
-    """Remove the MAIN-untracked bugs/gate-*.md copies that the ledger commit tracks, when their bytes are identical to
-    the tracked copy. An untracked twin is what makes git refuse the merge ("would be overwritten by merge"), so every
-    job's marker stayed on verify-ledger (2026-11-13). A twin whose bytes DIFFER is somebody's edit: it is kept, and the
-    merge is refused and reported as before. Untracked docs the ledger does not track are never touched."""
-    tracked = [p for p in C.git("ls-tree", "-r", "--name-only", ledger, "--", "bugs", cwd=C.MAIN).splitlines()
-               if re.fullmatch(r"bugs/gate-[\w.-]+\.md", p)]
-    untracked = set(C.git("ls-files", "--others", "--exclude-standard", "--", "bugs", cwd=C.MAIN).splitlines())
-    for rel in tracked:
-        if rel not in untracked:
-            continue
-        p = os.path.join(C.MAIN, rel)
-        if open(p, "rb").read() == subprocess.run(["git", "show", "%s:%s" % (ledger, rel)], cwd=C.MAIN,
-                                                 capture_output=True).stdout:
-            os.remove(p)
-            print("removed the untracked copy of %s: the ledger commit tracks the same bytes" % rel)
-        else:
-            print("untracked %s differs from the ledger's copy: kept (the merge will say so)" % rel)
-
-
 def land_ledger(new, sha, wait_s=900):
     """Move master to include the ledger commit NEW (built on SHA, the commit the gate ran on). A gate takes hours, so
     master has almost always moved since SHA: then the commit is MERGED onto the master of the day, which is safe because
@@ -199,7 +179,6 @@ def land_ledger(new, sha, wait_s=900):
         print("ledger commit %s NOT landed: the integrator lock was busy for %ds; it stays on branch verify-ledger" % (new[:10], wait_s))
         return False
     try:
-        clear_untracked_twins(new)
         if C.git("rev-parse", "master", cwd=C.MAIN) == sha:
             st, detail = SF.merge(C.MAIN, "--ff-only", "verify-ledger")
         else:
