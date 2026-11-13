@@ -572,7 +572,24 @@ def test_every_declaration_is_seen():
     # The declarations landed without a ladder rung, which this check exists
     # to catch; `formal-doc-truth` went red on the same drift and this rung
     # closes it. fire_runtime.c grew with them (785 -> 790 KB).
-    for header, want in (('fire_runtime.h', 826),   # --fix writes the live figure
+    # 826 -> 829 (2026-11-12, the gate fix for `formal-doc-truth` at 77937cfa2):
+    # THREE names, all read off the calls on the live header, all from
+    # 9d97fb1d9 ("codegen: kind-dispatch member calls and `in` on a tagged
+    # mixed-return word") and 364787542 (re.sub capturing lambda), which landed
+    # after the 826 rung:
+    #   +1  `mojo_word_contains` — `needle in <tagged word>`. Word-shaped (two
+    #       int64_t in, int in), word 428 -> 429, total 936 -> 937.
+    #   +1  `mojo_word_as_list` — the list a tagged word holds for the member
+    #       call lowering. Box-shaped: it returns a `MojoList *`, which the
+    #       boundary cannot hand back by value, so the box figure 508 -> 509,
+    #       total 937 -> 938.
+    #   +1  `mojo_word_as_text` — the `char *` a tagged word holds. Word-shaped
+    #       (one int64_t in, one `char *` out, both one word), word 429 -> 430,
+    #       total 938 -> 939.
+    # `mojo_bound_method_fn` / `mojo_bound_method_self` are `static inline`,
+    # which the scanner does not count, so they move nothing.
+    # fire_runtime.c grew by 62 lines with the three (811763 bytes, 793 KB).
+    for header, want in (('fire_runtime.h', 829),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already
