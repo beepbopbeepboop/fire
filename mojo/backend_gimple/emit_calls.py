@@ -3385,6 +3385,29 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             raise RuntimeError(
                 f"cannot compile module: self recursive call to "
                 f"{_rec!r} will cause an infinite loop")
+        # Inside a concrete (elaborated) instantiation, a bracketed generic
+        # call whose type arguments are not all concrete cannot be
+        # materialized: stubbing it would be a silent wrong answer (mutual /
+        # uninstantiable recursion). Refuse it. Restrict the mutual case to
+        # arguments that read as a progressing expression (e.g. `i + 1`), to
+        # avoid rejecting legitimate non-literal-but-unresolvable type forms.
+        if (getattr(gen, '_is_elaborated_instantiation', False)
+                and isinstance(node.func, gimple_ctypes.SubscriptExpr)
+                and isinstance(node.func.obj, gimple_ctypes.IdentExpr)):
+            _g = node.func.obj.name
+            _ix = node.func.index
+            _el = _ix.elements if isinstance(_ix, gimple_ctypes.TupleExpr) else [_ix]
+            _targs = [gen._type_expr_to_ann(e) for e in _el]
+            if not all(gimple_exprtypes._is_concrete_type_arg(t) for t in _targs):
+                _cfn = getattr(gen, 'current_func_name', None) or ''
+                if _g == _cfn or (isinstance(_cfn, str) and _cfn.startswith(_g + '_')):
+                    raise RuntimeError(
+                        f'cannot compile module: self recursive call to {_g!r} '
+                        f'will cause an infinite loop')
+                raise RuntimeError(
+                    f"cannot materialize instantiation of generic {_g!r}: "
+                    f"its type arguments are not concrete, which would "
+                    f"cause infinite recursion")
         gimple_ctypes._debug_note('indirect call stubbed', type(node.func).__name__)
         t = gen._new_temp('int64_t')
         gen._emit(f'  {t} = (int64_t)0;  /* indirect call via {type(node.func).__name__} */')
