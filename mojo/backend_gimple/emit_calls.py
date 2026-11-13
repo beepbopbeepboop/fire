@@ -3075,8 +3075,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 try:
                     if isinstance(_nnode, gimple_ctypes.IntLiteral):
                         _ncount = int(_nnode.value)
-                    elif hasattr(gen, '_try_eval_const_int'):
-                        _ncount = gen._try_eval_const_int(_nnode)
+                    elif hasattr(gen, '_eval_const_int'):
+                        _ncount = gen._eval_const_int(_nnode)
                 except Exception:
                     _ncount = None
             if _fill_node is not None and _ncount is not None and _ncount > 0:
