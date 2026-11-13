@@ -214,8 +214,19 @@ def test_paramless_function_bracket_refused_in_single_tu():
         check("paramless bracket refused (not 0)", False,
               detail="compile succeeded silently — expected refusal")
     except RuntimeError as e:
+        # Pin the BEHAVIOUR — a loud refusal that names the construct and
+        # points at link mode — not one exact sentence. `_lower_call` has two
+        # refusal spellings for this shape (the ownership-scoped
+        # "link-mode specialisation" and the module-generic "needs the
+        # generic instantiated ... link mode (fire build) does"), and
+        # asserting one of them is what went stale when commit 45e8d6280
+        # split them. The same behaviour is pinned for `f[1]()` by
+        # test_comptime_assert_diagnostic.py::
+        # test_in_process_refuses_a_bracketed_call_to_a_generic_function.
+        s = str(e)
         check("paramless bracket refused (not 0)",
-              "link-mode specialisation" in str(e), detail=str(e))
+              "a[...]()" in s and ("link mode" in s or "link-mode" in s),
+              detail=s)
 
 
 def run_all():
