@@ -1229,8 +1229,7 @@ def cmd_gate(a):
 
 
 def gate_off_in(path, pattern, reason, doc, worker):
-    """Add one OFF entry to the gates file at PATH (the single writer of tools/gates.json: `gate off` and the
-    integrator's automatic ungate both come through here)."""
+    """Add one OFF entry to the gates file at PATH (the single writer of tools/gates.json: `gate off` comes through here)."""
     cfg = json.load(open(path))
     cfg.setdefault("off", {})[pattern] = dict(reason=reason, doc=doc, worker=worker, since=time.strftime("%F %T"))
     json.dump(cfg, open(path, "w"), indent=2)
