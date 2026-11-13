@@ -11862,41 +11862,61 @@ print("%r" % p)
         _PASS += 1
 
     def test_attribute_to_def_write_invalidates_the_walk_memo():
-        """`_attribute_to_def` stamps the generator's `def` line/col onto
-        the synthesized prologue statements. The walk memo records scalar
-        field values as it descends, so a walk of the prologue taken BEFORE
-        the stamp still held the old `line` value. The stamp must invalidate
-        that entry, so the next walk sees the generator's line. This is the
-        behavioural half of `every_ast_mutation_site_invalidates_the_walk_memo`
-        for this one write site."""
+        """`_attribute_to_def` stamps every prologue statement it is handed
+        with the line/col of the generator's `def`, and that stamp is an AST
+        write: the walk-memo entry of every statement it touches must be
+        dropped, like at every other write site in `mojo/`.
+
+        The prologue statements are freshly synthesized in the lowering
+        pipeline, but the helper is shared: the next statement it is handed
+        can be one the memo has already answered, and a write that leaves
+        the entry in place is exactly the stale-memo hazard the memo's
+        contract exists to close. The census
+        (`every_ast_mutation_site_invalidates_the_walk_memo`) polices the
+        contract for this site statically; this is the behavioural half —
+        before the `_walk_ast_invalidate` call, a statement the memo had
+        already answered kept answering with the pre-stamp entry after the
+        write."""
         global _PASS, _FAIL
         name = "attribute_to_def_write_invalidates_the_walk_memo"
         import mojo.middle.exprtypes as ET
         import mojo.middle.coro as CO
-        from types import SimpleNamespace
-        from fire_compiler import AssignStmt, IdentExpr
+        from fire_compiler import py_tokenize, Parser, FunctionDef, VarDecl
 
         err = None
         try:
             ET._walk_ast_reset()
-            prologue = [AssignStmt(target=IdentExpr(name="p"),
-                                   value=IdentExpr(name="q")),
-                        AssignStmt(target=IdentExpr(name="r"),
-                                   value=IdentExpr(name="s"))]
-            before = ET._walk_ast(prologue)
-            if any(isinstance(v, int) and v == 40 for v in before):
-                err = 'the test precondition is wrong: 40 is already in the walk'
+            stmts = (Parser(py_tokenize(
+                "def g(a):\n    yield a\nvar p = 1\n")).parse_module() or [])
+            fn = [s for s in stmts if isinstance(s, FunctionDef)][0]
+            stmt = [s for s in stmts if isinstance(s, VarDecl)][0]
+            # The generator def lives on its own line in the source, apart
+            # from the prologue statement, so the stamp moves both fields.
+            fn.line, fn.col = 42, 7
+            first = ET._walk_ast(stmt)
+            if ET._walk_ast(stmt) is not first:
+                err = 'nothing was memoized, so this proved nothing'
+            elif any(isinstance(v, int) and not isinstance(v, bool)
+                     and v == fn.line for v in first):
+                err = ('the test precondition is wrong: the def line is '
+                       'already in the pre-stamp walk')
             else:
-                CO._attribute_to_def(prologue, SimpleNamespace(line=40, col=3))
-                after = ET._walk_ast(prologue)
-                lines = [v for v in after if isinstance(v, int) and not isinstance(v, bool)]
-                if prologue[0].line != 40 or prologue[1].col != 3:
-                    err = '_attribute_to_def did not stamp the def line/col'
-                elif 40 not in lines:
-                    err = ('the walk after the stamp still answers from the memo: '
-                           'the generator def line 40 is missing from it')
+                CO._attribute_to_def([stmt], fn)
+                after = ET._walk_ast(stmt)
+                scalars = [v for v in after
+                           if isinstance(v, int) and not isinstance(v, bool)]
+                if (stmt.line, stmt.col) != (fn.line, fn.col):
+                    err = 'the stamp did not reach the statement'
+                elif after is first:
+                    err = ('the memo entry for the statement survived the '
+                           'write: the walk after the stamp still answered '
+                           'from the pre-stamp memo')
+                elif fn.line not in scalars:
+                    err = ('the walk after the stamp still answers from the '
+                           'memo: the generator def line %d is missing from '
+                           'it' % fn.line)
         except Exception as e:  # noqa: BLE001
-            err = "%s: %s" % (type(e).__name__, e)
+            err = f'{type(e).__name__}: {e}'
         finally:
             ET._walk_ast_reset()
         if err:
@@ -14147,7 +14167,7 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_walk_ast_memo_never_answers_stale_over_real_compiles(), 'test_walk_ast_memo_never_answers_stale_over_real_compiles (line 12671)')
     _run_isolated(lambda: test_every_ast_mutation_site_invalidates_the_walk_memo(), 'test_every_ast_mutation_site_invalidates_the_walk_memo (line 12672)')
     _run_isolated(lambda: test_posthoc_class_attr_write_invalidates_the_walk_memo(), 'test_posthoc_class_attr_write_invalidates_the_walk_memo (line 13416)')
-    _run_isolated(lambda: test_attribute_to_def_write_invalidates_the_walk_memo(), 'test_attribute_to_def_write_invalidates_the_walk_memo')
+    _run_isolated(lambda: test_attribute_to_def_write_invalidates_the_walk_memo(), 'test_attribute_to_def_write_invalidates_the_walk_memo (line 11864)')
     _run_isolated(lambda: test_walk_ast_memo_survives_the_sync_generator_hoist_writes(), 'test_walk_ast_memo_survives_the_sync_generator_hoist_writes (line 12672)')
     _run_isolated(lambda: test_scalar_arity_min_max_params_are_not_containers(), 'test_scalar_arity_min_max_params_are_not_containers (line 12673)')
     _run_isolated(lambda: test_a_forwarded_string_argument_keeps_its_type(), 'test_a_forwarded_string_argument_keeps_its_type (line 12674)')
