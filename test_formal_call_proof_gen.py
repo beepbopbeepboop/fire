@@ -3513,8 +3513,14 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
         end = len(code)
         words = [int.from_bytes(code[i:i + 4], "little")
                  for i in range(0, end - end % 4, 4)]
+        # The `svc` words are in the decoder's set but get NO step-OK lemma by
+        # design: its statement `arm64_step s code ≠ none` is false for the
+        # exit form (x16 = 1), so the f03896fff model refuses to emit one for
+        # them.  The expected set must mirror that, or the filter looks like
+        # it "moved" when the model did the right thing.
         expected = [f"{self.prefix}_step_ok_{i}" for i, w in enumerate(words)
-                    if G._step_branch_index(w) is not None]
+                    if G._step_branch_index(w) is not None
+                    and not G._is_svc(w)]
         self.assertEqual(expected, self.step_ok)
 
     def test_the_derivation_is_total_over_the_step_table(self):
@@ -3625,10 +3631,28 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
                 continue
             code = _struct.pack("<I", word)
             with self.subTest(entry=j):
-                self.assertIn("theorem syn_sr_0",
-                              G._gen_step_result_lemmas("syn", code, 0x1000))
-                self.assertIn("rw [syn_sr_0 s h]",
-                              G._gen_step_lemmas("syn", code, 0x1000))
+                sr = G._gen_step_result_lemmas("syn", code, 0x1000)
+                self.assertIn("theorem syn_sr_0", sr)
+                if j == 35:
+                    # The `svc` is the one entry whose step depends on MACHINE
+                    # STATE: x16 picks the form.  Its step-RESULT lemma
+                    # carries the x16 hypothesis that selects it (the single
+                    # word has no `movz` before it, so x16 is dynamic and only
+                    # the write form is admissible, under `¬ x16 = 1`), and NO
+                    # step-OK lemma is emitted for it: the statement the
+                    # step-OK lemma would read off,
+                    # `arm64_step s code ≠ none`, is FALSE for the exit form,
+                    # which is why the f03896fff design refuses to state it.
+                    # The generic `rw [syn_sr_0 s h]` below is the shape every
+                    # other entry has.
+                    self.assertIn("hx : ¬ arm64_reg 16 s = 1", sr)
+                    self.assertNotIn(
+                        "step_ok", G._gen_step_lemmas("syn", code, 0x1000),
+                        "a step-OK lemma for the svc would state "
+                        "`arm64_step s code ≠ none`, false for the exit form")
+                else:
+                    self.assertIn("rw [syn_sr_0 s h]",
+                                  G._gen_step_lemmas("syn", code, 0x1000))
 
 
 class TestStepLemmasCoverTheExecutableRegionOnly(unittest.TestCase):
