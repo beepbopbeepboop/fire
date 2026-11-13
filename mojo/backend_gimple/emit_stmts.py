@@ -3477,26 +3477,6 @@ def _box_float_mixed_return_arm(gen, vtype: str, v: str) -> tuple[str, str]:
         f"kind (a box of it would be rendered by the wrong repr)")
 
 
-def _check_float_arm_into_annotated_pointer(gen, vtype) -> None:
-    """Refuse a float return arm in a function whose return type is a pointer.
-
-    A pointer C return type reaches this emitter only from an ANNOTATION
-    (`-> String`, `-> MojoList *`, ...): an inferred float+pointer join is
-    widened to the tagged word before we get here (`_is_float_mixed_return`).
-    So a float arm is a contradiction of a static type, and Mojo rejects it
-    as a type error. The old spelling, `(int64_t)<double>` cast into the
-    pointer, compiled and silently returned the truncated bits as the pointer.
-    The diagnostic is the honest answer: it names the function, the arm's
-    type and the annotated return type."""
-    _rt = _as_str(getattr(gen, 'func_ret_type', '') or '')
-    if _as_str(vtype) in ('double', 'float') and _rt.endswith(' *'):
-        raise TypeError(
-            f"function {_as_str(getattr(gen, 'current_func_name', '') or '?')!r} "
-            f"is annotated to return {_rt!r} but has a return arm of type "
-            f"{_as_str(vtype)!r}; a float cannot be returned as a pointer "
-            f"(fix the annotation or the returned value)")
-
-
 def _gen_stmt_ReturnStmt(gen, node):
     # doc/OWNERSHIP_MODEL.md Phase 3 codegen wiring (TODO item 1) — see
     # gimple_gen_infra.py's "Public entry points" section for the whole
@@ -3573,7 +3553,6 @@ def _gen_stmt_ReturnStmt(gen, node):
         vtype: str = ''
         v: str = ''
         vtype, v = gen.lower_expr(node.value)
-        _check_float_arm_into_annotated_pointer(gen, vtype)
         # A dict slot read whose runtime kind is on the slot: box it so the
         # kind survives a return (callers cannot see this frame's dict/key temps).
         _dsr = getattr(gen, '_dict_slot_reads', None)

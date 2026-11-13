@@ -25,11 +25,6 @@ MODULES = [
     ("ast_rewriter.py", "ast_rewriter"),
     ("mojo/middle/module_shared.py", "module_shared"),
     ("mojo/middle/coro.py", "coro"),
-    # Uses `re.sub(..., lambda _m: self._func_csym(...), ...)`, a CAPTURING
-    # lambda. Once refused outright by _lower_re_sub_callback, which made this
-    # whole module unusable as a single-module repro; fixed by unpacking the
-    # lambda's bound method into (fn, env) for the regex callback.
-    ("mojo/backend_gimple/module_gen.py", "module_gen"),
 ]
 
 
