@@ -356,10 +356,10 @@ def _gen_for_regex_iter(gen, node: gimple_ctypes.ForStmt, pattern: str) -> None:
     info = gen._regex_progs[pattern]
     ngroups = info['ngroups']
 
-    prog_local = gen._new_val('const ReNode *', info['prog_var'])
-    ranges_local = gen._new_val('const ReRange *', info['ranges_var'])
-    classinfo_local = gen._new_val('const ReClassInfo *', info['classinfo_var'])
-    names_local = gen._new_val('const char * *', info['names_var'])
+    prog_local = gen._new_val('const ReNode *', gimple_ctypes.regex_compile.table_ref(info['prog_var']))
+    ranges_local = gen._new_val('const ReRange *', gimple_ctypes.regex_compile.table_ref(info['ranges_var']))
+    classinfo_local = gen._new_val('const ReClassInfo *', gimple_ctypes.regex_compile.table_ref(info['classinfo_var']))
+    names_local = gen._new_val('const char * *', gimple_ctypes.regex_compile.table_ref(info['names_var']))
 
     text_len = gen._call_expr('int64_t', 'mojo_strlen', [('char *', text_val)])
     pos_var = gen._new_temp('int64_t')
@@ -451,9 +451,9 @@ def _emit_regex_scan(gen, pattern: str, text_val: str) -> tuple:
     target is `bb_post`, which is where the advance lives."""
     info = _regex_prog_for(gen, pattern)
     ngroups = info['ngroups']
-    prog_local = gen._new_val('const ReNode *', info['prog_var'])
-    ranges_local = gen._new_val('const ReRange *', info['ranges_var'])
-    classinfo_local = gen._new_val('const ReClassInfo *', info['classinfo_var'])
+    prog_local = gen._new_val('const ReNode *', gimple_ctypes.regex_compile.table_ref(info['prog_var']))
+    ranges_local = gen._new_val('const ReRange *', gimple_ctypes.regex_compile.table_ref(info['ranges_var']))
+    classinfo_local = gen._new_val('const ReClassInfo *', gimple_ctypes.regex_compile.table_ref(info['classinfo_var']))
 
     text_len = gen._call_expr('int64_t', 'mojo_strlen', [('char *', text_val)])
     pos_var = gen._new_temp('int64_t')

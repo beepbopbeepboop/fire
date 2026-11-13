@@ -11242,7 +11242,12 @@ def gen_module_impl(self, stmts: list):
             _unpacked = (getattr(self, '_tuple_unpack_locals', None) or {}).get(
                 _as_str(caller_name), ())
             if _as_str(a.name) in _unpacked:
-                return False
+                # The box says nothing about a tuple-unpack target, so only
+                # a slot every return of the callee PROVES to be a str counts
+                # (`s, n = pair()` with `pair` returning `"de", 1`). A slot
+                # proven a container, or not proven at all, stays exempt; see
+                # `_unpack_slot_proves` below.
+                return _unpack_slot_proves('str', a, caller_name)
         return _as_str(st) in ('int64_t', 'int', 'bool')
 
     def _resolve_param_containers():
@@ -11540,17 +11545,20 @@ def gen_module_impl(self, stmts: list):
     # number: coro.py's `_mark_coro_param_elem_kinds`, reached through
     # `_async_method_setup`'s tuple. The box is the fallback, not evidence of a
     # scalar, so the exemption is evidence-based and narrow. A name is exempt
-    # ONLY when every binding of it in the caller is a tuple unpack from a
-    # module-level call whose returns, in that slot, are containers on every
-    # return statement. A slot the callee returns as a str or a number (or
-    # anything it cannot prove a container) keeps the observation, so
-    # `s, n = pair()` with `pair` returning `"de", 1` still refuses.
+    # from the box reading ONLY when every binding of it in the caller is a
+    # tuple unpack from a module-level call. Of those, a slot the callee
+    # returns as a STR on every return statement is the one kind that counts
+    # as a non-container observation (`_unpack_slot_proves('str', ...)` in
+    # `_is_noncontainer_arg`), so `s, n = pair()` with `pair` returning
+    # `"de", 1` still refuses. A slot proven a container, or not proven at
+    # all, is exempt, which is what keeps the coro `_async_method_setup`
+    # tuple from being read as a str or a number.
     _CONTAINER_CTYPES = ('MojoList *', 'MojoDict *', 'MojoSet *')
     _caller_body_by_name: dict = {}
     for _cbn, _cbb in _caller_bodies:
         _caller_body_by_name[_as_str(_cbn)] = _cbb
     _caller_binding_memo: dict = {}   # caller -> {name: [binding | None]}
-    _container_slot_memo: dict = {}   # (callee, index, arity) -> bool
+    _tuple_slot_memo: dict = {}   # (kind, callee, index, arity) -> bool
 
     def _target_names(target):
         """Every bare name a store target binds (`a`, `(a, b)`, `[a, *b]`)."""
@@ -11610,26 +11618,36 @@ def gen_module_impl(self, stmts: list):
         _caller_binding_memo[caller_name] = table
         return table
 
-    def _element_is_container(callee, e):
-        if isinstance(e, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr,
-                          gimple_ctypes.DictExpr, gimple_ctypes.SetExpr)):
-            return True
+    def _element_proves(kind, callee, e):
+        """Does expression `e`, the value of one tuple slot in a return of
+        `callee`, provably have `kind`? `'container'` is a list, dict or set;
+        `'str'` is a `char *`. A name answers from the callee's own inferred
+        type, and anything else is unproven."""
+        if kind == 'str':
+            if isinstance(e, gimple_ctypes.StringLiteral):
+                return True
+            _wanted = ('char *',)
+        else:
+            if isinstance(e, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr,
+                              gimple_ctypes.DictExpr, gimple_ctypes.SetExpr)):
+                return True
+            _wanted = _CONTAINER_CTYPES
         if isinstance(e, gimple_ctypes.IdentExpr):
             _nm = _as_str(e.name)
             _vt = self._inferred_var_types.get(callee, {}).get(_nm)
             if _vt is None:
                 _vt = self._inferred_param_types.get(callee, {}).get(_nm)
-            return _as_str(_vt) in _CONTAINER_CTYPES
+            return _as_str(_vt) in _wanted
         return False
 
-    def _slot_is_container(callee, index, arity):
+    def _slot_proves(kind, callee, index, arity):
         """Does every return statement of `callee` yield a `arity`-tuple whose
-        slot `index` is a container? False for no returns, a non-tuple return,
-        or a tuple of another arity. Returns inside nested defs are not the
-        callee's own, so they are skipped."""
-        _key = (callee, index, arity)
-        if _key in _container_slot_memo:
-            return _container_slot_memo[_key]
+        slot `index` provably has `kind` (see `_element_proves`)? False for no
+        returns, a non-tuple return, or a tuple of another arity. Returns inside
+        nested defs are not the callee's own, so they are skipped."""
+        _key = (kind, callee, index, arity)
+        if _key in _tuple_slot_memo:
+            return _tuple_slot_memo[_key]
         _ans = False
         _cfd = _fn_by_name.get(callee)
         if _cfd is not None:
@@ -11647,22 +11665,22 @@ def gen_module_impl(self, stmts: list):
                 _rv = _r.value
                 if (not isinstance(_rv, gimple_ctypes.TupleExpr)
                         or len(_rv.elements) != arity
-                        or not _element_is_container(callee, _rv.elements[index])):
+                        or not _element_proves(kind, callee, _rv.elements[index])):
                     _ans = False
                     break
-        _container_slot_memo[_key] = _ans
+        _tuple_slot_memo[_key] = _ans
         return _ans
 
-    def _unpack_from_container_slot(a, caller_name):
+    def _unpack_slot_proves(kind, a, caller_name):
         """Is call argument `a` a name whose every binding in `caller_name` is
-        a container-returning tuple-unpack slot (see the block above)?"""
+        a tuple-unpack slot that provably has `kind` (see the block above)?"""
         if not isinstance(a, gimple_ctypes.IdentExpr):
             return False
         _bs = _caller_bindings(_as_str(caller_name)).get(_as_str(a.name))
         if not _bs:
             return False
         for _b in _bs:
-            if _b is None or not _slot_is_container(_b[0], _b[1], _b[2]):
+            if _b is None or not _slot_proves(kind, _b[0], _b[1], _b[2]):
                 return False
         return True
 
@@ -11810,7 +11828,7 @@ def gen_module_impl(self, stmts: list):
 
                 st = _arg_scalar_type(caller_name, a)
                 if (_pc is None and _is_noncontainer_arg(a, caller_name, st)
-                        and not _unpack_from_container_slot(a, caller_name)):
+                        and not _unpack_slot_proves('container', a, caller_name)):
                     _record_param_noncontainer(callee, pnames[i])
                 if not st:
                     # An int/bool/None literal contributes NOTHING above, and
@@ -11951,7 +11969,7 @@ def gen_module_impl(self, stmts: list):
                         elif (_is_noncontainer_arg(
                                 _kw[1], caller_name,
                                 _arg_scalar_type(caller_name, _kw[1]))
-                                and not _unpack_from_container_slot(_kw[1], caller_name)):
+                                and not _unpack_slot_proves('container', _kw[1], caller_name)):
                             _record_param_noncontainer(callee, _kwn)
                         break
 
