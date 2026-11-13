@@ -2875,10 +2875,8 @@ test('formal-eh-tables', [PY, 'test_formal_eh_tables.py'],
 test('formal-dylib', [PY, 'test_formal_dylib.py'],
      deps=['preflight', 'prooflib'],
      mem='tiny',
-     expect='4 failing: three hole-count checks on the overflow-trapping exports, whose termination '
-            'obligations an exit svc keeps named (bugs/mid/FORMAL_svc_exit_handling_incomplete.md), and the '
-            'branching export whose termination the test expects proved but which stays named '
-            '(bugs/FORMAL_dylib_branchy_termination_walk_named.md)',
+     expect='3 failing: the hole-count checks on the overflow-trapping exports, whose termination '
+            'obligations an exit svc keeps named (bugs/mid/FORMAL_svc_exit_handling_incomplete.md)',
      desc='formal dylib emission, Mach-O re-read, dlopen, prove')
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'], mem='tiny',

@@ -6235,6 +6235,109 @@ def _lower_matmul(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     return result_type, t
 
 
+def _membership_container_type(gen, right_node) -> str | None:
+    """The definitive scalar type name of a membership-test's right operand,
+    or None when it is not provably a scalar (so runtime dispatch stays).
+
+    Implements DIAGNOSTICS_missing_validation_modular-part3: `x in y` /
+    `x not in y` must reject a container type that has no __contains__.
+    """
+    # Provably scalar by SHAPE: literal.
+    if isinstance(right_node, gimple_ctypes.BoolLiteral):
+        return 'Bool'
+    if isinstance(right_node, gimple_ctypes.IntLiteral):
+        return 'Int'
+    if isinstance(right_node, gimple_ctypes.FloatLiteral):
+        return 'Float64'
+    # Provably scalar by SHAPE: arithmetic/comparison expressions whose
+    # result is a known scalar (e.g. `x in (a + b)`), and calls whose
+    # return type is a known scalar.
+    if isinstance(right_node, (gimple_ctypes.BinaryOp,
+                               gimple_ctypes.CompareChain, gimple_ctypes.UnaryOp)):
+        try:
+            qt = _as_str(gen._quick_type(right_node) or '')
+        except Exception:
+            qt = ''
+        if qt == '_Bool':
+            return 'Bool'
+        if qt == 'double':
+            return 'Float64'
+        if qt in ('int', 'int64_t'):
+            return 'Int'
+        return None
+    if isinstance(right_node, gimple_ctypes.CallExpr):
+        try:
+            qt = _as_str(gen._quick_type(right_node) or '')
+        except Exception:
+            qt = ''
+        if qt == '_Bool':
+            return 'Bool'
+        if qt == 'double':
+            return 'Float64'
+        if qt in ('int', 'int64_t'):
+            return 'Int'
+        return None
+    # Provably scalar by BINDING.
+    if isinstance(right_node, gimple_ctypes.IdentExpr):
+        name = right_node.name
+        # A name only in _global_var_types (module-global read) is declared
+        # int64_t but may be a boxed container; do not reject it.
+        in_local = name in gen.var_types
+        if not in_local:
+            return None
+        # If this name is also a module-global binding, be conservative: the
+        # erased-container arm must keep working.
+        if name in getattr(gen, '_global_var_types', {}):
+            return None
+        ctype = gen.var_types.get(name)
+        if ctype == '_Bool':
+            return 'Bool'
+        if ctype == 'double':
+            return 'Float64'
+        if ctype in ('int', 'int64_t'):
+            # A parameter/local whose declared type is an unresolved generic
+            # parameter (or AnyType/unresolved) must compile conservatively.
+            fn_node = getattr(gen, '_current_func_node', None)
+            if fn_node is not None:
+                tparams = set(getattr(fn_node, 'type_params', None) or [])
+                tparams.update(getattr(fn_node, 'type_param_names', None) or [])
+                params = getattr(fn_node, 'params', None) or []
+                param_types = getattr(fn_node, 'param_types', None)
+                if param_types is None and params and isinstance(params[0], (list, tuple)):
+                    param_types = [p[1] if len(p) > 1 else None for p in params]
+                if params:
+                    for i, p in enumerate(params):
+                        pname = p[0] if isinstance(p, (list, tuple)) else p
+                        if _as_str(pname).lstrip('*') != name:
+                            continue
+                        pann = None
+                        if param_types and i < len(param_types):
+                            pann = param_types[i]
+                        elif isinstance(p, (list, tuple)) and len(p) > 1:
+                            pann = p[1]
+                        if pann is None:
+                            # Unannotated/unresolved parameter -> conservative.
+                            return None
+                        pann_s = _as_str(pann).strip()
+                        if pann_s in tparams or pann_s == 'AnyType' or pann_s == '':
+                            return None
+                        # Concrete scalar annotation (Int/Bool/Float64 etc.)
+                        # -> provably scalar.
+                        return 'Int'
+            # No function node context: be conservative for parameters we
+            # cannot confidently classify, but locals declared/known as
+            # concrete scalars are fine. Fall through to reject as Int when
+            # this is clearly a concrete scalar binding; absent better info,
+            # treat as Int (concrete) only if not obviously generic - but we
+            # can't tell. Err toward rejecting concrete Ints? Safer to be
+            # conservative here.
+            return None
+        # A local known to hold a container (MojoList *, MojoDict *,
+        # MojoSet *, char *, tuple/struct types) is not scalar.
+        return None
+    return None
+
+
 def _lower_in_range(gen, x_val: str, range_args: list,
                     negate: bool) -> tuple[str, str]:
     if len(range_args) == 1:
@@ -6300,10 +6403,12 @@ def _lower_in_impl_values(gen, xt: str, xv: str, right_node, negate: bool,
             isinstance(right_node.func, gimple_ctypes.IdentExpr) and
             right_node.func.name == 'range'):
         return gen._lower_in_range(xv, right_node.args, negate=negate)
+    _scalar_ct = _membership_container_type(gen, right_node)
+    if _scalar_ct is not None:
+        raise RuntimeError(f"'{_scalar_ct}' does not implement the '__contains__' method")
 
     rt, rv = gen.lower_expr(right_node)
-    res = gen._lower_in_dispatch(xt, xv, rt, rv, negate, x_is_none=x_is_none)
-    # `c in ('[', '(', '{')`, `k in {"a", "b"}`, `x in [1, 2]`: the container is
+    res = gen._lower_in_dispatch(xt, xv, rt, rv, negate, x_is_none=x_is_none)    # `c in ('[', '(', '{')`, `k in {"a", "b"}`, `x in [1, 2]`: the container is
     # built for this one membership test and no name can ever refer to it, yet
     # it was never released -- three per character of every tokenizer scan.
     # Free it once the test has read it. Only a display is treated this way (an

@@ -2288,38 +2288,76 @@ def test_a_conditional_value_is_not_a_branch(tmpdir, shared):
                   f"export's named `_spec`")
 
 
-def test_the_last_exports_walk_ignores_the_image_tail(tmpdir, shared):
-    """The LAST export's CFG walk judged the image's runtime tail, not its own
-    reachable code, so its termination was a named `sorry`.
+def test_a_branching_exports_stack_guard_does_not_defeat_termination(
+        tmpdir, shared):
+    """A branching export's termination was a named `sorry` because its own
+    stack-floor guard's trap arm is an exit `svc` the model never reaches.
 
-    `_export_extent` is the next export's entry, or `base + code_size` for the
-    last one (the library's `DylibExport.exportEnd`, whose `exportEnd_last`
-    proves the two agree).  For the last export that extent spans what the
-    emitter laid down after its own `ret`: the stack-floor handler, the runtime
-    routines, and then the image's DATA.  `_gen_universal_e2e_cfg`'s
-    constant-fuel guard read every block `_cfg_blocks` finds in
-    `[entry, func_end)`, so the tail's back edges made `_acyclic` false AND
-    `_gen_run_cert` returned None for the first data word — and the walk then
-    reported `None`, which `_dylib_total_proof` renders as a `sorry` over a
-    termination claim that is true.  The guard now judges the blocks REACHABLE
-    from the entry, which is the CFG the run uses, so the walk proves the last
-    export like any other.
+    `formal/model`'s `stack_floor_guarded_names` puts the prologue guard in
+    every body that already has a conditional branch (the widening that bounds
+    a deep DAG of distinct functions), so `def branchy(n): if n > 3: return 1`
+    carries one:
+
+        ADRP X17, page ; ADD X17, X17, #off ; LDR X16, [X17]
+        ADD X17, SP, #0 ; CMP X17, X16 ; B.HS ok
+        <write the message ; movz x0/#2 ; movz x16/#1 ; svc>   (the trap)
+      ok: …
+
+    `_cfg_blocks` makes the trap block a successor of the `B.HS`, and
+    `_trap_terminating` puts it in `trap` because it ends in `svc`.  With the
+    model's corrected `svc` arm (`x16 = 1` is `none`, f03896fff) `_gen_run_cert`
+    can no longer certify that block, so the whole walk answered `None` and
+    `_dylib_total_proof` rendered the termination claim as a `sorry` — for
+    EVERY guarded export, and for every arm64 program; the old no-op `svc` arm
+    had let the walk step straight through the trap.
+
+    The edge is dead, and the fix is to read that off the MODEL's initial state:
+    the run starts at `Arm64State.init n base`, whose `mem` is `fun _ => 0`, and
+    the startup stub that writes the floor word is not in the walked range (a
+    dylib has no stub at all), so the `LDR` reads 0 and `CMP SP, 0` cannot
+    borrow — `B.HS` is taken for every state the run visits.
+    `_stack_floor_guard_dead_fall` names the emitted sequence, the reachability
+    BFS does not follow the dead edge, and the emitted proof closes the arm with
+    an actual theorem about the branch's flags; the arm is skipped, not
+    assumed.
+
+    Fixing that exposed a second, latent defect: the walk's fuel path was
+    `len(code) / 4` — the whole `__TEXT`, including the interned strings after
+    the last `RET` — while the image (and `runExport`) use
+    `codeSize = exec_code_end`.  `total_of_halts` rejected the mismatch, which
+    is the drift check that comment promises; the walk now spells the image's
+    own `PATH`.
 
     No Lean here: this pins the EMITTER's verdict, and `several exports, and
-    one with no derivable spec` is what checks the file it produces.  The
+    one with no derivable spec` is what typechecks the file it produces.  The
     program is the smallest one that has the defect: a straight-line export
-    first, and the BRANCHING one LAST, because only the last export's extent
-    reaches the image's tail.
+    first, and the BRANCHING one LAST, which also keeps the last export's
+    extent (the one that reaches the image's end) under the walk.
     """
     import re as _re
     from formal.build import compile_formal_dylib
-    from formal.arm64_proof_gen import generate_dylib_proof
+    from formal.arm64_proof_gen import (_exec_code_limit, _is_svc,
+                                        generate_dylib_proof)
     src = os.path.join(tmpdir, "tail.mojo")
     with open(src, "w") as f:
         f.write("def head(n):\n  return n + 1\n\n\n"
                 "def branchy(n):\n  if n > 3:\n    return 1\n  return 0\n")
     out = os.path.join(tmpdir, "tail.dylib")
     built = compile_formal_dylib([src], output=out, prove=False)
+    # The row is about the PROLOGUE GUARD, so the guard is checked in the
+    # export's own words rather than inferred from the theorem: if the emitter
+    # ever stops guarding a branching body this row would otherwise pass
+    # without exercising the arm it exists for.
+    code, base = built["code"], built["info"]["base_addr"]
+    branchy = [e for e in built["exports"] if e["name"] == "branchy"][0]
+    later = [e["entry"] for e in built["exports"]
+             if e["entry"] > branchy["entry"]]
+    end = min(later) if later else base + _exec_code_limit(code)
+    own = [int.from_bytes(code[i - base:i - base + 4], "little")
+           for i in range(branchy["entry"], end, 4)]
+    check(any(_is_svc(w) for w in own),
+          "the branching export's own code carries no exit `svc`, so it has no "
+          "stack-floor guard and this row is not measuring the arm it names")
     path = os.path.join(tmpdir, "tail_proof.lean")
     with open(path, "w") as f:
         f.write(generate_dylib_proof(
@@ -2331,13 +2369,78 @@ def test_the_last_exports_walk_ignores_the_image_tail(tmpdir, shared):
     check(m is not None, "the last, branching export has no `semantics_total` "
                          "theorem at all, so this row is not looking at it")
     check(m.group(2).strip() != "sorry",
-          "the LAST export's termination is a named `sorry`: its CFG walk was "
-          "defeated by the image tail after its own `ret`, which no argument "
-          "of the export can reach")
+          "the branching export's termination is a named `sorry`: its CFG walk "
+          "was defeated by the stack-floor guard's trap arm, which no run from "
+          "`Arm64State.init` takes")
     check("total_of_halts" in m.group(2),
-          f"the last export's termination is not the PROVED shape: "
+          f"the branching export's termination is not the PROVED shape: "
           f"{m.group(2).strip()!r}")
+    # The proved shape is only sound if the walk's fuel is the image's own:
+    # `_dylib_total_proof` must spell `exec_code_end / 4`, not `len(code) / 4`.
+    # `total_of_halts` below checks it in Lean; this pins the number the file
+    # carries, so a wrong PATH is a red row and not only a typecheck away.
+    check(f"{max(1, _exec_code_limit(code) // 4)} * n.toNat" in text,
+          "the walk's fuel path is not the image's `codeSize / 4`, so the "
+          "generated theorem is about a different run than `runExport`")
 
+
+def test_a_branching_export_termination_proves_in_lean(tmpdir, shared):
+    """The branching export's PROVED termination must be a file Lean accepts.
+
+    The sibling row above pins the EMITTER's verdict -- `total_of_halts`
+    with the walk's fuel, not a `sorry`.  That is a text check, and it is
+    not the typecheck: `DylibExport.total_of_halts` takes its hypothesis at
+    the statement `runExport` gives,
+
+        match runExport image e n with | some _ => True | none => False,
+
+    and a walk that states its `none` arm `True` where `runExport`'s is
+    `False` does not elaborate.  The arm the walk states is `none => True`
+    whenever a reachable branch targets a halt block, and the guard's dead
+    trap edge forced it on every guarded export -- so the branching
+    export's termination "proved" in the emitter's text and was REJECTED
+    by Lean (`Application type mismatch` on the `none` arm, measured on
+    this image while the row above stayed green).  The dead edge cannot
+    produce a `none` result: the cbz arm closes it by contradiction
+    (`hguard` proves the branch taken for every state the run visits), so
+    the statement states `none => False` and the application typechecks.
+
+    The image is the smallest one with the defect -- ONE branching export,
+    which has no overflow trap of its own, so no obligation anywhere else
+    in the file -- and the requirement is the whole file: it typechecks
+    with zero holes.
+    """
+    import re as _re
+    from formal.build import compile_formal_dylib
+    from formal.lean import find_lean, check_proof_cached
+    from formal.arm64_proof_gen import generate_dylib_proof
+    src = os.path.join(tmpdir, "guard.mojo")
+    with open(src, "w") as f:
+        f.write("def branchy(n):\n  if n > 3:\n    return 1\n  return 0\n")
+    out = os.path.join(tmpdir, "guard.dylib")
+    built = compile_formal_dylib([src], output=out, prove=False)
+    path = os.path.join(tmpdir, "guard_proof.lean")
+    with open(path, "w") as f:
+        f.write(generate_dylib_proof(
+            built["code"], built["info"], built["exports"], {}))
+    text = open(path).read()
+    m = _re.search(r"theorem (dylib_export_\w*branchy)_semantics_total :\n"
+                   r"    DylibExport\.Total dylib_image \1 :=\n\s*(.+)", text)
+    check(m is not None, "the branching export has no `semantics_total` "
+                         "theorem at all, so this row is not looking at it")
+    check(m.group(2).strip() != "sorry" and "total_of_halts" in m.group(2),
+          f"the branching export's termination is not the PROVED shape: "
+          f"{m.group(2).strip()!r}")
+    root = HERE
+    if not find_lean(root):
+        print("    SKIP: no lean found (the emitted file is not typechecked)")
+        return
+    ok, detail, _, n = check_proof_cached(path, repo_root=root)
+    check(ok, "lean rejected the branching export's proved termination: "
+              f"{detail[-400:]}")
+    check(n == 0, f"the one-export proof admits {n} hole(s): the branching "
+                  f"body has no trap of its own, so every obligation in the "
+                  f"file is one the walk should have discharged")
 
 
 def _segment_flags_and_section_metadata(data):
@@ -2489,8 +2592,10 @@ TESTS = [
      test_a_conditional_expression_derives_a_spec),
     ("a conditional value is not a branch",
      test_a_conditional_value_is_not_a_branch),
-    ("the last export's walk ignores the image tail",
-     test_the_last_exports_walk_ignores_the_image_tail),
+    ("a branching export's termination survives its stack guard",
+     test_a_branching_exports_stack_guard_does_not_defeat_termination),
+    ("a branching export's termination proves in Lean",
+     test_a_branching_export_termination_proves_in_lean),
     ("a wrong spec on a multi-export image is rejected",
      test_a_wrong_spec_on_a_multi_export_image_is_rejected),
     ("overloads build and export once", test_overloads_do_not_collide),
