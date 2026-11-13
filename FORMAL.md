@@ -32,7 +32,7 @@ number that disagrees is stale, not wrong; the name is the claim.
 ## 1. The thesis
 
 `fire.py` has two machine-code backends. The gimple backend emits C, links
-`runtime/fire_runtime.c` (783 KB) plus the other runtime translation units, and
+`runtime/fire_runtime.c` (785 KB) plus the other runtime translation units, and
 hands the result to a system linker. The formal backend emits Mach-O or ELF
 itself, links **libSystem, and — since phase 2 landed — the per-architecture
 runtime dylib when and only when the image names something in it**, and carries
@@ -93,11 +93,11 @@ not just `fire_runtime.h`:
 
 | | count | note |
 |---|---|---|
-| entry points across **12** headers | **932** | `fire_runtime.h` 822, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 16, `fire_ssl.h` 13, `fire_coro.h` 11, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_alloc_census.h` 4, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
+| entry points across **12** headers | **933** | `fire_runtime.h` 823, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 16, `fire_ssl.h` 13, `fire_coro.h` 11, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_alloc_census.h` 4, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
 | **word in, word out** | **426** | every parameter and the return value is one 64-bit word |
-| not word-shaped | **506** | a box crosses the boundary — in an argument, in the return, or both |
+| not word-shaped | **507** | a box crosses the boundary — in an argument, in the return, or both |
 
-So **426 of 932 (45.7%)** is the reachable-surface ceiling. The previous
+So **426 of 933 (45.7%)** is the reachable-surface ceiling. The previous
 revision of this section published 418 of 920 (45.4%), and before that 402 of
 863 (46.6%) and 389 of 455 (77%) — the word *share* has been stable across recent censuses. Two headers have been added
 since (`fire_coro.h`, `fire_metal.h`), `fire_runtime.h` alone grew by 115
@@ -265,7 +265,7 @@ bounded: arm64 against a scratch region (`_SCRATCH = ARM64_CONTAINER_BUDGET =
 131072`, declared in `formal/model.py` and read by
 `formal/arm64_codegen.py`; over-capacity raises in `_blob_cap`'s callers) and
 x86-64 against `_BLOB_BYTES = X86_64_CONTAINER_BUDGET = 16384` the same way.
-So the **506** non-word entry points of §2.2 are not merely unwired — they have
+So the **507** non-word entry points of §2.2 are not merely unwired — they have
 no representation.
 
 ### 3.3 The gimple premise — ESTABLISHED by phase 0, with one latent failure left
@@ -418,14 +418,14 @@ true.
 
 This is stated separately because it is the load-bearing consequence of decision 3.
 
-Under (c) alone, the formal target's containers stay frame blobs and the 506
+Under (c) alone, the formal target's containers stay frame blobs and the 507
 box-crossing entry points of §2.2 stay gimple-only, permanently. That is a real
 ceiling, and it is why (c) cannot be the destination.
 
 A slab allocator removes the ceiling. Once the formal target has a *proved* bump
 allocator, its `MojoList` can be a real pointer into a region rather than a stack
 blob; `doc/ABI.md`'s `List → MojoList *` becomes literally true on both backends;
-and the 506 become callable **incrementally, one entry point at a time, each with
+and the 507 become callable **incrementally, one entry point at a time, each with
 its own proof** — rather than in one change to the value model that would disturb
 a proof library which is currently **hole-free**: zero `sorry`, zero `axiom` and
 zero vacuous declarations across all five `lib/` modules, measured by
