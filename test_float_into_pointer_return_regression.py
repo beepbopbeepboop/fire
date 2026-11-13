@@ -44,19 +44,43 @@ def pick(x: Int) -> String:
     assert "'double'" in msg, msg
 
 
-def test_int_return_into_the_same_shape_still_compiles():
-    # The pre-existing spelling gcc accepts with a warning; the fix must not
-    # have disturbed it.
-    src = """\
+def _assert_refused(src: str, arm_ctype: str) -> None:
+    try:
+        _compile(src)
+    except TypeError as e:
+        msg = str(e)
+    else:
+        raise AssertionError(
+            f"a {arm_ctype} return arm in a `-> String` function compiled; it "
+            "must be refused (it used to hand the caller the raw bits as a "
+            "pointer)")
+    assert "'pick'" in msg, msg
+    assert "'char *'" in msg, msg
+    assert f"'{arm_ctype}'" in msg, msg
+
+
+def test_int_return_into_an_annotated_pointer_is_refused():
+    # gcc used to accept `return 7` here with a pointer-from-integer warning,
+    # and print(pick(0)) dereferenced address 7 (CPython prints 7).
+    _assert_refused("""\
 def pick(x: Int) -> String:
     if x == 1:
         return "one"
     return 7
-"""
-    _compile(src)
+""", "int")
+
+
+def test_bool_return_into_an_annotated_pointer_is_refused():
+    _assert_refused("""\
+def pick(x: Int) -> String:
+    if x == 1:
+        return "one"
+    return x == 2
+""", "_Bool")
 
 
 if __name__ == "__main__":
     test_float_return_into_an_annotated_pointer_is_refused()
-    test_int_return_into_the_same_shape_still_compiles()
+    test_int_return_into_an_annotated_pointer_is_refused()
+    test_bool_return_into_an_annotated_pointer_is_refused()
     print("PASS")

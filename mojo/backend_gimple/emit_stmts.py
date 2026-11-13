@@ -3477,23 +3477,28 @@ def _box_float_mixed_return_arm(gen, vtype: str, v: str) -> tuple[str, str]:
         f"kind (a box of it would be rendered by the wrong repr)")
 
 
+_NON_POINTER_SCALAR_ARM_CTYPES = ('double', 'float', 'int', 'int64_t', '_Bool')
+
+
 def _check_float_arm_into_annotated_pointer(gen, vtype) -> None:
-    """Refuse a float return arm in a function whose return type is a pointer.
+    """Refuse a scalar (float/int/bool) return arm in a pointer-returning function.
 
     A pointer C return type reaches this emitter only from an ANNOTATION
-    (`-> String`, `-> MojoList *`, ...): an inferred float+pointer join is
+    (`-> String`, `-> MojoList *`, ...): an inferred scalar+pointer join is
     widened to the tagged word before we get here (`_is_float_mixed_return`).
-    So a float arm is a contradiction of a static type, and Mojo rejects it
-    as a type error. The old spelling, `(int64_t)<double>` cast into the
-    pointer, compiled and silently returned the truncated bits as the pointer.
-    The diagnostic is the honest answer: it names the function, the arm's
-    type and the annotated return type."""
+    So a scalar arm is a contradiction of a static type, and Mojo rejects it
+    as a type error. The old spelling, `(char *)<scalar>` cast into the
+    pointer, compiled (gcc warns, not errors) and silently handed the caller
+    the raw bits as the pointer (`print(pick(0))` dereferenced address 7 for
+    `return 7`). The diagnostic is the honest answer: it names the function,
+    the arm's type and the annotated return type."""
     _rt = _as_str(getattr(gen, 'func_ret_type', '') or '')
-    if _as_str(vtype) in ('double', 'float') and _rt.endswith(' *'):
+    _vt = _as_str(vtype)
+    if _vt in _NON_POINTER_SCALAR_ARM_CTYPES and _rt.endswith(' *'):
         raise TypeError(
             f"function {_as_str(getattr(gen, 'current_func_name', '') or '?')!r} "
             f"is annotated to return {_rt!r} but has a return arm of type "
-            f"{_as_str(vtype)!r}; a float cannot be returned as a pointer "
+            f"{_vt!r}; a scalar of that type cannot be returned as a pointer "
             f"(fix the annotation or the returned value)")
 
 
