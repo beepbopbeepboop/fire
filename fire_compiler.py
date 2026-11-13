@@ -5028,6 +5028,10 @@ def _expr_constraint_text(node):
         func = _expr_constraint_text(node.func)
         args = ", ".join(_expr_constraint_text(a) for a in (node.args or []))
         return f"{func}({args})"
+    if isinstance(node, SubscriptExpr):
+        obj = _expr_constraint_text(node.obj)
+        idx = _expr_constraint_text(node.index)
+        return f"{obj}[{idx}]"
     if isinstance(node, UnaryOp):
         op = str(node.op)
         operand = _expr_constraint_text(node.operand)
