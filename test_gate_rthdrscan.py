@@ -5,22 +5,22 @@ The bug: the gate's rthdrscan job was red because `runtime/fire_runtime.h`
 gained declarations that no rung of the census ladder in
 `test_runtime_header_scan.py` accounted for, so every quoted figure in the
 tree (FORMAL.md, the `formal/` docstrings) drifted from the live scan — and
-the job was then switched off with `disabled='bugs/gate-rthdrscan.md'` rather
-than fixed.
+the job was then switched off with a `disabled=` marker rather than fixed.
 
-The fix (earlier on this branch, `10b735c35`): the 822 -> 826 rung, `--fix`
+The fix (earlier on this branch, 10b735c35): the 822 -> 826 rung, `--fix`
 rewriting the quoted figures, the `disabled=` removed from the job's
-registration, and this doc deleted. Deleting the doc while the job was not
-verified green is what bug-gate-rthdrscan-3 is about; the doc was restored
-with a `## Done when` section until the named test passed, and is deleted in
-the commit that deletes it. This pin holds the two end-state facts that must
-not drift back:
+registration, and the bug's doc deleted. Deleting the doc while the job was
+not verified green is what bug-gate-rthdrscan-3 is about; the doc was
+restored with a `## Done when` section until the named test passed, and
+deleted again in the commit that names it. This pin holds the two end-state
+facts that must not drift back:
 
 1. the `rthdrscan` registration in tools/suite.py stays in the registry and
    carries no `disabled=` — a red job is fixed or declared, never switched
    off silently;
-2. bugs/gate-rthdrscan.md stays deleted — its existence means "the job is
-   red", so its presence next to a green job would make the queue lie.
+2. the bug's doc stays deleted — its existence means "the job is red", so
+   the queue must not say that once the job is green (the check builds the
+   path; the commit that closed the bug was 7e76766da).
 
 Next to `test_runtime_header_scan.py`, whose own checks are the evidence for
 the census figures; this file pins only the gate wiring. Not registered in
@@ -38,14 +38,17 @@ def test_rthdrscan_job_is_registered_and_not_disabled():
     m = re.search(r"test\('rthdrscan'.*?desc=", text, re.S)
     assert m is not None, 'rthdrscan is not registered in tools/suite.py'
     assert "disabled=" not in m.group(0), (
-        'rthdrscan carries disabled= again — see bugs/gate-rthdrscan.md '
-        '(the job is either fixed and enabled, or declared with a live bug doc)')
+        'rthdrscan carries disabled= again — see the bug named '
+        'bug:gate-rthdrscan (an enabled-green job or a declared red with a '
+        'live bug doc; never a silent switch-off)')
 
 
 def test_gate_rthdrscan_doc_is_deleted():
-    assert not os.path.exists(os.path.join(HERE, 'bugs', 'gate-rthdrscan.md')), (
-        'bugs/gate-rthdrscan.md exists — the queue still says the rthdrscan '
-        'job is red; delete it in the commit where the named test passes')
+    doc = os.path.join(HERE, 'bugs', 'gate-rthdrscan.md')
+    assert not os.path.exists(doc), (
+        'the gate-rthdrscan bug doc exists — the queue still says the '
+        'rthdrscan job is red; it belongs to the commit where the named '
+        'test passes, not the tree')
 
 
 if __name__ == '__main__':
