@@ -21,6 +21,11 @@ node that the walk memo may have cached, and does not call `_walk_ast_invalidate
 ## Next step
 1. Read `_attribute_to_def` (mojo/middle/coro.py ~4620-4640) and decide whether the written node can be
    memoised. If yes, call `_walk_ast_invalidate(<node>)` right after the write. Prefer this over the allowlist.
+   Measured while merging 2026-11-12: both call sites (`_async_method_setup` around line 4668 and the
+   async-generator lowering around line 8556) run in `lower()`, before `gen_module` walks the tree, and the
+   prologue `VarDecl` nodes they pass in are freshly synthesized (`N.VarDecl(...)` built immediately above
+   the call). That makes the reasoned allowlist entry the likely correct form; confirm no path reaches a
+   prologue the memo has already walked before choosing it.
 2. If the write is provably memo-neutral (line/col are not read through the memo), add the key to
    `_WALK_AST_MUTATION_ALLOWLIST` with that reason instead, and say so in the commit.
 3. Quick test: `python3 test_gimple.py` and confirm `every_ast_mutation_site_invalidates_the_walk_memo` PASSES.
