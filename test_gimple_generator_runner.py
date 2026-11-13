@@ -393,6 +393,39 @@ def test_generator_c_compiles(name: str, mojo_src: str):
         _FAIL += 1
 
 
+def _stray_include_lines(c_code: str) -> list:
+    """Return the 1-based line numbers of every `#include` directive that sits
+    inside a brace-delimited body (brace depth > 0). The module prelude is the
+    only place a header may appear; a copy inside a function is a gcc error."""
+    depth = 0
+    stray = []
+    for n, line in enumerate(c_code.splitlines(), 1):
+        if depth > 0 and line.lstrip().startswith('#include'):
+            stray.append(n)
+        depth += line.count('{') - line.count('}')
+    return stray
+
+
+def test_generator_c_no_stray_include(name: str, mojo_src: str):
+    """Emit the generator module's C and assert no `#include` lands inside a
+    function body. Pins the nested generator / generator method emitter
+    (the 2026-11-12 `#include <sys/types.h>` inside `T_run` gcc error, fixed
+    on this tree)."""
+    global _PASS, _FAIL
+    try:
+        c_code, _cpp = gimple_codegen.compile_to_gimple_with_cpp(mojo_src)
+        stray = _stray_include_lines(c_code)
+        if not stray:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: #include inside a function body at line(s) {stray}")
+            _FAIL += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+
+
 def test_generator_refused(name: str, mojo_src: str, expected_substr: str):
     """Assert this generator shape is honestly REFUSED at compile time
     (raises with a message containing `expected_substr`) rather than
@@ -3043,6 +3076,36 @@ def outer():
         yield k
     return g
 """, "variable(s) k")
+    test_generator_c_no_stray_include("nested_generator_method_no_stray_include", """\
+struct T:
+    var k: Int
+    def __init__(out self, k: Int):
+        self.k = k
+    def run(self):
+        def g():
+            yield self.k
+            yield self.k + 1
+        for v in g():
+            print(v)
+
+def main():
+    var t = T(7)
+    t.run()
+""")
+    test_generator_c_no_stray_include("generator_method_no_stray_include", """\
+struct T:
+    var k: Int
+    def __init__(out self, k: Int):
+        self.k = k
+    def run(self) -> Generator[Int]:
+        yield self.k
+        yield self.k + 1
+
+def main():
+    var t = T(3)
+    for v in t.run():
+        print(v)
+""")
     # A nested generator defined in a METHOD that reads `self` (test_frame.py's
     # `g`). `self` is handed over as a hidden pointer, not boxed, so the
     # generator sees the live receiver: a read, a write that lands on the
@@ -6232,6 +6295,63 @@ def main():
         print(p[1])
 main()
 """, "0\n1\n")
+
+    # The same walk reached through a NESTED def: `inner` is an ordinary def
+    # nested in `outer`, and the list reaches `walk` only through `inner`'s
+    # parameter. Used to refuse ("yields ['xs'] ... call sites do not all pass
+    # the same statically-known type"): the scan typed `walk(fn)` with
+    # `outer`'s env, where `fn` is not bound, and never recorded `inner`'s own
+    # call sites. The scan now types each nested def's body with that def's own
+    # env, and records its call sites, so `fn` is `outer`'s `body`, a list.
+    test_generator_stdout("nested_def_returned_generator_iterated_in_for", """\
+def walk(xs):
+    for i, st in enumerate(list(xs)):
+        yield xs, i
+def outer(body):
+    def inner(fn):
+        return walk(fn)
+    return inner(body)
+def main():
+    for p in outer([1, 2]):
+        print(p[1])
+main()
+""", "0\n1\n")
+
+    # The nested def's argument must be typable for the walk to be. A value
+    # the scan cannot type at the nested call still refuses.
+    test_generator_refused("nested_def_returned_generator_untypable_arg_refuses", """\
+def walk(xs):
+    for i, st in enumerate(list(xs)):
+        yield xs, i
+def outer(body):
+    def inner(fn):
+        return walk(fn)
+    return inner(body)
+def main():
+    for p in outer(getattr(main, 'x', None)):
+        print(p[1])
+main()
+""", "yields ['xs']")
+
+    # A nested def that ESCAPES as a value (here returned, then called through
+    # another name) has call sites this scan cannot see, so its parameter must
+    # not be typed from the direct call alone. The string passed through `f`
+    # would otherwise reach `walk`'s list slot.
+    test_generator_refused("nested_def_escaping_value_call_refuses", """\
+def walk(xs):
+    for i, st in enumerate(list(xs)):
+        yield xs, i
+def outer(body):
+    def inner(fn):
+        return walk(fn)
+    inner(body)
+    return inner
+def main():
+    f = outer([1, 2])
+    for p in f("abc"):
+        print(p[1])
+main()
+""", "yields ['xs']")
 
     # The guard is what makes the recursive argument a list. Without it the
     # argument is an untypable hole and the slot must still refuse.
@@ -9772,6 +9892,7 @@ def main():
     _foreign_a3_generator_handle_for_loop()
     _foreign_cpp_module_global_value()
     _cpp_for_over_callable_local_is_named()
+    _regression_read_table_callable_reader()
     _cpp_coroutine_builtin_module_constant()
     _cpp_coroutine_exc_ctor_value()
 

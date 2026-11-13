@@ -3036,9 +3036,21 @@ int64_t mojo_dyn_call(int64_t fn, MojoList *args, MojoDict *kw)
         for (int64_t i = 0; i < n; i++) v[i] = mojo_list_get_int(args, i);
         return _mojo_vararg_invoke((MojoVarargFn *)fp, v, n, kw);
     }
+    /* A plain function pointer has no name-based parameter binding, but a
+     * dynamic call may still carry keyword arguments in call order (e.g. a
+     * call through a callable-valued parameter). Append their values after
+     * the positional arguments so they bind positionally. */
+    MojoList *_merged_args = NULL;
     if (kw && mojo_dict_len(kw) > 0) {
-        mojo_raise_type_error((char *)"got an unexpected keyword argument");
-        return 0;
+        _merged_args = mojo_list_new();
+        for (int64_t i = 0; i < n; i++) mojo_list_append_int(_merged_args, mojo_list_get_int(args, i));
+        MojoList *_kws = mojo_dict_keys(kw);
+        for (int64_t i = 0; i < mojo_list_len(_kws); i++) {
+            char *_k = mojo_list_get_str(_kws, i);
+            mojo_list_append_int(_merged_args, mojo_dict_get_int(kw, _k));
+        }
+        args = _merged_args;
+        n = mojo_list_len(args);
     }
     int64_t a[5] = {0, 0, 0, 0, 0};
     if (n > 5) n = 5;

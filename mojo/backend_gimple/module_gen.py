@@ -14241,23 +14241,43 @@ def gen_module_impl(self, stmts: list):
             return self._fn_returns_generator.get(arg.func.name)
         return None
 
-    for _rf in all_functions:
-        if not isinstance(_rf, FunctionDef):
-            continue
-        acc_rt = []
-        _gmi_collect_return_values(acc_rt, _rf.body)
-        rt_prov = None
-        for _rv in acc_rt:
-            if (isinstance(_rv, CallExpr) and isinstance(_rv.func, IdentExpr)
-                    and _rv.func.name in self._generator_api):
-                if rt_prov is None:
-                    rt_prov = _rv.func.name
-                elif rt_prov != _rv.func.name:
+    # A function returns a generator when every value it returns is a call to
+    # a generator, directly or through a function that already returns one:
+    # `def outer(b): def inner(f): return walk(f); return inner(b)` makes
+    # `outer(...)` a generator, so `for p in outer(...)` iterates it. The
+    # candidates are the module's top-level defs plus its nested ordinary defs
+    # the call-site scan can resolve by name (`_nested_plain_defs_for_scan`).
+    # Each round only ADDS names, so the fixpoint terminates.
+    _ret_defs = [_d for _d in all_functions if isinstance(_d, FunctionDef)]
+    _ret_defs += gimple_gen_coro._nested_plain_defs_for_scan(all_functions)
+    _ret_changed = True
+    while _ret_changed:
+        _ret_changed = False
+        for _rf in _ret_defs:
+            if _rf.name in self._fn_returns_generator:
+                continue
+            acc_rt = []
+            _gmi_collect_return_values(acc_rt, _rf.body)
+            rt_prov = None
+            for _rv in acc_rt:
+                _rv_callee = (_rv.func.name
+                              if isinstance(_rv, CallExpr) and isinstance(_rv.func, IdentExpr)
+                              else None)
+                if _rv_callee is not None and _rv_callee in self._generator_api:
+                    _rv_prov = _rv_callee
+                elif _rv_callee is not None and _rv_callee in self._fn_returns_generator:
+                    _rv_prov = self._fn_returns_generator[_rv_callee]
+                else:
+                    _rv_prov = None
+                if _rv_prov is None:
                     rt_prov = '<conflict>'
-            else:
-                rt_prov = '<conflict>'
-        if rt_prov not in (None, '<conflict>'):
-            self._fn_returns_generator[_rf.name] = rt_prov
+                elif rt_prov is None:
+                    rt_prov = _rv_prov
+                elif rt_prov != _rv_prov:
+                    rt_prov = '<conflict>'
+            if rt_prov not in (None, '<conflict>'):
+                self._fn_returns_generator[_rf.name] = rt_prov
+                _ret_changed = True
 
     _param_gen_obs: dict[str, dict[str, dict]] = {}  # callee -> {pname -> {fname: count}}
     for _round in range(4):
