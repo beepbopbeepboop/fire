@@ -1608,14 +1608,27 @@ def _gen_stmt_AssignStmt(gen, node):
                      and v in getattr(gen, '_boxed_vals', ())
                      and gen.var_types.get(_copy_src) == 'int64_t'
                      and ginf.tagged_for_target_name(gen, _copy_src))
+        # A call to a float+pointer function is a tagged word too
+        # (`lower_expr` marks its temp in `_tagged_word_vals`), and binding it
+        # to a name must keep the box: `mojo_box_word` below would hand a
+        # double box on unchanged but a LIST box's word as an int, and the
+        # name would lose the kind every later consumer dispatches on. Unlike
+        # the generator cases the RHS itself is proof for THIS store, so the
+        # name-level "every binding is tagged" walk is not needed.
+        _call_tagged = (vtype == 'int64_t'
+                        and isinstance(node.value, gimple_ctypes.CallExpr)
+                        and isinstance(node.value.func, gimple_ctypes.IdentExpr)
+                        and _as_str(node.value.func.name) in getattr(
+                            gen, '_ret_may_hold_float', ()))
         # A receive-only name (`x = yield`, every binding of it) keeps the
         # resume word's box too: `x = yield` after `next(it)` is the None box,
         # and the name must render it as None (`tagged_recv_name`).
         _keep_tagged_box = (vtype == 'int64_t'
                             and (v in getattr(gen, '_tagged_word_vals', ())
-                                 or _for_copy)
+                                 or _for_copy or _call_tagged)
                             and gen.var_types.get(tname, 'int64_t') == 'int64_t'
-                            and (ginf.tagged_next_bind_name(gen, _as_str(tname))
+                            and (_call_tagged
+                                 or ginf.tagged_next_bind_name(gen, _as_str(tname))
                                  or ginf.tagged_recv_name(gen, _as_str(tname))))
         # A MIXED name (`x = 0` beside `x = v` over a tagged generator) is a
         # box-holding local too, so every int64 store into it must be a box:
@@ -1625,7 +1638,8 @@ def _gen_stmt_AssignStmt(gen, node):
         # A tagged word and a non-int64 name never mix: see
         # MIXED_NAME_NON_INT64_REFUSAL. Refused here, before any store is
         # emitted, rather than unwrapping the box into a str/float slot.
-        _tagged_bind = (v in getattr(gen, '_tagged_word_vals', ()) or _for_copy)
+        _tagged_bind = (v in getattr(gen, '_tagged_word_vals', ()) or _for_copy
+                        or _call_tagged)
         # A float/str/bool/int store into a box-holding name is boxed by its
         # kind here, BEFORE any refusal below reads the value's C type, so it
         # is carried by the box rather than refused. A container stored into a
@@ -3402,6 +3416,67 @@ def _redecl_upgrade_default(gen, name: str, ctype: str) -> None:
             return
 
 
+def _is_float_mixed_return(gen) -> bool:
+    """Is the body being emitted one whose return type inference widened to
+    the TAGGED WORD because its arms mix a float with a pointer?
+
+    The answer comes from `_float_mixed_return_bodies`, the set
+    `infra_infer._infer_return_type_core` records against the SAME body object,
+    so this emitter cannot disagree with the declared return type: the body is
+    only in the set because inference widened it to `int64_t`, and `func_ret_type`
+    is that answer here. A body not in the set keeps every arm's own spelling
+    exactly as before."""
+    if _as_str(getattr(gen, 'func_ret_type', '') or '') != 'int64_t':
+        return False
+    _body = getattr(gen, '_cur_func_body', None)
+    return _body is not None and id(_body) in getattr(
+        gen, '_float_mixed_return_bodies', ())
+
+
+def _box_float_mixed_return_arm(gen, vtype: str, v: str) -> tuple[str, str]:
+    """Box one return arm of a float+pointer function into the tagged word.
+
+    Every arm that has no `int64_t` spelling is boxed by its own kind, so a
+    consumer that only sees the word (`mojo_repr_boxed`, the list kind
+    reader) still renders the value: `double` -> kind 'd', `char *` -> 'p',
+    `MojoList *` (tuple or list) -> 'l', `MojoBytes *` -> 's'. An `int`/`_Bool`
+    arm is already a plain word and passes through unchanged.
+
+    Any OTHER pointer kind — a dict, a set, a struct — is refused rather than
+    guessed: a box's "container" kind renders through the LIST repr, so
+    reading a dict pointer out of it would walk dict memory as a slot array.
+    A diagnostic naming the function is the only honest answer; the shapes
+    that matter today (`comptime.eval_const`) return str/list/None/float."""
+    vt = _as_str(vtype)
+    if vt in ('int', 'int64_t'):
+        # A plain integer has an int64_t spelling, so it IS the word.
+        return vtype, v
+    if vt == '_Bool':
+        # A bool is its OWN kind in the tagged word: the raw 1/0 prints as an
+        # integer, and CPython prints True/False.
+        return 'int64_t', gen._call_expr(
+            'int64_t', 'mojo_box_from_bool',
+            [('int64_t', gen._to_int64('_Bool', v))])
+    if vt in ('double', 'float'):
+        dv = v if vt == 'double' else gen._new_val('double', f'(double){v}')
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_double',
+                                         [('double', dv)])
+    if vt == 'char *':
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_str',
+                                         [('char *', v)])
+    if vt == 'MojoList *':
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_list',
+                                         [('MojoList *', v)])
+    if vt == 'MojoBytes *':
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_box_from_bytes',
+                                         [('void *', v)])
+    raise TypeError(
+        f"function {_as_str(getattr(gen, 'current_func_name', '') or '?')!r} "
+        f"returns a float beside a {vt!r}; a tagged word can carry a float "
+        f"beside an int/str/list/tuple/bytes/None, but not beside this pointer "
+        f"kind (a box of it would be rendered by the wrong repr)")
+
+
 def _gen_stmt_ReturnStmt(gen, node):
     # doc/OWNERSHIP_MODEL.md Phase 3 codegen wiring (TODO item 1) — see
     # gimple_gen_infra.py's "Public entry points" section for the whole
@@ -3430,6 +3505,13 @@ def _gen_stmt_ReturnStmt(gen, node):
     if node.value is None:
         ginf.emit_return_frees(gen)
         gmp._cattr_leave(gen)
+        # A bare `return` is `return None`, and in a tagged function a None is
+        # the shared None box, not the NULL word (which `mojo_repr_boxed` would
+        # read as the integer 0).
+        if _is_float_mixed_return(gen):
+            _nv = gen._call_expr('int64_t', 'mojo_box_none', [])
+            gen._emit(f"  return {_nv};")
+            return
         # If function returns non-void, return default value
         if gen.func_ret_type and gen.func_ret_type != 'void':
             ret = gen.func_ret_type
@@ -3659,6 +3741,30 @@ def _gen_stmt_ReturnStmt(gen, node):
         if gen.current_func_name and v in gen._func_value_names:
             gen._return_func_value_names[gen.current_func_name] = \
                 gen._func_value_names[v]
+        # A float+pointer function returns the TAGGED WORD: box this arm by
+        # its kind so the declared `int64_t` return carries the value instead
+        # of truncating it into the pointer the old join chose. AFTER the
+        # bookkeeping above, which is about the value's own container shape and
+        # still wants the unboxed `v`.
+        if _is_float_mixed_return(gen):
+            if isinstance(node.value, gimple_ctypes.NoneLiteral) or (
+                    isinstance(node.value, gimple_ctypes.IdentExpr)
+                    and _as_str(node.value.name) == 'None'):
+                # `return None` lowers as the word 0, which is an int slot's
+                # value, not the shared None box the kind reader looks for.
+                # The parser spells it as either a NoneLiteral or the bare
+                # identifier `None` (the same pair `coro.py` checks).
+                vtype, v = 'int64_t', gen._call_expr('int64_t',
+                                                     'mojo_box_none', [])
+            elif isinstance(node.value, gimple_ctypes.BoolLiteral):
+                # A bool arm lowers to the same `int` 1/0 an int arm does, so
+                # without the kind the word prints `1` where CPython prints
+                # `True`. `mojo_box_from_bool` is the tagged-word spelling.
+                vtype, v = 'int64_t', gen._call_expr(
+                    'int64_t', 'mojo_box_from_bool',
+                    [('int64_t', gen._to_int64(vtype, v))])
+            else:
+                vtype, v = _box_float_mixed_return_arm(gen, vtype, v)
         ret = gen.func_ret_type
         if ret == 'void':
             gen._emit(gimple_codegen._RETURN)

@@ -4919,6 +4919,19 @@ def _canon_conv(conv: str):
 # ── Code generator ─────────────────────────────────────────────────
 
 
+def align_value_error(val):
+    """Shared @align value rule: None if valid, else a diagnostic suffix."""
+    try:
+        v = int(val)
+    except Exception:
+        return f"@align value must be a positive power of 2, got {val}"
+    if v <= 0 or (v & (v - 1)) != 0:
+        return f"@align value must be a positive power of 2, got {v}"
+    if v > (1 << 29):
+        return "@align value exceeds maximum alignment (2^29)"
+    return None
+
+
 class Parser:
     _tok: list
     _pos: int
@@ -5797,12 +5810,9 @@ class Parser:
             val = self._eval_align_constant_int(arg)
             if val is None:
                 continue
-            if val <= 0 or (val & (val - 1)) != 0:
-                raise SyntaxError(
-                    f"{self._loc(loc_tok)}@align value must be a positive power of 2")
-            if val > (1 << 29):
-                raise SyntaxError(
-                    f"{self._loc(loc_tok)}@align value exceeds maximum alignment (2^29)")
+            err = align_value_error(val)
+            if err is not None:
+                raise SyntaxError(f"{self._loc(loc_tok)}{err}")
 
     def _eval_align_constant_int(self, expr):
         if isinstance(expr, IntLiteral):

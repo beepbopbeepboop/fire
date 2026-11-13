@@ -333,6 +333,19 @@ def _lower_re_sub_callback(gen, cb_arg) -> tuple[str, str]:
         else:
             gen._emit(f'  {env_t} = (void *)0;')
         return fn_ptr_t, env_t
+    # Fallback: treat callback as a simple function pointer.
+    #
+    # Route the conversion through `_coerce_to_type`, never a hand-written
+    # `(void *){cb_val}`: a bare top-level `def` lowers to the file-scope
+    # `static void * _funcptr_<fn>` (see calls_shared._callable_value_symbol),
+    # and a C-style cast whose operand is that GLOBAL DECL is not a legal
+    # raw-GIMPLE operand — gcc reports "invalid operand in unary operation"
+    # for `_t6 = (void *)_funcptr_repl_9f63a2;` inside a `__GIMPLE` body (the
+    # `.ci` parse `fire.py build` uses), while the bare assignment
+    # `_t6 = _funcptr_repl_9f63a2;` is accepted. `_coerce_to_type` already
+    # owns this rule (same `void *` is a plain copy, any other type is
+    # materialised into a register temp before the cast), so the fix is to
+    # use it rather than to spell a second answer here.
     if isinstance(cb_arg, gimple_ctypes.LambdaExpr):
         # Lower the lambda; after lowering, we can check whether it produced
         # a bound method (capturing) or a bare function pointer (non-capturing)
@@ -348,11 +361,12 @@ def _lower_re_sub_callback(gen, cb_arg) -> tuple[str, str]:
         fn_ptr_t = gen._new_val('void *', f'(void *){cb_val}')
         env_t = gen._new_val('void *', '(void *)0')
         return fn_ptr_t, env_t
-    # Fallback: treat callback as a simple function pointer
+    # Fallback: treat callback as a simple function pointer.
     cb_type, cb_val = gen.lower_expr(cb_arg)
-    fn_ptr_t = gen._new_val('void *', f'(void *){cb_val}')
+    fn_ptr_t = gen._new_val('void *', gen._coerce_to_type(cb_type, 'void *', cb_val))
     env_t = gen._new_val('void *', '(void *)0')
     return fn_ptr_t, env_t
+
 
 
 def _gen_for_regex_iter(gen, node: gimple_ctypes.ForStmt, pattern: str) -> None:

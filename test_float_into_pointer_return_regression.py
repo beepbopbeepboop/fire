@@ -1,20 +1,21 @@
-"""Regression test: a float returned from a function whose inferred return
-type is a POINTER must compile.
+"""Regression test: a float returned from a function whose return type is an
+ANNOTATED POINTER must still compile.
 
-`comptime.py`'s `eval_const` returns bool/int/float/str/tuple from one
-function, so its return-type join lands on `char *`. When `13b16397d` added
-`if isinstance(node, FloatLiteral): return node.value`, that branch emitted a
-bare `(char *)<double>`:
+This is the shape that remains on the declared-pointer path: the annotation
+fixes the C return type, so the float arm has to be coerced into it. When
+`13b16397d` added `if isinstance(node, FloatLiteral): return node.value`, that
+branch emitted a bare `(char *)<double>`:
 
     mojo/middle/comptime.py:470:3: error: cannot convert to a pointer type
 
-which took down `make mojoc`, `make stage2/mojo` and `test_selfhost.py`'s build.
-The int/bool branches of the same function were already returning into the same
-pointer slot and gcc accepts those with a warning, so only the float spelling
-ever surfaced.
+`_sce_simple_emit` routes a float->pointer coercion through int64_t, like every
+other scalar->pointer coercion in that file, so the compiles-but-truncates
+spelling below still stands for an annotated return.
 
-`_sce_simple_emit` now routes a float->pointer coercion through int64_t, like
-every other scalar->pointer coercion in that file.
+An INFERRED float-beside-pointer return no longer takes this path: it returns
+the tagged word (`test_float_return_beside_tuple_return.py`, whose bug doc was
+DELETED with its fix). The annotation-contradicted shape is written down in the
+bugs/ queue as the follow-up to that fix.
 """
 import os
 import re

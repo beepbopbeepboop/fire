@@ -522,11 +522,14 @@ def _gen_stmt_FromImportStmt(gen, node):
         if isinstance(_fi_info, dict) and _fi_info.get('signature'):
             if not (isinstance(gen.imported_symbols.get(symbol_name), dict)
                     and 'signature' in gen.imported_symbols[symbol_name]):
+                # The signature stays under the DEFINING name, exactly as
+                # the module-scope path (`_register_sym`) stores it: it
+                # describes the defining function, and the local alias is
+                # only a binding. The import-extern block renames the
+                # original identifier to the C symbol (`original_name` ->
+                # `csym` below); renaming it to the alias here made that
+                # rename a no-op and left the extern under the alias name.
                 _fi_sig = _fi_info['signature']
-                if symbol_name != name:
-                    import re as _re_fi
-                    _fi_sig = _re_fi.sub(r'\b' + _re_fi.escape(name) + r'\b',
-                                         symbol_name, _fi_sig, count=1)
                 gen.imported_symbols[symbol_name] = {
                     # `_fi_eff_mod`, not `node.module`: when the name only
                     # REACHES this module through a re-export, every reader
@@ -633,6 +636,16 @@ def _gen_stmt_FromImportStmt(gen, node):
                         ]
                 if _fi_pts:
                     gen._imported_home_param_types[_pair_key(_fi_home, symbol_name)] = list(_fi_pts)
+            if symbol_name != name:
+                # The C symbol every call site under this alias is emitted
+                # with, resolved HERE, inside the function-body scope whose
+                # `record_flat=False` home binding `_func_csym` reads. The
+                # module-level import-extern preamble runs after that scope
+                # is popped, so resolving it there drops the qualifier and
+                # declares the bare name (a second, independent mismatch
+                # with the call site). The preamble reads this instead.
+                gen.imported_symbols[symbol_name]['csym'] = _as_str(
+                    gen._func_csym(symbol_name))
             # Param defaults too — same gap as the top-level loop had
             # before its own BUG-2026-020 fix.
             try:

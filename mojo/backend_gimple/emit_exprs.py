@@ -119,6 +119,20 @@ def lower_expr(gen, node) -> tuple[str, str]:
         return gen._lower_UnaryOp(node)
     elif isinstance(node, gimple_ctypes.CallExpr):
         _rt, _rv = gen._lower_call(node)
+        # The result of calling a float+pointer function is a TAGGED WORD
+        # (`module_gen._ret_may_hold_float`, filled from the same per-body
+        # inference decision that boxed its arms). Mark it so every consumer
+        # dispatches by kind instead of reading the word as an integer or
+        # casting it to the pointer the old join chose: `print` ->
+        # `mojo_repr_boxed`, a list store -> `mojo_list_append_word`,
+        # arithmetic/comparison -> the `_tagged_*_select` pairs, and a bind to
+        # a local carries both marks across (see `stmts_shared`'s unbox arm).
+        if (_rt == 'int64_t' and isinstance(_rv, str)
+                and isinstance(node.func, gimple_ctypes.IdentExpr)
+                and _as_str(node.func.name) in getattr(
+                    gen, '_ret_may_hold_float', ())):
+            gen._boxed_vals.add(_rv)
+            gen._tagged_word_vals.add(_rv)
         # A `yield` used as a VALUE (`x = yield`, `print((yield))`) reads the
         # resume word, which is the None box when the generator was resumed by
         # `next()` / `send(None)` (coro.py's trampoline). Mark it as a tagged
