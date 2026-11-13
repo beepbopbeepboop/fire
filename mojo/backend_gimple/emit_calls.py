@@ -2475,6 +2475,128 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             f"`{_fname}(<call to a supported compiled async "
             "function>)` -- falling back to interpreting this module "
             "from source instead")
+    # rebind[T](x) / rebind[downcast[T, Trait]](x): identity in this backend.
+    # The downcast-witness form must diagnose when concrete T does not conform
+    # to Trait (missing witness table).
+    if isinstance(node.func, gimple_ctypes.SubscriptExpr):
+        _rb_obj = node.func.obj
+        _rb_name = None
+        if isinstance(_rb_obj, gimple_ctypes.IdentExpr):
+            _rb_name = _as_str(_rb_obj.name)
+        elif isinstance(_rb_obj, gimple_ctypes.MemberExpr):
+            _rb_name = _as_str(getattr(_rb_obj, 'member', None))
+        if _rb_name == 'rebind':
+            _rb_idx = node.func.index
+            _dc_call = None
+            if isinstance(_rb_idx, gimple_ctypes.SubscriptExpr):
+                _dc_obj = _rb_idx.obj
+                _dc_name = _as_str(getattr(_dc_obj, 'name', None)) if isinstance(_dc_obj, gimple_ctypes.IdentExpr) else None
+                if _dc_name == 'downcast':
+                    _dc_call = _rb_idx
+            if _dc_call is not None:
+                _dc_args = _dc_call.index
+                _dc_elems = _dc_args.elements if isinstance(_dc_args, gimple_ctypes.TupleExpr) else [_dc_args]
+                if len(_dc_elems) >= 2:
+                    def _rb_type_name(e):
+                        if isinstance(e, gimple_ctypes.IdentExpr):
+                            return _as_str(e.name)
+                        if isinstance(e, gimple_ctypes.MemberExpr):
+                            return _as_str(e.member)
+                        if isinstance(e, gimple_ctypes.StringLiteral):
+                            return _as_str(e.value)
+                        # best-effort text
+                        try:
+                            return _as_str(getattr(e, 'name', None)) or str(e)
+                        except Exception:
+                            return None
+                    _src_t = _rb_type_name(_dc_elems[0])
+                    _trait_t = _rb_type_name(_dc_elems[1])
+                    # Only diagnose when src type is concrete (not a generic param).
+                    _generic = False
+                    try:
+                        fn = getattr(gen, '_current_function_def', None) or getattr(gen, '_func_node', None)
+                        cparams = getattr(fn, 'comptime_params', None) or []
+                        # normalize names
+                        cpn = set()
+                        for p in cparams:
+                            if isinstance(p, str): cpn.add(p)
+                            elif isinstance(p, (list, tuple)) and p: cpn.add(p[0])
+                            elif hasattr(p, 'name'): cpn.add(getattr(p, 'name'))
+                        if _src_t in cpn:
+                            _generic = True
+                        # also if unresolved in comptime vals as concrete type name marker? keep simple
+                    except Exception:
+                        pass
+                    # treat unknown/placeholder names conservatively? if it's literally 'Self' or param-like
+                    if _src_t and not _generic:
+                        # try to decide if concrete struct we know about
+                        sb = getattr(gen, '_struct_bases', None) or {}
+                        tb = getattr(gen, '_trait_bases', None) or {}
+                        is_known_struct = _src_t in sb
+                        is_known_trait = _trait_t in tb or True  # trait may be local
+                        # If src_t equals a comptime param in _comptime_vals resolved to something else, prefer resolved
+                        try:
+                            cv = (getattr(gen, '_comptime_vals', None) or {}).get(_src_t)
+                            if isinstance(cv, str) and cv:
+                                _src_t_res = cv
+                            else:
+                                _src_t_res = _src_t
+                        except Exception:
+                            _src_t_res = _src_t
+                        # if resolved is still a param name, skip
+                        try:
+                            fn = getattr(gen, '_current_function_def', None) or getattr(gen, '_func_node', None)
+                            cparams = getattr(fn, 'comptime_params', None) or []
+                            cpn = set()
+                            for p in cparams:
+                                if isinstance(p, str): cpn.add(p)
+                                elif isinstance(p, (list, tuple)) and p: cpn.add(p[0])
+                                elif hasattr(p, 'name'): cpn.add(getattr(p, 'name'))
+                            if _src_t_res in cpn:
+                                _generic = True
+                        except Exception:
+                            pass
+                        if not _generic:
+                            # Only check when we can identify a concrete struct context.
+                            # Accept if undecidable/generic-like.
+                            if is_known_struct or (_src_t_res and _src_t_res[:1].isupper()):
+                                pred = _comptime_conforms_to_pred(gen)
+                                ok = None
+                                if pred is not None and _trait_t:
+                                    try:
+                                        ok = pred(_src_t_res, _trait_t)
+                                    except Exception:
+                                        ok = None
+                                else:
+                                    # try direct
+                                    try:
+                                        import mojo.middle.comptime as _ce
+                                        sb2 = getattr(gen, '_struct_bases', None) or {}
+                                        tb2 = getattr(gen, '_trait_bases', None) or {}
+                                        ex2 = getattr(gen, '_conformance_bases_extra', None) or {}
+                                        bases = dict(ex2); bases.update(sb2); bases.update(tb2)
+                                        ok = _ce.conforms_to(_src_t_res, _trait_t, bases)
+                                    except Exception:
+                                        ok = None
+                                # ok False => missing witness; ok True/None => accept (None = undecidable)
+                                if ok is False:
+                                    modname = getattr(gen, '_module_name', None) or ''
+                                    if not modname:
+                                        fnm = getattr(gen, '_current_filename', '') or 't.mojo'
+                                        modname = os.path.splitext(os.path.basename(fnm))[0]
+                                    struct_q = f"{modname}::{_src_t_res}" if modname else _src_t_res
+                                    trait_q = _trait_t or 'Trait'
+                                    line = getattr(node, 'line', None)
+                                    loc = f" (line {line})" if line else ''
+                                    raise RuntimeError(
+                                        f"function instantiation failed{loc}\n"
+                                        f"note: struct '{struct_q}' does not have witness table for trait '{trait_q}'"
+                                    )
+            # Lower as identity: return the (single) argument.
+            if node.args:
+                return gen.lower_expr(node.args[0])
+            return 'int64_t', '0'
+
     # __get_address_as_owned_value(addr)  →  *(int64_t *)addr
     # Mojo ownership intrinsic: load the value at a raw-pointer address.
     if isinstance(node.func, gimple_ctypes.IdentExpr) and node.func.name == '__get_address_as_owned_value' \
