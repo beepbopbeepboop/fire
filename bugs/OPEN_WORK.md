@@ -43,7 +43,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_dylib_stack_floor_guard_never_fires.md` | **unclaimed** | a dylib's stack-floor guard compares SP against a word nothing initialises |
 
 ### `unclassified` — 1 document, 0 claimed
 

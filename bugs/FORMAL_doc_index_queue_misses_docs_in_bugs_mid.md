@@ -14,7 +14,7 @@ under the comment "the formal documents live in bugs/ (moved there 2026-10-31); 
 directory-class reorg (35e261a02, "The swarm moved 1 doc(s) to the directory of their class (the class is the location)",
 and its siblings) moved formal documents into `bugs/mid/` without updating the tool. In the merged tree:
 
-- `bugs/FORMAL_dylib_stack_floor_guard_never_fires.md` — IN the queue
+- a dylib's stack-floor guard (FIXED: load-time floor initializer; doc deleted)
 - `bugs/FORMAL_doc_index_queue_misses_docs_in_bugs_mid.md` — IN the queue (this doc)
 - `bugs/mid/FORMAL_arm64_instruction_coverage.md` — missing
 - `bugs/mid/FORMAL_concrete_eval_eq_mojo_instances_omit_the_two_arg_env.md` — missing

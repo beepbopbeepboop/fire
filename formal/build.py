@@ -23814,7 +23814,12 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         })
 
     mod_init_addrs: list = []
-    has_mod_init = bool(M.module_body_functions(ordered))
+    # A load-time entry exists for a module body AND for the stack-floor
+    # initializer a guarded library needs (`library_floor_init_needed` is the
+    # emitters' own question, so the section is declared exactly when they emit
+    # the initializer). `_mod_init_addrs` checks the answer afterwards.
+    has_mod_init = (bool(M.module_body_functions(ordered))
+                    or M.library_floor_init_needed(ordered, library_structs))
     if fmt == "elf":
         # ONE pass, not two, and the reason is the layout: a Mach-O dylib's
         # code starts after a load-command list whose SIZE depends on whether

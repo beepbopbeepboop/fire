@@ -1169,6 +1169,18 @@ dylib_exports: list = None, globals_base: int = None,
             self.asm.emit(encode_ldp_sp_post(29, 30))
             self.asm.emit(encode_ret())
 
+        # A LIBRARY's stack-floor initializer, when one is needed. It is emitted
+        # BEFORE the bodies, where the startup stub sits in an executable: it is
+        # a function of its own that nothing branches to, so no path tree walks
+        # it, and it is registered as the first load-time entry below. It has to
+        # be a separate function at all because the floor it fills is what every
+        # guarded body reads; see `_emit_library_floor_init`.
+        self._floor_init_label = None
+        if not emit_startup and self._guarded_names:
+            self._floor_init_label = M.LIBRARY_FLOOR_INIT_LABEL
+            self._internal_labels.add(M.LIBRARY_FLOOR_INIT_LABEL)
+            self._emit_library_floor_init()
+
         for f, label in zip(functions, self._def_labels):
             self._emit_function(f, label)
 
@@ -1251,10 +1263,15 @@ dylib_exports: list = None, globals_base: int = None,
             # program on this path, since a program enters its body through
             # the startup stub instead — so the key is inert unless a dylib
             # reads it.
-            "mod_init_addrs": [
-                self.asm.labels[f.name]
-                for f in M.module_body_functions(functions)
-                if f.name in self.asm.labels],
+            # The library floor initializer, when there is one, is FIRST: the
+            # guarded prologues in the bodies read the floor it fills, and the
+            # loader runs these in order before any export can be called.
+            "mod_init_addrs": (
+                ([self.asm.labels[self._floor_init_label]]
+                 if self._floor_init_label else [])
+                + [self.asm.labels[f.name]
+                   for f in M.module_body_functions(functions)
+                   if f.name in self.asm.labels]),
             # The EXCEPTION KIND TABLE, published rather than recomputed and put
             # in `info` for both proof generators to read, because the word an
             # unwinder writes on one side has to mean the same integer on the
@@ -1822,32 +1839,16 @@ dylib_exports: list = None, globals_base: int = None,
         # `ulimit -s 2048` where the usable stack is exactly 14 frames: `n=13`
         # exits 0 and `n=14` dies of SIGSEGV with no output.
         #
-        # AFTER the argument moves, and the reason is a LIBRARY's guard rather
-        # than a program's. A program image's guard is four instructions that
-        # touch only X16/X17 (the startup stub already read `getrlimit` — see
-        # `_emit_stack_floor_init`), but a LIBRARY has no stub, so its first
-        # guarded prologue still emits the `getrlimit` call, and AAPCS gives a
-        # call every caller-saved register: X0..X17, which is where every
-        # incoming argument still is at the top of this prologue. That guard
-        # parks argument 0 in X14 and puts it back, because it is the one
-        # register whose value it needed for itself, and arguments 1..7 would be
-        # simply destroyed. Measured, and the shape of the failure is a contract
-        # check reading a parameter that is no longer the caller's: on arm64,
-        # `formal/examples/bounds_index.mojo`'s `at_offset(2, 5)` and
-        # `at_offset(4, 5)` exited 1 through `debug_assert` where CPython answers
-        # 2 and 4 — two parameters, and the guard ran before the second was
-        # saved. One-argument functions were unaffected, which is why this sat
-        # behind every single-argument case in the corpus. Keeping the homes
-        # first for BOTH shapes is one ordering to reason about, and a program's
-        # guard is unharmed by registers it never writes.
-        #
-        # It cannot be fixed by pushing the arguments around the call instead:
-        # a `sub sp, #16` across `getrlimit` was measured as a hang or a SIGSEGV
-        # on EVERY program (`def helper(x): return x + 1` with a `main` that
-        # calls it), because the C library reads SP-relative state across the
-        # boundary and the offsets the rest of this prologue computes from SP
-        # are then wrong by that much. The callee-saved homes are the only place
-        # an argument can live across this call.
+        # AFTER the argument moves. The guard is call-free now (it LOADS the
+        # floor word, and the floor is filled once at load time by the startup
+        # stub for a program or by `_emit_library_floor_init` for a library), so
+        # it clobbers only X16/X17 and nothing it touches holds an argument. The
+        # homes are still written first, so the order is one thing to reason
+        # about for every guarded prologue: the argument homes, then the guard,
+        # then the frame. The historical reason for this order was a `getrlimit`
+        # call inside the guard, which clobbered every caller-saved argument
+        # register; that call moved out of the prologue, and the placement
+        # constraint that remains is the one below.
         #
         # **…which is why the homes are written BEFORE the guard and the pushes
         # that preserve them come AFTER it.** The registers are the homes, so
@@ -2052,9 +2053,10 @@ dylib_exports: list = None, globals_base: int = None,
     def _emit_stack_floor_init(self) -> None:
         """Read `RLIMIT_STACK` once and park the FLOOR in `__DATA`.
 
-        Called from the STARTUP STUB only — `compile`'s `emit_startup` branch,
-        before the entry function is called and outside every function body —
-        and that placement is the whole reason this is its own method. The read
+        Called from the STARTUP STUB (`compile`'s `emit_startup` branch, before
+        the entry function is called) and from the LIBRARY's load-time
+        initializer (`_emit_library_floor_init`), both outside every function
+        body, and that placement is the whole reason this is its own method. The read
         is a `getrlimit` CALL, and a call inside a guarded prologue is a `BL` on
         a path `formal/arm64_proof_gen.py` WALKS: the walker cannot follow a call
         out of the image, so with the read in the prologue it refused proof
@@ -2133,6 +2135,41 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
         self.asm.label(done_label)
 
+    def _emit_library_floor_init(self) -> None:
+        """The LIBRARY's load-time stack-floor initializer, as a function.
+
+        A program's floor is filled by its startup stub, which runs once before
+        `main`. A LIBRARY has no stub (`emit_startup=False`), so before this its
+        floor word was never written: every guarded prologue loaded zero, `SP >=
+        0` always held, and a recursive export that exhausted the stack died with
+        SIGSEGV rather than the trap the guard exists to give. Measured on a
+        dylib built from `def deep(n): ... return 1 + deep(n - 1)`, which
+        answered signal 11 at depth 240 (`test_formal_dylib.py`'s
+        `test_a_dylib_export_traps_at_its_stack_floor`).
+
+        Filling the floor LAZILY from the first guarded prologue, the other
+        obvious answer, anchors it to whichever caller ran first and is wrong
+        either way: a first call near the top stores a floor too high, and one
+        near the bottom stores a floor below the real stack. So the floor is
+        anchored at LOAD time, the moment the program's is anchored at process
+        entry, and the loader runs this function before any export can be called
+        (it is the first entry of `info["mod_init_addrs"]`, which `formal/elf.py`
+        and `formal/macho_linker.py` write into the load-time array).
+
+        The body is the stub's own sequence, `_emit_stack_floor_init`, wrapped in
+        a frame that saves X29/X30: the `getrlimit` inside it is a `BL`, which
+        clobbers the link register, and the loader's `ret` must return to the
+        loader. Nothing branches to this function, so no path tree walks it and
+        the proof layer's walked range never reaches it. It is emitted before the
+        bodies, where the stub is, so it is the same code the stub would be
+        for the same arguments.
+        """
+        self.asm.label(M.LIBRARY_FLOOR_INIT_LABEL)
+        self.asm.emit(encode_stp_sp_pre(29, 30))
+        self._emit_stack_floor_init()
+        self.asm.emit(encode_ldp_sp_post(29, 30))
+        self.asm.emit(encode_ret())
+
     def _emit_stack_floor_guard(self) -> None:
         """Refuse instead of dying when the frame just taken crosses the floor.
 
@@ -2144,8 +2181,11 @@ dylib_exports: list = None, globals_base: int = None,
         one outcome this backend already has an idiom for and the one a caller
         can read.
 
-        The FLOOR is a `__DATA` word the STARTUP STUB filled once
-        (`_emit_stack_floor_init`), so the guard only LOADS it and compares:
+        The FLOOR is a `__DATA` word filled ONCE, at load time, before any
+        guarded code can run: by the STARTUP STUB for a program, and by the
+        library's load-time initializer (`_emit_library_floor_init`, which is
+        `_emit_stack_floor_init` as a function) for a dylib. So the guard only
+        LOADS it and compares:
 
             ADRP+ADD X17, &floor ; LDR X16, [X17]      the floor word
             ADD X17, SP, #0 ; CMP X17, X16
@@ -2153,18 +2193,14 @@ dylib_exports: list = None, globals_base: int = None,
             <message> ; movz x0, 2 ; movz x16, 1 ; svc #0x80   SP < floor
 
         There is **no call in this sequence**, and that is deliberate as well as
-        necessary: the `getrlimit` that fills `&limit` lives in the startup stub
-        (`_emit_stack_floor_init`), where no path tree walks it.
+        necessary: the `getrlimit` that fills `&limit` lives in the load-time
+        initializer (the startup stub, or `_emit_library_floor_init`), where no
+        path tree walks it.
 
-                ADRP+ADD X16, &floor ; LDR X16, [X16]
-                ADD X17, SP, #0 ; CMP X17, X16
-                B.HS ok                                    SP >= floor: carry set
-                movz x0, 2 ; movz x16, 1 ; svc #0x80       SP < floor: exit(2)
-            ok:
-
-          * **A library** (no stub) has no floor in `__DATA` yet, so the first
-            guarded prologue reads the limit itself and stores the floor — the
-            original shape, below.
+        A guarded prologue in a library is the same sequence. The one thing a
+        library does differently is WHEN the floor is filled, and that is why it
+        has an initializer and not a lazy store in the prologue: see
+        `_emit_library_floor_init`.
 
         The move is the arm64 twin of x86-64's `_emit_stack_floor_init` and it is
         the WALKER, not taste, that decided it: a `BL getrlimit` in every
@@ -2266,7 +2302,11 @@ dylib_exports: list = None, globals_base: int = None,
         _emit_sub_imm(self.asm, 31, 31, 16)
         self.asm.emit_adrp_add(1, label)
         self.asm.emit(encode_movz_xd_imm(0, 2))              # fd = stderr
-        self.asm.emit(encode_movz_xd_imm(2, len(text)))      # length
+        # The BYTE length, `M.diagnostic_length`, not `len(text)`: the interned
+        # blob is `text.encode()`, and the message is not ASCII (an em dash is
+        # three bytes). `len(text)` made the write stop two bytes short — measured
+        # as 837 written of 839 on the first arm64 trap run.
+        self.asm.emit(encode_movz_xd_imm(2, M.diagnostic_length(text)))  # length
         self.asm.emit(encode_movz_xd_imm(16, DARWIN_SYS_WRITE))
         self.asm.emit(encode_svc(0x80))
         _emit_add_imm(self.asm, 31, 31, 16)
