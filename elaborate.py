@@ -1019,14 +1019,24 @@ def _validate_align_decorators_for_struct(module_src, template_src, struct_name,
             # nodes in some forms; try common shapes conservatively.
             target = None
             value = None
-            if hasattr(ms, 'target') and hasattr(ms, 'value'):
-                target = getattr(ms, 'target', None)
-                value = getattr(ms, 'value', None)
-            elif isinstance(ms, AssignStmt) and len(getattr(ms, 'targets', [])) == 1:
-                t = ms.targets[0]
+            if isinstance(ms, AssignStmt):
+                targets = getattr(ms, 'targets', None)
+                if targets and len(targets) == 1:
+                    t = targets[0]
+                else:
+                    t = getattr(ms, 'target', None)
                 if isinstance(t, IdentExpr):
                     target = t.name
-                value = ms.value
+                elif isinstance(t, str):
+                    target = t
+                value = getattr(ms, 'value', None)
+            elif hasattr(ms, 'target') and hasattr(ms, 'value'):
+                t = getattr(ms, 'target', None)
+                if isinstance(t, IdentExpr):
+                    target = t.name
+                elif isinstance(t, str):
+                    target = t
+                value = getattr(ms, 'value', None)
             if not isinstance(target, str) or target in bindings or value is None:
                 continue
             try:
@@ -1058,6 +1068,12 @@ def _validate_align_decorators_for_struct(module_src, template_src, struct_name,
             # false diagnostic for this instantiation.
             val = None
         if val is None:
+            # Preserve legacy diagnostics for an unknown bare name used as
+            # @align(...) in this instantiation context.
+            if isinstance(arg, IdentExpr) and arg.name not in bindings:
+                raise RuntimeError(
+                    "function instantiation failed\n"
+                    f"use of unknown declaration '{arg.name}'\n{arg.name}")
             continue
         if val <= 0 or (val & (val - 1)) != 0 or val > (1 << 29):
             raise RuntimeError(
