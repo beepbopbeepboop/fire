@@ -1779,12 +1779,63 @@ def _dtype_cast_ctype(e):
     return None
 
 
+def _comptime_conforms_to_pred(gen):
+    try:
+        import mojo.middle.comptime as _comptime_eval
+        sb = getattr(gen, '_struct_bases', None) or {}
+        tb = getattr(gen, '_trait_bases', None) or {}
+        ex = getattr(gen, '_conformance_bases_extra', None) or {}
+        tbt = getattr(gen, '_conformance_trait_bases_text', None)
+        if tbt is None:
+            tbt = {}
+            try:
+                src = getattr(gen, '_source_text', '') or ''
+                if not src:
+                    fn = getattr(gen, '_current_filename', '') or ''
+                    if fn:
+                        with open(fn) as f:
+                            src = f.read()
+                if src:
+                    for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\s*(\[[^\]]*\])?\s*\(([^)]*)\)\s*:', src, re.MULTILINE):
+                        name = m.group(1)
+                        bstr = m.group(3) or ''
+                        blist = []
+                        for part in bstr.split(','):
+                            part = part.strip()
+                            if not part:
+                                continue
+                            b = part.split('[')[0].split('.')[-1].strip()
+                            if b and re.match(r'^[A-Za-z_]\w*$', b):
+                                blist.append(b)
+                        tbt[name] = blist
+                    for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\b', src, re.MULTILINE):
+                        tbt.setdefault(m.group(1), [])
+            except Exception:
+                tbt = {}
+            try:
+                gen._conformance_trait_bases_text = tbt
+            except Exception:
+                pass
+        if not sb and not tb and not ex and not tbt:
+            return None
+        bases = dict(ex)
+        bases.update(sb)
+        bases.update(tb)
+        for k, v in (tbt or {}).items():
+            if v or k not in bases:
+                bases[k] = v
+        return lambda t, tr, _b=bases: _comptime_eval.conforms_to(t, tr, _b)
+    except Exception:
+        return None
+
+
 def _eval_constrained_msg(gen, msg_node, node):
     msg = None
     if msg_node is not None:
         try:
             import mojo.middle.comptime as _comptime_eval
-            m = _comptime_eval.eval_const(msg_node, getattr(gen, '_comptime_vals', {}) or {})
+            m = _comptime_eval.eval_const(msg_node, getattr(gen, '_comptime_vals', {}) or {},
+                                          conforms_to_pred=_comptime_conforms_to_pred(gen))
             if isinstance(m, str):
                 msg = m
             elif m is not None:
@@ -1881,7 +1932,9 @@ def _try_lower_constrained(gen, node):
     try:
         import mojo.middle.comptime as _comptime_eval
         cvals = getattr(gen, '_comptime_vals', {}) or {}
-        state = _comptime_eval.eval_const_bool_state(cond_node, cvals)
+        _cpred = _comptime_conforms_to_pred(gen)
+        state = _comptime_eval.eval_const_bool_state(cond_node, cvals,
+                                                     conforms_to_pred=_cpred)
     except Exception:
         state = None
     if state == 0:  # CONST_FALSE / provably false

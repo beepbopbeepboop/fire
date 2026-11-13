@@ -7211,6 +7211,8 @@ def gen_module_impl(self, stmts: list):
                           if (self.do_imports or self.link_imports) else []))
     self._struct_bases = {s.name: list(getattr(s, 'bases', None) or [])
                            for s in all_struct_defs if isinstance(s, StructDef)}
+    self._trait_bases = {s.name: list(getattr(s, 'bases', None) or [])
+                         for s in all_struct_defs if isinstance(s, TraitDef)}
     _all_struct_names = {_as_str(_as_structdef_node(s).name) for s in all_struct_defs if isinstance(s, StructDef)}
     _struct_bases_map = {}
     for _sbm in all_struct_defs:
