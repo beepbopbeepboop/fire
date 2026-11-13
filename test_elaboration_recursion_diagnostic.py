@@ -112,12 +112,40 @@ def test_finite_chain_few_levels_deep_builds():
     assert r is not None and r.returncode == 0, (out, None if r is None else r.stdout)
 
 
+def test_concrete_unrenderable_type_arg_is_not_refused():
+    # The refusal is for arguments that can recurse without bound (`i + 1`) or
+    # name an unbound type parameter. A string literal and a `.uint32` dot-value
+    # are concrete data, so the call must NOT be refused: std/math/math.mojo's
+    # `llvm_intrinsic["llvm.*", ...]` and std/builtin/_format_float.mojo's
+    # `_truncate[.uint32](...)` previously made the stdlib dylib skip those modules.
+    # Only the build is asserted here. The nested call's VALUE is not yet correct
+    # (it takes the pre-existing stub path, which answers 0): see
+    # bugs/CODEGEN_nested_bracket_generic_call_stubs_to_zero.md.
+    src = (
+        'def tag[s: StaticString](x: Int) -> Int:\n'
+        '    return x\n'
+        '\n'
+        'def ident[dt: DType](x: Int) -> Int:\n'
+        '    return x\n'
+        '\n'
+        'def wrap[i: Int](x: Int) -> Int:\n'
+        '    return tag["abc"](x) + ident[.uint32](x) + i\n'
+        '\n'
+        'def main():\n'
+        '    print(wrap[1](5))\n'
+    )
+    rc, out, _ = _build_and_run(src)
+    assert rc == 0, 'concrete unrenderable type argument was refused:\n' + out
+    assert 'will cause an infinite loop' not in out and 'cannot materialize' not in out, out
+
+
 if __name__ == '__main__':
     tests = [
         test_direct_self_recursion_still_refused,
         test_mutual_recursion_refused,
         test_finite_chain_builds_and_runs,
         test_finite_chain_few_levels_deep_builds,
+        test_concrete_unrenderable_type_arg_is_not_refused,
     ]
     for t in tests:
         t()
