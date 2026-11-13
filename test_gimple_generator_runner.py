@@ -6462,6 +6462,88 @@ main()
 """, "yields ['xs']")
 
 
+def run_for_over_literal_in_generator_tests():
+    # `for x in <list/tuple literal>:` inside a generator/coroutine body.
+    # The literal is already lowered to a real `MojoList *` by `_cpp_expr` (a
+    # self-invoking lambda that constructs and fills one -- this model has no
+    # braced-init-list C++ value for a container), but the generic range-for
+    # fallback emitted `for (auto x : <that lambda>())`. A raw `MojoList *`
+    # has no ADL `begin`/`end`, so g++ rejected every such loop with
+    # "'begin' was not declared in this scope" / "'end' was not declared in
+    # this scope". The loop now iterates the lowered list through the same
+    # cached-local + indexed `mojo_list_len` / `mojo_list_get_*` lowering
+    # every other list-valued iterable in a generator body already used.
+    # Real: the nested recursive generator in
+    # `run_nested_recursive_generator_getattr_tests` above, whose inner
+    # `for fld in ('v', 'missing')` is exactly this shape.
+    test_generator_stdout("generator_for_over_tuple_literal", """\
+def outer():
+    def inner():
+        for fld in ('v', 'missing'):
+            yield fld
+    yield from inner()
+
+def main():
+    for x in outer():
+        print(x)
+main()
+""", "v\nmissing\n")
+
+    test_generator_stdout("generator_for_over_int_list_literal", """\
+def outer():
+    def g():
+        for v in [10, 20, 30]:
+            yield v
+    yield from g()
+
+def main():
+    for x in outer():
+        print(x)
+main()
+""", "10\n20\n30\n")
+
+    # The double element path: yield is not used for the value here because an
+    # unannotated generator's yield slot is int64_t in this body model (a
+    # separate, unrelated limitation); the loop's own read of the literal is
+    # what this pins.
+    test_generator_stdout("generator_for_over_float_tuple_literal", """\
+def outer():
+    def g():
+        for v in (1.5, 2.5):
+            print(v)
+            yield 0
+    yield from g()
+
+def main():
+    for x in outer():
+        pass
+main()
+""", "1.5\n2.5\n")
+
+    # A literal iterable with a `for/else`: the else body runs only when the
+    # loop completes without a break. The literal lowering returns before the
+    # generic for/else block, so it carries the shared break flag itself.
+    test_generator_stdout("generator_for_else_over_literal", """\
+def outer():
+    def g():
+        for v in (1, 2):
+            yield v
+            break
+        else:
+            yield -1
+        for v in (3, 4):
+            yield v
+        else:
+            yield -1
+    yield from g()
+
+def main():
+    for x in outer():
+        print(x)
+main()
+""", "1\n3\n4\n-1\n")
+
+
 def run_generator_tuple_repr_tests():
     # A tuple yielded by a generator is built by `__mojo_tuple_box_N` (the
     # A3 runtime, runtime/fire_coro_gen.c), and `list(gen)` puts that box
@@ -6498,6 +6580,7 @@ main()
 def run_tests():
     run_generator_tuple_repr_tests()
     run_nested_recursive_generator_getattr_tests()
+    run_for_over_literal_in_generator_tests()
     run_cpp_send_tests()
     run_send_into_just_started_regression()
     run_cpp_path_multi_arg_print_tests()
