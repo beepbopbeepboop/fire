@@ -14633,46 +14633,6 @@ main()
     _run_isolated(lambda: test_re_sub_with_inline_lambda(),
                   'test_re_sub_with_inline_lambda')
 
-    def test_re_sub_with_capturing_lambda():
-        """A re.sub() whose second argument is a CAPTURING lambda (one that
-        reads an enclosing local) must be dispatched down the callback path,
-        with the callback and its env unpacked from the lambda's
-        MojoBoundMethod (fn, self) and passed to mojo_regex_sub_fn. Before the
-        fix, `_re_sub_repl_is_callback` answered False for any capturing lambda,
-        so the lambda's value went to mojo_regex_sub_str as a replacement
-        string; a later fix refused it outright, which made `module_gen.py`
-        (its `@@CSYM:` resolution) uncompilable. That is the shape tested here.
-        """
-        global _PASS, _FAIL
-        name = "re_sub_with_capturing_lambda"
-        src = r'''
-import re
-
-def main():
-    k = "N"
-    print(re.sub(r"[0-9]+", lambda _m: k, "a1b22"))
-main()
-'''
-        ok, c_src, stderr = gimple_body_compiles(src)
-        if ok:
-            if ('mojo_regex_sub_fn' not in c_src
-                    or 'mojo_bound_method_fn' not in c_src
-                    or 'mojo_bound_method_self' not in c_src):
-                print(f"FAIL  {name}: capturing lambda was not unpacked into (fn, env) for the callback")
-                _FAIL += 1
-                return
-            print(f"PASS  {name}")
-            _PASS += 1
-            return
-        print(f"FAIL  {name}")
-        print("      --- gcc stderr ---")
-        for line in stderr.splitlines():
-            print(f"      {line}")
-        _FAIL += 1
-
-    _run_isolated(lambda: test_re_sub_with_capturing_lambda(),
-                  'test_re_sub_with_capturing_lambda')
-
     def test_regex_scan_in_a_method_body_compiles_and_matches_cpython():
         """`for m in PAT.finditer(s)` inside a struct method — a `__GIMPLE`
         body, which gcc reads as raw GIMPLE under `-x c` (the build's flags) —

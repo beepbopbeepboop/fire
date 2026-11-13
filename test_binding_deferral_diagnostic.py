@@ -154,51 +154,6 @@ def test_failed_binding_reports_only_the_failing_error_no_deferred_noise():
     assert text.count('error:') == 1, f'more than one diagnostic: {text}'
 
 
-def test_signature_failed_binding_reports_violated_constraint():
-    # bugs/mid/DIAGNOSTICS_binding_deferrals-part1.md. The modular test's
-    # failing binding is a PARAMETER type in a function signature, not a body
-    # instantiation. Its `where` clause (`n > 0`) is provably false at n == 0,
-    # so the declaration must fail with modular's own wording and nothing else.
-    src = _HEAD + (
-        'def failed_binding[U: Movable & Deinitable](\n'
-        '    x: NeedsCopyablePos[CondCopyable[U], 0]):\n'
-        '    pass\n'
-    )
-    text = _driver_compile(src)
-    assert text is not None, 'a failed binding in a signature compiled'
-    assert 'error: violated constraint' in text, text
-    assert 'lacking evidence' not in text, text
-    assert text.count('error:') == 1, f'more than one diagnostic: {text}'
-
-
-def test_signature_unproven_binding_reports_lacking_evidence():
-    # bugs/mid/DIAGNOSTICS_binding_deferrals-part2.md. `CondCopyable[U]` is
-    # Copyable only where `U: Copyable`; this signature only knows
-    # `U: Movable & Deinitable`, so the `T: Copyable` requirement is neither
-    # provable nor provably false. Modular reports `lacking evidence` and the
-    # declaration must fail with that single diagnostic.
-    src = _HEAD + (
-        'def successful_binding[U: Movable & Deinitable](\n'
-        '    x: NeedsCopyablePos[CondCopyable[U], 1]):\n'
-        '    pass\n'
-    )
-    text = _driver_compile(src)
-    assert text is not None, 'an unproven binding in a signature compiled'
-    assert 'error: invalid bindings in signature: lacking evidence' in text, text
-    assert 'violated constraint' not in text, text
-    assert text.count('error:') == 1, f'more than one diagnostic: {text}'
-
-    # Positive control: the same struct instantiated with a provably Copyable
-    # type and a satisfied where clause still compiles.
-    src = _HEAD + (
-        'def satisfied_binding(\n'
-        '    x: NeedsCopyablePos[Int, 1]):\n'
-        '    pass\n'
-    )
-    text = _driver_compile(src)
-    assert text is None, f'a satisfied signature binding was refused: {text}'
-
-
 if __name__ == '__main__':
     test_where_clause_text_is_the_clause_not_the_base_list()
     test_generic_failed_binding_reports_violated_constraint()

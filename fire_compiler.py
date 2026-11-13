@@ -2581,6 +2581,74 @@ def _check_variadic_element_types(stmts, filename) -> None:
         raise RuntimeError("\n".join(lines))
 
 
+def _module_name_from_filename(filename: str | None) -> str | None:
+    if not filename:
+        return None
+    import os
+    base = os.path.basename(filename)
+    if not base:
+        return None
+    name, _ext = os.path.splitext(base)
+    return name or None
+
+
+def _docstring_block_abs_loc(block, node_line: int, node_col: int):
+    # node positions are 1-based within the parsed block snippet.
+    if node_line <= 1:
+        return (block.line, block.col + max(node_col - 1, 0))
+    return (block.line + node_line - 1, node_col)
+
+
+def _check_docstring_self_imports(stmts, filename) -> None:
+    """Reject `import X` / `from X import ...` (and equivalent self-imports)
+    inside mojo docstring code blocks of module X."""
+    import os
+    module_name = _module_name_from_filename(filename)
+    if not module_name:
+        return
+    try:
+        from mojo.middle.docstring_blocks import extract_module_docstring_mojo_blocks
+    except Exception:
+        return
+    # Read source text for accurate positions when possible.
+    source = None
+    if filename and os.path.exists(filename):
+        try:
+            with open(filename, "r", encoding="utf-8") as f:
+                source = f.read()
+        except Exception:
+            source = None
+    try:
+        blocks = extract_module_docstring_mojo_blocks(stmts, source=source)
+    except Exception:
+        return
+    for block in blocks:
+        try:
+            block_stmts = Parser(py_tokenize(block.code)).parse_module()
+        except Exception:
+            # A non-parsing doc example is not a self-import diagnostic.
+            continue
+        for st in block_stmts:
+            imported_modules = []
+            if isinstance(st, ImportStmt):
+                if st.module:
+                    imported_modules.append((st.module, getattr(st, "line", 1), getattr(st, "col", 1)))
+                extra = getattr(st, "extra", None) or []
+                for mod, _alias in extra:
+                    if mod:
+                        imported_modules.append((mod, getattr(st, "line", 1), getattr(st, "col", 1)))
+            elif isinstance(st, FromImportStmt):
+                mod = st.module or ""
+                if mod and not mod.startswith("."):
+                    imported_modules.append((mod, getattr(st, "line", 1), getattr(st, "col", 1)))
+            for mod, ln, col in imported_modules:
+                root = mod.split(".", 1)[0]
+                if root == module_name:
+                    abs_line, abs_col = _docstring_block_abs_loc(block, ln or 1, col or 1)
+                    loc = f"{filename}:{abs_line}:{abs_col}: " if filename else f"{abs_line}:{abs_col}: "
+                    raise SyntaxError(f"{loc}error: module '{module_name}' cannot import itself")
+
+
 def _module_function_defs(stmts) -> dict:
     """`{name: FunctionDef}` for each module-level function whose name is
     defined exactly once. A name defined twice (an overload, a redefinition)
@@ -9243,6 +9311,7 @@ class Parser:
         _check_mlir_type_argument_calls(stmts, self._filename)
         _check_inferred_param_dependencies(stmts, self._filename)
         _check_variadic_element_types(stmts, self._filename)
+        _check_docstring_self_imports(stmts, self._filename)
         return stmts
 
     def _parse_stmt_into(self, stmts: list):

@@ -10,7 +10,7 @@ master for part of it all along.
 This is the census the docstring of `arm64_reg_or_sp` in
 `lib/ProofLib.lean` (`~line 1850`) points at: "That is a coverage gap
 rather than a wrong answer (the generator refuses such a word rather than
-mis-reading it), and `bugs/mid/FORMAL_arm64_instruction_coverage.md` is where
+mis-reading it), and `bugs/FORMAL_arm64_instruction_coverage.md` is where
 the census of it belongs." The file did not exist, and the statement it
 rests on is only half true (below).
 

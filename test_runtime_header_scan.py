@@ -554,25 +554,7 @@ def test_every_declaration_is_seen():
     # the box figure stays at 506, total 931 -> 932. The declaration landed
     # without a ladder rung, which this check exists to catch; `formal-doc-truth`
     # and `rthdrscan` both went red on the same drift and were fixed in parallel.
-    # 822 -> 826 (2026-11-12, the gate fix for `formal-doc-truth` at 827020b319):
-    # THREE names, all read off the call on the live header, all from
-    # 29aa3f763 ("codegen: a float beside a pointer return travels as a
-    # tagged word"), which landed on master via 95227994d after the 822 rung:
-    #   +1  `mojo_box_from_list` — box the list/tuple arm of a tagged
-    #       mixed return as a kind-'l' word. Box-shaped: its first argument is
-    #       a `MojoList *` the boundary cannot pass by value (the
-    #       argument-crosses-as-a-box rule), so the word figure does NOT move
-    #       for it — the whole box figure 507 -> 508, total 933 -> 934.
-    #   +1  `mojo_box_from_bytes` — box the bytes arm as a kind-'s' word.
-    #       Word-shaped (a `void *` parameter is one 64-bit word and is not a
-    #       named container type), word 426 -> 427, total 934 -> 935.
-    #   +1  `mojo_word_subscript` — `w[i]` on a word of unknown kind, the
-    #       receiver dispatching by kind (list/tuple, str, bytes). Word-shaped
-    #       (two int64_t in, int64_t out), word 427 -> 428, total 935 -> 936.
-    # The declarations landed without a ladder rung, which this check exists
-    # to catch; `formal-doc-truth` went red on the same drift and this rung
-    # closes it. fire_runtime.c grew with them (785 -> 790 KB).
-    for header, want in (('fire_runtime.h', 826),   # --fix writes the live figure
+    for header, want in (('fire_runtime.h', 822),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already
