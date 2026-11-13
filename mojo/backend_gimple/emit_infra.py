@@ -570,6 +570,11 @@ def _reset_func(gen, body: list = None, params: list = None,
     # paths.
     gen._func_used_setjmp: bool = False
     gen.func_ret_type: str             = ''
+    # The Mojo-level return ANNOTATION ('String', 'Bool', ...), kept
+    # beside func_ret_type's C spelling: the return-arm check needs to
+    # know whether the annotation is itself a scalar, which `Bool *`
+    # cannot say.
+    gen.current_func_ret_ann: str      = ''
     gen._last_was_terminal: bool       = False
     # Computed once, reused for both the _elem_types and _dict_val_types
     # seeds just below -- see _locally_bound_names' own docstring.
@@ -947,6 +952,7 @@ class FuncState:
         self.fs_try_finally_bodies: list = []
         self.fs_func_used_setjmp: bool = False
         self.fsfunc_ret_type: str = ''
+        self.fsfunc_ret_ann: str = ''
         self.fs_last_was_terminal: bool = False
         self.fs_elem_types: dict = {}
         self.fs_nested_elem_types: dict = {}
@@ -1056,6 +1062,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_try_finally_bodies = gen._try_finally_bodies
     st.fs_func_used_setjmp = gen._func_used_setjmp
     st.fsfunc_ret_type = gen.func_ret_type
+    st.fsfunc_ret_ann = gen.current_func_ret_ann
     st.fs_last_was_terminal = gen._last_was_terminal
     st.fs_elem_types = gen._elem_types
     st.fs_nested_elem_types = gen._nested_elem_types
@@ -1175,6 +1182,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._try_finally_bodies = st.fs_try_finally_bodies
     gen._func_used_setjmp = st.fs_func_used_setjmp
     gen.func_ret_type = st.fsfunc_ret_type
+    gen.current_func_ret_ann = st.fsfunc_ret_ann
     gen._last_was_terminal = st.fs_last_was_terminal
     gen._elem_types = st.fs_elem_types
     gen._nested_elem_types = st.fs_nested_elem_types

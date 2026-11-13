@@ -11988,6 +11988,17 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         addr = gen._new_val(ot, f"_mojo_at_{cn} ({ov}, {idx64})")
         return ot, addr
 
+    # Scalar-erased SIMD/Scalar lane READ. `mlir.py` states the model: every
+    # `SIMD[dtype, N]` value is scalar-erased — width 1 IS the scalar, and the
+    # C backend does not store wider lanes — so a lane of an erased value is
+    # the value itself. A scalar C type has no other legal Mojo subscript, so
+    # this cannot shadow a real container. Without it, `v[i]` fell through to
+    # the pointer helper below and emitted `_mojo_at_int64_t (double_value, i)`
+    # (invalid C: expected `int64_t *`, have `double`) — the regression that
+    # made test_simd/test_math fail to compile once a float SIMD constructor
+    # started producing its scalar C type (2026-11-12).
+    if ot in ('float', 'double', '__fp16'):
+        return ot, ov
     # p[i] via _mojo_at_ helper (ptr arithmetic not allowed in __GIMPLE)
     et = gimple_ctypes._elem_type(ot)
     cn = gimple_ctypes._c_id(et)
