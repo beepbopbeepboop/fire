@@ -10005,17 +10005,6 @@ def gen_module_impl(self, stmts: list):
     # call site's own result, which is where most consumers meet the value —
     # `print(f(x))` never reads a parameter at all.
     self._ret_may_hold_str: set = set()
-    # Functions whose RETURN VALUE is a TAGGED WORD because their arms mix a
-    # float with a pointer (`infra_infer._infer_return_type_core` widens that
-    # shape to `int64_t`; each arm is boxed by `_gen_stmt_ReturnStmt`). This is
-    # the call-site half: the result of calling one is a possibly-boxed word,
-    # so `lower_expr` marks the temp for the consumers that dispatch by kind
-    # (`print` -> `mojo_repr_boxed`, a list store -> `mojo_list_append_word`,
-    # arithmetic -> `_tagged_arith_select`) instead of reading it as a plain
-    # integer or casting it to the pointer the old join chose. Computed with
-    # `_float_mixed_return_bodies` — the exact per-body decision inference
-    # recorded — so a marker and its emitter cannot drift apart.
-    self._ret_may_hold_float: set = set()
     # Function name -> its parameter NAMES in order. Populated here, in the
     # same pass that fills `_inferred_param_types`, because that map is keyed
     # by param NAME while a call site identifies a callee's parameter only by
@@ -13075,53 +13064,6 @@ def gen_module_impl(self, stmts: list):
         for _fn_name in sorted(_fset):
             if _fn_name in _sset:
                 _fset.discard(_fn_name)
-
-    # Which CALLEES return a TAGGED WORD because their arms mix a float with a
-    # pointer. Inference records that decision per BODY in
-    # `_float_mixed_return_bodies` (`infra_infer._infer_return_type_core` widens
-    # the shape to `int64_t` there and the return emitter boxes each arm by the
-    # same body id). A call site needs the NAME, before/independent of the body
-    # that may not be emitted yet, so the two populations every fixed point
-    # above walks are asked here: `_fn_by_name` for top-level definitions and
-    # the `_gmi_*` tables for nested lifted ones. A body inference has not seen
-    # yet is asked directly, so a call site emitted later cannot miss it.
-    #
-    # An ANNOTATED return type is skipped: the annotation decides the C return
-    # type (the float arm keeps its old coercion), so the value is not a tagged
-    # word and marking it one here would misread it at every consumer. That
-    # shape — a pointer annotation contradicted by a float arm — is not a
-    # tagged word: `emit_stmts._check_float_arm_into_annotated_pointer`
-    # refuses it at compile time.
-    _ret_float: set = set()
-    _fmb = getattr(self, '_float_mixed_return_bodies', None)
-    if _fmb is None:
-        _fmb = set()
-        self._float_mixed_return_bodies = _fmb
-
-    def _note_float_mixed(_ff_name, _ff_body):
-        if _ff_body is None:
-            return
-        if id(_ff_body) not in _fmb:
-            # The SAME entry point the definition emitter uses, overlays and
-            # all: it records the mix in `_fmb` when (and only when) it
-            # widens the return type, so a call site marked here and the
-            # definition emitting there are answering one question.
-            try:
-                self._infer_return_type(_ff_body)
-            except Exception:
-                return
-        if id(_ff_body) in _fmb:
-            _ret_float.add(_as_str(_ff_name))
-
-    for _rf_name in _fn_by_name:
-        _rf_fn = _fn_by_name[_rf_name]
-        if getattr(_rf_fn, 'return_type', None) is not None:
-            continue
-        _note_float_mixed(_rf_name, getattr(_rf_fn, 'body', None))
-    for _gni in range(len(_gmi_src)):
-        _note_float_mixed(_as_str(_gmi_lift[_gni]),
-                          getattr(_gmi_def[_gni], 'body', None))
-    self._ret_may_hold_float = _ret_float
 
     _STRUCT_FALLBACKS = ('MojoDict *', 'MojoList *', 'MojoSet *', 'MojoBytes *',
                          'MojoStr *', 'char *', 'int', 'int64_t')
@@ -18636,12 +18578,7 @@ def gen_module_impl(self, stmts: list):
                           f"{ret_type} {cname} () {_stub_body}  /* stub from {module} */\n#endif")
             continue
 
-        # A function-scoped alias carries the C symbol its call sites were
-        # emitted with (recorded inside the scope that binds it, see
-        # emit_funcs.py's function-scoped pre-pass); resolving it here would
-        # run outside that scope and lose the module qualifier.
-        _recorded_csym = _as_str(sym_info.get('csym')) if sym_info.get('csym') else None
-        safe = _recorded_csym or self._func_csym(_as_str(sym_name))
+        safe = self._func_csym(_as_str(sym_name))
         if 'signature' in sym_info:
             if _sn in _C_RESERVED_FUNCS:
                 _system_types_skip = {'time_t', 'suseconds_t', 'size_t', 'ssize_t', 'off_t', 'socklen_t', 'pid_t', 'uid_t', 'gid_t', 'useconds_t', 'clock_t', 'fd_set', 'sa_family_t', 'in_addr_t', 'in_port_t'}
@@ -18699,118 +18636,41 @@ def gen_module_impl(self, stmts: list):
                 if not sym_info.get('c_parameters') and not sym_info.get('parameters'):
                     _sig_pts = _ggf_dup._imported_def_pts(self, _sn)
                     if _sig_pts:
-                        # `c_return_type` is the DEFINER's resolved C type:
-                        # module_loader computes it through
-                        # `_mojo_type_to_c` (gimple_codegen._mojo_type), which
-                        # returns a valid C type for every annotation or
-                        # `int64_t` — never the raw annotation text. Use it
-                        # as-is. The shape test this used to carry
-                        # (`not any(c in _sig_ret for c in ('*', ' '))`) read
-                        # that guarantee backwards: every multi-token pointer
-                        # type (`char *`, `MojoList *`) failed the
-                        # single-token test and was clobbered to `int64_t`,
-                        # so the importer's call through the extern then fed
-                        # an `int64_t` into a `char *`-typed module global —
-                        # gcc's `assignment to 'char *' from 'int64_t' ...
-                        # -Wint-conversion` in the 2026-11-12 self-host build
-                        # (`dispatch_table_global_ctype`'s `char *` return is
-                        # the instance: `_forced = ..._9f63a2 (check_name)`
-                        # around module_gen.py:16860).
-                        _sig_ret = _as_str(sym_info.get('c_return_type'))
-                        if not _sig_ret or _sig_ret == 'unknown':
-                            # No resolved type from the loader (`return_type`
-                            # is the RAW annotation — multi-token Mojo text
-                            # like `str | None` is not valid C — so keep the
-                            # old single-token guard on this fallback only).
-                            _rt = _as_str(sym_info.get('return_type'))
-                            if _rt and _rt != 'unknown' \
-                                    and not any(c in _rt for c in ('*', ' ')):
-                                _sig_ret = _rt
-                            else:
-                                _sig_ret = 'int64_t'
+                        _sig_ret = _as_str(sym_info.get('c_return_type')) \
+                            or _as_str(sym_info.get('return_type')) or 'int64_t'
+                        if _sig_ret and _sig_ret != 'unknown' \
+                                and not any(c in _sig_ret for c in ('*', ' ')):
+                            pass
+                        else:
+                            _sig_ret = 'int64_t'
                         signature = f'{_sig_ret} {safe} ({", ".join(_as_list(_sig_pts))})'
-                # The scan's PARAMETER list is a second, independent inference
-                # and must not own the extern's shape. Two ways it disagrees
-                # with the DEFINER, both measured on the 2026-11-12 self-host
-                # build:
-                #
-                # * TYPES: an unannotated parameter (`def module_qualifier(q)`)
-                #   is `int64_t` to the importer's text scan and `char *` to
-                #   the definition, which is typed from the body. gcc rejects
-                #   the unit with `conflicting types for
-                #   'mojo_middle_exprtypes_module_qualifier_d719e0'; have
-                #   'char *(int64_t)'` against the definition's `char *(char *)`,
-                #   and every call through the extern then fails too.
-                # * ARITY: the scan DROPS every parameter with no annotation
-                #   (`module_loader`'s `if ':' in param`), so its list is
-                #   SHORTER than the definition's (1 scanned vs 2 defined for
-                #   `_gmi_prefold_toplevel_comptime`, 3 vs 5 for
-                #   `user_dunder_repr_call`). This arm used to re-type only
-                #   from the DEFINER's committed store (`definer_only=True`),
-                #   which is empty whenever the definition is not compiled
-                #   into this translation unit — the normal single-module
-                #   compile. The extern then kept the dropped arity while the
-                #   call sites, whose mangled suffix comes from
-                #   `_effective_param_types`, passed the definer's count:
-                #   `too many arguments to function '..._register_sym_ab0ffa';
-                #   expected 2, have 7`, plus a pointer argument in an
-                #   integer-typed shifted slot for every later position.
-                #
-                # So the list here is the SAME one the symbol name was hashed
-                # from: `_effective_param_types` (tier order: this unit's own
-                # definition, then the definer's committed signature, then the
-                # importer's registration-time snapshot from the home module's
-                # own parsed `FunctionDef`). Name and extern agree by
-                # construction rather than by two inferences happening to
-                # match; the scan remains the fallback only when no list
-                # resolves at all. A scanned parameter's NAME is kept at the
-                # position it occupies when the arity agrees (C prototypes do
-                # not need one, but dropping it would churn every green extern
-                # and the import tests read it); a parameter the scan DROPPED
-                # has no scanned position to sit in, so that list is emitted
-                # types-only. Never a variadic.
+                # The scan's PARAMETER types are a second inference too: an
+                # unannotated parameter (`def module_qualifier(q)`) is
+                # `int64_t` to the importer's text scan and `char *` to the
+                # definition, which is typed from the body. The mangled name's
+                # overload hash is already computed from the definer's list
+                # (`_overload_suffix` -> `_imported_def_pts`), so name and
+                # extern must not disagree about the very list the name was
+                # hashed from: gcc rejects the unit with `conflicting types
+                # for 'mojo_middle_exprtypes_module_qualifier_d719e0'; have
+                # 'char *(int64_t)'` against the definition's `char *(char *)`,
+                # and every call through the extern then fails too. Only the
+                # DEFINER's committed list counts (`definer_only`): with no
+                # definition in this closure (a dylib link) nothing is written
+                # there and the scan stays the only evidence, as before.
+                # The scan can also DROP parameters (3 scanned, 5 defined for
+                # `user_dunder_repr_call`), so the definer's list replaces the
+                # scan's whole parameter list rather than being matched to it.
+                # Never a variadic.
                 if (sym_info.get('parameters') or sym_info.get('c_parameters')) \
                         and not sym_info.get('variadic'):
-                    _def_pts = _ggf_dup._effective_param_types(self, _sn)
+                    _def_pts = _ggf_dup._imported_def_pts(self, _sn, True)
                     if _def_pts:
-                        _m_sig = re.match(
-                            r'^(.*?\b' + re.escape(safe) + r'\s*)\((.*)\)\s*$',
-                            signature)
+                        _m_sig = re.match(r'^(.*?\b' + re.escape(safe) + r'\s*)\(.*\)\s*$',
+                                          signature)
                         if _m_sig:
-                            _eff_list = _as_list(_def_pts)
-                            _scan_sig = _as_str(_m_sig.group(2))
-                            if _scan_sig.strip() in ('', 'void'):
-                                _scan_parts = []
-                            else:
-                                _scan_parts = [_p.strip()
-                                               for _p in _scan_sig.split(',')]
-                            _new_parts = []
-                            # Names are positional: keep them only when no
-                            # parameter was dropped, so scanned position i is
-                            # definition position i.
-                            _keep_names = (len(_scan_parts)
-                                           == len(_eff_list))
-                            for _pi in range(len(_eff_list)):
-                                _tp = _as_str(_eff_list[_pi])
-                                _is_vararg = (_tp == '...')
-                                if _keep_names:
-                                    _toks = _scan_parts[_pi].split()
-                                    if len(_toks) >= 2 and re.match(
-                                            r'^[A-Za-z_]\w*$',
-                                            _as_str(_toks[len(_toks) - 1])):
-                                        _tp = _tp + ' ' + _as_str(
-                                            _toks[len(_toks) - 1])
-                                _new_parts.append(_tp)
-                                # C's `...` must be last. `_signature_ctypes`
-                                # keeps params that follow `*args` so call
-                                # sites can still coerce them, but a prototype
-                                # cannot spell `(int64_t, ..., int64_t)`; drop
-                                # the tail, exactly as the loader's own scan
-                                # does for that shape.
-                                if _is_vararg:
-                                    break
                             signature = (_m_sig.group(1) + '('
-                                         + ', '.join(_new_parts) + ')')
+                                         + ', '.join(_as_list(_def_pts)) + ')')
                 if signature.startswith('MojoTuple_'):
                     # Part 4 (measured 2026-10-21 integration, `split`'s
                     # `-> Tuple[String, String]`): the scanned/resolved

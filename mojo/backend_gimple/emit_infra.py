@@ -7464,15 +7464,6 @@ Order matters and is the same one `_repr_boxed_container` uses: the live
     """
     _res = gen._new_temp('int64_t')
     _it64 = gen._ensure_local('int64_t', value)
-    # A kind-'l'/'p'/'s' box — the tagged word of a mixed float+pointer return
-    # — holds its container pointer in the box's bits. The registry dispatch
-    # below only recognises a BARE container pointer, and would read the box
-    # cell as a list header (`len(f(1))` on the tuple arm printed the tuple's
-    # repr where CPython prints 2). `mojo_box_word` is the one unbox: it
-    # answers the pointer for those kinds and the word unchanged otherwise
-    # (a float box stays a box, which the registry arms decline, as they
-    # should — a float has no len()).
-    _it64 = gen._call_expr('int64_t', 'mojo_box_word', [('int64_t', _it64)])
     # The text of a kind-'p' string box (`mojo_box_from_str`, a tagged word that
     # holds a str) is the pointer the box carries. `mojo_str_box_word` unwraps
     # only that kind, so the string arm below measures the text itself.
@@ -8083,8 +8074,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
             # list slot. Routed through `_own_repr` because the box's
             # `mojo_repr_boxed` result is a fresh buffer on every path.
             if _pi < len(args) and (_is_may_hold_float_param(gen, args[_pi])
-                                    or _is_float_param_arith(gen, args[_pi])
-                                    or aval in getattr(gen, '_tagged_word_vals', ())):
+                                    or _is_float_param_arith(gen, args[_pi])):
                 _rv = _own_repr(gen, 'mojo_repr_boxed',
                                 gen._call_expr('char *', 'mojo_repr_boxed',
                                                [('int64_t', aval)]), _owned_reprs)

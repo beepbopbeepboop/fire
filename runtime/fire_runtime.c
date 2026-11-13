@@ -1928,39 +1928,6 @@ int64_t mojo_box_from_str(char *s)
     return (int64_t)(uintptr_t)bx;
 }
 
-/* A LIST (or runtime tuple: a MojoList carrying mojo_mark_as_tuple) travelling
- * in a TAGGED word — the return value of a function whose arms mix a float
- * with a list/tuple (`comptime.eval_const` returns a built tuple beside a
- * float). A heap cell, because a double beside a pointer has no arm type of
- * its own; the box is kind-'l' and `mojo_repr_boxed` renders it through
- * `mojo_repr_list_kinds`, which reads the list's own per-slot kinds and its
- * tuple marker. Nothing else in this runtime creates a kind-'l' box: 'l' is
- * otherwise only a LIST-SLOT kind (see `mojo_repr_slot_kind`), so the two
- * meanings cannot be confused — both are "the pointer to a list". */
-int64_t mojo_box_from_list(MojoList *l)
-{
-    MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
-    if (!bx) return (int64_t)(intptr_t)l;
-    bx->magic = MOJO_BOX_MAGIC;
-    bx->bits = (int64_t)(intptr_t)l;
-    bx->kind = 'l';
-    _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
-    return (int64_t)(uintptr_t)bx;
-}
-
-/* A bytes value in a TAGGED word: kind 's', whose repr `mojo_repr_boxed`
- * already spells (`mojo_bytes_repr`). Same reason as `mojo_box_from_list`. */
-int64_t mojo_box_from_bytes(void *b)
-{
-    MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
-    if (!bx) return (int64_t)(intptr_t)b;
-    bx->magic = MOJO_BOX_MAGIC;
-    bx->bits = (int64_t)(intptr_t)b;
-    bx->kind = 's';
-    _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
-    return (int64_t)(uintptr_t)bx;
-}
-
 /* None in a TAGGED word (a generator that yields None beside values, read by a
  * for loop): the one kind-'n' box, allocated once and shared, so a generator
  * yielding None in a loop does not grow the box registry per yield.
@@ -2034,10 +2001,6 @@ void mojo_list_append_word(MojoList *l, int64_t w)
              * is ignored -- the same shape `None` takes in every other list. */
             case 'n': _list_word_push(l, MOJO_KIND_NONE, 0, 'i'); return;
             case 's': _list_word_push(l, MOJO_KIND_BYTES, bx->bits, 'i'); return;
-            /* A list/tuple box (`mojo_box_from_list`): the slot IS that nested
-             * container, so it takes the container kind — not the int word,
-             * which is the pointer and printed as a decimal address. */
-            case 'l': _list_word_push(l, MOJO_KIND_LIST, bx->bits, 'i'); return;
             default:  _list_word_push(l, 'i', bx->bits, 'i'); return;
         }
     }
@@ -9161,38 +9124,6 @@ int mojo_in_dispatch_int(int64_t container, int64_t needle)
     return 0;
 }
 
-/* `needle in container` where the CONTAINER is a TAGGED word: the result of a
- * function whose arms mix a float with a list/tuple/str/None, or a kind-mixed
- * yield. Its static C type is the erased int64_t that carries the box, so the
- * ordinary membership lowering took its integer fallback and answered False for
- * every such test (`3 in t` printed False where CPython prints True) — the box
- * address is not a registered container. Unbox by kind, exactly as
- * `mojo_word_subscript` / `mojo_len_word` / `mojo_word_slice` do for the same
- * value model, and ask the same registry dispatch a bare container would.
- *
- * A float, int, bool or None word is not iterable in Python, so it raises
- * TypeError (CPython's answer for `1 in 2.5`) rather than reporting "no". A
- * bytes container is matched only by an already-bytes needle: converting the
- * other needle kinds is the static path's job (`_lower_in_dispatch`'s
- * `MojoBytes *` arm), which owns the codegen's evidence about them. */
-int mojo_word_contains(int64_t container, int64_t needle)
-{
-    int64_t c = mojo_box_word(container);
-    int64_t n = mojo_box_word(needle);
-    if (mojo_is_registered_bytes(c)) {
-        if (mojo_is_registered_bytes(n))
-            return mojo_bytes_contains((MojoBytes *)(intptr_t)c,
-                                       (MojoBytes *)(intptr_t)n);
-        mojo_raise_type_error((char *)"a bytes-like object is required");
-        return 0;
-    }
-    if (mojo_is_registered_list(c) || mojo_is_registered_dict(c)
-        || mojo_is_registered_set(c) || mojo_boxed_is_str(c))
-        return mojo_in_dispatch_int(c, n);
-    mojo_raise_type_error((char *)"argument is not iterable");
-    return 0;
-}
-
 /* ── `==` / `!=` between values: Python value equality ──────────────────────
  *
  * The compiled path used to lower every comparison between two containers to
@@ -9452,17 +9383,6 @@ static int _value_kind(int64_t v)
  * empty sequence slices to. */
 int64_t mojo_word_slice(int64_t w, int64_t start, int64_t stop)
 {
-    /* A TAGGED word (a mixed-return value or a kind-mixed yield) carries its
-     * container pointer in the box's bits; slicing the BOX's own address
-     * would read the heap cell as a container. Unbox the pointer kinds that
-     * have one, exactly as `mojo_len_word` does. */
-    if (mojo_is_boxed(w)) {
-        MojoBox *bx = (MojoBox *)(intptr_t)w;
-        if (bx->kind == 'l') w = bx->bits;
-        else if (bx->kind == 'p') w = bx->bits;
-        else if (bx->kind == 's') w = bx->bits;
-        else { mojo_raise_type_error((char *)"object is not sliceable"); return 0; }
-    }
     if (mojo_is_registered_list(w))
         return (int64_t)(intptr_t)mojo_list_slice((MojoList *)(intptr_t)w, start, stop);
     if (mojo_is_registered_bytes(w))
@@ -9470,70 +9390,6 @@ int64_t mojo_word_slice(int64_t w, int64_t start, int64_t stop)
     if (mojo_boxed_is_str(w))
         return (int64_t)(intptr_t)mojo_cstr_slice((char *)(intptr_t)w, start, stop);
     return (int64_t)(intptr_t)mojo_list_new();
-}
-
-/* `w[i]` where the receiver is a WORD of unknown kind — the tagged result of a
- * function whose arms mix a float with a pointer (or a kind-mixed yield). The
- * value could be a list/tuple, a str or a bytes object, so the answer is
- * dispatched by the word's kind, exactly as `mojo_len_word` and
- * `mojo_word_slice` do for the same value model. A list/tuple slot comes back
- * BOXED when it holds a float (`mojo_list_get_boxed`), which is the same word
- * a caller of a mixed-return function already handles; a str subscript is the
- * one-char string `mojo_char_at_str_cp` answers everywhere else. A float, int
- * or None receiver has no subscript in Python, so it raises rather than
- * reading the heap cell as a container. */
-int64_t mojo_word_subscript(int64_t w, int64_t i)
-{
-    if (mojo_is_boxed(w)) {
-        MojoBox *bx = (MojoBox *)(intptr_t)w;
-        if (bx->kind == 'l') return mojo_list_get_boxed((MojoList *)(intptr_t)bx->bits, i);
-        if (bx->kind == 'p')
-            return (int64_t)(intptr_t)mojo_char_at_str_cp((char *)(intptr_t)bx->bits, i);
-        if (bx->kind == 's')
-            return mojo_bytes_get_checked((MojoBytes *)(intptr_t)bx->bits, i);
-        if (bx->kind == 'n')
-            mojo_raise_type_error((char *)"'NoneType' object is not subscriptable");
-        mojo_raise_type_error((char *)"object is not subscriptable");
-        return 0;
-    }
-    if (mojo_is_registered_list(w))
-        return mojo_list_get_boxed((MojoList *)(intptr_t)w, i);
-    if (mojo_is_registered_bytes(w))
-        return mojo_bytes_get_checked((MojoBytes *)(intptr_t)w, i);
-    if (mojo_boxed_is_str(w))
-        return (int64_t)(intptr_t)mojo_char_at_str_cp((char *)(intptr_t)w, i);
-    mojo_raise_type_error((char *)"object is not subscriptable");
-    return 0;
-}
-
-/* The MojoList* a TAGGED word holds, for `word.method(...)` on a receiver whose
- * static C type is the erased int64_t: a kind-'l' box (or a bare registered
- * list) is the list. Every other kind — a float, a str, bytes, None — is not a
- * list, so this raises TypeError instead of letting the caller read the box
- * header as a MojoList header (which is what the old cast did: `t.append(5)`
- * on a tagged list crashed writing through the box). The caller's list arms
- * all take that pointer; nothing here guesses an element type. */
-MojoList *mojo_word_as_list(int64_t w)
-{
-    int64_t u = mojo_box_word(w);
-    if (mojo_is_registered_list(u))
-        return (MojoList *)(intptr_t)u;
-    mojo_raise_type_error((char *)"object is not a list");
-    return mojo_list_new();
-}
-
-/* The text pointer a TAGGED word holds, for the str arms of `word.method(...)`:
- * a kind-'p' string box, or a bare string word. A float/int/None/bytes word has
- * no text, so raise rather than hand the box address to strlen (which is what
- * the old `(char *)` cast of an int64_t receiver did). */
-char *mojo_word_as_text(int64_t w)
-{
-    if (mojo_is_str_box(w))
-        return (char *)(intptr_t)mojo_str_box_word(w);
-    if (mojo_boxed_is_str(w))
-        return (char *)(intptr_t)w;
-    mojo_raise_type_error((char *)"object has no string methods");
-    return (char *)"";
 }
 
 /* `s.startswith(p)` / `s.endswith(p)` with `p` held as a word: Python's
@@ -14025,12 +13881,6 @@ typedef struct { char *name; char *path; int is_dir_nofollow; int is_symlink; in
  * a registered list slices as a list, anything else as a string. */
 int64_t mojo_word_slice_step(int64_t w, int has_start, int64_t start,
                              int has_stop, int64_t stop, int64_t step) {
-    /* A TAGGED word: see mojo_word_slice's identical unbox. */
-    if (mojo_is_boxed(w)) {
-        MojoBox *bx = (MojoBox *)(intptr_t)w;
-        if (bx->kind == 'l' || bx->kind == 'p' || bx->kind == 's') w = bx->bits;
-        else { mojo_raise_type_error((char *)"object is not sliceable"); return 0; }
-    }
     if (mojo_is_registered_list(w))
         return (int64_t)(intptr_t)mojo_list_slice_step((MojoList *)(intptr_t)w, has_start,
                                                        start, has_stop, stop, step);
@@ -16119,8 +15969,6 @@ int64_t mojo_len_word(int64_t v)
         MojoBox *bx = (MojoBox *)(intptr_t)v;
         if (mojo_is_str_box(v)) return (int64_t)strlen((char *)(intptr_t)mojo_str_box_word(v));
         if (bx->kind == 's') return mojo_bytes_len((MojoBytes *)(intptr_t)bx->bits);
-        /* A list/tuple box (`mojo_box_from_list`): the bits ARE the list. */
-        if (bx->kind == 'l') return mojo_list_len((MojoList *)(intptr_t)bx->bits);
         mojo_raise_type_error((char *)"object has no len()");
         return 0;
     }

@@ -1,19 +1,9 @@
-SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part1, COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2, COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3
+SPLIT: bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part1.md, bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2.md (part3 fixed and deleted)
 # COMPILE_FAIL: Tools/c-analyzer/c_common/tables.py
 
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
-
-## Status 2026-11-12 — re-split: the csv.reader-family parts all landed; the file still refuses on two new, named shapes
-
-The 2026-10-29/2026-10-30 entries below describe the callable-valued-parameter (`_get_reader=csv.reader`) blocker; that work LANDED on 2026-11-12 (callables in dynamic calls and the foreign-callable table 4cb02b8c1; `csv.reader` runtime and the cpp `for` over a tabled callable 7e6a8ac5c; the earlier split's part 1 deleted with 373cf8633) and the previous split's three parts were all fixed and deleted. This doc is RE-SPLIT into a fresh part1/part2/part3 for what remains (the pool has no hard slot, so the work moves to mid):
-
-- part 1 (`bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part1.md`): `parse_table` — `a list-literal argument with mixed element types is not supported at a compiled-generator call in a coroutine body` (`raise NotImplementedError((header, line))`, tables.py:176).
-- part 2 (`bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2.md`): `read_table` — `` `with <context manager> as <name>:` over a manager this codegen does not model is not supported in a compiled generator body `` (`with _open(infile, newline='') as infile:`, tables.py:92, `_open=open` a default-valued callable parameter).
-- part 3 (`bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3.md`): end-to-end `tables.py` build (depends on parts 1 and 2; residual shapes, if any, are re-split there rather than grown into scope).
-
-Measured 2026-11-12 on this tree: sources copied from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/` into `.tmp/ca/`; `python3 fire.py build -o .tmp/ca/tables_out .tmp/ca/c_common/tables.py` still fails, and `MOJO_DEBUG=1` reports exactly the two shapes above for pass 1 and both retry passes (peak 0.2 GB, child exit 1). The doc-refs ratchet is why the SPLIT line no longer narrates the deleted parts; it now names the three live part docs only.
 
 ## Status 2026-10-30 (round 3) — planning correction: step 1's site is wrong
 
