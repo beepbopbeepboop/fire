@@ -7955,6 +7955,19 @@ class Interpreter:
         else:
             raise NotImplementedError(f"{self._loc(expr)}Unary operator {op} not implemented")
 
+    def _eval_constrained_call(self, expr, cond_node, msg_node=None):
+        """Compile-time-style `constrained` check, evaluated at call time.
+
+        A provably-false condition raises `constraint failed: <msg>` (or
+        `constraint failed` with no message); a true condition is a no-op. The
+        message is only evaluated on failure, and an error in the condition
+        propagates rather than being read as false."""
+        if self.eval_expr(cond_node):
+            return None
+        msg = self.eval_expr(msg_node) if msg_node is not None else None
+        text = 'constraint failed' if msg is None else f'constraint failed: {msg}'
+        raise RuntimeError(f"{self._loc(expr)}{text}")
+
     def _eval_constrained_bracket(self, expr):
         """`constrained[cond, msg]()` — the bracket form of Mojo's builtin.
 
@@ -7963,9 +7976,7 @@ class Interpreter:
         no compile-time pass, so it checks the condition when the call runs:
         false raises `constraint failed: <msg>` (or `constraint failed` with no
         message), true is a no-op. A name the user has bound themselves is a
-        real callee and is not intercepted. The message is only evaluated on
-        failure, and an error in the condition propagates rather than being
-        read as false."""
+        real callee and is not intercepted."""
         idx = expr.func.index
         if isinstance(idx, (N.TupleExpr, N.ListExpr)):
             elems = list(getattr(idx, 'elements', None) or [])
@@ -7973,11 +7984,8 @@ class Interpreter:
             elems = [idx]
         if not elems:
             raise TypeError(f"{self._loc(expr)}constrained[] needs a condition")
-        if self.eval_expr(elems[0]):
-            return None
-        msg = self.eval_expr(elems[1]) if len(elems) > 1 else None
-        text = 'constraint failed' if msg is None else f'constraint failed: {msg}'
-        raise RuntimeError(f"{self._loc(expr)}{text}")
+        msg_node = elems[1] if len(elems) > 1 else None
+        return self._eval_constrained_call(expr, elems[0], msg_node)
 
     def eval_CallExpr(self, expr):
         """Evaluate function call."""
@@ -7987,6 +7995,12 @@ class Interpreter:
                 and func_node.obj.name == 'constrained'
                 and not self.scope.has('constrained')):
             return self._eval_constrained_bracket(expr)
+        if (isinstance(func_node, N.IdentExpr)
+                and func_node.name == 'constrained'
+                and len(getattr(expr, 'args', None) or []) >= 1
+                and not self.scope.has('constrained')):
+            msg_node = expr.args[1] if len(expr.args) > 1 else None
+            return self._eval_constrained_call(expr, expr.args[0], msg_node)
         func = self.eval_expr(expr.func)
         # Call-site unpacking: `g(*args)` / `g(**opts)`. fire_compiler.py's
         # LPAREN arg-list parser lets `_parse_unary` wrap a starred argument
