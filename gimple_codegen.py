@@ -1855,11 +1855,6 @@ class GimpleGen:
         # here with a literal container gives _collect_self_assigns the real
         # C type AND guarantees the field is valid from construction.
         self._comptime_vals: dict = {}
-        # Module-level `alias NAME = <type>` declarations (annotation spelling
-        # of the target). Populated by the module pre-pass and expanded by
-        # `_resolve_type` and call lowering so an alias behaves like the type
-        # it names. Part 1/2 of CODEGEN_simd_and_array_values_erase_to_int64.
-        self._type_aliases: dict = {}
         # Nesting depth of runtime-degraded `comptime if` emission. When > 0,
         # branch bodies are being generated for a comptime-if whose conditions
         # could not be resolved statically (so all branches are emitted as a
@@ -6433,43 +6428,6 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).with_filename(filename).parse_module()
     _check_ownership(stmts, filename)
-    # Early diagnostics: trait method requirement evidence (part 2).
-    try:
-        import elaborate as _elab_diag
-        def _walk_diag_fns(_stmts, _in_generic_fn=False):
-            for _st in (_stmts or []):
-                if isinstance(_st, FunctionDef):
-                    _is_generic = bool(getattr(_st, 'comptime_params', None) or
-                                       getattr(_st, 'comptime_param_annotations', None))
-                    try:
-                        _elab_diag.check_signature_binding_evidence(mojo_src, _st, stmts)
-                    except RuntimeError:
-                        raise
-                    except Exception:
-                        pass
-                    if _is_generic:
-                        try:
-                            _elab_diag.check_method_call_evidence(mojo_src, _st, stmts)
-                        except RuntimeError:
-                            raise
-                        except Exception:
-                            pass
-                    _walk_diag_fns(getattr(_st, 'body', None), _is_generic)
-                elif isinstance(_st, StructDef):
-                    for _m in (getattr(_st, 'methods', None) or []):
-                        _walk_diag_fns([_m], bool(getattr(_m, 'comptime_params', None)))
-                else:
-                    for _attr in ('body', 'then_body', 'else_body'):
-                        _v = getattr(_st, _attr, None)
-                        if isinstance(_v, list):
-                            _walk_diag_fns(_v, _in_generic_fn)
-                    for _cond, _body in (getattr(_st, 'elifs', None) or []):
-                        _walk_diag_fns(_body, _in_generic_fn)
-        _walk_diag_fns(stmts, False)
-    except RuntimeError:
-        raise
-    except Exception:
-        pass
     stmts = ast_rewriter.desugar_enums(stmts)
     try:
         stmts = _transform_enum_classes(stmts)

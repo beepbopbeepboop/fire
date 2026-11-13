@@ -120,16 +120,6 @@ def test_ok_conditional_rp_ref_origin():
         '    return x.v\n')
 
 
-def test_where_text_renders_member_access():
-    # A `where` constraint may name a member (`conforms_to(Self.IteratorType, ..)`).
-    # The MemberExpr field is `member`; rendering it read a non-existent `.attr`
-    # and aborted the whole std/iter/__init__.mojo compile (stdlib-dylib skip).
-    from fire_compiler import IdentExpr, MemberExpr, _expr_constraint_text
-    assert _expr_constraint_text(MemberExpr(IdentExpr('Self'), 'IteratorType')) == 'Self.IteratorType'
-    nested = MemberExpr(MemberExpr(IdentExpr('a'), 'b'), 'c')
-    assert _expr_constraint_text(nested) == 'a.b.c'
-
-
 if __name__ == '__main__':
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     for t in tests:

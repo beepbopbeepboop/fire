@@ -2616,7 +2616,7 @@ def _build_and_run_with_driver_output(pkg_files: dict, entry: str, td: str) -> t
         finally:
             sys.stdout = old_stdout
             driver_stdout = import_stringio.getvalue()
-
+        
         if rc != 0 or not os.path.exists(out):
             return rc, '', driver_stdout
         result = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
@@ -2650,7 +2650,7 @@ def test_imported_global_accessor_in_link_mode() -> bool:
     }
     # The accessor symbol expected for link failure on the pre-fix tree:
     expected_access_name = '_xr_defn__mojo_global_get_N'
-
+    
     with tempfile.TemporaryDirectory() as td:
         # Shape 1: typed function -> CPython-equivalent expected '8'
         rc1, stdout1, driver_out1 = _build_and_run_with_driver_output(pkg1, 'xr_use.mojo', td)

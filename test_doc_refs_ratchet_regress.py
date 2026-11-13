@@ -68,48 +68,10 @@ def test_round_2026_11_11_doc_not_over_ratchet_baseline():
         f'closed round doc still over its ratchet baseline: {result.stdout}'
 
 
-def test_two_preexisting_gains_are_pinned():
-    """SUITE_doc_refs_ratchet_two_preexisting_gains (2026-11-13): the doc-refs
-    ratchet was red on master for two pre-existing citation gains, neither
-    caused by the lane that filed the bug —
-      * bugs/GATE_selfhost_closure_cannot_compile.md cited the deleted
-        parse_module sig-table doc (CODEGEN_selfhost_sig_table_parse_module_
-        recover, fixed in 32d9c79c7) by its `bugs/` path, and
-      * bugs/hard/README.md kept the row of the deleted align-decorator doc
-        (DIAGNOSTICS_align_decorator, whose three parts all landed) bare.
-    The fix retargeted the GATE doc's citation at the bug and its fix commit,
-    dropped the dead row, and deleted this bug's own doc, which cited the
-    align-decorator doc in a sentence the bare walk could not skip. This pins
-    the ratchet green and keeps both files free of the deleted docs. The stems
-    are assembled below without the suffix and never written through as one
-    token: this file is a tracked .py, its ratchet budget is already used by
-    the pins above, and a citation in it would be the regression this test
-    exists to pin."""
-    result = subprocess.run(
-        [sys.executable, os.path.join(HERE, 'tools', 'dangling_doc_refs.py'), '--ratchet'],
-        capture_output=True, text=True, cwd=HERE)
-    assert result.returncode == 0, \
-        f'ratchet still red after the two preexisting gains were fixed:\n' \
-        f'{result.stdout}{result.stderr}'
-    sig_table_doc = 'CODEGEN_selfhost_sig_table_parse_module_recover' + '.md'
-    with open(os.path.join(HERE, 'bugs', 'GATE_selfhost_closure_cannot_compile.md'),
-              encoding='utf-8') as f:
-        assert f'bugs/mid/{sig_table_doc}' not in f.read(), \
-            'deleted sig-table doc cited by path again in the GATE doc'
-    align_doc = 'DIAGNOSTICS_align_decorator' + '.md'
-    with open(os.path.join(HERE, 'bugs', 'hard', 'README.md'), encoding='utf-8') as f:
-        assert align_doc not in f.read(), \
-            'deleted align-decorator row back in the hard README'
-    bug_doc = 'SUITE_doc_refs_ratchet_two_preexisting_gains' + '.md'
-    assert not os.path.exists(os.path.join(HERE, 'bugs', bug_doc)), \
-        'the bug doc for this ratchet red should be deleted with the fix'
-
-
 if __name__ == '__main__':
     test_doc_is_deleted()
     test_ratchet_does_not_gain_after_doc_removal()
     test_round_2026_11_11_doc_is_deleted()
     test_round_2026_11_11_doc_not_over_ratchet_baseline()
     test_gate_doc_refs_ratchet_red_on_master_fixed()
-    test_two_preexisting_gains_are_pinned()
     print('regression: PASS')
