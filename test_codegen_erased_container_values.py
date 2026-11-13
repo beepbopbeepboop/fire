@@ -18,8 +18,6 @@ A bare run executes every open probe and is red until they all land.
 import re
 import sys
 
-import gimple_codegen as g
-
 from test_codegen_erased_container_values_pins import _compile, _defn
 
 
