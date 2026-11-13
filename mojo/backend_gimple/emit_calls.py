@@ -326,26 +326,6 @@ def _finish_generator_start(gen, api: dict, arg_pairs: list) -> str:
     return t
 
 
-def _nested_generator_start_arg_pairs(gen, node: gimple_ctypes.CallExpr,
-                                      api: dict) -> list:
-    """User positional argument pairs followed by captured enclosing values,
-    the assembly shared by every backend that constructs a nested generator
-    (GIMPLE here, and the C++ coroutine delegate). Only the plain positional
-    form is threaded; a keyword or defaulted argument is refused rather than
-    silently mis-slotted into a capture's position."""
-    user_n = len(api['params']) - len(api['captures'])
-    if getattr(node, 'kwargs', None) or len(node.args) != user_n:
-        raise RuntimeError(
-            "cannot compile module: call to nested generator "
-            f"{api.get('nested_name', '<nested>')!r} with keyword or defaulted "
-            "arguments is not supported (only the plain positional form is "
-            "threaded, together with its enclosing-scope captures)")
-    arg_pairs = [gen.lower_expr(a) for a in node.args]
-    arg_pairs += [gen.lower_expr(gimple_ctypes.IdentExpr(_cn))
-                  for _cn, _ in api['captures']]
-    return arg_pairs
-
-
 def _emit_nested_generator_start_call(gen, node: gimple_ctypes.CallExpr,
                                       api: dict) -> str:
     """Construction of a nested generator that reads enclosing names
@@ -355,7 +335,16 @@ def _emit_nested_generator_start_call(gen, node: gimple_ctypes.CallExpr,
     `_lower_async_closure_construct` uses for a nested async closure. Only
     the plain positional form is threaded; a keyword or defaulted argument
     is refused rather than silently mis-slotted into a capture's position."""
-    arg_pairs = _nested_generator_start_arg_pairs(gen, node, api)
+    user_n = len(api['params']) - len(api['captures'])
+    if getattr(node, 'kwargs', None) or len(node.args) != user_n:
+        raise RuntimeError(
+            "cannot compile module: call to nested generator "
+            f"{api['nested_name']!r} with keyword or defaulted arguments is "
+            "not supported (only the plain positional form is threaded, "
+            "together with its enclosing-scope captures)")
+    arg_pairs = [gen.lower_expr(a) for a in node.args]
+    arg_pairs += [gen.lower_expr(gimple_ctypes.IdentExpr(_cn))
+                  for _cn, _ in api['captures']]
     _record_generator_value_kind(api)
     return _finish_generator_start(gen, api, arg_pairs)
 
@@ -2931,6 +2920,45 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gen._emit_container_new(t, _generic_ctype)
             gen._note_fresh_result(t)
             return _generic_ctype, t
+        if base in ('SIMD', 'Scalar'):
+            # SIMD/Scalar constructor: dispatch on the bracket's dtype argument.
+            # Float dtypes keep their scalar C type (not erased to int64_t);
+            # integer dtypes keep the existing int64_t lowering. This avoids the
+            # "indirect call via SubscriptExpr" placeholder for these ctors.
+            _idx = node.func.index
+            _idxs = _idx.elements if isinstance(_idx, gimple_ctypes.TupleExpr) else [_idx]
+            _dt_ctype = _dtype_cast_ctype(_idxs[0]) if _idxs else None
+            # Fallback: resolve a bare/spelled dtype name to its C type.
+            if _dt_ctype is None and _idxs:
+                try:
+                    _dt_name = gen._type_expr_to_ann(_idxs[0]) if hasattr(gen, '_type_expr_to_ann') else None
+                    if _dt_name:
+                        _dt_ctype = _DTYPE_CAST_CTYPES.get(str(_dt_name).replace('DType.', '').lstrip('.'))
+                except Exception:
+                    _dt_ctype = None
+            if _dt_ctype in ('float', 'double', '__fp16'):
+                _target = _dt_ctype
+            else:
+                _target = 'int64_t'
+            if node.args:
+                _at, _av = gen.lower_expr(node.args[0])
+                for _a in node.args[1:]:
+                    gen.lower_expr(_a)
+                for _kw in (getattr(node, 'kwargs', None) or []):
+                    try:
+                        gen.lower_expr(_kw[1])
+                    except Exception:
+                        pass
+                _cv = gen._coerce_to_type(_at, _target, _av) if hasattr(gen, '_coerce_to_type') else _av
+                return _target, gen._new_val(_target, _cv)
+            # No args: zero value of the scalar dtype.
+            for _kw in (getattr(node, 'kwargs', None) or []):
+                try:
+                    gen.lower_expr(_kw[1])
+                except Exception:
+                    pass
+            _zv = '0.0' if _target in ('float', 'double', '__fp16') else '0'
+            return _target, gen._new_val(_target, f'({_target}){_zv}')
         if base in ('Array', 'FixedSizeArray'):
             # Array/FixedSizeArray constructor: produce a tracked MojoList *
             # so element reads and Span views can inherit the element type
