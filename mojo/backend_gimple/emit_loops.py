@@ -2309,9 +2309,18 @@ def _gen_for_enumerate(gen, node):
         for vi, vname in enumerate(tuple_vars):
             if vname == '_':
                 continue
-            cv = gen._cname(vname)
             force = gen.var_types.get(vname) not in (None, pair_elem)
             gen._declare_var(vname, pair_elem, force=force)
+            # AFTER the declaration, never before: `force` mints a fresh
+            # `_shadowN_<name>` C identifier and re-points `_c_names` at it,
+            # so a `_cname` captured first names the OLD variable. Real: a
+            # loop target already typed `char *` by an earlier use, unpacked
+            # from a runtime pair list (`for i, (a, b) in enumerate(pairs)`),
+            # force-renamed `a` to an `int64_t` shadow while the store below
+            # still wrote the ORIGINAL `char * a` — `a = mojo_list_get_int(...)`
+            # uncast (-Wint-conversion), and the body read the never-assigned
+            # shadow. See bug:CODEGEN_unpack_loop_var_unified_to_char_star_loses_slot_store_cast.
+            cv = gen._cname(vname)
             if suf_inner == 'str':
                 ts = gen._new_val('char *', f"mojo_list_get_str ({tuple_ptr}, {vi})")
                 if gen.var_types.get(vname, pair_elem) == 'char *':
