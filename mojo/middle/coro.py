@@ -4641,6 +4641,9 @@ def _attribute_to_def(prologue: list, fn) -> list:
     for stmt in prologue:
         stmt.line = fn.line
         stmt.col = fn.col
+        # The walk memo records scalar field values as it descends, so a
+        # memoised walk of this statement would still answer with the old
+        # line/col. Drop it (and any containing entry) at the write.
         _walk_ast_invalidate(stmt)
     return prologue
 

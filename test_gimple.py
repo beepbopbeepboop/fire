@@ -11896,14 +11896,25 @@ print("%r" % p)
             first = ET._walk_ast(stmt)
             if ET._walk_ast(stmt) is not first:
                 err = 'nothing was memoized, so this proved nothing'
+            elif any(isinstance(v, int) and not isinstance(v, bool)
+                     and v == fn.line for v in first):
+                err = ('the test precondition is wrong: the def line is '
+                       'already in the pre-stamp walk')
             else:
                 CO._attribute_to_def([stmt], fn)
+                after = ET._walk_ast(stmt)
+                scalars = [v for v in after
+                           if isinstance(v, int) and not isinstance(v, bool)]
                 if (stmt.line, stmt.col) != (fn.line, fn.col):
                     err = 'the stamp did not reach the statement'
-                elif ET._walk_ast(stmt) is first:
+                elif after is first:
                     err = ('the memo entry for the statement survived the '
                            'write: the walk after the stamp still answered '
                            'from the pre-stamp memo')
+                elif fn.line not in scalars:
+                    err = ('the walk after the stamp still answers from the '
+                           'memo: the generator def line %d is missing from '
+                           'it' % fn.line)
         except Exception as e:  # noqa: BLE001
             err = f'{type(e).__name__}: {e}'
         finally:
@@ -14706,6 +14717,28 @@ main()
 
     _run_isolated(lambda: test_regex_scan_in_a_method_body_compiles_and_matches_cpython(),
                   'test_regex_scan_in_a_method_body_compiles_and_matches_cpython')
+
+    # gate-stdlib-syntax: a FLOAT scalar's bit accessors answer an integer.
+    #
+    # This is the minimum shape of the eight-file `stdlib-syntax` red the two
+    # held `SIMD[X, 1] -> X` landings produced.
+    # Once a width-1 SIMD value is typed float/double, `val.to_bits()` and
+    # `x._to_bits_signed()` reach the generic scalar-method stub, which hands
+    # the receiver's type straight back; a bitwise expression on that result
+    # is then `float & float`, which gcc rejects. It is live in
+    # std/utils/numerics.mojo's isnan/isinf (their comptime-dead float8 arms
+    # are emitted, not pruned) and in std/math/math.mojo's frexp, reached from
+    # test_ldexp/test_math. The stdlib's own signatures say these accessors
+    # return an integer. This case fails on a resolver-only landing with
+    # "invalid operands to binary & (have 'float' and 'float')" and passes here.
+    _run_isolated(lambda: test("gate_stdlib_syntax_float_bit_accessors", """\
+def f(val: SIMD[Float32, 1]) -> Bool:
+    return (val.to_bits() & 0x7F).eq(0x7C)
+
+def g(x: SIMD[Float64, 1]) -> Bool:
+    var b = x._to_bits_signed()
+    return (b & 0x7FF).eq(0)
+"""), 'gate_stdlib_syntax_float_bit_accessors')
 
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.

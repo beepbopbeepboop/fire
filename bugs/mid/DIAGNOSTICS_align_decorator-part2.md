@@ -14,9 +14,9 @@ The shared `@align` value rule (positive, power of 2, at most 2^29) is
 implemented: `fire_compiler.py::_validate_align_decorators` (called from
 `_parse_struct`) validates a struct's constant `@align(...)` argument at parse
 time, with regression test `test_align_decorator_literal_diagnostic.py`.
-`bugs/mid/DIAGNOSTICS_align_decorator-part1.md` (the align expression stored on
-the AST) is the remaining dependency: this part's parametric cases read the
-expression back at elaboration. This part extends the same rule to a generic
+Part 1 (align expression stored on the StructDef AST) is the remaining
+dependency: this part's parametric cases read the expression back at
+elaboration. This part extends the same rule to a generic
 struct's bracket parameters; it must not add a second validation
 implementation.
 

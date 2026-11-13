@@ -32,6 +32,7 @@ honestly bound.
 """
 BASELINE = {
     'OPUS.md': 2,
+    'bugs/TEST_formal_imports_largest_file_bound_under_load.md': 1,
     'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
     'build_stdlib_dylib.py': 1,
@@ -189,6 +190,7 @@ BASELINE = {
 # .py` is out of the walk entirely, and `test_suite.py` is in both tables for the
 # reason the header above gives for its prefixed entry.
 BARE_BASELINE = {
+    'bugs/OPEN_WORK.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md': 3,
     'fire.py': 1,
     'formal/arm64_codegen.py': 1,

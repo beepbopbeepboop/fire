@@ -1597,6 +1597,7 @@ _RUNTIME_CALLABLE_WORDS = {
     'os.walk': 'mojo_os_walk_w',
     'glob.glob': 'mojo_glob_w',
     'glob.iglob': 'mojo_glob_w',
+    'csv.reader': 'mojo_csv_reader_w',
 }
 
 

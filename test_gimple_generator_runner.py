@@ -1176,53 +1176,63 @@ def _regression_read_table_callable_reader():
     # Root-cause regression for bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
     # `_get_reader` is a callable-valued parameter (default csv.reader); the
     # loop `for row in _get_reader(lines, ...):` in `read_table` must compile
-    # and run correctly.
+    # and produce output matching CPython ground truth.
+    mojo_src = """\
+import csv
+
+def read_table(infile, header, *, sep='\\t',
+               _get_reader=csv.reader):
+    lines = infile.splitlines()
+    for row in _get_reader(lines, delimiter=sep):
+        yield row
+
+def main():
+    data = "a\\tb\\n1\\t2\\n3\\t4\\n"
+    for r in read_table(data, "a\\tb", sep='\\t'):
+        print(r[0], r[1])
+main()
+"""
+    cpy_src = """\
+import csv
+
+def read_table(infile, header, *, sep='\\t',
+               _get_reader=csv.reader):
+    lines = infile.splitlines()
+    for row in _get_reader(lines, delimiter=sep):
+        yield row
+
+def main():
+    data = "a\\tb\\n1\\t2\\n3\\t4\\n"
+    for r in read_table(data, "a\\tb", sep='\\t'):
+        print(r[0], r[1])
+main()
+"""
     test_generator_matches_cpython(
         "cpp_for_callable_param_read_table_like",
-        """\
-def _get_reader_list(lines, delimiter='\t'):
-    res = []
-    for line in lines:
-        if delimiter in line:
-            res.append(line.split(delimiter))
-        else:
-            res.append([line])
-    return res
+        mojo_src,
+        cpy_src)
 
-def read_table(infile, header, *, sep='\t',
-               _get_reader=_get_reader_list):
+
+def _regression_read_table_callable_reader_untabled_refusal():
+    # An untabled callable-valued parameter must still be refused by name
+    # (honest refusal, no silent wrong behavior).
+    src = """\
+def my_reader(lines):
+    return []
+
+def read_table(infile, *, _get_reader=my_reader):
     lines = infile.splitlines()
-    for row in _get_reader(lines, delimiter=sep):
+    for row in _get_reader(lines):
         yield row
 
 def main():
-    data = "a\\tb\\n1\\t2\\n3\\t4\\n"
-    for r in read_table(data, "a\tb", sep='\t'):
-        print(r[0], r[1])
-main()
-""",
-        """\
-def _get_reader_list(lines, delimiter='\t'):
-    res = []
-    for line in lines:
-        if delimiter in line:
-            res.append(line.split(delimiter))
-        else:
-            res.append([line])
-    return res
-
-def read_table(infile, header, *, sep='\t',
-               _get_reader=_get_reader_list):
-    lines = infile.splitlines()
-    for row in _get_reader(lines, delimiter=sep):
-        yield row
-
-def main():
-    data = "a\\tb\\n1\\t2\\n3\\t4\\n"
-    for r in read_table(data, "a\tb", sep='\t'):
-        print(r[0], r[1])
-main()
-""")
+    for r in read_table("a"):
+        print(r)
+"""
+    test_generator_refused(
+        "cpp_for_callable_param_read_table_like_untabled_refusal",
+        src,
+        "_get_reader")
 
 
 def _cpp_coroutine_builtin_module_constant():
@@ -10065,6 +10075,7 @@ def main():
     _foreign_cpp_module_global_value()
     _cpp_for_over_callable_local_is_named()
     _regression_read_table_callable_reader()
+    _regression_read_table_callable_reader_untabled_refusal()
     _cpp_coroutine_builtin_module_constant()
     _cpp_coroutine_exc_ctor_value()
 
@@ -12354,10 +12365,67 @@ def main():
 main()
 """, "1\n7\n")
 
+    _test_method_returns_generator_via_subclass_inchain()
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)
     print(f"\n{_PASS} passed, {_FAIL} failed")
+
+
+def _test_method_returns_generator_via_subclass_inchain():
+    """In-chain import: a base method returns cls.gen_method(...) or None
+    (polymorphic generator method on subclasses) and a caller unpacks the
+    result. The imported module must compile without 'no known generator API'."""
+    global _PASS, _FAIL
+    name = "method_returns_generator_via_subclass_inchain"
+    try:
+        wd = tempfile.mkdtemp(prefix='mojo_gen_mrg_')
+        os.makedirs(os.path.join(wd, 'pkg', 'parser'), exist_ok=True)
+        files = {
+            'pkg/__init__.py': '',
+            'pkg/parser/__init__.py': 'from ..info import Sub\n',
+            'pkg/info.py': (
+                "class Base:\n"
+                "    @classmethod\n"
+                "    def _format_data(cls, data):\n"
+                "        raise NotImplementedError\n"
+                "    @classmethod\n"
+                "    def _render_item(cls, data):\n"
+                "        if data is None:\n"
+                "            return None\n"
+                "        return cls._format_data(data)\n"
+                "    @classmethod\n"
+                "    def _row(cls):\n"
+                "        rendered = cls._render_item([1])\n"
+                "        rendered, = rendered\n"
+                "        return rendered\n"
+                "\n"
+                "class Sub(Base):\n"
+                "    @classmethod\n"
+                "    def _format_data(cls, data):\n"
+                "        for x in data:\n"
+                "            yield str(x)\n"
+            ),
+        }
+        for rel, src in files.items():
+            p = os.path.join(wd, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, 'w') as f:
+                f.write(src)
+        entry = os.path.join(wd, 'pkg', 'parser', '__init__.py')
+        with open(entry) as f:
+            entry_src = f.read()
+        c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
+            entry_src, do_imports=True, filename=entry)
+        if '# ERROR: compiling imported module' in c_code:
+            raise RuntimeError('imported module compile error:\n' + '\n'.join(
+                l for l in c_code.splitlines() if '# ERROR' in l))
+        print(f"PASS  {name}")
+        _PASS += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
 
 
 # ONE entry point. This file used to carry TWO `if __name__ == '__main__':`

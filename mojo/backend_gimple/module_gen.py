@@ -6913,6 +6913,8 @@ def gen_module_impl(self, stmts: list):
         'name': 'char *', 'methods': 'MojoList *', 'decorators': 'MojoList *',
         'line': 'int64_t', 'col': 'int64_t',
     }
+    # Compiler-pre-seeded AST layout homes are initialized on GimpleGen so
+    # every compile unit (including nested temp_gens) sees them.
     self.struct_boxed_fields['IfStmt'] = {'condition'}
     self.struct_boxed_fields['WhileStmt'] = {'condition'}
     self.struct_boxed_fields['ForStmt'] = {'target', 'iterable'}
@@ -7746,7 +7748,27 @@ def gen_module_impl(self, stmts: list):
         # see it.
         _skey = _sanitize_cname_qualifier(_shome) if _shome else ''
         _owner = self._struct_name_owner.get(_sname)
+        _preshome = ''
+        if hasattr(self, '_compiler_preseed_struct_home'):
+            _preshome = self._compiler_preseed_struct_home.get(_sname, '')
         if _owner is None:
+            # A compiler-pre-seeded layout reserves the bare C name for the
+            # compiler's home. A StructDef from a genuinely different module is
+            # a cross-module collision and must take a qualified cname, leaving
+            # the pre-seeded layout (and any real compiler StructDef) as the
+            # bare-name owner.
+            if _preshome and _shome and _shome != _preshome:
+                _q = _sanitize_cname_qualifier(_shome)
+                _cname = _q + '_' + _sname
+                _n = 2
+                while _cname in self._struct_cname_of_name or _cname in self._struct_name_owner:
+                    _cname = _q + '_' + _sname + str(_n)
+                    _n += 1
+                self._struct_cname_by_id[_sid] = _cname
+                self._struct_name_owner[_cname] = s
+                self._struct_cname_by_home[_skey + '::' + _sname] = _cname
+                self._struct_qualified_cnames.add(_cname)
+                continue
             # First claim on this bare name: it OWNS it, under the bare name.
             self._struct_name_owner[_sname] = s
             self._struct_cname_by_id[_sid] = _sname
@@ -14358,6 +14380,129 @@ def gen_module_impl(self, stmts: list):
             if rt_prov not in (None, '<conflict>'):
                 self._fn_returns_generator[_rf.name] = rt_prov
                 _ret_changed = True
+
+    # Methods that return a generator (for concrete receiver types): in
+    # in-chain imports, a base method may `return cls.gen_method(...)` where
+    # gen_method is a generator on subclasses but not on the base. Analyze
+    # each (concrete_struct, method) with cls/self resolved to that struct.
+    if not hasattr(self, '_method_returns_generator'):
+        self._method_returns_generator = {}
+    if self._generator_method_api or self._generator_api or self._fn_returns_generator:
+        _sdefs = [s for s in stmts if isinstance(s, StructDef)]
+        if _sdefs:
+            _sdef_by = {sd.name: sd for sd in _sdefs}
+            _bases_map = {sd.name: list(getattr(sd, 'bases', None) or []) for sd in _sdefs}
+            def _mro(name, _seen=None):
+                if _seen is None: _seen = set()
+                if name in _seen or name not in _sdef_by:
+                    return [name] if name in _sdef_by else []
+                _seen.add(name)
+                out = [name]
+                for b in _bases_map.get(name, []):
+                    for x in _mro(b, _seen):
+                        if x not in out:
+                            out.append(x)
+                return out
+            _mros = {sd.name: _mro(sd.name) for sd in _sdefs}
+            def _find_method(struct_name, method_name):
+                for cn in _mros.get(struct_name, [struct_name]):
+                    sd = _sdef_by.get(cn)
+                    if sd is None:
+                        continue
+                    for m in sd.methods:
+                        if m.name == method_name:
+                            return cn, m
+                return None, None
+            def _meth_ret_api_for(rv, recv_struct, decl_struct):
+                if not isinstance(rv, CallExpr):
+                    return None
+                fn = rv.func
+                if isinstance(fn, IdentExpr):
+                    if fn.name in self._generator_api:
+                        return self._generator_api[fn.name]
+                    prov = self._fn_returns_generator.get(fn.name)
+                    if isinstance(prov, str):
+                        return self._generator_api.get(prov)
+                    # method in _method_returns_generator? only same-name unlikely
+                    return None
+                if isinstance(fn, MemberExpr) and isinstance(fn.obj, IdentExpr):
+                    mn = fn.member
+                    on = fn.obj.name
+                    if on in ('self', 'cls'):
+                        # resolve in context of concrete receiver
+                        api = self._generator_method_api.get((recv_struct, mn))
+                        if api is not None:
+                            return api
+                        # try declaring struct
+                        api = self._generator_method_api.get((decl_struct, mn))
+                        if api is not None:
+                            return api
+                        # if it's a method (not generator) that returns generator for recv_struct
+                        mapi = self._method_returns_generator.get((recv_struct, mn))
+                        if mapi is not None:
+                            return mapi
+                        return None
+                    api = self._generator_method_api.get((on, mn))
+                    if api is not None:
+                        return api
+                    mapi = self._method_returns_generator.get((on, mn))
+                    if mapi is not None:
+                        return mapi
+                return None
+            # fixed-point over (recv_struct, method) pairs
+            for _ in range(4):
+                _chg = False
+                for sd in _sdefs:
+                    for m in sd.methods:
+                        # analyze for every struct that can receive this method impl?
+                        # find all concrete structs where this (decl_struct, m) is the resolved impl
+                        decl = sd.name
+                        for recv in _sdefs:
+                            recv_name = recv.name
+                            owner, found = _find_method(recv_name, m.name)
+                            if found is not m:
+                                continue
+                            mk = (recv_name, m.name)
+                            if mk in self._generator_method_api or mk in self._method_returns_generator:
+                                continue
+                            rets = []
+                            _gmi_collect_return_values(rets, m.body)
+                            if not rets:
+                                continue
+                            api = None
+                            bad = False
+                            for rv in rets:
+                                ra = _meth_ret_api_for(rv, recv_name, decl)
+                                if ra is not None:
+                                    if api is None:
+                                        api = ra
+                                    elif api is not ra:
+                                        bad = True
+                                        break
+                                else:
+                                    if rv is None or isinstance(rv, NoneLiteral):
+                                        continue
+                                    if isinstance(rv, IdentExpr) and rv.name == 'None':
+                                        continue
+                                    bad = True
+                                    break
+                            if not bad and api is not None:
+                                self._method_returns_generator[mk] = api
+                                self.func_return_types[f"{recv_name}_{m.name}"] = 'MojoGenerator *'
+                                self.func_return_types[f"{decl}_{m.name}"] = 'MojoGenerator *'
+                                try:
+                                    mangled = self._struct_method_csym(recv_name, m.name, '')
+                                    self.func_return_types[mangled] = 'MojoGenerator *'
+                                except Exception:
+                                    pass
+                                try:
+                                    mangled = self._struct_method_csym(decl, m.name, '')
+                                    self.func_return_types[mangled] = 'MojoGenerator *'
+                                except Exception:
+                                    pass
+                                _chg = True
+                if not _chg:
+                    break
 
     _param_gen_obs: dict[str, dict[str, dict]] = {}  # callee -> {pname -> {fname: count}}
     for _round in range(4):

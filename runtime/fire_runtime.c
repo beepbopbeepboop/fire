@@ -18105,3 +18105,69 @@ int64_t mojo_next_word(int64_t w, int has_default, int64_t dflt)
     default: return ((int64_t (*)(void *))sg->value)(h);
     }
 }
+
+/* ── csv.reader (tabled foreign callable) ────────────────────────────── */
+static int64_t _csv_reader_impl(int64_t lines_word, MojoDict *kw)
+{
+    char delim = ',';
+    if (kw && mojo_dict_contains(kw, (char *)"delimiter")) {
+        int64_t dv = mojo_dict_get_int(kw, (char *)"delimiter");
+        char *s = 0;
+        if (mojo_word_is_text(dv)) s = (char *)(intptr_t)mojo_str_box_word(dv);
+        else if (mojo_boxed_is_str(dv)) s = (char *)(intptr_t)dv;
+        else if ((intptr_t)dv > 4096) s = (char *)(intptr_t)dv;
+        if (s && s[0]) delim = s[0];
+    }
+    MojoList *rows = mojo_list_new();
+    MojoList *lines = 0;
+    if (mojo_is_registered_list(lines_word)) {
+        lines = (MojoList *)(intptr_t)lines_word;
+    } else {
+        lines = mojo_iter_word(lines_word);
+    }
+    if (!lines) return (int64_t)(intptr_t)rows;
+    int64_t n = mojo_list_len(lines);
+    for (int64_t i = 0; i < n; i++) {
+        int64_t lw = mojo_list_get_boxed(lines, i);
+        char *line = 0;
+        if (mojo_word_is_text(lw)) line = (char *)(intptr_t)mojo_str_box_word(lw);
+        else if (mojo_boxed_is_str(lw)) line = (char *)(intptr_t)lw;
+        else line = (char *)(intptr_t)lw;
+        if (!line) line = (char *)"";
+        size_t len = strlen(line);
+        char *tmp = (char *)malloc(len + 1);
+        if (!tmp) continue;
+        memcpy(tmp, line, len + 1);
+        while (len > 0 && (tmp[len-1] == '\n' || tmp[len-1] == '\r')) tmp[--len] = 0;
+        MojoList *row = mojo_list_new();
+        char *p = tmp;
+        for (;;) {
+            char *q = strchr(p, delim);
+            if (!q) {
+                mojo_list_append_str(row, strdup(p));
+                break;
+            }
+            *q = 0;
+            mojo_list_append_str(row, strdup(p));
+            p = q + 1;
+        }
+        mojo_list_append_int(rows, (int64_t)(intptr_t)row);
+        free(tmp);
+    }
+    return (int64_t)(intptr_t)rows;
+}
+int64_t mojo_csv_reader_vf(int64_t lines_word, MojoList *packed, MojoDict *kw)
+{
+    (void)packed;
+    return _csv_reader_impl(lines_word, kw);
+}
+
+static MojoVarargFn *_csv_reader_vfn = 0;
+void *mojo_csv_reader_w = 0;
+__attribute__((constructor)) static void _mojo_csv_reader_init(void)
+{
+    if (!_csv_reader_vfn) {
+        _csv_reader_vfn = mojo_vararg_fn_new((void *)mojo_csv_reader_vf, 0, 1, 1, 0);
+    }
+    mojo_csv_reader_w = (void *)_csv_reader_vfn;
+}

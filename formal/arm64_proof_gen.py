@@ -6693,16 +6693,56 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     L = []
     A = L.append
     A(f"def {S}_qS0 (st : Arm64State) : Arm64State := st")
+    # A write `svc` may be composed, but only when BOTH halves of its
+    # provenance are in this run: the `movz` that set x16 is one of the
+    # run's own earlier instructions (so the `hx` the step lemma needs is
+    # discharged from the reg-16 chain and not assumed about an arbitrary
+    # state), and the fall-through rewrites x0 before anything reads the
+    # byte count the model does not model.  An exit `svc` has no successor
+    # to certify, and a dynamic one has no provenance at all, so both are
+    # still refused.
+    svc_write = {}
+    for k, pc in enumerate(run_pcs):
+        if not _is_svc(words.get(pc, 0)):
+            continue
+        prev_pc = pc - 4
+        prev = words.get(prev_pc)
+        if (k > 0 and run_pcs[k - 1] == prev_pc and prev is not None
+                and (prev & 0xffe0001f) in (0xd2800010, 0x52800010)):
+            x16 = (prev >> 5) & 0xffff
+        else:
+            x16 = None
+        if x16 is None or x16 == 1:
+            return None
+        if not _x0_reassigned_after_write(words, pc):
+            return None
+        svc_write[pc] = x16
+    rhss = []
     for k, pc in enumerate(run_pcs):
         idx = _step_branch_index(words[pc])
-        rhs = _step_rhs(words[pc], idx)
+        if idx == 35:
+            rhs = "some { s with pc := s.pc + 4 }"
+        else:
+            rhs = _step_rhs(words[pc], idx)
         if rhs is None or not rhs.startswith("some "):
             return None
+        rhss.append(rhs)
+    # A step whose effect moves the pc (the write `svc`, `RET`) composes with
+    # `runs_cons_jump`, not `runs_cons_seq`: `arm64_runs` adds the implicit
+    # `pc + 4` only for a step that left the pc alone.  The composed state is
+    # then the step's own result, with no further bump.
+    pc_writes = ["pc :=" in (rhs[len("some "):] if rhs.startswith("some ")
+                             else rhs) for rhs in rhss]
+    for k, rhs in enumerate(rhss):
         body = re.sub(r"\bs\b", f"({S}_qS{k} st)", rhs)
         A(f"def {S}_qT{k} (st : Arm64State) : Arm64State :=\n  {body[len('some '):]}")
         if k + 1 < m:
-            A(f"def {S}_qS{k + 1} (st : Arm64State) : Arm64State := "
-              f"{{ {S}_qT{k} st with pc := {run_pcs[k + 1]} }}")
+            if pc_writes[k]:
+                A(f"def {S}_qS{k + 1} (st : Arm64State) : Arm64State := "
+                  f"{S}_qT{k} st")
+            else:
+                A(f"def {S}_qS{k + 1} (st : Arm64State) : Arm64State := "
+                  f"{{ {S}_qT{k} st with pc := {run_pcs[k + 1]} }}")
     # pc facts (shared by self_k / runs / mid)
     #
     # `hpc{k}` is the side condition `runs_cons_seq`/`runs_cons_jump` wants, and
@@ -6711,18 +6751,52 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
     # reduction `rfl` asks for and why it is not free.  Each `k` unfolds only
     # the chain up to itself, which is all its own projection needs.
     defs_unfold = _block_state_unfold(S, m)
+
+    def _pc_proof(k):
+        proof = _state_proof(_block_state_unfold(S, k + 1))
+        # A jump step's `qS{k}` is its predecessor's post-step state, whose
+        # `pc` is `(qS{k-1}).pc + 4`; `simp` exposes the arithmetic but does
+        # not decide it, and `hpc{k-1}` is in context.
+        return proof + " <;> omega" if any(pc_writes[:k]) else proof
+
     pc_facts = []
     pc_facts.append(f"  have hpc0 : ({S}_qS0 st).pc = {run_pcs[0]} := by")
     pc_facts.append(f"    simp [{S}_qS0, hpc]")
     for k in range(1, m):
         pc_facts.append(f"  have hpc{k} : ({S}_qS{k} st).pc = {run_pcs[k]} := "
-                        + _state_proof(_block_state_unfold(S, k + 1)))
+                        + _pc_proof(k))
     step_facts = []
+    hx_facts = []
     for k, pc in enumerate(run_pcs):
         i = (pc - base) // 4
-        step_facts.append(f"  have hs{k} : arm64_step ({S}_qS{k} st) {code_name} "
-                          f"= some ({S}_qT{k} st) :=\n"
-                          f"      {sr_name}_sr_{i} ({S}_qS{k} st) (hpc{k})")
+        if _is_svc(words[pc]):
+            # The step lemma is `work_step_svc_write`, under its `hx`
+            # hypothesis.  Discharge that from the run's OWN reg-16 chain:
+            # the preceding `movz` is in this run (the admission above
+            # checked it), so the chain ends in the literal x16, and the
+            # literal is not 1.
+            x16 = svc_write[pc]
+            chain, final = _emit_reg_chain(name, words, tag, run_pcs[:k], 16,
+                                           st="st")
+            hx_facts.append(
+                f"  have h16_{k} : arm64_reg 16 ({S}_qS{k} st) = {final} := by\n"
+                f"    have hq : arm64_reg 16 ({S}_qS{k} st) = "
+                f"arm64_reg 16 ({S}_qT{k - 1} st) := "
+                f"{_state_proof(_block_state_unfold(S, k + 1))}\n"
+                f"    rw [hq]\n"
+                + "\n".join("    " + line for line in chain))
+            hx_facts.append(
+                f"  have hx{k} : ¬ arm64_reg 16 ({S}_qS{k} st) = 1 := by\n"
+                f"    rw [h16_{k}]\n"
+                f"    decide")
+            step_facts.append(
+                f"  have hs{k} : arm64_step ({S}_qS{k} st) {code_name} "
+                f"= some ({S}_qT{k} st) :=\n"
+                f"      {sr_name}_sr_{i} ({S}_qS{k} st) (hpc{k}) (hx{k})")
+        else:
+            step_facts.append(f"  have hs{k} : arm64_step ({S}_qS{k} st) "
+                              f"{code_name} = some ({S}_qT{k} st) :=\n"
+                              f"      {sr_name}_sr_{i} ({S}_qS{k} st) (hpc{k})")
 
     # The `hseq` side condition of `runs_cons_seq` is discharged two ways, and
     # the split is not stylistic.  For the block's FIRST instruction the source
@@ -6746,72 +6820,89 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
         A(f"theorem {S}_self{k} (st : Arm64State) (hpc : st.pc = {run_pcs[0]}) :")
         A(f"    arm64_runs {code_name} {k} st = some ({S}_qS{k} st) := by")
         A("\n".join(pc_facts[:k + 1]))
+        A("\n".join(hx_facts[:k]))
         A("\n".join(step_facts[:k]))
         if k == 1:
-            A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 "
-              f"(by first | (simp only [{S}_qT0, {S}_qS0] <;> done) | rfl),")
-            A(f"      show st.pc + 4 = {run_pcs[1]} from by rw [hpc]]")
+            if pc_writes[0]:
+                A(f"  rw [runs_cons_jump st ({S}_qT0 st) {code_name} 0 hs0 "
+                  f"(by simp only [{S}_qT0]; omega)]")
+            else:
+                A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 "
+                  f"(by first | (simp only [{S}_qT0, {S}_qS0] <;> done) | rfl),")
+                A(f"      show st.pc + 4 = {run_pcs[1]} from by rw [hpc]]")
             A(f"  exact runs_zero {code_name} ({S}_qS1 st)")
         else:
             A(f"  rw [runs_append {code_name} {k - 1} 1 st, {S}_self{k - 1} st hpc]")
             A(f"  simp only []")
-            A(f"  rw [runs_cons_seq ({S}_qS{k - 1} st) ({S}_qT{k - 1} st) "
-              f"{code_name} 0 hs{k - 1} "
-              f"{_state_proof(_block_state_unfold(S, k), paren=True)},")
-            A(f"      show ({S}_qS{k - 1} st).pc + 4 = {run_pcs[k]} "
-              f"from by rw [hpc{k - 1}]]")
+            if pc_writes[k - 1]:
+                A(f"  rw [runs_cons_jump ({S}_qS{k - 1} st) ({S}_qT{k - 1} st) "
+                  f"{code_name} 0 hs{k - 1} "
+                  f"(by simp only [{S}_qT{k - 1}]; omega)]")
+            else:
+                A(f"  rw [runs_cons_seq ({S}_qS{k - 1} st) ({S}_qT{k - 1} st) "
+                  f"{code_name} 0 hs{k - 1} "
+                  f"{_state_proof(_block_state_unfold(S, k), paren=True)},")
+                A(f"      show ({S}_qS{k - 1} st).pc + 4 = {run_pcs[k]} "
+                  f"from by rw [hpc{k - 1}]]")
             A(f"  exact runs_zero {code_name} ({S}_qS{k} st)")
         A("")
 
     # runs certificate
     idx_last = _step_branch_index(words[run_pcs[-1]])
-    cert_exit = (f"({S}_qT{m - 1} st)"
-                 if idx_last == 0
+    last_is_ret = idx_last == 0
+    last_moves_pc = pc_writes[m - 1]
+    # A step that moves the pc already produced the successor address, so the
+    # certificate's exit is its own result; a sequential step gets the implicit
+    # `pc + 4` the runner adds.
+    cert_exit = (f"({S}_qT{m - 1} st)" if last_moves_pc
                  else f"({{ {S}_qT{m - 1} st with pc := {run_pcs[-1] + 4} }})")
-    if idx_last == 0:
+    if last_is_ret:
         # RET-ending run: the jump side-condition (RET pc != current pc) is a
         # value-flow hypothesis the caller must supply.  `hjump` is stated on
         # the pre-RET state's x30 (the return address).
-        hjump_name = f"{S}_qS{m - 1}"
         A(f"theorem {S}_runs (st : Arm64State) (hpc : st.pc = {run_pcs[0]})")
         A(f"    (hjump : ({S}_qS{m - 1} st).x30.toNat ≠ {run_pcs[-1]}) :")
-        A(f"    arm64_runs {code_name} {m} st = some {cert_exit} := by")
-        A("\n".join(pc_facts))
-        A("\n".join(step_facts))
-        if m == 1:
-            A(f"  rw [runs_cons_jump st ({S}_qT0 st) {code_name} 0 hs0")
-            A(f"      (by rw [show ({S}_qT0 st).pc = ({S}_qS0 st).x30.toNat "
-              f"from {_state_proof(_block_state_unfold(S, 1))}]; exact hjump)]")
-            A(f"  exact runs_zero {code_name} ({S}_qT0 st)")
-        else:
-            A(f"  rw [runs_append {code_name} {m - 1} 1 st, {S}_self{m - 1} st hpc]")
-            A(f"  simp only []")
-            A(f"  rw [runs_cons_jump ({S}_qS{m - 1} st) ({S}_qT{m - 1} st) "
-              f"{code_name} 0 hs{m - 1}")
-            A(f"      (by rw [show ({S}_qT{m - 1} st).pc = ({S}_qS{m - 1} st).x30.toNat "
-              f"from {_state_proof(defs_unfold)}]; exact hjump)]")
-            A(f"  exact runs_zero {code_name} ({S}_qT{m - 1} st)")
-        exit_expr = f"({S}_qT{m - 1} st)"
     else:
         A(f"theorem {S}_runs (st : Arm64State) (hpc : st.pc = {run_pcs[0]}) :")
-        A(f"    arm64_runs {code_name} {m} st = some {cert_exit} := by")
-        A("\n".join(pc_facts))
-        A("\n".join(step_facts))
-        if m == 1:
+    A(f"    arm64_runs {code_name} {m} st = some {cert_exit} := by")
+    A("\n".join(pc_facts))
+    A("\n".join(hx_facts))
+    A("\n".join(step_facts))
+    if m == 1:
+        if last_moves_pc:
+            if last_is_ret:
+                A(f"  rw [runs_cons_jump st ({S}_qT0 st) {code_name} 0 hs0")
+                A(f"      (by rw [show ({S}_qT0 st).pc = ({S}_qS0 st).x30.toNat "
+                  f"from {_state_proof(_block_state_unfold(S, 1))}]; exact hjump)]")
+            else:
+                A(f"  rw [runs_cons_jump st ({S}_qT0 st) {code_name} 0 hs0 "
+                  f"(by simp only [{S}_qT0]; omega)]")
+            A(f"  exact runs_zero {code_name} ({S}_qT0 st)")
+        else:
             A(f"  rw [runs_cons_seq st ({S}_qT0 st) {code_name} 0 hs0 "
               f"(by first | (simp only [{S}_qT0, {S}_qS0] <;> done) | rfl),")
             A(f"      show st.pc + 4 = {run_pcs[0] + 4} from by rw [hpc]]")
             A(f"  exact runs_zero {code_name} ({{ {S}_qT0 st with pc := {run_pcs[0] + 4} }})")
+    else:
+        A(f"  rw [runs_append {code_name} {m - 1} 1 st, {S}_self{m - 1} st hpc]")
+        A(f"  simp only []")
+        if last_moves_pc:
+            A(f"  rw [runs_cons_jump ({S}_qS{m - 1} st) ({S}_qT{m - 1} st) "
+              f"{code_name} 0 hs{m - 1}")
+            if last_is_ret:
+                A(f"      (by rw [show ({S}_qT{m - 1} st).pc = ({S}_qS{m - 1} st).x30.toNat "
+                  f"from {_state_proof(defs_unfold)}]; exact hjump)]")
+            else:
+                A(f"      (by simp only [{S}_qT{m - 1}]; omega)]")
+            A(f"  exact runs_zero {code_name} ({S}_qT{m - 1} st)")
         else:
-            A(f"  rw [runs_append {code_name} {m - 1} 1 st, {S}_self{m - 1} st hpc]")
-            A(f"  simp only []")
             A(f"  rw [runs_cons_seq ({S}_qS{m - 1} st) ({S}_qT{m - 1} st) "
               f"{code_name} 0 hs{m - 1} {_state_proof(defs_unfold, paren=True)},")
             A(f"      show ({S}_qS{m - 1} st).pc + 4 = {run_pcs[-1] + 4} "
               f"from by rw [hpc{m - 1}]]")
             A(f"  exact runs_zero {code_name} "
               f"({{ {S}_qT{m - 1} st with pc := {run_pcs[-1] + 4} }})")
-        exit_expr = f"({{ {S}_qT{m - 1} st with pc := {run_pcs[-1] + 4} }})"
+    exit_expr = cert_exit
     A("")
     # The exit-avoidance hypothesis is stated over the run's pc *list*, not as
     # a nested conjunction of per-pc disequalities: Lean cannot synthesise
@@ -6845,6 +6936,197 @@ def _gen_run_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
             A("    exact hk")
     def_names = [f"{S}_qS0", f"{S}_qT0"] + [f"{S}_qS{k}" for k in range(1, m)] + [f"{S}_qT{k}" for k in range(1, m)]
     return "\n".join(L), f"{S}_runs", f"{S}_mid", exit_expr, def_names, (idx_last == 0)
+
+
+def _gen_halt_cert(name: str, words: dict, base: int, tag: str, run_pcs: list,
+                   exit_pc: int, code_name: str = None, sr_name: str = None,
+                   leaders=frozenset()):
+    """Emit the pieces of a proof that a straight-line run ENDS the program.
+
+    The run is a block whose last instruction is a statically-known exit `svc`
+    (`_is_svc_exit`) and whose earlier `svc`s, if any, are writes.  Such a
+    block has no successor at all, so `_gen_run_cert` cannot describe it: that
+    function certifies a `some` result, and the exit step is `none`.
+
+    The proof is built from the same run certificates as the rest of the walk,
+    in segments split at the `svc`s:
+
+      * a segment of ordinary instructions is one `_gen_run_cert` run;
+      * a write `svc` is one `arm64_go_exit_step_jump_at`, with its `hx`
+        hypothesis discharged from the segment's own x16 chain;
+      * the final exit `svc` is the one step whose result is `none`.
+
+    The theorem it emits takes the entry state, a fuel, and the fuel bound, so
+    every edge that reaches this block calls ONE certificate rather than each
+    re-deriving the same halt.
+
+    Returns `(defs_text, halt_theorem_name, n_steps)` or None when the block is
+    not this shape or a system call's number is not statically known.
+    """
+    code_name = code_name or f"{name}_code"
+    sr_name = sr_name or name
+    if not run_pcs:
+        return None
+    if not _is_svc_exit(words, run_pcs[-1], leaders):
+        return None
+    svc_x16 = {}
+    for pc in run_pcs:
+        if not _is_svc(words.get(pc, 0)):
+            continue
+        x = _svc_static_x16(words, pc, leaders)
+        if x is None:
+            return None
+        svc_x16[pc] = x
+    for pc, x in svc_x16.items():
+        if pc != run_pcs[-1] and x == 1:
+            # An early exit means the block cannot reach its tail; the split
+            # below would certify instructions after a halt, which is a claim
+            # about a state no path has.
+            return None
+    total = len(run_pcs)
+    S = f"{name}_{tag}"
+
+    # Split the instructions at the svcs.  `("run", [])` is a legal segment
+    # (two adjacent system calls) and is skipped rather than certifying zero
+    # instructions.
+    segs, cur = [], []
+    for pc in run_pcs:
+        if _is_svc(words.get(pc, 0)):
+            segs.append(("run", cur))
+            segs.append(("svc", pc))
+            cur = []
+        else:
+            cur.append(pc)
+    if cur:
+        segs.append(("run", cur))
+
+    L = []
+    run_tags = {}
+    for j, (kind, pcs) in enumerate(segs):
+        if kind != "run" or not pcs:
+            continue
+        seg_tag = f"{tag}_r{j}"
+        part = _gen_run_cert(name, words, base, seg_tag, pcs, exit_pc,
+                             code_name=code_name, sr_name=sr_name)
+        if part is None:
+            return None
+        defs_text, cert, mid, exit_expr, def_names, is_ret = part
+        if is_ret:
+            return None
+        L.append(defs_text)
+        run_tags[j] = dict(tag=seg_tag, pcs=pcs, cert=cert, mid=mid,
+                           exit_expr=exit_expr,defs=def_names,chain=None)
+
+    A = L.append
+    A(f"theorem {S}_halts (st : Arm64State) (hpc : st.pc = {run_pcs[0]})")
+    A(f"    (f : Nat) (hf : {total} < f) :")
+    A(f"    arm64_go_exit st {code_name} {exit_pc} f = none := by")
+
+    cur_state, cur_pc_fact, cur_fuel, cur_pc = "st", "hpc", "f", run_pcs[0]
+    prev_run = None          # the run segment immediately before this svc
+    for j, (kind, pcs) in enumerate(segs):
+        if kind == "svc":
+            pc = pcs
+            x = svc_x16[pc]
+            hpc = f"hpc_svc_{j}"
+            hpc_proof = cur_pc_fact
+            A(f"  have {hpc} : ({cur_state}).pc = {pc} := {hpc_proof}")
+            if prev_run is None:
+                # The number is static in the IMAGE but not in this run: no
+                # preceding movz is in the segment, so there is no chain from
+                # which to discharge `hx`.  Refuse rather than assume.
+                return None
+            rr = prev_run
+            chain_lines, final = _emit_reg_chain(
+                name, words, rr["tag"], rr["pcs"], 16,
+                st=f"({rr['input']})")
+            if not re.fullmatch(r"\(?UInt64\.ofNat \d+\)?", final or ""):
+                return None
+            rr["chain"] = (chain_lines, final)
+            h16 = f"h16_svc_{j}"
+            hx = f"hx_svc_{j}"
+            A(f"  have {h16} : arm64_reg 16 ({cur_state}) = {final} := by")
+            A(f"    rw [{rr['hsid']}]")
+            A(f"    change arm64_reg 16 ({name}_{rr['tag']}_qT"
+              f"{len(rr['pcs']) - 1} ({rr['input']})) = {final}")
+            for line in chain_lines:
+                A(f"    {line}")
+            if x == 1:
+                A(f"  have {hx} : arm64_reg 16 ({cur_state}) = 1 := by")
+                A(f"    rw [{h16}]")
+                A(f"    decide")
+                i = (pc - base) // 4
+                A(f"  have hstep_x_{j} : arm64_step ({cur_state}) {code_name} = none := by")
+                A(f"    have hsr := {sr_name}_sr_{i} ({cur_state}) {hpc} {hx}")
+                A(f"    rw [hsr]")
+                A(f"  have hne_x_{j} : ({cur_state}).pc ≠ {exit_pc} := by")
+                A(f"    rw [{hpc}]")
+                A(f"    decide")
+                A(f"  rw [show {cur_fuel} = ({cur_fuel} - 1) + 1 from by omega]")
+                A(f"  unfold arm64_go_exit")
+                A(f"  rw [if_neg (by omega), if_neg hne_x_{j}, hstep_x_{j}]")
+                A(f"  try rfl")
+                return "\n".join(L), f"{S}_halts", total
+            A(f"  have {hx} : ¬ arm64_reg 16 ({cur_state}) = 1 := by")
+            A(f"    rw [{h16}]")
+            A(f"    decide")
+            i = (pc - base) // 4
+            tgt = f"{{ {cur_state} with pc := {pc + 4} }}"
+            A(f"  have hstep_w_{j} : arm64_step ({cur_state}) {code_name} = "
+              f"some ({tgt} : Arm64State) := by")
+            A(f"    have hsr := {sr_name}_sr_{i} ({cur_state}) {hpc} {hx}")
+            A(f"    rw [hsr, {hpc}]")
+            A(f"    try rfl")
+            A(f"  have hne_w_{j} : ({tgt} : Arm64State).pc ≠ ({cur_state}).pc := by")
+            A(f"    rw [{hpc}]")
+            A(f"    change {pc + 4} ≠ {pc}")
+            A(f"    decide")
+            A(f"  have hgj_w_{j} := arm64_go_exit_step_jump_at ({cur_state}) "
+              f"({tgt}) {code_name} {exit_pc} ({cur_fuel} - 1) {pc} "
+              f"hstep_w_{j} hne_w_{j} {hpc} (by decide)")
+            A(f"  rw [show ({cur_fuel} - 1) + 1 = {cur_fuel} from by omega] at hgj_w_{j}")
+            A(f"  rw [hgj_w_{j}]")
+            cur_state, cur_pc, cur_fuel, cur_pc_fact = tgt, pc + 4, f"({cur_fuel} - 1)", "by rfl"
+            prev_run = None
+            continue
+        if not pcs:
+            continue
+        m = len(pcs)
+        rr = run_tags[j]
+        rr["input"] = cur_state
+        hpc = f"hpc_run_{j}"
+        hpc_proof = cur_pc_fact if cur_state == "st" else "by rfl"
+        A(f"  have {hpc} : ({cur_state}).pc = {pcs[0]} := {hpc_proof}")
+        tc_expr = re.sub(r"\bst\b", f"({cur_state})", rr["exit_expr"])
+        hcert = f"hcert_run_{j}"
+        A(f"  have {hcert} : arm64_runs {code_name} {m} ({cur_state}) = "
+          f"some ({tc_expr}) := {rr['cert']} ({cur_state}) {hpc}")
+        hs = f"s_run_{j}"
+        hrun = f"hrun_run_{j}"
+        A(f"  rcases (show ∃ s, arm64_runs {code_name} {m} ({cur_state}) = "
+          f"some s from ⟨_, {hcert}⟩) with ⟨{hs}, {hrun}⟩")
+        hsid = f"hsid_run_{j}"
+        A(f"  have {hsid} : {hs} = ({tc_expr}) := by")
+        A(f"    injection {hrun}.symm.trans {hcert}")
+        hmid = f"hmid_run_{j}"
+        A(f"  have {hmid} := {rr['mid']} {exit_pc} ({cur_state}) {hpc} (by simp)")
+        next_pc = pcs[-1] + 4
+        hpc_next = f"hpc_run_{j}_end"
+        A(f"  have {hpc_next} : ({hs}).pc = {next_pc} := by")
+        A(f"    rw [{hsid}]")
+        A(f"    try rfl")
+        htc = f"htc_run_{j}"
+        A(f"  have {htc} : ({hs}).pc ≠ {exit_pc} := by")
+        A(f"    rw [{hpc_next}]")
+        A(f"    decide")
+        A(f"  rw [show {cur_fuel} = {m} + ({cur_fuel} - {m}) from by omega]")
+        A(f"  rw [go_exit_glue {code_name} {exit_pc} {m} ({cur_fuel} - {m}) "
+          f"({cur_state}) {hs} {hrun} {hmid} {htc}]")
+        rr["hsid"] = hsid
+        rr["input"] = cur_state
+        prev_run = rr
+        cur_state, cur_fuel, cur_pc_fact, cur_pc = hs, f"({cur_fuel} - {m})", hpc_next, next_pc
+    return None
 
 
 def _reduced_sp(pcs: list, words: dict) -> str:
@@ -8404,6 +8686,11 @@ def _svc_static_x16(words: dict, pc: int, leaders=frozenset()):
     block: otherwise another path can reach the `svc` with a different x16,
     and the answer is None, which the caller treats as dynamic.
 
+    Both spellings of the move are accepted because both leave the same x16:
+    the emitter spells some sites `movz x16` (0xd2800010 mask) and others
+    `movz w16` (0x52800010 mask), and a reader that only knew the first
+    measured every exit `svc` written the second way as dynamic.
+
     `leaders` is the set of block-start addresses (branch targets and fall-
     throughs); a `svc` at one of them is dynamic.
     """
@@ -8412,11 +8699,112 @@ def _svc_static_x16(words: dict, pc: int, leaders=frozenset()):
     prev = words.get(pc - 4)
     if prev is None:
         return None
-    # MOVZ Xd, #imm16 (64-bit, hw = 0) with Rd = 16: bits 31..21 are
-    # 1 1 0 1 0 0 1 0 1 0 0 (sf=1, opc=10, 100101, hw=00), bits 4..0 are 10000.
-    if (prev & 0xffe0001f) != 0xd2800010:
+    if (prev & 0xffe0001f) not in (0xd2800010, 0x52800010):
         return None
     return (prev >> 5) & 0xffff
+
+
+def _is_svc_exit(words: dict, pc: int, leaders=frozenset()) -> bool:
+    """Whether the `svc` at `pc` is statically `SYS_exit` (x16 = 1).
+
+    Encoding is not exit: a `SYS_write` `svc` falls through at `pc + 4`.  The
+    block structure that decides "this block cannot return" must ask this
+    question, not `_is_svc`, or a write tail is closed as a trap and the
+    fall-through the machine takes is lost.  A dynamic `svc` is not a KNOWN
+    exit either, so it answers False rather than guessing.
+    """
+    return (_is_svc(words.get(pc, 0))
+            and _svc_static_x16(words, pc, leaders) == 1)
+
+
+def _reads_x0(w: int, idx: int):
+    """Whether the instruction reads `x0`, or None when this reader cannot tell.
+
+    A conservative answer is the only sound one: False is returned only for a
+    form whose encoding makes x0 impossible as an operand.  Used by
+    `_x0_reassigned_after_write`'s proof-side check, where a "maybe" has to
+    be refused rather than believed.
+
+    The register fields are the instruction's own: `Rd` is bits 4..0, `Rn`
+    bits 9..5 and `Rm` bits 20..16.  For a store pair both `Rt` and `Rt2` are
+    read; for a load pair the base is read and the destinations are written.
+    """
+    rd = w & 0x1f
+    rn = (w >> 5) & 0x1f
+    rm = (w >> 16) & 0x1f
+    rt2 = (w >> 10) & 0x1f
+    # No GPR operand at all: immediates, ADRP, B/BL, B.cond (flags), RET
+    # (x30).  RET's word is fixed and does not read x0.
+    if idx == 0 or idx == 14 or idx == 15 or idx == 20 or idx == 51:
+        return False
+    if idx in (23, 24, 25):                      # MOVZ / MOVN / MOVK
+        return False
+    if idx in (16, 17):                          # CBZ / CBNZ
+        return (w & 0x1f) == 0
+    if idx in (52, 53):                          # TBZ / TBNZ
+        return (w & 0x1f) == 0
+    if idx in (10, 11, 12):                      # ADD/SUB immediate
+        return rn == 0
+    if idx in (2, 3, 4, 5, 8):                   # register arithmetic
+        return rn == 0 or rm == 0
+    if idx in (6, 66):                           # CMP/CMN, SUBS/ADDS
+        if rd == 31:                             # compare spelling: two reads
+            return rn == 0 or rm == 0
+        # The register-writing spelling still reads `Rn`/`Rm`, and x0 can be
+        # either.  The immediate spelling's "Rm" bits are the immediate, but
+        # being conservative here costs a refusal, never a false proof.
+        return rn == 0 or rm == 0
+    if idx == 21:                                # STP
+        return 0 in (w & 0x1f, rt2, rn)
+    if idx == 22:                                # LDP: base is read
+        return rn == 0
+    if idx == 18:                                # LDR Xt, [Xn, #imm]
+        return rn == 0
+    if idx == 19:                                # NOP-like / no register read
+        return False
+    if idx in (54, 56, 58, 59, 60, 61, 62, 64):  # loads: base read
+        return rn == 0
+    if idx in (55, 57, 63, 65):                  # stores: value and base read
+        return 0 in (w & 0x1f, rn)
+    return None
+
+
+def _x0_reassigned_after_write(words: dict, pc: int, limit: int = 16) -> bool:
+    """Whether x0 is rewritten before anything can read the write's result.
+
+    A `SYS_write` `svc` returns the number of bytes written in x0, and the
+    model does not model that value: its write step leaves x0 as it was.  A
+    continuation that reads x0 before rewriting it would therefore be proved
+    about a state the machine never has.  So a straight-line run may pass
+    through a write `svc` only when the fall-through rewrites x0 before any
+    instruction that reads it, and before any control-flow instruction (a
+    branch changes which code sees the stale value, and an `svc` starts
+    another syscall whose arguments could name it).
+
+    **The walk is over the IMAGE's fall-through, not the run's suffix**, so a
+    run that ends at the write `svc` is checked past its own end.  That is the
+    direction the unsoundness points: the next block is where a reader would
+    be, and a proof of this block cannot see it otherwise.  Unknown
+    instruction shapes answer "no", which is a refusal, not a guess.
+    """
+    cur = pc + 4
+    for _ in range(limit):
+        w = words.get(cur)
+        if w is None:
+            return False
+        idx = _step_branch_index(w)
+        if idx is None:
+            return False
+        if idx in (0, 14, 15, 16, 17, 35, 51, 52, 53):
+            return False
+        reads = _reads_x0(w, idx)
+        if reads is None or reads:
+            return False
+        wr = _regs_written(w, idx)
+        if wr is not None and 0 in wr:
+            return True
+        cur += 4
+    return False
 
 
 def _trap_terminating(blocks: list, words: dict) -> set:
@@ -8438,6 +8826,7 @@ def _trap_terminating(blocks: list, words: dict) -> set:
     second guard) is closed under the same rule.
     """
     by_start = {b["start"]: b for b in blocks}
+    leaders = frozenset(by_start)
     out = set()
     changed = True
     while changed:
@@ -8454,7 +8843,7 @@ def _trap_terminating(blocks: list, words: dict) -> set:
             w = words.get(b["instrs"][-1])
             if w is None:
                 continue
-            if _is_svc(w):
+            if _is_svc_exit(words, b["instrs"][-1], leaders):
                 out.add(b["start"])
                 changed = True
             elif _step_branch_index(w) == 15:        # BL
@@ -8594,6 +8983,7 @@ def _unfollowable_calls(code: bytes, base: int, func_entry: int,
         end = func_end
     blocks = _cfg_blocks(words, func_entry, end)
     by_start = {b["start"]: b for b in blocks}
+    leaders = frozenset(by_start)
     out = []
     for pc in sorted(p for p in words if func_entry <= p < end - 4):
         if _step_branch_index(words[pc]) != 15:       # 15 = BL
@@ -8602,7 +8992,7 @@ def _unfollowable_calls(code: bytes, base: int, func_entry: int,
         if tgt is None or tgt == func_entry:
             continue                                   # self-call: contracted
         nxt = by_start.get(pc + 4)
-        if nxt is not None and _is_svc(words[nxt["instrs"][-1]]):
+        if nxt is not None and _is_svc_exit(words, nxt["instrs"][-1], leaders):
             continue                                   # bounded stop: no return
         kind = ("opaque" if not (func_entry <= tgt < end) else "intralocal")
         out.append({"kind": kind, "pc": pc, "target": tgt, "func_end": end})
@@ -8955,6 +9345,18 @@ def _cfg_decomposition_refusal(name: str, code: bytes, base: int,
     `RET` — because that is the range whose words the certificates are built
     from. A word outside it is not in the way, and naming one would send the
     reader to an instruction nothing here executes.
+
+    **The `svc` is a second search.**  When the unmodelled-word loop finds
+    nothing, the refusal is most often an `svc` whose certificate cannot be
+    BUILT even though the instruction has a step (idx 35, so the loop above
+    skips it): a dynamic x16 (neither the exit nor the write form can be
+    selected), an exit `svc` mid-run (a runs certificate certifies a `some`
+    successor and cannot cross a halt), or a write `svc` whose x0 the
+    fall-through does not rewrite before a read.  The scan classifies the
+    image's `svc`s the same way the certificate builders do —
+    `_svc_static_x16` over the block's leaders, `_x0_reassigned_after_write`
+    — and names the first one that refuses, so the "every instruction has a
+    step" sentence stops blaming an empty runs certificate for an svc.
     """
     words = {base + i: int.from_bytes(code[i:i + 4], "little")
              for i in range(0, len(code) - len(code) % 4, 4)}
@@ -8982,6 +9384,48 @@ def _cfg_decomposition_refusal(name: str, code: bytes, base: int,
               "None are a shape with no `RET`, a block whose runs certificate "
               "is empty, and a fixed-fuel caller whose budget is below the "
               "instruction count.")
+    blocks = _cfg_blocks(words, func_entry, func_end)
+    leaders = frozenset(b["start"] for b in blocks)
+    for pc in sorted(p for p in words
+                     if func_entry <= p < func_end and _is_svc(words[p])):
+        block = next((b for b in blocks if pc in b["instrs"]), None)
+        if block is None:
+            continue
+        x16 = _svc_static_x16(words, pc, leaders)
+        if x16 is None:
+            return (
+                f"universal theorem: CFG decomposition unsupported for this "
+                f"function shape, and every instruction in its own code has a "
+                f"step, so the cause is not an unmodelled word: it is the svc "
+                f"at {pc:#x} in {name}'s own code, whose x16 the image does "
+                f"not fix (no `movz x16` immediately before it in the block, "
+                f"or the svc is a block entry another path can reach with a "
+                f"different x16).  The step is x16-discriminating -- exit "
+                f"halts, write continues -- and with x16 unknown the walk "
+                f"refuses rather than guessing which form the machine takes, "
+                f"which is the dynamic-svc case the svc-exit design leaves "
+                f"refused.")
+        if x16 == 1 and block["instrs"][-1] != pc:
+            return (
+                f"universal theorem: CFG decomposition unsupported for this "
+                f"function shape, and every instruction in its own code has a "
+                f"step, so the cause is not an unmodelled word: it is the "
+                f"exit svc at {pc:#x} in {name}'s own code, in the middle of "
+                f"a straight-line run.  x16 = 1 halts the machine, so a runs "
+                f"certificate -- which certifies a `some` successor -- cannot "
+                f"cross it; an exit svc belongs at the tail of the block a "
+                f"branch lands on, where the walk closes it with a halt "
+                f"certificate instead.")
+        if x16 != 1 and not _x0_reassigned_after_write(words, pc):
+            return (
+                f"universal theorem: CFG decomposition unsupported for this "
+                f"function shape, and every instruction in its own code has a "
+                f"step, so the cause is not an unmodelled word: it is the "
+                f"write svc at {pc:#x} in {name}'s own code.  SYS_write "
+                f"returns the byte count in x0 and the model does not model "
+                f"that value, so the fall-through must rewrite x0 before any "
+                f"instruction reads it; this one does not, or it crosses a "
+                f"branch the walk cannot see through.")
     return ("universal theorem: CFG decomposition unsupported for this function "
             "shape, and every instruction in its own code has a step, so the "
             "cause is not an unmodelled word: the walk returns None for a shape "
@@ -9065,6 +9509,15 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # weakening of every universal theorem in the corpus for nothing.
     _trap = _trap_terminating(blocks, words)
     _trap_stop = any(_is_trap_bl(b, words, _trap) for b in blocks)
+    # The blocks whose own last instruction is a known exit `svc`.  `_trap`
+    # also contains a `BL` block whose fall-through is one of these (the call
+    # returns into a halt), but such a block still has to be CERTIFIED, so the
+    # halt certificate is keyed by this narrower set.
+    _blocks_by_start = {b["start"]: b for b in blocks}
+    _halt_blocks = {b["start"] for b in blocks
+                    if _is_svc_exit(words, b["instrs"][-1],
+                                    frozenset(_blocks_by_start))}
+    _halt_info = {}
 
     def _trap_branch(b) -> bool:
         """A conditional block that reaches a bounded stop on either edge.
@@ -9155,6 +9608,15 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             _succ.append(_fall[_i0])
         _stack.extend(_j for _j in _succ if _j not in _reach_i)
     _reach = [blocks[i] for i in _order if i in _reach_i]
+    # A reachable block whose branch target is a halt block: that edge's
+    # `go_exit` is `none`, so the universal statement needs the `none => True`
+    # arm.  It is NOT `_trap_stop` (the run test is still a value run -- the
+    # stack-floor guard's trap is not taken under the concrete initial state),
+    # which is why the two questions are separate.
+    _trap_branch_reach = any(
+        any(t in _halt_blocks for t in b["targets"]) for b in _reach)
+    _branch_trap_targets = {t for b in _reach for t in b["targets"]
+                            if t in _halt_blocks}
     if fuel is not None:
         _acyclic = all(t > b["instrs"][-1] for b in _reach for t in b["targets"])
         # Loop-contract machinery (below, ~line 8286/10707) handles cyclic
@@ -9350,6 +9812,30 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             # below stays valid; the entry is never read for a block with no
             # visit.
             run_info[bi] = (None, None, "st", 0, [], False, 0, [])
+            continue
+        if (block["start"] in _branch_trap_targets
+                and fuel is None and frame is None):
+            # A DIRECT branch (the stack-floor guard is the common one) lands
+            # on a block whose own tail is an exit `svc`.  That edge has no
+            # returning state, so it needs a halt certificate rather than the
+            # `some` run certificate below, and `emit_block` closes it with
+            # one call.  Only direct branch targets are generated: a halt
+            # block reached as a `BL`'s fall-through is closed by the `bl`
+            # arm's own trap stop, and certifying it here would be a def
+            # nothing consumes.
+            hpart = _gen_halt_cert(
+                name, words, base, f"b{bi}_halt", block["instrs"], exit_pc,
+                code_name=code_name, sr_name=sr_name,
+                leaders=frozenset(_blocks_by_start))
+            if hpart is None:
+                return None
+            hdefs, hname, htotal = hpart
+            _halt_info[bi] = (hname, htotal)
+            run_info[bi] = (None, None, "st", 0, [], False, 0, [])
+            A(f"/-- Block {bi}: start={block['start']:#x} is a halt block "
+              f"({len(block['instrs'])} instructions, no successor) -/")
+            A(hdefs)
+            A("")
             continue
         if block["kind"] in ("seq", "ret"):
             run_pcs = block["instrs"]
@@ -9848,6 +10334,21 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         run_start = block["instrs"][0] if block["instrs"] else block["start"]
         m = re.match(r"^s_(\d+)$", state.strip())
         _pf = _pc_fact_lookup(state)
+        if bi in _halt_info and not is_contract:
+            # A block whose own tail is an exit `svc`: the edge that reached
+            # it has no successor, and the pre-pass emitted ONE halt
+            # certificate for the whole block.  The statement's `none` arm is
+            # `True` (`_trap_branch_reach`), so the run ending here is closed
+            # by rewriting with that certificate.
+            _hname, _htotal = _halt_info[bi]
+            _hp = _pf if _pf is not None else "by rfl"
+            A(f"{IND}have hpc_halt_{bi} : ({state}).pc = {run_start} := {_hp}")
+            A(f"{IND}have hnone_halt_{bi} : arm64_go_exit ({state}) {C} "
+              f"{EXIT} {fuel_n} = none := "
+              f"{_hname} ({state}) hpc_halt_{bi} {fuel_n} (by omega)")
+            A(f"{IND}rw [hnone_halt_{bi}]")
+            A(f"{IND}exact True.intro")
+            return
         if is_contract and bi == 0:
             A(f"{IND}have hpc_{bi} : ({state}).pc = {run_start} := {ctx['hpc']}")
         elif _pf is not None:
@@ -12000,7 +12501,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # trampoline outside the code slice, where `arm64_step` answers `none`).
     # For a function without such a path the run never halts early, and
     # `none => False` stays — the stronger claim, unchanged byte for byte.
-    _none_br = "True" if _trap_stop else "False"
+    _none_br = "True" if (_trap_stop or _trap_branch_reach) else "False"
     if not _via_prog:
         A(f"    (match arm64_exec_go_exit {init} {C} {exit_pc} ({FUEL0}) with")
         A(f"     | some s => {_prop}")
@@ -12250,6 +12751,10 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int,
     """
     blocks = []
     plan = _step_result_plan(code, limit)
+    end = len(code) if limit is None else limit
+    _words_list = [int.from_bytes(code[i:i + 4], "little")
+                   for i in range(0, end - end % 4, 4)]
+    word_by_pc = {base + i * 4: w for i, w in enumerate(_words_list)}
     for i in extra_idx or ():
         if i in plan:
             continue
@@ -12264,6 +12769,44 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int,
         plan[i] = (w, idx, rhs)
     for i, (w, idx, rhs) in sorted(plan.items()):
         pc = base + i * 4
+        if idx == 35:
+            # An `svc`'s successor is decided by x16, which is machine
+            # state, so one encoding cannot select one lemma.  The static
+            # reader answers from the `movz` directly before the `svc` --
+            # leaders are deliberately NOT consulted: the lemma is a
+            # conditional fact over ANY state satisfying its `hx`
+            # hypothesis, and it is the DISCHARGE of `hx` at the application
+            # site that owes provenance.  Static `1` gets the exit form
+            # (halts, no result); anything else, including a dynamic x16,
+            # gets the write form under the `hx` hypothesis.
+            prev = word_by_pc.get(pc - 4)
+            x16 = None
+            if prev is not None and (prev & 0xffe0001f) in (0xd2800010, 0x52800010):
+                x16 = (prev >> 5) & 0xffff
+            if x16 == 1:
+                hx_type = "arm64_reg 16 s = 1"
+                _lemma = "work_step_svc_exit"
+                concl = "none"
+            else:
+                hx_type = "\u00ac arm64_reg 16 s = 1"
+                _lemma = "work_step_svc_write"
+                concl = "some { s with pc := s.pc + 4 }"
+            # `work_step_svc_write` states its successor with the BOUND pc
+            # parameter while the right-hand side writes `s.pc` -- the same
+            # gap the ADRP comment below closes with `simpa [h]`, and the
+            # exit form has no pc in its conclusion, so it keeps `exact`.
+            _closer = (f"simpa [h] using ({_lemma} s {name}_code {pc} ({w} : UInt32) h hinsn hw hx)"
+                       if _lemma == "work_step_svc_write" else
+                       f"exact {_lemma} s {name}_code {pc} ({w} : UInt32) h hinsn hw hx")
+            blocks.append(
+                f"theorem {name}_sr_{i} (s : Arm64State) (h : s.pc = {pc})\n"
+                f"    (hx : {hx_type}) :\n"
+                f"  arm64_step s {name}_code = {concl} := by\n"
+                f"  have hinsn : arm64_read_insn {name}_code {pc} = ({w} : UInt32) "
+                f":= by native_decide\n"
+                f"  have hw : (({w} : UInt32) &&& 0xffe0001f) = 0xd4000001 := by native_decide\n"
+                f"  {_closer}")
+            continue
         if idx in _WORK_STEP_BY_IDX:
             lemma, tests = _WORK_STEP_BY_IDX[idx]
             pos = 0
