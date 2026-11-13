@@ -4068,6 +4068,7 @@ UNREGISTERED = {
     'test_runtime_alloc_census.py': _STANDALONE_TEST_REASON,
     'test_runtime_class_creation.py': _STANDALONE_TEST_REASON,
     'test_runtime_cstr_region.py': _STANDALONE_TEST_REASON,
+    'test_stdlib_dylib_ratchet.py': _STANDALONE_TEST_REASON,
     'test_str_slice_tuple_return.py': _STANDALONE_TEST_REASON,
     'test_suite_sweep_map_guard.py': _STANDALONE_TEST_REASON,
     'test_untyped_closure_str_return.py': _STANDALONE_TEST_REASON,

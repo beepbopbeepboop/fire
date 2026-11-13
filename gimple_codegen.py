@@ -2829,7 +2829,7 @@ class GimpleGen:
         self._scope_live_depth: list = []
         self._scope_live_fn: list = []
         self._current_filename: str = ""  # filename for #line directives
-        self._emitted_line_pairs: set[tuple[str, int]] = set()  # (filename, line) pairs already emitted
+        self._stmt_line_directive: str | None = None  # `#line` for the innermost statement being emitted (see emit_stmts.gen_stmt)
         # external_call["name", Ret](args) targets → (ret_ctype, [arg_ctypes]); first use wins.
         # Shared across imported modules so the root preamble can emit one extern proto each.
         self._external_protos: dict[str, tuple[str, list[str]]] = {}
@@ -2958,6 +2958,12 @@ class GimpleGen:
         # importer needs it to find the defining module's generator api for a
         # read through the accessor. Set beside `_imported_global_accessors`.
         self._imported_global_home: dict = {}
+        # Imported global name (as bound here) -> (the DEFINING module's
+        # qualified name, the global's name in that module). Keys are the
+        # `_module_globals` spelling, not the C-mangled one. Read by
+        # `_reconcile_imported_global_accessors` to take the definer's final
+        # C type once that module is compiled into this unit.
+        self._imported_global_module: dict = {}
         # Concrete imported structs used as parameter types here: their StructDefs
         # (so the layout typedef is emitted in dylib mode) and their names (so only
         # these — not local structs — get the authoritative struct-pointer param
@@ -3112,6 +3118,24 @@ class GimpleGen:
         # compile has its own scope stack), exactly like
         # _own_imported_func_home.
         self._import_scope_stack: list = []
+        # The whole-module body-import pre-scan (set up by gen_module before
+        # any function/closure is emitted; see
+        # gimple_gen_funcs._prescan_func_import_frames):
+        #
+        # * {container_name -> {bare_name -> module_qualifier}} for the
+        #   container's own lexical `from ... import` bindings. A lifted
+        #   closure is emitted before its enclosing function's body, so it
+        #   seeds its frame from here (the enclosing container's entry) to
+        #   keep a free function imported in the enclosing body visible.
+        # * {bare_name -> "module1|module2|..."} for EVERY lexical body
+        #   binding in this unit (`|`-joined rather than a list value so
+        #   the self-hosted backend keeps it a string). `_func_qualifier`'s
+        #   tier-3 fallback refuses an unbound reference whose only answer
+        #   would be the shared sibling registry if some other body binds
+        #   the same bare name to a DIFFERENT sibling
+        #   (IMPORT_ambiguous_sibling_function).
+        self._func_import_frames: dict = {}
+        self._lexical_func_import_homes: dict = {}
         # (sanitized_home_qualifier, as_referenced_name) -> [ctype, ...]:
         # the parameter ctypes a name's HOME MODULE says it has, snapshotted
         # at FromImportStmt registration time (gimple_module_gen's
@@ -4305,15 +4329,6 @@ class GimpleGen:
 
     # ── Statement generation ───────────────────────────────────────────────
 
-    # Statement kinds whose handler recurses into gen_stmt for a nested body
-    # (their own nested statements already get their own correct #line via
-    # that recursive call) — excluded from the re-stamping below, which would
-    # otherwise overwrite a nested statement's correct line with the outer
-    # compound statement's line.
-    _COMPOUND_STMT_KINDS = frozenset((
-        'IfStmt', 'WhileStmt', 'ForStmt', 'TryStmt', 'WithStmt',
-        'FunctionDef', 'ComptimeIfStmt', 'ComptimeForStmt', 'MatchStmt',
-    ))
 
     # ── Statement handlers (one per AST node type) ────────────────────────
 
@@ -4729,8 +4744,11 @@ class GimpleGen:
         return ctype in _SCALAR_CTYPE_SIZE
     def _overload_suffix(self, bare_name: str) -> str:
         return gfn._overload_suffix(self, bare_name)
-    def _note_own_func_home(self, bare_name: str, module_name: str, record_scope: bool=True) -> None:
-        return gfn._note_own_func_home(self, bare_name, module_name, record_scope)
+    def _note_own_func_home(self, bare_name: str, module_name: str,
+                            record_scope: bool=True,
+                            record_flat: bool=True) -> None:
+        return gfn._note_own_func_home(self, bare_name, module_name,
+                                       record_scope, record_flat)
     def _func_return_type_for_call(self, bare_name: str, default: str = 'int64_t') -> str:
         """`func_return_types[bare_name]`, unless the module this reference
         resolves to PUBLISHED its own answer for that definition, which wins.
@@ -4762,8 +4780,12 @@ class GimpleGen:
         return gfn._pop_import_scope(self)
     def _resolve_import_module_qualifier(self, mod: str) -> str:
         return gfn._resolve_import_module_qualifier(self, mod)
-    def _collect_body_import_bindings(self, node_list: list, scope: dict) -> None:
-        return gfn._collect_body_import_bindings(self, node_list, scope)
+    def _collect_body_import_bindings(self, node_list: list, scope: dict,
+                                      nested_defs: list | None = None) -> None:
+        return gfn._collect_body_import_bindings(self, node_list, scope,
+                                                 nested_defs)
+    def _prescan_func_import_frames(self, body: list, owner_name: str) -> None:
+        return gfn._prescan_func_import_frames(self, body, owner_name)
     def _func_qualifier(self, bare_name: str) -> str:
         return gfn._func_qualifier(self, bare_name)
     def _own_overlay_global_ctype(self, name: str) -> str | None:
@@ -5456,6 +5478,8 @@ class GimpleGen:
         return ginf._emit_stdlib_import_externs(self, stmts)
     def _emit_imported_global_accessors(self, stmts) -> None:
         return ginf._emit_imported_global_accessors(self, stmts)
+    def _reconcile_imported_global_accessors(self) -> None:
+        return ginf._reconcile_imported_global_accessors(self)
     def _new_bb(self) -> str:
         return ginf._new_bb(self)
     def _emit(self, line: str):
@@ -6741,16 +6765,18 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
                 except Exception: pass
     except Exception:
         pass
-    # Clear remaining backend_gimple/middle module-level accumulators (foreign
-    # callables, runtime callable words/values, module member libc, selfhost
-    # extra field cache, mojo elem ctype map) so they do not survive past the
-    # compile boundary (next step).
+    # Clear the module-level PER-COMPILE accumulators (foreign callables, the
+    # selfhost extra field cache) so they do not survive past the compile
+    # boundary. Not the module's fixed tables: `_MODULE_MEMBER_LIBC` (the libm
+    # members of an uncompiled module) and `_MOJO_ELEM_C` (Mojo element type
+    # to C type) are constants, and clearing them here made the first compile
+    # in a process empty them for every later one: `math.floor` then lowered to
+    # the uncompiled-module stub, a NotImplementedError at run time, depending
+    # on which tests ran before it.
     try:
         for _modname, _names in (
             ('mojo.backend_gimple.cpp_async', ('_FOREIGN_CALLABLES',)),
-            ('mojo.backend_gimple.emit_methods', ('_MODULE_MEMBER_LIBC',)),
             ('mojo.backend_gimple.emit_funcs', ('_SELFHOST_EXTRA_FIELD_CACHE',)),
-            ('mojo.middle.iter_factory', ('_MOJO_ELEM_C',)),
         ):
             import importlib as _il2
             _m = _il2.import_module(_modname)

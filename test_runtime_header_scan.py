@@ -519,7 +519,42 @@ def test_every_declaration_is_seen():
     # with them. The commit added the declarations without a rung — the drift
     # this ladder exists to catch — so the number is read off the call (810),
     # not added up.
-    for header, want in (('fire_runtime.h', 810),   # --fix writes the live figure
+    #
+    # 810 -> 821 (2026-11-12, the gate fix for `rthdrscan` at 203fd5ea3c):
+    # ELEVEN names, none of which bumped this ladder, so the job was red on
+    # 810 vs 821 (and already on 810 vs 817 at the gate commit, where seven of
+    # them had landed) and the prose copies of the census were stale with it.
+    # Read off the call (821), the whole delta, in four commits:
+    #   +6  `mojo_gen_cm_is_handle` / `mojo_gen_cm_enter` /
+    #       `mojo_gen_cm_exit_normal` / `mojo_gen_cm_exit_exc` and
+    #       `mojo_gen_throw_set` / `mojo_gen_throw_take` (b04aaf28c,
+    #       "codegen: lower contextmanager generators used in `with`") — the
+    #       handle test, the enter/exit entries, and the throw state an
+    #       exception escaping a `with` leaves for `__exit__` to inspect.
+    #   +1  `mojo_getattr_default` (37c877f7c, "codegen: a runtime-named
+    #       getattr in a compiled generator dispatches, not refuses") — the
+    #       three-argument `getattr(obj, name, default)` miss arm.
+    #   +1  `mojo_str_word_fresh` (75931501a, "codegen: str(int) and
+    #       String(int) results are owned") — the owned conversion whose one
+    #       use can be freed, rather than the borrowed transient.
+    #   +3  `mojo_dict_set_other_struct_repr` /
+    #       `mojo_dict_set_bytes_other_struct_repr` /
+    #       `mojo_dict_repr_other_slot` (46d36b17f, "dict keys and dict value
+    #       reprs: tuple keys read back, items pairs print, struct values per
+    #       slot") — a dict slot holding a struct type the dict's recorded repr
+    #       does not describe, in both key domains, and the walker's reader.
+    # Seven are word-shaped (the five generator entries, `getattr_default` and
+    # `str_word_fresh`) and four are box-shaped (`throw_take` and the three
+    # dict entries), which is the whole 418 -> 425 word and 502 -> 506 box
+    # movement in the quoted figures — `--fix` wrote those from this scan.
+    # 821 -> 822 (2026-11-12): ONE name, read off the call on the live header.
+    # `mojo_mul_word` (63dd14dda, "codegen: handle str-box ops in tagged
+    # generator words") — the `*`/str-repeat word picker. Word-shaped (two
+    # int64_t in, one int64_t out), so the word figure moves 425 -> 426 and
+    # the box figure stays at 506, total 931 -> 932. The declaration landed
+    # without a ladder rung, which this check exists to catch; `formal-doc-truth`
+    # and `rthdrscan` both went red on the same drift and were fixed in parallel.
+    for header, want in (('fire_runtime.h', 822),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already

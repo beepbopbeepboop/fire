@@ -20,7 +20,7 @@ import math
 import collections
 import builtins
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, Field, MISSING
 import fire_compiler as N
 
 # Operators handled by Interpreter._apply_compare_op — both eval_BinaryOp
@@ -35,6 +35,69 @@ _COMPARE_OPS = {'==', '!=', '<', '>', '<=', '>=', 'in', 'not in', 'is', 'is not'
 # (see Interpreter._generator_expression). Dunder-ish to stay clear of any
 # name a real program would use.
 _GENEXP_ITER_NAME = '__mojo_genexp_iter__'
+
+
+# `@dataclass` / `@dataclasses.dataclass` is a COMPILE-TIME TRANSFORM, not a
+# runtime wrapper — the same argument `formal/dataclass_transform.py` records
+# for the compiled backends. CPython's `dataclasses.dataclass` rewrites a REAL
+# Python class: it reads the class's `__qualname__`, `__module__`, `__mro__`
+# and `__annotations__` and generates `__init__`/`__eq__`/`__repr__` methods.
+# This interpreter's classes are `MojoClass` objects, not Python classes, so
+# handing one to the real decorator raised on its first `__qualname__` read —
+# and executing `fire_compiler.py`, whose 65 AST dataclasses are decorated this
+# way, died at class-definition time (`interp-tokenizer-oracle` never reached
+# `py_tokenize` at all).
+#
+# Its ONE observable half on a struct — construct by filling the declared
+# fields in declaration order with their defaults — is what
+# `MojoClass.__call__` already does, so applying it would be a no-op even if it
+# succeeded. A class that really IS a Python class (execute_StructDef's
+# `types.new_class` path) still gets the decorator applied for real; see the
+# `isinstance(bound, MojoClass)` guard in `_apply_function_decorators`.
+_DATACLASS_DECORATORS = frozenset({'dataclass', 'dataclasses.dataclass'})
+
+
+def _unwrap_dataclass_field(value):
+    """The default a declared field takes, given the value its initializer
+    evaluated to. `field(default=...)` and `field(default_factory=...)` are
+    calls that return a `dataclasses.Field`; the constructor binds the
+    wrapped default (or the factory's result), never the Field object.
+    Any other value passes through unchanged. A Field with neither a
+    `default` nor a `default_factory` is a required field with no default,
+    which binds None, as a bare `x: int` does."""
+    if not isinstance(value, Field):
+        return value
+    if value.default is not MISSING:
+        return value.default
+    if value.default_factory is not MISSING:
+        return value.default_factory()
+    return None
+
+
+def _decorator_dotted_name(node):
+    """The dotted SOURCE spelling of a decorator node (`dataclass`,
+    `dataclasses.dataclass`), or None for a shape this cannot spell.
+
+    A bare decorator is stored as a plain string; one with an argument list is
+    a `CallExpr` whose `func` is that dotted name's nested
+    `IdentExpr`/`MemberExpr` (fire_compiler's `_dotted_name_expr`), and a
+    `@spec(...)` is a `DecoratorArgs` that keeps the dotted name itself.
+    Needed because matching only the bare string misses every dotted or
+    parameterised spelling of a compile-time decorator."""
+    if isinstance(node, str):
+        return node
+    if isinstance(node, N.DecoratorArgs):
+        return node.name
+    if isinstance(node, N.CallExpr):
+        return _decorator_dotted_name(node.func)
+    if isinstance(node, N.IdentExpr):
+        return node.name
+    if isinstance(node, N.MemberExpr):
+        base = _decorator_dotted_name(node.obj)
+        if base is None:
+            return None
+        return base + '.' + node.member
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -2644,6 +2707,7 @@ class MojoClass:
                         setattr(instance, f.name, container_default)
                         continue
                 value = self.interpreter.eval_expr(f.value) if f.value is not None else None
+                value = _unwrap_dataclass_field(value)
                 value = self.interpreter._coerce_to_declared_type(value, getattr(f, 'type_ann', None))
                 setattr(instance, f.name, value)
             elif self.interpreter._is_instance(f, 'AssignStmt'):
@@ -2652,10 +2716,13 @@ class MojoClass:
                 # raised "'AssignStmt' object has no attribute 'targets'"
                 # on any instantiation of a class with a bare `NAME = value`
                 # class-body attribute (e.g. `class Foo: count = 0`).
+                # `name: Type = field(default=...)` lands here (an AssignStmt
+                # carrying `type_ann`, not a VarDecl), so the dataclass Field
+                # unwrap applies to it too.
                 value = self.interpreter.eval_expr(f.value) if f.value is not None else None
                 target = f.target
                 if self.interpreter._is_instance(target, 'IdentExpr'):
-                    setattr(instance, target.name, value)
+                    setattr(instance, target.name, _unwrap_dataclass_field(value))
         init = self.methods.get('__init__')
         if init is not None:
             interp = self.interpreter
@@ -5345,6 +5412,12 @@ class Interpreter:
         """
         decs = getattr(node, 'decorators', None) or []
         for d in reversed(decs):
+            # A dataclass transform applied to one of THIS interpreter's
+            # classes (see _DATACLASS_DECORATORS): skip it rather than hand a
+            # MojoClass to CPython's dataclasses, which cannot process one.
+            if isinstance(bound, MojoClass) \
+                    and _decorator_dotted_name(d) in _DATACLASS_DECORATORS:
+                continue
             if isinstance(d, str):
                 if d in self._COMPILE_TIME_DECORATORS:
                     continue
