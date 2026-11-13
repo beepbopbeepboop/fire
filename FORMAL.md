@@ -32,7 +32,7 @@ number that disagrees is stale, not wrong; the name is the claim.
 ## 1. The thesis
 
 `fire.py` has two machine-code backends. The gimple backend emits C, links
-`runtime/fire_runtime.c` (781 KB) plus the other runtime translation units, and
+`runtime/fire_runtime.c` (783 KB) plus the other runtime translation units, and
 hands the result to a system linker. The formal backend emits Mach-O or ELF
 itself, links **libSystem, and — since phase 2 landed — the per-architecture
 runtime dylib when and only when the image names something in it**, and carries
@@ -97,7 +97,7 @@ not just `fire_runtime.h`:
 | **word in, word out** | **426** | every parameter and the return value is one 64-bit word |
 | not word-shaped | **506** | a box crosses the boundary — in an argument, in the return, or both |
 
-So **426 of 932 (45.6%)** is the reachable-surface ceiling. The previous
+So **426 of 932 (45.7%)** is the reachable-surface ceiling. The previous
 revision of this section published 418 of 920 (45.4%), and before that 402 of
 863 (46.6%) and 389 of 455 (77%) — the word *share* has been stable across recent censuses. Two headers have been added
 since (`fire_coro.h`, `fire_metal.h`), `fire_runtime.h` alone grew by 115
