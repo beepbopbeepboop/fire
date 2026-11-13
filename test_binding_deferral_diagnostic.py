@@ -18,6 +18,12 @@ Three things had to hold for the failing binding:
   whichever path instantiates it. The in-TU elaboration queue used to leak the
   raw exception, while an explicit `Struct[...]` in a body was wrapped.
 * A satisfied binding of the same shape compiles with no diagnostic.
+
+Part 2 (modular parity): only the error that failed the binding is reported,
+with no deferred-constraint noise. The `n == 0` binding is provably false
+(`violated constraint`); the `n == 1` binding is not provably false (any
+"lacking evidence" for the conditional `T: Copyable` requirement is deferred
+and must not surface as noise on a violated binding).
 """
 
 import os
@@ -126,9 +132,32 @@ def test_satisfied_generic_binding_compiles():
     assert text is None, f'a satisfied binding was refused: {text}'
 
 
+def test_failed_binding_reports_only_the_failing_error_no_deferred_noise():
+    # n == 0 is provably false (violated constraint) even though CondCopyable[U]
+    # is only conditionally Copyable for a generic U. The diagnostic must report
+    # only the error that failed the binding, with no deferred/lacking-evidence
+    # noise about the conditional Copyable requirement.
+    src = _HEAD + (
+        'def failed_binding[U: Movable & Deinitable]():\n'
+        '    var a = NeedsCopyablePos[CondCopyable[U], 0]()\n'
+        '\n'
+        '\n'
+        'def main():\n'
+        '    failed_binding[Int]()\n'
+    )
+    text = _driver_compile(src)
+    assert text is not None, 'a failed binding compiled'
+    assert "invalid instantiation of 'NeedsCopyablePos': violated constraint" in text, text
+    assert "requirement 'n > 0' is not satisfied" in text, text
+    assert 'lacking evidence' not in text, text
+    assert 'invalid bindings in signature' not in text, text
+    assert text.count('error:') == 1, f'more than one diagnostic: {text}'
+
+
 if __name__ == '__main__':
     test_where_clause_text_is_the_clause_not_the_base_list()
     test_generic_failed_binding_reports_violated_constraint()
     test_explicit_failed_binding_uses_the_same_wording()
     test_satisfied_generic_binding_compiles()
+    test_failed_binding_reports_only_the_failing_error_no_deferred_noise()
     print('ok')
