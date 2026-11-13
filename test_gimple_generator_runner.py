@@ -12354,10 +12354,67 @@ def main():
 main()
 """, "1\n7\n")
 
+    _test_method_returns_generator_via_subclass_inchain()
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)
     print(f"\n{_PASS} passed, {_FAIL} failed")
+
+
+def _test_method_returns_generator_via_subclass_inchain():
+    """In-chain import: a base method returns cls.gen_method(...) or None
+    (polymorphic generator method on subclasses) and a caller unpacks the
+    result. The imported module must compile without 'no known generator API'."""
+    global _PASS, _FAIL
+    name = "method_returns_generator_via_subclass_inchain"
+    try:
+        wd = tempfile.mkdtemp(prefix='mojo_gen_mrg_')
+        os.makedirs(os.path.join(wd, 'pkg', 'parser'), exist_ok=True)
+        files = {
+            'pkg/__init__.py': '',
+            'pkg/parser/__init__.py': 'from ..info import Sub\n',
+            'pkg/info.py': (
+                "class Base:\n"
+                "    @classmethod\n"
+                "    def _format_data(cls, data):\n"
+                "        raise NotImplementedError\n"
+                "    @classmethod\n"
+                "    def _render_item(cls, data):\n"
+                "        if data is None:\n"
+                "            return None\n"
+                "        return cls._format_data(data)\n"
+                "    @classmethod\n"
+                "    def _row(cls):\n"
+                "        rendered = cls._render_item([1])\n"
+                "        rendered, = rendered\n"
+                "        return rendered\n"
+                "\n"
+                "class Sub(Base):\n"
+                "    @classmethod\n"
+                "    def _format_data(cls, data):\n"
+                "        for x in data:\n"
+                "            yield str(x)\n"
+            ),
+        }
+        for rel, src in files.items():
+            p = os.path.join(wd, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, 'w') as f:
+                f.write(src)
+        entry = os.path.join(wd, 'pkg', 'parser', '__init__.py')
+        with open(entry) as f:
+            entry_src = f.read()
+        c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
+            entry_src, do_imports=True, filename=entry)
+        if '# ERROR: compiling imported module' in c_code:
+            raise RuntimeError('imported module compile error:\n' + '\n'.join(
+                l for l in c_code.splitlines() if '# ERROR' in l))
+        print(f"PASS  {name}")
+        _PASS += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
 
 
 # ONE entry point. This file used to carry TWO `if __name__ == '__main__':`
