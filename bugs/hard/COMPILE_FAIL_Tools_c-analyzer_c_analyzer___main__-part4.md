@@ -1,3 +1,5 @@
+SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4-part1, COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4-part2, COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4-part3
+
 # COMPILE_FAIL: c_analyzer/__main__.py part 4 — `yield from` a captured nested generator inside a coroutine generator
 
 Parent: `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md` (SPLIT)
