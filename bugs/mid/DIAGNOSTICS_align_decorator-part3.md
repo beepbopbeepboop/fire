@@ -6,20 +6,16 @@ Split from `bugs/hard/DIAGNOSTICS_align_decorator.md` (umbrella step 6 of
 expression shape and the original integration acceptance test.
 
 ## Class
-mid — the work is not a one-line validator change: the existing call hook
-(`emit_infra.py::_comptime_call_hook`) resolves only *imported* functions, so
-the parse/instantiate validation must gain a module-local source lookup and
-carry the folded call value into the same error path. Bounded, but it crosses
-the decorator validator, elaboration and the comptime evaluator, so not easy.
+easy
 
 ## Prerequisites / depends on
-Part 1 (parsing/storage of the align expression on StructDef) and part 2
-(parametric/arithmetic power-of-two validation with diagnostics propagated at
-instantiation) are implemented; the part-2 bug doc was deleted with its fix.
-Part 1's value rule is implemented: `fire_compiler.py::_validate_align_decorators`
+Part 1 (parsing/storage of the align expression on StructDef) and
+`bugs/mid/DIAGNOSTICS_align_decorator-part2.md` (parsing/storage and
+power-of-two validation with diagnostics propagated at instantiation). Part 1's
+value rule is already implemented: `fire_compiler.py::_validate_align_decorators`
 validates a constant `@align(...)` argument at parse time (regression test
-`test_align_decorator_literal_diagnostic.py`). This part must reuse parts 1/2's
-validator rather than add a third one.
+`test_align_decorator_literal_diagnostic.py`). This part must reuse
+parts 1/2's validator rather than add a third one.
 
 ## Goal
 Add support for evaluating a comptime function call in `@align(...)` (so the
@@ -75,24 +71,13 @@ able to fold it without a call hook; this part supplies that capability.
 - Layout is out of scope: a valid `@align` value continues to compile without
   applying alignment to emitted struct/alloca layout (validation only).
 
-## Acceptance
-- A non-power-of-2 `@align(calculate_illegal_alignment(alignment))` instantiated
-  at `[23]` fails with `function instantiation failed` and
-  `struct alignment must be a positive power of 2, got 69`; valid results compile.
-
-## Done when
-- Quick test: `test_align_decorator_parametric_diagnostic.py`, run as
-  `python3 test_align_decorator_parametric_diagnostic.py` (prints `ok`; measured
-  2.3 s, 0.1 GB on 2026-11-12 before any change). The call-shape cases below are
-  added as new `test_call_*` functions in that existing file — NOT a second
-  `test_align_decorator_diagnostic.py`, which would duplicate the parametric
-  test's `_compile_full` / `_assert_align_error` helpers.
-- The file is extended, not replaced: the existing `test_parametric_*`,
-  `test_module_alias_cases` and `test_unknown_align_name` must keep passing.
-
-## Regression cases
-- Compile source through the same `_compile_full` helper already in that file
-  (`gimple_codegen.compile_to_gimple(src, do_imports=True, filename=<path>)`).
+## Acceptance / regression test
+- Create `test_align_decorator_diagnostic.py` next to existing diagnostics
+  tests (e.g. beside `test_comptime_dtype_diagnostic.py`) using the
+  `_compile_full` pattern: write source under `.tmp/` and call
+  `gimple_codegen.compile_to_gimple(src, do_imports=True, filename=<path>)`.
+- `python3 test_align_decorator_diagnostic.py` is the narrow verification for
+  this bug and passes once parts 1-3 are implemented.
 - Cover (matching observable expectations where applicable to this compiler's
   diagnostic wording):
   - a valid power-of-two alignment accepted (e.g. `@align(4)` / `@align(8)`),
@@ -119,13 +104,5 @@ able to fold it without a call hook; this part supplies that capability.
   landed with the branch side of the merge (`_validate_align_decorators` in
   `fire_compiler.py`; its part-1 doc was removed with the fix). The
   constant-literal regression `test_align_decorator_literal_diagnostic.py`
-  landed with it.
-- **2026-11-12 (replan):** the parametric (part-2) cases already live in
-  `test_align_decorator_parametric_diagnostic.py` and pass (`ok`). What is still
-  missing is the comptime call shape (`calculate_illegal_alignment(alignment)`),
-  so this part's test additions go into that file. Class raised easy -> mid
-  (see `## Class`).
-- **Overlap (2026-11-12):** branch `work/bug-mid-diagnostics-align-decorator-part-3`
-  has commit `b3f363cf9`, not yet on master, which implements this call shape,
-  adds `test_align_decorator_diagnostic.py` and deletes this doc. Whichever lands
-  first, the other must be reconciled: do not land both implementations.
+  landed with it; this part's parametric/call integration test
+  `test_align_decorator_diagnostic.py` is a separate file and is still to add.

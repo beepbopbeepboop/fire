@@ -1894,7 +1894,6 @@ def _register_link_imports(gen, stmts: list) -> list:
                         # available: on-demand elaboration for a generic /
                         # overloaded `def`, whole-module inlining for
                         # anything else. See `_classify_unresolved_export`.
-                        _found = False
                         if source:
                             try:
                                 msrc = open(source).read()
@@ -1926,14 +1925,6 @@ def _register_link_imports(gen, stmts: list) -> list:
                                                 _sibling, _smsrc):
                                             _found = True
                                             break
-                        # Link mode: no dylib for a local module. Inline the
-                        # module so its definitions (including global accessors)
-                        # land in this TU. This is the route that `_link_inline_modules`
-                        # already uses for functions and structs — it compiles the
-                        # sibling module into this translation unit so its globals
-                        # and their accessors are available on the link line.
-                        if not _found and not from_reflection and source and source.endswith('.mojo'):
-                            gen._link_inline_modules.add(stmt.module)
                         continue
                     if sym in seen:
                         continue
@@ -3569,12 +3560,7 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
         _emsg = str(e)
         if isinstance(e, RuntimeError) and (
                 'constraint failed' in _emsg
-                or 'comptime assertion failed' in _emsg
-                or ('function instantiation failed' in _emsg
-                    and 'struct alignment must be a positive power of 2' in _emsg)
-                or ('function instantiation failed' in _emsg
-                    and 'use of unknown declaration' in _emsg
-                    and '@align' in _emsg)):
+                or 'comptime assertion failed' in _emsg):
             raise
         # A `where` clause of the struct that is provably false for these type
         # args is a real diagnostic (modular: `error: violated constraint`),
@@ -3625,12 +3611,7 @@ def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
             _emsg = str(e)
             if isinstance(e, RuntimeError) and (
                     'constraint failed' in _emsg
-                    or 'comptime assertion failed' in _emsg
-                    or ('function instantiation failed' in _emsg
-                        and 'struct alignment must be a positive power of 2' in _emsg)
-                    or ('function instantiation failed' in _emsg
-                        and 'use of unknown declaration' in _emsg
-                        and '@align' in _emsg)):
+                    or 'comptime assertion failed' in _emsg):
                 raise
             gimple_ctypes._debug_note('inferred generic struct elaboration failed')
             info = None

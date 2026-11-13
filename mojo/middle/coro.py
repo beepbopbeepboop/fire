@@ -4630,13 +4630,6 @@ def _attribute_to_def(prologue: list, fn) -> list:
     with its statement's `#line`, and a line-less statement emits none, which
     left the first lines of every `__mgco_<name>_body` numbered from whatever
     directive preceded the function. They take the generator's own line.
-
-    The stamp is an in-place AST write, so each statement's entry is dropped
-    from the shared `_walk_ast` memo as it is written — the same contract
-    every other write site in this file upholds (test_gimple.py's census
-    `every_ast_mutation_site_invalidates_the_walk_memo` polices this site;
-    `attribute_to_def_write_invalidates_the_walk_memo` is its behavioural
-    pin).
     """
     for stmt in prologue:
         stmt.line = fn.line

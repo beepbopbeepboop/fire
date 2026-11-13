@@ -92,9 +92,9 @@ is reusable. Scope the arm to base `SIMD`: the `Scalar[...]` spelling is
 part 5's.
 
 Sibling coordination:
-`bugs/mid/CODEGEN_simd_and_array_values_erase_to_int64-part5.md` lands the
-same rule for the `Scalar[X]` / `SIMD[X, 1]` spellings in
-`mojo/middle/infra_infer.py::_resolve_type`. Whichever lands first, there
-must be ONE dtype-spelling table, not two: if part 5's is already in, the
-`_mojo_type` arm should resolve the dtype through it; if this arm lands
-first, part 5 may delegate to its table.
+part 5 landed the same rule for the `Scalar[X]` / `SIMD[X, 1]` spellings in
+`mojo/middle/infra_infer.py::_resolve_type` (the former part-5 doc is
+DELETED, fixed). Whichever lands first, there must be ONE dtype-spelling
+table, not two: if part 5's is already in, the `_mojo_type` arm should
+resolve the dtype through it; if this arm lands first, part 5 may delegate
+to its table.

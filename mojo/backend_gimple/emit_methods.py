@@ -4659,70 +4659,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         and isinstance(node.args[0], gimple_ctypes.FloatLiteral)
     )
 
-    # ── A TAGGED word as a METHOD receiver ───────────────────────────────
-    # The result of a function whose arms mix a float with a list/tuple/str/
-    # None is carried as the erased `int64_t` word (`_tagged_word_vals`), so
-    # its kind is a runtime fact. Dispatching on the static C type took the
-    # integer fallbacks: `.append`/`.extend`/... cast the BOX to `MojoList *`
-    # and wrote through it (SIGSEGV), and `.count`/`.index` cast it to
-    # `char *` and read the box header as text (answered 0 / -1). This is the
-    # same gap the subscript closed with `mojo_word_subscript` and `len` with
-    # `mojo_len_word`; the member call gets the same runtime kind dispatch.
-    # A list word goes to the existing list arm, a str word to the existing
-    # str arm, and any other kind raises instead of reading the box as a
-    # container (CPython raises AttributeError; this runtime has one raiser
-    # for a bad receiver, and the text is exact about the fact).
-    if ot in ('int', 'int64_t') and ov in getattr(gen, '_tagged_word_vals', ()):
-        _tw = gen._new_temp('int64_t')
-        _twl = gen._ensure_local(ot, ov)
-        if ot == 'int64_t':
-            gen._emit(f"  {_tw} = {_twl};")
-        else:
-            gen._emit(f"  {_tw} = (int64_t){_twl};")
-        # List-only names: the only container kind that has them here is a
-        # list (the return widening refuses a dict/set/struct pointer arm),
-        # so `mojo_word_as_list` is the whole dispatch and raises otherwise.
-        if method in ('append', 'extend', 'insert', 'pop', 'sort',
-                      'reverse', 'copy', 'remove', 'clear'):
-            _lp = gen._call_expr('MojoList *', 'mojo_word_as_list',
-                                 [('int64_t', _tw)])
-            return gen._lower_list_method(_lp, method, node.args, node.kwargs)
-        # Names that are a real list method AND a real str method: the two
-        # arms produce the same `int64_t`, so pick by the word's kind at run
-        # time. The str arm is what raises for a float/int/None word.
-        if method in ('count', 'index') and len(node.args) == 1 \
-                and not getattr(node, 'kwargs', None):
-            _bb_list = gen._new_bb()
-            _bb_str = gen._new_bb()
-            _bb_after = gen._new_bb()
-            _uw = gen._call_expr('int64_t', 'mojo_box_word', [('int64_t', _tw)])
-            _is_list = gen._call_expr('int', 'mojo_is_registered_list',
-                                      [('int64_t', _uw)])
-            gen._emit(f"  if ({_is_list}) goto {_bb_list}; else goto {_bb_str};")
-            _tw_res = gen._new_temp('int64_t')
-            gen._emit_label(_bb_list)
-            _lp = gen._call_expr('MojoList *', 'mojo_word_as_list',
-                                 [('int64_t', _tw)])
-            _lt, _lv = gen._lower_list_method(_lp, method, node.args)
-            gen._emit(f"  {_tw_res} = {_lv};")
-            gen._emit(f"  goto {_bb_after};")
-            gen._emit_label(_bb_str)
-            _tx = gen._call_expr('char *', 'mojo_word_as_text', [('int64_t', _tw)])
-            _st, _sv = gen._lower_str_method(_tx, method, node.args)
-            gen._emit(f"  {_tw_res} = {_sv};")
-            gen._emit_label(_bb_after)
-            return 'int64_t', _tw_res
-        # str-only names: unbox the kind-'p' text pointer (or a bare string)
-        # and keep the existing str lowering, which is already total over the
-        # rest of the tag's value model (a tuple of affixes, a word needle).
-        if method in ('startswith', 'endswith', 'strip', 'lstrip', 'rstrip',
-                      'split', 'join', 'replace', 'find', 'lower', 'upper',
-                      'format', 'encode', 'rfind', 'rindex'):
-            _tx = gen._call_expr('char *', 'mojo_word_as_text',
-                                 [('int64_t', _tw)])
-            return gen._lower_str_method(_tx, method, node.args,
-                                         node.kwargs)
-
     # ── Opaque int → coerce to appropriate container type FIRST ──────────
     # Must happen before container-type checks so the casted type is seen below.
     if ot in ('int', 'int64_t') and not _get_float_timeout and method in (
@@ -5600,6 +5536,24 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 return 'MojoList *', t
             except Exception:
                 pass
+        # A FLOAT scalar's bit accessors return an integer (the bit pattern),
+        # not the receiver's float type. This must win once width-1 SIMD
+        # receivers are typed float/double (part 5), otherwise bitwise ops on
+        # the result become `float & float` in the generated C. The stdlib
+        # calls these without extra arguments in the affected paths.
+        if method in ('to_bits', '_to_bits_signed') and ot in ('float', 'double') and not node.args:
+            if ot == 'double':
+                t = gen._new_temp('int64_t')
+                gen._emit(f'  {t} = mojo_double_to_bits ({ov_local});')
+                return 'int64_t', t
+            # float: produce an integer bit pattern. Widen to double and use the
+            # available runtime helper so the result type is integer-valued in the
+            # generated C (sufficient for typing/compile of bitwise uses).
+            _d = gen._new_temp('double')
+            gen._emit(f'  {_d} = (double){ov_local};')
+            t = gen._new_temp('int64_t')
+            gen._emit(f'  {t} = mojo_double_to_bits ({_d});')
+            return 'int64_t', t
         # Other scalar methods: pass the receiver through unchanged
         for ea in node.args[1:]: gen.lower_expr(ea)
         return gen._stub_result(ot, ov_local, f'{ot}.{method}() stubbed')
