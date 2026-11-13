@@ -42,3 +42,14 @@ Register it in `tools/suite.py` next to the other diagnostic regressions —
 `where-clause-call-site-diagnostic` (line ~4184) — and add that name to the
 bucket list that holds those diagnostic tests (`check`), then run
 `python3 test_suite.py` to confirm the estate row is gone.
+
+## Done when
+
+The focused pin passes:
+
+    python3 -c "import test_suite as t; t.test_the_trait_requirement_evidence_diagnostic_is_gated()"
+    # PASS  the gate: trait-requirement-evidence-diagnostic runs on every gate
+
+and `python3 test_suite.py` no longer names
+`test_trait_requirement_evidence_diagnostic.py` in its `the estate: every test
+file is run by something` row.

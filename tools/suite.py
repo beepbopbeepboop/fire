@@ -4185,6 +4185,18 @@ test('unpacking-in-comprehensions', [PY, 'test_unpacking_in_comprehensions.py'],
      desc='registered by the estate audit (every test file runs)')
 test('where-clause-call-site-diagnostic', [PY, 'test_where_clause_call_site_diagnostic.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
+# Landed with 06ea5b0ef ("compiler: enforce trait method requirement
+# evidence (part 2)") and registered nowhere until
+# bug:SUITE_trait_requirement_evidence_unregistered. Cheap (tiny, 0.1 GB
+# measured, sub-second, drives `compile_to_gimple` in-process only) and it
+# pins a compiler diagnostic, so it runs in the everyday loop rather than in
+# `regressions`; `test_suite.py`'s
+# test_the_trait_requirement_evidence_diagnostic_is_gated pins that.
+test('trait-requirement-evidence-diagnostic', [PY, 'test_trait_requirement_evidence_diagnostic.py'], mem='tiny',
+     desc='trait method requirement evidence at use sites (part 2): '
+          'conditional methods, mismatched constraints, conditional defaults '
+          'and the MOCO-4214/4400 shapes are refused with the modular '
+          'diagnostic, and the positive controls still compile')
 test('dead-worker-state', [PY, 'tools/test_dead_worker_state.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 test('done-ratchet-landing', [PY, 'tools/test_done_ratchet_landing.py'], mem='tiny',
@@ -4381,7 +4393,7 @@ test('orch-verify-lock', [PY, 'tools/test_verify_lock.py'], mem='tiny',
 
 BUCKETS = {
     # The everyday green gate — parallel, no exclusive members, minutes.
-    'check': ['ambiguous-import-diagnostic', 'attr-error-messages', 'backtick-import-literals', 'bootstrap-hotspots', 'compile-linked-result', 'comptime-assert-diagnostic', 'comptime-dtype-diagnostic', 'constrained-diagnostic', 'dict-none-key', 'floatliteral-special', 'foreign-callable-lambda-default', 'implicit-string-concat', 'import-missing-module-diagnostic', 'lexer-double-slash-operator', 'linked-list-link-symbols', 'linked-list-struct-element-step4', 'linked-list-struct-element-step4b', 'linked-list-struct-element-step4c', 'module-loader-stdlib', 'mro', 'out-param-return-type-diagnostic', 'parser-param-for', 'python315-free-threaded-abi', 'python315-frozendict', 'python315-sentinel', 'qualified-member-no-leak', 'reg-formal-ast-bridge-two-arg', 'selfhost-debug-flag', 'sys-utf8-default-encoding', 'tuple-enumerate-var-refinement', 'unpacking-in-comprehensions', 'where-clause-call-site-diagnostic', 'modular', 'enum-desugar', 'linked-list-hash-step1', 'gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
+    'check': ['ambiguous-import-diagnostic', 'attr-error-messages', 'backtick-import-literals', 'bootstrap-hotspots', 'compile-linked-result', 'comptime-assert-diagnostic', 'comptime-dtype-diagnostic', 'constrained-diagnostic', 'dict-none-key', 'floatliteral-special', 'foreign-callable-lambda-default', 'implicit-string-concat', 'import-missing-module-diagnostic', 'lexer-double-slash-operator', 'linked-list-link-symbols', 'linked-list-struct-element-step4', 'linked-list-struct-element-step4b', 'linked-list-struct-element-step4c', 'module-loader-stdlib', 'mro', 'out-param-return-type-diagnostic', 'parser-param-for', 'python315-free-threaded-abi', 'python315-frozendict', 'python315-sentinel', 'qualified-member-no-leak', 'reg-formal-ast-bridge-two-arg', 'selfhost-debug-flag', 'sys-utf8-default-encoding', 'trait-requirement-evidence-diagnostic', 'tuple-enumerate-var-refinement', 'unpacking-in-comprehensions', 'where-clause-call-site-diagnostic', 'modular', 'enum-desugar', 'linked-list-hash-step1', 'gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
 
               'interp-tokenizer-oracle',
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
