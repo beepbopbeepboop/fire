@@ -9098,6 +9098,109 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         except Exception:
             _call_txt = gen._cpp_expr(s.iterable)
         _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
+        # If this is a call through a tabled foreign callable with known iterator
+        # element type (e.g. csv.reader), bind the loop target accordingly.
+        _elem_ctype = None
+        _is_tabled_callable = False
+        try:
+            if (isinstance(s.iterable, gimple_ctypes.CallExpr)
+                    and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)):
+                _fcname = s.iterable.func.name
+                import mojo.middle.types as _mtypes_mod
+                _foreign = getattr(_mtypes_mod, '_FOREIGN_CALLABLES', {}) or {}
+                _foreign_iter = getattr(_mtypes_mod, '_FOREIGN_CALLABLE_ITER_ELEM', {}) or {}
+                _get_qualified_name = getattr(_mtypes_mod, '_get_qualified_name', None)
+                _pd = None
+                _pdefaults = getattr(gen, '_func_param_defaults', None) or {}
+                if isinstance(_pdefaults, dict):
+                    _cand = _pdefaults.get(_fcname)
+                    if _cand is not None and not isinstance(_cand, list):
+                        _pd = _cand
+                    else:
+                        for _k, _v in _pdefaults.items():
+                            if isinstance(_v, list):
+                                for _pair in _v:
+                                    try:
+                                        if _pair and _pair[0] == _fcname:
+                                            _pd = _pair[1]; break
+                                    except Exception:
+                                        pass
+                            if _pd is not None:
+                                break
+                if _pd is None and getattr(gen, '_func_node', None) is not None:
+                    _fnd = getattr(gen._func_node, 'param_defaults', None) or {}
+                    if isinstance(_fnd, dict):
+                        _pd = _fnd.get(_fcname)
+                _q = None
+                if _pd is not None and _get_qualified_name is not None:
+                    try:
+                        _q = _get_qualified_name(_pd)
+                    except Exception:
+                        _q = None
+                if (_q and (_q in _foreign or _q in _foreign_iter)) or (_fcname in _foreign or _fcname in _foreign_iter):
+                    _is_tabled_callable = True
+                if _q and _q in _foreign_iter:
+                    _elem_ctype = _foreign_iter[_q]
+                if _elem_ctype is None and _fcname in _foreign_iter:
+                    _elem_ctype = _foreign_iter[_fcname]
+        except Exception:
+            _elem_ctype = None
+        # An untabled callable-valued parameter/local must still be refused by
+        # name rather than miscompiled/silently mishandled. Do not refuse when
+        # the param resolves to a known/tabled foreign callable, or to a known
+        # compiled generator/async function (those have their own lowering).
+        _is_known_generator_callee = False
+        try:
+            if _pd is not None:
+                _pdname = None
+                if isinstance(_pd, gimple_ctypes.IdentExpr):
+                    _pdname = _pd.name
+                elif isinstance(_pd, gimple_ctypes.AttributeExpr):
+                    _pdname = f"{getattr(getattr(_pd, 'obj', None), 'name', '')}.{getattr(_pd, 'attr', '')}".strip('.')
+                if _pdname and (_pdname in getattr(gen, '_generator_api', {})
+                                or _pdname in getattr(gen, '_async_api', {})
+                                or _pdname.split('.')[-1] in getattr(gen, '_generator_api', {})
+                                or _pdname.split('.')[-1] in getattr(gen, '_async_api', {})):
+                    _is_known_generator_callee = True
+            # Direct name fallback
+            if (s.iterable.func.name in getattr(gen, '_generator_api', {})
+                    or s.iterable.func.name in getattr(gen, '_async_api', {})):
+                _is_known_generator_callee = True
+        except Exception:
+            pass
+        if (isinstance(s.iterable, gimple_ctypes.CallExpr)
+                and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
+                and s.iterable.func.name in getattr(gen, '_cpp_param_names', ())
+                and not _is_tabled_callable
+                and not _is_known_generator_callee):
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                f"a `for` over a call through the callable-valued local/parameter "
+                f"'{s.iterable.func.name}(...)' is not supported in a compiled "
+                f"generator/coroutine body")
+        if _elem_ctype and isinstance(s.target, str) and not for_target_is_tuple(s.target) and not s.else_body:
+            _ctr = gen._cpp_fresh_name("_mg_i")
+            _tname = s.target
+            _lines = []
+            if _tname not in declared:
+                declared[_tname] = _elem_ctype
+                _ctype = _elem_ctype
+                _lines.append(f"{indent}{_ctype} {_tname};")
+            else:
+                _ctype = declared[_tname] or _elem_ctype
+            _lines.append(f"{indent}for (int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
+            if _ctype == 'double':
+                _get = f"mojo_list_get_double({_wi}, {_ctr})"
+            elif _ctype in ('char *', 'const char *'):
+                _get = f"mojo_list_get_str({_wi}, {_ctr})"
+            else:
+                _get = f"mojo_list_get_int({_wi}, {_ctr})"
+                if _ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+                    _get = f"({ _ctype })(intptr_t){_get}"
+            _lines.append(f"{indent}    {_tname} = {_get};")
+            for inner in s.body:
+                _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+            _lines.append(f"{indent}}}")
+            return _pre + _lines
         _inner_for = gimple_ctypes.ForStmt(
             target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
             body=s.body, else_body=s.else_body)
@@ -9109,6 +9212,60 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             and s.iterable.func.name in getattr(gen, '_cpp_param_names', ())):
         _cdecl = declared.get(s.iterable.func.name) if declared else None
         if isinstance(_cdecl, str) and _cdecl.startswith('std::function'):
+            _fcname = s.iterable.func.name
+            _elem_ctype = None
+            try:
+                import mojo.middle.types as _mtypes_mod
+                _foreign_iter = getattr(_mtypes_mod, '_FOREIGN_CALLABLE_ITER_ELEM', {}) or {}
+                _get_qualified_name = getattr(_mtypes_mod, '_get_qualified_name', None)
+            except Exception:
+                _foreign_iter = {}
+                _get_qualified_name = None
+            # Try to resolve foreign callable iterator element type from param default.
+            try:
+                _pd = None
+                _pdefaults = getattr(gen, '_func_param_defaults', None) or {}
+                # param-keyed dict form
+                if isinstance(_pdefaults, dict):
+                    _cand = _pdefaults.get(_fcname)
+                    if _cand is not None and not isinstance(_cand, list):
+                        _pd = _cand
+                    else:
+                        # function-keyed form: {func_name: [(param, default_node), ...]}
+                        for _k, _v in _pdefaults.items():
+                            if isinstance(_v, list):
+                                for _pair in _v:
+                                    try:
+                                        if _pair and _pair[0] == _fcname:
+                                            _pd = _pair[1]
+                                            break
+                                    except Exception:
+                                        pass
+                            if _pd is not None:
+                                break
+                if _pd is None and getattr(gen, '_func_node', None) is not None:
+                    _fnd = getattr(gen._func_node, 'param_defaults', None) or {}
+                    if isinstance(_fnd, dict):
+                        _pd = _fnd.get(_fcname)
+                    elif isinstance(_fnd, list):
+                        for _pair in _fnd:
+                            try:
+                                if _pair and _pair[0] == _fcname:
+                                    _pd = _pair[1]; break
+                            except Exception:
+                                pass
+                if _pd is not None and _get_qualified_name is not None:
+                    try:
+                        _q = _get_qualified_name(_pd)
+                        if _q and _q in _foreign_iter:
+                            _elem_ctype = _foreign_iter[_q]
+                    except Exception:
+                        pass
+                # fallback: if callee name itself is a known foreign iterable
+                if _elem_ctype is None and _fcname in _foreign_iter:
+                    _elem_ctype = _foreign_iter[_fcname]
+            except Exception:
+                pass
             _wi = gen._cpp_fresh_name("_mg_witer")
             declared[_wi] = 'MojoList *'
             if not hasattr(gen, '_cpp_word_iter_locals'):
@@ -9121,6 +9278,30 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             except Exception:
                 _call_txt = gen._cpp_expr(s.iterable)
             _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
+            if _elem_ctype and isinstance(s.target, str) and not for_target_is_tuple(s.target) and not s.else_body:
+                _ctr = gen._cpp_fresh_name("_mg_i")
+                _tname = s.target
+                _lines = []
+                if _tname not in declared:
+                    declared[_tname] = _elem_ctype
+                    _ctype = _elem_ctype
+                    _lines.append(f"{indent}{_ctype} {_tname};")
+                else:
+                    _ctype = declared[_tname] or _elem_ctype
+                _lines.append(f"{indent}for (int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
+                if _ctype == 'double':
+                    _get = f"mojo_list_get_double({_wi}, {_ctr})"
+                elif _ctype in ('char *', 'const char *'):
+                    _get = f"mojo_list_get_str({_wi}, {_ctr})"
+                else:
+                    _get = f"mojo_list_get_int({_wi}, {_ctr})"
+                    if _ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+                        _get = f"({ _ctype })(intptr_t){_get}"
+                _lines.append(f"{indent}    {_tname} = {_get};")
+                for inner in s.body:
+                    _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                _lines.append(f"{indent}}}")
+                return _pre + _lines
             _inner_for = gimple_ctypes.ForStmt(
                 target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
                 body=s.body, else_body=s.else_body)
@@ -9298,12 +9479,30 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         elif _is_callable_local:
             # Look up param default
             try:
+                import mojo.middle.types as _mtypes_mod2
+                _get_qualified_name = getattr(_mtypes_mod2, '_get_qualified_name', None)
+            except Exception:
+                _get_qualified_name = None
+            try:
                 _pdefaults = getattr(gen, '_func_param_defaults', None) or {}
-                _pd = _pdefaults.get(_cl_callee)
-                if _pd is not None:
-                    # Try to extract qualified name
+                _pd = None
+                if isinstance(_pdefaults, dict):
+                    _cand = _pdefaults.get(_cl_callee)
+                    if _cand is not None and not isinstance(_cand, list):
+                        _pd = _cand
+                    else:
+                        for _k, _v in _pdefaults.items():
+                            if isinstance(_v, list):
+                                for _pair in _v:
+                                    try:
+                                        if _pair and _pair[0] == _cl_callee:
+                                            _pd = _pair[1]; break
+                                    except Exception:
+                                        pass
+                            if _pd is not None:
+                                break
+                if _pd is not None and _get_qualified_name is not None:
                     try:
-                        from mojo.middle.types import _get_qualified_name
                         _q = _get_qualified_name(_pd)
                         if _q and _q in _foreign_iter:
                             _resolved_foreign = _q
@@ -9314,10 +9513,18 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     try:
                         _fn = gen._func_node
                         _fdefaults = getattr(_fn, 'param_defaults', None) or {}
-                        _pd2 = _fdefaults.get(_cl_callee)
-                        if _pd2 is not None:
+                        _pd2 = None
+                        if isinstance(_fdefaults, dict):
+                            _pd2 = _fdefaults.get(_cl_callee)
+                        elif isinstance(_fdefaults, list):
+                            for _pair in _fdefaults:
+                                try:
+                                    if _pair and _pair[0] == _cl_callee:
+                                        _pd2 = _pair[1]; break
+                                except Exception:
+                                    pass
+                        if _pd2 is not None and _get_qualified_name is not None:
                             try:
-                                from mojo.middle.types import _get_qualified_name
                                 _q = _get_qualified_name(_pd2)
                                 if _q and _q in _foreign_iter:
                                     _resolved_foreign = _q
@@ -9330,6 +9537,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         # If we have a resolved foreign table entry that gives iterator element ctype,
         # we need to handle it (step 4)
         if _resolved_foreign is not None and _resolved_foreign in _foreign_iter:
+            _elem_ctype = _foreign_iter[_resolved_foreign] or 'int64_t'
             _wi = gen._cpp_fresh_name("_mg_witer")
             declared[_wi] = 'MojoList *'
             if not hasattr(gen, '_cpp_word_iter_locals'):
@@ -9363,6 +9571,32 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                              + f"{gen._cpp_container_cast_prefix('MojoList', False)}mojo_list_get_int({_wi}, {_ctr});")
                 for _si, _nm in enumerate(_names):
                     _lines.append(f"{indent}    {_nm} = mojo_list_get_int({_tup}, {_si});")
+                for inner in s.body:
+                    _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                _lines.append(f"{indent}}}")
+                return _pre + _lines
+            # Single-target iteration: bind element using table's element ctype.
+            if isinstance(s.target, str):
+                _ctr = gen._cpp_fresh_name("_mg_i")
+                _tname = s.target
+                _lines = []
+                if _tname not in declared:
+                    declared[_tname] = _elem_ctype
+                    _ctype = _elem_ctype
+                    _lines.append(f"{indent}{_ctype} {_tname};")
+                else:
+                    _ctype = declared[_tname] or _elem_ctype
+                _lines.append(f"{indent}for (int64_t {_ctr} = 0; {_ctr} < mojo_list_len({_wi}); {_ctr}++) {{")
+                if _ctype == 'double':
+                    _get = f"mojo_list_get_double({_wi}, {_ctr})"
+                elif _ctype in ('char *', 'const char *'):
+                    _get = f"mojo_list_get_str({_wi}, {_ctr})"
+                else:
+                    # MojoList*/containers and word-typed values travel as int64_t slots.
+                    _get = f"mojo_list_get_int({_wi}, {_ctr})"
+                    if _ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+                        _get = f"({ _ctype })(intptr_t){_get}"
+                _lines.append(f"{indent}    {_tname} = {_get};")
                 for inner in s.body:
                     _lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
                 _lines.append(f"{indent}}}")
