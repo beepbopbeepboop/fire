@@ -1789,8 +1789,7 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
             'runtime/fire_python.h',
             'formal/model', 'FORMAL.md', 'formal/build.py',
             'build_stdlib_dylib.py'],
-     desc='runtime header export scan sees every declaration',
-     disabled='bugs/gate-rthdrscan.md')
+     desc='runtime header export scan sees every declaration')
 # `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
 # the ratchet, and the reason it needed a measurement to be safe.
 # `test_selfhost.py` calls `fire.build_executable(fire.py)`, which is the
@@ -1944,8 +1943,7 @@ test('formal-doc-truth', [PY, 'test_formal_doc_truth.py'], mem='tiny', cache=Tru
             'formal/x86_64_proof_gen.py', 'build_stdlib_dylib.py',
             'reflect.py'],
      desc='every checkable figure in FORMAL.md, doc/ABI.md and OPUS.md '
-          'agrees with the tree',
-     disabled='bugs/gate-formal-doc-truth.md')
+          'agrees with the tree')
 # The two checks that arrived with a merge and ran by nothing (the estate check
 # in suite-self-test reported both). The stale-verdict half of doc-refs has a
 # negative control -- a deliberately wrong verdict row must be flagged or the
