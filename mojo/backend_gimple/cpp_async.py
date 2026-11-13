@@ -493,6 +493,10 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         if _opa == 'object':
             gen._cpp_object_params.add(gimple_ctypes._as_str(_opn))
     gen._cpp_list_word_names = gimple_exprtypes._list_method_names(fn)
+    # Expose current function for lowering helpers (e.g. with-open default
+    # resolution in cpp_core._cpp_with_stmt).
+    gen._cpp_current_fn_node = fn
+    gen._cpp_current_func_name = fn.name
     _opa = gcc_._cpp_collect_os_path_aliases(fn)
     if _opa:
         fn = gcc_._cpp_lower_os_path_aliases(fn, _opa)   # `join(a, b)` -> `os.path.join(a, b)`

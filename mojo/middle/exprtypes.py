@@ -1152,6 +1152,10 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             return 'MojoList *'
         if e.func.member in ('startswith', 'endswith') and len(e.args) == 1:
             return '_Bool'
+        if e.func.member == 'read' and not e.args and not getattr(e, 'kwargs', None):
+            # File-handle .read() returns the content as char * (see
+            # int_read / cpp generator file-handle lowering).
+            return 'char *'
         if e.func.member == 'get' and len(e.args) in (1, 2) and (dict_val_types is not None):
             key = _receiver_key(e.func.obj)
             if key is not None and key in dict_val_types:
