@@ -7436,19 +7436,19 @@ def gen_module_impl(self, stmts: list):
             _omo = _as_structdef_node(_omo)
             _own_method_ids[id(_omo)] = {
                 id(_as_funcdef_node(_m)) for _m in _omo.methods}
-    # Declaration-time conditional conformance checks (trait conformance part 1).
+    # Declaration-time conditional conformance checks (trait conformance parts 1, 4).
     from elaborate import (check_conformance_declarations as _check_conf_decls,
-                           check_conditional_rp_origin as _check_rp_origin)
-    _check_conf_decls(
-        [s for s in all_struct_defs if isinstance(s, StructDef)],
-        [s for s in all_struct_defs if isinstance(s, TraitDef)])
+                           check_conditional_rp_origin as _check_rp_origin,
+                           check_copy_move_synthesis as _check_copy_move_synth)
+    _all_struct_def_nodes = [s for s in all_struct_defs if isinstance(s, StructDef)]
+    _all_trait_def_nodes = [s for s in all_struct_defs if isinstance(s, TraitDef)]
+    _check_conf_decls(_all_struct_def_nodes, _all_trait_def_nodes)
     _all_stmts_for_rp = list(stmts)
     _all_stmts_for_rp.extend(getattr(self, '_stripped_generic_fns', []) or [])
     if self.do_imports or self.link_imports:
         _all_stmts_for_rp.extend(imported_stmts or [])
-    _check_rp_origin(
-        _all_stmts_for_rp,
-        [s for s in all_struct_defs if isinstance(s, StructDef)])
+    _check_rp_origin(_all_stmts_for_rp, _all_struct_def_nodes)
+    _check_copy_move_synth(_all_struct_def_nodes, _all_trait_def_nodes)
     _merge_struct_inheritance(all_struct_defs)
     # id(inherited method node) -> home module name, resolved by finding
     # which struct ORIGINALLY declared it.
