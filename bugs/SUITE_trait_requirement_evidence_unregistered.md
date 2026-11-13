@@ -16,8 +16,8 @@ ends
         declared family: test_trait_requirement_evidence_diagnostic.py
 
 The file arrived in commit `06ea5b0ef` ("compiler: enforce trait method
-requirement evidence (part 2)"), which added it and removed
-`bugs/mid/DIAGNOSTICS_trait_conformance-part2.md`, but registered nothing.
+requirement evidence (part 2)"), which added it and removed the part-2
+trait-conformance doc, but registered nothing.
 
 ## What was measured
 

@@ -129,17 +129,17 @@ def _resolve_type(gen, ann: str | None) -> str:
                         s = s[len('dtype.'):]
                     if s.startswith('.'):
                         s = s[1:]
+                    # ONE dtype-spelling table (types._SIMD_FLOAT_DTYPE_CTYPE),
+                    # the same one `emit_calls._float_dtype_arg_ctype` reads, so
+                    # the resolver and the call lowerer cannot drift apart. Its
+                    # keys are the normalized spelling (`float32`, `Float32`,
+                    # `DType.float32`); `f32`/`f64` are the remaining aliases.
                     sl = s.lower()
-                    if sl in ('float32', 'f32'):
-                        return 'float'
-                    if sl in ('float64', 'f64'):
-                        return 'double'
-                    # Alias spellings sometimes used for width-1 scalar SIMD.
-                    if s in ('Float32',):
-                        return 'float'
-                    if s in ('Float64',):
-                        return 'double'
-                    return None
+                    if sl == 'f32':
+                        sl = 'float32'
+                    elif sl == 'f64':
+                        sl = 'float64'
+                    return gimple_ctypes._SIMD_FLOAT_DTYPE_CTYPE.get(sl)
 
                 def _resolve_dtype_token(tok):
                     _ct = _dtype_ctype(tok)

@@ -69,6 +69,26 @@ Comprehension = getattr(_fc, 'Comprehension', None)
 COMPREHENSION_FOLD_CAP = 4096
 
 
+def _is_dtype_value(v) -> bool:
+    """A value that is a DType: a bound `DType.x` / `dtype.x` spelling, or the
+    `('DType', x)` marker. A bare `('.', x)` is an ENUM variant reference in
+    general and only a DType when the other operand is one."""
+    if isinstance(v, str):
+        return v.startswith('DType.') or v.startswith('dtype.')
+    return isinstance(v, tuple) and len(v) == 2 and v[0] in ('DType', 'dtype')
+
+
+def _dtype_operand_name(v):
+    """The lowercase DType name a comparison operand denotes, or None. Accepts
+    the bound DType spellings and the dot-relative `('.', x)` marker, so
+    `dtype == .float32` and `dtype == DType.float32` decide the same way."""
+    if _is_dtype_value(v):
+        return _dtype_name_from_value(v)
+    if isinstance(v, tuple) and len(v) == 2 and v[0] == '.' and isinstance(v[1], str):
+        return v[1].lower()
+    return None
+
+
 def compare_op(op: str, left, right):
     """Fold one comparison-chain link, or None if `op` is not a known comparison.
 
@@ -82,6 +102,23 @@ def compare_op(op: str, left, right):
     closure-lowering doesn't support several small same-scope lambdas bound
     into one dict literal). Returns None for an unrecognized op, distinct
     from a real False."""
+    # DType operands compare by NAME. A bound `dtype` is `DType.float32` (or
+    # the `('DType', x)` marker) while a dot-relative `.float32` is the
+    # `('.', x)` marker; plain equality of the two spellings is always False,
+    # which folded `dtype == .float32` to a false branch. Only when both sides
+    # resolve to a dtype this evaluator KNOWS is the answer decided; an
+    # unknown spelling keeps the ordinary fold below rather than becoming a
+    # false one.
+    if op in ('==', '!=') and (_is_dtype_value(left) or _is_dtype_value(right)):
+        _ln, _rn = _dtype_operand_name(left), _dtype_operand_name(right)
+        if _ln in _KNOWN_DTYPE_NAMES and _rn in _KNOWN_DTYPE_NAMES:
+            return (_ln == _rn) if op == '==' else (_ln != _rn)
+    if op in ('in', 'not in') and _is_dtype_value(left) and isinstance(right, (tuple, list)):
+        _ln = _dtype_operand_name(left)
+        _names = [_dtype_operand_name(x) for x in right]
+        if (_ln in _KNOWN_DTYPE_NAMES
+                and all(_n in _KNOWN_DTYPE_NAMES for _n in _names)):
+            return (_ln in _names) if op == 'in' else (_ln not in _names)
     if op == '==':  return left == right
     if op == '!=':  return left != right
     if op == '<':   return left < right
@@ -636,21 +673,24 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
         return bool(_ct)
     if DottedLiteral is not None and isinstance(node, DottedLiteral):
         # A dot-relative value (`.float32`, `.Some`) folds to a marker for
-        # enum/DType values.  The node's field is `path`
-        # (fire_compiler.DottedLiteral: `.float32` -> path='float32'), and
-        # `.name` does not exist on it — reading the wrong field raised
-        # AttributeError, the guard turned that into "not foldable", and every
-        # dotted value stayed unfolded while `_const_foldable` called the same
-        # node foldable (which reads as CONST_FALSE, not CONST_UNKNOWN).  That
-        # made `DType.float32 == .float32` fold FALSE and prune the arm that
-        # was true.
+        # enum/DType values. The node's field is `path`
+        # (fire_compiler.DottedLiteral: `.float32` -> path='float32'); it has no
+        # `.name`, and reading that orphan field raised AttributeError, which the
+        # guard turned into "not foldable" — while `_const_foldable` called the
+        # same node foldable, which reads as CONST_FALSE, not CONST_UNKNOWN.
+        # That made `DType.float32 == .float32` fold FALSE and prune the arm
+        # that was true. `path` is REQUIRED to be a non-empty string here: a
+        # dot value whose spelling cannot be read is not foldable, and saying
+        # so keeps it consistent with `_const_foldable`.
         try:
             _dpath = getattr(node, 'path', None)
             if _dpath is None:
                 _dpath = getattr(node, 'name')
-            return ('.', _dpath)
         except Exception:
             return None
+        if not isinstance(_dpath, str) or not _dpath:
+            return None
+        return ('.', _dpath)
     if TupleExpr is not None and isinstance(node, TupleExpr):
         res = []
         for e in getattr(node, 'elements', []) or []:
@@ -865,6 +905,11 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
             r = eval_const(node.right, bindings, platform, conforms_to_pred)
             if l is None or r is None:
                 return None
+            if _is_dtype_value(l) and isinstance(r, (list, tuple)):
+                # `dtype in (.float32, .float64)`: membership by DType name
+                # (see compare_op), not the raw tuple test a bound DType never
+                # satisfies against its dot-relative members.
+                return compare_op('in', l, r)
             try:
                 if isinstance(r, (list, tuple, set)):
                     return l in r
