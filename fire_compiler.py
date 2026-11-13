@@ -5023,7 +5023,7 @@ def _expr_constraint_text(node):
         return str(node.name)
     if isinstance(node, MemberExpr):
         obj = _expr_constraint_text(node.obj)
-        return f"{obj}.{node.attr}"
+        return f"{obj}.{node.member}"
     if isinstance(node, CallExpr):
         func = _expr_constraint_text(node.func)
         args = ", ".join(_expr_constraint_text(a) for a in (node.args or []))

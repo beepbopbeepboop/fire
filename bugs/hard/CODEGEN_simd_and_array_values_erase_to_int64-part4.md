@@ -1,6 +1,9 @@
-SPLIT: CODEGEN_simd_and_array_values_erase_to_int64-part4-part1
-
 # A float SIMD value survives a call and a return (part 4)
+
+Split: the parameter/return/result-local propagation piece landed separately
+(part4-part1, 2026-11-13). This doc remains for the full call-and-return
+probe (`test_part4_float_simd_survives_call_and_return`), which also depends
+on part 3's float SIMD constructor.
 
 Part 4 of `bugs/hard/CODEGEN_simd_and_array_values_erase_to_int64.md`.
 

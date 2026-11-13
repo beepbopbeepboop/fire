@@ -4243,6 +4243,12 @@ test('reg-conforms-to-condition-diagnostic', [PY, 'test_conforms_to_condition_di
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-constrained-paren-diagnostic', [PY, 'test_constrained_paren_diagnostic.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
+# Landed with "Reject membership on provably scalar containers without
+# `__contains__`" (03d4302ba) and registered nowhere until this audit. 0.0 GB
+# measured, 0.65 s.
+test('reg-contains-method-diagnostic', [PY, 'test_contains_method_diagnostic.py'], mem='tiny',
+     desc="membership on a provably scalar type is refused with the "
+          "'__contains__' diagnostic")
 test('reg-dict-mixed-join', [PY, 'test_dict_mixed_join.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-dict-slot-read-bug', [PY, 'test_dict_slot_read_bug.py'], mem='tiny',
@@ -4255,6 +4261,12 @@ test('reg-docstring-mojo-blocks', [PY, 'test_docstring_mojo_blocks.py'], mem='ti
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-docstring-self-import', [PY, 'test_docstring_self_import.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
+# Landed with "Refuse mutually recursive and unbounded generic instantiation"
+# (b3e501b60) and registered nowhere until this audit. 0.1 GB measured, ~32 s
+# warm (it builds and runs four programs through `fire.py`).
+test('reg-elaboration-recursion-diagnostic', [PY, 'test_elaboration_recursion_diagnostic.py'], mem='tiny',
+     desc='mutually recursive and unbounded generic instantiation is refused in '
+          'bounded work while finite chains still run')
 test('reg-float-return-beside-tuple-return', [PY, 'test_float_return_beside_tuple_return.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-gate-rthdrscan', [PY, 'test_gate_rthdrscan.py'], mem='tiny',
@@ -4305,6 +4317,12 @@ test('reg-tagged-container-corpus', [PY, 'test_tagged_container_corpus.py'], mem
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('reg-tagged-mixed-readsites', [PY, 'test_tagged_mixed_readsites.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
+# Landed with "elaborate: reject where clauses that name module alias
+# constants" (491ae6d5b) and registered nowhere until this audit. 0.1 GB
+# measured, 2.3 s.
+test('reg-where-alias-diagnostic', [PY, 'test_where_alias_diagnostic.py'], mem='tiny',
+     desc='a provably false where clause naming a module alias constant is '
+          'refused; an undecided one and a plain assignment stay accepted')
 test('reg-where-message-diagnostic', [PY, 'test_where_message_diagnostic.py'], mem='tiny',
      desc='per-bug regression pin (estate backlog, 2026-11-13)')
 test('orch-chain-cap', [PY, 'tools/test_chain_cap.py'], mem='tiny',
@@ -4537,7 +4555,7 @@ BUCKETS = {
                      'sync-restart-guards'] + ['orch-chain-cap', 'orch-claim-release', 'orch-control-branch-retire', 'orch-control-cleanup', 'orch-control-prune-unmerged', 'orch-control-retire-landed', 'orch-finishing-first', 'orch-gate-doc', 'orch-gate-ledger', 'orch-integrate-dryrun', 'orch-land-master-moved', 'orch-orch-fixes', 'orch-orch-review', 'orch-orchestration-formal-unlanded-task-state', 'orch-proof-review', 'orch-stash-ff', 'orch-swarm-log-quiet', 'orch-verify-lock'],
 
     # Per-bug regression pins from the same audit; explicit, not in `check`.
-    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-gimple-function-scoped-alias-extern', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-where-message-diagnostic'],
+    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-gimple-function-scoped-alias-extern', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
 
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus

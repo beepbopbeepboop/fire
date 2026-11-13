@@ -1314,6 +1314,41 @@ main()
         src,
         "`with <context manager> as <name>:` over a manager")
 
+def _regression_raise_mixed_tuple_literal_in_generator():
+    # A compiled generator (cpp coroutine path) raising with a mixed-scalar
+    # tuple message like `raise NotImplementedError((header, line))` must
+    # get past the cpp coroutine lowering (the pre-fix refusal:
+    # "a list-literal argument with mixed element types is not supported at a
+    # compiled-generator call in a coroutine body" on the raise-message tuple)
+    # and build the message as a char* repr string. Directly exercises the
+    # cpp coroutine generator unit that parse_table hit.
+    global _PASS, _FAIL
+    name = "cpp_raise_mixed_tuple_literal_in_generator"
+    try:
+        import fire_compiler as _fc
+        src = (
+            "def gen(header, code):\n"
+            "    raise NotImplementedError((header, code))\n"
+            "    yield 1\n"
+        )
+        stmts = _fc.Parser(_fc.py_tokenize(src)).parse_module()
+        fn = stmts[0]
+        g = gimple_codegen.GimpleGen()
+        g._cpp_module_fn_names = set()
+        g._cpp_early_global_names = set()
+        cpp_text, _value_ctype, _base, _params = g._gen_cpp_generator_unit(fn)
+        # The raise must lower to a throw with a string-built message (no
+        # mixed-element list-literal refusal), so the message is a char*.
+        if "throw _MojoCppExc" not in cpp_text:
+            raise AssertionError("no throw _MojoCppExc in generated cpp coroutine unit")
+        if "mojo_str_cat_free" not in cpp_text and "strdup" not in cpp_text:
+            raise AssertionError("raise message was not lowered to a string repr")
+        print(f"PASS  {name}")
+        _PASS += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+
 
 def _cpp_coroutine_builtin_module_constant():
     # A constant read off a module MARKER that is NEVER INLINED — `os` and
@@ -10157,6 +10192,7 @@ def main():
     _regression_read_table_callable_reader()
     _regression_read_table_callable_reader_untabled_refusal()
     _regression_with_tabled_open_in_generator()
+    _regression_raise_mixed_tuple_literal_in_generator()
     _cpp_coroutine_builtin_module_constant()
     _cpp_coroutine_exc_ctor_value()
 

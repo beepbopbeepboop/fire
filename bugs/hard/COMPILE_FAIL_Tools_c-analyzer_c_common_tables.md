@@ -1,4 +1,4 @@
-SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part1, COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3
+SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3 (parts 1 and 2 fixed)
 # COMPILE_FAIL: Tools/c-analyzer/c_common/tables.py
 
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
@@ -20,8 +20,9 @@ passes. Part 1 and part 3 remain.
 
 The 2026-10-29/2026-10-30 entries below describe the callable-valued-parameter (`_get_reader=csv.reader`) blocker; that work LANDED on 2026-11-12 (callables in dynamic calls and the foreign-callable table 4cb02b8c1; `csv.reader` runtime and the cpp `for` over a tabled callable 7e6a8ac5c; the earlier split's part 1 deleted with 373cf8633) and the previous split's three parts were all fixed and deleted. This doc is RE-SPLIT into a fresh part1/part2/part3 for what remains (the pool has no hard slot, so the work moves to mid):
 
-- part 1 (`bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part1.md`): `parse_table` — `a list-literal argument with mixed element types is not supported at a compiled-generator call in a coroutine body` (`raise NotImplementedError((header, line))`, tables.py:176).
-- part 2: `read_table` — `` `with <context manager> as <name>:` over a manager this codegen does not model is not supported in a compiled generator body `` (`with _open(infile, newline='') as infile:`, tables.py:92, `_open=open` a default-valued callable parameter). (Fixed 2026-11-13; its bug doc was deleted.)
+- part 1 (fixed 2026-11-13): `parse_table` — mixed-scalar tuple literal at a raise-message argument position in a compiled generator body (`raise NotImplementedError((header, line))`, tables.py:176) now lowers to a `char *` repr message instead of refusing.
+- part 2 (fixed 2026-11-13): `read_table` — `` `with <context manager> as <name>:` over a manager this codegen does not model is not supported in a compiled generator body `` (`with _open(infile, newline='') as infile:`, tables.py:92, `_open=open` a default-valued callable parameter) now evaluates/binds modeled tabled-open managers and emits close on the normal path; untabled managers still refuse by name. Its bug doc was deleted.
+- part 3 (`bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3.md`): end-to-end `tables.py` build (depends on parts 1 and 2; residual shapes, if any, are re-split there rather than grown into scope).
 - part 3 (`bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3.md`): end-to-end `tables.py` build (depends on parts 1 and 2; residual shapes, if any, are re-split there rather than grown into scope).
 
 Measured 2026-11-12 on this tree: sources copied from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/` into `.tmp/ca/`; `python3 fire.py build -o .tmp/ca/tables_out .tmp/ca/c_common/tables.py` still fails, and `MOJO_DEBUG=1` reports exactly the two shapes above for pass 1 and both retry passes (peak 0.2 GB, child exit 1). The doc-refs ratchet is why the SPLIT line no longer narrates the deleted parts; it now names the three live part docs only.

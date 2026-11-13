@@ -11380,6 +11380,8 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
                         msg_cpp = gen._cpp_expr(msg_arg)
                     else:
                         msg_cpp = f'const_cast<char *>("{gimple_ctypes._c_escape(text)}")'
+                elif isinstance(msg_arg, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+                    msg_cpp = _cpp_raise_tuple_msg_expr(gen, msg_arg)
                 else:
                     msg_cpp = gen._cpp_expr(msg_arg)
             else:
@@ -11403,11 +11405,64 @@ def _cpp_raise_stmt(gen, s, indent: str) -> list[str]:
                 msg_cpp = gen._cpp_expr(msg_arg)
             else:
                 msg_cpp = f'const_cast<char *>("{gimple_ctypes._c_escape(text)}")'
+        elif isinstance(msg_arg, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+            # Exception messages are consumed as `char *` (printed/compared).
+            # A tuple/list literal argument is represented by its Python
+            # repr string rather than a boxed container, so mixed-scalar
+            # literals like `raise Exc((header, line))` do not go through
+            # the call-argument list lowering (which cannot produce a
+            # `char *` message).
+            msg_cpp = _cpp_raise_tuple_msg_expr(gen, msg_arg)
         else:
             # Variable/expression message: evaluate as char* expression
             msg_cpp = gen._cpp_expr(msg_arg)
     return [f"{indent}throw _MojoCppExc{{ (int64_t){tag}, {msg_cpp}, "
             f"(void *){msg_cpp} }};"]
+
+
+def _cpp_raise_tuple_msg_expr(gen, lit) -> str:
+    """Build a `char *` repr for a tuple/list literal used as a `raise`
+    message argument in a compiled generator body. Exception messages are
+    consumed as `char *`, so the literal cannot be lowered as a boxed
+    container. Each element is repr'd by its inferred scalar kind and the
+    pieces are concatenated into a Python-like literal string."""
+    elems = list(getattr(lit, 'elements', []) or [])
+    is_tuple = isinstance(lit, gimple_ctypes.TupleExpr)
+    open_ch = '(' if is_tuple else '['
+    close_ch = ')' if is_tuple else ']'
+    stmts = [f'char *_s = strdup("{open_ch}");', 'char *_p = nullptr;']
+    for i, el in enumerate(elems):
+        if i:
+            stmts.append('_p = strdup(", "); _s = mojo_str_cat_free(_s, _p); free(_p);')
+        if isinstance(el, gimple_ctypes.StringLiteral):
+            text, is_fstr = gen._decode_str_literal_text(
+                el.value, gimple_ctypes._str_literal_interp_flag(el))
+            if is_fstr:
+                ev = gen._cpp_expr(el)
+                piece = f"mojo_repr_str((char *)({ev}))"
+            else:
+                piece = f'strdup("{gimple_ctypes._c_escape(repr(text))}")'
+        else:
+            ev = gen._cpp_expr(el)
+            ct = gimple_exprtypes._infer_simple_expr_ctype(
+                el, gen._cpp_declared,
+                getattr(gen, '_cpp_gen_self_fields', None),
+                gen._async_api)
+            if ct == 'char *':
+                piece = f"mojo_repr_str((char *)({ev}))"
+            elif ct == 'double':
+                piece = f"mojo_repr_float((double)({ev}))"
+            elif ct == '_Bool':
+                piece = f'((({ev})) ? strdup("True") : strdup("False"))'
+            else:
+                piece = f"mojo_str_from_int((int64_t)({ev}))"
+        stmts.append(f'_p = {piece}; _s = mojo_str_cat_free(_s, _p); free(_p);')
+    if is_tuple and len(elems) == 1:
+        stmts.append('_p = strdup(","); _s = mojo_str_cat_free(_s, _p); free(_p);')
+    stmts.append(f'_p = strdup("{close_ch}"); _s = mojo_str_cat_free(_s, _p); free(_p);')
+    stmts.append('return _s;')
+    body = ' '.join(stmts)
+    return f"([&]() -> char * {{ {body} }}())"
 
 
 def _cpp_try_stmt(gen, node, declared: dict, indent: str) -> list[str]:
