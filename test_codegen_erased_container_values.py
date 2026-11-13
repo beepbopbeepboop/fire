@@ -109,6 +109,20 @@ def test_part5_scalar_annotation_resolves_to_scalar_ctype():
            if gen._resolve_type(a) != want}
     assert not bad, 'annotation -> (got, want): %r' % (bad,)
 
+    # A comptime local `dt` bound to a float dtype must resolve through the
+    # comptime binding, not stay erased to int64_t.
+    gen._comptime_vals['dt32'] = 'DType.float32'
+    gen._comptime_vals['dt64'] = 'DType.float64'
+    expect_ct = {
+        'Scalar[dt32]': 'float',
+        'SIMD[dt32, 1]': 'float',
+        'Scalar[dt64]': 'double',
+        'SIMD[dt64, 1]': 'double',
+    }
+    bad = {a: (gen._resolve_type(a), want) for a, want in expect_ct.items()
+           if gen._resolve_type(a) != want}
+    assert not bad, 'comptime annotation -> (got, want): %r' % (bad,)
+
 
 if __name__ == '__main__':
     part = sys.argv[1] if len(sys.argv) > 1 else ''

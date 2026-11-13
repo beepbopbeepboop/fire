@@ -1,4 +1,4 @@
-SPLIT: part1 landed (Array/FixedSizeArray ctor tracked), part2 landed in this branch (Span over Array inherits element type), CODEGEN_simd_and_array_values_erase_to_int64-part3, CODEGEN_simd_and_array_values_erase_to_int64-part4, CODEGEN_simd_and_array_values_erase_to_int64-part5
+SPLIT: part1 landed (Array/FixedSizeArray ctor tracked), part2 landed in this branch (Span over Array inherits element type), part3 open, part4 open, part5 landed (Scalar/SIMD width-1 annotation resolves to scalar C type; former part-5 doc DELETED)
 
 # CODEGEN: SIMD values and `Array`/`Span` elements erase to `int64_t`, so their real type is unknown
 

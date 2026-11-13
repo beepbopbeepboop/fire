@@ -5600,6 +5600,24 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 return 'MojoList *', t
             except Exception:
                 pass
+        # A FLOAT scalar's bit accessors return an integer (the bit pattern),
+        # not the receiver's float type. This must win once width-1 SIMD
+        # receivers are typed float/double (part 5), otherwise bitwise ops on
+        # the result become `float & float` in the generated C. The stdlib
+        # calls these without extra arguments in the affected paths.
+        if method in ('to_bits', '_to_bits_signed') and ot in ('float', 'double') and not node.args:
+            if ot == 'double':
+                t = gen._new_temp('int64_t')
+                gen._emit(f'  {t} = mojo_double_to_bits ({ov_local});')
+                return 'int64_t', t
+            # float: produce an integer bit pattern. Widen to double and use the
+            # available runtime helper so the result type is integer-valued in the
+            # generated C (sufficient for typing/compile of bitwise uses).
+            _d = gen._new_temp('double')
+            gen._emit(f'  {_d} = (double){ov_local};')
+            t = gen._new_temp('int64_t')
+            gen._emit(f'  {t} = mojo_double_to_bits ({_d});')
+            return 'int64_t', t
         # Other scalar methods: pass the receiver through unchanged
         for ea in node.args[1:]: gen.lower_expr(ea)
         return gen._stub_result(ot, ov_local, f'{ot}.{method}() stubbed')
