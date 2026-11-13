@@ -139,3 +139,27 @@ Option B, refusing a float+pointer return at codegen, is rejected: it turns `com
 ### Not done in this round
 
 No code changed. The self-host `fire.o` step is the integrator's to run (see Done when). `eval_const`'s callers in `mojo/middle/comptime.py` have not been audited for which consumers read the value as a float, which option A's step 4 depends on: do that audit first in the next round.
+
+## Status (2026-11-12, re-3 round): caller audit done; option A is not a one-function change
+
+Round re-3 started from the planning round above and did the audit it asked for first. No codegen changed. Landed: `test_float_return_beside_tuple_return.py`, the named acceptance test (four programs: `pick`, `tup`, a `float/tuple/None` mix, and the `eval_const` repro). It compiles each through `compile_mojo_to_gimple_exe`, runs it, and compares stdout with CPython. **It is RED on master** (binary exits -11, reproduced 2026-11-12). It is not registered in `tools/suite.py`, so no gate runs it. Treat it as the acceptance test for the next round, not as a passing check.
+
+### Audit: who reads `eval_const`'s result
+
+`mojo/middle/comptime.py:eval_const` (line 439) is recursive and its result is consumed as a value, not just returned:
+
+- Internal, about 45 sites in `comptime.py` (lines 258–1179 among them): `l = eval_const(node.left, ...)` then `l + r` / comparisons (650–720, 974–984), indexing `base[idx]` and slices (337–361), `in` (685), container building `res.append(v)` (485–506, and 1160), `isinstance`-style dispatch on the value, and `None` tests on every result.
+- External: `mojo/middle/resolve_shared.py:2456` (`comptime_eval.eval_const(node, gen._comptime_vals)`), `mojo/backend_gimple/emit_calls.py:1776` and `:5788`, and `mojo/backend_gimple/emit_stmts.py:4561`, `:4574`.
+
+Consequence: if `eval_const` is typed `int64_t` (option A, step 2), every one of those sites receives a tagged word where it expects a `bool`/`int`/`str`/`tuple`. The string and tuple branches would have to be unwrapped at every internal read, and the arithmetic sites would need the float unwrap as well. Changing only `infra_infer` would make the repro print wrong values silently in the self-hosted build, which is worse than the current SIGSEGV. Do not land step 2 without the consumer changes.
+
+### Decision for the next round
+
+1. Before any type change, make the consumer contract explicit in `comptime.py`: one `eval_const` that returns the tagged word is wrong for its own recursion. Choose one of:
+   - (a) Keep the typed recursion, and make the tagged word a boundary property: `eval_const` (the pointer/bool/int typed core) stays as it is, and a separate float-aware entry point is what the codegen-facing consumers call. This needs a real split of the float arm, not a rewrite of the repro; it changes which function the float branch lives in, so it is a source-structure decision. Record the choice in the Status before coding.
+   - (b) Full option A: `eval_const` returns `int64_t`, and each of the ~50 sites above unwraps with `mojo_box_word` (strings and tuples, via a `mojo_box_from_list` added beside `mojo_box_from_str`) or `mojo_box_int` (arithmetic). Larger, but it is the change the planning round's guide describes, and it touches no new contract.
+   Recommendation: (b), because the repro is the consumer contract the codegen has to honour for any mixed-return function, not just this one. (a) hides the bug in `comptime.py` and leaves the next mixed function broken.
+2. Then the planning round's plan steps 1–5 (runtime box, `infra_infer` join, `_sce_simple_emit` truncation arm, call-site typing via a `_ret_may_hold_float` set, and `_gen_stmt_ReturnStmt` boxing). Run the four cases in the test; the printed output must match CPython.
+3. Rewrite the two assertions in `test_float_into_pointer_return_regression.py` that pin `(int64_t)2.5` to the boxed form, keeping `test_int_return_into_the_same_shape_still_compiles`.
+
+The self-host `fire.o` step remains the integrator's to run (see Done when).
