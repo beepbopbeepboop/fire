@@ -14521,8 +14521,51 @@ main()
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_re_sub_with_inline_lambda():
+        """A re.sub() whose second argument is an INLINE lambda must be
+        dispatched down the callback path (mojo_regex_sub_fn with the lambda's
+        function pointer), never down the replacement-string path (mojo_regex_sub_str).
+
+        Before the fix, `_re_sub_repl_is_callback` only answered True for an
+        IdentExpr (a closure or a bare top-level def name), so a LambdaExpr was
+        classified as a plain replacement string and its (garbage) address was
+        passed to mojo_regex_sub_str as the replacement value — the compiled
+        program printed the lambda's machine code instead of the replacement
+        (bugs/CODEGEN_re_sub_inline_lambda_used_as_replacement_string).
+        """
+        global _PASS, _FAIL
+        name = "re_sub_with_inline_lambda"
+        src = r'''
+import re
+
+def main():
+    print(re.sub(r"[0-9]+", lambda _m: "N", "a1b22"))
+main()
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        if ok:
+            # The callback path means the generated call carries the
+            # mojo_regex_sub_fn shape (callback + env), not mojo_regex_sub_str.
+            if 'mojo_regex_sub_fn' not in c_src:
+                print(f"FAIL  {name}: re.sub with a lambda did not emit the callback call")
+                _FAIL += 1
+                return
+            print(f"PASS  {name}")
+            _PASS += 1
+            return
+        print(f"FAIL  {name}")
+        print("      --- generated C ---")
+        for i, line in enumerate(c_src.splitlines(), 1):
+            print(f"      {i:3}: {line}")
+        print("      --- gcc stderr ---")
+        for line in stderr.splitlines():
+            print(f"      {line}")
+        _FAIL += 1
+
     _run_isolated(lambda: test_regex_tables_are_referenced_by_address_in_a_gimple_body(),
                   'test_regex_tables_are_referenced_by_address_in_a_gimple_body')
+    _run_isolated(lambda: test_re_sub_with_inline_lambda(),
+                  'test_re_sub_with_inline_lambda')
 
     def test_regex_scan_in_a_method_body_compiles_and_matches_cpython():
         """`for m in PAT.finditer(s)` inside a struct method — a `__GIMPLE`
