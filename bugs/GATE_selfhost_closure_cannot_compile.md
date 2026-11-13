@@ -106,3 +106,17 @@ dead under CPython while the compiled compiler still emitted a call to
 _mojo_backend_gimple_emit_calls__lower_call_d1d4ed`. Fixed by calling the real
 method; the surrounding try/except already covers a node it cannot evaluate.
 This also cleared the last `assignment to 'char *' from 'int64_t'`.
+
+2026-11-13 (session 2): the remaining groups were all colleagues' landed
+commits, fixed here because they block this gate:
+`Parser.errors` / `StructDef.align_expr` / `StructDef.presence_fields` needed
+rows in module_gen's HARDCODED AST layout maps (the same class as item 1);
+`align_value_error` was unannotated, so its parameter and return types drifted
+(`conflicting types ... have 'char *(int64_t)'`) — now `(val: int) ->
+str | None`; `Parser_parse_module` needed its second parameter in BOTH
+hand-written signature tables (`_SELFHOST_SIGS` and `_LIBC_SIGS`, per
+bugs/mid/CODEGEN_selfhost_sig_table_parse_module_recover.md); and lifted
+lambdas were named `<enclosing>_lambda_<n>` with a PER-GEN counter, so two
+inlined modules lifting from a same-named comptime function collided
+(`redefinition of '_comptime_conforms_to_pred_lambda_1'`) — now qualified with
+the module id, using the same empty-module-name rule as the `main` renaming.

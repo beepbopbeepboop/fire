@@ -4987,7 +4987,7 @@ def _canon_conv(conv: str):
 # ── Code generator ─────────────────────────────────────────────────
 
 
-def align_value_error(val: int):
+def align_value_error(val: int) -> str | None:
     """Shared @align value rule: None if valid, else a diagnostic suffix."""
     try:
         v = int(val)
