@@ -2018,6 +2018,19 @@ def _lower_tuple_box_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     return 'int64_t', gen._call_expr('int64_t', _as_str(node.func.name), slot_pairs)
 
 
+def _is_default_init_literal(node) -> bool:
+    """True for `{}` (or `{field = value}`), Mojo's default-initializer
+    spelling in a value position such as `Array[T, N](fill={})`.
+
+    The parser has no node for it: an empty brace literal and a struct
+    initializer both arrive as a `DictExpr` with no pairs (see
+    `fire_compiler.Parser._parse_dict_or_set`). In an ordinary value
+    position that same node lowers to a `MojoDict *`; in a default-initializer
+    position it means `T()` for each element, which is the caller's to decide
+    because only the caller knows `T`."""
+    return isinstance(node, gimple_ctypes.DictExpr) and not node.pairs
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (isinstance(node.func, gimple_ctypes.IdentExpr)
             and re.match(r'^__mojo_tuple_box_\d+$', _as_str(node.func.name))):
@@ -3093,23 +3106,54 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 except Exception:
                     _ncount = None
             if _fill_node is not None and _ncount is not None and _ncount > 0:
-                _fat, _fav = gen.lower_expr(_fill_node)
                 _et = _elem_ct or 'int64_t'
-                for _ in range(_ncount):
-                    if _et == 'double' or _fat == 'double':
-                        _cv = gen._coerce_to_type(_fat, 'double', _fav) if hasattr(gen, '_coerce_to_type') else _fav
-                        gen._emit(f'  mojo_list_append_double ({t}, {_cv});')
-                    elif _et == 'char *' or _fat == 'char *':
-                        _cv = gen._coerce_to_type(_fat, 'char *', _fav) if hasattr(gen, '_coerce_to_type') else _fav
-                        gen._emit(f'  mojo_list_append_str ({t}, {_cv});')
-                    else:
-                        if hasattr(gen, '_coerce_to_type'):
-                            _cv = gen._coerce_to_type(_fat, 'int64_t', _fav)
-                        elif hasattr(gen, '_to_int64'):
-                            _cv = gen._to_int64(_fat, _fav)
+                if _is_default_init_literal(_fill_node):
+                    # `{}` in a `fill=` position is Mojo's DEFAULT
+                    # INITIALIZER, not an empty dict value: `fill: Self.T`
+                    # asks for `T()` at each of the `_ncount` indices
+                    # (`Array[Float32, 23](fill={})` is 23 zero floats).
+                    # Lowering it as a literal produces a `MojoDict *`, and
+                    # the numeric arm below then cast that POINTER to
+                    # `double` — a C constraint violation, reported by
+                    # gcc -fgimple as `pointer value use` on
+                    # test/algorithm/test_vectorize.mojo:109. The element
+                    # type, not the fill expression, names the zero.
+                    _zero = ('0.0' if _et == 'double'
+                             else '""' if _et == 'char *' else '0')
+                    for _ in range(_ncount):
+                        if _et == 'double':
+                            gen._emit(f'  mojo_list_append_double ({t}, {_zero});')
+                        elif _et == 'char *':
+                            gen._emit(f'  mojo_list_append_str ({t}, {_zero});')
                         else:
-                            _cv = _fav
-                        gen._emit(f'  mojo_list_append_int ({t}, {_cv});')
+                            gen._emit(f'  mojo_list_append_int ({t}, {_zero});')
+                else:
+                    _fat, _fav = gen.lower_expr(_fill_node)
+                    # A non-numeric fill cannot become a `double` element:
+                    # `(double)<pointer>` is the same constraint violation
+                    # the default-initializer arm above avoids. Lower it for
+                    # its side effects and do not fabricate elements, the
+                    # same fallback the unknown-count branch uses. (Every
+                    # other element kind has a legal cast for any fill.)
+                    _numeric = (_et != 'double'
+                                or gimple_ctypes.TypeLattice.is_int(_fat)
+                                or gimple_ctypes.TypeLattice.is_float(_fat))
+                    if _numeric:
+                        for _ in range(_ncount):
+                            if _et == 'double' or _fat == 'double':
+                                _cv = gen._coerce_to_type(_fat, 'double', _fav) if hasattr(gen, '_coerce_to_type') else _fav
+                                gen._emit(f'  mojo_list_append_double ({t}, {_cv});')
+                            elif _et == 'char *' or _fat == 'char *':
+                                _cv = gen._coerce_to_type(_fat, 'char *', _fav) if hasattr(gen, '_coerce_to_type') else _fav
+                                gen._emit(f'  mojo_list_append_str ({t}, {_cv});')
+                            else:
+                                if hasattr(gen, '_coerce_to_type'):
+                                    _cv = gen._coerce_to_type(_fat, 'int64_t', _fav)
+                                elif hasattr(gen, '_to_int64'):
+                                    _cv = gen._to_int64(_fat, _fav)
+                                else:
+                                    _cv = _fav
+                                gen._emit(f'  mojo_list_append_int ({t}, {_cv});')
             elif _fill_node is not None:
                 # Unknown count: evaluate fill for side effects but do not guess.
                 gen.lower_expr(_fill_node)
