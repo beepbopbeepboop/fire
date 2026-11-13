@@ -69,6 +69,46 @@ Comprehension = getattr(_fc, 'Comprehension', None)
 COMPREHENSION_FOLD_CAP = 4096
 
 
+# The scalar spellings a bound DType parameter takes once an instantiation has
+# substituted it textually (`dtype` -> `Float32`, see monomorphize_source). The
+# codegen already reads these as the scalar type (types._SCALAR_CTORS), so in a
+# comptime condition of that instantiation `Float32` names DType.float32 — and
+# without this, `Float32.is_floating_point()` / `Float32 == .float8_e5m2` were
+# unknown and the dead branch of a `comptime if` on the dtype was emitted.
+_DTYPE_SPELLINGS = frozenset({
+    'Float16', 'BFloat16', 'Float32', 'Float64',
+    'Int8', 'Int16', 'Int32', 'Int64',
+    'UInt8', 'UInt16', 'UInt32', 'UInt64',
+})
+
+
+def _dtype_spelling_value(name):
+    """`('DType', x)` for a scalar DType spelling such as `Float32`, else None."""
+    if name in _DTYPE_SPELLINGS:
+        return ('DType', name.lower())
+    return None
+
+
+def _is_dtype_value(v) -> bool:
+    """A value that is a DType: a bound `DType.x` / `dtype.x` spelling, or the
+    `('DType', x)` marker. A bare `('.', x)` is an ENUM variant reference in
+    general and only a DType when the other operand is one."""
+    if isinstance(v, str):
+        return v.startswith('DType.') or v.startswith('dtype.')
+    return isinstance(v, tuple) and len(v) == 2 and v[0] in ('DType', 'dtype')
+
+
+def _dtype_operand_name(v):
+    """The lowercase DType name a comparison operand denotes, or None. Accepts
+    the bound DType spellings and the dot-relative `('.', x)` marker, so
+    `dtype == .float32` and `dtype == DType.float32` decide the same way."""
+    if _is_dtype_value(v):
+        return _dtype_name_from_value(v)
+    if isinstance(v, tuple) and len(v) == 2 and v[0] == '.' and isinstance(v[1], str):
+        return v[1].lower()
+    return None
+
+
 def compare_op(op: str, left, right):
     """Fold one comparison-chain link, or None if `op` is not a known comparison.
 
@@ -82,6 +122,19 @@ def compare_op(op: str, left, right):
     closure-lowering doesn't support several small same-scope lambdas bound
     into one dict literal). Returns None for an unrecognized op, distinct
     from a real False."""
+    # DType operands compare by NAME. A bound `dtype` is `DType.float32` (or
+    # the `('DType', x)` marker) while a dot-relative `.float32` is the
+    # `('.', x)` marker; plain equality of the two spellings is always False,
+    # which folded `dtype == .float32` to a false branch.
+    if op in ('==', '!=') and (_is_dtype_value(left) or _is_dtype_value(right)):
+        _ln, _rn = _dtype_operand_name(left), _dtype_operand_name(right)
+        if _ln is not None and _rn is not None:
+            return (_ln == _rn) if op == '==' else (_ln != _rn)
+    if op in ('in', 'not in') and _is_dtype_value(left) and isinstance(right, (tuple, list)):
+        _ln = _dtype_operand_name(left)
+        _names = [_dtype_operand_name(x) for x in right]
+        if _ln is not None and all(_n is not None for _n in _names):
+            return (_ln in _names) if op == 'in' else (_ln not in _names)
     if op == '==':  return left == right
     if op == '!=':  return left != right
     if op == '<':   return left < right
@@ -591,11 +644,14 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
     if _ct is not None:
         return bool(_ct)
     if DottedLiteral is not None and isinstance(node, DottedLiteral):
-        # .name - for enum/DType values, return a marker
-        try:
-            return ('.', getattr(node, 'name'))
-        except Exception:
+        # `.float8_e5m2` - an enum/DType variant, spelled without its type.
+        # The node carries its spelling in `path` (fire_compiler.DottedLiteral);
+        # there is no `name` attribute, and reading one made every dotted
+        # variant fold to None, so `dtype == .float8_e5m2` never decided.
+        p = getattr(node, 'path', None)
+        if not isinstance(p, str) or not p:
             return None
+        return ('.', p)
     if TupleExpr is not None and isinstance(node, TupleExpr):
         res = []
         for e in getattr(node, 'elements', []) or []:
@@ -701,7 +757,8 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
                 return _w
             return None
     if isinstance(node, IdentExpr):
-        return bindings.get(node.name)
+        v = bindings.get(node.name)
+        return v if v is not None else _dtype_spelling_value(node.name)
     # `DType.int32` / `dtype.int32` — a compile-time DType value.
     if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
             and node.obj.name in ('DType', 'dtype')):
@@ -788,6 +845,11 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
             r = eval_const(node.right, bindings, platform, conforms_to_pred)
             if l is None or r is None:
                 return None
+            if _is_dtype_value(l) and isinstance(r, (list, tuple)):
+                # `dtype in (.float32, .float64)`: membership by DType name
+                # (see compare_op), not the raw tuple test a bound DType never
+                # satisfies against its dot-relative members.
+                return compare_op('in', l, r)
             try:
                 if isinstance(r, (list, tuple, set)):
                     return l in r
@@ -1021,7 +1083,7 @@ def _const_foldable(node, bindings: dict, call_hook=None, conforms_to_pred=None)
             and node.func.name == 'conforms_to'):
         return False
     if isinstance(node, IdentExpr):
-        return node.name in bindings
+        return node.name in bindings or _dtype_spelling_value(node.name) is not None
     # `DType.int32` / `dtype.int32`
     if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
             and node.obj.name in ('DType', 'dtype')):
