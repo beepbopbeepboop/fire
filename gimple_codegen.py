@@ -1855,11 +1855,6 @@ class GimpleGen:
         # here with a literal container gives _collect_self_assigns the real
         # C type AND guarantees the field is valid from construction.
         self._comptime_vals: dict = {}
-        # Module-level `alias NAME = <type>` declarations (annotation spelling
-        # of the target). Populated by the module pre-pass and expanded by
-        # `_resolve_type` and call lowering so an alias behaves like the type
-        # it names. Part 1/2 of CODEGEN_simd_and_array_values_erase_to_int64.
-        self._type_aliases: dict = {}
         # Nesting depth of runtime-degraded `comptime if` emission. When > 0,
         # branch bodies are being generated for a comptime-if whose conditions
         # could not be resolved statically (so all branches are emitted as a

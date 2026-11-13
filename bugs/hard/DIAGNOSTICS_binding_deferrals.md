@@ -50,7 +50,7 @@ existing body-instantiation regressions in that file stay green.
   Part 1 (provably-false signature binding → `error: violated constraint`)
   is fixed: declaration-time checking rejects a signature parameter whose
   generic struct instantiation has a provably-false `where` clause.
-  Remaining work is `bugs/hard/DIAGNOSTICS_binding_deferrals-part2.md`
+  Remaining work is `bugs/mid/DIAGNOSTICS_binding_deferrals-part2.md`
   (unproven requirement → `error: invalid bindings in signature: lacking evidence`).
 - **Note on the earlier part-2 interpretation.** The 2026-11-12 body fix read
   "only the error that failed it, not the constraints it deferred" as "this

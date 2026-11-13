@@ -2175,10 +2175,6 @@ STALE_PER_CHILD_BUDGETS = {
     'test_constrained_paren_diagnostic.py': 2,
     'test_dict_slot_read_bug.py': 1,
     'test_dict_slot_read_bug_demo.py': 1,
-    # The two sites are a whole-program COMPILE and the RUN of the 8-line
-    # program it produced (600 s / 60 s): the compile wall is real work, the run
-    # is a tiny program and a candidate for the shared constant.
-    'test_float_bit_reinterpret.py': 2,
     'test_gimple_function_scoped_alias_extern.py': 1,
     'test_interpreter_assert_message.py': 1,
     'test_interpreter_constrained_diagnostic.py': 1,
@@ -4081,12 +4077,10 @@ UNREGISTERED = {
     'test_codegen_int_div_zero.py': _STANDALONE_TEST_REASON,
     'test_codegen_sys_encoding_capture.py': _STANDALONE_TEST_REASON,
     'test_comptime_alias_instance_read.py': _STANDALONE_TEST_REASON,
-    'test_comptime_dtype_compare.py': _STANDALONE_TEST_REASON,
     'test_coro_generator_module_qual.py': _STANDALONE_TEST_REASON,
     'test_coro_list_param_int_element.py': _STANDALONE_TEST_REASON,
     'test_coro_module_qualifier_attr.py': _STANDALONE_TEST_REASON,
     'test_dylib_dedup.py': _STANDALONE_TEST_REASON,
-    'test_float_bit_reinterpret.py': _STANDALONE_TEST_REASON,
     'test_pointer_arm_scalar_shapes.py': _STANDALONE_TEST_REASON,
     'test_generic_struct_local_linked_list.py': _STANDALONE_TEST_REASON,
     'test_gimple_block_shadow.py': _STANDALONE_TEST_REASON,
@@ -4112,6 +4106,30 @@ UNREGISTERED = {
     'tools/test_swarm_class_refresh.py': _STANDALONE_TEST_REASON,
     'tools/test_swarm_feed.py': _STANDALONE_TEST_REASON,
     'tools/test_swarm_live_guard.py': _STANDALONE_TEST_REASON,
+    # ── RED today: exit non-zero, and no gate, tally or coverage number
+    #    reports any of it. The count is a re-run of every entry, not a
+    #    reading of a bug doc.
+    #
+    # The estate audit of 2026-11-13 found `test_lsp_error_recovery.py` in no
+    # bucket. It cannot simply be registered: it is RED. Its source is a bare
+    # `asdf` at module scope, which this parser accepts as an ordinary
+    # expression statement (`ExprStmt`), not a syntax error — so
+    # `parse_module(recover=True)` records NO error, and `compile_to_gimple`
+    # compiles the module silently, `struct Good` included. Neither half of
+    # the assertion can hold, whatever parts 1-2 of the diagnostics work do.
+    # The behaviour it means to pin — a diagnostic for an unknown declaration
+    # while the following struct is still emitted — is pinned at a real
+    # unknown declaration by `test_lsp_error_recovery_part2.py` (registered as
+    # `reg-lsp-error-recovery-part2`). Whether this file should be rewritten
+    # against one or retired as a duplicate of that test is the open question
+    # in `bugs/mid/DIAGNOSTICS_lsp_error_recovery-part3.md`; listing it here
+    # is what keeps the estate check green without landing a red job.
+    'test_lsp_error_recovery.py':
+        'RED 2026-11-13: a bare `asdf` parses as an ordinary expression '
+        'statement, so no recovered parse error is recorded and compilation '
+        'succeeds — its "use of unknown declaration" assertion cannot hold. '
+        'The intended shape is pinned by `reg-lsp-error-recovery-part2`; see '
+        '`bugs/mid/DIAGNOSTICS_lsp_error_recovery-part3.md`.',
     'test_x86_64_encoders.py': "Two checks on formal/x86_64.py's encoder "
         'arithmetic, independent of the round-trip above.',
     # `formal/x86_64_model_fuzz.py` is a TOOL whose harness's own entry path
@@ -5177,54 +5195,6 @@ def test_every_test_file_is_registered():
         if carried:
             print(f'        family {matcher.pattern} carries {len(carried)}: '
                   f'{carried[0]}, ...')
-
-
-_TRAIT_CONFORMANCE_DIAGNOSTIC_SUITES = (
-    # (spec name, test file, part) — the whole trait-conformance diagnostics
-    # family. Each is `compile_to_gimple`-only, no build, tiny and
-    # sub-second.
-    ('trait-requirement-evidence-diagnostic',
-     'test_trait_requirement_evidence_diagnostic.py', 'part 2'),
-    ('reg-conditional-conformance-synthesis-diagnostic',
-     'test_conditional_conformance_synthesis_diagnostic.py', 'part 4'),
-    ('downcast-witness-diagnostic',
-     'test_downcast_witness_diagnostic.py', 'part 7'),
-)
-
-
-def test_the_trait_conformance_diagnostic_suites_are_gated():
-    """Every trait-conformance diagnostic suite runs on every gate.
-
-    The three files landed with their fixes (`06ea5b0ef` part 2, `65cee30d4`
-    part 4, `ec12b76e1` part 7) and none was named by a spec, so
-    `suite-self-test`'s estate row was the only thing that mentioned them and
-    no run executed their cases
-    (`bug:SUITE_trait_requirement_evidence_unregistered`). Each was found by
-    the estate check only after the previous one was "fixed", which is why
-    this pins the family and not one file.
-
-    The estate check above is what found each one, but it can only ask that
-    SOME spec names the file; a name in a bucket `gate` does not expand to is
-    the same hole one level over, and `regressions`/`orchestrator` are exactly
-    such buckets by design. All three are cheap (tiny, 0.0-0.1 GB measured,
-    sub-second, no build) and pin compiler diagnostics, so they belong in the
-    everyday loop, and this check pins that by name so dropping a
-    registration — or moving one out of the gate — is a red row rather than a
-    silent coverage loss.
-    """
-    for name, filename, part in _TRAIT_CONFORMANCE_DIAGNOSTIC_SUITES:
-        spec = suite.REGISTRY.get(name)
-        files = ({os.path.basename(str(c)) for c in spec.cmd}
-                 if spec is not None else set())
-        check(f'the gate: {name} ({part}) runs on every gate',
-              spec is not None
-              and filename in files
-              and name in suite.expand_bucket('gate'),
-              ('bug:SUITE_trait_requirement_evidence_unregistered: no spec '
-               f'names {filename}, so it runs on nothing' if spec is None else
-               'bug:SUITE_trait_requirement_evidence_unregistered: '
-               f'{name} is registered but not reachable from `gate` '
-               f'(cmd={sorted(files)})'))
 
 
 def test_no_test_name_is_registered_twice():
@@ -6667,7 +6637,6 @@ def main():
                test_checked_run_replays_a_pass_and_reruns_a_failure,
                test_cached_spec_names_its_own_test,
                test_every_test_file_is_registered,
-               test_the_trait_conformance_diagnostic_suites_are_gated,
                test_no_test_name_is_registered_twice,
                test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,

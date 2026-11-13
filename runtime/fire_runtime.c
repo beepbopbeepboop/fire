@@ -1865,19 +1865,6 @@ int64_t mojo_double_to_bits(double v) {
     return bits;
 }
 
-float mojo_float_from_bits(int64_t bits) {
-    uint32_t w = (uint32_t)bits;
-    float v;
-    memcpy(&v, &w, sizeof(v));
-    return v;
-}
-
-int64_t mojo_float_to_bits(float v) {
-    uint32_t w;
-    memcpy(&w, &v, sizeof(w));
-    return (int64_t)w;
-}
-
 /* The box read as a double. A value that is NOT a box — or a box of a kind
  * that is not a double's — comes back as its own numeric value, not 0: the
  * codegen marks a whole READ SITE as possibly boxed (the runtime decides per

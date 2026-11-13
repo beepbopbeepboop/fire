@@ -1215,7 +1215,7 @@ def _c_to_cpp_scalar_type(ctype: str) -> str:
         return 'char *'
     return ctype
 
-def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None, nested_generator_api: dict | None=None, outer_fn_name: str | None=None) -> str | None:
+def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None) -> str | None:
     """The C type a `yield from <expr>` site contributes to its enclosing
     generator's overall yield-value type, for _generator_yield_ctype's
     same-type-everywhere check — None if `<expr>` isn't a bare call to a
@@ -1241,9 +1241,7 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, f
     if isinstance(call, CallExpr) and isinstance(call.func, IdentExpr) and (call.func.name == 'sorted') and call.args:
         _inner = call.args[0]
         _inner_yf = YieldFromExpr(value=_inner) if not isinstance(_inner, YieldFromExpr) else _inner
-        _inner_ctype = _yield_from_delegate_ctype(_inner_yf, generator_api,
-                                                  nested_generator_api=nested_generator_api,
-                                                  outer_fn_name=outer_fn_name)
+        _inner_ctype = _yield_from_delegate_ctype(_inner_yf, generator_api)
         return _inner_ctype if _inner_ctype not in (None, 'char *') else 'int64_t'
     # `yield from cls.<generator>(...)` -- a @classmethod generator
     # delegating to a SIBLING generator method of the same class. Resolved
@@ -1270,14 +1268,12 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None, f
         _mapi = generator_method_api.get((self_struct_name, _mname))
         if _mapi is not None:
             return _mapi.get('value_ctype')
+    if generator_api is None:
+        return None
     if isinstance(call, CallExpr) and isinstance(call.func, IdentExpr):
-        api = (generator_api or {}).get(call.func.name)
-        if api is None and nested_generator_api is not None and outer_fn_name is not None:
-            api = nested_generator_api.get((outer_fn_name, call.func.name))
+        api = generator_api.get(call.func.name)
         if api is not None:
             return api.get('value_ctype')
-    if generator_api is None and nested_generator_api is None:
-        return None
     if isinstance(call, CallExpr) and isinstance(call.func, MemberExpr) and isinstance(call.func.obj, IdentExpr) and (call.func.obj.name == 'self'):
         _mname = call.func.member
         if _mname == '_iter_member_' and generator_method_api is not None and self_struct_name:
@@ -1360,7 +1356,7 @@ def _walk_own_body(node):
             out.append(n)
     return out
 
-def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, generator_api: dict | None=None, nested_generator_api: dict | None=None, outer_fn_name: str | None=None) -> tuple[bool, list | None]:
+def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, generator_api: dict | None=None) -> tuple[bool, list | None]:
     """Companion to `_generator_yield_ctype` for the tuple-valued-yield
     case (`yield a, b` / `yield a, b, c`): computes the unified per-SLOT
     C++ element type list every tuple-yield site in `fn`'s own body must
@@ -1449,11 +1445,8 @@ def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None,
                 if (site[_si] == 'int64_t' and isinstance(_el, IdentExpr)
                         and _name_has_str_evidence(_el.name, fn)):
                     site[_si] = 'char *'
-        elif (isinstance(n, YieldFromExpr) and isinstance(n.value, CallExpr)
-              and isinstance(n.value.func, IdentExpr) and (n.value.func.name != fn.name)):
-            delegate_api = (generator_api or {}).get(n.value.func.name)
-            if delegate_api is None and nested_generator_api is not None and outer_fn_name is not None:
-                delegate_api = nested_generator_api.get((outer_fn_name, n.value.func.name))
+        elif isinstance(n, YieldFromExpr) and generator_api is not None and isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr) and (n.value.func.name != fn.name):
+            delegate_api = generator_api.get(n.value.func.name)
             delegate_slots = delegate_api.get('tuple_slot_ctypes') if delegate_api else None
             if delegate_slots is None:
                 continue
@@ -1621,7 +1614,7 @@ def _tuple_guarded_bare_yields(fn) -> set:
     return out
 
 
-def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_api: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, include_returns: bool=True, self_struct_ctype: str | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None, module_global_types: dict | None=None, nested_generator_api: dict | None=None, outer_fn_name: str | None=None) -> str | None:
+def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_api: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, include_returns: bool=True, self_struct_ctype: str | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None, module_global_types: dict | None=None) -> str | None:
     """The single scalar C++ type every `yield <value>` / `yield from
     <call>` in fn's own body must agree on (mixed types, a bare `yield` with
     no value, or a `yield from` that doesn't resolve to a known compiled
@@ -1767,9 +1760,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                 t = _yield_from_delegate_ctype(n, generator_api, field_elem_types,
                                                local_elem_types,
                                                generator_method_api,
-                                               self_struct_name,
-                                               nested_generator_api,
-                                               outer_fn_name)
+                                               self_struct_name)
             if t is None:
                 return None
             if ctype is None:

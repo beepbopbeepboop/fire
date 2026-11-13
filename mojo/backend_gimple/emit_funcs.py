@@ -3034,22 +3034,6 @@ def _func_qualifier(gen, bare_name: str) -> str:
         # to layer on the per-compile `_inline_module_qualifiers` remap,
         # which needs a `gen`.
         from mojo.middle.module_shared import module_qualifier
-        # An EMPTY module name means "no module" (the root compile's own
-        # `GimpleGen` is built without one), so it must sanitize to no
-        # qualifier. Without this guard the remap below answered for it:
-        # `_inline_module_qualifiers` is keyed by the SANITIZED module of
-        # every inlined file AND by `module.lstrip('.')...` for relative
-        # imports (`funcs_shared.py:1276`), so a `from . import x` writes
-        # the key `''` — and the last such writer in a whole-closure build
-        # was `mojo.middle`, making `_sanitize_qualifier('')` return
-        # `mojo_middle`. Every function the ROOT module defined then got a
-        # spurious `mojo_middle_` prefix while its importers' call sites
-        # (resolved through their own non-empty module) stayed bare:
-        # fire.py's `build_executable` was emitted as
-        # `mojo_middle_build_executable_d8f39a` against call sites emitting
-        # `build_executable_d8f39a` — undefined symbol at link.
-        if not q:
-            return ''
         key = module_qualifier(q)
         resolved = gen._inline_module_qualifiers.get(key, key)
         return module_qualifier(resolved)
@@ -3969,8 +3953,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         lines.append(f"#if USE_PYTHON")
         lines.append(f"  Py_Finalize ();")
         lines.append(f"#endif")
-        # `main` returns a C `int`; `result` has the Mojo `main`'s own type.
-        lines.append(f"  return (int)result;")
+        lines.append(f"  return result;")
         lines.append(f"}}")
 
     gen._pop_import_scope()
@@ -3996,15 +3979,10 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
 
     # Generate code for each top-level statement
     gen._in_toplevel_gen = True
-    gen._toplevel_bound_globals = []
     gen._frame_enter_module()
     try:
         for stmt in toplevel_stmts:
             gen.gen_stmt(stmt)
-            # AFTER the statement is lowered: a `globals()` inside this
-            # statement must see only the names bound by earlier ones (see
-            # `emit_infra.lower_module_globals_read`).
-            ginf.note_toplevel_bindings(gen, stmt)
     finally:
         gen._in_toplevel_gen = False
     gen._frame_leave()

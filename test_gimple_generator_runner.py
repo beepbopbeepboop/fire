@@ -259,36 +259,6 @@ def _build_foreign_package_run(entry_rel, entry_src, cwd):
     return out, cpython_stdout
 
 
-def _build_foreign_package_run_files(entry_src, files, cwd):
-    """`_build_foreign_package_run` with the caller's OWN package content —
-    `files` is the full package (rel path -> source, including `__init__.py`
-    and the entry's `main.py`) instead of the shared `_FOREIGN_PKG_FILES`.
-    For cross-module fixtures whose sibling modules differ from the shared
-    package (the tables.py part-4/part-5 regressions below). Returns
-    (compiled_stdout, cpython_stdout, cpython_completed)."""
-    pkg = os.path.join(cwd, 'fpp')
-    os.makedirs(pkg, exist_ok=True)
-    for rel, src in files.items():
-        with open(os.path.join(pkg, rel), 'w') as f:
-            f.write(src)
-    entry = os.path.join(pkg, 'main.py')
-    cp = subprocess.run([sys.executable, '-m', 'fpp.main'], cwd=cwd,
-                        capture_output=True, text=True,
-                        timeout=RUN_TIMEOUT_S)
-    cpython_stdout = cp.stdout
-    c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
-        entry_src, do_imports=True, filename=entry)
-    if not cpp_code:
-        raise RuntimeError(
-            "expected a non-empty generated .cpp — the entry's generator "
-            "should be cpp-path (the fixture's unrepresentable kwonly "
-            "default is what forces it down the cpp path)")
-    exe = _build_generator_program_from_code(c_code, cpp_code)
-    out = subprocess.run([exe], capture_output=True,
-                         timeout=RUN_TIMEOUT_S).stdout.decode()
-    return out, cpython_stdout, cp
-
-
 def _test_foreign_a3_generator_handle(name, entry_src, want):
     """Compile+run the package fixture and compare against CPython on the
     very same files. `want` is asserted against CPython's own output first,
@@ -304,42 +274,6 @@ def _test_foreign_a3_generator_handle(name, entry_src, want):
         return
     except Exception as e:
         print(f"FAIL  {name}: {e}")
-        _FAIL += 1
-        return
-    if cpy != want:
-        print(f"FAIL  {name}: CPython baseline is not {want!r} (got {cpy!r}) "
-              f"— fixture is wrong, not the compiler")
-        _FAIL += 1
-        return
-    if got == cpy:
-        print(f"PASS  {name}")
-        _PASS += 1
-    else:
-        print(f"FAIL  {name}: compiled stdout {got!r} != CPython {cpy!r}")
-        _FAIL += 1
-
-
-def _test_foreign_package_case(name, files, entry_src, want):
-    """`_test_foreign_a3_generator_handle` for a caller-defined package
-    (`files` is the FULL package content — `_build_foreign_package_run_files`
-    instead of the shared `_FOREIGN_PKG_FILES`). `want` is asserted against
-    CPython's own output first, so a fixture that drifted from its documented
-    expectation fails as a FIXTURE bug and not as a compiler regression."""
-    global _PASS, _FAIL
-    try:
-        wd = tempfile.mkdtemp(prefix='mojo_gen_fpp_')
-        got, cpy, cp = _build_foreign_package_run_files(entry_src, files, wd)
-    except subprocess.TimeoutExpired as e:
-        print(f"TIMEOUT {name}: {e}")
-        _FAIL += 1
-        return
-    except Exception as e:
-        print(f"FAIL  {name}: {e}")
-        _FAIL += 1
-        return
-    if cp.returncode != 0:
-        print(f"FAIL  {name}: CPython reference exited {cp.returncode}: "
-              f"{cp.stderr[-500:]} — fixture is wrong, not the compiler")
         _FAIL += 1
         return
     if cpy != want:
@@ -1414,106 +1348,6 @@ def _regression_raise_mixed_tuple_literal_in_generator():
     except Exception as e:
         print(f"FAIL  {name}: {e}")
         _FAIL += 1
-
-
-def _regression_tables_module_qualified_tuple_for():
-    # COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part4: a TUPLE-target
-    # `for` over a MODULE-QUALIFIED call to a FOREIGN module's compiled
-    # generator, with a KEYWORD argument, inside a cpp C++20-coroutine
-    # generator body — tables.py's parse_table doing
-    # `for line, filename in strutil.parse_entries(entries, ignoresep=sep):`.
-    #
-    # `consume` is forced down the cpp path by the unrepresentable `start=[]`
-    # kwonly default (the list literal the A3 gate does not admit — same trick
-    # as `_foreign_a3_generator_handle_next`); `mpe.parse_entries` is
-    # itself cpp-path (kwonly `ignoresep`) and yields (str, None) tuples like
-    # the real `strutil.parse_entries` does. The foreign module's cpp-lowered
-    # generator DOES register in `_generator_home_api` (module_gen.py:13906),
-    # so the callee is resolvable; on the 2026-11-13 tree what is missing is
-    # the ROUTING: `_cpp_iterable_is_delegatable_generator_call`
-    # (cpp_async.py:214) accepts only bare names and self/cls methods, so the
-    # loop falls to the generic emitter and `_cpp_refuse_unpacking_target`
-    # (cpp_core.py:9210) refuses the tuple target:
-    #
-    #     consume: a tuple `for` target (line, filename) over this iterable
-    #     is not supported in a compiled generator/coroutine body ...
-    #
-    # RED until part 4 lands; wire into run_tests() next to
-    # `_regression_raise_mixed_tuple_literal_in_generator` in that fix.
-    _test_foreign_package_case(
-        "tables_module_qualified_tuple_for",
-        {'__init__.py': '',
-         'mpe.py': (
-             "def parse_entries(entries, *, ignoresep=None):\n"
-             "    for entry in entries:\n"
-             "        if ignoresep and ignoresep in entry:\n"
-             "            subentries = [entry]\n"
-             "        else:\n"
-             "            subentries = entry.strip().replace(',', ' ').split()\n"
-             "        for item in subentries:\n"
-             "            yield item, None\n")},
-        (
-            "from . import mpe\n"
-            "\n"
-            "def consume(entries, *, sep=',', start=[]):\n"
-            "    for line, filename in mpe.parse_entries(entries, ignoresep=sep):\n"
-            "        if filename:\n"
-            "            yield line + '/' + filename\n"
-            "        else:\n"
-            "            yield line\n"
-            "\n"
-            "def main():\n"
-            "    for v in consume([\"x,y\", \"a b\", \"c\"]):\n"
-            "        print(v)\n"
-            "\n"
-            "main()\n"),
-        "x,y\na\nb\nc\n")
-
-
-def _regression_tables_callable_param_generator_handle_arg():
-    # COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part5: a call THROUGH a
-    # callable-valued parameter whose ARGUMENT is a compiled-generator HANDLE
-    # local — tables.py's read_table doing
-    # `lines = strutil._iter_significant_lines(infile)` then
-    # `for row in _get_reader(lines, delimiter=sep or '\t'):`. The handle is
-    # not statically a word, string or container, so `_cpp_dyn_call_expr`
-    # (cpp_core.py:1875, refusal at :1927) refuses:
-    #
-    #     read_table: a call through the callable-valued parameter
-    #     '_get_reader' passes an argument whose C type is not statically
-    #     a word, string or container.
-    #
-    # `mlines.iter_lines` is A3-lowered (no kwonly params) exactly like
-    # `strutil._iter_significant_lines`; `_get_reader=csv.reader` (a callable
-    # default) keeps `read_table` on the cpp path, and the csv.reader tabled
-    # runtime (part 2 / 7e6a8ac5c) iterates the materialized list of lines.
-    # Measured 2026-11-13: the SAME fixture with `lines = entries` (a list,
-    # no handle) compiles and runs, so this regression is red ONLY for the
-    # generator-handle-argument shape.
-    #
-    # RED until part 5 lands; wire into run_tests() in that fix.
-    _test_foreign_package_case(
-        "tables_callable_param_generator_handle_arg",
-        {'__init__.py': '',
-         'mlines.py': (
-             "def iter_lines(lines):\n"
-             "    for line in lines:\n"
-             "        yield line\n")},
-        (
-            "import csv\n"
-            "from . import mlines\n"
-            "\n"
-            "def read_table(entries, header, *, sep=',', _get_reader=csv.reader):\n"
-            "    lines = mlines.iter_lines(entries)\n"
-            "    for row in _get_reader(lines, delimiter=sep):\n"
-            "        yield row[0]\n"
-            "\n"
-            "def main():\n"
-            "    for v in read_table([\"a,b\", \"1,2\"], \"a,b\", sep=','):\n"
-            "        print(v)\n"
-            "\n"
-            "main()\n"),
-        "a\n1\n")
 
 
 def _cpp_coroutine_builtin_module_constant():

@@ -24,6 +24,8 @@ enclosing generator to a stack-switch body, so a fixture that fell into that
 path would not exercise this defect.
 
 Run: `python3 test_nested_generator_yield_from_in_coroutine.py`
+Cases: `minimal`, `main`/`main-shape`, `negative` (and `tagged` when added).
+With no argument, runs `minimal` and `main-shape` (the original positive cases).
 """
 import os
 import subprocess
@@ -101,6 +103,17 @@ def _compiled_run(src: str) -> tuple[str, int | None, str]:
     return 'built', r.returncode, r.stdout + r.stderr
 
 
+def _expect_refused(name: str, src: str, expected_substrings: list[str]):
+    status, rcode, out = _compiled_run(src)
+    assert status == 'refused', (
+        f'{name}: expected compiler refusal, got status={status!r} '
+        f'exit={rcode} out={out!r}')
+    for sub in expected_substrings:
+        assert sub in out, (
+            f'{name}: refusal missing expected text {sub!r}.\n'
+            f'Got refusal:\n{out}')
+
+
 def _check(name: str, src: str):
     want_code, want = _cpython_run(src)
     assert want_code == 0, (name, 'CPython fixture failed', want_code)
@@ -119,23 +132,94 @@ def test_yield_from_captured_nested_generator_main_shape():
     _check('main-shape', MAIN_SHAPE_SRC)
 
 
-CASES = {
-    'minimal': test_yield_from_captured_nested_generator_in_coroutine_generator,
-    'main-shape': test_yield_from_captured_nested_generator_main_shape,
+# --- part 3 (negative): shapes the capture model must NOT claim stay refused ---
+# Each must still produce the refusal it produces on master. The nested
+# generator `section` reads the enclosing `items`, so today the compiler reports
+# the coroutine path has no capture model for it and the `yield from` call is an
+# unresolved callee; these assertions pin those existing messages.
+
+NEGATIVE_REBOUND_SRC = r'''def fmt(analysis: list):
+    items = list(analysis)
+    def section():
+        for x in items:
+            yield x
+    items = []
+    yield from section()
+
+for v in fmt([1, 2]):
+    print(v)
+'''
+
+NEGATIVE_NONLOCAL_SRC = r'''def fmt(analysis: list):
+    items = list(analysis)
+    def section():
+        nonlocal items
+        items = []
+        for x in items:
+            yield x
+    yield from section()
+
+for v in fmt([1, 2]):
+    print(v)
+'''
+
+NEGATIVE_KWARG_SRC = r'''def fmt(analysis: list):
+    items = list(analysis)
+    def section(label='x'):
+        for x in items:
+            yield label
+            yield x
+    yield from section(label='y')
+
+for v in fmt([1, 2]):
+    print(v)
+'''
+
+# Refusal text observed on master/current tree for these unclaimed shapes.
+_NEGATIVE_UNRESOLVED = (
+    "a call to unresolved callee 'section(...)' is not supported in a "
+    "compiled generator/coroutine body")
+_NEGATIVE_NO_CAPTURE = (
+    "is a nested generator that reads enclosing-scope variable(s) items; "
+    "the coroutine path has no capture model for a generator defined inside "
+    "another function")
+
+
+def test_negative_unclaimed_nested_generator_shapes_stay_refused():
+    _expect_refused('negative-rebound', NEGATIVE_REBOUND_SRC,
+                    [_NEGATIVE_UNRESOLVED, _NEGATIVE_NO_CAPTURE])
+    _expect_refused('negative-nonlocal', NEGATIVE_NONLOCAL_SRC,
+                    [_NEGATIVE_UNRESOLVED, _NEGATIVE_NO_CAPTURE])
+    _expect_refused('negative-kwarg', NEGATIVE_KWARG_SRC,
+                    [_NEGATIVE_UNRESOLVED, _NEGATIVE_NO_CAPTURE])
+
+
+_CASES = {
+    'minimal': [test_yield_from_captured_nested_generator_in_coroutine_generator],
+    'main': [test_yield_from_captured_nested_generator_main_shape],
+    'main-shape': [test_yield_from_captured_nested_generator_main_shape],
+    'negative': [test_negative_unclaimed_nested_generator_shapes_stay_refused],
 }
+
+_DEFAULT_CASES = ['minimal', 'main-shape']
 
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1:
-        name = sys.argv[1]
-        if name not in CASES:
-            print(f'unknown case {name!r}; expected one of {sorted(CASES)}')
-            sys.exit(2)
-        CASES[name]()
-        print(f'PASS  {name}')
-        sys.exit(0)
+    args = sys.argv[1:]
+    if args:
+        selected = []
+        for a in args:
+            if a not in _CASES:
+                print(f'unknown case: {a} (known: {", ".join(sorted(_CASES))})')
+                sys.exit(2)
+            selected.extend(_CASES[a])
+        tests = [(fn.__name__, fn) for fn in selected]
+    else:
+        tests = [(fn.__name__, fn)
+                 for c in _DEFAULT_CASES for fn in _CASES[c]]
+
     failed = 0
-    for fname, fn in CASES.items():
+    for fname, fn in tests:
         try:
             fn()
             print(f'PASS  {fname}')
@@ -145,4 +229,7 @@ if __name__ == '__main__':
     if failed:
         print(f'FAILED: {failed}')
         sys.exit(1)
-    print('PASS  test_nested_generator_yield_from_in_coroutine')
+    if args == ['negative']:
+        print('PASS  test_nested_generator_yield_from_in_coroutine negative')
+    else:
+        print('PASS  test_nested_generator_yield_from_in_coroutine')

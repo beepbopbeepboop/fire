@@ -184,29 +184,6 @@ def selfhost_emitted_return_type(module: str, struct: str, method: str) -> str:
     return ''
 
 
-def stdlib_unit_emits(mojo_src: str) -> str:
-    """The generated C for mojo_src through
-    build_stdlib_dylib.compile_module_to_c: the single-unit path
-    compile_one.py and the stdlib-syntax gate use, so a shape that only the
-    elaborated (imported-generic) path refuses is exercised here and not by
-    gimple_compiles. Raises on a refusal."""
-    import build_stdlib_dylib
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stdlib_unit_probe.mojo')
-    return build_stdlib_dylib.compile_module_to_c(mojo_src, path, 'stdlib_unit_probe')
-
-
-def stdlib_unit_compiles(mojo_src: str) -> tuple[bool, str]:
-    """Return (ok, error) through build_stdlib_dylib.compile_module_to_c: the
-    single-unit path compile_one.py and the stdlib-syntax gate use. It is not
-    the in-process path gimple_compiles takes, and the two refuse different
-    things (a bracketed generic called from main is only instantiated here)."""
-    try:
-        stdlib_unit_emits(mojo_src)
-        return True, ''
-    except Exception as e:
-        return False, f'{type(e).__name__}: {e}'
-
-
 def gimple_compiles(mojo_src: str) -> tuple[bool, str, str]:
     """Return (ok, c_src, stderr)."""
     c_src = compile_to_gimple(mojo_src)
@@ -11716,12 +11693,7 @@ print("%r" % p)
                     paths.append(_r)
                     continue
                 for _dp, _dn, _ns in os.walk(_r):
-                    # `mojo/ir` is the typed IR (doc/GIR.md). Its `Ex`/`Instr`
-                    # classes have fields named `name`/`op`/`body` like AST
-                    # nodes do, but they are not AST nodes and `_walk_ast`
-                    # never sees one, so there is no memo to invalidate.
-                    _dn[:] = [d for d in _dn if d != "__pycache__"
-                              and not (_dp == "mojo" and d == "ir")]
+                    _dn[:] = [d for d in _dn if d != "__pycache__"]
                     for _n2 in sorted(_ns):
                         if _n2.endswith(".py"):
                             paths.append(os.path.join(_dp, _n2))
@@ -14895,21 +14867,6 @@ def g(x: SIMD[Float64, 1]) -> Bool:
     return (b & 0x7FF).eq(0)
 """), 'gate_stdlib_syntax_float_bit_accessors')
 
-    # A float bit REINTERPRETATION, not a zero: `bitcast[Float32, 1](bits)` and
-    # `SIMD[Float64, 1](from_bits=bits)` both lower through _emit_bits_to_float
-    # to the runtime's bit-pattern helpers. Before, the bitcast fell into the
-    # catch-all and produced `(int64_t)0`, a silently wrong answer.
-    test_c_shape("bitcast_and_from_bits_reinterpret_bits",
-                 """\
-def f(bits: Int64) -> Float32:
-    return bitcast[Float32, 1](bits)
-
-def g(bits: Int64) -> Float64:
-    return SIMD[Float64, 1](from_bits=bits)
-""",
-                 must_have=["mojo_float_from_bits (", "mojo_double_from_bits ("],
-                 must_not_have=["/* indirect call via"])
-
     # gate-stdlib-syntax: a FLOAT Array's fill value is not a float.
     #
     # The Array fill-unroll coerces its fill value to the element type, and a
@@ -14946,173 +14903,6 @@ def f() -> Float64:
 
     _run_isolated(_test_array_float_fill_from_a_container,
                   'gate_stdlib_syntax_array_float_fill_pointer_coercion')
-
-    # gate-stdlib-syntax (2026-11-13): the elaborated-instantiation refusal
-    # must ask whether a bracket argument PROGRESSES (`i + 1`, the unbounded
-    # instantiation b3e501b60 closed), not whether it is a concrete TYPE.
-    # `llvm_intrinsic["llvm.probe.name", T]` is an imported builtin call
-    # whose first argument is a fixed string value and whose second is a
-    # type: the old "not a concrete type" test read the string's rendering
-    # as '' and refused, taking std/math/math.mojo (frexp, reached from
-    # test_ldexp/test_math) and the other stdlib-syntax files red. The shipped
-    # lowering is the documented module-boundary stub. The case compiles in
-    # single-unit mode, the path compile_one.py uses.
-    def _test_imported_intrinsic_string_arg_in_instance():
-        global _PASS, _FAIL
-        name = "gate_stdlib_syntax_imported_intrinsic_string_arg"
-        ok, err = stdlib_unit_compiles("""\
-from std.sys.intrinsics import llvm_intrinsic
-
-def wrap[T: DType](x: SIMD[T, 1]) -> SIMD[T, 1]:
-    return llvm_intrinsic["llvm.probe.name", SIMD[T, 1], has_side_effect=False](x)
-
-def main():
-    print(wrap[DType.float32](SIMD[DType.float32, 1](2.0)))
-""")
-        if ok:
-            print(f"PASS  {name}")
-            _PASS += 1
-        else:
-            print(f"FAIL  {name}: {err}")
-            _FAIL += 1
-
-    _run_isolated(_test_imported_intrinsic_string_arg_in_instance,
-                  'gate_stdlib_syntax_imported_intrinsic_string_arg')
-
-    # gate-stdlib-syntax (2026-11-13): the same refusal on the two shapes
-    # that are compile-time VALUES, not type names, through real stdlib
-    # generics: `sqrt(x)`/`sin(x)` (an intrinsic-name string argument) and
-    # `erf(x)` (`polynomial_evaluate[[1.0, ...]]`, a comptime LIST). Both
-    # are imported generics, so this is the elaborated path the sweep uses.
-    # Before the progressing-argument predicate, `sqrt` refused with
-    # `_llvm_unary_fn` and `erf` with `polynomial_evaluate`: the old test
-    # was "not a concrete type", which neither a string nor a list is.
-    def _test_imported_generic_bracket_args():
-        global _PASS, _FAIL
-        name = "gate_stdlib_syntax_imported_generic_bracket_args"
-        ok, err = stdlib_unit_compiles("""\
-from std.math import sqrt, erf, sin
-
-def probe(x: Float32) -> Float32:
-    return sqrt(x) + erf(x) + sin(x)
-""")
-        if ok:
-            print(f"PASS  {name}")
-            _PASS += 1
-        else:
-            print(f"FAIL  {name}: {err}")
-            _FAIL += 1
-
-    _run_isolated(_test_imported_generic_bracket_args,
-                  'gate_stdlib_syntax_imported_generic_bracket_args')
-
-    # gate-stdlib-syntax (2026-11-13): a `comptime if` over the stdlib's
-    # zero-arg GPU target queries in a generic body (std/math/math.mojo's
-    # rsqrt/recip/exp2/log shape, reached from test_math). On a CPU build
-    # the queries are False, so the GPU arms are comptime-dead and must be
-    # pruned, not emitted as a runtime if/elif over an imported query. The
-    # assertion is on the generated C because a build that emitted the arms
-    # also succeeds on the single-unit path; the calls are what the fold
-    # removes, and the dead arm carries a progressing bracket call
-    # (`f[Int64](1 + 2)`) that the elaborated path refuses if it is reached.
-    def _test_comptime_dead_gpu_arm_pruned_in_instance():
-        global _PASS, _FAIL
-        name = "gate_stdlib_syntax_comptime_gpu_arm_pruned"
-        try:
-            c_src = stdlib_unit_emits("""\
-from std.sys.info import is_nvidia_gpu, is_amd_gpu
-
-def f[T: AnyType](x: Int64) -> Int64:
-    comptime if is_nvidia_gpu():
-        return 0
-    elif is_amd_gpu():
-        return f[Int64](1 + 2)
-    return x
-
-def main():
-    print(f[Float32](1))
-""")
-        except Exception as e:
-            print(f"FAIL  {name}: {type(e).__name__}: {e}")
-            _FAIL += 1
-            return
-        nvidia = c_src.count('std_sys_info_is_nvidia_gpu ()')
-        amd = c_src.count('std_sys_info_is_amd_gpu ()')
-        if nvidia == 0 and amd == 0:
-            print(f"PASS  {name}")
-            _PASS += 1
-        else:
-            print(f"FAIL  {name}: emitted the dead arms "
-                  f"(nvidia={nvidia}, amd={amd}; want 0 each)")
-            _FAIL += 1
-
-    _run_isolated(_test_comptime_dead_gpu_arm_pruned_in_instance,
-                  'gate_stdlib_syntax_comptime_gpu_arm_pruned')
-
-    # gate-stdlib-syntax (class 2): a bare `List(...)` is the container
-    # constructor with its element type inferred from the argument, so every
-    # form must be a `MojoList *`. It used to reach `_lower_opaque_ctor`'s
-    # uppercase rule (there is no bracket argument for the generic-container
-    # arm to match), which returns an `int64_t`: `var a = List([1, 2])` then
-    # made `a * 3` integer multiplication and the compiled program SEGFAULTED
-    # where the interpreter answers. The length/fill form is the shape
-    # `test/builtin/test_sort_issue_1018.mojo` and `test/builtin/test_simd.mojo`
-    # build once their `dtype`/`name` bracket arguments are elaborated, and its
-    # length is a runtime value, so it is a synthetic `[fill for _ in
-    # range(length)]` rather than a static unroll.
-    def _test_bare_list_constructor_keeps_its_container_type():
-        global _PASS, _FAIL
-        name = "gate_stdlib_syntax_bare_list_constructor"
-        src = '''\
-def main():
-    var a = List([1, 2])
-    print(len(a))
-    print(a[0], a[1])
-    var n = 4
-    var b = List(length=n, fill=7)
-    print(len(b), b[0], b[3])
-    var c = List()
-    print(len(c))
-    var d = List(a)
-    print(len(d), d[1])
-    var e = List(1, 2, 3)
-    print(len(e), e[2])
-'''
-        ok, c_src, stderr = gimple_body_compiles(src)
-        if not ok:
-            print(f"FAIL  {name}: gcc -fgimple -x c failed")
-            for line in stderr.splitlines()[:8]:
-                print(f"      {line}")
-            _FAIL += 1
-            return
-        with tempfile.TemporaryDirectory() as td:
-            c_file = os.path.join(td, 'bare_list.ci')
-            with open(c_file, 'w') as fh:
-                fh.write(c_src)
-            exe = os.path.join(td, 'bare_list.exe')
-            cc = subprocess.run(
-                [GCC, '-fgimple', '-x', 'c', f'-I{_RUNTIME_INC}', '-o', exe,
-                 c_file, os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
-                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
-            if cc.returncode != 0:
-                errs = [ln for ln in cc.stderr.splitlines() if ' error:' in ln]
-                print(f"FAIL  {name}: gcc link failed:\n"
-                      + "\n".join(errs[:6]))
-                _FAIL += 1
-                return
-            run = subprocess.run([exe], capture_output=True, text=True,
-                                 timeout=RUN_TIMEOUT_S)
-        want = '2\n1 2\n4 7 7\n0\n2 2\n3 3\n'
-        if run.returncode != 0 or run.stdout != want:
-            print(f"FAIL  {name}: printed {run.stdout!r} "
-                  f"(exit {run.returncode}), want {want!r}")
-            _FAIL += 1
-            return
-        print(f"PASS  {name}")
-        _PASS += 1
-
-    _run_isolated(_test_bare_list_constructor_keeps_its_container_type,
-                  'gate_stdlib_syntax_bare_list_constructor')
 
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.

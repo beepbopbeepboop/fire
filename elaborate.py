@@ -23,7 +23,7 @@ from fire_compiler import (py_tokenize, Parser, FunctionDef, StructDef,
                           align_value_error, _expr_constraint_text, MemberExpr)
 from mojo.middle import comptime as _comptime
 from mojo.middle.comptime import (eval_const, eval_const_bool_state, CONST_TRUE,
-                                  CONST_FALSE, conforms_to, eval_const_int)
+                                  CONST_FALSE, conforms_to)
 from gimple_codegen import _mojo_type
 from mojo.middle.types import _body_builds_struct_tuple
 
@@ -830,21 +830,42 @@ def check_conformance(module_src: str, type_name: str, trait_name: str):
     return (not missing), missing
 
 
-def _is_float_dtype(t: str) -> bool:
-    """Is the concrete type argument `t` a float dtype?
+_FLOAT_DTYPES = {
+    'Float64', 'Float32', 'Float16', 'BFloat16', 'Float8_E5M2', 'Float8_E4M3FN',
+    'Float8_E5M2FNUZ', 'Float8_E4M3FNUZ', 'Float8_E4M3B11FNUZ'
+}
 
-    A `dtype: DType` parameter reaches this checker as the SUBSTITUTED text, so
-    every spelling of one dtype must answer the same: the scalar type
-    (`Float32`), the qualified value (`DType.float32`) and the dot-relative
-    value (`.float32`, which is what a DottedLiteral renders as). The dtype
-    tables live in the shared comptime folder, which folds the same predicate
-    for `comptime if`, so there is one definition of which names are floats.
-    A spelling that is not a known dtype keeps the old conservative answer."""
-    return _comptime.dtype_predicate_for_spelling(t, 'is_floating_point') is True
+
+def _is_float_dtype(t: str) -> bool:
+    t = str(t).strip()
+    if t in _FLOAT_DTYPES:
+        return True
+    # DType.float32 style
+    if t.startswith('DType.'):
+        name = t.split('.')[-1]
+        if name in {'float64', 'float32', 'float16', 'bfloat16'}:
+            return True
+        if 'float' in name.lower():
+            return True
+    if 'float' in t.lower() and 'int' not in t.lower():
+        # be conservative but check common cases
+        if t in {'Float64', 'Float32'}:
+            return True
+    return False
 
 
 def _is_int_dtype(t: str) -> bool:
-    return _comptime.dtype_predicate_for_spelling(t, 'is_integral') is True
+    t = str(t).strip()
+    if t.startswith('Int') or t.startswith('UInt'):
+        # exclude floats
+        if t.startswith('Float'):
+            return False
+        return True
+    if t.startswith('DType.'):
+        name = t.split('.')[-1]
+        if name.startswith('int') or name.startswith('uint'):
+            return True
+    return False
 
 
 def _template_where_clauses(template_src: str):
@@ -1832,153 +1853,6 @@ def _unify_param_ann(ann, pnames, arg_ctype) -> dict:
     return {}
 
 
-def _align_int_binding_value(conc):
-    text = str(conc).strip()
-    if re.fullmatch(r'-?\d+', text):
-        try:
-            return int(text)
-        except Exception:
-            return None
-    return None
-
-
-def _align_eval_call_hook(module_src, name, argvals):
-    """Best-effort comptime call hook for @align evaluation.
-
-    Returns an int result or None when the call cannot be resolved/evaluated
-    as a pure scalar comptime call. Failures must not produce a false
-    diagnostic or crash.
-    """
-    try:
-        if not isinstance(name, str) or not all(isinstance(v, int) for v in argvals):
-            return None
-        import comptime
-        fn_src = extract_fn_source(module_src, name, arg_count=len(argvals))
-        if fn_src is None:
-            return None
-        # evaluate may raise for unsupported shapes; treat as unevaluable.
-        res = comptime.evaluate(fn_src, name, list(argvals))
-        if isinstance(res, bool):
-            return int(res)
-        if isinstance(res, int):
-            return res
-    except Exception:
-        return None
-    return None
-
-
-def _validate_align_decorators_for_struct(module_src, template_src, struct_name, targs):
-    """Validate parametric @align(...) decorators at struct instantiation.
-
-    Evaluates constant/comptime-foldable expressions using bound bracket args.
-    On provably invalid alignment, raises RuntimeError with the diagnostic text
-    required by DIAGNOSTICS_align_decorator. Unknown/unevaluable expressions are
-    accepted (no false diagnostic).
-    """
-    from fire_compiler import CallExpr, IdentExpr
-    sd = None
-    # Prefer the struct definition from the full module source so we see
-    # decorators that precede the extracted template block (extract_struct_source
-    # returns the `struct ...` block only, without leading decorators).
-    for _src in (module_src, template_src):
-        try:
-            stmts = Parser(py_tokenize(textwrap.dedent(_src))).parse_module()
-        except Exception:
-            continue
-        for s in stmts:
-            if isinstance(s, StructDef) and s.name == struct_name:
-                sd = s
-                break
-        if sd is not None and getattr(sd, 'decorators', None):
-            break
-        # keep a found struct even without decorators as fallback candidate
-    if sd is None:
-        return
-
-    bindings = {}
-    for k, v in (targs or {}).items():
-        iv = _align_int_binding_value(v)
-        if iv is not None:
-            bindings[k] = iv
-
-    # Include relevant module-level comptime/alias int bindings from the
-    # template's module when they evaluate to constants (best effort).
-    try:
-        mod_stmts = Parser(py_tokenize(module_src)).parse_module()
-        for ms in mod_stmts:
-            # fire_compiler represents module aliases as ComptimeVarStmt/Assign-like
-            # nodes in some forms; try common shapes conservatively.
-            target = None
-            value = None
-            if isinstance(ms, AssignStmt):
-                targets = getattr(ms, 'targets', None)
-                if targets and len(targets) == 1:
-                    t = targets[0]
-                else:
-                    t = getattr(ms, 'target', None)
-                if isinstance(t, IdentExpr):
-                    target = t.name
-                elif isinstance(t, str):
-                    target = t
-                value = getattr(ms, 'value', None)
-            elif hasattr(ms, 'target') and hasattr(ms, 'value'):
-                t = getattr(ms, 'target', None)
-                if isinstance(t, IdentExpr):
-                    target = t.name
-                elif isinstance(t, str):
-                    target = t
-                value = getattr(ms, 'value', None)
-            if not isinstance(target, str) or target in bindings or value is None:
-                continue
-            try:
-                iv = eval_const_int(value, {}, call_hook=None)
-            except Exception:
-                iv = None
-            if isinstance(iv, int):
-                bindings[target] = iv
-    except Exception:
-        pass
-
-    call_hook = lambda name, argvals: _align_eval_call_hook(module_src, name, argvals)
-
-    for dec in (getattr(sd, 'decorators', None) or []):
-        if not isinstance(dec, CallExpr):
-            continue
-        func = dec.func
-        if not (isinstance(func, IdentExpr) and func.name == 'align'):
-            continue
-        args = dec.args or []
-        kwargs = dec.kwargs or []
-        if len(args) != 1 or kwargs:
-            continue
-        arg = args[0]
-        try:
-            val = eval_const_int(arg, bindings, call_hook=call_hook)
-        except Exception:
-            # Evaluation failed in an unexpected way; do not crash or emit a
-            # false diagnostic for this instantiation.
-            val = None
-        if val is None:
-            # An unknown bare name used as `@align(...)` in this instantiation
-            # context. The `@align:` tag is part of the contract: the callers
-            # that decide whether an instantiation failure is a real user
-            # diagnostic rather than an elaboration-capability failure
-            # (`emit_resolve._ensure_generic_struct`/`_elaborate_generic_struct_call`
-            # and `elab_intu._materialize`) re-raise this class only when the
-            # message carries it. Without the tag the diagnostic was swallowed
-            # and a struct with `@align(missing)` compiled silently.
-            if isinstance(arg, IdentExpr) and arg.name not in bindings:
-                raise RuntimeError(
-                    "function instantiation failed\n"
-                    f"@align: use of unknown declaration '{arg.name}'\n{arg.name}")
-            continue
-        if val <= 0 or (val & (val - 1)) != 0 or val > (1 << 29):
-            raise RuntimeError(
-                "function instantiation failed\n"
-                f"struct alignment must be a positive power of 2, got {val}")
-
-
-
 # ── Parameters this codegen erases ──────────────────────────────────────
 #
 # A bracket parameter that occurs ONLY in positions `_mojo_type` discards can be
@@ -2312,14 +2186,10 @@ def _struct_layout_anns(concrete_src: str, name: str):
 
 
 def _elab_signature(concrete_src: str, name: str):
-    """(ret_ctype, [param_ctypes]) of the monomorphized function, via the ABI map.
-
-    `ret_ctype` is None when the function has no return annotation: its return
-    type is then the body's inferred type, which only the defining unit knows
-    (see monomorphize.defined_return_ctype), not this source's signature."""
+    """(ret_ctype, [param_ctypes]) of the monomorphized function, via the ABI map."""
     for s in Parser(py_tokenize(concrete_src)).parse_module():
         if isinstance(s, FunctionDef) and s.name == name:
-            ret = _mojo_type(s.return_type) if s.return_type else None
+            ret = _mojo_type(s.return_type) if s.return_type else 'void'
             if (isinstance(ret, str) and ret.startswith('MojoTuple_')
                     and not _body_builds_struct_tuple(
                             getattr(s, 'body', None))):
@@ -2375,6 +2245,111 @@ def _defined_symbols(obj: str) -> set:
 _SYMBOLS_CACHE: dict = {}
 
 
+def _align_instantiation_error(struct_name, type_args, got):
+    ta = ", ".join(str(a) for a in (type_args or []))
+    if ta:
+        head = f"function instantiation failed: {struct_name}[{ta}]"
+    else:
+        head = f"function instantiation failed: {struct_name}"
+    return RuntimeError(
+        f"{head}: @align struct alignment must be a positive power of 2, got {got}"
+    )
+
+
+def _align_instantiation_unknown(struct_name, type_args, name):
+    ta = ", ".join(str(a) for a in (type_args or []))
+    if ta:
+        head = f"function instantiation failed: {struct_name}[{ta}]"
+    else:
+        head = f"function instantiation failed: {struct_name}"
+    # Consistent with compiler unknown-declaration diagnostics.
+    return RuntimeError(f"{head}: @align: use of unknown declaration '{name}'")
+
+
+def _collect_module_int_bindings(module_src):
+    bindings = {}
+    try:
+        mod = Parser(py_tokenize(module_src)).parse_module()
+    except Exception:
+        return bindings
+    for stmt in mod:
+        if isinstance(stmt, ComptimeVarStmt):
+            try:
+                v = _comptime.eval_const_int(stmt.value, bindings)
+            except Exception:
+                v = None
+            if isinstance(v, int):
+                bindings[stmt.target] = v
+        elif isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr):
+            # Module-level `alias X = 1` can be represented as an assignment in
+            # some paths; capture integer-constant values when available.
+            try:
+                v = _comptime.eval_const_int(stmt.value, bindings)
+            except Exception:
+                v = None
+            if isinstance(v, int):
+                bindings[stmt.target.name] = v
+    return bindings
+
+
+def _find_struct_def_in_source(src, struct_name):
+    try:
+        mod = Parser(py_tokenize(src)).parse_module()
+    except Exception:
+        return None
+    for stmt in mod:
+        if isinstance(stmt, StructDef) and stmt.name == struct_name:
+            return stmt
+    return None
+
+
+def _validate_generic_struct_align(module_src, tmpl_src, struct_name, type_args, targs):
+    # Prefer the full module source so decorators attached above the struct are
+    # visible; fall back to the extracted template.
+    sd = _find_struct_def_in_source(module_src, struct_name)
+    if sd is None:
+        sd = _find_struct_def_in_source(tmpl_src, struct_name)
+    if sd is None:
+        return
+    decs = getattr(sd, "decorators", None) or []
+    # Build bindings: integer bracket args + module-level int aliases/comptimes.
+    bindings = _collect_module_int_bindings(module_src)
+    for k, v in (targs or {}).items():
+        # Integer-like args are represented as strings (e.g. "3").
+        try:
+            iv = int(str(v).strip())
+        except Exception:
+            continue
+        bindings[k] = iv
+    for dec in decs:
+        if not isinstance(dec, CallExpr):
+            continue
+        func = dec.func
+        if not (isinstance(func, IdentExpr) and func.name == "align"):
+            continue
+        args = getattr(dec, "args", None) or []
+        kwargs = getattr(dec, "kwargs", None) or []
+        if len(args) != 1 or kwargs:
+            continue
+        arg = args[0]
+        try:
+            val = _comptime.eval_const_int(arg, bindings)
+        except Exception:
+            val = None
+        if val is None:
+            # Unknown name used in align expression: report user-visible error.
+            if isinstance(arg, IdentExpr) and arg.name not in bindings:
+                raise _align_instantiation_unknown(struct_name, type_args, arg.name)
+            # Other non-constant/unknown cases: leave unknown and do not emit
+            # a false diagnostic.
+            continue
+        err = align_value_error(val)
+        if err is not None and "must be a positive power of 2" in err:
+            raise _align_instantiation_error(struct_name, type_args, val)
+        if err is not None:
+            ta = ", ".join(str(a) for a in (type_args or []))
+            head = f"function instantiation failed: {struct_name}[{ta}]" if ta else f"function instantiation failed: {struct_name}"
+            raise RuntimeError(f"{head}: @align: {err.lstrip('@align ').strip()}")
 
 
 class Elaborator:
@@ -2420,8 +2395,6 @@ class Elaborator:
                                                      conformance_bases=_where_conformance_bases(module_src))
         _, concrete = mm.monomorphize_source(tmpl, targs)
         ret, ptypes = _elab_signature(concrete, mangled)
-        if ret is None:
-            ret = mm.defined_return_ctype(mangled) or 'void'
         return {'symbol': mangled, 'object': obj, 'cpp_object': cpp_obj,
                 'ret': ret, 'params': ptypes}
 
@@ -2451,7 +2424,7 @@ class Elaborator:
             return None
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
-        _validate_align_decorators_for_struct(module_src, tmpl, struct_name, targs)
+        _validate_generic_struct_align(module_src, tmpl, struct_name, type_args, targs)
 
         nested_defs, renames = [], []
         for mention, n_src, n_name, n_args in (nested or []):

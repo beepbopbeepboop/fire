@@ -1300,10 +1300,10 @@ def _body_builds_struct_tuple(body) -> bool:
     return False
 
 
-# Dtype spellings for float SIMD annotations -> scalar C type. The one table
-# for this mapping: `_mojo_type` below, `emit_calls._float_dtype_arg_ctype`
-# and the `Scalar[X]` / `SIMD[X, 1]` arm of `infra_infer._resolve_type` (reached
-# as `GimpleGen._resolve_type`) all read it, so there is no second table.
+# Dtype spellings for float SIMD annotations -> scalar C type.
+# Reusable: part 5's resolver rule (Scalar[X] / SIMD[X, 1]) may delegate to
+# this table so there is one mapping, not two (see CODEGEN_simd_and_array_
+# values_erase_to_int64-part5 coordination note).
 _SIMD_FLOAT_DTYPE_CTYPE = {
     'DType.float32': 'float',
     'Float32': 'float',
@@ -1409,8 +1409,7 @@ def _mojo_type(ann: str | type | None) -> str:
         if base == 'SIMD':
             # `SIMD[<float dtype>, N]` (any N) is scalar-erased to the C type
             # of the dtype. Integer and unresolvable dtypes fall through to
-            # the `int64_t` box, exactly as before. `Scalar[...]` resolves in
-            # `infra_infer._resolve_type`, not here.
+            # the `int64_t` box, exactly as before. `Scalar[...]` is part 5's.
             dt = _simd_float_dtype_ctype(inner)
             if dt is not None:
                 return dt

@@ -1003,7 +1003,7 @@ def reset_cap(name, verdict):
         os.remove(doc)
 
 
-CONTROLLER_FILES = {"TASK.md", "TASK_REPORT.md", "work.log", "exitcode", "REPORT.md"}   # written into a worker's tree by the controller, or (REPORT.md / TASK_REPORT.md) the worker's closing report, left untracked
+CONTROLLER_FILES = {"TASK.md", "work.log", "exitcode", "REPORT.md"}   # written into a worker's tree by the controller, or (REPORT.md) the worker's closing report, left untracked
 
 
 def tree_extras(wt):
