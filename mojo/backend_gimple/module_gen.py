@@ -15564,6 +15564,9 @@ def gen_module_impl(self, stmts: list):
     # sibling's own `from c import K` says nothing about what this module's
     # `K` means.
     _gmi_scan_imported_global_homes(self, stmts)
+    # Phase 1.7 has typed every global, and each `do_imports` sibling has been
+    # compiled into this unit, so the definer's final accessor types are known.
+    self._reconcile_imported_global_accessors()
 
     func_parts: list[str] = []
 
