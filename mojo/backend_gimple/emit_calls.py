@@ -2931,6 +2931,45 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gen._emit_container_new(t, _generic_ctype)
             gen._note_fresh_result(t)
             return _generic_ctype, t
+        if base in ('SIMD', 'Scalar'):
+            # SIMD/Scalar constructor: dispatch on the bracket's dtype argument.
+            # Float dtypes keep their scalar C type (not erased to int64_t);
+            # integer dtypes keep the existing int64_t lowering. This avoids the
+            # "indirect call via SubscriptExpr" placeholder for these ctors.
+            _idx = node.func.index
+            _idxs = _idx.elements if isinstance(_idx, gimple_ctypes.TupleExpr) else [_idx]
+            _dt_ctype = _dtype_cast_ctype(_idxs[0]) if _idxs else None
+            # Fallback: resolve a bare/spelled dtype name to its C type.
+            if _dt_ctype is None and _idxs:
+                try:
+                    _dt_name = gen._type_expr_to_ann(_idxs[0]) if hasattr(gen, '_type_expr_to_ann') else None
+                    if _dt_name:
+                        _dt_ctype = _DTYPE_CAST_CTYPES.get(str(_dt_name).replace('DType.', '').lstrip('.'))
+                except Exception:
+                    _dt_ctype = None
+            if _dt_ctype in ('float', 'double', '__fp16'):
+                _target = _dt_ctype
+            else:
+                _target = 'int64_t'
+            if node.args:
+                _at, _av = gen.lower_expr(node.args[0])
+                for _a in node.args[1:]:
+                    gen.lower_expr(_a)
+                for _kw in (getattr(node, 'kwargs', None) or []):
+                    try:
+                        gen.lower_expr(_kw[1])
+                    except Exception:
+                        pass
+                _cv = gen._coerce_to_type(_at, _target, _av) if hasattr(gen, '_coerce_to_type') else _av
+                return _target, gen._new_val(_target, _cv)
+            # No args: zero value of the scalar dtype.
+            for _kw in (getattr(node, 'kwargs', None) or []):
+                try:
+                    gen.lower_expr(_kw[1])
+                except Exception:
+                    pass
+            _zv = '0.0' if _target in ('float', 'double', '__fp16') else '0'
+            return _target, gen._new_val(_target, f'({_target}){_zv}')
         if base in ('Array', 'FixedSizeArray'):
             # Array/FixedSizeArray constructor: produce a tracked MojoList *
             # so element reads and Span views can inherit the element type

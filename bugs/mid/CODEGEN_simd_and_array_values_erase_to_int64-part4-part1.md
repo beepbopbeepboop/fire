@@ -73,8 +73,7 @@ It runs `test_part4_part1_simd_param_return_keep_ctype` (red today: the
 signature is `int64_t ... (int64_t x)` and the result local is
 `int64_t r;`) and `test_part4_part1_int_simd_unchanged` (green today, must
 stay green). Both must pass. The test source carries NO SIMD constructor, so
-the result is independent of part 3 (the constructor, carried by
-`bugs/mid/CODEGEN_simd_and_array_values_erase_to_int64-part3.md`); the
+the result is independent of part 3 (the constructor, covered by CODEGEN_simd_and_array_values_erase_to_int64-part3, doc deleted); the
 original part4 doc's own test
 (`test_part4_float_simd_survives_call_and_return`, run under the plain
 `part4` prefix) additionally stays red until part 3 lands and is not this
