@@ -1622,11 +1622,26 @@ def _cpp_expr_static_ctype(gen, e):
                 return rt
     if (isinstance(e, gimple_ctypes.MemberExpr)
             and isinstance(e.obj, gimple_ctypes.IdentExpr)):
+        # A struct field read on a known struct-pointer receiver
+        # (`self.<field>`, or `<struct-ptr local>.<field>`).
+        _obj_name = e.obj.name
+        _struct_name = None
+        if _obj_name == 'self':
+            _struct_name = getattr(gen, '_cpp_gen_self_struct', None)
+        elif _obj_name == 'cls':
+            _struct_name = getattr(gen, '_cpp_gen_self_struct', None)
+        else:
+            _struct_name = gen._cpp_struct_ptr_local(_obj_name)
+        if _struct_name:
+            _ft = gen.struct_field_types.get(_struct_name, {}).get(e.member)
+            if _ft in ('char *', 'int64_t', 'double', '_Bool', 'MojoList *',
+                       'MojoDict *', 'MojoSet *'):
+                return _ft
         # A module-level CONSTANT read as a value (`os.linesep`) — the same
         # real field read `_cpp_expr`'s MemberExpr case now emits, and the
         # same ctype, so a `not os.linesep` / `x == os.linesep` test is
         # decided on the string's emptiness rather than on a null pointer.
-        _mglob = _cpp_module_global_field(gen, e.obj.name, e.member)
+        _mglob = _cpp_module_global_field(gen, _obj_name, e.member)
         if _mglob is not None:
             return _mglob[0]
     return None
@@ -7527,6 +7542,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     module_global_types=getattr(
                         gen, '_cpp_module_global_ctypes', None),
                     dict_val_types=getattr(gen, '_cpp_local_dict_val_types', None))
+                if ctype is None:
+                    ctype = _cpp_expr_static_ctype(gen, s.value)
             if ctype is None:
                 ctype = 'int64_t'  # default for unknown-type locals
             declared[name] = ctype
@@ -10211,6 +10228,9 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                                     else 'int64_t')
                             declared[_nm] = _tct
                             lines.append(f"{indent}{'char *' if _tct == 'char *' else 'int64_t'} {_nm};")
+                    if s.else_body:
+                        _brk_var = gen._cpp_fresh_name("_mg_brk")
+                        lines.append(f"{indent}bool {_brk_var} = false;")
                     lines.append(f"{indent}for (int64_t {_ctr} = 0; "
                                  f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _itname)}); "
                                  f"{_ctr}++) {{")
@@ -10233,9 +10253,18 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                         else:
                             lines.append(f"{indent}    {_nm} = "
                                          f"mojo_list_get_int({_tupvar}, {_si});")
-                    for inner in s.body:
-                        lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                    if s.else_body:
+                        for inner in s.body:
+                            lines.extend(gen._cpp_stmt_with_break_flag(inner, declared, indent + '    ', _brk_var))
+                    else:
+                        for inner in s.body:
+                            lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
                     lines.append(f"{indent}}}")
+                    if s.else_body:
+                        lines.append(f"{indent}if (!{_brk_var}) {{")
+                        for inner in s.else_body:
+                            lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                        lines.append(f"{indent}}}")
                     return lines
                 # A known struct-pointer element type (e.g. `Thing *`,
                 # from `_field_elem_types` -- the `self.<field>: list
