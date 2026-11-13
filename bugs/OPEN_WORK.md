@@ -43,7 +43,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `bugs/mid/FORMAL_concrete_eval_eq_mojo_instances_omit_the_two_arg_env.md` | **unclaimed** | the concrete `eval_eq_mojo_*` instances omit the two-argument environment |
+| *(fixed)* | the concrete `eval_eq_mojo_*` instances now pass the same two-argument call environment as the universal theorem (FORMAL_concrete_eval_eq_mojo_instances_omit_the_two_arg_env, doc deleted) |
 | `bugs/mid/FORMAL_svc_exit_handling_incomplete.md` | **unclaimed** | `svc` exit handling is not structurally complete |
 
 ### `unclassified` — 1 document, 0 claimed
