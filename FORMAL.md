@@ -525,26 +525,25 @@ refused, and the refusal now names the *type* mismatch rather than a prefix.
 | | arm64 | x86_64 |
 |---|---|---|
 | word-shaped entry points (`runtime_abi`) | 431 | 431 |
-| …of which the runtime dylib actually **exports** | 369 | 369 |
-| …reachable with no heap handle the formal path cannot obtain | **323** | **323** |
+| …of which the runtime dylib actually **exports** | 375 | 375 |
+| …reachable with no heap handle the formal path cannot obtain | **328** | **328** |
 
-So the honest statement of the surface is **323 word-shaped calls are callable
+So the honest statement of the surface is **328 word-shaped calls are callable
 from a formal image today**, not the "0" this document published when the phase
-was written, and not the 430 of §2.2. The two gaps between the
-431 of the row above and 323 are
-both deliberate and both named (the three declarations added since the last
-re-measure are defined in `fire_runtime.c`, a default unit, so the next rebuild
-counts them as exported, not among the 56):
+was written, and not the 431 of §2.2. The two gaps between the
+431 of the row above and 328 are
+both deliberate and both named:
 
-- **46 of the 369** the library exports take a `void *` parameter the
+- **47 of the 375** the library exports take a `void *` parameter the
   frame-resident value model cannot obtain — a `MojoList *` or `MojoDict *` that
   only the heap could have produced. That is phase 6's work, not a bug.
 - **56 of the 431** the dylib does not export at all, because
   `runtime_dylib` links `runtime_units(arch, None)` — the core runtime, the
   coroutine runtime and the async scheduler — and not the OPTIONAL units
-  (`fire_sqlite3.c`, `fire_ssl.c`, `fire_zlib.c`, `fire_ncurses.c`, which the
-  gimple path compiles on demand), nor `fire_metal.h` / `fire_python.h`, which
-  have no linked definition in any path. So `mojo_strlen` is exported and
+  (`fire_sqlite3.c` 16, `fire_ncurses.c` 16, `fire_ssl.c` 11, `fire_metal.c` 5,
+  `fire_zlib.c` 2, which the gimple path links on demand), nor the six
+  word-shaped `mojo_python_*` entry points, whose `fire_python.c` is
+  deliberately never linked. So `mojo_strlen` is exported and
   `mojo_sqlite3_step` is not, and both are word-shaped.
 
 The two architectures agree exactly, which is the property phase 2 was for.
@@ -570,7 +569,6 @@ same 22 and not three different numbers:
 | `mojo_str_register` | `void mojo_str_register(char *s)` | ″ |
 | `mojo_str_rfind_from` | `int64_t mojo_str_rfind_from(char *s, char *needle, int64_t start, int64_t stop)` | ″ |
 | `mojo_str_startswith_from` | `int mojo_str_startswith_from(char *s, char *prefix, int64_t start, int64_t stop)` | ″ |
-| `mojo_str_register` | `void mojo_str_register(char *s)` | ″ |
 | `mojo_struct_tag_register` | `void mojo_struct_tag_register(int64_t tag)` | ″ |
 | `mojo_word_eq` | `int mojo_word_eq(int64_t a, int64_t b)` | ″ |
 | `int_normpath` | `int64_t int_normpath(int64_t marker, int64_t path)` | ″ |
@@ -611,7 +609,13 @@ since the 2026-10-27 gate fixups), while the exported/reachable rows are
 `runtime_abi() ∩ the dylib's export table`, and they move only when the
 dylib is rebuilt and `test_formal_runtime_link.py` re-measures them —
 re-measured 2026-10-28: 241 / 201 (228 / 188 at the 2026-10-23 measurement,
-and the 56 / 40 gaps did not move).
+and the 56 / 40 gaps did not move), and re-measured 2026-11-13: 375 / 328 —
+the rows had sat at 369 / 323 in the meantime while the header census grew to
+431, so the rebuilt dylib exports six word-shaped entry points more than the
+rows said and five more are reachable; the unexported gap is 56 as at every
+measurement since 2026-10-23 (now the five optional units' 50 names plus the
+six word-shaped `mojo_python_*` the dylib never links), and the heap-handle
+set grew 40 → 47.
 
 *Removes:* `gimple_runtime_refusal`'s over-broad claim. No proof content yet —
 and that last clause is the honest boundary: a call that *builds, links and
@@ -798,16 +802,16 @@ and made the optional units link on the gimple path ([1]: a program calling
 **The step that was still missing then has since landed, so the "0" this
 paragraph used to publish is wrong.** The formal path is now opted into the
 dylib: a formal image that names a word-shaped runtime entry point carries the
-per-architecture library on its link line, and the measured surface is **184
+per-architecture library on its link line, and the measured surface is **328
 callable entry points, identically on both architectures** (§6 phase 2 has the
-three-row table and where the other 96 go). `test_formal_runtime_link.py` is
+three-row table and where the other 103 go). `test_formal_runtime_link.py` is
 what measures it, and it goes further than "is not refused": it builds, links
 and **runs** the image on both architectures and checks the answer, because a
 refusal replaced by an image that builds and computes the wrong number is the
 failure this whole programme is about.
 
 **The one thing that has NOT moved is the honest boundary between "callable"
-and "provable".** 201 calls build and run; none of them is yet a call a *proof*
+and "provable".** 328 calls build and run; none of them is yet a call a *proof*
 can follow, because `arm64_step`'s `BL` still has no callee (§3.1, phase 3). A
 number that conflated the two would be the more comfortable one and the less
 true one.
@@ -1272,8 +1276,8 @@ site. **Trap:** proving it for a concrete `n` and generalising by hand.
 **[3] per-export contracts.** Phase 4 proper. `export_result_spec` is an
 obligation and `dylib_export_contract_of_spec` is proved, so a caller's theorem
 now consumes a contract instead of asserting one — but no real *spec* exists
-yet for any actual export. **389 of 846** entry points are word-in/word-out
-(§2.2) and **201** of them are callable from a formal image today (§6 phase 2),
+yet for any actual export. **431 of 942** entry points are word-in/word-out
+(§2.2) and **328** of them are callable from a formal image today (§6 phase 2),
 so there is a callable surface with no contracts on it, which is the state phase
 4 exists to end. Start with the
 exports a caller can actually reach today.
