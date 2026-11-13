@@ -30,6 +30,21 @@ edited by hand") describes a queue that is derived from a subset of the corpus.
 Every formal document in the tree is a row of the queue, wherever the class directories put it, so a worker triaging
 from `bugs/OPEN_WORK.md` sees the same set `find bugs -name 'FORMAL_*.md' -o -name 'LEAN_*.md'` finds.
 
+## Done when
+
+`test_suite.py::test_the_formal_doc_index_is_current`'s two new checks pass:
+"a document in a class subdirectory is a row — the walk is recursive, not a
+directory list" (a planted `bugs/a_class/<stem>.md` comes back as a row, so the
+check cannot pass on a corpus accident) and "every formal document under
+`bugs/` is a row of the queue, class directories included" (the real tree's
+formal documents are exactly the queue's rows, and each row names the path it
+resolves to). Both fail on the pre-fix `rows()`, which rendered two rows for
+this five-document tree. Run just them with
+
+    python3 -c 'import test_suite as T; T.test_the_formal_doc_index_is_current()'
+
+and the test file that covers the tool with `python3 test_suite.py`.
+
 ## Next step
 
 1. Decide the scope in one line: `rows()` walks `bugs/` and its subdirectories (`os.walk`), or names the class
