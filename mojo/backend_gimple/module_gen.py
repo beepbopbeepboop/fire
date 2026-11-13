@@ -18635,7 +18635,12 @@ def gen_module_impl(self, stmts: list):
                           f"{ret_type} {cname} () {_stub_body}  /* stub from {module} */\n#endif")
             continue
 
-        safe = self._func_csym(_as_str(sym_name))
+        # A function-scoped alias carries the C symbol its call sites were
+        # emitted with (recorded inside the scope that binds it, see
+        # emit_funcs.py's function-scoped pre-pass); resolving it here would
+        # run outside that scope and lose the module qualifier.
+        _recorded_csym = _as_str(sym_info.get('csym')) if sym_info.get('csym') else None
+        safe = _recorded_csym or self._func_csym(_as_str(sym_name))
         if 'signature' in sym_info:
             if _sn in _C_RESERVED_FUNCS:
                 _system_types_skip = {'time_t', 'suseconds_t', 'size_t', 'ssize_t', 'off_t', 'socklen_t', 'pid_t', 'uid_t', 'gid_t', 'useconds_t', 'clock_t', 'fd_set', 'sa_family_t', 'in_addr_t', 'in_port_t'}
