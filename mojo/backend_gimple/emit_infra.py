@@ -1097,6 +1097,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_struct_layout = gen._struct_layout
     st.fs_layout_hint = gen._layout_hint
     st.fscurrent_func_name = gen.current_func_name
+    st.fs_current_func_node = getattr(gen, '_current_func_node', None)
     st.fs_loop_depth = gen._loop_depth
     st.fs_captures = gen._captures
     st.fs_env_param = gen._env_param
@@ -1217,6 +1218,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._struct_layout = st.fs_struct_layout
     gen._layout_hint = st.fs_layout_hint
     gen.current_func_name = st.fscurrent_func_name
+    gen._current_func_node = st.fs_current_func_node
     gen._loop_depth = st.fs_loop_depth
     gen._captures = st.fs_captures
     gen._local_bindings_cache = st.fs_local_bindings_cache

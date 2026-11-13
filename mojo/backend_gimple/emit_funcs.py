@@ -3524,7 +3524,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # Set module context for global field access
     gen._current_module_ctx = gen.module_name if len(gen.module_name) > 0 else "root"
     gen.current_func_name = node.name
-    # A module-level function is not a method: clear the struct a previous
+    gen._current_func_node = node    # A module-level function is not a method: clear the struct a previous
     # METHOD body left behind (the method path sets it and never resets it).
     # A stale name made a local called `cls` here take the classmethod arm of
     # `_lower_MemberExpr`, lowering `cls.methods` to a dynamic
@@ -3972,8 +3972,8 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
     else:
         fn_name = gimple_ctypes._module_toplevel_name(gen.module_name)
     gen.current_func_name = fn_name
-    gen._current_struct_name = ""   # top-level code is outside any method body
-    gen.func_ret_type = 'void'
+    gen._current_func_node = None
+    gen._current_struct_name = ""   # top-level code is outside any method body    gen.func_ret_type = 'void'
     gen.current_func_ret_ann = ''
     gen.func_return_types[fn_name] = 'void'
 
@@ -4873,9 +4873,9 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # Key by overload so overloaded methods don't share closure state (each
     # overload's lifted closures + capture env are distinct).
     gen.current_func_name = f"{struct_name}_{node.name}{overload_id}"
+    gen._current_func_node = node
     gimple_exprtypes.record_bool_params(gen, node)
     gen._current_struct_name = struct_name  # for Self() constructor call lowering
-
     # Seed param types for pre-pass inference
     for i, (pname, ptype) in enumerate(node.params):
         # Strip Mojo parameter modifiers (inout, borrowed, etc.)

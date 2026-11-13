@@ -1,6 +1,6 @@
 # DIAGNOSTICS: missing validation/error reporting for modular test cases
 
-SPLIT: DIAGNOSTICS_missing_validation_modular-part1, DIAGNOSTICS_missing_validation_modular-part2, DIAGNOSTICS_missing_validation_modular-part3, DIAGNOSTICS_missing_validation_modular-part5, DIAGNOSTICS_missing_validation_modular-part6
+SPLIT: DIAGNOSTICS_missing_validation_modular-part1, DIAGNOSTICS_missing_validation_modular-part2, DIAGNOSTICS_missing_validation_modular-part5, DIAGNOSTICS_missing_validation_modular-part6
 
 ## Symptom
 Modular test files expect compile-time errors/diagnostics that our compiler does not produce (it compiles them successfully). These are cases where modular's compiler rejects invalid code but ours accepts it.
@@ -173,6 +173,13 @@ See build/checkfail_candidates.json (61 error-like cases).
   (`import_qualified_member_no_leak.mojo`); a real submodule (`mod.sub`) or
   a declared name still resolves. Regression:
   `test_qualified_member_no_leak.py`.
+- **Landed (2026-11-13):** `in` / `not in` on a provably scalar container type
+  with no `__contains__` is a compile-time error in the gimple lowering, with
+  the container type's spelling in the message
+  (`'Int' does not implement the '__contains__' method`, and likewise
+  `Float64`/`Bool`). Type-erased/module-global and unresolved-generic cases
+  stay conservative so runtime dispatch is preserved. Regression:
+  `test_contains_method_diagnostic.py`.
 - **Landed (follow-up, branch 3096):** `eval_const_int` resolves `IdentExpr`
   comptime bindings, enabling `range(...)` bounds that are comptime variables.
   Regressions: `test_comptime_assert_diagnostic.py`,
