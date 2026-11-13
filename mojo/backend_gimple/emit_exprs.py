@@ -119,6 +119,20 @@ def lower_expr(gen, node) -> tuple[str, str]:
         return gen._lower_UnaryOp(node)
     elif isinstance(node, gimple_ctypes.CallExpr):
         _rt, _rv = gen._lower_call(node)
+        # The result of calling a float+pointer function is a TAGGED WORD
+        # (`module_gen._ret_may_hold_float`, filled from the same per-body
+        # inference decision that boxed its arms). Mark it so every consumer
+        # dispatches by kind instead of reading the word as an integer or
+        # casting it to the pointer the old join chose: `print` ->
+        # `mojo_repr_boxed`, a list store -> `mojo_list_append_word`,
+        # arithmetic/comparison -> the `_tagged_*_select` pairs, and a bind to
+        # a local carries both marks across (see `stmts_shared`'s unbox arm).
+        if (_rt == 'int64_t' and isinstance(_rv, str)
+                and isinstance(node.func, gimple_ctypes.IdentExpr)
+                and _as_str(node.func.name) in getattr(
+                    gen, '_ret_may_hold_float', ())):
+            gen._boxed_vals.add(_rv)
+            gen._tagged_word_vals.add(_rv)
         # A `yield` used as a VALUE (`x = yield`, `print((yield))`) reads the
         # resume word, which is the None box when the generator was resumed by
         # `next()` / `send(None)` (coro.py's trampoline). Mark it as a tagged
@@ -6221,6 +6235,198 @@ def _lower_matmul(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     return result_type, t
 
 
+def _definitive_scalar_type(gen, node) -> str | None:
+    """The scalar kind ('Int'/'Float64'/'Bool') PROVEN for `node` by shape,
+    binding or a known callee return, or None when the value class is not
+    provable.
+
+    "Provable" never rests on `_quick_type`'s `int64_t` answer: that string
+    doubles as the estimator's FALLBACK for a type-erased box, and a box may
+    hold a container. The membership diagnostic (`_membership_container_type`)
+    must stay conservative exactly there — the 2026-11-13 stdlib-dylib gate
+    regression was six real modules (compile.mojo's `content in String(self)`
+    among them) skipped because the estimator defaulted unrecorded calls to
+    int64_t and that default read as "provably Int". A container that is not
+    proven scalar keeps its runtime dispatch; a proven scalar is an error in
+    both engines, just at different times.
+    """
+    if isinstance(node, gimple_ctypes.BoolLiteral):
+        return 'Bool'
+    if isinstance(node, gimple_ctypes.IntLiteral):
+        return 'Int'
+    if isinstance(node, gimple_ctypes.FloatLiteral):
+        return 'Float64'
+    if isinstance(node, gimple_ctypes.CompareChain):
+        # A chained comparison (`a < b < c`) is a bool regardless of the
+        # operand kinds, exactly as the estimator's own row says.
+        return 'Bool'
+    if isinstance(node, gimple_ctypes.UnaryOp):
+        if node.op == 'not':
+            return 'Bool'
+        # `-x`/`~x` never yield a container (a boxed-container operand is a
+        # runtime error, not a value), so the operand's proven kind is the
+        # answer, and an unproven operand stays unproven.
+        return _definitive_scalar_type(gen, node.operand)
+    if isinstance(node, gimple_ctypes.BinaryOp):
+        if node.op in ('is', 'is not', '==', '!=', '<', '<=', '>', '>=',
+                       'in', 'not in'):
+            return 'Bool'
+        lt = _definitive_scalar_type(gen, node.left)
+        rt = _definitive_scalar_type(gen, node.right)
+        if node.op in ('/', '//', '**', '<<', '>>'):
+            # Genuinely non-container: a container operand is a TypeError in
+            # both engines, so a proof on either side decides the kind, and
+            # an all-unknown pair is a word op that raises on a non-numeric
+            # box, never a container.
+            if lt is None and rt is None:
+                return 'Int'
+            if lt is None:
+                return rt
+            if rt is None:
+                return lt
+            return 'Float64' if 'Float64' in (lt, rt) else 'Int'
+        # The rest ('+', '*', '|', '&', '^', '-', '%', 'and', 'or') can
+        # yield a CONTAINER from a type-erased operand: list+list, int*list,
+        # dict|dict, set&set, set-set, str%s, and `and`/`or` selecting the
+        # container arm. Without a proof for BOTH operands the result's
+        # value class is not proven and runtime dispatch stays.
+        if lt is None or rt is None:
+            return None
+        return 'Float64' if 'Float64' in (lt, rt) else 'Int'
+    if isinstance(node, gimple_ctypes.CallExpr):
+        try:
+            qt = _as_str(gen._quick_type(node) or '')
+        except Exception:
+            return None
+        if qt == '_Bool':
+            # The estimator's _Bool answers are all specific rows (bool,
+            # isinstance, all/any, a recorded `-> Bool`); the fallback never
+            # produces _Bool, so the kind is proven.
+            return 'Bool'
+        if qt == 'double':
+            return 'Float64'
+        if qt in ('int', 'int64_t'):
+            # The estimator's int64_t for a call is a proof only for its
+            # specific int-return rows; for everything else it is the box
+            # fallback, and a box may hold a container.
+            return 'Int' if _call_provably_returns_int(gen, node) else None
+        return None
+    if isinstance(node, gimple_ctypes.IdentExpr):
+        return _definitive_binding_type(gen, node.name)
+    return None
+
+
+def _definitive_binding_type(gen, name) -> str | None:
+    """A local/parameter's proven scalar kind from its recorded binding type.
+
+    A name only in `_global_var_types` (a module-global read) is declared
+    int64_t but may be a boxed container, and a module-global container must
+    keep working; a name not in `var_types` at all is out of scope either
+    way. The `int64_t` cells additionally require a concrete scalar
+    annotation on the parameter: int64_t is exactly what a type-erased box
+    reads as, and an unannotated/unresolved parameter (or one still carrying
+    its generic parameter's name) is a word, not an Int. The `_Bool`/
+    `double` cells need no annotation: a box is an int64_t word, never a
+    one-byte bool or an 8-byte double.
+    """
+    if name not in gen.var_types:
+        return None
+    if name in getattr(gen, '_global_var_types', {}):
+        return None
+    ctype = gen.var_types.get(name)
+    if ctype == '_Bool':
+        return 'Bool'
+    if ctype == 'double':
+        return 'Float64'
+    if ctype in ('int', 'int64_t'):
+        # A parameter/local whose declared type is an unresolved generic
+        # parameter (or AnyType/unresolved) must compile conservatively.
+        fn_node = getattr(gen, '_current_func_node', None)
+        if fn_node is not None:
+            tparams = set(getattr(fn_node, 'type_params', None) or [])
+            tparams.update(getattr(fn_node, 'type_param_names', None) or [])
+            params = getattr(fn_node, 'params', None) or []
+            param_types = getattr(fn_node, 'param_types', None)
+            if param_types is None and params and isinstance(params[0], (list, tuple)):
+                param_types = [p[1] if len(p) > 1 else None for p in params]
+            if params:
+                for i, p in enumerate(params):
+                    pname = p[0] if isinstance(p, (list, tuple)) else p
+                    if _as_str(pname).lstrip('*') != name:
+                        continue
+                    pann = None
+                    if param_types and i < len(param_types):
+                        pann = param_types[i]
+                    elif isinstance(p, (list, tuple)) and len(p) > 1:
+                        pann = p[1]
+                    if pann is None:
+                        # Unannotated/unresolved parameter -> conservative.
+                        return None
+                    pann_s = _as_str(pann).strip()
+                    if pann_s in tparams or pann_s == 'AnyType' or pann_s == '':
+                        return None
+                    # Concrete scalar annotation (Int/Bool/Float64 etc.)
+                    # -> provably scalar.
+                    return 'Int'
+        # No function node context: a module-level binding cannot be a
+        # container-proven Int either (it may be a boxed word).
+        return None
+    # A local known to hold a container (MojoList *, MojoDict *,
+    # MojoSet *, char *, tuple/struct types) is not scalar.
+    return None
+
+
+def _call_provably_returns_int(gen, node) -> bool:
+    """Whether the estimator's int64_t answer for this call is a KNOWN int
+    return rather than its box fallback.
+
+    Mirrors the estimator's own row order for the bare-name shape and reports
+    the proof only for the specific rows; the tail (`_func_return_type_for_
+    call(name, 'int64_t')` answering its default for a callee whose return
+    was never recorded) means "erased" and must stay conservative. A call
+    through a member/subscript shape is never proven: the estimator's
+    receiver rows are best-effort (the receiver's type is usually still
+    unknown at this point — the blind spot its own comment documents) and
+    its int64_t there is the fallback as often as a recorded method return.
+    """
+    f = node.func
+    if not isinstance(f, gimple_ctypes.IdentExpr):
+        return False
+    fname = f.name
+    if gen._locally_binds_name(fname):
+        # Shadowed: the estimator's own tail answers from the local
+        # definition's recorded return, so that record is the proof.
+        return _as_str(gen._func_return_type_for_call(fname, '') or '') in gimple_ctypes._SCALAR_INT_TYPES
+    if fname in gimple_ctypes._BUILTIN_SCALAR_RET_CTYPES:
+        return gimple_ctypes._BUILTIN_SCALAR_RET_CTYPES[fname] in gimple_ctypes._SCALAR_INT_TYPES
+    if fname in ('abs', 'mojo_abs'):
+        # `abs` of anything that is a value is a scalar (a boxed-container
+        # operand is a runtime error, never a value), so its int64_t answer
+        # is a proof, matching the estimator's own row.
+        return bool(node.args)
+    if fname in gimple_ctypes._SCALAR_CTORS:
+        # Mirror the estimator's own gate for this row (a def or import of
+        # the same name takes its recorded/declared return instead).
+        return (gimple_ctypes._SCALAR_CTORS[fname] in gimple_ctypes._SCALAR_INT_TYPES
+                and fname not in gen.func_return_types
+                and fname not in gen.imported_symbols)
+    # An ordinary name: proven only if the callee's own recorded return
+    # type is an integer one; the estimator's default is no proof.
+    return _as_str(gen._func_return_type_for_call(fname, '') or '') in gimple_ctypes._SCALAR_INT_TYPES
+
+
+def _membership_container_type(gen, right_node) -> str | None:
+    """The definitive scalar type name of a membership-test's right operand,
+    or None when it is not provably a scalar (so runtime dispatch stays).
+
+    Implements DIAGNOSTICS_missing_validation_modular-part3: `x in y` /
+    `x not in y` must reject a container type that has no __contains__.
+    "Provably" is `_definitive_scalar_type`'s contract: shape, binding or a
+    known callee return — never the estimator's box fallback.
+    """
+    return _definitive_scalar_type(gen, right_node)
+
+
 def _lower_in_range(gen, x_val: str, range_args: list,
                     negate: bool) -> tuple[str, str]:
     if len(range_args) == 1:
@@ -6286,10 +6492,12 @@ def _lower_in_impl_values(gen, xt: str, xv: str, right_node, negate: bool,
             isinstance(right_node.func, gimple_ctypes.IdentExpr) and
             right_node.func.name == 'range'):
         return gen._lower_in_range(xv, right_node.args, negate=negate)
+    _scalar_ct = _membership_container_type(gen, right_node)
+    if _scalar_ct is not None:
+        raise RuntimeError(f"'{_scalar_ct}' does not implement the '__contains__' method")
 
     rt, rv = gen.lower_expr(right_node)
-    res = gen._lower_in_dispatch(xt, xv, rt, rv, negate, x_is_none=x_is_none)
-    # `c in ('[', '(', '{')`, `k in {"a", "b"}`, `x in [1, 2]`: the container is
+    res = gen._lower_in_dispatch(xt, xv, rt, rv, negate, x_is_none=x_is_none)    # `c in ('[', '(', '{')`, `k in {"a", "b"}`, `x in [1, 2]`: the container is
     # built for this one membership test and no name can ever refer to it, yet
     # it was never released -- three per character of every tokenizer scan.
     # Free it once the test has read it. Only a display is treated this way (an
@@ -6310,6 +6518,20 @@ def _set_needle_is_word(gen, xv: str) -> bool:
     has not recorded as a real integer (`_int_word_vals`). See
     mojo_set_contains_word."""
     return xv not in gen._int_word_vals
+
+
+def _in_question_result(gen, ti: str, negate: bool) -> tuple[str, str]:
+    """Turn an `int` membership-answer temp into the `_Bool` `in`/`not in`
+    result. Shared by the tagged-word early return and the ordinary dispatch
+    tail so the negation has exactly one spelling."""
+    t = gen._new_val('_Bool', f"{ti} != 0")
+    if negate:
+        ti2 = gen._new_temp('int')
+        tn = gen._new_temp('_Bool')
+        gen._emit(f"  {ti2} = (int) {t};")
+        gen._emit(f"  {tn} = {ti2} == 0;")
+        return '_Bool', tn
+    return '_Bool', t
 
 
 def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
@@ -6341,6 +6563,20 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
         rv = gen._new_val(rt, f"({rt}){rv}")
     ti = gen._new_temp('int')
 
+    # A TAGGED word (`_tagged_word_vals`: the result of a float+pointer mixed
+    # return, or a kind-mixed yield) on the CONTAINER side has its kind as a
+    # runtime fact, so the static dispatch below cannot pick a container kind
+    # and the erased-int fallback asked the registries about the BOX address:
+    # `3 in t` was False for a list arm. Unbox by kind in the runtime, exactly
+    # as the subscript (`mojo_word_subscript`) and `len` (`mojo_len_word`) do
+    # for this value model. A float/int/None word raises TypeError there, as
+    # CPython does for `1 in 2.5`.
+    if rt in ('int', 'int64_t') and rv in getattr(gen, '_tagged_word_vals', ()):
+        _wc = gen._new_val('int64_t', gen._to_int64(rt, rv))
+        _wn = gen._new_val('int64_t', gen._to_int64(xt, xv))
+        gen._emit_call('int', ti, 'mojo_word_contains',
+                       [('int64_t', _wc), ('int64_t', _wn)])
+        return _in_question_result(gen, ti, negate)
     # `x in <bytes-subclass instance>`: substring/byte membership against
     # the backing MojoBytes payload. See COMPILE_FAIL_zipfile___init__.
     if gen._bytes_subclass_of(rt) and not gen._struct_defines_method(
@@ -6551,15 +6787,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
         gen._emit(f"  /* TODO: 'in' for {rt} */")
         gen._emit(f"  {ti} = 0;")
 
-    t = gen._new_val('_Bool', f"{ti} != 0")
-
-    if negate:
-        ti2 = gen._new_temp('int')
-        tn  = gen._new_temp('_Bool')
-        gen._emit(f"  {ti2} = (int) {t};")
-        gen._emit(f"  {tn} = {ti2} == 0;")
-        return '_Bool', tn
-    return '_Bool', t
+    return _in_question_result(gen, ti, negate)
 
 
 def _lower_external_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:

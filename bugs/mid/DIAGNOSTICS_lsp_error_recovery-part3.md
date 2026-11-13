@@ -30,3 +30,28 @@ invocation used by sibling diagnostic tests) passes once parts 1-2 land.
 - The test fails before parts 1-2 and passes after them (serves as the regression
   gate for the split work).
 - Satisfies the original doc's acceptance: "Add `test_lsp_error_recovery.py`."
+
+## Status (2026-11-13)
+
+The test exists (32d00561e) and parts 1-2 have landed, but the test still FAILS,
+so this remains open. Measured with
+`python3 tools/memslot.py --gb 8 --label lsp-recovery -- python3 test_lsp_error_recovery.py`:
+
+    AssertionError: expected a 'use of unknown declaration' diagnostic,
+    got errors=[]
+
+Cause is in the test, not in the parts 1-2 behaviour: its source is a bare
+`asdf` at module scope, which the parser accepts as an ordinary expression
+statement (`parse_module(recover=True)` yields `[ExprStmt, StructDef]` with
+`errors == []`) and which `compile_to_gimple` compiles silently with `struct
+Good` present. A real recovered error is made by a malformed declaration (part
+1's `def\n`) or an unknown decorator (part 2's `@align(missing)`), and part 2's
+test `test_lsp_error_recovery_part2.py` already pins the diagnostic-plus-`Good`
+behaviour at such a source.
+
+Next step, for this doc's owner: decide whether `test_lsp_error_recovery.py`
+(a) rewrites `UNKNOWN_DECL_SRC` to a real unknown declaration and asserts at
+the compilation layer, or (b) is retired as a duplicate of
+`test_lsp_error_recovery_part2.py`; then the file can be registered. Until
+then it is listed (not registered) in `test_suite.py`'s `UNREGISTERED` as RED
+with this doc cited, which is what made the estate check green.

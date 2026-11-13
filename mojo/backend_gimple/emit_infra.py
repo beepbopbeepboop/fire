@@ -570,6 +570,11 @@ def _reset_func(gen, body: list = None, params: list = None,
     # paths.
     gen._func_used_setjmp: bool = False
     gen.func_ret_type: str             = ''
+    # The Mojo-level return ANNOTATION ('String', 'Bool', ...), kept
+    # beside func_ret_type's C spelling: the return-arm check needs to
+    # know whether the annotation is itself a scalar, which `Bool *`
+    # cannot say.
+    gen.current_func_ret_ann: str      = ''
     gen._last_was_terminal: bool       = False
     # Computed once, reused for both the _elem_types and _dict_val_types
     # seeds just below -- see _locally_bound_names' own docstring.
@@ -947,6 +952,7 @@ class FuncState:
         self.fs_try_finally_bodies: list = []
         self.fs_func_used_setjmp: bool = False
         self.fsfunc_ret_type: str = ''
+        self.fsfunc_ret_ann: str = ''
         self.fs_last_was_terminal: bool = False
         self.fs_elem_types: dict = {}
         self.fs_nested_elem_types: dict = {}
@@ -1056,6 +1062,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_try_finally_bodies = gen._try_finally_bodies
     st.fs_func_used_setjmp = gen._func_used_setjmp
     st.fsfunc_ret_type = gen.func_ret_type
+    st.fsfunc_ret_ann = gen.current_func_ret_ann
     st.fs_last_was_terminal = gen._last_was_terminal
     st.fs_elem_types = gen._elem_types
     st.fs_nested_elem_types = gen._nested_elem_types
@@ -1090,6 +1097,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_struct_layout = gen._struct_layout
     st.fs_layout_hint = gen._layout_hint
     st.fscurrent_func_name = gen.current_func_name
+    st.fs_current_func_node = getattr(gen, '_current_func_node', None)
     st.fs_loop_depth = gen._loop_depth
     st.fs_captures = gen._captures
     st.fs_env_param = gen._env_param
@@ -1175,6 +1183,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._try_finally_bodies = st.fs_try_finally_bodies
     gen._func_used_setjmp = st.fs_func_used_setjmp
     gen.func_ret_type = st.fsfunc_ret_type
+    gen.current_func_ret_ann = st.fsfunc_ret_ann
     gen._last_was_terminal = st.fs_last_was_terminal
     gen._elem_types = st.fs_elem_types
     gen._nested_elem_types = st.fs_nested_elem_types
@@ -1209,6 +1218,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._struct_layout = st.fs_struct_layout
     gen._layout_hint = st.fs_layout_hint
     gen.current_func_name = st.fscurrent_func_name
+    gen._current_func_node = st.fs_current_func_node
     gen._loop_depth = st.fs_loop_depth
     gen._captures = st.fs_captures
     gen._local_bindings_cache = st.fs_local_bindings_cache
@@ -7464,6 +7474,15 @@ Order matters and is the same one `_repr_boxed_container` uses: the live
     """
     _res = gen._new_temp('int64_t')
     _it64 = gen._ensure_local('int64_t', value)
+    # A kind-'l'/'p'/'s' box — the tagged word of a mixed float+pointer return
+    # — holds its container pointer in the box's bits. The registry dispatch
+    # below only recognises a BARE container pointer, and would read the box
+    # cell as a list header (`len(f(1))` on the tuple arm printed the tuple's
+    # repr where CPython prints 2). `mojo_box_word` is the one unbox: it
+    # answers the pointer for those kinds and the word unchanged otherwise
+    # (a float box stays a box, which the registry arms decline, as they
+    # should — a float has no len()).
+    _it64 = gen._call_expr('int64_t', 'mojo_box_word', [('int64_t', _it64)])
     # The text of a kind-'p' string box (`mojo_box_from_str`, a tagged word that
     # holds a str) is the pointer the box carries. `mojo_str_box_word` unwraps
     # only that kind, so the string arm below measures the text itself.
@@ -8074,7 +8093,8 @@ def _gen_print(gen, args: list, kwargs: list = None):
             # list slot. Routed through `_own_repr` because the box's
             # `mojo_repr_boxed` result is a fresh buffer on every path.
             if _pi < len(args) and (_is_may_hold_float_param(gen, args[_pi])
-                                    or _is_float_param_arith(gen, args[_pi])):
+                                    or _is_float_param_arith(gen, args[_pi])
+                                    or aval in getattr(gen, '_tagged_word_vals', ())):
                 _rv = _own_repr(gen, 'mojo_repr_boxed',
                                 gen._call_expr('char *', 'mojo_repr_boxed',
                                                [('int64_t', aval)]), _owned_reprs)
@@ -8393,6 +8413,12 @@ def _gen_print(gen, args: list, kwargs: list = None):
     _emit_literal_print('\\n', print_fn)
 
 
+# The stdlib module that owns the zero-arg GPU target queries. The fold
+# below is keyed on the IMPORT SITE as well as the name: a user's own
+# zero-arg `is_gpu()` must keep its real value.
+_GPU_TARGET_QUERY_MODULE = 'std.sys.info'
+
+
 def _comptime_call_hook(gen):
     """Build the call hook for comptime_eval.eval_const_int: fold a call to
     an *imported* function by running it at compile time as cached machine
@@ -8403,6 +8429,17 @@ def _comptime_call_hook(gen):
     of it — a backend with no import elaborator (the formal arm64 path) omits
     it and simply does not fold calls."""
     def hook(name, argvals):
+        if not argvals and _is_gpu_target_query_false(name):
+            _imported_from = (gen.imported_symbols.get(name) or {}).get('module')
+            if _imported_from == _GPU_TARGET_QUERY_MODULE:
+                return 0
+        cache = getattr(gen, '_comptime_call_hook_cache', None)
+        if cache is None:
+            cache = {}
+            gen._comptime_call_hook_cache = cache
+        key = (name, tuple(argvals))
+        if key in cache:
+            return cache[key]
         src_path = gen._imported_fn_sources.get(name)
         if not src_path:
             return None
@@ -8419,11 +8456,100 @@ def _comptime_call_hook(gen):
             module_src = open(src_path).read()
             fn_src = _elab.extract_fn_source(module_src, name)
             if fn_src:
-                return int(_comptime.evaluate(fn_src, name, argvals))
+                value = int(_comptime.evaluate(fn_src, name, argvals))
+                cache[key] = value
+                return value
         except Exception:
             gimple_ctypes._debug_note('comptime evaluation failed', name)
+        cache[key] = None
         return None
     return hook
+
+
+# The stdlib's zero-arg GPU target queries (std/sys/info.mojo), answered
+# False by this backend: the gimple build compiles C for the host's gcc, so
+# the target triple is a CPU triple and no GPU-triple query can be true.
+# `is_gpu` is the or of the three architectures; the `_is_sm_*` family is
+# nvidia-triple-derived (`_is_nvidia_gpu_any[...]` over the sm_ archs) and
+# the `_is_amd_*` family the amdgpu-arch check, so they fold with their
+# architectures. Without the fold a CPU build's
+# `comptime if is_nvidia_gpu(): ... elif is_amd_gpu(): ...` cannot resolve:
+# the queries are imported calls the hook's source-extraction route cannot
+# evaluate, the condition stays CONST_UNKNOWN, and the comptime-if emits
+# every arm. The dead GPU bodies are then lowered as live code: the one that
+# carried a progressing bracket call was refused by the
+# elaborated-instantiation guard (the original stdlib-syntax red,
+# test/math/test_math.mojo through std/math/math.mojo's rsqrt/recip/exp2/log
+# arms), and even without that guard every one of them is code a CPU build
+# must not emit. The `has_*` device-capability queries are NOT here: they ask
+# about a runtime accelerator, not the target triple.
+_GPU_TARGET_QUERY_FALSE = frozenset((
+    'is_nvidia_gpu', 'is_amd_gpu', 'is_apple_gpu', 'is_gpu',
+))
+_GPU_TARGET_QUERY_PREFIXES = ('_is_sm_', '_is_amd_')
+
+
+def _is_gpu_target_query_false(name) -> bool:
+    """A zero-arg compile-target GPU query the gimple (host-CPU) build
+    answers False."""
+    return (name in _GPU_TARGET_QUERY_FALSE
+            or name.startswith(_GPU_TARGET_QUERY_PREFIXES))
+
+
+def _conformance_trait_bases_from_source(gen):
+    extra = getattr(gen, '_conformance_trait_bases_text', None)
+    if extra is not None:
+        return extra
+    extra = {}
+    try:
+        src = getattr(gen, '_source_text', '') or ''
+        if not src:
+            fn = getattr(gen, '_current_filename', '') or ''
+            if fn:
+                with open(fn) as f:
+                    src = f.read()
+        if src:
+            for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\s*(\[[^\]]*\])?\s*\(([^)]*)\)\s*:', src, re.MULTILINE):
+                name = m.group(1)
+                bstr = m.group(3) or ''
+                blist = []
+                for part in bstr.split(','):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    b = part.split('[')[0].split('.')[-1].strip()
+                    if b and re.match(r'^[A-Za-z_]\w*$', b):
+                        blist.append(b)
+                extra[name] = blist
+            for m in re.finditer(r'^\s*trait\s+([A-Za-z_]\w*)\b', src, re.MULTILINE):
+                extra.setdefault(m.group(1), [])
+    except Exception:
+        extra = {}
+    try:
+        gen._conformance_trait_bases_text = extra
+    except Exception:
+        pass
+    return extra
+
+
+def _conforms_to_pred(gen):
+    """Predicate for comptime `conforms_to(T, Trait)` folding, or None."""
+    try:
+        sb = getattr(gen, '_struct_bases', None) or {}
+        tb = getattr(gen, '_trait_bases', None) or {}
+        ex = getattr(gen, '_conformance_bases_extra', None) or {}
+        tbt = _conformance_trait_bases_from_source(gen) or {}
+        if not sb and not tb and not ex and not tbt:
+            return None
+        bases = dict(ex)
+        bases.update(sb)
+        bases.update(tb)
+        for k, v in tbt.items():
+            if v or k not in bases:
+                bases[k] = v
+        return lambda t, tr, _b=bases: comptime_eval.conforms_to(t, tr, _b)
+    except Exception:
+        return None
 
 
 def _eval_const_int(gen, node) -> int | None:
@@ -8433,7 +8559,8 @@ def _eval_const_int(gen, node) -> int | None:
     (mojo/middle/comptime.py); this wrapper supplies the gimple path's
     binding table and its compile-time-call hook."""
     return comptime_eval.eval_const_int(node, gen._comptime_vals,
-                                          _comptime_call_hook(gen))
+                                          _comptime_call_hook(gen),
+                                          conforms_to_pred=_conforms_to_pred(gen))
 
 
 def _eval_const_bool_state(gen, node) -> int:
@@ -8441,12 +8568,14 @@ def _eval_const_bool_state(gen, node) -> int:
     every branching caller uses, because `_eval_const_bool`'s `bool | None`
     collapses None into False once compiled (see comptime.CONST_UNKNOWN)."""
     return comptime_eval.eval_const_bool_state(node, gen._comptime_vals,
-                                               _comptime_call_hook(gen))
+                                               _comptime_call_hook(gen),
+                                               conforms_to_pred=_conforms_to_pred(gen))
 
 def _eval_const_bool(gen, node) -> bool | None:
     """Evaluate an expression as a compile-time bool, or return None."""
     return comptime_eval.eval_const_bool(node, gen._comptime_vals,
-                                           _comptime_call_hook(gen))
+                                           _comptime_call_hook(gen),
+                                           conforms_to_pred=_conforms_to_pred(gen))
 
 def _split_top_level_comma(s: str) -> list[str]:
     """Split s by top-level commas only (bracket-aware), stripped.

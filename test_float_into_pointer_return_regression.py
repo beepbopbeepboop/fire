@@ -1,23 +1,18 @@
-"""Regression test: a float returned from a function whose inferred return
-type is a POINTER must compile.
+"""Regression test: a float returned from a function whose return type is an
+ANNOTATED POINTER is a compile-time error, not a silent truncation.
 
-`comptime.py`'s `eval_const` returns bool/int/float/str/tuple from one
-function, so its return-type join lands on `char *`. When `13b16397d` added
-`if isinstance(node, FloatLiteral): return node.value`, that branch emitted a
-bare `(char *)<double>`:
+The annotation fixes the C return type at a pointer (`char *`), and a float
+arm cannot be returned as one. The old spelling coerced it through an
+int64_t temp (`(char *)(int64_t)2.5`), compiled, and handed the caller the
+truncated bits as the "string" -- `print(pick(0))` printed `1` where CPython
+prints `1.5`. The annotation is authoritative, as in a static type system, so
+the emitter now refuses the arm and names the function.
 
-    mojo/middle/comptime.py:470:3: error: cannot convert to a pointer type
-
-which took down `make mojoc`, `make stage2/mojo` and `test_selfhost.py`'s build.
-The int/bool branches of the same function were already returning into the same
-pointer slot and gcc accepts those with a warning, so only the float spelling
-ever surfaced.
-
-`_sce_simple_emit` now routes a float->pointer coercion through int64_t, like
-every other scalar->pointer coercion in that file.
+An INFERRED float-beside-pointer return is a different shape: it has no
+annotation, widens to the tagged word, and is compared against CPython in
+`test_float_return_beside_tuple_return.py`.
 """
 import os
-import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -29,38 +24,63 @@ def _compile(src: str) -> str:
     return compile_to_gimple(src, do_imports=False)
 
 
-def test_float_return_into_a_pointer_typed_function_compiles():
-    # The join of `char *` and `double` is `char *` (a pointer beats a
-    # non-pointer), so the float return needs a coercion -- and a direct
-    # `(char *)<double>` is invalid C.
+def test_float_return_into_an_annotated_pointer_is_refused():
     src = """\
 def pick(x: Int) -> String:
     if x == 1:
         return "one"
     return 2.5
 """
-    c = _compile(src)
-    # The two-step: an int64_t temp holding the float, then the pointer cast.
-    # `_t5 = (int64_t)2.5;  _t4 = (char *)_t5;`
-    assert re.search(r'= \(int64_t\)2\.5;', c), (
-        "the float->pointer return did not go through an int64_t temp")
-    assert re.search(r'= \(char \*\)_t\d+;', c), (
-        "the float->pointer return did not reach the pointer cast")
+    try:
+        _compile(src)
+    except TypeError as e:
+        msg = str(e)
+    else:
+        raise AssertionError(
+            "a float return arm in a `-> String` function compiled; it must "
+            "be refused (it used to truncate to a pointer)")
+    assert "'pick'" in msg, msg
+    assert "'char *'" in msg, msg
+    assert "'double'" in msg, msg
 
 
-def test_int_return_into_the_same_shape_still_compiles():
-    # The pre-existing spelling gcc accepts with a warning; the fix must not
-    # have disturbed it.
-    src = """\
+def _assert_refused(src: str, arm_ctype: str) -> None:
+    try:
+        _compile(src)
+    except TypeError as e:
+        msg = str(e)
+    else:
+        raise AssertionError(
+            f"a {arm_ctype} return arm in a `-> String` function compiled; it "
+            "must be refused (it used to hand the caller the raw bits as a "
+            "pointer)")
+    assert "'pick'" in msg, msg
+    assert "'char *'" in msg, msg
+    assert f"'{arm_ctype}'" in msg, msg
+
+
+def test_int_return_into_an_annotated_pointer_is_refused():
+    # gcc used to accept `return 7` here with a pointer-from-integer warning,
+    # and print(pick(0)) dereferenced address 7 (CPython prints 7).
+    _assert_refused("""\
 def pick(x: Int) -> String:
     if x == 1:
         return "one"
     return 7
-"""
-    _compile(src)
+""", "int")
+
+
+def test_bool_return_into_an_annotated_pointer_is_refused():
+    _assert_refused("""\
+def pick(x: Int) -> String:
+    if x == 1:
+        return "one"
+    return x == 2
+""", "_Bool")
 
 
 if __name__ == "__main__":
-    test_float_return_into_a_pointer_typed_function_compiles()
-    test_int_return_into_the_same_shape_still_compiles()
+    test_float_return_into_an_annotated_pointer_is_refused()
+    test_int_return_into_an_annotated_pointer_is_refused()
+    test_bool_return_into_an_annotated_pointer_is_refused()
     print("PASS")

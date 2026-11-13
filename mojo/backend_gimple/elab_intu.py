@@ -3017,7 +3017,9 @@ def _collect_inner(work, rec, queue):
     gen = work.gen
     depth = work.depth.get((rec['kind'], rec['base'], rec['args']), 0)
     if depth >= _MAX_DEPTH:
-        return
+        raise RuntimeError(
+            f'elaborator expansion is {depth} levels deep - '
+            f'infinite recursion?')
     ann_sites = rec['sites']
     bases = []
     for holder, attr in ann_sites:
@@ -3100,13 +3102,13 @@ def _collect_inner(work, rec, queue):
         # (a dangling symbol). Refuse with a clear diagnostic instead. A
         # CONCRETE self-call (`self_recursion[0]()`) is a legitimate
         # instantiation and is left to `_concrete_args`.
-        if base == rec['base']:
-            _args = (_bracket_args(gen, n.func) if isinstance(n.func, SubscriptExpr)
-                     else None)
+        if base == rec['base'] and isinstance(n.func, SubscriptExpr):
+            _args = _bracket_args(gen, n.func)
             if _args is None or not all(_is_concrete(a) for a in _args):
                 raise RuntimeError(
                     f'self recursive call to {base!r} will cause an '
                     f'infinite loop')
+            # Concrete self-recursion: a legitimate base-case instantiation.
             return
         # Same registration, for a struct CONSTRUCTED inside the concrete body
         # (`empty`'s body is `return _Empty[T]()`) — that call names the struct
@@ -3903,6 +3905,9 @@ def _materialize(work, key):
         # (modular: `error: invalid call to '<fn>': violated constraint`).
         try:
             elaborate.check_bounds(module_src, tmpl, targs)
+            if kind == 'struct':
+                elaborate._validate_generic_struct_align(
+                    module_src, tmpl, base, list(args), targs)
         except elaborate.WhereConformanceError as _we:
             # A struct's violated `where` is the same diagnostic whichever path
             # instantiates it (emit_resolve reports it the same way).
@@ -3911,6 +3916,14 @@ def _materialize(work, key):
             raise
         except elaborate.ConformanceError:
             raise
+        except RuntimeError as e:
+            _emsg = str(e)
+            if (('function instantiation failed' in _emsg
+                 and 'struct alignment must be a positive power of 2' in _emsg)
+                or ('function instantiation failed' in _emsg
+                    and 'use of unknown declaration' in _emsg
+                    and '@align' in _emsg)):
+                raise
         except Exception:
             pass
         if kind == 'struct':

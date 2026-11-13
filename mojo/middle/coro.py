@@ -30,7 +30,6 @@ Anything not eligible is left untouched and falls through to the existing
 gimple_cpp_* C++20-coroutine path -- incremental cutover.
 """
 from __future__ import annotations
-import contextlib
 import dataclasses
 
 import os
@@ -139,27 +138,38 @@ def enabled() -> bool:
     return os.environ.get(_ENV, _MODE) != _OLD_MODE
 
 
-@contextlib.contextmanager
-def pinned(mode: str):
+class pinned:
     """Select the coroutine backend (`'cpp'` or `'stackswitch'`) for the
-    duration of one block, then restore whatever `MOJO_CORO` was before.
+    duration of one `with` block, then restore whatever `MOJO_CORO` was before.
 
     `enabled()` reads the env var at each compile, so a test that needs one
     backend must say so around its own compile calls. A module-level
     `os.environ[...] = ...` is process-wide: whichever test file is imported
     last wins for every other file sharing the process. Scoped, it can't
-    leak into anything else."""
-    if mode not in (_OLD_MODE, _MODE):
-        raise ValueError(f"unknown coroutine backend {mode!r}")
-    _prev = os.environ.get(_ENV)
-    os.environ[_ENV] = mode
-    try:
-        yield
-    finally:
-        if _prev is None:
+    leak into anything else.
+
+    A class rather than a `@contextlib.contextmanager` generator: this module
+    is compiled by the compiler itself (`test_selfhost.py::coro_module_compiles_to_c`),
+    and the compiled path refuses a generator function with no coroutine
+    companion. The enter/restore behaviour is identical."""
+
+    def __init__(self, mode: str):
+        if mode not in (_OLD_MODE, _MODE):
+            raise ValueError(f"unknown coroutine backend {mode!r}")
+        self._mode = mode
+        self._prev = None
+
+    def __enter__(self):
+        self._prev = os.environ.get(_ENV)
+        os.environ[_ENV] = self._mode
+        return None
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._prev is None:
             os.environ.pop(_ENV, None)
         else:
-            os.environ[_ENV] = _prev
+            os.environ[_ENV] = self._prev
+        return False
 
 
 # ── eligibility ─────────────────────────────────────────────────────────
@@ -4630,6 +4640,13 @@ def _attribute_to_def(prologue: list, fn) -> list:
     with its statement's `#line`, and a line-less statement emits none, which
     left the first lines of every `__mgco_<name>_body` numbered from whatever
     directive preceded the function. They take the generator's own line.
+
+    The stamp is an in-place AST write, so each statement's entry is dropped
+    from the shared `_walk_ast` memo as it is written — the same contract
+    every other write site in this file upholds (test_gimple.py's census
+    `every_ast_mutation_site_invalidates_the_walk_memo` polices this site;
+    `attribute_to_def_write_invalidates_the_walk_memo` is its behavioural
+    pin).
     """
     for stmt in prologue:
         stmt.line = fn.line
@@ -6875,9 +6892,20 @@ def _lift_capture_free_nested_scopes(stmts: list) -> None:
                         continue
                 except Exception:
                     pass
-                # names `m` binds
+                # names `m` binds — including its comptime bracket params
+                # (`def f[func: def() ...]`): a nested scope that references
+                # one of those closes over a value only `m`'s call sites
+                # supply, so lifting it to module level would leave the name
+                # bound to nothing there (the "unresolved callee 'func(...)'"
+                # refusal for __lift_<owner>_<m>_wrapper). It must stay
+                # nested, where the nested-async-closure path captures the
+                # callable as a declared callable-value local.
                 m_bound = set()
                 for pn, _pa in m.params:
+                    m_bound.add(pn)
+                for pn in getattr(m, 'comptime_params', None) or []:
+                    m_bound.add(pn)
+                for pn in getattr(m, 'variadic_bracket_params', None) or []:
                     m_bound.add(pn)
                 for bn in gimple_exprtypes._walk_own_body(m.body):
                     m_bound |= _ca_binding_names(bn)

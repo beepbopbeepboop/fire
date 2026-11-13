@@ -505,8 +505,12 @@ def _selfhost_impl_py_files(sd: str) -> list[str]:
 # 30-minute bootstrap.
 _SELFHOST_SIGS = {
     # Parser (fire_compiler.py)
+    # `recover: bool = False` -- a defaulted parameter occupies a C slot, and
+    # `bool` lowers to `_Bool` (the definition is `Parser_parse_module(Parser
+    # *, _Bool)`). Without the slot every importing module got gcc's
+    # "conflicting types for 'Parser_parse_module'".
     'Parser_parse_module': (
-        'MojoList *', ['Parser *'], 'fire_compiler'),
+        'MojoList *', ['Parser *', '_Bool'], 'fire_compiler'),
     'Parser___init__': (
         'void', ['Parser *', 'MojoList *'], 'fire_compiler'),
     'Parser_with_filename': (
@@ -3886,7 +3890,7 @@ class GimpleGen:
         # header declaration that test_selfhost.py's
         # `pinned_prototypes_match_their_definitions` checks.
         'py_tokenize':              ('MojoList *', ['char *']),
-        'Parser_parse_module':   ('MojoList *', ['Parser *']),
+        'Parser_parse_module':   ('MojoList *', ['Parser *', '_Bool']),
         'mojo_eval':             ('int',         ['int', 'MojoDict *', 'MojoDict *']),
         'interpret_and_execute': ('void',        ['char *', 'int']),
         # C math functions with non-int64_t return types — temps must be float/double
@@ -6424,6 +6428,43 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).with_filename(filename).parse_module()
     _check_ownership(stmts, filename)
+    # Early diagnostics: trait method requirement evidence (part 2).
+    try:
+        import elaborate as _elab_diag
+        def _walk_diag_fns(_stmts, _in_generic_fn=False):
+            for _st in (_stmts or []):
+                if isinstance(_st, FunctionDef):
+                    _is_generic = bool(getattr(_st, 'comptime_params', None) or
+                                       getattr(_st, 'comptime_param_annotations', None))
+                    try:
+                        _elab_diag.check_signature_binding_evidence(mojo_src, _st, stmts)
+                    except RuntimeError:
+                        raise
+                    except Exception:
+                        pass
+                    if _is_generic:
+                        try:
+                            _elab_diag.check_method_call_evidence(mojo_src, _st, stmts)
+                        except RuntimeError:
+                            raise
+                        except Exception:
+                            pass
+                    _walk_diag_fns(getattr(_st, 'body', None), _is_generic)
+                elif isinstance(_st, StructDef):
+                    for _m in (getattr(_st, 'methods', None) or []):
+                        _walk_diag_fns([_m], bool(getattr(_m, 'comptime_params', None)))
+                else:
+                    for _attr in ('body', 'then_body', 'else_body'):
+                        _v = getattr(_st, _attr, None)
+                        if isinstance(_v, list):
+                            _walk_diag_fns(_v, _in_generic_fn)
+                    for _cond, _body in (getattr(_st, 'elifs', None) or []):
+                        _walk_diag_fns(_body, _in_generic_fn)
+        _walk_diag_fns(stmts, False)
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
     stmts = ast_rewriter.desugar_enums(stmts)
     try:
         stmts = _transform_enum_classes(stmts)

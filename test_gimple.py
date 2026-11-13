@@ -184,6 +184,29 @@ def selfhost_emitted_return_type(module: str, struct: str, method: str) -> str:
     return ''
 
 
+def stdlib_unit_emits(mojo_src: str) -> str:
+    """The generated C for mojo_src through
+    build_stdlib_dylib.compile_module_to_c: the single-unit path
+    compile_one.py and the stdlib-syntax gate use, so a shape that only the
+    elaborated (imported-generic) path refuses is exercised here and not by
+    gimple_compiles. Raises on a refusal."""
+    import build_stdlib_dylib
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stdlib_unit_probe.mojo')
+    return build_stdlib_dylib.compile_module_to_c(mojo_src, path, 'stdlib_unit_probe')
+
+
+def stdlib_unit_compiles(mojo_src: str) -> tuple[bool, str]:
+    """Return (ok, error) through build_stdlib_dylib.compile_module_to_c: the
+    single-unit path compile_one.py and the stdlib-syntax gate use. It is not
+    the in-process path gimple_compiles takes, and the two refuse different
+    things (a bracketed generic called from main is only instantiated here)."""
+    try:
+        stdlib_unit_emits(mojo_src)
+        return True, ''
+    except Exception as e:
+        return False, f'{type(e).__name__}: {e}'
+
+
 def gimple_compiles(mojo_src: str) -> tuple[bool, str, str]:
     """Return (ok, c_src, stderr)."""
     c_src = compile_to_gimple(mojo_src)
@@ -11862,41 +11885,61 @@ print("%r" % p)
         _PASS += 1
 
     def test_attribute_to_def_write_invalidates_the_walk_memo():
-        """`_attribute_to_def` stamps the generator's `def` line/col onto
-        the synthesized prologue statements. The walk memo records scalar
-        field values as it descends, so a walk of the prologue taken BEFORE
-        the stamp still held the old `line` value. The stamp must invalidate
-        that entry, so the next walk sees the generator's line. This is the
-        behavioural half of `every_ast_mutation_site_invalidates_the_walk_memo`
-        for this one write site."""
+        """`_attribute_to_def` stamps every prologue statement it is handed
+        with the line/col of the generator's `def`, and that stamp is an AST
+        write: the walk-memo entry of every statement it touches must be
+        dropped, like at every other write site in `mojo/`.
+
+        The prologue statements are freshly synthesized in the lowering
+        pipeline, but the helper is shared: the next statement it is handed
+        can be one the memo has already answered, and a write that leaves
+        the entry in place is exactly the stale-memo hazard the memo's
+        contract exists to close. The census
+        (`every_ast_mutation_site_invalidates_the_walk_memo`) polices the
+        contract for this site statically; this is the behavioural half —
+        before the `_walk_ast_invalidate` call, a statement the memo had
+        already answered kept answering with the pre-stamp entry after the
+        write."""
         global _PASS, _FAIL
         name = "attribute_to_def_write_invalidates_the_walk_memo"
         import mojo.middle.exprtypes as ET
         import mojo.middle.coro as CO
-        from types import SimpleNamespace
-        from fire_compiler import AssignStmt, IdentExpr
+        from fire_compiler import py_tokenize, Parser, FunctionDef, VarDecl
 
         err = None
         try:
             ET._walk_ast_reset()
-            prologue = [AssignStmt(target=IdentExpr(name="p"),
-                                   value=IdentExpr(name="q")),
-                        AssignStmt(target=IdentExpr(name="r"),
-                                   value=IdentExpr(name="s"))]
-            before = ET._walk_ast(prologue)
-            if any(isinstance(v, int) and v == 40 for v in before):
-                err = 'the test precondition is wrong: 40 is already in the walk'
+            stmts = (Parser(py_tokenize(
+                "def g(a):\n    yield a\nvar p = 1\n")).parse_module() or [])
+            fn = [s for s in stmts if isinstance(s, FunctionDef)][0]
+            stmt = [s for s in stmts if isinstance(s, VarDecl)][0]
+            # The generator def lives on its own line in the source, apart
+            # from the prologue statement, so the stamp moves both fields.
+            fn.line, fn.col = 42, 7
+            first = ET._walk_ast(stmt)
+            if ET._walk_ast(stmt) is not first:
+                err = 'nothing was memoized, so this proved nothing'
+            elif any(isinstance(v, int) and not isinstance(v, bool)
+                     and v == fn.line for v in first):
+                err = ('the test precondition is wrong: the def line is '
+                       'already in the pre-stamp walk')
             else:
-                CO._attribute_to_def(prologue, SimpleNamespace(line=40, col=3))
-                after = ET._walk_ast(prologue)
-                lines = [v for v in after if isinstance(v, int) and not isinstance(v, bool)]
-                if prologue[0].line != 40 or prologue[1].col != 3:
-                    err = '_attribute_to_def did not stamp the def line/col'
-                elif 40 not in lines:
-                    err = ('the walk after the stamp still answers from the memo: '
-                           'the generator def line 40 is missing from it')
+                CO._attribute_to_def([stmt], fn)
+                after = ET._walk_ast(stmt)
+                scalars = [v for v in after
+                           if isinstance(v, int) and not isinstance(v, bool)]
+                if (stmt.line, stmt.col) != (fn.line, fn.col):
+                    err = 'the stamp did not reach the statement'
+                elif after is first:
+                    err = ('the memo entry for the statement survived the '
+                           'write: the walk after the stamp still answered '
+                           'from the pre-stamp memo')
+                elif fn.line not in scalars:
+                    err = ('the walk after the stamp still answers from the '
+                           'memo: the generator def line %d is missing from '
+                           'it' % fn.line)
         except Exception as e:  # noqa: BLE001
-            err = "%s: %s" % (type(e).__name__, e)
+            err = f'{type(e).__name__}: {e}'
         finally:
             ET._walk_ast_reset()
         if err:
@@ -14147,7 +14190,7 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_walk_ast_memo_never_answers_stale_over_real_compiles(), 'test_walk_ast_memo_never_answers_stale_over_real_compiles (line 12671)')
     _run_isolated(lambda: test_every_ast_mutation_site_invalidates_the_walk_memo(), 'test_every_ast_mutation_site_invalidates_the_walk_memo (line 12672)')
     _run_isolated(lambda: test_posthoc_class_attr_write_invalidates_the_walk_memo(), 'test_posthoc_class_attr_write_invalidates_the_walk_memo (line 13416)')
-    _run_isolated(lambda: test_attribute_to_def_write_invalidates_the_walk_memo(), 'test_attribute_to_def_write_invalidates_the_walk_memo')
+    _run_isolated(lambda: test_attribute_to_def_write_invalidates_the_walk_memo(), 'test_attribute_to_def_write_invalidates_the_walk_memo (line 11864)')
     _run_isolated(lambda: test_walk_ast_memo_survives_the_sync_generator_hoist_writes(), 'test_walk_ast_memo_survives_the_sync_generator_hoist_writes (line 12672)')
     _run_isolated(lambda: test_scalar_arity_min_max_params_are_not_containers(), 'test_scalar_arity_min_max_params_are_not_containers (line 12673)')
     _run_isolated(lambda: test_a_forwarded_string_argument_keeps_its_type(), 'test_a_forwarded_string_argument_keeps_its_type (line 12674)')
@@ -14613,6 +14656,46 @@ main()
     _run_isolated(lambda: test_re_sub_with_inline_lambda(),
                   'test_re_sub_with_inline_lambda')
 
+    def test_re_sub_with_capturing_lambda():
+        """A re.sub() whose second argument is a CAPTURING lambda (one that
+        reads an enclosing local) must be dispatched down the callback path,
+        with the callback and its env unpacked from the lambda's
+        MojoBoundMethod (fn, self) and passed to mojo_regex_sub_fn. Before the
+        fix, `_re_sub_repl_is_callback` answered False for any capturing lambda,
+        so the lambda's value went to mojo_regex_sub_str as a replacement
+        string; a later fix refused it outright, which made `module_gen.py`
+        (its `@@CSYM:` resolution) uncompilable. That is the shape tested here.
+        """
+        global _PASS, _FAIL
+        name = "re_sub_with_capturing_lambda"
+        src = r'''
+import re
+
+def main():
+    k = "N"
+    print(re.sub(r"[0-9]+", lambda _m: k, "a1b22"))
+main()
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        if ok:
+            if ('mojo_regex_sub_fn' not in c_src
+                    or 'mojo_bound_method_fn' not in c_src
+                    or 'mojo_bound_method_self' not in c_src):
+                print(f"FAIL  {name}: capturing lambda was not unpacked into (fn, env) for the callback")
+                _FAIL += 1
+                return
+            print(f"PASS  {name}")
+            _PASS += 1
+            return
+        print(f"FAIL  {name}")
+        print("      --- gcc stderr ---")
+        for line in stderr.splitlines():
+            print(f"      {line}")
+        _FAIL += 1
+
+    _run_isolated(lambda: test_re_sub_with_capturing_lambda(),
+                  'test_re_sub_with_capturing_lambda')
+
     def test_regex_scan_in_a_method_body_compiles_and_matches_cpython():
         """`for m in PAT.finditer(s)` inside a struct method — a `__GIMPLE`
         body, which gcc reads as raw GIMPLE under `-x c` (the build's flags) —
@@ -14698,6 +14781,93 @@ main()
     _run_isolated(lambda: test_regex_scan_in_a_method_body_compiles_and_matches_cpython(),
                   'test_regex_scan_in_a_method_body_compiles_and_matches_cpython')
 
+    def test_named_callback_re_sub_compiles_and_runs_in_a_gimple_body():
+        """`re.sub(pat, top_level_def, src)` must pass the callback as the
+        bare `void *` value it already is, never with a C-style `(void *)`
+        cast emitted INSIDE the `__GIMPLE` body.
+
+        A bare top-level `def` lowers to the file-scope
+        `static void * _funcptr_<fn>` (calls_shared._callable_value_symbol),
+        so the old fallback in `_lower_re_sub_callback` emitted
+        `_t6 = (void *)_funcptr_repl_9f63a2;` — and a cast whose operand is a
+        GLOBAL DECL is not a legal raw-GIMPLE operand, so gcc rejected the
+        whole `.ci` with "invalid operand in unary operation". gcc only
+        enforces that under `-x c` (this test's `gimple_body_compiles`, the
+        same parse `fire.py build` uses); a `.c` suffix lowers from C and
+        tolerates it, which is why every pre-existing re.sub test stayed
+        green.
+
+        Both lowering arms are covered because they share
+        `_lower_re_sub_callback`: a literal pattern folds into the codegen's
+        own regex engine (`mojo_regex_sub_fn`), while a pattern PARAMETER
+        falls back to the POSIX backend (`mojo_re_sub_fn`). The program is
+        then compiled and RUN with CPython's own stdout as the expectation,
+        so the callback has to be actually invoked and produce the right
+        string, not merely parse.
+        """
+        global _PASS, _FAIL
+        name = "named_callback_re_sub_compiles_and_runs_in_a_gimple_body"
+        src = r'''
+import re
+
+def repl(mm):
+    return "N"
+
+class S:
+    def sub(self, s):
+        return re.sub(r"[0-9]+", repl, s)
+
+    def sub_dynamic(self, pat, s):
+        return re.sub(pat, repl, s)
+
+def main():
+    print(S().sub("a1b22"))
+    print(S().sub_dynamic(r"[a-z]+", "a1b22"))
+main()
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        # The exact spelling this pins: no cast of the `_funcptr_` static.
+        casted = re.findall(r'= \(void \*\)_funcptr_', c_src)
+        if not ok or casted or '__GIMPLE char * S_sub' not in c_src:
+            print(f"FAIL  {name}: ok={ok} cast-funcptr-elems={casted}")
+            if not ok:
+                for line in stderr.splitlines()[:12]:
+                    print(f"      {line}")
+            _FAIL += 1
+            return
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'named_cb_re_sub.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, timeout=RUN_TIMEOUT_S)
+            c_file = os.path.join(td, 'named_cb_re_sub.ci')
+            with open(c_file, 'w') as fh:
+                fh.write(c_src)
+            exe = os.path.join(td, 'named_cb_re_sub.exe')
+            cc = subprocess.run(
+                [GCC, '-fgimple', '-x', 'c', f'-I{_RUNTIME_INC}', '-o', exe,
+                 c_file, os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+            if cc.returncode != 0:
+                errs = [ln for ln in cc.stderr.splitlines() if ' error:' in ln]
+                print(f"FAIL  {name}: gcc -fgimple -x c failed:\n"
+                      + "\n".join(errs[:6]))
+                _FAIL += 1
+                return
+            run = subprocess.run([exe], capture_output=True, text=True,
+                                 timeout=RUN_TIMEOUT_S)
+        if run.returncode != 0 or run.stdout != py.stdout:
+            print(f"FAIL  {name}: compiled printed {run.stdout!r} "
+                  f"(exit {run.returncode}), CPython printed {py.stdout!r}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    _run_isolated(lambda: test_named_callback_re_sub_compiles_and_runs_in_a_gimple_body(),
+                  'test_named_callback_re_sub_compiles_and_runs_in_a_gimple_body')
+
     # gate-stdlib-syntax: a FLOAT scalar's bit accessors answer an integer.
     #
     # This is the minimum shape of the eight-file `stdlib-syntax` red the two
@@ -14719,6 +14889,160 @@ def g(x: SIMD[Float64, 1]) -> Bool:
     var b = x._to_bits_signed()
     return (b & 0x7FF).eq(0)
 """), 'gate_stdlib_syntax_float_bit_accessors')
+
+    # A float bit REINTERPRETATION, not a zero: `bitcast[Float32, 1](bits)` and
+    # `SIMD[Float64, 1](from_bits=bits)` both lower through _emit_bits_to_float
+    # to the runtime's bit-pattern helpers. Before, the bitcast fell into the
+    # catch-all and produced `(int64_t)0`, a silently wrong answer.
+    test_c_shape("bitcast_and_from_bits_reinterpret_bits",
+                 """\
+def f(bits: Int64) -> Float32:
+    return bitcast[Float32, 1](bits)
+
+def g(bits: Int64) -> Float64:
+    return SIMD[Float64, 1](from_bits=bits)
+""",
+                 must_have=["mojo_float_from_bits (", "mojo_double_from_bits ("],
+                 must_not_have=["/* indirect call via"])
+
+    # gate-stdlib-syntax: a FLOAT Array's fill value is not a float.
+    #
+    # The Array fill-unroll coerces its fill value to the element type, and a
+    # `{}` fill lowers to a `MojoDict *`. C lets a pointer convert only to an
+    # INTEGER type, so the generic `(double)<ptr>` cast the coercion used to
+    # emit is rejected outright -- gcc: "pointer value used where a
+    # floating-point was expected". Real: test/algorithm/test_vectorize.mojo's
+    # `Array[Float32, buf_len](fill={})` (twice), which only became reachable
+    # when b0910af72 made the width arm fire for a comptime width; the red
+    # that produced is `stdlib-syntax`. The fix is the same int-word
+    # conversion every other pointer->number coercion in emit_resolve.py uses.
+    #
+    # The append count is asserted, not just "gcc accepted it": a dead width
+    # arm would also compile, and that is the regression (b0910af72) this
+    # would otherwise stop watching.
+    def _test_array_float_fill_from_a_container():
+        global _PASS, _FAIL
+        name = "gate_stdlib_syntax_array_float_fill_pointer_coercion"
+        ok, c_src, stderr = gimple_compiles("""\
+def f() -> Float64:
+    comptime n = 23
+    var a = Array[Float32, n](fill={})
+    return Float64(a[0])
+""")
+        appends = c_src.count('mojo_list_append_double')
+        if ok and appends == 23:
+            print(f"PASS  {name}")
+            _PASS += 1
+            return
+        print(f"FAIL  {name}: ok={ok} appends={appends} (want 23)")
+        for line in stderr.splitlines()[:8]:
+            print(f"      {line}")
+        _FAIL += 1
+
+    _run_isolated(_test_array_float_fill_from_a_container,
+                  'gate_stdlib_syntax_array_float_fill_pointer_coercion')
+
+    # gate-stdlib-syntax (2026-11-13): the elaborated-instantiation refusal
+    # must ask whether a bracket argument PROGRESSES (`i + 1`, the unbounded
+    # instantiation b3e501b60 closed), not whether it is a concrete TYPE.
+    # `llvm_intrinsic["llvm.probe.name", T]` is an imported builtin call
+    # whose first argument is a fixed string value and whose second is a
+    # type: the old "not a concrete type" test read the string's rendering
+    # as '' and refused, taking std/math/math.mojo (frexp, reached from
+    # test_ldexp/test_math) and the other stdlib-syntax files red. The shipped
+    # lowering is the documented module-boundary stub. The case compiles in
+    # single-unit mode, the path compile_one.py uses.
+    def _test_imported_intrinsic_string_arg_in_instance():
+        global _PASS, _FAIL
+        name = "gate_stdlib_syntax_imported_intrinsic_string_arg"
+        ok, err = stdlib_unit_compiles("""\
+from std.sys.intrinsics import llvm_intrinsic
+
+def wrap[T: DType](x: SIMD[T, 1]) -> SIMD[T, 1]:
+    return llvm_intrinsic["llvm.probe.name", SIMD[T, 1], has_side_effect=False](x)
+
+def main():
+    print(wrap[DType.float32](SIMD[DType.float32, 1](2.0)))
+""")
+        if ok:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+
+    _run_isolated(_test_imported_intrinsic_string_arg_in_instance,
+                  'gate_stdlib_syntax_imported_intrinsic_string_arg')
+
+    # gate-stdlib-syntax (2026-11-13): the same refusal on the two shapes
+    # that are compile-time VALUES, not type names, through real stdlib
+    # generics: `sqrt(x)`/`sin(x)` (an intrinsic-name string argument) and
+    # `erf(x)` (`polynomial_evaluate[[1.0, ...]]`, a comptime LIST). Both
+    # are imported generics, so this is the elaborated path the sweep uses.
+    # Before the progressing-argument predicate, `sqrt` refused with
+    # `_llvm_unary_fn` and `erf` with `polynomial_evaluate`: the old test
+    # was "not a concrete type", which neither a string nor a list is.
+    def _test_imported_generic_bracket_args():
+        global _PASS, _FAIL
+        name = "gate_stdlib_syntax_imported_generic_bracket_args"
+        ok, err = stdlib_unit_compiles("""\
+from std.math import sqrt, erf, sin
+
+def probe(x: Float32) -> Float32:
+    return sqrt(x) + erf(x) + sin(x)
+""")
+        if ok:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+
+    _run_isolated(_test_imported_generic_bracket_args,
+                  'gate_stdlib_syntax_imported_generic_bracket_args')
+
+    # gate-stdlib-syntax (2026-11-13): a `comptime if` over the stdlib's
+    # zero-arg GPU target queries in a generic body (std/math/math.mojo's
+    # rsqrt/recip/exp2/log shape, reached from test_math). On a CPU build
+    # the queries are False, so the GPU arms are comptime-dead and must be
+    # pruned, not emitted as a runtime if/elif over an imported query. The
+    # assertion is on the generated C because a build that emitted the arms
+    # also succeeds on the single-unit path; the calls are what the fold
+    # removes, and the dead arm carries a progressing bracket call
+    # (`f[Int64](1 + 2)`) that the elaborated path refuses if it is reached.
+    def _test_comptime_dead_gpu_arm_pruned_in_instance():
+        global _PASS, _FAIL
+        name = "gate_stdlib_syntax_comptime_gpu_arm_pruned"
+        try:
+            c_src = stdlib_unit_emits("""\
+from std.sys.info import is_nvidia_gpu, is_amd_gpu
+
+def f[T: AnyType](x: Int64) -> Int64:
+    comptime if is_nvidia_gpu():
+        return 0
+    elif is_amd_gpu():
+        return f[Int64](1 + 2)
+    return x
+
+def main():
+    print(f[Float32](1))
+""")
+        except Exception as e:
+            print(f"FAIL  {name}: {type(e).__name__}: {e}")
+            _FAIL += 1
+            return
+        nvidia = c_src.count('std_sys_info_is_nvidia_gpu ()')
+        amd = c_src.count('std_sys_info_is_amd_gpu ()')
+        if nvidia == 0 and amd == 0:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: emitted the dead arms "
+                  f"(nvidia={nvidia}, amd={amd}; want 0 each)")
+            _FAIL += 1
+
+    _run_isolated(_test_comptime_dead_gpu_arm_pruned_in_instance,
+                  'gate_stdlib_syntax_comptime_gpu_arm_pruned')
 
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.
