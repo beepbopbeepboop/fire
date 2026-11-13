@@ -1307,7 +1307,14 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      #     with it.  The registry is the authority for both: a
                      #     census entry for a job that no longer carries an
                      #     `expect=` fails this very check.
-                     'formal-dylib': 4,
+                     # `formal-dylib` at 3 (was 4): the fourth failure it named
+                     # — the branching export whose termination stayed a named
+                     # obligation — is fixed on this branch (the CFG walk no
+                     # longer chokes on the dead stack-floor trap arm), so its
+                     # marker states 3 and the reader sees 3. The remaining
+                     # three are the overflow-trapping hole-count rows in
+                     # bugs/mid/FORMAL_svc_exit_handling_incomplete.md.
+                     'formal-dylib': 3,
                      'gimplerunner': 20,
                      'x86-containers': 1,
      # `ab-native` left this census with the A/B campaign: its bug doc was
