@@ -14698,6 +14698,28 @@ main()
     _run_isolated(lambda: test_regex_scan_in_a_method_body_compiles_and_matches_cpython(),
                   'test_regex_scan_in_a_method_body_compiles_and_matches_cpython')
 
+    # gate-stdlib-syntax: a FLOAT scalar's bit accessors answer an integer.
+    #
+    # This is the minimum shape of the eight-file `stdlib-syntax` red the two
+    # held `SIMD[X, 1] -> X` landings produced.
+    # Once a width-1 SIMD value is typed float/double, `val.to_bits()` and
+    # `x._to_bits_signed()` reach the generic scalar-method stub, which hands
+    # the receiver's type straight back; a bitwise expression on that result
+    # is then `float & float`, which gcc rejects. It is live in
+    # std/utils/numerics.mojo's isnan/isinf (their comptime-dead float8 arms
+    # are emitted, not pruned) and in std/math/math.mojo's frexp, reached from
+    # test_ldexp/test_math. The stdlib's own signatures say these accessors
+    # return an integer. This case fails on a resolver-only landing with
+    # "invalid operands to binary & (have 'float' and 'float')" and passes here.
+    _run_isolated(lambda: test("gate_stdlib_syntax_float_bit_accessors", """\
+def f(val: SIMD[Float32, 1]) -> Bool:
+    return (val.to_bits() & 0x7F).eq(0x7C)
+
+def g(x: SIMD[Float64, 1]) -> Bool:
+    var b = x._to_bits_signed()
+    return (b & 0x7FF).eq(0)
+"""), 'gate_stdlib_syntax_float_bit_accessors')
+
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.
     if isinstance(_isolate(lambda: 1 / 0), ZeroDivisionError) and _isolate(lambda: None) is None:
