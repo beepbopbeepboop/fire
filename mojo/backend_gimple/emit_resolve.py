@@ -1894,6 +1894,7 @@ def _register_link_imports(gen, stmts: list) -> list:
                         # available: on-demand elaboration for a generic /
                         # overloaded `def`, whole-module inlining for
                         # anything else. See `_classify_unresolved_export`.
+                        _found = False
                         if source:
                             try:
                                 msrc = open(source).read()
@@ -1925,6 +1926,14 @@ def _register_link_imports(gen, stmts: list) -> list:
                                                 _sibling, _smsrc):
                                             _found = True
                                             break
+                        # Link mode: no dylib for a local module. Inline the
+                        # module so its definitions (including global accessors)
+                        # land in this TU. This is the route that `_link_inline_modules`
+                        # already uses for functions and structs — it compiles the
+                        # sibling module into this translation unit so its globals
+                        # and their accessors are available on the link line.
+                        if not _found and not from_reflection and source and source.endswith('.mojo'):
+                            gen._link_inline_modules.add(stmt.module)
                         continue
                     if sym in seen:
                         continue
@@ -2620,6 +2629,25 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             # else in this file, and the same truncate-to-int word
             # `_to_int64('double', ...)` hands every other float consumer.
             v = gen._ensure_local(s, v)
+            ip = gen._new_val('int64_t', f'(int64_t){v}')
+            gen._emit(f'  {dest} = ({d}){ip};')
+        elif d in ('double', 'float') and s.endswith(' *'):
+            # The mirror of the branch above, and the same C rule: a pointer
+            # converts only to an INTEGER type. `(double)<ptr>` is rejected
+            # outright ("pointer value used where a floating-point was
+            # expected"); it needs the same two-step through the int64_t word
+            # that every other pointer-to-number conversion here uses (see the
+            # `s.endswith(' *') and d in ('int', 'int64_t')` branch above,
+            # including the void * intermediate GIMPLE requires).
+            #
+            # Found through `Array[Float32, buf_len](fill={})` in
+            # test/algorithm/test_vectorize.mojo: the Array fill-unroll
+            # coerces the `{}` fill value (a MojoDict *) to the element type,
+            # and b0910af72 made that arm actually fire for a comptime width,
+            # exposing this cast as gcc errors on every appended element.
+            v = gen._ensure_local(s, v)
+            if s != 'void *':
+                v = gen._new_val('void *', f'(void *){v}')
             ip = gen._new_val('int64_t', f'(int64_t){v}')
             gen._emit(f'  {dest} = ({d}){ip};')
         else:

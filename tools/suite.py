@@ -59,6 +59,7 @@ Usage
     tools/suite.py                      # the `check` bucket, -j ncpu
     tools/suite.py bootstrap            # the ordered 3-stage self-host chain
     tools/suite.py gate                 # check + every heavy CLAUDE.md gate step
+    tools/suite.py orchestrator         # the swarm/registry/landing tests (no git in `check`)
     tools/suite.py check selfhost       # two buckets
     tools/suite.py gimple               # one test, by name
     tools/suite.py -j1 bootstrap        # strictly serial, output streamed live
@@ -1789,8 +1790,7 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
             'runtime/fire_python.h',
             'formal/model', 'FORMAL.md', 'formal/build.py',
             'build_stdlib_dylib.py'],
-     desc='runtime header export scan sees every declaration',
-     disabled='bugs/gate-rthdrscan.md')
+     desc='runtime header export scan sees every declaration')
 # `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
 # the ratchet, and the reason it needed a measurement to be safe.
 # `test_selfhost.py` calls `fire.build_executable(fire.py)`, which is the
@@ -1944,8 +1944,7 @@ test('formal-doc-truth', [PY, 'test_formal_doc_truth.py'], mem='tiny', cache=Tru
             'formal/x86_64_proof_gen.py', 'build_stdlib_dylib.py',
             'reflect.py'],
      desc='every checkable figure in FORMAL.md, doc/ABI.md and OPUS.md '
-          'agrees with the tree',
-     disabled='bugs/gate-formal-doc-truth.md')
+          'agrees with the tree')
 # The two checks that arrived with a merge and ran by nothing (the estate check
 # in suite-self-test reported both). The stale-verdict half of doc-refs has a
 # negative control -- a deliberately wrong verdict row must be flagged or the
@@ -2367,19 +2366,11 @@ test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
             'a fact — see ' + MEM_DEBT_DOC,
      artifact='mojoc', inputs=[MOJO_MAIN] + PY_FILES + [RUNTIME_SRC, RUNTIME_HDR],
      desc='build the one managed native compiler (-O2 -g0)')
-# ab-native's expect= reason. Named for the 15-30 GB self-host pre-pass
-# blowup it used to describe; the blowup is closed (CODEGEN_ab_native_fails,
-# 2026-10-26: 0.1 GB / ~10s), so the text now states the current 1-of-30
-# divergence. `2f75609d` turned the job back from disabled= to expect=
-# referencing the constant `58192261` had removed, so every import of this
-# module (i.e. every `make gate`) died with a NameError before any test ran.
-# The "1 failing" is load-bearing, not decoration: _expect_count_drift
-# re-counts the run's "Results: N passed, M failed" line against it, so a
-# second divergence cannot be absorbed silently by the marker.
-SELFHOST_TOKENIZE_BLOWUP = (
-    'CODEGEN_ab_native_fails — 1 failing: match_stmt diverges '
-    '(29/30 byte-identical; the blowup this constant was named for is '
-    'closed, the run is now 0.1 GB / ~10s)')
+# The A/B native campaign is past: its bug doc (`CODEGEN_ab_native_fails`) was
+# deleted with the work, and the `expect=` marker that watched `match_stmt`'s
+# divergence went with it (2026-11-13). The job keeps its registration, class
+# and memwhy for the day the corpus is run again; a marker with no live subject
+# is a red line in every gate, and this one had none left.
 # `program` (55 GB), UP from `module` (24) — the one job the ratchet moves up,
 # and the measurement is why: registered at `small` (8 GB) it was killed by its
 # own ceiling on 2026-09-29 at a peak of 9.4 GB (a RESOURCE verdict, which is
@@ -2423,7 +2414,6 @@ test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
             'turned back on, and it reserves 0 meanwhile. Over the 4 GB line '
             'because the workload is — see ' + MEM_DEBT_DOC,
      deps=['mojoc'], excl=True, cache=True, extra=['test_ab_native.py'],
-     expect=SELFHOST_TOKENIZE_BLOWUP,  # 29/30 pass (match_stmt diverges, see bug doc); cheap (0.1 GB, ~10s)
      desc='python vs native codegen, byte-for-byte, over the A/B corpus')
 # NOT switched, deliberately, and the reason is per job rather than per
 # principle: `bootstrap-stage2-dumps` carries the same blowup in its `expect=`
@@ -2885,10 +2875,8 @@ test('formal-eh-tables', [PY, 'test_formal_eh_tables.py'],
 test('formal-dylib', [PY, 'test_formal_dylib.py'],
      deps=['preflight', 'prooflib'],
      mem='tiny',
-     expect='4 failing: three hole-count checks on the overflow-trapping exports, whose termination '
-            'obligations an exit svc keeps named (bugs/mid/FORMAL_svc_exit_handling_incomplete.md), and the '
-            'branching export whose termination the test expects proved but which stays named '
-            '(bugs/FORMAL_dylib_branchy_termination_walk_named.md)',
+     expect='3 failing: the hole-count checks on the overflow-trapping exports, whose termination '
+            'obligations an exit svc keeps named (bugs/mid/FORMAL_svc_exit_handling_incomplete.md)',
      desc='formal dylib emission, Mach-O re-read, dlopen, prove')
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'], mem='tiny',
@@ -2977,6 +2965,9 @@ test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
 # library_census; every sorry must live only in lib/Scaffold.lean.
 test('formal-proof-gaps', [PY, 'test_formal_proof_gaps.py'],
      deps=['preflight', 'prooflib'], mem='module',
+     memwhy='the proof-gap ledger runs library_census over the whole Lean '
+            'library (module class); over the 4 GB line because the workload '
+            'is — see ' + MEM_DEBT_DOC,
      desc='proof-gap ledger matches library_census (Scaffold only)')
 test('formal-once-bound-strings', [PY, 'test_formal_once_bound_strings.py'],
      deps=['preflight'], mem='tiny',
@@ -4213,9 +4204,168 @@ test('enum-desugar', [PY, 'test_enum_desugar.py'], mem='tiny',
 test('linked-list-hash-step1', [PY, 'test_linked_list_hash_step1.py'], mem='tiny',
      desc='registered by the estate audit (every test file runs)')
 
+# ── pins the 2026-11-13 estate audit found unregistered ───────────────
+# These test files landed while `suite-self-test` was OFF (the recover-land
+# backlog) and no spec named them. Registered so the estate's "every test
+# file is run by something" is true again; the buckets below keep them out
+# of `check`/`gate` (the everyday loop stays curated).
+test('reg-align-decorator-literal-diagnostic', [PY, 'test_align_decorator_literal_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-align-decorator-parametric-diagnostic', [PY, 'test_align_decorator_parametric_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-align-decorator-part1-storage', [PY, 'test_align_decorator_part1_storage.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-analyzer-build', [PY, 'test_analyzer_build.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-binding-deferral-diagnostic', [PY, 'test_binding_deferral_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-class-rebind-late-binding', [PY, 'test_class_rebind_late_binding.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-codegen-drop-unreferenced-unimpl-stubs', [PY, 'test_codegen_drop_unreferenced_unimpl_stubs.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-codegen-enumerate-unpack-shadow-store-cast', [PY, 'test_codegen_enumerate_unpack_shadow_store_cast.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-codegen-erased-container-values', [PY, 'test_codegen_erased_container_values_pins.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-codegen-import-extern-annotated-ptr-return', [PY, 'test_codegen_import_extern_annotated_ptr_return.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-codegen-import-extern-unannotated-param-dropped-arity', [PY, 'test_codegen_import_extern_unannotated_param_dropped_arity.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-codegen-local-bindings-cache', [PY, 'test_codegen_local_bindings_cache.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-codegen-local-generic-float-literal', [PY, 'test_codegen_local_generic_float_literal.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-codegen-tuple-slot-scalar-beside-list', [PY, 'test_codegen_tuple_slot_scalar_beside_list.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-comptime-float-condition-diagnostic', [PY, 'test_comptime_float_condition_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-conforms-to-condition-diagnostic', [PY, 'test_conforms_to_condition_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-constrained-paren-diagnostic', [PY, 'test_constrained_paren_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+# Landed with "Reject membership on provably scalar containers without
+# `__contains__`" (03d4302ba) and registered nowhere until this audit. 0.0 GB
+# measured, 0.65 s.
+test('reg-contains-method-diagnostic', [PY, 'test_contains_method_diagnostic.py'], mem='tiny',
+     desc="membership on a provably scalar type is refused with the "
+          "'__contains__' diagnostic")
+test('reg-dict-mixed-join', [PY, 'test_dict_mixed_join.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-dict-slot-read-bug', [PY, 'test_dict_slot_read_bug.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-dict-slot-read-bug-demo', [PY, 'test_dict_slot_read_bug_demo.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-dict-slot-read-selfhost-modules', [PY, 'test_dict_slot_read_selfhost_modules.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-docstring-mojo-blocks', [PY, 'test_docstring_mojo_blocks.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-docstring-self-import', [PY, 'test_docstring_self_import.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+# Landed with "Refuse mutually recursive and unbounded generic instantiation"
+# (b3e501b60) and registered nowhere until this audit. 0.6 GB measured (it
+# builds and runs seven programs through `fire.py`).
+test('reg-elaboration-recursion-diagnostic', [PY, 'test_elaboration_recursion_diagnostic.py'], mem='tiny',
+     desc='mutually recursive and unbounded generic instantiation is refused in '
+          'bounded work while finite chains still run')
+test('reg-float-return-beside-tuple-return', [PY, 'test_float_return_beside_tuple_return.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-gate-rthdrscan', [PY, 'test_gate_rthdrscan.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-gimple-function-scoped-alias-extern', [PY, 'test_gimple_function_scoped_alias_extern.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-inferred-param-dependency-diagnostic', [PY, 'test_inferred_param_dependency_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-inferred-where-clause-diagnostic', [PY, 'test_inferred_where_clause_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-interpreter-assert-message', [PY, 'test_interpreter_assert_message.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-interpreter-constrained-diagnostic', [PY, 'test_interpreter_constrained_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-line-directives-per-generated-line', [PY, 'test_line_directives_per_generated_line.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-linked-list-hash-equality', [PY, 'test_linked_list_hash_equality.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-lsp-error-recovery-part2', [PY, 'test_lsp_error_recovery_part2.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-match-class-pattern-match-args', [PY, 'test_match_class_pattern_match_args.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-mixed-kind-name-representation', [PY, 'test_mixed_kind_name_representation.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-mlir-annotation-diagnostic', [PY, 'test_mlir_annotation_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-nested-generator-for-in-coroutine', [PY, 'test_nested_generator_for_in_coroutine.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-nested-generator-yield-from-in-coroutine', [PY, 'test_nested_generator_yield_from_in_coroutine.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-os-path-split-word-truthy', [PY, 'test_os_path_split_word_truthy.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-paren-ternary-gimple-operand', [PY, 'test_paren_ternary_gimple_operand.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-parser-error-recovery-part1', [PY, 'test_parser_error_recovery_part1.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-peek-result-print-link', [PY, 'test_peek_result_print_link.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-peekable-iterator-link', [PY, 'test_peekable_iterator_link.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-python315-disjoint-bases', [PY, 'test_python315_disjoint_bases.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-python315-lazy-imports', [PY, 'test_python315_lazy_imports.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-sibling-ast-name-collision', [PY, 'test_sibling_ast_name_collision.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-tagged-container-corpus', [PY, 'test_tagged_container_corpus.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('reg-tagged-mixed-readsites', [PY, 'test_tagged_mixed_readsites.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+# Landed with "elaborate: reject where clauses that name module alias
+# constants" (491ae6d5b) and registered nowhere until this audit. 0.1 GB
+# measured, 2.3 s.
+test('reg-where-alias-diagnostic', [PY, 'test_where_alias_diagnostic.py'], mem='tiny',
+     desc='a provably false where clause naming a module alias constant is '
+          'refused; an undecided one and a plain assignment stay accepted')
+test('reg-where-message-diagnostic', [PY, 'test_where_message_diagnostic.py'], mem='tiny',
+     desc='per-bug regression pin (estate backlog, 2026-11-13)')
+test('orch-chain-cap', [PY, 'tools/test_chain_cap.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-claim-release', [PY, 'tools/test_claim_release.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-control-branch-retire', [PY, 'tools/test_control_branch_retire.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-control-cleanup', [PY, 'tools/test_control_cleanup.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-control-prune-unmerged', [PY, 'tools/test_control_prune_unmerged.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-control-retire-landed', [PY, 'tools/test_control_retire_landed.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-finishing-first', [PY, 'tools/test_finishing_first.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-gate-doc', [PY, 'tools/test_gate_doc.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-gate-ledger', [PY, 'tools/test_gate_ledger.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-integrate-dryrun', [PY, 'tools/test_integrate_dryrun.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-land-master-moved', [PY, 'tools/test_land_master_moved.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-orch-fixes', [PY, 'tools/test_orch_fixes.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-orch-review', [PY, 'tools/test_orch_review.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-orchestration-formal-unlanded-task-state', [PY, 'tools/test_orchestration_formal_unlanded_task_state.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-proof-review', [PY, 'tools/test_proof_review.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-stash-ff', [PY, 'tools/test_stash_ff.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-swarm-log-quiet', [PY, 'tools/test_swarm_log_quiet.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+test('orch-verify-lock', [PY, 'tools/test_verify_lock.py'], mem='tiny',
+     desc='orchestrator unit test (estate backlog, 2026-11-13)')
+
 BUCKETS = {
     # The everyday green gate — parallel, no exclusive members, minutes.
-    'check': ['ambiguous-import-diagnostic', 'attr-error-messages', 'backtick-import-literals', 'bootstrap-hotspots', 'compile-linked-result', 'comptime-assert-diagnostic', 'comptime-dtype-diagnostic', 'constrained-diagnostic', 'dict-none-key', 'floatliteral-special', 'foreign-callable-lambda-default', 'implicit-string-concat', 'import-missing-module-diagnostic', 'lexer-double-slash-operator', 'linked-list-link-symbols', 'linked-list-struct-element-step4', 'linked-list-struct-element-step4b', 'linked-list-struct-element-step4c', 'module-loader-stdlib', 'mro', 'out-param-return-type-diagnostic', 'parser-param-for', 'python315-free-threaded-abi', 'python315-frozendict', 'python315-sentinel', 'qualified-member-no-leak', 'reg-formal-ast-bridge-two-arg', 'selfhost-debug-flag', 'sys-utf8-default-encoding', 'tuple-enumerate-var-refinement', 'unpacking-in-comprehensions', 'where-clause-call-site-diagnostic', 'dead-worker-state', 'done-ratchet-landing', 'modular', 'refill-claim-blocked', 'swarm-reclass-busy-set', 'swarm-replan', 'swarm-why', 'sync-restart-guards', 'enum-desugar', 'linked-list-hash-step1', 'gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
+    'check': ['ambiguous-import-diagnostic', 'attr-error-messages', 'backtick-import-literals', 'bootstrap-hotspots', 'compile-linked-result', 'comptime-assert-diagnostic', 'comptime-dtype-diagnostic', 'constrained-diagnostic', 'dict-none-key', 'floatliteral-special', 'foreign-callable-lambda-default', 'implicit-string-concat', 'import-missing-module-diagnostic', 'lexer-double-slash-operator', 'linked-list-link-symbols', 'linked-list-struct-element-step4', 'linked-list-struct-element-step4b', 'linked-list-struct-element-step4c', 'module-loader-stdlib', 'mro', 'out-param-return-type-diagnostic', 'parser-param-for', 'python315-free-threaded-abi', 'python315-frozendict', 'python315-sentinel', 'qualified-member-no-leak', 'reg-formal-ast-bridge-two-arg', 'selfhost-debug-flag', 'sys-utf8-default-encoding', 'tuple-enumerate-var-refinement', 'unpacking-in-comprehensions', 'where-clause-call-site-diagnostic', 'modular', 'enum-desugar', 'linked-list-hash-step1', 'gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
+
               'interp-tokenizer-oracle',
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'runtimere', 'globcompiled', 'interporacle', 'examples-parse',
@@ -4391,6 +4541,22 @@ BUCKETS = {
               # bucket, and in `check` for `formal-sys`'s reason: no Lean, four
               # seconds.
               'formal-reproducible'],
+
+    # The orchestrator's own tests (the swarm, the registry, reclass, landing).
+    # Deliberately NOT in `check` (and so not in `gate`, which is `check` plus
+    # the heavy steps): they exercise tools/swarm.py's git-facing passes and
+    # the fleet registry, and `make check` must not be in the business of
+    # spawning git or touching checkout/fleet state — the default loop needs no
+    # git binary at all. The tests stub `_git` and the registry, but that is a
+    # property of the tests, not something a category boundary should rely on.
+    # Run them explicitly: `make check-orchestrator`.
+    'orchestrator': ['dead-worker-state', 'done-ratchet-landing', 'refill-claim-blocked',
+                     'swarm-reclass-busy-set', 'swarm-replan', 'swarm-why',
+                     'sync-restart-guards'] + ['orch-chain-cap', 'orch-claim-release', 'orch-control-branch-retire', 'orch-control-cleanup', 'orch-control-prune-unmerged', 'orch-control-retire-landed', 'orch-finishing-first', 'orch-gate-doc', 'orch-gate-ledger', 'orch-integrate-dryrun', 'orch-land-master-moved', 'orch-orch-fixes', 'orch-orch-review', 'orch-orchestration-formal-unlanded-task-state', 'orch-proof-review', 'orch-stash-ff', 'orch-swarm-log-quiet', 'orch-verify-lock'],
+
+    # Per-bug regression pins from the same audit; explicit, not in `check`.
+    'regressions': ['reg-align-decorator-literal-diagnostic', 'reg-align-decorator-parametric-diagnostic', 'reg-align-decorator-part1-storage', 'reg-analyzer-build', 'reg-binding-deferral-diagnostic', 'reg-class-rebind-late-binding', 'reg-codegen-drop-unreferenced-unimpl-stubs', 'reg-codegen-enumerate-unpack-shadow-store-cast', 'reg-codegen-erased-container-values', 'reg-codegen-import-extern-annotated-ptr-return', 'reg-codegen-import-extern-unannotated-param-dropped-arity', 'reg-codegen-local-bindings-cache', 'reg-codegen-local-generic-float-literal', 'reg-codegen-tuple-slot-scalar-beside-list', 'reg-comptime-float-condition-diagnostic', 'reg-conforms-to-condition-diagnostic', 'reg-constrained-paren-diagnostic', 'reg-contains-method-diagnostic', 'reg-dict-mixed-join', 'reg-dict-slot-read-bug', 'reg-dict-slot-read-bug-demo', 'reg-dict-slot-read-selfhost-modules', 'reg-docstring-mojo-blocks', 'reg-docstring-self-import', 'reg-elaboration-recursion-diagnostic', 'reg-float-return-beside-tuple-return', 'reg-gate-rthdrscan', 'reg-gimple-function-scoped-alias-extern', 'reg-inferred-param-dependency-diagnostic', 'reg-inferred-where-clause-diagnostic', 'reg-interpreter-assert-message', 'reg-interpreter-constrained-diagnostic', 'reg-line-directives-per-generated-line', 'reg-linked-list-hash-equality', 'reg-lsp-error-recovery-part2', 'reg-match-class-pattern-match-args', 'reg-mixed-kind-name-representation', 'reg-mlir-annotation-diagnostic', 'reg-nested-generator-for-in-coroutine', 'reg-nested-generator-yield-from-in-coroutine', 'reg-os-path-split-word-truthy', 'reg-paren-ternary-gimple-operand', 'reg-parser-error-recovery-part1', 'reg-peek-result-print-link', 'reg-peekable-iterator-link', 'reg-python315-disjoint-bases', 'reg-python315-lazy-imports', 'reg-sibling-ast-name-collision', 'reg-tagged-container-corpus', 'reg-tagged-mixed-readsites', 'reg-where-alias-diagnostic', 'reg-where-message-diagnostic'],
+
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps

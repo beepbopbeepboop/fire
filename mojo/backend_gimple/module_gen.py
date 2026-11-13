@@ -3036,6 +3036,24 @@ def _module_class_attr_global_stores(gen, cls):
         if _ct is None:
             continue
         _line = getattr(cls, 'line', 0)
+        # A class-body attribute assigned a Python builtin FUNCTION VALUE
+        # (`_StringGlobber.concat_path = operator.add`, CPython 3.15's glob.py)
+        # cannot be evaluated as a value by this backend: it lowered to a
+        # runtime `getattr(operator, 'add')`, which raised
+        # `AttributeError: add` in the module constructor — before main — so
+        # compiling CPython's glob.py produced a program that died at import.
+        # Every CALL through such an attribute resolves statically to the
+        # class's own method of the same name (the synthesized
+        # `<mod>_<Cls>_<method>`: for glob, the base's `path + text`), so the
+        # function word is never called and the attribute needs no value. Skip
+        # the store instead of emitting an initializer that cannot succeed.
+        _v = _cfd[1]
+        if (isinstance(_v, MemberExpr)
+                and isinstance(getattr(_v, 'obj', None), IdentExpr)
+                and _as_str(_v.obj.name) == 'operator'
+                and any(getattr(_m, 'name', None) == _aname
+                        for _m in getattr(cls, 'methods', []) or [])):
+            continue
         gen._global_var_types[_mangled] = _ct
         # The field-typing pass runs BEFORE this module's globals are typed, so
         # it fell back to the `<Cls> *` "unknown" field type; now that the
@@ -4871,6 +4889,159 @@ def _gmi_transform_enum_classes(self, stmts: list) -> list:
     return out if changed or out != stmts else stmts
 
 
+
+
+def _ann_to_str(gen, ann):
+    if ann is None:
+        return None
+    if isinstance(ann, str):
+        return ann
+    try:
+        return gen._type_expr_to_ann(ann)
+    except Exception:
+        try:
+            return str(ann)
+        except Exception:
+            return None
+
+
+def _split_top_level_bracket_args(text):
+    # Split "A, B[C, D], 0" at top-level commas inside the outermost [...].
+    out = []
+    depth = 0
+    start = 0
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            if depth > 0:
+                depth -= 1
+        elif ch == ',' and depth == 0:
+            out.append(text[start:i].strip())
+            start = i + 1
+        i += 1
+    tail = text[start:].strip()
+    if tail:
+        out.append(tail)
+    return out
+
+
+def _parse_generic_inst_annotation(ann_str):
+    if not isinstance(ann_str, str):
+        return None, None
+    s = ann_str.strip()
+    lb = s.find('[')
+    if lb <= 0 or not s.endswith(']'):
+        return None, None
+    base = s[:lb].strip()
+    # base may be qualified like pkg.Struct in rare cases; take last component
+    # for struct-name lookup, but keep simple: only plain names.
+    if not re.match(r'^[A-Za-z_]\w*$', base):
+        return None, None
+    inner = s[lb + 1:-1]
+    args = _split_top_level_bracket_args(inner)
+    if not args:
+        return None, None
+    return base, args
+
+
+def _find_struct_template_source(gen, module_src, name):
+    # Local struct in current module.
+    if module_src:
+        try:
+            import elaborate as _elaborate_mod
+            tmpl = _elaborate_mod.extract_struct_source(module_src, name)
+            if tmpl:
+                return module_src, tmpl
+        except Exception:
+            pass
+    # Imported generic struct.
+    path = getattr(gen, '_imported_generic_structs', {}).get(name)
+    if path:
+        try:
+            text = open(path).read()
+        except Exception:
+            text = None
+        if text:
+            try:
+                import elaborate as _elaborate_mod
+                tmpl = _elaborate_mod.extract_struct_source(text, name)
+                if tmpl:
+                    return text, tmpl
+            except Exception:
+                pass
+    return None, None
+
+
+def _check_fn_signature_binding_violations(gen, fn, module_src):
+    params = getattr(fn, 'params', None) or []
+    if not params:
+        return
+    for item in params:
+        # params are typically (name, annotation[, ...]) tuples/lists.
+        try:
+            ptype = item[1] if len(item) > 1 else None
+        except Exception:
+            ptype = None
+        ann = _ann_to_str(gen, ptype)
+        base, args = _parse_generic_inst_annotation(ann)
+        if not base or not args:
+            continue
+        struct_module_src, tmpl = _find_struct_template_source(gen, module_src, base)
+        if not tmpl:
+            continue
+        try:
+            import elaborate as _elaborate_mod
+            targs = _elaborate_mod.bind_type_args(tmpl, list(args))
+            if targs is None:
+                continue
+            # Part 1: only provably-false where clauses (violated constraint).
+            try:
+                _elaborate_mod.check_where_clauses(struct_module_src or module_src or '', tmpl, targs)
+            except _elaborate_mod.WhereConformanceError as e:
+                _cfn = getattr(gen, '_current_filename', '') or ''
+                _cln = getattr(fn, 'line', 0) or 0
+                _clc = getattr(fn, 'col', 0) or 0
+                _cat = f'{_cfn}:{_cln}:{_clc}: ' if _cfn else f'{_cln}:{_clc}: '
+                raise RuntimeError(f"{_cat}error: violated constraint")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            continue
+
+
+def _check_signature_binding_violations(gen, stmts):
+    try:
+        module_src = None
+        cfn = getattr(gen, '_current_filename', None)
+        if cfn and os.path.exists(cfn):
+            try:
+                with open(cfn) as f:
+                    module_src = f.read()
+            except Exception:
+                module_src = None
+        for s in (stmts or []):
+            if isinstance(s, FunctionDef):
+                _check_fn_signature_binding_violations(gen, s, module_src)
+            elif isinstance(s, StructDef):
+                for m in (getattr(s, 'methods', None) or []):
+                    if isinstance(m, FunctionDef):
+                        _check_fn_signature_binding_violations(gen, m, module_src)
+        # Generic function declarations may have been stripped from `stmts`
+        # earlier (kept in `_stripped_generic_fns`) but still need the same
+        # declaration-time signature binding check.
+        for s in (getattr(gen, '_stripped_generic_fns', None) or []):
+            if isinstance(s, FunctionDef):
+                _check_fn_signature_binding_violations(gen, s, module_src)
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
+
+
+
 def gen_module_impl(self, stmts: list):
     self._stmts = stmts
     self._current_module_stmts = stmts
@@ -5431,6 +5602,7 @@ def gen_module_impl(self, stmts: list):
         if _local_generics:
             _stripped_generic_fns = [s for s in stmts
                                       if isinstance(s, FunctionDef) and s.name in _local_generics]
+            self._stripped_generic_fns = list(_stripped_generic_fns)
             stmts = [s for s in stmts
                      if not (isinstance(s, FunctionDef) and s.name in _local_generics)]
             for _sgf in _stripped_generic_fns:
@@ -5438,6 +5610,8 @@ def gen_module_impl(self, stmts: list):
                     if isinstance(_n, FunctionDef):
                         _async_fns.pop(id(_n), None)
                         _generator_fns.pop(id(_n), None)
+        else:
+            self._stripped_generic_fns = []
 
     if _gsrc:
         for _s in stmts:
@@ -5478,6 +5652,7 @@ def gen_module_impl(self, stmts: list):
     self._register_imported_structs(stmts)
     self._register_imported_generics(stmts)
     self._register_imported_generic_structs(stmts)
+    _check_signature_binding_violations(self, stmts)
 
     # In-TU generic instantiation: materialize an imported generic as a REAL
     # definition in this translation unit rather than an `extern` beside a
@@ -6397,6 +6572,14 @@ def gen_module_impl(self, stmts: list):
             # is not derived from the dataclass, so a field the parser writes
             # and `_parse_funcdef` reads needs BOTH.
             '_last_bracket_variadics': 'MojoList *',
+            # `Parser.errors` — the recovered-diagnostics list
+            # (`parse_module(recover=True)` appends to it). Same
+            # dataclass-field-without-a-row shape as `_lazy_import_blockers`:
+            # `82e5cded0` added `self.errors = []` to `__init__` and the class
+            # annotation but not this row, so the self-hosted `Parser` struct
+            # omitted it and gcc rejected every access with
+            # `'Parser' has no member named 'errors'`.
+            'errors': 'MojoList *',
             # NOT `_CONV_KWS`: that is a CLASS-level constant
             # (`Parser._CONV_KWS = {...}`, fire_compiler.py), not an instance
             # field. Listing it here made `self._CONV_KWS` read this
@@ -6583,6 +6766,7 @@ def gen_module_impl(self, stmts: list):
         'variadic_bracket_params': 'MojoList *',
         'where_clause': 'int64_t',
         'where_else': 'int64_t',
+        'return_origin': 'char *',
         'line': 'int64_t',
         'col': 'int64_t',
     }
@@ -6897,7 +7081,10 @@ def gen_module_impl(self, stmts: list):
     self.struct_field_types['StructDef'] = {
         'name': 'char *', 'fields': 'MojoList *', 'methods': 'MojoList *',
         'decorators': 'MojoList *', 'comptime_aliases': 'MojoDict *',
-        'bases': 'MojoList *', 'line': 'int64_t', 'col': 'int64_t',
+        'bases': 'MojoList *',
+        # Parallel to `bases`: (base_name, where_text) per positional base.
+        'base_constraints': 'MojoList *',
+        'line': 'int64_t', 'col': 'int64_t',
         '_fieldwise_ctor_synthesized': '_Bool',
         'bracket_params': 'MojoList *',
         'type_param_names': 'MojoList *',
@@ -6908,9 +7095,20 @@ def gen_module_impl(self, stmts: list):
         # bracket parameter list.
         'where_clause': 'int64_t',
         'bracket_types': 'MojoList *',
+        # `align_expr` is the parsed argument/expression of a struct's
+        # `@align(...)` decorator (None when absent), and `presence_fields`
+        # the compiler-minted presence-tracked field names. Both dataclass
+        # fields landed without a row here, so the self-hosted `StructDef`
+        # struct omitted them and gcc rejected every access with
+        # `'StructDef' has no member named 'align_expr'` /
+        # `... 'presence_fields'` (module_gen's own mint site and
+        # mojo/middle/types.py's presence-bit helpers).
+        'align_expr': 'int64_t',
+        'presence_fields': 'MojoList *',
     }
     self.struct_field_types['TraitDef'] = {
         'name': 'char *', 'methods': 'MojoList *', 'decorators': 'MojoList *',
+        'bases': 'MojoList *',
         'line': 'int64_t', 'col': 'int64_t',
     }
     # Compiler-pre-seeded AST layout homes are initialized on GimpleGen so
@@ -7211,6 +7409,8 @@ def gen_module_impl(self, stmts: list):
                           if (self.do_imports or self.link_imports) else []))
     self._struct_bases = {s.name: list(getattr(s, 'bases', None) or [])
                            for s in all_struct_defs if isinstance(s, StructDef)}
+    self._trait_bases = {s.name: list(getattr(s, 'bases', None) or [])
+                         for s in all_struct_defs if isinstance(s, TraitDef)}
     _all_struct_names = {_as_str(_as_structdef_node(s).name) for s in all_struct_defs if isinstance(s, StructDef)}
     _struct_bases_map = {}
     for _sbm in all_struct_defs:
@@ -7236,6 +7436,19 @@ def gen_module_impl(self, stmts: list):
             _omo = _as_structdef_node(_omo)
             _own_method_ids[id(_omo)] = {
                 id(_as_funcdef_node(_m)) for _m in _omo.methods}
+    # Declaration-time conditional conformance checks (trait conformance part 1).
+    from elaborate import (check_conformance_declarations as _check_conf_decls,
+                           check_conditional_rp_origin as _check_rp_origin)
+    _check_conf_decls(
+        [s for s in all_struct_defs if isinstance(s, StructDef)],
+        [s for s in all_struct_defs if isinstance(s, TraitDef)])
+    _all_stmts_for_rp = list(stmts)
+    _all_stmts_for_rp.extend(getattr(self, '_stripped_generic_fns', []) or [])
+    if self.do_imports or self.link_imports:
+        _all_stmts_for_rp.extend(imported_stmts or [])
+    _check_rp_origin(
+        _all_stmts_for_rp,
+        [s for s in all_struct_defs if isinstance(s, StructDef)])
     _merge_struct_inheritance(all_struct_defs)
     # id(inherited method node) -> home module name, resolved by finding
     # which struct ORIGINALLY declared it.
@@ -13089,8 +13302,9 @@ def gen_module_impl(self, stmts: list):
     # An ANNOTATED return type is skipped: the annotation decides the C return
     # type (the float arm keeps its old coercion), so the value is not a tagged
     # word and marking it one here would misread it at every consumer. That
-    # shape — a pointer annotation contradicted by a float arm — remains open;
-    # see the bug doc.
+    # shape — a pointer annotation contradicted by a float arm — is not a
+    # tagged word: `emit_stmts._check_float_arm_into_annotated_pointer`
+    # refuses it at compile time.
     _ret_float: set = set()
     _fmb = getattr(self, '_float_mixed_return_bodies', None)
     if _fmb is None:
@@ -15962,237 +16176,238 @@ def gen_module_impl(self, stmts: list):
     # it. An UNRESOLVABLE condition falls through unchanged (the flatten
     # keeps the IfStmt and the runtime-branch path below emits it as before).
     for stmt in _flatten_resolved_conditionals(stmts):
-        if isinstance(stmt, FunctionDef):
-            if (stmt.name in self._supported_generators or stmt.name in self._supported_async
-                    or stmt.name in self._supported_async_gen):
-                continue
-            if stmt.name in self._unsupported_generator_names:
-                continue
+        try:
+            if isinstance(stmt, FunctionDef):
+                if (stmt.name in self._supported_generators or stmt.name in self._supported_async
+                        or stmt.name in self._supported_async_gen):
+                    continue
+                if stmt.name in self._unsupported_generator_names:
+                    continue
             # A DEVICE function becomes MSL, accumulated into
             # `_device_parts` and embedded as a C string at the end of the
             # module -- the same trick `test_llm/kernels.metal.inc` uses, and
             # the reason this needs no offline metallib step at all. It is
             # NOT emitted as C, because a C definition of a kernel would be
             # dead code that still has to typecheck.
-            if _device_kinds.get(_as_str(stmt.name)) == _gmi_device_select.DEVICE:
-                _msl = None
+                if _device_kinds.get(_as_str(stmt.name)) == _gmi_device_select.DEVICE:
+                    _msl = None
+                    try:
+                        _msl = _gmi_emit_metal.emit_kernel(stmt, kernel=True)
+                    except _gmi_emit_metal.MetalUnsupported as _me:
+                        if _as_str(stmt.name) in _device_explicit:
+            # EXPLICIT `@gpu` that will not lower is a build
+            # error, not a silently-stubbed C function: the user
+            # asked for the GPU, the whole point of the path is
+            # that the GPU runs the code they wrote, and quietly
+            # running it on the CPU is a lie with exit 0.
+                            raise RuntimeError(
+                                f'GPU kernel {_as_str(stmt.name)!r} did not lower '
+                                f'to MSL: {_me}') from _me
+            # INFERRED (a stdlib kernel reached through
+            # `compile_function[...]`) that will not lower is
+            # different in kind: nobody asked for the device path for
+            # this function, and erroring here made the module
+            # uncompilable. Measured: 10 stdlib/test files died on it
+            # -- std/gpu's `abort_kernel`/`_read_back_kernel`, the
+            # test/asyncrt and test/algorithm/gpu device-pointer
+            # kernels -- so `stdlib-syntax` was 91 unexpected and the
+            # whole stdlib could not be built. Falling back to the
+            # host costs nothing that was asked for: the function
+            # compiles and runs as ordinary C, and the GPU path simply
+            # does not engage for it until the emitter covers it
+            # (`doc/GPU_OFFLOAD_PLAN.md` increment 2).
+                        _device_fallbacks.append(
+                            f'{_as_str(stmt.name)}: {_me}')
+                        _device_kinds[_as_str(stmt.name)] = _gmi_device_select.HOST
+                    if _msl is not None:
+                        _device_parts.append(_msl)
+                        continue
+                _nested_pushed = []
+                _prefix = f"{stmt.name}::"
+                for _qn, _info in self._nested_async_api.items():
+                    if _qn.startswith(_prefix):
+                        _nm = _info['nested_name']
+                        self._async_api[_nm] = _info
+                        _nested_pushed.append(_nm)
+                for _cvs in stmt.body:
+                    if isinstance(_cvs, ComptimeVarStmt):
+                        _cv = self._eval_const(_cvs.value)
+                        if _cv is not None:
+                            if isinstance(_cv, str):
+                                self._comptime_str_names.add(
+                                    _as_str(_cvs.target))
+                            self._comptime_vals.setdefault(_cvs.target, _cv)
+                _func_outer_scope = self._push_import_scope()
+                self._collect_body_import_bindings(stmt.body, _func_outer_scope)
                 try:
-                    _msl = _gmi_emit_metal.emit_kernel(stmt, kernel=True)
-                except _gmi_emit_metal.MetalUnsupported as _me:
-                    if _as_str(stmt.name) in _device_explicit:
-                        # EXPLICIT `@gpu` that will not lower is a build
-                        # error, not a silently-stubbed C function: the user
-                        # asked for the GPU, the whole point of the path is
-                        # that the GPU runs the code they wrote, and quietly
-                        # running it on the CPU is a lie with exit 0.
-                        raise RuntimeError(
-                            f'GPU kernel {_as_str(stmt.name)!r} did not lower '
-                            f'to MSL: {_me}') from _me
-                    # INFERRED (a stdlib kernel reached through
-                    # `compile_function[...]`) that will not lower is
-                    # different in kind: nobody asked for the device path for
-                    # this function, and erroring here made the module
-                    # uncompilable. Measured: 10 stdlib/test files died on it
-                    # -- std/gpu's `abort_kernel`/`_read_back_kernel`, the
-                    # test/asyncrt and test/algorithm/gpu device-pointer
-                    # kernels -- so `stdlib-syntax` was 91 unexpected and the
-                    # whole stdlib could not be built. Falling back to the
-                    # host costs nothing that was asked for: the function
-                    # compiles and runs as ordinary C, and the GPU path simply
-                    # does not engage for it until the emitter covers it
-                    # (`doc/GPU_OFFLOAD_PLAN.md` increment 2).
-                    _device_fallbacks.append(
-                        f'{_as_str(stmt.name)}: {_me}')
-                    _device_kinds[_as_str(stmt.name)] = _gmi_device_select.HOST
-                if _msl is not None:
-                    _device_parts.append(_msl)
-                    continue
-            _nested_pushed = []
-            _prefix = f"{stmt.name}::"
-            for _qn, _info in self._nested_async_api.items():
-                if _qn.startswith(_prefix):
-                    _nm = _info['nested_name']
-                    self._async_api[_nm] = _info
-                    _nested_pushed.append(_nm)
-            for _cvs in stmt.body:
-                if isinstance(_cvs, ComptimeVarStmt):
-                    _cv = self._eval_const(_cvs.value)
-                    if _cv is not None:
-                        if isinstance(_cv, str):
-                            self._comptime_str_names.add(
-                                _as_str(_cvs.target))
-                        self._comptime_vals.setdefault(_cvs.target, _cv)
-            _func_outer_scope = self._push_import_scope()
-            self._collect_body_import_bindings(stmt.body, _func_outer_scope)
-            try:
-                for ci in _gmi_closures_callee_first(self._all_closures.get(stmt.name, {})):
-                    _gmi_emit_closure_recursive(self, func_parts, _emitted_closures, _emitted_env_allocs, ci, stmt.name)
-                self._lambda_parts = []
-                func_parts.append(self.gen_func(stmt))
-            finally:
-                self._pop_import_scope()
-                for _nm in _nested_pushed:
-                    self._async_api.pop(_nm, None)
-            if self._lambda_parts:
-                func_parts.extend(self._lambda_parts)
-                self._lambda_parts = []
-            func_parts.append('')
-        elif isinstance(stmt, StructDef):
-            _moids = self._struct_method_overload_ids(stmt)
+                    for ci in _gmi_closures_callee_first(self._all_closures.get(stmt.name, {})):
+                        _gmi_emit_closure_recursive(self, func_parts, _emitted_closures, _emitted_env_allocs, ci, stmt.name)
+                    self._lambda_parts = []
+                    func_parts.append(self.gen_func(stmt))
+                finally:
+                    self._pop_import_scope()
+                    for _nm in _nested_pushed:
+                        self._async_api.pop(_nm, None)
+                if self._lambda_parts:
+                    func_parts.extend(self._lambda_parts)
+                    self._lambda_parts = []
+                func_parts.append('')
+            elif isinstance(stmt, StructDef):
+                _moids = self._struct_method_overload_ids(stmt)
             # Index loop, NOT `zip(stmt.methods, _moids)`: the self-hosted
             # backend has no `zip()` lowering (`mojo_unsupported_iter`, body
             # runs zero times), so this method-BODY emission loop silently
             # emitted nothing — every struct method was missing from compiled
             # mojoc's output. `_moids` is length-aligned with `stmt.methods`.
-            _z7_meths = stmt.methods
-            for _z7k in range(len(_z7_meths)):
-                m = _z7_meths[_z7k]
-                overload_id = _moids[_z7k] if _z7k < len(_moids) else ''
-                if (stmt.name, m.name) in self._supported_generator_methods:
-                    continue
-                if (m.name == '__new__'
-                        and stmt.name in getattr(self, '_bytes_subclass_structs', ())):
-                    # A builtin-`bytes` subclass's `__new__` is handled
-                    # inline at the construction site (payload synthesis);
-                    # its `return super().__new__(cls, val)` body is not a
-                    # callable C method. See _lower_struct_constructor.
-                    continue
-                method_outer_name = f"{stmt.name}_{m.name}{overload_id}"
-                _method_outer_scope = self._push_import_scope()
-                self._collect_body_import_bindings(m.body, _method_outer_scope)
-                for ci in _gmi_closures_callee_first(self._all_closures.get(method_outer_name, {})):
-                    _gmi_emit_closure_recursive(self, func_parts, _emitted_closures, _emitted_env_allocs, ci, method_outer_name)
-                self._lambda_parts = []
-                # An INHERITED method body physically belongs to the base
-                # class's module (the merge copied the node), so its `#line`
-                # directives must name that file — see gen_stmt's
-                # `_line_src_file` and _inherited_method_src above.
-                _imh_src = getattr(self, '_inherited_method_src', {}).get(id(m))
-                _prev_line_src = getattr(self, '_line_src_file', None)
-                if _imh_src:
-                    self._line_src_file = (self._module_source_paths.get(_imh_src)
-                                           or self._current_filename)
-                # TRANSACTIONAL body emission (2026-10-21, measured): a
-                # definition-site method body of a struct with unbound type
-                # parameters may be UNLOWERABLE — a field typed by a type
-                # parameter erases to a plain scalar in this TU, so a
-                # `next(self._inner)` in it hits the emit_calls hard refusal
-                # (measured: std/itertools `_Product2___next__` and
-                # std/collections/string `BytesIter___next__` refused the WHOLE
-                # module before this; the instantiating TU emits the same
-                # methods under the mangled name with real field types, so the
-                # bare body is what cannot exist). The FIRST cut of the fix
-                # skipped the bodies of EVERY struct with type parameters —
-                # and that was a regression, measured against the de890235 A/B:
-                # 1,768 definitions dropped, 133 of them referenced from other
-                # TUs (e.g. `Span_count`/`Span_copy_from` — `Span` is generic
-                # but its bodies were lowerable and were genuinely CALLED from
-                # _unicode/_utf8/test_span — undefined symbols at link). So:
-                # attempt every body exactly as master did, and fall back to
-                # prototype-ONLY for the individual methods that REFUSE — the
-                # codegen's own honest `cannot compile module:` RuntimeError
-                # is the boundary. Rollback is the emit_loops regex-fallback
-                # transactional pattern: func_parts from the mark, the scope
-                # stack down to its pre-call depth (the method's own frame is
-                # popped with it), body_lines/decls (cleared at the method's
-                # own `_reset_func`, so they hold nothing but this method's
-                # partial output), the annotation-seeded container maps (the
-                # only shared dicts `_gen_struct_method` setdefault-seeds per
-                # LOCAL name — a rejected method's partial seeds must not
-                # reach the next method), and the line-source override.
-                # Anything that is not a codegen refusal propagates, exactly
-                # as master would have.
-                _parts_mark = len(func_parts)
-                _scope_depth = len(self._import_scope_stack)
-                _elem_snap = dict(self._elem_types)
-                _nested_snap = dict(self._nested_elem_types)
-                _dval_snap = dict(self._dict_val_types)
-                _prev_tp = getattr(self, '_current_struct_type_params', None)
-                self._current_struct_type_params = getattr(stmt, 'type_param_names', None)
-                try:
-                    func_parts.append(self._gen_struct_method(stmt.name, m, overload_id))
-                    func_parts.append('')
-                except RuntimeError as _me_err:
-                    if not str(_me_err).startswith('cannot compile module'):
-                        raise
-                    del func_parts[_parts_mark:]
-                    while len(self._import_scope_stack) > _scope_depth:
-                        self._import_scope_stack.pop()
-                    self.body_lines.clear()
-                    self.decls.clear()
+                _z7_meths = stmt.methods
+                for _z7k in range(len(_z7_meths)):
+                    m = _z7_meths[_z7k]
+                    overload_id = _moids[_z7k] if _z7k < len(_moids) else ''
+                    if (stmt.name, m.name) in self._supported_generator_methods:
+                        continue
+                    if (m.name == '__new__'
+                            and stmt.name in getattr(self, '_bytes_subclass_structs', ())):
+            # A builtin-`bytes` subclass's `__new__` is handled
+            # inline at the construction site (payload synthesis);
+            # its `return super().__new__(cls, val)` body is not a
+            # callable C method. See _lower_struct_constructor.
+                        continue
+                    method_outer_name = f"{stmt.name}_{m.name}{overload_id}"
+                    _method_outer_scope = self._push_import_scope()
+                    self._collect_body_import_bindings(m.body, _method_outer_scope)
+                    for ci in _gmi_closures_callee_first(self._all_closures.get(method_outer_name, {})):
+                        _gmi_emit_closure_recursive(self, func_parts, _emitted_closures, _emitted_env_allocs, ci, method_outer_name)
                     self._lambda_parts = []
-                    self._elem_types.clear(); self._elem_types.update(_elem_snap)
-                    self._nested_elem_types.clear(); self._nested_elem_types.update(_nested_snap)
-                    self._dict_val_types.clear(); self._dict_val_types.update(_dval_snap)
+            # An INHERITED method body physically belongs to the base
+            # class's module (the merge copied the node), so its `#line`
+            # directives must name that file — see gen_stmt's
+            # `_line_src_file` and _inherited_method_src above.
+                    _imh_src = getattr(self, '_inherited_method_src', {}).get(id(m))
+                    _prev_line_src = getattr(self, '_line_src_file', None)
+                    if _imh_src:
+                        self._line_src_file = (self._module_source_paths.get(_imh_src)
+                                               or self._current_filename)
+            # TRANSACTIONAL body emission (2026-10-21, measured): a
+            # definition-site method body of a struct with unbound type
+            # parameters may be UNLOWERABLE — a field typed by a type
+            # parameter erases to a plain scalar in this TU, so a
+            # `next(self._inner)` in it hits the emit_calls hard refusal
+            # (measured: std/itertools `_Product2___next__` and
+            # std/collections/string `BytesIter___next__` refused the WHOLE
+            # module before this; the instantiating TU emits the same
+            # methods under the mangled name with real field types, so the
+            # bare body is what cannot exist). The FIRST cut of the fix
+            # skipped the bodies of EVERY struct with type parameters —
+            # and that was a regression, measured against the de890235 A/B:
+            # 1,768 definitions dropped, 133 of them referenced from other
+            # TUs (e.g. `Span_count`/`Span_copy_from` — `Span` is generic
+            # but its bodies were lowerable and were genuinely CALLED from
+            # _unicode/_utf8/test_span — undefined symbols at link). So:
+            # attempt every body exactly as master did, and fall back to
+            # prototype-ONLY for the individual methods that REFUSE — the
+            # codegen's own honest `cannot compile module:` RuntimeError
+            # is the boundary. Rollback is the emit_loops regex-fallback
+            # transactional pattern: func_parts from the mark, the scope
+            # stack down to its pre-call depth (the method's own frame is
+            # popped with it), body_lines/decls (cleared at the method's
+            # own `_reset_func`, so they hold nothing but this method's
+            # partial output), the annotation-seeded container maps (the
+            # only shared dicts `_gen_struct_method` setdefault-seeds per
+            # LOCAL name — a rejected method's partial seeds must not
+            # reach the next method), and the line-source override.
+            # Anything that is not a codegen refusal propagates, exactly
+            # as master would have.
+                    _parts_mark = len(func_parts)
+                    _scope_depth = len(self._import_scope_stack)
+                    _elem_snap = dict(self._elem_types)
+                    _nested_snap = dict(self._nested_elem_types)
+                    _dval_snap = dict(self._dict_val_types)
+                    _prev_tp = getattr(self, '_current_struct_type_params', None)
+                    self._current_struct_type_params = getattr(stmt, 'type_param_names', None)
+                    try:
+                        func_parts.append(self._gen_struct_method(stmt.name, m, overload_id))
+                        func_parts.append('')
+                    except RuntimeError as _me_err:
+                        if not str(_me_err).startswith('cannot compile module'):
+                            raise
+                        del func_parts[_parts_mark:]
+                        while len(self._import_scope_stack) > _scope_depth:
+                            self._import_scope_stack.pop()
+                        self.body_lines.clear()
+                        self.decls.clear()
+                        self._lambda_parts = []
+                        self._elem_types.clear(); self._elem_types.update(_elem_snap)
+                        self._nested_elem_types.clear(); self._nested_elem_types.update(_nested_snap)
+                        self._dict_val_types.clear(); self._dict_val_types.update(_dval_snap)
+                        self._line_src_file = _prev_line_src
+                        self._pop_import_scope()
+            # The class tables name this method's symbol (a `mojo_class_setattr` and a classattr-reader
+            # entry for every non-dunder method). The body above was refused, so that symbol is never
+            # defined in THIS TU: a link reference to it is an undefined symbol (measured: std/iter's
+            # `_PeekableIterator_peek`, which the dylib referenced and never defined). Record it, and the
+            # two table loops leave it out. Only the methods that were refused are recorded.
+                        try:
+                            _proto_cname = self._struct_cname_by_id.get(id(stmt), stmt.name)
+                            self._prototype_only_syms.add(
+                                self._struct_method_csym(_proto_cname, _as_str(m.name), _as_str(overload_id or '')))
+                        except Exception:
+                            pass
+                        func_parts.append(
+                            f"/* {stmt.name}.{m.name}{overload_id}: definition-site "
+                            f"body not lowerable in this TU — {_me_err} — prototype "
+                            f"only; the instantiating TU emits the mangled copy */")
+                        func_parts.append('')
+                        continue
+                    finally:
+                        self._current_struct_type_params = _prev_tp
                     self._line_src_file = _prev_line_src
                     self._pop_import_scope()
-                    # The class tables name this method's symbol (a `mojo_class_setattr` and a classattr-reader
-                    # entry for every non-dunder method). The body above was refused, so that symbol is never
-                    # defined in THIS TU: a link reference to it is an undefined symbol (measured: std/iter's
-                    # `_PeekableIterator_peek`, which the dylib referenced and never defined). Record it, and the
-                    # two table loops leave it out. Only the methods that were refused are recorded.
-                    try:
-                        _proto_cname = self._struct_cname_by_id.get(id(stmt), stmt.name)
-                        self._prototype_only_syms.add(
-                            self._struct_method_csym(_proto_cname, _as_str(m.name), _as_str(overload_id or '')))
-                    except Exception:
-                        pass
-                    func_parts.append(
-                        f"/* {stmt.name}.{m.name}{overload_id}: definition-site "
-                        f"body not lowerable in this TU — {_me_err} — prototype "
-                        f"only; the instantiating TU emits the mangled copy */")
-                    func_parts.append('')
-                    continue
-                finally:
-                    self._current_struct_type_params = _prev_tp
-                self._line_src_file = _prev_line_src
-                self._pop_import_scope()
-                if self._lambda_parts:
-                    func_parts.extend(self._lambda_parts)
-                    self._lambda_parts = []
+                    if self._lambda_parts:
+                        func_parts.extend(self._lambda_parts)
+                        self._lambda_parts = []
             # The class body runs at this statement: a class attribute that
             # reads a module global is stored here, in source order, after
             # that global's own assignment (see _module_class_attr_global_stores).
-            toplevel_stmts.extend(_module_class_attr_global_stores(self, stmt))
-        elif isinstance(stmt, TraitDef):
-            lines = [f"typedef struct {stmt.name}_vtable {{"]
-            _seen_vtable_members: set = set()
-            for m in stmt.methods:
-                safe_mname = _safe_name(m.name)
-                if safe_mname in _seen_vtable_members:
-                    continue
-                _seen_vtable_members.add(safe_mname)
-                ret    = self._resolve_type(m.return_type)
-                if gimple_ctypes._params_have_vararg(m.params):
-                    ptypes = 'MojoList *'
-                else:
-                    if m.params:
-                        # Plain unpack loop, NOT a genexpr with a
-                        # tuple-unpack target joined into a string.
-                        _vt_parts = []
-                        for _vtpn, _vtpt in m.params:
-                            _vt_parts.append(self._resolve_type(_vtpt))
-                        ptypes = ', '.join(_vt_parts)
+                toplevel_stmts.extend(_module_class_attr_global_stores(self, stmt))
+            elif isinstance(stmt, TraitDef):
+                lines = [f"typedef struct {stmt.name}_vtable {{"]
+                _seen_vtable_members: set = set()
+                for m in stmt.methods:
+                    safe_mname = _safe_name(m.name)
+                    if safe_mname in _seen_vtable_members:
+                        continue
+                    _seen_vtable_members.add(safe_mname)
+                    ret    = self._resolve_type(m.return_type)
+                    if gimple_ctypes._params_have_vararg(m.params):
+                        ptypes = 'MojoList *'
                     else:
-                        ptypes = 'void'
-                lines.append(f"  {ret} (*{safe_mname}) ({ptypes});")
-            lines.append(f"}} {stmt.name}_vtable;")
-            func_parts.extend(lines)
-            func_parts.append('')
-        elif isinstance(stmt, (ImportStmt, FromImportStmt)):
-            pass  # Imports processed in pre-pass; extern declarations generated in preamble
-        elif (isinstance(stmt, ComptimeVarStmt)
-                and isinstance(stmt.value, (ListExpr, TupleExpr))):
-            toplevel_stmts.append(AssignStmt(
-                target=IdentExpr(stmt.target, line=stmt.line, col=stmt.col),
-                value=stmt.value, line=stmt.line, col=stmt.col))
-        elif isinstance(stmt, (AssignStmt, AugAssignStmt, MultiAssignStmt,
-                               ExprStmt, IfStmt, WhileStmt, ForStmt,
-                               TryStmt, WithStmt, PassStmt,
-                               BreakStmt, ContinueStmt, ReturnStmt,
-                               RaiseStmt, AssertStmt, VarDecl)):
-            toplevel_stmts.append(stmt)
-        elif isinstance(stmt, ComptimeVarStmt):
+                        if m.params:
+            # Plain unpack loop, NOT a genexpr with a
+            # tuple-unpack target joined into a string.
+                            _vt_parts = []
+                            for _vtpn, _vtpt in m.params:
+                                _vt_parts.append(self._resolve_type(_vtpt))
+                            ptypes = ', '.join(_vt_parts)
+                        else:
+                            ptypes = 'void'
+                    lines.append(f"  {ret} (*{safe_mname}) ({ptypes});")
+                lines.append(f"}} {stmt.name}_vtable;")
+                func_parts.extend(lines)
+                func_parts.append('')
+            elif isinstance(stmt, (ImportStmt, FromImportStmt)):
+                pass  # Imports processed in pre-pass; extern declarations generated in preamble
+            elif (isinstance(stmt, ComptimeVarStmt)
+                    and isinstance(stmt.value, (ListExpr, TupleExpr))):
+                toplevel_stmts.append(AssignStmt(
+                    target=IdentExpr(stmt.target, line=stmt.line, col=stmt.col),
+                    value=stmt.value, line=stmt.line, col=stmt.col))
+            elif isinstance(stmt, (AssignStmt, AugAssignStmt, MultiAssignStmt,
+                                   ExprStmt, IfStmt, WhileStmt, ForStmt,
+                                   TryStmt, WithStmt, PassStmt,
+                                   BreakStmt, ContinueStmt, ReturnStmt,
+                                   RaiseStmt, AssertStmt, VarDecl)):
+                toplevel_stmts.append(stmt)
+            elif isinstance(stmt, ComptimeVarStmt):
             # PART 6 (2026-10-23, family S): a module-level comptime
             # constant with a FOLDABLE value (int / bool / str, and after
             # comptime.py's family-S fold: the string-wrapping constructors
@@ -16208,19 +16423,30 @@ def gen_module_impl(self, stmts: list):
             # feeds) lets the IdentExpr read path answer the real value.
             # Only FOLDABLE values are recorded; an un-fodable initializer
             # keeps the pre-branch TODO drop exactly (honest refusal).
-            _cv_val = self._eval_const(stmt.value)
-            if _cv_val is not None:
-                if isinstance(_cv_val, str):
-                    self._comptime_str_names.add(_as_str(stmt.target))
-                self._comptime_vals.setdefault(_as_str(stmt.target), _cv_val)
+                _cv_val = self._eval_const(stmt.value)
+                if _cv_val is not None:
+                    if isinstance(_cv_val, str):
+                        self._comptime_str_names.add(_as_str(stmt.target))
+                    self._comptime_vals.setdefault(_as_str(stmt.target), _cv_val)
+                else:
+                    _debug_note('top-level statement dropped',
+                                type(stmt).__name__)
+                    func_parts.append(
+                        f"/* TODO: top-level {type(stmt).__name__} */")
             else:
-                _debug_note('top-level statement dropped',
-                            type(stmt).__name__)
-                func_parts.append(
-                    f"/* TODO: top-level {type(stmt).__name__} */")
-        else:
-            _debug_note('top-level statement dropped', type(stmt).__name__)
-            func_parts.append(f"/* TODO: top-level {type(stmt).__name__} */")
+                _debug_note('top-level statement dropped', type(stmt).__name__)
+                func_parts.append(f"/* TODO: top-level {type(stmt).__name__} */")
+
+        except Exception as _me_err:
+            try:
+                import sys
+                print("CAUGHT_IN_MAIN_LOOP:", str(_me_err)[:80], file=sys.stderr)
+                if not hasattr(self, '_lsp_recovery_errors'):
+                    self._lsp_recovery_errors = []
+                self._lsp_recovery_errors.append(_me_err)
+            except Exception:
+                pass
+            continue
 
     # `_as_funcdef_node`, not a bare `s`: `stmts` is a heterogeneous
     # statement list, so its self-hosted element type is opaque int64_t
@@ -18728,33 +18954,88 @@ def gen_module_impl(self, stmts: list):
                             else:
                                 _sig_ret = 'int64_t'
                         signature = f'{_sig_ret} {safe} ({", ".join(_as_list(_sig_pts))})'
-                # The scan's PARAMETER types are a second inference too: an
-                # unannotated parameter (`def module_qualifier(q)`) is
-                # `int64_t` to the importer's text scan and `char *` to the
-                # definition, which is typed from the body. The mangled name's
-                # overload hash is already computed from the definer's list
-                # (`_overload_suffix` -> `_imported_def_pts`), so name and
-                # extern must not disagree about the very list the name was
-                # hashed from: gcc rejects the unit with `conflicting types
-                # for 'mojo_middle_exprtypes_module_qualifier_d719e0'; have
-                # 'char *(int64_t)'` against the definition's `char *(char *)`,
-                # and every call through the extern then fails too. Only the
-                # DEFINER's committed list counts (`definer_only`): with no
-                # definition in this closure (a dylib link) nothing is written
-                # there and the scan stays the only evidence, as before.
-                # The scan can also DROP parameters (3 scanned, 5 defined for
-                # `user_dunder_repr_call`), so the definer's list replaces the
-                # scan's whole parameter list rather than being matched to it.
-                # Never a variadic.
+                # The scan's PARAMETER list is a second, independent inference
+                # and must not own the extern's shape. Two ways it disagrees
+                # with the DEFINER, both measured on the 2026-11-12 self-host
+                # build:
+                #
+                # * TYPES: an unannotated parameter (`def module_qualifier(q)`)
+                #   is `int64_t` to the importer's text scan and `char *` to
+                #   the definition, which is typed from the body. gcc rejects
+                #   the unit with `conflicting types for
+                #   'mojo_middle_exprtypes_module_qualifier_d719e0'; have
+                #   'char *(int64_t)'` against the definition's `char *(char *)`,
+                #   and every call through the extern then fails too.
+                # * ARITY: the scan DROPS every parameter with no annotation
+                #   (`module_loader`'s `if ':' in param`), so its list is
+                #   SHORTER than the definition's (1 scanned vs 2 defined for
+                #   `_gmi_prefold_toplevel_comptime`, 3 vs 5 for
+                #   `user_dunder_repr_call`). This arm used to re-type only
+                #   from the DEFINER's committed store (`definer_only=True`),
+                #   which is empty whenever the definition is not compiled
+                #   into this translation unit — the normal single-module
+                #   compile. The extern then kept the dropped arity while the
+                #   call sites, whose mangled suffix comes from
+                #   `_effective_param_types`, passed the definer's count:
+                #   `too many arguments to function '..._register_sym_ab0ffa';
+                #   expected 2, have 7`, plus a pointer argument in an
+                #   integer-typed shifted slot for every later position.
+                #
+                # So the list here is the SAME one the symbol name was hashed
+                # from: `_effective_param_types` (tier order: this unit's own
+                # definition, then the definer's committed signature, then the
+                # importer's registration-time snapshot from the home module's
+                # own parsed `FunctionDef`). Name and extern agree by
+                # construction rather than by two inferences happening to
+                # match; the scan remains the fallback only when no list
+                # resolves at all. A scanned parameter's NAME is kept at the
+                # position it occupies when the arity agrees (C prototypes do
+                # not need one, but dropping it would churn every green extern
+                # and the import tests read it); a parameter the scan DROPPED
+                # has no scanned position to sit in, so that list is emitted
+                # types-only. Never a variadic.
                 if (sym_info.get('parameters') or sym_info.get('c_parameters')) \
                         and not sym_info.get('variadic'):
-                    _def_pts = _ggf_dup._imported_def_pts(self, _sn, True)
+                    _def_pts = _ggf_dup._effective_param_types(self, _sn)
                     if _def_pts:
-                        _m_sig = re.match(r'^(.*?\b' + re.escape(safe) + r'\s*)\(.*\)\s*$',
-                                          signature)
+                        _m_sig = re.match(
+                            r'^(.*?\b' + re.escape(safe) + r'\s*)\((.*)\)\s*$',
+                            signature)
                         if _m_sig:
+                            _eff_list = _as_list(_def_pts)
+                            _scan_sig = _as_str(_m_sig.group(2))
+                            if _scan_sig.strip() in ('', 'void'):
+                                _scan_parts = []
+                            else:
+                                _scan_parts = [_p.strip()
+                                               for _p in _scan_sig.split(',')]
+                            _new_parts = []
+                            # Names are positional: keep them only when no
+                            # parameter was dropped, so scanned position i is
+                            # definition position i.
+                            _keep_names = (len(_scan_parts)
+                                           == len(_eff_list))
+                            for _pi in range(len(_eff_list)):
+                                _tp = _as_str(_eff_list[_pi])
+                                _is_vararg = (_tp == '...')
+                                if _keep_names:
+                                    _toks = _scan_parts[_pi].split()
+                                    if len(_toks) >= 2 and re.match(
+                                            r'^[A-Za-z_]\w*$',
+                                            _as_str(_toks[len(_toks) - 1])):
+                                        _tp = _tp + ' ' + _as_str(
+                                            _toks[len(_toks) - 1])
+                                _new_parts.append(_tp)
+                                # C's `...` must be last. `_signature_ctypes`
+                                # keeps params that follow `*args` so call
+                                # sites can still coerce them, but a prototype
+                                # cannot spell `(int64_t, ..., int64_t)`; drop
+                                # the tail, exactly as the loader's own scan
+                                # does for that shape.
+                                if _is_vararg:
+                                    break
                             signature = (_m_sig.group(1) + '('
-                                         + ', '.join(_as_list(_def_pts)) + ')')
+                                         + ', '.join(_new_parts) + ')')
                 if signature.startswith('MojoTuple_'):
                     # Part 4 (measured 2026-10-21 integration, `split`'s
                     # `-> Tuple[String, String]`): the scanned/resolved
@@ -20127,7 +20408,37 @@ def gen_module_impl(self, stmts: list):
             pass
     except Exception:
         pass
-    return self._dedup_variadic_externs(_drop_unreferenced_unimpl_stubs(_drop_unreachable_repr_cluster(parts)))
+    try:
+        result = self._dedup_variadic_externs(_drop_unreferenced_unimpl_stubs(_drop_unreachable_repr_cluster(parts)))
+    except Exception:
+        result = None
+    # Re-raise collected errors for error recovery (LSP/front-end) after building output
+    try:
+        if getattr(self, '_lsp_recovery_errors', None):
+            errs = self._lsp_recovery_errors
+            # If there are errors containing "use of unknown declaration", re-raise the first one
+            for e in errs:
+                if 'use of unknown declaration' in str(e):
+                    if result is not None:
+                        # Try to attach result to exception if possible
+                        try:
+                            e.module_output = result
+                        except Exception:
+                            pass
+                    raise e
+            # Otherwise re-raise the first error
+            e0 = errs[0]
+            if result is not None:
+                try:
+                    e0.module_output = result
+                except Exception:
+                    pass
+            raise e0
+    except Exception:
+        raise
+    if result is None:
+        raise RuntimeError("module generation failed")
+    return result
 
 def __getattr__(name):
     import gimple_codegen

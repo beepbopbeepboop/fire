@@ -33,6 +33,7 @@ def held(name, claim):
 class RefillClaimBlocked(unittest.TestCase):
     def setUp(self):
         self.qdir = tempfile.mkdtemp()
+        self.ctl = tempfile.mkdtemp()      # never the live dead_models/registry
         self.items = [item("fix-merge-blocked-1", "bug:X", 1), item("fix-merge-blocked-2", "bug:X", 2),
                       item("fix-replan-ok", "bug:Y", 3)]
         for it in self.items:
@@ -41,6 +42,7 @@ class RefillClaimBlocked(unittest.TestCase):
         self.patches = [
             mock.patch.object(C, "load_pool", return_value=POOL),
             mock.patch.object(C, "qdir", return_value=self.qdir),
+            mock.patch.object(C, "ctl_dir", return_value=self.ctl),
             mock.patch.object(C, "live_names", return_value=frozenset()),
             mock.patch.object(C, "breaker_until", return_value=0),
             mock.patch.object(C, "dead_on_arrival", return_value=False),
@@ -63,6 +65,7 @@ class RefillClaimBlocked(unittest.TestCase):
         for p in self.patches:
             p.stop()
         shutil.rmtree(self.qdir, ignore_errors=True)
+        shutil.rmtree(self.ctl, ignore_errors=True)
 
     def test_blocked_tasks_take_no_slot_and_the_next_one_starts(self):
         C.cmd_refill(argparse.Namespace(target=2, prefix="fix-"))

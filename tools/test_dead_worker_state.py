@@ -52,5 +52,52 @@ class DeadWorkerState(unittest.TestCase):
             self.assertEqual(C.dead_running_tasks({"f": task("running", self.wt("f"))}), set())
 
 
+class DeadOnArrivalSinceBase(unittest.TestCase):
+    """A fixer/continuation starts from a branch that already has commits master lacks. `ahead()` counts those
+    inherited commits, so a fixer that died in its first second looked busy and was never bounced or banned
+    (2026-11-13: the wal-2 fixer died on the free-tier rate limit and stayed an exited-err entry with 5 inherited
+    commits, while its model kept getting restarted). `ahead_since_base` is the worker's own contribution."""
+
+    def setUp(self):
+        import subprocess
+        self.root = tempfile.mkdtemp()
+        self.repo = os.path.join(self.root, "repo")
+        os.makedirs(self.repo)
+        self.wt = os.path.join(self.root, "wt")
+        os.makedirs(self.wt)
+        open(os.path.join(self.wt, "work.log"), "w").write(
+            "Error: Rate limit exceeded: free-models-per-day-high-balance.\n")
+        g = lambda *a: subprocess.run(["git", "-C", self.repo, *a], check=True, capture_output=True)
+        g("init", "-q", "-b", "master")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "root")
+        g("branch", "work/base")
+        g("checkout", "-q", "work/base")
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base work")
+        g("branch", "work/fixer", "work/base")
+        self.saved = C.MAIN
+        C.MAIN = self.repo
+
+    def tearDown(self):
+        C.MAIN = self.saved
+
+    def task(self, branch, base):
+        return {"state": "exited-err", "worktree": self.wt, "pid": 0, "claims": [],
+                "branch": branch, "base": base, "model": "m", "pool": "p"}
+
+    def test_a_fixer_that_added_nothing_is_dead_on_arrival(self):
+        t = self.task("work/fixer", "work/base")
+        self.assertEqual(C.ahead(t), 1)              # the base commit master lacks
+        self.assertEqual(C.ahead_since_base(t), 0)
+        self.assertTrue(C.dead_on_arrival(t))
+
+    def test_a_fixer_with_its_own_commit_is_not_dead_on_arrival(self):
+        import subprocess
+        subprocess.run(["git", "-C", self.repo, "checkout", "-q", "work/fixer"], check=True)
+        subprocess.run(["git", "-C", self.repo, "-c", "user.name=t", "-c", "user.email=t@t",
+                        "commit", "-q", "--allow-empty", "-m", "own work"], check=True)
+        self.assertEqual(C.ahead_since_base(self.task("work/fixer", "work/base")), 1)
+        self.assertFalse(C.dead_on_arrival(self.task("work/fixer", "work/base")))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,11 @@
-SPLIT: CODEGEN_simd_and_array_values_erase_to_int64-part4-part1
+SPLIT: CODEGEN_simd_and_array_values_erase_to_int64-part4-part2, CODEGEN_simd_and_array_values_erase_to_int64-part4-part3
 
 # A float SIMD value survives a call and a return (part 4)
+
+Split: the parameter/return/result-local propagation piece landed separately
+(part4-part1, 2026-11-13). This doc remains for the full call-and-return
+probe (`test_part4_float_simd_survives_call_and_return`), which also depends
+on part 3's float SIMD constructor.
 
 Part 4 of `bugs/hard/CODEGEN_simd_and_array_values_erase_to_int64.md`.
 
@@ -23,12 +28,12 @@ argument, so generic call typing sees `Int64`.
 
 ## Done when
 
-File: `test_codegen_erased_container_values.py` (repo root).
+File: `test_codegen_erased_container_values_pins.py` (repo root).
 
-Command: `python3 test_codegen_erased_container_values.py part4`
+Command: `python3 test_codegen_erased_container_values_pins.py part4`
 
-It runs `test_part4_float_simd_survives_call_and_return` (red today; red until
-part 3 lands). It must pass.
+It runs `test_part4_float_simd_survives_call_and_return` (green: part 3 has
+landed and this pin moved to the pins file). It must pass.
 
 ## Where to start
 

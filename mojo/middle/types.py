@@ -1300,6 +1300,30 @@ def _body_builds_struct_tuple(body) -> bool:
     return False
 
 
+# Dtype spellings for float SIMD annotations -> scalar C type.
+# Reusable: part 5's resolver rule (Scalar[X] / SIMD[X, 1]) may delegate to
+# this table so there is one mapping, not two (see CODEGEN_simd_and_array_
+# values_erase_to_int64-part5 coordination note).
+_SIMD_FLOAT_DTYPE_CTYPE = {
+    'DType.float32': 'float',
+    'Float32': 'float',
+    'float32': 'float',
+    'DType.float64': 'double',
+    'Float64': 'double',
+    'float64': 'double',
+}
+
+
+def _simd_float_dtype_ctype(inner: str) -> str | None:
+    """For a `SIMD[<dtype>, N]` bracket, return the scalar C type of
+    `<dtype>` when it is a float dtype spelling, else None (integer or
+    unresolvable -> caller keeps the conservative `int64_t` fallback)."""
+    parts = _split_top_level_commas(inner)
+    if not parts:
+        return None
+    return _SIMD_FLOAT_DTYPE_CTYPE.get(parts[0].strip())
+
+
 def _mojo_type(ann: str | type | None) -> str:
     if not ann:
         return 'int64_t'
@@ -1382,6 +1406,13 @@ def _mojo_type(ann: str | type | None) -> str:
             return 'Span *'
         if base == 'Optional':
             return _mojo_type(_split_top_level_commas(inner)[0].strip())
+        if base == 'SIMD':
+            # `SIMD[<float dtype>, N]` (any N) is scalar-erased to the C type
+            # of the dtype. Integer and unresolvable dtypes fall through to
+            # the `int64_t` box, exactly as before. `Scalar[...]` is part 5's.
+            dt = _simd_float_dtype_ctype(inner)
+            if dt is not None:
+                return dt
         ann = base
     if isinstance(ann, str) and len(ann) > 1 and (ann[0] == '*') and (ann[1] != '*'):
         inner = ann[1:].strip()
@@ -2704,6 +2735,10 @@ _FOREIGN_CALLABLES = {
     'os.walk': _CPP_CALLABLE_CTYPE,
     'glob.glob': _CPP_CALLABLE_CTYPE,
     'glob.iglob': _CPP_CALLABLE_CTYPE,
+    # Builtin open: modeled as a file-handle-producing callable for
+    # callable-valued parameters and context-manager lowering in compiled
+    # generator bodies (see COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2).
+    'open': _CPP_CALLABLE_CTYPE,
 }
 _FOREIGN_CALLABLE_ITER_ELEM = {
     'csv.reader': 'MojoList *',

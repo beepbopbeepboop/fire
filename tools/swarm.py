@@ -695,9 +695,18 @@ def _move_citations(old, new):
     return [f for f in r.stdout.split() if f]
 
 
+_GIT_LAST_ERR = ""
+
+
 def _git(*a):
-    """(returncode, stdout) for a git command in the main checkout. Never exits: a pass must survive a failed move."""
+    """(returncode, stdout) for a git command in the main checkout. Never exits: a pass must survive a failed move.
+
+    This is the ONE git entry point of a pass (tests replace it, so `make check` never runs git and needs no git binary).
+    git's stderr is left in `_GIT_LAST_ERR` for a caller that must quote the reason, so no caller ever needs a second,
+    uninterceptable `subprocess.run(["git", ...])`."""
+    global _GIT_LAST_ERR
     r = subprocess.run(["git", *a], cwd=C.MAIN, capture_output=True, text=True)
+    _GIT_LAST_ERR = r.stderr
     return r.returncode, r.stdout
 
 
@@ -766,9 +775,10 @@ def apply_moves(st):
                     open(os.path.join(C.MAIN, f), "w", encoding="utf-8").write(body)
                 for base, old, new, cited in plan:
                     os.makedirs(os.path.dirname(os.path.join(C.MAIN, new)), exist_ok=True)
-                    rc, _ = _git("mv", old, new)
+                    rc, _ = _git("mv", old, new)     # through the seam: `make check` must never run git
                     if rc:
-                        raise RuntimeError("git mv %s %s failed" % (old, new))
+                        raise RuntimeError("git mv %s %s failed: %s"
+                                           % (old, new, (_GIT_LAST_ERR or "").strip()))
                     done.append((old, new))
             except Exception:                    # put back what this pass changed, then report it
                 for old, new in reversed(done):
@@ -869,8 +879,12 @@ def retire_dead():
         subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "mark", name, "abandoned"], capture_output=True)
         n += 1
         if not backfill and C.limit_hit(t) and t.get("pool"):   # an old log's limit line is history, not a live ban
-            C.mark_dead(t["model"], C.pool_slot(t["pool"]), C.limit_reset(t))
-            log("retired %s: a limit kill, slot %s banned until its reset" % (name, t["pool"]))
+            _sl = C.find_slot(t["pool"])
+            if _sl is not None:
+                C.mark_dead(t["model"], _sl, C.limit_reset(t))
+                log("retired %s: a limit kill, slot %s banned until its reset" % (name, t["pool"]))
+            else:
+                log("retired %s: a limit kill, but slot %s is no longer in pool.json" % (name, t["pool"]))
             continue
         if not backfill:
             for c in t.get("claims", []):

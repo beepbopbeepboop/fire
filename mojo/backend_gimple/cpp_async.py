@@ -493,6 +493,10 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         if _opa == 'object':
             gen._cpp_object_params.add(gimple_ctypes._as_str(_opn))
     gen._cpp_list_word_names = gimple_exprtypes._list_method_names(fn)
+    # Expose current function for lowering helpers (e.g. with-open default
+    # resolution in cpp_core._cpp_with_stmt).
+    gen._cpp_current_fn_node = fn
+    gen._cpp_current_func_name = fn.name
     _opa = gcc_._cpp_collect_os_path_aliases(fn)
     if _opa:
         fn = gcc_._cpp_lower_os_path_aliases(fn, _opa)   # `join(a, b)` -> `os.path.join(a, b)`
@@ -1883,6 +1887,8 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
             'params': param_ctypes, 'captures': caps,
             'nested_name': inner.name,
             'tagged': gen._cpp_last_tagged_yield,
+            'tuple_slot_ctypes': getattr(gen, '_cpp_last_tuple_slot_ctypes', None),
+            'mixed_slots': bool(getattr(gen, '_cpp_last_mixed_slots', False)),
         }
         gen.func_param_types[f"{base}_start"] = param_ctypes
         gen._generator_cpp_units.append(cpp_text)

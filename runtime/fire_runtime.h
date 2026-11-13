@@ -174,6 +174,12 @@ int64_t mojo_vararg_call_8(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t
  * the constructor allocated with it. */
 void mojo_bound_method_free(MojoBoundMethod *bm);
 void mojo_closure_free(void *bm);
+/* The two halves of a bound method, for a caller that needs them apart: a
+ * capturing lambda handed to a C ABI that takes a bare function pointer plus
+ * a `void *` env (re.sub's regex callback `char *(*)(void *, char *)`) gets
+ * (fn, env) and calls `fn(env, ...)` exactly as mojo_bound_method_call_N does. */
+static inline void *mojo_bound_method_fn(MojoBoundMethod *bm) { return bm->fn; }
+static inline void *mojo_bound_method_self(MojoBoundMethod *bm) { return bm->self; }
 static inline int64_t mojo_bound_method_call_0(MojoBoundMethod *bm) {
     return ((int64_t (*)(void *))bm->fn)(bm->self);
 }
@@ -775,6 +781,11 @@ void mojo_gen_cm_exit_exc(int64_t w);
  * the old hardcoded-false fallback. See mojo_in_dispatch_str's definition. */
 int mojo_in_dispatch_str(int64_t container, char *needle);
 int mojo_in_dispatch_int(int64_t container, int64_t needle);
+/* `needle in <word of unknown kind>`: the container is a TAGGED word (a
+ * mixed-return value or a kind-mixed yield), so its kind is a runtime fact.
+ * A list/dict/set/str word dispatches through mojo_in_dispatch_int; a float,
+ * int or None word has no membership in Python and raises TypeError. */
+int mojo_word_contains(int64_t container, int64_t needle);
 void mojo_mark_as_tuple(MojoList *l);
 int mojo_is_tuple(MojoList *l);
 /* Per-slot element kinds (see the MojoList comment above for why a flat
@@ -1028,6 +1039,12 @@ int64_t     mojo_word_slice(int64_t w, int64_t start, int64_t stop);
  * dispatched by the word's kind (list/tuple, str, bytes), box-returning for a
  * float list slot; a float/int/None receiver raises TypeError. */
 int64_t     mojo_word_subscript(int64_t w, int64_t i);
+/* The `MojoList *` / `char *` a TAGGED word holds, for the member-call
+ * lowering: a kind-'l' box or a registered list is the list, a kind-'p' box
+ * or a bare string is the text. Any other kind raises TypeError instead of
+ * reading the box header as the container it is not. */
+MojoList   *mojo_word_as_list(int64_t w);
+char       *mojo_word_as_text(int64_t w);
 char       *mojo_cstr_reverse(char *s);        /* reversed(<str>) */
 /* `s[start:stop] == needle` / `!= needle` without ever materializing the
  * slice - see mojo_cstr_region_eq's comment in fire_runtime.c for why this
@@ -2315,6 +2332,8 @@ MojoList *mojo_py_tokenize(char *source);
 
 /* Builtin file I/O - defined in runtime */
 int64_t mojo_open_file(char *path);  /* opens a file, returns handle as int64_t */
+/* open() with optional mode/newline; newline==NULL means "not provided". */
+int64_t mojo_open_file_ex(char *path, char *mode, char *newline);
 
 /* Wrappers for C library functions that take pointer-to-pointer args.
    Generated GIMPLE code passes int64_t/void* opaque values; these wrappers

@@ -21890,7 +21890,7 @@ def _runtime_library_for(ordered: list, arch: str, fmt: str):
 
     The tree-level figures live in one place and are checked against the live
     census by `test_runtime_header_scan.py` — `bugs/FORMAL_known_limits.md`
-    §3.1 for the word-shaped surface (932 entry points, 426 of them word-shaped,
+    §3.1 for the word-shaped surface (939 entry points, 430 of them word-shaped,
     measured over every header in `runtime/`).
     """
     named = _runtime_word_calls(ordered)
@@ -23814,7 +23814,12 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         })
 
     mod_init_addrs: list = []
-    has_mod_init = bool(M.module_body_functions(ordered))
+    # A load-time entry exists for a module body AND for the stack-floor
+    # initializer a guarded library needs (`library_floor_init_needed` is the
+    # emitters' own question, so the section is declared exactly when they emit
+    # the initializer). `_mod_init_addrs` checks the answer afterwards.
+    has_mod_init = (bool(M.module_body_functions(ordered))
+                    or M.library_floor_init_needed(ordered, library_structs))
     if fmt == "elf":
         # ONE pass, not two, and the reason is the layout: a Mach-O dylib's
         # code starts after a load-command list whose SIZE depends on whether

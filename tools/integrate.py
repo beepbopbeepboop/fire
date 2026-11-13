@@ -15,12 +15,14 @@ One round:
      are copied to gate-judgement.txt for a human/controller to compare.
   4. Green: master is fast-forwarded to integ, merged tasks are marked
      `integrated`. Red: master is untouched, merged tasks are marked
-     `integration-failed`, and the failing jobs are printed. The controller then
-     marks the culprit `superseded` and spawns a fix task
-     (`control.py spawn --base work/<culprit>`); the next round is master + what
-     is still outstanding, so one bad set never blocks the rest.
+     `integration-failed` (their branches remain, so the next round re-tries
+     them once the cause is fixed), the failing jobs are printed and get a
+     `bugs/gate-<job>.md` doc, and gates.json is NOT edited to make the round
+     pass. Nothing lands unverified: if every landing job is OFF there is
+     nothing to check, and the round is refused. A red landing gate is a stop,
+     not an ungate.
 """
-import argparse, fcntl, os, re, shutil, subprocess, sys, tempfile, time
+import argparse, fcntl, os, re, shutil, subprocess, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control as C
 import stash_ff as SF
@@ -133,36 +135,6 @@ def land_on_master(regate=None, tries=3):
         if regate and regate() != 0:
             sys.exit("RED after master moved (%s): master untouched; redo the round" % ", ".join(moved[:5]))
     sys.exit("master kept moving under the round (%d tries): redo the round" % tries)
-
-
-def ungate_red(names, merged, why):
-    """A red landing gate does not hold the work: the failing jobs are turned OFF for the backlog, a GATE report
-    is filed for them, and both are committed on the `integ` branch so the fast-forward lands them with the round.
-    Returns the OFF pattern and the report's path. Each job comes back when its failure is fixed (`control.py gate on`)."""
-    pattern = "^(" + "|".join(re.escape(n) for n in sorted(set(names))) + ")$"
-    slug = merged[0] if merged else "round"
-    doc = "bugs/mid/GATE_red_%s_%s.md" % (slug, time.strftime("%F"))
-    body = ("# GATE red: %d landing-gate job(s) red on `%s` (%s)\n\n"
-            "## Status (%s, OPEN; jobs turned OFF to land the round)\n\n"
-            "The landing gate of round `%s` ran RED. The integrator turned these jobs OFF "
-            "(`tools/gates.json`, one anchored regex) so the round could land, and files each one here until it is fixed:\n\n"
-            "    %s\n\n"
-            "Tasks landed with this round: %s.\n\n"
-            "Evidence: `work-integ/gate.log` and `work-integ/confirm.log` (the failing jobs re-run alone), "
-            "`work-integ/build/suite.log` for the job output.\n\n"
-            "Consequence: these jobs are NOT covered by the gate for this landing. Re-enable each one when fixed with "
-            "`python3 tools/control.py gate on '<pattern>'` and remove this report in the same commit.\n"
-            % (len(set(names)), " ".join(merged), why, time.strftime("%F"), " ".join(merged), "\n    ".join(sorted(set(names))), ", ".join(merged)))
-    integ_doc = os.path.join(INTEG, doc)
-    os.makedirs(os.path.dirname(integ_doc), exist_ok=True)
-    open(integ_doc, "w").write(body)
-    C.gate_off_in(os.path.join(INTEG, "tools", "gates.json"), pattern,
-                  "landing gate red on %s (%s); see %s" % (" ".join(merged), why, doc), doc, "integrator")
-    C.git("add", doc, "tools/gates.json", cwd=INTEG)
-    C.git("commit", "-m", "gate: turn %d red landing-gate job(s) OFF for %s; file GATE report\n\n%s\n\n"
-          "Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>" % (len(set(names)), " ".join(merged), doc),
-          cwd=INTEG)
-    return pattern, doc
 
 
 def mark_landed(merged):
@@ -346,9 +318,15 @@ def gate_doc(culprit, t, failing, files=()):
     gets a doc: bugs/gate-<job>.md, one per failing job, which the feeder routes easy -> mid -> hard like every doc.
     The culprit is superseded (its claims release, so the doc can be worked on master) and held (`hold` keeps it out
     of the landing candidates, so it cannot go red again in a loop). With culprit None the job was already red on
-    master: only the docs are written and no branch is held. An existing doc is left alone. Returns the doc paths."""
+    master: only the docs are written and no branch is held. An existing doc is left alone. Returns the doc paths.
+    If no usable job name is given, nothing is attributed: no doc is invented and no branch is held (2026-11-12 a
+    phantom "landing" job was invented from an empty failing list, and the swarm fed that doc to a worker)."""
     # A job name becomes a file name: keep only things that are job names (never a path such as a failing stdlib file).
-    jobs = [j for j in (failing or []) if re.fullmatch(r"[\w.-]+", j)] or ["landing"]
+    jobs = [j for j in (failing or []) if re.fullmatch(r"[\w.-]+", j)]
+    if not jobs:
+        print("gate red but no failing job name is usable (%r): nothing attributed, no branch held, no doc filed"
+              % (failing,))
+        return []
     branch = t["branch"] if t else "master"
     if culprit is not None:
         # Hold the culprit FIRST: if writing a doc fails, the branch must still stay out of the landing candidates,
@@ -380,7 +358,7 @@ def gate_doc(culprit, t, failing, files=()):
 def main():
     sys.stdout.reconfigure(line_buffering=True)  # progress must be visible in a redirected log
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dry-run", action="store_true", help="merge and report, do not gate or land")
+    ap.add_argument("--dry-run", action="store_true", help="merge and report, do nothing else: no gate, no landing, no fixers queued, no registry state changed")
     ap.add_argument("--only", nargs="*", help="restrict to these task names")
     ap.add_argument("--ignore-verdict", nargs="*", default=[], metavar="NAME",
                     help="take these named tasks although their worker's CONTROL-STATUS says BLOCKED or NEEDS-INFO; "
@@ -396,8 +374,9 @@ def main():
                          "tools/verify_landed.py, which files a fixer if they go red")
     ap.add_argument("--probe", action="store_true",
                     help="PROBE: merge and gate the named branches exactly as a landing would, then report PROBE GREEN or "
-                         "PROBE RED with the failing jobs. It changes NO registry state and never lands. The swarm uses it to "
-                         "find which branch breaks the gate (a binary search over the batch)")
+                         "PROBE RED with the failing jobs, or PROBE REFUSED when there is nothing to check (all landing "
+                         "jobs OFF: a refusal is not evidence against any candidate). It changes NO registry state and "
+                         "never lands. The swarm uses it to find which branch breaks the gate (a binary search over the batch)")
     ap.add_argument("--no-fixers", action="store_true",
                     help="a conflicting branch is merely left out: no merge fixer is queued and nothing is superseded "
                          "(used by the bisect probes, which re-merge the same branches many times)")
@@ -441,6 +420,8 @@ def main():
             print("CONFLICT %s:\n%s" % (name, r.stdout[-600:]))
             if a.no_fixers or a.probe:               # a probe: just leave it out, no side effects
                 print("(probe) %s conflicts: left out" % name)
+            elif a.dry_run:                          # a dry run reports; it never enqueues fixers or touches the registry
+                print("(dry-run) %s conflicts: left out" % name)
             else:
                 enqueue_merge_fix(name, tasks[name], r.stdout)   # marks the task superseded, queues its fixer
         else:
@@ -494,14 +475,27 @@ def main():
     gate_cmd = (["python3", "tools/suite.py"] + a.jobs if a.jobs
                 else ["python3", "tools/suite.py"] + C.gates_cfg()["landing"] + C.gate_skip_args() if a.stdlib
                 else ["python3", "tools/suite.py", "gate"] + C.gate_skip_args())
-    # The landing gate can be OFF for a backlog (tools/gates.json). If every landing test is OFF there is nothing to
-    # run: the landing goes ungated, and the post-landing full gate (tools/verify_landed.py) is the check that runs.
+    # The landing gate can be OFF for a backlog (tools/gates.json). If every landing job is OFF there is nothing to
+    # run, and the round is refused below rather than landed on zero evidence (2026-11-12: a round landed ungated after
+    # the red was turned off, and broke stdlib-syntax on master).
     landing_left = [g for g in C.gates_cfg()["landing"]
                     if not any(re.search(pat, g) for pat in C.gates_cfg().get("off", {}))]
     if a.stdlib and not a.jobs and not landing_left:
-        print("landing gate OFF for the backlog (%s): landing %s ungated" % (
-            ", ".join(C.gates_cfg()["landing"]), merged))
-        rc = 0
+        # Nothing would be checked at all: landing anyway would fast-forward master on zero evidence. The OFF entries are
+        # an audited decision (control.py gate off names a doc and a worker), but they are not a licence to land blind.
+        msg = ("every landing job is OFF (%s): refusing to land %s ungated (master untouched). "
+               "Re-enable one with `python3 tools/control.py gate on '<pattern>'` once the red is fixed"
+               % (", ".join(C.gates_cfg()["landing"]), " ".join(merged)))
+        if a.probe:
+            # NOT "PROBE RED": a refused probe is not evidence against a candidate. The swarm reads PROBE GREEN/RED and
+            # bisects RED to a culprit; a refusal must stop the round (probe() yields EMPTY) or every candidate looks
+            # like the culprit and the first one is held and retired (2026-11-12: two finished branches were lost).
+            print("PROBE REFUSED: " + msg)
+            sys.exit(1)                      # no registry state either: a probe reports, it does not act
+        with C.registry() as reg:
+            for n in merged: reg[n]["state"] = "integration-failed"
+        print(msg)
+        sys.exit(1)
     else:
         print("gating %s: %s in %s (log %s/gate.log) ..." % (merged, " ".join(gate_cmd), INTEG, INTEG))
         rc = run(gate_cmd, INTEG, os.path.join(INTEG, "gate.log"))
@@ -542,12 +536,13 @@ def main():
         print("gate exited 0 but suite.log records:\n" + bad + "\ntreating the round as RED")
         rc = 1
     if rc != 0 and not a.probe:
-        # The red does not hold the round: the failing jobs are ungated and filed (ungate_red), and the round lands.
+        # A red landing gate STOPS the round: master is untouched and the merged tasks are marked integration-failed
+        # (the branches remain, so the next round re-tries them). gates.json is never edited to make a red round pass,
+        # and the failing jobs get a doc so the failure is tracked instead of landed over.
         names = failed or re.findall(r"\] (?:TIMEOUT|ERROR) (\S+)", bad)
         if names:
-            pattern, doc = ungate_red(names, merged, "gate red")
-            print("UNGATED %s (report %s); the round lands without them" % (", ".join(sorted(set(names))), doc))
-            rc = 0
+            print("FAILED_JOBS: %s" % " ".join(names))
+            gate_doc(None, None, names)
     if a.probe:
         jobs = failed_job_names(os.path.join(INTEG, "gate.log")) if rc else []
         files = []                                   # the stdlib sweep names each failing file under this heading
