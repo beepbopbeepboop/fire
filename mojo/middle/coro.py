@@ -6892,9 +6892,20 @@ def _lift_capture_free_nested_scopes(stmts: list) -> None:
                         continue
                 except Exception:
                     pass
-                # names `m` binds
+                # names `m` binds — including its comptime bracket params
+                # (`def f[func: def() ...]`): a nested scope that references
+                # one of those closes over a value only `m`'s call sites
+                # supply, so lifting it to module level would leave the name
+                # bound to nothing there (the "unresolved callee 'func(...)'"
+                # refusal for __lift_<owner>_<m>_wrapper). It must stay
+                # nested, where the nested-async-closure path captures the
+                # callable as a declared callable-value local.
                 m_bound = set()
                 for pn, _pa in m.params:
+                    m_bound.add(pn)
+                for pn in getattr(m, 'comptime_params', None) or []:
+                    m_bound.add(pn)
+                for pn in getattr(m, 'variadic_bracket_params', None) or []:
                     m_bound.add(pn)
                 for bn in gimple_exprtypes._walk_own_body(m.body):
                     m_bound |= _ca_binding_names(bn)
