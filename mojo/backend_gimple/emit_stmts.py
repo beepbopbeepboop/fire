@@ -1638,6 +1638,7 @@ def _gen_stmt_AssignStmt(gen, node):
         # store that brings the second kind. A box-holding name is the
         # exception: it is the int64_t box, and stores are boxed by kind.
         if vtype in ('double', 'char *') and not _mixed_box:
+
             _sk_key = (_as_str(gen.current_func_name), _as_str(tname))
             _sk_prev = gen._stored_kinds.get(_sk_key)
             if _sk_prev is not None and _sk_prev != vtype:
@@ -7003,6 +7004,13 @@ def _gen_stmt_WithStmt(gen, node):
 
         gen._emit_label(bb_exc)
         gen._emit("  mojo_exc_pop ();")
+        # The body's exception arrived by longjmp (mojo_raise), which does not set
+        # the pending flag: it is in flight by definition here. Mark it, so the
+        # re-raise check after the exits sees it. Only a generator context
+        # manager that swallows the exception clears it, and that is the one
+        # suppression the check exists to honour. Without the mark the exception
+        # was dropped silently, and the enclosing `try` never ran its handler.
+        gen._emit("  mojo_exc_pending_set (1);")
         _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs, True)
         # A context manager may suppress the exception (e.g. a
         # @contextlib.contextmanager generator that catches and does not

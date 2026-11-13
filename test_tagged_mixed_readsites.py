@@ -46,7 +46,7 @@ main()
     # Part 2: binary operators whose operands are a str box. x * 2 printed a
     # pointer-sized integer; x + x (box + box) did the same.
     'str_box_binops': (
-        'bugs/mid/CODEGEN_tagged_generator_mixed_type_step2-part2.md',
+        'fixed: tagged str-box * and + operands',
         """\
 def g():
     yield 1
