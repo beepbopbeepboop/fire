@@ -5558,6 +5558,12 @@ def _gen_stmt_ContinueStmt(gen, node):
 def _gen_stmt_ExprStmt(gen, node):
     if isinstance(node.value, gimple_ctypes.CallExpr) and isinstance(node.value.func, gimple_ctypes.IdentExpr):
         raw_name = gen._ident_call_name(node.value.func)
+        # `constrained(cond, msg)` in statement position: this bare-call fast
+        # path never reaches _lower_call, so route through the shared
+        # compile-time checker before any other statement lowering.
+        _constrained_res = ggc._try_lower_constrained(gen, node.value)
+        if _constrained_res is not None:
+            return
         # A bare, value-discarding call to an offloaded DEVICE function.
         # This handler has its own fast path for statement-position calls and
         # never reaches _lower_call, so without this the launch hook only
