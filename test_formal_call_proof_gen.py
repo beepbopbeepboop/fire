@@ -7338,6 +7338,73 @@ class TestTheStackFloorTrapIsAProofObligation(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestTheRefusalNamesTheSvcItRefuses(unittest.TestCase):
+    """The CFG-decomposition refusal must name the `svc` it cannot certify.
+
+    Every instruction in a guarded image has a step -- the `svc` too, idx
+    35 -- so the unmodelled-word search finds nothing, and the old sentence
+    blamed "an empty block runs certificate" for a refusal whose cause is
+    the svc.  The gate job reg-formal-ast-bridge-two-arg's planning round
+    asked for exactly this: the message names the svc and the reason its
+    certificate is refused.  The rows below feed hand-built images straight
+    into the diagnostic; none compiles and none touches Lean.
+    """
+
+    BASE = 0x10000000
+    # `movz x0, #5`: a filler the step table models (the diagnostic's first
+    # loop names unmodelled words before it ever reaches the svc scan), and
+    # NOT a move of x16, so an svc right after it has a dynamic x16.
+    FILL = 0xd2800000 | (5 << 5)
+    SVC = 0xd4000001
+    RET = 0xd65f03c0
+
+    @staticmethod
+    def _movz_x16(imm):
+        return 0xd2800010 | (imm << 5)
+
+    def _refusal(self, ws):
+        import formal.arm64_proof_gen as G
+        code = b"".join(w.to_bytes(4, "little") for w in ws)
+        return G._cfg_decomposition_refusal("fn", code, self.BASE, self.BASE)
+
+    def test_a_dynamic_svc_is_named_with_its_pc(self):
+        # entry, filler, filler, svc (no `movz x16` before it: x16 unknown), ret
+        msg = self._refusal([self.FILL, self.FILL, self.SVC, self.RET])
+        self.assertIn("0x10000008", msg, msg)
+        self.assertIn("x16", msg)
+        self.assertIn("dynamic-svc", msg)
+        self.assertNotIn("empty block runs certificate", msg,
+                         "the old sentence blamed an empty runs certificate "
+                         "for what is really the svc")
+
+    def test_an_exit_svc_mid_run_is_named(self):
+        # entry, filler, `movz x16 #1`, svc (exit -- but a ret follows it in
+        # the block, so it is mid-run, not the tail a branch would land on), ret
+        msg = self._refusal([self.FILL, self._movz_x16(1), self.SVC, self.RET])
+        self.assertIn("0x10000008", msg, msg)
+        self.assertIn("exit svc", msg)
+        self.assertIn("middle of a straight-line run", msg)
+        self.assertNotIn("empty block runs certificate", msg)
+
+    def test_a_write_svc_whose_x0_is_read_before_rewritten_is_named(self):
+        # entry, filler, `movz x16 #4`, svc, ADD X1, X0, X2 (reads x0 before
+        # the write's byte count is rewritten), ret
+        msg = self._refusal([self.FILL, self._movz_x16(4), self.SVC,
+                             0x91000401, self.RET])
+        self.assertIn("0x10000008", msg, msg)
+        self.assertIn("write svc", msg)
+        self.assertIn("x0", msg)
+        self.assertNotIn("empty block runs certificate", msg)
+
+    def test_the_generic_sentence_stands_when_no_svc_refuses(self):
+        # No RET at all and no svc in the image: a refusal for the shape,
+        # not for an instruction.  The generic sentence must be unchanged,
+        # so a future reword of it is a visible change here.
+        msg = self._refusal([self.FILL, self.FILL])
+        self.assertIn("with no `RET`", msg)
+        self.assertIn("empty block runs certificate", msg)
+
+
 class TestAPlaceholderModelClaimsNothing(unittest.TestCase):
     """A model the shared generator cannot write must be CLAIMED as unwritten.
 

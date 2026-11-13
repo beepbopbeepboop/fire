@@ -9345,6 +9345,18 @@ def _cfg_decomposition_refusal(name: str, code: bytes, base: int,
     `RET` — because that is the range whose words the certificates are built
     from. A word outside it is not in the way, and naming one would send the
     reader to an instruction nothing here executes.
+
+    **The `svc` is a second search.**  When the unmodelled-word loop finds
+    nothing, the refusal is most often an `svc` whose certificate cannot be
+    BUILT even though the instruction has a step (idx 35, so the loop above
+    skips it): a dynamic x16 (neither the exit nor the write form can be
+    selected), an exit `svc` mid-run (a runs certificate certifies a `some`
+    successor and cannot cross a halt), or a write `svc` whose x0 the
+    fall-through does not rewrite before a read.  The scan classifies the
+    image's `svc`s the same way the certificate builders do —
+    `_svc_static_x16` over the block's leaders, `_x0_reassigned_after_write`
+    — and names the first one that refuses, so the "every instruction has a
+    step" sentence stops blaming an empty runs certificate for an svc.
     """
     words = {base + i: int.from_bytes(code[i:i + 4], "little")
              for i in range(0, len(code) - len(code) % 4, 4)}
@@ -9372,6 +9384,48 @@ def _cfg_decomposition_refusal(name: str, code: bytes, base: int,
               "None are a shape with no `RET`, a block whose runs certificate "
               "is empty, and a fixed-fuel caller whose budget is below the "
               "instruction count.")
+    blocks = _cfg_blocks(words, func_entry, func_end)
+    leaders = frozenset(b["start"] for b in blocks)
+    for pc in sorted(p for p in words
+                     if func_entry <= p < func_end and _is_svc(words[p])):
+        block = next((b for b in blocks if pc in b["instrs"]), None)
+        if block is None:
+            continue
+        x16 = _svc_static_x16(words, pc, leaders)
+        if x16 is None:
+            return (
+                f"universal theorem: CFG decomposition unsupported for this "
+                f"function shape, and every instruction in its own code has a "
+                f"step, so the cause is not an unmodelled word: it is the svc "
+                f"at {pc:#x} in {name}'s own code, whose x16 the image does "
+                f"not fix (no `movz x16` immediately before it in the block, "
+                f"or the svc is a block entry another path can reach with a "
+                f"different x16).  The step is x16-discriminating -- exit "
+                f"halts, write continues -- and with x16 unknown the walk "
+                f"refuses rather than guessing which form the machine takes, "
+                f"which is the dynamic-svc case the svc-exit design leaves "
+                f"refused.")
+        if x16 == 1 and block["instrs"][-1] != pc:
+            return (
+                f"universal theorem: CFG decomposition unsupported for this "
+                f"function shape, and every instruction in its own code has a "
+                f"step, so the cause is not an unmodelled word: it is the "
+                f"exit svc at {pc:#x} in {name}'s own code, in the middle of "
+                f"a straight-line run.  x16 = 1 halts the machine, so a runs "
+                f"certificate -- which certifies a `some` successor -- cannot "
+                f"cross it; an exit svc belongs at the tail of the block a "
+                f"branch lands on, where the walk closes it with a halt "
+                f"certificate instead.")
+        if x16 != 1 and not _x0_reassigned_after_write(words, pc):
+            return (
+                f"universal theorem: CFG decomposition unsupported for this "
+                f"function shape, and every instruction in its own code has a "
+                f"step, so the cause is not an unmodelled word: it is the "
+                f"write svc at {pc:#x} in {name}'s own code.  SYS_write "
+                f"returns the byte count in x0 and the model does not model "
+                f"that value, so the fall-through must rewrite x0 before any "
+                f"instruction reads it; this one does not, or it crosses a "
+                f"branch the walk cannot see through.")
     return ("universal theorem: CFG decomposition unsupported for this function "
             "shape, and every instruction in its own code has a step, so the "
             "cause is not an unmodelled word: the walk returns None for a shape "

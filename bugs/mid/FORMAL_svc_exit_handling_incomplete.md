@@ -23,12 +23,30 @@ corpus was refused (`def plain(a, b): return a + b` was enough). Landed here:
   uses `none => True` when such a branch is reachable.
 - `_gen_step_result_lemmas` emits `work_step_svc_exit`/`work_step_svc_write`
   under an `hx` binder for an `svc` word, selected by the static x16.
+- `_cfg_decomposition_refusal` now runs a SECOND search for `svc`s, which
+  the unmodelled-word loop skips because they HAVE a step (idx 35): it
+  classifies each image `svc` the way the certificate builders do
+  (`_svc_static_x16` over the block's leaders, `_x0_reassigned_after_write`)
+  and names the first one that refuses -- a dynamic x16, an exit `svc`
+  mid-run, or a write `svc` whose x0 the fall-through does not rewrite --
+  instead of the old fallback blaming "an empty block runs certificate"
+  for what is really the svc.  The gate doc's planning round (deleted with
+  the fix) asked for this in the same change; it is pinned by
+  `test_formal_call_proof_gen.TestTheRefusalNamesTheSvcItRefuses`.
 
 Measured: the gate job `reg-formal-ast-bridge-two-arg` passes, the two-arg
 program and `def main(n: Int, m: Int): return n + m` both typecheck in Lean
 (0 sorries in the generated file), and
 `test_formal_call_proof_gen.TestTheStackFloorGuardReadsTheLimitInTheStartupStub`
 is green again.
+
+The gate doc's open decision (D1 -- what the universal theorem claims on a
+path that reaches a trap tail's exit `svc`) is answered by the landed design:
+the halt is proved in its own per-block `{S}_halts` theorem, applied by
+`emit_block` on the branch edge, and the universal statement's `none` arm
+stays the honest `True` -- the match arm carries no state a per-path halt
+conclusion could bind to, so the halt lives in the theorem, and the branch
+edge's premise is exactly what the certificate supplies.
 
 Landed as 574813206 (archive) and f03896fff (master): the x16-discriminating model (exit is `none`, write
 continues at `pc + 4`), `work_step_svc` / `_exit` / `_write`, the svc step's right-hand side in the generator, no
