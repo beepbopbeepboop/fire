@@ -6913,6 +6913,8 @@ def gen_module_impl(self, stmts: list):
         'name': 'char *', 'methods': 'MojoList *', 'decorators': 'MojoList *',
         'line': 'int64_t', 'col': 'int64_t',
     }
+    # Compiler-pre-seeded AST layout homes are initialized on GimpleGen so
+    # every compile unit (including nested temp_gens) sees them.
     self.struct_boxed_fields['IfStmt'] = {'condition'}
     self.struct_boxed_fields['WhileStmt'] = {'condition'}
     self.struct_boxed_fields['ForStmt'] = {'target', 'iterable'}
@@ -7746,7 +7748,27 @@ def gen_module_impl(self, stmts: list):
         # see it.
         _skey = _sanitize_cname_qualifier(_shome) if _shome else ''
         _owner = self._struct_name_owner.get(_sname)
+        _preshome = ''
+        if hasattr(self, '_compiler_preseed_struct_home'):
+            _preshome = self._compiler_preseed_struct_home.get(_sname, '')
         if _owner is None:
+            # A compiler-pre-seeded layout reserves the bare C name for the
+            # compiler's home. A StructDef from a genuinely different module is
+            # a cross-module collision and must take a qualified cname, leaving
+            # the pre-seeded layout (and any real compiler StructDef) as the
+            # bare-name owner.
+            if _preshome and _shome and _shome != _preshome:
+                _q = _sanitize_cname_qualifier(_shome)
+                _cname = _q + '_' + _sname
+                _n = 2
+                while _cname in self._struct_cname_of_name or _cname in self._struct_name_owner:
+                    _cname = _q + '_' + _sname + str(_n)
+                    _n += 1
+                self._struct_cname_by_id[_sid] = _cname
+                self._struct_name_owner[_cname] = s
+                self._struct_cname_by_home[_skey + '::' + _sname] = _cname
+                self._struct_qualified_cnames.add(_cname)
+                continue
             # First claim on this bare name: it OWNS it, under the bare name.
             self._struct_name_owner[_sname] = s
             self._struct_cname_by_id[_sid] = _sname
