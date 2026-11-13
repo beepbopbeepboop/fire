@@ -21,8 +21,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_gimple_runner import compile_mojo_to_gimple_exe, RUN_TIMEOUT_S
 
 
+# No return annotation on purpose: an annotation decides the C return type,
+# and that "the annotation contradicts the body" shape is a separate,
+# still-open case (test_float_into_pointer_return_regression.py pins its
+# current spelling). The bug here is the INFERRED join of a float arm with a
+# pointer arm.
 PICK_SRC = """\
-def pick(x: Int) -> String:
+def pick(x: Int):
     if x == 1:
         return "s"
     return 1.5
@@ -90,11 +95,49 @@ def main():
     print(eval_const(TupleE([FloatLit(2.5)])))
 """
 
+# The CONSUMERS of the tagged word, not just `print(call())`: a value bound to
+# a name, arithmetic on it, a subscript and `len` of the tuple arm, a list
+# store that must keep a float slot a float, and indexing the str arm.
+CONSUMERS_SRC = """\
+def f(x: Int):
+    if x == 0:
+        return 2.5
+    return (3, 4)
+
+
+def pick(x: Int):
+    if x == 1:
+        return "ab"
+    return 1.5
+
+
+def main():
+    a = f(0)
+    b = f(1)
+    print(a)
+    print(a * 2)
+    print(a + 0.5)
+    print(a > 1)
+    print(b)
+    print(b[0])
+    print(len(b))
+    out = []
+    out.append(f(0))
+    out.append(f(1))
+    print(out)
+    s = pick(1)
+    print(s)
+    print(s[1])
+    print(len(s))
+    print(pick(0))
+"""
+
 CASES = [
     ("float_str_none", PICK_SRC),
     ("float_tuple_none", TUP_SRC),
     ("float_tuple_none_with_nested_none", NONE_SRC),
     ("eval_const_repro", EVAL_CONST_SRC),
+    ("tagged_word_consumers", CONSUMERS_SRC),
 ]
 
 

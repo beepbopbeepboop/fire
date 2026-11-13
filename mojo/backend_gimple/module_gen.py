@@ -9981,6 +9981,17 @@ def gen_module_impl(self, stmts: list):
     # call site's own result, which is where most consumers meet the value —
     # `print(f(x))` never reads a parameter at all.
     self._ret_may_hold_str: set = set()
+    # Functions whose RETURN VALUE is a TAGGED WORD because their arms mix a
+    # float with a pointer (`infra_infer._infer_return_type_core` widens that
+    # shape to `int64_t`; each arm is boxed by `_gen_stmt_ReturnStmt`). This is
+    # the call-site half: the result of calling one is a possibly-boxed word,
+    # so `lower_expr` marks the temp for the consumers that dispatch by kind
+    # (`print` -> `mojo_repr_boxed`, a list store -> `mojo_list_append_word`,
+    # arithmetic -> `_tagged_arith_select`) instead of reading it as a plain
+    # integer or casting it to the pointer the old join chose. Computed with
+    # `_float_mixed_return_bodies` — the exact per-body decision inference
+    # recorded — so a marker and its emitter cannot drift apart.
+    self._ret_may_hold_float: set = set()
     # Function name -> its parameter NAMES in order. Populated here, in the
     # same pass that fills `_inferred_param_types`, because that map is keyed
     # by param NAME while a call site identifies a callee's parameter only by
@@ -12962,6 +12973,52 @@ def gen_module_impl(self, stmts: list):
         for _fn_name in sorted(_fset):
             if _fn_name in _sset:
                 _fset.discard(_fn_name)
+
+    # Which CALLEES return a TAGGED WORD because their arms mix a float with a
+    # pointer. Inference records that decision per BODY in
+    # `_float_mixed_return_bodies` (`infra_infer._infer_return_type_core` widens
+    # the shape to `int64_t` there and the return emitter boxes each arm by the
+    # same body id). A call site needs the NAME, before/independent of the body
+    # that may not be emitted yet, so the two populations every fixed point
+    # above walks are asked here: `_fn_by_name` for top-level definitions and
+    # the `_gmi_*` tables for nested lifted ones. A body inference has not seen
+    # yet is asked directly, so a call site emitted later cannot miss it.
+    #
+    # An ANNOTATED return type is skipped: the annotation decides the C return
+    # type (the float arm keeps its old coercion), so the value is not a tagged
+    # word and marking it one here would misread it at every consumer. That
+    # shape — a pointer annotation contradicted by a float arm — remains open;
+    # see the bug doc.
+    _ret_float: set = set()
+    _fmb = getattr(self, '_float_mixed_return_bodies', None)
+    if _fmb is None:
+        _fmb = set()
+        self._float_mixed_return_bodies = _fmb
+
+    def _note_float_mixed(_ff_name, _ff_body):
+        if _ff_body is None:
+            return
+        if id(_ff_body) not in _fmb:
+            # The SAME entry point the definition emitter uses, overlays and
+            # all: it records the mix in `_fmb` when (and only when) it
+            # widens the return type, so a call site marked here and the
+            # definition emitting there are answering one question.
+            try:
+                self._infer_return_type(_ff_body)
+            except Exception:
+                return
+        if id(_ff_body) in _fmb:
+            _ret_float.add(_as_str(_ff_name))
+
+    for _rf_name in _fn_by_name:
+        _rf_fn = _fn_by_name[_rf_name]
+        if getattr(_rf_fn, 'return_type', None) is not None:
+            continue
+        _note_float_mixed(_rf_name, getattr(_rf_fn, 'body', None))
+    for _gni in range(len(_gmi_src)):
+        _note_float_mixed(_as_str(_gmi_lift[_gni]),
+                          getattr(_gmi_def[_gni], 'body', None))
+    self._ret_may_hold_float = _ret_float
 
     _STRUCT_FALLBACKS = ('MojoDict *', 'MojoList *', 'MojoSet *', 'MojoBytes *',
                          'MojoStr *', 'char *', 'int', 'int64_t')

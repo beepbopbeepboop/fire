@@ -862,6 +862,8 @@ int64_t     mojo_box_int(int64_t v);
 int64_t     mojo_box_from_double(double v);
 int64_t     mojo_box_from_bool(int64_t v);   /* a bool in a tagged word: renders True/False */
 int64_t     mojo_box_from_str(char *s);      /* a str in a tagged word: a kind-'p' box, renders the string */
+int64_t     mojo_box_from_list(MojoList *l); /* a list/tuple in a tagged word: a kind-'l' box, renders the list repr */
+int64_t     mojo_box_from_bytes(void *b);    /* a bytes value in a tagged word: kind 's', renders the bytes repr (void*: MojoBytes is declared later in this header) */
 int64_t     mojo_box_none(void);             /* None in a tagged word: renders None (one shared box) */
 void        mojo_list_append_word(MojoList *l, int64_t w);   /* append a tagged word under the kind it carries */
 void        mojo_list_append_str_kinded(MojoList *l, const char *v);   /* a string slot under the 'p' kind */
@@ -1021,6 +1023,10 @@ int         mojo_cstr_region_eq_n(char *s, int64_t slen, int64_t start, int64_t 
 /* `w[start:stop]` on a WORD of unknown kind: a list, a string or a bytes
  * value, decided by the value itself. See the definition. */
 int64_t     mojo_word_slice(int64_t w, int64_t start, int64_t stop);
+/* `w[i]` on a word of unknown kind (a tagged mixed-return value/mixed yield):
+ * dispatched by the word's kind (list/tuple, str, bytes), box-returning for a
+ * float list slot; a float/int/None receiver raises TypeError. */
+int64_t     mojo_word_subscript(int64_t w, int64_t i);
 char       *mojo_cstr_reverse(char *s);        /* reversed(<str>) */
 /* `s[start:stop] == needle` / `!= needle` without ever materializing the
  * slice - see mojo_cstr_region_eq's comment in fire_runtime.c for why this
