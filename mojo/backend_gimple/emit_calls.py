@@ -1766,6 +1766,67 @@ _DTYPE_CAST_CTYPES = {
 }
 
 
+def _float_dtype_arg_ctype(e):
+    """The C float type named by a dtype bracket argument, in any of its
+    spellings — `DType.float32`, the dot-relative `.float32`, or the scalar
+    name `Float32` an elaborated instantiation substitutes for a dtype
+    parameter — or None when it is not a float dtype."""
+    if isinstance(e, gimple_ctypes.DottedLiteral):
+        key = _as_str(e.path)
+    elif (isinstance(e, gimple_ctypes.MemberExpr)
+            and isinstance(e.obj, gimple_ctypes.IdentExpr)
+            and _as_str(e.obj.name) == 'DType'):
+        key = 'DType.' + _as_str(e.member)
+    elif isinstance(e, gimple_ctypes.IdentExpr):
+        key = _as_str(e.name)
+    else:
+        return None
+    return gimple_ctypes._SIMD_FLOAT_DTYPE_CTYPE.get(key)
+
+
+def _lower_bitcast_call(gen, node):
+    """`bitcast[Float32, 1](bits)` and its float-to-integer converse: a bit
+    REINTERPRETATION, not a conversion. Returns (ctype, value), or None when
+    the call is not a float bitcast (the caller keeps its catch-all).
+
+    The integer side is the int64_t word the codegen uses for every integer,
+    so an int-to-float bitcast reads that word's low bits through the
+    runtime (`mojo_float_from_bits` / `mojo_double_from_bits`), and a
+    float-to-int bitcast takes the pattern (`mojo_float_to_bits` /
+    `mojo_double_to_bits`). Before this, `bitcast[...]` fell into the
+    catch-all and produced `0`, which is a silently wrong answer."""
+    if not (isinstance(node.func, gimple_ctypes.SubscriptExpr)
+            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and _as_str(node.func.obj.name) == 'bitcast'
+            and len(node.args) == 1 and not node.kwargs):
+        return None
+    _ix = node.func.index
+    _idxs = _ix.elements if isinstance(_ix, gimple_ctypes.TupleExpr) else [_ix]
+    if not _idxs:
+        return None
+    target = _float_dtype_arg_ctype(_idxs[0])
+    if target is None:
+        return None
+    at, av = gen.lower_expr(node.args[0])
+    if at in ('float', 'double'):
+        # float -> float: the same bits, already the right type.
+        if at == target:
+            return target, av
+        return None
+    return _emit_bits_to_float(gen, target, at, av)
+
+
+def _emit_bits_to_float(gen, target, at, av):
+    """Reinterpret the integer word `av` (C type `at`) as a `target` float or
+    double: the one lowering behind `bitcast[...]` and `SIMD[...](from_bits=)`.
+    Returns (target, temp)."""
+    word = gen._coerce_to_type(at, 'int64_t', av) if hasattr(gen, '_coerce_to_type') else av
+    fn = 'mojo_double_from_bits' if target == 'double' else 'mojo_float_from_bits'
+    t = gen._new_temp(target)
+    gen._emit(f'  {t} = ({target}){fn} ({word});')
+    return target, t
+
+
 def _dtype_cast_ctype(e):
     """C type named by a dtype bracket argument — `DType.int32` or the
     dot-relative `.int32` — or None when it is anything else (a parameter, an
@@ -2074,6 +2135,19 @@ def _lower_tuple_box_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             bv = gen._to_int64(at, av)
         slot_pairs.append(('int64_t', bv))
     return 'int64_t', gen._call_expr('int64_t', _as_str(node.func.name), slot_pairs)
+
+
+def _is_default_init_literal(node) -> bool:
+    """True for `{}` (or `{field = value}`), Mojo's default-initializer
+    spelling in a value position such as `Array[T, N](fill={})`.
+
+    The parser has no node for it: an empty brace literal and a struct
+    initializer both arrive as a `DictExpr` with no pairs (see
+    `fire_compiler.Parser._parse_dict_or_set`). In an ordinary value
+    position that same node lowers to a `MojoDict *`; in a default-initializer
+    position it means `T()` for each element, which is the caller's to decide
+    because only the caller knows `T`."""
+    return isinstance(node, gimple_ctypes.DictExpr) and not node.pairs
 
 
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
@@ -2462,6 +2536,128 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             f"`{_fname}(<call to a supported compiled async "
             "function>)` -- falling back to interpreting this module "
             "from source instead")
+    # rebind[T](x) / rebind[downcast[T, Trait]](x): identity in this backend.
+    # The downcast-witness form must diagnose when concrete T does not conform
+    # to Trait (missing witness table).
+    if isinstance(node.func, gimple_ctypes.SubscriptExpr):
+        _rb_obj = node.func.obj
+        _rb_name = None
+        if isinstance(_rb_obj, gimple_ctypes.IdentExpr):
+            _rb_name = _as_str(_rb_obj.name)
+        elif isinstance(_rb_obj, gimple_ctypes.MemberExpr):
+            _rb_name = _as_str(getattr(_rb_obj, 'member', None))
+        if _rb_name == 'rebind':
+            _rb_idx = node.func.index
+            _dc_call = None
+            if isinstance(_rb_idx, gimple_ctypes.SubscriptExpr):
+                _dc_obj = _rb_idx.obj
+                _dc_name = _as_str(getattr(_dc_obj, 'name', None)) if isinstance(_dc_obj, gimple_ctypes.IdentExpr) else None
+                if _dc_name == 'downcast':
+                    _dc_call = _rb_idx
+            if _dc_call is not None:
+                _dc_args = _dc_call.index
+                _dc_elems = _dc_args.elements if isinstance(_dc_args, gimple_ctypes.TupleExpr) else [_dc_args]
+                if len(_dc_elems) >= 2:
+                    def _rb_type_name(e):
+                        if isinstance(e, gimple_ctypes.IdentExpr):
+                            return _as_str(e.name)
+                        if isinstance(e, gimple_ctypes.MemberExpr):
+                            return _as_str(e.member)
+                        if isinstance(e, gimple_ctypes.StringLiteral):
+                            return _as_str(e.value)
+                        # best-effort text
+                        try:
+                            return _as_str(getattr(e, 'name', None)) or str(e)
+                        except Exception:
+                            return None
+                    _src_t = _rb_type_name(_dc_elems[0])
+                    _trait_t = _rb_type_name(_dc_elems[1])
+                    # Only diagnose when src type is concrete (not a generic param).
+                    _generic = False
+                    try:
+                        fn = getattr(gen, '_current_function_def', None) or getattr(gen, '_func_node', None)
+                        cparams = getattr(fn, 'comptime_params', None) or []
+                        # normalize names
+                        cpn = set()
+                        for p in cparams:
+                            if isinstance(p, str): cpn.add(p)
+                            elif isinstance(p, (list, tuple)) and p: cpn.add(p[0])
+                            elif hasattr(p, 'name'): cpn.add(getattr(p, 'name'))
+                        if _src_t in cpn:
+                            _generic = True
+                        # also if unresolved in comptime vals as concrete type name marker? keep simple
+                    except Exception:
+                        pass
+                    # treat unknown/placeholder names conservatively? if it's literally 'Self' or param-like
+                    if _src_t and not _generic:
+                        # try to decide if concrete struct we know about
+                        sb = getattr(gen, '_struct_bases', None) or {}
+                        tb = getattr(gen, '_trait_bases', None) or {}
+                        is_known_struct = _src_t in sb
+                        is_known_trait = _trait_t in tb or True  # trait may be local
+                        # If src_t equals a comptime param in _comptime_vals resolved to something else, prefer resolved
+                        try:
+                            cv = (getattr(gen, '_comptime_vals', None) or {}).get(_src_t)
+                            if isinstance(cv, str) and cv:
+                                _src_t_res = cv
+                            else:
+                                _src_t_res = _src_t
+                        except Exception:
+                            _src_t_res = _src_t
+                        # if resolved is still a param name, skip
+                        try:
+                            fn = getattr(gen, '_current_function_def', None) or getattr(gen, '_func_node', None)
+                            cparams = getattr(fn, 'comptime_params', None) or []
+                            cpn = set()
+                            for p in cparams:
+                                if isinstance(p, str): cpn.add(p)
+                                elif isinstance(p, (list, tuple)) and p: cpn.add(p[0])
+                                elif hasattr(p, 'name'): cpn.add(getattr(p, 'name'))
+                            if _src_t_res in cpn:
+                                _generic = True
+                        except Exception:
+                            pass
+                        if not _generic:
+                            # Only check when we can identify a concrete struct context.
+                            # Accept if undecidable/generic-like.
+                            if is_known_struct or (_src_t_res and _src_t_res[:1].isupper()):
+                                pred = _comptime_conforms_to_pred(gen)
+                                ok = None
+                                if pred is not None and _trait_t:
+                                    try:
+                                        ok = pred(_src_t_res, _trait_t)
+                                    except Exception:
+                                        ok = None
+                                else:
+                                    # try direct
+                                    try:
+                                        import mojo.middle.comptime as _ce
+                                        sb2 = getattr(gen, '_struct_bases', None) or {}
+                                        tb2 = getattr(gen, '_trait_bases', None) or {}
+                                        ex2 = getattr(gen, '_conformance_bases_extra', None) or {}
+                                        bases = dict(ex2); bases.update(sb2); bases.update(tb2)
+                                        ok = _ce.conforms_to(_src_t_res, _trait_t, bases)
+                                    except Exception:
+                                        ok = None
+                                # ok False => missing witness; ok True/None => accept (None = undecidable)
+                                if ok is False:
+                                    modname = getattr(gen, '_module_name', None) or ''
+                                    if not modname:
+                                        fnm = getattr(gen, '_current_filename', '') or 't.mojo'
+                                        modname = os.path.splitext(os.path.basename(fnm))[0]
+                                    struct_q = f"{modname}::{_src_t_res}" if modname else _src_t_res
+                                    trait_q = _trait_t or 'Trait'
+                                    line = getattr(node, 'line', None)
+                                    loc = f" (line {line})" if line else ''
+                                    raise RuntimeError(
+                                        f"function instantiation failed{loc}\n"
+                                        f"note: struct '{struct_q}' does not have witness table for trait '{trait_q}'"
+                                    )
+            # Lower as identity: return the (single) argument.
+            if node.args:
+                return gen.lower_expr(node.args[0])
+            return 'int64_t', '0'
+
     # __get_address_as_owned_value(addr)  →  *(int64_t *)addr
     # Mojo ownership intrinsic: load the value at a raw-pointer address.
     if isinstance(node.func, gimple_ctypes.IdentExpr) and node.func.name == '__get_address_as_owned_value' \
@@ -3062,6 +3258,16 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _target = _dt_ctype
             else:
                 _target = 'int64_t'
+            # `SIMD[Float32, 1](from_bits=bits)`: the value whose IEEE pattern
+            # is `bits`. A float-typed scalar with no positional value, so a
+            # reinterpretation rather than a zero (see _lower_bitcast_call).
+            _from_bits = [_kv for _kv in (getattr(node, 'kwargs', None) or [])
+                          if _as_str(_kv[0]) == 'from_bits']
+            if _from_bits and _idxs and not node.args:
+                _fb_target = _float_dtype_arg_ctype(_idxs[0])
+                if _fb_target is not None:
+                    _fb_at, _fb_av = gen.lower_expr(_from_bits[0][1])
+                    return _emit_bits_to_float(gen, _fb_target, _fb_at, _fb_av)
             if node.args:
                 _at, _av = gen.lower_expr(node.args[0])
                 for _a in node.args[1:]:
@@ -3151,23 +3357,54 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 except Exception:
                     _ncount = None
             if _fill_node is not None and _ncount is not None and _ncount > 0:
-                _fat, _fav = gen.lower_expr(_fill_node)
                 _et = _elem_ct or 'int64_t'
-                for _ in range(_ncount):
-                    if _et == 'double' or _fat == 'double':
-                        _cv = gen._coerce_to_type(_fat, 'double', _fav) if hasattr(gen, '_coerce_to_type') else _fav
-                        gen._emit(f'  mojo_list_append_double ({t}, {_cv});')
-                    elif _et == 'char *' or _fat == 'char *':
-                        _cv = gen._coerce_to_type(_fat, 'char *', _fav) if hasattr(gen, '_coerce_to_type') else _fav
-                        gen._emit(f'  mojo_list_append_str ({t}, {_cv});')
-                    else:
-                        if hasattr(gen, '_coerce_to_type'):
-                            _cv = gen._coerce_to_type(_fat, 'int64_t', _fav)
-                        elif hasattr(gen, '_to_int64'):
-                            _cv = gen._to_int64(_fat, _fav)
+                if _is_default_init_literal(_fill_node):
+                    # `{}` in a `fill=` position is Mojo's DEFAULT
+                    # INITIALIZER, not an empty dict value: `fill: Self.T`
+                    # asks for `T()` at each of the `_ncount` indices
+                    # (`Array[Float32, 23](fill={})` is 23 zero floats).
+                    # Lowering it as a literal produces a `MojoDict *`, and
+                    # the numeric arm below then cast that POINTER to
+                    # `double` — a C constraint violation, reported by
+                    # gcc -fgimple as `pointer value use` on
+                    # test/algorithm/test_vectorize.mojo:109. The element
+                    # type, not the fill expression, names the zero.
+                    _zero = ('0.0' if _et == 'double'
+                             else '""' if _et == 'char *' else '0')
+                    for _ in range(_ncount):
+                        if _et == 'double':
+                            gen._emit(f'  mojo_list_append_double ({t}, {_zero});')
+                        elif _et == 'char *':
+                            gen._emit(f'  mojo_list_append_str ({t}, {_zero});')
                         else:
-                            _cv = _fav
-                        gen._emit(f'  mojo_list_append_int ({t}, {_cv});')
+                            gen._emit(f'  mojo_list_append_int ({t}, {_zero});')
+                else:
+                    _fat, _fav = gen.lower_expr(_fill_node)
+                    # A non-numeric fill cannot become a `double` element:
+                    # `(double)<pointer>` is the same constraint violation
+                    # the default-initializer arm above avoids. Lower it for
+                    # its side effects and do not fabricate elements, the
+                    # same fallback the unknown-count branch uses. (Every
+                    # other element kind has a legal cast for any fill.)
+                    _numeric = (_et != 'double'
+                                or gimple_ctypes.TypeLattice.is_int(_fat)
+                                or gimple_ctypes.TypeLattice.is_float(_fat))
+                    if _numeric:
+                        for _ in range(_ncount):
+                            if _et == 'double' or _fat == 'double':
+                                _cv = gen._coerce_to_type(_fat, 'double', _fav) if hasattr(gen, '_coerce_to_type') else _fav
+                                gen._emit(f'  mojo_list_append_double ({t}, {_cv});')
+                            elif _et == 'char *' or _fat == 'char *':
+                                _cv = gen._coerce_to_type(_fat, 'char *', _fav) if hasattr(gen, '_coerce_to_type') else _fav
+                                gen._emit(f'  mojo_list_append_str ({t}, {_cv});')
+                            else:
+                                if hasattr(gen, '_coerce_to_type'):
+                                    _cv = gen._coerce_to_type(_fat, 'int64_t', _fav)
+                                elif hasattr(gen, '_to_int64'):
+                                    _cv = gen._to_int64(_fat, _fav)
+                                else:
+                                    _cv = _fav
+                                gen._emit(f'  mojo_list_append_int ({t}, {_cv});')
             elif _fill_node is not None:
                 # Unknown count: evaluate fill for side effects but do not guess.
                 gen.lower_expr(_fill_node)
@@ -3473,6 +3710,9 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     f"cannot materialize instantiation of generic {_g!r}: "
                     f"its bracket arguments advance without converging, "
                     f"which would cause infinite recursion")
+        _bc = _lower_bitcast_call(gen, node)
+        if _bc is not None:
+            return _bc
         gimple_ctypes._debug_note('indirect call stubbed', type(node.func).__name__)
         t = gen._new_temp('int64_t')
         gen._emit(f'  {t} = (int64_t)0;  /* indirect call via {type(node.func).__name__} */')

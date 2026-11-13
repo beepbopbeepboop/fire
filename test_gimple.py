@@ -14890,6 +14890,21 @@ def g(x: SIMD[Float64, 1]) -> Bool:
     return (b & 0x7FF).eq(0)
 """), 'gate_stdlib_syntax_float_bit_accessors')
 
+    # A float bit REINTERPRETATION, not a zero: `bitcast[Float32, 1](bits)` and
+    # `SIMD[Float64, 1](from_bits=bits)` both lower through _emit_bits_to_float
+    # to the runtime's bit-pattern helpers. Before, the bitcast fell into the
+    # catch-all and produced `(int64_t)0`, a silently wrong answer.
+    test_c_shape("bitcast_and_from_bits_reinterpret_bits",
+                 """\
+def f(bits: Int64) -> Float32:
+    return bitcast[Float32, 1](bits)
+
+def g(bits: Int64) -> Float64:
+    return SIMD[Float64, 1](from_bits=bits)
+""",
+                 must_have=["mojo_float_from_bits (", "mojo_double_from_bits ("],
+                 must_not_have=["/* indirect call via"])
+
     # gate-stdlib-syntax: a FLOAT Array's fill value is not a float.
     #
     # The Array fill-unroll coerces its fill value to the element type, and a

@@ -1,4 +1,4 @@
-SPLIT: DIAGNOSTICS_binding_deferrals-part1, DIAGNOSTICS_binding_deferrals-part2
+SPLIT: DIAGNOSTICS_binding_deferrals-part2
 # DIAGNOSTICS step 4: Binding deferral reporting
 
 Part of the umbrella `bugs/hard/DIAGNOSTICS_missing_validation_modular.md`;
@@ -47,10 +47,11 @@ existing body-instantiation regressions in that file stay green.
   through `driver.compile_program` succeeds (`COMPILED OK`, 0.4 GB peak),
   because a declaration's parameter annotations are resolved to C types and
   never turned into generic instantiations, so the landed check never runs.
-  Remaining work is split into `bugs/mid/DIAGNOSTICS_binding_deferrals-part1.md`
-  (provably false signature binding → `error: violated constraint`) and
-  `bugs/mid/DIAGNOSTICS_binding_deferrals-part2.md` (unproven requirement →
-  `error: invalid bindings in signature: lacking evidence`).
+  Part 1 (provably-false signature binding → `error: violated constraint`)
+  is fixed: declaration-time checking rejects a signature parameter whose
+  generic struct instantiation has a provably-false `where` clause.
+  Remaining work is `bugs/mid/DIAGNOSTICS_binding_deferrals-part2.md`
+  (unproven requirement → `error: invalid bindings in signature: lacking evidence`).
 - **Note on the earlier part-2 interpretation.** The 2026-11-12 body fix read
   "only the error that failed it, not the constraints it deferred" as "this
   binding must not report `lacking evidence` anywhere". Modular's second

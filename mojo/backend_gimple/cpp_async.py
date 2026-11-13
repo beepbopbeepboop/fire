@@ -493,6 +493,10 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         if _opa == 'object':
             gen._cpp_object_params.add(gimple_ctypes._as_str(_opn))
     gen._cpp_list_word_names = gimple_exprtypes._list_method_names(fn)
+    # Expose current function for lowering helpers (e.g. with-open default
+    # resolution in cpp_core._cpp_with_stmt).
+    gen._cpp_current_fn_node = fn
+    gen._cpp_current_func_name = fn.name
     _opa = gcc_._cpp_collect_os_path_aliases(fn)
     if _opa:
         fn = gcc_._cpp_lower_os_path_aliases(fn, _opa)   # `join(a, b)` -> `os.path.join(a, b)`
@@ -966,7 +970,9 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # `_cpp_yield_tuple` to consult; cleared in `finally` below.
     _pre_ok, _pre_slots = gimple_exprtypes._generator_tuple_yield_slot_ctypes(
         fn, declared, self_fields, gen._async_api,
-        generator_api=gen._generator_api)
+        generator_api=gen._generator_api,
+        nested_generator_api=getattr(gen, '_nested_generator_api', None),
+        outer_fn_name=fn.name)
     gen._cpp_pending_tuple_slots = list(_pre_slots) if (_pre_ok and _pre_slots) else None
     # Value-carrying `return <expr>` support (real CPython 3.14
     # asyncio/futures.py's `Future.__await__`: `yield self` ... `return
@@ -1129,7 +1135,9 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             generator_method_api=gen._generator_method_api,
             self_struct_name=struct_name,
             self_struct_ctype=(f"{struct_name} *" if struct_name else None),
-            module_global_types=getattr(gen, '_cpp_module_global_ctypes', None))
+            module_global_types=getattr(gen, '_cpp_module_global_ctypes', None),
+            nested_generator_api=getattr(gen, '_nested_generator_api', None),
+            outer_fn_name=fn.name)
         # Tuple-valued yield (`yield a, b, ...`): _generator_yield_ctype
         # (just above) only decided the OVERALL promise value type
         # ('MojoList *' for a tuple yield, same as any plain list-
@@ -1143,7 +1151,9 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # _generator_yield_ctype itself came back non-None.
         has_tuple_yield, tuple_slot_ctypes = gimple_exprtypes._generator_tuple_yield_slot_ctypes(
             fn, declared, self_fields, gen._async_api,
-            generator_api=gen._generator_api)
+            generator_api=gen._generator_api,
+            nested_generator_api=getattr(gen, '_nested_generator_api', None),
+            outer_fn_name=fn.name)
         if has_tuple_yield and tuple_slot_ctypes is None:
             value_ctype = None
         gen._cpp_last_tuple_slot_ctypes = tuple_slot_ctypes if has_tuple_yield else None
@@ -3905,7 +3915,9 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
     # `finally` clearing, reused verbatim for the async-generator case.
     _pre_ok, _pre_slots = gimple_exprtypes._generator_tuple_yield_slot_ctypes(
         fn, declared, None, gen._async_api,
-        generator_api=gen._generator_api)
+        generator_api=gen._generator_api,
+        nested_generator_api=getattr(gen, '_nested_generator_api', None),
+        outer_fn_name=fn.name)
     gen._cpp_pending_tuple_slots = list(_pre_slots) if (_pre_ok and _pre_slots) else None
     # Same per-unit module-constant map as the other two unit emitters
     # (see _gen_cpp_generator_unit's seeding site), so an async GENERATOR
@@ -3933,7 +3945,9 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
         # reused verbatim for the async-generator (`async for`) case.
         has_tuple_yield, tuple_slot_ctypes = gimple_exprtypes._generator_tuple_yield_slot_ctypes(
             fn, declared, None, gen._async_api,
-            generator_api=gen._generator_api)
+            generator_api=gen._generator_api,
+            nested_generator_api=getattr(gen, '_nested_generator_api', None),
+            outer_fn_name=fn.name)
         if has_tuple_yield and tuple_slot_ctypes is None:
             value_ctype = None
         gen._cpp_last_tuple_slot_ctypes = tuple_slot_ctypes if has_tuple_yield else None

@@ -1084,6 +1084,7 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
     # rather than teaching cas.get_or_build a multi-artifact return shape
     # for this one caller).
     _cpp_bytes: dict = {}
+    _ret_bytes: dict = {}
 
     def build():
         # The instantiated function is already uniquely named (mangled); don't
@@ -1152,6 +1153,11 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
         if conformance_bases:
             gen._conformance_bases_extra = dict(conformance_bases)
         c = gen.gen_module(Parser(py_tokenize(concrete)).with_filename(mfile).parse_module())
+        # The defining unit's OWN return decision for the instantiated
+        # function (an annotation, or the body's inferred type when the
+        # template has none). Recorded so the caller declares the call site
+        # with the same type the definition has — see `defined_return_ctype`.
+        _ret_bytes['data'] = (gen.func_return_types.get(mangled) or '').encode()
         cfile, ofile = os.path.join(wd, mangled + '.c'), os.path.join(wd, mangled + '.o')
         with open(cfile, 'w') as f:
             f.write(c)
@@ -1217,17 +1223,46 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
                 f'elaborator expansion is {ELAB_DEPTH[0]} levels deep - '
                 f'infinite recursion?')
         obj, hit = cas.get_or_build(key, '.o', build)
-        if not hit and 'data' in _cpp_bytes:
+        if not hit:
             # First build of this instantiation, and it genuinely needed a
             # coroutine unit: publish it now (build() already ran above).
-            cas.publish(key, '.cpp.o', _cpp_bytes['data'])
+            if 'data' in _cpp_bytes:
+                cas.publish(key, '.cpp.o', _cpp_bytes['data'])
+            cas.publish(key, '.ret', _ret_bytes['data'])
+        elif cas.lookup(key, '.ret') is None:
+            # An entry built before the `.ret` sidecar existed: its object is
+            # still the right one, but nothing records the return type. Build
+            # once more to learn it, and publish only the missing artifacts,
+            # leaving the existing `.o` untouched.
+            build()
+            if 'data' in _cpp_bytes and cas.lookup(key, '.cpp.o') is None:
+                cas.publish(key, '.cpp.o', _cpp_bytes['data'])
+            cas.publish(key, '.ret', _ret_bytes['data'])
         # A PATH (cas.lookup's own return convention), not bytes — matches
         # `obj` above exactly, so callers can treat both uniformly (e.g.
         # gimple_codegen.py's `_link_objects`, ultimately passed straight
         # to a linker command line / cas.file_digest(path), never read as
         # in-memory bytes anywhere on that path).
         cpp_obj = cas.lookup(key, '.cpp.o')
+        with open(cas.lookup(key, '.ret')) as _f:
+            _DEFINED_RET[mangled] = _f.read() or None
     finally:
         ELAB_DEPTH[0] -= 1
         _IN_PROGRESS.discard(key)
     return mangled, obj, hit, cpp_obj
+
+
+# mangled name -> the C return type its defining unit gave it, recorded by
+# `instantiate` in this process (the CAS keeps it as the `.ret` sidecar).
+_DEFINED_RET: dict = {}
+
+
+def defined_return_ctype(mangled: str):
+    """The C return type the defining unit gave the instantiation `mangled`
+    (`'int64_t'`, `'void'`, ...), as recorded by the most recent `instantiate`
+    of that name in this process; None if there is none (a re-entrant cycle).
+
+    The defining unit is the authority. A template with no return annotation
+    gets its return type from its body (gen_func's inference), so reading the
+    annotation alone declared the call site `void` and dropped the value."""
+    return _DEFINED_RET.get(mangled)

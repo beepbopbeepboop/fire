@@ -2443,6 +2443,79 @@ def test_a_branching_export_termination_proves_in_lean(tmpdir, shared):
                   f"file is one the walk should have discharged")
 
 
+def test_a_dylib_export_traps_at_its_stack_floor(tmpdir, shared):
+    """A recursive export in a dylib must exit `STACK_TRAP_STATUS` past its
+    budget, not die with a signal.
+
+    The guard in a prologue compares SP against a floor word in `__DATA`, and
+    the word is written by a STARTUP STUB. A library has no stub, so before the
+    load-time floor initializer landed (`formal/arm64_codegen.py` and
+    `formal/x86_64_codegen.py`, `emit_library_floor_init`) nothing ever wrote
+    it, the floor was zero, `SP >= 0` always held, and a library that exhausted
+    its stack died with SIGSEGV instead of the trap the guard exists to give.
+    The measurement is the dylib built from `deep` below, which answered signal 11.
+
+    The depth past the budget is `model.stack_floor_depth(arch)` (60 frames on
+    arm64 against the 8 MiB stack), quadrupled so the call is well over the
+    floor on either backend. The call runs in a CHILD process, because the
+    failure mode under test is a dead process: on master the child dies with
+    -11 and this test reports that, rather than taking the test runner down with
+    it. A shallow call is checked first, so a broken export cannot pass the deep
+    one by also failing the shallow one.
+
+    The x86-64 half runs only under Rosetta 2 (see `rosetta()`); elsewhere it is
+    skipped with the reason printed, not silently.
+    """
+    from formal.build import compile_formal_dylib
+    from formal.model import module as model
+
+    src = os.path.join(tmpdir, "deep_lib.mojo")
+    with open(src, "w") as f:
+        f.write("def deep(n):\n"
+                "  if n == 0:\n"
+                "    return 0\n"
+                "  return 1 + deep(n - 1)\n")
+    child = ("import ctypes, sys\n"
+             "lib = ctypes.CDLL(sys.argv[1])\n"
+             "fn = getattr(lib, sys.argv[2])\n"
+             "fn.restype = ctypes.c_int64\n"
+             "fn.argtypes = [ctypes.c_int64]\n"
+             "print(fn(int(sys.argv[3])))\n")
+    trap = model.stack_trap_message()
+    arches = [("arm64", None, sys.executable)]
+    ok, why = rosetta()
+    if ok:
+        arches.append(("x86_64", ["arch", "-x86_64"], "/usr/bin/python3"))
+    else:
+        print(f"        (x86-64 half skipped: {why})")
+    for arch, prefix, py in arches:
+        out = os.path.join(tmpdir, f"deep_lib.{arch}.dylib")
+        built = compile_formal_dylib([src], output=out, prove=False,
+                                     arch=arch)
+        symbol = None
+        for e in built.get("exports", []):
+            if e.get("name") == "deep":
+                symbol = e["symbol"]
+        check(symbol is not None, f"[{arch}] no `deep` export in the dylib")
+        argv_base = (prefix or []) + [py, "-I", "-c", child, out, symbol]
+        shallow = subprocess.run(argv_base + ["3"], capture_output=True,
+                                 text=True, timeout=RUN_TIMEOUT)
+        check(shallow.returncode == 0 and shallow.stdout.strip() == "3",
+              f"[{arch}] deep(3) should return 3, got exit "
+              f"{shallow.returncode}: {shallow.stderr.strip()[-200:]}")
+        depth = 4 * model.stack_floor_depth(arch)
+        deep = subprocess.run(argv_base + [str(depth)], capture_output=True,
+                              text=True, timeout=RUN_TIMEOUT)
+        check(deep.returncode == model.STACK_TRAP_STATUS,
+              f"[{arch}] deep({depth}) past the stack budget should exit "
+              f"{model.STACK_TRAP_STATUS} (the floor trap), got "
+              f"{deep.returncode} ({'signal ' + str(-deep.returncode) if deep.returncode < 0 else 'a plain exit'}): "
+              f"{deep.stderr.strip()[-200:]}")
+        check(trap in deep.stderr,
+              f"[{arch}] the floor trap should write model.stack_trap_message "
+              f"to stderr; stderr was {deep.stderr.strip()[-200:]!r}")
+
+
 def _segment_flags_and_section_metadata(data):
     """Header flags, and per-segment `segflags` + per-section flags/reserved1/
     reserved2, walked here rather than through `parse_macho`.
@@ -2594,6 +2667,8 @@ TESTS = [
      test_a_conditional_value_is_not_a_branch),
     ("a branching export's termination survives its stack guard",
      test_a_branching_exports_stack_guard_does_not_defeat_termination),
+    ("a dylib export traps at its stack floor, not a signal",
+     test_a_dylib_export_traps_at_its_stack_floor),
     ("a branching export's termination proves in Lean",
      test_a_branching_export_termination_proves_in_lean),
     ("a wrong spec on a multi-export image is rejected",

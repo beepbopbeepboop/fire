@@ -71,7 +71,7 @@ here for the signature shape the modular test actually uses.
    the parent doc's Status so it is a decision, not an accident.
 
 The evidence/implication primitive is the one
-`bugs/mid/DIAGNOSTICS_trait_conformance-part2.md` plans for trait-requirement
+trait-requirement conformance evidence (the former part 2 plan) covers
 evidence at use sites. If that part lands first, reuse it; do not add a second
 evidence evaluator.
 

@@ -69,6 +69,26 @@ Comprehension = getattr(_fc, 'Comprehension', None)
 COMPREHENSION_FOLD_CAP = 4096
 
 
+def _is_dtype_value(v) -> bool:
+    """A value that is a DType: a bound `DType.x` / `dtype.x` spelling, or the
+    `('DType', x)` marker. A bare `('.', x)` is an ENUM variant reference in
+    general and only a DType when the other operand is one."""
+    if isinstance(v, str):
+        return v.startswith('DType.') or v.startswith('dtype.')
+    return isinstance(v, tuple) and len(v) == 2 and v[0] in ('DType', 'dtype')
+
+
+def _dtype_operand_name(v):
+    """The lowercase DType name a comparison operand denotes, or None. Accepts
+    the bound DType spellings and the dot-relative `('.', x)` marker, so
+    `dtype == .float32` and `dtype == DType.float32` decide the same way."""
+    if _is_dtype_value(v):
+        return _dtype_name_from_value(v)
+    if isinstance(v, tuple) and len(v) == 2 and v[0] == '.' and isinstance(v[1], str):
+        return v[1].lower()
+    return None
+
+
 def compare_op(op: str, left, right):
     """Fold one comparison-chain link, or None if `op` is not a known comparison.
 
@@ -82,6 +102,23 @@ def compare_op(op: str, left, right):
     closure-lowering doesn't support several small same-scope lambdas bound
     into one dict literal). Returns None for an unrecognized op, distinct
     from a real False."""
+    # DType operands compare by NAME. A bound `dtype` is `DType.float32` (or
+    # the `('DType', x)` marker) while a dot-relative `.float32` is the
+    # `('.', x)` marker; plain equality of the two spellings is always False,
+    # which folded `dtype == .float32` to a false branch. Only when both sides
+    # resolve to a dtype this evaluator KNOWS is the answer decided; an
+    # unknown spelling keeps the ordinary fold below rather than becoming a
+    # false one.
+    if op in ('==', '!=') and (_is_dtype_value(left) or _is_dtype_value(right)):
+        _ln, _rn = _dtype_operand_name(left), _dtype_operand_name(right)
+        if _ln in _KNOWN_DTYPE_NAMES and _rn in _KNOWN_DTYPE_NAMES:
+            return (_ln == _rn) if op == '==' else (_ln != _rn)
+    if op in ('in', 'not in') and _is_dtype_value(left) and isinstance(right, (tuple, list)):
+        _ln = _dtype_operand_name(left)
+        _names = [_dtype_operand_name(x) for x in right]
+        if (_ln in _KNOWN_DTYPE_NAMES
+                and all(_n in _KNOWN_DTYPE_NAMES for _n in _names)):
+            return (_ln in _names) if op == 'in' else (_ln not in _names)
     if op == '==':  return left == right
     if op == '!=':  return left != right
     if op == '<':   return left < right
@@ -213,7 +250,8 @@ _DTYPE_INTEGRAL = {
     'index',
 }
 _DTYPE_FLOATING = {
-    'float8_e3m4', 'float8_e4m3', 'float8_e4m3fn', 'float8_e4m3fnuz',
+    'float4_e2m1fn', 'float8_e3m4', 'float8_e4m3', 'float8_e4m3fn',
+    'float8_e4m3fnuz', 'float8_e4m3b11fnuz',
     'float8_e5m2', 'float8_e5m2fnuz', 'float8_e8m0fnu',
     'bfloat16', 'float16', 'float32', 'float64',
 }
@@ -225,6 +263,42 @@ _DTYPE_UNSIGNED_INT = {
     'uint', 'uint8', 'uint16', 'uint32', 'uint64', 'uint128', 'uint256',
 }
 _DTYPE_BOOL = {'bool', 'boolean'}
+
+#: Scalar TYPE spellings that name a DType when they appear where a DType VALUE
+#: is expected.  A generic whose parameter is declared `dtype: DType` is
+#: instantiated either with a DType value (`DType.float32`) or with the scalar
+#: type that value denotes (`Float32`), and monomorphization substitutes the
+#: argument TEXTUALLY, so the instantiated body contains `Float32.is_floating_point()`
+#: and `Float32 == .float32`.  Without this table those stay unfoldable, the
+#: `comptime if` is emitted as a RUNTIME branch with both arms, and an arm that
+#: is only type-correct for the dtype it was written for (the float8 bit-tests
+#: in std/utils/numerics.mojo calling `to_bits()` on the now-scalar `float`
+#: parameter) reaches gcc.  Mapping the spelling back to the dtype value is what
+#: lets the branch be decided and the inapplicable arm pruned.
+_DTYPE_TYPE_NAMES = {
+    'Bool': 'bool', 'Boolean': 'bool',
+    'Int': 'int', 'Int8': 'int8', 'Int16': 'int16', 'Int32': 'int32',
+    'Int64': 'int64', 'Int128': 'int128', 'Int256': 'int256',
+    'UInt': 'uint', 'UInt8': 'uint8', 'UInt16': 'uint16',
+    'UInt32': 'uint32', 'UInt64': 'uint64', 'UInt128': 'uint128',
+    'UInt256': 'uint256', 'Index': 'index',
+    'Float16': 'float16', 'Float32': 'float32', 'Float64': 'float64',
+    'BFloat16': 'bfloat16', 'Float4_E2M1FN': 'float4_e2m1fn',
+    'Float8_E3M4': 'float8_e3m4', 'Float8_E4M3': 'float8_e4m3',
+    'Float8_E4M3FN': 'float8_e4m3fn',
+    'Float8_E4M3FNUZ': 'float8_e4m3fnuz',
+    'Float8_E4M3B11FNUZ': 'float8_e4m3b11fnuz',
+    'Float8_E5M2': 'float8_e5m2',
+    'Float8_E5M2FNUZ': 'float8_e5m2fnuz',
+    'Float8_E8M0FNU': 'float8_e8m0fnu',
+}
+
+#: The dtype names this evaluator knows how to compare.  Equality of two DType
+#: values is by NAME (`Float32` and `DType.float32` and `.float32` are one
+#: dtype), so a value is only compared this way when both sides resolve to one
+#: of these; an unknown spelling keeps the old "not foldable" answer rather
+#: than becoming a false one.
+_KNOWN_DTYPE_NAMES = _DTYPE_INTEGRAL | _DTYPE_FLOATING | _DTYPE_BOOL
 
 
 def _dtype_name_from_value(v):
@@ -247,6 +321,13 @@ def _dtype_name_from_value(v):
 
 def _resolve_dtype_name(node, bindings, platform=None):
     """Resolve `node` to a DType name string, or None."""
+    # A scalar TYPE spelling used as a dtype value: `Float32` (see
+    # _DTYPE_TYPE_NAMES — this is the spelling monomorphization substitutes for
+    # a `dtype: DType` parameter).
+    if isinstance(node, IdentExpr):
+        _tn = _DTYPE_TYPE_NAMES.get(node.name)
+        if _tn is not None:
+            return _tn
     # DType.int32 / dtype.int32
     if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
             and node.obj.name in ('DType', 'dtype')):
@@ -591,11 +672,25 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
     if _ct is not None:
         return bool(_ct)
     if DottedLiteral is not None and isinstance(node, DottedLiteral):
-        # .name - for enum/DType values, return a marker
+        # A dot-relative value (`.float32`, `.Some`) folds to a marker for
+        # enum/DType values. The node's field is `path`
+        # (fire_compiler.DottedLiteral: `.float32` -> path='float32'); it has no
+        # `.name`, and reading that orphan field raised AttributeError, which the
+        # guard turned into "not foldable" — while `_const_foldable` called the
+        # same node foldable, which reads as CONST_FALSE, not CONST_UNKNOWN.
+        # That made `DType.float32 == .float32` fold FALSE and prune the arm
+        # that was true. `path` is REQUIRED to be a non-empty string here: a
+        # dot value whose spelling cannot be read is not foldable, and saying
+        # so keeps it consistent with `_const_foldable`.
         try:
-            return ('.', getattr(node, 'name'))
+            _dpath = getattr(node, 'path', None)
+            if _dpath is None:
+                _dpath = getattr(node, 'name')
         except Exception:
             return None
+        if not isinstance(_dpath, str) or not _dpath:
+            return None
+        return ('.', _dpath)
     if TupleExpr is not None and isinstance(node, TupleExpr):
         res = []
         for e in getattr(node, 'elements', []) or []:
@@ -701,7 +796,16 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
                 return _w
             return None
     if isinstance(node, IdentExpr):
-        return bindings.get(node.name)
+        if node.name in bindings:
+            return bindings.get(node.name)
+        # A scalar type spelling in a DType position is that dtype's value
+        # (`Float32` == `DType.float32` == `.float32`).  Only used where a
+        # compile-time VALUE is being folded, so an ordinary type name used as
+        # a type (annotations, constructors) never reaches here.
+        _tn = _DTYPE_TYPE_NAMES.get(node.name)
+        if _tn is not None:
+            return ('DType', _tn)
+        return None
     # `DType.int32` / `dtype.int32` — a compile-time DType value.
     if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
             and node.obj.name in ('DType', 'dtype')):
@@ -764,6 +868,19 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
         return not v if isinstance(v, (bool, int)) else None
     if isinstance(node, BinaryOp):
         op = node.op
+        # DType equality is identity of the dtype, not identity of the marker's
+        # spelling: `Float32`, `DType.float32` and `.float32` all denote one
+        # dtype, but eval_const's markers carry different tags for them
+        # (('DType', name) / ('.', name)), so the generic tuple comparison below
+        # would answer False for two equal dtypes. Compare the resolved dtype
+        # names first; an unknown spelling falls through to the ordinary fold.
+        if op in ('==', '!='):
+            _ldn = _resolve_dtype_name(node.left, bindings, platform)
+            _rdn = _resolve_dtype_name(node.right, bindings, platform)
+            if (_ldn in _KNOWN_DTYPE_NAMES
+                    and _rdn in _KNOWN_DTYPE_NAMES):
+                _eq = _ldn == _rdn
+                return _eq if op == '==' else not _eq
         l = eval_const(node.left, bindings, platform, conforms_to_pred)
         # Short-circuit `and`/`or`: a provably-false left of `and` (or
         # provably-true left of `or`) determines the result even when the
@@ -788,6 +905,11 @@ def eval_const(node, bindings: dict, platform: str = None, conforms_to_pred=None
             r = eval_const(node.right, bindings, platform, conforms_to_pred)
             if l is None or r is None:
                 return None
+            if _is_dtype_value(l) and isinstance(r, (list, tuple)):
+                # `dtype in (.float32, .float64)`: membership by DType name
+                # (see compare_op), not the raw tuple test a bound DType never
+                # satisfies against its dot-relative members.
+                return compare_op('in', l, r)
             try:
                 if isinstance(r, (list, tuple, set)):
                     return l in r
@@ -1028,7 +1150,7 @@ def _const_foldable(node, bindings: dict, call_hook=None, conforms_to_pred=None)
             and node.func.name == 'conforms_to'):
         return False
     if isinstance(node, IdentExpr):
-        return node.name in bindings
+        return node.name in bindings or node.name in _DTYPE_TYPE_NAMES
     # `DType.int32` / `dtype.int32`
     if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
             and node.obj.name in ('DType', 'dtype')):

@@ -119,16 +119,29 @@ def test_yield_from_captured_nested_generator_main_shape():
     _check('main-shape', MAIN_SHAPE_SRC)
 
 
+CASES = {
+    'minimal': test_yield_from_captured_nested_generator_in_coroutine_generator,
+    'main-shape': test_yield_from_captured_nested_generator_main_shape,
+}
+
+
 if __name__ == '__main__':
+    if len(sys.argv) > 1:
+        name = sys.argv[1]
+        if name not in CASES:
+            print(f'unknown case {name!r}; expected one of {sorted(CASES)}')
+            sys.exit(2)
+        CASES[name]()
+        print(f'PASS  {name}')
+        sys.exit(0)
     failed = 0
-    for fname, fn in list(globals().items()):
-        if fname.startswith('test_') and callable(fn):
-            try:
-                fn()
-                print(f'PASS  {fname}')
-            except Exception as e:
-                failed += 1
-                print(f'FAIL  {fname}  {e}')
+    for fname, fn in CASES.items():
+        try:
+            fn()
+            print(f'PASS  {fname}')
+        except Exception as e:
+            failed += 1
+            print(f'FAIL  {fname}  {e}')
     if failed:
         print(f'FAILED: {failed}')
         sys.exit(1)

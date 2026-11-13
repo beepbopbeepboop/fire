@@ -180,6 +180,20 @@ See build/checkfail_candidates.json (61 error-like cases).
   `Float64`/`Bool`). Type-erased/module-global and unresolved-generic cases
   stay conservative so runtime dispatch is preserved. Regression:
   `test_contains_method_diagnostic.py`.
+- **Landed (follow-up, 2026-11-13):** the part3 check above no longer reads
+  `_quick_type`'s `int64_t` FALLBACK as a proven Int — that default is the
+  type-erased box, which may hold a container, and the gate's `stdlib-dylib`
+  job went red on it: six stdlib modules (compile.mojo's `content in
+  String(self)` among them) fell back to source on `'Int' does not implement
+  the '__contains__' method`. `emit_exprs.py::_definitive_scalar_type` now
+  proves the kind by shape/binding/known-callee-return only (`_call_
+  provably_returns_int` mirrors the estimator's specific int rows — scalar
+  builtins, scalar ctors, a recorded `-> Int`; member/subscript calls are
+  never proven), and the container-yielding ops `+`/`*`/`|`/`&`/`^`/`-`/`%`/
+  `and`/`or` require a proof on BOTH operands. Generated C for previously
+  succeeding modules is byte-identical; the `stdlib-dylib` ratchet is green
+  again (0 skips). Regressions added to `test_contains_method_diagnostic.py`
+  (unrecorded call, erased operands, known-int calls).
 - **Landed (follow-up, branch 3096):** `eval_const_int` resolves `IdentExpr`
   comptime bindings, enabling `range(...)` bounds that are comptime variables.
   Regressions: `test_comptime_assert_diagnostic.py`,
