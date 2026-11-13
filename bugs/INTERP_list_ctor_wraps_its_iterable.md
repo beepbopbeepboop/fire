@@ -1,8 +1,10 @@
 # INTERP: `List(<iterable>)` wraps the argument as one element
 
 **Status (2026-11-13):** open. Found while fixing the compiled-path bare-`List(...)`
-constructor (`bugs/gate-stdlib-syntax.md` class 2); the two engines disagree on the
-same program.
+constructor (the gate-stdlib-syntax class-2 item: a bare `List(...)` erased to
+`int64_t` and the compiled program segfaulted; fixed in 66c1d6a9b, pinned by
+test_gimple.py's gate_stdlib_syntax_bare_list_constructor); the two engines
+disagree on the same program.
 
 ## Repro
 
