@@ -1,10 +1,27 @@
 # INTERP: `List(<iterable>)` wraps the argument as one element
 
-**Status (2026-11-13):** open. Found while fixing the compiled-path bare-`List(...)`
-constructor (the gate-stdlib-syntax class-2 item: a bare `List(...)` erased to
-`int64_t` and the compiled program segfaulted; fixed in 66c1d6a9b, pinned by
+**Status (2026-11-13):** FIXED. `_MojoListType.__call__` now implements the
+three forms below — `length=`/`fill=` (and `fill_with=`) build their elements,
+a single iterable argument is COPIED in its iteration order, everything else
+keeps the variadic `list(args)` reading — mirroring the compiled path's
+`_lower_bare_list_ctor` (emit_calls.py, 66c1d6a9b), which the interpreter now
+agrees with on the same program. Pinned by `test_interp_list_ctor.py`
+(direct constructor checks plus the doc's repro through `python3 fire.py run`).
+Found while fixing the compiled-path bare-`List(...)` constructor (the
+gate-stdlib-syntax class-2 item: a bare `List(...)` erased to `int64_t` and the
+compiled program segfaulted; fixed in 66c1d6a9b, pinned by
 test_gimple.py's gate_stdlib_syntax_bare_list_constructor); the two engines
-disagree on the same program.
+had disagreed on the same program.
+
+## Done when
+
+`python3 test_interp_list_ctor.py` passes in full (the direct
+`_MojoListType` checks named in the "Exact next step" —
+`L([1, 2])` copies, `L(length=3, fill=7)` fills, `L(1, 2, 3)` stays
+variadic — every iterable kind, `fill_with`, and the pre-existing
+behaviours, plus the repro below run through `python3 fire.py run`).
+Wrap it in the machine budget when running:
+`python3 tools/memslot.py --gb 8 --label interp-list-ctor -- python3 test_interp_list_ctor.py`.
 
 ## Repro
 
