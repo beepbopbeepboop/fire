@@ -2123,6 +2123,36 @@ def _cpp_is_struct_pointer_elem(gen, el) -> bool:
     return bool(ct) and ct.endswith(' *') and ct[:-2] in gen.struct_field_types
 
 
+def _cpp_typed_list_elem(gen, el):
+    """One NON-literal element of a flat list literal -> `(kind, expr)`. The
+    element's inferred scalar ctype picks its accessor (`char *` -> str,
+    `double` -> flt, `int64_t`/`_Bool` -> the int64_t box). An element whose
+    kind cannot be inferred REFUSES: at a call-argument position nothing
+    later re-types the box, so defaulting it to int64_t would hand a string
+    to an integer accessor. (The statement-level `_cpp_container_literal_init`
+    keeps its int64_t default; a container-typed local is re-typed by its
+    own uses.) A dict/set element has no flat representation here and
+    refuses. Nested list/tuple and struct-pointer elements never reach this
+    point (`_cpp_list_literal_arg_expr` boxes those)."""
+    if isinstance(el, (gimple_ctypes.DictExpr, gimple_ctypes.SetExpr)):
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            "a nested dict/set literal has no representation as a list "
+            "element in a list-literal argument of a compiled-generator call")
+    ct = gimple_exprtypes._infer_simple_expr_ctype(
+        el, gen._cpp_declared, getattr(gen, '_cpp_gen_self_fields', None),
+        gen._async_api)
+    if ct is None:
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            "an element of a list-literal argument of a compiled-generator "
+            "call has a value kind that cannot be resolved in a coroutine body")
+    ev = gen._cpp_expr(el)
+    if ct == 'char *':
+        return ('str', f"(char *)({ev})")
+    if ct == 'double':
+        return ('flt', f"(double)({ev})")
+    return ('int', f"(int64_t)({ev})")
+
+
 def _cpp_call_arg_expr(gen, a):
     """One call-argument expression for a compiled-generator/coroutine call.
     A list LITERAL has no valid C++ text at an argument position (`_cpp_expr`
@@ -2139,9 +2169,12 @@ def _cpp_list_literal_arg_expr(gen, lit):
     valued C++ expression: `mojo_list_new ()` for the empty literal,
     otherwise an immediately-invoked lambda that constructs the list and
     appends every element through its scalar accessor (append_str/_int/
-    _double). All elements must agree on one scalar type — anything else
-    refuses (the caller's contract collection already hints nothing for
-    mixed literals). Works for both ListExpr and TupleExpr (same `.elements`
+    _double). A literal element takes its kind from the literal; any other
+    element takes it from its inferred ctype (`_cpp_typed_list_elem`, the
+    same typing `_cpp_container_literal_init` gives a statement-level list).
+    All elements must agree on one scalar kind — a mixed literal refuses
+    (the caller's contract collection already hints nothing for mixed
+    literals). Works for both ListExpr and TupleExpr (same `.elements`
     shape, both box down to the one MojoList* runtime representation this
     body model uses for both Python lists and tuples) — used both at a
     compiled-generator call-argument position and at an ordinary runtime-
@@ -2169,10 +2202,7 @@ def _cpp_list_literal_arg_expr(gen, lit):
         elif isinstance(el, gimple_ctypes.FloatLiteral):
             kinds.append(('flt', gen._cpp_expr(el)))
         else:
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                "a non-scalar element in a list-literal argument of a "
-                "compiled-generator call is not supported in a coroutine "
-                "body")
+            kinds.append(_cpp_typed_list_elem(gen, el))
     kind = kinds[0][0]
     if any(k != kind for k, _ in kinds):
         raise gimple_exprtypes._UnsupportedGeneratorShape(
@@ -7443,7 +7473,12 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         _container_literal = isinstance(s.value, (gimple_ctypes.ListExpr,
                                                   gimple_ctypes.DictExpr,
                                                   gimple_ctypes.SetExpr))
-        val = gen._cpp_expr(s.value)
+        # A container literal's raw expression text (`val`) is only needed
+        # for a target that does NOT take the container-init path below; it
+        # is lowered lazily there. Lowering it eagerly here made a valid
+        # `stack = [top]` refuse whenever an element's kind is unresolved,
+        # though the statement-level init types that element by default.
+        val = None if _container_literal else gen._cpp_expr(s.value)
         _rhs_tagged = _cpp_is_tagged_word_expr(gen, s.value)
         if name not in declared:
             # `x = StructName(args)` — see `_cpp_expr`'s CallExpr
@@ -7603,6 +7638,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 init = _cpp_container_literal_init(gen, cpp_name, s.value, indent)
                 if init is not None:
                     return init
+            if val is None:
+                val = gen._cpp_expr(s.value)
             if isinstance(val, str) and val.startswith('@@CSYM:'):
                 return [f"{indent}{cpp_name} = _mj_w({val});"]
             _acast0 = _cpp_assign_cast_type(gen, val)
@@ -7615,6 +7652,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             init = _cpp_container_literal_init(gen, cpp_name, s.value, indent)
             if init is not None:
                 return init
+        if val is None:
+            val = gen._cpp_expr(s.value)
         # A mutated-by-reference capture (see `_gen_cpp_async_unit`'s
         # `mut_capture_names` docstring) is a pointer parameter -- the
         # WRITE must go through it (`*name = ...`), not overwrite the
@@ -10413,6 +10452,36 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 # fallback caught it first). Real: ftplib.py's mlsd.
                 _iter_list_expr = _cpp_as('MojoList *', gen._cpp_expr(s.iterable))
                 _iter_elem = 'char *'
+            elif (isinstance(s.iterable, (gimple_ctypes.TupleExpr,
+                                          gimple_ctypes.ListExpr))
+                    and isinstance(target, str) and not for_target_is_tuple(target)):
+                # `for fld in ('v', 'missing'):` — a list/tuple LITERAL used
+                # directly as the loop iterable. `_cpp_expr` already lowered
+                # the literal to a real `MojoList *` (a self-invoking lambda
+                # that constructs and fills one: there is no braced-init-list
+                # C++ value for a container in this model), but the generic
+                # range-for below emitted `for (auto fld : <that>)`, and a
+                # raw `MojoList *` has no ADL `begin`/`end` — g++:
+                # "'begin' was not declared in this scope" /
+                # "'end' was not declared in this scope". Iterate it through
+                # the same cached-local + indexed lowering every other
+                # list-valued iterable here uses. Element type comes from the
+                # literal elements themselves (all-str -> char *, all-float
+                # -> double, else the boxed int64_t convention). Real: the
+                # nested recursive generator in
+                # test_gimple_generator_runner.py looping over
+                # `('v', 'missing')` while walking struct attributes.
+                _iter_list_expr = _cpp_as('MojoList *', iter_expr)
+                _lit_etype = None
+                for _lit_el in s.iterable.elements:
+                    _lit_ect = gimple_exprtypes._infer_simple_expr_ctype(
+                        _lit_el, gen._cpp_declared,
+                        getattr(gen, '_cpp_gen_self_fields', None),
+                        gen._async_api) or 'int64_t'
+                    _lit_etype = (_lit_ect if _lit_etype is None
+                                  else (gimple_ctypes.TypeLattice.join(
+                                      _lit_etype, _lit_ect) or 'int64_t'))
+                _iter_elem = _lit_etype
             elif (isinstance(s.iterable, gimple_ctypes.IdentExpr)
                     and gen._cpp_declared is not None
                     and gen._cpp_declared.get(s.iterable.name) == 'char *'):
@@ -10472,6 +10541,16 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 _cached = gen._cpp_fresh_name("_mg_iter")
                 _ctr = gen._cpp_fresh_name("_mg_i")
                 lines = [f"{indent}MojoList *{_cached} = {_iter_list_expr};"]
+                # for/else: the else body runs only when the loop completes
+                # WITHOUT a `break`. This lowering has to carry it itself (it
+                # returns before the generic for/else block below), with the
+                # same shared break-flag protocol that block uses; without it
+                # a `for x in <list-valued expr>: ... else: ...` silently
+                # dropped the else body.
+                _iter_brk = None
+                if s.else_body:
+                    _iter_brk = gen._cpp_fresh_name("_mg_brk")
+                    lines.insert(0, f"{indent}bool {_iter_brk} = false;")
                 if _iter_elem == 'char *':
                     if not target_was_declared:
                         declared[target] = 'char *'
@@ -10499,9 +10578,18 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                                  f"{_ctr} < mojo_list_len({_cached}); {_ctr}++) {{")
                     lines.append(f"{indent}    {target} = mojo_list_get_int({_cached}, {_ctr});")
                 for inner in s.body:
-                    lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                    if _iter_brk is None:
+                        lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                    else:
+                        lines.extend(gen._cpp_stmt_with_break_flag(
+                            inner, declared, indent + '    ', _iter_brk))
                 _cpp_refuse_unpacking_target(target)
                 lines.append(f"{indent}}}")
+                if _iter_brk is not None:
+                    lines.append(f"{indent}if (!{_iter_brk}) {{")
+                    for inner in s.else_body:
+                        lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                    lines.append(f"{indent}}}")
                 return lines
             if s.else_body:
                 # for/else: the else body runs only when the loop

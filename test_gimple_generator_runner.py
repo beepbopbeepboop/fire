@@ -615,6 +615,26 @@ main()
 print(next(it))
 """)
 
+    # A non-literal element of a list-literal argument is typed by its inferred
+    # ctype (`_cpp_typed_list_elem`), so `[top, "x"]` with `top` of an unknown
+    # kind (a popped word) is a MIXED-kind list and is refused as one, rather
+    # than refused for being non-literal at all. Pins the new reason.
+    test_generator_refused("generator_list_literal_arg_mixed_kind_refused", """\
+def g(name):
+    stack = [name]
+    while stack:
+        top = stack.pop()
+        if isinstance(top, tuple):
+            yield top
+            continue
+        yield ",".join([top, "x"])
+
+def main():
+    for v in g("ab"):
+        print(v)
+main()
+""", "a list-literal argument with mixed element types")
+
     # A global bound TWICE to a generator is not one fact, so the read from
     # the function keeps the honest refusal rather than a guessed api.
     test_generator_refused("next_on_a_module_global_bound_twice_refused", """\
@@ -6462,6 +6482,88 @@ main()
 """, "yields ['xs']")
 
 
+def run_for_over_literal_in_generator_tests():
+    # `for x in <list/tuple literal>:` inside a generator/coroutine body.
+    # The literal is already lowered to a real `MojoList *` by `_cpp_expr` (a
+    # self-invoking lambda that constructs and fills one -- this model has no
+    # braced-init-list C++ value for a container), but the generic range-for
+    # fallback emitted `for (auto x : <that lambda>())`. A raw `MojoList *`
+    # has no ADL `begin`/`end`, so g++ rejected every such loop with
+    # "'begin' was not declared in this scope" / "'end' was not declared in
+    # this scope". The loop now iterates the lowered list through the same
+    # cached-local + indexed `mojo_list_len` / `mojo_list_get_*` lowering
+    # every other list-valued iterable in a generator body already used.
+    # Real: the nested recursive generator in
+    # `run_nested_recursive_generator_getattr_tests` above, whose inner
+    # `for fld in ('v', 'missing')` is exactly this shape.
+    test_generator_stdout("generator_for_over_tuple_literal", """\
+def outer():
+    def inner():
+        for fld in ('v', 'missing'):
+            yield fld
+    yield from inner()
+
+def main():
+    for x in outer():
+        print(x)
+main()
+""", "v\nmissing\n")
+
+    test_generator_stdout("generator_for_over_int_list_literal", """\
+def outer():
+    def g():
+        for v in [10, 20, 30]:
+            yield v
+    yield from g()
+
+def main():
+    for x in outer():
+        print(x)
+main()
+""", "10\n20\n30\n")
+
+    # The double element path: yield is not used for the value here because an
+    # unannotated generator's yield slot is int64_t in this body model (a
+    # separate, unrelated limitation); the loop's own read of the literal is
+    # what this pins.
+    test_generator_stdout("generator_for_over_float_tuple_literal", """\
+def outer():
+    def g():
+        for v in (1.5, 2.5):
+            print(v)
+            yield 0
+    yield from g()
+
+def main():
+    for x in outer():
+        pass
+main()
+""", "1.5\n2.5\n")
+
+    # A literal iterable with a `for/else`: the else body runs only when the
+    # loop completes without a break. The literal lowering returns before the
+    # generic for/else block, so it carries the shared break flag itself.
+    test_generator_stdout("generator_for_else_over_literal", """\
+def outer():
+    def g():
+        for v in (1, 2):
+            yield v
+            break
+        else:
+            yield -1
+        for v in (3, 4):
+            yield v
+        else:
+            yield -1
+    yield from g()
+
+def main():
+    for x in outer():
+        print(x)
+main()
+""", "1\n3\n4\n-1\n")
+
+
 def run_generator_tuple_repr_tests():
     # A tuple yielded by a generator is built by `__mojo_tuple_box_N` (the
     # A3 runtime, runtime/fire_coro_gen.c), and `list(gen)` puts that box
@@ -6498,6 +6600,7 @@ main()
 def run_tests():
     run_generator_tuple_repr_tests()
     run_nested_recursive_generator_getattr_tests()
+    run_for_over_literal_in_generator_tests()
     run_cpp_send_tests()
     run_send_into_just_started_regression()
     run_cpp_path_multi_arg_print_tests()
@@ -12251,10 +12354,67 @@ def main():
 main()
 """, "1\n7\n")
 
+    _test_method_returns_generator_via_subclass_inchain()
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)
     print(f"\n{_PASS} passed, {_FAIL} failed")
+
+
+def _test_method_returns_generator_via_subclass_inchain():
+    """In-chain import: a base method returns cls.gen_method(...) or None
+    (polymorphic generator method on subclasses) and a caller unpacks the
+    result. The imported module must compile without 'no known generator API'."""
+    global _PASS, _FAIL
+    name = "method_returns_generator_via_subclass_inchain"
+    try:
+        wd = tempfile.mkdtemp(prefix='mojo_gen_mrg_')
+        os.makedirs(os.path.join(wd, 'pkg', 'parser'), exist_ok=True)
+        files = {
+            'pkg/__init__.py': '',
+            'pkg/parser/__init__.py': 'from ..info import Sub\n',
+            'pkg/info.py': (
+                "class Base:\n"
+                "    @classmethod\n"
+                "    def _format_data(cls, data):\n"
+                "        raise NotImplementedError\n"
+                "    @classmethod\n"
+                "    def _render_item(cls, data):\n"
+                "        if data is None:\n"
+                "            return None\n"
+                "        return cls._format_data(data)\n"
+                "    @classmethod\n"
+                "    def _row(cls):\n"
+                "        rendered = cls._render_item([1])\n"
+                "        rendered, = rendered\n"
+                "        return rendered\n"
+                "\n"
+                "class Sub(Base):\n"
+                "    @classmethod\n"
+                "    def _format_data(cls, data):\n"
+                "        for x in data:\n"
+                "            yield str(x)\n"
+            ),
+        }
+        for rel, src in files.items():
+            p = os.path.join(wd, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, 'w') as f:
+                f.write(src)
+        entry = os.path.join(wd, 'pkg', 'parser', '__init__.py')
+        with open(entry) as f:
+            entry_src = f.read()
+        c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
+            entry_src, do_imports=True, filename=entry)
+        if '# ERROR: compiling imported module' in c_code:
+            raise RuntimeError('imported module compile error:\n' + '\n'.join(
+                l for l in c_code.splitlines() if '# ERROR' in l))
+        print(f"PASS  {name}")
+        _PASS += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
 
 
 # ONE entry point. This file used to carry TWO `if __name__ == '__main__':`

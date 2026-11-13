@@ -2,14 +2,63 @@
 
 Status: PARTIALLY LANDED 2026-11-11. Parent: the overflow-guard wrong-spec fix (the guarded contract in `formal/arm64_proof_gen.py::_dylib_contract_proof`, 2026-11-12).
 
+**2026-11-12 (gate `reg-formal-ast-bridge-two-arg`): the default-path walk can
+again cross an `svc`.** The model change in f03896fff made every compiled
+function's stack-floor-guard trap block a real halt, and `_gen_run_cert` then
+refused it because its last step is `none`; every universal theorem in the
+corpus was refused (`def plain(a, b): return a + b` was enough). Landed here:
+
+- `_is_svc_exit` is the exit-only structural predicate, and
+  `_trap_terminating`/`_unfollowable_calls` use it, so a write `svc` tail is
+  not a bounded stop.  `_svc_static_x16` now accepts both `movz x16` and
+  `movz w16` (the emitter spells both).
+- `_gen_run_cert` admits a static write `svc` whose `movz` is in the run and
+  whose fall-through rewrites `x0` before it is read (`_reads_x0` /
+  `_x0_reassigned_after_write`); exit `svc`s are still refused by it.
+- `_gen_halt_cert` proves the block that DOES end in an exit `svc` halts:
+  ordinary segments are run certificates, write `svc`s are
+  `arm64_go_exit_step_jump_at` with their `hx` discharged from the segment's
+  own x16 chain, and the final step is `none`; the theorem is applied by
+  `emit_block` on a direct branch into the block.  The universal statement
+  uses `none => True` when such a branch is reachable.
+- `_gen_step_result_lemmas` emits `work_step_svc_exit`/`work_step_svc_write`
+  under an `hx` binder for an `svc` word, selected by the static x16.
+- `_cfg_decomposition_refusal` now runs a SECOND search for `svc`s, which
+  the unmodelled-word loop skips because they HAVE a step (idx 35): it
+  classifies each image `svc` the way the certificate builders do
+  (`_svc_static_x16` over the block's leaders, `_x0_reassigned_after_write`)
+  and names the first one that refuses -- a dynamic x16, an exit `svc`
+  mid-run, or a write `svc` whose x0 the fall-through does not rewrite --
+  instead of the old fallback blaming "an empty block runs certificate"
+  for what is really the svc.  The gate doc's planning round (deleted with
+  the fix) asked for this in the same change; it is pinned by
+  `test_formal_call_proof_gen.TestTheRefusalNamesTheSvcItRefuses`.
+
+Measured: the gate job `reg-formal-ast-bridge-two-arg` passes, the two-arg
+program and `def main(n: Int, m: Int): return n + m` both typecheck in Lean
+(0 sorries in the generated file), and
+`test_formal_call_proof_gen.TestTheStackFloorGuardReadsTheLimitInTheStartupStub`
+is green again.
+
+The gate doc's open decision (D1 -- what the universal theorem claims on a
+path that reaches a trap tail's exit `svc`) is answered by the landed design:
+the halt is proved in its own per-block `{S}_halts` theorem, applied by
+`emit_block` on the branch edge, and the universal statement's `none` arm
+stays the honest `True` -- the match arm carries no state a per-path halt
+conclusion could bind to, so the halt lives in the theorem, and the branch
+edge's premise is exactly what the certificate supplies.
+
 Landed as 574813206 (archive) and f03896fff (master): the x16-discriminating model (exit is `none`, write
 continues at `pc + 4`), `work_step_svc` / `_exit` / `_write`, the svc step's right-hand side in the generator, no
 `_step_ok` lemma for an svc word, and the termination obligation's comment and pin. The dylib test is PASS=23 FAIL=6,
 the marker's count. Helper `_svc_static_x16` is on the archive (21b4a98cb), not yet called.
 
-STILL OPEN: the per-site x16 threading and the dynamic-write hypothesis (design items 2 and 4 below). The generated proofs for the overflow example close
-without it, because svc steps are not walked on the default path. Items 2 and 4 are needed before a dynamic svc can be
-proved rather than refused.
+STILL OPEN: the dynamic-`svc` named hypothesis (design item 4) and the
+`svc_write_assumed` slot; the dylib export paths already use their own
+guarded-obligation route.  The default walk's static case is landed above:
+static x16 is threaded at the application site, and a static write run
+certificate carries the x0-reassignment rule.  A dynamic `svc` on a walked
+path is still refused rather than guessed.
 
 ## Symptom (before 574813206)
 

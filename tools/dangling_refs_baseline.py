@@ -19,14 +19,6 @@ under test, and a sweep that turned them into prose would silently delete the
 proof while leaving the check green. `tools/suite.py` cites a `.md` path as a
 fixture for the same reason.
 
-`tools/test_swarm_replan.py` is the third, and its fixture is a whole synthetic
-BUG DOC rather than a name: the tests write `bugs/hard/X.md` into a temp dir and
-hand its stem to `split_reason`, so the `bugs/hard/X.md` in the REPLAN_TASK
-format argument is a file the test creates, not a claim about the tree. It
-cannot be renamed out of the pattern -- `REF` matches every `bugs/**.md` -- so
-it is entered here at the count it has (1) rather than left to fail the ratchet
-on every run.
-
 THE LEDGER ITSELF (`tools/dangling_refs_baseline.py`) is EXCLUDED from the
 walk, and it is excluded rather than entered because an entry for it cannot
 mean anything. Its whole content is the set of doc names other files still
@@ -46,13 +38,14 @@ BASELINE = {
     'consolidate_string_pool.py': 1,
     'doc/ABI.md': 7,
     'docs/imported-decorators-plan.md': 1,
+    'docs/tagged_generator_mixed_type-box.md': 1,
     'elaborate.py': 1,
     'fire.py': 2,
     'fire_compiler.py': 1,
     'formal/admitted.py': 1,
     'formal/arm64.py': 1,
     'formal/arm64_codegen.py': 4,
-    'formal/arm64_proof_gen.py': 11,
+    'formal/arm64_proof_gen.py': 10,
     'formal/build.py': 19,
     'formal/dataclass_transform.py': 6,
     'formal/imports.py': 21,
@@ -151,7 +144,7 @@ BASELINE = {
     'test_silent_noop_iter.py': 1,
     'test_string_literal_lexing.py': 2,
     'test_struct_formal.py': 1,
-    'test_suite.py': 18,
+    'test_suite.py': 17,
     'test_zip_loop_target_rebind_regress.py': 1,
     'tools/arm64_insn_audit.py': 1,
     'tools/dangling_doc_refs.py': 2,
@@ -171,6 +164,8 @@ BASELINE = {
     'tools/formal_sweep_parity.py': 1,
     'tools/formal_template_call_census.py': 5,
     'tools/task_text.py': 4,
+    'tools/test_orchestration_formal_unlanded_task_state.py': 1,
+    'tools/test_proof_review.py': 2,
     'tools/test_swarm_class_refresh.py': 2,
     'tools/test_swarm_feed.py': 13,
     'tools/test_swarm_replan.py': 1,
@@ -197,7 +192,7 @@ BARE_BASELINE = {
     'bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md': 3,
     'fire.py': 1,
     'formal/arm64_codegen.py': 1,
-    'formal/arm64_proof_gen.py': 2,
+    'formal/arm64_proof_gen.py': 1,
     'formal/dataclass_transform.py': 1,
     'formal/model/builtins.py': 4,
     'formal/model/calls.py': 2,
@@ -229,7 +224,8 @@ BARE_BASELINE = {
     'test_mutable_async_capture.py': 1,
     'test_refusal_taxonomy.py': 1,
     'test_regress_split_coro.py': 1,
-    'test_suite.py': 17,
+    'test_suite.py': 14,
+    'tools/control.py': 2,
     'tools/dangling_doc_refs.py': 2,
     'tools/formal_fuzz.py': 3,
     'tools/formal_proof_breadth.py': 1,
