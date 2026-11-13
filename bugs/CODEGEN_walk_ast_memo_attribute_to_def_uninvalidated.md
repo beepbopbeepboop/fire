@@ -29,3 +29,11 @@ Either call `_walk_ast_invalidate(stmt)` after the two assignments, or, if the w
 1. `python3 test_gimple.py` and confirm the single FAIL above.
 2. Add `_walk_ast_invalidate(stmt)` inside the loop in `_attribute_to_def` (import it from `mojo.middle.exprtypes` the same way the neighbouring call sites do).
 3. Re-run `test_gimple.py`; the FAIL must clear and the count of failures must be 0.
+
+## Done when
+
+`test_gimple.py`'s `attribute_to_def_write_invalidates_the_walk_memo` — the
+behavioural pin added next to the census — passes, and the census
+`every_ast_mutation_site_invalidates_the_walk_memo` reports no problem for
+`mojo/middle/coro.py::_attribute_to_def`. Quick run:
+`python3 tools/memslot.py --gb 8 --label gimple -- python3 test_gimple.py`.

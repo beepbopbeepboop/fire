@@ -11861,6 +11861,60 @@ print("%r" % p)
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_attribute_to_def_write_invalidates_the_walk_memo():
+        """`_attribute_to_def` stamps every prologue statement it is handed
+        with the line/col of the generator's `def`, and that stamp is an AST
+        write: the walk-memo entry of every statement it touches must be
+        dropped, like at every other write site in `mojo/`.
+
+        The prologue statements are freshly synthesized in the lowering
+        pipeline, but the helper is shared: the next statement it is handed
+        can be one the memo has already answered, and a write that leaves
+        the entry in place is exactly the stale-memo hazard the memo's
+        contract exists to close. The census
+        (`every_ast_mutation_site_invalidates_the_walk_memo`) polices the
+        contract for this site statically; this is the behavioural half —
+        before the `_walk_ast_invalidate` call, a statement the memo had
+        already answered kept answering with the pre-stamp entry after the
+        write."""
+        global _PASS, _FAIL
+        name = "attribute_to_def_write_invalidates_the_walk_memo"
+        import mojo.middle.exprtypes as ET
+        import mojo.middle.coro as CO
+        from fire_compiler import py_tokenize, Parser, FunctionDef, VarDecl
+
+        err = None
+        try:
+            ET._walk_ast_reset()
+            stmts = (Parser(py_tokenize(
+                "def g(a):\n    yield a\nvar p = 1\n")).parse_module() or [])
+            fn = [s for s in stmts if isinstance(s, FunctionDef)][0]
+            stmt = [s for s in stmts if isinstance(s, VarDecl)][0]
+            # The generator def lives on its own line in the source, apart
+            # from the prologue statement, so the stamp moves both fields.
+            fn.line, fn.col = 42, 7
+            first = ET._walk_ast(stmt)
+            if ET._walk_ast(stmt) is not first:
+                err = 'nothing was memoized, so this proved nothing'
+            else:
+                CO._attribute_to_def([stmt], fn)
+                if (stmt.line, stmt.col) != (fn.line, fn.col):
+                    err = 'the stamp did not reach the statement'
+                elif ET._walk_ast(stmt) is first:
+                    err = ('the memo entry for the statement survived the '
+                           'write: the walk after the stamp still answered '
+                           'from the pre-stamp memo')
+        except Exception as e:  # noqa: BLE001
+            err = f'{type(e).__name__}: {e}'
+        finally:
+            ET._walk_ast_reset()
+        if err:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_struct_unpack_computed_format_compiles():
         """`struct.unpack(fmt, buf)` whose format is a VARIABLE must not
         crash the compiler.
@@ -14102,6 +14156,7 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_walk_ast_memo_never_answers_stale_over_real_compiles(), 'test_walk_ast_memo_never_answers_stale_over_real_compiles (line 12671)')
     _run_isolated(lambda: test_every_ast_mutation_site_invalidates_the_walk_memo(), 'test_every_ast_mutation_site_invalidates_the_walk_memo (line 12672)')
     _run_isolated(lambda: test_posthoc_class_attr_write_invalidates_the_walk_memo(), 'test_posthoc_class_attr_write_invalidates_the_walk_memo (line 13416)')
+    _run_isolated(lambda: test_attribute_to_def_write_invalidates_the_walk_memo(), 'test_attribute_to_def_write_invalidates_the_walk_memo (line 11864)')
     _run_isolated(lambda: test_walk_ast_memo_survives_the_sync_generator_hoist_writes(), 'test_walk_ast_memo_survives_the_sync_generator_hoist_writes (line 12672)')
     _run_isolated(lambda: test_scalar_arity_min_max_params_are_not_containers(), 'test_scalar_arity_min_max_params_are_not_containers (line 12673)')
     _run_isolated(lambda: test_a_forwarded_string_argument_keeps_its_type(), 'test_a_forwarded_string_argument_keeps_its_type (line 12674)')
