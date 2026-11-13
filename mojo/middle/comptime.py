@@ -444,13 +444,33 @@ def _conforms_to_bases(struct_name, bases_map, _memo=None):
     return out
 
 
+# Traits the language derives for a struct from its fields, so their absence
+# from a DECLARED-bases map is not evidence against conformance.
+_AUTO_DERIVED_TRAITS = frozenset({'Copyable', 'Movable'})
+
+
 def conforms_to(struct_name, trait_name, bases_map):
+    """Whether STRUCT_NAME conforms to TRAIT_NAME, from the DECLARED bases map
+    (`{decl: [base, ...]}`): True/False when the map decides it, None when it
+    cannot. `_conforms_to_bases` is transitive.
+
+    `Copyable` and `Movable` are derived by the language for a struct whose
+    fields all support them, so a struct that does not LIST `Copyable` still
+    conforms: the map records declarations, not derivations. Proving a negative
+    from the empty list made a plain struct element satisfy neither — that is
+    how `LinkedList[CopyCountedStruct]()`'s
+    `comptime assert conforms_to(Self.ElementType, Copyable)` in the stdlib
+    failed to compile (2026-11-12), while the same struct is copied freely
+    everywhere else in this C backend. For a name the map does not know we
+    still answer None: nothing is known about it at all."""
     if not isinstance(struct_name, str) or not isinstance(trait_name, str):
         return None
     if not bases_map:
         return None
     if struct_name not in bases_map:
         return None
+    if trait_name in _AUTO_DERIVED_TRAITS:
+        return True
     if trait_name not in bases_map:
         known = False
         for bs in bases_map.values():

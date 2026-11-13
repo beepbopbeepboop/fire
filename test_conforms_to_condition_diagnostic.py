@@ -45,6 +45,23 @@ def test_comptime_assert_false_nonconforming_rejected():
     assert 'no' in out, out
 
 
+def test_comptime_assert_copyable_and_movable_are_derived():
+    # Copyable/Movable are derived from a struct's fields, so they are not in
+    # its DECLARED bases list; an empty list must not prove a negative. This is
+    # the shape of the stdlib check that failed: LinkedList's
+    # `comptime assert conforms_to(Self.ElementType, Copyable)` (2026-11-12).
+    _compile(
+        'struct Plain:\n'
+        '    var x: Int\n'
+        '\n'
+        'def f[T: AnyType]():\n'
+        '    comptime assert conforms_to(T, Copyable), "no"\n'
+        '    comptime assert conforms_to(T, Movable), "bad"\n'
+        '\n'
+        'def main():\n'
+        '    f[Plain]()\n')
+
+
 def test_comptime_assert_true_conforming_compiles():
     _compile(
         _TRAITS
