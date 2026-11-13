@@ -505,8 +505,12 @@ def _selfhost_impl_py_files(sd: str) -> list[str]:
 # 30-minute bootstrap.
 _SELFHOST_SIGS = {
     # Parser (fire_compiler.py)
+    # `recover: bool = False` -- a defaulted parameter occupies a C slot, and
+    # `bool` lowers to `_Bool` (the definition is `Parser_parse_module(Parser
+    # *, _Bool)`). Without the slot every importing module got gcc's
+    # "conflicting types for 'Parser_parse_module'".
     'Parser_parse_module': (
-        'MojoList *', ['Parser *'], 'fire_compiler'),
+        'MojoList *', ['Parser *', '_Bool'], 'fire_compiler'),
     'Parser___init__': (
         'void', ['Parser *', 'MojoList *'], 'fire_compiler'),
     'Parser_with_filename': (
@@ -3886,7 +3890,7 @@ class GimpleGen:
         # header declaration that test_selfhost.py's
         # `pinned_prototypes_match_their_definitions` checks.
         'py_tokenize':              ('MojoList *', ['char *']),
-        'Parser_parse_module':   ('MojoList *', ['Parser *']),
+        'Parser_parse_module':   ('MojoList *', ['Parser *', '_Bool']),
         'mojo_eval':             ('int',         ['int', 'MojoDict *', 'MojoDict *']),
         'interpret_and_execute': ('void',        ['char *', 'int']),
         # C math functions with non-int64_t return types — temps must be float/double

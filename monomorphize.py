@@ -1207,6 +1207,15 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
     _IN_PROGRESS.add(key)
     ELAB_DEPTH[0] += 1
     try:
+        # A hard guard on nested elaboration depth. Deep-but-finite concrete
+        # cascades are fine; an uninstantiable recursive generic must fail in
+        # bounded work rather than loop. Mirrors modular's
+        # --elaboration-max-depth (default 128).
+        _ELAB_MAX_DEPTH = 128
+        if ELAB_DEPTH[0] > _ELAB_MAX_DEPTH:
+            raise RuntimeError(
+                f'elaborator expansion is {ELAB_DEPTH[0]} levels deep - '
+                f'infinite recursion?')
         obj, hit = cas.get_or_build(key, '.o', build)
         if not hit and 'data' in _cpp_bytes:
             # First build of this instantiation, and it genuinely needed a

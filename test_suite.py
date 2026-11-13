@@ -1307,7 +1307,14 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      #     with it.  The registry is the authority for both: a
                      #     census entry for a job that no longer carries an
                      #     `expect=` fails this very check.
-                     'formal-dylib': 4,
+                     # `formal-dylib` at 3 (was 4): the fourth failure it named
+                     # — the branching export whose termination stayed a named
+                     # obligation — is fixed on this branch (the CFG walk no
+                     # longer chokes on the dead stack-floor trap arm), so its
+                     # marker states 3 and the reader sees 3. The remaining
+                     # three are the overflow-trapping hole-count rows in
+                     # bugs/mid/FORMAL_svc_exit_handling_incomplete.md.
+                     'formal-dylib': 3,
                      'gimplerunner': 20,
                      'x86-containers': 1,
      # `ab-native` left this census with the A/B campaign: its bug doc was
@@ -5841,8 +5848,12 @@ def test_the_formal_doc_index_is_current():
     name order (or there is nothing for the sort to undo) AND the reduced order
     to be name order (or the sort is not there).
 
-    Four checks, each shown to fail on a planted defect:
-      - the block in OPEN_WORK.md is current;
+    The checks, each shown to fail on a planted defect:
+      - the block in OPEN_WORK.md is current, and no merge conflict marker was
+        committed into the hand-maintained half;
+      - every formal document under `bugs/` is a row, class directories
+        included — a planted nested document proves the walk is recursive
+        rather than a directory list, and a row names the path it resolves to;
       - `--check` is not vacuous: adding a document makes it fail;
       - it is not blind either: rewriting every claim in the file leaves it
         green (and `--strict`, which is the full comparison, red);
@@ -5888,6 +5899,66 @@ def test_the_formal_doc_index_is_current():
           '--check: the block comparison cannot see the hand-maintained half, '
           'so the marker this checks for went unnoticed through every gate '
           'until a reader found it')
+
+    # THE CLASS DIRECTORIES. `rows()` used to scan `bugs/` with one
+    # `os.listdir` — its comment said "all in one directory" — and the swarm's
+    # reorg moved formal documents into `bugs/mid/` (35e261a02 and its
+    # siblings) without touching it, so the queue rendered two rows for a tree
+    # carrying five and `--check` stayed green: it compared the block against
+    # the same truncated `rows()`. Two halves, because either alone can pass on
+    # a corpus accident. A PLANTED nested document proves the walk is recursive
+    # whatever the tree happens to hold; the real tree's own formal documents
+    # prove the queue a triage reader sees is complete. And a row names the
+    # PATH it resolves to (`bugs/mid/…`), because a bare stem would make a
+    # document moving between class directories invisible to `--check`, which
+    # is this bug again in another spelling.
+    def formal_docs_under(bugs):
+        out = set()
+        for dirpath, dirnames, filenames in os.walk(bugs):
+            # The same "not an input" rule the tool derives, so a derived
+            # directory cannot make the oracle disagree about a real document.
+            dirnames[:] = sorted(d for d in dirnames
+                                 if not F.checked_run.is_derived_dir(d))
+            for n in sorted(filenames):
+                if not n.endswith('.md') or n == 'OPEN_WORK.md':
+                    continue
+                p = os.path.join(dirpath, n)
+                if F.is_formal(n[:-3], F.doc_text(p)):
+                    out.add(os.path.relpath(p, os.path.dirname(bugs))
+                            .replace(os.sep, '/'))
+        return out
+
+    walked = formal_docs_under(os.path.join(F.ROOT, 'bugs'))
+    planted_root = os.path.join(F.ROOT, '.tmp', 'formal_doc_index_walk')
+    planted_bugs = os.path.join(planted_root, 'bugs')
+    shutil.rmtree(planted_root, ignore_errors=True)
+    os.makedirs(os.path.join(planted_bugs, 'a_class'))
+    planted = ('FORMAL_zz_one_directory', 'a_class/FORMAL_zz_nested')
+    for stem in planted:
+        with open(os.path.join(planted_bugs, stem + '.md'), 'w',
+                  encoding='utf-8') as f:
+            f.write(f'# {stem.rsplit("/", 1)[-1]}: a planted document\n')
+    real_root, real_bugs, real_claims = F.ROOT, F.BUGS, F.live_claims
+    F.ROOT, F.BUGS, F.live_claims = planted_root, planted_bugs, (lambda: {})
+    try:
+        probe = {r[0] + '.md' for r in F.rows()}
+    finally:
+        F.ROOT, F.BUGS, F.live_claims = real_root, real_bugs, real_claims
+        shutil.rmtree(planted_root, ignore_errors=True)
+    check('formal doc index: a document in a class subdirectory is a row — the '
+          'walk is recursive, not a directory list',
+          probe == {f'bugs/{stem}.md' for stem in planted},
+          f'the planted rows came back as {sorted(probe)}; one `os.listdir` is '
+          f'how 35e261a02 moved three formal documents into `bugs/mid/` and the '
+          f'queue kept listing two of five')
+
+    laid_out = {r[0] + '.md' for r in F.rows()}
+    check('formal doc index: every formal document under bugs/ is a row of the '
+          'queue, class directories included',
+          walked == laid_out,
+          f'the queue is the set `find bugs -name \'FORMAL_*.md\' -o -name '
+          f'\'LEAN_*.md\'` finds, and each row names the path it resolves to; '
+          f'missing from the queue: {sorted(walked - laid_out)}')
 
     path = os.path.join(HERE, 'bugs', 'OPEN_WORK.md')
     backup = os.path.join(F.ROOT, '.tmp', 'OPEN_WORK.md.bak')
