@@ -530,16 +530,16 @@ refused, and the refusal now names the *type* mismatch rather than a prefix.
 
 So the honest statement of the surface is **323 word-shaped calls are callable
 from a formal image today**, not the "0" this document published when the phase
-was written, and not the 430 of §2.2. The two gaps between the
+was written, and not the 431 of §2.2. The two gaps between the
 431 of the row above and 323 are
 both deliberate and both named (the three declarations added since the last
 re-measure are defined in `fire_runtime.c`, a default unit, so the next rebuild
-counts them as exported, not among the 56):
+counts them as exported, not among the 62):
 
 - **46 of the 369** the library exports take a `void *` parameter the
   frame-resident value model cannot obtain — a `MojoList *` or `MojoDict *` that
   only the heap could have produced. That is phase 6's work, not a bug.
-- **56 of the 431** the dylib does not export at all, because
+- **62 of the 431** the dylib does not export at all, because
   `runtime_dylib` links `runtime_units(arch, None)` — the core runtime, the
   coroutine runtime and the async scheduler — and not the OPTIONAL units
   (`fire_sqlite3.c`, `fire_ssl.c`, `fire_zlib.c`, `fire_ncurses.c`, which the

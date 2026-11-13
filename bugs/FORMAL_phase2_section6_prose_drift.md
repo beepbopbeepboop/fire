@@ -55,3 +55,30 @@ old gap beside the new total.
 **Done when:** `python3 test_formal_runtime_link.py` passes with the rows
 re-measured, and the two prose figures are read by a check that fails if they
 disagree with the measured triple.
+
+## Status (2026-11-13) — partial
+
+**Landed:**
+
+- `test_formal_doc_truth.py` gained a `phase2` group. It reads the §6 phase 2
+  triple (word / exported / reachable, both architectures) and the three prose
+  figures derived from it, and checks the prose against the rows and against
+  §2.2's word total. It needs no dylib and runs in `check` via `formal-doc-truth`.
+  Measured before the fix: 2 FAIL (`not the 430 of §2.2` vs §2.2's 431; `56` vs
+  the `431 − 369 = 62` the rows imply).
+- FORMAL.md §6 phase 2 prose corrected to match its own rows: `430` → `431` in
+  "not the … of §2.2", `56` → `62` in both the "of the 431 … not export" bullet
+  and the parenthetical "not among the …". After: `phase2` 15/15 PASS.
+
+**Still missing (the Done-when half, which this round did not run):**
+
+- The rows are not re-measured. 369 / 323 predate the 22 declarations in the
+  table, and the `phase2` group only proves the prose agrees with the published
+  rows, not that the rows are current. If the live exported count is not 369,
+  the rows and the prose both move again.
+- Next step: build the runtime dylib and run `python3 test_formal_runtime_link.py`
+  (`proofs` bucket, heavy). Take the live `len(linked)` and
+  `len(linked) - len(handles)` for arm64 and x86_64, rewrite the three rows and
+  the three prose figures from those values, and re-run
+  `test_formal_doc_truth.py phase2`. Then delete this doc once its named test
+  passes, and run `python3 tools/dangling_doc_refs.py --ratchet`.
