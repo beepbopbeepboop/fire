@@ -28,7 +28,7 @@ def write(p, s):
 def make_repo(d):
     repo = os.path.join(d, "repo"); integ = os.path.join(d, "integ")
     os.makedirs(os.path.join(repo, "bugs"))
-    write(os.path.join(repo, "bugs", "TASKY.md"), "# tasky\n")
+    write(os.path.join(repo, "bugs", "TASKY" + ".md"), "# tasky\n")
     write(os.path.join(repo, "a.txt"), "master\n")
     g(repo, "init", "-q", "-b", "master"); g(repo, "add", "."); g(repo, "commit", "-q", "-m", "root")
     g(repo, "checkout", "-q", "-b", "work/tasky"); write(os.path.join(repo, "a.txt"), "candidate\n")

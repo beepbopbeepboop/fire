@@ -613,6 +613,9 @@ SAID_TO_STATUS = {
     'refused': 'refused',
     'too-large': 'too-large',
     'sorry': 'sorry',
+    # The census records a crashed run as its own verdict (`fib`,
+    # `for_two_bounds`); it is a status the reader owns, like the others.
+    'crash': 'crash',
 }
 
 
