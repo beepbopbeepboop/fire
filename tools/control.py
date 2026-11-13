@@ -499,11 +499,16 @@ def external():
 
 
 def norm_claim(c):
-    """A bare doc name, a name with the .md suffix, and a bugs/ path all mean the same `bug:<name>` claim."""
+    """A bare doc name, a name with the .md suffix, and a bugs/ path, in the top directory or in any one class
+    directory (bugs/hard/, bugs/mid/, ...), all mean the same `bug:<name>` claim: the document is the identity, not
+    the directory the swarm has moved it to. Namespaced keys (bug:, gate:, ...) pass through. Any other path is refused
+    rather than passed through, because a literal path claim conflicts with nothing and admits a second holder."""
     if ":" in c:
         return c
-    m = re.fullmatch(r"(?:bugs/(?:hard/)?)?([A-Za-z0-9_]+?)(?:\.md)?", c)
-    return "bug:" + m.group(1) if m else c
+    m = re.fullmatch(r"(?:bugs/(?:[A-Za-z0-9_-]+/)?)?([A-Za-z0-9_]+?)(?:\.md)?", c)
+    if not m:
+        raise ValueError("not a bug document or claim key: %r" % c)
+    return "bug:" + m.group(1)
 
 
 def external_conflicts(claims, skip=None):
@@ -513,7 +518,11 @@ def external_conflicts(claims, skip=None):
 def cmd_claim(a):
     """Register claims for work started outside control, so control's workers (and the feeder) stay off it, and the
     caller learns at once if a control worker or another outside session already holds it. Run it again to renew."""
-    claims = [norm_claim(c) for c in a.claim]
+    try:
+        claims = [norm_claim(c) for c in a.claim]
+    except ValueError as e:
+        print("REFUSED: %s" % e)
+        sys.exit(2)
     with registry() as tasks:
         bad = [(n, c, oc) for n, t in tasks.items() if state_of(t) not in TERMINAL for c in claims for oc in t["claims"]
                if conflicts(c, oc)] + external_conflicts(claims, skip=a.name)

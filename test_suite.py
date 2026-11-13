@@ -4100,6 +4100,27 @@ UNREGISTERED = {
     # ── RED today: exit non-zero, and no gate, tally or coverage number
     #    reports any of it. The count is a re-run of every entry, not a
     #    reading of a bug doc.
+    #
+    # The estate audit of 2026-11-13 found `test_lsp_error_recovery.py` in no
+    # bucket. It cannot simply be registered: it is RED. Its source is a bare
+    # `asdf` at module scope, which this parser accepts as an ordinary
+    # expression statement (`ExprStmt`), not a syntax error — so
+    # `parse_module(recover=True)` records NO error, and `compile_to_gimple`
+    # compiles the module silently, `struct Good` included. Neither half of
+    # the assertion can hold, whatever parts 1-2 of the diagnostics work do.
+    # The behaviour it means to pin — a diagnostic for an unknown declaration
+    # while the following struct is still emitted — is pinned at a real
+    # unknown declaration by `test_lsp_error_recovery_part2.py` (registered as
+    # `reg-lsp-error-recovery-part2`). Whether this file should be rewritten
+    # against one or retired as a duplicate of that test is the open question
+    # in `bugs/mid/DIAGNOSTICS_lsp_error_recovery-part3.md`; listing it here
+    # is what keeps the estate check green without landing a red job.
+    'test_lsp_error_recovery.py':
+        'RED 2026-11-13: a bare `asdf` parses as an ordinary expression '
+        'statement, so no recovered parse error is recorded and compilation '
+        'succeeds — its "use of unknown declaration" assertion cannot hold. '
+        'The intended shape is pinned by `reg-lsp-error-recovery-part2`; see '
+        '`bugs/mid/DIAGNOSTICS_lsp_error_recovery-part3.md`.',
     'test_x86_64_encoders.py': "Two checks on formal/x86_64.py's encoder "
         'arithmetic, independent of the round-trip above.',
     # `formal/x86_64_model_fuzz.py` is a TOOL whose harness's own entry path
@@ -5848,8 +5869,12 @@ def test_the_formal_doc_index_is_current():
     name order (or there is nothing for the sort to undo) AND the reduced order
     to be name order (or the sort is not there).
 
-    Four checks, each shown to fail on a planted defect:
-      - the block in OPEN_WORK.md is current;
+    The checks, each shown to fail on a planted defect:
+      - the block in OPEN_WORK.md is current, and no merge conflict marker was
+        committed into the hand-maintained half;
+      - every formal document under `bugs/` is a row, class directories
+        included — a planted nested document proves the walk is recursive
+        rather than a directory list, and a row names the path it resolves to;
       - `--check` is not vacuous: adding a document makes it fail;
       - it is not blind either: rewriting every claim in the file leaves it
         green (and `--strict`, which is the full comparison, red);
@@ -5895,6 +5920,66 @@ def test_the_formal_doc_index_is_current():
           '--check: the block comparison cannot see the hand-maintained half, '
           'so the marker this checks for went unnoticed through every gate '
           'until a reader found it')
+
+    # THE CLASS DIRECTORIES. `rows()` used to scan `bugs/` with one
+    # `os.listdir` — its comment said "all in one directory" — and the swarm's
+    # reorg moved formal documents into `bugs/mid/` (35e261a02 and its
+    # siblings) without touching it, so the queue rendered two rows for a tree
+    # carrying five and `--check` stayed green: it compared the block against
+    # the same truncated `rows()`. Two halves, because either alone can pass on
+    # a corpus accident. A PLANTED nested document proves the walk is recursive
+    # whatever the tree happens to hold; the real tree's own formal documents
+    # prove the queue a triage reader sees is complete. And a row names the
+    # PATH it resolves to (`bugs/mid/…`), because a bare stem would make a
+    # document moving between class directories invisible to `--check`, which
+    # is this bug again in another spelling.
+    def formal_docs_under(bugs):
+        out = set()
+        for dirpath, dirnames, filenames in os.walk(bugs):
+            # The same "not an input" rule the tool derives, so a derived
+            # directory cannot make the oracle disagree about a real document.
+            dirnames[:] = sorted(d for d in dirnames
+                                 if not F.checked_run.is_derived_dir(d))
+            for n in sorted(filenames):
+                if not n.endswith('.md') or n == 'OPEN_WORK.md':
+                    continue
+                p = os.path.join(dirpath, n)
+                if F.is_formal(n[:-3], F.doc_text(p)):
+                    out.add(os.path.relpath(p, os.path.dirname(bugs))
+                            .replace(os.sep, '/'))
+        return out
+
+    walked = formal_docs_under(os.path.join(F.ROOT, 'bugs'))
+    planted_root = os.path.join(F.ROOT, '.tmp', 'formal_doc_index_walk')
+    planted_bugs = os.path.join(planted_root, 'bugs')
+    shutil.rmtree(planted_root, ignore_errors=True)
+    os.makedirs(os.path.join(planted_bugs, 'a_class'))
+    planted = ('FORMAL_zz_one_directory', 'a_class/FORMAL_zz_nested')
+    for stem in planted:
+        with open(os.path.join(planted_bugs, stem + '.md'), 'w',
+                  encoding='utf-8') as f:
+            f.write(f'# {stem.rsplit("/", 1)[-1]}: a planted document\n')
+    real_root, real_bugs, real_claims = F.ROOT, F.BUGS, F.live_claims
+    F.ROOT, F.BUGS, F.live_claims = planted_root, planted_bugs, (lambda: {})
+    try:
+        probe = {r[0] + '.md' for r in F.rows()}
+    finally:
+        F.ROOT, F.BUGS, F.live_claims = real_root, real_bugs, real_claims
+        shutil.rmtree(planted_root, ignore_errors=True)
+    check('formal doc index: a document in a class subdirectory is a row — the '
+          'walk is recursive, not a directory list',
+          probe == {f'bugs/{stem}.md' for stem in planted},
+          f'the planted rows came back as {sorted(probe)}; one `os.listdir` is '
+          f'how 35e261a02 moved three formal documents into `bugs/mid/` and the '
+          f'queue kept listing two of five')
+
+    laid_out = {r[0] + '.md' for r in F.rows()}
+    check('formal doc index: every formal document under bugs/ is a row of the '
+          'queue, class directories included',
+          walked == laid_out,
+          f'the queue is the set `find bugs -name \'FORMAL_*.md\' -o -name '
+          f'\'LEAN_*.md\'` finds, and each row names the path it resolves to; '
+          f'missing from the queue: {sorted(walked - laid_out)}')
 
     path = os.path.join(HERE, 'bugs', 'OPEN_WORK.md')
     backup = os.path.join(F.ROOT, '.tmp', 'OPEN_WORK.md.bak')

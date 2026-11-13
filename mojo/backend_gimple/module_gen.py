@@ -5449,6 +5449,7 @@ def gen_module_impl(self, stmts: list):
         if _local_generics:
             _stripped_generic_fns = [s for s in stmts
                                       if isinstance(s, FunctionDef) and s.name in _local_generics]
+            self._stripped_generic_fns = list(_stripped_generic_fns)
             stmts = [s for s in stmts
                      if not (isinstance(s, FunctionDef) and s.name in _local_generics)]
             for _sgf in _stripped_generic_fns:
@@ -5456,6 +5457,8 @@ def gen_module_impl(self, stmts: list):
                     if isinstance(_n, FunctionDef):
                         _async_fns.pop(id(_n), None)
                         _generator_fns.pop(id(_n), None)
+        else:
+            self._stripped_generic_fns = []
 
     if _gsrc:
         for _s in stmts:
@@ -6609,6 +6612,7 @@ def gen_module_impl(self, stmts: list):
         'variadic_bracket_params': 'MojoList *',
         'where_clause': 'int64_t',
         'where_else': 'int64_t',
+        'return_origin': 'char *',
         'line': 'int64_t',
         'col': 'int64_t',
     }
@@ -6923,7 +6927,10 @@ def gen_module_impl(self, stmts: list):
     self.struct_field_types['StructDef'] = {
         'name': 'char *', 'fields': 'MojoList *', 'methods': 'MojoList *',
         'decorators': 'MojoList *', 'comptime_aliases': 'MojoDict *',
-        'bases': 'MojoList *', 'line': 'int64_t', 'col': 'int64_t',
+        'bases': 'MojoList *',
+        # Parallel to `bases`: (base_name, where_text) per positional base.
+        'base_constraints': 'MojoList *',
+        'line': 'int64_t', 'col': 'int64_t',
         '_fieldwise_ctor_synthesized': '_Bool',
         'bracket_params': 'MojoList *',
         'type_param_names': 'MojoList *',
@@ -6947,6 +6954,7 @@ def gen_module_impl(self, stmts: list):
     }
     self.struct_field_types['TraitDef'] = {
         'name': 'char *', 'methods': 'MojoList *', 'decorators': 'MojoList *',
+        'bases': 'MojoList *',
         'line': 'int64_t', 'col': 'int64_t',
     }
     # Compiler-pre-seeded AST layout homes are initialized on GimpleGen so
@@ -7274,6 +7282,19 @@ def gen_module_impl(self, stmts: list):
             _omo = _as_structdef_node(_omo)
             _own_method_ids[id(_omo)] = {
                 id(_as_funcdef_node(_m)) for _m in _omo.methods}
+    # Declaration-time conditional conformance checks (trait conformance part 1).
+    from elaborate import (check_conformance_declarations as _check_conf_decls,
+                           check_conditional_rp_origin as _check_rp_origin)
+    _check_conf_decls(
+        [s for s in all_struct_defs if isinstance(s, StructDef)],
+        [s for s in all_struct_defs if isinstance(s, TraitDef)])
+    _all_stmts_for_rp = list(stmts)
+    _all_stmts_for_rp.extend(getattr(self, '_stripped_generic_fns', []) or [])
+    if self.do_imports or self.link_imports:
+        _all_stmts_for_rp.extend(imported_stmts or [])
+    _check_rp_origin(
+        _all_stmts_for_rp,
+        [s for s in all_struct_defs if isinstance(s, StructDef)])
     _merge_struct_inheritance(all_struct_defs)
     # id(inherited method node) -> home module name, resolved by finding
     # which struct ORIGINALLY declared it.

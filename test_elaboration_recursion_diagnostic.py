@@ -16,7 +16,13 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 FIRE = [sys.executable, os.path.join(ROOT, 'fire.py')]
 
 
-def _build_and_run(source, *, timeout=120):
+def _build_and_run(source, *, timeout=600):
+    # 600 s, not 120: the FIRST `fire.py build` on a cold tree compiles the
+    # runtime and the modules it needs, and was measured at 121 s on this
+    # machine (a loaded box with other lanes) against 20-35 s once that cache
+    # exists — so a 120 s per-build cap failed the job on first run and passed
+    # it on every later one. The suite's own job timeout (3600 s) still bounds
+    # a genuine hang, including the four builds this file makes.
     with tempfile.TemporaryDirectory() as d:
         src = os.path.join(d, 't.mojo')
         exe = os.path.join(d, 'a.out')
@@ -157,6 +163,37 @@ def test_string_spelling_bracket_arg_builds():
     assert r is not None and r.returncode == 0, (out, None if r is None else r.stdout)
 
 
+def test_concrete_unrenderable_type_arg_is_not_refused():
+    # The refusal is for an argument that can recurse without bound (`i + 1`,
+    # `i * 2`): a bracketed generic call inside an elaborated instantiation
+    # whose bracket argument PROGRESSES is an unbounded instantiation. A string
+    # literal and a `.uint32` dot-value are fixed comptime data, so the call must
+    # NOT be refused: std/math/math.mojo's `llvm_intrinsic["llvm.*", ...]` and
+    # std/builtin/_format_float.mojo's `_truncate[.uint32](...)` previously made
+    # the stdlib skip those modules. The same goes for a type expression the
+    # renderer cannot spell (a local `comptime T = ...` alias): only the
+    # arithmetic SHAPE is refused, not "the renderer came back blank".
+    # Only the build is asserted here. The nested call's VALUE is not yet correct
+    # (it takes the pre-existing stub path, which answers 0): see
+    # bugs/CODEGEN_nested_bracket_generic_call_stubs_to_zero.md.
+    src = (
+        'def tag[s: StaticString](x: Int) -> Int:\n'
+        '    return x\n'
+        '\n'
+        'def ident[dt: DType](x: Int) -> Int:\n'
+        '    return x\n'
+        '\n'
+        'def wrap[i: Int](x: Int) -> Int:\n'
+        '    return tag["abc"](x) + ident[.uint32](x) + i\n'
+        '\n'
+        'def main():\n'
+        '    print(wrap[1](5))\n'
+    )
+    rc, out, _ = _build_and_run(src)
+    assert rc == 0, 'concrete unrenderable type argument was refused:\n' + out
+    assert 'will cause an infinite loop' not in out and 'cannot materialize' not in out, out
+
+
 if __name__ == '__main__':
     tests = [
         test_direct_self_recursion_still_refused,
@@ -165,6 +202,7 @@ if __name__ == '__main__':
         test_finite_chain_few_levels_deep_builds,
         test_intrinsic_name_bracket_arg_builds,
         test_string_spelling_bracket_arg_builds,
+        test_concrete_unrenderable_type_arg_is_not_refused,
     ]
     for t in tests:
         t()

@@ -28,6 +28,7 @@ producer does not print.
 contains (`"needs the generic instantiated"` / `"link mode (fire build)"`), or restore
 "link-mode specialisation" to the message — prefer the assertion, because the message's current wording
 names the command a user should run. Then `python3 test_comptime_bracket_params.py` must be
-6 passed. Separately, this file (and `test_elaboration_recursion_diagnostic.py`) is in no bucket, so
-nothing in `make check`/`make gate` can observe it either way; decide whether it belongs in `regressions`
-before relying on it as coverage.
+6 passed. Separately, this file is in no bucket, so nothing in `make check`/`make gate`
+can observe it either way; decide whether it belongs in `regressions` before relying on it
+as coverage. (`test_elaboration_recursion_diagnostic.py` was in the same hole and is now
+registered as `reg-elaboration-recursion-diagnostic`; this one is still unregistered.)
