@@ -19,7 +19,8 @@ import monomorphize as mm
 from fire_compiler import (py_tokenize, Parser, FunctionDef, StructDef,
                           TraitDef, split_top_level_commas, VarDecl,
                           AssignStmt, IdentExpr, TupleExpr, StringLiteral,
-                          ComptimeVarStmt, CallExpr, align_value_error)
+                          ComptimeVarStmt, CallExpr, BinaryOp, UnaryOp,
+                          align_value_error)
 from mojo.middle import comptime as _comptime
 from mojo.middle.comptime import (eval_const, eval_const_bool_state, CONST_TRUE,
                                   CONST_FALSE, conforms_to)
@@ -697,6 +698,276 @@ def where_violation_error(kind: str, name: str, exc: 'WhereConformanceError'):
     return RuntimeError(
         f"error: invalid {kind} of '{name}': violated constraint\n"
         f"note: {type(exc).__name__}: {exc}")
+
+
+# ── Declaration-time conditional conformance checks ──────────────────
+
+def _trait_ancestor_closure(trait_name, trait_bases, cache):
+    """All ancestors of `trait_name` reachable through known trait bases."""
+    if trait_name in cache:
+        return cache[trait_name]
+    out = set()
+    stack = list(trait_bases.get(trait_name, []))
+    while stack:
+        cur = stack.pop()
+        if cur in out:
+            continue
+        out.add(cur)
+        for nxt in (trait_bases.get(cur) or []):
+            if nxt not in out:
+                stack.append(nxt)
+    cache[trait_name] = out
+    return out
+
+
+def _parse_constraint_expr(text):
+    if not text:
+        return None
+    try:
+        toks = py_tokenize(text)
+        expr = Parser(toks)._parse_expr(0)
+        return expr
+    except Exception:
+        return None
+
+
+def _constraint_atoms(expr):
+    """Return (kind, expr_or_parts) for implication reasoning, or None if unknown."""
+    if expr is None:
+        return None
+    if isinstance(expr, CallExpr) and isinstance(expr.func, IdentExpr) and expr.func.name == 'conforms_to':
+        if len(expr.args) == 2 and isinstance(expr.args[0], IdentExpr) and isinstance(expr.args[1], IdentExpr):
+            return ('conforms', expr.args[0].name, expr.args[1].name)
+        return None
+    if isinstance(expr, UnaryOp) and str(expr.op) == 'not':
+        inner = _constraint_atoms(expr.operand)
+        if inner is None:
+            return None
+        return ('not', inner)
+    if isinstance(expr, BinaryOp) and str(expr.op) in ('and', 'or'):
+        left = _constraint_atoms(expr.left)
+        right = _constraint_atoms(expr.right)
+        if left is None or right is None:
+            return None
+        return (str(expr.op), left, right)
+    if isinstance(expr, TupleExpr):
+        elems = getattr(expr, 'elements', []) or []
+        if len(elems) == 1:
+            return _constraint_atoms(elems[0])
+    if isinstance(expr, IdentExpr):
+        # Treat bare name as unknown/opaque for implication purposes.
+        return None
+    return None
+
+
+def _conforms_implies(a, b, trait_bases, cache):
+    # a, b are ('conforms', T, TraitName)
+    if a[1] != b[1]:
+        return False
+    ta, tb = a[2], b[2]
+    if ta == tb:
+        return True
+    return tb in _trait_ancestor_closure(ta, trait_bases, cache)
+
+
+def _atom_implies(a, b, trait_bases, cache):
+    if a is None or b is None:
+        return False
+    ak, bk = a[0], b[0]
+    if ak == 'and':
+        # conjunction implies a conjunct if either side does
+        return _atom_implies(a[1], b, trait_bases, cache) or _atom_implies(a[2], b, trait_bases, cache)
+    if ak == 'or':
+        # or implies b only when every disjunct does
+        return _atom_implies(a[1], b, trait_bases, cache) and _atom_implies(a[2], b, trait_bases, cache)
+    if bk == 'and':
+        # a implies (x and y) if it implies both
+        return _atom_implies(a, b[1], trait_bases, cache) and _atom_implies(a, b[2], trait_bases, cache)
+    if bk == 'or':
+        # a implies (x or y) if it implies either
+        return _atom_implies(a, b[1], trait_bases, cache) or _atom_implies(a, b[2], trait_bases, cache)
+    if ak == 'conforms' and bk == 'conforms':
+        return _conforms_implies(a, b, trait_bases, cache)
+    if ak == bk == 'not':
+        # conservative: not X implies not Y only if Y implies X? safer to require equality of atoms
+        return _atom_implies(b[1], a[1], trait_bases, cache)
+    # unknown / mixed: be conservative
+    return a == b
+
+
+def _constraint_implies_text(derived_text, base_text, trait_bases, cache):
+    if not derived_text or not base_text:
+        return False
+    if derived_text.strip() == base_text.strip():
+        return True
+    da = _constraint_atoms(_parse_constraint_expr(derived_text))
+    ba = _constraint_atoms(_parse_constraint_expr(base_text))
+    if da is None or ba is None:
+        # anything the checker cannot parse is ACCEPTED (no diagnostic)
+        return True
+    return _atom_implies(da, ba, trait_bases, cache)
+
+
+def _ancestors_with_paths(base_name, base_where, trait_bases, cache, path=None):
+    """Yield (ancestor, where_text, path_names) for all reachable ancestors including base."""
+    if path is None:
+        path = [base_name]
+    yield (base_name, base_where, list(path))
+    for parent in (trait_bases.get(base_name) or []):
+        # Parent traits are unconditional in this part's model.
+        yield from _ancestors_with_paths(parent, base_where, trait_bases, cache, path + [parent])
+
+
+def _as_str(x):
+    return '' if x is None else str(x)
+
+
+def _struct_is_conditionally_register_passable(sd):
+    base_constraints = list(getattr(sd, 'base_constraints', []) or [])
+    if not base_constraints:
+        base_constraints = [(_as_str(b), '') for b in (getattr(sd, 'bases', []) or [])]
+    for bname, wtext in base_constraints:
+        if _as_str(bname) == 'RegisterPassable' and _as_str(wtext):
+            return True
+    return False
+
+
+def _base_type_name(ann):
+    if ann is None:
+        return ''
+    s = _as_str(ann).strip()
+    # strip common prefixes? not needed for simple cases
+    if '[' in s:
+        s = s.split('[', 1)[0]
+    return s.strip()
+
+
+def _iter_function_defs(stmts):
+    for s in (stmts or []):
+        if isinstance(s, FunctionDef):
+            yield s
+        elif isinstance(s, StructDef):
+            for m in (getattr(s, 'methods', None) or []):
+                if isinstance(m, FunctionDef):
+                    yield m
+        elif isinstance(s, TraitDef):
+            for m in (getattr(s, 'methods', None) or []):
+                if isinstance(m, FunctionDef):
+                    yield m
+
+
+def check_conditional_rp_origin(stmts, struct_defs):
+    """Reject returning ref[x] tied to a conditionally-RegisterPassable arg."""
+    cond_rp = {}
+    for sd in (struct_defs or []):
+        if isinstance(sd, StructDef) and _struct_is_conditionally_register_passable(sd):
+            cond_rp[_as_str(getattr(sd, 'name', ''))] = sd
+    if not cond_rp:
+        return
+    for fn in _iter_function_defs(stmts):
+        origin = _as_str(getattr(fn, 'return_origin', '') or '')
+        if not origin:
+            continue
+        # find parameter named origin
+        param_type = None
+        is_ref_param = False
+        for pname, ptype in (getattr(fn, 'params', None) or []):
+            if _as_str(pname) == origin:
+                param_type = ptype
+                conv = (getattr(fn, 'param_convs', None) or {}).get(pname)
+                # a ref argument is exempt
+                if _as_str(conv) == 'ref':
+                    is_ref_param = True
+                break
+        if is_ref_param or param_type is None:
+            continue
+        base = _base_type_name(param_type)
+        if base in cond_rp:
+            raise RuntimeError(
+                f"cannot return '{origin}'s origin, because it might expand to a "
+                f"RegisterPassable type")
+
+
+def check_conformance_declarations(struct_defs, trait_defs):
+    """Declaration-time checks for conditional trait conformance (part 1)."""
+    trait_bases = {}
+    for td in (trait_defs or []):
+        if isinstance(td, TraitDef):
+            trait_bases[_as_str(getattr(td, 'name', ''))] = list(getattr(td, 'bases', []) or [])
+    cache = {}
+    errors = []
+    for sd in (struct_defs or []):
+        if not isinstance(sd, StructDef):
+            continue
+        sline = getattr(sd, 'line', 0) or 0
+        base_constraints = list(getattr(sd, 'base_constraints', []) or [])
+        if not base_constraints:
+            # fall back to unconditional bases if field missing/empty
+            base_constraints = [(_as_str(b), '') for b in (getattr(sd, 'bases', []) or [])]
+
+        bc_map = {}
+        for bname, wtext in base_constraints:
+            bc_map[_as_str(bname)] = _as_str(wtext) if wtext is not None else ''
+
+        # Conditional TrivialRegisterPassable not supported
+        for bname, wtext in base_constraints:
+            if _as_str(bname) == 'TrivialRegisterPassable' and _as_str(wtext):
+                errors.append((sline,
+                    "conditional conformance to 'TrivialRegisterPassable' is not supported"))
+                break
+
+        # Collect ancestor reachability by ancestor name
+        by_ancestor = {}
+        for bname, wtext in base_constraints:
+            bname = _as_str(bname)
+            wtext = _as_str(wtext) if wtext is not None else ''
+            for anc, awhere, path in _ancestors_with_paths(bname, wtext, trait_bases, cache):
+                by_ancestor.setdefault(anc, []).append((awhere, path, bname))
+
+        # Diamond: ancestor reached through different conditional paths must be explicit
+        for anc, entries in by_ancestor.items():
+            where_groups = {}
+            for aw, path, direct in entries:
+                where_groups.setdefault(aw, []).append((path, direct))
+            if len(where_groups) <= 1:
+                continue
+            if anc in bc_map:
+                continue
+            errors.append((sline,
+                f"ancestor trait '{anc}' is reached via multiple inheritance paths "
+                f"with different constraints; it must be explicitly listed in the "
+                f"conformance list with the desired constraint"))
+            break
+
+        # DerivedDoesNotImplyAncestor / UnconditionalDerivedConditionalAncestor
+        for bname, wtext in base_constraints:
+            bname = _as_str(bname)
+            wtext = _as_str(wtext) if wtext is not None else ''
+            broke = False
+            for anc in _trait_ancestor_closure(bname, trait_bases, cache):
+                if anc not in bc_map:
+                    continue
+                anc_where = bc_map[anc]
+                if not wtext and anc_where:
+                    errors.append((sline,
+                        f"constraint for '{bname}' does not imply constraint for "
+                        f"ancestor trait '{anc}'; strengthen the derived constraint "
+                        f"by adding the ancestor's constraint with 'and'"))
+                    broke = True
+                    break
+                if wtext and anc_where and not _constraint_implies_text(wtext, anc_where, trait_bases, cache):
+                    errors.append((sline,
+                        f"constraint for '{bname}' does not imply constraint for "
+                        f"ancestor trait '{anc}'; strengthen the derived constraint "
+                        f"by adding the ancestor's constraint with 'and'"))
+                    broke = True
+                    break
+            if broke:
+                break
+
+    if errors:
+        line, msg = sorted(errors, key=lambda x: x[0])[0]
+        raise RuntimeError(f"error: {msg}")
 
 
 def _split_where_message(expr):
