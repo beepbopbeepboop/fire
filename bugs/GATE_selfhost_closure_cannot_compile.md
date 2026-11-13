@@ -66,3 +66,31 @@ int and bool branches are only accepted by accident.
 2026-11-12: 1-6 landed. Fresh `fire.ci` compiles clean; `make stage2/mojo`
 links an 18 MB binary; no bare `compile_to_gimple_parallel_frozen` call
 survives. `test_selfhost.py` re-running.
+
+2026-11-12 (later): the `comptime.py:470` float->pointer error is fixed
+(`759f02c2e`) and `make mojoc` gets much further. The next blocker is a
+different one: a function whose inferred return type is a pointer returning a
+`double` — fixed the same way. The regex tables then surfaced
+`non-trivial conversion in 'var_decl'` (an array decaying to a pointer inside a
+`__GIMPLE` body), fixed separately by `aacfc103f` (`regex_compile.table_ref`
+spells `&name[0]` at every use). One error still stands from the last
+`fire.py build fire.py`: `assignment to 'char *' from 'int64_t'` (reported at
+`module_gen.py:13769`, though that `#line` marker is drifted — the enclosing
+function gcc names is `fire_compiler_Parser__merge_string_literals`).
+
+2026-11-12 (later): the `module_loader.py:1379` error is root-caused and fixed.
+`_mojo_type` reaches `module_loader` through a FUNCTION-BODY import
+(`from gimple_codegen import _mojo_type` inside `_mojo_type_to_c`), and
+gen_module's early `/* from <mod> */` extern block ran before any of
+`_func_qualifier`'s tiers were populated, so `_func_csym('_mojo_type')`
+returned a bare / unsuffixed name. The extern therefore declared
+`extern char * _mojo_type (char * ann)` while every call site — resolved later,
+once the home module and overload suffix were known — emitted
+`mojo_middle_types__mojo_type_d719e0`: gcc "implicit declaration of function",
+then "conflicting types" against the real prototype, plus a weak
+`int64_t _mojo_type (...)` "unavailable in compiled mode" stub from the call
+sites that still saw the bare name. Two fixes in `emit_funcs.py`:
+`_func_qualifier` gained a final tier reading the DEFINING module from the
+symbol's own `imported_symbols` entry, and `_effective_param_types` gained the
+same entry's `c_parameters` (name-stripped) as a last-resort overload-hash
+input. Reproduced minimally with a 4-line module + `--dump-full`.

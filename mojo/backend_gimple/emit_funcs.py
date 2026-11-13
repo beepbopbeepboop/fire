@@ -2572,7 +2572,44 @@ def _effective_param_types(gen, bare_name: str) -> list | None:
         pts = _imported_def_pts(gen, bare_name)
     if pts is None:
         pts = gen.func_param_types.get(bare_name)
+    if pts is None:
+        pts = _import_entry_param_types(gen, bare_name)
     return pts
+
+
+def _import_entry_param_types(gen, bare_name: str) -> list | None:
+    """Bare c parameter types read out of the symbol's OWN import entry.
+
+    The designated tiers above are all populated by registration passes that
+    run after gen_module's early `/* from <mod> */` extern block, so on that
+    first pass they are empty and `_overload_suffix` hashed the empty list —
+    the extern went out as `extern char * mojo_middle_types__mojo_type
+    (char * ann)` (right qualifier, NO suffix) while every call site,
+    resolved later, emitted `mojo_middle_types__mojo_type_d719e0`. Two spellings
+    of one function: gcc reports the call as an implicit declaration, then
+    "conflicting types" against the real prototype.
+
+    `imported_symbols[name]['c_parameters']` is the one store that IS filled by
+    then, but it keeps the parameter NAMES (`['char * ann']`) while the
+    overload hash is defined over the BARE types (`['char *']` -> `_d719e0`).
+    Strip the trailing identifier and the hash matches the defining module's
+    own compile. Guarded on a `'signature'` being present so a module ALIAS
+    entry (`{module, return_type: 'unknown'}`) can never be hashed as a
+    function.
+    """
+    _info = _as_dict(_as_dict(getattr(gen, 'imported_symbols', None)).get(bare_name))
+    if not _info or not _as_str(_info.get('signature')):
+        return None
+    _cps = _info.get('c_parameters')
+    if not isinstance(_cps, list) or not _cps:
+        return None
+    _out = []
+    for _cp in _cps:
+        _s = _as_str(_cp)
+        if not _s:
+            continue
+        _out.append(re.sub(r'\s+[A-Za-z_][A-Za-z0-9_]*$', '', _s))
+    return _out or None
 
 
 def _overload_suffix(gen, bare_name: str) -> str:
@@ -3074,6 +3111,32 @@ def _func_qualifier(gen, bare_name: str) -> str:
                 if _sanitize_qualifier(_lq) != _cand:
                     raise RuntimeError(_ambiguous_func_import_error(bare_name))
         return _cand
+    # Tier 4 — the symbol's OWN import entry. Every writer that records a
+    # genuine imported function (`_register_sym`, `_gen_stmt_FromImportStmt`'s
+    # body pass, the re-export resolver) stores the DEFINING module in
+    # `imported_symbols[name]['module']`, and `_func_csym` needs that module
+    # to build the same mangled symbol the defining module's own compile
+    # emitted. Tiers 1-3 are all populated by the import scan, which runs
+    # AFTER gen_module's early `/* from <mod> */` extern block — so on that
+    # first pass every tier misses and this name used to come back
+    # unqualified. The extern was then emitted as `extern char * _mojo_type
+    # (...)` while the call sites, resolved later, emitted
+    # `mojo_middle_types__mojo_type_d719e0` — "implicit declaration of
+    # function ... did you mean ..." plus a conflicting weak
+    # `int64_t _mojo_type (...)` "unavailable in compiled mode" stub from the
+    # call sites that still saw the bare name.
+    #
+    # Guarded on a `'signature'` being present (and `return_type` not
+    # `unknown`) so a module ALIAS entry — `{module, return_type: 'unknown'}`,
+    # written by `_gen_stmt_ImportStmt`/the submodule-alias path — can never
+    # be mistaken for a function and inherit a bogus qualifier.
+    _imp4 = getattr(gen, 'imported_symbols', None)
+    if _imp4 and bare_name in _imp4:
+        _info4 = _as_dict(_imp4[bare_name])
+        if _as_str(_info4.get('signature')) and _info4.get('return_type') != 'unknown':
+            _mod4 = _as_str(_info4.get('module'))
+            if _mod4 and _mod4 != 'unknown':
+                return _sanitize_qualifier(_mod4)
     return ''
 
 
