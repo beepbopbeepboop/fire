@@ -5041,6 +5041,21 @@ def _expr_constraint_text(node):
         return f"{left} {op} {right}"
     if isinstance(node, BoolLiteral):
         return "True" if node.value else "False"
+    if isinstance(node, IntLiteral):
+        raw = getattr(node, 'raw', None)
+        return str(raw) if raw is not None else str(getattr(node, 'value', 0))
+    if isinstance(node, FloatLiteral):
+        raw = getattr(node, 'raw', None)
+        return str(raw) if raw is not None else str(getattr(node, 'value', 0.0))
+    if isinstance(node, SubscriptExpr):
+        obj = _expr_constraint_text(node.obj)
+        idx = node.index
+        if isinstance(idx, TupleExpr):
+            elems = idx.elements if hasattr(idx, 'elements') else []
+            inner = ", ".join(_expr_constraint_text(e) for e in elems)
+        else:
+            inner = _expr_constraint_text(idx)
+        return f"{obj}[{inner}]"
     if isinstance(node, TupleExpr):
         elems = node.elements if hasattr(node, 'elements') else []
         if len(elems) == 1:
