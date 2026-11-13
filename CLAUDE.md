@@ -166,6 +166,9 @@ one-line recipes that call it, so `make check-<x>` and
 
     make check              # the everyday SUBSET of the gate, -j ncpu, one tally
     make gate               # THE gate: check plus coro/stdlib/native/bootstrap
+    make check-orchestrator # the swarm/registry/reclass/landing tests. NOT in
+                            # check: they exercise git-facing fleet passes, and
+                            # the everyday loop spawns no git and needs no git
     make bootstrap          # just the 3-stage self-host chain
     gmake -j1 check         # strictly serial, every job's output streamed live
     make check J=4          # 4 at a time (works with either make; Apple's 3.81
@@ -442,11 +445,11 @@ mark it with a reason and a bug-doc link.
   compiled path ignored decorators too, so the diff was clean). A new
   interpreter-oracle bug belongs there, not in `test_runtime_diff.py`.
 
-Current `EXPECTED` entries, and the one `DISABLED` entry. **`python3
-tools/suite.py --list` is the census**, not this table — and since 2026-10-01 it
-is the only census that can be: every registered test is now in a bucket unless
-it declares `dep=True` (one does, `prooflib`), which `test_suite.py` checks in
-both directions. So the `[]` column the eleven ungated `expect=` jobs used to
+Current `EXPECTED` entries. **`python3 tools/suite.py --list` is the census** for
+both markers, not this table — and since 2026-10-01 it is the only census that
+can be: every registered test is now in a bucket unless it declares `dep=True`
+(one does, `prooflib`), which `test_suite.py` checks in both directions. So the
+`[]` column the eleven ungated `expect=` jobs used to
 print cannot be produced again by accident, which is what the two bugs about
 gated-but-never-run registrations were about; both of their docs are deleted
 with their fixes.

@@ -1,4 +1,4 @@
-SPLIT: part1 landed (Array/FixedSizeArray ctor tracked), part2 landed in this branch (Span over Array inherits element type), CODEGEN_simd_and_array_values_erase_to_int64-part3, CODEGEN_simd_and_array_values_erase_to_int64-part4, CODEGEN_simd_and_array_values_erase_to_int64-part5
+SPLIT: CODEGEN_simd_and_array_values_erase_to_int64-part1, CODEGEN_simd_and_array_values_erase_to_int64-part2, CODEGEN_simd_and_array_values_erase_to_int64-part3, CODEGEN_simd_and_array_values_erase_to_int64-part4
 
 # CODEGEN: SIMD values and `Array`/`Span` elements erase to `int64_t`, so their real type is unknown
 
@@ -92,14 +92,28 @@ from the annotation it is written with.
    scalar C type of `X`, including when `X` is a `comptime` local bound to
    `DType.float32`/`float64`.
 
-## Exact next step
+## Remaining work (replanned 2026-11-13)
 
-(1) landed in this worktree: `_lower_call`'s generic container constructors arm
+The container and literal-dtype halves have landed (see above and the pins in
+`test_codegen_erased_container_values_pins.py`). What still erases is the type
+*spelling* and a container that crosses a call boundary; each is filed as its
+own mid part under `bugs/mid/`:
+
+- `CODEGEN_simd_and_array_values_erase_to_int64-part1.md` — a module-local
+  `alias` of a type expands in annotations (parameter, return, local, element
+  type).
+- `CODEGEN_simd_and_array_values_erase_to_int64-part2.md` — the same alias
+  expands when it is the callee of a constructor (`F2(1.0)`, `A4(fill=...)`).
+- `CODEGEN_simd_and_array_values_erase_to_int64-part3.md` — a `comptime`-bound
+  float DType resolves in a signature, an annotated local, and a SIMD
+  constructor's dtype argument.
+- `CODEGEN_simd_and_array_values_erase_to_int64-part4.md` — `Array` /
+  `FixedSizeArray` parameters keep the element type their annotation declares.
+
+`(1)` landed in this worktree: `_lower_call`'s generic container constructors arm
 now handles `Array`/`FixedSizeArray`, builds `mojo_list_new()`, records
 `gen._elem_types[t]` from the bracket's first type argument, and initializes
 `N` elements from `fill=` when statically known. The probe emits a tracked
-`MojoList *` and no longer reads elements via `mojo_list_get_int`. Start with
-part 2 (`Span(<tracked container>)` inherits the element type), per
-`CODEGEN_simd_and_array_values_erase_to_int64-part2.md`. Byte-identical
+`MojoList *` and no longer reads elements via `mojo_list_get_int`. Byte-identical
 generated C is NOT expected for these representation changes; gate follow-ups
 with the `test/math` files plus `test_codegen_local_bindings_cache.py`.

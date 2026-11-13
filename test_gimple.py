@@ -14633,6 +14633,46 @@ main()
     _run_isolated(lambda: test_re_sub_with_inline_lambda(),
                   'test_re_sub_with_inline_lambda')
 
+    def test_re_sub_with_capturing_lambda():
+        """A re.sub() whose second argument is a CAPTURING lambda (one that
+        reads an enclosing local) must be dispatched down the callback path,
+        with the callback and its env unpacked from the lambda's
+        MojoBoundMethod (fn, self) and passed to mojo_regex_sub_fn. Before the
+        fix, `_re_sub_repl_is_callback` answered False for any capturing lambda,
+        so the lambda's value went to mojo_regex_sub_str as a replacement
+        string; a later fix refused it outright, which made `module_gen.py`
+        (its `@@CSYM:` resolution) uncompilable. That is the shape tested here.
+        """
+        global _PASS, _FAIL
+        name = "re_sub_with_capturing_lambda"
+        src = r'''
+import re
+
+def main():
+    k = "N"
+    print(re.sub(r"[0-9]+", lambda _m: k, "a1b22"))
+main()
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        if ok:
+            if ('mojo_regex_sub_fn' not in c_src
+                    or 'mojo_bound_method_fn' not in c_src
+                    or 'mojo_bound_method_self' not in c_src):
+                print(f"FAIL  {name}: capturing lambda was not unpacked into (fn, env) for the callback")
+                _FAIL += 1
+                return
+            print(f"PASS  {name}")
+            _PASS += 1
+            return
+        print(f"FAIL  {name}")
+        print("      --- gcc stderr ---")
+        for line in stderr.splitlines():
+            print(f"      {line}")
+        _FAIL += 1
+
+    _run_isolated(lambda: test_re_sub_with_capturing_lambda(),
+                  'test_re_sub_with_capturing_lambda')
+
     def test_regex_scan_in_a_method_body_compiles_and_matches_cpython():
         """`for m in PAT.finditer(s)` inside a struct method — a `__GIMPLE`
         body, which gcc reads as raw GIMPLE under `-x c` (the build's flags) —
@@ -14826,6 +14866,43 @@ def g(x: SIMD[Float64, 1]) -> Bool:
     var b = x._to_bits_signed()
     return (b & 0x7FF).eq(0)
 """), 'gate_stdlib_syntax_float_bit_accessors')
+
+    # gate-stdlib-syntax: a FLOAT Array's fill value is not a float.
+    #
+    # The Array fill-unroll coerces its fill value to the element type, and a
+    # `{}` fill lowers to a `MojoDict *`. C lets a pointer convert only to an
+    # INTEGER type, so the generic `(double)<ptr>` cast the coercion used to
+    # emit is rejected outright -- gcc: "pointer value used where a
+    # floating-point was expected". Real: test/algorithm/test_vectorize.mojo's
+    # `Array[Float32, buf_len](fill={})` (twice), which only became reachable
+    # when b0910af72 made the width arm fire for a comptime width; the red
+    # that produced is `stdlib-syntax`. The fix is the same int-word
+    # conversion every other pointer->number coercion in emit_resolve.py uses.
+    #
+    # The append count is asserted, not just "gcc accepted it": a dead width
+    # arm would also compile, and that is the regression (b0910af72) this
+    # would otherwise stop watching.
+    def _test_array_float_fill_from_a_container():
+        global _PASS, _FAIL
+        name = "gate_stdlib_syntax_array_float_fill_pointer_coercion"
+        ok, c_src, stderr = gimple_compiles("""\
+def f() -> Float64:
+    comptime n = 23
+    var a = Array[Float32, n](fill={})
+    return Float64(a[0])
+""")
+        appends = c_src.count('mojo_list_append_double')
+        if ok and appends == 23:
+            print(f"PASS  {name}")
+            _PASS += 1
+            return
+        print(f"FAIL  {name}: ok={ok} appends={appends} (want 23)")
+        for line in stderr.splitlines()[:8]:
+            print(f"      {line}")
+        _FAIL += 1
+
+    _run_isolated(_test_array_float_fill_from_a_container,
+                  'gate_stdlib_syntax_array_float_fill_pointer_coercion')
 
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.

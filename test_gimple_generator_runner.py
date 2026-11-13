@@ -1235,6 +1235,121 @@ def main():
         "_get_reader")
 
 
+def _regression_with_tabled_open_in_generator():
+    # COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2: a `with open(...)`
+    # (and a call through a parameter whose default is builtin open) in a plain
+    # compiled generator body (cpp C++20 coroutine path) must evaluate the
+    # manager, bind the alias, run the body, and close on the normal path.
+    # `*, start=[]` forces the cpp coroutine path (rejects the A3 stack-switch
+    # pass).
+    _p = os.path.join('.tmp', '_part2_open_regression.txt')
+    with open(_p, 'w', newline='') as _f:
+        _f.write('hello\nworld\n')
+    try:
+        mojo_src = f"""\
+def gen_read(p, *, start=[]):
+    with open(p) as f:
+        yield f.read()
+
+def gen_read_param(p, *, _open=open, start=[]):
+    with _open(p, newline='') as f:
+        yield f.read()
+
+def main():
+    p = r'''{_p}'''
+    for x in gen_read(p):
+        print(repr(x))
+    for x in gen_read_param(p):
+        print(repr(x))
+
+main()
+"""
+        cpy_src = f"""\
+def gen_read(p):
+    with open(p) as f:
+        yield f.read()
+
+def gen_read_param(p, _open=open):
+    with _open(p, newline='') as f:
+        yield f.read()
+
+def main():
+    p = r'''{_p}'''
+    for x in gen_read(p):
+        print(repr(x))
+    for x in gen_read_param(p):
+        print(repr(x))
+
+main()
+"""
+        test_generator_matches_cpython(
+            "cpp_with_tabled_open_in_generator",
+            mojo_src,
+            cpy_src)
+    finally:
+        try:
+            os.remove(_p)
+        except Exception:
+            pass
+
+    # Untabled manager default must still be refused by name.
+    src = """\
+class CM:
+    pass
+
+def make_cm():
+    return CM()
+
+def g(*, _cm=make_cm, start=[]):
+    with _cm() as x:
+        yield 1
+
+def main():
+    for v in g():
+        print(v)
+main()
+"""
+    test_generator_refused(
+        "cpp_with_tabled_open_in_generator_untabled_refusal",
+        src,
+        "`with <context manager> as <name>:` over a manager")
+
+def _regression_raise_mixed_tuple_literal_in_generator():
+    # A compiled generator (cpp coroutine path) raising with a mixed-scalar
+    # tuple message like `raise NotImplementedError((header, line))` must
+    # get past the cpp coroutine lowering (the pre-fix refusal:
+    # "a list-literal argument with mixed element types is not supported at a
+    # compiled-generator call in a coroutine body" on the raise-message tuple)
+    # and build the message as a char* repr string. Directly exercises the
+    # cpp coroutine generator unit that parse_table hit.
+    global _PASS, _FAIL
+    name = "cpp_raise_mixed_tuple_literal_in_generator"
+    try:
+        import fire_compiler as _fc
+        src = (
+            "def gen(header, code):\n"
+            "    raise NotImplementedError((header, code))\n"
+            "    yield 1\n"
+        )
+        stmts = _fc.Parser(_fc.py_tokenize(src)).parse_module()
+        fn = stmts[0]
+        g = gimple_codegen.GimpleGen()
+        g._cpp_module_fn_names = set()
+        g._cpp_early_global_names = set()
+        cpp_text, _value_ctype, _base, _params = g._gen_cpp_generator_unit(fn)
+        # The raise must lower to a throw with a string-built message (no
+        # mixed-element list-literal refusal), so the message is a char*.
+        if "throw _MojoCppExc" not in cpp_text:
+            raise AssertionError("no throw _MojoCppExc in generated cpp coroutine unit")
+        if "mojo_str_cat_free" not in cpp_text and "strdup" not in cpp_text:
+            raise AssertionError("raise message was not lowered to a string repr")
+        print(f"PASS  {name}")
+        _PASS += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+
+
 def _cpp_coroutine_builtin_module_constant():
     # A constant read off a module MARKER that is NEVER INLINED — `os` and
     # `signal` bind to an opaque marker with no compiled body in this TU, so
@@ -10076,6 +10191,8 @@ def main():
     _cpp_for_over_callable_local_is_named()
     _regression_read_table_callable_reader()
     _regression_read_table_callable_reader_untabled_refusal()
+    _regression_with_tabled_open_in_generator()
+    _regression_raise_mixed_tuple_literal_in_generator()
     _cpp_coroutine_builtin_module_constant()
     _cpp_coroutine_exc_ctor_value()
 

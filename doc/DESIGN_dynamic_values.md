@@ -78,6 +78,6 @@ Phase 3, retire the address-tagged box on the dynamic path, once no consumer use
 
 ## Evidence
 
-- `mixed_str_first` and the each-kind print on master: see `doc/` history and `CODEGEN_dict_slot_reads_refuse_compiler_sources.md`.
+- `mixed_str_first` and the each-kind print on master: see `doc/` history (fixed by dict-slot mixed-kind handling).
 - The chain's commit `ab1358422` fixes the each-kind print with a per-temp record of word and kind. It is a partial,
   parallel mechanism; it is not the consolidated design above, and it conflicts with master's boxed read path.

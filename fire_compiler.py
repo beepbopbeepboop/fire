@@ -790,6 +790,8 @@ class FunctionDef:
     # directions, so the flag is explicit.
     captures: list = field(default_factory=list)
     has_capture_list: bool = False
+    # Origin parameter name of a `ref[x]`/`mut[x]` return, or "" when absent.
+    return_origin: str = ""
     line: int = 0
     col: int = 0
 
@@ -887,6 +889,12 @@ class StructDef:
     align_expr: object = None
     comptime_aliases: dict = field(default_factory=dict)  # name -> value expr
     bases: list = field(default_factory=list)  # base class/struct names, e.g. `struct Child(Base):`
+    # Parallel to `bases`: one (base_name, where_text) per positional trait
+    # base. `where_text` is the source text of a conditional conformance
+    # (`struct S[T](Copyable where conforms_to(T, Copyable)):`) or "" when the
+    # base is unconditional. Kept separate so readers of `bases` (names only)
+    # are unchanged.
+    base_constraints: list = field(default_factory=list)
     # Keyword arguments in the class/struct base list, e.g.
     # `class M(TypedDict, extra_items=bool, closed=True):` (PEP 728/692).
     # Each entry is (name, value_expr).  The parser used to consume and
@@ -961,6 +969,9 @@ class TraitDef:
     name: str
     methods: list[FunctionDef]
     decorators: list = field(default_factory=list)
+    # Parent trait names in declaration order, e.g. `trait Sub(Base):`.
+    # Parsed from the parenthesised trait list; empty when none declared.
+    bases: list = field(default_factory=list)
     line: int = 0
     col: int = 0
 
@@ -2579,6 +2590,74 @@ def _check_variadic_element_types(stmts, filename) -> None:
                          f"must be an 'inferred' parameter")
     if lines:
         raise RuntimeError("\n".join(lines))
+
+
+def _module_name_from_filename(filename: str | None) -> str | None:
+    if not filename:
+        return None
+    import os
+    base = os.path.basename(filename)
+    if not base:
+        return None
+    name, _ext = os.path.splitext(base)
+    return name or None
+
+
+def _docstring_block_abs_loc(block, node_line: int, node_col: int):
+    # node positions are 1-based within the parsed block snippet.
+    if node_line <= 1:
+        return (block.line, block.col + max(node_col - 1, 0))
+    return (block.line + node_line - 1, node_col)
+
+
+def _check_docstring_self_imports(stmts, filename) -> None:
+    """Reject `import X` / `from X import ...` (and equivalent self-imports)
+    inside mojo docstring code blocks of module X."""
+    import os
+    module_name = _module_name_from_filename(filename)
+    if not module_name:
+        return
+    try:
+        from mojo.middle.docstring_blocks import extract_module_docstring_mojo_blocks
+    except Exception:
+        return
+    # Read source text for accurate positions when possible.
+    source = None
+    if filename and os.path.exists(filename):
+        try:
+            with open(filename, "r", encoding="utf-8") as f:
+                source = f.read()
+        except Exception:
+            source = None
+    try:
+        blocks = extract_module_docstring_mojo_blocks(stmts, source=source)
+    except Exception:
+        return
+    for block in blocks:
+        try:
+            block_stmts = Parser(py_tokenize(block.code)).parse_module()
+        except Exception:
+            # A non-parsing doc example is not a self-import diagnostic.
+            continue
+        for st in block_stmts:
+            imported_modules = []
+            if isinstance(st, ImportStmt):
+                if st.module:
+                    imported_modules.append((st.module, getattr(st, "line", 1), getattr(st, "col", 1)))
+                extra = getattr(st, "extra", None) or []
+                for mod, _alias in extra:
+                    if mod:
+                        imported_modules.append((mod, getattr(st, "line", 1), getattr(st, "col", 1)))
+            elif isinstance(st, FromImportStmt):
+                mod = st.module or ""
+                if mod and not mod.startswith("."):
+                    imported_modules.append((mod, getattr(st, "line", 1), getattr(st, "col", 1)))
+            for mod, ln, col in imported_modules:
+                root = mod.split(".", 1)[0]
+                if root == module_name:
+                    abs_line, abs_col = _docstring_block_abs_loc(block, ln or 1, col or 1)
+                    loc = f"{filename}:{abs_line}:{abs_col}: " if filename else f"{abs_line}:{abs_col}: "
+                    raise SyntaxError(f"{loc}error: module '{module_name}' cannot import itself")
 
 
 def _module_function_defs(stmts) -> dict:
@@ -4919,7 +4998,7 @@ def _canon_conv(conv: str):
 # ── Code generator ─────────────────────────────────────────────────
 
 
-def align_value_error(val):
+def align_value_error(val: int):
     """Shared @align value rule: None if valid, else a diagnostic suffix."""
     try:
         v = int(val)
@@ -4932,6 +5011,65 @@ def align_value_error(val):
     return None
 
 
+def _expr_constraint_text(node):
+    """Best-effort source-like text for a conditional-conformance `where`
+    expression. Only the forms needed for declaration-time implication checks
+    are rendered precisely (conforms_to calls, and/or/not, names, members,
+    parens/tuples). Anything else degrades to a conservative string so an
+    unknown shape is never mis-interpreted as a known one."""
+    if node is None:
+        return ""
+    if isinstance(node, IdentExpr):
+        return str(node.name)
+    if isinstance(node, MemberExpr):
+        obj = _expr_constraint_text(node.obj)
+        return f"{obj}.{node.member}"
+    if isinstance(node, CallExpr):
+        func = _expr_constraint_text(node.func)
+        args = ", ".join(_expr_constraint_text(a) for a in (node.args or []))
+        return f"{func}({args})"
+    if isinstance(node, SubscriptExpr):
+        obj = _expr_constraint_text(node.obj)
+        idx = _expr_constraint_text(node.index)
+        return f"{obj}[{idx}]"
+    if isinstance(node, UnaryOp):
+        op = str(node.op)
+        operand = _expr_constraint_text(node.operand)
+        if op == 'not':
+            return f"not {operand}"
+        return f"{op}{operand}"
+    if isinstance(node, BinaryOp):
+        op = str(node.op)
+        left = _expr_constraint_text(node.left)
+        right = _expr_constraint_text(node.right)
+        return f"{left} {op} {right}"
+    if isinstance(node, BoolLiteral):
+        return "True" if node.value else "False"
+    if isinstance(node, IntLiteral):
+        raw = getattr(node, 'raw', None)
+        return str(raw) if raw is not None else str(getattr(node, 'value', 0))
+    if isinstance(node, FloatLiteral):
+        raw = getattr(node, 'raw', None)
+        return str(raw) if raw is not None else str(getattr(node, 'value', 0.0))
+    if isinstance(node, SubscriptExpr):
+        obj = _expr_constraint_text(node.obj)
+        idx = node.index
+        if isinstance(idx, TupleExpr):
+            elems = idx.elements if hasattr(idx, 'elements') else []
+            inner = ", ".join(_expr_constraint_text(e) for e in elems)
+        else:
+            inner = _expr_constraint_text(idx)
+        return f"{obj}[{inner}]"
+    if isinstance(node, TupleExpr):
+        elems = node.elements if hasattr(node, 'elements') else []
+        if len(elems) == 1:
+            return f"({_expr_constraint_text(elems[0])})"
+        return "(" + ", ".join(_expr_constraint_text(e) for e in elems) + ")"
+    if isinstance(node, StringLiteral):
+        return str(node.value)
+    return f"<{type(node).__name__}>"
+
+
 class Parser:
     _tok: list
     _pos: int
@@ -4941,6 +5079,8 @@ class Parser:
     _struct_param_names: list
     _known_traits: set
     _lazy_import_blockers: list
+    # Recovered parse diagnostics (see `self.errors = []` in __init__).
+    errors: list
     # The `*Name: Type` variadic bracket parameters of the LAST bracket list
     # parsed (`_parse_generic_params_capture`), read once by `_parse_funcdef`
     # to fill `FunctionDef.variadic_bracket_params`. A plain attribute
@@ -4962,6 +5102,11 @@ class Parser:
         self._lazy_import_blockers = []
         # Empty until a bracket list is parsed; see the class-level note.
         self._last_bracket_variadics = []
+        # Diagnostics recorded while parsing in recovery mode. Each entry is a
+        # SyntaxError (or a string message) describing a recovered parse error.
+        # `parse_module(recover=True)` collects errors here and continues; the
+        # default non-recovering path still raises on the first error.
+        self.errors = []
         # `comptime NAME = <rhs>` the parser could not parse, as
         # `[(loc, text, exception_text), ...]`. A comptime right-hand side has
         # two very different fates that used to be INDISTINGUISHABLE: a
@@ -5264,15 +5409,34 @@ class Parser:
                         depth -= 1
                     elif t.kind == "EOF": break
         ret = None
+        return_origin = ""
         _ret_tok = self._peek()
         if self._peek().kind == "ARROW":
             self._advance()
             # Drop `ref` lifetime prefix on return type and skip lifetime parameters
             if self._is_kw("ref"):
                 self._advance()
-                # Skip lifetime parameters in brackets: ref[Origin]
+                # Capture/skip lifetime/origin parameters in brackets: ref[Origin]/ref[x]
                 if self._peek().kind == "LBRACKET":
-                    self._skip_bracketed()
+                    self._advance()  # [
+                    if self._peek().kind in ("NAME", "KW"):
+                        return_origin = _as_str(self._peek().value)
+                        self._advance()
+                        depth_b = 1
+                        while depth_b > 0:
+                            tb = self._peek()
+                            if tb.kind == "LBRACKET":
+                                depth_b += 1
+                            elif tb.kind == "RBRACKET":
+                                depth_b -= 1
+                                if depth_b == 0:
+                                    self._advance()
+                                    break
+                            elif tb.kind == "EOF":
+                                break
+                            self._advance()
+                    else:
+                        self._skip_bracketed()
             _ret_tok = self._peek()
             ret = self._parse_type_ann()
             # Skip additional qualifiers after return type
@@ -5331,7 +5495,25 @@ class Parser:
             if self._is_kw("ref"):
                 self._advance()
                 if self._peek().kind == "LBRACKET":
-                    self._skip_bracketed()
+                    self._advance()  # [
+                    if self._peek().kind in ("NAME", "KW"):
+                        return_origin = _as_str(self._peek().value)
+                        self._advance()
+                        depth_b = 1
+                        while depth_b > 0:
+                            tb = self._peek()
+                            if tb.kind == "LBRACKET":
+                                depth_b += 1
+                            elif tb.kind == "RBRACKET":
+                                depth_b -= 1
+                                if depth_b == 0:
+                                    self._advance()
+                                    break
+                            elif tb.kind == "EOF":
+                                break
+                            self._advance()
+                    else:
+                        self._skip_bracketed()
             ret = self._parse_type_ann()
         self._expect("COLON")
         self._lazy_import_blockers.append("functions")
@@ -5354,7 +5536,8 @@ class Parser:
                            captures=captures,
                            has_capture_list=has_capture_list,
                            where_clause=where_clause,
-                           where_else=where_else)
+                           where_else=where_else,
+                           return_origin=return_origin)
 
     def _parse_where_clauses(self):
         """Parse any `where` clauses at the current position: `(clause, else)`.
@@ -5514,6 +5697,7 @@ class Parser:
         # execute_StructDef), and keywords are preserved on the StructDef so
         # consumers that need them (e.g. TypedDict/PEP 728) can read them.
         bases = []
+        base_constraints = []
         class_keywords = []
         if self._peek().kind == "LPAREN":
             self._advance()
@@ -5564,7 +5748,15 @@ class Parser:
                         self._advance()  # consume DOT
                         last_name = self._peek().value
                         self._advance()  # consume NAME
+                    where_text = ""
+                    # Conditional conformance: `Trait where conforms_to(T, X)`
+                    # inside the base list. `where` is a NAME token here.
+                    if depth == 1 and self._peek().kind == "NAME" and self._peek().value == "where":
+                        self._advance()  # consume 'where'
+                        where_expr = self._parse_expr(0)
+                        where_text = _expr_constraint_text(where_expr)
                     bases.append(last_name)
+                    base_constraints.append((last_name, where_text))
                     expect_name = False
                     continue
                 self._advance()
@@ -5761,7 +5953,9 @@ class Parser:
         align_expr = self._extract_struct_align_expr(decs)
         return StructDef(name=name, fields=fields, methods=methods, decorators=decs,
                          align_expr=align_expr,
-                         comptime_aliases=aliases, bases=bases, keywords=class_keywords,
+                         comptime_aliases=aliases, bases=bases,
+                         base_constraints=base_constraints,
+                         keywords=class_keywords,
                          bracket_params=bracket_params,
                          type_param_names=type_param_names,
                          where_clause=struct_where,
@@ -5904,18 +6098,33 @@ class Parser:
         name = self._expect("NAME").value
         # Skip generic type-param block [T: Trait, ...]
         if self._peek().kind == "LBRACKET": self._skip_bracketed()
+        bases = []
         if self._peek().kind == "LPAREN":
             self._advance()
-            # Skip balanced parentheses in trait list
+            # Parse parent trait list, e.g. `trait Sub(Base):`.
             depth = 1
+            expect_name = True
             while depth > 0:
-                t = self._advance()
+                t = self._peek()
                 if t.kind == "LPAREN":
-                    depth += 1
-                elif t.kind == "RPAREN":
-                    depth -= 1
-                elif t.kind == "EOF":
+                    self._advance(); depth += 1; continue
+                if t.kind == "RPAREN":
+                    self._advance(); depth -= 1; continue
+                if t.kind == "EOF":
                     break
+                if t.kind == "COMMA" and depth == 1:
+                    self._advance(); expect_name = True; continue
+                if depth == 1 and expect_name and t.kind == "NAME":
+                    last_name = t.value
+                    self._advance()
+                    while self._peek().kind == "DOT" and self._peek(1).kind == "NAME":
+                        self._advance()
+                        last_name = self._peek().value
+                        self._advance()
+                    bases.append(last_name)
+                    expect_name = False
+                    continue
+                self._advance()
         self._expect("COLON")
         self._lazy_import_blockers.append("classes")
         body = self._parse_block()
@@ -5923,7 +6132,7 @@ class Parser:
         methods = [s for s in body if isinstance(s, FunctionDef)]
         decs = getattr(self, "_pending_decs", [])
         self._pending_decs = []
-        return TraitDef(name=name, methods=methods)
+        return TraitDef(name=name, methods=methods, decorators=decs, bases=bases)
 
     def _parse_try(self):
         # The `try` keyword's own line, recorded because `TryStmt` is the one
@@ -9232,18 +9441,74 @@ class Parser:
     def _is_kw(self, *w) -> bool:
         t = self._peek(); return t.kind == "KW" and t.value in w
 
-    def parse_module(self) -> list:
+    def parse_module(self, recover: bool = False) -> list:
         stmts = []
+        self.errors = []
         self._skip_newlines()
         while not self._at_end():
-            self._parse_stmt_into(stmts)
+            if recover:
+                start_pos = self._pos
+                try:
+                    self._parse_stmt_into(stmts)
+                except SyntaxError as e:
+                    self.errors.append(e)
+                    # Synchronize: advance past the failing construct so parsing
+                    # can continue at the next likely top-level declaration.
+                    self._synchronize_top_level(start_pos)
+                except Exception as e:
+                    # Treat other parse-time failures as recoverable errors too
+                    # so a malformed declaration does not abort the module.
+                    self.errors.append(e)
+                    self._synchronize_top_level(start_pos)
+            else:
+                self._parse_stmt_into(stmts)
             self._skip_newlines()
         stmts = _synthesize_fieldwise_inits(stmts)
         _check_out_argument_calls(stmts, self._filename)
         _check_mlir_type_argument_calls(stmts, self._filename)
         _check_inferred_param_dependencies(stmts, self._filename)
         _check_variadic_element_types(stmts, self._filename)
+        _check_docstring_self_imports(stmts, self._filename)
         return stmts
+
+    def _synchronize_top_level(self, start_pos: int):
+        """Recover after a parse error at module scope by skipping tokens until
+        the parser is positioned at a plausible start of the next top-level
+        declaration or statement. Must always make progress when not at EOF."""
+        if self._pos == start_pos and not self._at_end():
+            self._advance()
+        # Skip to a NEWLINE at module level, then consume layout/newlines until
+        # we reach a token that is not inside an indented block we failed in.
+        while not self._at_end():
+            t = self._peek()
+            if t.kind == "NEWLINE":
+                self._advance()
+                # Consume blank lines and dedents back to module scope.
+                while not self._at_end():
+                    t2 = self._peek()
+                    if t2.kind in ("NEWLINE", "DEDENT"):
+                        self._advance()
+                        continue
+                    if t2.kind == "INDENT":
+                        # Still inside/entering an indented region (e.g. we
+                        # failed mid-block); consume and keep seeking module
+                        # level.
+                        self._advance()
+                        continue
+                    break
+                # At module scope now? A top-level token follows (no INDENT
+                # pending). Stop so the main loop can parse it.
+                if self._at_end():
+                    return
+                if self._peek().kind not in ("INDENT", "DEDENT"):
+                    return
+                continue
+            if t.kind == "DEDENT":
+                self._advance()
+                if not self._at_end() and self._peek().kind not in ("INDENT", "DEDENT", "NEWLINE"):
+                    return
+                continue
+            self._advance()
 
     def _parse_stmt_into(self, stmts: list):
         """Parse one statement and append it to `stmts`.
