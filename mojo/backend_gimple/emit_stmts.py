@@ -1246,17 +1246,6 @@ def _tagged_opt_is_some_expr(gen, value_node, target_node, ot, ov, op,
 
 
 def _gen_stmt_AssignStmt(gen, node):
-    # `globals()[key] = value` at module scope: a store through the module's
-    # namespace dict, which in the compiled path IS the `_<mod>_globals`
-    # struct. Lowered to a name dispatch over the statically-known module
-    # names (the same set `globals()` itself snapshots) — see
-    # `emit_infra.lower_module_globals_setitem`. Must run before the generic
-    # subscript store, which would only mutate the snapshot's temporary dict
-    # (and would never see a live view of the module).
-    if (isinstance(node.target, gimple_ctypes.SubscriptExpr)
-            and ginf.is_module_globals_call(gen, node.target.obj)):
-        ginf.lower_module_globals_setitem(gen, node)
-        return
     # Box tracking (part 4, further, test_python_object): a box-producing
     # VALUE records its target local (`c = a / b` makes c a box — a
     # truediv result, so a double-bits one too) for later binary-op

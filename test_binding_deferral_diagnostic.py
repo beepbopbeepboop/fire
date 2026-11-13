@@ -173,7 +173,7 @@ def test_signature_failed_binding_reports_violated_constraint():
 
 
 def test_signature_unproven_binding_reports_lacking_evidence():
-    # bugs/hard/DIAGNOSTICS_binding_deferrals-part2.md. `CondCopyable[U]` is
+    # bugs/mid/DIAGNOSTICS_binding_deferrals-part2.md. `CondCopyable[U]` is
     # Copyable only where `U: Copyable`; this signature only knows
     # `U: Movable & Deinitable`, so the `T: Copyable` requirement is neither
     # provable nor provably false. Modular reports `lacking evidence` and the

@@ -1,22 +1,9 @@
-SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3, COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part4, COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part5
+SPLIT: COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3 (parts 1 and 2 fixed)
 # COMPILE_FAIL: Tools/c-analyzer/c_common/tables.py
 
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
-
-## Status 2026-11-13 — replan: the SPLIT line named nothing on disk; the build re-measured; the residual is split into part 4 and part 5
-
-The SPLIT line above had read "parts 1, 2, 3 fixed and deleted" — it named no part doc on disk, so it was ignored and this doc got replanned again. Re-measured on this tree (sources copied into `.tmp/ca/`; `python3 tools/memslot.py --gb 8 --label tables-build -- python3 fire.py build -o .tmp/ca/tables_out .tmp/ca/c_common/tables.py`, peak 0.2 GB, child exit 1):
-
-- the 2026-11-12 pair is GONE: part 1 (mixed-scalar tuple at the raise-message position, f864d028d) and part 2 (`with` over a tabled open, a912f5987; regression `_regression_with_tabled_open_in_generator`) are fixed and their docs deleted;
-- two NEW named refusals remain (full text and sites in the part docs):
-  - `parse_table`: a tuple `for` target over a module-qualified call to a foreign module's compiled generator with a keyword argument (`strutil.parse_entries(entries, ignoresep=sep)`, tables.py:166) — filed `bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part4.md`;
-  - `read_table`: a call through the callable-valued parameter `_get_reader` whose argument is a generator-handle local (`_get_reader(lines, ...)`, tables.py:115) — filed `bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part5.md`;
-- `bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part3.md` (the end-to-end build) is updated to be the closer depending on parts 4+5; its Done when is the same build command;
-- red regressions for both shapes are committed in `test_gimple_generator_runner.py` (`_regression_tables_module_qualified_tuple_for`, `_regression_tables_callable_param_generator_handle_arg`), verified on this tree to fail with exactly the two refusals above; each is wired into `run_tests()` by the fix that turns it green.
-
-The SPLIT line above now names the three live part docs (part 3, part 4, part 5), all on disk under `bugs/mid/`.
 
 ## Status 2026-11-13 — part 2 (open context manager in compiled generator body) fixed; doc deleted
 

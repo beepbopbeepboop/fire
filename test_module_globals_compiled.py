@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Regression for the module-scope `globals()` compile failure in
-`Tools/cases_generator/analyzer.py`.
+"""Regression for bugs/mid/COMPILE_FAIL_Tools_cases_generator_analyzer-part3-part1:
+module-scope `globals()` in the compiled path.
 
 Tools/cases_generator/lexer.py builds its operator table from the module's own
 uppercase constants, then rebinds each of those names to its own spelling:
