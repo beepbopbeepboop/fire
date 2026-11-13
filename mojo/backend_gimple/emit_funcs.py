@@ -2457,7 +2457,7 @@ def _home_def_return_type(gen, qualifier: str, bare_name: str):
     return store.get(_pair_key(qualifier, bare_name))
 
 
-def _imported_def_pts(gen, bare_name: str) -> list | None:
+def _imported_def_pts(gen, bare_name: str, definer_only: bool = False) -> list | None:
     """BUG-2026-024 helper: the parameter ctypes recorded for `bare_name` by
     its HOME module at FromImportStmt registration time
     (_imported_home_param_types, keyed (sanitized_home_qualifier, name)),
@@ -2476,15 +2476,10 @@ def _imported_def_pts(gen, bare_name: str) -> list | None:
     vs mod.computer.network.get_energy -> call sites emitted
     computer_case_get_energy_77b31a against definition ..._0ed997).
 
-    Both tiers below are read for every caller. The import-extern block used
-    to pass `definer_only=True` so an extern could only be re-typed from a
-    definition really in the translation unit, but that left it with
-    `module_loader`'s text-scan arity whenever the definition belonged to
-    ANOTHER unit (the ordinary single-module compile): the scan drops
-    unannotated parameters, so the extern declared fewer arguments than the
-    call sites — whose mangled suffix comes from `_effective_param_types` —
-    passed. It now reads the same list the name was hashed from, which is
-    what both tiers exist to supply.
+    `definer_only=True` skips the importer's own snapshot tier, so a hit means
+    a unit that DEFINES the name committed this signature (module_gen's extern
+    block uses it: an extern may only be re-typed from a definition that is
+    really in the translation unit).
 
     Never raises: an _AMBIGUOUS_FUNC_HOME entry resolves to None here so
     the caller falls through to the shared-slot tier; the authoritative
@@ -2549,7 +2544,7 @@ def _imported_def_pts(gen, bare_name: str) -> list | None:
             pts = _def_store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts
-        if store:
+        if store and not definer_only:
             pts = store.get(_pair_key(_sq, bare_name))
             if pts is not None:
                 return pts

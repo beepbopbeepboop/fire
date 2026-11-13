@@ -6326,20 +6326,6 @@ def _set_needle_is_word(gen, xv: str) -> bool:
     return xv not in gen._int_word_vals
 
 
-def _in_question_result(gen, ti: str, negate: bool) -> tuple[str, str]:
-    """Turn an `int` membership-answer temp into the `_Bool` `in`/`not in`
-    result. Shared by the tagged-word early return and the ordinary dispatch
-    tail so the negation has exactly one spelling."""
-    t = gen._new_val('_Bool', f"{ti} != 0")
-    if negate:
-        ti2 = gen._new_temp('int')
-        tn = gen._new_temp('_Bool')
-        gen._emit(f"  {ti2} = (int) {t};")
-        gen._emit(f"  {tn} = {ti2} == 0;")
-        return '_Bool', tn
-    return '_Bool', t
-
-
 def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
                        x_is_none: bool = False) -> tuple[str, str]:
     """Container-type dispatch (list/dict/set/str) for `in`/`not in`,
@@ -6369,20 +6355,6 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
         rv = gen._new_val(rt, f"({rt}){rv}")
     ti = gen._new_temp('int')
 
-    # A TAGGED word (`_tagged_word_vals`: the result of a float+pointer mixed
-    # return, or a kind-mixed yield) on the CONTAINER side has its kind as a
-    # runtime fact, so the static dispatch below cannot pick a container kind
-    # and the erased-int fallback asked the registries about the BOX address:
-    # `3 in t` was False for a list arm. Unbox by kind in the runtime, exactly
-    # as the subscript (`mojo_word_subscript`) and `len` (`mojo_len_word`) do
-    # for this value model. A float/int/None word raises TypeError there, as
-    # CPython does for `1 in 2.5`.
-    if rt in ('int', 'int64_t') and rv in getattr(gen, '_tagged_word_vals', ()):
-        _wc = gen._new_val('int64_t', gen._to_int64(rt, rv))
-        _wn = gen._new_val('int64_t', gen._to_int64(xt, xv))
-        gen._emit_call('int', ti, 'mojo_word_contains',
-                       [('int64_t', _wc), ('int64_t', _wn)])
-        return _in_question_result(gen, ti, negate)
     # `x in <bytes-subclass instance>`: substring/byte membership against
     # the backing MojoBytes payload. See COMPILE_FAIL_zipfile___init__.
     if gen._bytes_subclass_of(rt) and not gen._struct_defines_method(
@@ -6593,7 +6565,15 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
         gen._emit(f"  /* TODO: 'in' for {rt} */")
         gen._emit(f"  {ti} = 0;")
 
-    return _in_question_result(gen, ti, negate)
+    t = gen._new_val('_Bool', f"{ti} != 0")
+
+    if negate:
+        ti2 = gen._new_temp('int')
+        tn  = gen._new_temp('_Bool')
+        gen._emit(f"  {ti2} = (int) {t};")
+        gen._emit(f"  {tn} = {ti2} == 0;")
+        return '_Bool', tn
+    return '_Bool', t
 
 
 def _lower_external_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:

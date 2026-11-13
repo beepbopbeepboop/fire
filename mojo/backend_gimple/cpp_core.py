@@ -8765,7 +8765,6 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     # case not attempted here — stays False for that branch, matching
     # its existing (unchanged) refusal behavior.
     is_self_recursive = False
-    _nested_capture_arg_exprs = None
     # `self.method(...)` — a generator METHOD call (e.g. calendar.py's
     # `Calendar.itermonthdates` doing `for y, m, d in self.
     # itermonthdays3(year, month):`), resolved via
@@ -8839,7 +8838,6 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
         # reordering), taking the whole module down with it.
         _self_name = getattr(gen, '_cpp_gen_self_name', None)
         is_self_recursive = (_self_name is not None and sub_name == _self_name)
-        _nested_capture_arg_exprs = None
         if is_self_recursive:
             # Same locally-tracked self-context `_cpp_yield_from` uses
             # — no premature/partial registration into the real
@@ -8863,9 +8861,7 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
             # identical reason (this body references its own
             # not-yet-textually-defined extern "C" wrappers).
             gen._cpp_gen_self_recursed = True
-            receiver_exprs = []
         else:
-            receiver_exprs = []
             api = gen._generator_api.get(sub_name)
             if api is None or sub_name not in gen._supported_generators:
                 # ...or one IMPORTED by name (`from .iterutil import
@@ -8874,37 +8870,13 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
                 # extern "C" symbols drive it (registered just below).
                 api = getattr(gen, '_imported_generator_bindings', {}).get(sub_name)
             if api is None:
-                # A nested generator defined inside this same compiled
-                # generator/coroutine (claimed and compiled with its
-                # enclosing captures by cpp_async._compile_nested_generator_closures),
-                # registered in _nested_generator_api keyed (current generator
-                # name, nested name) — not in _generator_api. Its _start call
-                # takes the user positional arguments first, then each
-                # captured enclosing name as an ordinary identifier in scope.
-                _ng = getattr(gen, '_nested_generator_api', {})
-                api = _ng.get((getattr(gen, '_cpp_gen_self_name', None), sub_name))
-                if api is not None:
-                    _caps = api.get('captures') or []
-                    _user_n = len(api.get('params') or []) - len(_caps)
-                    if getattr(call, 'kwargs', None) or len(call.args) != _user_n:
-                        raise gimple_exprtypes._UnsupportedGeneratorShape(
-                            f"call to nested generator {sub_name!r} with keyword "
-                            "or defaulted arguments is not supported (only the "
-                            "plain positional form is threaded, together with "
-                            "its enclosing-scope captures)")
-                    _nested_capture_arg_exprs = [
-                        _cpp_call_arg_expr(gen, gimple_ctypes.IdentExpr(_cn))
-                        for _cn, _ in _caps]
-                else:
-                    raise gimple_exprtypes._UnsupportedGeneratorShape(
-                        f"`for ... in {sub_name}(...)` does not consume a generator "
-                        "this compile has itself already translated via the "
-                        "C++20-coroutine path (either it's not a generator this "
-                        "codegen supports, or it's defined LATER in this module — "
-                        "the consumed generator must be defined earlier)")
-    # `receiver_exprs` was populated above for method/self/cls cases.
-    # For a nested generator, capture values are appended after the user
-    # positional arguments (assembled below) to form its full _start args.
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    f"`for ... in {sub_name}(...)` does not consume a generator "
+                    "this compile has itself already translated via the "
+                    "C++20-coroutine path (either it's not a generator this "
+                    "codegen supports, or it's defined LATER in this module — "
+                    "the consumed generator must be defined earlier)")
+        receiver_exprs = []
     sub_params = api.get('params') or []
     # Pad omitted trailing arguments from the callee's registered param
     # defaults (same convention the direct `<base>_start(...)` construction
@@ -8922,25 +8894,18 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
               or getattr(gen, '_func_param_defaults', {}).get(f"{api['base']}_start")
               or [])
     arg_exprs = receiver_exprs + [_cpp_call_arg_expr(gen, a) for a in call.args]
-    # A nested generator's captures are appended AFTER its user positional
-    # arguments (never default-padded); emit_calls._emit_nested_generator_start_call
-    # assembles the same [user args] + [captures] sequence.
-    _expected = (len(sub_params) - len(_nested_capture_arg_exprs)
-                 if _nested_capture_arg_exprs is not None else len(sub_params))
-    while len(arg_exprs) < _expected:
+    while len(arg_exprs) < len(sub_params):
         _dv = gimple_exprtypes._trailing_default_at(_dflts, len(sub_params), len(arg_exprs))
         if _dv is None:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 f"`for ... in {sub_name}(...)`: expected "
-                f"{_expected - len(receiver_exprs)} argument(s), "
+                f"{len(sub_params) - len(receiver_exprs)} argument(s), "
                 f"got {len(call.args)}")
         arg_exprs.append(gen._default_expr_to_pair(_dv, cxx=True)[1])
-    if _nested_capture_arg_exprs is not None:
-        arg_exprs.extend(_nested_capture_arg_exprs)
     if len(arg_exprs) > len(sub_params):
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"`for ... in {sub_name}(...)`: expected "
-            f"{_expected - len(receiver_exprs)} argument(s), "
+            f"{len(sub_params) - len(receiver_exprs)} argument(s), "
             f"got {len(call.args)}")
     base = api['base']
     # Register this callee into the module-level extern-decl map, so the

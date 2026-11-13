@@ -1894,7 +1894,6 @@ def _register_link_imports(gen, stmts: list) -> list:
                         # available: on-demand elaboration for a generic /
                         # overloaded `def`, whole-module inlining for
                         # anything else. See `_classify_unresolved_export`.
-                        _found = False
                         if source:
                             try:
                                 msrc = open(source).read()
@@ -1926,14 +1925,6 @@ def _register_link_imports(gen, stmts: list) -> list:
                                                 _sibling, _smsrc):
                                             _found = True
                                             break
-                        # Link mode: no dylib for a local module. Inline the
-                        # module so its definitions (including global accessors)
-                        # land in this TU. This is the route that `_link_inline_modules`
-                        # already uses for functions and structs — it compiles the
-                        # sibling module into this translation unit so its globals
-                        # and their accessors are available on the link line.
-                        if not _found and not from_reflection and source and source.endswith('.mojo'):
-                            gen._link_inline_modules.add(stmt.module)
                         continue
                     if sym in seen:
                         continue

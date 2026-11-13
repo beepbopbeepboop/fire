@@ -9161,38 +9161,6 @@ int mojo_in_dispatch_int(int64_t container, int64_t needle)
     return 0;
 }
 
-/* `needle in container` where the CONTAINER is a TAGGED word: the result of a
- * function whose arms mix a float with a list/tuple/str/None, or a kind-mixed
- * yield. Its static C type is the erased int64_t that carries the box, so the
- * ordinary membership lowering took its integer fallback and answered False for
- * every such test (`3 in t` printed False where CPython prints True) — the box
- * address is not a registered container. Unbox by kind, exactly as
- * `mojo_word_subscript` / `mojo_len_word` / `mojo_word_slice` do for the same
- * value model, and ask the same registry dispatch a bare container would.
- *
- * A float, int, bool or None word is not iterable in Python, so it raises
- * TypeError (CPython's answer for `1 in 2.5`) rather than reporting "no". A
- * bytes container is matched only by an already-bytes needle: converting the
- * other needle kinds is the static path's job (`_lower_in_dispatch`'s
- * `MojoBytes *` arm), which owns the codegen's evidence about them. */
-int mojo_word_contains(int64_t container, int64_t needle)
-{
-    int64_t c = mojo_box_word(container);
-    int64_t n = mojo_box_word(needle);
-    if (mojo_is_registered_bytes(c)) {
-        if (mojo_is_registered_bytes(n))
-            return mojo_bytes_contains((MojoBytes *)(intptr_t)c,
-                                       (MojoBytes *)(intptr_t)n);
-        mojo_raise_type_error((char *)"a bytes-like object is required");
-        return 0;
-    }
-    if (mojo_is_registered_list(c) || mojo_is_registered_dict(c)
-        || mojo_is_registered_set(c) || mojo_boxed_is_str(c))
-        return mojo_in_dispatch_int(c, n);
-    mojo_raise_type_error((char *)"argument is not iterable");
-    return 0;
-}
-
 /* ── `==` / `!=` between values: Python value equality ──────────────────────
  *
  * The compiled path used to lower every comparison between two containers to
@@ -9504,36 +9472,6 @@ int64_t mojo_word_subscript(int64_t w, int64_t i)
         return (int64_t)(intptr_t)mojo_char_at_str_cp((char *)(intptr_t)w, i);
     mojo_raise_type_error((char *)"object is not subscriptable");
     return 0;
-}
-
-/* The MojoList* a TAGGED word holds, for `word.method(...)` on a receiver whose
- * static C type is the erased int64_t: a kind-'l' box (or a bare registered
- * list) is the list. Every other kind — a float, a str, bytes, None — is not a
- * list, so this raises TypeError instead of letting the caller read the box
- * header as a MojoList header (which is what the old cast did: `t.append(5)`
- * on a tagged list crashed writing through the box). The caller's list arms
- * all take that pointer; nothing here guesses an element type. */
-MojoList *mojo_word_as_list(int64_t w)
-{
-    int64_t u = mojo_box_word(w);
-    if (mojo_is_registered_list(u))
-        return (MojoList *)(intptr_t)u;
-    mojo_raise_type_error((char *)"object is not a list");
-    return mojo_list_new();
-}
-
-/* The text pointer a TAGGED word holds, for the str arms of `word.method(...)`:
- * a kind-'p' string box, or a bare string word. A float/int/None/bytes word has
- * no text, so raise rather than hand the box address to strlen (which is what
- * the old `(char *)` cast of an int64_t receiver did). */
-char *mojo_word_as_text(int64_t w)
-{
-    if (mojo_is_str_box(w))
-        return (char *)(intptr_t)mojo_str_box_word(w);
-    if (mojo_boxed_is_str(w))
-        return (char *)(intptr_t)w;
-    mojo_raise_type_error((char *)"object has no string methods");
-    return (char *)"";
 }
 
 /* `s.startswith(p)` / `s.endswith(p)` with `p` held as a word: Python's

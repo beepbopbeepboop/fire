@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Which emitted instruction forms are actually CHECKED, on both backends.
 
-`bugs/mid/FORMAL_arm64_instruction_coverage.md` is a survey with a number in it, and
+`bugs/FORMAL_arm64_instruction_coverage.md` is a survey with a number in it, and
 the number answers one question: *what can this backend not emit?* This tool
 answers the other four, for every instruction form the code generators CAN emit:
 

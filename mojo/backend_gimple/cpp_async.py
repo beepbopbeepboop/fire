@@ -1883,8 +1883,6 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
             'params': param_ctypes, 'captures': caps,
             'nested_name': inner.name,
             'tagged': gen._cpp_last_tagged_yield,
-            'tuple_slot_ctypes': getattr(gen, '_cpp_last_tuple_slot_ctypes', None),
-            'mixed_slots': bool(getattr(gen, '_cpp_last_mixed_slots', False)),
         }
         gen.func_param_types[f"{base}_start"] = param_ctypes
         gen._generator_cpp_units.append(cpp_text)

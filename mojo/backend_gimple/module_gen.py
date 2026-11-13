@@ -13089,9 +13089,8 @@ def gen_module_impl(self, stmts: list):
     # An ANNOTATED return type is skipped: the annotation decides the C return
     # type (the float arm keeps its old coercion), so the value is not a tagged
     # word and marking it one here would misread it at every consumer. That
-    # shape — a pointer annotation contradicted by a float arm — is not a
-    # tagged word: `emit_stmts._check_float_arm_into_annotated_pointer`
-    # refuses it at compile time.
+    # shape — a pointer annotation contradicted by a float arm — remains open;
+    # see the bug doc.
     _ret_float: set = set()
     _fmb = getattr(self, '_float_mixed_return_bodies', None)
     if _fmb is None:
@@ -18729,88 +18728,33 @@ def gen_module_impl(self, stmts: list):
                             else:
                                 _sig_ret = 'int64_t'
                         signature = f'{_sig_ret} {safe} ({", ".join(_as_list(_sig_pts))})'
-                # The scan's PARAMETER list is a second, independent inference
-                # and must not own the extern's shape. Two ways it disagrees
-                # with the DEFINER, both measured on the 2026-11-12 self-host
-                # build:
-                #
-                # * TYPES: an unannotated parameter (`def module_qualifier(q)`)
-                #   is `int64_t` to the importer's text scan and `char *` to
-                #   the definition, which is typed from the body. gcc rejects
-                #   the unit with `conflicting types for
-                #   'mojo_middle_exprtypes_module_qualifier_d719e0'; have
-                #   'char *(int64_t)'` against the definition's `char *(char *)`,
-                #   and every call through the extern then fails too.
-                # * ARITY: the scan DROPS every parameter with no annotation
-                #   (`module_loader`'s `if ':' in param`), so its list is
-                #   SHORTER than the definition's (1 scanned vs 2 defined for
-                #   `_gmi_prefold_toplevel_comptime`, 3 vs 5 for
-                #   `user_dunder_repr_call`). This arm used to re-type only
-                #   from the DEFINER's committed store (`definer_only=True`),
-                #   which is empty whenever the definition is not compiled
-                #   into this translation unit — the normal single-module
-                #   compile. The extern then kept the dropped arity while the
-                #   call sites, whose mangled suffix comes from
-                #   `_effective_param_types`, passed the definer's count:
-                #   `too many arguments to function '..._register_sym_ab0ffa';
-                #   expected 2, have 7`, plus a pointer argument in an
-                #   integer-typed shifted slot for every later position.
-                #
-                # So the list here is the SAME one the symbol name was hashed
-                # from: `_effective_param_types` (tier order: this unit's own
-                # definition, then the definer's committed signature, then the
-                # importer's registration-time snapshot from the home module's
-                # own parsed `FunctionDef`). Name and extern agree by
-                # construction rather than by two inferences happening to
-                # match; the scan remains the fallback only when no list
-                # resolves at all. A scanned parameter's NAME is kept at the
-                # position it occupies when the arity agrees (C prototypes do
-                # not need one, but dropping it would churn every green extern
-                # and the import tests read it); a parameter the scan DROPPED
-                # has no scanned position to sit in, so that list is emitted
-                # types-only. Never a variadic.
+                # The scan's PARAMETER types are a second inference too: an
+                # unannotated parameter (`def module_qualifier(q)`) is
+                # `int64_t` to the importer's text scan and `char *` to the
+                # definition, which is typed from the body. The mangled name's
+                # overload hash is already computed from the definer's list
+                # (`_overload_suffix` -> `_imported_def_pts`), so name and
+                # extern must not disagree about the very list the name was
+                # hashed from: gcc rejects the unit with `conflicting types
+                # for 'mojo_middle_exprtypes_module_qualifier_d719e0'; have
+                # 'char *(int64_t)'` against the definition's `char *(char *)`,
+                # and every call through the extern then fails too. Only the
+                # DEFINER's committed list counts (`definer_only`): with no
+                # definition in this closure (a dylib link) nothing is written
+                # there and the scan stays the only evidence, as before.
+                # The scan can also DROP parameters (3 scanned, 5 defined for
+                # `user_dunder_repr_call`), so the definer's list replaces the
+                # scan's whole parameter list rather than being matched to it.
+                # Never a variadic.
                 if (sym_info.get('parameters') or sym_info.get('c_parameters')) \
                         and not sym_info.get('variadic'):
-                    _def_pts = _ggf_dup._effective_param_types(self, _sn)
+                    _def_pts = _ggf_dup._imported_def_pts(self, _sn, True)
                     if _def_pts:
-                        _m_sig = re.match(
-                            r'^(.*?\b' + re.escape(safe) + r'\s*)\((.*)\)\s*$',
-                            signature)
+                        _m_sig = re.match(r'^(.*?\b' + re.escape(safe) + r'\s*)\(.*\)\s*$',
+                                          signature)
                         if _m_sig:
-                            _eff_list = _as_list(_def_pts)
-                            _scan_sig = _as_str(_m_sig.group(2))
-                            if _scan_sig.strip() in ('', 'void'):
-                                _scan_parts = []
-                            else:
-                                _scan_parts = [_p.strip()
-                                               for _p in _scan_sig.split(',')]
-                            _new_parts = []
-                            # Names are positional: keep them only when no
-                            # parameter was dropped, so scanned position i is
-                            # definition position i.
-                            _keep_names = (len(_scan_parts)
-                                           == len(_eff_list))
-                            for _pi in range(len(_eff_list)):
-                                _tp = _as_str(_eff_list[_pi])
-                                _is_vararg = (_tp == '...')
-                                if _keep_names:
-                                    _toks = _scan_parts[_pi].split()
-                                    if len(_toks) >= 2 and re.match(
-                                            r'^[A-Za-z_]\w*$',
-                                            _as_str(_toks[len(_toks) - 1])):
-                                        _tp = _tp + ' ' + _as_str(
-                                            _toks[len(_toks) - 1])
-                                _new_parts.append(_tp)
-                                # C's `...` must be last. `_signature_ctypes`
-                                # keeps params that follow `*args` so call
-                                # sites can still coerce them, but a prototype
-                                # cannot spell `(int64_t, ..., int64_t)`; drop
-                                # the tail, exactly as the loader's own scan
-                                # does for that shape.
-                                if _is_vararg:
-                                    break
                             signature = (_m_sig.group(1) + '('
-                                         + ', '.join(_new_parts) + ')')
+                                         + ', '.join(_as_list(_def_pts)) + ')')
                 if signature.startswith('MojoTuple_'):
                     # Part 4 (measured 2026-10-21 integration, `split`'s
                     # `-> Tuple[String, String]`): the scanned/resolved

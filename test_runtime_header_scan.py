@@ -547,6 +547,18 @@ def test_every_declaration_is_seen():
     # `str_word_fresh`) and four are box-shaped (`throw_take` and the three
     # dict entries), which is the whole 418 -> 425 word and 502 -> 506 box
     # movement in the quoted figures — `--fix` wrote those from this scan.
+    # 822 -> 826 (2026-11-12): FOUR names, read off the call on the live
+    # header. Two landed in 29aa3f763 ("codegen: a float beside a pointer
+    # return travels as a tagged word") and one in 7e6a8ac5c ("codegen/runtime:
+    # support csv.reader tabled callable in generator for-loops"); none moved
+    # this ladder, so the job went red again after it had been re-enabled.
+    #   +2  word-shaped: `mojo_box_from_bytes` (its `void *b` argument is a
+    #       word under `_ctype_is_word`) and `mojo_word_subscript` (two
+    #       int64_t in, one int64_t out).
+    #   +2  box-shaped: `mojo_box_from_list` (a `MojoList *` argument) and
+    #       `mojo_csv_reader_vf` (`MojoList *packed` and `MojoDict *kw`).
+    # So the word figure moves 426 -> 428, the box figure 506 -> 508, total
+    # 932 -> 936; `--fix` wrote those from this scan.
     # 821 -> 822 (2026-11-12): ONE name, read off the call on the live header.
     # `mojo_mul_word` (63dd14dda, "codegen: handle str-box ops in tagged
     # generator words") — the `*`/str-repeat word picker. Word-shaped (two
@@ -554,24 +566,6 @@ def test_every_declaration_is_seen():
     # the box figure stays at 506, total 931 -> 932. The declaration landed
     # without a ladder rung, which this check exists to catch; `formal-doc-truth`
     # and `rthdrscan` both went red on the same drift and were fixed in parallel.
-    # 822 -> 826 (2026-11-12, the gate fix for `formal-doc-truth` at 827020b319):
-    # THREE names, all read off the call on the live header, all from
-    # 29aa3f763 ("codegen: a float beside a pointer return travels as a
-    # tagged word"), which landed on master via 95227994d after the 822 rung:
-    #   +1  `mojo_box_from_list` — box the list/tuple arm of a tagged
-    #       mixed return as a kind-'l' word. Box-shaped: its first argument is
-    #       a `MojoList *` the boundary cannot pass by value (the
-    #       argument-crosses-as-a-box rule), so the word figure does NOT move
-    #       for it — the whole box figure 507 -> 508, total 933 -> 934.
-    #   +1  `mojo_box_from_bytes` — box the bytes arm as a kind-'s' word.
-    #       Word-shaped (a `void *` parameter is one 64-bit word and is not a
-    #       named container type), word 426 -> 427, total 934 -> 935.
-    #   +1  `mojo_word_subscript` — `w[i]` on a word of unknown kind, the
-    #       receiver dispatching by kind (list/tuple, str, bytes). Word-shaped
-    #       (two int64_t in, int64_t out), word 427 -> 428, total 935 -> 936.
-    # The declarations landed without a ladder rung, which this check exists
-    # to catch; `formal-doc-truth` went red on the same drift and this rung
-    # closes it. fire_runtime.c grew with them (785 -> 790 KB).
     for header, want in (('fire_runtime.h', 826),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this

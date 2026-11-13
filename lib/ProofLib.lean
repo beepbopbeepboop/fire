@@ -1850,7 +1850,7 @@ word, which is why reading `Rn` as SP there modelled `-x` as `sp - x`.
 model**: nothing in `arm64_step` decodes the extended-register class, so
 `add x0, sp, x16` assembles to a word this function answers nothing about.  That
 is a coverage gap rather than a wrong answer (the generator refuses such a word
-rather than mis-reading it), and `bugs/mid/FORMAL_arm64_instruction_coverage.md` is
+rather than mis-reading it), and `bugs/FORMAL_arm64_instruction_coverage.md` is
 where the census of it belongs.
 
 The 7 spellings this replaces were `if rn = 31 then s.sp else arm64_reg rn s`

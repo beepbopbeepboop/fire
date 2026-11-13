@@ -282,12 +282,15 @@ def _re_sub_repl_is_callback(gen, cb_arg) -> bool:
     `def` name — so a bare identifier that's already a known local/
     global *variable* can't be one; that's the tell used below.
 
-    Every LambdaExpr is a callable, capturing or not: a non-capturing one
-    lifts to a bare top-level C function, a capturing one to a
-    MojoBoundMethod whose (fn, env) _lower_re_sub_callback unpacks. Neither
-    is a replacement string, so neither may fall to the else branch."""
+    A non-capturing LambdaExpr lifts to a bare top-level C function and
+    its address can be used directly as the callback pointer. A capturing
+    LambdaExpr carries a heap env in a MojoBoundMethod that cannot be
+    passed as a bare fn ptr; refuse those rather than read the wrong env
+    (the else branch will treat them as a replacement string, producing a
+    compile error or runtime failure instead of silent garbage)."""
     if isinstance(cb_arg, gimple_ctypes.LambdaExpr):
-        return True
+        # Non-capturing lambda: no explicit captures field content.
+        return not cb_arg.captures
     if not isinstance(cb_arg, gimple_ctypes.IdentExpr):
         return False
     if cb_arg.name in gen._closure_envs:
@@ -305,9 +308,8 @@ def _lower_re_sub_callback(gen, cb_arg) -> tuple[str, str]:
 
     For LambdaExpr:
     - If the lambda captures enclosing locals (detected by lower_expr adding it to
-      gen._closure_vals), its value is a MojoBoundMethod whose fn takes the env as
-      its leading argument (the mojo_bound_method_call_N convention). That is the
-      regex callback ABI exactly, so the callback gets (bm->fn, bm->self).
+      gen._closure_vals), we cannot pass a MojoBoundMethod as a bare fn ptr, so
+      refuse loudly. The module will fall back to interpreting from source.
     - If the lambda is non-capturing, lower_expr returns a bare function pointer,
       which the callback path uses with env=0.
     """
@@ -351,11 +353,11 @@ def _lower_re_sub_callback(gen, cb_arg) -> tuple[str, str]:
         # to _closure_vals, the non-capturing path does not.
         cb_type, cb_val = gen.lower_expr(cb_arg)
         if cb_val in gen._closure_vals:
-            fn_ptr_t = gen._call_expr('void *', 'mojo_bound_method_fn',
-                                      [('void *', cb_val)])
-            env_t = gen._call_expr('void *', 'mojo_bound_method_self',
-                                   [('void *', cb_val)])
-            return fn_ptr_t, env_t
+            raise RuntimeError(
+                "re.sub(..., <capturing lambda>, ...) is not supported: a capturing "
+                "lambda is a MojoBoundMethod, not a bare function pointer, and this "
+                "codegen cannot wire its env into the regex callback ABI. Use a "
+                "non-capturing lambda or refer to a closure (IdentExpr) instead.")
         fn_ptr_t = gen._new_val('void *', f'(void *){cb_val}')
         env_t = gen._new_val('void *', '(void *)0')
         return fn_ptr_t, env_t
@@ -2307,18 +2309,9 @@ def _gen_for_enumerate(gen, node):
         for vi, vname in enumerate(tuple_vars):
             if vname == '_':
                 continue
+            cv = gen._cname(vname)
             force = gen.var_types.get(vname) not in (None, pair_elem)
             gen._declare_var(vname, pair_elem, force=force)
-            # AFTER the declaration, never before: `force` mints a fresh
-            # `_shadowN_<name>` C identifier and re-points `_c_names` at it,
-            # so a `_cname` captured first names the OLD variable. Real: a
-            # loop target already typed `char *` by an earlier use, unpacked
-            # from a runtime pair list (`for i, (a, b) in enumerate(pairs)`),
-            # force-renamed `a` to an `int64_t` shadow while the store below
-            # still wrote the ORIGINAL `char * a` — `a = mojo_list_get_int(...)`
-            # uncast (-Wint-conversion), and the body read the never-assigned
-            # shadow. See bug:CODEGEN_unpack_loop_var_unified_to_char_star_loses_slot_store_cast.
-            cv = gen._cname(vname)
             if suf_inner == 'str':
                 ts = gen._new_val('char *', f"mojo_list_get_str ({tuple_ptr}, {vi})")
                 if gen.var_types.get(vname, pair_elem) == 'char *':
