@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression: the interpreter's `List(...)` constructor.
 
-The bug (bugs/INTERP_list_ctor_wraps_its_iterable.md, 2026-11-13):
+The bug (INTERP_list_ctor_wraps_its_iterable, filed 2026-11-13):
 `myinterpreter.py`'s `_MojoListType.__call__` was a positional-variadic
 construction — `list(args)` — so a single iterable argument was WRAPPED as
 one element (`List([1, 2])` answered `[[1, 2]]`) and the `length=`/`fill=`
