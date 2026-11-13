@@ -2631,6 +2631,25 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
             v = gen._ensure_local(s, v)
             ip = gen._new_val('int64_t', f'(int64_t){v}')
             gen._emit(f'  {dest} = ({d}){ip};')
+        elif d in ('double', 'float') and s.endswith(' *'):
+            # The mirror of the branch above, and the same C rule: a pointer
+            # converts only to an INTEGER type. `(double)<ptr>` is rejected
+            # outright ("pointer value used where a floating-point was
+            # expected"); it needs the same two-step through the int64_t word
+            # that every other pointer-to-number conversion here uses (see the
+            # `s.endswith(' *') and d in ('int', 'int64_t')` branch above,
+            # including the void * intermediate GIMPLE requires).
+            #
+            # Found through `Array[Float32, buf_len](fill={})` in
+            # test/algorithm/test_vectorize.mojo: the Array fill-unroll
+            # coerces the `{}` fill value (a MojoDict *) to the element type,
+            # and b0910af72 made that arm actually fire for a comptime width,
+            # exposing this cast as gcc errors on every appended element.
+            v = gen._ensure_local(s, v)
+            if s != 'void *':
+                v = gen._new_val('void *', f'(void *){v}')
+            ip = gen._new_val('int64_t', f'(int64_t){v}')
+            gen._emit(f'  {dest} = ({d}){ip};')
         else:
             # GIMPLE: a cast operand must be a local, never a global decl
             # (e.g. a _slit_ string literal). Load it first.

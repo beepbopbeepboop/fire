@@ -3017,7 +3017,9 @@ def _collect_inner(work, rec, queue):
     gen = work.gen
     depth = work.depth.get((rec['kind'], rec['base'], rec['args']), 0)
     if depth >= _MAX_DEPTH:
-        return
+        raise RuntimeError(
+            f'elaborator expansion is {depth} levels deep - '
+            f'infinite recursion?')
     ann_sites = rec['sites']
     bases = []
     for holder, attr in ann_sites:
@@ -3100,13 +3102,13 @@ def _collect_inner(work, rec, queue):
         # (a dangling symbol). Refuse with a clear diagnostic instead. A
         # CONCRETE self-call (`self_recursion[0]()`) is a legitimate
         # instantiation and is left to `_concrete_args`.
-        if base == rec['base']:
-            _args = (_bracket_args(gen, n.func) if isinstance(n.func, SubscriptExpr)
-                     else None)
+        if base == rec['base'] and isinstance(n.func, SubscriptExpr):
+            _args = _bracket_args(gen, n.func)
             if _args is None or not all(_is_concrete(a) for a in _args):
                 raise RuntimeError(
                     f'self recursive call to {base!r} will cause an '
                     f'infinite loop')
+            # Concrete self-recursion: a legitimate base-case instantiation.
             return
         # Same registration, for a struct CONSTRUCTED inside the concrete body
         # (`empty`'s body is `return _Empty[T]()`) — that call names the struct

@@ -1,7 +1,7 @@
 # CONTROL: `norm_claim` does not normalise a `bugs/<class>/` path, so two spellings of one document do not conflict
 
-Found 2026-11-13 while fixing `FORMAL_doc_index_queue_misses_docs_in_bugs_mid`
-(the formal queue scanned one directory). `tools/control.py::norm_claim` accepts
+Found 2026-11-13 while fixing the formal doc index's directory walk (the queue
+scanned one directory). `tools/control.py::norm_claim` accepts
 a bare name, a name with `.md`, and a `bugs/` path — but only `bugs/` and
 `bugs/hard/`:
 

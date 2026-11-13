@@ -6250,8 +6250,15 @@ def _membership_container_type(gen, right_node) -> str | None:
     if isinstance(right_node, gimple_ctypes.FloatLiteral):
         return 'Float64'
     # Provably scalar by SHAPE: arithmetic/comparison expressions whose
-    # result is a known scalar (e.g. `x in (a + b)`), and calls whose
-    # return type is a known scalar.
+    # result is a known scalar (e.g. `x in (a + b)`).
+    #
+    # `int64_t` is NOT evidence of an Int here. It is `_quick_type`'s
+    # default for "I could not type this" (an unannotated call result, an
+    # operand bound to a boxed value), so a `_quick_type` answer of
+    # `int64_t` only counts when every operand is itself provably Int. The
+    # check used to take the default at face value and rejected a valid
+    # `item in self.resolve()` (myinterpreter.LazyImportType.__contains__),
+    # whose result is a list.
     if isinstance(right_node, (gimple_ctypes.BinaryOp,
                                gimple_ctypes.CompareChain, gimple_ctypes.UnaryOp)):
         try:
@@ -6262,9 +6269,12 @@ def _membership_container_type(gen, right_node) -> str | None:
             return 'Bool'
         if qt == 'double':
             return 'Float64'
-        if qt in ('int', 'int64_t'):
+        if qt in ('int', 'int64_t') and _operands_provably_int(gen, right_node):
             return 'Int'
         return None
+    # Provably scalar by SHAPE: a call. Its result type is an inference, not
+    # a declaration, so only a non-default answer is trusted; an `int64_t`
+    # from a call is the box default (see above) and says nothing about Int.
     if isinstance(right_node, gimple_ctypes.CallExpr):
         try:
             qt = _as_str(gen._quick_type(right_node) or '')
@@ -6274,8 +6284,6 @@ def _membership_container_type(gen, right_node) -> str | None:
             return 'Bool'
         if qt == 'double':
             return 'Float64'
-        if qt in ('int', 'int64_t'):
-            return 'Int'
         return None
     # Provably scalar by BINDING.
     if isinstance(right_node, gimple_ctypes.IdentExpr):
@@ -6336,6 +6344,20 @@ def _membership_container_type(gen, right_node) -> str | None:
         # MojoSet *, char *, tuple/struct types) is not scalar.
         return None
     return None
+
+
+def _operands_provably_int(gen, node) -> bool:
+    """True when an arithmetic/unary expression's result is Int because
+    every operand is itself provably Int (recursively, by the same
+    classifier `_membership_container_type` uses for a bare operand).
+    The codegen's own `int64_t` answer for the expression is not used as
+    the evidence; see the note in `_membership_container_type`."""
+    if isinstance(node, gimple_ctypes.BinaryOp):
+        return (_membership_container_type(gen, node.left) == 'Int'
+                and _membership_container_type(gen, node.right) == 'Int')
+    if isinstance(node, gimple_ctypes.UnaryOp):
+        return _membership_container_type(gen, node.operand) == 'Int'
+    return False
 
 
 def _lower_in_range(gen, x_val: str, range_args: list,

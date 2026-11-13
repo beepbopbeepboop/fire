@@ -21,7 +21,7 @@ from fire_compiler import (py_tokenize, Parser, FunctionDef, StructDef,
                           AssignStmt, IdentExpr, TupleExpr, StringLiteral,
                           ComptimeVarStmt, CallExpr, align_value_error)
 from mojo.middle import comptime as _comptime
-from mojo.middle.comptime import (eval_const_bool_state, CONST_TRUE,
+from mojo.middle.comptime import (eval_const, eval_const_bool_state, CONST_TRUE,
                                   CONST_FALSE, conforms_to)
 from gimple_codegen import _mojo_type
 from mojo.middle.types import _body_builds_struct_tuple
@@ -723,6 +723,33 @@ def _where_bindings(targs: dict) -> dict:
     return bindings
 
 
+def _module_alias_bindings(module_src: str) -> dict:
+    """Fold top-level `alias NAME = <literal>` bindings from module text.
+
+    The parser records `alias` as a no-op ExprStmt and the binding as an
+    ordinary AssignStmt, so the AST cannot distinguish a module alias from a
+    module-level assignment. Scan the source for `alias NAME = <literal>`
+    lines instead and fold the literal with the shared constant folder. The
+    last binding for a repeated name wins; anything that does not fold stays
+    out so the clause remains undecided rather than wrong."""
+    bindings = {}
+    if not module_src:
+        return bindings
+    for line in module_src.splitlines():
+        m = re.match(r'^alias\s+([A-Za-z_]\w*)\s*=\s*(.+)$', line)
+        if not m:
+            continue
+        name, rhs = m.group(1), m.group(2).strip()
+        try:
+            node = Parser(py_tokenize(rhs))._parse_expr(0)
+            val = eval_const(node, {})
+        except Exception:
+            val = None
+        if isinstance(val, (bool, int, float, str)):
+            bindings[name] = val
+    return bindings
+
+
 def _where_conformance_bases(module_src: str) -> dict:
     """Declared struct/trait bases from module_src for conforms_to folding."""
     bases = {}
@@ -793,7 +820,8 @@ def check_where_clauses(module_src: str, template_src: str, targs: dict):
     undecided = clauses is None
     if clauses:
         src_texts = _header_where_texts(template_src)
-        bindings = _where_bindings(targs)
+        bindings = _module_alias_bindings(module_src)
+        bindings.update(_where_bindings(targs))
         _cpred = _where_conforms_to_pred(module_src, targs)
         for i, item in enumerate(clauses):
             cond, msg = _split_where_message(item)
