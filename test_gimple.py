@@ -184,6 +184,20 @@ def selfhost_emitted_return_type(module: str, struct: str, method: str) -> str:
     return ''
 
 
+def stdlib_unit_compiles(mojo_src: str) -> tuple[bool, str]:
+    """Return (ok, error) through build_stdlib_dylib.compile_module_to_c: the
+    single-unit path compile_one.py and the stdlib-syntax gate use. It is not
+    the in-process path gimple_compiles takes, and the two refuse different
+    things (a bracketed generic called from main is only instantiated here)."""
+    import build_stdlib_dylib
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stdlib_unit_probe.mojo')
+    try:
+        build_stdlib_dylib.compile_module_to_c(mojo_src, path, 'stdlib_unit_probe')
+        return True, ''
+    except Exception as e:
+        return False, f'{type(e).__name__}: {e}'
+
+
 def gimple_compiles(mojo_src: str) -> tuple[bool, str, str]:
     """Return (ok, c_src, stderr)."""
     c_src = compile_to_gimple(mojo_src)
@@ -14903,6 +14917,36 @@ def f() -> Float64:
 
     _run_isolated(_test_array_float_fill_from_a_container,
                   'gate_stdlib_syntax_array_float_fill_pointer_coercion')
+
+    # gate-stdlib-syntax (2026-11-13): an IMPORTED builtin bracket call whose
+    # type arguments include a string literal (`llvm_intrinsic["llvm.x", T]`)
+    # inside a generic instantiation. The string arg renders as '' (not a
+    # type), so the elaborated-instantiation refusal fired and stopped
+    # std/math/math.mojo (frexp, reached from test_ldexp/test_math) and the
+    # other stdlib-syntax files. That refusal is for generics THIS unit
+    # defines; an imported name keeps the module-boundary zero stub. The
+    # case compiles in single-unit mode, the path compile_one.py uses.
+    def _test_imported_intrinsic_string_arg_in_instance():
+        global _PASS, _FAIL
+        name = "gate_stdlib_syntax_imported_intrinsic_string_arg"
+        ok, err = stdlib_unit_compiles("""\
+from std.sys.intrinsics import llvm_intrinsic
+
+def wrap[T: DType](x: SIMD[T, 1]) -> SIMD[T, 1]:
+    return llvm_intrinsic["llvm.probe.name", SIMD[T, 1], has_side_effect=False](x)
+
+def main():
+    print(wrap[DType.float32](SIMD[DType.float32, 1](2.0)))
+""")
+        if ok:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+
+    _run_isolated(_test_imported_intrinsic_string_arg_in_instance,
+                  'gate_stdlib_syntax_imported_intrinsic_string_arg')
 
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.
