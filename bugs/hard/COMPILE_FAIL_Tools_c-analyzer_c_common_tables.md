@@ -1,4 +1,4 @@
-SPLIT: bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part1.md, bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables-part2.md (part3 fixed and deleted)
+SPLIT: parts 1 (foreign-callable table/param typing), 2 (cpp for over tabled callable), and 3 (csv.reader runtime/iterator and end-to-end `tables.py` compile) — all fixed and deleted
 # COMPILE_FAIL: Tools/c-analyzer/c_common/tables.py
 
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`

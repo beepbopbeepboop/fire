@@ -14698,6 +14698,93 @@ main()
     _run_isolated(lambda: test_regex_scan_in_a_method_body_compiles_and_matches_cpython(),
                   'test_regex_scan_in_a_method_body_compiles_and_matches_cpython')
 
+    def test_named_callback_re_sub_compiles_and_runs_in_a_gimple_body():
+        """`re.sub(pat, top_level_def, src)` must pass the callback as the
+        bare `void *` value it already is, never with a C-style `(void *)`
+        cast emitted INSIDE the `__GIMPLE` body.
+
+        A bare top-level `def` lowers to the file-scope
+        `static void * _funcptr_<fn>` (calls_shared._callable_value_symbol),
+        so the old fallback in `_lower_re_sub_callback` emitted
+        `_t6 = (void *)_funcptr_repl_9f63a2;` — and a cast whose operand is a
+        GLOBAL DECL is not a legal raw-GIMPLE operand, so gcc rejected the
+        whole `.ci` with "invalid operand in unary operation". gcc only
+        enforces that under `-x c` (this test's `gimple_body_compiles`, the
+        same parse `fire.py build` uses); a `.c` suffix lowers from C and
+        tolerates it, which is why every pre-existing re.sub test stayed
+        green.
+
+        Both lowering arms are covered because they share
+        `_lower_re_sub_callback`: a literal pattern folds into the codegen's
+        own regex engine (`mojo_regex_sub_fn`), while a pattern PARAMETER
+        falls back to the POSIX backend (`mojo_re_sub_fn`). The program is
+        then compiled and RUN with CPython's own stdout as the expectation,
+        so the callback has to be actually invoked and produce the right
+        string, not merely parse.
+        """
+        global _PASS, _FAIL
+        name = "named_callback_re_sub_compiles_and_runs_in_a_gimple_body"
+        src = r'''
+import re
+
+def repl(mm):
+    return "N"
+
+class S:
+    def sub(self, s):
+        return re.sub(r"[0-9]+", repl, s)
+
+    def sub_dynamic(self, pat, s):
+        return re.sub(pat, repl, s)
+
+def main():
+    print(S().sub("a1b22"))
+    print(S().sub_dynamic(r"[a-z]+", "a1b22"))
+main()
+'''
+        ok, c_src, stderr = gimple_body_compiles(src)
+        # The exact spelling this pins: no cast of the `_funcptr_` static.
+        casted = re.findall(r'= \(void \*\)_funcptr_', c_src)
+        if not ok or casted or '__GIMPLE char * S_sub' not in c_src:
+            print(f"FAIL  {name}: ok={ok} cast-funcptr-elems={casted}")
+            if not ok:
+                for line in stderr.splitlines()[:12]:
+                    print(f"      {line}")
+            _FAIL += 1
+            return
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'named_cb_re_sub.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, timeout=RUN_TIMEOUT_S)
+            c_file = os.path.join(td, 'named_cb_re_sub.ci')
+            with open(c_file, 'w') as fh:
+                fh.write(c_src)
+            exe = os.path.join(td, 'named_cb_re_sub.exe')
+            cc = subprocess.run(
+                [GCC, '-fgimple', '-x', 'c', f'-I{_RUNTIME_INC}', '-o', exe,
+                 c_file, os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+            if cc.returncode != 0:
+                errs = [ln for ln in cc.stderr.splitlines() if ' error:' in ln]
+                print(f"FAIL  {name}: gcc -fgimple -x c failed:\n"
+                      + "\n".join(errs[:6]))
+                _FAIL += 1
+                return
+            run = subprocess.run([exe], capture_output=True, text=True,
+                                 timeout=RUN_TIMEOUT_S)
+        if run.returncode != 0 or run.stdout != py.stdout:
+            print(f"FAIL  {name}: compiled printed {run.stdout!r} "
+                  f"(exit {run.returncode}), CPython printed {py.stdout!r}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    _run_isolated(lambda: test_named_callback_re_sub_compiles_and_runs_in_a_gimple_body(),
+                  'test_named_callback_re_sub_compiles_and_runs_in_a_gimple_body')
+
     # gate-stdlib-syntax: a FLOAT scalar's bit accessors answer an integer.
     #
     # This is the minimum shape of the eight-file `stdlib-syntax` red the two
