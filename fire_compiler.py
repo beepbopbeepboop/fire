@@ -5030,6 +5030,11 @@ class Parser:
         self._lazy_import_blockers = []
         # Empty until a bracket list is parsed; see the class-level note.
         self._last_bracket_variadics = []
+        # Diagnostics recorded while parsing in recovery mode. Each entry is a
+        # SyntaxError (or a string message) describing a recovered parse error.
+        # `parse_module(recover=True)` collects errors here and continues; the
+        # default non-recovering path still raises on the first error.
+        self.errors = []
         # `comptime NAME = <rhs>` the parser could not parse, as
         # `[(loc, text, exception_text), ...]`. A comptime right-hand side has
         # two very different fates that used to be INDISTINGUISHABLE: a
@@ -9300,11 +9305,27 @@ class Parser:
     def _is_kw(self, *w) -> bool:
         t = self._peek(); return t.kind == "KW" and t.value in w
 
-    def parse_module(self) -> list:
+    def parse_module(self, recover: bool = False) -> list:
         stmts = []
+        self.errors = []
         self._skip_newlines()
         while not self._at_end():
-            self._parse_stmt_into(stmts)
+            if recover:
+                start_pos = self._pos
+                try:
+                    self._parse_stmt_into(stmts)
+                except SyntaxError as e:
+                    self.errors.append(e)
+                    # Synchronize: advance past the failing construct so parsing
+                    # can continue at the next likely top-level declaration.
+                    self._synchronize_top_level(start_pos)
+                except Exception as e:
+                    # Treat other parse-time failures as recoverable errors too
+                    # so a malformed declaration does not abort the module.
+                    self.errors.append(e)
+                    self._synchronize_top_level(start_pos)
+            else:
+                self._parse_stmt_into(stmts)
             self._skip_newlines()
         stmts = _synthesize_fieldwise_inits(stmts)
         _check_out_argument_calls(stmts, self._filename)
@@ -9313,6 +9334,45 @@ class Parser:
         _check_variadic_element_types(stmts, self._filename)
         _check_docstring_self_imports(stmts, self._filename)
         return stmts
+
+    def _synchronize_top_level(self, start_pos: int):
+        """Recover after a parse error at module scope by skipping tokens until
+        the parser is positioned at a plausible start of the next top-level
+        declaration or statement. Must always make progress when not at EOF."""
+        if self._pos == start_pos and not self._at_end():
+            self._advance()
+        # Skip to a NEWLINE at module level, then consume layout/newlines until
+        # we reach a token that is not inside an indented block we failed in.
+        while not self._at_end():
+            t = self._peek()
+            if t.kind == "NEWLINE":
+                self._advance()
+                # Consume blank lines and dedents back to module scope.
+                while not self._at_end():
+                    t2 = self._peek()
+                    if t2.kind in ("NEWLINE", "DEDENT"):
+                        self._advance()
+                        continue
+                    if t2.kind == "INDENT":
+                        # Still inside/entering an indented region (e.g. we
+                        # failed mid-block); consume and keep seeking module
+                        # level.
+                        self._advance()
+                        continue
+                    break
+                # At module scope now? A top-level token follows (no INDENT
+                # pending). Stop so the main loop can parse it.
+                if self._at_end():
+                    return
+                if self._peek().kind not in ("INDENT", "DEDENT"):
+                    return
+                continue
+            if t.kind == "DEDENT":
+                self._advance()
+                if not self._at_end() and self._peek().kind not in ("INDENT", "DEDENT", "NEWLINE"):
+                    return
+                continue
+            self._advance()
 
     def _parse_stmt_into(self, stmts: list):
         """Parse one statement and append it to `stmts`.
