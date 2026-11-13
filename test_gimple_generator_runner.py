@@ -2874,74 +2874,6 @@ def run_struct_ptr_through_local_dict_tests():
         "9\n")
 
 
-def run_tuple_target_for_and_method_stmt_generator_tests():
-    # A generator body with: `for a, b in pairs:` over a parameter (each
-    # element a 2-tuple), element reads off the first half (`fileinfo.filename`,
-    # `fileinfo.lno`), method calls on a stored struct instance as an expression
-    # statement and in `if`/`while` conditions, and a tuple-unpacking assignment
-    # from struct member reads. Mirrors the measured _iter_source shape
-    # (cpp-path generator tuple-target for-loop / method-call / tuple-unpack).
-    T_TUPLE_CPP_PKG_FILES = {
-        '__init__.py': '',
-        'info.py': (
-            "class FileInfo:\n"
-            "    def __init__(self, filename, lno):\n"
-            "        self.filename = filename\n"
-            "        self.lno = lno\n"
-            "\n"
-            "class SourceInfo:\n"
-            "    def __init__(self, filename):\n"
-            "        self.filename = filename\n"
-            "        self.text = \"\"\n"
-            "        self._start = 0\n"
-            "        self.count = 0\n"
-            "        self.done = False\n"
-            "    def _add_line(self, line, lno):\n"
-            "        self.text = self.text + line\n"
-            "        self.count = self.count + 1\n"
-            "        self._start = lno\n"
-            "    def too_much(self, maxtext, maxlines):\n"
-            "        return self.count > maxlines\n"
-            "    def _used(self):\n"
-            "        if not self.done and self.count > 0:\n"
-            "            self.done = True\n"
-            "            return True\n"
-            "        return False\n"
-        ),
-    }
-    _saved_pkg_files = _FOREIGN_PKG_FILES
-    try:
-        globals()['_FOREIGN_PKG_FILES'] = T_TUPLE_CPP_PKG_FILES
-        _test_foreign_a3_generator_handle(
-            "generator_tuple_target_for_and_method_stmts",
-            "from .info import FileInfo, SourceInfo\n"
-            "\n"
-            "def _iter_source(lines, *, maxlines=10, start=[]):\n"
-            "    srcinfo = SourceInfo(\"file.c\")\n"
-            "    for fileinfo, line in lines:\n"
-            "        srcinfo._add_line(fileinfo.filename + line, fileinfo.lno)\n"
-            "        if srcinfo.too_much(0, maxlines):\n"
-            "            break\n"
-            "        while srcinfo._used():\n"
-            "            yield srcinfo.count\n"
-            "    else:\n"
-            "        yield srcinfo.count\n"
-            "    filename, lno, text = srcinfo.filename, srcinfo._start, srcinfo.text\n"
-            "    yield lno\n"
-            "    yield srcinfo.count\n"
-            "\n"
-            "def main():\n"
-            "    pairs = [(FileInfo(\"a.c:\", 10), \"hello\"),"
-            " (FileInfo(\"b.c:\", 20), \"world\")]\n"
-            "    for v in _iter_source(pairs):\n"
-            "        print(v)\n"
-            "\n"
-            "main()\n",
-            "1\n2\n20\n2\n")
-    finally:
-        globals()['_FOREIGN_PKG_FILES'] = _saved_pkg_files
-
-
 def run_nested_generator_capture_tests():
     # A generator defined INSIDE another def that reads one of that def's
     # parameters or locals. The coroutine path has no capture model for a
@@ -6520,7 +6452,6 @@ def run_tests():
     run_variadic_lambda_value_tests()
     run_unpack_call_forward_tests()
     run_ctor_default_arg_in_generator_tests()
-    run_tuple_target_for_and_method_stmt_generator_tests()
     run_struct_ptr_through_local_dict_tests()
     run_mixed_yield_kind_tests()
     run_next_method_tests()

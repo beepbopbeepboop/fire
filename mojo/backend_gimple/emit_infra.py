@@ -7845,27 +7845,6 @@ def _own_repr(gen, fn: str, value: str, out: list) -> str:
     return value
 
 
-def _peek_is_user_method(gen, call) -> bool:
-    """True when a zero-argument `<obj>.peek()` call is a USER method, not the
-    peekable iterator's `Optional[Pointer]` niche that `_gen_print` describes.
-
-    The niche is recognised by the method NAME alone, which made a user class
-    with its own `peek()` print `Optional(Some)` for its int result. The receiver
-    settles it: an object of a struct that defines `peek` is that method. An
-    unknown receiver is a user method when any struct in the program defines
-    `peek`, so the niche is only assumed where no such class exists.
-    """
-    fn = getattr(call, 'func', None)
-    if not isinstance(fn, gimple_ctypes.MemberExpr):
-        return False
-    obj = fn.obj
-    if isinstance(obj, gimple_ctypes.IdentExpr):
-        rt = gen._type_of(_as_str(obj.name))
-        if isinstance(rt, str) and rt.endswith(' *'):
-            return 'peek' in gen._struct_method_names.get(rt[:-2], ())
-    return any('peek' in ms for ms in gen._struct_method_names.values())
-
-
 def _gen_print(gen, args: list, kwargs: list = None):
     # print(..., file=sys.stderr): kwargs used to be silently dropped
     # entirely (the file= expression was never even inspected), so every
@@ -8053,8 +8032,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                     if (isinstance(_cfunc, gimple_ctypes.MemberExpr)
                             and _as_str(getattr(_cfunc, 'member', '')) == 'peek'
                             and not getattr(_call_arg, 'args', None)
-                            and not getattr(_call_arg, 'kwargs', None)
-                            and not _peek_is_user_method(gen, _call_arg)):
+                            and not getattr(_call_arg, 'kwargs', None)):
                         _is_opt_ptr_niche = True
                 if _is_opt_ptr_niche:
                     # Optional[Pointer[...]] is lowered as a nullable pointer
@@ -8288,8 +8266,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
                     if (isinstance(_efunc, gimple_ctypes.MemberExpr)
                             and _as_str(getattr(_efunc, 'member', '')) == 'peek'
                             and not getattr(_earg, 'args', None)
-                            and not getattr(_earg, 'kwargs', None)
-                            and not _peek_is_user_method(gen, _earg)):
+                            and not getattr(_earg, 'kwargs', None)):
                         _opt_ptr_niche_emit = True
             if _opt_ptr_niche_emit and (atype in ('int', 'int64_t') or (isinstance(atype, str) and atype.endswith('*'))):
                 bb_some = gen._new_bb()
