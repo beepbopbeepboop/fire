@@ -547,7 +547,18 @@ def test_every_declaration_is_seen():
     # `str_word_fresh`) and four are box-shaped (`throw_take` and the three
     # dict entries), which is the whole 418 -> 425 word and 502 -> 506 box
     # movement in the quoted figures — `--fix` wrote those from this scan.
-    for header, want in (('fire_runtime.h', 821),   # --fix writes the live figure
+    for header, want in (('fire_runtime.h', 822),   # --fix writes the live figure
+    # 821 -> 822 (2026-11-12, `63dd14dda`, "codegen: handle str-box ops in
+    # tagged generator words"): ONE name, read off the call on the live
+    # header, and the only declaration past the 821 rung (`d26aed1cb`):
+    #   +1  `mojo_mul_word` (runtime/fire_runtime.h), the `*` that a tagged
+    #       generator word may be a str box or pointer for — `str * int` is a
+    #       repeat, anything else is the integer product. Two int64_t in, one
+    #       int64_t out, so it is word-shaped: the word figure moves 425 -> 426
+    #       and the box figure stays at 506, total 931 -> 932. The commit added
+    #       the declaration without touching this ladder, which is the drift
+    #       this check exists to catch; the rung is the live scan's own count,
+    #       and `--fix` writes the prose quotes from it.
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already
