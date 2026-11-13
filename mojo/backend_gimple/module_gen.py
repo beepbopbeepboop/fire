@@ -6415,6 +6415,14 @@ def gen_module_impl(self, stmts: list):
             # is not derived from the dataclass, so a field the parser writes
             # and `_parse_funcdef` reads needs BOTH.
             '_last_bracket_variadics': 'MojoList *',
+            # `Parser.errors` — the recovered-diagnostics list
+            # (`parse_module(recover=True)` appends to it). Same
+            # dataclass-field-without-a-row shape as `_lazy_import_blockers`:
+            # `82e5cded0` added `self.errors = []` to `__init__` and the class
+            # annotation but not this row, so the self-hosted `Parser` struct
+            # omitted it and gcc rejected every access with
+            # `'Parser' has no member named 'errors'`.
+            'errors': 'MojoList *',
             # NOT `_CONV_KWS`: that is a CLASS-level constant
             # (`Parser._CONV_KWS = {...}`, fire_compiler.py), not an instance
             # field. Listing it here made `self._CONV_KWS` read this
@@ -6926,6 +6934,16 @@ def gen_module_impl(self, stmts: list):
         # bracket parameter list.
         'where_clause': 'int64_t',
         'bracket_types': 'MojoList *',
+        # `align_expr` is the parsed argument/expression of a struct's
+        # `@align(...)` decorator (None when absent), and `presence_fields`
+        # the compiler-minted presence-tracked field names. Both dataclass
+        # fields landed without a row here, so the self-hosted `StructDef`
+        # struct omitted them and gcc rejected every access with
+        # `'StructDef' has no member named 'align_expr'` /
+        # `... 'presence_fields'` (module_gen's own mint site and
+        # mojo/middle/types.py's presence-bit helpers).
+        'align_expr': 'int64_t',
+        'presence_fields': 'MojoList *',
     }
     self.struct_field_types['TraitDef'] = {
         'name': 'char *', 'methods': 'MojoList *', 'decorators': 'MojoList *',
