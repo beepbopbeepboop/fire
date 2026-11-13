@@ -18636,13 +18636,35 @@ def gen_module_impl(self, stmts: list):
                 if not sym_info.get('c_parameters') and not sym_info.get('parameters'):
                     _sig_pts = _ggf_dup._imported_def_pts(self, _sn)
                     if _sig_pts:
-                        _sig_ret = _as_str(sym_info.get('c_return_type')) \
-                            or _as_str(sym_info.get('return_type')) or 'int64_t'
-                        if _sig_ret and _sig_ret != 'unknown' \
-                                and not any(c in _sig_ret for c in ('*', ' ')):
-                            pass
-                        else:
-                            _sig_ret = 'int64_t'
+                        # `c_return_type` is the DEFINER's resolved C type:
+                        # module_loader computes it through
+                        # `_mojo_type_to_c` (gimple_codegen._mojo_type), which
+                        # returns a valid C type for every annotation or
+                        # `int64_t` — never the raw annotation text. Use it
+                        # as-is. The shape test this used to carry
+                        # (`not any(c in _sig_ret for c in ('*', ' '))`) read
+                        # that guarantee backwards: every multi-token pointer
+                        # type (`char *`, `MojoList *`) failed the
+                        # single-token test and was clobbered to `int64_t`,
+                        # so the importer's call through the extern then fed
+                        # an `int64_t` into a `char *`-typed module global —
+                        # gcc's `assignment to 'char *' from 'int64_t' ...
+                        # -Wint-conversion` in the 2026-11-12 self-host build
+                        # (`dispatch_table_global_ctype`'s `char *` return is
+                        # the instance: `_forced = ..._9f63a2 (check_name)`
+                        # around module_gen.py:16860).
+                        _sig_ret = _as_str(sym_info.get('c_return_type'))
+                        if not _sig_ret or _sig_ret == 'unknown':
+                            # No resolved type from the loader (`return_type`
+                            # is the RAW annotation — multi-token Mojo text
+                            # like `str | None` is not valid C — so keep the
+                            # old single-token guard on this fallback only).
+                            _rt = _as_str(sym_info.get('return_type'))
+                            if _rt and _rt != 'unknown' \
+                                    and not any(c in _rt for c in ('*', ' ')):
+                                _sig_ret = _rt
+                            else:
+                                _sig_ret = 'int64_t'
                         signature = f'{_sig_ret} {safe} ({", ".join(_as_list(_sig_pts))})'
                 # The scan's PARAMETER types are a second inference too: an
                 # unannotated parameter (`def module_qualifier(q)`) is
