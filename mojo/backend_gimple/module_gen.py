@@ -4872,8 +4872,6 @@ def _gmi_transform_enum_classes(self, stmts: list) -> list:
 
 
 def gen_module_impl(self, stmts: list):
-    self._stmts = stmts
-    self._current_module_stmts = stmts
 
     # A class written INSIDE a function body is a type declaration like any
     # other, and the struct pipeline reads the module-level statement list, so
@@ -11244,12 +11242,7 @@ def gen_module_impl(self, stmts: list):
             _unpacked = (getattr(self, '_tuple_unpack_locals', None) or {}).get(
                 _as_str(caller_name), ())
             if _as_str(a.name) in _unpacked:
-                # The box says nothing about a tuple-unpack target, so only
-                # a slot every return of the callee PROVES to be a str counts
-                # (`s, n = pair()` with `pair` returning `"de", 1`). A slot
-                # proven a container, or not proven at all, stays exempt; see
-                # `_unpack_slot_proves` below.
-                return _unpack_slot_proves('str', a, caller_name)
+                return False
         return _as_str(st) in ('int64_t', 'int', 'bool')
 
     def _resolve_param_containers():
@@ -11547,20 +11540,17 @@ def gen_module_impl(self, stmts: list):
     # number: coro.py's `_mark_coro_param_elem_kinds`, reached through
     # `_async_method_setup`'s tuple. The box is the fallback, not evidence of a
     # scalar, so the exemption is evidence-based and narrow. A name is exempt
-    # from the box reading ONLY when every binding of it in the caller is a
-    # tuple unpack from a module-level call. Of those, a slot the callee
-    # returns as a STR on every return statement is the one kind that counts
-    # as a non-container observation (`_unpack_slot_proves('str', ...)` in
-    # `_is_noncontainer_arg`), so `s, n = pair()` with `pair` returning
-    # `"de", 1` still refuses. A slot proven a container, or not proven at
-    # all, is exempt, which is what keeps the coro `_async_method_setup`
-    # tuple from being read as a str or a number.
+    # ONLY when every binding of it in the caller is a tuple unpack from a
+    # module-level call whose returns, in that slot, are containers on every
+    # return statement. A slot the callee returns as a str or a number (or
+    # anything it cannot prove a container) keeps the observation, so
+    # `s, n = pair()` with `pair` returning `"de", 1` still refuses.
     _CONTAINER_CTYPES = ('MojoList *', 'MojoDict *', 'MojoSet *')
     _caller_body_by_name: dict = {}
     for _cbn, _cbb in _caller_bodies:
         _caller_body_by_name[_as_str(_cbn)] = _cbb
     _caller_binding_memo: dict = {}   # caller -> {name: [binding | None]}
-    _tuple_slot_memo: dict = {}   # (kind, callee, index, arity) -> bool
+    _container_slot_memo: dict = {}   # (callee, index, arity) -> bool
 
     def _target_names(target):
         """Every bare name a store target binds (`a`, `(a, b)`, `[a, *b]`)."""
@@ -11620,36 +11610,26 @@ def gen_module_impl(self, stmts: list):
         _caller_binding_memo[caller_name] = table
         return table
 
-    def _element_proves(kind, callee, e):
-        """Does expression `e`, the value of one tuple slot in a return of
-        `callee`, provably have `kind`? `'container'` is a list, dict or set;
-        `'str'` is a `char *`. A name answers from the callee's own inferred
-        type, and anything else is unproven."""
-        if kind == 'str':
-            if isinstance(e, gimple_ctypes.StringLiteral):
-                return True
-            _wanted = ('char *',)
-        else:
-            if isinstance(e, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr,
-                              gimple_ctypes.DictExpr, gimple_ctypes.SetExpr)):
-                return True
-            _wanted = _CONTAINER_CTYPES
+    def _element_is_container(callee, e):
+        if isinstance(e, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr,
+                          gimple_ctypes.DictExpr, gimple_ctypes.SetExpr)):
+            return True
         if isinstance(e, gimple_ctypes.IdentExpr):
             _nm = _as_str(e.name)
             _vt = self._inferred_var_types.get(callee, {}).get(_nm)
             if _vt is None:
                 _vt = self._inferred_param_types.get(callee, {}).get(_nm)
-            return _as_str(_vt) in _wanted
+            return _as_str(_vt) in _CONTAINER_CTYPES
         return False
 
-    def _slot_proves(kind, callee, index, arity):
+    def _slot_is_container(callee, index, arity):
         """Does every return statement of `callee` yield a `arity`-tuple whose
-        slot `index` provably has `kind` (see `_element_proves`)? False for no
-        returns, a non-tuple return, or a tuple of another arity. Returns inside
-        nested defs are not the callee's own, so they are skipped."""
-        _key = (kind, callee, index, arity)
-        if _key in _tuple_slot_memo:
-            return _tuple_slot_memo[_key]
+        slot `index` is a container? False for no returns, a non-tuple return,
+        or a tuple of another arity. Returns inside nested defs are not the
+        callee's own, so they are skipped."""
+        _key = (callee, index, arity)
+        if _key in _container_slot_memo:
+            return _container_slot_memo[_key]
         _ans = False
         _cfd = _fn_by_name.get(callee)
         if _cfd is not None:
@@ -11667,22 +11647,22 @@ def gen_module_impl(self, stmts: list):
                 _rv = _r.value
                 if (not isinstance(_rv, gimple_ctypes.TupleExpr)
                         or len(_rv.elements) != arity
-                        or not _element_proves(kind, callee, _rv.elements[index])):
+                        or not _element_is_container(callee, _rv.elements[index])):
                     _ans = False
                     break
-        _tuple_slot_memo[_key] = _ans
+        _container_slot_memo[_key] = _ans
         return _ans
 
-    def _unpack_slot_proves(kind, a, caller_name):
+    def _unpack_from_container_slot(a, caller_name):
         """Is call argument `a` a name whose every binding in `caller_name` is
-        a tuple-unpack slot that provably has `kind` (see the block above)?"""
+        a container-returning tuple-unpack slot (see the block above)?"""
         if not isinstance(a, gimple_ctypes.IdentExpr):
             return False
         _bs = _caller_bindings(_as_str(caller_name)).get(_as_str(a.name))
         if not _bs:
             return False
         for _b in _bs:
-            if _b is None or not _slot_proves(kind, _b[0], _b[1], _b[2]):
+            if _b is None or not _slot_is_container(_b[0], _b[1], _b[2]):
                 return False
         return True
 
@@ -11830,7 +11810,7 @@ def gen_module_impl(self, stmts: list):
 
                 st = _arg_scalar_type(caller_name, a)
                 if (_pc is None and _is_noncontainer_arg(a, caller_name, st)
-                        and not _unpack_slot_proves('container', a, caller_name)):
+                        and not _unpack_from_container_slot(a, caller_name)):
                     _record_param_noncontainer(callee, pnames[i])
                 if not st:
                     # An int/bool/None literal contributes NOTHING above, and
@@ -11971,7 +11951,7 @@ def gen_module_impl(self, stmts: list):
                         elif (_is_noncontainer_arg(
                                 _kw[1], caller_name,
                                 _arg_scalar_type(caller_name, _kw[1]))
-                                and not _unpack_slot_proves('container', _kw[1], caller_name)):
+                                and not _unpack_from_container_slot(_kw[1], caller_name)):
                             _record_param_noncontainer(callee, _kwn)
                         break
 
@@ -14299,6 +14279,129 @@ def gen_module_impl(self, stmts: list):
                 self._fn_returns_generator[_rf.name] = rt_prov
                 _ret_changed = True
 
+    # Methods that return a generator (for concrete receiver types): in
+    # in-chain imports, a base method may `return cls.gen_method(...)` where
+    # gen_method is a generator on subclasses but not on the base. Analyze
+    # each (concrete_struct, method) with cls/self resolved to that struct.
+    if not hasattr(self, '_method_returns_generator'):
+        self._method_returns_generator = {}
+    if self._generator_method_api or self._generator_api or self._fn_returns_generator:
+        _sdefs = [s for s in stmts if isinstance(s, StructDef)]
+        if _sdefs:
+            _sdef_by = {sd.name: sd for sd in _sdefs}
+            _bases_map = {sd.name: list(getattr(sd, 'bases', None) or []) for sd in _sdefs}
+            def _mro(name, _seen=None):
+                if _seen is None: _seen = set()
+                if name in _seen or name not in _sdef_by:
+                    return [name] if name in _sdef_by else []
+                _seen.add(name)
+                out = [name]
+                for b in _bases_map.get(name, []):
+                    for x in _mro(b, _seen):
+                        if x not in out:
+                            out.append(x)
+                return out
+            _mros = {sd.name: _mro(sd.name) for sd in _sdefs}
+            def _find_method(struct_name, method_name):
+                for cn in _mros.get(struct_name, [struct_name]):
+                    sd = _sdef_by.get(cn)
+                    if sd is None:
+                        continue
+                    for m in sd.methods:
+                        if m.name == method_name:
+                            return cn, m
+                return None, None
+            def _meth_ret_api_for(rv, recv_struct, decl_struct):
+                if not isinstance(rv, CallExpr):
+                    return None
+                fn = rv.func
+                if isinstance(fn, IdentExpr):
+                    if fn.name in self._generator_api:
+                        return self._generator_api[fn.name]
+                    prov = self._fn_returns_generator.get(fn.name)
+                    if isinstance(prov, str):
+                        return self._generator_api.get(prov)
+                    # method in _method_returns_generator? only same-name unlikely
+                    return None
+                if isinstance(fn, MemberExpr) and isinstance(fn.obj, IdentExpr):
+                    mn = fn.member
+                    on = fn.obj.name
+                    if on in ('self', 'cls'):
+                        # resolve in context of concrete receiver
+                        api = self._generator_method_api.get((recv_struct, mn))
+                        if api is not None:
+                            return api
+                        # try declaring struct
+                        api = self._generator_method_api.get((decl_struct, mn))
+                        if api is not None:
+                            return api
+                        # if it's a method (not generator) that returns generator for recv_struct
+                        mapi = self._method_returns_generator.get((recv_struct, mn))
+                        if mapi is not None:
+                            return mapi
+                        return None
+                    api = self._generator_method_api.get((on, mn))
+                    if api is not None:
+                        return api
+                    mapi = self._method_returns_generator.get((on, mn))
+                    if mapi is not None:
+                        return mapi
+                return None
+            # fixed-point over (recv_struct, method) pairs
+            for _ in range(4):
+                _chg = False
+                for sd in _sdefs:
+                    for m in sd.methods:
+                        # analyze for every struct that can receive this method impl?
+                        # find all concrete structs where this (decl_struct, m) is the resolved impl
+                        decl = sd.name
+                        for recv in _sdefs:
+                            recv_name = recv.name
+                            owner, found = _find_method(recv_name, m.name)
+                            if found is not m:
+                                continue
+                            mk = (recv_name, m.name)
+                            if mk in self._generator_method_api or mk in self._method_returns_generator:
+                                continue
+                            rets = []
+                            _gmi_collect_return_values(rets, m.body)
+                            if not rets:
+                                continue
+                            api = None
+                            bad = False
+                            for rv in rets:
+                                ra = _meth_ret_api_for(rv, recv_name, decl)
+                                if ra is not None:
+                                    if api is None:
+                                        api = ra
+                                    elif api is not ra:
+                                        bad = True
+                                        break
+                                else:
+                                    if rv is None or isinstance(rv, NoneLiteral):
+                                        continue
+                                    if isinstance(rv, IdentExpr) and rv.name == 'None':
+                                        continue
+                                    bad = True
+                                    break
+                            if not bad and api is not None:
+                                self._method_returns_generator[mk] = api
+                                self.func_return_types[f"{recv_name}_{m.name}"] = 'MojoGenerator *'
+                                self.func_return_types[f"{decl}_{m.name}"] = 'MojoGenerator *'
+                                try:
+                                    mangled = self._struct_method_csym(recv_name, m.name, '')
+                                    self.func_return_types[mangled] = 'MojoGenerator *'
+                                except Exception:
+                                    pass
+                                try:
+                                    mangled = self._struct_method_csym(decl, m.name, '')
+                                    self.func_return_types[mangled] = 'MojoGenerator *'
+                                except Exception:
+                                    pass
+                                _chg = True
+                if not _chg:
+                    break
+
     _param_gen_obs: dict[str, dict[str, dict]] = {}  # callee -> {pname -> {fname: count}}
     for _round in range(4):
         _changed = False
@@ -15566,9 +15669,6 @@ def gen_module_impl(self, stmts: list):
     # sibling's own `from c import K` says nothing about what this module's
     # `K` means.
     _gmi_scan_imported_global_homes(self, stmts)
-    # Phase 1.7 has typed every global, and each `do_imports` sibling has been
-    # compiled into this unit, so the definer's final accessor types are known.
-    self._reconcile_imported_global_accessors()
 
     func_parts: list[str] = []
 
