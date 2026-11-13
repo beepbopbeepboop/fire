@@ -589,7 +589,22 @@ def test_every_declaration_is_seen():
     # `mojo_bound_method_fn` / `mojo_bound_method_self` are `static inline`,
     # which the scanner does not count, so they move nothing.
     # fire_runtime.c grew by 62 lines with the three (811763 bytes, 793 KB).
-    for header, want in (('fire_runtime.h', 829),   # --fix writes the live figure
+    # 829 -> 830 (2026-11-13, the gate fix for `formal-doc-truth` at 4eba365d99):
+    # ONE name, read off the call on the live header, from a912f5987 ("codegen:
+    # model open() as context manager in compiled generator with-stmts"),
+    # which landed after the 829 rung without one:
+    #   +1  `mojo_open_file_ex` — `open()` with optional mode and newline
+    #       (`newline == NULL` means "not provided"). Word-shaped (three `char *`
+    #       in, one int64_t out, every one a single word), word 430 -> 431,
+    #       total 939 -> 940. Box figure unchanged.
+    # fire_runtime.c grew by 70 lines with it (814067 bytes, 795 KB).
+    # 830 -> 832 (7553dd570, "codegen: a float's bit accessors and bitcast are
+    # bit reinterpretations"): TWO names, read off the live header:
+    #   +1  `mojo_float_from_bits` (int64_t in, float out)
+    #   +1  `mojo_float_to_bits`   (float in, int64_t out)
+    #       Both carry a float across the boundary, so neither is word-shaped:
+    #       total 940 -> 942, word 431 unchanged, box 509 -> 511.
+    for header, want in (('fire_runtime.h', 832),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already

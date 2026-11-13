@@ -1,3 +1,5 @@
+SPLIT: COMPILE_FAIL_Tools_cases_generator_analyzer-part3-part1, COMPILE_FAIL_Tools_cases_generator_analyzer-part3-part2
+
 # COMPILE_FAIL_Tools_cases_generator_analyzer-part3: analyzer.py builds and matches CPython on real input
 
 Part 3 of 3 of `bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md`.
