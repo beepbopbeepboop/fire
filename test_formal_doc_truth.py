@@ -1015,8 +1015,10 @@ def group_phase2():
     not against a second hand-kept copy. The rows themselves are measured by
     `test_formal_runtime_link.py`, which builds the runtime dylib and is
     `proofs`-only, so this group checks that the PROSE agrees with the rows
-    as published; it cannot tell whether the rows are current. That is the
-    open half of `bugs/FORMAL_phase2_section6_prose_drift.md`.
+    as published; it cannot tell whether the rows are current. That half is
+    `test_formal_runtime_link.py`'s — its 2026-11-13 re-measure moved the rows
+    to 375 / 328, and this group is what held the prose to them while the rows
+    sat stale at 369 / 323.
 
     Like every group here, a published figure that cannot be found is a
     FAILURE and not a skip: a reworded sentence must not quietly stop being
@@ -1063,14 +1065,6 @@ def group_phase2():
         check(int(gap.group(1)) == word - exported,
               f'FORMAL.md §6 phase 2 says {gap.group(1)} are not exported, its rows '
               f'say {word} - {exported} = {word - exported}')
-
-    # The parenthetical that names the same gap by count ("not among the N").
-    named = re.search(r'not among the (\d+)\)', flat_text)
-    check(named is not None, 'FORMAL.md §6 phase 2 still names the gap a second time')
-    if named is not None and gap is not None:
-        check(int(named.group(1)) == int(gap.group(1)),
-              f'FORMAL.md §6 phase 2 says "not among the {named.group(1)}" and '
-              f'"{gap.group(1)} of the {gap.group(2)}" for the same gap')
 
     # "N of the M the library exports take a `void *`": M is the exported total,
     # and the reachable row is the exported total less that N.
