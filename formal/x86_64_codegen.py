@@ -1067,7 +1067,7 @@ class X86_64Codegen:
         both backends through one `_codegen_and_link` and hands both the same
         list). Accepting it here is what keeps `--backend=x86_64` from dying
         with a TypeError on a keyword meant for the other backend (see
-        bugs/FORMAL_arm64_instruction_coverage.md, "Landed alongside: dylib_syms"),
+        bugs/mid/FORMAL_arm64_instruction_coverage.md, "Landed alongside: dylib_syms"),
         and USING it is what keeps the two backends from disagreeing about
         which callee names are types: without it a struct constructor fell
         through to the extern path and became a `call _Point` against a symbol
