@@ -15963,237 +15963,238 @@ def gen_module_impl(self, stmts: list):
     # it. An UNRESOLVABLE condition falls through unchanged (the flatten
     # keeps the IfStmt and the runtime-branch path below emits it as before).
     for stmt in _flatten_resolved_conditionals(stmts):
-        if isinstance(stmt, FunctionDef):
-            if (stmt.name in self._supported_generators or stmt.name in self._supported_async
-                    or stmt.name in self._supported_async_gen):
-                continue
-            if stmt.name in self._unsupported_generator_names:
-                continue
+        try:
+            if isinstance(stmt, FunctionDef):
+                if (stmt.name in self._supported_generators or stmt.name in self._supported_async
+                        or stmt.name in self._supported_async_gen):
+                    continue
+                if stmt.name in self._unsupported_generator_names:
+                    continue
             # A DEVICE function becomes MSL, accumulated into
             # `_device_parts` and embedded as a C string at the end of the
             # module -- the same trick `test_llm/kernels.metal.inc` uses, and
             # the reason this needs no offline metallib step at all. It is
             # NOT emitted as C, because a C definition of a kernel would be
             # dead code that still has to typecheck.
-            if _device_kinds.get(_as_str(stmt.name)) == _gmi_device_select.DEVICE:
-                _msl = None
+                if _device_kinds.get(_as_str(stmt.name)) == _gmi_device_select.DEVICE:
+                    _msl = None
+                    try:
+                        _msl = _gmi_emit_metal.emit_kernel(stmt, kernel=True)
+                    except _gmi_emit_metal.MetalUnsupported as _me:
+                        if _as_str(stmt.name) in _device_explicit:
+            # EXPLICIT `@gpu` that will not lower is a build
+            # error, not a silently-stubbed C function: the user
+            # asked for the GPU, the whole point of the path is
+            # that the GPU runs the code they wrote, and quietly
+            # running it on the CPU is a lie with exit 0.
+                            raise RuntimeError(
+                                f'GPU kernel {_as_str(stmt.name)!r} did not lower '
+                                f'to MSL: {_me}') from _me
+            # INFERRED (a stdlib kernel reached through
+            # `compile_function[...]`) that will not lower is
+            # different in kind: nobody asked for the device path for
+            # this function, and erroring here made the module
+            # uncompilable. Measured: 10 stdlib/test files died on it
+            # -- std/gpu's `abort_kernel`/`_read_back_kernel`, the
+            # test/asyncrt and test/algorithm/gpu device-pointer
+            # kernels -- so `stdlib-syntax` was 91 unexpected and the
+            # whole stdlib could not be built. Falling back to the
+            # host costs nothing that was asked for: the function
+            # compiles and runs as ordinary C, and the GPU path simply
+            # does not engage for it until the emitter covers it
+            # (`doc/GPU_OFFLOAD_PLAN.md` increment 2).
+                        _device_fallbacks.append(
+                            f'{_as_str(stmt.name)}: {_me}')
+                        _device_kinds[_as_str(stmt.name)] = _gmi_device_select.HOST
+                    if _msl is not None:
+                        _device_parts.append(_msl)
+                        continue
+                _nested_pushed = []
+                _prefix = f"{stmt.name}::"
+                for _qn, _info in self._nested_async_api.items():
+                    if _qn.startswith(_prefix):
+                        _nm = _info['nested_name']
+                        self._async_api[_nm] = _info
+                        _nested_pushed.append(_nm)
+                for _cvs in stmt.body:
+                    if isinstance(_cvs, ComptimeVarStmt):
+                        _cv = self._eval_const(_cvs.value)
+                        if _cv is not None:
+                            if isinstance(_cv, str):
+                                self._comptime_str_names.add(
+                                    _as_str(_cvs.target))
+                            self._comptime_vals.setdefault(_cvs.target, _cv)
+                _func_outer_scope = self._push_import_scope()
+                self._collect_body_import_bindings(stmt.body, _func_outer_scope)
                 try:
-                    _msl = _gmi_emit_metal.emit_kernel(stmt, kernel=True)
-                except _gmi_emit_metal.MetalUnsupported as _me:
-                    if _as_str(stmt.name) in _device_explicit:
-                        # EXPLICIT `@gpu` that will not lower is a build
-                        # error, not a silently-stubbed C function: the user
-                        # asked for the GPU, the whole point of the path is
-                        # that the GPU runs the code they wrote, and quietly
-                        # running it on the CPU is a lie with exit 0.
-                        raise RuntimeError(
-                            f'GPU kernel {_as_str(stmt.name)!r} did not lower '
-                            f'to MSL: {_me}') from _me
-                    # INFERRED (a stdlib kernel reached through
-                    # `compile_function[...]`) that will not lower is
-                    # different in kind: nobody asked for the device path for
-                    # this function, and erroring here made the module
-                    # uncompilable. Measured: 10 stdlib/test files died on it
-                    # -- std/gpu's `abort_kernel`/`_read_back_kernel`, the
-                    # test/asyncrt and test/algorithm/gpu device-pointer
-                    # kernels -- so `stdlib-syntax` was 91 unexpected and the
-                    # whole stdlib could not be built. Falling back to the
-                    # host costs nothing that was asked for: the function
-                    # compiles and runs as ordinary C, and the GPU path simply
-                    # does not engage for it until the emitter covers it
-                    # (`doc/GPU_OFFLOAD_PLAN.md` increment 2).
-                    _device_fallbacks.append(
-                        f'{_as_str(stmt.name)}: {_me}')
-                    _device_kinds[_as_str(stmt.name)] = _gmi_device_select.HOST
-                if _msl is not None:
-                    _device_parts.append(_msl)
-                    continue
-            _nested_pushed = []
-            _prefix = f"{stmt.name}::"
-            for _qn, _info in self._nested_async_api.items():
-                if _qn.startswith(_prefix):
-                    _nm = _info['nested_name']
-                    self._async_api[_nm] = _info
-                    _nested_pushed.append(_nm)
-            for _cvs in stmt.body:
-                if isinstance(_cvs, ComptimeVarStmt):
-                    _cv = self._eval_const(_cvs.value)
-                    if _cv is not None:
-                        if isinstance(_cv, str):
-                            self._comptime_str_names.add(
-                                _as_str(_cvs.target))
-                        self._comptime_vals.setdefault(_cvs.target, _cv)
-            _func_outer_scope = self._push_import_scope()
-            self._collect_body_import_bindings(stmt.body, _func_outer_scope)
-            try:
-                for ci in _gmi_closures_callee_first(self._all_closures.get(stmt.name, {})):
-                    _gmi_emit_closure_recursive(self, func_parts, _emitted_closures, _emitted_env_allocs, ci, stmt.name)
-                self._lambda_parts = []
-                func_parts.append(self.gen_func(stmt))
-            finally:
-                self._pop_import_scope()
-                for _nm in _nested_pushed:
-                    self._async_api.pop(_nm, None)
-            if self._lambda_parts:
-                func_parts.extend(self._lambda_parts)
-                self._lambda_parts = []
-            func_parts.append('')
-        elif isinstance(stmt, StructDef):
-            _moids = self._struct_method_overload_ids(stmt)
+                    for ci in _gmi_closures_callee_first(self._all_closures.get(stmt.name, {})):
+                        _gmi_emit_closure_recursive(self, func_parts, _emitted_closures, _emitted_env_allocs, ci, stmt.name)
+                    self._lambda_parts = []
+                    func_parts.append(self.gen_func(stmt))
+                finally:
+                    self._pop_import_scope()
+                    for _nm in _nested_pushed:
+                        self._async_api.pop(_nm, None)
+                if self._lambda_parts:
+                    func_parts.extend(self._lambda_parts)
+                    self._lambda_parts = []
+                func_parts.append('')
+            elif isinstance(stmt, StructDef):
+                _moids = self._struct_method_overload_ids(stmt)
             # Index loop, NOT `zip(stmt.methods, _moids)`: the self-hosted
             # backend has no `zip()` lowering (`mojo_unsupported_iter`, body
             # runs zero times), so this method-BODY emission loop silently
             # emitted nothing — every struct method was missing from compiled
             # mojoc's output. `_moids` is length-aligned with `stmt.methods`.
-            _z7_meths = stmt.methods
-            for _z7k in range(len(_z7_meths)):
-                m = _z7_meths[_z7k]
-                overload_id = _moids[_z7k] if _z7k < len(_moids) else ''
-                if (stmt.name, m.name) in self._supported_generator_methods:
-                    continue
-                if (m.name == '__new__'
-                        and stmt.name in getattr(self, '_bytes_subclass_structs', ())):
-                    # A builtin-`bytes` subclass's `__new__` is handled
-                    # inline at the construction site (payload synthesis);
-                    # its `return super().__new__(cls, val)` body is not a
-                    # callable C method. See _lower_struct_constructor.
-                    continue
-                method_outer_name = f"{stmt.name}_{m.name}{overload_id}"
-                _method_outer_scope = self._push_import_scope()
-                self._collect_body_import_bindings(m.body, _method_outer_scope)
-                for ci in _gmi_closures_callee_first(self._all_closures.get(method_outer_name, {})):
-                    _gmi_emit_closure_recursive(self, func_parts, _emitted_closures, _emitted_env_allocs, ci, method_outer_name)
-                self._lambda_parts = []
-                # An INHERITED method body physically belongs to the base
-                # class's module (the merge copied the node), so its `#line`
-                # directives must name that file — see gen_stmt's
-                # `_line_src_file` and _inherited_method_src above.
-                _imh_src = getattr(self, '_inherited_method_src', {}).get(id(m))
-                _prev_line_src = getattr(self, '_line_src_file', None)
-                if _imh_src:
-                    self._line_src_file = (self._module_source_paths.get(_imh_src)
-                                           or self._current_filename)
-                # TRANSACTIONAL body emission (2026-10-21, measured): a
-                # definition-site method body of a struct with unbound type
-                # parameters may be UNLOWERABLE — a field typed by a type
-                # parameter erases to a plain scalar in this TU, so a
-                # `next(self._inner)` in it hits the emit_calls hard refusal
-                # (measured: std/itertools `_Product2___next__` and
-                # std/collections/string `BytesIter___next__` refused the WHOLE
-                # module before this; the instantiating TU emits the same
-                # methods under the mangled name with real field types, so the
-                # bare body is what cannot exist). The FIRST cut of the fix
-                # skipped the bodies of EVERY struct with type parameters —
-                # and that was a regression, measured against the de890235 A/B:
-                # 1,768 definitions dropped, 133 of them referenced from other
-                # TUs (e.g. `Span_count`/`Span_copy_from` — `Span` is generic
-                # but its bodies were lowerable and were genuinely CALLED from
-                # _unicode/_utf8/test_span — undefined symbols at link). So:
-                # attempt every body exactly as master did, and fall back to
-                # prototype-ONLY for the individual methods that REFUSE — the
-                # codegen's own honest `cannot compile module:` RuntimeError
-                # is the boundary. Rollback is the emit_loops regex-fallback
-                # transactional pattern: func_parts from the mark, the scope
-                # stack down to its pre-call depth (the method's own frame is
-                # popped with it), body_lines/decls (cleared at the method's
-                # own `_reset_func`, so they hold nothing but this method's
-                # partial output), the annotation-seeded container maps (the
-                # only shared dicts `_gen_struct_method` setdefault-seeds per
-                # LOCAL name — a rejected method's partial seeds must not
-                # reach the next method), and the line-source override.
-                # Anything that is not a codegen refusal propagates, exactly
-                # as master would have.
-                _parts_mark = len(func_parts)
-                _scope_depth = len(self._import_scope_stack)
-                _elem_snap = dict(self._elem_types)
-                _nested_snap = dict(self._nested_elem_types)
-                _dval_snap = dict(self._dict_val_types)
-                _prev_tp = getattr(self, '_current_struct_type_params', None)
-                self._current_struct_type_params = getattr(stmt, 'type_param_names', None)
-                try:
-                    func_parts.append(self._gen_struct_method(stmt.name, m, overload_id))
-                    func_parts.append('')
-                except RuntimeError as _me_err:
-                    if not str(_me_err).startswith('cannot compile module'):
-                        raise
-                    del func_parts[_parts_mark:]
-                    while len(self._import_scope_stack) > _scope_depth:
-                        self._import_scope_stack.pop()
-                    self.body_lines.clear()
-                    self.decls.clear()
+                _z7_meths = stmt.methods
+                for _z7k in range(len(_z7_meths)):
+                    m = _z7_meths[_z7k]
+                    overload_id = _moids[_z7k] if _z7k < len(_moids) else ''
+                    if (stmt.name, m.name) in self._supported_generator_methods:
+                        continue
+                    if (m.name == '__new__'
+                            and stmt.name in getattr(self, '_bytes_subclass_structs', ())):
+            # A builtin-`bytes` subclass's `__new__` is handled
+            # inline at the construction site (payload synthesis);
+            # its `return super().__new__(cls, val)` body is not a
+            # callable C method. See _lower_struct_constructor.
+                        continue
+                    method_outer_name = f"{stmt.name}_{m.name}{overload_id}"
+                    _method_outer_scope = self._push_import_scope()
+                    self._collect_body_import_bindings(m.body, _method_outer_scope)
+                    for ci in _gmi_closures_callee_first(self._all_closures.get(method_outer_name, {})):
+                        _gmi_emit_closure_recursive(self, func_parts, _emitted_closures, _emitted_env_allocs, ci, method_outer_name)
                     self._lambda_parts = []
-                    self._elem_types.clear(); self._elem_types.update(_elem_snap)
-                    self._nested_elem_types.clear(); self._nested_elem_types.update(_nested_snap)
-                    self._dict_val_types.clear(); self._dict_val_types.update(_dval_snap)
+            # An INHERITED method body physically belongs to the base
+            # class's module (the merge copied the node), so its `#line`
+            # directives must name that file — see gen_stmt's
+            # `_line_src_file` and _inherited_method_src above.
+                    _imh_src = getattr(self, '_inherited_method_src', {}).get(id(m))
+                    _prev_line_src = getattr(self, '_line_src_file', None)
+                    if _imh_src:
+                        self._line_src_file = (self._module_source_paths.get(_imh_src)
+                                               or self._current_filename)
+            # TRANSACTIONAL body emission (2026-10-21, measured): a
+            # definition-site method body of a struct with unbound type
+            # parameters may be UNLOWERABLE — a field typed by a type
+            # parameter erases to a plain scalar in this TU, so a
+            # `next(self._inner)` in it hits the emit_calls hard refusal
+            # (measured: std/itertools `_Product2___next__` and
+            # std/collections/string `BytesIter___next__` refused the WHOLE
+            # module before this; the instantiating TU emits the same
+            # methods under the mangled name with real field types, so the
+            # bare body is what cannot exist). The FIRST cut of the fix
+            # skipped the bodies of EVERY struct with type parameters —
+            # and that was a regression, measured against the de890235 A/B:
+            # 1,768 definitions dropped, 133 of them referenced from other
+            # TUs (e.g. `Span_count`/`Span_copy_from` — `Span` is generic
+            # but its bodies were lowerable and were genuinely CALLED from
+            # _unicode/_utf8/test_span — undefined symbols at link). So:
+            # attempt every body exactly as master did, and fall back to
+            # prototype-ONLY for the individual methods that REFUSE — the
+            # codegen's own honest `cannot compile module:` RuntimeError
+            # is the boundary. Rollback is the emit_loops regex-fallback
+            # transactional pattern: func_parts from the mark, the scope
+            # stack down to its pre-call depth (the method's own frame is
+            # popped with it), body_lines/decls (cleared at the method's
+            # own `_reset_func`, so they hold nothing but this method's
+            # partial output), the annotation-seeded container maps (the
+            # only shared dicts `_gen_struct_method` setdefault-seeds per
+            # LOCAL name — a rejected method's partial seeds must not
+            # reach the next method), and the line-source override.
+            # Anything that is not a codegen refusal propagates, exactly
+            # as master would have.
+                    _parts_mark = len(func_parts)
+                    _scope_depth = len(self._import_scope_stack)
+                    _elem_snap = dict(self._elem_types)
+                    _nested_snap = dict(self._nested_elem_types)
+                    _dval_snap = dict(self._dict_val_types)
+                    _prev_tp = getattr(self, '_current_struct_type_params', None)
+                    self._current_struct_type_params = getattr(stmt, 'type_param_names', None)
+                    try:
+                        func_parts.append(self._gen_struct_method(stmt.name, m, overload_id))
+                        func_parts.append('')
+                    except RuntimeError as _me_err:
+                        if not str(_me_err).startswith('cannot compile module'):
+                            raise
+                        del func_parts[_parts_mark:]
+                        while len(self._import_scope_stack) > _scope_depth:
+                            self._import_scope_stack.pop()
+                        self.body_lines.clear()
+                        self.decls.clear()
+                        self._lambda_parts = []
+                        self._elem_types.clear(); self._elem_types.update(_elem_snap)
+                        self._nested_elem_types.clear(); self._nested_elem_types.update(_nested_snap)
+                        self._dict_val_types.clear(); self._dict_val_types.update(_dval_snap)
+                        self._line_src_file = _prev_line_src
+                        self._pop_import_scope()
+            # The class tables name this method's symbol (a `mojo_class_setattr` and a classattr-reader
+            # entry for every non-dunder method). The body above was refused, so that symbol is never
+            # defined in THIS TU: a link reference to it is an undefined symbol (measured: std/iter's
+            # `_PeekableIterator_peek`, which the dylib referenced and never defined). Record it, and the
+            # two table loops leave it out. Only the methods that were refused are recorded.
+                        try:
+                            _proto_cname = self._struct_cname_by_id.get(id(stmt), stmt.name)
+                            self._prototype_only_syms.add(
+                                self._struct_method_csym(_proto_cname, _as_str(m.name), _as_str(overload_id or '')))
+                        except Exception:
+                            pass
+                        func_parts.append(
+                            f"/* {stmt.name}.{m.name}{overload_id}: definition-site "
+                            f"body not lowerable in this TU — {_me_err} — prototype "
+                            f"only; the instantiating TU emits the mangled copy */")
+                        func_parts.append('')
+                        continue
+                    finally:
+                        self._current_struct_type_params = _prev_tp
                     self._line_src_file = _prev_line_src
                     self._pop_import_scope()
-                    # The class tables name this method's symbol (a `mojo_class_setattr` and a classattr-reader
-                    # entry for every non-dunder method). The body above was refused, so that symbol is never
-                    # defined in THIS TU: a link reference to it is an undefined symbol (measured: std/iter's
-                    # `_PeekableIterator_peek`, which the dylib referenced and never defined). Record it, and the
-                    # two table loops leave it out. Only the methods that were refused are recorded.
-                    try:
-                        _proto_cname = self._struct_cname_by_id.get(id(stmt), stmt.name)
-                        self._prototype_only_syms.add(
-                            self._struct_method_csym(_proto_cname, _as_str(m.name), _as_str(overload_id or '')))
-                    except Exception:
-                        pass
-                    func_parts.append(
-                        f"/* {stmt.name}.{m.name}{overload_id}: definition-site "
-                        f"body not lowerable in this TU — {_me_err} — prototype "
-                        f"only; the instantiating TU emits the mangled copy */")
-                    func_parts.append('')
-                    continue
-                finally:
-                    self._current_struct_type_params = _prev_tp
-                self._line_src_file = _prev_line_src
-                self._pop_import_scope()
-                if self._lambda_parts:
-                    func_parts.extend(self._lambda_parts)
-                    self._lambda_parts = []
+                    if self._lambda_parts:
+                        func_parts.extend(self._lambda_parts)
+                        self._lambda_parts = []
             # The class body runs at this statement: a class attribute that
             # reads a module global is stored here, in source order, after
             # that global's own assignment (see _module_class_attr_global_stores).
-            toplevel_stmts.extend(_module_class_attr_global_stores(self, stmt))
-        elif isinstance(stmt, TraitDef):
-            lines = [f"typedef struct {stmt.name}_vtable {{"]
-            _seen_vtable_members: set = set()
-            for m in stmt.methods:
-                safe_mname = _safe_name(m.name)
-                if safe_mname in _seen_vtable_members:
-                    continue
-                _seen_vtable_members.add(safe_mname)
-                ret    = self._resolve_type(m.return_type)
-                if gimple_ctypes._params_have_vararg(m.params):
-                    ptypes = 'MojoList *'
-                else:
-                    if m.params:
-                        # Plain unpack loop, NOT a genexpr with a
-                        # tuple-unpack target joined into a string.
-                        _vt_parts = []
-                        for _vtpn, _vtpt in m.params:
-                            _vt_parts.append(self._resolve_type(_vtpt))
-                        ptypes = ', '.join(_vt_parts)
+                toplevel_stmts.extend(_module_class_attr_global_stores(self, stmt))
+            elif isinstance(stmt, TraitDef):
+                lines = [f"typedef struct {stmt.name}_vtable {{"]
+                _seen_vtable_members: set = set()
+                for m in stmt.methods:
+                    safe_mname = _safe_name(m.name)
+                    if safe_mname in _seen_vtable_members:
+                        continue
+                    _seen_vtable_members.add(safe_mname)
+                    ret    = self._resolve_type(m.return_type)
+                    if gimple_ctypes._params_have_vararg(m.params):
+                        ptypes = 'MojoList *'
                     else:
-                        ptypes = 'void'
-                lines.append(f"  {ret} (*{safe_mname}) ({ptypes});")
-            lines.append(f"}} {stmt.name}_vtable;")
-            func_parts.extend(lines)
-            func_parts.append('')
-        elif isinstance(stmt, (ImportStmt, FromImportStmt)):
-            pass  # Imports processed in pre-pass; extern declarations generated in preamble
-        elif (isinstance(stmt, ComptimeVarStmt)
-                and isinstance(stmt.value, (ListExpr, TupleExpr))):
-            toplevel_stmts.append(AssignStmt(
-                target=IdentExpr(stmt.target, line=stmt.line, col=stmt.col),
-                value=stmt.value, line=stmt.line, col=stmt.col))
-        elif isinstance(stmt, (AssignStmt, AugAssignStmt, MultiAssignStmt,
-                               ExprStmt, IfStmt, WhileStmt, ForStmt,
-                               TryStmt, WithStmt, PassStmt,
-                               BreakStmt, ContinueStmt, ReturnStmt,
-                               RaiseStmt, AssertStmt, VarDecl)):
-            toplevel_stmts.append(stmt)
-        elif isinstance(stmt, ComptimeVarStmt):
+                        if m.params:
+            # Plain unpack loop, NOT a genexpr with a
+            # tuple-unpack target joined into a string.
+                            _vt_parts = []
+                            for _vtpn, _vtpt in m.params:
+                                _vt_parts.append(self._resolve_type(_vtpt))
+                            ptypes = ', '.join(_vt_parts)
+                        else:
+                            ptypes = 'void'
+                    lines.append(f"  {ret} (*{safe_mname}) ({ptypes});")
+                lines.append(f"}} {stmt.name}_vtable;")
+                func_parts.extend(lines)
+                func_parts.append('')
+            elif isinstance(stmt, (ImportStmt, FromImportStmt)):
+                pass  # Imports processed in pre-pass; extern declarations generated in preamble
+            elif (isinstance(stmt, ComptimeVarStmt)
+                    and isinstance(stmt.value, (ListExpr, TupleExpr))):
+                toplevel_stmts.append(AssignStmt(
+                    target=IdentExpr(stmt.target, line=stmt.line, col=stmt.col),
+                    value=stmt.value, line=stmt.line, col=stmt.col))
+            elif isinstance(stmt, (AssignStmt, AugAssignStmt, MultiAssignStmt,
+                                   ExprStmt, IfStmt, WhileStmt, ForStmt,
+                                   TryStmt, WithStmt, PassStmt,
+                                   BreakStmt, ContinueStmt, ReturnStmt,
+                                   RaiseStmt, AssertStmt, VarDecl)):
+                toplevel_stmts.append(stmt)
+            elif isinstance(stmt, ComptimeVarStmt):
             # PART 6 (2026-10-23, family S): a module-level comptime
             # constant with a FOLDABLE value (int / bool / str, and after
             # comptime.py's family-S fold: the string-wrapping constructors
@@ -16209,19 +16210,30 @@ def gen_module_impl(self, stmts: list):
             # feeds) lets the IdentExpr read path answer the real value.
             # Only FOLDABLE values are recorded; an un-fodable initializer
             # keeps the pre-branch TODO drop exactly (honest refusal).
-            _cv_val = self._eval_const(stmt.value)
-            if _cv_val is not None:
-                if isinstance(_cv_val, str):
-                    self._comptime_str_names.add(_as_str(stmt.target))
-                self._comptime_vals.setdefault(_as_str(stmt.target), _cv_val)
+                _cv_val = self._eval_const(stmt.value)
+                if _cv_val is not None:
+                    if isinstance(_cv_val, str):
+                        self._comptime_str_names.add(_as_str(stmt.target))
+                    self._comptime_vals.setdefault(_as_str(stmt.target), _cv_val)
+                else:
+                    _debug_note('top-level statement dropped',
+                                type(stmt).__name__)
+                    func_parts.append(
+                        f"/* TODO: top-level {type(stmt).__name__} */")
             else:
-                _debug_note('top-level statement dropped',
-                            type(stmt).__name__)
-                func_parts.append(
-                    f"/* TODO: top-level {type(stmt).__name__} */")
-        else:
-            _debug_note('top-level statement dropped', type(stmt).__name__)
-            func_parts.append(f"/* TODO: top-level {type(stmt).__name__} */")
+                _debug_note('top-level statement dropped', type(stmt).__name__)
+                func_parts.append(f"/* TODO: top-level {type(stmt).__name__} */")
+
+        except Exception as _me_err:
+            try:
+                import sys
+                print("CAUGHT_IN_MAIN_LOOP:", str(_me_err)[:80], file=sys.stderr)
+                if not hasattr(self, '_lsp_recovery_errors'):
+                    self._lsp_recovery_errors = []
+                self._lsp_recovery_errors.append(_me_err)
+            except Exception:
+                pass
+            continue
 
     # `_as_funcdef_node`, not a bare `s`: `stmts` is a heterogeneous
     # statement list, so its self-hosted element type is opaque int64_t
@@ -20183,7 +20195,37 @@ def gen_module_impl(self, stmts: list):
             pass
     except Exception:
         pass
-    return self._dedup_variadic_externs(_drop_unreferenced_unimpl_stubs(_drop_unreachable_repr_cluster(parts)))
+    try:
+        result = self._dedup_variadic_externs(_drop_unreferenced_unimpl_stubs(_drop_unreachable_repr_cluster(parts)))
+    except Exception:
+        result = None
+    # Re-raise collected errors for error recovery (LSP/front-end) after building output
+    try:
+        if getattr(self, '_lsp_recovery_errors', None):
+            errs = self._lsp_recovery_errors
+            # If there are errors containing "use of unknown declaration", re-raise the first one
+            for e in errs:
+                if 'use of unknown declaration' in str(e):
+                    if result is not None:
+                        # Try to attach result to exception if possible
+                        try:
+                            e.module_output = result
+                        except Exception:
+                            pass
+                    raise e
+            # Otherwise re-raise the first error
+            e0 = errs[0]
+            if result is not None:
+                try:
+                    e0.module_output = result
+                except Exception:
+                    pass
+            raise e0
+    except Exception:
+        raise
+    if result is None:
+        raise RuntimeError("module generation failed")
+    return result
 
 def __getattr__(name):
     import gimple_codegen
