@@ -10413,6 +10413,36 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 # fallback caught it first). Real: ftplib.py's mlsd.
                 _iter_list_expr = _cpp_as('MojoList *', gen._cpp_expr(s.iterable))
                 _iter_elem = 'char *'
+            elif (isinstance(s.iterable, (gimple_ctypes.TupleExpr,
+                                          gimple_ctypes.ListExpr))
+                    and isinstance(target, str) and not for_target_is_tuple(target)):
+                # `for fld in ('v', 'missing'):` — a list/tuple LITERAL used
+                # directly as the loop iterable. `_cpp_expr` already lowered
+                # the literal to a real `MojoList *` (a self-invoking lambda
+                # that constructs and fills one: there is no braced-init-list
+                # C++ value for a container in this model), but the generic
+                # range-for below emitted `for (auto fld : <that>)`, and a
+                # raw `MojoList *` has no ADL `begin`/`end` — g++:
+                # "'begin' was not declared in this scope" /
+                # "'end' was not declared in this scope". Iterate it through
+                # the same cached-local + indexed lowering every other
+                # list-valued iterable here uses. Element type comes from the
+                # literal elements themselves (all-str -> char *, all-float
+                # -> double, else the boxed int64_t convention). Real: the
+                # nested recursive generator in
+                # test_gimple_generator_runner.py looping over
+                # `('v', 'missing')` while walking struct attributes.
+                _iter_list_expr = _cpp_as('MojoList *', iter_expr)
+                _lit_etype = None
+                for _lit_el in s.iterable.elements:
+                    _lit_ect = gimple_exprtypes._infer_simple_expr_ctype(
+                        _lit_el, gen._cpp_declared,
+                        getattr(gen, '_cpp_gen_self_fields', None),
+                        gen._async_api) or 'int64_t'
+                    _lit_etype = (_lit_ect if _lit_etype is None
+                                  else (gimple_ctypes.TypeLattice.join(
+                                      _lit_etype, _lit_ect) or 'int64_t'))
+                _iter_elem = _lit_etype
             elif (isinstance(s.iterable, gimple_ctypes.IdentExpr)
                     and gen._cpp_declared is not None
                     and gen._cpp_declared.get(s.iterable.name) == 'char *'):
@@ -10472,6 +10502,16 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 _cached = gen._cpp_fresh_name("_mg_iter")
                 _ctr = gen._cpp_fresh_name("_mg_i")
                 lines = [f"{indent}MojoList *{_cached} = {_iter_list_expr};"]
+                # for/else: the else body runs only when the loop completes
+                # WITHOUT a `break`. This lowering has to carry it itself (it
+                # returns before the generic for/else block below), with the
+                # same shared break-flag protocol that block uses; without it
+                # a `for x in <list-valued expr>: ... else: ...` silently
+                # dropped the else body.
+                _iter_brk = None
+                if s.else_body:
+                    _iter_brk = gen._cpp_fresh_name("_mg_brk")
+                    lines.insert(0, f"{indent}bool {_iter_brk} = false;")
                 if _iter_elem == 'char *':
                     if not target_was_declared:
                         declared[target] = 'char *'
@@ -10499,9 +10539,18 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                                  f"{_ctr} < mojo_list_len({_cached}); {_ctr}++) {{")
                     lines.append(f"{indent}    {target} = mojo_list_get_int({_cached}, {_ctr});")
                 for inner in s.body:
-                    lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                    if _iter_brk is None:
+                        lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                    else:
+                        lines.extend(gen._cpp_stmt_with_break_flag(
+                            inner, declared, indent + '    ', _iter_brk))
                 _cpp_refuse_unpacking_target(target)
                 lines.append(f"{indent}}}")
+                if _iter_brk is not None:
+                    lines.append(f"{indent}if (!{_iter_brk}) {{")
+                    for inner in s.else_body:
+                        lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                    lines.append(f"{indent}}}")
                 return lines
             if s.else_body:
                 # for/else: the else body runs only when the loop
