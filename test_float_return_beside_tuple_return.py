@@ -22,10 +22,10 @@ from test_gimple_runner import compile_mojo_to_gimple_exe, RUN_TIMEOUT_S
 
 
 # No return annotation on purpose: an annotation decides the C return type,
-# and that "the annotation contradicts the body" shape is a separate,
-# still-open case (test_float_into_pointer_return_regression.py pins its
-# current spelling). The bug here is the INFERRED join of a float arm with a
-# pointer arm.
+# and that "the annotation contradicts the body" shape is a separate case: an
+# annotated pointer return with a float arm is refused at compile time
+# (test_float_into_pointer_return_regression.py). The bug here is the INFERRED
+# join of a float arm with a pointer arm.
 PICK_SRC = """\
 def pick(x: Int):
     if x == 1:
