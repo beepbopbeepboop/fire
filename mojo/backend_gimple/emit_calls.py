@@ -3442,7 +3442,16 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _ix = node.func.index
             _el = _ix.elements if isinstance(_ix, gimple_ctypes.TupleExpr) else [_ix]
             _targs = [gen._type_expr_to_ann(e) for e in _el]
-            if not all(gimple_exprtypes._is_concrete_type_arg(t) for t in _targs):
+            # Refuse only an argument that can recurse without bound: a rendered
+            # unbound type parameter (`T`, `Self.T`), or a progressing arithmetic
+            # form (`i + 1`) the renderer leaves blank. A blank rendering of any
+            # other form (a string literal, a `.uint32` dot-value) is concrete
+            # data, not a recursion risk; it takes the pre-existing path below.
+            _unbound = any(
+                (t and not gimple_exprtypes._is_concrete_type_arg(t))
+                or (not t and isinstance(e, (gimple_ctypes.BinaryOp, gimple_ctypes.UnaryOp)))
+                for t, e in zip(_targs, _el))
+            if _unbound:
                 _cfn = getattr(gen, 'current_func_name', None) or ''
                 if _g == _cfn or (isinstance(_cfn, str) and _cfn.startswith(_g + '_')):
                     raise RuntimeError(
