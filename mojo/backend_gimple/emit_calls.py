@@ -5262,6 +5262,24 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if outer_ci:
         return gen._lower_outer_closure_call(fname_raw, outer_ci, node)
 
+    _ctor_rt = gen.func_return_types.get(fname_raw, 'int64_t')
+    # Bare `List(...)` — the container constructor with its element type
+    # inferred from the argument, NOT an opaque uppercase type. Every other
+    # resolution above has had its chance, so a user struct/local/function
+    # named `List` still wins; what is left is the builtin spelling, which
+    # must be a `MojoList *` (see _lower_bare_list_ctor for the measured
+    # integer erasure this replaces).
+    if (fname_raw == 'List'
+            and _ctor_rt in ('int64_t', '')
+            and fname_raw not in gen.var_types
+            and fname_raw not in gen.func_param_types
+            and fname_raw not in gen.struct_field_types
+            and fname_raw not in gen._KNOWN_SIGS
+            and fname_raw not in gimple_ctypes._C_RESERVED_FUNCS
+            and fname_raw not in gen.BUILTIN_VALUE_MAP
+            and not gen._locally_binds_name('List')):
+        return _lower_bare_list_ctor(gen, node)
+
     # Opaque uppercase constructor (imported type not in any table).
     # `fname_raw in _STR_WRAPPER_CTORS` bypasses the `imported_symbols`
     # exclusion specifically: StringSlice/StaticString have no real struct
@@ -5276,7 +5294,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # ['StringRef'] == ''`) is non-null and `not` yields False, where the
     # python3 reference's `not ''` is True (string truthiness). Comparing
     # the value against both the default and the empty string avoids that.
-    _ctor_rt = gen.func_return_types.get(fname_raw, 'int64_t')
     if ((_ctor_rt == 'int64_t' or _ctor_rt == '')
             and fname_raw[0:1].isupper()
             # a LOCAL holding a class word (`Foo = type('Foo', (), {})`) is a value to call
@@ -7120,6 +7137,92 @@ _COMPREHENSION_ITER_TYPES = (
     'MojoList *', 'MojoStr *', 'char *', 'MojoDict *', 'MojoSet *',
     'MojoGenerator *', 'MojoBytes *',
 )
+
+
+def _lower_bare_list_ctor(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """`List(...)` with NO bracket argument: an inferred-element container.
+
+    `List[T](...)` takes the generic-constructor arm; the bare spelling used
+    to reach `_lower_opaque_ctor`'s uppercase rule, which returns an
+    `int64_t`. So `var a = List([1, 2])` declared `a` as an integer and
+    `a * 3` became integer multiplication — the compiled program SEGFAULTS
+    where the interpreter answers 3 (bug:gate-stdlib-syntax class 2, and the
+    reason an elaborated `buckets = List([0]) * n` could not compile).
+
+    The element type is whatever the argument supplies, so a single
+    positional iterable is `list(...)`'s own lowering
+    (`_lower_ctor_from_iterable`), not a second iteration scheme;
+    `List(1, 2, 3)` is the variadic form, a list display. `List(length=, fill=)` has no iterable
+    argument; it is a synthetic `[fill for _ in range(length)]`, which
+    reuses the comprehension loop and therefore also handles a length that
+    is only known at run time (the fill is lowered ONCE, outside the loop,
+    because Mojo evaluates it once and copies it).
+    """
+    _length = None
+    _fill = None
+    for _kw in node.kwargs:
+        try:
+            _kn, _kv = _kw
+        except Exception:
+            continue
+        _kname = _as_str(_kn)
+        if _kname == 'length':
+            _length = _kv
+        elif _kname == 'fill':
+            _fill = _kv
+    if _length is not None and _fill is not None:
+        _ft, _fv = gen.lower_expr(_fill)
+        _ft = gen._get_actual_type(_ft, _fv) or _ft
+        if _ft == 'float':
+            _ft = 'double'
+        # A named temp, not `_ensure_local`: a literal fill has no name of
+        # its own, and the comprehension's element is an IdentExpr.
+        _fill_local = gen._new_val(_ft, _fv)
+        _range = gimple_ctypes.CallExpr(
+            func=gimple_ctypes.IdentExpr('range', node.line, node.col),
+            args=[_length], line=node.line, col=node.col)
+        gen.temp_counter += 1
+        _gen0 = gimple_ctypes.Generator(
+            target=f'_List_fill_elem{gen.temp_counter}', iterable=_range,
+            conditions=[], line=node.line, col=node.col)
+        _compr = gimple_ctypes.Comprehension(
+            kind='list',
+            element=gimple_ctypes.IdentExpr(_fill_local, node.line, node.col),
+            generators=[_gen0], line=node.line, col=node.col)
+        _rt, _rv = gen._lower_comprehension(_compr)
+        # Any other keyword (`capacity=`, a misspelt one) is still an
+        # expression the source evaluated: lower it for its side effects.
+        for _kw in node.kwargs:
+            try:
+                _kn, _kv = _kw
+            except Exception:
+                continue
+            if _as_str(_kn) not in ('length', 'fill'):
+                gen.lower_expr(_kv)
+        return 'MojoList *', _rv
+    if len(node.args) > 1:
+        # Mojo's variadic element form: `List(1, 2, 3)`. It is a list
+        # DISPLAY in all but spelling, so lower it as one rather than
+        # evaluating (and dropping) all but the first argument.
+        _lit = gimple_ctypes.ListExpr(elements=list(node.args))
+        _lt, _lv = gen._lower_list_literal(_lit)
+        return 'MojoList *', _lv
+    if not node.args:
+        # The length/fill pair is the only keyword pair that builds
+        # elements; everything else (`capacity=`, and a `length=` with no
+        # `fill=` this model cannot fill) is evaluated for its side effects
+        # and leaves this an empty list, which is still a `MojoList *`.
+        for _kw in node.kwargs:
+            try:
+                _kn, _kv = _kw
+            except Exception:
+                continue
+            gen.lower_expr(_kv)
+        _t = gen._new_val('MojoList *', 'mojo_list_new ()')
+        if hasattr(gen, '_note_fresh_result'):
+            gen._note_fresh_result(_t)
+        return 'MojoList *', _t
+    return _lower_ctor_from_iterable(gen, 'list', node)
 
 
 def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
