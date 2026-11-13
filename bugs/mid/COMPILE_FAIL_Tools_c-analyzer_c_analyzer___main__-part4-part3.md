@@ -1,8 +1,7 @@
 # COMPILE_FAIL: `yield from` a nested generator — refusals stay refused, and tagged-kind delegation matches the compiled kind
 
 Part 3 of `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4.md`
-(SPLIT). Depends on part 1 (`bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__-part4-part1.md`),
-which provides the lookup this part tests the edges of.
+(SPLIT). Depends on part 1 (minimal nested-generator `yield from` in a coroutine generator; fixed in this tree), which provides the lookup this part tests the edges of.
 
 ## Goal
 
