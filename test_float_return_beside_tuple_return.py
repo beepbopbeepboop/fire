@@ -65,6 +65,44 @@ def main():
     print(pick(0))
 """
 
+# The member-call and membership consumers of a tagged LIST arm. These lower
+# on the receiver's static C type (the erased `int64_t`), so `.append` cast the
+# BOX to `MojoList *` (SIGSEGV) and `in`/`.count`/`.index` took their integer
+# or str fallbacks (`False` / 0 / -1 where CPython prints True / 1 / 1). They
+# now dispatch on the word's runtime kind, like `t[0]` and `len(t)` already do.
+LIST_METHODS_SRC = """\
+def f(x: Int):
+    if x == 0:
+        return 2.5
+    return [3, 4]
+
+
+def main():
+    t = f(1)
+    t.append(5)
+    print(t)
+    print(3 in t)
+    print(9 in t)
+    print(t.count(3))
+    print(t.index(4))
+"""
+
+STR_METHODS_SRC = """\
+def g(x: Int):
+    if x == 0:
+        return 1.5
+    return "banana"
+
+
+def main():
+    s = g(1)
+    print(s.count("an"))
+    print(s.index("n"))
+    print(s.upper())
+    print(s.startswith("ba"))
+    print(s.find("na"))
+"""
+
 EVAL_CONST_SRC = """\
 from dataclasses import dataclass
 
@@ -138,6 +176,8 @@ CASES = [
     ("float_tuple_none_with_nested_none", NONE_SRC),
     ("eval_const_repro", EVAL_CONST_SRC),
     ("tagged_word_consumers", CONSUMERS_SRC),
+    ("tagged_word_list_methods", LIST_METHODS_SRC),
+    ("tagged_word_str_methods", STR_METHODS_SRC),
 ]
 
 

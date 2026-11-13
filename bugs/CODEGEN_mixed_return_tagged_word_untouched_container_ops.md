@@ -1,6 +1,24 @@
 # CODEGEN: a float+pointer mixed return now travels as a tagged word; container METHOD operations on that word still read it as an integer
 
-Status: OPEN (follow-up). Filed 2026-11-12 by the round that fixed the
+Status: FIXED 2026-11-12 (the part this doc is named for). The member-call
+and membership lowerings now dispatch on the receiver's runtime kind, exactly
+as the subscript already did: `mojo_word_as_list` / `mojo_word_as_text` (new
+runtime helpers) unbox a tagged word for the list and str method arms, and
+`mojo_word_contains` unboxes the container for `in`/`not in`. `t.append(5)`,
+`3 in t`, `t.count(3)` and `t.index(4)` all match CPython now; a float/int/None
+word raises TypeError instead of being read as a container. The four rows and
+the str-method twins are in `test_float_return_beside_tuple_return.py`
+(`tagged_word_list_methods`, `tagged_word_str_methods`). This doc is deleted
+with that commit. The annotated-return question below is carried over to
+`bugs/CODEGEN_float_into_pointer_return_annotation_decision.md`.
+
+## Done when
+
+`python3 test_float_return_beside_tuple_return.py` passes, including the
+`tagged_word_list_methods` case (append / `in` / count / index on a
+float+list mixed return) compared line by line with CPython.
+
+Status history: OPEN (follow-up). Filed 2026-11-12 by the round that fixed the
 representation bug — a function returning a float on one path and a tuple/list/
 str/None on another now returns the tagged word and every arm is boxed by kind
 (see `git log --oneline` around this file's commit;
