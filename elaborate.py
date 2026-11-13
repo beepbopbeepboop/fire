@@ -2186,10 +2186,14 @@ def _struct_layout_anns(concrete_src: str, name: str):
 
 
 def _elab_signature(concrete_src: str, name: str):
-    """(ret_ctype, [param_ctypes]) of the monomorphized function, via the ABI map."""
+    """(ret_ctype, [param_ctypes]) of the monomorphized function, via the ABI map.
+
+    `ret_ctype` is None when the function has no return annotation: its return
+    type is then the body's inferred type, which only the defining unit knows
+    (see monomorphize.defined_return_ctype), not this source's signature."""
     for s in Parser(py_tokenize(concrete_src)).parse_module():
         if isinstance(s, FunctionDef) and s.name == name:
-            ret = _mojo_type(s.return_type) if s.return_type else 'void'
+            ret = _mojo_type(s.return_type) if s.return_type else None
             if (isinstance(ret, str) and ret.startswith('MojoTuple_')
                     and not _body_builds_struct_tuple(
                             getattr(s, 'body', None))):
@@ -2395,6 +2399,8 @@ class Elaborator:
                                                      conformance_bases=_where_conformance_bases(module_src))
         _, concrete = mm.monomorphize_source(tmpl, targs)
         ret, ptypes = _elab_signature(concrete, mangled)
+        if ret is None:
+            ret = mm.defined_return_ctype(mangled) or 'void'
         return {'symbol': mangled, 'object': obj, 'cpp_object': cpp_obj,
                 'ret': ret, 'params': ptypes}
 
