@@ -166,6 +166,9 @@ one-line recipes that call it, so `make check-<x>` and
 
     make check              # the everyday SUBSET of the gate, -j ncpu, one tally
     make gate               # THE gate: check plus coro/stdlib/native/bootstrap
+    make check-orchestrator # the swarm/registry/reclass/landing tests. NOT in
+                            # check: they exercise git-facing fleet passes, and
+                            # the everyday loop spawns no git and needs no git
     make bootstrap          # just the 3-stage self-host chain
     gmake -j1 check         # strictly serial, every job's output streamed live
     make check J=4          # 4 at a time (works with either make; Apple's 3.81
