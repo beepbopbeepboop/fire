@@ -4138,11 +4138,6 @@ UNREGISTERED = {
         '`bugs/mid/DIAGNOSTICS_lsp_error_recovery-part3.md`.',
     'test_x86_64_encoders.py': "Two checks on formal/x86_64.py's encoder "
         'arithmetic, independent of the round-trip above.',
-    # Landed by master's trait-method-requirement-evidence work (06ea5b0ef).
-    # That lane (`bug:DIAGNOSTICS_trait_conformance-part4`) is still active and
-    # a registration there supersedes this entry — the estate check's
-    # `resolved` assertion enforces the removal.
-    'test_trait_requirement_evidence_diagnostic.py': _STANDALONE_TEST_REASON,
     # `formal/x86_64_model_fuzz.py` is a TOOL whose harness's own entry path
     # needs a check even though the sweep it feeds does not, so this file checks
     # it. It is unregistered for the reason its own docstring gives: the text
@@ -5206,6 +5201,54 @@ def test_every_test_file_is_registered():
         if carried:
             print(f'        family {matcher.pattern} carries {len(carried)}: '
                   f'{carried[0]}, ...')
+
+
+_TRAIT_CONFORMANCE_DIAGNOSTIC_SUITES = (
+    # (spec name, test file, part) — the whole trait-conformance diagnostics
+    # family. Each is `compile_to_gimple`-only, no build, tiny and
+    # sub-second.
+    ('trait-requirement-evidence-diagnostic',
+     'test_trait_requirement_evidence_diagnostic.py', 'part 2'),
+    ('reg-conditional-conformance-synthesis-diagnostic',
+     'test_conditional_conformance_synthesis_diagnostic.py', 'part 4'),
+    ('downcast-witness-diagnostic',
+     'test_downcast_witness_diagnostic.py', 'part 7'),
+)
+
+
+def test_the_trait_conformance_diagnostic_suites_are_gated():
+    """Every trait-conformance diagnostic suite runs on every gate.
+
+    The three files landed with their fixes (`06ea5b0ef` part 2, `65cee30d4`
+    part 4, `ec12b76e1` part 7) and none was named by a spec, so
+    `suite-self-test`'s estate row was the only thing that mentioned them and
+    no run executed their cases
+    (`bug:SUITE_trait_requirement_evidence_unregistered`). Each was found by
+    the estate check only after the previous one was "fixed", which is why
+    this pins the family and not one file.
+
+    The estate check above is what found each one, but it can only ask that
+    SOME spec names the file; a name in a bucket `gate` does not expand to is
+    the same hole one level over, and `regressions`/`orchestrator` are exactly
+    such buckets by design. All three are cheap (tiny, 0.0-0.1 GB measured,
+    sub-second, no build) and pin compiler diagnostics, so they belong in the
+    everyday loop, and this check pins that by name so dropping a
+    registration — or moving one out of the gate — is a red row rather than a
+    silent coverage loss.
+    """
+    for name, filename, part in _TRAIT_CONFORMANCE_DIAGNOSTIC_SUITES:
+        spec = suite.REGISTRY.get(name)
+        files = ({os.path.basename(str(c)) for c in spec.cmd}
+                 if spec is not None else set())
+        check(f'the gate: {name} ({part}) runs on every gate',
+              spec is not None
+              and filename in files
+              and name in suite.expand_bucket('gate'),
+              ('bug:SUITE_trait_requirement_evidence_unregistered: no spec '
+               f'names {filename}, so it runs on nothing' if spec is None else
+               'bug:SUITE_trait_requirement_evidence_unregistered: '
+               f'{name} is registered but not reachable from `gate` '
+               f'(cmd={sorted(files)})'))
 
 
 def test_no_test_name_is_registered_twice():
@@ -6648,6 +6691,7 @@ def main():
                test_checked_run_replays_a_pass_and_reruns_a_failure,
                test_cached_spec_names_its_own_test,
                test_every_test_file_is_registered,
+               test_the_trait_conformance_diagnostic_suites_are_gated,
                test_no_test_name_is_registered_twice,
                test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
