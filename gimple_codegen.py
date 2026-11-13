@@ -1875,6 +1875,16 @@ class GimpleGen:
         # provenance for the read fallback's pointer-range window — see
         # the `_comptime_str_names` check in emit_exprs's comptime read).
         self._comptime_str_names: set = set()
+        # Every function-level `comptime NAME = ...` target, folded or not:
+        # a `comptime` local is a compile-time value by definition, so the
+        # name itself marks constant materializability even when its value
+        # does not fold (a `List([...])` constructor call — std/math/
+        # math.mojo's `comptime coefficients` — is not a foldable scalar,
+        # yet a bracket argument that reads it, e.g. `coefficients[:8]`,
+        # is a compile-time constant and must not read as a runtime value
+        # in the elaborated-instantiation refusal; see emit_calls'
+        # _bracket_arg_is_concrete).
+        self._comptime_local_names: set = set()
         self._cb_statics: dict = {}
         self._cpp_reraise_stack: list = []
         # `dict[str, dict[str, str]]`, not bare `dict`: struct name ->

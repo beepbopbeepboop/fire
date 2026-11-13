@@ -14948,6 +14948,46 @@ def main():
     _run_isolated(_test_imported_intrinsic_string_arg_in_instance,
                   'gate_stdlib_syntax_imported_intrinsic_string_arg')
 
+    # gate-stdlib-syntax (2026-11-13): a `comptime if` over the stdlib's
+    # zero-arg GPU target queries in a generic body (std/math/math.mojo's
+    # rsqrt/recip/exp2/log shape, reached from test_math). On a CPU build
+    # the queries are False, so the GPU arms are comptime-dead and must be
+    # pruned. Unfolded, the condition is CONST_UNKNOWN and every arm
+    # emits; the dead arm's bracket argument is a runtime-computed
+    # `String(...)` call, which renders as a non-concrete type argument and
+    # trips the elaborated-instantiation refusal (b3e501b60) — the red that
+    # took test/math/test_math.mojo down. Before the fold this refused with
+    # the cannot-materialize RuntimeError; after it compiles. Same
+    # single-unit path as compile_one.py.
+    def _test_comptime_dead_gpu_arm_pruned_in_instance():
+        global _PASS, _FAIL
+        name = "gate_stdlib_syntax_comptime_gpu_arm_pruned"
+        ok, err = stdlib_unit_compiles("""\
+from std.sys.info import is_nvidia_gpu, is_amd_gpu
+
+def _probe[intrin: StaticString](x: Int64) -> Int64:
+    return x
+
+def f[dtype: DType](x: Int64) -> Int64:
+    comptime if is_nvidia_gpu():
+        return 0
+    elif is_amd_gpu():
+        return _probe[String("amdgcn.probe")](x)
+    return x
+
+def main():
+    print(f[DType.float32](1))
+""")
+        if ok:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+
+    _run_isolated(_test_comptime_dead_gpu_arm_pruned_in_instance,
+                  'gate_stdlib_syntax_comptime_gpu_arm_pruned')
+
     # The isolation itself: a test that raises is one FAIL and the run goes on.
     # Before `_isolate` existed, the first raise ended run_tests with no tally.
     if isinstance(_isolate(lambda: 1 / 0), ZeroDivisionError) and _isolate(lambda: None) is None:

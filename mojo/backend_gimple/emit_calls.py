@@ -1994,6 +1994,214 @@ def self_recursive_uninstantiable(gen, func) -> str | None:
     return base
 
 
+def _bracket_arg_is_concrete(gen, node) -> bool:
+    """Whether a bracket argument is materializable in the single-unit path,
+    for the elaborated-instantiation refusal (b3e501b60).
+
+    The refusal exists for `a[i + 1]()` inside the monomorphized `a`: the
+    argument names a RUNTIME value of the enclosing function, so no
+    instantiation exists to call, and the stub below would answer 0
+    silently (the mutual-recursion hole b3e501b60 closed). Its inverse —
+    an argument made only of compile-time constants, whatever the
+    expression shape — is materializable in principle; the single-unit path
+    lacks only the mechanism (value-parameter binding is link mode's job),
+    and the established discipline for those is the module-boundary stub,
+    which is what the pre-b3e501b60 build emitted.
+
+    The decision used to run on the argument's RENDERED TEXT:
+    `_type_expr_to_ann` renders bare type names and scalar literals, so a
+    comptime list (`polynomial_evaluate[[1.0, ...]]` — std/math/math.mojo's
+    erf/asin), a ternary over comptime slices (`_exp_taylor`'s
+    `coefficients[:] if dtype == .float64 else coefficients[:8]`), or a
+    constructor call (`Scalar[x.dtype](...)`) rendered '' — read as unbound —
+    and the refusal took test/math/test_math.mojo red (bugs/gate-stdlib-
+    syntax). Everything the renderer already settles keeps its answer here
+    (the `_is_concrete_type_arg` check on the rendered text); the argument's
+    own NAMES decide the rest — a constant is bound in the comptime tables
+    (a folded value or a `comptime` local), is a type name, or is a type
+    parameter a subscript binds; a runtime value is materializable in
+    static-query positions only (a member read, `x.dtype`; a type query,
+    `type_of(x)`); a comparison is a constant only in the CONDITION of a
+    ternary (std/math's `_exp_taylor` slice pick); and a VALUE expression —
+    arithmetic, a standalone comparison, a unary — is refused wherever it
+    stands, because in an elaborated TU a recursive argument
+    (`a[i + 1]`) arrives textually substituted (`a[0 + 1]`),
+    indistinguishable from a hand-written constant (see `_BOOL_BINOPS`)."""
+    text = gen._type_expr_to_ann(node)
+    if text and gimple_exprtypes._is_concrete_type_arg(text):
+        return True
+    cvals = getattr(gen, '_comptime_vals', None) or {}
+    ct_names = getattr(gen, '_comptime_local_names', None) or set()
+    return _bracket_arg_names_concrete(node, cvals, ct_names)
+
+
+# Builtins that answer from the argument's TYPE, not its value: the call is
+# a compile-time constant for any argument, runtime value or not
+# (`rebind[type_of(x)](result)` in std/math/math.mojo's sin/cos region).
+_TYPE_QUERY_BUILTINS = frozenset(('type_of',))
+
+
+# Operators whose result is a boolean value: a chain of these (`a == b`,
+# `a < b < c`, `x and y`, `not z`) is a compile-time constant in CONDITION
+# position — the condition of a ternary inside a bracket argument — once
+# its operands are (std/math's `_exp_taylor` picks the coefficient slice
+# with `coefficients[:] if dtype == .float64 else coefficients[:8]`).
+# The same spellings in VALUE position are refused with every other
+# BinaryOp/CompareChain/UnaryOp (see the value-expression case in
+# `_bracket_arg_names_concrete`): in an elaborated TU the recursive
+# argument of `a[i + 1]()` arrives textually substituted as `a[0 + 1]`,
+# arithmetically indistinguishable from a hand-written constant, so no
+# text-level test can tell the two apart — the old rendered-text rule
+# refused the whole class, and test_elaboration_recursion_diagnostic pins
+# that refusal (the mutual-recursion hole b3e501b60 closed).
+_BOOL_BINOPS = frozenset(
+    ('and', 'or', '==', '!=', '<', '<=', '>', '>=', 'in', 'not in'))
+
+
+def _bracket_arg_names_concrete(node, cvals, ct_names) -> bool:
+    """Whether a bracket argument the renderer cannot settle (it renders
+    '') is materializable, walking its free names. Two kinds of free names:
+
+    - a compile-time constant — bound in the comptime tables (a folded
+      value or a `comptime` local), a type name (capitalised), or a type
+      parameter a subscript binds;
+    - a runtime value of the enclosing function (`x`, `i`).
+
+    A runtime value is materializable in STATIC-QUERY positions only: a
+    member read on it (`x.dtype`, `x.length` — a SIMD's dtype and length
+    are fixed by the instantiation) or an argument of a type query
+    (`type_of(x)`). A VALUE expression over anything — arithmetic, a
+    comparison, a unary — is refused wherever it stands: in an elaborated
+    TU the recursive argument of `a[i + 1]()` arrives textually
+    substituted (`0 + 1`), indistinguishable from a hand-written constant,
+    and the old rendered-text rule refused the class (see _BOOL_BINOPS).
+    The one place a comparison is a compile-time constant is CONDITION
+    position: the condition of a ternary in a bracket argument, checked by
+    `_bracket_arg_cond_const`. `Self.*` and `*T` spellings stay unbound,
+    and a BARE single-uppercase-letter argument (a type parameter in
+    argument position, `g[T]()`) stays unbound exactly as
+    `_is_concrete_type_arg` read the rendered text — only inside a
+    subscript does a single-uppercase-letter read as a bound type
+    parameter (`SIMD[T, 1]`), which the renderer path already settles."""
+    if isinstance(node, gimple_ctypes.IdentExpr):
+        name = node.name
+        if name.startswith('Self') or name.startswith('*'):
+            return False
+        if re.fullmatch(r'[A-Z][0-9]?', name):
+            return False
+        if name in cvals or name in ct_names:
+            return True
+        if bool(name) and name[0].isupper():
+            return True
+        # A runtime value in a normal position: unmaterializable.
+        return False
+    if isinstance(node, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral,
+                         gimple_ctypes.BoolLiteral, gimple_ctypes.StringLiteral,
+                         gimple_ctypes.DottedLiteral)):
+        return True
+    if isinstance(node, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+        return all(_bracket_arg_names_concrete(e, cvals, ct_names)
+                   for e in getattr(node, 'elements', []) or [])
+    if isinstance(node, gimple_ctypes.DictExpr):
+        return all(isinstance(p, (tuple, list)) and len(p) == 2
+                   and _bracket_arg_names_concrete(p[0], cvals, ct_names)
+                   and _bracket_arg_names_concrete(p[1], cvals, ct_names)
+                   for p in getattr(node, 'pairs', []) or [])
+    # A ternary is materializable when its CONDITION is a compile-time
+    # boolean expression (condition position — the one place a comparison
+    # is a constant) and both branches are materializable values.
+    if isinstance(node, gimple_ctypes.TernaryExpr):
+        return (_bracket_arg_cond_const(node.condition, cvals, ct_names)
+                and _bracket_arg_names_concrete(node.then_val, cvals, ct_names)
+                and _bracket_arg_names_concrete(node.else_val, cvals, ct_names))
+    # A member read on a value is a static query: the read's value is fixed
+    # by the value's type (`x.dtype`, `x.length`), so a runtime receiver is
+    # materializable. A comptime receiver is folded by the same rule.
+    if isinstance(node, gimple_ctypes.MemberExpr):
+        return True
+    if isinstance(node, gimple_ctypes.SubscriptExpr):
+        return (_bracket_arg_names_concrete(node.obj, cvals, ct_names)
+                and _bracket_arg_names_concrete(node.index, cvals, ct_names))
+    if isinstance(node, gimple_ctypes.SliceExpr):
+        return all(_bracket_arg_names_concrete(part, cvals, ct_names)
+                   for part in (getattr(node, 'start', None),
+                                getattr(node, 'stop', None),
+                                getattr(node, 'step', None))
+                   if part is not None)
+    if isinstance(node, gimple_ctypes.CallExpr):
+        # A type query answers from the argument's type, not its value —
+        # `type_of(x)` is a compile-time constant for any `x`.
+        if (isinstance(node.func, gimple_ctypes.IdentExpr)
+                and node.func.name in _TYPE_QUERY_BUILTINS):
+            return True
+        if not _bracket_arg_names_concrete(node.func, cvals, ct_names):
+            return False
+        if not all(_bracket_arg_names_concrete(a, cvals, ct_names)
+                   for a in getattr(node, 'args', []) or []):
+            return False
+        return all(_bracket_arg_names_concrete(v, cvals, ct_names)
+                   for _k, v in getattr(node, 'kwargs', []) or [])
+    # A VALUE expression — arithmetic (`0 + 1`), a comparison, a unary —
+    # is refused wherever it stands (see the note on _BOOL_BINOPS): a
+    # substituted recursive argument is indistinguishable from a
+    # hand-written constant, and the old rendered-text rule refused the
+    # whole class.
+    if isinstance(node, (gimple_ctypes.BinaryOp, gimple_ctypes.CompareChain,
+                         gimple_ctypes.UnaryOp)):
+        return False
+    # An unrecognised shape: not materializable. The refusal stands.
+    return False
+
+
+def _bracket_arg_cond_const(node, cvals, ct_names) -> bool:
+    """Whether an expression in CONDITION position — the condition of a
+    ternary inside a bracket argument — is a compile-time boolean
+    constant. Here comparisons, `and`/`or` and `not` ARE constants (their
+    operands are, recursively); a bare name must be a comptime-bound
+    constant or a type name — an unsubstituted lowercase name is a runtime
+    value of the enclosing function, and a branch that flips with it would
+    be the recursion hole again. Value shapes (lists, subscripts, calls)
+    are not booleans: False here, where `_bracket_arg_names_concrete`
+    decides value position."""
+    if isinstance(node, gimple_ctypes.IdentExpr):
+        name = node.name
+        if name.startswith('Self') or name.startswith('*'):
+            return False
+        if re.fullmatch(r'[A-Z][0-9]?', name):
+            return False
+        if name in cvals or name in ct_names:
+            return True
+        if bool(name) and name[0].isupper():
+            return True
+        return False
+    if isinstance(node, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral,
+                         gimple_ctypes.BoolLiteral, gimple_ctypes.StringLiteral,
+                         gimple_ctypes.DottedLiteral)):
+        return True
+    if isinstance(node, gimple_ctypes.BinaryOp):
+        return (node.op in _BOOL_BINOPS
+                and _bracket_arg_cond_const(node.left, cvals, ct_names)
+                and _bracket_arg_cond_const(node.right, cvals, ct_names))
+    if isinstance(node, gimple_ctypes.CompareChain):
+        return (all(op in _BOOL_BINOPS
+                    for op in getattr(node, 'ops', []) or [])
+                and all(_bracket_arg_cond_const(o, cvals, ct_names)
+                        for o in getattr(node, 'operands', []) or []))
+    if isinstance(node, gimple_ctypes.UnaryOp):
+        return (node.op == 'not'
+                and _bracket_arg_cond_const(node.operand, cvals, ct_names))
+    if isinstance(node, gimple_ctypes.TernaryExpr):
+        return (_bracket_arg_cond_const(node.condition, cvals, ct_names)
+                and _bracket_arg_cond_const(node.then_val, cvals, ct_names)
+                and _bracket_arg_cond_const(node.else_val, cvals, ct_names))
+    # A static query in condition position: the read is fixed by the
+    # receiver's type (`x.dtype == .float32`), a compile-time boolean.
+    if isinstance(node, gimple_ctypes.MemberExpr):
+        return True
+    # Not a boolean constant: it cannot decide a branch.
+    return False
+
+
 def _lower_tuple_box_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """`__mojo_tuple_box_N(a, b, ...)`: a generator's yielded tuple, boxed slot by
     slot (see mojo/middle/coro.py). A slot whose C value is a string or a double
@@ -3386,19 +3594,22 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 f"cannot compile module: self recursive call to "
                 f"{_rec!r} will cause an infinite loop")
         # Inside a concrete (elaborated) instantiation, a bracketed generic
-        # call whose type arguments are not all concrete cannot be
+        # call whose type arguments are not all materializable cannot be
         # materialized: stubbing it would be a silent wrong answer (mutual /
-        # uninstantiable recursion). Refuse it. Restrict the mutual case to
-        # arguments that read as a progressing expression (e.g. `i + 1`), to
-        # avoid rejecting legitimate non-literal-but-unresolvable type forms.
+        # uninstantiable recursion). Refuse it. The test is on the ARGUMENTS'
+        # own names, not their rendered text — `_bracket_arg_is_concrete`
+        # keeps the renderer's answer for everything it settles and walks
+        # the names for the comptime shapes it renders '' (a comptime list,
+        # a ternary over comptime slices, a constructor call), which the old
+        # text test misread as unbound and refused (bugs/gate-stdlib-syntax,
+        # test/math/test_math.mojo through polynomial_evaluate).
         if (getattr(gen, '_is_elaborated_instantiation', False)
                 and isinstance(node.func, gimple_ctypes.SubscriptExpr)
                 and isinstance(node.func.obj, gimple_ctypes.IdentExpr)):
             _g = node.func.obj.name
             _ix = node.func.index
             _el = _ix.elements if isinstance(_ix, gimple_ctypes.TupleExpr) else [_ix]
-            _targs = [gen._type_expr_to_ann(e) for e in _el]
-            if not all(gimple_exprtypes._is_concrete_type_arg(t) for t in _targs):
+            if not all(_bracket_arg_is_concrete(gen, e) for e in _el):
                 _cfn = getattr(gen, 'current_func_name', None) or ''
                 if _g == _cfn or (isinstance(_cfn, str) and _cfn.startswith(_g + '_')):
                     raise RuntimeError(

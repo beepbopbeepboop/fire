@@ -908,6 +908,13 @@ def _gen_stmt_ComptimeVarStmt(gen, node):
     # the `/* ct param or undeclared: idx */` placeholder where the reference
     # folds it (repro: std/test/utils/test_static_tuple.mojo).
     _ct_target = _as_str(node.target)
+    # The name is a compile-time constant whether or not its value folds:
+    # record it for the elaborated-instantiation refusal's materializability
+    # test (emit_calls._bracket_arg_is_concrete), which reads comptime locals
+    # by NAME when the value is not in _comptime_vals (a `List([...])`
+    # constructor is not a foldable scalar, but the name still marks the
+    # bracket argument that reads it as a constant, not a runtime value).
+    gen._comptime_local_names.add(_ct_target)
     # `_as_comptimevar_node(node).value` for a DIRECT field read: reading
     # `.value` off the boxed, untyped ComptimeVarStmt node went through
     # reflective dispatch and came back as the miss sentinel, so `_eval_const`
