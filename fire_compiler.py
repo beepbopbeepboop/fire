@@ -881,6 +881,10 @@ class StructDef:
     fields: list
     methods: list[FunctionDef]
     decorators: list = field(default_factory=list)
+    # Parsed argument/expression of a struct's `@align(...)` decorator, or None
+    # when absent. Kept on the StructDef so later stages (e.g. struct emission
+    # and elaboration-time validation) can inspect it directly.
+    align_expr: object = None
     comptime_aliases: dict = field(default_factory=dict)  # name -> value expr
     bases: list = field(default_factory=list)  # base class/struct names, e.g. `struct Child(Base):`
     # Keyword arguments in the class/struct base list, e.g.
@@ -5754,13 +5758,27 @@ class Parser:
         decs    = getattr(self, "_pending_decs", [])
         self._pending_decs = []
         self._validate_align_decorators(decs)
+        align_expr = self._extract_struct_align_expr(decs)
         return StructDef(name=name, fields=fields, methods=methods, decorators=decs,
+                         align_expr=align_expr,
                          comptime_aliases=aliases, bases=bases, keywords=class_keywords,
                          bracket_params=bracket_params,
                          type_param_names=type_param_names,
                          where_clause=struct_where,
                          bracket_types=[(f.name, f.type_ann) for f in param_fields
                                         if isinstance(f, VarDecl)])
+
+    def _extract_struct_align_expr(self, decorators):
+        for dec in (decorators or []):
+            if isinstance(dec, CallExpr):
+                func = dec.func
+                if isinstance(func, IdentExpr) and func.name == "align":
+                    if dec.args:
+                        return dec.args[0]
+                    return None
+            elif isinstance(dec, str) and dec == "align":
+                return None
+        return None
 
     def _validate_align_decorators(self, decorators):
         for dec in decorators:
@@ -5876,7 +5894,9 @@ class Parser:
             else:
                 aliases[member_name] = IntLiteral(next_auto, raw='')
                 next_auto += 1
+        align_expr = self._extract_struct_align_expr(decs)
         return StructDef(name=name, fields=[], methods=[], decorators=decs,
+                         align_expr=align_expr,
                          comptime_aliases=aliases)
 
     def _parse_trait(self):

@@ -9,11 +9,11 @@ expression shape and the original integration acceptance test.
 easy
 
 ## Prerequisites / depends on
-Part 1 (parsing/storage) and part 2 (parametric/arithmetic power-of-two
-validation with diagnostics propagated at instantiation) are implemented; the
-part-2 bug doc was deleted with its fix. Part 1's value rule is implemented:
-`fire_compiler.py::_validate_align_decorators` validates a constant
-`@align(...)` argument at parse time (regression test
+Part 1 (parsing/storage of the align expression on StructDef) and part 2
+(parametric/arithmetic power-of-two validation with diagnostics propagated at
+instantiation) are implemented; the part-2 bug doc was deleted with its fix.
+Part 1's value rule is implemented: `fire_compiler.py::_validate_align_decorators`
+validates a constant `@align(...)` argument at parse time (regression test
 `test_align_decorator_literal_diagnostic.py`). This part must reuse parts 1/2's
 validator rather than add a third one.
 

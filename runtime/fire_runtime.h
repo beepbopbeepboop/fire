@@ -2678,3 +2678,8 @@ char *mojo_regex_sub_str(const ReNode *prog, const ReRange *ranges, const ReClas
 #ifdef __cplusplus
 }
 #endif
+
+/* csv.reader as a callable value for compiled code (tabled foreign callable).
+ * Returns a list of rows, each row a MojoList* of string fields. */
+int64_t   mojo_csv_reader_vf(int64_t lines_word, MojoList *packed, MojoDict *kw);
+extern void *mojo_csv_reader_w;

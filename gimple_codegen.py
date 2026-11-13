@@ -2017,6 +2017,30 @@ class GimpleGen:
         self._struct_cname_by_home: dict = {}
         self._struct_qualified_cnames: set = set()
         self._struct_home_by_id: dict = {}
+        # Compiler-pre-seeded AST/runtime layouts (e.g. IfStmt, Parser) that
+        # own their bare C name for the compiler's home even without a
+        # StructDef node in this compile unit. A sibling module's StructDef of
+        # the same bare name is a genuine cross-module collision and must get a
+        # module-qualified cname instead of reusing the pre-seeded layout.
+        self._compiler_preseed_struct_home: dict = {
+            _astn: 'fire_compiler' for _astn in (
+                'CallExpr', 'BinaryOp', 'CompareChain', 'UnaryOp', 'TernaryExpr',
+                'MemberExpr', 'IfStmt', 'WhileStmt', 'ForStmt', 'FunctionDef',
+                'ExprStmt', 'AssignStmt', 'AugAssignStmt', 'ReturnStmt',
+                'VarDecl', 'MultiAssignStmt', 'BreakStmt', 'ContinueStmt',
+                'PassStmt', 'AssertStmt', 'RaiseStmt', 'TryStmt', 'WithStmt',
+                'ImportStmt', 'FromImportStmt', 'ComptimeIfStmt',
+                'ComptimeForStmt', 'ComptimeVarStmt', 'GlobalStmt',
+                'NonlocalStmt', 'DottedLiteral', 'DelStmt', 'MatchStmt',
+                'MatchCase', 'LambdaExpr', 'SubscriptExpr', 'SliceExpr',
+                'Comprehension', 'Generator', 'IdentExpr', 'IntLiteral',
+                'FloatLiteral', 'BoolLiteral', 'EllipsisLiteral',
+                'NoneLiteral', 'StringLiteral', 'TstringLiteral',
+                'ImagLiteral', 'TupleLiteral', 'TupleExpr', 'ListLiteral',
+                'ListExpr', 'SetLiteral', 'SetExpr', 'DictLiteral',
+                'DictExpr', 'WalrusExpr', 'YieldExpr', 'YieldFromExpr',
+                'AwaitExpr', 'StructDef', 'TraitDef')
+        }
         # struct name -> [base class names]; populated per gen_module call
         # (see the struct-bases scan below). Default empty here so any method
         # lookup that runs before that scan (or on a GimpleGen instance that
